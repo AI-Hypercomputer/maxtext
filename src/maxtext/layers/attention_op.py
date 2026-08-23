@@ -282,7 +282,7 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
       compressed_kv_len: Optional[int] = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 128,
-      local_window: int = 128,
+      local_window: Optional[int] = 128,
       shard_count: int = 1,
   ):
     self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
@@ -297,7 +297,13 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
       if q_ids.size == 0 or kv_ids.size == 0:
         return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
       diff = q_ids - kv_ids
-      local_m = (diff >= 0) & (diff < self.local_window) & (kv_ids < self.local_kv_len)
+      if self.local_window is None:
+        local_m = (diff >= 0) & (kv_ids < self.local_kv_len)
+      elif self.local_window > 0:
+        local_m = (diff >= 0) & (diff < self.local_window) & (kv_ids < self.local_kv_len)
+      else:
+        local_m = np.zeros((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
+
       c_idx = kv_ids - self.local_kv_len - self.pad_kv_total
       ratio = max(1, self.compress_ratio)
       c_thresh = (q_ids + 1) // ratio
@@ -311,14 +317,16 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
     )
 
   def __eq__(self, other: object):
+    if not isinstance(other, type(self)):
+      return NotImplemented
     return (
-        isinstance(other, type(self))
-        and self.shape == other.shape
+        self.shape == other.shape
         and self.local_kv_len == other.local_kv_len
         and self.compressed_kv_len == other.compressed_kv_len
         and self.pad_kv_total == other.pad_kv_total
         and self.compress_ratio == other.compress_ratio
         and self.local_window == other.local_window
+        and np.array_equal(self.q_sequence, other.q_sequence)
     )
 
   def __hash__(self):
@@ -331,6 +339,7 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
             self.pad_kv_total,
             self.compress_ratio,
             self.local_window,
+            self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
 
@@ -1934,7 +1943,7 @@ class AttentionOp(nnx.Module):
       use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
-      elif self.attention_type == AttentionType.COMPRESSED and indexer_mask is None:
+      elif self.attention_type == AttentionType.COMPRESSED and compress_ratio > 4:
         local_kv_len = query.shape[2]
         compressed_kv_len = max(0, key.shape[2] - query.shape[2] - pad_kv_total)
         mask = HCAStaticMask(
@@ -1943,7 +1952,7 @@ class AttentionOp(nnx.Module):
             compressed_kv_len=compressed_kv_len,
             pad_kv_total=pad_kv_total,
             compress_ratio=compress_ratio,
-            local_window=self.sliding_window_size if self.sliding_window_size is not None else 128,
+            local_window=self.sliding_window_size,
         )
       elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
         mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
@@ -1959,6 +1968,7 @@ class AttentionOp(nnx.Module):
       if use_load_balanced_cp and self.attention_type not in (
           AttentionType.FULL,
           AttentionType.BLOCK_DIFFUSION,
+          AttentionType.COMPRESSED,
       ):
         mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
 

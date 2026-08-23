@@ -614,6 +614,96 @@ class BlockCausalMaskTest(unittest.TestCase):
         self.assertIsInstance(selected_mask, expected_mask_type)
 
 
+class HCAStaticMaskTest(unittest.TestCase):
+  """Tests the HCAStaticMask and its equivalence with the ground truth compressor masking formula."""
+
+  def test_hca_static_mask_vs_ground_truth_formula(self):
+    test_cases = [
+        (512, 128, 128, 0),
+        (1024, 128, 128, 64),
+        (512, 128, 0, 0),  # local_window = 0 (no local attention)
+        (512, 128, None, 0),  # local_window = None (full causal local attention)
+        (384, 128, 128, 128),  # unaligned sequence length with padding
+    ]
+
+    for seq_len, compress_ratio, local_window, pad_kv in test_cases:
+      with self.subTest(seq_len=seq_len, ratio=compress_ratio, window=local_window, pad=pad_kv):
+        comp_len = max(1, seq_len // max(1, compress_ratio))
+        total_kv_len = seq_len + pad_kv + comp_len
+        shape = (seq_len, total_kv_len)
+
+        mask = attention_op.HCAStaticMask(
+            shape=shape,
+            local_kv_len=seq_len,
+            compressed_kv_len=comp_len,
+            pad_kv_total=pad_kv,
+            compress_ratio=compress_ratio,
+            local_window=local_window,
+        )
+
+        q_ids = np.arange(seq_len)[:, None]
+        kv_ids = np.arange(total_kv_len)[None, :]
+        diff = q_ids - kv_ids
+
+        # Ground truth analytical formula
+        if local_window is None:
+          expected_local = (diff >= 0) & (kv_ids < seq_len)
+        elif local_window > 0:
+          expected_local = (diff >= 0) & (diff < local_window) & (kv_ids < seq_len)
+        else:
+          expected_local = np.zeros((seq_len, total_kv_len), dtype=bool)
+
+        c_idx = kv_ids - seq_len - pad_kv
+        c_thresh = (q_ids + 1) // max(1, compress_ratio)
+        expected_comp = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < comp_len)
+        expected_mask = expected_local | expected_comp
+
+        actual_mask = mask[:, :]
+        np.testing.assert_array_equal(actual_mask, expected_mask)
+
+  def test_hca_static_mask_equality_and_hash(self):
+    mask1 = attention_op.HCAStaticMask(
+        shape=(512, 640),
+        local_kv_len=512,
+        compressed_kv_len=4,
+        pad_kv_total=124,
+        compress_ratio=128,
+        local_window=128,
+    )
+    mask2 = attention_op.HCAStaticMask(
+        shape=(512, 640),
+        local_kv_len=512,
+        compressed_kv_len=4,
+        pad_kv_total=124,
+        compress_ratio=128,
+        local_window=128,
+    )
+    mask_diff_pad = attention_op.HCAStaticMask(
+        shape=(512, 640),
+        local_kv_len=512,
+        compressed_kv_len=4,
+        pad_kv_total=0,
+        compress_ratio=128,
+        local_window=128,
+    )
+
+    self.assertEqual(mask1, mask2)
+    self.assertEqual(hash(mask1), hash(mask2))
+    self.assertNotEqual(mask1, mask_diff_pad)
+    self.assertNotEqual(mask1, object())
+
+  def test_zero_division_guard(self):
+    mask = attention_op.HCAStaticMask(
+        shape=(128, 128),
+        local_kv_len=128,
+        compressed_kv_len=1,
+        compress_ratio=0,
+        local_window=128,
+    )
+    res = mask[:, :]
+    self.assertEqual(res.shape, (128, 128))
+
+
 class AttentionTypeResolutionTest(unittest.TestCase):
 
   def test_config_selects_block_diffusion_without_model_dispatch(self):
