@@ -1925,8 +1925,6 @@ class AttentionOp(nnx.Module):
       single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
-      if self.attention_type == AttentionType.COMPRESSED and indexer_mask is None:
-        sa_config = dataclasses.replace(sa_config, dq_reduction_steps=3)
 
       # Create the splash attention kernel object separately, jit it for performance
       @partial(
@@ -3087,83 +3085,3 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):
             self.local_window,
         )
     )
-
-
-def create_hca_static_mask_info(
-    seq_len: int,
-    aligned_kv_len: int,
-    compress_ratio: int = 128,
-    local_window: int = 128,
-    block_q: Optional[int] = None,
-    block_kv: Optional[int] = None,
-    config: Optional[Config] = None,
-):
-  """Builds compile-time MaskInfo for HCA with deduplicated sub-tile partial chunks.
-
-  Args:
-    seq_len: Query sequence length.
-    aligned_kv_len: Padded KV sequence length.
-    compress_ratio: CSA compression ratio (e.g. 128).
-    local_window: Local attention sliding window (e.g. 128).
-    block_q: Pallas query block size. If omitted, resolved from config.sa_block_q or default 512.
-    block_kv: Pallas KV block size. If omitted, resolved from config.sa_block_kv or default 512.
-    config: MaxText Config instance.
-  """
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info  # pylint: disable=g-import-not-at-top,import-outside-toplevel
-
-  if block_q is None:
-    block_q = getattr(config, "sa_block_q", 512) if config is not None else 512
-  if block_kv is None:
-    block_kv = getattr(config, "sa_block_kv", 512) if config is not None else 512
-
-  comp_len = max(1, seq_len // compress_ratio)
-  num_q_blocks = seq_len // block_q
-  comp_col = seq_len // block_kv
-
-  # Construct the 2 unique deduplicated (block_q, block_kv) partial chunks
-  q_sub = np.arange(block_q)[:, None]
-  kv_sub = np.arange(block_kv)[None, :]
-  chunk_boundary = (kv_sub > (q_sub + (block_kv - local_window))).astype(np.int8)
-  chunk_local = ((q_sub >= kv_sub) & (kv_sub > (q_sub - local_window))).astype(np.int8)
-  unique_partial_blocks = np.stack([chunk_boundary, chunk_local])
-
-  active_r, active_c, block_mask_list, mask_next_list = [], [], [], []
-
-  for i in range(num_q_blocks):
-    if i > 0:
-      active_r.append(i)
-      active_c.append(i - 1)
-      block_mask_list.append(1)
-      mask_next_list.append(0)
-    active_r.append(i)
-    active_c.append(i)
-    block_mask_list.append(1)
-    mask_next_list.append(1)
-    active_r.append(i)
-    active_c.append(comp_col)
-    if i == num_q_blocks - 1 and comp_len >= block_kv:
-      block_mask_list.append(2)
-      mask_next_list.append(0)
-    else:
-      block_mask_list.append(1)
-      mask_next_list.append(0)
-
-  fwd_info = splash_attention_mask_info.MaskInfo(
-      active_rows=jnp.array(active_r, dtype=jnp.int32),
-      active_cols=jnp.array(active_c, dtype=jnp.int32),
-      block_mask=jnp.array(block_mask_list, dtype=jnp.int8),
-      mask_next=jnp.array(mask_next_list, dtype=jnp.int32),
-      num_active_blocks=jnp.array([len(active_r)], dtype=jnp.int32),
-      partial_mask_blocks=jnp.array(unique_partial_blocks),
-      q_sequence=None,
-  )
-  dkv_info = splash_attention_mask_info.MaskInfo(
-      active_rows=jnp.array(active_c, dtype=jnp.int32),
-      active_cols=jnp.array(active_r, dtype=jnp.int32),
-      block_mask=jnp.array(block_mask_list, dtype=jnp.int8),
-      mask_next=jnp.array(mask_next_list, dtype=jnp.int32),
-      num_active_blocks=jnp.array([len(active_r)], dtype=jnp.int32),
-      partial_mask_blocks=jnp.array(unique_partial_blocks.swapaxes(-1, -2)),
-      q_sequence=None,
-  )
-  return fwd_info, dkv_info
