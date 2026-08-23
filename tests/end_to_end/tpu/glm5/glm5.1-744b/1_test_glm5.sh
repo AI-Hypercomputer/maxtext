@@ -31,7 +31,7 @@ echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 BF16_HF_PATH=gs://maxtext-glm5-europe-west4/hf-bf16
 if [ -z "${CKPT_DISK_LOCATION}" ]; then
   export BF16_HF_BUCKET=gs://maxtext-glm5-europe-west4/hf-bf16
-  gcloud storage cp -r ${CKPT_BUCKET} /tmp || true
+  gcloud storage cp -r ${BF16_HF_BUCKET} /tmp || true
   export BF16_LOCAL_PATH=/tmp/hf-bf16
 fi
 
