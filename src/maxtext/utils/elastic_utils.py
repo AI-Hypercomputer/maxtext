@@ -17,15 +17,22 @@
 from collections import Counter
 import functools
 from types import SimpleNamespace
+from typing import Any
 
 import jax
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
-import pathwaysutils
-from pathwaysutils.elastic import elastic
-from pathwaysutils.elastic import manager
 
-elastic_manager: manager.Manager | None = None
+try:
+  import pathwaysutils
+  from pathwaysutils.elastic import elastic
+  from pathwaysutils.elastic import manager
+except (ImportError, ModuleNotFoundError, AttributeError):
+  pathwaysutils = None
+  elastic = None
+  manager = None
+
+elastic_manager: Any | None = None
 pending_reinit_recorder = None
 pending_elastic_event_type = None
 
@@ -35,6 +42,7 @@ def record_slice_state(recorder, active_slices_override: int | None = None) -> N
   if (
       recorder is None
       or not hasattr(recorder, "record_elastic_slice_counts")
+      or pathwaysutils is None
       or not pathwaysutils.is_pathways_backend_used()
       or elastic_manager is None
   ):
@@ -88,7 +96,7 @@ def record_elastic_reinit_end() -> None:
 
 def elastic_enabled(config) -> bool:
   """Returns whether elastic mode is enabled."""
-  return pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
+  return pathwaysutils is not None and pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
 
 
 def elastic_snapshot(config) -> bool:

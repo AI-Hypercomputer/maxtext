@@ -676,10 +676,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       is_deepseek = (
           getattr(self.model, "is_deepseek", False)
           or (hasattr(self.model, "decoder") and getattr(self.model.decoder, "is_deepseek", False))
-          or (
-              hasattr(self.config, "decoder_block")
-              and str(self.config.decoder_block).lower() in ("deepseek", "glm5")
-          )
+          or (hasattr(self.config, "decoder_block") and str(self.config.decoder_block).lower() in ("deepseek", "glm5"))
       )
       if is_deepseek:
         first_dense = self.config.first_num_dense_layers
@@ -1896,12 +1893,21 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     cryptically on attribute access.
     """
     try:
-      tokenizer_val = getattr(TokenizerType, self.config.tokenizer_type, None)
+      tok_type = self.config.tokenizer_type
+      if hasattr(tok_type, "name"):
+        tok_name = tok_type.name.lower()
+      elif hasattr(tok_type, "value"):
+        tok_name = str(tok_type.value).lower()
+      else:
+        tok_name = str(tok_type).lower().rsplit(".", maxsplit=1)[-1]
+      tokenizer_val = getattr(TokenizerType, tok_name, None)
       if tokenizer_val is None and hasattr(TokenizerType, "DESCRIPTOR"):
-        tokenizer_val = TokenizerType.DESCRIPTOR.values_by_name[self.config.tokenizer_type].number
+        val_desc = getattr(TokenizerType.DESCRIPTOR, "values_by_name", {})
+        if tok_name in val_desc:
+          tokenizer_val = val_desc[tok_name].number
       return TokenizerParameters(
           path=self.config.tokenizer_path,
-          tokenizer_type=tokenizer_val,
+          tokenizer_type=tokenizer_val if tokenizer_val is not None else tok_name,
           access_token=self.config.hf_access_token,
           use_chat_template=self.config.use_chat_template,
           extra_ids=0,
