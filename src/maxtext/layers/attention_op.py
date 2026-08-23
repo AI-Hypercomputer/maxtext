@@ -1945,14 +1945,13 @@ class AttentionOp(nnx.Module):
         mask = mask_module.FullMask(mask_shape)
       elif self.attention_type == AttentionType.COMPRESSED and indexer_mask is None:
         local_kv_len = query.shape[2]
-        compressed_kv_len = key.shape[2] - query.shape[2] - pad_kv_total
+        compressed_kv_len = max(0, key.shape[2] - query.shape[2] - pad_kv_total)
         mask = HCAStaticMask(
             shape=mask_shape,
             local_kv_len=local_kv_len,
             compressed_kv_len=compressed_kv_len,
-            pad_kv_total=pad_kv_total,
-            sliding_window_size=self.sliding_window_size if self.sliding_window_size else None,
             compress_ratio=compress_ratio,
+            local_window=self.sliding_window_size if self.sliding_window_size is not None else 128,
         )
       elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
         mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
@@ -3103,3 +3102,154 @@ class LoadBalancedBlockCausalMask(BlockCausalMask):  # pylint: disable=abstract-
         shard_count=shard_count,
     )
     self.q_sequence = _load_balanced_q_sequence(shape, cp_size)
+
+
+class HCAStaticMask(splash_attention_mask._ComputableMask):
+  """Static compile-time mask for DeepSeek-V4 Hybrid Compressed Attention (HCA).
+
+  Defines coarse-block coordinates and deduplicated partial block patterns for
+  Splash Attention without materializing runtime boolean mask arrays in HBM.
+
+  Attributes:
+    shape: (seq_len, aligned_kv_len) tuple.
+    local_kv_len: Unpadded local sequence length.
+    compressed_kv_len: Number of active compressed tokens.
+    compress_ratio: Compression ratio for CSA (e.g. 128).
+    local_window: Local sliding-window size (e.g. 128).
+  """
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      local_kv_len: Optional[int] = None,
+      compressed_kv_len: Optional[int] = None,
+      compress_ratio: int = 128,
+      local_window: int = 128,
+      shard_count: int = 1,
+  ):
+    self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
+    self.compressed_kv_len = (
+        compressed_kv_len
+        if compressed_kv_len is not None
+        else max(1, self.local_kv_len // compress_ratio)
+    )
+    self.compress_ratio = compress_ratio
+    self.local_window = local_window
+
+    def hca_mask_function(q_ids, kv_ids):
+      if q_ids.size == 0 or kv_ids.size == 0:
+        return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
+      diff = q_ids - kv_ids
+      local_m = (diff >= 0) & (diff < self.local_window) & (kv_ids < self.local_kv_len)
+      c_idx = kv_ids - self.local_kv_len
+      c_thresh = (q_ids + 1) // self.compress_ratio
+      comp_m = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < self.compressed_kv_len)
+      return local_m | comp_m
+
+    super().__init__(
+        shape=shape,
+        mask_function=hca_mask_function,
+        shard_count=shard_count,
+    )
+
+  def __eq__(self, other: object):
+    return (
+        isinstance(other, type(self))
+        and self.shape == other.shape
+        and self.local_kv_len == other.local_kv_len
+        and self.compressed_kv_len == other.compressed_kv_len
+        and self.compress_ratio == other.compress_ratio
+        and self.local_window == other.local_window
+    )
+
+  def __hash__(self):
+    return hash((
+        type(self),
+        self.shape,
+        self.local_kv_len,
+        self.compressed_kv_len,
+        self.compress_ratio,
+        self.local_window,
+    ))
+
+
+def create_hca_static_mask_info(
+    seq_len: int,
+    aligned_kv_len: int,
+    compress_ratio: int = 128,
+    local_window: int = 128,
+    block_q: Optional[int] = None,
+    block_kv: Optional[int] = None,
+    config: Optional[Config] = None,
+):
+  """Builds compile-time MaskInfo for HCA with deduplicated sub-tile partial chunks.
+
+  Args:
+    seq_len: Query sequence length.
+    aligned_kv_len: Padded KV sequence length.
+    compress_ratio: CSA compression ratio (e.g. 128).
+    local_window: Local attention sliding window (e.g. 128).
+    block_q: Pallas query block size. If omitted, resolved from config.sa_block_q or default 512.
+    block_kv: Pallas KV block size. If omitted, resolved from config.sa_block_kv or default 512.
+    config: MaxText Config instance.
+  """
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info  # pylint: disable=g-import-not-at-top
+
+  if block_q is None:
+    block_q = getattr(config, "sa_block_q", 512) if config is not None else 512
+  if block_kv is None:
+    block_kv = getattr(config, "sa_block_kv", 512) if config is not None else 512
+
+  comp_len = max(1, seq_len // compress_ratio)
+  num_q_blocks = seq_len // block_q
+  comp_col = seq_len // block_kv
+
+  # Construct the 2 unique deduplicated (block_q, block_kv) partial chunks
+  q_sub = np.arange(block_q)[:, None]
+  kv_sub = np.arange(block_kv)[None, :]
+  chunk_boundary = (kv_sub > (q_sub + (block_kv - local_window))).astype(np.int8)
+  chunk_local = ((q_sub >= kv_sub) & (kv_sub > (q_sub - local_window))).astype(np.int8)
+  unique_partial_blocks = np.stack([chunk_boundary, chunk_local])
+
+  active_r, active_c, block_mask_list, mask_next_list = [], [], [], []
+
+  for i in range(num_q_blocks):
+    if i > 0:
+      active_r.append(i)
+      active_c.append(i - 1)
+      block_mask_list.append(1)
+      mask_next_list.append(0)
+    active_r.append(i)
+    active_c.append(i)
+    block_mask_list.append(1)
+    mask_next_list.append(1)
+    active_r.append(i)
+    active_c.append(comp_col)
+    if i == num_q_blocks - 1 and comp_len >= block_kv:
+      block_mask_list.append(2)
+      mask_next_list.append(0)
+    else:
+      block_mask_list.append(1)
+      mask_next_list.append(0)
+
+  fwd_info = splash_attention_mask_info.MaskInfo(
+      active_rows=jnp.array(active_r, dtype=jnp.int32),
+      active_cols=jnp.array(active_c, dtype=jnp.int32),
+      block_mask=jnp.array(block_mask_list, dtype=jnp.int8),
+      mask_next=jnp.array(mask_next_list, dtype=jnp.int32),
+      num_active_blocks=jnp.array([len(active_r)], dtype=jnp.int32),
+      partial_mask_blocks=jnp.array(unique_partial_blocks),
+      q_sequence=None,
+  )
+  dkv_info = splash_attention_mask_info.MaskInfo(
+      active_rows=jnp.array(active_c, dtype=jnp.int32),
+      active_cols=jnp.array(active_r, dtype=jnp.int32),
+      block_mask=jnp.array(block_mask_list, dtype=jnp.int8),
+      mask_next=jnp.array(mask_next_list, dtype=jnp.int32),
+      num_active_blocks=jnp.array([len(active_r)], dtype=jnp.int32),
+      partial_mask_blocks=jnp.array(unique_partial_blocks.swapaxes(-1, -2)),
+      q_sequence=None,
+  )
+  return fwd_info, dkv_info
+
+
