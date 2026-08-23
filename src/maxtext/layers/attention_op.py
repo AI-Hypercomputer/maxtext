@@ -216,90 +216,6 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
     )
 
 
-class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
-  """Static mask for DeepSeek-V4 Heavily Compressed Attention (HCA).
-
-  Local tokens attend causally (and with sliding window if set).
-  Compressed tokens attend fully without masking.
-  Tile padding tokens between local and compressed tokens are masked out.
-  """
-
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      local_kv_len: int,
-      compressed_kv_len: int,
-      pad_kv_total: int = 0,
-      sliding_window_size: int | None = None,
-      shard_count: int = 1,
-      compress_ratio: int = 0,
-  ):
-    if compress_ratio <= 0:
-      compress_ratio = max(1, local_kv_len // max(1, compressed_kv_len))
-    is_power_of_2 = (compress_ratio & (compress_ratio - 1)) == 0
-    compress_shift = int(np.log2(compress_ratio)) if is_power_of_2 else None
-    comp_start = local_kv_len + pad_kv_total
-    self.local_kv_len = local_kv_len
-    self.compressed_kv_len = compressed_kv_len
-    self.pad_kv_total = pad_kv_total
-    self.sliding_window_size = sliding_window_size
-    self.compress_ratio = compress_ratio
-
-    def hca_mask_fn(q_ids, kv_ids):
-      if q_ids.size == 0 or kv_ids.size == 0:
-        return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
-
-      q_valid = q_ids < local_kv_len
-      is_local = (kv_ids < local_kv_len) & q_valid
-      causal = q_ids >= kv_ids
-      if sliding_window_size is not None:
-        local_valid = causal & ((q_ids - kv_ids) < sliding_window_size)
-      else:
-        local_valid = causal
-
-      c_idx = kv_ids - comp_start
-      if compress_shift is not None:
-        c_thresh = (q_ids + 1) >> compress_shift
-      else:
-        c_thresh = (q_ids + 1) // compress_ratio
-
-      compressed_valid = q_valid & (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < compressed_kv_len)
-      return (is_local & local_valid) | compressed_valid
-
-    super().__init__(
-        shape=shape,
-        mask_function=hca_mask_fn,
-        shard_count=shard_count,
-    )
-
-  def __eq__(self, other: object):
-    if not isinstance(other, type(self)):
-      return NotImplemented
-    return (
-        self.shape == other.shape
-        and self.local_kv_len == other.local_kv_len
-        and self.compressed_kv_len == other.compressed_kv_len
-        and self.pad_kv_total == other.pad_kv_total
-        and self.sliding_window_size == other.sliding_window_size
-        and self.compress_ratio == other.compress_ratio
-        and np.array_equal(self.q_sequence, other.q_sequence)
-    )
-
-  def __hash__(self):
-    return hash(
-        (
-            type(self),
-            self.shape,
-            self.local_kv_len,
-            self.compressed_kv_len,
-            self.pad_kv_total,
-            self.sliding_window_size,
-            self.compress_ratio,
-            self.q_sequence.tobytes() if self.q_sequence is not None else None,
-        )
-    )
-
-
 class BlockCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access,abstract-method
   """Lazy mask with bidirectional attention within causal blocks."""
 
@@ -3129,9 +3045,7 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):
   ):
     self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
     self.compressed_kv_len = (
-        compressed_kv_len
-        if compressed_kv_len is not None
-        else max(1, self.local_kv_len // compress_ratio)
+        compressed_kv_len if compressed_kv_len is not None else max(1, self.local_kv_len // compress_ratio)
     )
     self.compress_ratio = compress_ratio
     self.local_window = local_window
@@ -3163,14 +3077,16 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):
     )
 
   def __hash__(self):
-    return hash((
-        type(self),
-        self.shape,
-        self.local_kv_len,
-        self.compressed_kv_len,
-        self.compress_ratio,
-        self.local_window,
-    ))
+    return hash(
+        (
+            type(self),
+            self.shape,
+            self.local_kv_len,
+            self.compressed_kv_len,
+            self.compress_ratio,
+            self.local_window,
+        )
+    )
 
 
 def create_hca_static_mask_info(
@@ -3193,7 +3109,7 @@ def create_hca_static_mask_info(
     block_kv: Pallas KV block size. If omitted, resolved from config.sa_block_kv or default 512.
     config: MaxText Config instance.
   """
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info  # pylint: disable=g-import-not-at-top
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   if block_q is None:
     block_q = getattr(config, "sa_block_q", 512) if config is not None else 512
@@ -3251,5 +3167,3 @@ def create_hca_static_mask_info(
       q_sequence=None,
   )
   return fwd_info, dkv_info
-
-
