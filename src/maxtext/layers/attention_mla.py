@@ -1378,8 +1378,7 @@ class MLA(Attention):
               if layer_idx is not None and self.served_group_sizes_tuple is not None
               else float(self.served_group_size)
           )
-          if group_size > 1:
-            loss_scale = loss_scale / group_size
+          loss_scale = loss_scale / jnp.maximum(group_size, 1.0)
 
         indexer_loss = self.calculate_indexer_loss(
             indexer_score=indexer_score,
