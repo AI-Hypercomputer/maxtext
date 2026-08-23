@@ -166,6 +166,33 @@ def skip_step_on_spikes(
   return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
+def add_gradient_clipping(tx, clipping_threshold):
+  """Clips gradients by global norm ahead of `tx`, keeping `tx`'s optimizer state shape.
+
+  `optax.chain(clip_by_global_norm(...), tx)` would nest tx's state under an extra chain level
+  even though the clip is stateless. Pre-training clips raw gradients in its train step instead,
+  so its checkpointed state has no such level and cannot restore one that does.
+
+  Args:
+    tx: The optimizer to clip gradients for.
+    clipping_threshold: Global norm to clip to.
+
+  Returns:
+    A transformation applying the same updates as the chained form, with tx's state tree.
+  """
+  clip = optax.clip_by_global_norm(clipping_threshold)
+  inner = optax.with_extra_args_support(tx)
+
+  def init_fn(params):
+    return inner.init(params)
+
+  def update_fn(updates, state, params=None, **extra_args):
+    updates, _ = clip.update(updates, optax.EmptyState(), params)
+    return inner.update(updates, state, params, **extra_args)
+
+  return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
 def get_optimizer(config, learning_rate_schedule, model=None):
   """Create optimizer."""
   if config.opt_type == "adamw":
