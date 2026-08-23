@@ -784,6 +784,16 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
     else:
       return input_tensor.T.reshape(target_shape)
 
+  def reshape_expert_kernel(input_tensor, target_shape=None):
+    """Transposes expert weights.
+
+    3D: (num_experts, in_dim, out_dim) -> (num_experts, out_dim, in_dim)
+    2D: (in_dim, out_dim) -> (out_dim, in_dim)
+    """
+    if input_tensor.ndim == 3:
+      return input_tensor.transpose(0, 2, 1)
+    return input_tensor.transpose(1, 0)
+
   def reshape_bias(input_tensor, target_shape=None):
     """Reshapes biases between MaxText 2D (heads, dim) and HF 1D (hidden)."""
     # saving_to_hf: MaxText [heads, head_dim] -> HF [hidden_dim] (flatten)
@@ -809,11 +819,13 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
       "self_attention-key-bias",
       "self_attention-value-bias",
   ]
-  moe_kernel_hooks = [
+  moe_gate_hooks = [
       "moe_block-gate-kernel",
       "moe_block-wi_0-kernel",
       "moe_block-wi_1-kernel",
       "moe_block-wo-kernel",
+  ]
+  moe_expert_hooks = [
       "moe_block-wi_0",
       "moe_block-wi_1",
       "moe_block-wo",
@@ -825,8 +837,10 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
     for key in bias_hooks:
       mapping[f"params-decoder-layers-{key}"] = reshape_bias
     if num_experts > 1:
-      for key in moe_kernel_hooks:
+      for key in moe_gate_hooks:
         mapping[f"params-decoder-layers-{key}"] = reshape_kernel
+      for key in moe_expert_hooks:
+        mapping[f"params-decoder-layers-{key}"] = reshape_expert_kernel
   else:
     for i in range(n_layers):
       for key in kernel_hooks:
@@ -834,8 +848,10 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
       for key in bias_hooks:
         mapping[f"params-decoder-layers_{i}-{key}"] = reshape_bias
       if num_experts > 1:
-        for key in moe_kernel_hooks:
+        for key in moe_gate_hooks:
           mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
+        for key in moe_expert_hooks:
+          mapping[f"params-decoder-layers_{i}-{key}"] = reshape_expert_kernel
   return mapping
 
 
@@ -2229,9 +2245,9 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     """
     if saving_to_hf:
       wi_0, wi_1 = input_tensor
-      wi_0_1 = np.empty(target_shape, dtype=wi_0.dtype)  # pyrefly: ignore[no-matching-overload]
-      wi_0_1[..., ::2] = wi_0
-      wi_0_1[..., 1::2] = wi_1
+      wi_0_1 = jnp.empty(target_shape, dtype=wi_0.dtype)
+      wi_0_1 = wi_0_1.at[..., ::2].set(wi_0)
+      wi_0_1 = wi_0_1.at[..., 1::2].set(wi_1)
       return wi_0_1
     else:
       wi_0_1 = input_tensor

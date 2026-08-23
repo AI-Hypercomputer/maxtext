@@ -66,11 +66,12 @@ Example Usage:
     scan_layers=True
 """
 
+import gc
+import os
+import time
+from typing import Sequence
 import jax
 import jax.numpy as jnp
-import os
-from typing import Sequence
-import time
 
 from transformers import AutoTokenizer, AutoProcessor
 
@@ -115,6 +116,17 @@ flags.DEFINE_string(
     "from. If not specified, defaults to maxtext.utils.globals.HF_IDS[model_name]. Use this to "
     "bundle a different tokenizer than the default (e.g., the base model's tokenizer instead of "
     "the instruction-tuned one).",
+)
+
+flags.DEFINE_integer(
+    "parallel_threads",
+    4,
+    "Number of threads used for parallel saving of weights. Lower this value to reduce peak host RAM usage.",
+)
+flags.register_validator(
+    "parallel_threads",
+    lambda value: value > 0,
+    message="--parallel_threads must be a positive integer.",
 )
 
 FLAGS = flags.FLAGS
@@ -235,6 +247,8 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
       ("qk_rope_head_dim", "qk_rope_head_dim"),
       ("v_head_dim", "v_head_dim"),
       ("vocab_size", "vocab_size"),
+      ("global_head_dim", "global_head_dim"),
+      ("num_global_key_value_heads", "global_num_kv_heads"),
   ]
 
   if max_config.attention_type == "mla":
@@ -251,17 +265,19 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     attributes_to_check.append(("head_dim", "head_dim"))
 
   mismatches = []
+  target_cfg = getattr(hf_config, "text_config", hf_config) or hf_config
 
   for hf_attr, mt_attr in attributes_to_check:
-    # Skip checks if the HF config doesn't have this attribute (e.g. layer_norm_eps vs rms_norm_eps)
-    if not hasattr(hf_config, hf_attr):
-      continue
-
     # Skip checks if MaxText config doesn't have the attribute (shouldn't happen for valid configs)
     if not hasattr(max_config, mt_attr):
       continue
 
-    hf_value = getattr(hf_config, hf_attr)
+    # Skip checks if the HF config doesn't have this attribute or raises AmbiguousGlobalPerLayerAttributeError
+    try:
+      hf_value = getattr(target_cfg, hf_attr)
+    except (AttributeError, ValueError, RuntimeError):
+      continue
+
     mt_value = getattr(max_config, mt_attr)
 
     # Handle None values
@@ -296,7 +312,7 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     if not is_match:
       if override:
         max_logging.log(f"⚠️ Overwriting HF Config '{hf_attr}': {hf_value} -> {mt_value} (from MaxText '{mt_attr}')")
-        setattr(hf_config, hf_attr, mt_value)
+        setattr(target_cfg, hf_attr, mt_value)
       else:
         mismatches.append(f"{hf_attr} (HF={hf_value} vs MaxText={mt_value})")
 
@@ -388,15 +404,21 @@ def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, para
   processed_params_list = []
   lora_scaling = config.lora.lora_alpha / config.lora.lora_rank if config.lora.lora_rank > 0 else 1.0
   for key in MemoryMonitorTqdm(filtered_map_keys, leave=True):
-    weight = [state_dict[subkey] for subkey in key] if isinstance(key, tuple) else state_dict.get(key)
-    if weight is not None and not isinstance(key, tuple):
+    if isinstance(key, tuple):
+      weight = [state_dict.pop(subkey, None) for subkey in key]
+      delta = None
+    else:
       delta = _get_lora_delta(key, state_dict, lora_scaling)
-      if delta is not None:
+      weight = state_dict.pop(key, None)
+      if weight is not None and delta is not None:
         if delta.shape != weight.shape and delta.size == weight.size:
           delta = delta.reshape(weight.shape)
         weight = (jnp.asarray(weight, dtype=jnp.float32) + delta).astype(weight.dtype)
     if weight is not None:
       processed_params_list.extend(process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config))
+      del weight
+      del delta
+      gc.collect()
   return dict(processed_params_list)
 
 
@@ -431,7 +453,14 @@ def _transform_and_save_weights(
       raise ValueError("Error: No weights were transformed. Check mappings and parameter paths.")
 
     max_logging.log("\nSaving HuggingFace model...")
-    save_model_files(transformed_hf_weights, hf_config_obj, tokenizer, processor, output_directory)
+    save_model_files(
+        transformed_hf_weights,
+        hf_config_obj,
+        tokenizer,
+        processor,
+        output_directory,
+        parallel_threads=FLAGS.parallel_threads,
+    )
     max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
 
   max_logging.log(f"Elapse for transform and save: {(time.time() - start) / 60:.2f} min")

@@ -29,6 +29,23 @@ import jax.numpy as jnp
 from orbax import checkpoint as ocp
 import qwix
 
+try:
+  from qwix._src.utils import flax_util as _qwix_flax_util  # pylint: disable=g-import-not-at-top
+
+  _orig_qwix_find_param = _qwix_flax_util.find_param
+
+  def _safe_qwix_find_param(x, ptq_array_type=None):
+    try:
+      return _orig_qwix_find_param(x, ptq_array_type)
+    except AttributeError as e:
+      if "shape" in str(e):
+        return None
+      raise
+
+  _qwix_flax_util.find_param = _safe_qwix_find_param
+except (ImportError, AttributeError):
+  pass
+
 from maxtext.common import checkpointing
 from maxtext.configs import pyconfig
 from maxtext.utils import gcs_utils
@@ -57,7 +74,8 @@ def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
 
   def lora_update_or_base(base_weight, lora_a, lora_b):
     if lora_a is not None and lora_b is not None:
-      return base_weight + jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor
+      delta = (jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor).astype(base_weight.dtype)
+      return (base_weight + delta).astype(base_weight.dtype)
     else:
       return base_weight  # Keep the base weight if no Lora update
 
@@ -96,7 +114,8 @@ def unapply_lora_from_base_params(base_params, lora_params, lora_scale_factor=1.
 
   def lora_update_or_base(base_weight, lora_a, lora_b):
     if lora_a is not None and lora_b is not None:
-      return base_weight - jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor
+      delta = (jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor).astype(base_weight.dtype)
+      return (base_weight - delta).astype(base_weight.dtype)
     else:
       return base_weight  # Keep the base weight if no Lora update
 
@@ -470,10 +489,18 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
   return qwix.LoraProvider(**lora_kwargs)
 
 
-def _prepare_dummy_inputs(dummy_bs: int = 1) -> tuple[jnp.ndarray, jnp.ndarray]:
-  """Builds dummy decoder inputs used to materialize LoRA parameters."""
-  # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
-  seq_len = 1
+def _prepare_dummy_inputs(
+    mesh: Optional[jax.sharding.Mesh] = None,
+    dummy_bs: int = 1,
+    seq_len: int = 1,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Builds minimal dummy decoder inputs partitioned appropriately for the mesh."""
+  if mesh is not None:
+    for axis in ("data", "fsdp", "fsdp_transpose", "expert"):
+      dummy_bs *= mesh.shape.get(axis, 1)
+    for axis in ("tensor_sequence", "context"):
+      seq_len *= mesh.shape.get(axis, 1)
+
   decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   return decoder_input_tokens, decoder_positions
@@ -598,12 +625,8 @@ def apply_lora_to_model(
 
   lora_provider = _build_lora_provider(mt_config)
 
-  dp_size = 1
-  if mesh is not None and "data" in mesh.shape:
-    dp_size = mesh.shape["data"]
-
   model_rngs = getattr(model.decoder, "rngs", None)  # pyrefly: ignore[missing-attribute]
-  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(dummy_bs=dp_size)
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mesh)
 
   lora_model = qwix.apply_lora_to_model(
       model,
@@ -612,6 +635,9 @@ def apply_lora_to_model(
       decoder_positions=decoder_positions,
       rngs=model_rngs,
   )
+  for _, val in nnx.graph.iter_graph(lora_model):
+    if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
+      del val.qwix_rngs
 
   if mesh is not None:
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
@@ -636,6 +662,16 @@ def apply_lora_to_model(
         val = var.get_value()
         if not isinstance(val, jax.Array):
           return var
+        if hasattr(sharding_spec, "spec") and len(sharding_spec.spec) != val.ndim:
+          spec_tuple = tuple(sharding_spec.spec)
+          if len(spec_tuple) > val.ndim:
+            if "local_layers" in spec_tuple and len(spec_tuple) - 1 == val.ndim:
+              spec_tuple = tuple(axis for axis in spec_tuple if axis != "local_layers")
+            else:
+              spec_tuple = spec_tuple[: val.ndim]
+          elif len(spec_tuple) < val.ndim:
+            spec_tuple = spec_tuple + (None,) * (val.ndim - len(spec_tuple))
+          sharding_spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*spec_tuple))
         # make_array_from_callback natively constructs a globally sharded array
         # from the local host arrays, bypassing backend-specific device_put issues
         # on both Pathways and McJAX.
@@ -681,15 +717,36 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
 
   sync_lora_metadata(mt_config)
 
+  mesh = getattr(model, "mesh", None)
+  if mesh is None:
+    try:
+      mesh = maxtext_utils.get_mesh_from_config(mt_config)
+    except Exception:  # pylint: disable=broad-exception-caught
+      mesh = None
+
   abstract_lora_params = nnx.state(model, nnx.LoRAParam)
 
+  def _build_target_leaf(v):
+    val = getattr(v, "value", v)
+    pspec = getattr(v, "sharding", None)
+    if not isinstance(pspec, jax.sharding.PartitionSpec):
+      pspec = jax.sharding.PartitionSpec()
+    if mesh is not None:
+      sharding = jax.sharding.NamedSharding(mesh, pspec)
+    else:
+      sharding = getattr(val, "sharding", None)
+
+    if hasattr(val, "shape") and hasattr(val, "dtype"):
+      return {"value": jax.ShapeDtypeStruct(shape=val.shape, dtype=val.dtype, sharding=sharding)}
+    return {"value": val}
+
   target_for_restore = jax.tree.map(
-      lambda v: {"value": v.value},
+      _build_target_leaf,
       abstract_lora_params,
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  sharding_tree = jax.tree.map(lambda x: x.sharding if hasattr(x, "sharding") else None, target_for_restore)
+  sharding_tree = jax.tree.map(lambda x: getattr(x, "sharding", None), target_for_restore)
   restore_args_tree = ocp.checkpoint_utils.construct_restore_args(target_for_restore, sharding_tree)
 
   try:
@@ -795,7 +852,8 @@ def apply_lora_on_base_params_nnx(base_params, lora_params, lora_scale_factor=1.
       lora_a = lora_node["lora_a.kernel"]
       lora_b = lora_node["lora_b.kernel"]
       if lora_a is not None and lora_b is not None:
-        base_node["kernel"] = base_node["kernel"] + jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor
+        delta = (jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor).astype(base_node["kernel"].dtype)
+        base_node["kernel"] = (base_node["kernel"] + delta).astype(base_node["kernel"].dtype)
       return
     for name, lora_child in lora_node.items():
       if _is_nnx_branch(lora_child):
@@ -819,7 +877,8 @@ def unapply_lora_from_base_params_nnx(base_params, lora_params, lora_scale_facto
       lora_a = lora_node["lora_a.kernel"]
       lora_b = lora_node["lora_b.kernel"]
       if lora_a is not None and lora_b is not None:
-        base_node["kernel"] = base_node["kernel"] - jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor
+        delta = (jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor).astype(base_node["kernel"].dtype)
+        base_node["kernel"] = (base_node["kernel"] - delta).astype(base_node["kernel"].dtype)
       return
     for name, lora_child in lora_node.items():
       if _is_nnx_branch(lora_child):

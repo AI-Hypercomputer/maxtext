@@ -716,10 +716,6 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
     self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
 
 
-if __name__ == "__main__":
-  unittest.main()
-
-
 class _StatefulGemma4DecoderLayer(nnx.Module):
   """Small stand-in that exposes cache ordering and mutable-state updates."""
 
@@ -1167,6 +1163,7 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "model_name=gemma4-e2b",
             "scan_layers=False",
             "attention=dot_product",
+            "remat_policy=none",
             "num_decoder_layers=3",
             "num_kv_shared_layers=1",
             "base_emb_dim=128",
@@ -1262,46 +1259,9 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
 
 
 class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
-  """Tests metadata_axis_name parameterization in NNXDecoder._apply_layers_sequentially."""
-
-  def setUp(self):
-    super().setUp()
-    self.cfg = _make_config(scan_layers=True, param_scan_axis=0)
-    self.mesh = _make_mesh(self.cfg)
-    self.rng = jax.random.PRNGKey(0)
+  """Tests for metadata axis name parameterization in NNXDecoder."""
 
   def test_metadata_axis_name_parameterization(self):
-    # Test that _apply_layers_sequentially accepts and respects metadata_axis_name
-    # pylint: disable=protected-access
-    decoder = NNXDecoder(
-        config=self.cfg,
-        mesh=self.mesh,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=nnx.Rngs(params=0, dropout=1),
-    )
-    layers = getattr(decoder, "layers", None)
-    if layers is not None:
-      batch = self.cfg.global_batch_size_to_train_on
-      seq_len = self.cfg.max_target_length
-      x = jnp.zeros((batch, seq_len, self.cfg.emb_dim), dtype=self.cfg.dtype)
-      positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
-      segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
-
-      y, updated_layers, _ = decoder._apply_layers_sequentially(
-          layers,
-          x,
-          length=self.cfg.num_decoder_layers,
-          metadata_axis_name="dense_layers",
-          decoder_positions=positions,
-          decoder_segment_ids=segment_ids,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      self.assertEqual(y.shape, x.shape)
-      self.assertIsNotNone(updated_layers)
-
-  def test_custom_metadata_axis_name_passed_to_scan_axis_sync(self):
-    # pylint: disable=protected-access
     cfg = _make_config(param_scan_axis=0)
     mesh = _make_mesh(cfg)
     rngs = nnx.Rngs(params=0)
@@ -1314,24 +1274,32 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
     )
 
     class DummyLayer(nnx.Module):
+      """A dummy NNX module for testing."""
 
-      def __init__(self, rngs):
+      def __init__(self):
         self.p = nnx.Param(jax.numpy.zeros((2,)))
 
       def __call__(self, x, **kwargs):
         return x + self.p.value, None
 
-    stacked_layers = nnx.vmap(lambda: DummyLayer(rngs=rngs), in_axes=(), out_axes=0, axis_size=2)()
+    # Manually create a stacked layer using NNX scan
+    stacked_layers = nnx.vmap(DummyLayer, in_axes=(), out_axes=0, axis_size=2)()
+
     x_in = jax.numpy.zeros((2,))
 
+    # We mock maxtext_utils_nnx.nnx_add_and_sync_scan_axis to ensure the custom name is passed
     original_add_scan_axis = maxtext_utils_nnx.nnx_add_and_sync_scan_axis
     mock_add_scan_axis = MagicMock(side_effect=original_add_scan_axis)
     maxtext_utils_nnx.nnx_add_and_sync_scan_axis = mock_add_scan_axis
 
     try:
       custom_axis_name = "custom_scanned_blocks"
+      # pylint: disable=protected-access
       _, _, _ = decoder._apply_layers_sequentially(
-          layers=stacked_layers, x_in=x_in, length=2, metadata_axis_name=custom_axis_name
+          layers=stacked_layers,
+          x_in=x_in,
+          length=2,
+          metadata_axis_name=custom_axis_name,
       )
       found_custom_name = False
       for call_args in mock_add_scan_axis.call_args_list:
@@ -1339,7 +1307,10 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
           found_custom_name = True
           break
 
-      self.assertTrue(found_custom_name, "The custom metadata_axis_name was not passed to nnx_add_and_sync_scan_axis!")
+      self.assertTrue(
+          found_custom_name,
+          "The custom metadata_axis_name was not passed to nnx_add_and_sync_scan_axis!",
+      )
     finally:
       maxtext_utils_nnx.nnx_add_and_sync_scan_axis = original_add_scan_axis
 

@@ -30,10 +30,6 @@ on:
         required: false
       GEMINI_API_KEY:
         required: false
-    outputs:
-      tests_result:
-        description: 'The result of all_tests_passed and all_notebooks_passed jobs.'
-        value: ${{ (jobs.all_tests_passed.result == 'success' && jobs.all_notebooks_passed.result == 'success') && 'success' || 'failure' }}
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours
@@ -77,16 +73,19 @@ jobs:
           bash .github/scripts/analyze_code_changes.sh
 
   code_quality_check:
+    name: Code Quality Check
     uses: ./.github/workflows/code_quality.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   docs_build_check:
+    name: Documentation Build Check
     uses: ./.github/workflows/check_docs_build.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   build_and_upload_maxtext_package:
+    name: Build MaxText Package
     needs: [analyze_code_changes, code_quality_check, docs_build_check]
     # Run if either tests or notebooks need to run; on PRs, gate on code quality + docs passing
     if: |
@@ -101,11 +100,14 @@ jobs:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   maxtext_jupyter_notebooks:
+    name: Jupyter Notebook Tests
     needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       always() &&
       needs.analyze_code_changes.outputs.run_notebooks == 'true' &&
-      needs.build_and_upload_maxtext_package.result == 'success'
+      needs.build_and_upload_maxtext_package.result == 'success' &&
+      (github.event_name != 'pull_request' ||
+        (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]'))
     uses: ./.github/workflows/run_jupyter_notebooks.yml
     strategy:
         fail-fast: false
@@ -140,7 +142,7 @@ jobs:
           echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
 
   tpu-pretrain-tests:
-    name: ${{ matrix.flavor || 'TPU Pretrain' }} tests
+    name: TPU Pretrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
@@ -158,7 +160,7 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   tpu-posttrain-tests:
-    name: ${{ matrix.flavor || 'TPU Posttrain' }} tests
+    name: TPU Posttrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
@@ -168,7 +170,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [tpu-post-training-unit]
+        flavor: [tpu-post-training-unit, tpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
@@ -177,7 +179,7 @@ jobs:
 
 
   tpu7x-tests:
-    name: TPU7X tests
+    name: TPU7X Tests
     needs: [gate_test_run]
     if: |
       always() &&
@@ -195,7 +197,7 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   gpu-tests:
-    name: ${{ matrix.flavor || 'GPU' }} tests
+    name: GPU Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
@@ -213,7 +215,7 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-pretrain-tests:
-    name: ${{ matrix.flavor || 'CPU Pretrain' }} tests
+    name: CPU Pretrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
@@ -223,7 +225,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu-unit]
+        flavor: [cpu-unit, cpu-integration]
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
@@ -231,7 +233,7 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-posttrain-tests:
-    name: ${{ matrix.flavor || 'CPU Posttrain' }} tests
+    name: CPU Posttrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
@@ -241,7 +243,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu-post-training-unit]
+        flavor: [cpu-post-training-unit, cpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
@@ -249,6 +251,7 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
+    name: TPU Pathways Unit Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
@@ -275,6 +278,7 @@ jobs:
       worker_group: ${{ matrix.group }}
 
   maxtext_tpu_pathways_integration_tests:
+    name: TPU Pathways Integration Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&

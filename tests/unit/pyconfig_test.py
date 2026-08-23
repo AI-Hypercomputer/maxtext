@@ -40,6 +40,40 @@ class PyconfigTest(unittest.TestCase):
 
     self.assertTrue(config.quantization is None or config.quantization == "")
 
+  def test_managed_mldiagnostics_storage_path(self):
+    # Test completely omitting the parameter (defaults to "" from base.yml)
+    config_omitted = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_1",
+        base_output_directory="gs://base_dir1",
+    )
+    self.assertEqual(
+        config_omitted.managed_mldiagnostics_dir,
+        "gs://base_dir1/test_run_1/managed-mldiagnostics",
+    )
+
+    config_none = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_2",
+        base_output_directory="gs://base_dir2",
+        managed_mldiagnostics_storage_path="",
+    )
+    self.assertEqual(
+        config_none.managed_mldiagnostics_dir,
+        "gs://base_dir2/test_run_2/managed-mldiagnostics",
+    )
+
+    config_custom = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_3",
+        base_output_directory="gs://base_dir3",
+        managed_mldiagnostics_storage_path="gs://custom_base",
+    )
+    self.assertEqual(
+        config_custom.managed_mldiagnostics_dir,
+        "gs://custom_base/test_run_3/managed-mldiagnostics",
+    )
+
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],

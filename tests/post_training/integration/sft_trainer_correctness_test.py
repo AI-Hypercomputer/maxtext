@@ -26,11 +26,9 @@ Usage:
 
 import functools
 import os.path
-import subprocess
 import sys
 import unittest
 
-import filelock
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
@@ -44,9 +42,8 @@ from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
-from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
+from tests.utils.test_helpers import ensure_tokenizer_downloaded
 import numpy as np
 import pytest
 from transformers import AutoTokenizer
@@ -67,7 +64,7 @@ def initialize_config():
       [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs/post_train", "sft.yml")],
       run_name="test-sft-trainer-correctness",
       model_name="default",
-      tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer"),
+      tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "llama2-chat-tokenizer"),
       enable_checkpointing=False,
       max_target_length=32,
       per_device_batch_size=1,
@@ -178,21 +175,7 @@ class SFTTrainerCorrectnessTest(unittest.TestCase):
           os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
       )
 
-    tokenizer_dir = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
-    lock_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer.lock")
-    with filelock.FileLock(lock_path):
-      if not os.path.exists(tokenizer_dir):
-        command = [
-            "gcloud",
-            "storage",
-            "cp",
-            "--recursive",
-            "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
-            os.path.join(MAXTEXT_ASSETS_ROOT, ""),
-        ]
-        exit_code = subprocess.call(command)
-        if exit_code != 0:
-          raise ValueError(f"Download tokenizer failed ({exit_code})")
+    ensure_tokenizer_downloaded("llama2-chat-tokenizer", skip_test_on_failure=True)
 
   @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 b/425997645")
   @pytest.mark.integration_test

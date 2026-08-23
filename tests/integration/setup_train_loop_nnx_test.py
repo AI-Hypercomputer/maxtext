@@ -31,7 +31,7 @@ import jax
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.utils.train_utils import setup_train_loop
+from maxtext.utils import train_utils
 from tests.utils.test_helpers import get_test_config_path
 import pytest
 
@@ -83,7 +83,7 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
         rampup_manager,
         eval_data_iterator,
         train_state,
-    ) = setup_train_loop(config, recorder=None)
+    ) = train_utils.setup_train_loop(config, recorder=None)
 
     # The NNX path returns a fully-merged TrainStateNNX (lines 352-354 in train_utils.py).
     self.assertIsInstance(train_state, train_state_nnx.TrainStateNNX)
@@ -109,13 +109,30 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
     # flag them as unused — they're part of the public return contract.
     del checkpoint_manager, rampup_manager, eval_data_iterator
 
+  def test_load_balanced_cp_keeps_checkpoint_iterator_unwrapped(self):
+    """The reordered view goes to the DataLoader and eval; the original iterator goes to checkpointing."""
+    config = _tiny_nnx_pyconfig(
+        ici_context_parallelism=2,
+        context_parallel_load_balance=True,
+        packing=False,
+        eval_interval=1,
+    )
+
+    *_, data_iterator, data_loader, _, eval_data_iterator, _ = train_utils.setup_train_loop(config, recorder=None)
+
+    # pylint: disable=protected-access
+    self.assertIsInstance(data_loader.data_iterator, train_utils._ReorderedDataIterator)
+    self.assertIs(data_loader.data_iterator.data_iterator, data_iterator)
+    self.assertNotIsInstance(data_iterator, train_utils._ReorderedDataIterator)
+    self.assertIsInstance(eval_data_iterator, train_utils._ReorderedDataIterator)
+
   def test_pure_nnx_setup_param_only_split_matches_model(self):
     """nnx.split(state.model, nnx.Param, ...) must yield a non-empty Param tree
 
     whose structure matches state_mesh_shardings.model after the same split.
     """
     config = _tiny_nnx_pyconfig()
-    *_, state_mesh_shardings, model, _, _, _, _, _, _, train_state = setup_train_loop(config, recorder=None)
+    *_, state_mesh_shardings, model, _, _, _, _, _, _, train_state = train_utils.setup_train_loop(config, recorder=None)
 
     _, params, _ = nnx.split(train_state.model, nnx.Param, ...)
     _, params_shardings, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)

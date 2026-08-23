@@ -223,6 +223,10 @@ class MetricLogger:
       log_parts.append(f"main_model_loss: {loss - mtp_loss:.3f}")
       log_parts.append(f"mtp_loss: {mtp_loss:.3f}")
 
+    if getattr(self.config, "use_indexer", False):
+      indexer_l = scalars.get("learning/indexer_loss", 0.0)
+      log_parts.append(f"indexer_loss: {float(indexer_l)}")
+
     max_logging.log(", ".join(log_parts))
 
   def _log_eval_metrics(self, metrics, step):
@@ -246,6 +250,11 @@ class MetricLogger:
       )
     if "eval/avg_dpo_reward_accuracy" in scalars:
       log_parts.append(f"dpo_reward_accuracy={scalars['eval/avg_dpo_reward_accuracy']:.3f}")
+
+    if getattr(self.config, "use_indexer", False):
+      indexer_l = scalars.get("eval/avg_indexer_loss", 0.0)
+      log_parts.append(f"avg_indexer_loss={indexer_l:.3f}")
+
     max_logging.log(", ".join(log_parts))
 
   def _log_running_eval_metrics(self, metrics, step):

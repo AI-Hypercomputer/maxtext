@@ -29,4 +29,8 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=$SCAN_LAYERS \
-    weight_dtype=bfloat16
+    weight_dtype=bfloat16 \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    checkpoint_storage_concurrent_gb=48 \
+    skip_jax_distributed_system=true

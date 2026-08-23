@@ -348,7 +348,7 @@ class Decoder(nn.Module):
     """Get remat policy"""
     policy = None
     cfg = self.config
-    if cfg.remat_policy != "none":
+    if cfg.remat_policy and cfg.remat_policy != "none":
       if cfg.remat_policy in ("minimal_with_context", "minimal_flash"):
         # save all
         if cfg.remat_policy == "minimal_flash":
@@ -678,6 +678,7 @@ class Decoder(nn.Module):
             "aqt": 0,
             "batch_stats": 0,
             "_overwrite_with_gradient": 0,
+            "indexer_losses": 0,
         },
         split_rngs={
             "params": True,

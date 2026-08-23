@@ -63,7 +63,7 @@ class Gemma4MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
 
   # --- 1. Top-Level Entry Point ---
 
-  def convert(self, model_state: dict):
+  def convert(self, model_state: dict, **kwargs):
     """Convert a MaxText Gemma4 model state into vLLM weight tensors."""
     logging.info(
         "\n%sStarting Gemma4 Conversion (is_moe=%s, num_layers=%d, num_reps=%d)...%s",

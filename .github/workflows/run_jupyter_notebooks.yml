@@ -34,11 +34,6 @@ on:
       maxtext_sha:
         required: false
         type: string
-      # Flag to skip source checkout and wheel installation
-      maxtext_installed:
-        required: false
-        type: boolean
-        default: false
     secrets:
       HF_TOKEN:
         required: true
@@ -46,7 +41,70 @@ on:
 permissions:
   contents: read
 jobs:
+  discover_notebooks:
+    name: Discover Notebooks to Run
+    runs-on: ubuntu-latest
+    outputs:
+      notebooks: ${{ steps.list.outputs.notebooks }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - name: Checkout MaxText
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.maxtext_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Determine Notebook List
+        id: list
+        shell: bash
+        run: |
+          MAXTEXT_NOTEBOOKS_ROOT="src/maxtext/examples"
+          SKIPPED=("sft_llama3_demo_gpu.ipynb" "maxtext_with_gepa.ipynb" "demo_decoding.ipynb" "dpo_qwen3_demo.ipynb")
+
+          is_skipped() {
+            local name="$1"
+            for s in "${SKIPPED[@]}"; do
+              [[ "$name" == "$s" ]] && return 0
+            done
+            return 1
+          }
+
+          SELECTED=()
+          if [ "${GITHUB_EVENT_NAME}" == "pull_request" ] && [ -n "${GITHUB_BASE_REF}" ]; then
+            git fetch origin "${GITHUB_BASE_REF}" --depth=50 2>/dev/null || true
+            while IFS= read -r file; do
+              if [[ -n "$file" && -f "$file" ]]; then
+                name=$(basename "$file")
+                if ! is_skipped "$name"; then
+                  SELECTED+=("$name")
+                fi
+              fi
+            done < <(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- "${MAXTEXT_NOTEBOOKS_ROOT}"/*.ipynb 2>/dev/null || true)
+          fi
+
+          # If not a PR or no specific notebooks were modified (e.g. scheduled run or workflow file modified), run all active notebooks
+          if [ ${#SELECTED[@]} -eq 0 ]; then
+            for nb in "$MAXTEXT_NOTEBOOKS_ROOT"/*.ipynb; do
+              name=$(basename "$nb")
+              if ! is_skipped "$name" && [[ -f "$nb" ]]; then
+                SELECTED+=("$name")
+              fi
+            done
+          fi
+
+          JSON_ARRAY=$(jq -nc '$ARGS.positional' --args "${SELECTED[@]}")
+          echo "Discovered notebooks to run: $JSON_ARRAY"
+          echo "notebooks=$JSON_ARRAY" >> "$GITHUB_OUTPUT"
+          echo "count=${#SELECTED[@]}" >> "$GITHUB_OUTPUT"
+
   run:
+    name: Execute ${{ matrix.notebook }}
+    needs: [discover_notebooks]
+    if: needs.discover_notebooks.outputs.count > 0
+    strategy:
+      fail-fast: false
+      matrix:
+        notebook: ${{ fromJson(needs.discover_notebooks.outputs.notebooks) }}
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
       image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
@@ -55,18 +113,15 @@ jobs:
         UV_TORCH_BACKEND: "cpu"
     steps:
       - name: Checkout MaxText
-        if: ${{ !inputs.maxtext_installed }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.maxtext_sha }}
           persist-credentials: false
       - name: Download the MaxText wheel
-        if: ${{ !inputs.maxtext_installed }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
       - name: Install MaxText and Dependencies
-        if: ${{ !inputs.maxtext_installed }}
         shell: bash
         run: |
           # 1. Create virtual environment
@@ -84,34 +139,28 @@ jobs:
               (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || true
             fi
           fi
-          uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
+          uv pip install "${maxtext_wheel}[tpu-post-train]" --resolution=lowest
           install_tpu_post_train_extra_deps
 
           python3 -m pip freeze
-      - name: Run Post-Training Notebooks
+      - name: Run Post-Training Notebook
         shell: bash
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
+          NOTEBOOK_NAME: ${{ matrix.notebook }}
           # TODO: Fix evaluation in sft_qwen3_demo.ipynb and remove this env variable
           RUN_EVALUATION: "false"
         run: |
-          if [ "${MAXTEXT_INSTALLED}" == "true" ]; then
-            # Move to the directory where code is baked into the image. See the Dockerfile.
-            # This is necessary because GHA sets an empty workspace by default.
-            cd /deps
-            PYTHON_EXE="python3"
-            PAPERMILL_EXE="papermill"
-          else
-            PYTHON_EXE=".venv/bin/python3"
-            PAPERMILL_EXE=".venv/bin/papermill"
-            source .venv/bin/activate
-          fi
+          PYTHON_EXE=".venv/bin/python3"
+          PAPERMILL_EXE=".venv/bin/papermill"
+          source .venv/bin/activate
+
           export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-          export MAXTEXT_REPO_ROOT=$(pwd)
-          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
-          export MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+          MAXTEXT_REPO_ROOT=$(pwd)
+          MAXTEXT_PKG_DIR="$(pwd)/src/maxtext"
+          MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+          export MAXTEXT_REPO_ROOT MAXTEXT_PKG_DIR MAXTEXT_NOTEBOOKS_ROOT
 
           # Register maxtext_venv as a selectable kernel in Jupyter
           $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
@@ -119,28 +168,22 @@ jobs:
           # Run Hugging Face authentication
           hf auth login --token "$HF_TOKEN"
 
-          for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/*.ipynb; do
-            filename=$(basename "$notebook")
-            if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" || "$filename" == "demo_decoding.ipynb" || "$filename" == "dpo_qwen3_demo.ipynb" ]]; then
-              echo "Skipping $filename"
-              continue
-            fi
-            output_name="${filename%.ipynb}_output.ipynb"
+          notebook="$MAXTEXT_NOTEBOOKS_ROOT/$NOTEBOOK_NAME"
+          output_name="${NOTEBOOK_NAME%.ipynb}_output.ipynb"
 
-            echo "------------------------------------------------------"
-            echo "Running $filename ..."
-            echo "------------------------------------------------------"
+          echo "------------------------------------------------------"
+          echo "Running $NOTEBOOK_NAME ..."
+          echo "------------------------------------------------------"
 
-            $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
+          $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
 
-            # Clean up any checkpoint directories created by the notebook to avoid filling up disk space
-            echo "Post-notebook disk cleanup for $filename ..."
-            rm -rf "$MAXTEXT_PKG_DIR"/*_output
-            rm -rf "$HOME/.cache/huggingface/hub"
-          done
+          # Clean up any checkpoint directories created by the notebook to avoid filling up disk space
+          echo "Post-notebook disk cleanup for $NOTEBOOK_NAME ..."
+          rm -rf "$MAXTEXT_PKG_DIR"/*_output
+          rm -rf "$HOME/.cache/huggingface/hub"
       - name: Upload Outputs
         if: always()
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
-          name: notebook-outputs-${{ inputs.device_name }}
+          name: notebook-outputs-${{ matrix.notebook }}-${{ inputs.device_name }}
           path: ./*_output.ipynb

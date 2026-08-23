@@ -520,7 +520,7 @@ class Gemma4ScannableBlock(nnx.Module):
     is ``None`` for both ``"none"`` and ``"full"``, so it
     cannot distinguish "no remat" from "full remat" on its own.
     """
-    return self.apply_internal_remat and self.config.remat_policy != "none"
+    return self.apply_internal_remat and bool(self.config.remat_policy) and self.config.remat_policy != "none"
 
   def _scan_local_layers(self, y, layer_kwargs):
     """Runs the local (sliding-window) layers via a per-layer rematerialized ``jax.lax.scan``."""

@@ -69,6 +69,13 @@ TEST_CASES = [
         "ep-as-dp",
         ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=2", "use_ring_of_experts=true"),
     ),
+    (
+        "deepseek2-16b",
+        "tpu7x-8",
+        1,
+        "shard-exp-on-fsdp",
+        ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=2"),
+    ),
     ("qwen3-0.6b", "tpu7x-16", 1, "", ()),
     ("gpt-oss-20b", "tpu7x-16", 1, "", ()),
     ("gpt-oss-20b", "tpu7x-16", 1, "", ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=2")),
@@ -175,7 +182,11 @@ def main(argv: Sequence[str]) -> None:
   validate_config(config)
   print(f"Sharding debug: {config.debug_sharding}")
 
-  rule_name = f"rule_{config.custom_mesh_and_rule}" if config.custom_mesh_and_rule else "rule_default"
+  if config.custom_mesh_and_rule and hasattr(config.custom_mesh_and_rule, "value"):
+    rule_value = config.custom_mesh_and_rule.value
+  else:
+    rule_value = str(config.custom_mesh_and_rule) if config.custom_mesh_and_rule else ""
+  rule_name = f"rule_{rule_value}" if rule_value else "rule_default"
   # Find overrides from argv to append to rule_name
   overrides = []
   for arg in argv:
@@ -189,6 +200,9 @@ def main(argv: Sequence[str]) -> None:
           "weight_dtype",
           "log_config",
           "debug_sharding",
+          "pure_nnx",
+          "enable_nnx",
+          "pure_nnx_decoder",
       ]:
         overrides.append(arg)
   if overrides:

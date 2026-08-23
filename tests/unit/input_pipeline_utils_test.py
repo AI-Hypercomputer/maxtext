@@ -14,9 +14,105 @@
 
 """Unit tests for input_pipeline_utils."""
 
+import dataclasses
 import unittest
+from types import SimpleNamespace
 
-from maxtext.input_pipeline.input_pipeline_utils import compute_file_sharding
+import numpy as np
+
+from maxtext.input_pipeline.input_pipeline_utils import BlockDiffusionCorruption, compute_file_sharding, PadOrTrimToMaxLength
+from maxtext.multimodal import utils as mm_utils
+
+
+class BlockDiffusionPaddingTest(unittest.TestCase):
+  """Checks that tokenizer padding never becomes diffusion supervision."""
+
+  def test_corruption_dataclass_serializes_configuration(self):
+    transform = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        min_noise=0.05,
+        logit_alignment="shifted",
+        canvas_policy="seed_and_mask",
+        axis=0,
+    )
+    other = BlockDiffusionCorruption(block_size=8, mask_id=100)
+
+    self.assertEqual(
+        tuple(field.name for field in dataclasses.fields(transform)),
+        ("block_size", "mask_id", "min_noise", "logit_alignment", "canvas_policy", "axis"),
+    )
+    self.assertNotEqual(dataclasses.asdict(transform), dataclasses.asdict(other))
+    self.assertIn("block_size=4", repr(transform))
+
+  def test_nonzero_token_pad_id_keeps_metadata_padding_zero(self):
+    clean = PadOrTrimToMaxLength(
+        max_length=6,
+        pad_id=7,
+        config=SimpleNamespace(training_objective="block_diffusion"),
+    ).map(
+        {
+            "inputs": np.asarray([11, 12, 13], dtype=np.int32),
+            "targets": np.asarray([11, 12, 13], dtype=np.int32),
+        }
+    )
+    corrupted = BlockDiffusionCorruption(block_size=4, mask_id=99, min_noise=1.0, axis=0).random_map(
+        clean, np.random.default_rng(0)
+    )
+
+    padding = np.arange(6) >= 3
+    np.testing.assert_array_equal(clean["inputs"][padding], 7)
+    np.testing.assert_array_equal(clean["inputs_segmentation"][padding], 0)
+    np.testing.assert_array_equal(clean["targets_segmentation"][padding], 0)
+    np.testing.assert_array_equal(clean["inputs_position"][padding], 0)
+    np.testing.assert_array_equal(clean["targets_position"][padding], 0)
+    np.testing.assert_array_equal(corrupted["corruption_mask"][padding], 0)
+    np.testing.assert_array_equal(corrupted["targets_loss_mask"][padding], 0)
+    np.testing.assert_array_equal(corrupted["inputs"][padding], 7)
+
+  def test_pad_valued_source_token_remains_valid(self):
+    clean = PadOrTrimToMaxLength(
+        max_length=4,
+        pad_id=7,
+        config=SimpleNamespace(training_objective="block_diffusion"),
+    ).map(
+        {
+            "inputs": np.asarray([11, 7], dtype=np.int32),
+            "targets": np.asarray([11, 7], dtype=np.int32),
+        }
+    )
+
+    np.testing.assert_array_equal(clean["inputs"], [11, 7, 7, 7])
+    np.testing.assert_array_equal(clean["inputs_segmentation"], [1, 1, 0, 0])
+    np.testing.assert_array_equal(clean["targets_segmentation"], [1, 1, 0, 0])
+
+  def test_causal_padding_preserves_legacy_metadata_pad_value(self):
+    clean = PadOrTrimToMaxLength(
+        max_length=4,
+        pad_id=7,
+        config=SimpleNamespace(training_objective="causal_lm"),
+    ).map(
+        {
+            "inputs": np.asarray([11, 7], dtype=np.int32),
+            "targets": np.asarray([11, 7], dtype=np.int32),
+        }
+    )
+
+    np.testing.assert_array_equal(clean["inputs_segmentation"], [1, 0, 7, 7])
+    np.testing.assert_array_equal(clean["targets_segmentation"], [1, 0, 7, 7])
+    np.testing.assert_array_equal(clean["inputs_position"], [0, 1, 7, 7])
+    np.testing.assert_array_equal(clean["targets_position"], [0, 1, 7, 7])
+
+  def test_corruption_rejects_mismatched_batch_shapes(self):
+    with self.assertRaisesRegex(ValueError, "must have identical shapes"):
+      BlockDiffusionCorruption(block_size=4, mask_id=99).random_map(
+          {
+              "inputs": np.asarray([11, 12], dtype=np.int32),
+              "targets": np.asarray([11, 12, 13], dtype=np.int32),
+              "targets_segmentation": np.ones(2, dtype=np.int32),
+          },
+          np.random.default_rng(0),
+      )
 
 
 class ComputeFileShardingNormalCaseTest(unittest.TestCase):
@@ -105,6 +201,41 @@ class ComputeFileShardingUndersizedCaseTest(unittest.TestCase):
     # 2 files, 3 hosts: file 1 has only one reader (host 1) → no row split needed
     _, _, row_shard = compute_file_sharding(2, host_index=1, host_count=3)
     self.assertIsNone(row_shard)
+
+
+class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
+  """Unit tests for PadOrTrimToMaxLength image padding behaviors."""
+
+  def test_qwen_vision_padding_bypass_and_validation(self):
+    dummy_output = mm_utils.PreprocessorOutput(pixel_values=np.zeros((1, 3, 224, 224)), num_images=1)
+
+    # Registered Qwen vision models bypass image padding
+    for vb in ["qwen3_vl", "qwen3_omni", "qwen3_5"]:
+      transform = PadOrTrimToMaxLength(
+          max_length=128, pad_id=0, config=SimpleNamespace(vision_encoder_block=vb, use_multimodal=True)
+      )
+      self.assertIs(transform._pad_image_and_mask(dummy_output), dummy_output)  # pylint: disable=protected-access
+
+    # Unregistered Qwen model raises ValueError when use_multimodal=True
+    unreg_transform = PadOrTrimToMaxLength(
+        max_length=128,
+        pad_id=0,
+        config=SimpleNamespace(vision_encoder_block="unregistered", model_name="qwen3-future", use_multimodal=True),
+    )
+    with self.assertRaisesRegex(ValueError, "registered in `PadOrTrimToMaxLength`"):
+      unreg_transform._pad_image_and_mask(dummy_output)  # pylint: disable=protected-access
+
+    # Text-only Qwen model (use_multimodal=False) bypasses error and returns preprocessed_image
+    text_transform = PadOrTrimToMaxLength(
+        max_length=128,
+        pad_id=0,
+        config=SimpleNamespace(vision_encoder_block=None, model_name="qwen3-0.6b", use_multimodal=False),
+    )
+    self.assertIs(text_transform._pad_image_and_mask(dummy_output), dummy_output)  # pylint: disable=protected-access
+
+    # None pixel_values raises ValueError
+    with self.assertRaisesRegex(ValueError, "must have pixel_values"):
+      unreg_transform._pad_image_and_mask(mm_utils.PreprocessorOutput(pixel_values=None))  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":

@@ -107,7 +107,12 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def test_max_text_trainer_instantiation_with_pyconfig(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
-    t.with_loss_fn(lambda *args, **kwargs: (jnp.array(0.5), {}))
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
     self.assertIsInstance(t, abstract_engine.AbstractTrainingEngine)
     self.mock_from_pretrained.assert_called_once()
 
@@ -119,8 +124,6 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       )
       t.compile(payload)
       self.assertTrue(t._compiled)
-      t.with_loss_fn(lambda *args, **kwargs: (jnp.array(0.5), {}))
-      self.assertFalse(t._compiled)
       t.fwd_bwd(payload)
       self.assertEqual(t._micro_step_count, 1)
       t.update()
@@ -342,7 +345,12 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def test_update_with_inflight_throttling(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
-    t.with_loss_fn(lambda *args, **kwargs: (jnp.array(0.5), {}))
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
 
     payload = DummyPayload()
     t.compile(payload)
@@ -387,6 +395,69 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # Closing trainer drains remaining inflight items.
     t.close()
     self.assertTrue(t._throttler._inflight_queue.empty())
+
+  def test_fwd_bwd_with_loss_output_and_aux_metrics(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload()
+
+    def _loss_fn(model, *args, **kwargs):
+      return abstract_engine.LossOutput(
+          primary_loss=abstract_engine.WeightedMetric(
+              unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+          ),
+          aux_metrics={
+              "metric_a": abstract_engine.WeightedMetric(unreduced_sum=jnp.array(12.0), denominator=jnp.array(3.0)),
+              "metric_b": jnp.array(0.42),
+          },
+      )
+
+    t.with_loss_fn(_loss_fn)
+    t.compile(payload)
+    t.fwd_bwd(payload)
+
+    self.assertEqual(t._micro_step_count, 1)
+    self.assertIsNotNone(t._accumulated_grads)
+
+    # Check that grad is scaled by 1/4.0
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+
+    metrics = t.get_metrics(clear_cache=True)
+    self.assertLen(metrics, 1)
+    self.assertIn("loss", metrics[0].weighted_metrics)
+    self.assertIn("metric_a", metrics[0].weighted_metrics)
+    self.assertIn("metric_b", metrics[0].scalar_metrics)
+    self.assertAlmostEqual(
+        float(metrics[0].weighted_metrics["loss"].compute().item()),
+        6.0,
+        places=4,
+    )
+    self.assertAlmostEqual(
+        float(metrics[0].weighted_metrics["metric_a"].compute().item()),
+        4.0,
+        places=4,
+    )
+
+  def test_fwd_bwd_with_loss_and_aux_dict_tuple(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload()
+
+    def custom_loss(model, *args, **kwargs):
+      unreduced_sum = jnp.sum(model.weights[...]) * 8.0
+      denominator = jnp.array(4.0)
+      return unreduced_sum / denominator, {
+          "aux_stat": jnp.array(1.23),
+          "xent_sum": unreduced_sum,
+          "total_weights": denominator,
+      }
+
+    t.with_loss_fn(custom_loss)
+    t.fwd_bwd(payload)
+
+    # Check that grad is scaled by 1/4.0
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    metrics = t.get_metrics(clear_cache=True)
+    self.assertIn("loss", metrics[0].weighted_metrics)
+    self.assertIn("aux_stat", metrics[0].scalar_metrics)
 
 
 if __name__ == "__main__":

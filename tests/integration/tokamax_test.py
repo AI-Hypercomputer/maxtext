@@ -17,9 +17,9 @@ import os
 import tempfile
 from absl.testing import absltest
 from absl.testing import parameterized
-import pytest
 from maxtext.trainers.pre_train import train
 from tests.utils.test_helpers import get_test_config_path
+import pytest
 
 train_main = train.main
 gettempdir = tempfile.gettempdir
@@ -41,11 +41,12 @@ class Train(parameterized.TestCase):
       }
       for base_name, quantization, use_gmm_v2, ici_expert_parallelism in [
           ("tokamax_v1_bf16", "", False, 1),
-          ("tokamax_v1_fp8", "fp8_full", False, 1),
+          ("tokamax_v1_fp8", "fp8", False, 1),  # not quantize gmm
+          ("tokamax_v1_fp8_full", "fp8_full", False, 1),  # quantize gmm
           ("tokamax_v2_bf16", "", True, 1),
-          ("tokamax_v2_fp8", "fp8_full", True, 1),
+          ("tokamax_v2_fp8_full", "fp8_full", True, 1),
           ("tokamax_v2_bf16", "", True, 2),
-          ("tokamax_v2_fp8", "fp8_full", True, 2),
+          ("tokamax_v2_fp8_full", "fp8_full", True, 2),
       ]
   )
   @pytest.mark.tpu_only

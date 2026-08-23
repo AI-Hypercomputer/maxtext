@@ -42,12 +42,45 @@ def _get_mock_devices(devices_per_slice, num_slices=1):
 class TrainRLTest(unittest.TestCase):
   """Tests for train_rl.py."""
 
-  def test_rl_config_includes_decoder_engram_defaults(self):
-    """RL models must expose Engram fields consumed by the shared decoder."""
+  def test_rl_config_includes_shared_decoder_defaults(self):
+    """RL models must expose fields consumed by the shared decoder."""
     config = types.RLConfig(model_name="gemma4-26b")
 
     self.assertEqual(config.engram_layers, [])
     self.assertEqual(config.engram_max_ngram_size, 3)
+    self.assertEqual(config.mhc_expansion_rate, 1)
+    self.assertEqual(config.sinkhorn_iterations, 20)
+    self.assertFalse(config.enable_mhc_lite)
+    self.assertFalse(config.enable_prefix_caching)
+
+  @pytest.mark.cpu_only
+  def test_rollout_prefix_caching_respects_config_for_attention_model(self):
+    config = SimpleNamespace(
+        enable_prefix_caching=True,
+        decoder_block=train_rl.DecoderBlockType.QWEN3,
+    )
+
+    self.assertTrue(train_rl.rollout_prefix_caching_enabled(config))
+
+  @pytest.mark.cpu_only
+  def test_rollout_prefix_caching_disabled_for_recurrent_model(self):
+    for decoder_block in (train_rl.DecoderBlockType.QWEN3_NEXT, train_rl.DecoderBlockType.QWEN3_5):
+      with self.subTest(decoder_block=decoder_block):
+        config = SimpleNamespace(
+            enable_prefix_caching=True,
+            decoder_block=decoder_block,
+        )
+
+        with mock.patch.object(train_rl.max_logging, "log") as mock_log:
+          self.assertFalse(train_rl.rollout_prefix_caching_enabled(config))
+
+        mock_log.assert_called_once()
+
+  @pytest.mark.cpu_only
+  def test_rollout_prefix_caching_defaults_to_disabled(self):
+    config = SimpleNamespace(decoder_block=train_rl.DecoderBlockType.QWEN3)
+
+    self.assertFalse(train_rl.rollout_prefix_caching_enabled(config))
 
   def test_setup_configs_and_devices_pathways_split(self):
     """Test setup_configs_and_devices with multiple VMs and Pathways."""

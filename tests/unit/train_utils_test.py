@@ -14,12 +14,24 @@
 
 """Unit tests for train_utils.py."""
 
+import itertools
+import pathlib
+import tempfile
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock
 
+import grain
+import jax
+import numpy as np
+from jax.experimental import mesh_utils
+from jax.sharding import Mesh
+from orbax.checkpoint import v1 as ocp
+
+from maxtext.common import grain_utility
+from maxtext.input_pipeline import multihost_dataloading
 from maxtext.utils import train_utils
 from maxtext.utils.train_utils import (
     validate_train_config,
@@ -56,6 +68,90 @@ class MockConfig:
   steps: int = 100
   lr_schedule_type: str = "cosine"
   use_iota_embed: bool = False
+
+
+class _FakeIterator:
+  """Minimal resettable iterator for reorder-view tests."""
+
+  def __init__(self, batches):
+    self._batches = batches
+    self._index = 0
+    self.reset_calls = 0
+
+  def __next__(self):
+    batch = self._batches[self._index]
+    self._index += 1
+    return batch
+
+  def reset(self):
+    self.reset_calls += 1
+    self._index = 0
+
+
+class TestReorderedDataIterator(unittest.TestCase):
+  """Tests for the load-balanced CP reorder view."""
+
+  # pylint: disable=protected-access
+
+  def test_reorders_batches_and_forwards_reset(self):
+    inner = _FakeIterator([1, 2])
+    wrapped = train_utils._ReorderedDataIterator(lambda batch: batch * 10, inner)
+
+    self.assertEqual(next(wrapped), 10)
+    self.assertEqual(next(wrapped), 20)
+    self.assertIs(iter(wrapped), wrapped)
+    wrapped.reset()
+    self.assertEqual(inner.reset_calls, 1)
+    self.assertEqual(next(wrapped), 10)
+
+  def test_loader_view_wraps_single_iterator(self):
+    inner = _FakeIterator([1])
+    view = train_utils._reorder_data_iterator_for_loader(lambda batch: batch * 10, inner)
+
+    self.assertIsInstance(view, train_utils._ReorderedDataIterator)
+    self.assertIs(view.data_iterator, inner)
+
+  def test_loader_view_wraps_each_list_element(self):
+    inners = [_FakeIterator([1]), _FakeIterator([2])]
+    view = train_utils._reorder_data_iterator_for_loader(lambda batch: batch * 10, inners)
+
+    self.assertIsInstance(view, list)
+    self.assertEqual(len(view), 2)
+    for wrapped, inner in zip(view, inners):
+      self.assertIsInstance(wrapped, train_utils._ReorderedDataIterator)
+      self.assertIs(wrapped.data_iterator, inner)
+    self.assertEqual(next(view[1]), 20)
+
+  def test_grain_checkpoint_round_trip_through_reorder_view(self):
+    """Batches consumed through the view advance the saved Grain state, and an
+    in-place restore is visible through a view built before the restore."""
+    with tempfile.TemporaryDirectory() as d:
+      path = pathlib.Path(d) / "ckpt"
+      iterator = iter(grain.MapDataset.range(10).to_iter_dataset())
+      view = train_utils._ReorderedDataIterator(lambda batch: batch * 10, iterator)
+      self.assertEqual(next(view), 0)
+      self.assertEqual(next(view), 10)
+      ocp.save_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable_v1(iterator)})
+      self.assertTrue((path / "iter" / "process_0-of-1.json").exists())
+
+      restored = iter(grain.MapDataset.range(10).to_iter_dataset())
+      restored_view = train_utils._ReorderedDataIterator(lambda batch: batch * 10, restored)
+      ocp.load_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable_v1(restored)})
+      self.assertEqual(next(restored_view), 20)
+
+  def test_eval_view_consume_reset_consume(self):
+    """The eval view repeats identical reordered passes across a reset."""
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    batches = [{"x": np.full((len(jax.devices()), 2), i, dtype=np.int32)} for i in range(2)]
+    eval_iterator = multihost_dataloading.MultiHostDataLoadIterator(batches, mesh)
+    view = train_utils._ReorderedDataIterator(lambda batch: {"x": batch["x"] + 100}, eval_iterator)
+
+    first_pass = [int(batch["x"][0, 0]) for batch in itertools.islice(view, 2)]
+    view.reset()
+    second_pass = [int(batch["x"][0, 0]) for batch in itertools.islice(view, 2)]
+
+    self.assertEqual(first_pass, [100, 101])
+    self.assertEqual(second_pass, first_pass)
 
 
 class TestValidateTrainConfig(unittest.TestCase):

@@ -39,6 +39,8 @@ from maxtext.common.common_types import (
 from maxtext.configs import pyconfig
 from maxtext.configs import types
 from maxtext.multimodal import processor as mm_processor
+from maxtext.trainers.diloco import diloco
+from maxtext.trainers.diloco import utils as diloco_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -156,11 +158,16 @@ def get_shaped_batch(config, batch_sharding=None):
     batch_shape = (config.global_batch_size_to_load, config.max_target_length)
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  # MRoPE uses (batch, seq, 3); same batch/seq axes as 1D positions so batch_sharding applies as-is.
+  position_shape = batch_shape + (3,) if config.use_mrope and config.use_multimodal else batch_shape
+  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(position_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  if getattr(config, "training_objective", "causal_lm") == "block_diffusion":
+    shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+    shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   if config.use_multimodal:
     image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
@@ -1772,28 +1779,34 @@ def setup_initial_state(
             ),
         )
         overlay = restored if is_emergency else restored["items"]
-        overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
+        if not (config.enable_diloco and isinstance(overlay, diloco.DiLoCoTrainState)):
+          # Standard Flax NNX branch: overlay weights into the initialized TrainStateNNX.
+          overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
 
-        def _has_shape_dtype_struct(tree):
-          return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
+          def _has_shape_dtype_struct(tree):
+            return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
 
-        def _merge_restored_overlay(ckpt_node, init_node):
-          """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
-          if _has_shape_dtype_struct(ckpt_node):
-            if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
-              res = {}
-              for k in init_node:
-                if k in ckpt_node:
-                  res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
-                else:
-                  res[k] = init_node[k]
-              return res
-            else:
-              return init_node
-          return ckpt_node
+          def _merge_restored_overlay(ckpt_node, init_node):
+            """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
+            if _has_shape_dtype_struct(ckpt_node):
+              if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
+                res = {}
+                for k in init_node:
+                  if k in ckpt_node:
+                    res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
+                  else:
+                    res[k] = init_node[k]
+                return res
+              else:
+                return init_node
+            return ckpt_node
 
-        merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
-        nnx.replace_by_pure_dict(state, merged)
+          merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
+          nnx.replace_by_pure_dict(state, merged)
+        else:
+          # DiLoCo branch: The restored checkpoint for DiLoCo is already a complete DiLoCoTrainState
+          # (containing inner_state, outer_opt_state, params, step) rather than a bare parameter mapping.
+          state = overlay
     else:
       if restored:
         if isinstance(
@@ -1829,8 +1842,17 @@ def setup_initial_state(
             state = state.replace(params=merged_params)
           else:
             state = state.replace(params=raw_params)
+
   if not config.pure_nnx:
     state = max_utils.unbox_logicallypartioned(state)
+  if config.enable_diloco:
+    state = diloco_utils.setup_diloco_initial_state(
+        state=state,
+        config=config,
+        mesh=mesh,
+        state_mesh_shardings=state_mesh_shardings,
+        restored=restored,
+    )
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 
@@ -1950,8 +1972,12 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
 
       def _make_abstract_leaf(leaf_a, leaf_s):
         leaf_s = _extract_primary_sharding(leaf_s)
-        if hasattr(leaf_s, "spec") and len(leaf_a.shape) != len(leaf_s.spec):
-          leaf_s = jax.sharding.NamedSharding(leaf_s.mesh, jax.sharding.PartitionSpec(*leaf_s.spec[: len(leaf_a.shape)]))
+        if hasattr(leaf_s, "spec") and len(leaf_s.spec) > len(leaf_a.shape):
+          if "local_layers" in leaf_s.spec and len(leaf_s.spec) - 1 == len(leaf_a.shape):
+            spec_tuple = tuple(axis for axis in leaf_s.spec if axis != "local_layers")
+          else:
+            spec_tuple = leaf_s.spec[: len(leaf_a.shape)]
+          leaf_s = jax.sharding.NamedSharding(leaf_s.mesh, jax.sharding.PartitionSpec(*spec_tuple))
         return jax.ShapeDtypeStruct(leaf_a.shape, leaf_a.dtype, sharding=leaf_s)
 
       if type(a_val) in (jax.Array, jax.ShapeDtypeStruct) or (hasattr(a_val, "shape") and not hasattr(a_val, "qvalue")):
@@ -2169,6 +2195,7 @@ def create_device_mesh(config, devices=None):
         "fsdp_transpose": getattr(config, "ici_fsdp_transpose_parallelism", 1),
         "sequence": getattr(config, "ici_sequence_parallelism", 1),
         "context": getattr(config, "ici_context_parallelism", 1),
+        "context_usp_ulysses": getattr(config, "ici_context_usp_ulysses_parallelism", 1),
         "context_autoregressive": getattr(config, "ici_context_autoregressive_parallelism", 1),
         "tensor": getattr(config, "ici_tensor_parallelism", 1),
         "tensor_sequence": getattr(config, "ici_tensor_sequence_parallelism", 1),
@@ -2196,6 +2223,7 @@ def create_device_mesh(config, devices=None):
           "fsdp_transpose": getattr(config, "dcn_fsdp_transpose_parallelism", 1),
           "sequence": getattr(config, "dcn_sequence_parallelism", 1),
           "context": getattr(config, "dcn_context_parallelism", 1),
+          "context_usp_ulysses": getattr(config, "dcn_context_usp_ulysses_parallelism", 1),
           "context_autoregressive": getattr(config, "dcn_context_autoregressive_parallelism", 1),
           "tensor": getattr(config, "dcn_tensor_parallelism", 1),
           "tensor_sequence": getattr(config, "dcn_tensor_sequence_parallelism", 1),

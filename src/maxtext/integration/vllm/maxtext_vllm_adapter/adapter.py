@@ -23,6 +23,7 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
+from maxtext.integration.vllm.hybrid_cache_utils import build_qwen_gdn_cache_layout, normalize_vllm_input_positions
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
@@ -256,9 +257,11 @@ class MaxTextForCausalLM(nnx.Module):
         attention_metadata_picked = next(iter(attention_metadata.values()))
       attention_metadata = attention_metadata_picked
 
-    # Ensure inputs are at least 2D with a batch dimension
+    # MaxText decode treats vLLM's flattened tokens as a batch with seq_len=1.
+    # MRoPE positions arrive channel-first and must also move their 3 channels
+    # to MaxText's trailing dimension.
     input_ids = jnp.expand_dims(input_ids, axis=1)
-    input_positions = jnp.expand_dims(attention_metadata.input_positions, axis=-1)
+    input_positions = normalize_vllm_input_positions(attention_metadata.input_positions)
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
@@ -378,7 +381,6 @@ def patch_kv_cache_manager():
     from tpu_inference.runner.kv_cache_manager import KVCacheManager
     from vllm.v1.kv_cache_interface import MambaSpec
     import torch
-    import numpy as np
   except ImportError as e:
     # Gracefully handle missing imports in standard JAX environments (e.g. unit tests on CPU)
     max_logging.log(f"Skipping KVCacheManager patch (tpu_inference or dependencies not installed): {e}")
@@ -414,31 +416,10 @@ def patch_kv_cache_manager():
     if decoder_block_str in ("qwen3_next", "qwen3_5"):
       interval = cfg.inhomogeneous_layer_cycle_interval
 
-      num_v_heads = cfg.gdn_num_value_heads
-      num_k_heads = cfg.gdn_num_key_heads
-      head_k_dim = cfg.gdn_key_head_dim
-      head_v_dim = cfg.gdn_value_head_dim
-      conv_kernel_size = cfg.gdn_conv_kernel_dim
-
-      key_dim = head_k_dim * num_k_heads
-      value_dim = head_v_dim * num_v_heads
-      conv_dim = key_dim * 2 + value_dim
-
-      conv_state_shape = (conv_kernel_size - 1, conv_dim)
-      recurrent_state_shape = (num_v_heads, head_k_dim, head_v_dim)
-
-      mamba_shapes = (conv_state_shape, recurrent_state_shape)
-
-      torch_dtype = torch.bfloat16
-      if str(cfg.dtype) == "float32":
-        torch_dtype = torch.float32
-      elif str(cfg.dtype) == "float16":
-        torch_dtype = torch.float16
-      mamba_dtypes = (torch_dtype, torch_dtype)
-
-      # Calculate unpadded mamba page size
-      dtype_size = 4 if torch_dtype == torch.float32 else 2
-      unpadded_mamba_page_size = sum(int(np.prod(shape)) * dtype_size for shape in mamba_shapes)
+      # Qwen GDN keeps its short convolution history in BF16, but recurrence is
+      # accumulated and persisted in FP32. Declaring both caches as the model
+      # dtype silently quantizes the recurrent state after every generated token.
+      mamba_shapes, mamba_dtypes, unpadded_mamba_page_size = build_qwen_gdn_cache_layout(cfg, torch)
 
       # Calculate attn_page_size_bytes
       from tpu_inference.layers.common.sharding import ShardingAxisName

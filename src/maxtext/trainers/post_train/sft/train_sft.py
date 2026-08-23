@@ -35,12 +35,12 @@ Training:
     eval_interval=-1 steps=10 profiler=xplane
 """
 
-import inspect
 from typing import Any, Sequence
 
 from absl import app
 import os
 import jax
+import jax.numpy as jnp
 import optax
 import pathwaysutils
 
@@ -68,6 +68,7 @@ from maxtext.trainers.post_train.sft import hooks
 from maxtext.utils import lora_utils
 from maxtext.utils import max_utils
 from maxtext.utils import max_logging
+# Placeholder: internal
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 
@@ -94,26 +95,26 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
     is_lora_enabled = self._lora_enabled
     wrt = nnx.LoRAParam if is_lora_enabled else nnx.Param
 
-    # Detect whether Tunix's train() expects (loss, aux, grad_norm) or just
-    # (loss, aux) by inspecting the source of PeftTrainer._train_step.
-    tunix_expects_grad_norm = False
-    try:
-      source = inspect.getsource(peft_trainer.PeftTrainer._train_step)  # pylint: disable=protected-access
-      tunix_expects_grad_norm = "grad_norm" in source
-    except (TypeError, OSError):
-      pass
-
     # Capture the graphdef once outside of JIT so that split/merge inside
     # jax.value_and_grad can use a stable (non-traced) structural descriptor.
     nnx.pop(self.model, nnx.Intermediate)
     graphdef, _, _ = nnx.split(self.model, wrt, ...)
+    _uses_gradient_accumulation = not (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1 and self.config.max_seq_token_per_tpu is None
+    )
 
     def train_step(
         model: nnx.Module,
         optimizer: nnx.Optimizer,
-        inputs: Any,
         grad_accumulator: Any = None,
+        inputs: Any = None,
+        is_update_step: Any = True,
     ):
+      if inputs is None and grad_accumulator is not None:
+        # In Tunix versions where train_step only receives (model, optimizer, inputs)
+        inputs = grad_accumulator
+        grad_accumulator = getattr(self, "grad_accumulator", None)
+
       inputs = gen_fn(inputs)
 
       # Split model into differentiable params and non-differentiable rest.
@@ -157,14 +158,38 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
 
       nnx.update(model, new_rest)
 
-      # Apply optimizer update. grads has the same nnx.State(wrt) structure
-      # as diff_params, which is compatible with optimizer.update.
-      optimizer.update(model, grads)
+      # Handle gradient accumulation and conditional/direct optimizer update
+      if not _uses_gradient_accumulation:
+        if isinstance(grads, dict) and not isinstance(grads, nnx.State):
+          grads = nnx.State(grads)
+        optimizer.update(model, grads)
+        grad_norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads))
+      else:
+        grad_accumulator.add(grads)
+
+        def apply_updates(model, optimizer, grad_accumulator):
+          acc_grads = grad_accumulator.get()
+          norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads))
+          if isinstance(acc_grads, dict) and not isinstance(acc_grads, nnx.State):
+            acc_grads = nnx.State(acc_grads)
+          optimizer.update(model, acc_grads)
+          grad_accumulator.reset()
+          return norm
+
+        def skip_updates(model, optimizer, grad_accumulator):
+          return jnp.array(0.0, dtype=jnp.float32)
+
+        grad_norm = nnx.cond(
+            is_update_step,
+            apply_updates,
+            skip_updates,
+            model,
+            optimizer,
+            grad_accumulator,
+        )
 
       aux_out = aux if has_aux else None
-      if tunix_expects_grad_norm:
-        return out_val, aux_out, optax.global_norm(grads)
-      return out_val, aux_out
+      return out_val, aux_out, grad_norm
 
     return train_step
 
