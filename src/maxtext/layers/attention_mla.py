@@ -73,6 +73,7 @@ from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.globals import EPS
+from maxtext.utils import index_share_utils
 
 
 PLACEHOLDER_SEQ_LEN = 1
@@ -742,11 +743,7 @@ class MLA(Attention):
     self.is_shared_layer = is_shared_layer
     self.served_group_size = served_group_size
     if getattr(config, "use_index_share", False):
-      from maxtext.utils import index_share_utils
-
-      pattern = index_share_utils.parse_index_share_pattern(
-          config.index_share_pattern, config.num_decoder_layers
-      )
+      pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
       self.is_full_tuple = tuple(role == "F" for role in pattern)
       self.served_group_sizes_tuple = index_share_utils.get_served_group_sizes(pattern)
     else:
@@ -1335,6 +1332,7 @@ class MLA(Attention):
           attention_mask = attention_mask.squeeze(axis=(1, 2))
 
         if self.indexer is not None:
+
           def _run_full(_):
             with jax.named_scope("glm_full_layer_indexer"):
               mask, indices, score = self.indexer(
@@ -1422,6 +1420,5 @@ class MLA(Attention):
     out_sharding = create_sharding(self.mesh, out_logical_name)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
-    if getattr(self.config, "use_index_share", False):
-      return out, kv_cache, new_indexer_state
+    self.new_indexer_state = new_indexer_state
     return out, kv_cache

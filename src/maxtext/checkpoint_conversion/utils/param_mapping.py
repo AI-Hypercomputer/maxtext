@@ -1919,12 +1919,16 @@ def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
     if saving_to_hf:
       # JAX -> HF
       if input_tensor.ndim == 4:  # [L, kv_lora_rank, num_heads, head_dim]
-        return input_tensor.transpose(0, 2, 3, 1).reshape(input_tensor.shape[0], num_heads * head_dim, input_tensor.shape[1])
+        return input_tensor.transpose(0, 2, 3, 1).reshape(
+            input_tensor.shape[0], num_heads * head_dim, input_tensor.shape[1]
+        )
       return input_tensor.transpose(1, 2, 0).reshape(num_heads * head_dim, input_tensor.shape[0])
     else:
       # HF -> JAX
       if input_tensor.ndim == 3:  # [L, num_heads * head_dim, kv_lora_rank]
-        return input_tensor.reshape(input_tensor.shape[0], num_heads, head_dim, input_tensor.shape[-1]).transpose(0, 3, 1, 2)
+        return input_tensor.reshape(input_tensor.shape[0], num_heads, head_dim, input_tensor.shape[-1]).transpose(
+            0, 3, 1, 2
+        )
       return input_tensor.reshape(num_heads, head_dim, input_tensor.shape[-1]).transpose(2, 0, 1)
 
   def reshape_wq_b_kernel(input_tensor, target_shape):
@@ -1943,12 +1947,16 @@ def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
     if saving_to_hf:
       # JAX -> HF
       if input_tensor.ndim == 4:  # [L, q_lora_rank, num_heads, head_dim]
-        return input_tensor.transpose(0, 2, 3, 1).reshape(input_tensor.shape[0], num_heads * head_dim, input_tensor.shape[1])
+        return input_tensor.transpose(0, 2, 3, 1).reshape(
+            input_tensor.shape[0], num_heads * head_dim, input_tensor.shape[1]
+        )
       return input_tensor.transpose(1, 2, 0).reshape(num_heads * head_dim, input_tensor.shape[0])
     else:
       # HF -> JAX
       if input_tensor.ndim == 3:  # [L, num_heads * head_dim, q_lora_rank]
-        return input_tensor.reshape(input_tensor.shape[0], num_heads, head_dim, input_tensor.shape[-1]).transpose(0, 3, 1, 2)
+        return input_tensor.reshape(input_tensor.shape[0], num_heads, head_dim, input_tensor.shape[-1]).transpose(
+            0, 3, 1, 2
+        )
       return input_tensor.reshape(num_heads, head_dim, input_tensor.shape[-1]).transpose(2, 0, 1)
 
   def reshape_indexer_wq_b_kernel(input_tensor, target_shape):
@@ -1984,7 +1992,7 @@ def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
       if len(target_shape) == 4:
         if target_shape[0] == input_tensor.shape[-1]:  # [I, L, H, D] (Linen)
           return reshaped.transpose(3, 0, 1, 2)
-        return reshaped.transpose(0, 3, 1, 2)          # [L, I, H, D] (NNX)
+        return reshaped.transpose(0, 3, 1, 2)  # [L, I, H, D] (NNX)
       elif len(target_shape) == 3:
         if target_shape[0] == input_tensor.shape[-1]:
           return reshaped.transpose(3, 0, 1, 2)[:, 0, :, :]
@@ -2024,7 +2032,7 @@ def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
       if len(target_shape) == 4:
         if target_shape[0] == num_heads:
           return reshaped.transpose(2, 0, 3, 1)  # [H, L, D, I] (Linen)
-        return reshaped.transpose(0, 2, 3, 1)    # [L, H, D, I] (NNX)
+        return reshaped.transpose(0, 2, 3, 1)  # [L, H, D, I] (NNX)
       elif len(target_shape) == 3:
         if target_shape[0] == num_heads:
           return reshaped.transpose(2, 0, 3, 1)[:, 0, :, :]
@@ -2092,7 +2100,9 @@ def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
         mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{key}"] = reshape_kernel
       mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-wkv_b-kernel"] = reshape_wkv_b_kernel
       mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-wq_b-kernel"] = reshape_wq_b_kernel
-      mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-indexer-wq_b-kernel"] = reshape_indexer_wq_b_kernel
+      mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-indexer-wq_b-kernel"] = (
+          reshape_indexer_wq_b_kernel
+      )
       mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-out-kernel"] = reshape_out_kernel
 
   return mapping

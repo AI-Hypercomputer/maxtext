@@ -51,9 +51,7 @@ def parse_index_share_pattern(pattern: str | Sequence[str], num_layers: int) -> 
     )
 
   if clean_pattern[0] != "F":
-    raise ValueError(
-        f"First layer (Layer 0) must always be 'F' (Full layer), but got '{clean_pattern[0]}'."
-    )
+    raise ValueError(f"First layer (Layer 0) must always be 'F' (Full layer), but got '{clean_pattern[0]}'.")
 
   # If pattern is shorter than num_layers, repeat it periodically to fill num_layers
   if len(clean_pattern) < num_layers:

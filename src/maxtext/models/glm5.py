@@ -18,6 +18,7 @@
 
 from typing import Optional
 
+import absl.logging
 from flax import nnx
 import jax
 from jax.ad_checkpoint import checkpoint_name
@@ -31,9 +32,10 @@ from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.models import deepseek
+from maxtext.utils import index_share_utils
 
 
-class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
+class GLMGenericLayer(deepseek.DeepSeekGenericLayer):  # pylint: disable=abstract-method
   """Generic GLM layer with Multi-Head Latent Attention and IndexShare support."""
 
   def __init__(
@@ -52,9 +54,6 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
     self.is_shared_layer = False
     self.served_group_size = 1
     if self.is_index_share_enabled and layer_idx >= 0:
-      from maxtext.utils import index_share_utils
-      import absl.logging
-
       pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
       self.is_shared_layer = index_share_utils.is_shared_layer(layer_idx, pattern)
       self.served_group_size = index_share_utils.get_served_group_sizes(pattern)[layer_idx]
@@ -62,9 +61,13 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
         num_f = pattern.count("F")
         num_s = pattern.count("S")
         absl.logging.info(
-            f"[GLM-5.2 IndexShare Active] Total layers: {config.num_decoder_layers} | "
-            f"Pattern: {config.index_share_pattern} | Full (F) layers with active indexers: {num_f} | "
-            f"Shared (S) layers with pruned indexers: {num_s} (Pruned {num_s / config.num_decoder_layers * 100:.1f}% indexer compute/parameters)"
+            "[GLM-5.2 IndexShare Active] Total layers: %d | Pattern: %s | Full (F) layers with active indexers: %d | "
+            "Shared (S) layers with pruned indexers: %d (Pruned %.1f%% indexer compute/parameters)",
+            config.num_decoder_layers,
+            config.index_share_pattern,
+            num_f,
+            num_s,
+            num_s / config.num_decoder_layers * 100,
         )
 
     # Re-initialize MLA with GLM-specific IndexShare configuration
@@ -128,11 +131,13 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
         cached_indexer_state=cached_indexer_state,
         layer_idx=layer_idx,
     )
+    attention_result = attn_out[0]
     if self.is_index_share_enabled:
-      attention_result, _, new_indexer_state = attn_out
+      new_indexer_state = getattr(self.self_attention, "new_indexer_state", None)
+      if new_indexer_state is None and len(attn_out) > 2:
+        new_indexer_state = attn_out[2]
       return self.with_logical_constraint(attention_result), new_indexer_state
     else:
-      attention_result, _ = attn_out
       return self.with_logical_constraint(attention_result), None
 
   def post_process(self, layer_output, load_balance_loss, moe_bias_updates, kv_cache=None, cached_indexer_state=None):

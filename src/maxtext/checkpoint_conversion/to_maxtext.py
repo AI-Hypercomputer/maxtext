@@ -53,6 +53,7 @@ import argparse
 from functools import partial
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -467,8 +468,6 @@ def _build_single_axis_stacked_tensor(
         hf_tensor_numpy = tensor_getter_fn(hf_key_single)
       except (ValueError, KeyError) as e:
         if "indexer" in str(hf_key_single) and str(hf_key_single).startswith("model.layers."):
-          import re
-
           m = re.match(r"model\.layers\.(\d+)\.(.+)", str(hf_key_single))
           if m:
             layer_idx = int(m.group(1))
@@ -479,7 +478,7 @@ def _build_single_axis_stacked_tensor(
               try:
                 hf_tensor_numpy = tensor_getter_fn(donor_key)
                 break
-              except Exception:
+              except Exception:  # pylint: disable=broad-exception-caught
                 continue
             else:
               hf_tensor_numpy = np.zeros(mt_slice_shape, dtype=np.float32)
@@ -1023,8 +1022,6 @@ def main(
       def _eager_getter(key):
         if key not in hf_state_dict_numpy:
           if getattr(config, "use_index_share", False) and "indexer" in key and key.startswith("model.layers."):
-            import re
-
             m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
             if m:
               layer_idx = int(m.group(1))
@@ -1060,8 +1057,6 @@ def main(
           return orig_tensor_getter(key)
         except (ValueError, KeyError) as e:
           if "indexer" in key and key.startswith("model.layers."):
-            import re
-
             m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
             if m:
               layer_idx = int(m.group(1))

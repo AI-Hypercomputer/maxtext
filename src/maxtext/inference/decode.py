@@ -24,7 +24,7 @@ from absl import app
 
 from maxtext.configs import pyconfig
 from maxtext.common import profiler
-from maxtext.common.gcloud_stub import jetstream, is_decoupled
+from maxtext.common.gcloud_stub import jetstream
 from maxtext.inference.maxengine import maxengine
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils

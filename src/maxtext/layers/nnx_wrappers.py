@@ -29,6 +29,7 @@ from flax.nnx import graph
 from flax.nnx import variablelib
 from flax.nnx.bridge import module as bdg_module
 from flax.nnx.module import Module
+
 try:
   from flax.nnx import Pytree
 except ImportError:

@@ -1101,13 +1101,13 @@ class NNXDecoder(nnx.Module):
 
       if is_index_share:
         final_carry, out_indexer_state, _ = current_carry
+        self.cached_indexer_state = out_indexer_state
       else:
         final_carry = current_carry
-        out_indexer_state = None
 
       # We don't need to rebuild scanned_state or return it because during
       # inference with vLLM, parameters do not change and we don't need intermediates.
-      return final_carry, layers, None, out_indexer_state
+      return final_carry, layers, None
     else:
       params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
       state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
@@ -1117,9 +1117,9 @@ class NNXDecoder(nnx.Module):
 
       if is_index_share:
         final_carry, out_indexer_state, _ = scan_res_carry
+        self.cached_indexer_state = out_indexer_state
       else:
         final_carry = scan_res_carry
-        out_indexer_state = None
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
       # in the sharding metadata. jax.lax.scan emits it at position 0.
@@ -1137,8 +1137,6 @@ class NNXDecoder(nnx.Module):
       nnx.update(layers, clean_state)
       out_layers = layers
 
-    if is_index_share:
-      return final_carry, out_layers, returned_kv_stacked if use_kv else None, out_indexer_state
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
 
   def get_decoder_layers(self):
@@ -1836,7 +1834,7 @@ class NNXDecoder(nnx.Module):
                 **common_kwargs,
             )
           elif getattr(cfg, "use_index_share", False):
-            y, self.dense_layers, _, cached_indexer_state = self._apply_layers_sequentially(
+            y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,
                 y,
                 *layer_args,
@@ -1845,10 +1843,10 @@ class NNXDecoder(nnx.Module):
                 cached_indexer_state=None,
                 **layer_kwargs,
             )
-
+            cached_indexer_state = getattr(self, "cached_indexer_state", None)
             num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
-            y, self.moe_layers, _, _ = self._apply_layers_sequentially(
+            y, self.moe_layers, _ = self._apply_layers_sequentially(
                 self.moe_layers,
                 y,
                 *layer_args,
