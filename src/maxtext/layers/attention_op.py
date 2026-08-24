@@ -1986,11 +1986,12 @@ class AttentionOp(nnx.Module):
         sinks,
         indexer_mask,
     ):
-      # Splash prefetches the segment ids into SMEM, and SMEM is 1 MB per core.
-      # This limits the segmented kernel to approximately 524,288 tokens. When
-      # packing is off there is one segment per example, so the segment ids are
-      # constant and the non-segmented kernel gives the same result. Drop the
-      # ids here, before any early return, so every path benefits.
+      # At 1,048,576 tokens the segmented kernel asks for a 2 MB SMEM prefetch
+      # against 1 MB per core and fails to compile. Which array that is has not
+      # been identified, and the failure has not reproduced on a second mesh.
+      # When packing is off there is one segment per example, so the segment ids
+      # are constant and the non-segmented kernel gives the same result. Drop
+      # the ids here, before any early return, so every path benefits.
       if not self.config.packing:
         decoder_segment_ids_q = None
         decoder_segment_ids_kv = None
