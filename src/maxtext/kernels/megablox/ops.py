@@ -289,7 +289,7 @@ def _fwd_run_tokamax_v1(
   """Executes the standard Tokamax GMM V1 for forward pass."""
   # manual_axis_type is for gmm with shard_map check_vma=True, needs tokamax > 0.0.12
   out_kwargs = {}
-  if use_manual_quantization:
+  if use_manual_quantization and ManualAxisType is not None:
     # used in batchsplit
     out_kwargs["manual_axis_type"] = ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
 
@@ -653,7 +653,7 @@ def _dlhs_run_tokamax_v1(
 ) -> jnp.ndarray:
   """Executes DLHS using GMM 1"""
   dlhs_kwargs = {}
-  if use_manual_quantization:
+  if use_manual_quantization and ManualAxisType is not None:
     dlhs_kwargs["manual_axis_type"] = ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
 
   dlhs_rhs = rhs.swapaxes(1, 2) if transpose_rhs else rhs
@@ -813,7 +813,7 @@ def _drhs_run_tokamax_v1(
 ) -> jnp.ndarray:
   """Executes standard Tokamax ragged_dot for DRHS."""
   drhs_kwargs = {}
-  if use_manual_quantization:
+  if use_manual_quantization and ManualAxisType is not None:
     drhs_kwargs["manual_axis_type"] = ManualAxisType(
         varying=frozenset(["expert"]), unreduced=frozenset(["data", "fsdp"])
     )

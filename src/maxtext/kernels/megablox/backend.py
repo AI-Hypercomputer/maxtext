@@ -524,10 +524,13 @@ def gmm(
       "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
       "transpose_rhs": transpose_rhs,
   }
+  out_shape_kwargs = {}
+  if ManualAxisType is not None and varying_axes:
+    out_shape_kwargs["manual_axis_type"] = ManualAxisType(varying=frozenset(varying_axes))
   call_gmm = qpl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct(
-          (m, n), preferred_element_type, manual_axis_type=ManualAxisType(varying=frozenset(varying_axes))
+          (m, n), preferred_element_type, **out_shape_kwargs
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
@@ -783,12 +786,15 @@ def tgmm(
       "prefer_element_type": jnp.dtype(preferred_element_type).name,
       "num_actual_groups": num_actual_groups,
   }
+  out_shape_kwargs = {}
+  if ManualAxisType is not None and varying_axes:
+    out_shape_kwargs["manual_axis_type"] = ManualAxisType(varying=frozenset(varying_axes))
   call_gmm = qpl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct(
           (num_actual_groups, k, n),
           preferred_element_type,
-          manual_axis_type=ManualAxisType(varying=frozenset(varying_axes)),
+          **out_shape_kwargs,
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
