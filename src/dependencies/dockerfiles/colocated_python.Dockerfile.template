@@ -10,9 +10,17 @@ WORKDIR /app
 COPY . /app/maxtext/
 
 # Install MaxText dependencies
-# We assume requirements.txt is in maxtext/src/dependencies/requirements/generated_requirements/tpu-requirements.txt based on repo structure
 RUN uv pip install --upgrade pip setuptools wheel
 RUN uv pip install -r maxtext/src/dependencies/requirements/generated_requirements/tpu-requirements.txt -c /opt/venv/server_constraints.txt
+
+# Overwrite colocated_python_backend.py with patched implementation and recompile pyc
+RUN cp /app/maxtext/colocated_python_backend.py /opt/venv/lib/python3.12/site-packages/pathways_sidecar/colocated_python_backend.py && \
+    rm -f /opt/venv/lib/python3.12/site-packages/pathways_sidecar/__pycache__/colocated_python_backend* && \
+    python3 -m py_compile /opt/venv/lib/python3.12/site-packages/pathways_sidecar/colocated_python_backend.py
+
+# Overwrite pathwaysutils with updated elasticity error classification
+RUN cp -r /app/maxtext/pathwaysutils /opt/venv/lib/python3.12/site-packages/pathwaysutils && \
+    rm -rf /opt/venv/lib/python3.12/site-packages/pathwaysutils/__pycache__
 
 # Ensure MaxText src is in PYTHONPATH
 ENV PYTHONPATH=/app/maxtext/src:$PYTHONPATH

@@ -460,7 +460,9 @@ def load_state_if_possible(
   # pure_nnx saves in the Linen on-disk layout, so every branch below loads the same tree Linen
   # does: the NNX abstract is converted to that layout going in, and what comes back is reshaped
   # into the NNX state on the way out.
-  is_nnx = isinstance(abstract_unboxed_pre_state, nnx.State)
+  is_nnx = isinstance(abstract_unboxed_pre_state, (nnx.State, train_state_nnx.TrainStateNNX))
+  if is_nnx and isinstance(abstract_unboxed_pre_state, train_state_nnx.TrainStateNNX):
+    abstract_unboxed_pre_state = nnx.state(abstract_unboxed_pre_state)
 
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")

@@ -167,7 +167,9 @@ def ensure_elastic_manager_initialized(config):
   if should_use_elastic(config) and elastic_manager is None:
     min_slices = config.elastic_min_slice_count
     if min_slices <= 0:
-      min_slices = config.num_slices
+      min_slices = getattr(config, "num_slices", -1)
+    if min_slices <= 0:
+      min_slices = getattr(config, "compile_topology_num_slices", -1)
     all_devices = jax.devices()
     slice_to_devices = elastic.get_slice_to_devices(all_devices)
     if min_slices <= 0:
@@ -366,7 +368,7 @@ def is_scale_up_event(config) -> bool:
 
 def maybe_elastic_scale_up(config, checkpoint_manager):
   """Waits for a checkpoint to finish before interrupting for scale up."""
-  if is_scale_up_event(config):
+  if not elastic_snapshot(config) and is_scale_up_event(config):
     max_logging.log(
         "Started a checkpoint and a new slice is available. Waiting for current"
         " checkpoint to finish before interrupting."

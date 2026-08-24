@@ -2047,6 +2047,22 @@ def create_device_mesh(config, devices=None):
   if getattr(config, "elastic_enabled", False):
     devices = elastic_utils.live_devices(config)
     num_slices = len(elastic_utils.live_slice_indices(config))
+    # During cold start or a JobSet restart, the live slice set can
+    # transiently be empty while Pathways workers (re)join. Building the
+    # mesh on zero slices raises a ZeroDivisionError below (num_devices //
+    # 0), which is not a classified slice-down event and crashes the
+    # workload. Reuse the existing placement wait to block until the
+    # minimum slices are healthy, then recompute the live topology.
+    if num_slices == 0:
+      max_logging.log(
+          "create_device_mesh: No live slices detected (transient "
+          "cold-start or restart). Waiting for device placement to "
+          "stabilize before building the mesh..."
+      )
+      devices = elastic_utils.wait_for_devices_placed(
+          config, timeout=config.elastic_timeout_seconds
+      )
+      num_slices = len(elastic_utils.live_slice_indices(config))
   else:
     num_slices = config.num_slices
 
