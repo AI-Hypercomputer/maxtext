@@ -16,6 +16,7 @@
 
 
 import enum
+import functools
 from typing import Any, Optional, Tuple
 
 import jax
@@ -23,6 +24,7 @@ import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 
 from flax import nnx
 
@@ -426,6 +428,16 @@ def prime_prefill_cache_state(
       cache.overlap_gate.set_value(overlap_gate_to_write)
 
 
+def _as_nd_init(init_fn: Any) -> Any:
+  """Adapts a 2/3-arg Flax initializer to a 5-arg NdInitializer if needed."""
+  def wrapped(key, shape, dtype, *args, **kwargs):
+    try:
+      return init_fn(key, shape, dtype, *args, **kwargs)
+    except TypeError:
+      return init_fn(key, shape, dtype)
+  return wrapped
+
+
 class BaseDeepseekCompressor(nnx.Module):
   """Shared base class for DeepSeek-V4 long-range attention compressors.
 
@@ -452,6 +464,7 @@ class BaseDeepseekCompressor(nnx.Module):
   ):
     self.config = config
     self.compress_rate = compress_ratio
+    kernel_init = _as_nd_init(kernel_init)
     self.head_dim = config.head_dim
     self.dtype = config.dtype
     self.weight_dtype = config.weight_dtype
@@ -699,6 +712,7 @@ class DeepseekV4Indexer(nnx.Module):
     """
     self.config = config
     self.compress_rate = compress_ratio
+    kernel_init = _as_nd_init(kernel_init)
     self.index_n_heads = config.indexer_n_heads
     self.index_head_dim = config.indexer_head_dim
     self.index_topk = config.indexer_topk
@@ -886,14 +900,50 @@ class DeepseekV4Indexer(nnx.Module):
 
     if use_kernel:
       q_seq_major = jnp.transpose(q, (0, 2, 1, 3))
-      index_scores = csa_streamindex.csa_streamindex_score(
-          q=q_seq_major,
-          compressed=compressed,
-          weights=weights,
-          softmax_scale=self.softmax_scale,
-          block_q=block_q,
-          block_w=128,
-      )
+      mesh = getattr(self.config, "mesh", None) or getattr(self, "mesh", None)
+      if mesh is None:
+        try:
+          mesh = maxtext_utils.get_mesh_from_config(self.config)
+        except (AttributeError, ValueError, KeyError):
+          mesh = None
+      if mesh is not None and mesh.size > 1:
+        q_pspec = jax.sharding.PartitionSpec(
+            ("data", "fsdp", "fsdp_transpose", "expert", "context"),
+            None,
+            None,
+            None,
+        )
+        out_pspec = jax.sharding.PartitionSpec(
+            ("data", "fsdp", "fsdp_transpose", "expert", "context"),
+            None,
+            None,
+        )
+        @functools.partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(q_pspec, out_pspec, out_pspec),
+            out_specs=out_pspec,
+            check_vma=False,
+        )
+        def _shard_mapped_streamindex(local_q, local_comp, local_weights):
+          return csa_streamindex.csa_streamindex_score(
+              q=local_q,
+              compressed=local_comp,
+              weights=local_weights,
+              softmax_scale=self.softmax_scale,
+              block_q=block_q,
+              block_w=512,
+          )
+        index_scores = _shard_mapped_streamindex(q_seq_major, compressed, weights)
+      else:
+        index_scores = csa_streamindex.csa_streamindex_score(
+            q=q_seq_major,
+            compressed=compressed,
+            weights=weights,
+            softmax_scale=self.softmax_scale,
+            block_q=block_q,
+            block_w=512,
+        )
     else:
       compressed_kv = jnp.expand_dims(compressed, axis=1)
       compressed_kv = jnp.broadcast_to(

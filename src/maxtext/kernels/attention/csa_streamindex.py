@@ -58,7 +58,7 @@ def csa_streamindex_score(
     *,
     softmax_scale: float,
     block_q: int = 128,
-    block_w: int = 128,
+    block_w: int = 512,
     interpret: bool = False,
 ) -> jax.Array:
   """Computes CSA StreamIndex scores using a fused Pallas TPU kernel.
@@ -69,7 +69,7 @@ def csa_streamindex_score(
     weights: Indexer weights tensor of shape [batch_size, seq_len, num_heads].
     softmax_scale: Scaling factor applied post-ReLU (typically head_dim**-0.5).
     block_q: Query sequence block size (default 128).
-    block_w: Compressed window block size (default 128).
+    block_w: Compressed window block size (default 512).
     interpret: If True, executes via JAX interpreter on CPU.
 
   Returns:
@@ -79,6 +79,10 @@ def csa_streamindex_score(
   _, compressed_len, comp_head_dim = compressed.shape
   assert comp_head_dim == head_dim, f"{comp_head_dim=} != {head_dim=}"
   assert weights.shape == (batch_size, seq_len, num_heads), f"{weights.shape=} != {(batch_size, seq_len, num_heads)=}"
+
+  q = jax.lax.stop_gradient(q)
+  compressed = jax.lax.stop_gradient(compressed)
+  weights = jax.lax.stop_gradient(weights)
 
   padded_s = ((seq_len + block_q - 1) // block_q) * block_q
   padded_w = ((compressed_len + block_w - 1) // block_w) * block_w
@@ -113,7 +117,7 @@ def csa_streamindex_score(
       interpret=interpret,
   )(q, compressed, weights)
 
-  return out[:, :seq_len, :compressed_len]
+  return jax.lax.stop_gradient(out[:, :seq_len, :compressed_len])
 
 
 def reference_csa_streamindex_score(
