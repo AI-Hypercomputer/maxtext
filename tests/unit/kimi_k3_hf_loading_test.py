@@ -23,14 +23,13 @@ safetensors = pytest.importorskip("safetensors")
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
-import flax.linen as nn
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from flax import nnx
 import orbax.checkpoint as ocp
 from maxtext.configs import pyconfig
-from maxtext.layers import quantizations
-from maxtext.models import models
+from maxtext.models.models import Transformer
 from maxtext.utils import maxtext_utils
-from maxtext.utils import sharding as sharding_utils
+
 
 
 
@@ -65,9 +64,11 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
 
-    # Initialize pure Linen model (zero host RAM footprint)
-    quant = quantizations.configure_quantization(config)
-    model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=models.MODEL_MODE_TRAIN)
+    # Initialize pure NNX abstract model (zero host RAM footprint)
+    abstract_model = nnx.eval_shape(
+        lambda: Transformer(config, mesh, None, rngs=nnx.Rngs(0))
+    )
+
 
 
 
@@ -78,31 +79,29 @@ class KimiK3HFLoadingTest(unittest.TestCase):
 
 
     
-    # Obtain abstract parameters and shardings without materializing weights in host RAM
-    abstract_params = maxtext_utils.get_abstract_param(model, config)
+    # Split only nnx.Param
+    graphdef, params_state, _ = nnx.split(abstract_model, nnx.Param, ...)
+    pure_dict = params_state.to_pure_dict()
 
-    def to_concrete_sharded_leaf(leaf):
-      if isinstance(leaf, nn.LogicallyPartitioned):
-        shd = sharding_utils.create_sharding(mesh, leaf.names, rules=config.logical_axis_rules)
-        val = leaf.value
-        return jax.ShapeDtypeStruct(shape=val.shape, dtype=val.dtype, sharding=shd)
-      if hasattr(leaf, "value"):
-        leaf = leaf.value
-      if isinstance(leaf, dict):
-        if len(leaf) == 1 and "value" in leaf:
-          return to_concrete_sharded_leaf(leaf["value"])
-        return {k: to_concrete_sharded_leaf(v) for k, v in leaf.items()}
-      if isinstance(leaf, jax.ShapeDtypeStruct):
-        return jax.ShapeDtypeStruct(shape=leaf.shape, dtype=leaf.dtype, sharding=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
-      return leaf
+    def add_sharding_to_pure_dict(d):
+      if isinstance(d, dict):
+        return {k: add_sharding_to_pure_dict(v) for k, v in d.items()}
+      if isinstance(d, jax.ShapeDtypeStruct):
+        return jax.ShapeDtypeStruct(shape=d.shape, dtype=d.dtype, sharding=NamedSharding(mesh, P()))
+      return d
 
-    sharded_target_params = to_concrete_sharded_leaf(abstract_params)
+    sharded_pure_dict = add_sharding_to_pure_dict(pure_dict)
 
     # Load converted Orbax checkpoint
     mngr = ocp.CheckpointManager(self.checkpoint_dir)
-    target_item = {"step": 0, "params": sharded_target_params, "opt_state": {}}
+    target_item = {"step": 0, "params": {"params": sharded_pure_dict}, "opt_state": {}}
     loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.StandardRestore(target_item)))
     print("Checkpoint restored successfully! Step:", mngr.latest_step())
+
+    params = loaded_state["items"]["params"]["params"]
+
+    # Update NNX abstract model in place with restored parameters
+    nnx.update(abstract_model, params_state.from_pure_dict(params))
 
     # Dummy inputs for 2-layer Kimi K3 (1 Dense + 1 MoE/MLA)
     batch_size = 1
@@ -111,12 +110,10 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
     segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
 
-
-    params = loaded_state["items"]["params"]["params"]
-
-    # Run forward pass with loaded state
-    logits, _ = model.apply({"params": params}, inputs, positions, segment_ids)
+    # Run NNX forward pass
+    logits, _ = abstract_model(inputs, positions, segment_ids)
     print("Logits shape:", logits.shape, "dtype:", logits.dtype)
+
 
     # Assertions
     self.assertEqual(logits.shape, (batch_size, seq_len, config.vocab_size))
