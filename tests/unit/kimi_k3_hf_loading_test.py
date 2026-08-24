@@ -24,11 +24,14 @@ safetensors = pytest.importorskip("safetensors")
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+import flax.linen as nn
 import orbax.checkpoint as ocp
 from maxtext.configs import pyconfig
-from maxtext.layers.nnx_wrappers import ToLinen
-from maxtext.models.models import Transformer
+from maxtext.layers import quantizations
+from maxtext.models import models
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding as sharding_utils
+
 
 
 
@@ -62,8 +65,10 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
 
-    # Initialize model
-    model = ToLinen(Transformer, args=(config, mesh, None))
+    # Initialize pure Linen model (zero host RAM footprint)
+    quant = quantizations.configure_quantization(config)
+    model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=models.MODEL_MODE_TRAIN)
+
 
 
 
@@ -73,6 +78,32 @@ class KimiK3HFLoadingTest(unittest.TestCase):
 
 
     
+    # Obtain abstract parameters and shardings without materializing weights in host RAM
+    abstract_params = maxtext_utils.get_abstract_param(model, config)
+
+    def to_concrete_sharded_leaf(leaf):
+      if isinstance(leaf, nn.LogicallyPartitioned):
+        shd = sharding_utils.create_sharding(mesh, leaf.names, rules=config.logical_axis_rules)
+        val = leaf.value
+        return jax.ShapeDtypeStruct(shape=val.shape, dtype=val.dtype, sharding=shd)
+      if hasattr(leaf, "value"):
+        leaf = leaf.value
+      if isinstance(leaf, dict):
+        if len(leaf) == 1 and "value" in leaf:
+          return to_concrete_sharded_leaf(leaf["value"])
+        return {k: to_concrete_sharded_leaf(v) for k, v in leaf.items()}
+      if isinstance(leaf, jax.ShapeDtypeStruct):
+        return jax.ShapeDtypeStruct(shape=leaf.shape, dtype=leaf.dtype, sharding=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
+      return leaf
+
+    sharded_target_params = to_concrete_sharded_leaf(abstract_params)
+
+    # Load converted Orbax checkpoint
+    mngr = ocp.CheckpointManager(self.checkpoint_dir)
+    target_item = {"step": 0, "params": sharded_target_params, "opt_state": {}}
+    loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.StandardRestore(target_item)))
+    print("Checkpoint restored successfully! Step:", mngr.latest_step())
+
     # Dummy inputs for 2-layer Kimi K3 (1 Dense + 1 MoE/MLA)
     batch_size = 1
     seq_len = 4
@@ -80,28 +111,6 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
     segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
 
-    # Initialize abstract state with zero memory allocation via eval_shape
-    rng = jax.random.PRNGKey(0)
-    abstract_state = jax.eval_shape(model.init, rng, inputs, positions, segment_ids)
-
-    def unwrap_and_shard(x):
-      if hasattr(x, "value"):
-        x = x.value
-      if isinstance(x, dict):
-        if "value" in x and len(x) == 1:
-          return unwrap_and_shard(x["value"])
-        return {k: unwrap_and_shard(v) for k, v in x.items()}
-      if isinstance(x, jax.ShapeDtypeStruct):
-        return jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=NamedSharding(mesh, jax.sharding.PartitionSpec()))
-      return x
-
-    unwrapped = unwrap_and_shard(abstract_state)
-
-    # Load converted Orbax checkpoint
-    mngr = ocp.CheckpointManager(self.checkpoint_dir)
-    target_item = {"step": 0, "params": unwrapped, "opt_state": {}}
-    loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.StandardRestore(target_item)))
-    print("Checkpoint restored successfully! Step:", mngr.latest_step())
 
     params = loaded_state["items"]["params"]["params"]
 
