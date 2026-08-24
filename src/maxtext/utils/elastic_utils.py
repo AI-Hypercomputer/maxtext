@@ -14,15 +14,13 @@
 
 """Utility functions for Elastic Training."""
 
-from collections import Counter
 import functools
-from types import SimpleNamespace
+from collections import Counter
 
 import jax
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 import pathwaysutils
-from pathwaysutils.elastic import elastic
 from pathwaysutils.elastic import manager
 
 elastic_manager: manager.Manager | None = None
@@ -30,37 +28,13 @@ pending_reinit_recorder = None
 pending_elastic_event_type = None
 
 
-def record_slice_state(recorder, active_slices_override: int | None = None) -> None:
-  """Records live slice counts and logs them to the GoodputRecorder."""
-  if (
-      recorder is None
-      or not hasattr(recorder, "record_elastic_slice_counts")
-      or not pathwaysutils.is_pathways_backend_used()
-      or elastic_manager is None
-  ):
-    return
-
-  available_slices = len(elastic.get_active_slice_indices())
-  active_slices = (
-      active_slices_override if active_slices_override is not None else len(elastic_manager.active_slice_indices)
-  )
-  total_slices = len(elastic.get_slice_to_devices(jax.devices()))
-
-  recorder.record_elastic_slice_counts(
-      available_slices=available_slices,
-      active_slices=active_slices,
-      total_slices=total_slices,
-  )
-
-
 def record_elastic_event_start(recorder, config) -> None:
   """Records start of an elastic scale up event."""
   global pending_elastic_event_type
   event_type = "elastic_scale_up" if is_scale_up_event(config) else "elastic_slice_down"
   pending_elastic_event_type = event_type
-  if recorder and hasattr(recorder, "record_elastic_wait_start_time"):
-    recorder.record_elastic_wait_start_time(event_type=event_type)
-    record_slice_state(recorder, active_slices_override=0)
+  if recorder:
+    recorder.record_custom_badput_event_start_time(custom_badput_event_type=event_type)
 
 
 def record_elastic_wait_end_and_reinit_start(recorder) -> None:
@@ -70,41 +44,23 @@ def record_elastic_wait_end_and_reinit_start(recorder) -> None:
     return
   event_type = pending_elastic_event_type
   pending_elastic_event_type = None
-  if recorder and hasattr(recorder, "record_elastic_wait_end_time"):
-    recorder.record_elastic_wait_end_time(event_type=event_type)
-    recorder.record_elastic_reinit_start_time()
-    record_slice_state(recorder)
+  if recorder:
+    recorder.record_custom_badput_event_end_time(custom_badput_event_type=event_type)
+    recorder.record_custom_badput_event_start_time(custom_badput_event_type="elastic_reinitialization")
   pending_reinit_recorder = recorder
 
 
 def record_elastic_reinit_end() -> None:
   """Records end of elastic reinitialization event."""
   global pending_reinit_recorder
-  if pending_reinit_recorder is not None and hasattr(pending_reinit_recorder, "record_elastic_reinit_end_time"):
-    pending_reinit_recorder.record_elastic_reinit_end_time()
-    record_slice_state(pending_reinit_recorder)
-  pending_reinit_recorder = None
+  if pending_reinit_recorder is not None:
+    pending_reinit_recorder.record_custom_badput_event_end_time(custom_badput_event_type="elastic_reinitialization")
+    pending_reinit_recorder = None
 
 
 def elastic_enabled(config) -> bool:
   """Returns whether elastic mode is enabled."""
   return pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
-
-
-def elastic_snapshot(config) -> bool:
-  """Returns whether elastic snapshot mode is enabled."""
-  return elastic_enabled(config) and config.elastic_backup_kind == "snapshot"
-
-
-def maybe_bubble_elastic_exception(config, e: Exception) -> None:
-  """Checks JAX/ScaleUp elastic errors and re-raises them if elasticity is enabled.
-
-  Args:
-    config: Maxtext configuration object.
-    e: The exception currently being evaluated.
-  """
-  if elastic_enabled(config) and isinstance(e, (jax.errors.JaxRuntimeError, manager.ScaleUpSignalError)):
-    raise e
 
 
 def should_use_elastic(config) -> bool:
@@ -233,12 +189,18 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
   ensure_elastic_manager_initialized(config)
   assert elastic_manager is not None
 
-  cleanup_partial = functools.partial(clean_up_checkpoints, config.checkpoint_dir)
+  def cleanup_iterators_and_checkpoints():
+    try:
+      from maxtext.input_pipeline.multihost_dataloading import cleanup_all_iterators
+      cleanup_all_iterators()
+    except Exception as e:
+      max_logging.log(f"Failed to cleanup iterators during elastic scale up: {e}")
+    clean_up_checkpoints(config.checkpoint_dir)
 
   if callback_fn is None:
-    effective_callback = cleanup_partial
+    effective_callback = cleanup_iterators_and_checkpoints
   else:
-    effective_callback = chain_callbacks(cleanup_partial, callback_fn)
+    effective_callback = chain_callbacks(cleanup_iterators_and_checkpoints, callback_fn)
 
   return elastic_manager.elastic_retry(
       max_retries=config.elastic_max_retries,
@@ -254,59 +216,19 @@ def is_scale_up_event(config) -> bool:
   if elastic_enabled(config):
     ensure_elastic_manager_initialized(config)
     assert elastic_manager is not None
-    return bool(elastic_manager.available_inactive_slices)
+    return elastic_manager.new_slice_event.is_set()
 
   return False
 
 
 def maybe_elastic_scale_up(config, checkpoint_manager):
   """Waits for a checkpoint to finish before interrupting for scale up."""
-  if not should_use_elastic(config):
-    max_logging.log("maybe_elastic_scale_up: Elastic training is not enabled.")
-    return
   if is_scale_up_event(config):
     max_logging.log(
         "Started a checkpoint and a new slice is available. Waiting for current"
         " checkpoint to finish before interrupting."
     )
     if checkpoint_manager is not None:
-      # The v1 Checkpointer exposes `.wait()`, the v0 emergency/replicator
-      # managers expose `.wait_until_finished()`; this module cannot import
-      # `checkpointing`'s dispatcher (checkpointing imports elastic_utils).
-      if hasattr(checkpoint_manager, "wait"):
-        checkpoint_manager.wait()
-      else:
-        checkpoint_manager.wait_until_finished()
+      checkpoint_manager.wait_until_finished()
     max_logging.log("Checkpoint save completed. Interrupting")
     raise manager.ScaleUpSignalError()
-
-
-def single_controller_mtc_init_kwargs(raw_keys):
-  """Returns topology kwargs for single-controller MTC initialization."""
-  kwargs = {
-      "data_parallelism": raw_keys["mtc_data_parallelism"],
-      "num_slices": raw_keys["num_slices"],
-  }
-  if not raw_keys.get("elastic_enabled", False):
-    return kwargs
-
-  config = SimpleNamespace(**raw_keys)
-  if not should_use_elastic(config):
-    return kwargs
-
-  active_devices = tuple(live_devices(config))
-  active_slice_indices = {getattr(device, "slice_index", 0) for device in active_devices if device is not None}
-  if not active_devices or not active_slice_indices:
-    raise ValueError("Elastic single-controller MTC initialization found no active devices.")
-
-  kwargs["devices"] = active_devices
-  kwargs["num_slices"] = len(active_slice_indices)
-  if not kwargs["data_parallelism"]:
-    kwargs["data_parallelism"] = kwargs["num_slices"]
-  max_logging.log(
-      "Using active elastic devices for single-controller MTC initialization: "
-      f"active_num_slices={kwargs['num_slices']}, "
-      f"active_device_count={len(active_devices)}, "
-      f"configured_num_slices={raw_keys['num_slices']}."
-  )
-  return kwargs

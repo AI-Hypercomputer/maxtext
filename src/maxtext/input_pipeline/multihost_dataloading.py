@@ -46,6 +46,24 @@ import jax.numpy as jnp
 
 from maxtext.utils import max_logging
 
+_GLOBAL_REMOTE_ITERATORS = weakref.WeakSet()
+_GLOBAL_MULTIHOST_ITERATORS = weakref.WeakSet()
+
+def cleanup_all_iterators():
+  max_logging.log(f"CLEANUP: Cleaning up {len(_GLOBAL_MULTIHOST_ITERATORS)} multihost iterators and {len(_GLOBAL_REMOTE_ITERATORS)} remote iterators")
+  for it in list(_GLOBAL_MULTIHOST_ITERATORS):
+    try:
+      if hasattr(it, "close"):
+        it.close()
+    except Exception as e:
+      max_logging.log(f"CLEANUP Error: {e}")
+  for it in list(_GLOBAL_REMOTE_ITERATORS):
+    try:
+      if hasattr(it, "close"):
+        it.close()
+    except Exception as e:
+      max_logging.log(f"CLEANUP Error: {e}")
+
 
 def _build_global_shape_and_sharding(
     local_shape: tuple[int, ...], global_mesh: Mesh
@@ -98,6 +116,7 @@ class MultiHostDataLoadIterator:
     self.last_local_data = None
     self.generate_padding_batch = generate_padding_batch
     self.expansion_loading_factor_for_grain = expansion_loading_factor_for_grain
+    _GLOBAL_MULTIHOST_ITERATORS.add(self)
 
   def reset(self):
     if hasattr(self.dataloader, "as_numpy_iterator"):
@@ -108,6 +127,15 @@ class MultiHostDataLoadIterator:
       raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
     self.out_of_data = False
     self.last_local_data = None
+
+  def close(self):
+    if hasattr(self, "local_iterator") and hasattr(self.local_iterator, "close") and callable(self.local_iterator.close):
+      self.local_iterator.close()
+    if hasattr(self, "dataloader") and hasattr(self.dataloader, "close") and callable(self.dataloader.close):
+      self.dataloader.close()
+      
+  def __del__(self):
+    self.close()
 
   def __iter__(self):
     self.reset()
@@ -201,6 +229,15 @@ class RemoteIterator:
     else:
       raise ValueError("Type error: dataloader should be Iterable.")
 
+  def close(self):
+    if hasattr(self, "iterator") and hasattr(self.iterator, "close") and callable(self.iterator.close):
+      self.iterator.close()
+    if hasattr(self, "dataloader") and hasattr(self.dataloader, "close") and callable(self.dataloader.close):
+      self.dataloader.close()
+      
+  def __del__(self):
+    self.close()
+
   def get_next(self, dummy_array):
     """Gets the next batch of data and forms a global array."""
     local_data = next(self.iterator)
@@ -239,11 +276,11 @@ class RemoteIterator:
       if jax.process_index() == 0:
         directory.mkdir(parents=True, exist_ok=True)
         filename = directory / "process_0.json"
-        filename.write_text(json.dumps(self.iterator.get_state(), indent=4))  # pyrefly: ignore[missing-attribute]
+        filename.write_text(json.dumps(self.iterator.get_state(), indent=4))
       return step_array
     directory.mkdir(parents=True, exist_ok=True)
     filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
-    state = json.dumps(self.iterator.get_state(), indent=4)  # pyrefly: ignore[missing-attribute]
+    state = json.dumps(self.iterator.get_state(), indent=4)
     filename.write_text(state)
     return step_array
 
@@ -255,7 +292,7 @@ class RemoteIterator:
     else:
       filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
     state = json.loads(filename.read_text())
-    self.iterator.set_state(state)  # pyrefly: ignore[missing-attribute]
+    self.iterator.set_state(state)
     return step_array
 
 
@@ -273,22 +310,30 @@ class RemoteIteratorWrapper:
     # named "local_iterator" to match MultiHostDataLoadIterator's interface.
     remote_iterator_cls = colocated_python.colocated_python_class(RemoteIterator)
     self.local_iterator = remote_iterator_cls(
-        get_ds_fn,  # pyrefly: ignore[bad-argument-count]
+        get_ds_fn,
         preprocessing_fn,
         global_shape,
         checkpoint_path,
-        elastic=elastic,  # pyrefly: ignore[unexpected-keyword]
+        elastic=elastic,
     )
+    _GLOBAL_REMOTE_ITERATORS.add(self)
     max_logging.log("RemoteIteratorWrapper initiated")
+
+  def close(self):
+    if hasattr(self, "local_iterator") and hasattr(self.local_iterator, "close") and callable(self.local_iterator.close):
+      self.local_iterator.close()
+    
+  def __del__(self):
+    self.close()
 
   def __iter__(self):
     return self
 
   def reset(self):
-    self.local_iterator.reset()  # pyrefly: ignore[missing-attribute]
+    self.local_iterator.reset()
 
   def __next__(self):
-    out = self.local_iterator.get_next(self.dummy_array)  # pyrefly: ignore[missing-attribute]
+    out = self.local_iterator.get_next(self.dummy_array)
     # use tree_map is out is a dict
     return jax.device_put(out, self.tpu_sharding)
 
@@ -296,10 +341,10 @@ class RemoteIteratorWrapper:
     replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
     step_array = jnp.array(step, dtype=jnp.int32)
     step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.save_state(step_array)  # pyrefly: ignore[missing-attribute]
+    self.local_iterator.save_state(step_array)
 
   def restore_state(self, step):
     replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
     step_array = jnp.array(step, dtype=jnp.int32)
     step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.restore_state(step_array)  # pyrefly: ignore[missing-attribute]
+    self.local_iterator.restore_state(step_array)
