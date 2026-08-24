@@ -4319,13 +4319,6 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   return mapping
 
 
-def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
-  """Transformation hooks for Kimi K3 parameters."""
-  hooks = {}
-  # Add default transpose and dequantization hooks
-  return hooks
-
-
 PARAM_MAPPING = {
 
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4388,53 +4381,14 @@ E2M1_TABLE = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0,
 import ml_dtypes
 
 
-def dequantize_mxfp4_w1_w3(inputs, target_shape=None):
-  """Stateless MXFP4 dequantization for w1 (gate) and w3 (up) projections."""
-  weight_packed, weight_scale = inputs
-  out_features, in_bytes = weight_packed.shape
-  in_features = in_bytes * 2
-
-  w_low = weight_packed & 0x0F
-  w_high = (weight_packed >> 4) & 0x0F
-  w_indices = np.stack([w_low, w_high], axis=-1).reshape(out_features, in_features)
-
-  w_fp = E2M1_TABLE[w_indices]
-  scales = E8M0_TABLE[weight_scale.astype(np.int32)]
-  scales = np.repeat(scales, 32, axis=-1)
-
-  w_dequant = w_fp * scales
-  w_transposed = np.transpose(w_dequant, (1, 0))
-
-  w_padded = np.pad(w_transposed, ((0, 7168 - 3584), (0, 0)), mode="constant")
-  return w_padded.astype(ml_dtypes.bfloat16)
-
-
-def dequantize_mxfp4_wo(inputs, target_shape=None):
-  """Stateless MXFP4 dequantization for wo (down) projection."""
-  weight_packed, weight_scale = inputs
-  out_features, in_bytes = weight_packed.shape
-  in_features = in_bytes * 2
-
-  w_low = weight_packed & 0x0F
-  w_high = (weight_packed >> 4) & 0x0F
-  w_indices = np.stack([w_low, w_high], axis=-1).reshape(out_features, in_features)
-
-  w_fp = E2M1_TABLE[w_indices]
-  scales = E8M0_TABLE[weight_scale.astype(np.int32)]
-  scales = np.repeat(scales, 32, axis=-1)
-
-  w_dequant = w_fp * scales
-  w_transposed = np.transpose(w_dequant, (1, 0))
-
-  w_padded = np.pad(w_transposed, ((0, 0), (0, 7168 - 3584)), mode="constant")
-  return w_padded.astype(ml_dtypes.bfloat16)
-
-
 def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Returns hook functions for Kimi K3 weight conversion."""
   hooks = {}
   n_layers = maxtext_config.num_decoder_layers
   first_num_dense_layers = config.get("first_k_dense_replace", maxtext_config.first_num_dense_layers)
+  emb_dim = getattr(maxtext_config, "emb_dim", 7168)
+  routed_hidden_size = getattr(maxtext_config, "routed_expert_hidden_size", 3584)
+  pad_dim = max(0, emb_dim - routed_hidden_size)
 
   def transpose(x, target_shape=None):
     return x.T if hasattr(x, "T") else x
@@ -4445,9 +4399,53 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     return x.T if hasattr(x, "T") else x
 
   def routed_expert_norm_hook(x, target_shape=None):
-    if hasattr(x, "shape") and len(x.shape) == 1 and x.shape[0] < 7168:
-      return np.pad(x, (0, 7168 - x.shape[0]), mode="constant", constant_values=1.0).astype(np.float32)
+    if hasattr(x, "shape") and len(x.shape) == 1 and x.shape[0] < emb_dim:
+      return np.pad(x, (0, emb_dim - x.shape[0]), mode="constant", constant_values=1.0).astype(np.float32)
     return x
+
+  def dequant_w1_w3(inputs, target_shape=None):
+    weight_packed, weight_scale = inputs
+    out_features, in_bytes = weight_packed.shape
+    in_features = in_bytes * 2
+
+    w_low = weight_packed & 0x0F
+    w_high = (weight_packed >> 4) & 0x0F
+    w_indices = np.stack([w_low, w_high], axis=-1).reshape(out_features, in_features)
+
+    w_fp = E2M1_TABLE[w_indices]
+    scales = E8M0_TABLE[weight_scale.astype(np.int32)]
+    scales = np.repeat(scales, 32, axis=-1)
+
+    w_dequant = w_fp * scales
+    w_transposed = np.transpose(w_dequant, (1, 0))
+
+    if pad_dim > 0:
+      w_padded = np.pad(w_transposed, ((0, pad_dim), (0, 0)), mode="constant")
+    else:
+      w_padded = w_transposed
+    return w_padded.astype(ml_dtypes.bfloat16)
+
+  def dequant_wo(inputs, target_shape=None):
+    weight_packed, weight_scale = inputs
+    out_features, in_bytes = weight_packed.shape
+    in_features = in_bytes * 2
+
+    w_low = weight_packed & 0x0F
+    w_high = (weight_packed >> 4) & 0x0F
+    w_indices = np.stack([w_low, w_high], axis=-1).reshape(out_features, in_features)
+
+    w_fp = E2M1_TABLE[w_indices]
+    scales = E8M0_TABLE[weight_scale.astype(np.int32)]
+    scales = np.repeat(scales, 32, axis=-1)
+
+    w_dequant = w_fp * scales
+    w_transposed = np.transpose(w_dequant, (1, 0))
+
+    if pad_dim > 0:
+      w_padded = np.pad(w_transposed, ((0, 0), (0, pad_dim)), mode="constant")
+    else:
+      w_padded = w_transposed
+    return w_padded.astype(ml_dtypes.bfloat16)
 
   linear_keys = [
       "self_attention-q_proj-kernel",
@@ -4492,9 +4490,9 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       hooks[f"{mt_layer}-mlp-shared_experts-wo-kernel"] = transpose
 
       # Stateless MXFP4 dequantization hooks for MoE experts
-      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_0"] = dequantize_mxfp4_w1_w3
-      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_1"] = dequantize_mxfp4_w1_w3
-      hooks[f"{mt_layer}-mlp-MoeBlock_0-wo"] = dequantize_mxfp4_wo
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_0"] = dequant_w1_w3
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_1"] = dequant_w1_w3
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-wo"] = dequant_wo
 
   hooks["params-decoder-logits_dense-kernel"] = transpose
   return hooks

@@ -228,10 +228,8 @@ class KimiDecoupledAttention(nnx.Module):
     )
 
     # Parameters: A_log & dt_bias
-    # A_log is initialized uniformly in [1, 16] and stored as log (per head_dim)
-    a_init = jax.random.uniform(rngs.params(), (self.head_dim,), minval=1.0, maxval=16.0)
-    self.A_log = nnx.Param(jnp.log(a_init))
-
+    # Paper Eq. (5): A_h is learnable per-head log-scale initialized to 0
+    self.A_log = nnx.Param(jnp.zeros((self.num_heads,)))
     self.dt_bias = nnx.Param(jnp.zeros((projection_size,)))
 
     # Output gate projection
@@ -319,12 +317,14 @@ class KimiDecoupledAttention(nnx.Module):
     g_raw = self.f_b_proj(self.f_a_proj(hidden_states)).reshape(B, T, self.num_heads, self.head_dim)
     dt_bias = self.dt_bias[...].reshape(1, 1, self.num_heads, self.head_dim)
 
-    # decay = -exp(A_log) * softplus(g_raw + dt_bias) <= 0
-    A_log = self.A_log[...].reshape(1, 1, 1, self.head_dim)
-    decay = -jnp.exp(A_log) * jax.nn.softplus(g_raw + dt_bias)
-
-    if self.gate_lower_bound is not None:
-      decay = jnp.maximum(decay, self.gate_lower_bound)
+    # Paper Eq. (5): g = gmin * Sigmoid(exp(A_log) * (g_raw + dt_bias)) in (gmin, 0)
+    gmin = self.gate_lower_bound if self.gate_lower_bound is not None else -5.0
+    a_val = self.A_log[...]
+    if a_val.ndim == 1 and a_val.shape[0] == self.num_heads:
+      A_log = a_val.reshape(1, 1, self.num_heads, 1)
+    else:
+      A_log = a_val.reshape(1, 1, 1, -1)
+    decay = gmin * jax.nn.sigmoid(jnp.exp(A_log) * (g_raw + dt_bias))
 
     # beta: [B, T, H] -> sigmoid(beta)
     beta = jax.nn.sigmoid(self.b_proj(hidden_states))

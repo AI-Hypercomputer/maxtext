@@ -120,13 +120,16 @@ def test_kda_recurrent_kernel_parity_with_fla(T):
 
   q_np = np.random.randn(B, T, H, K).astype(np.float32)
   k_np = np.random.randn(B, T, H, K).astype(np.float32)
+  # L2-normalize q and k as defined in KDA
+  q_np = q_np / np.maximum(np.linalg.norm(q_np, axis=-1, keepdims=True), 1e-6)
+  k_np = k_np / np.maximum(np.linalg.norm(k_np, axis=-1, keepdims=True), 1e-6)
+
   v_np = np.random.randn(B, T, HV, V).astype(np.float32)
   g_raw_np = np.random.randn(B, T, HV, K).astype(np.float32)
-  beta_np = np.random.randn(B, T, HV).astype(np.float32)
+  beta_np = 1.0 / (1.0 + np.exp(-np.random.randn(B, T, HV).astype(np.float32)))
 
-  # Compute g_np using Kimi K3 decay formula: g = -exp(A_log) * softplus(g_raw + dt_bias)
-  softplus_g = np.log1p(np.exp(g_raw_np + dt_bias_np[None, None, :, :]))
-  g_np = -np.exp(A_log_np)[None, None, :, None] * softplus_g
+  # Compute g_np using Kimi K3 decay formula: g = gmin * Sigmoid(exp(A_log) * (g_raw + dt_bias))
+  g_np = -5.0 / (1.0 + np.exp(-np.exp(A_log_np)[None, None, :, None] * (g_raw_np + dt_bias_np[None, None, :, :])))
 
   # PyTorch
   o_pt, S_pt = naive_recurrent_kda(

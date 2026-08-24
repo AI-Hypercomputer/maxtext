@@ -124,7 +124,7 @@ class PtKDA(nn.Module):
     self.f_b_proj = nn.Linear(head_dim, projection_size, bias=False)
     self.b_proj = nn.Linear(hidden_size, num_heads, bias=False)
 
-    self.A_log = nn.Parameter(torch.zeros(head_dim))
+    self.A_log = nn.Parameter(torch.zeros(num_heads))
     self.dt_bias = nn.Parameter(torch.zeros(projection_size))
 
     self.g_proj = nn.Linear(hidden_size, projection_size, bias=False)
@@ -144,12 +144,10 @@ class PtKDA(nn.Module):
     q = q / torch.linalg.norm(q, dim=-1, keepdim=True).clamp(min=1e-6)
     k = k / torch.linalg.norm(k, dim=-1, keepdim=True).clamp(min=1e-6)
 
-    # 2. Gate & Beta
+    # 2. Gate & Beta (Paper Eq. 5: g = gmin * sigmoid(exp(A_log) * (g + dt_bias)))
     g = self.f_b_proj(self.f_a_proj(x)).reshape(B, T, H, K)
-    g = -torch.exp(self.A_log).unsqueeze(0).unsqueeze(0).unsqueeze(0) * F.softplus(
-        g + self.dt_bias.reshape(1, 1, H, K)
-    )
-    g = torch.maximum(g, torch.tensor(-5.0))
+    a_log_exp = torch.exp(self.A_log).reshape(1, 1, H, 1)
+    g = -5.0 * torch.sigmoid(a_log_exp * (g + self.dt_bias.reshape(1, 1, H, K)))
     beta = torch.sigmoid(self.b_proj(x))
 
     # 3. Recurrent KDA step
