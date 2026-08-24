@@ -1516,29 +1516,34 @@ class Decoder(nn.Module):
           kv_caches, returned_kv_cache, num_full_blocks, block_pattern_len, stacked=True
       )
 
-    # Process any remaining layers that don't fit into a full scanned block
-    for layer_id in range(cfg.num_decoder_layers - remainder_layers, cfg.num_decoder_layers):
-      layer = qwen3.Qwen3NextDecoderLayerToLinen(
+    # Layers past the last whole block go into a short block of their own. It is a
+    # Qwen3NextScannableBlock like the scanned ones, named `layers_remainder`, so the
+    # parameter paths still match the pure-NNX decoder's and one mapping serves both.
+    if remainder_layers > 0:
+      start_idx = cfg.num_decoder_layers - remainder_layers
+      remainder_kv = tuple(kv_caches[start_idx:]) if kv_caches is not None else None
+      y_and_kv = qwen3.Qwen3NextScannableBlockToLinen(
           config=cfg,
           mesh=mesh,
-          model_mode=model_mode,
           quant=self.quant,
-          layer_idx=layer_id,
-      )
-      kv_cache = kv_caches[layer_id] if kv_caches is not None else None
-
-      remainder_args = (
+          model_mode=model_mode,
+          num_of_layers=remainder_layers,
+          layer_idx_offset=start_idx,
+          remat_policy_fn=self.get_remat_policy(),
+          apply_internal_remat=True,
+          name="layers_remainder",
+      )(
+          y,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
           previous_chunk,
           slot,
-          kv_cache,
+          remainder_kv,
           attention_metadata,
       )
 
-      y_and_kv = layer(y, *remainder_args)
       if isinstance(y_and_kv, tuple):
         y = y_and_kv[0]
         new_kv = y_and_kv[1]
@@ -1547,7 +1552,8 @@ class Decoder(nn.Module):
         new_kv = None
 
       if kv_caches is not None and new_kv is not None:
-        kv_caches[layer_id] = new_kv
+        for offset, updated_item in enumerate(new_kv):
+          kv_caches[start_idx + offset] = updated_item
 
     return y
 

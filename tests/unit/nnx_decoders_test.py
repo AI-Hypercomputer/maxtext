@@ -963,16 +963,9 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
 class TestNNXDecoderQwen3Next(unittest.TestCase):
   """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
 
-  def test_decoder_regroups_flat_kv_caches_per_block(self):
-    """A flat per-layer kv cache list must be regrouped per block and written back in order.
-
-    The scan runs over blocks, not layers, so passing the flat list straight
-    through would hand block i only ``kv_caches[i]``. Guards
-    ``_apply_qwen3_next_scanned_blocks``, which must also keep
-    ``skip_block_remat=True`` on this path rather than falling back to the
-    generic (block-rematerialized) branch.
-    """
-    cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": 8, "scan_layers": True})
+  def _build(self, num_decoder_layers):
+    """Builds a scanned Qwen3-Next decoder and its shared embedding."""
+    cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True})
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
     shared_embedding = Embed(
@@ -983,17 +976,16 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
         mesh=mesh,
         rngs=nnx.Rngs(params=0),
     )
+    return cfg, decoder, shared_embedding
 
+  def _run(self, cfg, decoder, shared_embedding, kv_caches=None):
+    """Runs one TRAIN-mode forward pass and returns the logits."""
     batch = cfg.global_batch_size_to_train_on
     seq = cfg.max_target_length
     ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq), 0, cfg.vocab_size)
     segment_ids = jnp.full((batch, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
     positions = jnp.broadcast_to(jnp.arange(seq)[None], (batch, seq))
-
-    # Distinct sentinel per layer: regrouping errors show up as caches landing on
-    # the wrong layer, which the pass-through in TRAIN mode makes visible.
-    kv_caches = [jnp.full((batch, seq), float(i)) for i in range(cfg.num_decoder_layers)]
-    decoder(
+    logits, _, _ = decoder(
         shared_embedding,
         ids,
         decoder_positions=positions,
@@ -1002,10 +994,91 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
         kv_caches=kv_caches,
     )
+    return logits
+
+  def test_decoder_regroups_flat_kv_caches_per_block(self):
+    """A flat per-layer kv cache list must be regrouped per block and written back in order.
+
+    The scan runs over blocks, not layers, so passing the flat list straight
+    through would hand block i only ``kv_caches[i]``. Guards
+    ``_apply_qwen3_next_scanned_blocks``, which must also keep
+    ``skip_block_remat=True`` on this path rather than falling back to the
+    generic (block-rematerialized) branch.
+    """
+    cfg, decoder, shared_embedding = self._build(8)
+    batch = cfg.global_batch_size_to_train_on
+    seq = cfg.max_target_length
+
+    # Distinct sentinel per layer: regrouping errors show up as caches landing on
+    # the wrong layer, which the pass-through in TRAIN mode makes visible.
+    kv_caches = [jnp.full((batch, seq), float(i)) for i in range(cfg.num_decoder_layers)]
+    self._run(cfg, decoder, shared_embedding, kv_caches=kv_caches)
 
     self.assertEqual(len(kv_caches), cfg.num_decoder_layers)
     for i, cache in enumerate(kv_caches):
       np.testing.assert_array_equal(np.asarray(cache), np.full((batch, seq), float(i)))
+
+  def test_decoder_keeps_layers_past_the_last_whole_block(self):
+    """Layers left over by the block scan must still be built and applied.
+
+    ``num_decoder_layers // inhomogeneous_layer_cycle_interval`` blocks cover
+    only a whole number of periods, so with 6 layers and a period of 4 the last
+    two would be silently dropped -- the model would quietly run 4 layers. They
+    go into ``layers_remainder`` instead; perturbing only that block's weights
+    has to move the output, which it cannot do if the block is never applied.
+    """
+    cfg, decoder, shared_embedding = self._build(6)
+    self.assertEqual(decoder.layers_remainder.num_local, 2)
+    # The remainder starts on a period boundary, so it holds no full-attention layer.
+    self.assertEqual(decoder.layers_remainder.num_global, 0)
+
+    before = self._run(cfg, decoder, shared_embedding)
+    _, params, rest = nnx.split(decoder.layers_remainder, nnx.Param, ...)
+    nnx.update(decoder.layers_remainder, jax.tree.map(lambda x: x + 0.1, params), rest)
+    after = self._run(cfg, decoder, shared_embedding)
+
+    self.assertFalse(
+        np.allclose(np.asarray(before), np.asarray(after)),
+        "the remainder block's weights did not affect the output, so it was not applied",
+    )
+
+  def test_decoder_has_no_remainder_block_when_layers_divide_evenly(self):
+    """With a whole number of periods every layer is inside the scan, so no remainder block."""
+    _, decoder, _ = self._build(8)
+    self.assertFalse(hasattr(decoder, "layers_remainder"))
+
+
+class TestQwen3NextDecoderParity(unittest.TestCase):
+  """The Linen `Decoder` and the pure-NNX `NNXDecoder` must emit the same parameter tree.
+
+  One checkpoint mapping (`QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING`) serves both
+  decoders, so a name or shape that differs between them silently breaks
+  conversion on whichever side the mapping was not written against.
+  """
+
+  def _param_tree(self, num_decoder_layers, pure_nnx_decoder):
+    """Returns {parameter key: shape} for the chosen decoder implementation."""
+    # pylint: disable=import-outside-toplevel
+    from maxtext.checkpoint_conversion.to_maxtext import get_maxtext_model_info
+
+    cfg = _make_config(
+        **{
+            **_QWEN3_NEXT_CONFIG,
+            "base_num_decoder_layers": num_decoder_layers,
+            "scan_layers": True,
+            "pure_nnx_decoder": pure_nnx_decoder,
+        }
+    )
+    model_info, _ = get_maxtext_model_info(cfg)
+    return {key: shape for key, (_, shape) in model_info.items()}
+
+  def test_decoders_agree_on_whole_periods(self):
+    self.assertEqual(self._param_tree(8, True), self._param_tree(8, False))
+
+  def test_decoders_agree_with_a_remainder(self):
+    """6 layers is one whole period plus a two-layer remainder, which both decoders
+    have to put in a `layers_remainder` block rather than spell out layer by layer."""
+    self.assertEqual(self._param_tree(6, True), self._param_tree(6, False))
 
 
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
