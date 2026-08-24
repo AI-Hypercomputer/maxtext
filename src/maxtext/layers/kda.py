@@ -228,8 +228,8 @@ class KimiDecoupledAttention(nnx.Module):
     )
 
     # Parameters: A_log & dt_bias
-    # Paper Eq. (5): A_h is learnable per-head log-scale initialized to 0
-    self.A_log = nnx.Param(jnp.zeros((self.num_heads,)))
+    # Paper Eq. (5) & HF checkpoint: A_log is per head_dim (shape: head_dim) initialized to 0
+    self.A_log = nnx.Param(jnp.zeros((self.head_dim,)))
     self.dt_bias = nnx.Param(jnp.zeros((projection_size,)))
 
     # Output gate projection

@@ -124,7 +124,7 @@ class PtKDA(nn.Module):
     self.f_b_proj = nn.Linear(head_dim, projection_size, bias=False)
     self.b_proj = nn.Linear(hidden_size, num_heads, bias=False)
 
-    self.A_log = nn.Parameter(torch.zeros(num_heads))
+    self.A_log = nn.Parameter(torch.zeros(head_dim))
     self.dt_bias = nn.Parameter(torch.zeros(projection_size))
 
     self.g_proj = nn.Linear(hidden_size, projection_size, bias=False)
@@ -146,7 +146,7 @@ class PtKDA(nn.Module):
 
     # 2. Gate & Beta (Paper Eq. 5: g = gmin * sigmoid(exp(A_log) * (g + dt_bias)))
     g = self.f_b_proj(self.f_a_proj(x)).reshape(B, T, H, K)
-    a_log_exp = torch.exp(self.A_log).reshape(1, 1, H, 1)
+    a_log_exp = torch.exp(self.A_log).reshape(1, 1, 1, K)
     g = -5.0 * torch.sigmoid(a_log_exp * (g + self.dt_bias.reshape(1, 1, H, K)))
     beta = torch.sigmoid(self.b_proj(x))
 

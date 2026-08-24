@@ -307,6 +307,7 @@ def test_inference_configs(config_file):
 KIMI_K3_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "kimi-k3.yml"),
     os.path.join(CONFIGS_DIR, "models", "kimi-k3-tiny.yml"),
+    os.path.join(CONFIGS_DIR, "models", "kimi-k3-minimal.yml"),
 ]
 
 
