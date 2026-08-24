@@ -4241,31 +4241,38 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
     mapping[f"{mt_layer}-pre_self_attention_norm-scale"] = f"{hf_layer}.input_layernorm.weight"
     mapping[f"{mt_layer}-pre_mlp_norm-scale"] = f"{hf_layer}.post_attention_layernorm.weight"
 
-    # KDA attention (layers 0, 1, 2)
-    mapping[f"{mt_layer}-self_attention-q_proj-kernel"] = f"{hf_layer}.self_attn.q_proj.weight"
-    mapping[f"{mt_layer}-self_attention-k_proj-kernel"] = f"{hf_layer}.self_attn.k_proj.weight"
-    mapping[f"{mt_layer}-self_attention-v_proj-kernel"] = f"{hf_layer}.self_attn.v_proj.weight"
-    mapping[f"{mt_layer}-self_attention-f_a_proj-kernel"] = f"{hf_layer}.self_attn.f_a_proj.weight"
-    mapping[f"{mt_layer}-self_attention-f_b_proj-kernel"] = f"{hf_layer}.self_attn.f_b_proj.weight"
-    mapping[f"{mt_layer}-self_attention-q_conv1d-weight"] = f"{hf_layer}.self_attn.q_conv1d.weight"
-    mapping[f"{mt_layer}-self_attention-k_conv1d-weight"] = f"{hf_layer}.self_attn.k_conv1d.weight"
-    mapping[f"{mt_layer}-self_attention-v_conv1d-weight"] = f"{hf_layer}.self_attn.v_conv1d.weight"
+    layer_num = i + 1
+    if hasattr(maxtext_config, "kda_layers") and maxtext_config.kda_layers:
+      is_kda = layer_num in maxtext_config.kda_layers
+    else:
+      is_kda = (i % 4 != 3)
 
-    mapping[f"{mt_layer}-self_attention-g_proj-kernel"] = f"{hf_layer}.self_attn.g_proj.weight"
-    mapping[f"{mt_layer}-self_attention-b_proj-kernel"] = f"{hf_layer}.self_attn.b_proj.weight"
-    mapping[f"{mt_layer}-self_attention-A_log"] = f"{hf_layer}.self_attn.A_log"
-    mapping[f"{mt_layer}-self_attention-dt_bias"] = f"{hf_layer}.self_attn.dt_bias"
-    mapping[f"{mt_layer}-self_attention-o_proj-kernel"] = f"{hf_layer}.self_attn.o_proj.weight"
+    if is_kda:
+      # KDA attention (layers 0, 1, 2)
+      mapping[f"{mt_layer}-self_attention-q_proj-kernel"] = f"{hf_layer}.self_attn.q_proj.weight"
+      mapping[f"{mt_layer}-self_attention-k_proj-kernel"] = f"{hf_layer}.self_attn.k_proj.weight"
+      mapping[f"{mt_layer}-self_attention-v_proj-kernel"] = f"{hf_layer}.self_attn.v_proj.weight"
+      mapping[f"{mt_layer}-self_attention-f_a_proj-kernel"] = f"{hf_layer}.self_attn.f_a_proj.weight"
+      mapping[f"{mt_layer}-self_attention-f_b_proj-kernel"] = f"{hf_layer}.self_attn.f_b_proj.weight"
+      mapping[f"{mt_layer}-self_attention-q_conv1d-weight"] = f"{hf_layer}.self_attn.q_conv1d.weight"
+      mapping[f"{mt_layer}-self_attention-k_conv1d-weight"] = f"{hf_layer}.self_attn.k_conv1d.weight"
+      mapping[f"{mt_layer}-self_attention-v_conv1d-weight"] = f"{hf_layer}.self_attn.v_conv1d.weight"
+      mapping[f"{mt_layer}-self_attention-g_proj-kernel"] = f"{hf_layer}.self_attn.g_proj.weight"
+      mapping[f"{mt_layer}-self_attention-b_proj-kernel"] = f"{hf_layer}.self_attn.b_proj.weight"
+      mapping[f"{mt_layer}-self_attention-A_log"] = f"{hf_layer}.self_attn.A_log"
+      mapping[f"{mt_layer}-self_attention-dt_bias"] = f"{hf_layer}.self_attn.dt_bias"
+      mapping[f"{mt_layer}-self_attention-o_proj-kernel"] = f"{hf_layer}.self_attn.o_proj.weight"
+    else:
+      # MLA attention (layer 3)
+      mapping[f"{mt_layer}-self_attention-query-kernel"] = f"{hf_layer}.self_attn.q_proj.weight"
+      mapping[f"{mt_layer}-self_attention-wkv_a-kernel"] = f"{hf_layer}.self_attn.kv_a_proj_with_mrope.weight"
+      mapping[f"{mt_layer}-self_attention-wkv_b-kernel"] = f"{hf_layer}.self_attn.kv_b_proj.weight"
+      mapping[f"{mt_layer}-self_attention-g_a_proj-kernel"] = f"{hf_layer}.self_attn.g_a_proj.weight"
+      mapping[f"{mt_layer}-self_attention-g_b_proj-kernel"] = f"{hf_layer}.self_attn.g_b_proj.weight"
+      mapping[f"{mt_layer}-self_attention-kv_norm-scale"] = f"{hf_layer}.self_attn.kv_a_norm.weight"
+      mapping[f"{mt_layer}-self_attention-o_norm-scale"] = f"{hf_layer}.self_attn.o_norm.weight"
+      mapping[f"{mt_layer}-self_attention-out-kernel"] = f"{hf_layer}.self_attn.o_proj.weight"
 
-    # MLA attention (layer 3)
-    mapping[f"{mt_layer}-self_attention-query-kernel"] = f"{hf_layer}.self_attn.q_proj.weight"
-    mapping[f"{mt_layer}-self_attention-wkv_a-kernel"] = f"{hf_layer}.self_attn.kv_a_proj_with_mrope.weight"
-    mapping[f"{mt_layer}-self_attention-wkv_b-kernel"] = f"{hf_layer}.self_attn.kv_b_proj.weight"
-    mapping[f"{mt_layer}-self_attention-g_a_proj-kernel"] = f"{hf_layer}.self_attn.g_a_proj.weight"
-    mapping[f"{mt_layer}-self_attention-g_b_proj-kernel"] = f"{hf_layer}.self_attn.g_b_proj.weight"
-    mapping[f"{mt_layer}-self_attention-kv_norm-scale"] = f"{hf_layer}.self_attn.kv_a_norm.weight"
-    mapping[f"{mt_layer}-self_attention-o_norm-scale"] = f"{hf_layer}.self_attn.o_norm.weight"
-    mapping[f"{mt_layer}-self_attention-out-kernel"] = f"{hf_layer}.self_attn.o_proj.weight"
 
     # MLP / MoE
     if i < first_num_dense_layers:
