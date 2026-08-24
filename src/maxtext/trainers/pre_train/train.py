@@ -865,6 +865,9 @@ def recover(
       )
       del python_vars[key]
 
+  # Clear JAX compilation caches
+  jax.clear_caches()
+
   while True:
     try:
       # 1. Find currently active slices (wait if none are active)
@@ -995,92 +998,100 @@ def recover(
       else:
         snapshot_loaded = False
         if snapshot_mgr is not None and snapshot_mgr.latest is not None:
-          try:
-            restored_step = snapshot_mgr.latest.step
-            _logger.info("Attempting to restore from in-memory snapshot at step %d...", restored_step)
-            if isinstance(model, nn.Module):
-              abstract_dict = {
-                  "step": state.step,
-                  "params": state.params,
-                  "opt_state": state.opt_state,
-              }
-              replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
-              restored_dict = snapshot_mgr.load(replicated_abstract_dict)
-              restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
-              jax.block_until_ready(restored_dict)
-              restored_state = state.replace(
-                  step=restored_dict["step"],
-                  params=restored_dict["params"],
-                  opt_state=restored_dict["opt_state"],
-              )
-            else:
-              abstract_dict = {
-                  "model": nnx.to_pure_dict(nnx.state(state.model)),
-                  "optimizer": nnx.to_pure_dict(nnx.state(state.optimizer)),
-              }
-              replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
-              restored_dict = snapshot_mgr.load(replicated_abstract_dict)
-              restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
-              jax.block_until_ready(restored_dict)
-              merged = jax.tree.map(
-                  lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
-                  restored_dict,
-                  abstract_dict,
-                  is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
-              )
-              m_state = nnx.state(state.model)
-              nnx.replace_by_pure_dict(m_state, merged["model"])
-              nnx.update(state.model, m_state)
-              opt_state = nnx.state(state.optimizer)
-              nnx.replace_by_pure_dict(opt_state, merged["optimizer"])
-              nnx.update(state.optimizer, opt_state)
-              restored_state = state
+          restored_step = snapshot_mgr.latest.step
+          _logger.info("Attempting to restore from in-memory snapshot at step %d...", restored_step)
+          for attempt in range(3):
+            try:
+              if isinstance(model, nn.Module):
+                abstract_dict = {
+                    "step": state.step,
+                    "params": state.params,
+                    "opt_state": state.opt_state,
+                }
+                replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+                restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+                restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+                jax.block_until_ready(restored_dict)
+                restored_state = state.replace(
+                    step=restored_dict["step"],
+                    params=restored_dict["params"],
+                    opt_state=restored_dict["opt_state"],
+                )
+              else:
+                abstract_dict = {
+                    "model": nnx.to_pure_dict(nnx.state(state.model)),
+                    "optimizer": nnx.to_pure_dict(nnx.state(state.optimizer)),
+                }
+                replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+                restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+                restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+                jax.block_until_ready(restored_dict)
+                merged = jax.tree.map(
+                    lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
+                    restored_dict,
+                    abstract_dict,
+                    is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+                )
+                m_state = nnx.state(state.model)
+                nnx.replace_by_pure_dict(m_state, merged["model"])
+                nnx.update(state.model, m_state)
+                opt_state = nnx.state(state.optimizer)
+                nnx.replace_by_pure_dict(opt_state, merged["optimizer"])
+                nnx.update(state.optimizer, opt_state)
+                restored_state = state
 
-            snapshot_loaded = True
-            _logger.info("Successfully restored in-memory snapshot at step %d!", restored_step)
-          except (RuntimeError, jax.errors.JaxRuntimeError) as e:
-            _logger.warning(
-                "In-memory snapshot recovery failed (%s). Falling back to persistent checkpoint.", e
-            )
+              snapshot_loaded = True
+              _logger.info("Successfully restored in-memory snapshot at step %d!", restored_step)
+              break
+            except (RuntimeError, jax.errors.JaxRuntimeError) as e:
+              _logger.warning(
+                  "In-memory snapshot recovery attempt %d/3 failed (%s). Retrying in 2s...", attempt + 1, e
+              )
+              time.sleep(2)
 
         if not snapshot_loaded:
-          if existing_checkpoint_manager is None:
-            raise RuntimeError(
-                "No snapshots or persistent checkpoints available to restore from. Cannot recover."
+          ckpt_step = checkpointing.latest_step(existing_checkpoint_manager) if existing_checkpoint_manager is not None else None
+          if ckpt_step is not None:
+            _logger.info("Restoring from persistent checkpoint at step %d...", ckpt_step)
+            unboxed_abstract = nnx.state(state) if config.pure_nnx else state
+            restored_state, _ = checkpointing.load_state_if_possible(
+                existing_checkpoint_manager,
+                None,
+                config.load_parameters_path,
+                config.load_full_state_path,
+                config.checkpoint_storage_concurrent_gb,
+                unboxed_abstract,
+                config.enable_single_replica_ckpt_restoring,
+                config.dataset_type,
+                use_ocdbt=config.checkpoint_storage_use_ocdbt,
+                use_zarr3=config.checkpoint_storage_use_zarr3,
+                enable_orbax_v1=config.enable_orbax_v1,
+                checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+                source_checkpoint_layout=config.source_checkpoint_layout,
+                expansion_factor_real_data=config.expansion_factor_real_data,
+                maxtext_config=config,
             )
-          _logger.info("Restoring from persistent checkpoint...")
-          ckpt_step = checkpointing.latest_step(existing_checkpoint_manager)
-          unboxed_abstract = nnx.state(state) if config.pure_nnx else state
-          restored_state, _ = checkpointing.load_state_if_possible(
-              existing_checkpoint_manager,
-              None,
-              config.load_parameters_path,
-              config.load_full_state_path,
-              config.checkpoint_storage_concurrent_gb,
-              unboxed_abstract,
-              config.enable_single_replica_ckpt_restoring,
-              config.dataset_type,
-              use_ocdbt=config.checkpoint_storage_use_ocdbt,
-              use_zarr3=config.checkpoint_storage_use_zarr3,
-              enable_orbax_v1=config.enable_orbax_v1,
-              checkpoint_conversion_fn=config.checkpoint_conversion_fn,
-              source_checkpoint_layout=config.source_checkpoint_layout,
-              expansion_factor_real_data=config.expansion_factor_real_data,
-              maxtext_config=config,
-          )
-          if hasattr(restored_state, '__getitem__') and 'items' in restored_state:
-            restored_state = restored_state['items']
-          if config.pure_nnx:
-            if isinstance(restored_state, nnx.State):
-              nnx_state = nnx.state(state)
-              merged = jax.tree.map(
-                  lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
-                  restored_state.to_pure_dict(),
-                  nnx_state.to_pure_dict(),
-                  is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
-              )
-              nnx.replace_by_pure_dict(nnx_state, merged)
+            if hasattr(restored_state, '__getitem__') and 'items' in restored_state:
+              restored_state = restored_state['items']
+            if config.pure_nnx:
+              if isinstance(restored_state, nnx.State):
+                nnx_state = nnx.state(state)
+                merged = jax.tree.map(
+                    lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
+                    restored_state.to_pure_dict(),
+                    nnx_state.to_pure_dict(),
+                    is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+                )
+                nnx.replace_by_pure_dict(nnx_state, merged)
+              restored_state = state
+          elif python_vars.get("step", 0) == 0:
+            _logger.info("No completed persistent checkpoint, but at step 0: using freshly initialized state for new mesh layout.")
             restored_state = state
+            restored_step = 0
+          else:
+            raise RuntimeError(
+                "No completed in-memory snapshots or persistent checkpoints available to restore from. Cannot recover."
+            )
 
           restored_step = ckpt_step if ckpt_step is not None else get_first_step(model, restored_state)
           if isinstance(model, nn.Module) and hasattr(restored_state, "replace"):
@@ -1397,7 +1408,7 @@ def train_loop(config, recorder, state=None):
                 jax_device_state,
                 python_vars,
                 immutable_data,
-                active_state=jax_device_state["state"],
+                active_state=None,
             )
             python_vars["next_scale_up_step"] = current_step + 10
             continue
@@ -1405,7 +1416,7 @@ def train_loop(config, recorder, state=None):
           training_loop_iteration(jax_device_state, python_vars, immutable_data)
           python_vars["step"] += 1
 
-        except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
+        except (jax.errors.JaxRuntimeError, RuntimeError, pathways_manager.ScaleUpSignalError) as e:
           if isinstance(e, pathways_manager.ScaleUpSignalError):
             _logger.info("[*] Bubbling ScaleUpSignalError to elastic_retry for clean scale-up re-initialization.")
             raise
