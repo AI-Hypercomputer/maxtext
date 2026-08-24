@@ -485,9 +485,10 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         tensor = getter(key)
       except ValueError as e:
         if "not found in HF checkpoint index" in str(e):
-          logging.warning("Key %s not found in HF checkpoint index; falling back to zeros with shape %s.", key, shape)
+          max_logging.log(f"Warning: Key {key} not found in HF checkpoint index; falling back to zeros with shape {shape}.")
           return np.zeros(shape, dtype=np.float32)
         raise e
+
 
       return apply_hook_fns(tensor, shape, hook)
 
