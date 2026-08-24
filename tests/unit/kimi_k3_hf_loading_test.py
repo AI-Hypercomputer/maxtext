@@ -49,10 +49,10 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         "model_name=kimi-k3",
         "override_model_config=True",
         "base_num_decoder_layers=2",
-        "hardware=cpu",
         "skip_jax_distributed_system=True",
         "scan_layers=False",
     ])
+
 
     # Initialize model
     model = ToLinen(Transformer, args=(config, None, None))
@@ -71,14 +71,15 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
     segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
 
-    # Initialize abstract state
+    # Initialize abstract state with zero memory allocation via eval_shape
     rng = jax.random.PRNGKey(0)
-    state = model.init(rng, inputs, positions, segment_ids)
+    abstract_state = jax.eval_shape(model.init, rng, inputs, positions, segment_ids)
 
     # Load converted Orbax checkpoint
     mngr = ocp.CheckpointManager(self.checkpoint_dir)
-    loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.PyTreeRestore(state)))
+    loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.PyTreeRestore(abstract_state)))
     print("Checkpoint restored successfully! Step:", mngr.latest_step())
+
 
     # Run forward pass with loaded state
     logits, _ = model.apply(loaded_state["items"], inputs, positions, segment_ids)
