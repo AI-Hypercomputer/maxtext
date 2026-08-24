@@ -880,6 +880,7 @@ def main(
 ) -> None:
   overall_start = time.time()
   # Check if the user is using an Instruct version. If so, use the base model architecture
+  model_name_original = None
   for i, arg in enumerate(args):
     if arg.startswith("model_name="):
       model_name_arg = args[i].split("=")[1]
@@ -890,18 +891,22 @@ def main(
         args[i] = f"model_name={model_name_arg}"
       break
 
+  # Initialize maxtext config
+  config = pyconfig.initialize(args)
+  max_utils.print_system_information()
+
+  if model_name_original is None:
+    model_name_original = config.model_name
+
   # check the supported model ids
   if model_name_original not in HF_IDS:
     raise ValueError(
-        f"Unsupported model name: {model_name_original}.\
-                      Supported models are: {list(HF_IDS.keys())}"
+        f"Unsupported model name: {model_name_original}."
+        f" Supported models are: {list(HF_IDS.keys())}"
     )
 
   model_id = hf_model_path or HF_IDS[model_name_original]
 
-  # Initialize maxtext config
-  config = pyconfig.initialize(args)
-  max_utils.print_system_information()
 
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"
