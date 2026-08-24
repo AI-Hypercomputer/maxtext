@@ -32,7 +32,9 @@ from maxtext.utils import maxtext_utils
 
 
 
+@pytest.mark.tpu_only
 class KimiK3HFLoadingTest(unittest.TestCase):
+
   """Tests loading a converted Kimi K3 Orbax checkpoint and running a forward pass."""
 
   @classmethod
