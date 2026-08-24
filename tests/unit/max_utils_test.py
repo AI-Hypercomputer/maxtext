@@ -178,6 +178,13 @@ class RingAxisDeviceMeshTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       max_utils.create_ring_axis_device_mesh([1, 1, 8, 16], self.AXES, self._devices(), "data")
 
+  def test_transposes_grid_when_needed_for_tiling(self):
+    """Test that a 2x16 grid is transposed to 16x2 when ring=8."""
+    devices = [self.FakeDevice(x * 16 + y, (x, y, 0)) for x in range(2) for y in range(16)]
+    mesh = max_utils.create_ring_axis_device_mesh([1, 1, 8, 16], self.AXES, devices, "tensor")
+    self.assertEqual(mesh.shape, (1, 1, 8, 16))
+    self.assertEqual(sorted(d.id for d in mesh.flatten()), sorted(d.id for d in devices))
+
 
 class FillUnspecifiedMeshAxesTest(unittest.TestCase):
   """Tests for fill_unspecified_mesh_axes."""

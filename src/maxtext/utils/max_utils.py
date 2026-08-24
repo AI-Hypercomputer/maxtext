@@ -501,10 +501,14 @@ def create_ring_axis_device_mesh(ici_parallelism, mesh_axes, devices, ring_axis)
   physical = physical.reshape([dim for dim in extent if dim > 1])
   if physical.ndim != 2:
     raise ValueError(f"mesh_ring_axis needs a 2D slice of the torus, got physical shape {tuple(extent)}")
-  # Preserve locality for non-ring axes.
-  if physical.shape[0] > physical.shape[1]:
-    physical = physical.T
   ring_height, ring_width = ring // 2, 2
+  # Determine if transposing is needed/preferred to allow valid tiling.
+  can_tile_normal = (physical.shape[0] % ring_height == 0) and (physical.shape[1] % ring_width == 0)
+  can_tile_transposed = (physical.shape[1] % ring_height == 0) and (physical.shape[0] % ring_width == 0)
+  if not can_tile_normal and can_tile_transposed:
+    physical = physical.T
+  elif can_tile_normal and can_tile_transposed and physical.shape[0] > physical.shape[1]:
+    physical = physical.T
   if physical.shape[0] % ring_height or physical.shape[1] % ring_width:
     raise ValueError(
         f"mesh_ring_axis={ring_axis} of size {ring} needs a {ring_height}x{ring_width} block to tile the"
