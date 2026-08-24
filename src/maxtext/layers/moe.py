@@ -2197,6 +2197,24 @@ class RoutedMoE(nnx.Module):
         rngs,
     ):
       batch_size, sequence_length, embed_dim = x.shape
+      expert_counts = None
+      if self.config.record_moe_routing_metrics:
+        _, selected_global_experts = self.get_topk(
+            logits, pre_bias_logits, rngs, sharded_input_ids
+        )
+        local_counts = jnp.bincount(
+            jnp.ravel(selected_global_experts), length=self.config.num_experts
+        ).astype(jnp.int32)
+        for pspec_axis in (input_partition_pspec[0], input_partition_pspec[1]):
+          if pspec_axis:
+            if isinstance(pspec_axis, tuple):
+              for ax in pspec_axis:
+                if ax and self.mesh.shape.get(ax, 1) > 1:
+                  local_counts = jax.lax.psum(local_counts, axis_name=ax)
+            elif self.mesh.shape.get(pspec_axis, 1) > 1:
+              local_counts = jax.lax.psum(local_counts, axis_name=pspec_axis)
+        expert_counts = local_counts
+
       if self.config.num_moe_emb_chunks > 0:
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
             x,
@@ -2269,27 +2287,12 @@ class RoutedMoE(nnx.Module):
             scatter_dimension=0,
             tiled=True,
         )
-        expert_counts = None
-        if self.config.record_moe_routing_metrics:
-          flat_selected = jnp.ravel(routing.selected_experts)
-          local_counts = jnp.bincount(
-              flat_selected, length=self.config.num_experts
-          ).astype(jnp.int32)
-          batch_axis = input_partition_pspec[0]
-          if batch_axis:
-            if isinstance(batch_axis, tuple):
-              for ax in batch_axis:
-                if ax and self.mesh.shape.get(ax, 1) > 1:
-                  local_counts = jax.lax.psum(local_counts, axis_name=ax)
-            elif self.mesh.shape.get(batch_axis, 1) > 1:
-              local_counts = jax.lax.psum(local_counts, axis_name=batch_axis)
-          expert_counts = local_counts
         return output, routing.lb_loss, routing.bias_updates, expert_counts
 
       if self.get_expert_parallelism_size() > 1:
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         if routing.sorted_selected_experts.shape[0] != original_inputs_first_dim:
-          raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
+          raise ValueError("original_inputs_first_dim does not match the original tensor shape!")
         output_shape = jax.lax.empty(
             (
                 original_inputs_first_dim,
@@ -2316,21 +2319,6 @@ class RoutedMoE(nnx.Module):
           group_sizes=routing.group_sizes,
       )
 
-      expert_counts = None
-      if self.config.record_moe_routing_metrics:
-        flat_selected = jnp.ravel(routing.selected_experts)
-        local_counts = jnp.bincount(
-            flat_selected, length=self.config.num_experts
-        ).astype(jnp.int32)
-        batch_axis = input_partition_pspec[0]
-        if batch_axis:
-          if isinstance(batch_axis, tuple):
-            for ax in batch_axis:
-              if ax and self.mesh.shape.get(ax, 1) > 1:
-                local_counts = jax.lax.psum(local_counts, axis_name=ax)
-          elif self.mesh.shape.get(batch_axis, 1) > 1:
-            local_counts = jax.lax.psum(local_counts, axis_name=batch_axis)
-        expert_counts = local_counts
       return output, routing.lb_loss, routing.bias_updates, expert_counts
 
     @functools.partial(
