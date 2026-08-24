@@ -1648,7 +1648,7 @@ class RoutedMoE(nnx.Module):
         spec = list(self._logical_to_mesh_axes(logical_axes))
         seq = spec[1]
         seq = () if seq is None else ((seq,) if isinstance(seq, str) else tuple(seq))
-        spec[1] = seq + ("tensor",)
+        spec[1] = seq if "tensor" in seq else seq + ("tensor",)
         return P(*spec)
 
       token_pspec = token_split_pspec if self._late_tp_combine else self._logical_to_mesh_axes
