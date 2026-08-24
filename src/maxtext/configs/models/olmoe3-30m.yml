@@ -39,3 +39,12 @@ use_qk_norm: true
 decoder_block: "olmoe3"
 
 load_balance_loss_weight: 0.01
+# The reference computes router logits in fp32 (`x.float() @ w.float()`).
+float32_gate_logits: true
+
+# EMo document-pool routing, canonical ladder settings: min = top_k,
+# max = eval = num_experts (fused_model.py builds them exactly so).
+emo_enabled: true
+emo_min_document_expert_pool: 16
+emo_max_document_expert_pool: 32
+emo_eval_document_expert_pool: 32

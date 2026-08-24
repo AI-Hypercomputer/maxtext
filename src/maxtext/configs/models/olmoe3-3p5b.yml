@@ -43,5 +43,15 @@ mlp_activations: ["silu", "linear"]
 use_qk_norm: true
 decoder_block: "olmoe3"
 
-# Auxiliary losses, matching OLMo-core's ladder settings.
+# Auxiliary losses, matching OLMo-core's ladder settings. The router z-loss
+# (1e-5) is a module constant in olmoe3.py.
 load_balance_loss_weight: 0.01
+# The reference computes router logits in fp32 (`x.float() @ w.float()`).
+float32_gate_logits: true
+
+# EMo document-pool routing, canonical ladder settings: min = top_k,
+# max = eval = num_experts (standalone_model.py defaults).
+emo_enabled: true
+emo_min_document_expert_pool: 16
+emo_max_document_expert_pool: 512
+emo_eval_document_expert_pool: 512
