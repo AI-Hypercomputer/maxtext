@@ -47,6 +47,7 @@ from maxtext.common.common_types import (
     CACHE_SCALE_SEQUENCE,
     CACHE_SEQUENCE,
     Config,
+    SEGMENT_ID_BATCH,
     DECODE_BATCH,
     DECODE_LENGTH,
     DECODING_ACTIVE_SEQUENCE_INDICATOR,
@@ -957,6 +958,12 @@ class AttentionOp(nnx.Module):
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
       seg_kv = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+
+      # With TSP/CP, all-gather seq dim prior to broadcast to avoid large all-to-all on broadcasted ids.
+      key_sharding = self._logical_to_mesh_axes((SEGMENT_ID_BATCH, None))
+      decoder_segment_ids = self._maybe_shard_with_pspec(decoder_segment_ids, key_sharding)
+      seg_kv = self._maybe_shard_with_pspec(seg_kv, key_sharding)
+
       mask = (decoder_segment_ids[:, :, None] == seg_kv[:, None, :]) & (seg_kv[:, None, :] >= 0)
       mask = mask[:, None, None, :, :]
 

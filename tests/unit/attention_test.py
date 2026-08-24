@@ -347,8 +347,11 @@ class BlockCausalMaskTest(unittest.TestCase):
         causal_block_size=4,
         context_parallel_load_balance=False,
         context_sharding="context",
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
     )
-    mesh = types.SimpleNamespace(shape={})
+    mesh = Mesh(jax.devices()[:1], ["context"])
     kwargs = {}
     if attention_type is not None:
       kwargs["attention_type"] = attention_type
@@ -474,13 +477,20 @@ class BlockCausalMaskTest(unittest.TestCase):
         causal_block_size=4,
         context_parallel_load_balance=True,
         context_sharding="context",
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
     )
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest("Need at least 2 devices to test chunk mask")
+    mesh = Mesh(devices[:2], ["context"])
     op = AttentionOp(
         config=config,
         num_query_heads=1,
         num_kv_heads=1,
         max_target_length=sequence_length,
-        mesh=types.SimpleNamespace(shape={"context": 2}),
+        mesh=mesh,
         attention_kernel="dot_product",
         attention_type=AttentionType.BLOCK_DIFFUSION,
     )
@@ -714,8 +724,19 @@ class LoadBalancedMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(mask[:, :], expected)
 
   def test_dot_product_local_mask_uses_segment_positions(self):
-    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
-    mesh = types.SimpleNamespace(shape={"context": 4})
+    config = types.SimpleNamespace(
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        using_pipeline_parallelism=False,
+        logical_axis_rules=[["segment_ids_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
+    )
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Need at least 4 devices to test chunk mask")
+    mesh = Mesh(devices[:4], ["context"])
     seq_len = 16
     sliding_window_size = 4
     positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
@@ -750,8 +771,19 @@ class LoadBalancedMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected_mask)
 
   def test_dot_product_chunk_mask_uses_segment_positions(self):
-    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
-    mesh = types.SimpleNamespace(shape={"context": 4})
+    config = types.SimpleNamespace(
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        using_pipeline_parallelism=False,
+        logical_axis_rules=[["segment_ids_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
+    )
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Need at least 4 devices to test chunk mask")
+    mesh = Mesh(devices[:4], ["context"])
     seq_len = 16
     chunk_size = 4
     positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
