@@ -225,6 +225,12 @@ ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
+# EMo document-pool routing (OLMoE3): restrict each document's top-k to a per-document
+# expert pool (size sampled from [min, max] in training, fixed at eval). arxiv 2605.06663
+emo_enabled: false
+emo_min_document_expert_pool: 16
+emo_max_document_expert_pool: 512
+emo_eval_document_expert_pool: 512
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
@@ -1324,6 +1330,13 @@ gdn_num_value_heads: 32
 gdn_chunk_size: 64
 # dtype for the chunked delta-rule state and matmul operands; the decay algebra stays float32.
 gdn_state_dtype: "float32"
+# Fused tokamax Kimi Delta Attention kernel (experimental; Pallas Mosaic on TPU >= gen6).
+use_tokamax_kda: false
+# Reference beta in [0, 2) via allow_neg_eigval; False clamps to [0, 1] (diagnostic).
+kda_allow_neg_eigval: true
+# Max packed documents/sequence for the KDA kernel (pads to seq + 63*bound; keep near the
+# real packing max to bound HBM). Ignored when packing=false.
+tokamax_kda_max_num_segments: 32
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on

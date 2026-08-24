@@ -882,6 +882,15 @@ class MoEGeneral(BaseModel):
       description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
+  emo_enabled: bool = Field(
+      False,
+      description="EMo document-pool routing (OLMoE3): restrict each packed document's top-k to a per-document expert pool.",
+  )
+  emo_min_document_expert_pool: int = Field(
+      16, description="Smallest EMo training pool size (must be >= num_experts_per_tok)."
+  )
+  emo_max_document_expert_pool: int = Field(512, description="Largest EMo training pool size (must be <= num_experts).")
+  emo_eval_document_expert_pool: int = Field(512, description="Fixed EMo pool size outside training.")
   use_custom_sort_vjp: bool = Field(
       True,
       description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul.",
@@ -1086,6 +1095,26 @@ class Qwen3Next(BaseModel):
   gdn_state_dtype: str = Field(
       "float32",
       description="dtype for the chunked delta-rule state and matmul operands. The decay algebra stays float32 either way.",
+  )
+  use_tokamax_kda: bool = Field(
+      False,
+      description=(
+          "Use the fused tokamax Kimi Delta Attention kernel (experimental; requires a tokamax build with the KDA op)."
+      ),
+  )
+  kda_allow_neg_eigval: bool = Field(
+      True,
+      description=(
+          "beta in [0,2) via allow_neg_eigval (reference). False clamps beta to [0,1], the only range the tokamax"
+          " Mosaic KDA kernel is validated for (non-reference; kernel fallback/diagnostic only)."
+      ),
+  )
+  tokamax_kda_max_num_segments: int = Field(
+      32,
+      description=(
+          "Static bound on packed documents per sequence for the tokamax KDA kernel; the kernel pads seq by "
+          "(chunk-1)*bound positions, so keep it close to the real packing maximum."
+      ),
   )
   gdn_chunk_size: int = Field(
       64,

@@ -30,13 +30,16 @@ Layer structure, matching the reference block:
   projects ``emb_dim -> moe_expert_input_dim``, runs the experts there, and
   projects back. The router still scores the full-width residual.
 
-Not yet implemented here (see the bring-up doc): the EMo document-pool router
-and globally-balanced auxiliary loss. Phase 0 uses the standard top-k router.
+Routing matches the reference: top-k weights renormalized to sum to ``top_k``
+(``restore_weight_scale``), a batch-level globally-balanced load-balancing
+loss, a 1e-5 router z-loss, and the EMo document-pool router (``emo_enabled``,
+with the canonical pools min=top_k, max=eval=num_experts).
 """
 
+import functools
 from typing import Any
 
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec
 import jax
 import jax.numpy as jnp
 
@@ -60,6 +63,22 @@ from maxtext.utils import max_utils
 # constant rather than a config key until a model needs to vary it.
 _KDA_NORM_EPS = 1e-5
 
+# Reference init std and router z-loss weight (fixed across the ladder).
+_INIT_STD = 0.02
+_ROUTER_Z_LOSS_WEIGHT = 1e-5
+
+
+def olmoe3_init(key, shape, dtype=jnp.float32, in_axis=None, out_axis=None):
+  """The reference init: truncated normal, std ``_INIT_STD``, bounds +/-3 std.
+
+  Every embedding, projection, router, and expert weight in the reference uses
+  this fixed-std init (fan-in plays no part). The trailing axis arguments are
+  accepted and ignored so the same function satisfies both MaxText initializer
+  signatures (``NdInitializer`` and plain ``Initializer``).
+  """
+  del in_axis, out_axis
+  return jax.nn.initializers.truncated_normal(stddev=_INIT_STD, lower=-3.0, upper=3.0)(key, shape, dtype)
+
 
 def _dense(config, in_features, out_features, kernel_axes, quant, rngs, use_bias=False):
   """DenseGeneral with the config-derived arguments this model always passes."""
@@ -67,7 +86,7 @@ def _dense(config, in_features, out_features, kernel_axes, quant, rngs, use_bias
       in_features_shape=in_features,
       out_features_shape=out_features,
       axis=-1,
-      kernel_init=max_initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
+      kernel_init=olmoe3_init,
       kernel_axes=kernel_axes,
       dtype=config.dtype,
       weight_dtype=config.weight_dtype,
@@ -141,7 +160,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     self.w_k = _dense(cfg, cfg.emb_dim, key_width, ("embed", "mlp"), quant, rngs)
     self.w_v = _dense(cfg, cfg.emb_dim, value_width, ("embed", "mlp"), quant, rngs)
 
-    conv_init = nnx.initializers.normal(stddev=0.02)
+    conv_init = jax.nn.initializers.truncated_normal(stddev=_INIT_STD, lower=-3.0, upper=3.0)
     self.q_conv = nnx.Param(conv_init(rngs.params(), (key_width, conv_size), cfg.weight_dtype))
     self.k_conv = nnx.Param(conv_init(rngs.params(), (key_width, conv_size), cfg.weight_dtype))
     self.v_conv = nnx.Param(conv_init(rngs.params(), (value_width, conv_size), cfg.weight_dtype))
@@ -177,32 +196,96 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     k = causal_depthwise_conv(self.w_k(x), self.k_conv[...], decoder_segment_ids).reshape(batch, seq_len, heads, dk)
     v = causal_depthwise_conv(self.w_v(x), self.v_conv[...], decoder_segment_ids).reshape(batch, seq_len, heads, dv)
 
-    # The fused KDA kernel L2-normalizes q/k and applies the query scale
-    # internally; both are explicit here.
-    q = _l2_normalize(q.astype(jnp.float32)) * (dk**-0.5)
-    k = _l2_normalize(k.astype(jnp.float32))
+    raw_g = self.f_proj_2(self.f_proj_1(x)).reshape(batch, seq_len, heads, dk)
+    # Reference uses allow_neg_eigval (beta in [0, 2)); False clamps to [0, 1].
+    beta_scale = 2.0 if self.config.kda_allow_neg_eigval else 1.0
+    beta = beta_scale * jax.nn.sigmoid(self.w_b(x).astype(jnp.float32))
 
-    raw_g = self.f_proj_2(self.f_proj_1(x)).reshape(batch, seq_len, heads, dk).astype(jnp.float32)
-    dt = self.dt_bias[...].reshape(1, 1, heads, dk)
-    log_decay = -jnp.exp(self.A_log[...]).reshape(1, 1, heads, 1) * jax.nn.softplus(raw_g + dt)
-    # beta in [0, 2): the reference sets allow_neg_eigval=True.
-    beta = 2.0 * jax.nn.sigmoid(self.w_b(x).astype(jnp.float32))
-
-    if decoder_segment_ids is None:
-      resets = jnp.zeros((batch, seq_len), dtype=bool)
+    if self.config.use_tokamax_kda:
+      out = self._tokamax_kda(q, k, v, raw_g, beta, decoder_segment_ids)
     else:
-      prev_ids = jnp.pad(decoder_segment_ids, ((0, 0), (1, 0)), constant_values=-1)[:, :seq_len]
-      resets = decoder_segment_ids != prev_ids
+      # Unfused path: L2-norm and query scale explicit (the kernel does them internally).
+      q = _l2_normalize(q.astype(jnp.float32)) * (dk**-0.5)
+      k = _l2_normalize(k.astype(jnp.float32))
 
-    chunk = self.config.gdn_chunk_size
-    if chunk > 0 and seq_len % chunk == 0:
-      out = _delta_rule_chunked(q, k, v.astype(jnp.float32), log_decay, beta, resets, chunk, self.config.gdn_state_dtype)
-    else:
-      out = _delta_rule_scan(q, k, v.astype(jnp.float32), jnp.exp(log_decay), beta, resets)
+      dt = self.dt_bias[...].reshape(1, 1, heads, dk)
+      log_decay = -jnp.exp(self.A_log[...]).reshape(1, 1, heads, 1) * jax.nn.softplus(raw_g.astype(jnp.float32) + dt)
+
+      if decoder_segment_ids is None:
+        resets = jnp.zeros((batch, seq_len), dtype=bool)
+      else:
+        prev_ids = jnp.pad(decoder_segment_ids, ((0, 0), (1, 0)), constant_values=-1)[:, :seq_len]
+        resets = decoder_segment_ids != prev_ids
+
+      chunk = self.config.gdn_chunk_size
+      if chunk > 0 and seq_len % chunk == 0:
+        out = _delta_rule_chunked(
+            q, k, v.astype(jnp.float32), log_decay, beta, resets, chunk, self.config.gdn_state_dtype
+        )
+      else:
+        out = _delta_rule_scan(q, k, v.astype(jnp.float32), jnp.exp(log_decay), beta, resets)
 
     gate = jax.nn.sigmoid(self.g_proj_2(self.g_proj_1(x)).reshape(batch, seq_len, heads, dv))
     out = self.o_norm(out.astype(x.dtype)) * gate
     return self.w_out(out.reshape(batch, seq_len, heads * dv))
+
+  def _tokamax_kda(self, q, k, v, raw_g, beta, decoder_segment_ids) -> jnp.ndarray:
+    """Fused KDA via tokamax (PR #1103, experimental). Raw q/k/v/gate in: the
+
+    kernel does the q/k L2-norm, K**-0.5 scale, and decay activation. beta in
+    [0, 2) matches the reference; parity checked against _delta_rule_scan.
+    """
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    # Lazy import: releases before the KDA PR lack this module.
+    from tokamax._src.ops.experimental.kda import api as kda_api
+
+    # Pallas kernels can't be auto-partitioned, so run under shard_map with only
+    # the batch axis split (sequence and heads stay whole; packing preserved).
+    batch_axes = nn.logical_to_mesh_axes(("activation_batch",), self.config.logical_axis_rules)[0]
+    # Segments only for packed data; the varlen path pads to seq + 63*max_segments.
+    has_segments = decoder_segment_ids is not None and bool(self.config.packing)
+    in_specs = [PartitionSpec(batch_axes, None, None, None)] * 4 + [PartitionSpec(batch_axes, None, None)]
+    if has_segments:
+      in_specs.append(PartitionSpec(batch_axes, None))
+    in_specs += [PartitionSpec(), PartitionSpec()]
+    max_num_segments = int(self.config.tokamax_kda_max_num_segments)
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=tuple(in_specs),
+        out_specs=PartitionSpec(batch_axes, None, None, None),
+        check_vma=False,
+    )
+    def call_kernel(q_, k_, v_, g_, beta_, *rest):
+      def head_first(t):
+        return t.transpose(2, 0, 1, 3)
+
+      seg_kwargs = {}
+      if has_segments:
+        # tokamax expects 1-indexed segment ids with 0 reserved for padding,
+        # which is MaxText's packed-data convention already.
+        seg_kwargs = {"segment_ids": rest[0], "max_num_segments": max_num_segments}
+      a_log_, dt_bias_ = rest[-2], rest[-1]
+      out, _ = kda_api.kimi_delta_attention(
+          head_first(q_),
+          head_first(k_),
+          head_first(v_),
+          head_first(g_),
+          beta_.transpose(2, 0, 1),
+          a_log=a_log_,
+          delta_time_bias=dt_bias_,
+          use_qk_l2norm=True,
+          use_gate_in_kernel=True,
+          **seg_kwargs,
+      )
+      return out.transpose(1, 2, 0, 3)
+
+    args = [q, k, v, raw_g, beta]
+    if has_segments:
+      args.append(decoder_segment_ids.astype(jnp.int32))
+    args += [self.A_log[...], self.dt_bias[...]]
+    return call_kernel(*args)
 
 
 def _l2_normalize(x: jnp.ndarray, eps: float = 1e-12) -> jnp.ndarray:
@@ -225,8 +308,9 @@ def _delta_rule_chunked(q, k, v, log_decay, beta, resets, chunk_size: int, state
       S_t[d,v] = sum_{j<=t} (A_t[d] / A_j[d]) k_j[d] delta_j[v]
       o_t[v]   = sum_{j<=t} ( (q_t * A_t) . (k_j / A_j) ) delta_j[v]
 
-  so folding ``A`` into q/k and ``1/A`` into its partner restores a plain matmul.
-  ``A`` is chunk-local, which is what bounds the growth of ``1/A``.
+  The pairwise ratio ``A_t[d] / A_j[d]`` is <= 1 for t >= j and is computed
+  exactly per pair; see the overflow note in the body for why it must not be
+  folded into the operands.
   """
   batch, seq_len, heads, dk = q.shape
   dv = v.shape[-1]
@@ -270,30 +354,34 @@ def _delta_rule_chunked(q, k, v, log_decay, beta, resets, chunk_size: int, state
     k_i = k_i.astype(compute_dtype)
     v_i = v_i.astype(compute_dtype)
 
-    # The pairwise terms only ever need exp(rel_i - rel_j) for i >= j, which is
-    # bounded by 1. Per-channel decay stops that collapsing to a mask, so the
-    # cumulative decay has to be folded into the two operands separately, and
-    # *that* is what can overflow: exp(-rel_j) grows like decay**-C. Splitting
-    # the fold symmetrically about the chunk midpoint halves the worst-case
-    # exponent in each operand, which doubles the usable chunk size.
-    shift = 0.5 * rel[..., -1:, :]
-    q_fold = q_i * jnp.exp(rel - shift).astype(compute_dtype)
-    k_fold = k_i * jnp.exp(rel - shift).astype(compute_dtype)
-    k_inv = k_i * jnp.exp(shift - rel).astype(compute_dtype)
-
     same_doc = seg[:, None, :, None] == seg[:, None, None, :]
     from_prev = (seg[:, None, :, None] == 0).astype(v_i.dtype)
 
+    # Exact per-pair exp(rel_i - rel_j) (bounded by 1 for same-doc i >= j).
+    # Folding decay into the operands would restore a matmul but overflows f32
+    # (A_log up to 16 -> |rel| ~1e3); the fused kernel is the real fix. Mask
+    # excluded pairs BEFORE the exp: their exponent can be +inf, and inf*0=NaN
+    # would poison the VJP.
+    pair_rel = rel[..., :, None, :] - rel[..., None, :, :]
+    pair_mask = (causal[None, None] & same_doc)[..., None]
+    pair_decay = jnp.exp(jnp.where(pair_mask, pair_rel, -jnp.inf)).astype(compute_dtype)
+
     # (I + diag(beta) M) delta = diag(beta) (v - carried prediction)
-    m = jnp.einsum("bhid,bhjd->bhij", k_fold, k_inv)
+    m = jnp.einsum("bhid,bhjd,bhijd->bhij", k_i, k_i, pair_decay)
     m = jnp.where(strict & same_doc, m, 0.0) * beta_i[..., None]
-    m_inv = jax.scipy.linalg.solve_triangular(eye + m, jnp.broadcast_to(eye, m.shape), lower=True, unit_diagonal=True)
+    # (I + M)^-1 via Newton (X <- X(2I - AX)); M nilpotent so it converges in
+    # log2(C) steps. Batched matmuls stay on the MXU; solve_triangular's TPU
+    # lowering forced a ~2.4s/step relayout at the 3p5b shape (profiled).
+    a_mat = eye + m
+    m_inv = eye - m
+    for _ in range(max(0, (c - 1).bit_length() - 1)):
+      m_inv = m_inv @ (2.0 * eye - a_mat @ m_inv)
     carried = jnp.einsum("bhid,bhdv->bhiv", k_i * cum.astype(compute_dtype), state) * from_prev
     delta = jnp.einsum(
         "bhij,bhjv->bhiv", m_inv.astype(compute_dtype), (v_i - carried) * beta_i[..., None].astype(compute_dtype)
     )
 
-    scores = jnp.einsum("bhid,bhjd->bhij", q_fold, k_inv)
+    scores = jnp.einsum("bhid,bhjd,bhijd->bhij", q_i, k_i, pair_decay)
     scores = jnp.where(causal & same_doc, scores, 0.0).astype(compute_dtype)
     out = jnp.einsum("bhid,bhdv->bhiv", q_i * cum.astype(compute_dtype), state) * from_prev
     out = out + jnp.einsum("bhij,bhjv->bhiv", scores, delta)
@@ -303,14 +391,18 @@ def _delta_rule_chunked(q, k, v, log_decay, beta, resets, chunk_size: int, state
     any_reset = (seg[:, -1] > 0)[:, None, None, None]
     decayed = state * cum[..., -1, :][..., None].astype(compute_dtype)
     state = jnp.where(any_reset, jnp.zeros_like(decayed), decayed)
+    # Pre-exp masking again: positions before an intra-chunk reset mix segments.
     last_seg = (seg == seg[:, -1:])[:, None, :, None]
-    k_carry = k_i * (jnp.exp(rel[..., -1:, :] - rel) * last_seg).astype(compute_dtype)
+    k_carry = k_i * jnp.exp(jnp.where(last_seg, rel[..., -1:, :] - rel, -jnp.inf)).astype(compute_dtype)
     # The carry dtype has to match the scan's init exactly or lax.scan rejects it.
     state = (state + jnp.einsum("bhid,bhiv->bhdv", k_carry, delta)).astype(compute_dtype)
     return state, out.astype(jnp.float32)
 
   init_state = jnp.zeros((batch, heads, dk, dv), compute_dtype)
-  _, outputs = jax.lax.scan(body, init_state, (q_c, k_c, v_c, log_a_c, beta_c, reset_c))
+  # Remat the body: otherwise the scan stores O(C^2 d) pairwise residuals
+  # (~544GB HBM at the 3p5b shape). Recompute them in the bwd instead.
+  body_remat = jax.checkpoint(body, policy=jax.checkpoint_policies.nothing_saveable)
+  _, outputs = jax.lax.scan(body_remat, init_state, (q_c, k_c, v_c, log_a_c, beta_c, reset_c))
   return outputs.transpose(1, 0, 3, 2, 4).reshape(batch, seq_len, heads, dv)
 
 
@@ -417,8 +509,101 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
   gate's input width needs overriding.
   """
 
+  def get_topk(self, gate_logits, pre_bias_logits, rngs=None, input_ids=None):
+    """Top-k routing weights, rescaled to sum to ``top_k`` as in the reference.
+
+    ``input_ids`` carries the packed segment ids (EMo routes per document); it
+    is consumed here and never forwarded, so the base class's hash-routing
+    interpretation of the argument can't engage.
+
+    The base class's softmax over the top-k logits already equals the
+    reference's L1-normalized gather of full-softmax scores
+    (``normalize_expert_weights=1.0``); ``restore_weight_scale=True`` then
+    multiplies by ``top_k``, which is the only piece missing here. The masked
+    logits leave that unchanged: every selected expert is inside the pool, so
+    the gathered scores are the unmasked ones.
+    """
+    if self.config.emo_enabled:
+      gate_logits = self._emo_mask_logits(gate_logits, input_ids, rngs)
+    top_k_weights, top_k_indices = super().get_topk(gate_logits, pre_bias_logits, rngs, input_ids=None)
+    return top_k_weights * self.num_experts_per_tok, top_k_indices
+
+  def _emo_mask_logits(self, gate_logits, segment_ids, rngs):
+    """Masks router logits to each document's expert pool (the EMo router).
+
+    Reference: ``EMoRouter`` in the standalone model. A document aggregates its
+    tokens' full-softmax scores, keeps its top ``pool`` experts by that total,
+    and every token of the document then routes within the pool. ``pool`` is
+    sampled uniformly from [emo_min, emo_max] per document during training and
+    fixed at ``emo_eval_document_expert_pool`` otherwise.
+
+    MaxText packs documents contiguously, so the per-document score totals are
+    cumulative-sum differences at document boundaries rather than a scatter
+    over a static document count — this also makes the masking independent of
+    the segment-id numbering (only boundaries matter). The auxiliary losses
+    intentionally see the unmasked logits, as in the reference.
+    """
+    cfg = self.config
+    batch, seq_len, _ = gate_logits.shape
+    if segment_ids is None:
+      segment_ids = jnp.zeros((batch, seq_len), dtype=jnp.int32)
+    positions = jnp.arange(seq_len)
+    prev_ids = jnp.pad(segment_ids, ((0, 0), (1, 0)), constant_values=-1)[:, :seq_len]
+    is_first = segment_ids != prev_ids  # position 0 always starts a document
+    next_ids = jnp.pad(segment_ids, ((0, 0), (0, 1)), constant_values=-1)[:, 1:]
+    is_last = segment_ids != next_ids  # the final position always ends one
+
+    start = jax.lax.cummax(jnp.where(is_first, positions, 0), axis=1)
+    end = jnp.flip(jax.lax.cummin(jnp.flip(jnp.where(is_last, positions, seq_len), axis=1), axis=1), axis=1)
+
+    scores = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
+    csum = jnp.cumsum(scores, axis=1)
+    csum_end = jnp.take_along_axis(csum, end[..., None], axis=1)
+    before = jnp.take_along_axis(csum, jnp.maximum(start - 1, 0)[..., None], axis=1)
+    csum_before = jnp.where((start == 0)[..., None], 0.0, before)
+    document_scores = csum_end - csum_before  # [b, s, E]: each token sees its document's totals
+
+    if rngs is not None and cfg.model_call_mode != "inference":
+      rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
+      draws = jax.random.randint(
+          rng, (batch, seq_len), cfg.emo_min_document_expert_pool, cfg.emo_max_document_expert_pool + 1
+      )
+      # One draw per document: every token reads the draw at its document start.
+      pool = jnp.take_along_axis(draws, start, axis=1)
+    else:
+      pool = jnp.full((batch, seq_len), cfg.emo_eval_document_expert_pool, dtype=jnp.int32)
+
+    order = jnp.argsort(-document_scores, axis=-1)
+    rank = jnp.argsort(order, axis=-1)
+    keep = rank < pool[..., None]
+    return jnp.where(keep, gate_logits, -jnp.inf)
+
+  def load_balance_loss(self, top_k_indices, logits) -> jax.Array:
+    """OLMo-core's batch-level load-balancing loss (``global_load_balancing``).
+
+    ``lb = (E / K) * sum_e mean_{b,s}(probs_e) * counts_e / (B * S)``, scaled by
+    ``load_balance_loss_weight``. Counts are summed over the whole batch rather
+    than per sequence; under jit the batch axis here is the global batch, so
+    the reduction spans all data-parallel replicas, which is exactly the
+    reference's all-reduced global balancing.
+    """
+    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.float32)
+    counts = expert_mask.sum(axis=(0, 1, 2))
+    tokens = top_k_indices.shape[0] * top_k_indices.shape[1]
+    mean_probs = logits.astype(jnp.float32).mean(axis=(0, 1))
+    lb = (mean_probs * counts).sum() * self.num_experts / (self.num_experts_per_tok * tokens)
+    return lb * self.config.load_balance_loss_weight
+
   def __init__(self, *args, gate_in_features: int, **kwargs):
     super().__init__(*args, **kwargs)
+    cfg = self.config
+    if cfg.emo_enabled:
+      if cfg.emo_min_document_expert_pool < self.num_experts_per_tok:
+        raise ValueError("emo_min_document_expert_pool must be >= num_experts_per_tok.")
+      pool_ok = cfg.emo_min_document_expert_pool <= cfg.emo_max_document_expert_pool <= self.num_experts
+      eval_ok = self.num_experts_per_tok <= cfg.emo_eval_document_expert_pool <= self.num_experts
+      if not pool_ok or not eval_ok:
+        raise ValueError("EMo pool sizes must satisfy top_k <= min <= max/eval <= num_experts.")
     if gate_in_features != self.moe_expert_input_dim:
       self.gate = moe.GateLogit(
           in_features_shape=gate_in_features,
@@ -489,7 +674,7 @@ class OLMoE3DecoderLayer(nnx.Module):
         in_features=cfg.emb_dim,
         intermediate_dim=shared_dim,
         activations=cfg.mlp_activations,
-        kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
+        kernel_init=olmoe3_init,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -510,7 +695,7 @@ class OLMoE3DecoderLayer(nnx.Module):
           num_experts=cfg.num_experts,
           num_experts_per_tok=cfg.num_experts_per_tok,
           mesh=mesh,
-          kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
+          kernel_init=olmoe3_init,
           kernel_axes=("embed", None),
           intermediate_dim=cfg.moe_mlp_dim,
           dtype=cfg.dtype,
@@ -559,9 +744,17 @@ class OLMoE3DecoderLayer(nnx.Module):
     ffn_in = self.ffn_in_norm(hidden)
     ffn_out = self.shared_ffn(ffn_in, deterministic=deterministic)
     if self.moe_block is not None:
-      routed, load_balance_loss, _ = self.moe_block(self.latent_down(ffn_in), gate_inputs=ffn_in)
+      # input_ids carries the packed segment ids for the EMo document pools.
+      routed, load_balance_loss, _ = self.moe_block(
+          self.latent_down(ffn_in), gate_inputs=ffn_in, input_ids=decoder_segment_ids
+      )
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-        self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+        # Reference auxiliary loss adds a router z-loss:
+        # 1e-5 * mean(logsumexp(router logits)^2). This gate call is identical
+        # to the one inside moe_block, so XLA folds the two into one.
+        router_logits, _ = self.moe_block.gate(ffn_in)
+        z_loss = jnp.mean(jax.scipy.special.logsumexp(router_logits.astype(jnp.float32), axis=-1) ** 2)
+        self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss + _ROUTER_Z_LOSS_WEIGHT * z_loss)
       ffn_out = ffn_out + self.latent_up(routed)
 
     layer_output = hidden + self.ffn_out_norm(ffn_out)
