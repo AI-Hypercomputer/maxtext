@@ -23,10 +23,13 @@ safetensors = pytest.importorskip("safetensors")
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 import orbax.checkpoint as ocp
 from maxtext.configs import pyconfig
 from maxtext.layers.nnx_wrappers import ToLinen
 from maxtext.models.models import Transformer
+from maxtext.utils import maxtext_utils
+
 
 
 class KimiK3HFLoadingTest(unittest.TestCase):
@@ -54,8 +57,12 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     ])
 
 
+    devices_array = maxtext_utils.create_device_mesh(config)
+    mesh = Mesh(devices_array, config.mesh_axes)
+
     # Initialize model
-    model = ToLinen(Transformer, args=(config, None, None))
+    model = ToLinen(Transformer, args=(config, mesh, None))
+
 
 
 
@@ -75,14 +82,29 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     rng = jax.random.PRNGKey(0)
     abstract_state = jax.eval_shape(model.init, rng, inputs, positions, segment_ids)
 
+    def unwrap_and_shard(x):
+      if hasattr(x, "value"):
+        x = x.value
+      if isinstance(x, dict):
+        if "value" in x and len(x) == 1:
+          return unwrap_and_shard(x["value"])
+        return {k: unwrap_and_shard(v) for k, v in x.items()}
+      if isinstance(x, jax.ShapeDtypeStruct):
+        return jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=NamedSharding(mesh, jax.sharding.PartitionSpec()))
+      return x
+
+    unwrapped = unwrap_and_shard(abstract_state)
+
     # Load converted Orbax checkpoint
     mngr = ocp.CheckpointManager(self.checkpoint_dir)
-    loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.PyTreeRestore(abstract_state)))
+    target_item = {"step": 0, "params": unwrapped, "opt_state": {}}
+    loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.StandardRestore(target_item)))
     print("Checkpoint restored successfully! Step:", mngr.latest_step())
 
+    params = loaded_state["items"]["params"]["params"]
 
     # Run forward pass with loaded state
-    logits, _ = model.apply(loaded_state["items"], inputs, positions, segment_ids)
+    logits, _ = model.apply({"params": params}, inputs, positions, segment_ids)
     print("Logits shape:", logits.shape, "dtype:", logits.dtype)
 
     # Assertions
@@ -90,12 +112,12 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     self.assertFalse(jnp.isnan(logits).any(), "Logits contain NaNs!")
     self.assertFalse(jnp.isinf(logits).any(), "Logits contain Infs!")
 
-    params = loaded_state["items"]["params"]
     self.assertIn("token_embedder", params)
     self.assertIn("decoder", params)
     self.assertIn("layers_0", params["decoder"])
     self.assertIn("layers_1", params["decoder"])
     print("FORWARD PASS SUCCESSFUL!")
+
 
 
 
