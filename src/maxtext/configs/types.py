@@ -712,6 +712,10 @@ class CompressedAttention(BaseModel):
   compressed_rope_max_timescale: int = Field(
       160000, description="If positive, used for Compressed Sparse/Heavy Attention."
   )
+  use_csa_streamindex_kernel: bool = Field(
+      False,
+      description="Whether to use Pallas TPU kernel for CSA StreamIndex score computation.",
+  )
 
 
 class AttentionIndexer(BaseModel):

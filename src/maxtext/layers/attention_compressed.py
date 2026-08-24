@@ -45,6 +45,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference.kvcache import KVQuant
 from maxtext.inference import kvcache
+from maxtext.kernels.attention import csa_streamindex
 
 
 class CSAPoolingConfig(enum.IntEnum):
@@ -682,7 +683,7 @@ class DeepseekV4Indexer(nnx.Module):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: Any = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       quant: Optional[Quant] = None,
       rngs: Optional[nnx.Rngs] = None,
   ):
@@ -874,20 +875,35 @@ class DeepseekV4Indexer(nnx.Module):
       return jnp.zeros((batch_size, seq_len, min(self.index_topk, compressed_len)), dtype=jnp.int32)
 
     # --- TOP-K ROUTING MATH (Executes in both Prefill and AR) ---
-    compressed_kv = jnp.expand_dims(compressed, axis=1)
-    compressed_kv = jnp.broadcast_to(compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim))
-
     q = self.q_proj(q_latent).reshape((batch_size, seq_len, self.index_n_heads, self.index_head_dim))
     q = jnp.transpose(q, (0, 2, 1, 3))
     q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
 
-    q = q.astype(jnp.float32)
-    compressed_kv = compressed_kv.astype(jnp.float32)
-
-    scores = jnp.einsum("bhsd,bhwd->bhsw", q, compressed_kv)
-    scores = jax.nn.relu(scores) * self.softmax_scale
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
-    index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights)
+
+    block_q = 128
+    use_kernel = getattr(self.config, "use_csa_streamindex_kernel", False) and (seq_len >= block_q)
+
+    if use_kernel:
+      q_seq_major = jnp.transpose(q, (0, 2, 1, 3))
+      index_scores = csa_streamindex.csa_streamindex_score(
+          q=q_seq_major,
+          compressed=compressed,
+          weights=weights,
+          softmax_scale=self.softmax_scale,
+          block_q=block_q,
+          block_w=128,
+      )
+    else:
+      compressed_kv = jnp.expand_dims(compressed, axis=1)
+      compressed_kv = jnp.broadcast_to(
+          compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim)
+      )
+      q_fp32 = q.astype(jnp.float32)
+      compressed_kv = compressed_kv.astype(jnp.float32)
+      scores = jnp.einsum("bhsd,bhwd->bhsw", q_fp32, compressed_kv)
+      scores = jax.nn.relu(scores) * self.softmax_scale
+      index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights)
 
     k = min(self.index_topk, compressed_len)
 
@@ -932,7 +948,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: Any = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
