@@ -2298,13 +2298,15 @@ class AttentionOp(nnx.Module):
 
       return attention_output, None
 
-    # Pad query and segment IDs to mask_shape if sequence length is not aligned to block size for compressed attention
-    orig_q_len = query.shape[2]
-    pad_q = mask_shape[0] - query.shape[2] if self.attention_type == AttentionType.COMPRESSED else 0
-    if pad_q > 0:
-      query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
-      if decoder_segment_ids is not None:
-        decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)), constant_values=-1)
+    pad_q = 0
+    orig_q_len = None
+    if self.attention_type == AttentionType.COMPRESSED:
+      orig_q_len = query.shape[2]
+      if mask_shape[0] > orig_q_len:
+        pad_q = mask_shape[0] - orig_q_len
+        query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
+        if decoder_segment_ids is not None:
+          decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)), constant_values=-1)
 
     query = self._maybe_shard_with_pspec(query, axis_names_q)
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
@@ -2331,8 +2333,8 @@ class AttentionOp(nnx.Module):
 
     x, max_logits = ret
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
-    # Slice outputs back to unpadded sequence length
-    if pad_q > 0:
+    # Slice outputs back to unpadded sequence length for compressed attention
+    if self.attention_type == AttentionType.COMPRESSED and pad_q > 0:
       x = x[:, :orig_q_len, :, :]
       if record_max_logits:
         max_logits = max_logits[:, :, :orig_q_len]

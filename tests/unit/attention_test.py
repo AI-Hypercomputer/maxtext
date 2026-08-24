@@ -362,51 +362,60 @@ class BlockCausalMaskTest(unittest.TestCase):
         **kwargs,
     )
 
-  def _make_flash_op(
-      self,
-      *,
-      attention_type=AttentionType.BLOCK_DIFFUSION,
-      context_parallel_size=1,
-      context_parallel_load_balance=False,
-  ):
-    """Builds a minimal flash-attention operator for dispatch tests."""
-    config = types.SimpleNamespace(
-        causal_block_size=4,
-        context_parallel_strategy="all_gather",
-        context_parallel_load_balance=context_parallel_load_balance,
-        context_sharding="context",
-        sa_block_q=4,
-        sa_block_kv=4,
-        sa_block_kv_compute=4,
-        sa_block_q_dkv=4,
-        sa_block_kv_dkv=4,
-        sa_block_kv_dkv_compute=4,
-        sa_block_q_dq=4,
-        sa_block_kv_dq=4,
-        sa_use_fused_bwd_kernel=True,
-        sa_q_layout="HEAD_DIM_MINOR",
-        sa_k_layout="HEAD_DIM_MINOR",
-        sa_v_layout="HEAD_DIM_MINOR",
-        use_splash_scheduler=False,
-        sa_fuse_reciprocal=False,
-        sa_use_base2_exp=False,
-        use_tokamax_splash=False,
-        use_jax_splash=False,
-    )
-    device = types.SimpleNamespace(platform="cpu")
-    mesh = types.SimpleNamespace(
-        devices=np.asarray([device], dtype=object),
-        shape={"context": context_parallel_size},
-    )
-    return AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=8,
-        mesh=mesh,
-        attention_kernel="flash",
-        attention_type=attention_type,
-    )
+def _make_flash_op(
+    *,
+    attention_type=AttentionType.BLOCK_DIFFUSION,
+    context_parallel_size=1,
+    context_parallel_load_balance=False,
+    max_target_length=8,
+):
+  """Builds a minimal flash-attention operator for dispatch tests."""
+  config = types.SimpleNamespace(
+      causal_block_size=4,
+      context_parallel_strategy="all_gather",
+      context_parallel_load_balance=context_parallel_load_balance,
+      context_sharding="context",
+      sa_block_q=4,
+      sa_block_kv=4,
+      sa_block_kv_compute=4,
+      sa_block_q_dkv=4,
+      sa_block_kv_dkv=4,
+      sa_block_kv_dkv_compute=4,
+      sa_block_q_dq=4,
+      sa_block_kv_dq=4,
+      sa_use_fused_bwd_kernel=True,
+      sa_q_layout="HEAD_DIM_MINOR",
+      sa_k_layout="HEAD_DIM_MINOR",
+      sa_v_layout="HEAD_DIM_MINOR",
+      use_splash_scheduler=False,
+      sa_fuse_reciprocal=False,
+      sa_use_base2_exp=False,
+      use_tokamax_splash=False,
+      use_jax_splash=False,
+      cost_estimate_flops_fwd=-1,
+      cost_estimate_flops_bwd=-1,
+      dq_reduction_steps=-1,
+  )
+  device = types.SimpleNamespace(platform="tpu")
+  mesh = types.SimpleNamespace(
+      devices=np.asarray([device] * context_parallel_size, dtype=object),
+      shape={"context": context_parallel_size},
+  )
+  return AttentionOp(
+      config=config,
+      num_query_heads=1,
+      num_kv_heads=1,
+      max_target_length=max_target_length,
+      mesh=mesh,
+      attention_kernel="flash",
+      attention_type=attention_type,
+  )
+
+
+class JaxFlashAttentionTest(unittest.TestCase):
+  """Tests for JAX flash attention."""
+
+  _make_flash_op = staticmethod(_make_flash_op)
 
   def test_dense_and_splash_masks_match(self):
     sequence_length = 10
@@ -704,44 +713,11 @@ class HCAStaticMaskTest(unittest.TestCase):
     self.assertEqual(res.shape, (128, 128))
 
   def test_load_balanced_cp_raises_on_hca(self):
-    config = types.SimpleNamespace(
-        context_parallel_strategy="all_gather",
-        context_parallel_load_balance=True,
-        context_sharding="context",
-        sa_block_q=128,
-        sa_block_kv=128,
-        sa_block_kv_compute=128,
-        sa_block_q_dkv=128,
-        sa_block_kv_dkv=128,
-        sa_block_kv_dkv_compute=128,
-        sa_block_q_dq=128,
-        sa_block_kv_dq=128,
-        sa_use_fused_bwd_kernel=True,
-        sa_q_layout="HEAD_DIM_MINOR",
-        sa_k_layout="HEAD_DIM_MINOR",
-        sa_v_layout="HEAD_DIM_MINOR",
-        use_splash_scheduler=False,
-        sa_fuse_reciprocal=False,
-        sa_use_base2_exp=False,
-        use_tokamax_splash=True,
-        use_jax_splash=False,
-        cost_estimate_flops_fwd=-1,
-        cost_estimate_flops_bwd=-1,
-        dq_reduction_steps=-1,
-    )
-    device = types.SimpleNamespace(platform="tpu")
-    mesh = types.SimpleNamespace(
-        devices=np.asarray([device, device], dtype=object),
-        shape={"context": 2},
-    )
-    op = AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=512,
-        mesh=mesh,
-        attention_kernel="flash",
+    op = _make_flash_op(
         attention_type=AttentionType.COMPRESSED,
+        context_parallel_size=2,
+        context_parallel_load_balance=True,
+        max_target_length=512,
     )
     query = jnp.zeros((1, 1, 512, 128))
     key = jnp.zeros((1, 1, 516, 128))
