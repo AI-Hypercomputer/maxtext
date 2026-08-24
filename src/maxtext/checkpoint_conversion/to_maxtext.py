@@ -915,6 +915,8 @@ def main(
     output_directory = f"tmp/{config.run_name}"
   else:
     output_directory = config.base_output_directory
+  output_directory = os.path.abspath(output_directory)
+
 
   hf_token = config.hf_access_token
 
