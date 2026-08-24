@@ -133,9 +133,7 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):  # pylint: disable=abstrac
     )
     attention_result = attn_out[0]
     if self.is_index_share_enabled:
-      new_indexer_state = getattr(self.self_attention, "new_indexer_state", None)
-      if new_indexer_state is None and len(attn_out) > 2:
-        new_indexer_state = attn_out[2]
+      new_indexer_state = attn_out[2] if len(attn_out) > 2 else None
       return self.with_logical_constraint(attention_result), new_indexer_state
     else:
       return self.with_logical_constraint(attention_result), None

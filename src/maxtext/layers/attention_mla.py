@@ -1420,5 +1420,6 @@ class MLA(Attention):
     out_sharding = create_sharding(self.mesh, out_logical_name)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
-    self.new_indexer_state = new_indexer_state
+    if getattr(self.config, "use_index_share", False):
+      return out, kv_cache, new_indexer_state
     return out, kv_cache
