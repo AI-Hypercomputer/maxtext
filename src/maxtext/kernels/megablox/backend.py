@@ -29,6 +29,8 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 import qwix.pallas as qpl
 
+ManualAxisType = getattr(jax.sharding, "ManualAxisType", getattr(jax.core, "ManualAxisType", None))
+
 
 def _validate_args(
     *,
@@ -525,7 +527,7 @@ def gmm(
   call_gmm = qpl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct(
-          (m, n), preferred_element_type, manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes))
+          (m, n), preferred_element_type, manual_axis_type=ManualAxisType(varying=frozenset(varying_axes))
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
@@ -786,7 +788,7 @@ def tgmm(
       out_shape=jax.ShapeDtypeStruct(
           (num_actual_groups, k, n),
           preferred_element_type,
-          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes)),
+          manual_axis_type=ManualAxisType(varying=frozenset(varying_axes)),
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,

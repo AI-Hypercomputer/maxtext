@@ -29,6 +29,8 @@ import qwix
 import qwix.pallas as qpl
 import tokamax
 
+ManualAxisType = getattr(jax.sharding, "ManualAxisType", getattr(jax.core, "ManualAxisType", None))
+
 
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
     dot_dimension_numbers=(([1], [2]), ([], [])),
@@ -289,7 +291,7 @@ def _fwd_run_tokamax_v1(
   out_kwargs = {}
   if use_manual_quantization:
     # used in batchsplit
-    out_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
+    out_kwargs["manual_axis_type"] = ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
 
   if transpose_rhs:
     rhs = rhs.swapaxes(1, 2)
@@ -652,7 +654,7 @@ def _dlhs_run_tokamax_v1(
   """Executes DLHS using GMM 1"""
   dlhs_kwargs = {}
   if use_manual_quantization:
-    dlhs_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
+    dlhs_kwargs["manual_axis_type"] = ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
 
   dlhs_rhs = rhs.swapaxes(1, 2) if transpose_rhs else rhs
   return tokamax.ragged_dot_general(
@@ -812,7 +814,7 @@ def _drhs_run_tokamax_v1(
   """Executes standard Tokamax ragged_dot for DRHS."""
   drhs_kwargs = {}
   if use_manual_quantization:
-    drhs_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(
+    drhs_kwargs["manual_axis_type"] = ManualAxisType(
         varying=frozenset(["expert"]), unreduced=frozenset(["data", "fsdp"])
     )
   return tokamax.ragged_dot_general(
