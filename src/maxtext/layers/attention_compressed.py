@@ -890,23 +890,25 @@ class DeepseekV4Indexer(nnx.Module):
 
     # --- TOP-K ROUTING MATH (Executes in both Prefill and AR) ---
     q = self.q_proj(q_latent).reshape((batch_size, seq_len, self.index_n_heads, self.index_head_dim))
-    q = jnp.transpose(q, (0, 2, 1, 3))
-    q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
-
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
 
     block_q = 128
     use_kernel = getattr(self.config, "use_csa_streamindex_kernel", False) and (seq_len >= block_q)
 
     if use_kernel:
-      q_seq_major = jnp.transpose(q, (0, 2, 1, 3))
+      q_seq_major = self.rotary_emb(q, position_ids, unsqueeze_dim=2)
       mesh = getattr(self.config, "mesh", None) or getattr(self, "mesh", None)
       if mesh is None:
         try:
           mesh = maxtext_utils.get_mesh_from_config(self.config)
         except (AttributeError, ValueError, KeyError):
           mesh = None
-      if mesh is not None and mesh.size > 1:
+      total_batch_shards = 1
+      if mesh is not None:
+        for axis_name in ("data", "fsdp", "fsdp_transpose", "expert", "context"):
+          if axis_name in mesh.shape:
+            total_batch_shards *= mesh.shape[axis_name]
+      if mesh is not None and total_batch_shards > 1 and (batch_size % total_batch_shards == 0):
         q_pspec = jax.sharding.PartitionSpec(
             ("data", "fsdp", "fsdp_transpose", "expert", "context"),
             None,
@@ -932,7 +934,8 @@ class DeepseekV4Indexer(nnx.Module):
               weights=local_weights,
               softmax_scale=self.softmax_scale,
               block_q=block_q,
-              block_w=512,
+              block_w=1024,
+              head_chunk=32,
           )
         index_scores = _shard_mapped_streamindex(q_seq_major, compressed, weights)
       else:
@@ -942,9 +945,12 @@ class DeepseekV4Indexer(nnx.Module):
             weights=weights,
             softmax_scale=self.softmax_scale,
             block_q=block_q,
-            block_w=512,
+            block_w=1024,
+            head_chunk=32,
         )
     else:
+      q = jnp.transpose(q, (0, 2, 1, 3))
+      q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
       compressed_kv = jnp.expand_dims(compressed, axis=1)
       compressed_kv = jnp.broadcast_to(
           compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim)

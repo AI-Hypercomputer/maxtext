@@ -28,27 +28,39 @@ def csa_streamindex_score_kernel(
     out_ref,      # [block_q, block_w]
     *,
     softmax_scale: float,
+    head_chunk: int = 32,
 ):
   """Pallas TPU kernel for fused indexer score calculation.
 
-  Computes scores directly in VMEM without materializing intermediate
-  [b, h, s, w] tensors in HBM.
+  Accumulates head scores chunked directly into a [block_q, block_w] accumulator
+  in VMEM without allocating large [block_q, num_heads, block_w] intermediate buffers.
   """
   q = q_ref[...]
   k = k_ref[...]
   w = w_ref[...]
 
-  # QK dot product: [block_q, num_heads, head_dim] x [block_w, head_dim] -> [block_q, num_heads, block_w]
-  scores = jnp.einsum(
-      "shd,wd->shw",
-      q.astype(jnp.float32),
-      k.astype(jnp.float32),
-      preferred_element_type=jnp.float32,
-  )
-  scores = jnp.maximum(scores, 0.0) * softmax_scale
-  scores = scores * w[:, :, None].astype(jnp.float32)
-  out = jnp.sum(scores, axis=1)
-  out_ref[...] = out.astype(out_ref.dtype)
+  block_q, num_heads, head_dim = q.shape
+  block_w, _ = k.shape
+
+  acc = jnp.zeros((block_q, block_w), dtype=jnp.float32)
+
+  for h_start in range(0, num_heads, head_chunk):
+    h_end = min(h_start + head_chunk, num_heads)
+    q_c = q[:, h_start:h_end, :]
+    w_c = w[:, h_start:h_end].astype(jnp.float32)
+
+    # [block_q, h_c, head_dim] x [block_w, head_dim] -> [block_q, h_c, block_w]
+    scores_c = jnp.einsum(
+        "shd,wd->shw",
+        q_c,
+        k,
+        preferred_element_type=jnp.float32,
+    )
+    scores_c = jnp.maximum(scores_c, 0.0)
+    chunk_acc = jnp.sum(scores_c * w_c[:, :, None], axis=1)
+    acc = acc + chunk_acc
+
+  out_ref[...] = (acc * softmax_scale).astype(out_ref.dtype)
 
 
 def csa_streamindex_score(
@@ -58,7 +70,8 @@ def csa_streamindex_score(
     *,
     softmax_scale: float,
     block_q: int = 128,
-    block_w: int = 512,
+    block_w: int = 1024,
+    head_chunk: int = 32,
     interpret: bool = False,
 ) -> jax.Array:
   """Computes CSA StreamIndex scores using a fused Pallas TPU kernel.
@@ -70,6 +83,7 @@ def csa_streamindex_score(
     softmax_scale: Scaling factor applied post-ReLU (typically head_dim**-0.5).
     block_q: Query sequence block size (default 128).
     block_w: Compressed window block size (default 512).
+    head_chunk: Number of heads processed per accumulation step in VMEM (default 32).
     interpret: If True, executes via JAX interpreter on CPU.
 
   Returns:
@@ -108,11 +122,14 @@ def csa_streamindex_score(
       functools.partial(
           csa_streamindex_score_kernel,
           softmax_scale=softmax_scale,
+          head_chunk=head_chunk,
       ),
       in_specs=in_specs,
       out_specs=out_specs,
       grid=grid,
-      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "parallel", "parallel")),
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel", "parallel", "arbitrary"),
+      ),
       out_shape=jax.ShapeDtypeStruct((batch_size, padded_s, padded_w), jnp.float32),
       interpret=interpret,
   )(q, compressed, weights)
