@@ -1244,7 +1244,9 @@ class Qwen3NextScannableBlock(nnx.Module):
     self.layer_idx_offset = layer_idx_offset
 
     cycle_interval = cfg.inhomogeneous_layer_cycle_interval
-    full_attention_offset = cfg.full_attention_layer_offset % cycle_interval
+    # Qwen3-Next puts the full-attention layer last in every cycle, which is what
+    # Qwen3NextDecoderLayer derives from layer_idx when it is not told explicitly.
+    full_attention_offset = cycle_interval - 1
 
     positions = [(layer_idx_offset + i) % cycle_interval for i in range(num_of_layers)]
     self.num_local = sum(1 for p in positions if p != full_attention_offset)
@@ -1258,9 +1260,9 @@ class Qwen3NextScannableBlock(nnx.Module):
     # model's layer order when the full-attention layer is last in the period.
     if self.num_global == 1 and positions[-1] != full_attention_offset:
       raise ValueError(
-          f"Qwen3-Next scannable block expects the full-attention layer last in the block, but with "
-          f"full_attention_layer_offset={cfg.full_attention_layer_offset} and layer_idx_offset={layer_idx_offset} it "
-          f"lands at block position {positions.index(full_attention_offset)} of {num_of_layers}."
+          f"Qwen3-Next scannable block expects the full-attention layer last in the block, but a block of "
+          f"{num_of_layers} layers starting at layer_idx_offset={layer_idx_offset} lands it at block position "
+          f"{positions.index(full_attention_offset)}. Blocks must start on a cycle boundary."
       )
 
     if self.num_local > 0:
@@ -1493,8 +1495,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # knows each sub-layer's role up front and passes it explicitly, because inside a
     # scan the layer's position is not recoverable from layer_idx.
     if is_full_attention_layer is None:
-      offset = cfg.full_attention_layer_offset % cfg.inhomogeneous_layer_cycle_interval
-      is_full_attention_layer = self.layer_idx % cfg.inhomogeneous_layer_cycle_interval == offset
+      is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
     self.is_full_attention_layer = is_full_attention_layer
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.

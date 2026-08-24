@@ -874,13 +874,15 @@ _QWEN3_NEXT_CONFIG = {
 class TestQwen3NextScannableBlock(unittest.TestCase):
   """Tests Qwen3-Next's nested local(scan)/global(length-1 scan) decoder block."""
 
-  def _build(self, **overrides):
+  def _build(self, layer_idx_offset=0, **overrides):
+    """Builds one scannable block; overrides go to the config, layer_idx_offset to the block."""
     cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, **overrides})
     mesh = _make_mesh(cfg)
     block = qwen3.Qwen3NextScannableBlock(
         config=cfg,
         mesh=mesh,
         model_mode=MODEL_MODE_TRAIN,
+        layer_idx_offset=layer_idx_offset,
         rngs=nnx.Rngs(0),
     )
     return cfg, mesh, block
@@ -955,9 +957,14 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     np.testing.assert_allclose(np.asarray(y_external), np.asarray(y_scanned), rtol=1e-5, atol=1e-5)
 
   def test_rejects_block_whose_global_layer_is_not_last(self):
-    """The local scan runs before the global layer, so any other ordering must be refused."""
+    """The local scan runs before the global layer, so any other ordering must be refused.
+
+    A block starting off a cycle boundary straddles two periods -- with a cycle of
+    4, layers 1..4 put the full-attention layer third of four. Applying it as
+    local-scan-then-global would silently reorder the model, so it is rejected.
+    """
     with self.assertRaisesRegex(ValueError, "full-attention layer last"):
-      self._build(full_attention_layer_offset=0)
+      self._build(layer_idx_offset=1)
 
 
 class TestNNXDecoderQwen3Next(unittest.TestCase):
