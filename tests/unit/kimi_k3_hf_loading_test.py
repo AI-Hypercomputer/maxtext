@@ -88,21 +88,14 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     self.assertEqual(logits.shape, (batch_size, seq_len, config.vocab_size))
     self.assertFalse(jnp.isnan(logits).any(), "Logits contain NaNs!")
     self.assertFalse(jnp.isinf(logits).any(), "Logits contain Infs!")
-    print("FORWARD PASS SUCCESSFUL!")
 
-    params = state["params"]
+    params = loaded_state["items"]["params"]
     self.assertIn("token_embedder", params)
     self.assertIn("decoder", params)
     self.assertIn("layers_0", params["decoder"])
-    self.assertIn("layers_3", params["decoder"])
+    self.assertIn("layers_1", params["decoder"])
+    print("FORWARD PASS SUCCESSFUL!")
 
-    # Run forward pass
-    logits, _ = model.apply(state, inputs, positions, segment_ids)
-
-    # Assertions on logits
-    self.assertEqual(logits.shape, (batch_size, seq_len, config.vocab_size))
-    self.assertFalse(jnp.isnan(logits).any(), "Logits contain NaN!")
-    self.assertFalse(jnp.isinf(logits).any(), "Logits contain Inf!")
 
 
 if __name__ == "__main__":
