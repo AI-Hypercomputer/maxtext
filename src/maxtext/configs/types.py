@@ -1973,14 +1973,26 @@ class AdamW(BaseModel):
 class Muon(BaseModel):
   """Configuration specific to the Muon optimizer."""
 
+  muon_type: str = Field(
+      "maxtext_muon",
+      description=("Type of Muon optimizer: 'maxtext_muon' (or 'maxtext', 'sharded') vs" " 'optax_muon' (or 'optax')."),
+  )
   muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
   muon_weight_decay: float = Field(
-      0,
-      description="Strength of the weight decay regularization. This is multiplied with the learning rate.",
+      0.0,
+      description=("Strength of the weight decay regularization. This is multiplied with" " the learning rate."),
   )
   muon_consistent_rms: float | None = Field(
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
+  )
+  muon_ns_steps: int = Field(
+      5,
+      description="Number of Newton-Schulz iterations for Muon optimizer.",
+  )
+  muon_use_all_to_all: bool = Field(
+      True,
+      description=("Whether to use all-to-all communication during Newton-Schulz" " iterations in Muon optimizer."),
   )
 
 
@@ -4303,13 +4315,14 @@ class MaxTextConfig(
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
-        DecoderBlockType.QWEN3,
-        DecoderBlockType.QWEN3_MOE,
-        DecoderBlockType.QWEN3_CUSTOM_MOE,
-        DecoderBlockType.QWEN3_NEXT,
-        DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
+        DecoderBlockType.GPT_OSS,
         DecoderBlockType.LLAMA2,
+        DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_5,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_NEXT,
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "

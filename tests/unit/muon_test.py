@@ -69,31 +69,31 @@ class MuonTest(parameterized.TestCase):
       {
           "testcase_name": "2d_tuple_axes",
           "input_shape": (2, 3),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=1),
+          "dim_nums": _muon.ShardedMuonDimensionNumbers(reduction_axis=0, output_axis=1),
           "expected_flat_shape": (1, 1, 2, 3),
       },
       {
           "testcase_name": "3d_batch_axis",
           "input_shape": (2, 3, 4),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=2),
+          "dim_nums": _muon.ShardedMuonDimensionNumbers(reduction_axis=0, output_axis=2),
           "expected_flat_shape": (1, 3, 2, 4),
       },
       {
           "testcase_name": "3d_negative_axes_indices",
           "input_shape": (2, 3, 4),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=-3, output_axis=-1),
+          "dim_nums": _muon.ShardedMuonDimensionNumbers(reduction_axis=-3, output_axis=-1),
           "expected_flat_shape": (1, 3, 2, 4),
       },
       {
           "testcase_name": "4d_multiple_batch_axes",
           "input_shape": (2, 3, 4, 5),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3),
+          "dim_nums": _muon.ShardedMuonDimensionNumbers(reduction_axis=2, output_axis=3),
           "expected_flat_shape": (1, 6, 4, 5),
       },
       {
           "testcase_name": "4d_multiple_output_axes",
           "input_shape": (2, 3, 4, 5),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=(0, 3)),
+          "dim_nums": _muon.ShardedMuonDimensionNumbers(reduction_axis=2, output_axis=(0, 3)),
           "expected_flat_shape": (1, 3, 4, 10),
       },
   )
@@ -113,7 +113,7 @@ class MuonTest(parameterized.TestCase):
     # Case 1: a dim nums for all weights, no matter if they're muon.
     def weight_dim_nums_fn(params):
       def fn_(x):
-        return _muon.MuonDimensionNumbers(0, 1) if x.ndim == 2 else None
+        return _muon.ShardedMuonDimensionNumbers(0, 1) if x.ndim == 2 else None
 
       return jax.tree.map(fn_, params)
 
@@ -129,7 +129,7 @@ class MuonTest(parameterized.TestCase):
     # Case 2: a None inserted for parameters that are not muon.
     def weight_dim_nums_fn(params):  # pylint: disable=function-redefined
       del params
-      return {"w1": _muon.MuonDimensionNumbers(), "w2": None}
+      return {"w1": _muon.ShardedMuonDimensionNumbers(), "w2": None}
 
     opt = _muon.muon(
         learning_rate=1e-3,
@@ -147,7 +147,7 @@ class MuonTest(parameterized.TestCase):
     params_sq = {"w": jax.random.normal(key, shape=(10, 10))}
     updates_sq, _ = get_updates(params_sq, preconditioning=preconditioning)
     # Test: 2D parameter (10, 10) with trivial dim nums
-    dim_nums = {"w": _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=1)}
+    dim_nums = {"w": _muon.ShardedMuonDimensionNumbers(reduction_axis=0, output_axis=1)}
     reshape_updates_sq, _ = get_updates(
         params_sq,
         preconditioning=preconditioning,
@@ -166,7 +166,7 @@ class MuonTest(parameterized.TestCase):
     with self.subTest("2D with dimension numbers, (10, 12)"):
       # Test 1: 2D with dimension numbers, (10, 12)
       params = {"w": w}
-      dim_nums = {"w": _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=1)}
+      dim_nums = {"w": _muon.ShardedMuonDimensionNumbers(reduction_axis=0, output_axis=1)}
       reshape_updates, _ = get_updates(
           params,
           preconditioning=preconditioning,
@@ -180,7 +180,7 @@ class MuonTest(parameterized.TestCase):
         return x.reshape(10, 3, 1, 4).transpose(3, 2, 0, 1)
 
       reshape_params = {"w": reshape_fn_1(w)}
-      dim_nums = {"w": _muon.MuonDimensionNumbers(reduction_axis=(2,), output_axis=(0, 3))}
+      dim_nums = {"w": _muon.ShardedMuonDimensionNumbers(reduction_axis=(2,), output_axis=(0, 3))}
       reshape_updates, _ = get_updates(
           reshape_params,
           preconditioning=preconditioning,
@@ -199,7 +199,7 @@ class MuonTest(parameterized.TestCase):
         return x.reshape(2, 1, 5, 12).transpose(2, 3, 1, 0)
 
       reshape_params = {"w": reshape_fn_2(w)}
-      dim_nums = {"w": _muon.MuonDimensionNumbers(reduction_axis=(0, 3), output_axis=(1,))}
+      dim_nums = {"w": _muon.ShardedMuonDimensionNumbers(reduction_axis=(0, 3), output_axis=(1,))}
       reshape_updates, _ = get_updates(
           reshape_params,
           preconditioning=preconditioning,
@@ -217,7 +217,7 @@ class MuonTest(parameterized.TestCase):
     def get_muon_mu(state):
       return state[0]["muon"][0][0][1]
 
-    dim_num = _muon.MuonDimensionNumbers(reduction_axis=(1,), output_axis=(2,))
+    dim_num = _muon.ShardedMuonDimensionNumbers(reduction_axis=(1,), output_axis=(2,))
 
     # Test 1: full dim_nums
     params = {"w1": jnp.ones((1, 2, 3)), "w2": jnp.ones((2, 3, 4))}
@@ -243,7 +243,7 @@ class MuonTest(parameterized.TestCase):
         "w1": {"a": jnp.ones((2, 3)), "b": jnp.ones((2, 3))},
         "w2": {"a": jnp.ones((2, 3)), "b": jnp.ones((2, 3))},
     }
-    dim_num = _muon.MuonDimensionNumbers()
+    dim_num = _muon.ShardedMuonDimensionNumbers()
     dim_nums = {"w1": None, "w2": {"a": dim_num, "b": None}}
     _, state = get_updates(params, dim_nums, preconditioning=preconditioning)
     state_structure = jax.tree.structure(get_muon_mu(state), is_leaf=lambda x: isinstance(x, optax.MaskedNode))
@@ -258,7 +258,7 @@ class MuonTest(parameterized.TestCase):
         "w1": {"a": jnp.ones((2, 3)), "b": jnp.ones((2, 3))},
         "w2": {"a": jnp.ones((2, 3)), "b": jnp.ones((2, 3))},
     }
-    dim_num = _muon.MuonDimensionNumbers()
+    dim_num = _muon.ShardedMuonDimensionNumbers()
     dim_nums = {"w1": dim_num, "w2": None}
     _, state = get_updates(params, dim_nums)
     state_structure = jax.tree.structure(get_muon_mu(state), is_leaf=lambda x: isinstance(x, optax.MaskedNode))
@@ -269,12 +269,12 @@ class MuonTest(parameterized.TestCase):
     self.assertIsInstance(get_muon_mu(state)["w2"]["b"], optax.MaskedNode)
 
   def test_newton_schulz(self):
-    """Test that Newton--Schulz orhogonalizes/unitiarizes correctly."""
+    """Test that Newton--Schulz orthogonalizes/unitarizes correctly."""
     mat_real = jax.random.normal(jax.random.key(0), (4, 3), dtype=jnp.float32)
     mat_complex = jax.random.normal(jax.random.key(0), (4, 3), dtype=jnp.complex64)
     ns_coeffs = jnp.array([2.0, -1.5, 0.5])
 
-    if jax.default_backend() == "tpu":
+    if jax.default_backend() in ("tpu", "proxy"):
       atol, rtol = 1e-2, 1e-2
     else:
       atol, rtol = 1e-5, 1e-5
@@ -289,7 +289,7 @@ class MuonTest(parameterized.TestCase):
         ns_steps=20,
         precond_fn=precond_fn,
         ns_step_fn=ns_step_fn,
-        dim_nums=_muon.MuonDimensionNumbers(0, 1),
+        dim_nums=_muon.ShardedMuonDimensionNumbers(0, 1),
     )
 
     gram_real = mat_real_orth.T @ mat_real_orth
@@ -309,7 +309,7 @@ class MuonTest(parameterized.TestCase):
         ns_steps=10,
         precond_fn=precond_fn,
         ns_step_fn=ns_step_fn,
-        dim_nums=_muon.MuonDimensionNumbers(0, 1),
+        dim_nums=_muon.ShardedMuonDimensionNumbers(0, 1),
     )
 
     gram_complex = mat_complex_orth.conj().T @ mat_complex_orth
@@ -421,21 +421,55 @@ class MuonTest(parameterized.TestCase):
     gram = jnp.dot(w_update.T, w_update)
     gram = gram / jnp.max(gram)
     ortho_error = jnp.linalg.norm(gram - jnp.eye(gram.shape[0]))
-    self.assertLess(ortho_error, 1e-3, f"Orthogonality error too high: {ortho_error}")
+    tol = 1e-2 if jax.default_backend() in ("tpu", "proxy") else 1e-3
+    self.assertLess(ortho_error, tol, f"Orthogonality error too high: {ortho_error}")
 
-  def test_use_all_to_all_option(self):
+  @parameterized.parameters(True, False)
+  def test_use_all_to_all_option(self, use_all_to_all):
     """Ensures use_all_to_all option runs cleanly on multi-dimensional tensors."""
-    params = {"w": jnp.ones((2, 3, 4, 5))}
-    dim_nums = _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3)
+    key = jax.random.key(0)
+    devices = jax.devices()
+    if len(devices) >= 2:
+      mesh = jax.sharding.Mesh(np.array(devices[:2]).reshape(2, 1), axis_names=("x", "y"))
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", None, None, None))
+      w = jax.device_put(jax.random.normal(key, (2, 3, 4, 5)), sharding)
+      dim_nums = _muon.ShardedMuonDimensionNumbers(reduction_axis=2, output_axis=3, sharding=sharding)
+    else:
+      w = jax.random.normal(key, (2, 3, 4, 5))
+      dim_nums = _muon.ShardedMuonDimensionNumbers(reduction_axis=2, output_axis=3)
+
+    params = {"w": w}
     opt = _muon.muon(
         learning_rate=0.1,
         muon_weight_dimension_numbers={"w": dim_nums},
-        use_all_to_all=False,
+        use_all_to_all=use_all_to_all,
     )
     state = opt.init(params)
-    updates, _ = opt.update(params, state, params)
+
+    @jax.jit
+    def step(p, s):
+      return opt.update(p, s, p)
+
+    updates, _ = step(params, state)
     self.assertEqual(updates["w"].shape, (2, 3, 4, 5))
     self.assertFalse(jnp.isnan(updates["w"]).any())
+    self.assertFalse(jnp.isinf(updates["w"]).any())
+
+  def test_ns_coeffs_schedule_slicing(self):
+    """Passing more coeffs than ns_steps should slice the trailing ns_steps."""
+    params = {"w": jnp.ones((4, 4))}
+    coeffs_12 = jnp.ones((12, 3))
+    opt = _muon.scale_by_muon(ns_coeffs=coeffs_12, ns_steps=10)
+    state = opt.init(params)
+    self.assertEqual(state.ns_coeffs.shape, (10, 3))
+
+  def test_ns_coeffs_insufficient_raises(self):
+    """Passing fewer coeffs than ns_steps must raise ValueError."""
+    params = {"w": jnp.ones((4, 4))}
+    coeffs_3 = jnp.ones((3, 3))
+    opt = _muon.scale_by_muon(ns_coeffs=coeffs_3, ns_steps=5)
+    with self.assertRaisesRegex(ValueError, "Not enough coeffs to perform 5 steps"):
+      opt.init(params)
 
 
 if __name__ == "__main__":

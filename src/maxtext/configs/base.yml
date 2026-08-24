@@ -1007,9 +1007,12 @@ mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inher
 # https://github.com/google-deepmind/optax/blob/main/optax/contrib/_muon.py
 # "mu_dtype", "adam_eps" are shared by AdamW
 # "nesterov", "weight_decay_mask", "adaptive" use default
+muon_type: "maxtext_muon" # Type of Muon optimizer: "maxtext_muon" (or "sharded", "maxtext") vs "optax_muon" (or "optax")
 muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
+muon_ns_steps: 5 # Number of Newton-Schulz iterations for Muon optimizer.
+muon_use_all_to_all: true # Whether to use all-to-all communication during Newton-Schulz iterations in Muon.
 
 
 # Use iota operator in Embed

@@ -214,7 +214,7 @@ NS_ITERATORS = {
 }
 
 
-class MuonDimensionNumbers(NamedTuple):
+class ShardedMuonDimensionNumbers(NamedTuple):
   """Specification for which weight axes participate in matrix projection.
 
   Muon defines an orthogonalization for 2D matrix weights for matrix-vector
@@ -243,7 +243,7 @@ class MuonDimensionNumbers(NamedTuple):
   sharding: jax.sharding.NamedSharding | None = None
 
 
-def _normalize_axes(x: jax.Array, dim_nums: MuonDimensionNumbers) -> tuple[tuple[int, ...], tuple[int, ...]]:
+def _normalize_axes(x: jax.Array, dim_nums: ShardedMuonDimensionNumbers) -> tuple[tuple[int, ...], tuple[int, ...]]:
   """Normalize axes in dimension numbers to non-negative int tuples."""
   reduction_axes = (
       (dim_nums.reduction_axis,) if isinstance(dim_nums.reduction_axis, int) else tuple(dim_nums.reduction_axis)
@@ -261,7 +261,7 @@ def _normalize_axes(x: jax.Array, dim_nums: MuonDimensionNumbers) -> tuple[tuple
   return reduction_axes, output_axes
 
 
-WeightDimNumOrFn = MuonDimensionNumbers | optax.Params | Callable[[optax.Params], optax.Params | None]
+WeightDimNumOrFn = ShardedMuonDimensionNumbers | optax.Params | Callable[[optax.Params], optax.Params | None]
 
 
 class MuonState(NamedTuple):
@@ -308,8 +308,8 @@ def scale_by_muon(
       raise ValueError(f"ns_coeffs must have shape (3,) or (n, 3), got {ns_coeffs_.shape}")
     if ns_coeffs_.ndim == 2:
       # pyrefly: ignore[unsupported-operation]
-      if not ns_coeffs_.shape[0] <= ns_steps:
-        raise ValueError(f"Not enough coeffs to perform {ns_steps} steps")
+      if ns_coeffs_.shape[0] < ns_steps:
+        raise ValueError(f"Not enough coeffs to perform {ns_steps} steps, got" f" {ns_coeffs_.shape[0]}")
       # pyrefly: ignore[unsupported-operation]
       ns_coeffs_ = ns_coeffs_[-ns_steps:]
 
@@ -341,13 +341,13 @@ def scale_by_muon(
 
     def orthogonalize_leaf(
         leaf: jax.Array | optax.MaskedNode,
-        dim_nums: MuonDimensionNumbers | optax.MaskedNode | None,
+        dim_nums: ShardedMuonDimensionNumbers | optax.MaskedNode | None,
     ) -> jax.Array | optax.MaskedNode:
       """Orthogonalize a single leaf tensor."""
       if isinstance(leaf, optax.MaskedNode) or isinstance(dim_nums, optax.MaskedNode):
         return optax.MaskedNode()
       if dim_nums is None:
-        dim_nums = MuonDimensionNumbers()
+        dim_nums = ShardedMuonDimensionNumbers()
       return orthogonalize(
           x=leaf,
           ns_coeffs=state.ns_coeffs,
@@ -361,12 +361,12 @@ def scale_by_muon(
     if callable(weight_dimension_numbers):
       resolved_dim_nums = weight_dimension_numbers(updates)
     elif weight_dimension_numbers is None:
-      resolved_dim_nums = jax.tree.map(lambda _: MuonDimensionNumbers(), updates)
+      resolved_dim_nums = jax.tree.map(lambda _: ShardedMuonDimensionNumbers(), updates)
     else:
       resolved_dim_nums = weight_dimension_numbers
 
     def is_leaf(x):
-      return x is None or isinstance(x, (MuonDimensionNumbers, optax.MaskedNode))
+      return x is None or isinstance(x, (ShardedMuonDimensionNumbers, optax.MaskedNode))
 
     updates = jax.tree.map(
         orthogonalize_leaf,
@@ -396,7 +396,7 @@ def scale_by_muon(
 
 def get_reshape_fns(
     x: jax.Array,
-    dim_nums: MuonDimensionNumbers,
+    dim_nums: ShardedMuonDimensionNumbers,
     use_all_to_all: bool = True,
 ) -> tuple[
     reshape_utils.ReshapeFn,
@@ -420,7 +420,7 @@ def orthogonalize(
     ns_steps: jax.typing.ArrayLike,
     precond_fn: Callable[[jax.Array], jax.Array],
     ns_step_fn: Callable[..., jax.Array],
-    dim_nums: MuonDimensionNumbers,
+    dim_nums: ShardedMuonDimensionNumbers,
     use_all_to_all: bool = True,
 ) -> jax.Array:
   """Apply Newton-Schulz iterations to a single leaf tensor."""
@@ -469,14 +469,14 @@ def orthogonalize(
   return unreshape_fn(x_flat_orthogonalized)
 
 
-def _get_shape_products(x: jax.Array, dim_nums: MuonDimensionNumbers) -> tuple[float, float]:
+def _get_shape_products(x: jax.Array, dim_nums: ShardedMuonDimensionNumbers) -> tuple[float, float]:
   reduction_axes, output_axes = _normalize_axes(x, dim_nums)
   fan_in = math.prod(x.shape[ax] for ax in reduction_axes)
   fan_out = math.prod(x.shape[ax] for ax in output_axes)
   return fan_in, fan_out
 
 
-def _scale_update_for_width_transfer(update: jax.Array, dim_nums: MuonDimensionNumbers):
+def _scale_update_for_width_transfer(update: jax.Array, dim_nums: ShardedMuonDimensionNumbers):
   """Apply width scaling from <https://github.com/KellerJordan/Muon>."""
   fan_in, fan_out = _get_shape_products(update, dim_nums)
   scale = jnp.sqrt(jnp.maximum(1, fan_out / fan_in))
@@ -485,7 +485,7 @@ def _scale_update_for_width_transfer(update: jax.Array, dim_nums: MuonDimensionN
 
 def _scale_update_for_consistent_rms(
     update: jax.Array,
-    dim_nums: MuonDimensionNumbers,
+    dim_nums: ShardedMuonDimensionNumbers,
     consistent_rms: jax.typing.ArrayLike,
 ):
   """Apply consistent RMS scaling from <https://arxiv.org/abs/2502.16982>."""
@@ -502,7 +502,7 @@ def scale_by_shape(
 
   Args:
     weight_dimension_numbers: An optional tree with the same structure as the
-      params of `MuonDimensionNumbers`s, specifying how to reshape the
+      params of `ShardedMuonDimensionNumbers`s, specifying how to reshape the
       parameters before and after the orthogonalization OR a callable returning
       such a tree. None implies that all parameters are 2D matrices.
     consistent_rms: An optional float to activate consistent RMS scaling. If
@@ -531,11 +531,11 @@ def scale_by_shape(
       if isinstance(update, optax.MaskedNode) or isinstance(dim_nums, optax.MaskedNode):
         return optax.MaskedNode()
       if dim_nums is None:
-        dim_nums = MuonDimensionNumbers()
+        dim_nums = ShardedMuonDimensionNumbers()
       return base_scaling_fn(update, dim_nums)
 
     def is_leaf(x):
-      return x is None or isinstance(x, (MuonDimensionNumbers, optax.MaskedNode))
+      return x is None or isinstance(x, (ShardedMuonDimensionNumbers, optax.MaskedNode))
 
     scaled_updates = jax.tree.map(
         scaling_fn,
@@ -626,13 +626,14 @@ def muon(
     adam_weight_decay: Weight decay factor for Adam.
     adam_learning_rate: Auxiliary learning rate for the Adam optimizer. If
       `None`, the learning rate for Adam defaults to the same as Muon.
-    muon_weight_dimension_numbers: An optional tree of `MuonDimensionNumbers`s,
-      specifying how to reshape the parameters for orthogonalization otherwise
-      muon parameters are assumed to be 2D matrices. A `None` value indicates
-      that the parameter is not a muon parameter and will be optimized with
-      Adam. A callable takes as input the params and returns a possibly masked
-      pytree of specs, similar to `weight_decay_mask`. If not provided, muon is
-      applied to all 2D parameters.
+    muon_weight_dimension_numbers: An optional tree of
+      `ShardedMuonDimensionNumbers`s, specifying how to reshape the parameters
+      for orthogonalization otherwise muon parameters are assumed to be 2D
+      matrices. A `None` value indicates that the parameter is not a muon
+      parameter and will be optimized with Adam. A callable takes as input the
+      params and returns a possibly masked pytree of specs, similar to
+      `weight_decay_mask`. If not provided, muon is applied to all 2D
+      parameters.
     consistent_rms: An optional float to activate consistent RMS scaling. Scales
       updates by `sqrt(max(fan_in, fan_out)) * consistent_rms` to make root mean
       square (RMS) shape-independent, like AdamW. `0.2` is recommended to match
@@ -686,7 +687,7 @@ def muon(
     def param_labels(params):
       return jax.tree.map(lambda x: "muon" if x.ndim == 2 else "adam", params)
 
-    muon_weight_dimension_numbers = MuonDimensionNumbers()
+    muon_weight_dimension_numbers = ShardedMuonDimensionNumbers()
   else:
 
     def param_labels(params):
@@ -704,7 +705,7 @@ def muon(
           populate_subtree_,
           dim_nums,
           params,
-          is_leaf=lambda x: x is None or isinstance(x, MuonDimensionNumbers),
+          is_leaf=lambda x: x is None or isinstance(x, ShardedMuonDimensionNumbers),
       )
 
   # We need to normalize the dimension numbers because they have to match the
@@ -720,7 +721,7 @@ def muon(
     mask = jax.tree.map(lambda label: label == "muon", param_labels(params))
 
     def is_leaf(x):
-      return x is None or isinstance(x, (MuonDimensionNumbers, optax.MaskedNode))
+      return x is None or isinstance(x, (ShardedMuonDimensionNumbers, optax.MaskedNode))
 
     def populate_subtree_(dim_nums, submask):
       return jax.tree.map(lambda m: dim_nums if m else optax.MaskedNode(), submask)
