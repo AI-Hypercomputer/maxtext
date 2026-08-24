@@ -4261,7 +4261,11 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       mapping[f"{mt_layer}-self_attention-b_proj-kernel"] = f"{hf_layer}.self_attn.b_proj.weight"
       mapping[f"{mt_layer}-self_attention-A_log"] = f"{hf_layer}.self_attn.A_log"
       mapping[f"{mt_layer}-self_attention-dt_bias"] = f"{hf_layer}.self_attn.dt_bias"
+      mapping[f"{mt_layer}-self_attention-o_norm-scale"] = f"{hf_layer}.self_attn.o_norm.weight"
       mapping[f"{mt_layer}-self_attention-o_proj-kernel"] = f"{hf_layer}.self_attn.o_proj.weight"
+
+
+
     else:
       # MLA attention (layer 3)
       mapping[f"{mt_layer}-self_attention-query-kernel"] = f"{hf_layer}.self_attn.q_proj.weight"
