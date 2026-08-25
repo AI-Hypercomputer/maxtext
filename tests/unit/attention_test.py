@@ -338,8 +338,65 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+def _create_mock_flash_op(
+    *,
+    attention_type=AttentionType.BLOCK_DIFFUSION,
+    context_parallel_size=1,
+    context_parallel_load_balance=False,
+    max_target_length=8,
+    block_size=4,
+    use_tokamax_splash=False,
+):
+  """Helper method to construct a mock AttentionOp for flash testing."""
+  config = types.SimpleNamespace(
+      causal_block_size=4,
+      context_parallel_strategy="all_gather",
+      context_parallel_load_balance=context_parallel_load_balance,
+      context_sharding="context",
+      sa_block_q=block_size,
+      sa_block_kv=block_size,
+      sa_block_kv_compute=block_size,
+      sa_block_q_dkv=block_size,
+      sa_block_kv_dkv=block_size,
+      sa_block_kv_dkv_compute=block_size,
+      sa_block_q_dq=block_size,
+      sa_block_kv_dq=block_size,
+      sa_use_fused_bwd_kernel=True,
+      sa_q_layout="HEAD_DIM_MINOR",
+      sa_k_layout="HEAD_DIM_MINOR",
+      sa_v_layout="HEAD_DIM_MINOR",
+      use_splash_scheduler=False,
+      sa_fuse_reciprocal=False,
+      sa_use_base2_exp=False,
+      use_tokamax_splash=use_tokamax_splash,
+      use_jax_splash=False,
+      cost_estimate_flops_fwd=-1,
+      cost_estimate_flops_bwd=-1,
+      dq_reduction_steps=-1,
+      use_max_logit_estimate=-1,
+      shard_mode="none",
+      debug_sharding=False,
+  )
+  device = types.SimpleNamespace(platform="cpu")
+  mesh = types.SimpleNamespace(
+      devices=np.asarray([device] * context_parallel_size, dtype=object),
+      shape={"context": context_parallel_size},
+  )
+  return AttentionOp(
+      config=config,
+      num_query_heads=1,
+      num_kv_heads=1,
+      max_target_length=max_target_length,
+      mesh=mesh,
+      attention_kernel="flash",
+      attention_type=attention_type,
+  )
+
+
 class BlockCausalMaskTest(unittest.TestCase):
   """Tests the shared dense and Splash block-causal masks."""
+
+  _make_flash_op = staticmethod(_create_mock_flash_op)
 
   def _make_op(self, sequence_length, *, attention_type=AttentionType.BLOCK_DIFFUSION):
     """Builds a minimal dot-product attention operator."""
@@ -360,56 +417,6 @@ class BlockCausalMaskTest(unittest.TestCase):
         mesh=mesh,
         attention_kernel="dot_product",
         **kwargs,
-    )
-
-  def _make_flash_op(
-      self,
-      *,
-      attention_type=AttentionType.BLOCK_DIFFUSION,
-      context_parallel_size=1,
-      context_parallel_load_balance=False,
-      max_target_length=8,
-  ):
-    """Builds a minimal flash-attention operator for dispatch tests."""
-    config = types.SimpleNamespace(
-        causal_block_size=4,
-        context_parallel_strategy="all_gather",
-        context_parallel_load_balance=context_parallel_load_balance,
-        context_sharding="context",
-        sa_block_q=4,
-        sa_block_kv=4,
-        sa_block_kv_compute=4,
-        sa_block_q_dkv=4,
-        sa_block_kv_dkv=4,
-        sa_block_kv_dkv_compute=4,
-        sa_block_q_dq=4,
-        sa_block_kv_dq=4,
-        sa_use_fused_bwd_kernel=True,
-        sa_q_layout="HEAD_DIM_MINOR",
-        sa_k_layout="HEAD_DIM_MINOR",
-        sa_v_layout="HEAD_DIM_MINOR",
-        use_splash_scheduler=False,
-        sa_fuse_reciprocal=False,
-        sa_use_base2_exp=False,
-        use_tokamax_splash=False,
-        use_jax_splash=False,
-        cost_estimate_flops_fwd=-1,
-        cost_estimate_flops_bwd=-1,
-        dq_reduction_steps=-1,
-    )
-    device = types.SimpleNamespace(platform="cpu")
-    mesh = types.SimpleNamespace(
-        devices=np.asarray([device] * context_parallel_size, dtype=object),
-        shape={"context": context_parallel_size},
-    )
-    return AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=max_target_length,
-        mesh=mesh,
-        attention_kernel="flash",
-        attention_type=attention_type,
     )
 
   def test_dense_and_splash_masks_match(self):
@@ -621,55 +628,11 @@ class BlockCausalMaskTest(unittest.TestCase):
 class HCAStaticMaskTest(unittest.TestCase):
   """Tests the HCAStaticMask and its equivalence with the compressor mask."""
 
-  def _make_flash_op(
-      self,
-      *,
-      attention_type=AttentionType.COMPRESSED,
-      context_parallel_size=1,
-      context_parallel_load_balance=False,
-      max_target_length=512,
-  ):
-    """Helper method to construct a mock AttentionOp for flash testing."""
-    config = types.SimpleNamespace(
-        causal_block_size=4,
-        context_parallel_strategy="all_gather",
-        context_parallel_load_balance=context_parallel_load_balance,
-        context_sharding="context",
-        sa_block_q=128,
-        sa_block_kv=128,
-        sa_block_kv_compute=128,
-        sa_block_q_dkv=128,
-        sa_block_kv_dkv=128,
-        sa_block_kv_dkv_compute=128,
-        sa_block_q_dq=128,
-        sa_block_kv_dq=128,
-        sa_use_fused_bwd_kernel=True,
-        sa_q_layout="HEAD_DIM_MINOR",
-        sa_k_layout="HEAD_DIM_MINOR",
-        sa_v_layout="HEAD_DIM_MINOR",
-        use_splash_scheduler=False,
-        sa_fuse_reciprocal=False,
-        sa_use_base2_exp=False,
-        use_tokamax_splash=False,
-        use_jax_splash=False,
-        cost_estimate_flops_fwd=-1,
-        cost_estimate_flops_bwd=-1,
-        dq_reduction_steps=-1,
-    )
-    device = types.SimpleNamespace(platform="cpu")
-    mesh = types.SimpleNamespace(
-        devices=np.asarray([device] * context_parallel_size, dtype=object),
-        shape={"context": context_parallel_size},
-    )
-    return AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=max_target_length,
-        mesh=mesh,
-        attention_kernel="flash",
-        attention_type=attention_type,
-    )
+  def _make_flash_op(self, **kwargs):
+    kwargs.setdefault("attention_type", AttentionType.COMPRESSED)
+    kwargs.setdefault("max_target_length", 512)
+    kwargs.setdefault("block_size", 128)
+    return _create_mock_flash_op(**kwargs)
 
   def test_hca_static_mask_matches_compressor_mask(self):
     test_cases = [
@@ -767,35 +730,118 @@ class HCAStaticMaskTest(unittest.TestCase):
     self.assertNotEqual(mask1, object())
 
   def test_zero_division_guard(self):
-    mask = attention_op.HCAStaticMask(
-        shape=(128, 128),
-        local_kv_len=128,
-        compressed_kv_len=1,
-        compress_ratio=0,
-        local_window=128,
-    )
-    res = mask[:, :]
-    self.assertEqual(res.shape, (128, 128))
+    with self.assertRaisesRegex(ValueError, "compress_ratio must be positive"):
+      attention_op.HCAStaticMask(
+          shape=(128, 128),
+          local_kv_len=128,
+          compressed_kv_len=1,
+          compress_ratio=0,
+          local_window=128,
+      )
+    with self.assertRaisesRegex(ValueError, "compress_ratio must be positive"):
+      attention_op.HCAStaticMask(
+          shape=(128, 128),
+          local_kv_len=128,
+          compressed_kv_len=1,
+          compress_ratio=-1,
+          local_window=128,
+      )
 
-  def test_load_balanced_cp_raises_on_hca(self):
+  def test_csa_flash_requires_indexer_mask(self):
     op = self._make_flash_op(
         attention_type=AttentionType.COMPRESSED,
-        context_parallel_size=2,
-        context_parallel_load_balance=True,
         max_target_length=512,
     )
     query = jnp.zeros((1, 1, 512, 128))
-    key = jnp.zeros((1, 1, 516, 128))
-    with self.assertRaisesRegex(
-        ValueError, "Load-balanced context parallelism is currently not supported for DeepSeek-V4 HCA"
+    key = jnp.zeros((1, 1, 640, 128))
+    with self.assertRaisesRegex(ValueError, "indexer_mask must be provided for CSA"):
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=4)
+
+  def test_hca_flash_constructs_hcastaticmask(self):
+    op = self._make_flash_op(
+        attention_type=AttentionType.COMPRESSED,
+        max_target_length=512,
+        use_tokamax_splash=True,
+    )
+    query = jnp.zeros((1, 1, 512, 128))
+    key = jnp.zeros((1, 1, 640, 128))
+    with (
+        unittest.mock.patch.object(op, "_maybe_shard_with_pspec", side_effect=lambda x, p: x),
+        unittest.mock.patch.object(op, "_logical_to_mesh_axes", return_value=(None,)),
+        unittest.mock.patch.object(
+            jax, "shard_map", side_effect=lambda f, **kwargs: (lambda *args, **kw: (jnp.zeros_like(query), None))
+        ),
+        unittest.mock.patch.object(
+            attention_op,
+            "HCAStaticMask",
+            wraps=attention_op.HCAStaticMask,
+        ) as mock_mask,
     ):
-      op.tpu_flash_attention(
-          query,
-          key,
-          key,
-          decoder_segment_ids=None,
-          compress_ratio=128,
-      )
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=128)
+      mock_mask.assert_called_once()
+      self.assertEqual(mock_mask.call_args.kwargs["compress_ratio"], 128)
+
+  def test_hca_context_parallelism_raises_not_implemented(self):
+    op = self._make_flash_op(
+        attention_type=AttentionType.COMPRESSED,
+        context_parallel_size=2,
+        max_target_length=512,
+    )
+    query = jnp.zeros((1, 1, 512, 128))
+    key = jnp.zeros((1, 1, 640, 128))
+    with self.assertRaisesRegex(
+        NotImplementedError, "Context parallelism is currently not implemented for DeepSeek-V4 HCA Flash Attention"
+    ):
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=128)
+
+  def test_packed_positions_and_segment_ids_vs_generate_attention_mask(self):
+    """Verifies segment-id based document packing with positions on CPU ground truth generate_attention_mask."""
+    l1, l2 = 200, 312
+    total_len = l1 + l2
+    compress_ratio = 128
+    comp_len = total_len // compress_ratio  # 4
+    op = AttentionOp(
+        config=types.SimpleNamespace(
+            causal_block_size=4,
+            context_parallel_load_balance=False,
+            context_sharding="context",
+            moba=False,
+        ),
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=total_len,
+        mesh=types.SimpleNamespace(shape={}),
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=128,
+    )
+
+    pos = jnp.concatenate([jnp.arange(l1, dtype=jnp.int32), jnp.arange(l2, dtype=jnp.int32)], axis=0)[None, :]
+    seg = jnp.concatenate([jnp.ones(l1, dtype=jnp.int32), jnp.full(l2, 2, dtype=jnp.int32)], axis=0)[None, :]
+
+    usable_len = comp_len * compress_ratio
+    block_positions = pos[:, :usable_len:compress_ratio]
+    future_mask = (block_positions[:, None, None, :] + compress_ratio) > (pos[:, None, :, None] + 1)
+    compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0)
+
+    dummy_q = jnp.zeros((1, total_len, 1, 128))
+    dummy_k = jnp.zeros((1, total_len + comp_len, 1, 128))
+
+    mask = op.generate_attention_mask(
+        dummy_q,
+        dummy_k,
+        decoder_segment_ids=seg,
+        segment_positions=pos,
+        model_mode=MODEL_MODE_TRAIN,
+        compressed_mask=compressed_causal_mask,
+        pad_kv_total=0,
+    )
+    mask_matrix = np.squeeze(np.array(mask == 0.0))
+
+    # Assert Doc 1 (rows 0..199) cannot attend to Doc 2 (cols 200..511)
+    self.assertFalse(np.any(mask_matrix[:l1, l1:total_len]))
+    # Assert Doc 2 (rows 200..511) cannot attend to Doc 1 (cols 0..199)
+    self.assertFalse(np.any(mask_matrix[l1:total_len, :l1]))
 
   def test_compressed_flash_missing_or_invalid_compress_ratio_raises(self):
     op = self._make_flash_op(

@@ -264,15 +264,16 @@ class HCAStaticMask(splash_attention_mask.Mask):
   """Static compile-time mask for DeepSeek-V4 Hybrid Compressed Attention (HCA).
 
   Defines coarse-block coordinates and deduplicated partial block patterns for
-  Splash Attention with pre-packed bitmasks loaded into VMEM/SMEM, eliminating
-  runtime VPU arithmetic overhead without materializing dense boolean mask arrays in HBM.
+  Splash Attention with pre-packed bitmasks loaded into VMEM/SMEM. Evaluates
+  analytical boolean slices on host CPU during compilation, eliminating runtime VPU
+  arithmetic overhead without materializing dense boolean mask arrays in HBM.
 
   Attributes:
     shape: (seq_len, aligned_kv_len) tuple.
     local_kv_len: Unpadded local sequence length.
     compressed_kv_len: Number of active compressed tokens.
     pad_kv_total: Prepend tile padding tokens between local and compressed KV.
-    compress_ratio: Compression ratio for HCA (e.g. 128).
+    compress_ratio: Compression ratio for HCA (e.g. 128). Must be positive.
     local_window: Local sliding-window size (e.g. 128).
   """
 
@@ -286,14 +287,18 @@ class HCAStaticMask(splash_attention_mask.Mask):
       local_window: Optional[int] = 128,
       shard_count: int = 1,
   ):
+    # shard_count is retained for Splash Attention Mask API compatibility;
+    # HCA static coordinates do not shard local window math across sequence axes.
     del shard_count
+    if compress_ratio <= 0:
+      raise ValueError(f"compress_ratio must be positive, got {compress_ratio}")
     self._shape = shape
     self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
     self.compressed_kv_len = (
-        compressed_kv_len if compressed_kv_len is not None else max(1, self.local_kv_len // max(1, compress_ratio))
+        compressed_kv_len if compressed_kv_len is not None else max(1, self.local_kv_len // compress_ratio)
     )
     self.pad_kv_total = pad_kv_total
-    self.compress_ratio = max(1, compress_ratio)
+    self.compress_ratio = compress_ratio
     self.local_window = local_window
 
   @property
@@ -1879,6 +1884,9 @@ class AttentionOp(nnx.Module):
             )
             if config.cost_estimate_flops_bwd >= 0
             else None,
+            # Tokamax Splash backward kernel requires dq_reduction_steps in (3, None).
+            # Setting dq_reduction_steps=3 for AttentionType.COMPRESSED enables in-kernel
+            # circular ring buffer gradient accumulation, cutting unreduced dQ HBM write traffic by ~42x.
             dq_reduction_steps=(
                 config.dq_reduction_steps
                 if config.dq_reduction_steps > 0
@@ -1976,9 +1984,9 @@ class AttentionOp(nnx.Module):
         if compress_ratio is None or compress_ratio <= 0:
           raise ValueError("compress_ratio must be provided for AttentionType.COMPRESSED flash attention.")
         if compress_ratio > 4:
-          if use_load_balanced_cp:
-            raise ValueError(
-                "Load-balanced context parallelism is currently not supported for DeepSeek-V4 HCA static attention."
+          if cp_size > 1:
+            raise NotImplementedError(
+                "Context parallelism is currently not implemented for DeepSeek-V4 HCA Flash Attention."
             )
           local_kv_len = query.shape[2]
           compressed_kv_len = max(0, key.shape[2] - query.shape[2] - pad_kv_total)
@@ -1991,8 +1999,15 @@ class AttentionOp(nnx.Module):
               local_window=self.sliding_window_size,
               shard_count=splash_q_seq_shards,
           )
+        elif compress_ratio == 4:
+          if indexer_mask is None:
+            raise ValueError("indexer_mask must be provided for CSA (compress_ratio == 4) dynamic splash attention.")
+          mask = None
         else:
-          mask = mask_module.CausalMask(shape=mask_shape)
+          raise ValueError(
+              f"Unsupported compress_ratio={compress_ratio} for AttentionType.COMPRESSED. "
+              "Expected 4 for CSA (requires indexer_mask) or >4 for HCA (requires HCAStaticMask)."
+          )
       elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
         mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
         mask_kwargs = {"cp_size": cp_size} if use_load_balanced_cp else {}
@@ -2074,7 +2089,7 @@ class AttentionOp(nnx.Module):
         return splash_kernel
 
       segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
-      if indexer_mask is None:
+      if indexer_mask is None and mask is not None:
         splash_kernel = wrap_tokamax_splash_kernel(single_head_mask)
         splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
       else:
