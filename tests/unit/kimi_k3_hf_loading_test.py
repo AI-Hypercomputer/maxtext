@@ -106,10 +106,11 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     def run_layer0_forward(state_in, x, p, s):
       with nn.logical_axis_rules(config.logical_axis_rules):
         m = nnx.merge(graphdef, state_in)
-        h = m.decoder.token_embedder(x)
-        h = m.decoder.layers["decoder_0"](h, p, s, enable_dropout=False)
+        embed_fn = getattr(m, "shared_embedding", getattr(m, "token_embedder", None))
+        h = embed_fn(x)
+        h = m.decoder.layers["decoder_0"](h, s, p, deterministic=True)
         h = m.decoder.decoder_norm(h)
-        return m.decoder.token_embedder.attend(h)
+        return embed_fn.attend(h)
 
     @jax.jit
     def run_full_forward(state_in, x, p, s):
