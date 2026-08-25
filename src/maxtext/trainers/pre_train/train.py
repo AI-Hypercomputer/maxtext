@@ -25,7 +25,6 @@ import os
 import sys
 import time
 import logging
-import gc
 
 from absl import app
 import optax
@@ -866,9 +865,8 @@ def recover(
       )
       del python_vars[key]
 
-  # Clear JAX compilation caches and force garbage collection of dead-slice buffers
+  # Clear JAX compilation caches
   jax.clear_caches()
-  gc.collect()
 
   while True:
     try:
