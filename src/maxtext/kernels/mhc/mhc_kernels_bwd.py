@@ -17,7 +17,7 @@ import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from maxtext.kernels.mhc import common
+from maxtext.src.maxtext.kernels.mhc import common
 
 
 def _post_apply_bwd(
@@ -408,14 +408,16 @@ def post_bwd(
 
 def pre_op_bwd(
     config: common.MhcKernelConfig,
-    permutations: jax.Array,
-    residuals: tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, common.MhcWeights]],
+    residuals: tuple[
+        tuple[jax.Array, jax.Array],
+        tuple[jax.Array, jax.Array, common.MhcWeights],
+    ],
     cotangents: tuple[jax.Array, common.KernelContext],
-) -> tuple[jax.Array, common.MhcWeights]:
+) -> tuple[jax.Array, None, common.MhcWeights]:
   """Custom-VJP backward rule for the low-level pre-branch entry point."""
-  saved, (x, weights) = residuals
+  saved, (x, permutations, weights) = residuals
   d_layer_input, (d_x, d_h_post, d_residual) = cotangents
-  return pre_bwd(
+  d_x_out, d_weights = pre_bwd(
       saved,
       (d_layer_input, d_x, d_h_post, d_residual),
       x,
@@ -423,6 +425,7 @@ def pre_op_bwd(
       permutations,
       config=config,
   )
+  return d_x_out, None, d_weights
 
 
 def post_op_bwd(

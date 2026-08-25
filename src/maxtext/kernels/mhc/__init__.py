@@ -13,17 +13,17 @@
 # limitations under the License.
 """MaxText mHC-lite Pallas kernel package."""
 
-from maxtext.kernels.mhc.api import hbm_specs
-from maxtext.kernels.mhc.api import MhcCoeffGradients
-from maxtext.kernels.mhc.api import MhcCoeffOutputs
-from maxtext.kernels.mhc.api import MhcCoeffParams
-from maxtext.kernels.mhc.api import MhcContext
-from maxtext.kernels.mhc.api import MhcDims
-from maxtext.kernels.mhc.api import MhcKernelConfig
-from maxtext.kernels.mhc.api import MhcWeights
-from maxtext.kernels.mhc.api import post
-from maxtext.kernels.mhc.api import pre
-from maxtext.kernels.mhc.common import UnsupportedInputError
+from maxtext.src.maxtext.kernels.mhc.api import hbm_specs
+from maxtext.src.maxtext.kernels.mhc.api import MhcCoeffGradients
+from maxtext.src.maxtext.kernels.mhc.api import MhcCoeffOutputs
+from maxtext.src.maxtext.kernels.mhc.api import MhcCoeffParams
+from maxtext.src.maxtext.kernels.mhc.api import MhcContext
+from maxtext.src.maxtext.kernels.mhc.api import MhcDims
+from maxtext.src.maxtext.kernels.mhc.api import MhcKernelConfig
+from maxtext.src.maxtext.kernels.mhc.api import MhcWeights
+from maxtext.src.maxtext.kernels.mhc.api import post
+from maxtext.src.maxtext.kernels.mhc.api import pre
+from maxtext.src.maxtext.kernels.mhc.common import UnsupportedInputError
 
 __all__ = [
     "pre",
@@ -38,3 +38,4 @@ __all__ = [
     "UnsupportedInputError",
     "hbm_specs",
 ]
+

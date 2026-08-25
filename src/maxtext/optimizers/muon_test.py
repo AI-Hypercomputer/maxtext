@@ -21,7 +21,7 @@ from absl.testing import parameterized
 import chex
 import jax
 import jax.numpy as jnp
-from maxtext.optimizers import muon as _muon
+from maxtext.src.maxtext.optimizers import muon as _muon
 import numpy as np
 import optax
 
@@ -423,19 +423,47 @@ class MuonTest(parameterized.TestCase):
     ortho_error = jnp.linalg.norm(gram - jnp.eye(gram.shape[0]))
     self.assertLess(ortho_error, 1e-3, f"Orthogonality error too high: {ortho_error}")
 
-  def test_use_all_to_all_option(self):
+  @parameterized.parameters(True, False)
+  def test_use_all_to_all_option(self, use_all_to_all):
     """Ensures use_all_to_all option runs cleanly on multi-dimensional tensors."""
-    params = {"w": jnp.ones((2, 3, 4, 5))}
-    dim_nums = _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3)
+    key = jax.random.key(0)
+    devices = jax.devices()
+    if len(devices) >= 2:
+      mesh = jax.sharding.Mesh(np.array(devices[:2]).reshape(2, 1), axis_names=("x", "y"))
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", None, None, None))
+      w = jax.device_put(jax.random.normal(key, (2, 3, 4, 5)), sharding)
+      dim_nums = _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3, sharding=sharding)
+    else:
+      w = jax.random.normal(key, (2, 3, 4, 5))
+      dim_nums = _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3)
+
+    params = {"w": w}
     opt = _muon.muon(
         learning_rate=0.1,
         muon_weight_dimension_numbers={"w": dim_nums},
-        use_all_to_all=False,
+        use_all_to_all=use_all_to_all,
     )
     state = opt.init(params)
     updates, _ = opt.update(params, state, params)
     self.assertEqual(updates["w"].shape, (2, 3, 4, 5))
     self.assertFalse(jnp.isnan(updates["w"]).any())
+    self.assertFalse(jnp.isinf(updates["w"]).any())
+
+  def test_ns_coeffs_schedule_slicing(self):
+    """Passing more coeffs than ns_steps should slice the trailing ns_steps."""
+    params = {"w": jnp.ones((4, 4))}
+    coeffs_12 = jnp.ones((12, 3))
+    opt = _muon.scale_by_muon(ns_coeffs=coeffs_12, ns_steps=10)
+    state = opt.init(params)
+    self.assertEqual(state.ns_coeffs.shape, (10, 3))
+
+  def test_ns_coeffs_insufficient_raises(self):
+    """Passing fewer coeffs than ns_steps must raise ValueError."""
+    params = {"w": jnp.ones((4, 4))}
+    coeffs_3 = jnp.ones((3, 3))
+    opt = _muon.scale_by_muon(ns_coeffs=coeffs_3, ns_steps=5)
+    with self.assertRaisesRegex(ValueError, "Not enough coeffs to perform 5 steps"):
+      opt.init(params)
 
 
 if __name__ == "__main__":

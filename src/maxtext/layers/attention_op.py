@@ -31,7 +31,7 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import (
+from maxtext.src.maxtext.common.common_types import (
     Array,
     AttentionType,
     AxisIdxes,
@@ -63,21 +63,25 @@ from maxtext.common.common_types import (
     PREFILL_LENGTH,
     Q_LENGTH,
 )
-from maxtext.inference.kvcache import KVQuant, KVTensor
-from maxtext.kernels.attention import jax_flash_attention
-from maxtext.kernels.attention import tokamax_ring_attention
-from maxtext.kernels.attention import ulysses_attention
-from maxtext.kernels.attention import usp_attention
-from maxtext.kernels.attention.ragged_attention import ragged_gqa
-from maxtext.kernels.attention.ragged_attention import ragged_mha
-from maxtext.layers import nnx_wrappers
-from maxtext.layers.initializers import variable_to_logically_partitioned
-from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.utils import max_utils
-from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules
+from maxtext.src.maxtext.inference.kvcache import KVQuant, KVTensor
+from maxtext.src.maxtext.kernels.attention import jax_flash_attention
+from maxtext.src.maxtext.kernels.attention import tokamax_ring_attention
+from maxtext.src.maxtext.kernels.attention import ulysses_attention
+from maxtext.src.maxtext.kernels.attention import usp_attention
+from maxtext.src.maxtext.kernels.attention.ragged_attention import ragged_gqa
+from maxtext.src.maxtext.kernels.attention.ragged_attention import ragged_mha
+from maxtext.src.maxtext.layers import nnx_wrappers
+from maxtext.src.maxtext.layers.initializers import variable_to_logically_partitioned
+from maxtext.src.maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.src.maxtext.utils import max_utils
+from maxtext.src.maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
-from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
+
+try:
+  from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
+except ImportError:
+  tokamax_pallas_triton = None
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes

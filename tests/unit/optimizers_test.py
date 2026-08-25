@@ -14,23 +14,21 @@
 
 """Unit tests for all optimizers."""
 import re
+from typing import NamedTuple
 import unittest
-from unittest.mock import patch, MagicMock
-import jax
-import optax
-import jax.numpy as jnp
+from unittest.mock import MagicMock, patch
 
-import pytest
 from absl.testing import parameterized
 from flax import nnx
-from optax.contrib import MuonDimensionNumbers as mdn
-
-from maxtext.configs import pyconfig
-from maxtext.optimizers import optimizers
-from maxtext.utils import maxtext_utils, muon_utils
-from tests.utils.test_helpers import get_test_config_path
-from typing import NamedTuple
-
+import jax
+import jax.numpy as jnp
+from maxtext.src.maxtext.configs import pyconfig
+from maxtext.src.maxtext.optimizers import optimizers
+from maxtext.src.maxtext.optimizers.muon import MuonDimensionNumbers as mdn
+from maxtext.src.maxtext.utils import maxtext_utils, muon_utils
+from maxtext.tests.utils.test_helpers import get_test_config_path
+import optax
+import pytest
 
 # deepseek2, specific: q_lora_rank=0
 # applicable: deepseek2-16, but not deepseek2-236b (q_lora_rank=1536)
@@ -703,15 +701,15 @@ class TestMuonLogic(unittest.TestCase):
 
   def test_transform_logic_attention(self):
     path_out = ("layers_0", "self_attention", "out", "kernel")
-    self.assertEqual(muon_utils.transform_logic(path_out), mdn((0, -2), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(path_out), mdn((-3, -2), (-1,)))
 
     path_q = ("layers_0", "self_attention", "query", "kernel")
-    self.assertEqual(muon_utils.transform_logic(path_q), mdn((0,), (-2, -1)))
+    self.assertEqual(muon_utils.transform_logic(path_q), mdn((-3,), (-2, -1)))
 
   def test_get_transform_tree(self):
     fake_tree = {"params": {"layer_0": {"kernel": "leaf", "bias": "leaf"}, "MoeBlock_0": {"wi_0": "leaf"}}}
     result = muon_utils.get_transform_tree(fake_tree)
-    self.assertEqual(result["params"]["layer_0"]["kernel"], mdn((0,), (-1,)))
+    self.assertEqual(result["params"]["layer_0"]["kernel"], mdn((-2,), (-1,)))
     self.assertIsNone(result["params"]["layer_0"]["bias"])
 
   def test_get_muon_weight_dimension_numbers_nnx(self):
@@ -740,8 +738,8 @@ class TestMuonLogic(unittest.TestCase):
     # Extract dimension numbers using the NNX path in muon_utils
     result = muon_utils.get_muon_weight_dimension_numbers(model, config)
 
-    # Verify standard weight path: ('layer1', 'kernel') -> default (0,)
-    self.assertEqual(result.layer1.kernel, mdn((0,), (-1,)))
+    # Verify standard weight path: ('layer1', 'kernel') -> default (-2,)
+    self.assertEqual(result.layer1.kernel, mdn((-2,), (-1,)))
 
     # Verify MoE weight path: ('MoeBlock_0', 'wi_0', 'kernel') -> (-2,)
     self.assertEqual(result.MoeBlock_0.wi_0.kernel, mdn((-2,), (-1,)))
@@ -776,10 +774,10 @@ class TestMuonLogic(unittest.TestCase):
     config = MagicMock()
     result = muon_utils.get_muon_weight_dimension_numbers(model, config)
 
-    # Check attention query: [0] -> [-2, -1]
-    self.assertEqual(result.self_attention.query.kernel, mdn((0,), (-2, -1)))
-    # Check attention out: [0, -2] -> [-1]
-    self.assertEqual(result.self_attention.out.kernel, mdn((0, -2), (-1,)))
+    # Check attention query: [-3] -> [-2, -1]
+    self.assertEqual(result.self_attention.query.kernel, mdn((-3,), (-2, -1)))
+    # Check attention out: [-3, -2] -> [-1]
+    self.assertEqual(result.self_attention.out.kernel, mdn((-3, -2), (-1,)))
 
   def test_muon_newton_schulz_config(self):
     """Verifies that muon optimizer configures Newton-Schulz parameters correctly based on model."""
@@ -798,8 +796,8 @@ class TestMuonLogic(unittest.TestCase):
     config_ds4 = pyconfig.initialize(argv_ds4)
 
     with (
-        patch("maxtext.optimizers.optimizers.get_muon_weight_dimension_numbers") as mock_get_mdn,
-        patch("maxtext.optimizers.optimizers.muon") as mock_muon,
+        patch("maxtext.src.maxtext.optimizers.optimizers.get_muon_weight_dimension_numbers") as mock_get_mdn,
+        patch("maxtext.src.maxtext.optimizers.optimizers.muon") as mock_muon,
     ):
       mock_get_mdn.return_value = {}
       optimizers.get_optimizer(config_ds4, learning_rate_schedule, model=model)
@@ -808,14 +806,15 @@ class TestMuonLogic(unittest.TestCase):
       self.assertEqual(kwargs["ns_steps"], 10)
       self.assertEqual(len(kwargs["ns_coeffs"]), 10)
       self.assertEqual(kwargs["ns_coeffs"][-1], (2.0, -1.5, 0.5))
+      self.assertTrue(kwargs["use_all_to_all"])
 
     # Case 2: Standard Model (Llama2) (Defaults to 5-step schedule)
     argv_llama = ["", get_test_config_path(), "run_name=test", "opt_type=muon", "model_name=llama2-7b"]
     config_llama = pyconfig.initialize(argv_llama)
 
     with (
-        patch("maxtext.optimizers.optimizers.get_muon_weight_dimension_numbers") as mock_get_mdn,
-        patch("maxtext.optimizers.optimizers.muon") as mock_muon,
+        patch("maxtext.src.maxtext.optimizers.optimizers.get_muon_weight_dimension_numbers") as mock_get_mdn,
+        patch("maxtext.src.maxtext.optimizers.optimizers.muon") as mock_muon,
     ):
       mock_get_mdn.return_value = {}
       optimizers.get_optimizer(config_llama, learning_rate_schedule, model=model)
@@ -823,6 +822,7 @@ class TestMuonLogic(unittest.TestCase):
       _, kwargs = mock_muon.call_args
       self.assertEqual(kwargs["ns_steps"], 5)
       self.assertEqual(kwargs["ns_coeffs"], (3.4445, -4.7750, 2.0315))
+      self.assertTrue(kwargs["use_all_to_all"])
 
 
 if __name__ == "__main__":

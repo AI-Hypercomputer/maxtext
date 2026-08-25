@@ -15,8 +15,8 @@
 
 from typing import Literal, Sequence
 import jax
-from maxtext.kernels.mhc import common
-from maxtext.kernels.mhc import mhc_kernels_fwd
+from maxtext.src.maxtext.kernels.mhc import common
+from maxtext.src.maxtext.kernels.mhc import mhc_kernels_fwd
 
 type Implementation = Literal["mosaic", "mosaic_tpu", "xla"]
 MhcContext = common.MHCContext
@@ -111,3 +111,4 @@ def post(
       kernel_context,
       config=config,
   )
+
