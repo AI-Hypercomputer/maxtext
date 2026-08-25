@@ -1319,6 +1319,7 @@ class Qwen3NextScannableBlock(nnx.Module):
         remat=remat,
         remat_policy=self.remat_policy_fn if remat else None,
         prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config) if remat else True,
+        static_unroll=remat and maxtext_utils.offload_needs_static_unroll(self.config),
     )
 
   def _scan_global_layer(self, y, layer_kwargs):
@@ -1420,6 +1421,9 @@ class Qwen3NextScannableBlock(nnx.Module):
     cfg = self.config
     inputs = carry
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    # Name the block input so remat policies can save or offload it, as in Gemma4's
+    # scannable block. The per-layer inputs inside the block carry the same name.
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     layer_kwargs = {
         "decoder_segment_ids": decoder_segment_ids,
@@ -1542,6 +1546,10 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
+    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    # The residual entering the layer is the natural remat checkpoint: it is cheap to
+    # keep (or offload) and everything else in the layer can be recomputed from it.
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     residual = inputs
 
     # First LayerNorm, applied before the attention block.

@@ -802,6 +802,33 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_qwen3_next_offloaded_decoder_layer_input(self):
+    """AOT test for offloading a Qwen3-Next remat checkpoint to pinned host.
+
+    Qwen3-Next scans over blocks that scan (and rematerialize) their own layers.
+    An offloaded residual therefore leaves two nested scans, which XLA could not
+    lower until the block loop was unrolled -- the compile used to fail
+    post-optimization with a memory-space mismatch. Kept small: the unroll makes
+    compile time grow with the block count.
+    """
+    compiled_trainstep_file = "/tmp/test_qwen3_next_offloaded"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-64",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "remat_policy=custom",
+            "decoder_layer_input=offload",
+        )
+    )
+
   def test_deepseek32(self):
     # test deepseek3.2 with sparse attention
     compiled_trainstep_file = "/tmp/test_deepseek32.pickle"

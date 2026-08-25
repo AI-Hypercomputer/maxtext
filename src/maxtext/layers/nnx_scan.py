@@ -101,6 +101,7 @@ def apply_scanned_layers(
     remat_policy: Callable[..., Any] | None = None,
     prevent_cse: bool = True,
     unroll: int = 1,
+    static_unroll: bool = False,
 ) -> Any:
   """Applies stacked NNX layers using ``jax.lax.scan``.
 
@@ -111,6 +112,12 @@ def apply_scanned_layers(
 
   Externally managed per-layer state, such as KV caches, is not supported by
   this scan path.
+
+  ``static_unroll`` swaps ``jax.lax.scan`` for a Python loop over the stacked
+  layers. The traced program is identical apart from the loop structure, but the
+  per-layer rematerialization residuals stay separate values instead of being
+  stacked on a leading axis, which is what an enclosing scan needs when the
+  policy offloads them to pinned host.
 
   Note:
     This is a minimal, model-agnostic scan primitive. The other NNX decoder
@@ -187,10 +194,31 @@ def apply_scanned_layers(
     )
     return next_carry, (new_params, updated_rest)
 
-  scan_fn = jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse) if remat else scan_body
-  final_carry, (scanned_new_params, scanned_rest) = jax.lax.scan(
-      scan_fn, carry, (params, rest), length=length, unroll=unroll
-  )
+  if static_unroll:
+    # ``prevent_cse=False`` relies on the scan boundary to keep XLA from folding a
+    # rematerialized forward back into the original one. Straight-line code has no
+    # such boundary, so leaving CSE enabled would undo the rematerialization: on
+    # qwen3-next-80b at 8k tokens it costs 3.4GB of HBM.
+    prevent_cse = True
+
+  body_fn = jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse) if remat else scan_body
+
+  if static_unroll:
+    # A Python loop instead of ``jax.lax.scan``: the per-iteration outputs stay
+    # separate values rather than being stacked into a leading-axis array. That
+    # matters when this helper runs inside another scan and ``remat_policy``
+    # offloads a residual to pinned host -- see ``offload_needs_static_unroll``.
+    final_carry = carry
+    per_iteration = []
+    for i in range(length):
+      slice_i = jax.tree.map(lambda x, i=i: x[i], (params, rest))
+      final_carry, outputs = body_fn(final_carry, slice_i)
+      per_iteration.append(outputs)
+    scanned_new_params, scanned_rest = jax.tree.map(lambda *xs: jnp.stack(xs), *per_iteration)
+  else:
+    final_carry, (scanned_new_params, scanned_rest) = jax.lax.scan(
+        body_fn, carry, (params, rest), length=length, unroll=unroll
+    )
 
   if param_scan_axis != 0:
     scanned_new_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), scanned_new_params)
