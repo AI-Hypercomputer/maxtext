@@ -1487,6 +1487,7 @@ class RoutedMoE(nnx.Module):
         weight_gather_axes,
         group_offset,
         partial_sum=None,
+        bias=None,
     ):
       def extract_vma(tensor):
         # Parses the varying mesh axes from JAX's type string for a tensor inside shard_map.
@@ -1528,6 +1529,15 @@ class RoutedMoE(nnx.Module):
       # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
       use_custom_vjp_gmm = self.config.use_tokamax_gmm or self.config.megablox
 
+      # BIAS-IN-EPILOGUE FOLD: only the tokamax v1 (unquantized) mosaic path
+      # supports the per-expert rhs_bias fold. If a caller requests a bias on any
+      # other backend we raise rather than silently drop it (callers gate the
+      # fold on this exact predicate; otherwise they add the bias outside).
+      if bias is not None and not is_tokamax_v1_unquantized:
+        raise NotImplementedError(
+            "gmm(bias=...) epilogue fold is only supported on the tokamax v1"
+            " unquantized mosaic path."
+        )
       if is_tokamax_v1_unquantized:
         # tokamax v1 (unquantized)
         output = tokamax.ragged_dot(
@@ -1539,6 +1549,10 @@ class RoutedMoE(nnx.Module):
             implementation="mosaic",
             # `group_offset` is not yet supported
             group_offset=None,
+            # Per-expert [E,N] bias folded inside the ragged_dot epilogue
+            # (added after the bf16 convert, before the store-mask); None keeps
+            # the champion byte-identical no-bias path.
+            rhs_bias=bias,
         )
       elif use_custom_vjp_gmm:
         # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
@@ -1692,6 +1706,35 @@ class RoutedMoE(nnx.Module):
         wo_bias_pspec,
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
+    # BIAS-IN-EPILOGUE FOLD FSDP fix. When the per-expert [E,N] bias is folded
+    # into the ragged_dot epilogue, the RAW bias is fed straight into the Pallas
+    # kernel (transform_bias's [E,N]->[M,N] gather is skipped). The default bias
+    # pspecs above ("exp", "activation_mlp"/"activation_embed") keep the bias
+    # FSDP-sharded, and unlike the weights (which explicitly all-gather over FSDP
+    # via mlp_no_fsdp + weight_gather_axes) a Pallas custom-call does NOT trigger
+    # an SPMD all-gather on its operands. The champion outside-add path unsharded
+    # the bias implicitly through transform_bias's indexing; the fold removes that,
+    # leaving the partitioner unable to lower the train step (observed: compile
+    # completes only through model-init, the train-step HLO never emits -> silent
+    # step-1 hang across cells/metros). Fix: replicate the tiny [E,N] bias
+    # (737KB) before the kernel. Full replication is ~free and preserves values
+    # bit-exactly. Gate on the SAME predicate the fold uses so non-fold/champion
+    # sharding is byte-identical.
+    _use_bias_fold = (
+        self.config.enable_bias_fold
+        and self.config.mlp_bias
+        and self.config.use_tokamax_gmm
+        and not self.config.quantization
+        and not self.config.use_gmm_v2
+        and not self.config.use_fused_moe_pallas
+    )
+    if _use_bias_fold:
+      w0_bias_pspec = P()
+      w1_bias_pspec = P()
+      # wo folds only at TP==1 (see use_wo_bias_fold); replicate its bias only then
+      # so the TP>1 outside-add path keeps its original sharding.
+      if self.get_tensor_parallelism_size() == 1:
+        wo_bias_pspec = P()
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
     output_pspec = self._logical_to_mesh_axes(
         (
@@ -1929,6 +1972,26 @@ class RoutedMoE(nnx.Module):
       )
       return wo_gather_axes, wo_tile_size
 
+    # BIAS-IN-EPILOGUE FOLD predicate. The tokamax v1 (unquantized) mosaic path
+    # folds a per-expert [E,N] bias inside the ragged_dot epilogue (added after
+    # the bf16 convert, before the store-mask). Gate on the SAME predicate the
+    # gmm() v1 branch uses so non-GPT-OSS / quantized / gmm-v2 / megablox paths
+    # keep the byte-identical outside-add fallback.
+    use_bias_fold = (
+        self.config.enable_bias_fold
+        and self.config.mlp_bias
+        and self.config.use_tokamax_gmm
+        and not self.config.quantization
+        and not self.config.use_gmm_v2
+        # The fused_moe pallas path does not route bias through gmm_fn (and adds
+        # wo_bias outside expecting a gathered [M,N]); keep it on outside-add.
+        and not self.config.use_fused_moe_pallas
+    )
+    # The wo (down-proj) bias is added AFTER a possible tensor-parallel
+    # psum_scatter; folding it into the wo gmm (before the TP reduce) would sum
+    # the bias TP times. Only fold wo when TP == 1.
+    use_wo_bias_fold = use_bias_fold and self.get_tensor_parallelism_size() == 1
+
     def gmm_up(
         x,
         w0,
@@ -1943,45 +2006,100 @@ class RoutedMoE(nnx.Module):
     ):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
+      # When use_bias_fold, w0_bias/w1_bias are the RAW per-expert [E,N] biases
+      # (transform_bias skips the [E,N]->[M,N] gather) so the kernel can add
+      # bias[group] inside the ragged_dot epilogue. Otherwise they are the
+      # gathered [M,N] biases added outside the GMM (byte-identical fallback).
+      up_fold = use_bias_fold and w0_bias is not None and w1_bias is not None
       if self.config.prefuse_moe_weights:
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
         w_fused = jnp.concatenate([w0, w1], axis=-1)
-        out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-        n = out.shape[-1] // 2
-        layer_w0, layer_w1 = out[:, :n], out[:, n:]
-        if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
-          layer_w0 = layer_w0 + w0_bias
-          layer_w1 = layer_w1 + w1_bias
+        if up_fold:
+          # FOLD: fused per-expert [E,2N] bias, split-aligned with w_fused's
+          # N-split, added in-epilogue. The kernel zero-inits unvisited
+          # (ragged-padding) rows and only adds bias to written group rows, so
+          # padding stays 0; keep the valid-token mask as a harmless re-zero to
+          # preserve exact padding semantics.
+          w_bias_fused = jnp.concatenate([w0_bias, w1_bias], axis=-1)
+          out = gmm_fn(
+              x,
+              w_fused,
+              tiling=wi_tile_size,
+              weight_gather_axes=wi_gather_axes,
+              bias=w_bias_fused,
+          )
+          n = out.shape[-1] // 2
+          layer_w0, layer_w1 = out[:, :n], out[:, n:]
           if mask is not None:
             layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
             layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
+        else:
+          out = gmm_fn(
+              x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes
+          )
+          n = out.shape[-1] // 2
+          layer_w0, layer_w1 = out[:, :n], out[:, n:]
+          if (
+              self.config.mlp_bias
+              and w0_bias is not None
+              and w1_bias is not None
+          ):
+            layer_w0 = layer_w0 + w0_bias
+            layer_w1 = layer_w1 + w1_bias
+            if mask is not None:
+              layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
+              layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       else:
-        layer_w0 = gmm_fn(
-            x,
-            w0,
-            tiling=wi_tile_size,
-            weight_gather_axes=wi_gather_axes,
-            partial_sum=partial_accum0,
-        )
-        if self.config.mlp_bias and w0_bias is not None:
-          layer_w0 = layer_w0 + w0_bias
+        if up_fold:
+          layer_w0 = gmm_fn(
+              x,
+              w0,
+              tiling=wi_tile_size,
+              weight_gather_axes=wi_gather_axes,
+              partial_sum=partial_accum0,
+              bias=w0_bias,
+          )
           if mask is not None:
             layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
+        else:
+          layer_w0 = gmm_fn(
+              x,
+              w0,
+              tiling=wi_tile_size,
+              weight_gather_axes=wi_gather_axes,
+              partial_sum=partial_accum0,
+          )
+          if self.config.mlp_bias and w0_bias is not None:
+            layer_w0 = layer_w0 + w0_bias
+            if mask is not None:
+              layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
 
-        layer_w1 = gmm_fn(
-            x,
-            w1,
-            tiling=wi_tile_size,
-            weight_gather_axes=wi_gather_axes,
-            partial_sum=partial_accum1,
-        )
-        if self.config.mlp_bias and w1_bias is not None:
-          layer_w1 = layer_w1 + w1_bias
+        if up_fold:
+          layer_w1 = gmm_fn(
+              x,
+              w1,
+              tiling=wi_tile_size,
+              weight_gather_axes=wi_gather_axes,
+              partial_sum=partial_accum1,
+              bias=w1_bias,
+          )
           if mask is not None:
             layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
+        else:
+          layer_w1 = gmm_fn(
+              x,
+              w1,
+              tiling=wi_tile_size,
+              weight_gather_axes=wi_gather_axes,
+              partial_sum=partial_accum1,
+          )
+          if self.config.mlp_bias and w1_bias is not None:
+            layer_w1 = layer_w1 + w1_bias
+            if mask is not None:
+              layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       return layer_w0, layer_w1
 
@@ -2120,7 +2238,16 @@ class RoutedMoE(nnx.Module):
       )
 
       if self.config.mlp_bias:
-        w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
+        # BIAS-IN-EPILOGUE FOLD: folded w0/w1 biases stay RAW per-expert [E,N]
+        # (the kernel adds bias[group] in the epilogue); non-folded biases are
+        # gathered [E,N]->[M,N] for the outside-add. NOTE: the chunking path
+        # keeps wo on the outside gather+add (its wo handling is separate), so
+        # only w0/w1 fold here.
+        if not use_bias_fold:
+          w0_bias, w1_bias = self.transform_bias(
+              routing.selected_experts, w0_bias, w1_bias
+          )
+        (wo_bias,) = self.transform_bias(routing.selected_experts, wo_bias)
 
       partial_sum0 = jnp.zeros((cur_x_chunk.shape[0], w0.shape[-1]), dtype=cur_x_chunk.dtype)
       partial_sum1 = jnp.zeros((cur_x_chunk.shape[0], w1.shape[-1]), dtype=cur_x_chunk.dtype)
@@ -2197,6 +2324,9 @@ class RoutedMoE(nnx.Module):
         rngs,
     ):
       batch_size, sequence_length, embed_dim = x.shape
+      # Set True when wo_bias is folded into the wo gmm epilogue (non-fused,
+      # non-chunking, TP==1 path); the shared outside-add is then skipped.
+      wo_folded = False
       if self.config.num_moe_emb_chunks > 0:
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
             x,
@@ -2216,19 +2346,138 @@ class RoutedMoE(nnx.Module):
         mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
 
         if self.config.mlp_bias:
-          w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
+          # BIAS-IN-EPILOGUE FOLD: folded biases stay RAW per-expert [E,N] (the
+          # kernel adds bias[group] in the epilogue); non-folded biases are
+          # gathered [E,N]->[M,N] for the outside-add. wo folds only at TP==1.
+          # use_bias_fold excludes use_fused_moe_pallas, so the fused path below
+          # still receives gathered [M,N] biases as before.
+          if not use_bias_fold:
+            w0_bias, w1_bias = self.transform_bias(
+                routing.selected_experts, w0_bias, w1_bias
+            )
+          if not use_wo_bias_fold:
+            (wo_bias,) = self.transform_bias(routing.selected_experts, wo_bias)
 
-        gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
-        output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
+        if self.config.use_fused_moe_pallas:
+          w_fused = jnp.concatenate([w0, w1], axis=-1)
+          gather_indices = (
+              route_metadata.local_sorted_indices
+              if route_metadata.local_sorted_indices is not None
+              else (
+                  routing.sorted_selected_experts
+                  // self.config.num_experts_per_tok
+              )
+          )
+          _fm_kwargs = dict(
+              tile_m=self.config.wi_tile_fwd_batch_seq,
+              tile_k=self.config.wi_tile_fwd_embed_dim,
+              tile_n=self.config.wi_tile_fwd_mlp_dim,
+              tile_h=self.config.wo_tile_fwd_embed_dim,
+              interpret=self.mesh.devices.flat[0].platform != "tpu",
+          )
+          _G = self.config.num_fused_moe_expert_chunks
+          if _G <= 1:
+            # FAST PATH. fuse_dispatch selects the FORWARD gather: False = v2
+            # (pre-gathered x[gather_indices] HBM buffer), True = KB-19 v3 Fusion A
+            # (in-kernel prologue gather). Default False => byte-identical to the
+            # pre-KB-14(b) call (the entire existing fleet is unchanged).
+            intermediate_output = tokamax.fused_moe(
+                x,
+                w_fused,
+                wo,
+                routing.group_sizes,
+                gather_indices,
+                fuse_dispatch=self.config.fused_moe_fuse_dispatch,
+                **_fm_kwargs,
+            )
+          else:
+            # KB-14(b) expert-group chunking via dynamic-slice & v3 fuse_dispatch (~1/G compute, zero kernel change).
+            _E = w_fused.shape[0]
+            if _E % _G != 0:
+              raise ValueError(
+                  f"num_fused_moe_expert_chunks={_G} must divide"
+                  f" num_experts={_E}"
+              )
+            _ec = _E // _G
+            _gs = routing.group_sizes  # [E] int32
+            _cum = jnp.concatenate(
+                [jnp.zeros(1, jnp.int32), jnp.cumsum(_gs).astype(jnp.int32)]
+            )
+            _N = gather_indices.shape[0]
+            _tm = self.config.wi_tile_fwd_batch_seq
+            _m = ((_N + _tm - 1) // _tm) * _tm
+            _gi_pad = jnp.pad(gather_indices, (0, _m))
+            # KB-14(b) §2 HBM FIX: accumulate chunks in a fori_loop with _out as
+            # CARRY (was a static Python unroll). The unroll created G INDEPENDENT
+            # fused_moe custom-calls (each depends only on x + slices, no
+            # inter-chunk data dep), so XLA scheduled all G concurrently -> every
+            # chunk's full-size _og [_m~=_N, H] + the _out accumulator co-live =
+            # ~G x temporaries (114.86G OOM at G=4). Threading _out through a
+            # sequential fori_loop forces each chunk's temporaries to free before
+            # the next -> peak ~2 x [_N, H]. The per-chunk masked scatter-add is
+            # BYTE-IDENTICAL (same visit order, same mask) so numerics are
+            # unchanged (certified bit-exact vs G=1). Loop index _g is traced, so
+            # all expert/index slices use dynamic_slice (Python-slice needs a
+            # static index). _ec/_m are static => JIT-safe (no data-dep shapes).
+            _H = x.shape[-1]
+            _out0 = jnp.zeros((_N, _H), dtype=x.dtype)
 
-      intermediate_layer = self.apply_ffn_activation(output0, output1)
-      wo_gather_axes, wo_tile_size = get_wo_gmm_params()
-      intermediate_output = gmm_fn(
-          intermediate_layer,
-          wo,
-          tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
-      )
+            def _chunk_body(_g, _out):
+              _e0 = _g * _ec
+              _st = _cum[_e0]
+              _et = jax.lax.dynamic_slice(_cum, (_e0 + _ec,), (1,))[0]
+              _gs_g = jax.lax.dynamic_slice(_gs, (_e0,), (_ec,))
+              _gi_g = jax.lax.dynamic_slice(_gi_pad, (_st,), (_m,))
+              _wf_g = jax.lax.dynamic_slice(
+                  w_fused, (_e0, 0, 0), (_ec,) + w_fused.shape[1:]
+              )
+              _wo_g = jax.lax.dynamic_slice(
+                  wo, (_e0, 0, 0), (_ec,) + wo.shape[1:]
+              )
+              _og = tokamax.fused_moe(
+                  x,
+                  _wf_g,
+                  _wo_g,
+                  _gs_g,
+                  _gi_g,
+                  fuse_dispatch=True,
+                  **_fm_kwargs,
+              )
+              _rows = jax.lax.broadcasted_iota(jnp.int32, (_m, 1), 0) + _st
+              _valid = _rows < _et
+              return _out.at[jnp.clip(_rows[:, 0], 0, _N - 1)].add(
+                  jnp.where(_valid, _og, 0.0)
+              )
+
+            intermediate_output = jax.lax.fori_loop(0, _G, _chunk_body, _out0)
+        else:
+          gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
+          output0, output1 = gmm_up(
+              x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask
+          )
+
+          intermediate_layer = self.apply_ffn_activation(output0, output1)
+          wo_gather_axes, wo_tile_size = get_wo_gmm_params()
+          if use_wo_bias_fold and wo_bias is not None:
+            # FOLD: wo_bias is RAW per-expert [E,N] (transform_bias skipped the
+            # gather); add it in the wo epilogue. Safe only at TP==1 (no
+            # psum_scatter below to double-count it). Mark folded so the shared
+            # outside-add is skipped; the valid-token mask still applies below.
+            intermediate_output = gmm_fn(
+                intermediate_layer,
+                wo,
+                tiling=wo_tile_size,
+                weight_gather_axes=wo_gather_axes,
+                bias=wo_bias,
+            )
+            wo_folded = True
+          else:
+            intermediate_output = gmm_fn(
+                intermediate_layer,
+                wo,
+                tiling=wo_tile_size,
+                weight_gather_axes=wo_gather_axes,
+            )
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
             intermediate_output,
@@ -2238,7 +2487,12 @@ class RoutedMoE(nnx.Module):
         )
       if self.config.mlp_bias:
         mask = jnp.arange(intermediate_output.shape[0]) < valid_token_count(intermediate_output, routing, route_metadata)
-        intermediate_output = intermediate_output + wo_bias
+        # When wo_bias was folded into the wo GMM epilogue (TP==1 fold path), it
+        # is already applied per-expert-group inside the kernel; skip the outside
+        # add (which would double-count, and shape-mismatch on the raw [E,N]
+        # bias). The valid-token mask still applies in both paths.
+        if not wo_folded:
+          intermediate_output = intermediate_output + wo_bias
         intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
       intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
 
