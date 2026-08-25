@@ -307,6 +307,9 @@ class Fp8Quantization(Quantization):
   """Configures Fp8 quantization for NVIDIA GPUs"""
 
   quant_mode = "train"
+  # The forward dtype, for callers that quantize an operand themselves rather than through
+  # `dot_general_cls` or `einsum`, such as the grouped matmul in MoE.
+  quantize_dtype = jnp.float8_e4m3fn
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
@@ -396,6 +399,7 @@ class NANOOFp8Quantization(Quantization):
   """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
 
   quant_mode = "train"
+  quantize_dtype = jnp.float8_e4m3fnuz
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""

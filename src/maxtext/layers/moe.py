@@ -1499,12 +1499,14 @@ class RoutedMoE(nnx.Module):
         )
 
     def get_quantization_dtypes():
-      lhs_quantize_dtype, rhs_quantize_dtype = None, None
-      if self.quant is not None:
-        quant_dg = self.quant.quant_dg
-        lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
-        rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
-      return lhs_quantize_dtype, rhs_quantize_dtype
+      # AQT describes its numerics through a `quant_dg`, while the fp8 schemes just name the
+      # dtype they quantize to. Under qwix there is no quantization object here at all, and
+      # the gmm takes its rule from the qwix rule instead.
+      quant_dg = getattr(self.quant, "quant_dg", None)
+      if quant_dg is not None:
+        return quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype(), quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
+      quantize_dtype = getattr(self.quant, "quantize_dtype", None)
+      return quantize_dtype, quantize_dtype
 
     def gmm(
         inputs,
