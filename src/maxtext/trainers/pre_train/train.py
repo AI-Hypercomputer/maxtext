@@ -40,6 +40,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
+if not hasattr(jax.extend.core, "get_opaque_trace_state"):
+  jax.extend.core.get_opaque_trace_state = lambda convention=None: None
+
 from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
