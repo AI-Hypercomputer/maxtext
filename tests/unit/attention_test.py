@@ -805,8 +805,8 @@ class HCAStaticMaskTest(unittest.TestCase):
     key = jnp.zeros((1, 1, 516, 128))
     with self.assertRaisesRegex(ValueError, "compress_ratio must be provided for AttentionType.COMPRESSED"):
       op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=None)
-    with self.assertRaisesRegex(ValueError, "Static flash attention is only supported for HCA"):
-      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=4)
+    with self.assertRaisesRegex(ValueError, "compress_ratio must be provided for AttentionType.COMPRESSED"):
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=0)
 
 
 class AttentionTypeResolutionTest(unittest.TestCase):
@@ -4953,6 +4953,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     self._run_compressed_attention(compress_ratio, attention_kernel)
 
   @parameterized.named_parameters(
+      {"testcase_name": "csa_ratio4_flash", "compress_ratio": 4, "attention_kernel": "flash"},
       {"testcase_name": "hca_ratio128_flash", "compress_ratio": 128, "attention_kernel": "flash"},
   )
   @pytest.mark.tpu_only
@@ -4960,6 +4961,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     self._run_compressed_attention(compress_ratio, attention_kernel)
 
   @parameterized.named_parameters(
+      {"testcase_name": "csa_ratio4", "compress_ratio": 4},
       {"testcase_name": "hca_ratio128", "compress_ratio": 128},
   )
   @pytest.mark.tpu_only
@@ -5095,6 +5097,13 @@ class CompressedAttentionTest(parameterized.TestCase):
           "attention_kernel": "dot_product",
           "l1": 32,
           "l2": 32,
+      },
+      {
+          "testcase_name": "csa_flash",
+          "compress_ratio": 4,
+          "attention_kernel": "flash",
+          "l1": 64,
+          "l2": 64,
       },
       {
           "testcase_name": "hca_dot_product",

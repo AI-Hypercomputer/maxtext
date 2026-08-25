@@ -1948,25 +1948,24 @@ class AttentionOp(nnx.Module):
       elif self.attention_type == AttentionType.COMPRESSED:
         if compress_ratio is None or compress_ratio <= 0:
           raise ValueError("compress_ratio must be provided for AttentionType.COMPRESSED flash attention.")
-        if compress_ratio <= 4:
-          raise ValueError(
-              f"Static flash attention is only supported for HCA (compress_ratio > 4), got compress_ratio={compress_ratio}"
+        if compress_ratio > 4:
+          if use_load_balanced_cp:
+            raise ValueError(
+                "Load-balanced context parallelism is currently not supported for DeepSeek-V4 HCA static attention."
+            )
+          local_kv_len = query.shape[2]
+          compressed_kv_len = max(0, key.shape[2] - query.shape[2] - pad_kv_total)
+          mask = HCAStaticMask(
+              shape=mask_shape,
+              local_kv_len=local_kv_len,
+              compressed_kv_len=compressed_kv_len,
+              pad_kv_total=pad_kv_total,
+              compress_ratio=compress_ratio,
+              local_window=self.sliding_window_size,
+              shard_count=splash_q_seq_shards,
           )
-        if use_load_balanced_cp:
-          raise ValueError(
-              "Load-balanced context parallelism is currently not supported for DeepSeek-V4 HCA static attention."
-          )
-        local_kv_len = query.shape[2]
-        compressed_kv_len = max(0, key.shape[2] - query.shape[2] - pad_kv_total)
-        mask = HCAStaticMask(
-            shape=mask_shape,
-            local_kv_len=local_kv_len,
-            compressed_kv_len=compressed_kv_len,
-            pad_kv_total=pad_kv_total,
-            compress_ratio=compress_ratio,
-            local_window=self.sliding_window_size,
-            shard_count=splash_q_seq_shards,
-        )
+        else:
+          mask = mask_module.CausalMask(shape=mask_shape)
       elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
         mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
         mask_kwargs = {"cp_size": cp_size} if use_load_balanced_cp else {}
