@@ -524,7 +524,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
-      attention_kernel: str = "flash",
+      attention_kernel: str = "dot_product",
   ):
     """Initializes the HCA Compressor.
 
@@ -651,7 +651,8 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
           cache=cache,
       )
 
-    # Skip causal mask generation when using static flash attention (HCAStaticMask), during decoding (seq_len == 1), or if no blocks were pooled
+    # Skip causal mask generation when using static flash attention (HCAStaticMask),
+    # during decoding (seq_len == 1), or if no blocks were pooled.
     if self.attention_kernel == "flash":
       return compressed_kv, None
     if seq_len == 1 or compressed_len == 0:

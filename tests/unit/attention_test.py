@@ -629,6 +629,7 @@ class HCAStaticMaskTest(unittest.TestCase):
       context_parallel_load_balance=False,
       max_target_length=512,
   ):
+    """Helper method to construct a mock AttentionOp for flash testing."""
     config = types.SimpleNamespace(
         causal_block_size=4,
         context_parallel_strategy="all_gather",
@@ -4989,14 +4990,18 @@ class CompressedAttentionTest(parameterized.TestCase):
         compress_ratio=compress_ratio,
         attention_kernel="dot_product",
     )
-    attn_dot = self._create_compressed_attention_layer(cfg_dot, compress_ratio=compress_ratio, attention_kernel="dot_product")
+    attn_dot = self._create_compressed_attention_layer(
+        cfg_dot, compress_ratio=compress_ratio, attention_kernel="dot_product"
+    )
 
     cfg_flash = self._get_test_config(
         max_target_length=total_len,
         compress_ratio=compress_ratio,
         attention_kernel="flash",
     )
-    attn_flash = self._create_compressed_attention_layer(cfg_flash, compress_ratio=compress_ratio, attention_kernel="flash")
+    attn_flash = self._create_compressed_attention_layer(
+        cfg_flash, compress_ratio=compress_ratio, attention_kernel="flash"
+    )
 
     batch_size = cfg_dot.global_batch_size_to_train_on
 

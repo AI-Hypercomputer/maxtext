@@ -1863,7 +1863,11 @@ class AttentionOp(nnx.Module):
             )
             if config.cost_estimate_flops_bwd >= 0
             else None,
-            dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
+            dq_reduction_steps=(
+                config.dq_reduction_steps
+                if config.dq_reduction_steps > 0
+                else (3 if self.attention_type == AttentionType.COMPRESSED else None)
+            ),
             use_experimental_scheduler=self.use_splash_scheduler,
         )
       else:
