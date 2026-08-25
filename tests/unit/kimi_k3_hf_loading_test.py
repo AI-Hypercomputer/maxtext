@@ -59,6 +59,8 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         if self.checkpoint_dir.endswith("items")
         else os.path.join(self.checkpoint_dir, "0", "items")
     )
+    num_devices = jax.device_count()
+    expert_parallelism = min(num_devices, 8) if num_devices > 0 else 1
     config = pyconfig.initialize([
         "kimi_k3_hf_loading_test.py",
         self.config_path,
@@ -66,6 +68,9 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         "override_model_config=True",
         "base_num_decoder_layers=2",
         "scan_layers=False",
+        "dtype=bfloat16",
+        "weight_dtype=bfloat16",
+        f"ici_expert_parallelism={expert_parallelism}",
         f"load_parameters_path={ckpt_path}",
     ])
 
