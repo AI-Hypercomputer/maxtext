@@ -275,6 +275,9 @@ merge_gating_gmm: false
 use_tokamax_gmm: false
 # Whether to use Tokamax GMM v2 for MoE kernel. Requires use_tokamax_gmm=true.
 use_gmm_v2: false
+# Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
+# When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
+use_gmm_v2_heuristic_tiling: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 

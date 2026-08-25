@@ -1572,6 +1572,7 @@ class RoutedMoE(nnx.Module):
             lhs_vma_axes=lhs_vma_axes,
             rhs_vma_axes=rhs_vma_axes,
             use_gmm_v2=self.config.use_gmm_v2,
+            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
         )

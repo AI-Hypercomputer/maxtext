@@ -40,6 +40,14 @@ class PyconfigTest(unittest.TestCase):
 
     self.assertTrue(config.quantization is None or config.quantization == "")
 
+  def test_gmm_v2_heuristic_tiling_requires_gmm_v2(self):
+    with self.assertRaisesRegex(ValueError, "`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`."):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          use_gmm_v2_heuristic_tiling=True,
+          use_gmm_v2=False,
+      )
+
   def test_managed_mldiagnostics_storage_path(self):
     # Test completely omitting the parameter (defaults to "" from base.yml)
     config_omitted = pyconfig.initialize(

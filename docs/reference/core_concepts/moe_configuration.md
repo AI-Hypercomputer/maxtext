@@ -93,6 +93,8 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `use_gmm_v2`: If enabled, use the Tokamax GMM v2 kernel for grouped matrix multiplication. Requires `use_tokamax_gmm` to be True.
 
+`use_gmm_v2_heuristic_tiling`: If enabled, use the heuristic tiling from Tokamax GMM v2. Recommended when not using custom tuned tile sizes.
+
 `megablox`: If enabled, use Megablox for sparse matrix operations. Effective only when `use_tokamax_gmm` is False.
 
 `capacity_factor`: A scalar multiplier for expert capacity. Effective only when `sparse_matmul` is False.
@@ -155,5 +157,5 @@ Implementation Support:
 - Tokamax Ragged Dot (Includes two implementations):
 
   - **GMM v1**: Uses Tokamax's native autotuner; does not accept manual tile sizes from MaxText.
-  - **GMM v2**: Supports all 18 manual tiling configurations.
+  - **GMM v2**: Supports all 18 manual tiling configurations. Optionally, use `use_gmm_v2_heuristic_tiling=True` for heuristic tiling.
   - Enabled for FP8 and BF16.

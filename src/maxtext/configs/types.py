@@ -1045,6 +1045,11 @@ class MoEKernels(BaseModel):
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
   )
 
+  use_gmm_v2_heuristic_tiling: bool = Field(
+      False,
+      description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
+  )
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -4305,6 +4310,9 @@ class MaxTextConfig(
         raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
+
+    if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
+      raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:
