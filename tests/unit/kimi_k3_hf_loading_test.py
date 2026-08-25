@@ -192,10 +192,16 @@ class KimiK3HFLoadingTest(unittest.TestCase):
           if use_qk_l2norm_in_kernel:
             q = q / torch.linalg.norm(q, dim=-1, keepdim=True).clamp(min=1e-6)
             k = k / torch.linalg.norm(k, dim=-1, keepdim=True).clamp(min=1e-6)
-          if use_gate_in_kernel:
-            a_log_exp = torch.exp(A_log).reshape(1, 1, 1, K_dim)
-            g = lower_bound * torch.sigmoid(a_log_exp * (g + dt_bias.reshape(1, 1, H, K_dim)))
-          if use_beta_sigmoid_in_kernel:
+          if use_gate_in_kernel and g is not None:
+            if A_log is not None:
+              a_log_exp = torch.exp(A_log).reshape(1, 1, 1, -1)
+            else:
+              a_log_exp = 1.0
+            if dt_bias is not None:
+              dt = dt_bias.reshape(1, 1, H, K_dim) if dt_bias.numel() == H * K_dim else dt_bias.reshape(1, 1, 1, -1)
+              g = g + dt
+            g = lower_bound * torch.sigmoid(a_log_exp * g) if lower_bound is not None else torch.sigmoid(g)
+          if use_beta_sigmoid_in_kernel and beta is not None:
             beta = torch.sigmoid(beta)
           scale = K_dim ** -0.5
           q = q * scale
@@ -205,12 +211,15 @@ class KimiK3HFLoadingTest(unittest.TestCase):
             q_t = q[:, t]
             k_t = k[:, t]
             v_t = v[:, t]
-            g_t = g[:, t]
-            b_t = beta[:, t]
+            g_t = g[:, t] if g is not None else 0.0
+            if beta is not None:
+              b_t = beta[:, t].reshape(B, H, 1)
+            else:
+              b_t = 1.0
             S = S * torch.exp(g_t).unsqueeze(-1)
             k_S = torch.sum(k_t.unsqueeze(-1) * S, dim=-2)
             v_diff = v_t - k_S
-            bk = b_t.unsqueeze(-1) * k_t
+            bk = b_t * k_t
             S = S + bk.unsqueeze(-1) * v_diff.unsqueeze(-2)
             o_t = torch.sum(q_t.unsqueeze(-1) * S, dim=-2)
             outputs.append(o_t)
@@ -271,13 +280,20 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         if hasattr(hf_config, "text_config"):
           hf_config.text_config.quantization_config = None
           hf_config.text_config.num_hidden_layers = 2
+          hf_config.text_config.num_nextn_predict_layers = 0
           if hasattr(hf_config.text_config, "linear_attn_config") and isinstance(hf_config.text_config.linear_attn_config, dict):
             hf_config.text_config.linear_attn_config["kda_layers"] = [1]
             hf_config.text_config.linear_attn_config["full_attn_layers"] = [2]
+        if hasattr(hf_config, "vision_config"):
+          hf_config.vision_config.vt_num_hidden_layers = 0
         if hasattr(hf_config, "num_hidden_layers"):
           hf_config.num_hidden_layers = 2
         if hasattr(hf_config, "num_layers"):
           hf_config.num_layers = 2
+        if hasattr(hf_config, "kda_layers"):
+          hf_config.kda_layers = [1]
+        if hasattr(hf_config, "full_attn_layers"):
+          hf_config.full_attn_layers = [2]
         if hasattr(hf_config, "kda_layers"):
           hf_config.kda_layers = [1]
         if hasattr(hf_config, "full_attn_layers"):
