@@ -97,17 +97,20 @@ def record_slice_state(recorder, active_slices_override: int | None = None) -> N
   ):
     return
 
-  available_slices = len(elastic.get_active_slice_indices())
-  active_slices = (
-      active_slices_override if active_slices_override is not None else len(elastic_manager.active_slice_indices)
-  )
-  total_slices = len(elastic.get_slice_to_devices(jax.devices()))
+  try:
+    available_slices = len(elastic.get_active_slice_indices())
+    active_slices = (
+        active_slices_override if active_slices_override is not None else len(elastic_manager.active_slice_indices)
+    )
+    total_slices = len(elastic.get_slice_to_devices(jax.devices()))
 
-  recorder.record_elastic_slice_counts(
-      available_slices=available_slices,
-      active_slices=active_slices,
-      total_slices=total_slices,
-  )
+    recorder.record_elastic_slice_counts(
+        available_slices=available_slices,
+        active_slices=active_slices,
+        total_slices=total_slices,
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Goodput: record_slice_state failed to record slice counts: {e}")
 
 
 def record_elastic_event_start(recorder, config) -> None:

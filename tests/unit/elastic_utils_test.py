@@ -508,6 +508,19 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     fake_recorder.record_elastic_slice_counts.assert_not_called()
 
+  def test_record_slice_state_handles_health_check_failure(self):
+    """A health-check failure must not propagate."""
+    elastic_utils.elastic_manager = self.fake_manager
+    elastic_utils.elastic.get_active_slice_indices = Mock(
+        side_effect=MockJaxRuntimeError("unrecognized backend error")
+    )
+    fake_recorder = Mock()
+
+    # Should not raise.
+    elastic_utils.record_slice_state(fake_recorder)
+
+    fake_recorder.record_elastic_slice_counts.assert_not_called()
+
   def test_record_slice_state_noop_no_elastic_manager(self):
     """Tests that record_slice_state no-ops when elastic_manager is uninitialized."""
     elastic_utils.elastic_manager = None
