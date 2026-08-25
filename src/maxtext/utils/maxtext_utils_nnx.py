@@ -164,7 +164,7 @@ def create_nnx_sharded_model(
     named_sharding = nnx_extract_named_sharding(abstract_state)
 
   if mesh is None:
-    mesh = abstract_model.mesh  # pyrefly: ignore[missing-attribute]
+    mesh = abstract_model.mesh
 
   # JIT a function that creates the model state with proper sharding from the start.
   # By providing out_shardings, we instruct JAX to produce sharded output directly,
@@ -218,6 +218,33 @@ def nnx_update_sharding_meta(variable, transform_fn):
   return variable
 
 
+def nnx_sync_moveaxis(tree, from_axis, to_axis):
+  """Moves an axis in both values and sharding metadata of nnx.Variables."""
+  if from_axis == to_axis:
+    return tree
+
+  def _op(x):
+    is_var = isinstance(x, nnx.Variable)
+    val = x.get_value() if is_var else x
+    if not hasattr(val, "shape"):
+      return x
+
+    new_val = jnp.moveaxis(val, from_axis, to_axis)
+    if not is_var:
+      return new_val
+
+    def move_fn(l):
+      while len(l) < val.ndim:
+        l.append(None)
+      if len(l) > max(from_axis, to_axis):
+        l.insert(to_axis, l.pop(from_axis))
+      return l
+
+    return nnx_update_sharding_meta(x.replace(value=new_val), move_fn)
+
+  return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable) or hasattr(x, "shape"))
+
+
 def nnx_remove_scan_axis(tree, name="layers"):
   """Removes the given scan axis from the PartitionSpec."""
 
@@ -225,25 +252,11 @@ def nnx_remove_scan_axis(tree, name="layers"):
     if not isinstance(x, nnx.Variable):
       return x
 
-    # Scanned stacks record their own axis name, such as "dense_layers" or "moe_layers",
-    # so prefer it over the caller's default. Otherwise the name never matches and the
-    # check below strips a real logical axis instead of the scan axis.
-    axis_name = x.get_metadata().get(nnx.PARTITION_NAME, name)
-
     def remove_fn(l):
-      removed = axis_name in l
-      if removed:
-        l.remove(axis_name)
-      if len(l) > x.get_value().ndim:
-        if removed:
-          raise ValueError(
-              f"Sharding names {l} still exceed value rank {x.get_value().ndim} after removing scan axis "
-              f"{axis_name!r}; the partition metadata is inconsistent."
-          )
-        raise ValueError(
-            f"Scan axis {axis_name!r} not found in sharding names {l} for a rank-{x.get_value().ndim} value; "
-            "the partition metadata is inconsistent."
-        )
+      if name in l:
+        l.remove(name)
+      while len(l) > x.get_value().ndim:
+        l.pop(0)
       return l
 
     return nnx_update_sharding_meta(x, remove_fn)
@@ -251,31 +264,18 @@ def nnx_remove_scan_axis(tree, name="layers"):
   return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
 
-def nnx_add_and_sync_scan_axis(tree, name="layers", pos=0):
-  """Restores the scan axis on each variable's value and sharding metadata.
-
-  jax.lax.scan stacks its outputs with the scan axis at position 0. For each
-  variable this moves that axis to the variable's own param_scan_axis (falling
-  back to pos when the metadata is absent) and inserts the matching axis name at
-  the same position, so the value and its sharding metadata stay aligned.
-  """
+def nnx_add_scan_axis(tree, name="layers", pos=0):
+  """Adds the given scan axis to the PartitionSpec at the specified position."""
 
   def _op(x):
     if not isinstance(x, nnx.Variable):
       return x
 
-    axis_name = x.get_metadata().get(nnx.PARTITION_NAME, name)
-    target = x.get_metadata().get("param_scan_axis", pos)
-
-    val = x.get_value()
-    if target != 0 and hasattr(val, "ndim") and val.ndim > target:
-      x = x.replace(value=jnp.moveaxis(val, 0, target))
-
     def add_fn(l):
-      if axis_name not in l:
+      if name not in l:
         while len(l) < x.get_value().ndim - 1:
           l.append(None)
-        l.insert(target, axis_name)
+        l.insert(pos, name)
       else:
         while len(l) < x.get_value().ndim:
           l.append(None)
@@ -284,3 +284,73 @@ def nnx_add_and_sync_scan_axis(tree, name="layers", pos=0):
     return nnx_update_sharding_meta(x, add_fn)
 
   return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
+
+def nnx_add_and_sync_scan_axis(tree, name="layers", scan_axis=0):
+  """Adds the given scan axis to PartitionSpec and moves axis if scan_axis != 0."""
+  tree = nnx_add_scan_axis(tree, name, 0)
+  if scan_axis != 0:
+    new_params, new_rest = tree.split(nnx.Param, ...)
+    new_params = nnx_sync_moveaxis(new_params, 0, scan_axis)
+    tree = nnx.merge_state(new_params, new_rest)
+  return tree
+
+
+def apply_moe_bias_updates(model: nnx.Module, moe_bias_updates: dict[str, jax.Array]) -> None:
+  """Applies aux-loss-free load-balancing bias updates to each MoE gate's bias, in place.
+
+  Different decoder blocks sow `moe_bias_updates` intermediates at different depths: DeepSeek
+  sows once per homogeneous scanned `moe_layers` collection, while Qwen3-Next sows once per
+  layer position inside each scanned block (its MoE gates aren't a single uniform scanned
+  collection). Rather than hardcoding an absolute attribute path for one decoder block, this
+  locates each target `gate.bias` parameter generically: it's the unique `Param` leaf whose
+  path ends in `("gate", "bias")` and lives under the same parent module that produced the
+  corresponding sow, found by matching path prefixes against the live parameter tree.
+
+  Args:
+    model: The NNX model whose gate-bias parameters will be updated in place.
+    moe_bias_updates: A dict mapping each sow path (its components joined with "/") to its
+      update array, as collected in `train.py`'s `train_step` from the model's sown
+      `moe_bias_updates` intermediates. A dict (rather than a list of (path, array) pairs)
+      because this value flows through `jax.lax.scan` under gradient accumulation, which
+      requires every leaf to be an array -- dict keys are pytree structure, not leaves, so
+      the string paths survive that unscathed.
+  """
+  param_paths = [
+      tuple(k.key for k in path if hasattr(k, "key"))
+      for path, _ in jax.tree_util.tree_leaves_with_path(nnx.state(model, nnx.Param).to_pure_dict())
+  ]
+  gate_bias_paths = [p for p in param_paths if p[-2:] == ("gate", "bias")]
+
+  for sow_path_str, update in moe_bias_updates.items():
+    sow_path = tuple(sow_path_str.split("/"))
+    parent_path = sow_path[:-1]
+    matches = [p for p in gate_bias_paths if p[: len(parent_path)] == parent_path]
+    if len(matches) != 1:
+      raise ValueError(
+          f"Expected exactly one gate.bias parameter under {parent_path} for the "
+          f"moe_bias_updates sown at {sow_path}, found {len(matches)}: {matches}"
+      )
+    target_bias = model
+    for key in matches[0]:
+      target_bias = getattr(target_bias, key)
+    update_arr = jnp.array(update)
+    if target_bias.value.shape == update_arr.shape:
+      target_bias.value = target_bias.value + update_arr
+    elif target_bias.value.ndim == update_arr.ndim and sorted(target_bias.value.shape) == sorted(update_arr.shape):
+      target_shape = target_bias.value.shape
+      update_shape = update_arr.shape
+      used = [False] * len(update_shape)
+      perm = []
+      for s in target_shape:
+        for i, us in enumerate(update_shape):
+          if us == s and not used[i]:
+            perm.append(i)
+            used[i] = True
+            break
+      if len(perm) == len(target_shape):
+        target_bias.value = target_bias.value + jnp.transpose(update_arr, perm)
+      else:
+        target_bias.value = target_bias.value + update_arr
+    else:
+      target_bias.value = target_bias.value + update_arr
