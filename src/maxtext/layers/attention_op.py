@@ -1021,14 +1021,14 @@ class AttentionOp(nnx.Module):
       s_len = kv_seq_len - c_len
 
       def get_sliding_mask(s_len):
-        # Safely use segment_positions, or fall back to next_pos if None
-        if segment_positions is not None:
-          abs_q = segment_positions[:, :, None]
-        else:
-          local_next = next_pos[:, None] if isinstance(next_pos, jax.Array) else next_pos
-          abs_q = jnp.arange(q_seq_len)[None, :, None] + local_next
-
         if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+          # Safely use segment_positions, or fall back to next_pos if None
+          if segment_positions is not None:
+            abs_q = segment_positions[:, :, None]
+          else:
+            local_next = next_pos[:, None] if isinstance(next_pos, jax.Array) else next_pos
+            abs_q = jnp.arange(q_seq_len)[None, :, None] + local_next
+
           if decoder_segment_ids is not None:
             is_valid = decoder_segment_ids[:, :s_len] == DECODING_ACTIVE_SEQUENCE_INDICATOR
             valid_indices = jnp.where(is_valid, jnp.arange(s_len)[None, :], -1)
@@ -1042,13 +1042,18 @@ class AttentionOp(nnx.Module):
             abs_k_prefill = jnp.broadcast_to(i, abs_k_ar.shape)
 
             abs_k = jnp.where(is_ar_cache, abs_k_ar, abs_k_prefill)
-            distance = abs_q - abs_k
-            in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
-            return in_window & (distance >= 0)
+          else:
+            abs_k = jnp.arange(s_len)[None, None, :]
+          distance = abs_q - abs_k
+          in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
+          return in_window & (distance >= 0)
 
-        # For prefill and training phases (q_seq_len > 1)
-        abs_k = jnp.arange(s_len)[None, None, :]
-        distance = abs_q - abs_k
+        # For prefill and training phases (q_seq_len > 1):
+        # Use global buffer coordinates so causal/sliding mask is valid across packed sequences
+        local_next = next_pos[:, None] if isinstance(next_pos, jax.Array) else next_pos
+        row_ids = jnp.arange(q_seq_len)[None, :, None] + local_next
+        col_ids = jnp.arange(s_len)[None, None, :]
+        distance = row_ids - col_ids
         in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
         return in_window & (distance >= 0)
 

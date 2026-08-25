@@ -4872,5 +4872,179 @@ class KVHeadShardingTest(parameterized.TestCase):
       self.attention._validate_kv_head_sharding(self._KV_KERNEL_AXES)  # pylint: disable=protected-access
 
 
+class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
+  """Tests to validate AttentionOp masking logic for DeepSeek-V4 attention patterns."""
+
+  def setUp(self):
+    self.config = pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], run_name="test")
+
+  def test_generate_attention_mask_local_sliding(self):
+    """Verifies AttentionType.LOCAL_SLIDING enforces both causal and sliding window constraints."""
+
+    # Test with multiple heads and different sequence lengths
+    for s_len in [1, 8, 128]:
+      op = AttentionOp(
+          config=self.config,
+          num_query_heads=4,
+          num_kv_heads=1,
+          max_target_length=256,
+          mesh=None,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.LOCAL_SLIDING,
+          sliding_window_size=3,
+      )
+
+      batch_size = 1
+      q_dummy = jnp.zeros((batch_size, s_len, 1, 128))
+      k_dummy = jnp.zeros((batch_size, s_len, 1, 128))
+
+      mask = op.generate_attention_mask(
+          query=q_dummy,
+          key=k_dummy,
+          decoder_segment_ids=None,
+          model_mode="train",
+      )
+
+      self.assertEqual(mask.shape, (1, 1, 1, s_len, s_len))
+      mask_np = np.array(mask)[0, 0, 0]
+
+      # Expected float mask for window_size=3
+      # Row 0: [0.0, INF, INF, INF, INF, ...]
+      # Row 1: [0.0, 0.0, INF, INF, INF, ...]
+      # Row 2: [0.0, 0.0, 0.0, INF, INF, ...]
+      # Row 3: [INF, 0.0, 0.0, 0.0, INF, ...]
+      if s_len > 1:
+        self.assertEqual(mask_np[0, 1], DEFAULT_MASK_VALUE)  # strict causal
+      self.assertEqual(mask_np[0, 0], 0.0)
+
+      if s_len >= 4:
+        self.assertEqual(mask_np[3, 0], DEFAULT_MASK_VALUE)  # sliding window size=3
+        self.assertEqual(mask_np[3, 1], 0.0)
+
+  def test_generate_attention_mask_compressed(self):
+    """Verifies AttentionType.COMPRESSED stitches sliding window and float compressed_mask."""
+
+    batch_size = 1
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=3,
+    )
+
+    q_dummy = jnp.zeros((batch_size, s_len, 1, 128))
+    k_dummy = jnp.zeros((batch_size, kv_len, 1, 128))
+
+    # Simulate a compressed float mask [batch, 1, s_len, c_len]
+    # In practice, this exactly mirrors what both HCA and CSA output:
+    # - HCA emits a simple mask blocking future blocks (batch, 1, seq_len, c_len)
+    # - CSA emits a sparse mask where only top-K blocks are 0.0, rest are -inf.
+    # We simulate this by making Block 0 invalid (-inf), and Block 1 valid (0.0).
+    compressed_mask = np.zeros((batch_size, 1, s_len, c_len), dtype=np.float32)
+    compressed_mask[:, :, :, 0] = DEFAULT_MASK_VALUE
+    compressed_mask = jnp.array(compressed_mask)
+
+    mask = op.generate_attention_mask(
+        query=q_dummy,
+        key=k_dummy,
+        decoder_segment_ids=None,
+        model_mode="train",
+        compressed_mask=compressed_mask,
+    )
+
+    # Returned float mask should dynamically inherit the dimensionality of compressed_mask
+    # Because compressed_mask was 4D, the final mask should also be 4D: [batch, 1, s_len, kv_len]
+    self.assertEqual(mask.shape, (batch_size, 1, s_len, kv_len))
+    mask_np = np.array(mask)[0, 0]
+
+    # Uncompressed block (first s_len cols) follows sliding window float mask
+    self.assertEqual(mask_np[0, 1], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 0], 0.0)
+    self.assertEqual(mask_np[3, 0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[3, 1], 0.0)
+
+    # Compressed block (last c_len cols) follows compressed_mask strictly
+    np.testing.assert_allclose(mask_np[:, s_len], DEFAULT_MASK_VALUE)
+    np.testing.assert_allclose(mask_np[:, s_len + 1], 0.0)
+    print("Mask logic for uncompressed & compressed attention passed perfectly.")
+
+  def test_generate_attention_mask_compressed_all_modes(self):
+    """Verifies AttentionType.COMPRESSED across train, prefill, and autoregressive modes."""
+    batch_size = 2
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=3,
+    )
+
+    # 1. Training mode (batch_size=2, 4D compressed_mask)
+    q_train = jnp.zeros((batch_size, s_len, 1, 128))
+    k_train = jnp.zeros((batch_size, kv_len, 1, 128))
+    c_mask_4d = jnp.zeros((batch_size, 1, s_len, c_len), dtype=jnp.float32)
+    mask_train = op.generate_attention_mask(
+        query=q_train,
+        key=k_train,
+        decoder_segment_ids=None,
+        model_mode="train",
+        compressed_mask=c_mask_4d,
+    )
+    self.assertEqual(mask_train.shape, (batch_size, 1, s_len, kv_len))
+
+    # 2. Prefill mode (batch_size=2, 5D compressed_mask with segment_positions)
+    c_mask_5d = jnp.zeros((batch_size, 1, 1, s_len, c_len), dtype=jnp.float32)
+    seg_pos = jnp.arange(s_len)[None, :].repeat(batch_size, axis=0)
+    mask_prefill = op.generate_attention_mask(
+        query=q_train,
+        key=k_train,
+        decoder_segment_ids=None,
+        model_mode="prefill",
+        compressed_mask=c_mask_5d,
+        segment_positions=seg_pos,
+    )
+    self.assertEqual(mask_prefill.shape, (batch_size, 1, 1, s_len, kv_len))
+
+    # 3. Autoregressive mode (q_seq_len=1, batch_size=2, decoder_segment_ids)
+    q_ar = jnp.zeros((batch_size, 1, 1, 128))
+    k_ar = jnp.zeros((batch_size, kv_len, 1, 128))
+    c_mask_ar = jnp.zeros((batch_size, 1, 1, c_len), dtype=jnp.float32)
+    seg_ids = jnp.ones((batch_size, 16), dtype=jnp.int32)
+    mask_ar = op.generate_attention_mask(
+        query=q_ar,
+        key=k_ar,
+        decoder_segment_ids=seg_ids,
+        model_mode="autoregressive",
+        compressed_mask=c_mask_ar,
+    )
+    self.assertEqual(mask_ar.shape, (batch_size, 1, 1, 1, kv_len))
+
+    # 4. Compressed mask is None (fallback to uncompressed mask shape)
+    mask_none = op.generate_attention_mask(
+        query=q_train,
+        key=k_train,
+        decoder_segment_ids=None,
+        model_mode="train",
+        compressed_mask=None,
+    )
+    self.assertEqual(mask_none.ndim, 4)
+    self.assertEqual(mask_none.shape[-1], kv_len)
+
+
 if __name__ == "__main__":
   unittest.main()
