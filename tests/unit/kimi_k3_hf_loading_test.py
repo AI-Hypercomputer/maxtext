@@ -41,10 +41,15 @@ class KimiK3HFLoadingTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    cls.checkpoint_dir = os.environ.get(
+    raw_ckpt_dir = os.environ.get(
         "KIMI_K3_CHECKPOINT_DIR",
-        os.path.abspath("scratch/kimi_k3_orbax_checkpoint"),
+        "scratch/kimi_k3_orbax_checkpoint",
     )
+    if raw_ckpt_dir.startswith("gs://"):
+      cls.checkpoint_dir = raw_ckpt_dir
+    else:
+      cls.checkpoint_dir = os.path.abspath(raw_ckpt_dir)
+
     cls.config_path = os.environ.get(
         "KIMI_K3_CONFIG",
         "src/maxtext/configs/models/kimi-k3-minimal.yml",
