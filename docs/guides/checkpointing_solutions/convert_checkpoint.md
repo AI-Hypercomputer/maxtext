@@ -41,6 +41,10 @@ Use the `to_maxtext.py` script to convert a Hugging Face model checkpoint into a
 
 > **Note:** For more information, checkout [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/4b/test_qwen3_to_mt.sh) and [gemma3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma3/4b/test_gemma3_to_mt.sh).
 
+> **Note (Multimodal Models / Gemma 3):** When converting [multimodal models](../../tutorials/posttraining/multimodal.md) to maxtext, you must set `use_multimodal=true` and disable lazy loading with `--lazy_load_tensors=False` (lazy loading of HF tensors is not supported for multimodal models yet).
+>
+> Furthermore, for **Gemma 3**, you must explicitly specify `--eager_load_method='transformers'` (the default is `'safetensors'`) to ensure key structure compatibility with Hugging Face Transformers.
+
 > **Note (Gemma 4 E2B / E4B):** The `gemma4-e2b` and `gemma4-e4b` variants use the `gemma4_small` decoder block, which has per-layer KV sharing and is **incompatible with `nn.scan`**. Conversion must therefore be run with `scan_layers=False` (unscanned), and any downstream training/inference run must also use `scan_layers=False`. Additionally, if you want to convert the **base** (pretrained) model rather than the instruction-tuned default, pass `--hf_model_path=google/gemma-4-E4B` (or `google/gemma-4-E2B`) explicitly — `HF_IDS` defaults to the `-it` repository. See [convert_gemma4_base.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma4/e4b/convert_gemma4_base.sh) for a full example.
 
 ### Setup Environment
@@ -85,10 +89,12 @@ You can find your converted checkpoint files under `${BASE_OUTPUT_DIRECTORY}/0/i
 
 - `model_name`: The specific model identifier. It must match a supported entry in the MaxText [globals.py](https://github.com/AI-Hypercomputer/maxtext/blob/16b684840db9b96b19e24e84ac49f06af7204ae3/src/maxtext/utils/globals.py#L46C1-L46C7).
 - `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [to the Checkpoints guide](checkpoints) for more information. **Note:** When resuming or loading a checkpoint in MaxText, this setting will automatically be loaded from the checkpoint metadata, meaning you do not have to manually specify it during model execution. If you do explicitly specify a value for `scan_layers`, it must match the checkpoint's saved configuration, or a `ValueError` mismatch error will be raised.
-- `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
+- `use_multimodal`: Indicates if multimodality is used. **Note:** When `use_multimodal=true`, you must pass `--lazy_load_tensors=False` because lazy loading of tensors is not yet supported for multimodal models.
 - `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Google Cloud Storage (GCS) or local.
 - `hardware=cpu`: The conversion script runs on a CPU machine.
 - `checkpoint_storage_use_zarr3` and `checkpoint_storage_use_ocdbt`: These storage flags enable McJAX compatibility when set to True (the default). For Pathways, these should be False.
+- `--lazy_load_tensors` (Optional / Required for multimodal): Controls on-demand loading of HF tensors to minimize RAM usage. Defaults to `True` for text models. Must be set to `False` (`--lazy_load_tensors=False`) for multimodal models.
+- `--eager_load_method` (Optional): Backend used when eager loading (`--lazy_load_tensors=False`). Choices are `safetensors` (default) or `transformers`. Must be set to `transformers` (`--eager_load_method='transformers'`) for Gemma 3 models to ensure key mapping compatibility.
 - `--hf_model_path` (Optional): Specifies a customized remote directory or local directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
 - `--save_dtype` (Optional): Specifies the data type of saved model weights. Default to `bfloat16` to save memory.
 
@@ -141,7 +147,7 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
 - `model_name`: The specific model identifier. It must match a supported entry in the MaxText [globals.py](https://github.com/AI-Hypercomputer/maxtext/blob/16b684840db9b96b19e24e84ac49f06af7204ae3/src/maxtext/utils/globals.py#L46C1-L46C7).
 - `load_parameters_path`: The path to the MaxText Orbax checkpoint.
 - `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [to the Checkpoints guide](checkpoints) for more information.
-- `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
+- `use_multimodal`: Indicates if multimodality is used. Set to `true` when converting multimodal models back to Hugging Face format.
 - `hardware=cpu`: The conversion script runs on a CPU machine.
 - `base_output_directory`: The path where the converted checkpoint will be stored; it can be Google Cloud Storage (GCS), Hugging Face Hub or local.
 - `weight_dtype`: It affects the resulting Hugging Face weight dtype. Default value is `float32`. We recommend using `bfloat16` to save memory and speed up conversion.
@@ -290,15 +296,27 @@ To extend conversion support to a new model architecture, you must define its sp
 
 - In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/param_mapping.py), add the `hook_fn` logic (`def {MODEL}_MAXTEXT_TO_HF_PARAM_HOOK_FN`). This is the transformation needed per layer.
 
-2. **Add Hugging Face weights Shape**: In [`utils/globals.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/hf_shape.py), define the tensor shape of Hugging Face format (`def {MODEL}_HF_WEIGHTS_TO_SHAPE`). This is used to ensure the tensor shape is matched after to_huggingface conversion.
+2. **Add Hugging Face weights Shape**: In [`utils/hf_shape.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/hf_shape.py), define the tensor shape of Hugging Face format (`def {MODEL}_HF_WEIGHTS_TO_SHAPE`). This is used to ensure the tensor shape is matched after to_huggingface conversion.
 
-3. **Register model key**: In [`utils/utils.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py), add the new model key in `HF_IDS`.
+3. **Register model key**: In [`utils/globals.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py), add the new model key in `HF_IDS`.
 
 4. **Add transformer config**: In [`utils/hf_model_configs.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/hf_model_configs.py), add the `transformers.Config` object, describing the Hugging Face model configuration (defined in [`src/maxtext/configs/models`](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/models)). This configuration must precisely match the MaxText model's architecture.
 
 Here is an example [PR to add support for gemma3 multi-modal model](https://github.com/AI-Hypercomputer/maxtext/pull/1983).
 
 ### Common Errors
+
+- **Error:** `ValueError: lazy loading of HF tensors is not supported for multimodal models yet.`
+
+  - **Cause:** `to_maxtext` enables `--lazy_load_tensors=True` by default to conserve RAM, but lazy loading of tensors is not currently supported for multimodal models.
+
+  - **Solution:** Pass `--lazy_load_tensors=False` to disable lazy loading when converting multimodal models.
+
+- **Error:** `ValueError: HuggingFace key model.language_model.embed_tokens.weight not found in state_dict.` (or parameter name mismatch when converting Gemma 3)
+
+  - **Cause:** When eager loading is enabled (`--lazy_load_tensors=False`), `--eager_load_method` defaults to `"safetensors"`. Gemma 3 parameter mapping expects the module hierarchy from Hugging Face Transformers (`from_pretrained`).
+
+  - **Solution:** Pass `--eager_load_method='transformers'` to the `to_maxtext` conversion command for Gemma 3 models.
 
 - **Error:** When loading a converted checkpoint, `Type ShapeDtypeStruct is not a valid JAX type`.
 
