@@ -390,8 +390,8 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     elastic_utils.record_elastic_event_start(fake_recorder, config)
 
-    fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type="elastic_slice_down"
+    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(
+        event_type="elastic_slice_down"
     )
     self.assertEqual(elastic_utils.pending_elastic_event_type, "elastic_slice_down")
 
@@ -404,8 +404,8 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     elastic_utils.record_elastic_event_start(fake_recorder, config)
 
-    fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type="elastic_scale_up"
+    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(
+        event_type="elastic_scale_up"
     )
 
   def test_record_elastic_wait_end_and_reinit_start_noop_on_first_attempt(self):
@@ -415,8 +415,8 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
 
-    fake_recorder.record_custom_badput_event_end_time.assert_not_called()
-    fake_recorder.record_custom_badput_event_start_time.assert_not_called()
+    fake_recorder.record_elastic_wait_end_time.assert_not_called()
+    fake_recorder.record_elastic_reinit_start_time.assert_not_called()
     self.assertIsNone(elastic_utils.pending_reinit_recorder)
 
   def test_record_elastic_wait_end_and_reinit_start(self):
@@ -426,12 +426,10 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
 
-    fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
-        custom_badput_event_type="elastic_slice_down"
+    fake_recorder.record_elastic_wait_end_time.assert_called_once_with(
+        event_type="elastic_slice_down"
     )
-    fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type="elastic_reinitialization"
-    )
+    fake_recorder.record_elastic_reinit_start_time.assert_called_once_with()
     self.assertIs(elastic_utils.pending_reinit_recorder, fake_recorder)
     self.assertIsNone(elastic_utils.pending_elastic_event_type)
 
@@ -442,9 +440,7 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     elastic_utils.record_elastic_reinit_end()
 
-    fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
-        custom_badput_event_type="elastic_reinitialization"
-    )
+    fake_recorder.record_elastic_reinit_end_time.assert_called_once_with()
     self.assertIsNone(elastic_utils.pending_reinit_recorder)
 
   def test_record_elastic_reinit_end_on_cold_start(self):
@@ -452,6 +448,116 @@ class ElasticUtilsTest(parameterized.TestCase):
     elastic_utils.pending_reinit_recorder = None
 
     elastic_utils.record_elastic_reinit_end()
+
+  def test_record_slice_state_calls_recorder(self):
+    """Tests that record_slice_state computes and forwards the right slice counts."""
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0}
+    elastic_utils.elastic.get_active_slice_indices = Mock(return_value={0, 1})
+    original_get_slice_to_devices = elastic_utils.elastic.get_slice_to_devices
+    elastic_utils.elastic.get_slice_to_devices = Mock(
+        return_value={0: [FakeDevice(slice_index=0)], 1: [FakeDevice(slice_index=1)]}
+    )
+    fake_recorder = Mock()
+
+    try:
+      elastic_utils.record_slice_state(fake_recorder)
+    finally:
+      elastic_utils.elastic.get_slice_to_devices = original_get_slice_to_devices
+
+    fake_recorder.record_elastic_slice_counts.assert_called_once_with(
+        available_slices=2, active_slices=1, total_slices=2
+    )
+
+  def test_record_slice_state_active_slices_override(self):
+    """Tests that an explicit active_slices_override is forwarded instead of the live count."""
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0, 1}
+    elastic_utils.elastic.get_active_slice_indices = Mock(return_value={0, 1})
+    original_get_slice_to_devices = elastic_utils.elastic.get_slice_to_devices
+    elastic_utils.elastic.get_slice_to_devices = Mock(
+        return_value={0: [FakeDevice(slice_index=0)], 1: [FakeDevice(slice_index=1)]}
+    )
+    fake_recorder = Mock()
+
+    try:
+      elastic_utils.record_slice_state(fake_recorder, active_slices_override=0)
+    finally:
+      elastic_utils.elastic.get_slice_to_devices = original_get_slice_to_devices
+
+    fake_recorder.record_elastic_slice_counts.assert_called_once_with(
+        available_slices=2, active_slices=0, total_slices=2
+    )
+
+  def test_record_slice_state_noop_recorder_missing_attr(self):
+    """Tests that record_slice_state no-ops for a recorder without record_elastic_slice_counts."""
+    elastic_utils.elastic_manager = self.fake_manager
+    fake_recorder = Mock(spec=[])
+
+    elastic_utils.record_slice_state(fake_recorder)
+
+    self.assertFalse(hasattr(fake_recorder, "record_elastic_slice_counts"))
+
+  def test_record_slice_state_noop_not_pathways(self):
+    """Tests that record_slice_state no-ops when not on the Pathways backend."""
+    elastic_utils.elastic_manager = self.fake_manager
+    elastic_utils.pathwaysutils.is_pathways_backend_used.return_value = False
+    fake_recorder = Mock()
+
+    elastic_utils.record_slice_state(fake_recorder)
+
+    fake_recorder.record_elastic_slice_counts.assert_not_called()
+
+  def test_record_slice_state_noop_no_elastic_manager(self):
+    """Tests that record_slice_state no-ops when elastic_manager is uninitialized."""
+    elastic_utils.elastic_manager = None
+    fake_recorder = Mock()
+
+    elastic_utils.record_slice_state(fake_recorder)
+
+    fake_recorder.record_elastic_slice_counts.assert_not_called()
+
+  def test_record_slice_state_noop_recorder_none(self):
+    """Tests that record_slice_state no-ops when the recorder is None."""
+    elastic_utils.elastic_manager = self.fake_manager
+
+    # Should not raise.
+    elastic_utils.record_slice_state(None)
+
+  def test_elastic_event_lifecycle_records_slice_counts(self):
+    """End-to-end: start -> wait-end/reinit-start -> reinit-end each log slice counts."""
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.available_inactive_slices = set()
+    self.fake_manager.active_slice_indices = {0}
+    elastic_utils.elastic.get_active_slice_indices = Mock(return_value={0})
+    original_get_slice_to_devices = elastic_utils.elastic.get_slice_to_devices
+    elastic_utils.elastic.get_slice_to_devices = Mock(
+        return_value={0: [FakeDevice(slice_index=0)]}
+    )
+    fake_recorder = Mock()
+    config = FakeConfig()
+
+    try:
+      elastic_utils.record_elastic_event_start(fake_recorder, config)
+      elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
+      elastic_utils.record_elastic_reinit_end()
+    finally:
+      elastic_utils.elastic.get_slice_to_devices = original_get_slice_to_devices
+
+    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(
+        event_type="elastic_slice_down"
+    )
+    fake_recorder.record_elastic_wait_end_time.assert_called_once_with(
+        event_type="elastic_slice_down"
+    )
+    fake_recorder.record_elastic_reinit_start_time.assert_called_once_with()
+    fake_recorder.record_elastic_reinit_end_time.assert_called_once_with()
+    # active_slices=0 is forced on event start (we've lost/are waiting on slices),
+    # then reflects the live count once wait ends and once reinit ends.
+    self.assertEqual(
+        [c.kwargs["active_slices"] for c in fake_recorder.record_elastic_slice_counts.call_args_list],
+        [0, 1, 1],
+    )
 
   def test_ensure_elastic_manager_initialized_readonly_config(self):
     """Tests that ensure_elastic_manager_initialized works with read-only config."""

@@ -868,6 +868,9 @@ def recover(
       )
       elastic_manager.active_slice_indices = all_active_slices
       jax.config.update("jax_default_device", elastic_manager.default_device)
+      # Slice topology for this recovery attempt is now known: close out the
+      # "wait" badput window and open "reinit", logging the post-wait slice counts.
+      elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)
       _logger.info(
           "Active slices after recovery: %s",
           elastic_manager.active_slice_indices,
@@ -1098,6 +1101,9 @@ def recover(
       _logger.info(
           "Recovery complete! Resuming safely at step %d...", restored_step
       )
+      # State is fully restored on the new mesh: close out the "reinit" badput
+      # window and log the fully-recovered slice counts.
+      elastic_utils.record_elastic_reinit_end()
       break
 
     except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError, RuntimeError) as e:
@@ -1128,6 +1134,10 @@ def train_loop(config, recorder, state=None):
     _logger.info(
         "[*] Active slices at startup: %s", elastic_manager.active_slice_indices
     )
+    # Seed a slice-count record now that elastic_manager exists, so cumulative
+    # slice-efficiency queries always have a record at/near job start to seed
+    # from instead of treating the pre-first-event stretch as zero efficiency.
+    elastic_utils.record_slice_state(recorder)
     stop_event = threading.Event()
     monitor_thread = threading.Thread(
         target=elastic_manager._monitor_new_slices,  # pylint: disable=protected-access
@@ -1363,6 +1373,7 @@ def train_loop(config, recorder, state=None):
               elastic_utils.elastic_snapshot(config)
               and elastic_manager.available_inactive_slices
           ):
+            elastic_utils.record_elastic_event_start(recorder, config)
             recover(
                 jax_device_state,
                 python_vars,
@@ -1383,6 +1394,7 @@ def train_loop(config, recorder, state=None):
             _logger.error(
                 "[!] Elastic event detected around step %d", python_vars["step"]
             )
+            elastic_utils.record_elastic_event_start(recorder, config)
             needs_recovery = True
           else:
             # Checkpoint mode or non-elastic error: bubble to elastic_retry
