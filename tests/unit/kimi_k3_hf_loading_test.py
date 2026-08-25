@@ -131,7 +131,7 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         import sys
         import types
         import torch
-        import torch.nn as nn
+        import torch.nn as torch_nn
         import torch.nn.functional as F
         import transformers.utils.generic as tg
 
@@ -152,12 +152,12 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         fla_ops_utils_index = types.ModuleType("fla.ops.utils.index")
         fla_utils = types.ModuleType("fla.utils")
 
-        class ShortConvolution(nn.Module):
+        class ShortConvolution(torch_nn.Module):
           def __init__(self, hidden_size, kernel_size=4, activation="silu", **kwargs):
             super().__init__()
             self.hidden_size = hidden_size
             self.kernel_size = kernel_size
-            self.weight = nn.Parameter(torch.empty(hidden_size, 1, kernel_size))
+            self.weight = torch_nn.Parameter(torch.empty(hidden_size, 1, kernel_size))
             self.bias = None
             self.activation = activation
           def forward(self, x, cache=None, output_final_state=False, cu_seqlens=None):
@@ -169,12 +169,12 @@ class KimiK3HFLoadingTest(unittest.TestCase):
               y = F.silu(y)
             return y, None
 
-        class FusedRMSNormGated(nn.Module):
+        class FusedRMSNormGated(torch_nn.Module):
           def __init__(self, hidden_size, elementwise_affine=True, eps=1e-5, **kwargs):
             super().__init__()
             self.hidden_size = hidden_size
             self.eps = eps
-            self.weight = nn.Parameter(torch.ones(hidden_size)) if elementwise_affine else None
+            self.weight = torch_nn.Parameter(torch.ones(hidden_size)) if elementwise_affine else None
           def forward(self, x, gate=None):
             norm = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
             out = x * norm
