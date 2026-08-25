@@ -55,6 +55,10 @@ from maxtext.layers.embeddings import Embed, DeepSeekV4RotaryEmbedding
 from maxtext.layers.linears import DeepSeekV4GroupedLinear
 from maxtext.layers.mhc import DeepSeek4HyperHead
 from maxtext.layers.moe import RoutedMoE, RoutedAndSharedMoE
+from maxtext.layers.multi_token_prediction import (
+    MultiTokenPredictionLayer,
+    MultiTokenPredictionBlock,
+)
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models.deepseek4 import DeepSeek4DecoderLayer
 
@@ -77,7 +81,7 @@ def get_maxtext_config(**overrides) -> Config:
       "num_experts": 4,
       "num_experts_per_tok": 2,
       "compress_ratios": [0, 0, 4, 128, 4],
-      "mtp_num_layers": 0,
+      "mtp_num_layers": 1,
       "max_target_length": 32,
       "max_prefill_predict_length": 32,
       "skip_jax_distributed_system": True,
@@ -138,7 +142,7 @@ class ModelArgs:
   norm_eps: float = 1e-6
   compress_rates: List[int] = dataclasses.field(default_factory=lambda: [0, 0, 4, 128, 4])
   n_hash_layers: int = 3
-  n_mtp_layers: int = 0
+  n_mtp_layers: int = 1
 
 
 # ==============================================================================
@@ -687,6 +691,37 @@ class ParallelHead_PT(nn_pt.Module):
     return F.linear(x, self.weight)
 
 
+class MTPBlock_PT(Block_PT):
+  def __init__(self, layer_id: int, args: ModelArgs):
+    super().__init__(layer_id, args)
+    self.ffn = MoE_PT(is_hash_layer=False, args=args)
+    self.e_proj = Linear_PT(args.dim, args.dim)
+    self.h_proj = Linear_PT(args.dim, args.dim)
+    self.enorm = RMSNorm_PT(args.dim, args.norm_eps)
+    self.hnorm = RMSNorm_PT(args.dim, args.norm_eps)
+    self.norm = RMSNorm_PT(args.dim, args.norm_eps)
+
+    hc_dim = self.hc_mult * args.dim
+    self.hc_head_fn = nn_pt.Parameter(torch.randn(self.hc_mult, hc_dim, dtype=torch.float32) * 0.02)
+    self.hc_head_base = nn_pt.Parameter(torch.zeros(self.hc_mult, dtype=torch.float32))
+    self.hc_head_scale = nn_pt.Parameter(torch.ones(1, dtype=torch.float32))
+
+    self.embed: Optional[ParallelEmbedding_PT] = None
+    self.head: Optional[ParallelHead_PT] = None
+
+  def forward(self, x: torch.Tensor, start_pos: int, input_ids: torch.Tensor) -> torch.Tensor:
+    assert self.embed is not None and self.head is not None
+    e = self.embed(input_ids)
+    e = self.enorm(e)
+    if self.args.hc_mult > 1:
+      e = e.unsqueeze(2).expand(-1, -1, self.args.hc_mult, -1)
+    x = self.hnorm(x)
+    x = self.e_proj(e) + self.h_proj(x)
+    x = super().forward(x, start_pos, input_ids)
+    logits = self.head(x, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm)
+    return logits
+
+
 # ==============================================================================
 # 4. Parameter Mapping Transfer Helpers
 # ==============================================================================
@@ -707,6 +742,68 @@ def _get_nested_pt_attr(obj, path: str):
     else:
       return None
   return curr
+
+
+
+def _apply_mtp_param_mapping(mt_layer, pt_model, mtp_idx: int, pt_config_dict: dict, mx_config: Config):
+  mapping = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(pt_config_dict, mx_config, scan_layers=False)
+  hooks = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(pt_config_dict, mx_config, scan_layers=False, saving_to_hf=False)
+
+  def _strip_prefix(k):
+    return k.replace(f"mtp.{mtp_idx}.", "").replace(f"model.mtp_blocks.{mtp_idx}.", "")
+
+  for mt_key, hf_key in mapping.items():
+    if f"params-mtp_block-mtp_layer_{mtp_idx+1}" not in mt_key and f"Tid2EidVar-mtp_block-mtp_layer_{mtp_idx+1}" not in mt_key and f"MoEBiasVar-mtp_block-mtp_layer_{mtp_idx+1}" not in mt_key:
+      continue
+
+    if "Tid2EidVar" in mt_key:
+      prefix = f"Tid2EidVar-mtp_block-mtp_layer_{mtp_idx+1}-"
+    elif "MoEBiasVar" in mt_key:
+      prefix = f"MoEBiasVar-mtp_block-mtp_layer_{mtp_idx+1}-"
+    else:
+      prefix = f"params-mtp_block-mtp_layer_{mtp_idx+1}-"
+
+    nnx_subpath = mt_key.replace(prefix, "").replace("-", ".")
+    parts = nnx_subpath.split(".")
+    obj = mt_layer
+    valid = True
+    for part in parts:
+      if hasattr(obj, part):
+        obj = getattr(obj, part)
+      else:
+        valid = False
+        break
+    if not valid or obj is None or not hasattr(obj, "value"):
+      continue
+
+    target_shape = obj.value.shape
+    hook_fn = hooks.get(mt_key, lambda x, target_shape=None: x)
+
+    if hf_key is None:
+      val = hook_fn(None, target_shape=target_shape)
+    elif isinstance(hf_key, list):
+      pt_vals = [_get_nested_pt_attr(pt_model, _strip_prefix(k)) for k in hf_key]
+      if any(v is None for v in pt_vals):
+        continue
+      pt_vals = [v.detach().numpy() for v in pt_vals]
+      slice_shape = target_shape[1:]
+      processed_vals = [hook_fn(v, target_shape=slice_shape) for v in pt_vals]
+      val = np.stack(processed_vals, axis=0)
+    elif isinstance(hf_key, tuple):
+      pt_vals = [_get_nested_pt_attr(pt_model, _strip_prefix(k)) for k in hf_key]
+      if any(v is None for v in pt_vals):
+        continue
+      pt_vals = tuple(v.detach().numpy() for v in pt_vals)
+      val = hook_fn(pt_vals, target_shape=target_shape)
+    else:
+      pt_attr = _get_nested_pt_attr(pt_model, _strip_prefix(hf_key))
+      if pt_attr is None:
+        continue
+      pt_val = pt_attr.detach().numpy()
+      val = hook_fn(pt_val, target_shape=target_shape)
+
+    if val is not None:
+      setattr(obj, "value", jnp.array(val))
 
 
 def _apply_global_param_mapping(mt_model, pt_model, pt_config_dict: dict, mx_config: Config):
@@ -1240,6 +1337,77 @@ class DeepSeekV4FlashDecoderLayerTest(unittest.TestCase):
     self._run_layer_test(4)
 
 
+class DeepSeekV4FlashMTPTest(unittest.TestCase):
+  """Validates MTPBlock_PT against MaxText MultiTokenPredictionLayer."""
+
+  def setUp(self):
+    self.batch_size = 2
+    self.seq_len = 16
+    self.args = ModelArgs()
+    self.dim = self.args.dim
+    self.vocab_size = self.args.vocab_size
+    self.mx_config = get_maxtext_config()
+    self.args.score_func = self.mx_config.routed_score_func
+    self.args.route_scale = self.mx_config.routed_scaling_factor
+    self.mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("tensor",))
+    self.rngs = nnx.Rngs(0)
+
+  def test_mtp_layer_parity(self):
+    pt_mtp = MTPBlock_PT(layer_id=0, args=self.args)
+    pt_embed = ParallelEmbedding_PT(self.vocab_size, self.dim)
+    pt_head = ParallelHead_PT(self.vocab_size, self.dim, self.args)
+    pt_mtp.embed = pt_embed
+    pt_mtp.head = pt_head
+
+    mt_mtp_layer = MultiTokenPredictionLayer(
+        config=self.mx_config,
+        mesh=self.mesh,
+        layer_number=1,
+        transformer_layer_module=DeepSeek4DecoderLayer,
+        rngs=self.rngs,
+    )
+
+    pt_config_dict = {
+        "num_hidden_layers": self.args.n_layers,
+        "first_k_dense_replace": 0,
+        "n_routed_experts": self.args.n_routed_experts,
+        "num_experts_per_tok": self.args.n_activated_experts,
+        "first_num_hash_layers": self.args.n_hash_layers,
+    }
+    _apply_mtp_param_mapping(mt_mtp_layer, pt_mtp, mtp_idx=0, pt_config_dict=pt_config_dict, mx_config=self.mx_config)
+
+    x_np = np.random.uniform(0.1, 1.0, size=(self.batch_size, self.seq_len, self.args.hc_mult, self.dim)).astype(np.float32)
+    pos_np = np.arange(self.seq_len)[None, :].repeat(self.batch_size, axis=0)
+    input_ids_np = np.random.randint(0, self.vocab_size, size=(self.batch_size, self.seq_len))
+
+    # PyTorch MTP forward
+    pt_logits = pt_mtp(
+        x=torch.tensor(x_np),
+        start_pos=0,
+        input_ids=torch.tensor(input_ids_np, dtype=torch.long),
+    ).detach().numpy()
+
+    # MaxText MTP forward: embedding + MTP layer + head
+    e_pt = pt_embed(torch.tensor(input_ids_np, dtype=torch.long)).detach().numpy()
+    mt_hidden = mt_mtp_layer(
+        prev_hidden_state=jnp.array(x_np),
+        target_token_embedding=jnp.array(e_pt),
+        position_ids=jnp.array(pos_np),
+        decoder_segment_ids=jnp.ones_like(pos_np, dtype=jnp.int32),
+        deterministic=True,
+        model_mode="train",
+    )
+    # Apply head
+    mt_hidden_head = mt_mtp_layer.hc_head(mt_hidden)
+    mt_hidden_norm = mt_mtp_layer.final_norm(mt_hidden_head)
+    head_w = pt_head.weight.detach().numpy()
+    mt_logits = np.array(jnp.dot(mt_hidden_norm, jnp.array(head_w.T)))
+
+    max_diff = np.max(np.abs(mt_logits - pt_logits))
+    mean_diff = np.mean(np.abs(mt_logits - pt_logits))
+    print(f"MTP Parity -> max_diff: {max_diff:.6e}, mean_diff: {mean_diff:.6e}")
+    np.testing.assert_allclose(mt_logits, pt_logits, rtol=5e-2, atol=5e-2)
+
 # ==============================================================================
 # Full Model Functional & Parity Test
 # ==============================================================================
@@ -1259,6 +1427,11 @@ class Transformer_PT(nn_pt.Module):
       self.hc_head_fn = nn_pt.Parameter(torch.randn(args.hc_mult, args.hc_mult * args.dim, dtype=torch.float32) * 0.02)
       self.hc_head_base = nn_pt.Parameter(torch.zeros(args.hc_mult, dtype=torch.float32))
       self.hc_head_scale = nn_pt.Parameter(torch.ones(1, dtype=torch.float32))
+    if args.n_mtp_layers > 0:
+      self.mtp = nn_pt.ModuleList([MTPBlock_PT(i, args) for i in range(args.n_mtp_layers)])
+      for mtp_block in self.mtp:
+        mtp_block.embed = self.embed
+        mtp_block.head = self.head
 
   def forward(self, input_ids: torch.Tensor, start_pos: int = 0):
     h = self.embed(input_ids)
@@ -1269,11 +1442,18 @@ class Transformer_PT(nn_pt.Module):
     
     if self.args.hc_mult > 1:
       logits = self.head(h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm)
+      h_norm = self.norm(self.head.hc_head(h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base))
     else:
       h_norm = self.norm(h)
       logits = F.linear(h_norm, self.head.weight)
     
-    return logits
+    mtp_logits = None
+    if self.args.n_mtp_layers > 0:
+      mtp_hidden = h
+      for i, mtp_block in enumerate(self.mtp):
+        mtp_logits = mtp_block(mtp_hidden, start_pos, input_ids)
+    
+    return logits, mtp_logits
 
 
 class DeepSeekV4FlashFullModelTest(unittest.TestCase):
@@ -1289,7 +1469,7 @@ class DeepSeekV4FlashFullModelTest(unittest.TestCase):
 
   def test_full_model_parity(self):
     rng = jax.random.PRNGKey(0)
-    pt_config_dict = {"num_hidden_layers": 5, "num_hash_layers": 3}
+    pt_config_dict = {"num_hidden_layers": 5, "num_mtp_layers": 1, "num_hash_layers": 3}
 
     pt_model = Transformer_PT(self.args)
     pt_model.eval()
@@ -1311,11 +1491,15 @@ class DeepSeekV4FlashFullModelTest(unittest.TestCase):
         
     _apply_global_param_mapping(mt_model, pt_model, pt_config_dict, self.mx_config)
 
+    if self.args.n_mtp_layers > 0:
+      for j in range(self.args.n_mtp_layers):
+        _apply_mtp_param_mapping(getattr(mt_model.mtp_block, f'mtp_layer_{j+1}'), pt_model.mtp[j], j, pt_config_dict, self.mx_config)
+
     # Do forward pass
     pt_model.eval()
     import torch
     with torch.no_grad():
-        logits_pt = pt_model(torch.tensor(input_ids.tolist(), dtype=torch.long))
+        logits_pt, mtp_logits_pt = pt_model(torch.tensor(input_ids.tolist(), dtype=torch.long))
     
     mt_out = mt_model(
         decoder_input_tokens=input_ids,
@@ -1505,6 +1689,22 @@ class DeepSeekV4FlashFullModelTest(unittest.TestCase):
         
     assert_close(np.array(mt_out), logits_pt.detach().numpy(), "Full Model Logits")
 
+    if self.args.n_mtp_layers > 0 and mtp_logits_pt is not None:
+      mt_mtp_layer = getattr(mt_model.mtp_block, "mtp_layer_1")
+      e_mt = mt_model.token_embedder(input_ids)
+      mt_mtp_h = mt_mtp_layer(
+          prev_hidden_state=mt_curr_h,
+          target_token_embedding=e_mt,
+          position_ids=positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode="train",
+      )
+      mt_mtp_head = mt_mtp_layer.hc_head(mt_mtp_h)
+      mt_mtp_norm = mt_mtp_layer.final_norm(mt_mtp_head)
+      mt_mtp_logits = mt_model.decoder.logits_dense(mt_mtp_norm)
+      assert_close(np.array(mt_mtp_logits), mtp_logits_pt.detach().numpy(), "Full Model MTP Logits")
+
   def test_scanned_full_model_parity(self):
     """Validates full PyTorch Transformer_PT against MaxText Transformer (DeepSeek4) with scan_layers=True."""
     # 7 layers: 3 prefix [0, 0, 4] + 4 scanned (2 blocks of [128, 4])
@@ -1512,6 +1712,7 @@ class DeepSeekV4FlashFullModelTest(unittest.TestCase):
     compress_rates = [0, 0, 4, 128, 4, 128, 4]
     pt_config_dict = {
         "num_hidden_layers": n_layers,
+        "num_mtp_layers": 1,
         "num_hash_layers": 3,
     }
 
@@ -1521,6 +1722,7 @@ class DeepSeekV4FlashFullModelTest(unittest.TestCase):
         n_layers=n_layers,
         compress_rates=compress_rates,
         n_hash_layers=3,
+        n_mtp_layers=1,
         n_routed_experts=4,
         n_activated_experts=2,
     )
@@ -1532,6 +1734,7 @@ class DeepSeekV4FlashFullModelTest(unittest.TestCase):
         first_num_hash_layers=3,
         num_experts=4,
         num_experts_per_tok=2,
+        mtp_num_layers=1,
         scan_layers=True,
     )
 
@@ -1544,7 +1747,7 @@ class DeepSeekV4FlashFullModelTest(unittest.TestCase):
 
     # PyTorch Forward Pass
     with torch.no_grad():
-      logits_pt = pt_model(torch.tensor(input_ids.tolist(), dtype=torch.long))
+      logits_pt, mtp_logits_pt = pt_model(torch.tensor(input_ids.tolist(), dtype=torch.long))
 
     # MaxText Linen Forward Pass
     positions = jnp.broadcast_to(jnp.arange(self.seq_len, dtype=jnp.int32)[None, :], (self.batch_size, self.seq_len))

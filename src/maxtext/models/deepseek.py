@@ -415,6 +415,9 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       layer_idx: int = -1,
   ) -> None:
     super().__init__(config, model_mode, mesh, rngs, quant, layer_idx)
+    is_hash_routing = (
+        layer_idx >= 0 and layer_idx < getattr(self.config, "first_num_hash_layers", 0)
+    )
     self.DeepSeekMoeBlock_0 = moe.RoutedAndSharedMoE(
         config=self.config,
         mesh=mesh,
@@ -424,6 +427,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         weight_dtype=self.config.weight_dtype,
         quant=quant,
         rngs=self.rngs,
+        is_hash_routing=is_hash_routing,
     )
 
   def __call__(
@@ -596,11 +600,14 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           self.DeepSeekMoeBlock_0,
           x=intermediate_inputs,
           mhc_type=HyperConnectionType.MLP_MOE,
+          input_ids=decoder_input_tokens,
       )
       load_balance_loss = metadata["load_balance_loss"]
       moe_bias_updates = metadata["moe_bias_updates"]
     else:
-      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(hidden_states, deterministic)
+      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(
+          hidden_states, deterministic, input_ids=decoder_input_tokens
+      )
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
@@ -608,7 +615,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(
-        x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
+        x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding, **kwargs
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
 
