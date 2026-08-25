@@ -221,3 +221,63 @@ To run MMLU benchmarks and validate the model's performance, follow the instruct
   * [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) implementation with flag `sparse_matmul=True megablox=False`.
   * General dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
 * Dropping implementation with flag `sparse_matmul=False` and reasonable `capacity_factor`, commonly used from 1 to 1.25.
+
+---
+
+# Kimi K3 (2.8T MoE / KimiLinearModel)
+
+**Kimi K3** ([arXiv:2607.24653](https://arxiv.org/abs/2607.24653)) is Moonshot AI's 2.8T-parameter linear-attention hybrid model featuring:
+* **Hybrid 3:1 Interleaving**: 69 KDA (Kimi Decoupled Attention) linear-time recurrence layers and 24 Multi-Head Latent Attention (MLA) full-attention layers (93 layers total, ending with global MLA at layer 93).
+* **KDA Recurrent Gating**: Log-decay gating parameterized via $g_t^h = g_{\min} \cdot \text{sigmoid}(e^{A_h} (z_t^h + b)) \in (-5.0, 0)$ with unit L2-normalized query/key vectors.
+* **Stable LatentMoE**: 896 routed experts (16 active per token) + 2 shared experts with dimension down-projection ($7168 \to 3584$), intermediate RMSNorm (`latent_moe_use_norm: true`), and up-projection ($3584 \to 7168$).
+* **Quantile Balancing Router**: Sigmoid router scoring (`routed_score_func: "sigmoid"`), auxiliary-loss-free top-k selection (`topk_method: "noaux_tc"`), and learnable bias correction (`routed_bias: true`).
+* **Situ-GLU Activations**: Non-monotonic $\text{Situ}(x, \beta_1) = \beta_1 \tanh(x / \beta_1) \cdot \sigma(x)$ with $\beta_1 = 4.0$ coupled with linear-beta-tanh branch ($\beta_2 = 25.0$).
+* **MXFP4 Expert Weights**: 4-bit `E2M1` packed representations with 8-bit `E8M0` group-32 scales dequantized directly during conversion.
+
+## Checkpoint Conversion for Kimi K3
+
+1. **Download HuggingFace Checkpoint**:
+```sh
+# Full model
+hf download moonshotai/Kimi-K3 --local-dir $LOCAL_HF_PATH
+
+# Or subset for fast testing
+python3 scratch/download_kimi_k3_subset.py
+```
+
+2. **Convert Checkpoint to MaxText Orbax Format**:
+```sh
+# Full 93-layer model
+python3 src/maxtext/checkpoint_conversion/to_maxtext.py \
+    src/maxtext/configs/models/kimi-k3.yml \
+    model_name=kimi-k3 \
+    hf_model_path=$LOCAL_HF_PATH \
+    base_output_directory=$ORBAX_OUTPUT_DIR
+
+# Minimal 2-layer model for fast validation
+python3 src/maxtext/checkpoint_conversion/to_maxtext.py \
+    src/maxtext/configs/models/kimi-k3-minimal.yml \
+    model_name=kimi-k3 \
+    hf_model_path=scratch/hf_kimi_k3_subset \
+    base_output_directory=scratch/kimi_k3_orbax_checkpoint \
+    override_model_config=True \
+    base_num_decoder_layers=2 \
+    scan_layers=False
+```
+
+## Running Verification on TPU v5p-8
+
+On a TPU v5p-8 VM (8 TPU chips):
+
+```sh
+# 1. Run Unit and Mathematical Parity Tests
+pytest tests/unit/situ_activation_test.py tests/unit/kda_test.py tests/unit/mla_output_gate_test.py tests/unit/kimi_moe_test.py tests/unit/kimi_linear_model_test.py tests/unit/kimi_k3_logit_parity_test.py tests/unit/configs_test.py -k "kimi"
+
+# 2. Run Architectural Details Verification
+python3 scratch/verify_kimi_k3_architectural_details.py
+
+# 3. Run Checkpoint Loading and Forward Pass Verification on TPU
+KIMI_K3_CHECKPOINT_DIR=scratch/kimi_k3_orbax_checkpoint \
+KIMI_K3_CONFIG=src/maxtext/configs/models/kimi-k3-minimal.yml \
+pytest -m tpu_only tests/unit/kimi_k3_hf_loading_test.py
+```

@@ -45,21 +45,23 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         "KIMI_K3_CHECKPOINT_DIR",
         os.path.abspath("scratch/kimi_k3_orbax_checkpoint"),
     )
+    cls.config_path = os.environ.get(
+        "KIMI_K3_CONFIG",
+        "src/maxtext/configs/models/kimi-k3-minimal.yml",
+    )
     if not os.path.exists(cls.checkpoint_dir):
       raise unittest.SkipTest(f"Checkpoint directory {cls.checkpoint_dir} does not exist. Run to_maxtext first.")
-
 
   def test_load_checkpoint_and_forward_pass(self):
     config = pyconfig.initialize([
         "kimi_k3_hf_loading_test.py",
-        "src/maxtext/configs/models/kimi-k3-minimal.yml",
+        self.config_path,
         "model_name=kimi-k3",
         "override_model_config=True",
         "base_num_decoder_layers=2",
         "skip_jax_distributed_system=True",
         "scan_layers=False",
     ])
-
 
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
