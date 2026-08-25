@@ -276,6 +276,7 @@ def make_tgmm_configs(
       # tgmm accumulation happens at the 'pallas_call' level.
       zero_init=False,
       fuse_act=fuse_act,
+      transpose_rhs=False,
   )
 
 

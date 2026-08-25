@@ -710,11 +710,15 @@ def _dlhs_run_tokamax_v2(
     transpose_rhs: bool,
 ) -> jnp.ndarray:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
-  # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs support.
-  dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
   dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
 
   custom_dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+  kernel_transpose_rhs = not transpose_rhs
+  dlhs_rhs = rhs
+  # Sub-byte packing only supports the standard [group, k, n] RHS layout.
+  if kernel_transpose_rhs and jax.dtypes.itemsize_bits(rhs.dtype) < 8:
+    dlhs_rhs = rhs.swapaxes(1, 2)
+    kernel_transpose_rhs = False
 
   dlhs = gmm_v2.gmm_v2(
       lhs=dlhs_lhs,
@@ -725,6 +729,7 @@ def _dlhs_run_tokamax_v2(
       tile_info=custom_dlhs_tiling,
       preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
+      transpose_rhs=kernel_transpose_rhs,
   )
 
   if isinstance(dlhs_dout, qpl.QArray):
