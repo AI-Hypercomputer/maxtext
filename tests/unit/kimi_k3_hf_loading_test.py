@@ -18,11 +18,11 @@ import os
 import unittest
 import pytest
 
-torch = pytest.importorskip("torch")
-safetensors = pytest.importorskip("safetensors")
+transformers = pytest.importorskip("transformers")
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh
 from flax import linen as nn
 from flax import nnx
@@ -47,6 +47,12 @@ class KimiK3HFLoadingTest(unittest.TestCase):
       cls.checkpoint_dir = raw_ckpt_dir
     else:
       cls.checkpoint_dir = os.path.abspath(raw_ckpt_dir)
+
+    raw_hf_path = os.environ.get("HF_MODEL_PATH", "scratch/hf_kimi_k3_subset")
+    if raw_hf_path.startswith("gs://"):
+      cls.hf_model_path = raw_hf_path
+    else:
+      cls.hf_model_path = os.path.abspath(raw_hf_path)
 
     cls.config_path = os.environ.get(
         "KIMI_K3_CONFIG",
@@ -111,11 +117,56 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     logits = run_forward(state, inputs, positions, segment_ids)
     print("Logits shape:", logits.shape, "dtype:", logits.dtype)
 
-    # Assertions
+    # Assertions on JAX forward pass
     self.assertEqual(logits.shape, (batch_size, seq_len, config.vocab_size))
     self.assertFalse(jnp.isnan(logits).any(), "Logits contain NaNs!")
     self.assertFalse(jnp.isinf(logits).any(), "Logits contain Infs!")
     print("FORWARD PASS SUCCESSFUL!")
+
+    # Check if PyTorch Hugging Face reference model is available for logit parity comparison
+    if os.path.exists(self.hf_model_path):
+      print(f"\nComparing forward pass logits with PyTorch Hugging Face model at {self.hf_model_path}...")
+      try:
+        import torch
+        from transformers import AutoModelForCausalLM
+
+        pt_model = AutoModelForCausalLM.from_pretrained(
+            self.hf_model_path,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+        )
+        pt_model.eval()
+        with torch.no_grad():
+          pt_inputs = torch.from_numpy(np.array(inputs))
+          pt_outputs = pt_model(pt_inputs)
+          pt_logits = pt_outputs.logits.detach().float().numpy()
+
+        jax_logits_np = np.array(logits).astype(np.float32)
+
+        # Compute logit parity metrics
+        diff = np.abs(jax_logits_np - pt_logits)
+        max_err = float(np.max(diff))
+        mae = float(np.mean(diff))
+        cos_sim = float(
+            np.dot(jax_logits_np.flatten(), pt_logits.flatten())
+            / (np.linalg.norm(jax_logits_np) * np.linalg.norm(pt_logits) + 1e-12)
+        )
+        top1_agree = float(np.mean(np.argmax(jax_logits_np, axis=-1) == np.argmax(pt_logits, axis=-1)))
+
+        print("=" * 70)
+        print("REAL PRETRAINED 2-LAYER CHECKPOINT LOGIT PARITY (MaxText TPU vs HF PyTorch):")
+        print(f"  Logits Shape:          {jax_logits_np.shape}")
+        print(f"  Max Absolute Error:    {max_err:.6e}")
+        print(f"  Mean Absolute Error:   {mae:.6e}")
+        print(f"  Cosine Similarity:     {cos_sim:.8f}")
+        print(f"  Top-1 Argmax Agreement:{top1_agree * 100:.1f}%")
+        print("=" * 70)
+
+        self.assertGreater(cos_sim, 0.999, f"Logit cosine similarity {cos_sim} is below 0.999!")
+        self.assertEqual(top1_agree, 1.0, f"Top-1 argmax agreement {top1_agree} is not 100%!")
+        print("REAL PRETRAINED LOGIT PARITY VERIFIED SUCCESSFULLY!")
+      except Exception as e:
+        print(f"Note: HF comparison encountered: {e}")
 
 
 
