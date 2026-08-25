@@ -260,11 +260,12 @@ class BlockCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable
     )
 
 
-class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access,abstract-method
+class HCAStaticMask(splash_attention_mask.Mask):
   """Static compile-time mask for DeepSeek-V4 Hybrid Compressed Attention (HCA).
 
   Defines coarse-block coordinates and deduplicated partial block patterns for
-  Splash Attention without materializing runtime boolean mask arrays in HBM.
+  Splash Attention with pre-packed bitmasks loaded into VMEM/SMEM, eliminating
+  runtime VPU arithmetic overhead without materializing dense boolean mask arrays in HBM.
 
   Attributes:
     shape: (seq_len, aligned_kv_len) tuple.
@@ -285,36 +286,48 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
       local_window: Optional[int] = 128,
       shard_count: int = 1,
   ):
+    del shard_count
+    self._shape = shape
     self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
     self.compressed_kv_len = (
         compressed_kv_len if compressed_kv_len is not None else max(1, self.local_kv_len // max(1, compress_ratio))
     )
     self.pad_kv_total = pad_kv_total
-    self.compress_ratio = compress_ratio
+    self.compress_ratio = max(1, compress_ratio)
     self.local_window = local_window
 
-    def hca_mask_function(q_ids, kv_ids):
-      if q_ids.size == 0 or kv_ids.size == 0:
-        return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
-      diff = q_ids - kv_ids
-      if self.local_window is None:
-        local_m = (diff >= 0) & (kv_ids < self.local_kv_len)
-      elif self.local_window > 0:
-        local_m = (diff >= 0) & (diff < self.local_window) & (kv_ids < self.local_kv_len)
-      else:
-        local_m = np.zeros((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
+  @property
+  def shape(self) -> tuple[int, int]:
+    return self._shape
 
-      c_idx = kv_ids - self.local_kv_len - self.pad_kv_total
-      ratio = max(1, self.compress_ratio)
-      c_thresh = (q_ids + 1) // ratio
-      comp_m = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < self.compressed_kv_len)
-      return local_m | comp_m
+  def __getitem__(self, idx: tuple[slice, slice]) -> np.ndarray:
+    if len(idx) != 2:
+      raise NotImplementedError(f"Unsupported slice: {idx}")
+    q_slice, kv_slice = idx
+    if not isinstance(q_slice, slice) or not isinstance(kv_slice, slice):
+      raise NotImplementedError(f"Unsupported slice: {idx}")
 
-    super().__init__(
-        shape=shape,
-        mask_function=hca_mask_function,
-        shard_count=shard_count,
-    )
+    q_slice = splash_attention_mask._fill_slice(q_slice, self.shape[0])
+    kv_slice = splash_attention_mask._fill_slice(kv_slice, self.shape[1])
+
+    rows = np.arange(q_slice.start, q_slice.stop, dtype=np.int32)[:, None]
+    cols = np.arange(kv_slice.start, kv_slice.stop, dtype=np.int32)[None, :]
+
+    if rows.size == 0 or cols.size == 0:
+      return np.empty((rows.shape[0], cols.shape[1]), dtype=np.bool_)
+
+    diff = rows - cols
+    if self.local_window is None:
+      local_m = (diff >= 0) & (cols < self.local_kv_len)
+    elif self.local_window > 0:
+      local_m = (diff >= 0) & (diff < self.local_window) & (cols < self.local_kv_len)
+    else:
+      local_m = np.zeros((rows.shape[0], cols.shape[1]), dtype=np.bool_)
+
+    c_idx = cols - self.local_kv_len - self.pad_kv_total
+    c_thresh = (rows + 1) // self.compress_ratio
+    comp_m = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < self.compressed_kv_len)
+    return local_m | comp_m
 
   def __eq__(self, other: object):
     if not isinstance(other, type(self)):
@@ -326,7 +339,6 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
         and self.pad_kv_total == other.pad_kv_total
         and self.compress_ratio == other.compress_ratio
         and self.local_window == other.local_window
-        and np.array_equal(self.q_sequence, other.q_sequence)
     )
 
   def __hash__(self):
@@ -339,7 +351,6 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
             self.pad_kv_total,
             self.compress_ratio,
             self.local_window,
-            self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
 
