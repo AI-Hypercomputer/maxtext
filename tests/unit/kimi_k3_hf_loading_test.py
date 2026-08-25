@@ -64,6 +64,7 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     config = pyconfig.initialize([
         "kimi_k3_hf_loading_test.py",
         self.config_path,
+        "base_config=src/maxtext/configs/base.yml",
         "model_name=kimi-k3",
         "override_model_config=True",
         "base_num_decoder_layers=2",
@@ -71,6 +72,7 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         "dtype=bfloat16",
         "weight_dtype=bfloat16",
         f"ici_expert_parallelism={expert_parallelism}",
+        "ici_fsdp_parallelism=1",
         f"load_parameters_path={ckpt_path}",
     ])
 

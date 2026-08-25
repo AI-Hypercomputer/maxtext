@@ -332,6 +332,7 @@ class GateLogit(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.kernel_axes,
           out_sharding=self.kernel_axes,
       )
 
@@ -341,6 +342,7 @@ class GateLogit(nnx.Module):
       # DSV3 was using nnx.Param and that code we are keeping the same
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+          sharding=bias_axes,
           out_sharding=bias_axes,
       )
       if self.model_name.startswith("deepseek4"):
@@ -585,6 +587,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wi_kernel_axes,
           out_sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
@@ -599,6 +602,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wo_kernel_axes,
           out_sharding=self.wo_kernel_axes,
       )
     else:
@@ -610,6 +614,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wi_kernel_axes,
           out_sharding=self.wi_kernel_axes,
       )
       self.wi_1 = nnx.Param(
@@ -620,6 +625,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wi_kernel_axes,
           out_sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
@@ -634,6 +640,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wo_kernel_axes,
           out_sharding=self.wo_kernel_axes,
       )
 
