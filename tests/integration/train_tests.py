@@ -723,12 +723,16 @@ class TrainTests(unittest.TestCase):
     # Gemma 3 reads its local/global attention pattern and rope scaling off the named
     # model config, so it cannot run under the placeholder "default" model name.
     families = [
-        ("gemma", "tokenizer.gemma", []),
-        ("gemma2", "tokenizer.gemma", []),
-        ("gemma3", "tokenizer.gemma3", ["model_name=gemma3-4b", "override_model_config=True"]),
+        ("gemma", "gemma", "tokenizer.gemma", []),
+        ("gemma2", "gemma2", "tokenizer.gemma", []),
+        ("gemma3", "gemma3", "tokenizer.gemma3", ["model_name=gemma3-4b", "override_model_config=True"]),
+        # Host offload keeps the parameters in pinned_host, so the gradients are moved
+        # back to device memory before the optimizer update. That move must not also
+        # relayout them out of the ZeRO-1 ("data"-sharded) layout the moments are in.
+        ("gemma-host-offload", "gemma", "tokenizer.gemma", ["parameter_memory_host_offload=True", "param_scan_axis=0"]),
     ]
-    for decoder_block, tokenizer, extra_args in families:
-      with self.subTest(decoder_block=decoder_block):
+    for case, decoder_block, tokenizer, extra_args in families:
+      with self.subTest(case=case):
         gemma_zero1_ga = [
             None,
             get_test_config_path(),

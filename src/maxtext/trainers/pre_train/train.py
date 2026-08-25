@@ -557,9 +557,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         grad_shardings,
     )
   if config.parameter_memory_host_offload:
+    # Only the memory kind should change here. Targeting `params_shardings` would also
+    # undo the ZeRO-1 relayout above, handing the optimizer gradients sharded P('fsdp')
+    # against moments sharded P(('data', 'fsdp')). `grad_shardings` is `params_shardings`
+    # whenever ZeRO-1 + explicit sharding is not active, so this is otherwise unchanged.
     raw_grads = jax.device_put(
         raw_grads,
-        max_utils.with_memory_kind(params_shardings, "device"),
+        max_utils.with_memory_kind(grad_shardings, "device"),
     )
 
   # Extract aux fields into locals
