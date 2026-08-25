@@ -753,7 +753,14 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
+  elif config.decoder_block in (
+      DecoderBlockType.QWEN3_NEXT,
+      DecoderBlockType.QWEN3_5,
+  ):
+    num_dense_layers = config.first_num_dense_layers
+    num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
+    return num_dense_layers, num_moe_layers
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK4:
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -1955,10 +1962,10 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
 
     def _to_abstract_var(a_var, s_var):
-      a_val = a_var.get_value()
+      a_val = a_var.get_value() if hasattr(a_var, "get_value") else a_var
       s_val = getattr(s_var, "sharding", None) if isinstance(s_var, nnx.Variable) else s_var
       if s_val is None and isinstance(s_var, nnx.Variable):
-        s_val = s_var.get_value()
+        s_val = s_var.get_value() if hasattr(s_var, "get_value") else s_var
 
       def _extract_primary_sharding(s):
         if isinstance(s, (jax.sharding.Sharding, jax.sharding.PartitionSpec)):
@@ -1983,7 +1990,9 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
       else:
         s_tree = (
             jax.tree.map(lambda _: s_val, a_val)
-            if isinstance(s_val, (jax.sharding.Sharding, jax.sharding.PartitionSpec))
+            if isinstance(
+                s_val, (jax.sharding.Sharding, jax.sharding.PartitionSpec)
+            )
             else s_val
         )
         new_val = jax.tree.map(
@@ -1992,7 +2001,9 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
             s_tree,
             is_leaf=lambda x: hasattr(x, "shape") and hasattr(x, "dtype"),
         )
-      return a_var.replace(value=new_val)
+      if hasattr(a_var, "replace"):
+        return a_var.replace(value=new_val)
+      return new_val
 
     abstract_state = jax.tree.map(
         _to_abstract_var,

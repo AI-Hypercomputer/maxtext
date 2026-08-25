@@ -14,6 +14,7 @@
 
 """DeepSeek Manifold-Constrained Hyper Connections (mHC) Layer."""
 
+import functools
 import itertools
 import math
 from typing import Callable
@@ -21,13 +22,14 @@ from typing import Callable
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.kernels.mhc import api as mhc_kernel
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes
 
 
 def get_permutation_matrices(k: int) -> Array:
@@ -104,8 +106,13 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.weight_dtype = self.config.weight_dtype
     self.matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
-    if getattr(self.config, "use_mhc_pallas_kernel", False) and not self.config.enable_mhc_lite:
-      raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
+    if (
+        getattr(self.config, "use_mhc_pallas_kernel", False)
+        and not self.config.enable_mhc_lite
+    ):
+      raise ValueError(
+          "use_mhc_pallas_kernel=True requires enable_mhc_lite=True."
+      )
 
     # Norm layer
     self.mhc_norm = RMSNorm(
@@ -268,22 +275,74 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     h_post = None
     h_res = None
     context = None
-    use_kernel = self.config.enable_mhc_lite and getattr(self.config, "use_mhc_pallas_kernel", False)
+    use_kernel = self.config.enable_mhc_lite and getattr(
+        self.config, "use_mhc_pallas_kernel", False
+    )
     if use_kernel:
-      fwd_block_size = getattr(self.config, "mhc_pallas_kernel_fwd_block_size", 256)
-      bwd_block_size = getattr(self.config, "mhc_pallas_kernel_bwd_block_size", 128)
+      fwd_block_size = getattr(
+          self.config, "mhc_pallas_kernel_fwd_block_size", 256
+      )
+      bwd_block_size = getattr(
+          self.config, "mhc_pallas_kernel_bwd_block_size", 128
+      )
       kernel_config = mhc_kernel.MhcKernelConfig(
           block_size=fwd_block_size,
           bwd_block_size=bwd_block_size,
           rms_epsilon=self.config.normalization_layer_epsilon,
       )
       weights = self._get_mhc_weights()
-      layer_input, context = mhc_kernel.pre(
-          x,
-          weights,
-          jnp.asarray(self.permutation_matrices, self.dtype),
-          config=kernel_config,
-      )
+      perms = jnp.asarray(self.permutation_matrices, self.dtype)
+      if self.mesh is not None:
+        rules = get_logical_axis_rules()
+        x_pspec = logical_to_mesh_axes(
+            ("activation_batch", "activation_length", None, "activation_embed"),
+            mesh=self.mesh,
+            rules=rules,
+        )
+        layer_input_pspec = logical_to_mesh_axes(
+            ("activation_batch", "activation_length", "activation_embed"),
+            mesh=self.mesh,
+            rules=rules,
+        )
+        h_post_pspec = logical_to_mesh_axes(
+            ("activation_batch", "activation_length", None),
+            mesh=self.mesh,
+            rules=rules,
+        )
+        residual_pspec = logical_to_mesh_axes(
+            ("activation_batch", "activation_length", None, None),
+            mesh=self.mesh,
+            rules=rules,
+        )
+        weights_pspec = jax.tree.map(lambda _: P(), weights)
+        perms_pspec = P()
+        context_pspec = mhc_kernel.MhcContext(
+            x=x_pspec,
+            h_post=h_post_pspec,
+            residual=residual_pspec,
+            implementation="mosaic",
+        )
+
+        @functools.partial(
+            jax.shard_map,
+            mesh=self.mesh,
+            in_specs=(x_pspec, weights_pspec, perms_pspec),
+            out_specs=(layer_input_pspec, context_pspec),
+            check_vma=False,
+        )
+        def shard_mapped_pre(x_val, weights_val, perms_val):
+          return mhc_kernel.pre(
+              x_val, weights_val, perms_val, config=kernel_config
+          )
+
+        layer_input, context = shard_mapped_pre(x, weights, perms)
+      else:
+        layer_input, context = mhc_kernel.pre(
+            x,
+            weights,
+            perms,
+            config=kernel_config,
+        )
     else:
       with jax.named_scope("mhc_norm"):
         # 1. Flatten the tensor, and RMS normalization
@@ -294,10 +353,14 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       post_alpha = jnp.asarray(self.post_alpha[...], self.dtype)
       res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
 
-      alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
+      alpha_concat = jnp.concatenate(
+          [pre_alpha, post_alpha, res_alpha], axis=-1
+      )
 
       # MatMul on normalized input
-      h_concat = jnp.einsum("bsm,mn -> bsn", norm_x, alpha_concat, precision=self.matmul_precision)
+      h_concat = jnp.einsum(
+          "bsm,mn -> bsn", norm_x, alpha_concat, precision=self.matmul_precision
+      )
       h_pre = h_concat[..., : self.k]
       h_post = h_concat[..., self.k : 2 * self.k]
       h_res = h_concat[..., 2 * self.k :]
@@ -310,13 +373,9 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
           1.0,
           eps=1e-6,
       )
-      # bskd, bsk -> bsd (fused contracted GEMM)
-      layer_input = jnp.einsum(
-          "bsk,bskd->bsd",
-          pre_mapping,
-          x,
-          precision=self.matmul_precision,
-      )
+      # Moving away from einsum seems to allow XLA to perform better fusions
+      # bskd, bsk -> bsd
+      layer_input = jnp.sum(x * jnp.expand_dims(pre_mapping, axis=3), axis=2)
 
     # 3. Pre-norm
     layer_input = norm_fn(layer_input)
@@ -335,17 +394,64 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       raise ValueError(f"Unsupported type: {mhc_type}")
 
     if use_kernel:
-      fwd_block_size = getattr(self.config, "mhc_pallas_kernel_fwd_block_size", 256)
-      bwd_block_size = getattr(self.config, "mhc_pallas_kernel_bwd_block_size", 128)
+      fwd_block_size = getattr(
+          self.config, "mhc_pallas_kernel_fwd_block_size", 256
+      )
+      bwd_block_size = getattr(
+          self.config, "mhc_pallas_kernel_bwd_block_size", 128
+      )
       kernel_config = mhc_kernel.MhcKernelConfig(
           block_size=fwd_block_size,
           bwd_block_size=bwd_block_size,
       )
-      output = mhc_kernel.post(
-          layer_out,
-          context,
-          config=kernel_config,
-      )
+      if self.mesh is not None:
+        rules = get_logical_axis_rules()
+        x_pspec = logical_to_mesh_axes(
+            ("activation_batch", "activation_length", None, "activation_embed"),
+            mesh=self.mesh,
+            rules=rules,
+        )
+        layer_out_pspec = logical_to_mesh_axes(
+            ("activation_batch", "activation_length", "activation_embed"),
+            mesh=self.mesh,
+            rules=rules,
+        )
+        h_post_pspec = logical_to_mesh_axes(
+            ("activation_batch", "activation_length", None),
+            mesh=self.mesh,
+            rules=rules,
+        )
+        residual_pspec = logical_to_mesh_axes(
+            ("activation_batch", "activation_length", None, None),
+            mesh=self.mesh,
+            rules=rules,
+        )
+        context_pspec = mhc_kernel.MhcContext(
+            x=x_pspec,
+            h_post=h_post_pspec,
+            residual=residual_pspec,
+            implementation="mosaic",
+        )
+
+        @functools.partial(
+            jax.shard_map,
+            mesh=self.mesh,
+            in_specs=(layer_out_pspec, context_pspec),
+            out_specs=x_pspec,
+            check_vma=False,
+        )
+        def shard_mapped_post(layer_out_val, context_val):
+          return mhc_kernel.post(
+              layer_out_val, context_val, config=kernel_config
+          )
+
+        output = shard_mapped_post(layer_out, context)
+      else:
+        output = mhc_kernel.post(
+            layer_out,
+            context,
+            config=kernel_config,
+        )
       return output, metadata
 
     # 5. Post mapping

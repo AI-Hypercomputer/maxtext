@@ -144,6 +144,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
 
     # Determine the type of attention mechanism for the current layer.
     is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+    self.is_full_attention_layer = is_full_attention_layer
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
