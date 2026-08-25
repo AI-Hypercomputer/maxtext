@@ -99,11 +99,20 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
     segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
 
-    # Split NNX model into static graphdef and state to run a pure functional forward pass
+    # Split NNX model into static graphdef and state to run pure functional forward passes
     graphdef, state = nnx.split(model)
 
     @jax.jit
-    def run_forward(state_in, x, p, s):
+    def run_layer0_forward(state_in, x, p, s):
+      with nn.logical_axis_rules(config.logical_axis_rules):
+        m = nnx.merge(graphdef, state_in)
+        h = m.decoder.token_embedder(x)
+        h = m.decoder.layers["decoder_0"](h, p, s, enable_dropout=False)
+        h = m.decoder.decoder_norm(h)
+        return m.decoder.token_embedder.attend(h)
+
+    @jax.jit
+    def run_full_forward(state_in, x, p, s):
       with nn.logical_axis_rules(config.logical_axis_rules):
         m = nnx.merge(graphdef, state_in)
         return m(
@@ -113,15 +122,20 @@ class KimiK3HFLoadingTest(unittest.TestCase):
             enable_dropout=False,
         )
 
-    print("Running JIT-compiled forward pass on TPU...")
-    logits = run_forward(state, inputs, positions, segment_ids)
-    print("Logits shape:", logits.shape, "dtype:", logits.dtype)
+    print("Running JIT-compiled full 2-layer forward pass on TPU...")
+    full_logits = run_full_forward(state, inputs, positions, segment_ids)
+    print("Full model logits shape:", full_logits.shape, "dtype:", full_logits.dtype)
+
+    print("Running JIT-compiled layer-0 forward pass on TPU...")
+    layer0_logits = run_layer0_forward(state, inputs, positions, segment_ids)
+    print("Layer 0 logits shape:", layer0_logits.shape, "dtype:", layer0_logits.dtype)
 
     # Assertions on JAX forward pass
-    self.assertEqual(logits.shape, (batch_size, seq_len, config.vocab_size))
-    self.assertFalse(jnp.isnan(logits).any(), "Logits contain NaNs!")
-    self.assertFalse(jnp.isinf(logits).any(), "Logits contain Infs!")
-    print("FORWARD PASS SUCCESSFUL!")
+    self.assertEqual(full_logits.shape, (batch_size, seq_len, config.vocab_size))
+    self.assertFalse(jnp.isnan(full_logits).any(), "Full model logits contain NaNs!")
+    self.assertFalse(jnp.isinf(full_logits).any(), "Full model logits contain Infs!")
+    self.assertFalse(jnp.isnan(layer0_logits).any(), "Layer 0 logits contain NaNs!")
+    print("FORWARD PASSES ON TPU SUCCESSFUL!")
 
     # Check if PyTorch Hugging Face reference model is available for logit parity comparison
     print(f"\nChecking Hugging Face reference checkpoint at: {self.hf_model_path}")
@@ -189,28 +203,28 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         final_norm = PtRMSNorm(D)
         final_norm.scale.data = norm_w.float()
 
-        # Run PyTorch reference forward pass
+        # Run PyTorch reference forward pass for Layer 0
         token_ids_pt = torch.from_numpy(np.array(inputs))
         x_pt = embed_w[token_ids_pt].float()
         x_pt = layer0(x_pt)
         x_pt = final_norm(x_pt)
         pt_logits = (x_pt @ lm_head_w.float().T).detach().numpy()
 
-        jax_logits_np = np.array(logits).astype(np.float32)
+        jax_layer0_logits_np = np.array(layer0_logits).astype(np.float32)
 
         # Compute logit parity metrics
-        diff = np.abs(jax_logits_np - pt_logits)
+        diff = np.abs(jax_layer0_logits_np - pt_logits)
         max_err = float(np.max(diff))
         mae = float(np.mean(diff))
         cos_sim = float(
-            np.dot(jax_logits_np.flatten(), pt_logits.flatten())
-            / (np.linalg.norm(jax_logits_np) * np.linalg.norm(pt_logits) + 1e-12)
+            np.dot(jax_layer0_logits_np.flatten(), pt_logits.flatten())
+            / (np.linalg.norm(jax_layer0_logits_np) * np.linalg.norm(pt_logits) + 1e-12)
         )
-        top1_agree = float(np.mean(np.argmax(jax_logits_np, axis=-1) == np.argmax(pt_logits, axis=-1)))
+        top1_agree = float(np.mean(np.argmax(jax_layer0_logits_np, axis=-1) == np.argmax(pt_logits, axis=-1)))
 
         print("=" * 70)
-        print("REAL PRETRAINED CHECKPOINT LOGIT PARITY (MaxText TPU vs HF PyTorch):")
-        print(f"  Logits Shape:          {jax_logits_np.shape}")
+        print("REAL PRETRAINED LAYER-0 CHECKPOINT LOGIT PARITY (MaxText TPU vs HF PyTorch):")
+        print(f"  Logits Shape:          {jax_layer0_logits_np.shape}")
         print(f"  Max Absolute Error:    {max_err:.6e}")
         print(f"  Mean Absolute Error:   {mae:.6e}")
         print(f"  Cosine Similarity:     {cos_sim:.8f}")
