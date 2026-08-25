@@ -4034,6 +4034,9 @@ class MaxTextConfig(
           "qwen3",
           "qwen3_moe",
           "qwen3_custom_moe",
+          "gemma",
+          "gemma2",
+          "gemma3",
       }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(

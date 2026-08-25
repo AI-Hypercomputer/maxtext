@@ -444,6 +444,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
     loss_model, loss_params, loss_rng = state.model, None, None
 
+  # Layout the gradients must be in when they reach the optimizer. This is
+  # params_shardings unless ZeRO-1 + explicit sharding is active, in which case the
+  # optimizer moments live in a "data"-sharded layout that explicit sharding will not
+  # implicitly reconcile with the parameter layout.
+  grad_shardings = sharding.get_grad_shardings(config, state_mesh_shardings, params_shardings)
+
   # --- Gradient computation ---
   if config.gradient_accumulation_steps > 1:
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
@@ -454,6 +460,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         params_shardings,
         data,
         loss_rng,
+        out_grad_shardings=grad_shardings,
     )
   else:
     if isinstance(model, nn.Module):
@@ -519,7 +526,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             curr_params,
             is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
-        nnx.update(state.model, curr_params)
+        if grad_shardings is params_shardings:
+          nnx.update(state.model, curr_params)
+        # Otherwise (ZeRO-1 + explicit sharding) leave state.model in the ZeRO-1 layout
+        # it was donated in. curr_params above is all-gathered over "data" for the
+        # forward/backward pass only; writing it back would hand the optimizer params
+        # sharded P('fsdp') alongside gradients and moments sharded P(('data', 'fsdp')),
+        # which explicit sharding rejects instead of silently reconciling.
 
       def diff_wrapper(curr_params, custom_params, rest, config, data):
         local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
@@ -535,6 +548,14 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
       raw_grads,
   )
+  if grad_shardings is not params_shardings:
+    # No-op for the gradient-accumulation path, which already produced grads in this
+    # layout; needed for the single-microbatch path under ZeRO-1 + explicit sharding.
+    raw_grads = jax.tree.map(
+        functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+        raw_grads,
+        grad_shardings,
+    )
   if config.parameter_memory_host_offload:
     raw_grads = jax.device_put(
         raw_grads,
