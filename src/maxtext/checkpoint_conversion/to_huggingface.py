@@ -183,7 +183,9 @@ def _get_model_mappings(
     ValueError: If mappings for the specified `model_name` are not found.
   """
   if model_name not in PARAM_MAPPING or model_name not in HF_SHAPE or model_name not in HOOK_FNS:
-    raise ValueError(f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}")
+    raise ValueError(
+        f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}"
+    )
 
   param_mapping = PARAM_MAPPING[model_name](hf_config_dict, maxtext_config, scan_layers)
   hook_fn_mapping = HOOK_FNS[model_name](hf_config_dict, maxtext_config, scan_layers, saving_to_hf=True)
@@ -238,6 +240,12 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
       ("vocab_size", "vocab_size"),
       ("global_head_dim", "global_head_dim"),
       ("num_global_key_value_heads", "global_num_kv_heads"),
+      ("hc_mult", "mhc_expansion_rate"),
+      ("num_hash_layers", "first_num_hash_layers"),
+      ("index_n_heads", "indexer_n_heads"),
+      ("index_head_dim", "indexer_head_dim"),
+      ("o_lora_rank", "o_lora_rank"),
+      ("o_groups", "o_groups"),
   ]
 
   if max_config.attention_type == "mla":
@@ -279,7 +287,11 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
         mt_value = mt_value * 2
 
     # Special handling for Qwen3-MoE: hf.intermediate_size is the aggregated dense MLP dim, but mt.mlp_dim is dim per expert
-    if "qwen3" in max_config.model_name and getattr(max_config, "num_experts", 0) > 1 and hf_attr == "intermediate_size":
+    if (
+        "qwen3" in max_config.model_name
+        and getattr(max_config, "num_experts", 0) > 1
+        and hf_attr == "intermediate_size"
+    ):
       mt_value = mt_value * getattr(max_config, "num_experts_per_tok", 1)
 
     # Handle vocab size padding
@@ -430,7 +442,9 @@ def _transform_and_save_weights(
   if lora_restore_path and not load_parameters_path:
     # Adapter Mode
     transformed_hf_weights, found_hf_modules = _transform_weights_to_adapter(param_map, maxtext_state_dict)
-    save_adapter_files(output_directory, transformed_hf_weights, config, found_hf_modules, HF_IDS.get(config.model_name))
+    save_adapter_files(
+        output_directory, transformed_hf_weights, config, found_hf_modules, HF_IDS.get(config.model_name)
+    )
     max_logging.log(f"✅ LoRA adapter successfully saved at {output_directory}")
   else:
     # Base or Merged Mode
