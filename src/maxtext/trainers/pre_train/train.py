@@ -44,6 +44,7 @@ from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
+from maxtext.common.common_types import DecoderBlockType
 from maxtext.configs import pyconfig
 from maxtext.configs.types import TeCommGemmOverlapPolicy
 from maxtext.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
@@ -80,6 +81,31 @@ from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_g
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
 
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
+
+# Aux-loss-free load balancing (DeepSeek V3-style sigmoid+bias routing) sows its
+# router-bias update under a module attribute name that differs per model family,
+# since each family names its RoutedAndSharedMoE instance differently.
+#
+# This lookup is only reached by the legacy Linen decoder bridge below -- the
+# default pure-NNX path finds the bias generically via the `_find_gate_bias`
+# helper defined further below in this file instead (an upstream fix replaced
+# its own hardcoded lookup with that helper, which incidentally also fixed a
+# pre-existing unscanned-mode bug there; see PR history for HY3's onboarding
+# for details).
+#
+# Verified behavior for this Linen-path branch specifically (hy3-tiny,
+# routed_bias_update_rate=0.05): with `scan_layers=true` it updates the bias
+# correctly (this table is what lets Hy3 resolve to the right module name;
+# without it, `update_state_param` below would silently no-op instead of
+# raising, since a non-matching path just leaves every param unchanged, same
+# as it always did for DeepSeek); with `scan_layers=false` it silently
+# no-ops regardless of this table, since the Linen-side aux collection this
+# branch depends on (`moe_bias_updates`) is only ever populated when layers
+# are scanned into a single stacked array.
+_MOE_BLOCK_ATTR_BY_DECODER_BLOCK = {
+    DecoderBlockType.DEEPSEEK: "DeepSeekMoeBlock_0",
+    DecoderBlockType.HY3: "Hy3MoeBlock_0",
+}
 
 
 def get_first_step(model, state):
@@ -611,7 +637,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
     if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
-      target_path = ("params", "decoder", "moe_layers", "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "bias")
+      moe_block_attr = _MOE_BLOCK_ATTR_BY_DECODER_BLOCK.get(config.decoder_block, "DeepSeekMoeBlock_0")
+      target_path = ("params", "decoder", "moe_layers", moe_block_attr, "MoeBlock_0", "gate", "bias")
       # Updates the shape to be aligned with state.
       moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
       new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)

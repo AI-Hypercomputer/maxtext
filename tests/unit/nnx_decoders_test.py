@@ -1076,6 +1076,53 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
     self.assertEqual(len(updated_kvs), num_layers)
     np.testing.assert_allclose(y_external, y_scanned, rtol=1e-5, atol=1e-5)
 
+  def test_hy3_decoder_forward(self):
+    """Test NNXDecoder with hy3 block (1 dense layer + 3 MoE layers)."""
+    cfg = _make_config(
+        model_name="hy3-tiny",
+        decoder_block="hy3",
+        scan_layers=False,
+        num_decoder_layers=4,
+        first_num_dense_layers=1,
+        base_emb_dim=128,
+        base_num_query_heads=4,
+        base_num_kv_heads=2,
+        head_dim=32,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=128,
+        num_experts=4,
+        num_experts_per_tok=2,
+        shared_experts=1,
+        routed_scaling_factor=1.0,
+        routed_score_func="sigmoid",
+        routed_bias=True,
+        use_qk_norm=True,
+        sparse_matmul=False,
+        vocab_size=256,
+    )
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=self.rngs,
+    )
+    shared_embedding = self._make_shared_embedding(cfg)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(
+        logits.shape,
+        (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size),
+    )
+
 
 @pytest.mark.tpu_only
 class TestGemma4SmallNNXDecoder(unittest.TestCase):
