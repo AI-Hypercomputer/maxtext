@@ -524,6 +524,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
+      attention_kernel: str = "flash",
   ):
     """Initializes the HCA Compressor.
 
@@ -537,6 +538,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       quant: Optional quantization scheme.
       model_mode: The operational mode (e.g., "train", "prefill").
       rngs: An optional Rngs instance for stochastic initializations or dropout.
+      attention_kernel: Attention kernel name ("flash", "dot_product").
     """
     super().__init__(
         config,
@@ -548,6 +550,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
         model_mode,
         rngs,
     )
+    self.attention_kernel = attention_kernel
 
   def __call__(
       self,
@@ -648,7 +651,9 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
           cache=cache,
       )
 
-    # Skip causal mask generation during decoding (seq_len == 1) or if no blocks were pooled
+    # Skip causal mask generation when using static flash attention (HCAStaticMask), during decoding (seq_len == 1), or if no blocks were pooled
+    if self.attention_kernel == "flash":
+      return compressed_kv, None
     if seq_len == 1 or compressed_len == 0:
       compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
       return compressed_kv, compressed_mask
@@ -1297,6 +1302,7 @@ class CompressedAttention(Attention):
           quant=self.quant,
           model_mode=self.model_mode,
           rngs=self.rngs,
+          attention_kernel=self.attention_kernel,
       )
     elif self.compress_ratio == 4:
       self.csa_compressor = DeepseekV4CSACompressor(

@@ -1863,7 +1863,11 @@ class AttentionOp(nnx.Module):
             )
             if config.cost_estimate_flops_bwd >= 0
             else None,
-            dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
+            dq_reduction_steps=(
+                config.dq_reduction_steps
+                if config.dq_reduction_steps > 0
+                else (3 if (getattr(jax.devices()[0], "num_cores", 1) > 1 and query.shape[2] >= 1024 and self.attention_type == AttentionType.COMPRESSED) else None)
+            ),
             use_experimental_scheduler=self.use_splash_scheduler,
         )
       else:
@@ -1939,6 +1943,14 @@ class AttentionOp(nnx.Module):
       else:
         mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
 
+      splash_q_seq_shards = cp_size
+      if self.attention_type == AttentionType.COMPRESSED and cp_size == 1:
+        num_cores = getattr(jax.devices()[0], "num_cores", 1)
+        shards = max(1, num_cores * 2)
+        while shards > 1 and (query.shape[2] % (shards * shards) != 0):
+          shards //= 2
+        splash_q_seq_shards = shards
+
       mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
       use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
       if self.attention_type == AttentionType.FULL:
@@ -1957,6 +1969,7 @@ class AttentionOp(nnx.Module):
             pad_kv_total=pad_kv_total,
             compress_ratio=compress_ratio,
             local_window=self.sliding_window_size,
+            shard_count=splash_q_seq_shards,
         )
       elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
         mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
@@ -2027,7 +2040,7 @@ class AttentionOp(nnx.Module):
         splash_kernel = tokamax_splash_kernel.make_splash_mha(
             mask=single_head_mask,
             config=sa_config,
-            q_seq_shards=cp_size,  # axis for sequence sharding,
+            q_seq_shards=splash_q_seq_shards,
         )
         return splash_kernel
 
