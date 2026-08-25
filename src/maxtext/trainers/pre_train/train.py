@@ -884,6 +884,14 @@ def recover(
       if existing_checkpoint_manager is not None:
         checkpointing.cancel_checkpoint_manager(existing_checkpoint_manager)
 
+      # Reset snapshotter to abandon in-flight host saves while preserving the latest snapshot
+      if snapshot_mgr is not None:
+        new_snapshot_mgr = Snapshotter(replica_axis_index=snapshot_mgr.replica_axis_index)
+        with snapshot_mgr._lock:
+          new_snapshot_mgr._latest_snapshot = snapshot_mgr._latest_snapshot
+        python_vars["snapshot"] = new_snapshot_mgr
+        snapshot_mgr = new_snapshot_mgr
+
       # 2. Re-run setup_train_loop to rebuild Mesh, Model, Optimizers
       (
           init_rng,
