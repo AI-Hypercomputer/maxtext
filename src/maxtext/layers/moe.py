@@ -33,6 +33,7 @@ from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import sort_activations
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
@@ -149,6 +150,16 @@ def _sort_activations(
     if use_custom_vjp:
       return _sort_activations_custom(inputs, sort_indices)
     return inputs[sort_indices, ...]
+
+
+def _route_activations(inputs: jax.Array, selected_experts: jax.Array) -> jax.Array:
+  """Groups token activations by expert without materializing Top-K copies."""
+  selected_experts = selected_experts.reshape((inputs.shape[0], -1))
+  # When use_gather_mosaic_kernel=False, use the general JAX backward, which
+  # gathers and sums gradients from all expert copies of each token. The
+  # optimized Mosaic gather-reduce kernel currently requires exactly 8 selected
+  # experts per token and is enabled only by the specialized batch-split path.
+  return sort_activations.route(inputs, selected_experts, use_gather_mosaic_kernel=False)
 
 
 @jax.custom_vjp
@@ -952,11 +963,13 @@ class RoutedMoE(nnx.Module):
       if roll_to_expert_id is not None:
         flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
       sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-      # sort inputs for number of selected experts
-      replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-      sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
-          self.dtype
-      )
+      if self.config.moe_use_direct_token_gather:
+        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts).astype(self.dtype)
+      else:
+        replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
+            self.dtype
+        )
       group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
