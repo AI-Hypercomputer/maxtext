@@ -816,8 +816,18 @@ def training_loop_iteration(
   metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
 
   # Async Host Backup (Elastic Mode only)
+  # Skip in-memory snapshot if persistent checkpointing is actively saving in the background
+  # to prevent PCIe DMA, host RAM, and colocated sidecar thread contention.
+  is_checkpoint_saving = (
+      checkpoint_manager is not None
+      and hasattr(checkpoint_manager, "is_saving_in_progress")
+      and checkpoint_manager.is_saving_in_progress()
+  )
   if snapshot_mgr is not None and step % config.elastic_snapshot_interval == 0:
-    save_snapshot(snapshot_mgr, state, step, model)
+    if not is_checkpoint_saving:
+      save_snapshot(snapshot_mgr, state, step, model)
+    else:
+      _logger.info("Skipping in-memory snapshot at step %d because persistent checkpoint save is in progress.", step)
 
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
