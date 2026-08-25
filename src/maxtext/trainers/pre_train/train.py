@@ -695,10 +695,7 @@ def save_snapshot(snapshot_mgr, state, step, model):
     }
   state_dict = train_utils.replicate_single_device_sharded_arrays(state_dict)
   _logger.info("Saving in-memory snapshot at step %d...", step)
-  try:
-    snapshot_mgr.save(step, state_dict)
-  except Exception as e:  # pylint: disable=broad-except
-    _logger.warning("Failed to queue in-memory snapshot at step %d: %s", step, e)
+  snapshot_mgr.save(step, state_dict)
 
 
 def training_loop_iteration(
@@ -850,13 +847,6 @@ def recover(
   if metric_logger_instance is not None:
     metric_logger_instance.buffered_metrics.clear()
 
-  # Reset profiler to ensure no stale trace state persists across recovery rollback
-  if "prof" in python_vars and python_vars["prof"] is not None:
-    try:
-      python_vars["prof"].deactivate()
-    except Exception as e:
-      _logger.warning("Failed to deactivate profiler during recovery: %s", e)
-
   # Delete old iterators and loaders to release colocated python resources
   for key in ["data_iterator", "eval_data_iterator", "data_loader"]:
     if key in python_vars:
@@ -965,7 +955,6 @@ def recover(
               "opt_state": active_state.opt_state,
           }
           restored_dict = jax.device_put(active_dict, sharding_dict)
-          jax.block_until_ready(restored_dict)
           restored_state = state.replace(
               step=restored_dict["step"],
               params=restored_dict["params"],
@@ -983,11 +972,10 @@ def recover(
               "optimizer": nnx.to_pure_dict(nnx.state(active_state.optimizer)),
           }
           restored_dict = jax.device_put(active_dict, sharding_dict)
-          jax.block_until_ready(restored_dict)
           nnx.update(state.model, restored_dict["model"])
           nnx.update(state.optimizer, restored_dict["optimizer"])
           restored_state = state
-          restored_step = int(python_vars.get("step", state.optimizer.step.value))
+          restored_step = int(state.optimizer.step.value)
         _logger.info(
             "Resharding complete. Retrying. Slices used: %s",
             elastic_manager.active_slice_indices,
@@ -1007,7 +995,6 @@ def recover(
               replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
               restored_dict = snapshot_mgr.load(replicated_abstract_dict)
               restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
-              jax.block_until_ready(restored_dict)
               restored_state = state.replace(
                   step=restored_dict["step"],
                   params=restored_dict["params"],
@@ -1021,7 +1008,6 @@ def recover(
               replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
               restored_dict = snapshot_mgr.load(replicated_abstract_dict)
               restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
-              jax.block_until_ready(restored_dict)
               merged = jax.tree.map(
                   lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
                   restored_dict,
@@ -1049,15 +1035,13 @@ def recover(
                 "No snapshots or persistent checkpoints available to restore from. Cannot recover."
             )
           _logger.info("Restoring from persistent checkpoint...")
-          ckpt_step = checkpointing.latest_step(existing_checkpoint_manager)
-          unboxed_abstract = nnx.state(state) if config.pure_nnx else state
           restored_state, _ = checkpointing.load_state_if_possible(
               existing_checkpoint_manager,
               None,
               config.load_parameters_path,
               config.load_full_state_path,
               config.checkpoint_storage_concurrent_gb,
-              unboxed_abstract,
+              state,
               config.enable_single_replica_ckpt_restoring,
               config.dataset_type,
               use_ocdbt=config.checkpoint_storage_use_ocdbt,
@@ -1070,23 +1054,10 @@ def recover(
           )
           if hasattr(restored_state, '__getitem__') and 'items' in restored_state:
             restored_state = restored_state['items']
-          if config.pure_nnx:
-            if isinstance(restored_state, nnx.State):
-              nnx_state = nnx.state(state)
-              merged = jax.tree.map(
-                  lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
-                  restored_state.to_pure_dict(),
-                  nnx_state.to_pure_dict(),
-                  is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
-              )
-              nnx.replace_by_pure_dict(nnx_state, merged)
-            restored_state = state
-
-          restored_step = ckpt_step if ckpt_step is not None else get_first_step(model, restored_state)
-          if isinstance(model, nn.Module) and hasattr(restored_state, "replace"):
-            restored_state = restored_state.replace(step=jnp.array(restored_step))
-          elif hasattr(restored_state, "optimizer") and hasattr(restored_state.optimizer, "step"):
-            restored_state.optimizer.step.value = jnp.array(restored_step, dtype=jnp.uint32)
+          if isinstance(model, nn.Module):
+            restored_step = int(restored_state.step)
+          else:
+            restored_step = int(restored_state.optimizer.step.value)
 
         if metric_logger_instance is not None:
           metric_logger_instance.learning_rate_schedule = learning_rate_schedule
@@ -1380,38 +1351,29 @@ def train_loop(config, recorder, state=None):
       ):
         try:
           # Scale-up check at the end of the step (only if elastic snapshot)
-          current_step = python_vars["step"]
-          next_scale_up_step = python_vars.get("next_scale_up_step", 0)
-
           if (
-              elastic_utils.elastic_enabled(config)
+              elastic_utils.elastic_snapshot(config)
               and elastic_manager.available_inactive_slices
-              and current_step >= next_scale_up_step
           ):
-            _logger.info(
-                "[*] New slice(s) %s available for scale-up at step %d! Performing in-memory RAM resharding...",
-                elastic_manager.available_inactive_slices,
-                current_step,
-            )
             recover(
                 jax_device_state,
                 python_vars,
                 immutable_data,
                 active_state=jax_device_state["state"],
             )
-            python_vars["next_scale_up_step"] = current_step + 10
-            continue
+            # Start snapshot save immediately on the new mesh
+            save_snapshot(snapshot_mgr, jax_device_state["state"], python_vars["step"], model)
 
           training_loop_iteration(jax_device_state, python_vars, immutable_data)
           python_vars["step"] += 1
 
         except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
-          if isinstance(e, pathways_manager.ScaleUpSignalError):
-            _logger.info("[*] Bubbling ScaleUpSignalError to elastic_retry for clean scale-up re-initialization.")
-            raise
-          elif elastic_utils.elastic_snapshot(config) and elastic.is_error_due_to_slice_down(e):
+          if elastic_utils.elastic_snapshot(config) and (
+              isinstance(e, pathways_manager.ScaleUpSignalError)
+              or elastic.is_error_due_to_slice_down(e)
+          ):
             _logger.error(
-                "[!] Elastic slice-down event detected around step %d", python_vars["step"]
+                "[!] Elastic event detected around step %d", python_vars["step"]
             )
             needs_recovery = True
           else:
@@ -1501,9 +1463,11 @@ def run(config, recorder):
 
 
 def get_train_func(config, recorder, argv):
-  """Returns the train function, wrapping in elastic_retry if elastic training is enabled."""
+  """Returns the train function, wrapping in elastic_retry if backup_kind is checkpoint."""
   if config.elastic_enabled:
     max_logging.log(f"Elastic utils: Elastic training enabled with {config.elastic_backup_kind} backup.")
+
+  if config.elastic_enabled and config.elastic_backup_kind == "checkpoint":
 
     def on_elastic_event():
       elastic_utils.record_elastic_event_start(recorder, config)

@@ -19,7 +19,3 @@ COPY ${PACKAGE_DIR}/maxtext/assets/ "${MAXTEXT_ASSETS_ROOT}"
 
 # Copy all files except assets from local workspace into docker container
 COPY --exclude=${PACKAGE_DIR}/maxtext/assets/ ${PACKAGE_DIR}/maxtext/ src/maxtext/
-
-# Copy updated pathwaysutils into python site-packages
-COPY pathwaysutils/ /usr/local/lib/python3.12/site-packages/pathwaysutils/
-

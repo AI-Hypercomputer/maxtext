@@ -2976,16 +2976,16 @@ class MaxTextConfig(
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
 
     # Automatically determine number of slices if not specified.
-    # E. HARDWARE-DEPENDENT CALCULATIONS
-    if self.elastic_enabled:
-      elastic_utils.ensure_elastic_manager_initialized(self)
-
     raw_keys_for_num_slices = {
         "num_slices": self.num_slices,
         "hardware": self.hardware,
         "compile_topology_num_slices": self.compile_topology_num_slices,
     }
     self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices, config=self)
+
+    # E. HARDWARE-DEPENDENT CALCULATIONS
+    if self.elastic_enabled:
+      elastic_utils.ensure_elastic_manager_initialized(self)
 
     def get_num_target_devices():
       """Get the number of devices for the target topology, handling AOT compilation and single-controller modes."""

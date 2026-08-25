@@ -182,11 +182,10 @@ def _colocated_cpu_mesh(mesh: Mesh) -> Mesh:
 class RemoteIterator:
   "iterator class for using colocated python class"
 
-  def __init__(self, get_ds_fn, preprocessing_fn, global_shape, cpu_sharding, checkpoint_path, elastic=False):
+  def __init__(self, get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic=False):
     self.get_ds_fn = get_ds_fn
     self.preprocessing_fn = preprocessing_fn
     self.global_shape = global_shape
-    self.cpu_sharding = cpu_sharding
     self.checkpoint_path = checkpoint_path
     self.elastic = elastic
     self.reset()
@@ -202,16 +201,31 @@ class RemoteIterator:
     else:
       raise ValueError("Type error: dataloader should be Iterable.")
 
-  def get_next(self):
+  def get_next(self, dummy_array):
     """Gets the next batch of data and forms a global array."""
     local_data = next(self.iterator)
 
-    def form_global_array_colocated_python(array):
-      arr_np = np.asarray(array)
-      shape = (self.global_shape[0], *arr_np.shape[1:]) if arr_np.ndim > 1 else (self.global_shape[0],)
-      return jax.make_array_from_process_local_data(self.cpu_sharding, arr_np, shape)
+    def form_global_array_colocated_python(path, array, devices, global_shape, sharding):
+      try:
+        device_arrays = np.split(array, len(devices), axis=0)
+      except ValueError as array_split_error:
+        raise ValueError(
+            f"Unable to put to devices shape {array.shape} with "
+            f"local device count {len(devices)} "
+            f"at {jtu.keystr(path)}"
+        ) from array_split_error
+      device_arrays = jax.device_put(device_arrays, devices)
+      return jax.make_array_from_single_device_arrays(shape=global_shape, sharding=sharding, arrays=device_arrays)
 
-    return jtu.tree_map(form_global_array_colocated_python, local_data)
+    return jtu.tree_map_with_path(
+        partial(
+            form_global_array_colocated_python,
+            devices=list(dummy_array.sharding.addressable_devices),
+            global_shape=self.global_shape,
+            sharding=dummy_array.sharding,
+        ),
+        local_data,
+    )
 
   def save_state(self, step_array):
     """Saves the iterator state to a file."""
@@ -249,11 +263,12 @@ class RemoteIteratorWrapper:
   """Wrapper for RemoteIterator that handles device placement."""
 
   def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
-    self.global_shape = global_shape
     self.cpu_devices = _colocated_cpu_devices(tuple(global_mesh.devices.flat))
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
+    self.dummy_array = jnp.zeros((len(self.cpu_devices)))
+    self.dummy_array = jax.device_put(self.dummy_array, self.cpu_sharding)
     # This is a proxy to a RemoteIterator running in a colocated process,
     # named "local_iterator" to match MultiHostDataLoadIterator's interface.
     remote_iterator_cls = colocated_python.colocated_python_class(RemoteIterator)
@@ -261,34 +276,8 @@ class RemoteIteratorWrapper:
         get_ds_fn,  # pyrefly: ignore[bad-argument-count]
         preprocessing_fn,
         global_shape,
-        self.cpu_sharding,
         checkpoint_path,
         elastic=elastic,  # pyrefly: ignore[unexpected-keyword]
-    )
-
-    def _out_specs_fn():
-      features = (
-          "inputs",
-          "targets",
-          "inputs_segmentation",
-          "targets_segmentation",
-          "inputs_position",
-          "targets_position",
-      )
-      return {
-          k: jax.ShapeDtypeStruct(global_shape, jnp.int32, sharding=self.cpu_sharding)
-          for k in features
-      }
-
-    self.local_iterator.get_next = self.local_iterator.get_next.specialize(
-        out_specs_fn=_out_specs_fn,
-        devices=self.cpu_devices,
-    )
-    self.local_iterator.save_state = self.local_iterator.save_state.specialize(
-        out_specs_fn=lambda s: s
-    )
-    self.local_iterator.restore_state = self.local_iterator.restore_state.specialize(
-        out_specs_fn=lambda s: s
     )
     max_logging.log("RemoteIteratorWrapper initiated")
 
@@ -299,7 +288,7 @@ class RemoteIteratorWrapper:
     self.local_iterator.reset()  # pyrefly: ignore[missing-attribute]
 
   def __next__(self):
-    out = self.local_iterator.get_next()  # pyrefly: ignore[missing-attribute]
+    out = self.local_iterator.get_next(self.dummy_array)  # pyrefly: ignore[missing-attribute]
     # use tree_map is out is a dict
     return jax.device_put(out, self.tpu_sharding)
 

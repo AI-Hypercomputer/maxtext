@@ -414,12 +414,13 @@ def get_num_slices(raw_keys, config=None):
   if getattr(raw_keys, "hardware", None) == "cpu":
     max_logging.log(" Setting num_slices=1 for CPU hardware type")
     return 1
-  if int(raw_keys.get("compile_topology_num_slices", -1)) > 0:
+  if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
-  elif config is not None and elastic_utils.should_use_elastic(config):
-    return len(elastic_utils.live_slice_indices(config))
   else:
-    return 1
+    try:
+      return len(elastic_utils.live_slice_indices(config))
+    except (ValueError, AttributeError):
+      return 1
 
 
 def is_cpu_backend(raw_keys):
