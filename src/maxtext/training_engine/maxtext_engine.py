@@ -27,6 +27,8 @@ from typing import Any
 
 from absl import logging
 from flax import nnx
+from flax.traverse_util import flatten_dict
+from flax.traverse_util import unflatten_dict
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -202,7 +204,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compile_requested = False
     self._compiled_signature: Any = None
     self._signature_compare_warned: bool = False
-    self._raiden_sync: Any = None
+    self._raiden_syncs: Any = None
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     model_or_model_mesh_pair = model_creation_utils.from_pretrained(
@@ -238,7 +240,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     )
     self._metrics_recorder = metrics_module.MetricsRecorder()
     self._throttler = inflight_throttler.InflightThrottler(config=self._config)
-    self._raiden_sync: Any = None
+    self._raiden_syncs: Any = None
 
   @property
   def model(self) -> Any:
@@ -973,6 +975,32 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return nnx.state(model, nnx.Param)
     return self.model
 
+  def _split_into_chunks(self, nested_state: Any, num_chunks: int) -> list[Any]:
+    """Splits a nested param dict into `num_chunks` nested dicts of near-equal leaf count.
+
+    Rebinding raiden's native WeightSynchronizer with a full new array list
+    only releases its hold on the PREVIOUS bind's buffers atomically with
+    acquiring the new ones (BindWeights: "releases the holds on the
+    previously bound buffers and acquires holds on the new ones") -- so the
+    complete new state must already be host-staged before the old one can be
+    dropped, and every rebind after the first needs ~2x one copy's worth of
+    host memory, not ~1x. Splitting the state across `num_chunks` independent
+    RaidenSynchronizer instances -- each bound, D2H'd, and released one at a
+    time -- bounds that overlap to ~(num_chunks+1)/num_chunks of one copy
+    instead of ~2x. Confirmed against a live OOM at num_chunks=1: main hit
+    the 420G container limit on a Qwen3-30B-A3B (~245GB bf16) trainer's
+    SECOND weight-sync cycle (the first has no stale buffer to overlap with).
+    The orchestrator and rollout's RaidenSamplerAdapter already support a
+    source contributing multiple WorkUnitMetadata entries (pooled by exact
+    variable name in manifest preflight, not by unit count), so no changes
+    are needed outside this trainer-side split.
+    """
+    flat = flatten_dict(nested_state)
+    chunk_flats = [{} for _ in range(num_chunks)]
+    for i, key in enumerate(flat):
+      chunk_flats[i % num_chunks][key] = flat[key]
+    return [unflatten_dict(cf) for cf in chunk_flats]
+
   def prepare_weight_sync(
       self,
       staging_transport: str = "raiden",
@@ -1023,8 +1051,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             scan_axis=self._config.param_scan_axis,
         )
 
-      # 3. Bind parameters to the Raiden transport
-      if self._raiden_sync is None:
+      # 3. Bind parameters to the Raiden transport, one chunk at a time (see
+      # _split_into_chunks) -- construct the per-chunk synchronizers once,
+      # matching the persistent-instance-per-cycle pattern the rebind
+      # optimization (fewer stale holds) depends on.
+      num_chunks = max(1, int(os.environ.get("RAIDEN_WEIGHT_SYNC_CHUNKS", "4")))
+      if self._raiden_syncs is None:
         # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
         # detection tunix's K8sJaxContext.initialize() uses), trainer params
         # are proxy-backed and Raiden can't bind them in place -- host_stage
@@ -1034,45 +1066,72 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             "proxy" in os.environ.get("JAX_PLATFORMS", "")
             and os.environ.get("JAX_BACKEND_TARGET")
         )
-        self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
-            job_name="trainer",
-            worker_index=jax.process_index(),
-            auto_h2d=False,
-            host_stage=is_pathways,
-            parallelism=4,
-        )
-      self._raiden_sync.bind(params_state)
+        # worker_index must be unique per chunk (it seeds WorkUnitId's
+        # job_replica_id) -- otherwise every chunk's work unit collides under
+        # the same id in the handler's registry and only one survives
+        # registration.
+        self._raiden_syncs = [
+            raiden_synchronizer.RaidenSynchronizer(
+                job_name="trainer",
+                worker_index=jax.process_index() * num_chunks + i + 1,
+                auto_h2d=False,
+                host_stage=is_pathways,
+                parallelism=4,
+            )
+            for i in range(num_chunks)
+        ]
 
-      # 4. Initiate Device-to-Host transfer to stage weights for network transfer
-      if self._raiden_sync.active:
-        self._raiden_sync.d2h()
-
-      if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
-        logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
-
-      metadata = self._raiden_sync.work_unit_metadata()
-      logging.info(
-          "Trainer prepared weight sync for step %d: registered %d variables on mesh %s",
-          self.train_step,
-          len(metadata.variables),
-          metadata.mesh_axes,
+      chunks = (
+          self._split_into_chunks(params_state, num_chunks)
+          if num_chunks > 1
+          else [params_state]
       )
-      return [metadata]
+      del params_state
+
+      verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
+      all_metadata = []
+      total_variables = 0
+      for chunk_idx, (sync, chunk_state) in enumerate(zip(self._raiden_syncs, chunks)):
+        sync.bind(chunk_state)
+
+        # 4. Initiate Device-to-Host transfer to stage this chunk for network
+        # transfer before moving on to the next chunk.
+        if sync.active:
+          sync.d2h()
+
+        if verify_weights:
+          logging.info("Source weights checksums (chunk %d): %s", chunk_idx, sync.checksums())
+
+        metadata = sync.work_unit_metadata()
+        total_variables += len(metadata.variables)
+        all_metadata.append(metadata)
+
+      logging.info(
+          "Trainer prepared weight sync for step %d: registered %d variables across %d chunk(s) on mesh %s",
+          self.train_step,
+          total_variables,
+          num_chunks,
+          all_metadata[0].mesh_axes if all_metadata else None,
+      )
+      return all_metadata
 
     return []
 
   def release_weight_sync(self, **kwargs: Any) -> Any:
     """Releases staged weight buffers after transfer completion."""
-    if self._raiden_sync is not None:
-      logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
+    if self._raiden_syncs:
+      for sync in self._raiden_syncs:
+        logging.vlog(1, "Trainer Raiden metrics: %s", sync.metrics())
+        sync.release_host_arrays()
     return True
 
   def close(self) -> None:
     """Closes the trainer and its associated resources."""
-    if self._raiden_sync is not None:
-      if hasattr(self._raiden_sync, "close"):
-        self._raiden_sync.close()
-      self._raiden_sync = None
+    if self._raiden_syncs:
+      for sync in self._raiden_syncs:
+        if hasattr(sync, "close"):
+          sync.close()
+      self._raiden_syncs = None
     self._throttler.cleanup()
     self._metrics_recorder.cleanup()
     self._checkpoint_manager.close()
