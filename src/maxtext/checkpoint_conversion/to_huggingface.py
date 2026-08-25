@@ -246,8 +246,12 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
       ("qk_rope_head_dim", "qk_rope_head_dim"),
       ("v_head_dim", "v_head_dim"),
       ("vocab_size", "vocab_size"),
-      ("global_head_dim", "global_head_dim"),
-      ("num_global_key_value_heads", "global_num_kv_heads"),
+      ("hc_mult", "mhc_expansion_rate"),
+      ("num_hash_layers", "first_num_hash_layers"),
+      ("index_n_heads", "indexer_n_heads"),
+      ("index_head_dim", "indexer_head_dim"),
+      ("o_lora_rank", "o_lora_rank"),
+      ("o_groups", "o_groups"),
   ]
 
   if max_config.attention_type == "mla":
@@ -264,19 +268,17 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     attributes_to_check.append(("head_dim", "head_dim"))
 
   mismatches = []
-  target_cfg = getattr(hf_config, "text_config", hf_config) or hf_config
 
   for hf_attr, mt_attr in attributes_to_check:
+    # Skip checks if the HF config doesn't have this attribute (e.g. layer_norm_eps vs rms_norm_eps)
+    if not hasattr(hf_config, hf_attr):
+      continue
+
     # Skip checks if MaxText config doesn't have the attribute (shouldn't happen for valid configs)
     if not hasattr(max_config, mt_attr):
       continue
 
-    # Skip checks if the HF config doesn't have this attribute or raises AmbiguousGlobalPerLayerAttributeError
-    try:
-      hf_value = getattr(target_cfg, hf_attr)
-    except (AttributeError, ValueError, RuntimeError):
-      continue
-
+    hf_value = getattr(hf_config, hf_attr)
     mt_value = getattr(max_config, mt_attr)
 
     # Handle None values
@@ -311,7 +313,7 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     if not is_match:
       if override:
         max_logging.log(f"⚠️ Overwriting HF Config '{hf_attr}': {hf_value} -> {mt_value} (from MaxText '{mt_attr}')")
-        setattr(target_cfg, hf_attr, mt_value)
+        setattr(hf_config, hf_attr, mt_value)
       else:
         mismatches.append(f"{hf_attr} (HF={hf_value} vs MaxText={mt_value})")
 
@@ -534,13 +536,15 @@ def main(argv: Sequence[str]) -> None:
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict(), config)
   param_map = mappings["param_mapping"]
   shape_map = mappings["shape_mapping"]  # HF target shapes
+  
+
   hook_fn_map = mappings["hook_fn_mapping"]
 
   # 4. Extract and transform weights for Linen/NNX-SFT/NNX-RL checkpoints
   maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
 
   # Validate that checkpoint keys match the parameter mapping
-  state_keys = {k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict}
+  state_keys = {k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict }
   filtered_map_keys = validate_and_filter_param_map_keys(param_map, state_keys)
 
   # When not converting a multimodal model, skip vision encoder weights even if

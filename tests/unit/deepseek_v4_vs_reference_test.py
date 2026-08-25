@@ -1231,7 +1231,7 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
     )
 
     config_arguments = {
-        "model_name": "deepseek4-tiny",
+        "model_name": "deepseek4-284b",
         "override_model_config": True,
         "per_device_batch_size": 1,
         "matmul_precision": "highest",
@@ -1471,7 +1471,7 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
     self.rngs = nnx.Rngs(0)
 
     # Build MaxText config dictionary
-    argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-tiny"]
+    argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-284b"]
     config_arguments = {
         "attention": "dot_product",
         "dtype": "float32",
