@@ -362,60 +362,55 @@ class BlockCausalMaskTest(unittest.TestCase):
         **kwargs,
     )
 
-def _make_flash_op(
-    *,
-    attention_type=AttentionType.BLOCK_DIFFUSION,
-    context_parallel_size=1,
-    context_parallel_load_balance=False,
-    max_target_length=8,
-):
-  """Builds a minimal flash-attention operator for dispatch tests."""
-  config = types.SimpleNamespace(
-      causal_block_size=4,
-      context_parallel_strategy="all_gather",
-      context_parallel_load_balance=context_parallel_load_balance,
-      context_sharding="context",
-      sa_block_q=4,
-      sa_block_kv=4,
-      sa_block_kv_compute=4,
-      sa_block_q_dkv=4,
-      sa_block_kv_dkv=4,
-      sa_block_kv_dkv_compute=4,
-      sa_block_q_dq=4,
-      sa_block_kv_dq=4,
-      sa_use_fused_bwd_kernel=True,
-      sa_q_layout="HEAD_DIM_MINOR",
-      sa_k_layout="HEAD_DIM_MINOR",
-      sa_v_layout="HEAD_DIM_MINOR",
-      use_splash_scheduler=False,
-      sa_fuse_reciprocal=False,
-      sa_use_base2_exp=False,
-      use_tokamax_splash=False,
-      use_jax_splash=False,
-      cost_estimate_flops_fwd=-1,
-      cost_estimate_flops_bwd=-1,
-      dq_reduction_steps=-1,
-  )
-  device = types.SimpleNamespace(platform="tpu")
-  mesh = types.SimpleNamespace(
-      devices=np.asarray([device] * context_parallel_size, dtype=object),
-      shape={"context": context_parallel_size},
-  )
-  return AttentionOp(
-      config=config,
-      num_query_heads=1,
-      num_kv_heads=1,
-      max_target_length=max_target_length,
-      mesh=mesh,
-      attention_kernel="flash",
-      attention_type=attention_type,
-  )
-
-
-class JaxFlashAttentionTest(unittest.TestCase):
-  """Tests for JAX flash attention."""
-
-  _make_flash_op = staticmethod(_make_flash_op)
+  def _make_flash_op(
+      self,
+      *,
+      attention_type=AttentionType.BLOCK_DIFFUSION,
+      context_parallel_size=1,
+      context_parallel_load_balance=False,
+      max_target_length=8,
+  ):
+    """Builds a minimal flash-attention operator for dispatch tests."""
+    config = types.SimpleNamespace(
+        causal_block_size=4,
+        context_parallel_strategy="all_gather",
+        context_parallel_load_balance=context_parallel_load_balance,
+        context_sharding="context",
+        sa_block_q=4,
+        sa_block_kv=4,
+        sa_block_kv_compute=4,
+        sa_block_q_dkv=4,
+        sa_block_kv_dkv=4,
+        sa_block_kv_dkv_compute=4,
+        sa_block_q_dq=4,
+        sa_block_kv_dq=4,
+        sa_use_fused_bwd_kernel=True,
+        sa_q_layout="HEAD_DIM_MINOR",
+        sa_k_layout="HEAD_DIM_MINOR",
+        sa_v_layout="HEAD_DIM_MINOR",
+        use_splash_scheduler=False,
+        sa_fuse_reciprocal=False,
+        sa_use_base2_exp=False,
+        use_tokamax_splash=False,
+        use_jax_splash=False,
+        cost_estimate_flops_fwd=-1,
+        cost_estimate_flops_bwd=-1,
+        dq_reduction_steps=-1,
+    )
+    device = types.SimpleNamespace(platform="cpu")
+    mesh = types.SimpleNamespace(
+        devices=np.asarray([device] * context_parallel_size, dtype=object),
+        shape={"context": context_parallel_size},
+    )
+    return AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=max_target_length,
+        mesh=mesh,
+        attention_kernel="flash",
+        attention_type=attention_type,
+    )
 
   def test_dense_and_splash_masks_match(self):
     sequence_length = 10
@@ -624,20 +619,69 @@ class JaxFlashAttentionTest(unittest.TestCase):
 
 
 class HCAStaticMaskTest(unittest.TestCase):
-  """Tests the HCAStaticMask and its equivalence with the ground truth compressor masking formula."""
+  """Tests the HCAStaticMask and its equivalence with the compressor mask."""
 
-  def test_hca_static_mask_vs_ground_truth_formula(self):
+  def _make_flash_op(
+      self,
+      *,
+      attention_type=AttentionType.COMPRESSED,
+      context_parallel_size=1,
+      context_parallel_load_balance=False,
+      max_target_length=512,
+  ):
+    config = types.SimpleNamespace(
+        causal_block_size=4,
+        context_parallel_strategy="all_gather",
+        context_parallel_load_balance=context_parallel_load_balance,
+        context_sharding="context",
+        sa_block_q=128,
+        sa_block_kv=128,
+        sa_block_kv_compute=128,
+        sa_block_q_dkv=128,
+        sa_block_kv_dkv=128,
+        sa_block_kv_dkv_compute=128,
+        sa_block_q_dq=128,
+        sa_block_kv_dq=128,
+        sa_use_fused_bwd_kernel=True,
+        sa_q_layout="HEAD_DIM_MINOR",
+        sa_k_layout="HEAD_DIM_MINOR",
+        sa_v_layout="HEAD_DIM_MINOR",
+        use_splash_scheduler=False,
+        sa_fuse_reciprocal=False,
+        sa_use_base2_exp=False,
+        use_tokamax_splash=False,
+        use_jax_splash=False,
+        cost_estimate_flops_fwd=-1,
+        cost_estimate_flops_bwd=-1,
+        dq_reduction_steps=-1,
+    )
+    device = types.SimpleNamespace(platform="cpu")
+    mesh = types.SimpleNamespace(
+        devices=np.asarray([device] * context_parallel_size, dtype=object),
+        shape={"context": context_parallel_size},
+    )
+    return AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=max_target_length,
+        mesh=mesh,
+        attention_kernel="flash",
+        attention_type=attention_type,
+    )
+
+  def test_hca_static_mask_matches_compressor_mask(self):
     test_cases = [
         (512, 128, 128, 0),
         (1024, 128, 128, 64),
-        (512, 128, 0, 0),  # local_window = 0 (no local attention)
-        (512, 128, None, 0),  # local_window = None (full causal local attention)
-        (384, 128, 128, 128),  # unaligned sequence length with padding
+        (512, 128, None, 0),  # full causal local attention
+        (384, 128, 128, 128),
+        (489, 128, 128, 23),  # unaligned sequence length 489
     ]
 
     for seq_len, compress_ratio, local_window, pad_kv in test_cases:
       with self.subTest(seq_len=seq_len, ratio=compress_ratio, window=local_window, pad=pad_kv):
-        comp_len = max(1, seq_len // max(1, compress_ratio))
+        comp_len = max(0, seq_len // max(1, compress_ratio))
         total_kv_len = seq_len + pad_kv + comp_len
         shape = (seq_len, total_kv_len)
 
@@ -650,22 +694,42 @@ class HCAStaticMaskTest(unittest.TestCase):
             local_window=local_window,
         )
 
-        q_ids = np.arange(seq_len)[:, None]
-        kv_ids = np.arange(total_kv_len)[None, :]
-        diff = q_ids - kv_ids
+        op = AttentionOp(
+            config=types.SimpleNamespace(
+                causal_block_size=4,
+                context_parallel_load_balance=False,
+                context_sharding="context",
+                moba=False,
+            ),
+            num_query_heads=1,
+            num_kv_heads=1,
+            max_target_length=seq_len,
+            mesh=types.SimpleNamespace(shape={}),
+            attention_kernel="dot_product",
+            attention_type=AttentionType.COMPRESSED,
+            sliding_window_size=local_window,
+        )
 
-        # Ground truth analytical formula
-        if local_window is None:
-          expected_local = (diff >= 0) & (kv_ids < seq_len)
-        elif local_window > 0:
-          expected_local = (diff >= 0) & (diff < local_window) & (kv_ids < seq_len)
+        position_ids = jnp.arange(seq_len)[None, :]
+        usable_len = comp_len * compress_ratio
+        if comp_len > 0:
+          block_positions = position_ids[:, :usable_len:compress_ratio]
+          future_mask = (block_positions[:, None, None, :] + compress_ratio) > (position_ids[:, None, :, None] + 1)
+          compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0)
         else:
-          expected_local = np.zeros((seq_len, total_kv_len), dtype=bool)
+          compressed_causal_mask = jnp.zeros((1, 1, seq_len, 0))
 
-        c_idx = kv_ids - seq_len - pad_kv
-        c_thresh = (q_ids + 1) // max(1, compress_ratio)
-        expected_comp = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < comp_len)
-        expected_mask = expected_local | expected_comp
+        dummy_q = jnp.zeros((1, seq_len, 1, 128))
+        dummy_k = jnp.zeros((1, seq_len + comp_len, 1, 128))
+        ref_mask = op.generate_attention_mask(
+            dummy_q,
+            dummy_k,
+            decoder_segment_ids=None,
+            model_mode=MODEL_MODE_TRAIN,
+            compressed_mask=compressed_causal_mask,
+            pad_kv_total=pad_kv,
+        )
+        expected_mask = np.array(ref_mask[0, 0] == 0.0)
 
         actual_mask = mask[:, :]
         np.testing.assert_array_equal(actual_mask, expected_mask)
@@ -713,7 +777,7 @@ class HCAStaticMaskTest(unittest.TestCase):
     self.assertEqual(res.shape, (128, 128))
 
   def test_load_balanced_cp_raises_on_hca(self):
-    op = _make_flash_op(
+    op = self._make_flash_op(
         attention_type=AttentionType.COMPRESSED,
         context_parallel_size=2,
         context_parallel_load_balance=True,
@@ -731,6 +795,18 @@ class HCAStaticMaskTest(unittest.TestCase):
           decoder_segment_ids=None,
           compress_ratio=128,
       )
+
+  def test_compressed_flash_missing_or_invalid_compress_ratio_raises(self):
+    op = self._make_flash_op(
+        attention_type=AttentionType.COMPRESSED,
+        max_target_length=512,
+    )
+    query = jnp.zeros((1, 1, 512, 128))
+    key = jnp.zeros((1, 1, 516, 128))
+    with self.assertRaisesRegex(ValueError, "compress_ratio must be provided for AttentionType.COMPRESSED"):
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=None)
+    with self.assertRaisesRegex(ValueError, "Static flash attention is only supported for HCA"):
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=4)
 
 
 class AttentionTypeResolutionTest(unittest.TestCase):
@@ -4877,7 +4953,6 @@ class CompressedAttentionTest(parameterized.TestCase):
     self._run_compressed_attention(compress_ratio, attention_kernel)
 
   @parameterized.named_parameters(
-      {"testcase_name": "csa_ratio4_flash", "compress_ratio": 4, "attention_kernel": "flash"},
       {"testcase_name": "hca_ratio128_flash", "compress_ratio": 128, "attention_kernel": "flash"},
   )
   @pytest.mark.tpu_only
@@ -4885,7 +4960,6 @@ class CompressedAttentionTest(parameterized.TestCase):
     self._run_compressed_attention(compress_ratio, attention_kernel)
 
   @parameterized.named_parameters(
-      {"testcase_name": "csa_ratio4", "compress_ratio": 4},
       {"testcase_name": "hca_ratio128", "compress_ratio": 128},
   )
   @pytest.mark.tpu_only
@@ -4894,6 +4968,71 @@ class CompressedAttentionTest(parameterized.TestCase):
     out_dot = self._run_compressed_attention(compress_ratio, "dot_product")
     out_flash = self._run_compressed_attention(compress_ratio, "flash")
     np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
+
+  @pytest.mark.tpu_only
+  def test_hca_flash_vs_dot_product_unaligned_489(self):
+    """Direct forward-value numerical equivalence between dot_product and flash attention for S=489."""
+    out_dot = self._run_compressed_attention(128, "dot_product", seq_len=489)
+    out_flash = self._run_compressed_attention(128, "flash", seq_len=489)
+    np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
+
+  @pytest.mark.tpu_only
+  def test_hca_flash_vs_dot_product_packed_crossing_window(self):
+    """Verifies numerical equivalence between dot_product and flash attention on packed sequences crossing compression windows."""
+    l1, l2 = 200, 312
+    total_len = l1 + l2
+    compress_ratio = 128
+    cfg_dot = self._get_test_config(
+        max_target_length=total_len,
+        compress_ratio=compress_ratio,
+        attention_kernel="dot_product",
+    )
+    attn_dot = self._create_compressed_attention_layer(cfg_dot, compress_ratio=compress_ratio, attention_kernel="dot_product")
+
+    cfg_flash = self._get_test_config(
+        max_target_length=total_len,
+        compress_ratio=compress_ratio,
+        attention_kernel="flash",
+    )
+    attn_flash = self._create_compressed_attention_layer(cfg_flash, compress_ratio=compress_ratio, attention_kernel="flash")
+
+    batch_size = cfg_dot.global_batch_size_to_train_on
+
+    # Generate random inputs and packed metadata
+    x = jax.random.normal(jax.random.PRNGKey(42), (batch_size, total_len, cfg_dot.base_emb_dim))
+    pos = jnp.broadcast_to(
+        jnp.concatenate([jnp.arange(l1, dtype=jnp.int32), jnp.arange(l2, dtype=jnp.int32)], axis=0)[None, :],
+        (batch_size, total_len),
+    )
+    seg = jnp.broadcast_to(
+        jnp.concatenate([jnp.ones(l1, dtype=jnp.int32), jnp.full(l2, 2, dtype=jnp.int32)], axis=0)[None, :],
+        (batch_size, total_len),
+    )
+
+    out_dot, _ = attn_dot(
+        x,
+        x,
+        decoder_segment_ids=seg,
+        inputs_positions=pos,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    out_flash, _ = attn_flash(
+        x,
+        x,
+        decoder_segment_ids=seg,
+        inputs_positions=pos,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    np.testing.assert_allclose(
+        np.array(out_flash),
+        np.array(out_dot),
+        rtol=1e-2,
+        atol=1e-2,
+        err_msg="Static flash attention does not match dot_product on packed sequence crossing compression window.",
+    )
 
   def _get_test_config(self, max_target_length, compress_ratio, attention_kernel):
     """Initializes and returns a MaxTextConfig for document packing tests."""
@@ -4956,13 +5095,6 @@ class CompressedAttentionTest(parameterized.TestCase):
           "attention_kernel": "dot_product",
           "l1": 32,
           "l2": 32,
-      },
-      {
-          "testcase_name": "csa_flash",
-          "compress_ratio": 4,
-          "attention_kernel": "flash",
-          "l1": 64,
-          "l2": 64,
       },
       {
           "testcase_name": "hca_dot_product",
@@ -5082,8 +5214,9 @@ class CompressedAttentionTest(parameterized.TestCase):
         err_msg="Adversarial corruption in Doc 1 leaked into Doc 2 in packed sequence.",
     )
 
-  def _run_compressed_attention(self, compress_ratio, attention_kernel):
+  def _run_compressed_attention(self, compress_ratio, attention_kernel, seq_len=None):
     """Runs CompressedAttention forward pass with specified compression ratio and kernel."""
+    target_length = seq_len if seq_len is not None else 512
     # Setup test config
     config_arguments = {
         "per_device_batch_size": 1.0,
@@ -5093,8 +5226,8 @@ class CompressedAttentionTest(parameterized.TestCase):
         "ici_data_parallelism": -1,
         "ici_tensor_parallelism": 1,
         "ici_autoregressive_parallelism": 1,
-        "max_target_length": 512,
-        "max_prefill_predict_length": 512,
+        "max_target_length": target_length,
+        "max_prefill_predict_length": target_length,
         "attention_type": AttentionType.COMPRESSED.value,
         "head_dim": 128,
         "q_lora_rank": 256,
@@ -5117,17 +5250,17 @@ class CompressedAttentionTest(parameterized.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
     batch_size = cfg.global_batch_size_to_train_on
-    seq_len = cfg.max_target_length
+    cur_seq_len = cfg.max_target_length
     embed_dim = cfg.base_emb_dim
 
     # Inputs shape: [batch, seq_len, embed_dim]
     lnx = jax.random.normal(
         jax.random.PRNGKey(0),
-        shape=(batch_size, seq_len, embed_dim),
+        shape=(batch_size, cur_seq_len, embed_dim),
         dtype=jnp.float32,
     )
-    decoder_positions = jnp.stack([jnp.arange(seq_len, dtype=jnp.int32) for _ in range(batch_size)])
-    decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    decoder_positions = jnp.stack([jnp.arange(cur_seq_len, dtype=jnp.int32) for _ in range(batch_size)])
+    decoder_segment_ids = jnp.ones((batch_size, cur_seq_len), dtype=jnp.int32)
 
     # Instantiate CompressedAttention
     attn = CompressedAttention(
@@ -5159,7 +5292,7 @@ class CompressedAttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    self.assertEqual(output.shape, (batch_size, seq_len, embed_dim))
+    self.assertEqual(output.shape, (batch_size, cur_seq_len, embed_dim))
     return output
 
 

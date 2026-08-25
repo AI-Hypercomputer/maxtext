@@ -1863,11 +1863,7 @@ class AttentionOp(nnx.Module):
             )
             if config.cost_estimate_flops_bwd >= 0
             else None,
-            dq_reduction_steps=(
-                config.dq_reduction_steps
-                if config.dq_reduction_steps > 0
-                else (3 if (getattr(jax.devices()[0], "num_cores", 1) > 1 and query.shape[2] >= 1024 and self.attention_type == AttentionType.COMPRESSED) else None)
-            ),
+            dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
             use_experimental_scheduler=self.use_splash_scheduler,
         )
       else:
@@ -1944,18 +1940,18 @@ class AttentionOp(nnx.Module):
         mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
 
       splash_q_seq_shards = cp_size
-      if self.attention_type == AttentionType.COMPRESSED and cp_size == 1:
-        num_cores = getattr(jax.devices()[0], "num_cores", 1)
-        shards = max(1, num_cores * 2)
-        while shards > 1 and (query.shape[2] % (shards * shards) != 0):
-          shards //= 2
-        splash_q_seq_shards = shards
 
       mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
       use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
-      elif self.attention_type == AttentionType.COMPRESSED and compress_ratio > 4:
+      elif self.attention_type == AttentionType.COMPRESSED:
+        if compress_ratio is None or compress_ratio <= 0:
+          raise ValueError("compress_ratio must be provided for AttentionType.COMPRESSED flash attention.")
+        if compress_ratio <= 4:
+          raise ValueError(
+              f"Static flash attention is only supported for HCA (compress_ratio > 4), got compress_ratio={compress_ratio}"
+          )
         if use_load_balanced_cp:
           raise ValueError(
               "Load-balanced context parallelism is currently not supported for DeepSeek-V4 HCA static attention."
@@ -2313,6 +2309,9 @@ class AttentionOp(nnx.Module):
 
     pad_q = 0
     orig_q_len = None
+    pad_kv = 0
+    orig_kv_len = None
+    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
     if self.attention_type == AttentionType.COMPRESSED:
       orig_q_len = query.shape[2]
       if mask_shape[0] > orig_q_len:
@@ -2321,11 +2320,18 @@ class AttentionOp(nnx.Module):
         if decoder_segment_ids is not None:
           decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)), constant_values=-1)
 
+      orig_kv_len = key.shape[2]
+      if mask_shape[1] > orig_kv_len:
+        pad_kv = mask_shape[1] - orig_kv_len
+        key = jnp.pad(key, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
+        value = jnp.pad(value, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
+        if decoder_segment_ids_kv_in is not None:
+          decoder_segment_ids_kv_in = jnp.pad(decoder_segment_ids_kv_in, ((0, 0), (0, pad_kv)), constant_values=-1)
+
     query = self._maybe_shard_with_pspec(query, axis_names_q)
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
     value = self._maybe_shard_with_pspec(value, axis_names_kv)
     decoder_segment_ids_q = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
-    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
     decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids_kv_in, segment_axis_names_kv)
     sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
     indexer_mask = self._maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
