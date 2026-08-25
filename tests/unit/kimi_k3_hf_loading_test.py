@@ -99,18 +99,18 @@ class KimiK3HFLoadingTest(unittest.TestCase):
 
     sharded_pure_dict = add_sharding_to_pure_dict(pure_dict)
 
-    # Configure memory-bounded PyTreeCheckpointHandler (restore_concurrent_gb=4) to prevent host OOM
+    # Configure PyTreeCheckpointHandler (restore_concurrent_gb=96)
     handler = ocp.PyTreeCheckpointHandler(
         use_ocdbt=True,
         use_zarr3=True,
-        restore_concurrent_gb=4,
+        restore_concurrent_gb=96,
     )
     mngr = ocp.CheckpointManager(
         self.checkpoint_dir,
         item_handlers={"items": handler},
         options=ocp.CheckpointManagerOptions(read_only=True),
     )
-    target_item = {"step": 0, "params": sharded_pure_dict, "opt_state": {}}
+    target_item = {"step": 0, "params": {"params": sharded_pure_dict}, "opt_state": {}}
     restore_args = ocp.checkpoint_utils.construct_restore_args(target_item)
     loaded_state = mngr.restore(
         0,
@@ -120,7 +120,7 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     )
     print("Checkpoint restored successfully! Step:", mngr.latest_step())
 
-    params = loaded_state["items"]["params"]
+    params = loaded_state["items"]["params"]["params"]
     del loaded_state
     del target_item
     del sharded_pure_dict
