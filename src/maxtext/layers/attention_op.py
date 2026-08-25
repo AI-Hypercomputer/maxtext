@@ -354,6 +354,11 @@ class HCAStaticMask(splash_attention_mask.Mask):
         )
     )
 
+  def __bool__(self) -> bool:
+    raise NotImplementedError(
+        "Conversion to bool is unsupported. Could be caused by using logical" " instead of bitwise operations on masks."
+    )
+
 
 def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
   """Generates an explicit boolean mask for chunked causal attention.

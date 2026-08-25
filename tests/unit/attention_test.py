@@ -4981,14 +4981,15 @@ class CompressedAttentionTest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   def test_hca_flash_vs_dot_product_packed_crossing_window(self):
-    """Verifies numerical equivalence between dot_product and flash attention on packed sequences crossing compression windows."""
+    """Verifies numerical equivalence between dot_product and flash attention on packed sequences crossing compression
+
+    windows.
+    """
     l1, l2 = 200, 312
     total_len = l1 + l2
     compress_ratio = 128
     cfg_dot = self._get_test_config(
         max_target_length=total_len,
-        compress_ratio=compress_ratio,
-        attention_kernel="dot_product",
     )
     attn_dot = self._create_compressed_attention_layer(
         cfg_dot, compress_ratio=compress_ratio, attention_kernel="dot_product"
@@ -4996,8 +4997,6 @@ class CompressedAttentionTest(parameterized.TestCase):
 
     cfg_flash = self._get_test_config(
         max_target_length=total_len,
-        compress_ratio=compress_ratio,
-        attention_kernel="flash",
     )
     attn_flash = self._create_compressed_attention_layer(
         cfg_flash, compress_ratio=compress_ratio, attention_kernel="flash"
@@ -5041,7 +5040,7 @@ class CompressedAttentionTest(parameterized.TestCase):
         err_msg="Static flash attention does not match dot_product on packed sequence crossing compression window.",
     )
 
-  def _get_test_config(self, max_target_length, compress_ratio, attention_kernel):
+  def _get_test_config(self, max_target_length):
     """Initializes and returns a MaxTextConfig for document packing tests."""
     config_arguments = {
         "per_device_batch_size": 1.0,
@@ -5132,8 +5131,6 @@ class CompressedAttentionTest(parameterized.TestCase):
 
     cfg = self._get_test_config(
         max_target_length=total_len,
-        compress_ratio=compress_ratio,
-        attention_kernel=attention_kernel,
     )
     attn = self._create_compressed_attention_layer(cfg, compress_ratio=compress_ratio, attention_kernel=attention_kernel)
     batch_size = cfg.global_batch_size_to_train_on
