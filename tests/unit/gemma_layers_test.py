@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The Gemma decoder layers must produce the same activations under both shard modes.
+"""Tests for the Gemma 1 / 2 / 3 decoder layers.
+
+Currently these cover sharding: each layer must produce the same activations under both
+shard modes.
 
 Under `shard_mode=auto` a missing sharding annotation costs nothing — GSPMD infers a
 layout. Under `shard_mode=explicit` the same omission is a hard `ShardingTypeError`,
@@ -82,7 +85,7 @@ _LAYERS = [
 ]
 
 
-class GemmaExplicitShardingTest(parameterized.TestCase):
+class GemmaLayersShardModeTest(parameterized.TestCase):
   """Auto and explicit shard modes must agree on every Gemma decoder layer."""
 
   def setUp(self):
