@@ -1041,6 +1041,20 @@ class MoEKernels(BaseModel):
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
   )
 
+  enable_bias_fold: bool = Field(
+      False,
+      description=(
+          "Opt-in: fold the per-expert [E,N] MLP bias INTO the tokamax v1"
+          " ragged_dot epilogue (rhs_bias=) instead of the byte-identical"
+          " outside-add. DEFAULT FALSE. When False, bias is added outside the"
+          " GMM so the v1 backward VJP (which does not support rhs_bias)"
+          " compiles. Only set True on a config whose backward path supports"
+          " the in-kernel fold; it is currently structurally compile-dead under"
+          " scan_layers + jax.shard_map at mesh scale (see gpt_oss_hillclimb"
+          " h1_compile_hang_findings)."
+      ),
+  )
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
