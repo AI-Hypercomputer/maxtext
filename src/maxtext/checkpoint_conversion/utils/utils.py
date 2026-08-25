@@ -1285,8 +1285,9 @@ def save_weights_to_checkpoint(
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
 
+  params = jax_weights if (isinstance(jax_weights, dict) and "params" in jax_weights) else {"params": jax_weights}
   state_new = train_state.TrainState(
-      step=step_number_to_save_new_ckpt, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+      step=step_number_to_save_new_ckpt, apply_fn=None, params=params, tx=None, opt_state={}  # type: ignore
   )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
