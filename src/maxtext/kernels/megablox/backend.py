@@ -29,8 +29,6 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 import qwix.pallas as qpl
 
-ManualAxisType = getattr(jax.sharding, "ManualAxisType", getattr(jax.core, "ManualAxisType", None))
-
 
 def _validate_args(
     *,
@@ -524,13 +522,10 @@ def gmm(
       "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
       "transpose_rhs": transpose_rhs,
   }
-  out_shape_kwargs = {}
-  if ManualAxisType is not None and varying_axes:
-    out_shape_kwargs["manual_axis_type"] = ManualAxisType(varying=frozenset(varying_axes))
   call_gmm = qpl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct(
-          (m, n), preferred_element_type, **out_shape_kwargs
+          (m, n), preferred_element_type, manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes))
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
@@ -786,15 +781,12 @@ def tgmm(
       "prefer_element_type": jnp.dtype(preferred_element_type).name,
       "num_actual_groups": num_actual_groups,
   }
-  out_shape_kwargs = {}
-  if ManualAxisType is not None and varying_axes:
-    out_shape_kwargs["manual_axis_type"] = ManualAxisType(varying=frozenset(varying_axes))
   call_gmm = qpl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct(
           (num_actual_groups, k, n),
           preferred_element_type,
-          **out_shape_kwargs,
+          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes)),
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
