@@ -188,7 +188,7 @@ multiprocess>=0.70.19
 mypy-extensions>=1.1.0
 namex>=0.1.0
 nbclient>=0.11.0
-nbformat>=5.10.4
+nbformat>=5.11.0
 nest-asyncio>=1.6.0 ; sys_platform == 'win32'
 nest-asyncio2>=1.7.2
 networkx>=3.6.1
@@ -251,7 +251,7 @@ py-spy>=0.4.0
 pyarrow>=25.0.0
 pyasn1>=0.6.4
 pyasn1-modules>=0.4.2
-pybase64>=1.4.3
+pybase64>=1.5.0
 pycnite>=2024.7.31
 pycountry>=26.2.16
 pycparser>=3.0 ; (implementation_name != 'PyPy' and platform_python_implementation != 'PyPy') or (implementation_name == 'pypy' and platform_python_implementation == 'PyPy')
@@ -336,7 +336,7 @@ toolz>=1.1.0
 torch==2.11.0+cpu
 torchax>=0.0.13
 torchvision==0.26.0+cpu
-tornado>=6.5.7
+tornado>=6.5.8
 tpu-info>=0.7.1
 tqdm>=4.70.0
 traitlets>=5.16.1
