@@ -1055,7 +1055,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # _split_into_chunks) -- construct the per-chunk synchronizers once,
       # matching the persistent-instance-per-cycle pattern the rebind
       # optimization (fewer stale holds) depends on.
-      num_chunks = max(1, int(os.environ.get("RAIDEN_WEIGHT_SYNC_CHUNKS", "4")))
+      #
+      # Default is 1 (chunking off): N>1 means N native WeightSynchronizer
+      # listener instances are alive in the same process simultaneously, and
+      # the tunix orchestrator transfers all of them in one combined
+      # many-to-one call -- confirmed (3 separate runs, always at the same
+      # point: right as the transfer starts after all chunks bind) to
+      # segfault the trainer process, unlike any single-instance (N=1) run,
+      # which has never crashed here. Root cause not yet isolated (leading
+      # suspects: tiling_utils.cc's process-wide 4-thread NumaThreadPool
+      # shared across all instances, or the native controller's many-to-one
+      # transfer scheduling) -- until it's fixed upstream or worked around
+      # (e.g. serializing transfers one chunk at a time instead of one
+      # combined call), N>1 is opt-in only via this env var, not the default.
+      # This does reintroduce chunking's original motivation -- an OOM risk
+      # on a rebind cycle's peak host memory -- as a separate, real problem.
+      num_chunks = max(1, int(os.environ.get("RAIDEN_WEIGHT_SYNC_CHUNKS", "1")))
       if self._raiden_syncs is None:
         # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
         # detection tunix's K8sJaxContext.initialize() uses), trainer params
