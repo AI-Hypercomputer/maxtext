@@ -53,6 +53,14 @@ class TestTransformLogic(unittest.TestCase):
   def test_bias_is_excluded(self):
     self.assertIsNone(muon_utils.transform_logic(("decoder", "dense", "bias")))
 
+  def test_bias_variant_is_excluded(self):
+    # Bias names (e.g., in MoE with mlp_bias=True) are excluded across all expert projections.
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "moe_block", "wi_0_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "GptOssMlp", "wi_0_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "GptOssMlp", "wi_1_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "GptOssMlp", "wo_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "mlp", "mlp_bias")))
+
   def test_embedding_is_excluded(self):
     self.assertIsNone(muon_utils.transform_logic(("token_embedder", "embedding")))
 
@@ -69,9 +77,27 @@ class TestTransformLogic(unittest.TestCase):
   def test_moe_wo_uses_last_two_axes(self):
     self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "wo")), mdn((-2,), (-1,)))
 
+  def test_moe_prefused_wi_uses_last_two_axes(self):
+    self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "wi")), mdn((-2,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "routed_experts", "wi")), mdn((-2,), (-1,)))
+
+  def test_qwen3_next_moe_routed_experts(self):
+    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_0")), mdn((-2,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_1")), mdn((-2,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wo")), mdn((-2,), (-1,)))
+
+  def test_qwen3_moe_block(self):
+    self.assertEqual(muon_utils.transform_logic(("decoder", "moe_block", "wi_0")), mdn((-2,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "moe_block", "wo")), mdn((-2,), (-1,)))
+
+  def test_gpt_oss_mlp_moe(self):
+    self.assertEqual(muon_utils.transform_logic(("decoder", "GptOssMlp", "wi_0")), mdn((-2,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "GptOssMlp", "wo")), mdn((-2,), (-1,)))
+
   def test_moe_gate_falls_through_to_standard(self):
-    # 'gate' is inside MoeBlock_0 but not one of (wi_0, wi_1, wo) → standard.
+    # 'gate' is inside MoeBlock_0 but not one of (wi, wi_0, wi_1, wo) → standard.
     self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel")), mdn((0,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "routed_experts", "gate", "kernel")), mdn((0,), (-1,)))
 
   # --- 2.2 Self-attention ---
   def test_self_attention_out_projection(self):
@@ -118,6 +144,18 @@ class TestTransformLogic(unittest.TestCase):
     # o_a_proj projects with reduction on in_features_per_group (-2)
     # and output on out_features_per_group (-1)
     self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "o_a_proj")), mdn((-2,), (-1,)))
+
+  def test_deepseek_v4_position_bias_is_standard_weight(self):
+    # position_bias in DeepSeek V4 compressed attention is a 2D weight matrix (not a 1D bias vector),
+    # so it receives standard Muon dimension numbers mdn((0,), (-1,)).
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "csa_compressor", "position_bias")),
+        mdn((0,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "hca_compressor", "position_bias")),
+        mdn((0,), (-1,)),
+    )
 
 
 class TestGetTransformTree(unittest.TestCase):
