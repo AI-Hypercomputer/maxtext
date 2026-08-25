@@ -785,33 +785,15 @@ def maybe_update_params_sharding_with_opt_nnx(
     opt_state = state_mesh_shardings.optimizer.opt_state
 
     def collect_mu_trees(obj, out):
-      # Leaf variable (e.g. a bare count/step OptArray): nothing to collect below
-      # it, and its __contains__ delegates to the wrapped value (a NamedSharding),
-      # so the dict-style 'mu' membership test below would raise on it.
       if isinstance(obj, nnx.Variable):
         return
-
-      # 1. Direct hit on ScaleByAdamState (Linen path or unflattened NNX)
-      if isinstance(obj, optax.ScaleByAdamState):
-        out.append(obj.mu)
-        return
-
-      # 2. Flattened optax moment state (nnx.State/dict) holding a param-mirroring
-      # 'mu' tree. Matching on 'mu' alone (not 'mu' and 'nu') also catches Muon's
-      # scale_by_muon state (mu + ns_coeffs, no nu) alongside Adam's (mu + nu).
-      if hasattr(obj, "__getitem__") and "mu" in obj:
+      if hasattr(obj, "get") and "mu" in obj:
         out.append(obj["mu"])
-        return
-
-      # 3. Recursive search through containers (nnx.State, dict, list, tuple)
-      values = None
-      if hasattr(obj, "values"):  # Handles nnx.State and dict
-        values = obj.values()
+      elif hasattr(obj, "values"):
+        for v in obj.values():
+          collect_mu_trees(v, out)
       elif isinstance(obj, (list, tuple)):
-        values = obj
-
-      if values:
-        for v in values:
+        for v in obj:
           collect_mu_trees(v, out)
 
     mu_trees = []
@@ -819,7 +801,7 @@ def maybe_update_params_sharding_with_opt_nnx(
     sharded_fp32_params = mu_trees or None
   if sharded_fp32_params is None:
     actual_type = type(state_mesh_shardings.optimizer.get("opt_state", "None"))
-    raise NotImplementedError(f"Could not find Adam optimizer state in: {actual_type}")
+    raise NotImplementedError(f"Could not find Adam/Muon optimizer state in: {actual_type}")
 
   # Update model parameter sharding to match the mu (first moment) sharding.
   # This ensures parameter sharding is consistent with the Zero-1 distributed layout.
@@ -834,9 +816,7 @@ def maybe_update_params_sharding_with_opt_nnx(
   # a MaskedNode-vs-leaf pytree structure error).
   mu_lookup = {}
   for mu_tree in mu_trees:
-    for path, mu_var in jax.tree_util.tree_leaves_with_path(
-        mu_tree, is_leaf=lambda x: isinstance(x, nnx.Variable)
-    ):
+    for path, mu_var in jax.tree_util.tree_leaves_with_path(mu_tree, is_leaf=lambda x: isinstance(x, nnx.Variable)):
       if not isinstance(mu_var, nnx.Variable):
         continue
       mu_value = mu_var.get_value()

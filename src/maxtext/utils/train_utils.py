@@ -25,29 +25,29 @@ from functools import partial
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
-from maxtext.common import checkpointing
-from maxtext.common import emergency_checkpointing
-from maxtext.common import train_state_nnx
-from maxtext.common.common_types import ReorderStrategy
-from maxtext.common.data_loader import create_dataloader
-from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
-from maxtext.optimizers import optimizers
-from maxtext.trainers.diloco import diloco
-from maxtext.utils import diloco_sharding
-from maxtext.utils import lora_utils
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
-from maxtext.utils import model_creation_utils
-from maxtext.utils import sharding
-from maxtext.utils.rampup_batch import create_rampup_manager
+from maxtext.src.maxtext.common import checkpointing
+from maxtext.src.maxtext.common import emergency_checkpointing
+from maxtext.src.maxtext.common import train_state_nnx
+from maxtext.src.maxtext.common.common_types import ReorderStrategy
+from maxtext.src.maxtext.common.data_loader import create_dataloader
+from maxtext.src.maxtext.common.goodput import GoodputEvent, maybe_record_goodput
+from maxtext.src.maxtext.optimizers import optimizers
+from maxtext.src.maxtext.trainers.diloco import diloco
+from maxtext.src.maxtext.utils import diloco_sharding
+from maxtext.src.maxtext.utils import lora_utils
+from maxtext.src.maxtext.utils import max_logging
+from maxtext.src.maxtext.utils import max_utils
+from maxtext.src.maxtext.utils import maxtext_utils
+from maxtext.src.maxtext.utils import model_creation_utils
+from maxtext.src.maxtext.utils import sharding
+from maxtext.src.maxtext.utils.rampup_batch import create_rampup_manager
 
 
-def create_training_optimizer(config, model):
+def create_training_optimizer(config, model, mesh=None):
   """Creates the optimizer and learning rate schedule."""
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
-  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model, mesh=mesh)
   return learning_rate_schedule, tx
 
 
@@ -249,7 +249,7 @@ def setup_train_loop(config, recorder, devices=None):
     train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
   """
   # pylint: disable=import-outside-toplevel
-  from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
+  from maxtext.src.maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     is_training = True
@@ -261,7 +261,7 @@ def setup_train_loop(config, recorder, devices=None):
       _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
     else:
       model = model_creation_utils.from_config(config, devices)
-    learning_rate_schedule, tx = create_training_optimizer(config, model)
+    learning_rate_schedule, tx = create_training_optimizer(config, model, mesh=mesh)
 
     if config.pure_nnx:
       # For NNX, the train state is wrapped in the TrainStateNNX module.

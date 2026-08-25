@@ -1967,8 +1967,8 @@ class Muon(BaseModel):
 
   muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
   muon_weight_decay: float = Field(
-      0,
-      description="Strength of the weight decay regularization. This is multiplied with the learning rate.",
+      0.0,
+      description=("Strength of the weight decay regularization. This is multiplied with" " the learning rate."),
   )
   muon_consistent_rms: float | None = Field(
       None,
@@ -1977,6 +1977,10 @@ class Muon(BaseModel):
   muon_ns_steps: int = Field(
       5,
       description="Number of Newton-Schulz iterations for Muon optimizer.",
+  )
+  muon_use_all_to_all: bool = Field(
+      True,
+      description=("Whether to use all-to-all communication during Newton-Schulz" " iterations in Muon optimizer."),
   )
 
 

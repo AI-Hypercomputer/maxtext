@@ -28,19 +28,19 @@ from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from maxtext.common import common_types
-from maxtext.common import train_state_nnx
-from maxtext.configs import pyconfig
-from maxtext.trainers.pre_train import train as maxtext_train
-from maxtext.training_engine import abstract_engine
-from maxtext.training_engine import checkpointing
-from maxtext.training_engine import inflight_throttler
-from maxtext.training_engine import metrics as metrics_module
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
-from maxtext.utils import model_creation_utils
-from maxtext.utils import sharding
-from maxtext.utils import train_utils
+from maxtext.src.maxtext.common import common_types
+from maxtext.src.maxtext.common import train_state_nnx
+from maxtext.src.maxtext.configs import pyconfig
+from maxtext.src.maxtext.trainers.pre_train import train as maxtext_train
+from maxtext.src.maxtext.training_engine import abstract_engine
+from maxtext.src.maxtext.training_engine import checkpointing
+from maxtext.src.maxtext.training_engine import inflight_throttler
+from maxtext.src.maxtext.training_engine import metrics as metrics_module
+from maxtext.src.maxtext.utils import max_utils
+from maxtext.src.maxtext.utils import maxtext_utils
+from maxtext.src.maxtext.utils import model_creation_utils
+from maxtext.src.maxtext.utils import sharding
+from maxtext.src.maxtext.utils import train_utils
 
 
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
@@ -83,7 +83,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_grads: Any = None
     self._micro_step_count = 0
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
-    self._learning_rate_schedule, self._optimizer = train_utils.create_training_optimizer(self._config, self._model)
+    self._learning_rate_schedule, self._optimizer = train_utils.create_training_optimizer(
+        self._config, self._model, mesh=self._mesh
+    )
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(

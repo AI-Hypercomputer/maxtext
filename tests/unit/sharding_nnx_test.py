@@ -22,8 +22,8 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from maxtext.common import train_state_nnx
-from maxtext.utils import sharding
+from maxtext.src.maxtext.common import train_state_nnx
+from maxtext.src.maxtext.utils import sharding
 import numpy as np
 import optax
 
@@ -167,6 +167,29 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
         ]
     )
     self.assertEqual(n_prev, n_after)
+
+  def test_zero1_partitioned_optimizer_filters_masked_nodes(self):
+    """Partitioned optimizers (Muon + Adam) with MaskedNode must update all branch params without error."""
+    cfg = _Cfg(shard_optimizer_over_data=True)
+    partitioned_opt = optax.partition(
+        transforms={
+            "muon": optax.adam(1e-3),
+            "adam": optax.adam(1e-3),
+        },
+        param_labels=lambda p: jax.tree.map(
+            lambda v: "muon" if "kernel" in getattr(v, "tag", "") else "adam",
+            p,
+        ),
+    )
+    state_mesh_shardings = _build_state_mesh_shardings(self.model, partitioned_opt)
+    prev, updated = sharding.maybe_update_params_sharding_with_opt_nnx(cfg, state_mesh_shardings)
+    self.assertIsInstance(prev, nnx.State)
+    self.assertIsInstance(updated, nnx.State)
+    # Ensure no MaskedNode leaked into updated.model
+    leaves = jax.tree.leaves(updated.model, is_leaf=lambda x: isinstance(x, nnx.Variable))
+    self.assertGreater(len(leaves), 0)
+    for leaf in leaves:
+      self.assertIsInstance(leaf.get_value(), NamedSharding)
 
 
 class TestNnxConstructNamedSharding(unittest.TestCase):

@@ -37,21 +37,21 @@ from jax.experimental.serialize_executable import serialize
 from jax.experimental.topologies import get_topology_desc
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh
-from maxtext.common import train_state_nnx
-from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
-from maxtext.configs import pyconfig
-from maxtext.layers import quantizations
-from maxtext.models import models
-from maxtext.optimizers import optimizers
-from maxtext.trainers.diloco import diloco
-from maxtext.trainers.pre_train import train
-from maxtext.utils import accelerator_to_spec_map
-from maxtext.utils import gcs_utils
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
-from maxtext.utils import maxtext_utils_nnx
-from maxtext.utils import model_creation_utils
-from maxtext.utils import sharding
+from maxtext.src.maxtext.common import train_state_nnx
+from maxtext.src.maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
+from maxtext.src.maxtext.configs import pyconfig
+from maxtext.src.maxtext.layers import quantizations
+from maxtext.src.maxtext.models import models
+from maxtext.src.maxtext.optimizers import optimizers
+from maxtext.src.maxtext.trainers.diloco import diloco
+from maxtext.src.maxtext.trainers.pre_train import train
+from maxtext.src.maxtext.utils import accelerator_to_spec_map
+from maxtext.src.maxtext.utils import gcs_utils
+from maxtext.src.maxtext.utils import max_utils
+from maxtext.src.maxtext.utils import maxtext_utils
+from maxtext.src.maxtext.utils import maxtext_utils_nnx
+from maxtext.src.maxtext.utils import model_creation_utils
+from maxtext.src.maxtext.utils import sharding
 
 # pylint: disable=too-many-positional-arguments
 
@@ -138,7 +138,7 @@ def get_shaped_inputs(topology_mesh, config):
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
-  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model, mesh=topology_mesh)
 
   # Shaped RNG keys
   _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
