@@ -124,8 +124,9 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     print("FORWARD PASS SUCCESSFUL!")
 
     # Check if PyTorch Hugging Face reference model is available for logit parity comparison
+    print(f"\nChecking Hugging Face reference checkpoint at: {self.hf_model_path}")
     if os.path.exists(self.hf_model_path):
-      print(f"\nComparing forward pass logits with PyTorch Hugging Face model at {self.hf_model_path}...")
+      print(f"Found Hugging Face model at {self.hf_model_path}. Loading for logit parity comparison...")
       try:
         import torch
         from transformers import AutoModelForCausalLM
@@ -166,7 +167,12 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         self.assertEqual(top1_agree, 1.0, f"Top-1 argmax agreement {top1_agree} is not 100%!")
         print("REAL PRETRAINED LOGIT PARITY VERIFIED SUCCESSFULLY!")
       except Exception as e:
-        print(f"Note: HF comparison encountered: {e}")
+        import traceback
+        print(f"HF comparison error:\n{traceback.format_exc()}")
+        raise e
+    else:
+      print(f"WARNING: Hugging Face checkpoint not found at {self.hf_model_path}.")
+      print("Pass HF_MODEL_PATH=<path_to_hf_subset> to run logit parity against PyTorch.")
 
 
 
