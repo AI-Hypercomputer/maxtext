@@ -246,6 +246,27 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         sys.modules["fla.ops.utils.index"] = fla_ops_utils_index
         sys.modules["fla.utils"] = fla_utils
 
+        # 3. Pure PyTorch CPU fallback for flash_attention_2 in transformers
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        def cpu_flash_attn_forward(module, query, key, value, attention_mask=None, scaling=None, dropout=0.0, **kwargs):
+          B, H, T_q, D_q = query.shape
+          _, _, T_k, D_v = value.shape
+          if scaling is None:
+            scaling = D_q ** -0.5
+          scores = torch.matmul(query, key.transpose(-1, -2)) * scaling
+          if attention_mask is not None:
+            if attention_mask.dim() == 2:
+              attention_mask = attention_mask[:, None, None, :]
+            scores = scores + attention_mask
+          causal_mask = torch.triu(torch.full((T_q, T_k), float('-inf'), device=query.device), diagonal=1)
+          scores = scores + causal_mask[None, None, :, :]
+          attn_weights = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+          attn_output = torch.matmul(attn_weights, value)
+          return attn_output, attn_weights
+
+        ALL_ATTENTION_FUNCTIONS["flash_attention_2"] = cpu_flash_attn_forward
+
         from transformers import AutoConfig, AutoModelForCausalLM
 
         # Ensure all required custom python modeling files are present in the subset directory
