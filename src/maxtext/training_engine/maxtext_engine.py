@@ -241,6 +241,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._metrics_recorder = metrics_module.MetricsRecorder()
     self._throttler = inflight_throttler.InflightThrottler(config=self._config)
     self._raiden_syncs: Any = None
+    # RAIDEN_TRANSPORT=ffi path only (see _prepare_weight_sync_ffi): keeps
+    # the bound device arrays' Python references alive between
+    # prepare_weight_sync() and release_weight_sync(), since there's no OO
+    # RaidenSynchronizer instance holding them for this path.
+    self._ffi_arrays: Any = None
 
   @property
   def model(self) -> Any:
@@ -1001,6 +1006,132 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       chunk_flats[i % num_chunks][key] = flat[key]
     return [unflatten_dict(cf) for cf in chunk_flats]
 
+  def _prepare_weight_sync_ffi(self, params_state: Any) -> Any:
+    """Experimental: binds via tpu_raiden's low-level FFI instead of the OO
+    RaidenSynchronizer class -- see the RAIDEN_TRANSPORT=ffi branch in
+    prepare_weight_sync() for why. WIP, modeled on
+    mohit/raiden-integration's PeftTrainer._prepare_weight_sync_pathways
+    (same repo, different branch) but reusing raiden_synchronizer's
+    flatten/filter/metadata helpers to stay consistent with what the
+    destination side (unchanged, still the OO RaidenSynchronizer class) is
+    matching against by name.
+
+    Only the source side changes here. The destination
+    (RaidenSamplerAdapter / VllmSamplerAdapter) keeps calling h2d() on its
+    existing OO-class binding -- no multi_h2d, no destination-side FFI --
+    per the explicit call to keep that side as-is.
+    """
+    import ipaddress  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.orchestrator import weight_sync  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.worker import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+    from tpu_raiden.frameworks.jax import weight_synchronizer_ffi as raiden_ffi  # pylint: disable=g-import-not-at-top
+
+    names, arrays = raiden_synchronizer.flatten_weights(params_state)
+    names, arrays = raiden_synchronizer._filter_bindable(names, arrays)  # pylint: disable=protected-access
+    del params_state
+
+    mesh = None
+    for arr in arrays:
+      candidate_mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
+      if candidate_mesh is not None:
+        mesh = candidate_mesh
+        break
+    if mesh is None:
+      raise RuntimeError(
+          "prepare_weight_sync (ffi): no trainable array carried a mesh;"
+          " cannot determine the device mesh for the FFI call."
+      )
+
+    def _unpack_ip(row: Any) -> str:
+      raw_bytes = np.asarray(row[:4]).astype(np.int32).tobytes()
+      try:
+        ip_obj = ipaddress.IPv6Address(raw_bytes)
+        if ip_obj.ipv4_mapped is not None:
+          return str(ip_obj.ipv4_mapped)
+        return f"[{ip_obj}]" if ":" in str(ip_obj) else str(ip_obj)
+      except ValueError:
+        return "127.0.0.1"
+
+    def _slice_bytes(arr: Any) -> int:
+      shd_obj = getattr(arr, "sharding", None)
+      local_shape = (
+          shd_obj.shard_shape(arr.shape)
+          if hasattr(shd_obj, "shard_shape")
+          else arr.shape
+      )
+      return int(np.prod(local_shape)) * arr.dtype.itemsize
+
+    max_slice_size = max(_slice_bytes(arr) for arr in arrays)
+    src_global_ids = np.arange(mesh.devices.size, dtype=np.int32).reshape(
+        mesh.devices.shape
+    )
+    src_shard_idx = jax.device_put(
+        src_global_ids,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(*mesh.axis_names)
+        ),
+    )
+    slice_byte_sizes = jnp.array([max_slice_size] * len(arrays), dtype=jnp.int32)
+
+    src_ws_info = raiden_ffi.init_weight_synchronizer_and_d2h(
+        device_arrays=arrays,
+        shard_idx=src_shard_idx,
+        mesh=mesh,
+        slice_byte_sizes=slice_byte_sizes,
+        local_port=0,
+        parallelism=4,
+        num_layers=len(arrays),
+        listener_port=0,
+    )
+    src_ws_info.block_until_ready()
+    src_info_np = np.asarray(src_ws_info).reshape(-1, 6)
+    src_ips = tuple(f"{_unpack_ip(row)}:{row[4]}" for row in src_info_np)
+    src_listener = f"{_unpack_ip(src_info_np[0])}:{src_info_np[0][5]}"
+
+    variables = tuple(
+        raiden_synchronizer._tensor_metadata(name, arr, idx)  # pylint: disable=protected-access
+        for idx, (name, arr) in enumerate(zip(names, arrays))
+    )
+    mesh_axes = tuple(mesh.axis_names)
+    mesh_shape = tuple(mesh.shape[a] for a in mesh_axes)
+
+    work_unit = weight_sync.WorkUnitMetadata(
+        unit=weight_sync.WorkUnitId(job_name="trainer"),
+        shards=src_ips,
+        control_plane_rpc_address=src_listener,
+        mesh_shape=mesh_shape,
+        mesh_axes=mesh_axes,
+        variables=variables,
+    )
+
+    # Keep the device arrays' Python references alive until
+    # release_weight_sync(): the FFI call above doesn't take ownership the
+    # way the OO class's self.arrays does, and letting them get GC'd while
+    # the native transport still expects to read from them would be exactly
+    # the kind of use-after-free class of bug this whole investigation has
+    # been chasing.
+    self._ffi_arrays = arrays
+    self._ffi_names = names
+
+    if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
+      checksums = {
+          name: float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
+          for name, arr in list(zip(names, arrays))[:3]
+      }
+      checksums["__grand_total__"] = float(
+          sum(jnp.sum(jnp.abs(arr).astype(jnp.float32)) for arr in arrays)
+      )
+      logging.info("Source weights checksums (ffi): %s", checksums)
+
+    logging.info(
+        "Trainer prepared weight sync for step %d (ffi transport): %d"
+        " variables on mesh %s",
+        self.train_step,
+        len(variables),
+        mesh_axes,
+    )
+    return [work_unit]
+
   def prepare_weight_sync(
       self,
       staging_transport: str = "raiden",
@@ -1051,7 +1182,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             scan_axis=self._config.param_scan_axis,
         )
 
-      # 3. Bind parameters to the Raiden transport, one chunk at a time (see
+      # 3. Bind parameters to the Raiden transport.
+      #
+      # RAIDEN_TRANSPORT=ffi (experimental, see _prepare_weight_sync_ffi):
+      # one unified tpu_raiden FFI call (init_weight_synchronizer_and_d2h)
+      # spanning every trainable tensor, instead of N chunked OO
+      # RaidenSynchronizer instances. There is structurally only ever one
+      # native transport object on the source side with this path, which
+      # would sidestep the whole "N native listeners alive at once" class of
+      # bug the chunked OO path below has been fighting (a segfault when
+      # transferring concurrently, fixed by serializing transfers; a
+      # reproducible Connection reset on the first serialized transfer,
+      # still unexplained even after minimizing listener idle time). Skips
+      # host_stage/to_host_cpu_state entirely -- the FFI does its own D2H as
+      # part of an XLA program (jax.experimental.compute_on), which should
+      # also work directly on Pathways proxy-backed arrays without an
+      # explicit device_get() round trip first, unlike the OO path.
+      if os.environ.get("RAIDEN_TRANSPORT", "").lower() == "ffi":
+        return self._prepare_weight_sync_ffi(params_state)
+
+      # Default: chunked OO RaidenSynchronizer path, one chunk at a time (see
       # _split_into_chunks) -- construct the per-chunk synchronizers once,
       # matching the persistent-instance-per-cycle pattern the rebind
       # optimization (fewer stale holds) depends on.
@@ -1167,6 +1317,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       for sync in self._raiden_syncs:
         logging.vlog(1, "Trainer Raiden metrics: %s", sync.metrics())
         sync.release_host_arrays()
+    if self._ffi_arrays is not None:
+      # No native-side release call exists for a single bind/transfer round
+      # in the FFI API (destroy_weight_synchronizer tears down the whole
+      # native instance, which close() below does at trainer shutdown, not
+      # per-round) -- dropping the Python references is what this path has
+      # to release each round.
+      self._ffi_arrays = None
+      self._ffi_names = None
     return True
 
   def close(self) -> None:
@@ -1176,6 +1334,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         if hasattr(sync, "close"):
           sync.close()
       self._raiden_syncs = None
+    if self._ffi_arrays is not None:
+      try:
+        from tpu_raiden.frameworks.jax import weight_synchronizer_ffi as raiden_ffi  # pylint: disable=g-import-not-at-top
+        raiden_ffi.destroy_weight_synchronizer()
+      except ImportError:
+        pass
+      self._ffi_arrays = None
+      self._ffi_names = None
     self._throttler.cleanup()
     self._metrics_recorder.cleanup()
     self._checkpoint_manager.close()
