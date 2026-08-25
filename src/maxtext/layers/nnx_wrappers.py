@@ -27,18 +27,8 @@ from flax.core import FrozenDict
 from flax.core import meta
 from flax.nnx import graph
 from flax.nnx import variablelib
-try:
-  from flax.nnx.bridge import module as bdg_module
-except ImportError:
-  try:
-    from flax.nnx.bridge import wrappers as bdg_module
-  except ImportError:
-    import flax.nnx.bridge as bdg_module
-
-try:
-  from flax.nnx.module import Module
-except ImportError:
-  from flax.nnx import Module
+from flax.nnx.bridge import module as bdg_module
+from flax.nnx.module import Module
 
 try:
   from flax.nnx import Pytree
