@@ -75,7 +75,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.fake_logging = create_autospec(self.original_max_logging)
     self.fake_jax = create_autospec(self.original_jax)
     self.fake_manager = create_autospec(self.original_manager_class, instance=True)
-    self.fake_manager.available_inactive_slices = set()    # Configure default behaviors if needed
+    self.fake_manager.available_inactive_slices = set()  # Configure default behaviors if needed
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
     self.fake_jax.process_index.return_value = 0
     self.fake_manager.slice_to_devices = {0: [FakeDevice(slice_index=0)]}
@@ -390,9 +390,7 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     elastic_utils.record_elastic_event_start(fake_recorder, config)
 
-    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(
-        event_type="elastic_slice_down"
-    )
+    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(event_type="elastic_slice_down")
     self.assertEqual(elastic_utils.pending_elastic_event_type, "elastic_slice_down")
 
   def test_record_elastic_event_start_scale_up(self):
@@ -404,9 +402,7 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     elastic_utils.record_elastic_event_start(fake_recorder, config)
 
-    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(
-        event_type="elastic_scale_up"
-    )
+    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(event_type="elastic_scale_up")
 
   def test_record_elastic_wait_end_and_reinit_start_noop_on_first_attempt(self):
     """Tests recording elastic event end and elastic reinit start."""
@@ -426,9 +422,7 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
 
-    fake_recorder.record_elastic_wait_end_time.assert_called_once_with(
-        event_type="elastic_slice_down"
-    )
+    fake_recorder.record_elastic_wait_end_time.assert_called_once_with(event_type="elastic_slice_down")
     fake_recorder.record_elastic_reinit_start_time.assert_called_once_with()
     self.assertIs(elastic_utils.pending_reinit_recorder, fake_recorder)
     self.assertIsNone(elastic_utils.pending_elastic_event_type)
@@ -465,9 +459,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     finally:
       elastic_utils.elastic.get_slice_to_devices = original_get_slice_to_devices
 
-    fake_recorder.record_elastic_slice_counts.assert_called_once_with(
-        available_slices=2, active_slices=1, total_slices=2
-    )
+    fake_recorder.record_elastic_slice_counts.assert_called_once_with(available_slices=2, active_slices=1, total_slices=2)
 
   def test_record_slice_state_active_slices_override(self):
     """Tests that an explicit active_slices_override is forwarded instead of the live count."""
@@ -485,9 +477,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     finally:
       elastic_utils.elastic.get_slice_to_devices = original_get_slice_to_devices
 
-    fake_recorder.record_elastic_slice_counts.assert_called_once_with(
-        available_slices=2, active_slices=0, total_slices=2
-    )
+    fake_recorder.record_elastic_slice_counts.assert_called_once_with(available_slices=2, active_slices=0, total_slices=2)
 
   def test_record_slice_state_noop_recorder_missing_attr(self):
     """Tests that record_slice_state no-ops for a recorder without record_elastic_slice_counts."""
@@ -511,9 +501,7 @@ class ElasticUtilsTest(parameterized.TestCase):
   def test_record_slice_state_handles_health_check_failure(self):
     """A health-check failure must not propagate."""
     elastic_utils.elastic_manager = self.fake_manager
-    elastic_utils.elastic.get_active_slice_indices = Mock(
-        side_effect=MockJaxRuntimeError("unrecognized backend error")
-    )
+    elastic_utils.elastic.get_active_slice_indices = Mock(side_effect=MockJaxRuntimeError("unrecognized backend error"))
     fake_recorder = Mock()
 
     # Should not raise.
@@ -544,9 +532,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.fake_manager.active_slice_indices = {0}
     elastic_utils.elastic.get_active_slice_indices = Mock(return_value={0})
     original_get_slice_to_devices = elastic_utils.elastic.get_slice_to_devices
-    elastic_utils.elastic.get_slice_to_devices = Mock(
-        return_value={0: [FakeDevice(slice_index=0)]}
-    )
+    elastic_utils.elastic.get_slice_to_devices = Mock(return_value={0: [FakeDevice(slice_index=0)]})
     fake_recorder = Mock()
     config = FakeConfig()
 
@@ -557,12 +543,8 @@ class ElasticUtilsTest(parameterized.TestCase):
     finally:
       elastic_utils.elastic.get_slice_to_devices = original_get_slice_to_devices
 
-    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(
-        event_type="elastic_slice_down"
-    )
-    fake_recorder.record_elastic_wait_end_time.assert_called_once_with(
-        event_type="elastic_slice_down"
-    )
+    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(event_type="elastic_slice_down")
+    fake_recorder.record_elastic_wait_end_time.assert_called_once_with(event_type="elastic_slice_down")
     fake_recorder.record_elastic_reinit_start_time.assert_called_once_with()
     fake_recorder.record_elastic_reinit_end_time.assert_called_once_with()
     # active_slices=0 is forced on event start (we've lost/are waiting on slices),

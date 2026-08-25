@@ -159,10 +159,13 @@ class GoodputUtilsTest(unittest.TestCase):
     mock_cloud_logger.return_value = mock.MagicMock()
     elastic_config = self._make_elastic_config("runner_test_elastic")
 
-    with mock.patch(
-        "maxtext.utils.elastic_utils.pathwaysutils.is_pathways_backend_used",
-        return_value=True,
-    ), mock.patch("maxtext.utils.elastic_utils.record_slice_state") as mock_seed:
+    with (
+        mock.patch(
+            "maxtext.utils.elastic_utils.pathwaysutils.is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch("maxtext.utils.elastic_utils.record_slice_state") as mock_seed,
+    ):
       recorder = create_goodput_recorder(elastic_config)
 
     from ml_goodput_measurement import goodput_elastic  # pylint: disable=g-import-not-at-top
@@ -176,12 +179,15 @@ class GoodputUtilsTest(unittest.TestCase):
     mock_cloud_logger.return_value = mock.MagicMock()
     elastic_config = self._make_elastic_config("runner_test_elastic_fallback")
 
-    with mock.patch(
-        "maxtext.utils.elastic_utils.pathwaysutils.is_pathways_backend_used",
-        return_value=True,
-    ), mock.patch(
-        "ml_goodput_measurement.goodput_elastic.ElasticGoodputRecorder",
-        side_effect=RuntimeError("boom"),
+    with (
+        mock.patch(
+            "maxtext.utils.elastic_utils.pathwaysutils.is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch(
+            "ml_goodput_measurement.goodput_elastic.ElasticGoodputRecorder",
+            side_effect=RuntimeError("boom"),
+        ),
     ):
       recorder = create_goodput_recorder(elastic_config)
 
@@ -206,9 +212,10 @@ class GoodputUtilsTest(unittest.TestCase):
     elastic_config = self._make_elastic_config("runner_test_monitor_elastic")
     common_kwargs = {"job_name": "test"}
 
-    with mock.patch(
-        "maxtext.utils.elastic_utils.should_use_elastic", return_value=True
-    ), mock.patch("ml_goodput_measurement.monitoring_elastic.ElasticGoodputMonitor") as mock_elastic_monitor:
+    with (
+        mock.patch("maxtext.utils.elastic_utils.should_use_elastic", return_value=True),
+        mock.patch("ml_goodput_measurement.monitoring_elastic.ElasticGoodputMonitor") as mock_elastic_monitor,
+    ):
       mock_elastic_monitor.return_value = mock.MagicMock()
       monitor = _construct_goodput_monitor(elastic_config, common_kwargs)
 
@@ -231,12 +238,14 @@ class GoodputUtilsTest(unittest.TestCase):
     elastic_config = self._make_elastic_config("runner_test_monitor_elastic_fallback")
     common_kwargs = {"job_name": "test"}
 
-    with mock.patch(
-        "maxtext.utils.elastic_utils.should_use_elastic", return_value=True
-    ), mock.patch(
-        "ml_goodput_measurement.monitoring_elastic.ElasticGoodputMonitor",
-        side_effect=RuntimeError("boom"),
-    ), mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor") as mock_monitor:
+    with (
+        mock.patch("maxtext.utils.elastic_utils.should_use_elastic", return_value=True),
+        mock.patch(
+            "ml_goodput_measurement.monitoring_elastic.ElasticGoodputMonitor",
+            side_effect=RuntimeError("boom"),
+        ),
+        mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor") as mock_monitor,
+    ):
       mock_monitor.return_value = mock.MagicMock()
       monitor = _construct_goodput_monitor(elastic_config, common_kwargs)
 

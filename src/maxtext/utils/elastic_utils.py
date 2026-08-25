@@ -86,7 +86,6 @@ def restore_resharded_state(elastic_mgr: Any, mesh: Any, state: Any):
   return step, state
 
 
-
 def record_slice_state(recorder, active_slices_override: int | None = None) -> None:
   """Records live slice counts and logs them to the GoodputRecorder."""
   if (
@@ -216,13 +215,11 @@ def ensure_elastic_manager_initialized(config):
     if elastic_manager.active_slice_indices:
       jax.config.update("jax_default_device", elastic_manager.default_device)
 
+
 def mutate_config_for_topology(config, el_manager):
   """Dynamically mutate the config to match the degraded slice topology."""
   new_slice_count = el_manager.active_slice_count
-  max_logging.log(
-      f"[*] Dynamically mutating config.num_slices and "
-      f"config.dcn_data_parallelism to: {new_slice_count}"
-  )
+  max_logging.log(f"[*] Dynamically mutating config.num_slices and " f"config.dcn_data_parallelism to: {new_slice_count}")
   object.__setattr__(config, "num_slices", new_slice_count)
   object.__setattr__(config, "dcn_data_parallelism", new_slice_count)
 
@@ -233,10 +230,9 @@ def mutate_config_for_topology(config, el_manager):
       config.dcn_parallelism[data_axis_idx] = new_slice_count
 
   # Recalculate num_target_devices and batch sizes for the new topology
-  new_num_devices = len([
-      d for d in jax.devices() if getattr(d, "slice_index", 0) in el_manager.active_slice_indices
-  ])
+  new_num_devices = len([d for d in jax.devices() if getattr(d, "slice_index", 0) in el_manager.active_slice_indices])
   recalculate_batch_sizes(config, new_num_devices)
+
 
 def get_local_batch_size(config) -> int:
   """Returns the local batch size based on the config."""
@@ -251,9 +247,7 @@ def live_devices(config=None):
     assert elastic_manager is not None
 
     # Filter devices that are in active slices
-    active_devices = [
-        d for d in jax.devices() if d.slice_index in elastic_manager.active_slice_indices
-    ]
+    active_devices = [d for d in jax.devices() if d.slice_index in elastic_manager.active_slice_indices]
     return sorted(active_devices, key=lambda d: (d.slice_index, d.process_index))
 
   return jax.devices()
@@ -306,7 +300,9 @@ def wait_for_devices_placed(config, timeout: float = 60.0, poll_interval: float 
       active_devices = live_devices(config)
 
       if len(elastic_manager.active_slice_indices) < min_slices or not active_devices:
-        max_logging.log(f"Active slices ({len(elastic_manager.active_slice_indices)}) < min ({min_slices}). Waiting for slices...")
+        max_logging.log(
+            f"Active slices ({len(elastic_manager.active_slice_indices)}) < min ({min_slices}). Waiting for slices..."
+        )
         time.sleep(poll_interval)
         continue
 
@@ -318,7 +314,9 @@ def wait_for_devices_placed(config, timeout: float = 60.0, poll_interval: float 
       arr = jax.device_put(test_val, sharding)
       jax.block_until_ready(arr)
       arr.delete()
-      max_logging.log(f"Confirmed {len(active_devices)} devices on slices {elastic_manager.active_slice_indices} are placed and ready.")
+      max_logging.log(
+          f"Confirmed {len(active_devices)} devices on slices {elastic_manager.active_slice_indices} are placed and ready."
+      )
       return active_devices
     except Exception as e:
       max_logging.log(f"Waiting for Pathways device placement to stabilize ({e}). Retrying poll...")
@@ -447,17 +445,11 @@ def recalculate_batch_sizes(config, new_num_devices: int):
     return
   object.__setattr__(config, "num_target_devices", new_num_devices)
 
-  def calc_gbs(
-      per_device_batch_size, expansion_factor, num_devices, grad_accum_steps
-  ):
+  def calc_gbs(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps):
     if per_device_batch_size < 1.0:
       mbs_load = int(num_devices * (expansion_factor if expansion_factor > 0 else 1))
     else:
-      mbs_load = int(
-          num_devices
-          * per_device_batch_size
-          * (expansion_factor if expansion_factor > 0 else 1)
-      )
+      mbs_load = int(num_devices * per_device_batch_size * (expansion_factor if expansion_factor > 0 else 1))
     mbs_train = int(num_devices * per_device_batch_size)
     gbs_load = int(mbs_load * grad_accum_steps)
     gbs_train = int(mbs_train * grad_accum_steps)
@@ -481,9 +473,7 @@ def recalculate_batch_sizes(config, new_num_devices: int):
       new_num_devices,
       1,
   )
-  object.__setattr__(
-      config, "global_batch_size_to_load_eval", gbs_load_eval
-  )
+  object.__setattr__(config, "global_batch_size_to_load_eval", gbs_load_eval)
   object.__setattr__(config, "global_batch_size_to_eval_on", gbs_eval)
   object.__setattr__(config, "micro_batch_size_to_eval_on", mbs_eval)
 
@@ -500,20 +490,14 @@ def recalculate_batch_sizes(config, new_num_devices: int):
         new_num_devices,
         config.gradient_accumulation_steps,
     )
-    object.__setattr__(
-        config, "global_batch_size_to_load_start", gbs_load_start
-    )
-    object.__setattr__(
-        config, "global_batch_size_to_load_increment", gbs_load_inc
-    )
+    object.__setattr__(config, "global_batch_size_to_load_start", gbs_load_start)
+    object.__setattr__(config, "global_batch_size_to_load_increment", gbs_load_inc)
 
     diff_batch_size = gbs_load - gbs_load_start
     if gbs_load_inc > 0:
       num_increments = diff_batch_size // gbs_load_inc
       if num_increments > 0:
-        rampup_samples_per_increment = (
-            config.global_rampup_samples / num_increments
-        )
+        rampup_samples_per_increment = config.global_rampup_samples / num_increments
         object.__setattr__(
             config,
             "rampup_samples_per_increment_to_load",
@@ -524,9 +508,7 @@ def recalculate_batch_sizes(config, new_num_devices: int):
         current_batch_size = gbs_load_start
         for _ in range(int(num_increments)):
           steps_for_this_stage = (
-              math.ceil(rampup_samples_per_increment / current_batch_size)
-              if current_batch_size > 0
-              else 0
+              math.ceil(rampup_samples_per_increment / current_batch_size) if current_batch_size > 0 else 0
           )
           total_rampup_steps += steps_for_this_stage
           current_batch_size += gbs_load_inc
@@ -535,6 +517,7 @@ def recalculate_batch_sizes(config, new_num_devices: int):
         object.__setattr__(config, "rampup_end_step", 0)
     else:
       object.__setattr__(config, "rampup_end_step", 0)
+
 
 def elastic_snapshot(config) -> bool:
   """Returns whether elastic snapshot mode is enabled."""
@@ -550,5 +533,3 @@ def maybe_bubble_elastic_exception(config, e: Exception) -> None:
   """
   if elastic_enabled(config) and isinstance(e, (jax.errors.JaxRuntimeError, manager.ScaleUpSignalError)):
     raise e
-
-
