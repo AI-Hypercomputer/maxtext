@@ -1239,7 +1239,7 @@ def transformer_engine_context():
     )
     with global_shard_guard(mesh_resource):
       yield
-  except (ImportError, AttributeError):
+  except Exception:  # pylint: disable=broad-exception-caught
     yield
 
 

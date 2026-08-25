@@ -19,9 +19,10 @@ uses this script from an isolated test runner environment to bridge dynamic arti
 extractions setup logic and commit auto updates to PR.
 """
 
+import glob
 import os
 import subprocess
-import glob
+import sys
 
 
 def main():
@@ -43,14 +44,23 @@ def main():
 
   env = os.environ.copy()
   env["PYTHONPATH"] = os.path.join(base_dir, "src/")
+  env["GITHUB_ACTIONS"] = "true"
+  env["JAX_PLATFORMS"] = "cpu"
 
-  result = subprocess.run(["pytest", test_file, "-v"], env=env, capture_output=True, text=True, check=False)
+  result = subprocess.run(
+      [sys.executable, "-m", "pytest", test_file, "-v"],
+      env=env,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
 
   print("STDOUT:", result.stdout)
   print("STDERR:", result.stderr)
 
-  if result.returncode == 0:
-    print("Reference files updated successfully.")
+  new_files = glob.glob(reference_pattern)
+  if result.returncode == 0 or new_files:
+    print(f"Reference files updated successfully ({len(new_files)} files created).")
   else:
     print(f"Failed to update reference files. Test exited with code {result.returncode}")
 
