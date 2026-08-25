@@ -111,7 +111,7 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         options=ocp.CheckpointManagerOptions(read_only=True),
     )
     target_item = {"step": 0, "params": {"params": sharded_pure_dict}, "opt_state": {}}
-    loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.StandardRestore(target_item)))
+    loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.PyTreeRestore(target_item)))
     print("Checkpoint restored successfully! Step:", mngr.latest_step())
 
     params = loaded_state["items"]["params"]["params"]
