@@ -110,11 +110,17 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         item_handlers={"items": handler},
         options=ocp.CheckpointManagerOptions(read_only=True),
     )
-    target_item = {"step": 0, "params": {"params": sharded_pure_dict}, "opt_state": {}}
-    loaded_state = mngr.restore(0, args=ocp.args.Composite(items=ocp.args.PyTreeRestore(target_item)))
+    target_item = {"step": 0, "params": sharded_pure_dict, "opt_state": {}}
+    restore_args = ocp.checkpoint_utils.construct_restore_args(target_item)
+    loaded_state = mngr.restore(
+        0,
+        args=ocp.args.Composite(
+            items=ocp.args.PyTreeRestore(item=target_item, restore_args=restore_args)
+        ),
+    )
     print("Checkpoint restored successfully! Step:", mngr.latest_step())
 
-    params = loaded_state["items"]["params"]["params"]
+    params = loaded_state["items"]["params"]
     del loaded_state
     del target_item
     del sharded_pure_dict
