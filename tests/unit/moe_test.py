@@ -33,7 +33,7 @@ from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from maxtext.layers.quantizations import Fp8Quantization
+from maxtext.layers.quantizations import configure_quantization, Fp8Quantization
 from maxtext.utils import max_logging, maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
@@ -1733,6 +1733,111 @@ class RoutedMoeTest(parameterized.TestCase):
     relative_norm_diff_threshold = 0.22 if quantization else 0.012
     diff_summary = compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold)
     max_logging.log("\n" + diff_summary)
+
+
+class GetEinsumTest(parameterized.TestCase):
+  """Tests for the quantized einsums RoutedMoE.get_einsum hands to dense_matmul."""
+
+  def _make_moe(self, quant):
+    """Builds a small RoutedMoE on the dense_matmul path with the given quantization."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="get_einsum_test",
+        enable_checkpointing=False,
+        decoder_block="mixtral",
+        num_experts=4,
+        num_experts_per_tok=2,
+        base_emb_dim=64,
+        base_mlp_dim=32,
+        base_moe_mlp_dim=32,
+        dtype="float32",
+        weight_dtype="float32",
+        megablox=False,
+        sparse_matmul=False,
+        max_target_length=8,
+        per_device_batch_size=1,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    return moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=Mesh(devices_array, cfg.mesh_axes),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=jnp.float32,
+        quant=quant,
+        rngs=nnx.Rngs(0),
+    )
+
+  def _quantization(self, quantization):
+    """Returns the quantization object the config string maps to."""
+    return configure_quantization(
+        pyconfig.initialize(
+            [None, get_test_config_path()],
+            enable_checkpointing=False,
+            quantization=quantization,
+        )
+    )
+
+  def test_fp8_einsum_is_bound(self):
+    model = self._make_moe(Fp8Quantization())
+    einsum_fn = model.get_einsum(einsum_name=moe.WI_0)
+    result = einsum_fn("ab,bc->ac", jnp.ones((2, 3)), jnp.ones((3, 4)))
+    self.assertEqual(result.shape, (2, 4))
+
+  def test_aqt_einsum_is_bound(self):
+    model = self._make_moe(self._quantization("int8"))
+    self.assertIsNone(model.quant_einsums)
+    einsum_fn = model.get_einsum(einsum_name=moe.WI_0)
+    result = einsum_fn("ab,bc->ac", jnp.ones((2, 3)), jnp.ones((3, 4)))
+    self.assertEqual(result.shape, (2, 4))
+
+  def test_unregistered_quant_einsum_name_raises(self):
+    model = self._make_moe(Fp8Quantization())
+    einsum_fn = model.get_einsum(einsum_name="not_registered")
+    with self.assertRaises(ValueError) as ctx:
+      einsum_fn("ab,bc->ac", jnp.ones((2, 3)), jnp.ones((3, 4)))
+    self.assertIn("not_registered", str(ctx.exception))
+    self.assertIn("Available names", str(ctx.exception))
+
+  @parameterized.named_parameters(
+      ("fp8", "fp8", jnp.float8_e4m3fn),
+      ("nanoo_fp8", "nanoo_fp8", jnp.float8_e4m3fnuz),
+  )
+  def test_fp8_einsum_quantizes_both_operands(self, quantization, e4m3_dtype):
+    """The bridged einsum is the plain one with both operands cast to the scheme's e4m3."""
+    model = self._make_moe(self._quantization(quantization))
+    lhs = jax.random.normal(jax.random.PRNGKey(0), (4, 16), dtype=jnp.float32)
+    rhs = jax.random.normal(jax.random.PRNGKey(1), (16, 8), dtype=jnp.float32)
+
+    actual = model.get_einsum(einsum_name=moe.WI_0)("ab,bc->ac", lhs, rhs)
+
+    # The scaling factors start at 1 and are only updated on the backward pass, so a forward
+    # call on a freshly built layer quantizes by a plain cast.
+    quantized = jnp.einsum(
+        "ab,bc->ac", lhs.astype(e4m3_dtype).astype(jnp.float32), rhs.astype(e4m3_dtype).astype(jnp.float32)
+    )
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(quantized))
+    self.assertFalse(np.array_equal(np.asarray(actual), np.asarray(jnp.einsum("ab,bc->ac", lhs, rhs))))
+
+  @parameterized.named_parameters(("fp8", "fp8"), ("nanoo_fp8", "nanoo_fp8"))
+  def test_quantized_dense_matmul_tracks_unquantized(self, quantization):
+    """A quantized MoE layer follows the same layer run unquantized, to within e4m3."""
+    reference = self._make_moe(None)
+    model = self._make_moe(self._quantization(quantization))
+    copy_weights(reference, model)
+
+    inputs = jax.random.normal(jax.random.PRNGKey(42), (1, 8, reference.config.base_emb_dim), dtype=jnp.float32)
+    expected, _, _ = reference(inputs)
+    actual, _, _ = model(inputs)
+
+    self.assertTrue(np.isfinite(actual).all())
+    # e4m3 keeps three mantissa bits, and the layer is quantized at each of wi_0, wi_1 and wo,
+    # so the agreement is loose; it is the same threshold the qwix MoE test above uses.
+    relative_error = np.linalg.norm(actual - expected) / np.linalg.norm(expected)
+    self.assertLess(relative_error, 0.22)
+    self.assertFalse(np.allclose(actual, expected))
 
 
 def make_moe(cfg, mesh):
