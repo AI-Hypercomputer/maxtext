@@ -17,6 +17,7 @@
 # Full emb_dim = 7168 matching HuggingFace Kimi K3 specs
 
 # Model Architecture
+base_config: "base.yml"
 model_name: "kimi-k3"
 decoder_block: "kimi_k3"
 base_emb_dim: 7168

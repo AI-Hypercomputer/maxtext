@@ -64,7 +64,6 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     config = pyconfig.initialize([
         "kimi_k3_hf_loading_test.py",
         self.config_path,
-        "base_config=src/maxtext/configs/base.yml",
         "model_name=kimi-k3",
         "override_model_config=True",
         "base_num_decoder_layers=2",
