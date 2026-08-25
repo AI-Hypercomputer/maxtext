@@ -83,7 +83,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_grads: Any = None
     self._micro_step_count = 0
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
-    self._learning_rate_schedule, self._optimizer = train_utils.create_training_optimizer(self._config, self._model)
+    self._learning_rate_schedule, self._optimizer = train_utils.create_training_optimizer(
+        self._config, self._model, mesh=self._mesh
+    )
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(

@@ -308,8 +308,8 @@ def scale_by_muon(
       raise ValueError(f"ns_coeffs must have shape (3,) or (n, 3), got {ns_coeffs_.shape}")
     if ns_coeffs_.ndim == 2:
       # pyrefly: ignore[unsupported-operation]
-      if not ns_coeffs_.shape[0] <= ns_steps:
-        raise ValueError(f"Not enough coeffs to perform {ns_steps} steps")
+      if ns_coeffs_.shape[0] < ns_steps:
+        raise ValueError(f"Not enough coeffs to perform {ns_steps} steps, got" f" {ns_coeffs_.shape[0]}")
       # pyrefly: ignore[unsupported-operation]
       ns_coeffs_ = ns_coeffs_[-ns_steps:]
 
