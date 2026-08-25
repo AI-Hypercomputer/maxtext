@@ -1925,11 +1925,18 @@ class AttentionOp(nnx.Module):
           ],
       )
       def wrap_ulysses_splash_kernel(single_head_mask):
-        splash_kernel = tokamax_splash_kernel.make_splash_mha(
-            mask=single_head_mask,
-            config=sa_config,
-            q_seq_shards=1,
-        )
+        if self.attention_type == AttentionType.COMPRESSED and key.shape[1] == 1:
+          splash_kernel = tokamax_splash_kernel.make_splash_mqa(
+              mask=single_head_mask,
+              config=sa_config,
+              q_seq_shards=1,
+          )
+        else:
+          splash_kernel = tokamax_splash_kernel.make_splash_mha(
+              mask=single_head_mask,
+              config=sa_config,
+              q_seq_shards=1,
+          )
         return splash_kernel
 
       splash_kernel = wrap_ulysses_splash_kernel(mask)
@@ -2047,11 +2054,18 @@ class AttentionOp(nnx.Module):
           ],
       )
       def wrap_tokamax_splash_kernel(single_head_mask):
-        splash_kernel = tokamax_splash_kernel.make_splash_mha(
-            mask=single_head_mask,
-            config=sa_config,
-            q_seq_shards=splash_q_seq_shards,
-        )
+        if self.attention_type == AttentionType.COMPRESSED and key.shape[1] == 1:
+          splash_kernel = tokamax_splash_kernel.make_splash_mqa(
+              mask=single_head_mask,
+              config=sa_config,
+              q_seq_shards=splash_q_seq_shards,
+          )
+        else:
+          splash_kernel = tokamax_splash_kernel.make_splash_mha(
+              mask=single_head_mask,
+              config=sa_config,
+              q_seq_shards=splash_q_seq_shards,
+          )
         return splash_kernel
 
       segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
@@ -2277,12 +2291,15 @@ class AttentionOp(nnx.Module):
             return attention_output, None
         else:
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
+          is_mqa_compressed = self.attention_type == AttentionType.COMPRESSED and key.shape[1] == 1
 
           if record_max_logits:
 
             def kernel_fn(q, k, v, d, s):
               # Pass save_residuals=True to force stats generation
-              out, stats = kernel(q, k, v, d, sinks=s, save_residuals=True)
+              k_in = k[0] if is_mqa_compressed else k
+              v_in = v[0] if is_mqa_compressed else v
+              out, stats = kernel(q, k_in, v_in, d, sinks=s, save_residuals=True)
               return out, stats["max_logits"]
 
             attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(
@@ -2290,7 +2307,13 @@ class AttentionOp(nnx.Module):
             )
             return attention_output, max_logits
           else:
-            attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
+
+            def call_kernel_fn(q, k, v, d, s):
+              k_in = k[0] if is_mqa_compressed else k
+              v_in = v[0] if is_mqa_compressed else v
+              return kernel(q, k_in, v_in, d, sinks=s)
+
+            attention_output = jax.vmap(call_kernel_fn, in_axes=(0, 0, 0, 0, None))(
                 query, key, value, decoder_segment_ids_tuple, sinks
             )
             return attention_output, None
