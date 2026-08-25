@@ -141,11 +141,6 @@ class KimiK3HFLoadingTest(unittest.TestCase):
               weights[k] = s.get_tensor(k)
         print(f"Loaded {len(weights)} tensors from {self.hf_model_path}.")
 
-        D = config.emb_dim
-        H = config.num_query_heads
-        K = config.head_dim
-        intermediate_dim = config.intermediate_dim
-
         # 1. Embeddings & Final Norm & LM Head
         embed_w = weights.get("model.embed_tokens.weight", weights.get("language_model.model.embed_tokens.weight"))
         norm_w = weights.get("model.norm.weight", weights.get("language_model.model.norm.weight"))
@@ -157,10 +152,15 @@ class KimiK3HFLoadingTest(unittest.TestCase):
             if "language_model.model.layers.0.input_layernorm.weight" in weights
             else "model.layers.0."
         )
+        D = int(embed_w.shape[1])
+        kda_H = int(weights[f"{prefix0}self_attn.b_proj.weight"].shape[0])
+        kda_K = int(weights[f"{prefix0}self_attn.A_log"].shape[0])
+        intermediate_dim = int(weights[f"{prefix0}mlp.gate_proj.weight"].shape[0])
+
         norm1 = PtRMSNorm(D)
         norm1.scale.data = weights[f"{prefix0}input_layernorm.weight"].float()
 
-        kda = PtKDA(hidden_size=D, num_heads=H, head_dim=K, conv_kernel_size=4)
+        kda = PtKDA(hidden_size=D, num_heads=kda_H, head_dim=kda_K, conv_kernel_size=4)
         kda.q_proj.weight.data = weights[f"{prefix0}self_attn.q_proj.weight"].float()
         kda.k_proj.weight.data = weights[f"{prefix0}self_attn.k_proj.weight"].float()
         kda.v_proj.weight.data = weights[f"{prefix0}self_attn.v_proj.weight"].float()
