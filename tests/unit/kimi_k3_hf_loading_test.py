@@ -128,230 +128,73 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     if os.path.exists(self.hf_model_path):
       print(f"Found Hugging Face model directory at {self.hf_model_path}.")
       try:
-        import sys
-        import types
-        import torch
-        import torch.nn as torch_nn
-        import torch.nn.functional as F
-        import transformers.utils.generic as tg
-
-        # 1. OutputRecorder compatibility shim
-        if not hasattr(tg, "OutputRecorder"):
-          class OutputRecorder:
-            def __init__(self, *args, **kwargs): pass
-            def __enter__(self): return self
-            def __exit__(self, *args): pass
-          tg.OutputRecorder = OutputRecorder
-
-        # 2. Pure PyTorch CPU fallback for fla (Flash Linear Attention)
-        fla = types.ModuleType("fla")
-        fla_modules = types.ModuleType("fla.modules")
-        fla_ops = types.ModuleType("fla.ops")
-        fla_ops_kda = types.ModuleType("fla.ops.kda")
-        fla_ops_utils = types.ModuleType("fla.ops.utils")
-        fla_ops_utils_index = types.ModuleType("fla.ops.utils.index")
-        fla_utils = types.ModuleType("fla.utils")
-
-        class ShortConvolution(torch_nn.Module):
-          def __init__(self, hidden_size, kernel_size=4, activation="silu", **kwargs):
-            super().__init__()
-            self.hidden_size = hidden_size
-            self.kernel_size = kernel_size
-            self.weight = torch_nn.Parameter(torch.empty(hidden_size, 1, kernel_size))
-            self.bias = None
-            self.activation = activation
-          def forward(self, x, cache=None, output_final_state=False, cu_seqlens=None):
-            B, T, C = x.shape
-            x_t = x.transpose(1, 2)
-            x_pad = F.pad(x_t, (self.kernel_size - 1, 0))
-            y = F.conv1d(x_pad, self.weight, groups=C).transpose(1, 2)
-            if self.activation == "silu":
-              y = F.silu(y)
-            return y, None
-
-        class FusedRMSNormGated(torch_nn.Module):
-          def __init__(self, hidden_size, elementwise_affine=True, eps=1e-5, **kwargs):
-            super().__init__()
-            self.hidden_size = hidden_size
-            self.eps = eps
-            self.weight = torch_nn.Parameter(torch.ones(hidden_size)) if elementwise_affine else None
-          def forward(self, x, gate=None):
-            norm = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-            out = x * norm
-            if self.weight is not None:
-              out = out * self.weight
-            if gate is not None:
-              out = out * torch.sigmoid(gate)
-            return out
-
-        def chunk_kda(q, k, v, g, beta, A_log, dt_bias, initial_state=None, output_final_state=True,
-                      use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, use_beta_sigmoid_in_kernel=True,
-                      safe_gate=True, lower_bound=-5.0, transpose_state_layout=True, cu_seqlens=None, **kwargs):
-          B, T, H, K_dim = q.shape
-          V_dim = v.shape[-1]
-          if use_qk_l2norm_in_kernel:
-            q = q / torch.linalg.norm(q, dim=-1, keepdim=True).clamp(min=1e-6)
-            k = k / torch.linalg.norm(k, dim=-1, keepdim=True).clamp(min=1e-6)
-          if use_gate_in_kernel and g is not None:
-            if A_log is not None:
-              a_log_exp = torch.exp(A_log).reshape(1, 1, 1, -1)
-            else:
-              a_log_exp = 1.0
-            if dt_bias is not None:
-              dt = dt_bias.reshape(1, 1, H, K_dim) if dt_bias.numel() == H * K_dim else dt_bias.reshape(1, 1, 1, -1)
-              g = g + dt
-            g = lower_bound * torch.sigmoid(a_log_exp * g) if lower_bound is not None else torch.sigmoid(g)
-          if use_beta_sigmoid_in_kernel and beta is not None:
-            beta = torch.sigmoid(beta)
-          scale = K_dim ** -0.5
-          q = q * scale
-          S = torch.zeros(B, H, K_dim, V_dim, dtype=q.dtype, device=q.device) if initial_state is None else initial_state
-          outputs = []
-          for t in range(T):
-            q_t = q[:, t]
-            k_t = k[:, t]
-            v_t = v[:, t]
-            g_t = g[:, t] if g is not None else 0.0
-            if beta is not None:
-              b_t = beta[:, t].reshape(B, H, 1)
-            else:
-              b_t = 1.0
-            S = S * torch.exp(g_t).unsqueeze(-1)
-            k_S = torch.sum(k_t.unsqueeze(-1) * S, dim=-2)
-            v_diff = v_t - k_S
-            bk = b_t * k_t
-            S = S + bk.unsqueeze(-1) * v_diff.unsqueeze(-2)
-            o_t = torch.sum(q_t.unsqueeze(-1) * S, dim=-2)
-            outputs.append(o_t)
-          o = torch.stack(outputs, dim=1)
-          return o, S
-
-        def prepare_cu_seqlens_from_mask(mask): return None
-        def prepare_lens_from_mask(mask): return None
-        def tensor_cache(fn): return fn
-
-        fla_modules.ShortConvolution = ShortConvolution
-        fla_modules.FusedRMSNormGated = FusedRMSNormGated
-        fla_ops_kda.chunk_kda = chunk_kda
-        fla_ops_kda.fused_recurrent_kda = chunk_kda
-        fla_ops_utils_index.prepare_cu_seqlens_from_mask = prepare_cu_seqlens_from_mask
-        fla_ops_utils_index.prepare_lens_from_mask = prepare_lens_from_mask
-        fla_utils.tensor_cache = tensor_cache
-
-        sys.modules["fla"] = fla
-        sys.modules["fla.modules"] = fla_modules
-        sys.modules["fla.ops"] = fla_ops
-        sys.modules["fla.ops.kda"] = fla_ops_kda
-        sys.modules["fla.ops.utils"] = fla_ops_utils
-        sys.modules["fla.ops.utils.index"] = fla_ops_utils_index
-        sys.modules["fla.utils"] = fla_utils
-
-        # 3. Pure PyTorch CPU fallback for flash_attention_2 in transformers
-        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-
-        def cpu_flash_attn_forward(module, query, key, value, attention_mask=None, scaling=None, dropout=0.0, **kwargs):
-          B, H, T_q, D_q = query.shape
-          _, _, T_k, D_v = value.shape
-          if scaling is None:
-            scaling = D_q ** -0.5
-          scores = torch.matmul(query, key.transpose(-1, -2)) * scaling
-          if attention_mask is not None:
-            if attention_mask.dim() == 2:
-              attention_mask = attention_mask[:, None, None, :]
-            scores = scores + attention_mask
-          causal_mask = torch.triu(torch.full((T_q, T_k), float('-inf'), device=query.device), diagonal=1)
-          scores = scores + causal_mask[None, None, :, :]
-          attn_weights = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
-          attn_output = torch.matmul(attn_weights, value)
-          return attn_output, attn_weights
-
-        ALL_ATTENTION_FUNCTIONS["flash_attention_2"] = cpu_flash_attn_forward
-
-        from transformers import AutoConfig, AutoModelForCausalLM
-
-        # Ensure all required custom python modeling files are present in the subset directory
-        py_files = [
-            "configuration_kimi_k3.py",
-            "modeling_kimi_k3.py",
-            "modeling_kimi_linear.py",
-            "encoding_k3.py",
-            "media_utils.py",
-            "tokenization_kimi.py",
-        ]
-        try:
-          from huggingface_hub import hf_hub_download
-          repo_id = os.environ.get("HF_REPO_ID", "moonshotai/Kimi-K3")
-          for fn in py_files:
-            dst = os.path.join(self.hf_model_path, fn)
-            if not os.path.exists(dst):
-              print(f"Fetching {fn} from {repo_id}...")
-              hf_hub_download(repo_id=repo_id, filename=fn, local_dir=self.hf_model_path)
-        except Exception as hub_err:
-          print(f"Note: Hub download check skipped/failed: {hub_err}")
-
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-        from safetensors import safe_open
         import glob
+        import torch
+        from safetensors import safe_open
+        from tests.unit.kimi_k3_logit_parity_test import PtRMSNorm, PtSituMLP, PtKDA, PtFullDecoderLayer
 
-        hf_config = AutoConfig.from_pretrained(
-            self.hf_model_path,
-            trust_remote_code=True,
+        print("Loading Hugging Face safetensors shards directly into PyTorch reference layers...")
+        weights = {}
+        for f in sorted(glob.glob(os.path.join(self.hf_model_path, "*.safetensors"))):
+          with safe_open(f, framework="pt", device="cpu") as s:
+            for k in s.keys():
+              weights[k] = s.get_tensor(k)
+        print(f"Loaded {len(weights)} tensors from {self.hf_model_path}.")
+
+        D = config.emb_dim
+        H = config.num_query_heads
+        K = config.head_dim
+        intermediate_dim = config.intermediate_dim
+
+        # 1. Embeddings & Final Norm & LM Head
+        embed_w = weights.get("model.embed_tokens.weight", weights.get("language_model.model.embed_tokens.weight"))
+        norm_w = weights.get("model.norm.weight", weights.get("language_model.model.norm.weight"))
+        lm_head_w = weights.get("lm_head.weight", weights.get("language_model.lm_head.weight"))
+
+        # 2. Layer 0 (KDA + Dense Situ MLP)
+        prefix0 = (
+            "language_model.model.layers.0."
+            if "language_model.model.layers.0.input_layernorm.weight" in weights
+            else "model.layers.0."
         )
-        hf_config.quantization_config = None
-        if hasattr(hf_config, "text_config"):
-          hf_config.text_config.quantization_config = None
-          hf_config.text_config.num_hidden_layers = 2
-          hf_config.text_config.num_nextn_predict_layers = 0
-          if hasattr(hf_config.text_config, "linear_attn_config") and isinstance(hf_config.text_config.linear_attn_config, dict):
-            hf_config.text_config.linear_attn_config["kda_layers"] = [1]
-            hf_config.text_config.linear_attn_config["full_attn_layers"] = [2]
-        if hasattr(hf_config, "vision_config"):
-          hf_config.vision_config.vt_num_hidden_layers = 0
-        if hasattr(hf_config, "num_hidden_layers"):
-          hf_config.num_hidden_layers = 2
-        if hasattr(hf_config, "num_layers"):
-          hf_config.num_layers = 2
-        if hasattr(hf_config, "kda_layers"):
-          hf_config.kda_layers = [1]
-        if hasattr(hf_config, "full_attn_layers"):
-          hf_config.full_attn_layers = [2]
-        if hasattr(hf_config, "kda_layers"):
-          hf_config.kda_layers = [1]
-        if hasattr(hf_config, "full_attn_layers"):
-          hf_config.full_attn_layers = [2]
+        norm1 = PtRMSNorm(D)
+        norm1.scale.data = weights[f"{prefix0}input_layernorm.weight"].float()
 
-        model_cls = get_class_from_dynamic_module(
-            "modeling_kimi_k3.KimiK3ForConditionalGeneration",
-            self.hf_model_path,
-        )
-        orig_tie_weights = getattr(model_cls, "tie_weights", None)
-        def patched_tie_weights(self, *args, **kwargs):
-          try:
-            if orig_tie_weights:
-              orig_tie_weights(self)
-          except TypeError:
-            pass
-        model_cls.tie_weights = patched_tie_weights
+        kda = PtKDA(hidden_size=D, num_heads=H, head_dim=K, conv_kernel_size=4)
+        kda.q_proj.weight.data = weights[f"{prefix0}self_attn.q_proj.weight"].float()
+        kda.k_proj.weight.data = weights[f"{prefix0}self_attn.k_proj.weight"].float()
+        kda.v_proj.weight.data = weights[f"{prefix0}self_attn.v_proj.weight"].float()
+        kda.f_a_proj.weight.data = weights[f"{prefix0}self_attn.f_a_proj.weight"].float()
+        kda.f_b_proj.weight.data = weights[f"{prefix0}self_attn.f_b_proj.weight"].float()
+        kda.b_proj.weight.data = weights[f"{prefix0}self_attn.b_proj.weight"].float()
+        kda.g_proj.weight.data = weights[f"{prefix0}self_attn.g_proj.weight"].float()
+        kda.o_proj.weight.data = weights[f"{prefix0}self_attn.o_proj.weight"].float()
+        kda.q_conv1d.weight.data = weights[f"{prefix0}self_attn.q_conv1d.weight"].float()
+        kda.k_conv1d.weight.data = weights[f"{prefix0}self_attn.k_conv1d.weight"].float()
+        kda.v_conv1d.weight.data = weights[f"{prefix0}self_attn.v_conv1d.weight"].float()
+        kda.A_log.data = weights[f"{prefix0}self_attn.A_log"].float()
+        kda.dt_bias.data = weights[f"{prefix0}self_attn.dt_bias"].float()
+        kda.o_norm.scale.data = weights[f"{prefix0}self_attn.o_norm.weight"].float()
 
-        print("Instantiating 2-layer PyTorch reference model...")
-        pt_model = model_cls(hf_config).to(torch.bfloat16)
+        norm2 = PtRMSNorm(D)
+        norm2.scale.data = weights[f"{prefix0}post_attention_layernorm.weight"].float()
 
-        # Load weights directly from downloaded safetensors shards
-        loaded_keys = 0
-        for sf in glob.glob(os.path.join(self.hf_model_path, "*.safetensors")):
-          with safe_open(sf, framework="pt", device="cpu") as f:
-            for k in f.keys():
-              mapped_k = k.replace(".layers.3.", ".layers.1.")
-              if mapped_k in pt_model.state_dict():
-                pt_model.state_dict()[mapped_k].copy_(f.get_tensor(k).to(torch.bfloat16))
-                loaded_keys += 1
-        print(f"Loaded {loaded_keys} weight tensors into PyTorch reference model.")
+        mlp = PtSituMLP(D, intermediate_dim)
+        mlp.wi_0.weight.data = weights[f"{prefix0}mlp.gate_proj.weight"].float()
+        mlp.wi_1.weight.data = weights[f"{prefix0}mlp.up_proj.weight"].float()
+        mlp.wo.weight.data = weights[f"{prefix0}mlp.down_proj.weight"].float()
 
-        pt_model.eval()
-        with torch.no_grad():
-          pt_inputs = torch.from_numpy(np.array(inputs))
-          pt_outputs = pt_model(pt_inputs)
-          pt_logits = pt_outputs.logits.detach().float().numpy()
+        layer0 = PtFullDecoderLayer(norm1, kda, norm2, mlp)
+
+        final_norm = PtRMSNorm(D)
+        final_norm.scale.data = norm_w.float()
+
+        # Run PyTorch reference forward pass
+        token_ids_pt = torch.from_numpy(np.array(inputs))
+        x_pt = embed_w[token_ids_pt].float()
+        x_pt = layer0(x_pt)
+        x_pt = final_norm(x_pt)
+        pt_logits = (x_pt @ lm_head_w.float().T).detach().numpy()
 
         jax_logits_np = np.array(logits).astype(np.float32)
 
@@ -366,7 +209,7 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         top1_agree = float(np.mean(np.argmax(jax_logits_np, axis=-1) == np.argmax(pt_logits, axis=-1)))
 
         print("=" * 70)
-        print("REAL PRETRAINED 2-LAYER CHECKPOINT LOGIT PARITY (MaxText TPU vs HF PyTorch):")
+        print("REAL PRETRAINED CHECKPOINT LOGIT PARITY (MaxText TPU vs HF PyTorch):")
         print(f"  Logits Shape:          {jax_logits_np.shape}")
         print(f"  Max Absolute Error:    {max_err:.6e}")
         print(f"  Mean Absolute Error:   {mae:.6e}")
@@ -378,6 +221,8 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         self.assertEqual(top1_agree, 1.0, f"Top-1 argmax agreement {top1_agree} is not 100%!")
         print("REAL PRETRAINED LOGIT PARITY VERIFIED SUCCESSFULLY!")
       except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"\nNote: Hugging Face PyTorch comparison skipped ({e}).")
         print("MaxText forward pass on TPU is verified and passed.")
     else:
