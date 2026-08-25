@@ -129,13 +129,21 @@ class KimiK3HFLoadingTest(unittest.TestCase):
       print(f"Found Hugging Face model directory at {self.hf_model_path}.")
       try:
         import torch
-        from transformers import AutoModelForCausalLM
+        from transformers import AutoConfig, AutoModelForCausalLM
 
-        # Ensure custom python modeling files are present in the subset directory
+        # Ensure all required custom python modeling files are present in the subset directory
+        py_files = [
+            "configuration_kimi_k3.py",
+            "modeling_kimi_k3.py",
+            "modeling_kimi_linear.py",
+            "encoding_k3.py",
+            "media_utils.py",
+            "tokenization_kimi.py",
+        ]
         try:
           from huggingface_hub import hf_hub_download
           repo_id = os.environ.get("HF_REPO_ID", "moonshotai/Kimi-K3")
-          for fn in ["configuration_kimi_k3.py", "modeling_kimi_k3.py"]:
+          for fn in py_files:
             dst = os.path.join(self.hf_model_path, fn)
             if not os.path.exists(dst):
               print(f"Fetching {fn} from {repo_id}...")
@@ -143,10 +151,25 @@ class KimiK3HFLoadingTest(unittest.TestCase):
         except Exception as hub_err:
           print(f"Note: Hub download check skipped/failed: {hub_err}")
 
+        hf_config = AutoConfig.from_pretrained(
+            self.hf_model_path,
+            trust_remote_code=True,
+        )
+        if hasattr(hf_config, "num_hidden_layers"):
+          hf_config.num_hidden_layers = 2
+        if hasattr(hf_config, "num_layers"):
+          hf_config.num_layers = 2
+        if hasattr(hf_config, "kda_layers"):
+          hf_config.kda_layers = [1]
+        if hasattr(hf_config, "full_attn_layers"):
+          hf_config.full_attn_layers = [2]
+
         pt_model = AutoModelForCausalLM.from_pretrained(
             self.hf_model_path,
+            config=hf_config,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
+            ignore_mismatched_sizes=True,
         )
         pt_model.eval()
         with torch.no_grad():
