@@ -127,6 +127,7 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     print(f"\nChecking Hugging Face reference checkpoint at: {self.hf_model_path}")
     if os.path.exists(self.hf_model_path):
       print(f"Found Hugging Face model directory at {self.hf_model_path}.")
+      try:
         import torch
         import transformers.utils.generic as tg
         if not hasattr(tg, "OutputRecorder"):
