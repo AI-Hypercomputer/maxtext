@@ -202,6 +202,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compile_requested = False
     self._compiled_signature: Any = None
     self._signature_compare_warned: bool = False
+    self._raiden_sync: Any = None
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     model_or_model_mesh_pair = model_creation_utils.from_pretrained(
@@ -544,9 +545,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     A leaf whose batch dim doesn't evenly divide the batch axis's mesh size (e.g. a
     sequence-packed micro-batch, always size 1) replicates that dim instead of sharding
-    it -- every device runs fwd/bwd on the same data, and averaging identical per-device
-    gradients across the axis reproduces the single-device gradient exactly, just with
-    redundant compute.
+    it -- every device holds and computes on the same data with no cross-device split,
+    which is correct (there's nothing to reduce back together afterwards) but wastes
+    compute across the axis for that micro-batch.
     """
     data_sharding = sharding.get_input_data_sharding(self._config, self._mesh)
     data_spec = tuple(data_sharding.spec)
@@ -1024,15 +1025,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
       # 3. Bind parameters to the Raiden transport
       if self._raiden_sync is None:
+        # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
+        # detection tunix's K8sJaxContext.initialize() uses), trainer params
+        # are proxy-backed and Raiden can't bind them in place -- host_stage
+        # pulls them to client host memory first. Direct-TPU trainers skip
+        # that extra copy since their params already live on TPU.
+        is_pathways = bool(
+            "proxy" in os.environ.get("JAX_PLATFORMS", "")
+            and os.environ.get("JAX_BACKEND_TARGET")
+        )
         self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
             job_name="trainer",
             worker_index=jax.process_index(),
             auto_h2d=False,
-            # Trainer params already live on TPU (no pathways proxy in front of
-            # them), so bind directly rather than staging through host CPU
-            # memory first -- host_stage is for destinations that can't bind
-            # proxy-backed arrays in place.
-            host_stage=False,
+            host_stage=is_pathways,
             parallelism=4,
         )
       self._raiden_sync.bind(params_state)
