@@ -23,7 +23,11 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import jax
 import jax.ad_checkpoint
 
-from aqt.jax.v2 import aqt_tensor
+try:
+  from aqt.jax.v2 import aqt_tensor
+except ImportError:
+  aqt_tensor = None
+
 from flax import linen as nn
 from flax.core import lift as flax_lift
 from flax.core import scope as flax_scope

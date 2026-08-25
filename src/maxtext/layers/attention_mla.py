@@ -755,6 +755,43 @@ class MLA(Attention):
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
 
+    # Kimi K3 MLA Output Gate
+    if config.mla_use_output_gate:
+      self.g_a_proj = DenseGeneral(
+          in_features_shape=config.emb_dim,
+          out_features_shape=config.head_dim,
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("embed", "g_a_proj"),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          matmul_precision=config.matmul_precision,
+          shard_mode=config.shard_mode,
+          rngs=rngs,
+      )
+      self.g_b_proj = DenseGeneral(
+          in_features_shape=config.head_dim,
+          out_features_shape=(self.num_query_heads, self.v_head_dim),
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("g_b_proj", "head", "d_kv"),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          matmul_precision=config.matmul_precision,
+          shard_mode=config.shard_mode,
+          rngs=rngs,
+      )
+      self.o_norm = RMSNorm(
+          num_features=self.v_head_dim,
+          epsilon=config.normalization_layer_epsilon,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          rngs=rngs,
+      )
+
+
   def init_indexer_cache(self, inputs_kv_shape: Tuple):
     """Initializes Indexer Cache."""
     batch_size, _, _ = inputs_kv_shape
@@ -1344,7 +1381,13 @@ class MLA(Attention):
     out = self._maybe_shard_with_logical(out, self.out_axis_names)
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
 
+    # Kimi K3 MLA Output Gate: o = RMSNorm(o) * sigmoid(g)
+    if self.config.mla_use_output_gate:
+      g = self.g_b_proj(self.g_a_proj(inputs_q))
+      out = self.o_norm(out) * jax.nn.sigmoid(g)
+
     out_sharding = create_sharding(self.mesh, out_logical_name)
+
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache

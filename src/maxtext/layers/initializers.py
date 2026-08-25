@@ -20,7 +20,12 @@ import jax
 
 from flax import linen as nn
 from flax import nnx
-from aqt.jax.v2 import aqt_tensor
+try:
+  from aqt.jax.v2 import aqt_tensor
+except ImportError:
+  aqt_tensor = None
+
+
 
 from maxtext.common.common_types import Array, DType, Shape, PRNGKey
 
@@ -79,7 +84,7 @@ def variable_to_logically_partitioned(variable: nnx.Variable):
     The variable's value, potentially wrapped in `nn.LogicallyPartitioned`.
   """
   val = variable.get_value()
-  if isinstance(val, aqt_tensor.QTensor):
+  if aqt_tensor is not None and isinstance(val, aqt_tensor.QTensor):
     return val
 
   if variable.type.__name__ == "_overwrite_with_gradient":

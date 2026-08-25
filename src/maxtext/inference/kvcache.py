@@ -22,9 +22,15 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from aqt.jax.v2 import config as aqt_config
-from aqt.jax.v2.aqt_tensor import QTensor as KVTensor
-from aqt.jax.v2.flax import aqt_flax
+try:
+  from aqt.jax.v2 import config as aqt_config
+  from aqt.jax.v2.aqt_tensor import QTensor as KVTensor
+  from aqt.jax.v2.flax import aqt_flax
+except ImportError:
+  aqt_config = None
+  KVTensor = None
+  aqt_flax = None
+
 
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned

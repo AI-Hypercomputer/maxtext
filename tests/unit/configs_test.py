@@ -300,3 +300,18 @@ INFERENCE_CONFIGS = [
 @pytest.mark.parametrize("config_file", INFERENCE_CONFIGS)
 def test_inference_configs(config_file):
   run_config_validation(config_file)
+
+
+# --- Test Group: Kimi K3 Model Family ---
+
+KIMI_K3_CONFIGS = [
+    os.path.join(CONFIGS_DIR, "models", "kimi-k3.yml"),
+    os.path.join(CONFIGS_DIR, "models", "kimi-k3-tiny.yml"),
+    os.path.join(CONFIGS_DIR, "models", "kimi-k3-minimal.yml"),
+]
+
+
+@pytest.mark.parametrize("config_file", KIMI_K3_CONFIGS)
+def test_kimi_k3_configs(config_file):
+  run_config_validation(config_file)
+

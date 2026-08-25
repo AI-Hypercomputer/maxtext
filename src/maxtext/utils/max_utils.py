@@ -241,20 +241,20 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   """
 
   # Early exit for cases where we don't need to initialize the jax distributed system.
-  if raw_keys["skip_jax_distributed_system"]:
+  if raw_keys.get("skip_jax_distributed_system", False):
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
-  if raw_keys["enable_single_controller"]:
+  if raw_keys.get("enable_single_controller", False):
     max_logging.log("Skipping jax distributed system since its not needed for single controller.")
-    if raw_keys["enable_multi_tier_checkpointing"]:
+    if raw_keys.get("enable_multi_tier_checkpointing", False):
       max_logging.log("Initializing multi-tier checkpointing for single controller...")
       mtc_init_kwargs = elastic_utils.single_controller_mtc_init_kwargs(raw_keys)
       initialize_multi_tier_checkpointing(
-          local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
-          backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
-          backup_interval_steps=raw_keys["multi_tier_checkpointing_backup_interval_steps"],
-          run_name=raw_keys["run_name"],
-          jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
+          local_checkpoint_directory=raw_keys.get("local_checkpoint_directory"),
+          backup_interval_minutes=raw_keys.get("multi_tier_checkpointing_backup_interval_minutes"),
+          backup_interval_steps=raw_keys.get("multi_tier_checkpointing_backup_interval_steps"),
+          run_name=raw_keys.get("run_name"),
+          jax_initialization_timeout_seconds=raw_keys.get("jax_distributed_initialization_timeout", 300),
           use_colocated_python=True,
           **mtc_init_kwargs,
       )
@@ -262,7 +262,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   if jax.distributed.is_initialized():
     max_logging.log("Jax distributed system is already initialized.")
     return
-  if raw_keys["inference_benchmark_test"] or raw_keys["compile_topology"]:
+  if raw_keys.get("inference_benchmark_test", False) or raw_keys.get("compile_topology", False):
     max_logging.log("Skipping jax distributed system initialization.")
     return
 
@@ -281,13 +281,14 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     return
 
   # Initialization for gpu_multiprocess hardware
-  if raw_keys["hardware"] == "gpu_multiprocess":
+  if raw_keys.get("hardware") == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system for gpu_multiprocess hardware...")
-    if not raw_keys["enable_emergency_checkpoint"]:
-      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+    timeout = raw_keys.get("jax_distributed_initialization_timeout", 300)
+    if not raw_keys.get("enable_emergency_checkpoint", False):
+      jax.distributed.initialize(initialization_timeout=timeout)
     else:
       max_logging.log("Initializing jax distributed to support local checkpointing with GPUs...")
-      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+      jax.distributed.initialize(initialization_timeout=timeout)
       ocp.multihost.initialize_runtime_to_distributed_ids()
       ocp.multihost.initialize_distributed_to_device_ids()
       max_logging.log("Jax distributed system initialized!")
@@ -295,20 +296,21 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   # Initialization for tpu backend
   max_logging.log("Attempting to initialize the jax distributed system for TPU backend...")
-  if raw_keys["enable_multi_tier_checkpointing"]:
+  timeout = raw_keys.get("jax_distributed_initialization_timeout", 300)
+  if raw_keys.get("enable_multi_tier_checkpointing", False):
     initialize_multi_tier_checkpointing(
-        local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
-        backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
-        backup_interval_steps=raw_keys["multi_tier_checkpointing_backup_interval_steps"],
-        run_name=raw_keys["run_name"],
-        jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
-        data_parallelism=raw_keys["mtc_data_parallelism"],
-        num_slices=raw_keys["num_slices"],
+        local_checkpoint_directory=raw_keys.get("local_checkpoint_directory"),
+        backup_interval_minutes=raw_keys.get("multi_tier_checkpointing_backup_interval_minutes"),
+        backup_interval_steps=raw_keys.get("multi_tier_checkpointing_backup_interval_steps"),
+        run_name=raw_keys.get("run_name"),
+        jax_initialization_timeout_seconds=timeout,
+        data_parallelism=raw_keys.get("mtc_data_parallelism"),
+        num_slices=raw_keys.get("num_slices"),
     )
     max_logging.log("Jax distributed system initialized on TPUs for multi-tier checkpointing!")
-  elif raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1:
-    if not raw_keys["enable_emergency_checkpoint"]:
-      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+  elif raw_keys.get("enable_checkpointing", False) and raw_keys.get("compile_topology_num_slices", -1) == -1:
+    if not raw_keys.get("enable_emergency_checkpoint", False):
+      jax.distributed.initialize(initialization_timeout=timeout)
     else:
       initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized on TPUs!")
@@ -413,10 +415,10 @@ def get_num_slices(raw_keys, config=None):
   if raw_keys.get("num_slices", -1) != -1:
     max_logging.log(f"Using num_slices={raw_keys['num_slices']} per user request.")
     return raw_keys["num_slices"]
-  if getattr(raw_keys, "hardware", None) == "cpu":
+  if raw_keys.get("hardware") == "cpu" or getattr(raw_keys, "hardware", None) == "cpu":
     max_logging.log(" Setting num_slices=1 for CPU hardware type")
     return 1
-  if int(raw_keys["compile_topology_num_slices"]) > 0:
+  if int(raw_keys.get("compile_topology_num_slices", -1)) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
     try:
@@ -427,12 +429,12 @@ def get_num_slices(raw_keys, config=None):
 
 def is_cpu_backend(raw_keys):
   """Determine whether Maxtext is intended to run on a CPU backend."""
-  return raw_keys["hardware"] == "cpu"
+  return raw_keys.get("hardware") == "cpu"
 
 
 def is_gpu_backend(raw_keys):
   """Determine whether Maxtext is intended to run on a GPU backend."""
-  return raw_keys["hardware"] == "gpu"
+  return raw_keys.get("hardware") in ("gpu", "gpu_multiprocess")
 
 
 def get_coordinator_ip_address():

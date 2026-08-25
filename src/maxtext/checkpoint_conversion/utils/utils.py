@@ -1290,7 +1290,10 @@ def save_weights_to_checkpoint(
       save_interval_steps,
       use_ocdbt=use_ocdbt,
       use_zarr3=use_zarr3,
+      checkpoint_storage_concurrent_gb=30,
   )
+
+
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
 
@@ -1299,12 +1302,16 @@ def save_weights_to_checkpoint(
   )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
   if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new, config=config):
     max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
   checkpointing.wait_until_finished(checkpoint_manager)
+  checkpoint_manager.close()
+
 
   max_logging.log(f"Elapse for checkpoint save: {(time.time() - start) / 60:.2f} min")
+
 
 
 def _build_multi_axis_stacked_tensor(

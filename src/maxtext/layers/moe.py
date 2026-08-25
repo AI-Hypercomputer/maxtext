@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 # Copyright 2023–2026 Google LLC
+
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +24,11 @@ import math
 import random
 from typing import Iterable, Optional, Tuple, Union
 
-from aqt.jax.v2 import aqt_tensor as aqt
+try:
+  from aqt.jax.v2 import aqt_tensor as aqt
+except ImportError:
+  aqt = None
+
 from flax import nnx
 from flax import struct
 import jax
@@ -35,7 +42,9 @@ from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.kernels import sort_activations
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
+from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -54,10 +63,20 @@ from maxtext.utils.sharding import (
     remove_mesh_axes_from_partition_spec,
 )
 import numpy as np
-import qwix
-from qwix.contrib.sparsity import sparsity_module
-import qwix.pallas as qpl
-import tokamax
+try:
+  import qwix
+  from qwix.contrib.sparsity import sparsity_module
+  import qwix.pallas as qpl
+except ImportError:
+  qwix = None
+  sparsity_module = None
+  qpl = None
+
+try:
+  import tokamax
+except ImportError:
+  tokamax = None
+
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -324,6 +343,7 @@ class GateLogit(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.kernel_axes,
           out_sharding=self.kernel_axes,
       )
 
@@ -333,6 +353,7 @@ class GateLogit(nnx.Module):
       # DSV3 was using nnx.Param and that code we are keeping the same
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+          sharding=bias_axes,
           out_sharding=bias_axes,
       )
       if self.model_name.startswith("deepseek4"):
@@ -498,8 +519,9 @@ class RoutedMoE(nnx.Module):
       self._expert_parallelism_name = "expert"
 
     self.gate = GateLogit(
-        in_features_shape=self.moe_expert_input_dim,
+        in_features_shape=self.config.emb_dim,
         out_features_shape=self.num_experts,
+
         mesh=self.mesh,
         model_name=self.config.model_name,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
@@ -516,8 +538,11 @@ class RoutedMoE(nnx.Module):
         shard_mode=config.shard_mode,
         rngs=self.rngs,
     )
-    rule = qpl.get_current_rule("gmm")
+
+    rule = qpl.get_current_rule("gmm") if qpl is not None else None
     sparsity_rule = None
+
+
     if rule is not None:
       if not isinstance(rule, qwix.QtRule):
         raise ValueError("Expect a QtRule for quantized training.")
@@ -573,6 +598,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wi_kernel_axes,
           out_sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
@@ -587,6 +613,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wo_kernel_axes,
           out_sharding=self.wo_kernel_axes,
       )
     else:
@@ -598,6 +625,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wi_kernel_axes,
           out_sharding=self.wi_kernel_axes,
       )
       self.wi_1 = nnx.Param(
@@ -608,6 +636,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wi_kernel_axes,
           out_sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
@@ -622,6 +651,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
+          sharding=self.wo_kernel_axes,
           out_sharding=self.wo_kernel_axes,
       )
 
@@ -675,6 +705,8 @@ class RoutedMoE(nnx.Module):
 
   def _logical_to_mesh_axes(self, logical_name):
     logical_rules = get_logical_axis_rules()
+    if not logical_rules and hasattr(self, "config") and hasattr(self.config, "logical_axis_rules"):
+      logical_rules = self.config.logical_axis_rules
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
   def _maybe_shard_with_pspec(self, inputs, pspec: jax.sharding.PartitionSpec | None, logical_axes=None):
@@ -1475,13 +1507,14 @@ class RoutedMoE(nnx.Module):
     def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
       if self.config.quantization and self.config.use_qwix_quantization:
         return group_sizes
-      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
+      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa") or tokamax is None:
         return group_sizes
       else:
         return tokamax.RaggedDotGroupSizes(
             group_sizes,
             inputs.shape[0],
         )
+
 
     def get_quantization_dtypes():
       lhs_quantize_dtype, rhs_quantize_dtype = None, None
@@ -1604,12 +1637,14 @@ class RoutedMoE(nnx.Module):
       return False
 
     def maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec):
-      if isinstance(w0_kernel, aqt.QTensor):
+      if aqt is not None and isinstance(w0_kernel, aqt.QTensor):
+
         w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
-      if isinstance(w1_kernel, aqt.QTensor):
+      if aqt is not None and isinstance(w1_kernel, aqt.QTensor):
         w1_pspec = aqt.partition_spec(w1_pspec, (1,), w1_kernel.dtype, use_bias=False)
-      if isinstance(wo_kernel, aqt.QTensor):
+      if aqt is not None and isinstance(wo_kernel, aqt.QTensor):
         wo_pspec = aqt.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
+
       return w0_pspec, w1_pspec, wo_pspec
 
     allow_batch_replication = self.get_expert_parallelism_size() == 1
@@ -3343,6 +3378,19 @@ class RoutedAndSharedMoE(nnx.Module):
         rngs=self.rngs,
     )
 
+    if getattr(self.config, "latent_moe_use_norm", False):
+      self.routed_expert_norm = RMSNorm(
+          num_features=self.moe_expert_input_dim,
+          epsilon=self.config.normalization_layer_epsilon,
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          rngs=self.rngs,
+      )
+
+
+    else:
+      self.routed_expert_norm = None
+
   @property
   def routed_moe(self):
     return self.MoeBlock_0
@@ -3377,12 +3425,16 @@ class RoutedAndSharedMoE(nnx.Module):
         out_sharding=out_sharding,
         input_ids=input_ids,
     )
+    if self.routed_expert_norm is not None:
+      routed_experts = self.routed_expert_norm(routed_experts)
+
     shared_experts = self.shared_experts(
         inputs,
         intermediate_sharding=intermediate_sharding,
         out_sharding=out_sharding,
     )
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
+
 
 
 def get_gate_logit(

@@ -16,8 +16,12 @@
 
 from collections.abc import Sequence
 
-import drjax
+try:
+  import drjax
+except ImportError:
+  drjax = None
 import jax
+
 import jax.numpy as jnp
 from jaxtyping import PyTree
 

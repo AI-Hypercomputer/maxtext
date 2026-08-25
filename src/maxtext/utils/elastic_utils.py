@@ -21,11 +21,16 @@ from types import SimpleNamespace
 import jax
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
-import pathwaysutils
-from pathwaysutils.elastic import elastic
-from pathwaysutils.elastic import manager
+try:
+  import pathwaysutils
+  from pathwaysutils.elastic import elastic
+  from pathwaysutils.elastic import manager
+  elastic_manager: manager.Manager | None = None
+except ImportError:
+  pathwaysutils = None
+  elastic_manager = None
 
-elastic_manager: manager.Manager | None = None
+
 pending_reinit_recorder = None
 pending_elastic_event_type = None
 
@@ -88,7 +93,8 @@ def record_elastic_reinit_end() -> None:
 
 def elastic_enabled(config) -> bool:
   """Returns whether elastic mode is enabled."""
-  return pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
+  return pathwaysutils is not None and pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
+
 
 
 def elastic_snapshot(config) -> bool:
@@ -224,7 +230,7 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
         "Elastic training requires the Pathways backend, and elastic_enabled"
         " must be set to True: current config.elastic_enabled:"
         f" {config.elastic_enabled}, pathways backend used:"
-        f" {pathwaysutils.is_pathways_backend_used()}"
+        f" {pathwaysutils.is_pathways_backend_used() if pathwaysutils is not None else False}"
     )
     raise ValueError(msg)
 

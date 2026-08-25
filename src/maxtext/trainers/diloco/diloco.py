@@ -24,8 +24,12 @@ This module contains implementations of:
 
 from typing import Any, Callable
 
-import drjax
+try:
+  import drjax
+except ImportError:
+  drjax = None
 from flax import nnx
+
 from flax import struct
 import jax
 import jax.numpy as jnp

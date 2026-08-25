@@ -16,7 +16,11 @@
 
 from typing import Any
 
-import drjax
+try:
+  import drjax
+except ImportError:
+  drjax = None
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
