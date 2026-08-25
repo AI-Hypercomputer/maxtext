@@ -247,6 +247,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
   freeze_clip_bounds = bool(getattr(config, "use_clipped_linears_for_vit", False))
 
   if freeze_mask_fn is not None or freeze_clip_bounds:
+
     def _partition(params):
       # trainable_mask: True where trainable under the whitelist (all-True if no whitelist).
       if freeze_mask_fn is not None:
@@ -254,8 +255,11 @@ def get_optimizer(config, learning_rate_schedule, model=None):
       else:
         trainable_mask = jax.tree_util.tree_map(lambda _: True, params)
       if freeze_clip_bounds:
+        # Gemma4-small (E2B/E4B) ViT: exclude the checkpoint-resident, non-trainable per-projection
+        # activation clip bounds from optimizer updates / weight decay.
         # clip_optimizer_freeze_mask returns True for trainable leaves, False for clip bounds.
         from maxtext.models import gemma4_vision  # pylint: disable=import-outside-toplevel
+
         clip_trainable = gemma4_vision.clip_optimizer_freeze_mask(params)
         trainable_mask = jax.tree_util.tree_map(lambda a, b: bool(a) and bool(b), trainable_mask, clip_trainable)
       return jax.tree_util.tree_map(lambda x: "trainable" if x else "frozen", trainable_mask)
