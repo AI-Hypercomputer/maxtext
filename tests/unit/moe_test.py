@@ -2119,5 +2119,55 @@ class FusedMlpMoETest(unittest.TestCase):
     )
 
 
+class GatherReplicatedActivationsTest(unittest.TestCase):
+  """Tests the replicated activation gather."""
+
+  # pylint: disable=protected-access
+
+  @staticmethod
+  def _reference_chain(inputs, sort_indices, num_repeats, use_custom_vjp):
+    """Pre-optimization dispatch gather: materialized repeat, then sorted gather."""
+    return moe._sort_activations(jnp.repeat(inputs, num_repeats, axis=0), sort_indices, use_custom_vjp)
+
+  @staticmethod
+  def _random_case(seed, num_tokens, hidden, num_experts, num_experts_per_tok, dtype):
+    """Random activations plus a permute()-style argsort of flattened top-k expert ids."""
+    rng = np.random.default_rng(seed)
+    inputs = jnp.asarray(rng.standard_normal((num_tokens, hidden)), dtype=dtype)
+    selected_experts = rng.integers(0, num_experts, size=(num_tokens, num_experts_per_tok))
+    sort_indices = jnp.argsort(jnp.ravel(jnp.asarray(selected_experts, dtype=jnp.int32)))
+    return inputs, sort_indices
+
+  def test_forward_and_vjp_match_reference(self):
+    """Tests bitwise forward and vjp equality on the custom-vjp path."""
+    for num_tokens, hidden, num_experts, top_k in ((24, 16, 8, 6), (7, 5, 3, 4)):
+      for seed, dtype in enumerate((jnp.float32, jnp.bfloat16)):
+        with self.subTest(num_tokens=num_tokens, dtype=dtype):
+          inputs, sort_indices = self._random_case(seed, num_tokens, hidden, num_experts, top_k, dtype)
+
+          def ref_fn(x):
+            return self._reference_chain(x, sort_indices, top_k, True)
+
+          def new_fn(x):
+            return moe._gather_replicated_activations(x, sort_indices, top_k, True)
+
+          ref_out, ref_vjp = jax.vjp(ref_fn, inputs)
+          new_out, new_vjp = jax.vjp(new_fn, inputs)
+
+          self.assertEqual(ref_out.dtype, new_out.dtype)
+          np.testing.assert_array_equal(np.asarray(ref_out), np.asarray(new_out))
+          ct = jnp.asarray(np.random.default_rng(seed + 1000).standard_normal(ref_out.shape), dtype=dtype)
+          np.testing.assert_array_equal(np.asarray(ref_vjp(ct)[0]), np.asarray(new_vjp(ct)[0]))
+
+  def test_jvp_matches_reference(self):
+    """custom_vjp forbids jvp, so forward-mode has to go through the use_custom_vjp=False fallback."""
+    inputs, sort_indices = self._random_case(11, 24, 16, 8, 6, jnp.float32)
+    tangent = jnp.asarray(np.random.default_rng(12).standard_normal(inputs.shape), dtype=jnp.float32)
+    ref = jax.jvp(lambda x: self._reference_chain(x, sort_indices, 6, False), (inputs,), (tangent,))
+    new = jax.jvp(lambda x: moe._gather_replicated_activations(x, sort_indices, 6, False), (inputs,), (tangent,))
+    for reference, actual in zip(ref, new):
+      np.testing.assert_array_equal(np.asarray(reference), np.asarray(actual))
+
+
 if __name__ == "__main__":
   unittest.main()
