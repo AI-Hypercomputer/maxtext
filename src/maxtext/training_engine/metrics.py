@@ -115,14 +115,17 @@ class MetricsRecorder:
         buffer.scalar_metrics[name] = jax.numpy.append(buffer.scalar_metrics[name], metric)
     self._metrics_buffer[-1] = buffer
 
-  def get_metrics(self, clear_cache: bool = True) -> list[abstract_engine.MetricsBuffer]:
-    """Returns cached metrics and optionally clears the metrics cache.
+  def get_metrics_history(self, clear_cache: bool = True) -> list[abstract_engine.MetricsBuffer]:
+    """Returns every cached step buffer and optionally clears the metrics cache.
+
+    The engine's own `get_metrics` returns only the most recent buffer, per the trainer
+    contract. This is the accessor that keeps the full history reachable.
 
     Args:
       clear_cache: Whether to reset cached metrics after retrieval.
 
     Returns:
-      The accumulated on-device MetricsBuffer.
+      One on-device MetricsBuffer per recorded train step, oldest first.
     """
     metrics_to_return = self._metrics_buffer
     if clear_cache:
@@ -187,7 +190,12 @@ class MetricsLogger:
         arrays.
     """
     log_message = [f"Completed step: {step}"]
-    log_message.extend(f"{k}: {metrics[k]:.3f}" for k in _METRICS_TO_LOG if k in metrics)
+    for k in _METRICS_TO_LOG:
+      if k in metrics:
+        if k == "learning_rate":
+          log_message.append(f"{k}: {metrics[k]:.3e}")
+        else:
+          log_message.append(f"{k}: {metrics[k]:.3f}")
 
     logging.info(", ".join(log_message))
 
