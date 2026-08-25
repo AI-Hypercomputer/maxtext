@@ -164,6 +164,41 @@ class PyconfigTest(unittest.TestCase):
     )
     self.assertEqual(config.tokenizer_path, "Qwen/Qwen3-30B-A3B-Base")
 
+  def test_explicit_sharding_qwen3_decoder_support(self):
+    """The Qwen3 decoders that have been onboarded to explicit sharding are accepted."""
+    for decoder_block in ("qwen3", "qwen3_moe", "qwen3_custom_moe"):
+      with self.subTest(decoder_block=decoder_block):
+        config = pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            shard_mode="explicit",
+            decoder_block=decoder_block,
+        )
+        self.assertEqual(config.decoder_block.value, decoder_block)
+
+    # Qwen3-Next and Qwen3.5 use gated-delta-net linear attention, and the
+    # Qwen3-VL/Omni encoders are multimodal; neither is onboarded yet.
+    for decoder_block in ("qwen3_next", "qwen3_5"):
+      with self.subTest(decoder_block=decoder_block):
+        with self.assertRaisesRegex(Exception, "not supported with 'explicit' sharding"):
+          pyconfig.initialize(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+              skip_jax_distributed_system=True,
+              shard_mode="explicit",
+              decoder_block=decoder_block,
+          )
+
+    with self.assertRaisesRegex(Exception, "not supported with `use_multimodal`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          model_name="qwen3-vl-4b",
+          override_model_config=True,
+          use_multimodal=True,
+          scan_layers=False,  # Required by the Qwen3-VL deepstack path; unrelated to sharding.
+      )
+
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
     self.assertEqual(resolve_config_path(__file__), __file__)
