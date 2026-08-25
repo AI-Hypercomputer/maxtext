@@ -79,7 +79,14 @@ def unscan_layers(
   new_flat = {}
   unscanned_count = 0
 
-  for key, value in flat.items():
+  # Drain `flat` as we go (pop, not iterate-then-keep) rather than holding
+  # every original scanned array alive for the whole function: at 30B-A3B
+  # scale (padded MoE weights are tens of GB each), keeping both the
+  # original scanned tree and the ~num_layers-times-larger unscanned tree
+  # alive simultaneously roughly doubles peak host memory during Raiden's
+  # D2H staging -- confirmed as the direct cause of an OOMKill there.
+  for key in list(flat.keys()):
+    value = flat.pop(key)
     if layer_container not in key:
       new_flat[key] = value
       continue
@@ -91,9 +98,13 @@ def unscan_layers(
 
     if not hasattr(arr, "shape") or arr.ndim <= scan_axis:
       # Not a per-layer leaf (shouldn't happen for real params under
-      # `layers`, but don't silently drop anything unexpected).
+      # `layers`, but don't silently drop anything unexpected). Keep the
+      # original (possibly already-wrapped) value, matching pre-existing
+      # behavior -- unlike the actually-scanned case below, there's no
+      # multi-copy blowup here worth restructuring around.
       new_flat[key] = value
       continue
+    del value
 
     if arr.shape[scan_axis] != num_layers:
       raise ValueError(
@@ -105,6 +116,7 @@ def unscan_layers(
       sliced = jax.lax.index_in_dim(arr, i, axis=scan_axis, keepdims=False)
       new_key = prefix + (f"{layer_container}_{i}",) + suffix
       new_flat[new_key] = sliced
+    del arr
     unscanned_count += 1
 
   if unscanned_count == 0:
