@@ -1424,6 +1424,11 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
   ) -> None:
     """Validates runtime constraints for the TPU Ulysses path."""
+    if self.attention_type == AttentionType.COMPRESSED:
+      raise ValueError(
+          "TPU Ulysses attention does not support AttentionType.COMPRESSED (DeepSeek-V4 HCA/CSA) "
+          "due to MQA (num_kv_heads=1), asymmetric Q/KV sequence lengths, and dynamic/ragged masking."
+      )
     ulysses_attention.validate_ulysses_runtime(
         model_mode=model_mode,
         previous_chunk=previous_chunk,
@@ -1446,6 +1451,8 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
   ) -> None:
     """Validates runtime constraints for the TPU USP path."""
+    if self.attention_type == AttentionType.COMPRESSED:
+      raise ValueError("TPU USP attention does not support AttentionType.COMPRESSED (DeepSeek-V4 HCA/CSA).")
     usp_attention.validate_usp_runtime(
         model_mode=model_mode,
         previous_chunk=previous_chunk,
@@ -1461,16 +1468,18 @@ class AttentionOp(nnx.Module):
       query: Array,
       key: Array | KVTensor,
       value: Array | KVTensor,
-      decoder_segment_ids: Array | None,
-      segment_positions: Array | None,
-      lengths: Array | None,
-      model_mode: str,
-      use_ragged_attention: bool = False,
-      previous_chunk: Any = None,
-      bidirectional_mask: Any = None,
-      sinks: Array | None = None,
-      indexer_mask: Array | None = None,
+      decoder_segment_ids: Optional[Array] = None,
+      decoder_positions: Optional[Array] = None,
+      deterministic: bool = False,
+      model_mode: str = MODEL_MODE_AUTOREGRESSIVE,
+      previous_chunk: Optional[Tuple[Array, Array, Array]] = None,
+      segment_positions: Optional[Array] = None,
+      bidirectional_mask: Optional[Array] = None,
+      lengths: Optional[Array] = None,
+      sinks: Optional[Array] = None,
       compressed_mask: Optional[Array] = None,
+      indexer_mask: Optional[Array] = None,
+      use_ragged_attention: bool = False,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
@@ -1483,6 +1492,13 @@ class AttentionOp(nnx.Module):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
+    cp_size = (
+        self.mesh.shape.get(self.config.context_sharding, 1)
+        if self.mesh is not None and hasattr(self.mesh, "shape")
+        else 1
+    )
+    if self.attention_type == AttentionType.COMPRESSED and cp_size > 1:
+      raise ValueError(f"Context parallelism (cp_size={cp_size}) is not supported with AttentionType.COMPRESSED.")
     if (
         target_hardware == "tpu"
         and tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
@@ -1889,7 +1905,7 @@ class AttentionOp(nnx.Module):
             # circular ring buffer gradient accumulation, cutting unreduced dQ HBM write traffic by ~42x.
             dq_reduction_steps=(
                 config.dq_reduction_steps
-                if config.dq_reduction_steps > 0
+                if config.dq_reduction_steps is not None and config.dq_reduction_steps > 0
                 else (3 if self.attention_type == AttentionType.COMPRESSED else None)
             ),
             use_experimental_scheduler=self.use_splash_scheduler,
@@ -1938,7 +1954,7 @@ class AttentionOp(nnx.Module):
           ],
       )
       def wrap_ulysses_splash_kernel(single_head_mask):
-        if self.attention_type == AttentionType.COMPRESSED and key.shape[1] == 1:
+        if self.attention_type == AttentionType.COMPRESSED and self.num_kv_heads == 1:
           splash_kernel = tokamax_splash_kernel.make_splash_mqa(
               mask=single_head_mask,
               config=sa_config,
@@ -2074,7 +2090,7 @@ class AttentionOp(nnx.Module):
           ],
       )
       def wrap_tokamax_splash_kernel(single_head_mask):
-        if self.attention_type == AttentionType.COMPRESSED and key.shape[1] == 1:
+        if self.attention_type == AttentionType.COMPRESSED and self.num_kv_heads == 1:
           splash_kernel = tokamax_splash_kernel.make_splash_mqa(
               mask=single_head_mask,
               config=sa_config,
@@ -2288,17 +2304,27 @@ class AttentionOp(nnx.Module):
 
           # Construct the splash kernel call with dynamic mask
           def dynamic_mask_splash_kernel(q, k, v, segment, sinks, indexer_mask):
-            splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mha(
-                mask=indexer_mask,
-                config=sa_config,
-            )
+            if self.attention_type == AttentionType.COMPRESSED and self.num_kv_heads == 1:
+              splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mqa(
+                  mask=indexer_mask,
+                  config=sa_config,
+              )
+              k_in = k[0]
+              v_in = v[0]
+            else:
+              splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mha(
+                  mask=indexer_mask,
+                  config=sa_config,
+              )
+              k_in = k
+              v_in = v
             kernel = partial(splash_kernel, max_logit_value=max_logit_value)
 
             if record_max_logits:
-              out, stats = kernel(q, k, v, segment, sinks=sinks, save_residuals=True)
+              out, stats = kernel(q, k_in, v_in, segment, sinks=sinks, save_residuals=True)
               return out, stats["max_logits"]
             else:
-              return kernel(q, k, v, segment, sinks=sinks), None
+              return kernel(q, k_in, v_in, segment, sinks=sinks), None
 
           # Iterate over batch dimension for (query, key, value, segment, sinks, mask)
           attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
@@ -2311,7 +2337,7 @@ class AttentionOp(nnx.Module):
             return attention_output, None
         else:
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
-          is_mqa_compressed = self.attention_type == AttentionType.COMPRESSED and key.shape[1] == 1
+          is_mqa_compressed = self.attention_type == AttentionType.COMPRESSED and self.num_kv_heads == 1
 
           if record_max_logits:
 

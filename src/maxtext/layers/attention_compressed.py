@@ -1167,6 +1167,13 @@ class CompressedAttention(Attention):
     if self.compress_ratio == 0:
       attention_type = AttentionType.LOCAL_SLIDING
 
+    cp_size = mesh.shape.get(config.context_sharding, 1) if mesh is not None and hasattr(mesh, "shape") else 1
+    if cp_size > 1 and self.compress_ratio > 0:
+      raise ValueError(
+          f"Context parallelism (cp_size={cp_size}, strategy={getattr(config, 'context_parallel_strategy', 'unknown')}) "
+          f"is not supported for CompressedAttention with compress_ratio={self.compress_ratio}."
+      )
+
     super().__init__(
         config=config,
         num_query_heads=num_query_heads,
