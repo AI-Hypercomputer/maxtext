@@ -21,6 +21,7 @@ import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
+from maxtext.src.maxtext.layers.normalizations import l2norm
 from tokamax._src.ops.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
 
 
@@ -96,8 +97,8 @@ def _pallas_gdn_bwd_kernel(
     k = k.astype(jnp.float32)
     v = v.astype(jnp.float32)
     if use_qk_norm_in_gdn:
-      q = q / (jnp.linalg.norm(q, axis=-1, keepdims=True) + 1e-6)
-      k = k / (jnp.linalg.norm(k, axis=-1, keepdims=True) + 1e-6)
+      q = l2norm(q, dim=-1, eps=1e-6)
+      k = l2norm(k, dim=-1, eps=1e-6)
     scale = 1.0 / jnp.sqrt(kq_head_dim)
     q = q * scale
     b_val = b_val.astype(jnp.float32)
@@ -694,8 +695,6 @@ def _compute_forward_conv_and_states(
   )
 
   if use_qk_norm_in_gdn:
-    from maxtext.src.maxtext.layers.normalizations import l2norm
-
     q = l2norm(q, dim=-1, eps=1e-6)
     k = l2norm(k, dim=-1, eps=1e-6)
 
