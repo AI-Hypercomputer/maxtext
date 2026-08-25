@@ -24,6 +24,7 @@ safetensors = pytest.importorskip("safetensors")
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from flax import linen as nn
 from flax import nnx
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
@@ -92,18 +93,22 @@ class KimiK3HFLoadingTest(unittest.TestCase):
     positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
     segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
 
-    # Run JIT-compiled NNX forward pass
-    @nnx.jit
-    def run_forward(m, x, p, s):
-      return m(
-          decoder_input_tokens=x,
-          decoder_positions=p,
-          decoder_segment_ids=s,
-          enable_dropout=False,
-      )
+    # Split NNX model into static graphdef and state to run a pure functional forward pass
+    graphdef, state = nnx.split(model)
+
+    @jax.jit
+    def run_forward(state_in, x, p, s):
+      with nn.logical_axis_rules(config.logical_axis_rules):
+        m = nnx.merge(graphdef, state_in)
+        return m(
+            decoder_input_tokens=x,
+            decoder_positions=p,
+            decoder_segment_ids=s,
+            enable_dropout=False,
+        )
 
     print("Running JIT-compiled forward pass on TPU...")
-    logits = run_forward(model, inputs, positions, segment_ids)
+    logits = run_forward(state, inputs, positions, segment_ids)
     print("Logits shape:", logits.shape, "dtype:", logits.dtype)
 
     # Assertions

@@ -694,6 +694,8 @@ class RoutedMoE(nnx.Module):
 
   def _logical_to_mesh_axes(self, logical_name):
     logical_rules = get_logical_axis_rules()
+    if not logical_rules and hasattr(self, "config") and hasattr(self.config, "logical_axis_rules"):
+      logical_rules = self.config.logical_axis_rules
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
   def _maybe_shard_with_pspec(self, inputs, pspec: jax.sharding.PartitionSpec | None, logical_axes=None):
