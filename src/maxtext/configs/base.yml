@@ -288,6 +288,8 @@ moe_fsdp_use_two_stage_all_gather: false
 shard_exp_on_fsdp: false
 # use fsdp and fsdp_transpose axes for sharding the moe weights
 use_2d_fsdp_sharding: false
+# Use the tensor axis as expert parallelism in the default sparse MoE path.
+moe_late_tp_combine: false
 
 # deepseek moe
 first_num_dense_layers: 0 # number of initial dense layers in the model
@@ -587,6 +589,7 @@ logical_axis_rules: [
                       ['activation_exp', ['expert']],
                       # MoE Weights
                       ['exp', 'expert'],
+                      ['exp_tp', ['expert', 'tensor']],
                       ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
                       ['embed_moe', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses']],
                       ['embed_moe', ['fsdp', 'context', 'context_usp_ulysses']],
