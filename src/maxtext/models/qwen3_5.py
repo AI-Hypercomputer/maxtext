@@ -24,14 +24,14 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from maxtext.common.common_types import Config, Array
-from maxtext.layers import initializers as max_initializers
-from maxtext.layers import nnx_wrappers
-from maxtext.layers.normalizations import Qwen3NextRMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.utils import max_utils
+from maxtext.src.maxtext.common.common_types import Config, Array
+from maxtext.src.maxtext.layers import initializers as max_initializers
+from maxtext.src.maxtext.layers import nnx_wrappers
+from maxtext.src.maxtext.layers.normalizations import Qwen3NextRMSNorm
+from maxtext.src.maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.src.maxtext.utils import max_utils
 
-from maxtext.models.qwen3 import (
+from maxtext.src.maxtext.models.qwen3 import (
     Qwen3NextGatedDeltaNet,
     Qwen3NextFullAttention,
     Qwen3NextSparseMoeBlock,
@@ -144,6 +144,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
 
     # Determine the type of attention mechanism for the current layer.
     is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+    self.is_full_attention_layer = is_full_attention_layer
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:

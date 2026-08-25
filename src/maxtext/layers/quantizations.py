@@ -30,7 +30,11 @@ from aqt.jax.v2 import calibration
 import qwix
 from qwix._src.core import numerics
 from qwix._src.core import dot_general_qt
-from qwix._src.core import sparsity
+
+try:
+  from qwix._src.core import sparsity
+except ImportError:
+  sparsity = None
 
 import jax
 import jax.numpy as jnp
@@ -61,11 +65,11 @@ try:
   flax_util.find_param = _safe_find_param
 except (NameError, AttributeError):
   pass
-from maxtext.layers import nnx_wrappers
+from maxtext.src.maxtext.layers import nnx_wrappers
 
-from maxtext.configs.types import TeCommGemmOverlapPolicy
-from maxtext.common.common_types import DType, Config
-from maxtext.inference.kvcache import KVQuant
+from maxtext.src.maxtext.configs.types import TeCommGemmOverlapPolicy
+from maxtext.src.maxtext.common.common_types import DType, Config
+from maxtext.src.maxtext.inference.kvcache import KVQuant
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config

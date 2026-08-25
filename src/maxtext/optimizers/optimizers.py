@@ -21,8 +21,8 @@ import jax.numpy as jnp
 
 import optax
 from optax.contrib._muon import muon
-from maxtext.common.common_types import DecoderBlockType
-from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
+from maxtext.src.maxtext.common.common_types import DecoderBlockType
+from maxtext.src.maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
 
 
 def _get_path_mask_fn(patterns, match_returns_true=True):
@@ -204,7 +204,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
       ns_steps = 10
     else:
       ns_coeffs = (3.4445, -4.7750, 2.0315)
-      ns_steps = 5
+      ns_steps = getattr(config, "muon_ns_steps", 5)
 
     muon_kwargs = {
         # Shared parameters: "nesterov" uses default

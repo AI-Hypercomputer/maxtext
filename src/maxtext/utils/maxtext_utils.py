@@ -27,8 +27,8 @@ from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh, NamedSharding
-from maxtext.common import checkpointing
-from maxtext.common.common_types import (
+from maxtext.src.maxtext.common import checkpointing
+from maxtext.src.maxtext.common.common_types import (
     AttentionType,
     DecoderBlockType,
     MODEL_MODE_AUTOREGRESSIVE,
@@ -36,17 +36,17 @@ from maxtext.common.common_types import (
     ReorderStrategy,
     ShardMode,
 )
-from maxtext.configs import pyconfig
-from maxtext.configs import types
-from maxtext.multimodal import processor as mm_processor
-from maxtext.trainers.diloco import diloco
-from maxtext.trainers.diloco import utils as diloco_utils
-from maxtext.utils import elastic_utils
-from maxtext.utils import gcs_utils
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils_nnx
-from maxtext.utils import sharding
+from maxtext.src.maxtext.configs import pyconfig
+from maxtext.src.maxtext.configs import types
+from maxtext.src.maxtext.multimodal import processor as mm_processor
+from maxtext.src.maxtext.trainers.diloco import diloco
+from maxtext.src.maxtext.trainers.diloco import utils as diloco_utils
+from maxtext.src.maxtext.utils import elastic_utils
+from maxtext.src.maxtext.utils import gcs_utils
+from maxtext.src.maxtext.utils import max_logging
+from maxtext.src.maxtext.utils import max_utils
+from maxtext.src.maxtext.utils import maxtext_utils_nnx
+from maxtext.src.maxtext.utils import sharding
 import numpy as np
 import optax
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
@@ -455,7 +455,7 @@ def calculate_gemma4_small_tflops_training_per_device(config, embedding_flops):
   """
   # Local import keeps Bazel's dep graph cycle-free (layers -> maxtext_utils -> layers).
   # pytype: disable=import-error
-  from maxtext.models import gemma4_small  # pylint: disable=import-outside-toplevel
+  from maxtext.src.maxtext.models import gemma4_small  # pylint: disable=import-outside-toplevel
   # pytype: enable=import-error
 
   b = config.per_device_batch_size
@@ -753,7 +753,14 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
+  elif config.decoder_block in (
+      DecoderBlockType.QWEN3_NEXT,
+      DecoderBlockType.QWEN3_5,
+  ):
+    num_dense_layers = config.first_num_dense_layers
+    num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
+    return num_dense_layers, num_moe_layers
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK4:
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -1955,10 +1962,10 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
 
     def _to_abstract_var(a_var, s_var):
-      a_val = a_var.get_value()
+      a_val = a_var.get_value() if hasattr(a_var, "get_value") else a_var
       s_val = getattr(s_var, "sharding", None) if isinstance(s_var, nnx.Variable) else s_var
       if s_val is None and isinstance(s_var, nnx.Variable):
-        s_val = s_var.get_value()
+        s_val = s_var.get_value() if hasattr(s_var, "get_value") else s_var
 
       def _extract_primary_sharding(s):
         if isinstance(s, (jax.sharding.Sharding, jax.sharding.PartitionSpec)):
@@ -1983,7 +1990,9 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
       else:
         s_tree = (
             jax.tree.map(lambda _: s_val, a_val)
-            if isinstance(s_val, (jax.sharding.Sharding, jax.sharding.PartitionSpec))
+            if isinstance(
+                s_val, (jax.sharding.Sharding, jax.sharding.PartitionSpec)
+            )
             else s_val
         )
         new_val = jax.tree.map(
@@ -1992,7 +2001,9 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
             s_tree,
             is_leaf=lambda x: hasattr(x, "shape") and hasattr(x, "dtype"),
         )
-      return a_var.replace(value=new_val)
+      if hasattr(a_var, "replace"):
+        return a_var.replace(value=new_val)
+      return new_val
 
     abstract_state = jax.tree.map(
         _to_abstract_var,

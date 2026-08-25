@@ -26,15 +26,15 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import HyperConnectionType
-from maxtext.configs import pyconfig
-from maxtext.kernels import mhc as mhc_kernel
-from maxtext.kernels.mhc import common as mhc_kernel_common
-from maxtext.layers import attention_mla, linears, mhc, moe
-from maxtext.layers.initializers import nd_dense_init
-from maxtext.layers.normalizations import RMSNorm
-from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path
+from maxtext.src.maxtext.common.common_types import HyperConnectionType
+from maxtext.src.maxtext.configs import pyconfig
+from maxtext.src.maxtext.kernels import mhc as mhc_kernel
+from maxtext.src.maxtext.kernels.mhc import common as mhc_kernel_common
+from maxtext.src.maxtext.layers import attention_mla, linears, mhc, moe
+from maxtext.src.maxtext.layers.initializers import nd_dense_init
+from maxtext.src.maxtext.layers.normalizations import RMSNorm
+from maxtext.src.maxtext.utils import maxtext_utils
+from maxtext.tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 
@@ -894,6 +894,7 @@ class TestMhcCostEstimates(unittest.TestCase):
     self.assertEqual(self.dims.post_apply_fwd_cost().transcendentals, 0)
     self.assertEqual(self.dims.pre_apply_bwd_cost().transcendentals, 0)
     self.assertEqual(self.dims.post_apply_bwd_cost().transcendentals, 0)
+
 
 
 if __name__ == "__main__":

@@ -44,18 +44,19 @@ from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
-from maxtext.configs import pyconfig
-from maxtext.configs.types import TeCommGemmOverlapPolicy
-from maxtext.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
-from maxtext.utils.globals import EPS
-from maxtext.utils import elastic_utils
-# Placeholder: internal
+from maxtext.src.maxtext.configs import pyconfig
+from maxtext.src.maxtext.configs.types import TeCommGemmOverlapPolicy
+from maxtext.src.maxtext.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
+from maxtext.src.maxtext.utils.globals import EPS
+from maxtext.src.maxtext.utils import elastic_utils
+# pylint: disable-next=unused-import, no-name-in-module
+from maxtext import maxtext_google
 
 # pylint: disable=too-many-positional-arguments
-from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
-from maxtext.layers.attention_mla import indexer_losses
-from maxtext.common import checkpointing, profiler
-from maxtext.common.goodput import (
+from maxtext.src.maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
+from maxtext.src.maxtext.layers.attention_mla import indexer_losses
+from maxtext.src.maxtext.common import checkpointing, profiler
+from maxtext.src.maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,
     RECORD_JOB_START_TIME,
@@ -64,20 +65,20 @@ from maxtext.common.goodput import (
     maybe_record_goodput,
     record_goodput,
 )
-from maxtext.common.gcloud_stub import vertex_tensorboard_modules
-from maxtext.common import metric_logger
-from maxtext.common.metric_logger import record_activation_metrics
-from maxtext.utils import exceptions
-from maxtext.utils import gcs_utils
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
-from maxtext.utils import qk_clip_utils
-from maxtext.utils import sharding
-from maxtext.utils import maxtext_utils_nnx
-from maxtext.utils import train_utils
-from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
-from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
+from maxtext.src.maxtext.common.gcloud_stub import vertex_tensorboard_modules
+from maxtext.src.maxtext.common import metric_logger
+from maxtext.src.maxtext.common.metric_logger import record_activation_metrics
+from maxtext.src.maxtext.utils import exceptions
+from maxtext.src.maxtext.utils import gcs_utils
+from maxtext.src.maxtext.utils import max_logging
+from maxtext.src.maxtext.utils import max_utils
+from maxtext.src.maxtext.utils import maxtext_utils
+from maxtext.src.maxtext.utils import qk_clip_utils
+from maxtext.src.maxtext.utils import sharding
+from maxtext.src.maxtext.utils import maxtext_utils_nnx
+from maxtext.src.maxtext.utils import train_utils
+from maxtext.src.maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
+from maxtext.src.maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
 
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
@@ -374,20 +375,29 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       nested_key = ("intermediates", "decoder", "moe_layers", "moe_bias_updates")
       moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
     else:
-      # NNX intermediates are model-rooted (no "intermediates" prefix),
-      # so match by suffix instead. Unlike collect_intermediates_by_suffix
-      # we must not ravel: the decoder update is a 2-D matrix that's
-      # transposed and MTP update is 1-D matrix.
-      for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
-        keys = tuple(k.key for k in path if hasattr(k, "key"))
-        if not keys or keys[-1] != "moe_bias_updates":
-          continue
-        if "decoder" in keys:
-          moe_bias_updates = (val,)
-        elif "mtp_block" in keys:
-          if mtp_moe_bias_updates is None:
-            mtp_moe_bias_updates = []
-          mtp_moe_bias_updates.append(val)
+      # NNX intermediates are model-rooted (no "intermediates" prefix), so match by
+      # suffix instead. A decoder block may sow more than one moe_bias_updates leaf
+      # (e.g. Qwen3-Next sows one per layer position inside each scanned block, since
+      # its MoE gates aren't a single homogeneous scanned collection like DeepSeek's),
+      # so collect every match keyed by its path, joined into a single string -- the
+      # path is used downstream (maxtext_utils_nnx.apply_moe_bias_updates) to locate
+      # the matching gate.bias parameter generically. This must be a dict (path string
+      # -> array), not a list of (path, array) pairs: this aux value flows through
+      # jax.lax.scan under gradient accumulation (gradient_accumulation.py), which
+      # requires every leaf to be a valid JAX array -- a plain string leaf (as part of
+      # a path tuple) would break that, whereas dict keys are pytree structure, not
+      # leaves, so they pass through untouched. Unlike collect_intermediates_by_suffix
+      # we must not ravel: each update is a 2-D matrix transposed at the apply site.
+      moe_bias_updates = {
+          "/".join(tuple(k.key for k in path if hasattr(k, "key"))): val
+          for path, val in jax.tree_util.tree_leaves_with_path(
+              intermediate_outputs
+          )
+          if tuple(k.key for k in path if hasattr(k, "key"))[-1:]
+          == ("moe_bias_updates",)
+      }
+      if not moe_bias_updates:
+        moe_bias_updates = None
 
   # Add the model's primary output to the intermediates dict so it can be used
   # by the acceptance rate calculation in eval_step.
@@ -641,7 +651,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       state.apply_gradients(grads)
     new_state = state
 
-    # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
+    # Apply updates for Auxiliary-Loss-Free load balancing
     # pylint: disable=too-many-nested-blocks
     if config.routed_bias and config.routed_bias_update_rate > 0.0:
       if getattr(config, "model_name", "").startswith("deepseek4"):
@@ -671,23 +681,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
               node.bias.value = node.bias.value + jnp.array(update_val)
               if getattr(config, "log_moe_bias_norms", False):
                 bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
-      else:
-        # 1. Update main decoder scanned MoE layers.
-        # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
-        decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
-        decoder_bias = _find_gate_bias(decoder_layer)
-        if decoder_bias is not None:
-          decoder_bias.value = decoder_bias.value + jnp.array(moe_bias_updates[0]).transpose()
-
-        # 2. Update auxiliary MTP MoE layers (if enabled).
-        # Unlike the main decoder, each MTP layer is an individual un-scanned layer
-        # with a 1D bias of shape (num_experts,).
-        if mtp_moe_bias_updates is not None and hasattr(new_state.model, "mtp_block"):
-          for i, update in enumerate(mtp_moe_bias_updates):
-            mtp_layer = getattr(new_state.model.mtp_block, f"mtp_layer_{i + 1}", None)
-            mtp_bias = _find_gate_bias(mtp_layer)
-            if mtp_bias is not None:
-              mtp_bias.value = mtp_bias.value + jnp.array(update)
+      elif moe_bias_updates is not None:
+        maxtext_utils_nnx.apply_moe_bias_updates(
+            new_state.model, moe_bias_updates
+        )
 
   lm_loss = xent_sum / (total_weights + EPS)
   scalar_metrics = {
