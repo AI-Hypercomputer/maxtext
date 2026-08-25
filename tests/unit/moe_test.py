@@ -835,6 +835,43 @@ class RoutedMoeTest(parameterized.TestCase):
       assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
+  def test_moe_emb_chunking_ragged_sort(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_block_chunking_ragged_sort_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        megablox=False,
+        sparse_matmul=True,
+        use_tokamax_gmm=True,
+        use_gmm_v2=True,
+        num_moe_emb_chunks=4,
+        use_ring_of_experts=True,
+        use_ragged_sort=True,
+        mlp_bias=True,
+        per_device_batch_size=1,
+        max_target_length=128,
+        float32_gate_logits=True,
+    )
+
+    rng = jax.random.PRNGKey(1234)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
+    actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+    assert_moe_close(actual_output, expected_output, cfg.dtype)
+
+  @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
