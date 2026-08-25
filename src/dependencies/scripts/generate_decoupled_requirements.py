@@ -54,6 +54,7 @@ EXCLUDED_GCLOUD_PACKAGES = (
     "grpcio-status",
     "ml-goodput-measurement",
     "proto-plus",
+    "xprof",
 )
 # google-pasta is a tensorflow dependency that only provides `pasta`; it has no Cloud surface.
 KEPT_GCLOUD_PACKAGES = ("google-pasta",)
@@ -67,6 +68,7 @@ EXCLUDED_ACCELERATOR_PREFIXES = (
     "jax-cuda",
     "libtpu",
     "nvidia-cuda-",
+    "nvidia-cudnn-",
     "transformer-engine",
 )
 EXCLUDED_ACCELERATOR_SUFFIXES = ("-cu12",)
