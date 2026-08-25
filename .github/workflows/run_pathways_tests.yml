@@ -1,4 +1,4 @@
-# Copyright 2023-2026 Google LLC
+# Copyright 2023, 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ on:
       pytest_addopts:
         required: false
         type: string
-        default: ''
+        default: ""
       is_scheduled_run:
         required: true
         type: boolean
@@ -56,11 +56,11 @@ on:
       total_workers:
         required: false
         type: string
-        default: '1'
+        default: "1"
       worker_group:
         required: false
         type: string
-        default: '1'
+        default: "1"
 
 
 permissions:
@@ -76,17 +76,20 @@ jobs:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS: true
+        PATHWAYS_UNSAFE_UNSAFE_OVERRIDE_GRPC_CREDENTIALS: "grpc_insecure_override"
         JAX_PLATFORMS: "proxy"
-        JAX_BACKEND_TARGET: "grpc://localhost:29000"
+        JAX_BACKEND_TARGET: "grpc://127.0.0.1:29000"
         TPU_VISIBLE_DEVICES: ""
       options: ${{ inputs.container_resource_option }}
     steps:
       - name: Checkout MaxText
         env:
           MAXTEXT_SHA: ${{ inputs.maxtext_sha }}
+          REPO: ${{ github.repository }}
         run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           git config --global --add safe.directory /__w/maxtext/maxtext
-          git clone https://github.com/google/maxtext.git .
+          git clone "https://github.com/${REPO}.git" .
           git fetch origin "$MAXTEXT_SHA"
           git checkout FETCH_HEAD
       - name: Download the maxtext wheel
@@ -105,19 +108,137 @@ jobs:
           python3 -m pip freeze
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
+      - name: Start Pathways Daemons
+        shell: bash
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKER_GROUP: ${{ inputs.worker_group }}
+          PATHWAYS_UNSAFE_UNSAFE_OVERRIDE_GRPC_CREDENTIALS: "grpc_insecure_override"
+          IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS: "true"
+        run: |
+          # Ensure nobody group and user exist (required by cloud_proxy_server_sanitized)
+          grep -q '^nobody:' /etc/group || echo "nobody:x:65534:" >> /etc/group
+          grep -q '^nobody:' /etc/passwd || echo "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin" >> /etc/passwd
+
+          cat << 'EOF' > /tmp/extract_pathways.py
+          import urllib.request, json, tarfile, io, os
+
+          def get_token(repo):
+              url = f"https://us-docker.pkg.dev/v2/token?service=us-docker.pkg.dev&scope=repository:{repo}:pull"
+              with urllib.request.urlopen(url) as r:
+                  return json.load(r)["token"]
+
+          def extract_image_layers(repo):
+              token = get_token(repo)
+              headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.docker.distribution.manifest.v2+json"}
+              manifest_url = f"https://us-docker.pkg.dev/v2/{repo}/manifests/latest"
+              req = urllib.request.Request(manifest_url, headers=headers)
+              with urllib.request.urlopen(req) as r:
+                  manifest = json.load(r)
+
+              for layer in manifest.get("layers", []):
+                  digest = layer["digest"]
+                  blob_url = f"https://us-docker.pkg.dev/v2/{repo}/blobs/{digest}"
+                  req = urllib.request.Request(blob_url, headers=headers)
+                  with urllib.request.urlopen(req) as r:
+                      layer_data = r.read()
+                  with tarfile.open(fileobj=io.BytesIO(layer_data), mode="r:*") as tar:
+                      for member in tar:
+                          if member.name.startswith("/") or ".." in member.name:
+                              continue
+                          norm = os.path.normpath(member.name).lstrip("./")
+                          # Crucial: only extract usr/grte and usr/pathways to avoid overwriting /bin/sh or host system binaries
+                          if not (norm.startswith("usr/grte") or norm.startswith("usr/pathways")):
+                              continue
+                          target = os.path.join("/", norm)
+                          parent = os.path.dirname(target)
+                          os.makedirs(parent, exist_ok=True)
+                          try:
+                              os.chmod(parent, 0o777)
+                          except Exception:
+                              pass
+                          if os.path.exists(target):
+                              try:
+                                  os.chmod(target, 0o777)
+                                  if os.path.isfile(target) or os.path.islink(target):
+                                      os.remove(target)
+                              except Exception:
+                                  pass
+                          if member.isdir():
+                              os.makedirs(target, exist_ok=True)
+                              try:
+                                  os.chmod(target, 0o777)
+                              except Exception:
+                                  pass
+                          else:
+                              try:
+                                  f = tar.extractfile(member)
+                                  if f is not None:
+                                      with open(target, "wb") as out:
+                                          out.write(f.read())
+                                      mode = member.mode or 0o755
+                                      if member.isfile() and (norm.endswith(".so") or "sanitized" in norm or "/lib64/" in norm or "/run/" in norm):
+                                          mode |= 0o755
+                                      os.chmod(target, mode)
+                                  elif member.issym() or member.islnk():
+                                      try:
+                                          os.symlink(member.linkname, target)
+                                      except FileExistsError:
+                                          pass
+                              except Exception:
+                                  pass
+
+          print("Extracting Pathways server & GRTE v5 runtime...")
+          extract_image_layers("cloud-tpu-v2-images/pathways/server")
+          print("Extracting Pathways proxy server...")
+          extract_image_layers("cloud-tpu-v2-images/pathways/proxy_server")
+          print("Extraction complete.")
+          EOF
+          python3 /tmp/extract_pathways.py
+          chmod +x /usr/pathways/run/* 2>/dev/null || true
+
+          echo "Starting Pathways Resource Manager..."
+          TPU_SKIP_MDS_QUERY=true /usr/pathways/run/cloud_pathways_server_sanitized \
+            --server_port=29001 \
+            --node_type=resource_manager \
+            --enforce_kernel_ipv6_support=false \
+            --instance_count=1 \
+            --instance_type=tpuv6e:2x2 \
+            --gcs_scratch_location="gs://cloud-pathways-staging/maxtext-ci/${RUN_ID}_${RUN_ATTEMPT}_${WORKER_GROUP}" > /tmp/pathways_rm.log 2>&1 &
+
+          echo "Starting Pathways Worker..."
+          /usr/pathways/run/cloud_pathways_server_sanitized \
+            --server_port=29005 \
+            --resource_manager_address=127.0.0.1:29001 \
+            --enforce_kernel_ipv6_support=false \
+            --gcs_scratch_location="gs://cloud-pathways-staging/maxtext-ci/${RUN_ID}_${RUN_ATTEMPT}_${WORKER_GROUP}" > /tmp/pathways_worker.log 2>&1 &
+
+          echo "Starting Pathways Proxy..."
+          XLA_FLAGS="--xla_dump_to=/tmp/aot_test_dump --xla_dump_hlo_as_text --xla_dump_hlo_module_re=jit_train_step" \
+          /usr/pathways/run/cloud_proxy_server_sanitized \
+            --server_port=29000 \
+            --resource_manager_address=127.0.0.1:29001 \
+            --gcs_scratch_location="gs://cloud-pathways-staging/maxtext-ci/${RUN_ID}_${RUN_ATTEMPT}_${WORKER_GROUP}" \
+            --xla_tpu_scoped_vmem_limit_kib=65536 \
+            --xla_tpu_spmd_rng_bit_generator_unsafe=true > /tmp/pathways_proxy.log 2>&1 &
       - name: Wait for Pathways Proxy Readiness
         shell: bash
         run: |
-          echo "Waiting for Pathways Proxy at localhost:29000..."
+          echo "Waiting for Pathways Proxy at 127.0.0.1:29000..."
           for _ in {1..30}; do
-            if python3 -c "import socket; socket.create_connection(('localhost', 29000), timeout=1)" 2>/dev/null; then
+            if python3 -c "import socket; socket.create_connection(('127.0.0.1', 29000), timeout=1)" 2>/dev/null; then
               echo "Pathways Proxy port is open and listening!"
               sleep 2  # Allow gRPC server to complete internal handshakes
               exit 0
             fi
             sleep 2
           done
-          echo "ERROR: Pathways Proxy failed to start within 60s" && exit 1
+          echo "ERROR: Pathways Proxy failed to start within 60s"
+          echo "=== RM LOG ===" && cat /tmp/pathways_rm.log || true
+          echo "=== WORKER LOG ===" && cat /tmp/pathways_worker.log || true
+          echo "=== PROXY LOG ===" && cat /tmp/pathways_proxy.log || true
+          exit 1
       - name: Run Tests
         shell: bash
         env:
@@ -132,6 +253,8 @@ jobs:
           cleanup_tpu_locks() {
             echo "Received cancellation signal; cleaning up /dev/accel* locks and /tmp/libtpu_lockfile..."
             kill -9 "${PYTEST_PID:-}" 2>/dev/null || true
+            pkill -9 -f cloud_pathways_server_sanitized 2>/dev/null || true
+            pkill -9 -f cloud_proxy_server_sanitized 2>/dev/null || true
             rm -f /tmp/libtpu_lockfile
             fuser -k -9 /dev/accel* 2>/dev/null || true
             sleep 0.5
@@ -164,34 +287,3 @@ jobs:
           .venv/bin/python3 -m pytest ${PYTEST_ADDOPTS} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0 ${SPLIT_ARGS} &
           PYTEST_PID=$!
           wait "$PYTEST_PID"
-    services:
-      resource_manager:
-        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest # zizmor: ignore[unpinned-images]
-        ports:
-          - "29001:29001"
-          - "29002:29002"
-        options:
-          --entrypoint=[/usr/pathways/run/cloud_pathways_server_sanitized, --server_port=29001, --node_type=resource_manager, --enforce_kernel_ipv6_support=false, --instance_count=1, --instance_type=tpuv6e:2x2, --gcs_scratch_location=gs://cloud-pathways-staging/maxtext-ci/${{ github.run_id }}_${{ github.run_attempt }}_${{ inputs.worker_group }}]
-        env:
-          TPU_SKIP_MDS_QUERY: true
-
-      worker:
-        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest # zizmor: ignore[unpinned-images]
-        ports:
-          - "29005:29005"
-          - "29006:29006"
-          - "8471:8471"
-          - "8080:8080"
-        options:
-          --entrypoint=[/usr/pathways/run/cloud_pathways_server_sanitized, --server_port=29005, --resource_manager_address=localhost:29001, --enforce_kernel_ipv6_support=false, --gcs_scratch_location=gs://cloud-pathways-staging/maxtext-ci/${{ github.run_id }}_${{ github.run_attempt }}_${{ inputs.worker_group }}]
-          --tpu=4
-
-      proxy:
-        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest # zizmor: ignore[unpinned-images]
-        ports:
-          - "29000:29000"
-        env:
-          IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS: true
-          XLA_FLAGS: "--xla_dump_to=/tmp/aot_test_dump --xla_dump_hlo_as_text --xla_dump_hlo_module_re=jit_train_step"
-        options:
-          --entrypoint=[/usr/pathways/run/cloud_proxy_server_sanitized, --server_port=29000, --resource_manager_address=localhost:29001, --enforce_kernel_ipv6_support=false, --gcs_scratch_location=gs://cloud-pathways-staging/maxtext-ci/${{ github.run_id }}_${{ github.run_attempt }}_${{ inputs.worker_group }}, --xla_tpu_scoped_vmem_limit_kib=65536, --xla_tpu_spmd_rng_bit_generator_unsafe=true]
