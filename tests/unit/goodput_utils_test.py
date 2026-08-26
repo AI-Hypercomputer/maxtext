@@ -24,6 +24,7 @@ from maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,
     RECORD_JOB_START_TIME,
+    _construct_goodput_monitor,
     create_goodput_recorder,
     maybe_monitor_goodput,
     maybe_record_goodput,
@@ -140,6 +141,116 @@ class GoodputUtilsTest(unittest.TestCase):
 
     mock_record_job_start_time.assert_called_once()
     mock_record_job_end_time.assert_not_called()
+
+  def _make_elastic_config(self, run_name):
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        base_output_directory=get_test_base_output_directory(),
+        run_name=run_name,
+        enable_checkpointing=False,
+        enable_goodput_recording=True,
+        elastic_enabled=True,
+        enable_single_controller=True,
+    )
+
+  @mock.patch("google.cloud.logging.Client")
+  def test_create_goodput_recorder_elastic(self, mock_cloud_logger):
+    """create_goodput_recorder builds an ElasticGoodputRecorder and seeds slice state."""
+    mock_cloud_logger.return_value = mock.MagicMock()
+    elastic_config = self._make_elastic_config("runner_test_elastic")
+
+    with (
+        mock.patch(
+            "maxtext.utils.elastic_utils.pathwaysutils.is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch("maxtext.utils.elastic_utils.record_slice_state") as mock_seed,
+    ):
+      recorder = create_goodput_recorder(elastic_config)
+
+    from ml_goodput_measurement import goodput_elastic  # pylint: disable=g-import-not-at-top
+
+    self.assertIsInstance(recorder, goodput_elastic.ElasticGoodputRecorder)
+    mock_seed.assert_called_once_with(recorder)
+
+  @mock.patch("google.cloud.logging.Client")
+  def test_create_goodput_recorder_elastic_fallback_on_error(self, mock_cloud_logger):
+    """Falls back to the base GoodputRecorder if elastic recorder construction raises."""
+    mock_cloud_logger.return_value = mock.MagicMock()
+    elastic_config = self._make_elastic_config("runner_test_elastic_fallback")
+
+    with (
+        mock.patch(
+            "maxtext.utils.elastic_utils.pathwaysutils.is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch(
+            "ml_goodput_measurement.goodput_elastic.ElasticGoodputRecorder",
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+      recorder = create_goodput_recorder(elastic_config)
+
+    from ml_goodput_measurement import goodput as base_goodput  # pylint: disable=g-import-not-at-top
+
+    self.assertIs(type(recorder), base_goodput.GoodputRecorder)
+
+  def test_create_goodput_recorder_not_elastic_when_backend_absent(self):
+    """elastic_enabled=True alone isn't enough: falls back without the Pathways backend."""
+    elastic_config = self._make_elastic_config("runner_test_elastic_no_pathways")
+
+    with mock.patch("google.cloud.logging.Client") as mock_cloud_logger:
+      mock_cloud_logger.return_value = mock.MagicMock()
+      recorder = create_goodput_recorder(elastic_config)
+
+    from ml_goodput_measurement import goodput as base_goodput  # pylint: disable=g-import-not-at-top
+
+    self.assertIs(type(recorder), base_goodput.GoodputRecorder)
+
+  def test_construct_goodput_monitor_elastic(self):
+    """_construct_goodput_monitor prefers ElasticGoodputMonitor when elastic training applies."""
+    elastic_config = self._make_elastic_config("runner_test_monitor_elastic")
+    common_kwargs = {"job_name": "test"}
+
+    with (
+        mock.patch("maxtext.utils.elastic_utils.should_use_elastic", return_value=True),
+        mock.patch("ml_goodput_measurement.monitoring_elastic.ElasticGoodputMonitor") as mock_elastic_monitor,
+    ):
+      mock_elastic_monitor.return_value = mock.MagicMock()
+      monitor = _construct_goodput_monitor(elastic_config, common_kwargs)
+
+    mock_elastic_monitor.assert_called_once_with(include_slice_efficiency=True, **common_kwargs)
+    self.assertIs(monitor, mock_elastic_monitor.return_value)
+
+  def test_construct_goodput_monitor_non_elastic(self):
+    """_construct_goodput_monitor uses the base GoodputMonitor when elastic training is off."""
+    common_kwargs = {"job_name": "test"}
+
+    with mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor") as mock_monitor:
+      mock_monitor.return_value = mock.MagicMock()
+      monitor = _construct_goodput_monitor(self.config, common_kwargs)
+
+    mock_monitor.assert_called_once_with(pathway_enabled=self.config.enable_pathways_goodput, **common_kwargs)
+    self.assertIs(monitor, mock_monitor.return_value)
+
+  def test_construct_goodput_monitor_elastic_fallback_on_error(self):
+    """Falls back to the base GoodputMonitor if elastic monitor construction raises."""
+    elastic_config = self._make_elastic_config("runner_test_monitor_elastic_fallback")
+    common_kwargs = {"job_name": "test"}
+
+    with (
+        mock.patch("maxtext.utils.elastic_utils.should_use_elastic", return_value=True),
+        mock.patch(
+            "ml_goodput_measurement.monitoring_elastic.ElasticGoodputMonitor",
+            side_effect=RuntimeError("boom"),
+        ),
+        mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor") as mock_monitor,
+    ):
+      mock_monitor.return_value = mock.MagicMock()
+      monitor = _construct_goodput_monitor(elastic_config, common_kwargs)
+
+    mock_monitor.assert_called_once_with(pathway_enabled=elastic_config.enable_pathways_goodput, **common_kwargs)
+    self.assertIs(monitor, mock_monitor.return_value)
 
 
 if __name__ == "__main__":

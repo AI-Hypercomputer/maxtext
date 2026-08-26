@@ -42,6 +42,26 @@ RECORD_JOB_START_TIME = f"record_{GoodputEvent.JOB.value}_start_time"
 RECORD_JOB_END_TIME = f"record_{GoodputEvent.JOB.value}_end_time"
 
 
+def _construct_goodput_monitor(config, common_kwargs):
+  """Constructs a GoodputMonitor, preferring the elastic-aware monitor when applicable."""
+  if config.elastic_enabled:
+    try:
+      from maxtext.utils import elastic_utils  # pylint: disable=import-outside-toplevel
+
+      if elastic_utils.should_use_elastic(config):
+        from ml_goodput_measurement import monitoring_elastic  # pylint: disable=import-outside-toplevel
+
+        monitor = monitoring_elastic.ElasticGoodputMonitor(include_slice_efficiency=True, **common_kwargs)
+        max_logging.log(f"Goodput: using ElasticGoodputMonitor for job: {config.run_name}")
+        return monitor
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.log(f"Goodput: could not create elastic goodput monitor, falling back to base monitor: {e}")
+
+  monitor = monitoring.GoodputMonitor(pathway_enabled=config.enable_pathways_goodput, **common_kwargs)
+  max_logging.log(f"Goodput: using GoodputMonitor for job: {config.run_name}")
+  return monitor
+
+
 @contextlib.contextmanager
 def maybe_monitor_goodput(config):
   """Monitor cumulative goodput if enabled on the lead host.
@@ -66,18 +86,20 @@ def maybe_monitor_goodput(config):
         enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
         enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
     )
-    goodput_monitor = monitoring.GoodputMonitor(
-        job_name=config.run_name,
-        logger_name=f"goodput_{config.run_name}",
-        tensorboard_dir=config.tensorboard_dir,
-        upload_interval=config.goodput_upload_interval_seconds,
-        monitoring_enabled=True,
-        pathway_enabled=config.enable_pathways_goodput,
-        include_badput_breakdown=True,
-        include_step_deviation=config.monitor_step_time_deviation,
-        step_deviation_interval_seconds=config.step_deviation_interval_seconds,
-        gcp_options=gcp_options,
-    )
+
+    common_kwargs = {
+        "job_name": config.run_name,
+        "logger_name": f"goodput_{config.run_name}",
+        "tensorboard_dir": config.tensorboard_dir,
+        "upload_interval": config.goodput_upload_interval_seconds,
+        "monitoring_enabled": True,
+        "include_badput_breakdown": True,
+        "include_step_deviation": config.monitor_step_time_deviation,
+        "step_deviation_interval_seconds": config.step_deviation_interval_seconds,
+        "gcp_options": gcp_options,
+    }
+
+    goodput_monitor = _construct_goodput_monitor(config, common_kwargs)
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
     yield
@@ -121,8 +143,27 @@ def create_goodput_recorder(config):
     if config.enable_goodput_recording and jax.process_index() == 0:
       max_logging.log("[GOODPUT NO-OP] recorder skipped (decoupled stub).")
     return None
-  if config.enable_goodput_recording:
-    logger_name = f"goodput_{config.run_name}"
-    recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
-    return recorder
-  return None
+
+  if not config.enable_goodput_recording:
+    return None
+
+  logger_name = f"goodput_{config.run_name}"
+
+  # Detect if we should use the elastic-aware recorder
+  if config.elastic_enabled:
+    try:
+      from maxtext.utils import elastic_utils  # pylint: disable=import-outside-toplevel
+
+      if elastic_utils.should_use_elastic(config):
+        from ml_goodput_measurement import goodput_elastic  # pylint: disable=import-outside-toplevel
+
+        recorder = goodput_elastic.ElasticGoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
+        elastic_utils.record_slice_state(recorder)
+        max_logging.log(f"Goodput: created ElasticGoodputRecorder for job: {config.run_name}")
+        return recorder
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.log(f"Goodput: could not create elastic goodput recorder, falling back to base recorder: {e}")
+
+  recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
+  max_logging.log(f"Goodput: created base GoodputRecorder for job: {config.run_name}")
+  return recorder

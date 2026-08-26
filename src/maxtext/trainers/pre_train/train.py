@@ -860,9 +860,7 @@ def recover(
   # Delete old iterators and loaders to release colocated python resources
   for key in ["data_iterator", "eval_data_iterator", "data_loader"]:
     if key in python_vars:
-      _logger.info(
-          "Deleting old %s to release colocated python resources...", key
-      )
+      _logger.info("Deleting old %s to release colocated python resources...", key)
       del python_vars[key]
 
   while True:
@@ -878,6 +876,9 @@ def recover(
       )
       elastic_manager.active_slice_indices = all_active_slices
       jax.config.update("jax_default_device", elastic_manager.default_device)
+      # Slice topology for this recovery attempt is now known: close out the
+      # "wait" badput window and open "reinit", logging the post-wait slice counts.
+      elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)
       _logger.info(
           "Active slices after recovery: %s",
           elastic_manager.active_slice_indices,
@@ -927,10 +928,8 @@ def recover(
           jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
       )
 
-      params_shardings, state_mesh_shardings = (
-          sharding.maybe_update_params_sharding_with_opt(
-              config, state_mesh_shardings
-          )
+      params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(
+          config, state_mesh_shardings
       )
 
       # 3. Re-compile train and eval steps for the NEW mesh
@@ -957,9 +956,7 @@ def recover(
 
       # 4. Restore TrainState from active state (device-to-device) or host snapshot
       if active_state is not None:
-        _logger.info(
-            "[*] Resharding active state directly (device-to-device)..."
-        )
+        _logger.info("[*] Resharding active state directly (device-to-device)...")
         if isinstance(model, nn.Module):
           for_sharding_dict = {
               "step": state.step,
@@ -1043,15 +1040,11 @@ def recover(
             snapshot_loaded = True
             _logger.info("Successfully restored in-memory snapshot at step %d!", restored_step)
           except (RuntimeError, jax.errors.JaxRuntimeError) as e:
-            _logger.warning(
-                "In-memory snapshot recovery failed (%s). Falling back to persistent checkpoint.", e
-            )
+            _logger.warning("In-memory snapshot recovery failed (%s). Falling back to persistent checkpoint.", e)
 
         if not snapshot_loaded:
           if existing_checkpoint_manager is None:
-            raise RuntimeError(
-                "No snapshots or persistent checkpoints available to restore from. Cannot recover."
-            )
+            raise RuntimeError("No snapshots or persistent checkpoints available to restore from. Cannot recover.")
           _logger.info("Restoring from persistent checkpoint...")
           restored_state, _ = checkpointing.load_state_if_possible(
               existing_checkpoint_manager,
@@ -1070,8 +1063,8 @@ def recover(
               expansion_factor_real_data=config.expansion_factor_real_data,
               maxtext_config=config,
           )
-          if hasattr(restored_state, '__getitem__') and 'items' in restored_state:
-            restored_state = restored_state['items']
+          if hasattr(restored_state, "__getitem__") and "items" in restored_state:
+            restored_state = restored_state["items"]
           if isinstance(model, nn.Module):
             restored_step = int(restored_state.step)
           else:
@@ -1081,9 +1074,7 @@ def recover(
           metric_logger_instance.learning_rate_schedule = learning_rate_schedule
 
       # Update jax_device_state with the newly built JAX objects
-      if not isinstance(model, nn.Module) and isinstance(
-          restored_state, train_state_nnx.TrainStateNNX
-      ):
+      if not isinstance(model, nn.Module) and isinstance(restored_state, train_state_nnx.TrainStateNNX):
         _, restored_state = nnx.split(restored_state)
       jax_device_state["state"] = restored_state
       jax_device_state["init_rng"] = init_rng
@@ -1093,9 +1084,7 @@ def recover(
       jax_device_state["p_train_step"] = p_train_step
       jax_device_state["p_eval_step"] = p_eval_step
 
-      new_data_loader, new_data_iter, new_eval_iter = recreate_dataloaders(
-          config, mesh, recorder, rampup_manager
-      )
+      new_data_loader, new_data_iter, new_eval_iter = recreate_dataloaders(config, mesh, recorder, rampup_manager)
 
       python_vars["step"] = restored_step
       python_vars["data_loader"] = new_data_loader
@@ -1105,9 +1094,10 @@ def recover(
       python_vars["rampup_manager"] = rampup_manager
       python_vars["last_step_completion"] = datetime.datetime.now()
 
-      _logger.info(
-          "Recovery complete! Resuming safely at step %d...", restored_step
-      )
+      _logger.info("Recovery complete! Resuming safely at step %d...", restored_step)
+      # State is fully restored on the new mesh: close out the "reinit" badput
+      # window and log the fully-recovered slice counts.
+      elastic_utils.record_elastic_reinit_end()
       break
 
     except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError, RuntimeError) as e:
@@ -1117,9 +1107,7 @@ def recover(
           or is_no_replicas_err
           or elastic.is_error_due_to_slice_down(e)
       ):
-        _logger.warning(
-            "Slice state change or error caught during recovery: %s. Retrying recovery.", e
-        )
+        _logger.warning("Slice state change or error caught during recovery: %s. Retrying recovery.", e)
       else:
         raise
 
@@ -1135,9 +1123,11 @@ def train_loop(config, recorder, state=None):
   if config.elastic_enabled:
     elastic_utils.ensure_elastic_manager_initialized(config)
     elastic_manager = elastic_utils.elastic_manager
-    _logger.info(
-        "[*] Active slices at startup: %s", elastic_manager.active_slice_indices
-    )
+    _logger.info("[*] Active slices at startup: %s", elastic_manager.active_slice_indices)
+    # Seed a slice-count record now that elastic_manager exists, so cumulative
+    # slice-efficiency queries always have a record at/near job start to seed
+    # from instead of treating the pre-first-event stretch as zero efficiency.
+    elastic_utils.record_slice_state(recorder)
     stop_event = threading.Event()
     monitor_thread = threading.Thread(
         target=elastic_manager._monitor_new_slices,  # pylint: disable=protected-access
@@ -1163,9 +1153,7 @@ def train_loop(config, recorder, state=None):
 
         def run_setup():
           try:
-            results = train_utils.setup_train_loop(
-                config, recorder, devices=devices
-            )
+            results = train_utils.setup_train_loop(config, recorder, devices=devices)
             setup_results["results"] = results
           except Exception as e:
             setup_results["exception"] = e
@@ -1182,17 +1170,11 @@ def train_loop(config, recorder, state=None):
             new_slice = bool(elastic_manager.available_inactive_slices)
 
             if new_slice and not init_done:
-              max_logging.log(
-                  "New slice detected during initialization. Triggering retry."
-              )
-              raise pathways_manager.ScaleUpSignalError(
-                  "Scale up during initialization"
-              )
+              max_logging.log("New slice detected during initialization. Triggering retry.")
+              raise pathways_manager.ScaleUpSignalError("Scale up during initialization")
 
             if init_done and new_slice:
-              raise pathways_manager.ScaleUpSignalError(
-                  "Both events set during initialization"
-              )
+              raise pathways_manager.ScaleUpSignalError("Both events set during initialization")
 
           if init_done:
             break
@@ -1214,9 +1196,7 @@ def train_loop(config, recorder, state=None):
             state,
         ) = setup_results["results"]
 
-        init_rng = jax.device_put(
-            init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-        )
+        init_rng = jax.device_put(init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
         break  # Initialization succeeded!
       except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
         is_scale_up = isinstance(e, pathways_manager.ScaleUpSignalError)
@@ -1369,10 +1349,8 @@ def train_loop(config, recorder, state=None):
       ):
         try:
           # Scale-up check at the end of the step (only if elastic snapshot)
-          if (
-              elastic_utils.elastic_snapshot(config)
-              and elastic_manager.available_inactive_slices
-          ):
+          if elastic_utils.elastic_snapshot(config) and elastic_manager.available_inactive_slices:
+            elastic_utils.record_elastic_event_start(recorder, config)
             recover(
                 jax_device_state,
                 python_vars,
@@ -1387,12 +1365,10 @@ def train_loop(config, recorder, state=None):
 
         except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
           if elastic_utils.elastic_snapshot(config) and (
-              isinstance(e, pathways_manager.ScaleUpSignalError)
-              or elastic.is_error_due_to_slice_down(e)
+              isinstance(e, pathways_manager.ScaleUpSignalError) or elastic.is_error_due_to_slice_down(e)
           ):
-            _logger.error(
-                "[!] Elastic event detected around step %d", python_vars["step"]
-            )
+            _logger.error("[!] Elastic event detected around step %d", python_vars["step"])
+            elastic_utils.record_elastic_event_start(recorder, config)
             needs_recovery = True
           else:
             # Checkpoint mode or non-elastic error: bubble to elastic_retry
