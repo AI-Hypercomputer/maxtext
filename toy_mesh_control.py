@@ -1,10 +1,10 @@
-"""Standalone prototype demonstrating explicit core and ICI mesh control for multi-core TPU v7x with XAOT compilation."""
+"""Prototype demonstrating explicit core and ICI mesh control for multi-core TPU v7x with XAOT compilation."""
 
 import functools
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 import numpy as np
 import jax
-from jax.experimental import mesh_utils
+from jax._src import mesh_utils
 from jax.experimental.shard_map import shard_map
 from jax.experimental.topologies import get_topology_desc
 import jax.lax as lax
@@ -12,11 +12,12 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 
-def get_v7x_devices(topology_name: str = "tpu7x:2x2x2") -> Sequence[Any]:
+def get_v7x_devices(topology_name: str = "tpu7x:4x4x4") -> Sequence[Any]:
   """Simulate TPU v7x multi-core devices (2 cores per chip) via XAOT topology description.
 
-  For example, `tpu7x:2x2x2` defines a 2x2x2 chip grid (8 chips) with 2 cores
-  per chip = 16 total v7x devices (device_kind: TPU7x).
+  For example:
+  - `tpu7x:2x2x2`: 8 chips (2x2x2) x 2 cores/chip = 16 total v7x devices.
+  - `tpu7x:4x4x4`: 64 chips (4x4x4) x 2 cores/chip = 128 total v7x devices (v7x cube).
   """
   topology = get_topology_desc(
       platform="tpu",
@@ -29,150 +30,147 @@ def get_v7x_devices(topology_name: str = "tpu7x:2x2x2") -> Sequence[Any]:
   return topology.devices
 
 
-def create_mesh(
-    devices: Sequence[Any],
-    axis_names: Sequence[str] = ("row", "col"),
-    ici_parallelism: Mapping[str, int] | None = None,
-    core_parallelism: Mapping[str, int] | None = None,
-    **kwargs: Any,
-) -> Mesh:
-  """Creates a JAX Mesh with explicit control over ICI vs Core parallelism per logical axis.
+def _create_device_mesh_for_nd_torus_v7x(
+    physical_mesh: np.ndarray,
+    mesh_shape: Sequence[int],
+    core_mesh_shape: Sequence[int] | None = None,
+    *,
+    allow_split_physical_axes: bool = True,
+) -> tuple[np.ndarray, np.ndarray, tuple[int, ...]]:
+  """Assigns logical parallelism axes to physical axes on TPU v7x with explicit core sharding.
 
-  In JAX/XLA, TPU v7x hardware has a physical hierarchy:
-    (dim_x, dim_y, dim_z, cores_per_chip)
-  where the 2 cores on each chip form the fastest, innermost dimension (stride 1).
-  To ensure that logical axes with core_parallelism > 1 correctly map to on-chip core
-  pairs (so that collectives along that axis gather core pairs together), the axes
-  are ordered by network intensity:
-    1. Pure ICI axes (core_parallelism == 1) are placed earlier (outer mesh dimensions).
-    2. Core-sharded axes (core_parallelism > 1) are placed last (inner mesh dimensions).
+  Supports 1D, 2D, 3D, and 4D logical shardings. Core sharding can either be
+  shared with an ICI axis (e.g. ici=4, core=2 -> size 8) or assigned to a unique
+  core-only axis not shared with any ICI dimension (e.g. ici=1, core=2 -> size 2).
 
   Args:
-    devices: Sequence of JAX devices (e.g. from get_v7x_devices).
-    axis_names: Tuple/List of logical axis names (e.g., ('row', 'col')).
-    ici_parallelism: Mapping of axis name -> ICI parallelism degree.
-    core_parallelism: Mapping of axis name -> Core parallelism degree.
-    **kwargs: Accepts kwargs in the form `ici_<axis>_parallelism` and
-      `core_<axis>_parallelism`.
+    physical_mesh: 4D np.ndarray of shape (dim_x, dim_y, dim_z, cores_per_chip)
+      representing the physical TPU topology (from `_get_physical_tpu_mesh`).
+    mesh_shape: Sequence[int] representing the ICI mesh shape (chips per logical axis).
+    core_mesh_shape: Optional Sequence[int] specifying the explicit core sharding
+      degrees per logical axis (product must equal 2 for v7x).
+    allow_split_physical_axes: bool, whether physical axes can be split.
 
   Returns:
-    A jax.sharding.Mesh with correct physical-to-logical mapping.
+    device_mesh: np.ndarray of devices shaped in network intensity order.
+    assignment_array: 2D array [physical_axis, logical_axis] -> assigned size.
+    perm: tuple of logical axis indices in network intensity order.
   """
-  axis_names = list(axis_names)
-  ici_map = dict(ici_parallelism or {})
-  core_map = dict(core_parallelism or {})
+  if core_mesh_shape is None:
+    core_mesh_shape = (1,) * len(mesh_shape)
 
-  # Parse additional kwargs like ici_row_parallelism=4, core_row_parallelism=2
-  for k, v in kwargs.items():
-    if k.startswith("ici_") and k.endswith("_parallelism"):
-      axis = k[4:-12]
-      ici_map[axis] = v
-    elif k.startswith("core_") and k.endswith("_parallelism"):
-      axis = k[5:-12]
-      core_map[axis] = v
+  ici_mesh_shape = tuple(mesh_shape)
+  core_mesh_shape = tuple(core_mesh_shape)
 
-  # Identify hardware topology dimensions
-  coords_set = sorted(list(set(tuple(d.coords) for d in devices)))
-  cores_set = sorted(list(set(d.core_on_chip for d in devices)))
-  num_chips = len(coords_set)
-  cores_per_chip = len(cores_set)
-
-  # Validate products match available hardware
-  ici_total = int(np.prod([ici_map.get(ax, 1) for ax in axis_names]))
-  core_total = int(np.prod([core_map.get(ax, 1) for ax in axis_names]))
-
-  if ici_total != num_chips:
+  if len(ici_mesh_shape) != len(core_mesh_shape):
     raise ValueError(
-        f"Total ICI parallelism ({ici_total}) must equal number of chips"
-        f" ({num_chips})."
+        f"Length of ici_mesh_shape ({len(ici_mesh_shape)}) must equal"
+        f" length of core_mesh_shape ({len(core_mesh_shape)})"
     )
-  if core_total != cores_per_chip:
+  if physical_mesh.ndim != 4 or physical_mesh.shape[3] != 2:
     raise ValueError(
-        f"Total Core parallelism ({core_total}) must equal cores per chip"
-        f" ({cores_per_chip})."
+        "Expected 4D physical mesh with 2 cores per chip for v7x, got"
+        f" shape {physical_mesh.shape}"
+    )
+
+  num_chips = int(np.prod(physical_mesh.shape[:3]))
+  cores_per_chip = physical_mesh.shape[3]
+
+  if int(np.prod(ici_mesh_shape)) != num_chips:
+    raise ValueError(
+        f"Product of ici_mesh_shape {ici_mesh_shape} ({np.prod(ici_mesh_shape)})"
+        f" must match number of chips ({num_chips})"
+    )
+  if int(np.prod(core_mesh_shape)) != cores_per_chip:
+    raise ValueError(
+        f"Product of core_mesh_shape {core_mesh_shape} ({np.prod(core_mesh_shape)})"
+        f" must match cores per chip ({cores_per_chip})"
     )
 
   # Order axes by network intensity:
-  # Axes with core_parallelism == 1 use only ICI (lower intensity -> outer dimensions).
-  # Axes with core_parallelism > 1 use fast on-chip cores (highest intensity -> innermost dimension).
-  sorted_axes = sorted(
-      axis_names,
-      key=lambda ax: (core_map.get(ax, 1) > 1, ici_map.get(ax, 1)),
-  )
+  # - Pure ICI axes (core == 1) have lower network intensity -> placed first.
+  # - Core-sharded axes (core > 1) use the fast on-chip interconnect -> placed last (stride 1).
+  num_axes = len(ici_mesh_shape)
+  perm = tuple(sorted(range(num_axes), key=lambda i: (core_mesh_shape[i] > 1, ici_mesh_shape[i])))
 
-  sorted_shape = tuple(
-      ici_map.get(ax, 1) * core_map.get(ax, 1) for ax in sorted_axes
-  )
-  device_mesh = mesh_utils.create_device_mesh(
-      sorted_shape, devices, allow_split_physical_axes=True
-  )
+  ordered_ici_shape = tuple(ici_mesh_shape[i] for i in perm)
+  ordered_core_shape = tuple(core_mesh_shape[i] for i in perm)
+  ordered_total_shape = tuple(ordered_ici_shape[i] * ordered_core_shape[i] for i in range(num_axes))
 
-  return Mesh(device_mesh, tuple(sorted_axes))
+  if allow_split_physical_axes:
+    ordered_device_mesh, assignment = mesh_utils._create_device_mesh_for_nd_torus_splitting_axes(
+        physical_mesh, ordered_total_shape
+    )
+  else:
+    ordered_device_mesh, assignment = mesh_utils._create_device_mesh_for_nd_torus(
+        physical_mesh, ordered_total_shape
+    )
+
+  return ordered_device_mesh, assignment, perm
+
+
+def create_mesh_v7x(
+    devices: Sequence[Any],
+    axis_names: Sequence[str],
+    ici_mesh_shape: Sequence[int],
+    core_mesh_shape: Sequence[int] | None = None,
+    *,
+    allow_split_physical_axes: bool = True,
+) -> Mesh:
+  """Creates a JAX Mesh on TPU v7x with explicit core sharding."""
+  physical_mesh = mesh_utils._get_physical_tpu_mesh(devices)
+  ordered_device_mesh, _, perm = _create_device_mesh_for_nd_torus_v7x(
+      physical_mesh,
+      ici_mesh_shape,
+      core_mesh_shape,
+      allow_split_physical_axes=allow_split_physical_axes,
+  )
+  ordered_axis_names = tuple(axis_names[i] for i in perm)
+  return Mesh(ordered_device_mesh, ordered_axis_names)
 
 
 def main():
-  print("=" * 70)
-  print("1. Simulating TPU v7x devices (topology: tpu7x:2x2x2) via XAOT")
-  print("=" * 70)
-  # tpu7x:2x2x2 simulates 8 chips (2x2x2) with 2 cores per chip = 16 v7x devices
-  devices = get_v7x_devices(topology_name="tpu7x:2x2x2")
-  print(
-      f"Total simulated devices: {len(devices)} (Device kind:"
-      f" {devices[0].device_kind})"
-  )
-  for d in devices:
-    print(f"  Device {d.id}: coords={d.coords}, core_on_chip={d.core_on_chip}")
+  print("=" * 80)
+  print("Simulating TPU v7x cube (topology: tpu7x:4x4x4 -> 128 devices) via XAOT")
+  print("=" * 80)
+  devices = get_v7x_devices("tpu7x:4x4x4")
+  print(f"Total simulated devices: {len(devices)} (Device kind: {devices[0].device_kind})")
 
-  print("\n" + "=" * 70)
-  print("2. Creating 2D Mesh with explicit Core and ICI controls")
-  print("   - 'row': ici=4, core=2 -> total degree = 8 (sharding over cores!)")
-  print("   - 'col': ici=2, core=1 -> total degree = 2 (pure ICI)")
-  print("=" * 70)
+  print("\n" + "=" * 80)
+  print("Creating 4D Mesh: unique core axis not shared with ICI (2x4x4x4)")
+  print("  - 'core_axis': ici=1, core=2 -> degree = 2 (pure core axis)")
+  print("  - 'x':         ici=4, core=1 -> degree = 4")
+  print("  - 'y':         ici=4, core=1 -> degree = 4")
+  print("  - 'z':         ici=4, core=1 -> degree = 4")
+  print("=" * 80)
 
-  mesh = create_mesh(
+  mesh = create_mesh_v7x(
       devices=devices,
-      axis_names=("row", "col"),
-      ici_row_parallelism=4,
-      core_row_parallelism=2,
-      ici_col_parallelism=2,
-      core_col_parallelism=1,
+      axis_names=("core_axis", "x", "y", "z"),
+      ici_mesh_shape=(1, 4, 4, 4),
+      core_mesh_shape=(2, 1, 1, 1),
   )
   print(f"Constructed Mesh: {mesh}")
-  print(f"Mesh shape: {mesh.shape}")
-  print("Device IDs in Mesh array:")
-  print(np.vectorize(lambda d: d.id)(mesh.devices))
-
-  print("\n" + "=" * 70)
-  print("3. Defining All-Gather over 'row' axis (ShardMap + XAOT)")
-  print("=" * 70)
 
   @jax.jit
   @functools.partial(
       shard_map,
       mesh=mesh,
-      in_specs=P("row", "col"),
-      out_specs=P(None, "col"),
+      in_specs=P("core_axis", "x", "y", "z"),
+      out_specs=P(None, "x", "y", "z"),
       check_rep=False,
   )
-  def all_gather_row(x):
-    # x is sharded across ('row', 'col'); all_gather across 'row' produces shape sharded only on 'col'
-    return lax.all_gather(x, axis_name="row", axis=0, tiled=True)
+  def all_gather_core_axis(x):
+    return lax.all_gather(x, axis_name="core_axis", axis=0, tiled=True)
 
-  # Abstract input tensor of shape (32, 64) sharded as P("row", "col")
-  # Dimension 0 is sharded across 'row' (size 8), dimension 1 across 'col' (size 2).
-  # Local per-device shape is (32 // 8, 64 // 2) = (4, 32).
-  x_sharding = NamedSharding(mesh, P("row", "col"))
-  x_abstract = jax.ShapeDtypeStruct((32, 64), jnp.float32, sharding=x_sharding)
+  x_sharding = NamedSharding(mesh, P("core_axis", "x", "y", "z"))
+  x_abstract = jax.ShapeDtypeStruct((2, 4, 4, 4), jnp.float32, sharding=x_sharding)
 
-  # Generate and print JAXPR
-  jaxpr = jax.make_jaxpr(all_gather_row)(x_abstract)
-  print("\n--- JAXPR ---")
-  print(jaxpr)
-
-  # Lower & XAOT Compile to HLO
-  lowered = all_gather_row.lower(x_abstract)
+  lowered = all_gather_core_axis.lower(x_abstract)
   print("\n--- Lowered HLO Module ---")
-  print(lowered.as_text("hlo"))
+  for line in lowered.as_text("hlo").splitlines():
+    if "all-gather" in line or "replica_groups" in line:
+      print(line)
 
   compiled = lowered.compile()
   print("\n--- XAOT Compilation Successful! ---")
