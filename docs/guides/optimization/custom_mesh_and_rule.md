@@ -55,6 +55,10 @@ Similar in philosophy to `ep-as-cp.yml`, this configuration explicitly includes 
 
 Different with the rule in `base.yml`, this rule configures expert physical axis to function as data parallelism rather than FSDP. This removes the constraint where FSDPxEP is limited by specific model dimensions, particularly for small tensors such as attention projections. Ultimately, this change benefits large-scale training.
 
+### `dsv3-mlperf-4k.yml`
+
+Tuned for DeepSeek V3 MLPerf training at a 4k sequence length. It uses the same mesh and the same expert-as-data-parallelism philosophy as `ep-as-dp.yml`, but shards the attention weights (`q_lora`, `kv_lora` and `embed_attn`) on the `expert` physical axis and replicates them over `fsdp` / `fsdp_transpose`. At a short sequence length the attention projections are small, and their FSDP all-gather makes the attention layer latency bound; because the expert axis carries the batch outside of MoE, sharding attention weights on it behaves like FSDP over a much smaller and faster axis, trading HBM for a cheaper collective. MoE and dense MLP weights are unchanged and keep using FSDP.
+
 ### `shard-exp-on-fsdp`
 
 When enabled, this shards the expert dimension of the MoE weights across the FSDP axis. It requires `num_experts` to be a multiple of FSDP rank and is particularly useful when using the Muon optimizer.
