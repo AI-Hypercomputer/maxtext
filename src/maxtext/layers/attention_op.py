@@ -261,7 +261,7 @@ class BlockCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable
 
 
 class HCAStaticMask(splash_attention_mask.Mask):
-  """Static compile-time mask for DeepSeek-V4 Hybrid Compressed Attention (HCA).
+  """Static compile-time mask for DeepSeek-V4 Heavily Compressed Attention (HCA).
 
   Defines coarse-block coordinates and deduplicated partial block patterns for
   Splash Attention with pre-packed bitmasks loaded into VMEM/SMEM. Evaluates
@@ -1396,6 +1396,8 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
   ) -> None:
     """Validates runtime constraints for the TPU Tokamax ring path."""
+    if self.attention_type == AttentionType.COMPRESSED:
+      raise ValueError("TPU Tokamax ring attention does not support AttentionType.COMPRESSED (DeepSeek-V4 HCA/CSA).")
     if getattr(self.config, "use_indexer", False) and indexer_mask is None:
       raise ValueError(
           "`indexer_mask` cannot be None when `use_indexer` is True. "
@@ -1952,18 +1954,11 @@ class AttentionOp(nnx.Module):
           ],
       )
       def wrap_ulysses_splash_kernel(single_head_mask):
-        if self.attention_type == AttentionType.COMPRESSED and self.num_kv_heads == 1:
-          splash_kernel = tokamax_splash_kernel.make_splash_mqa(
-              mask=single_head_mask,
-              config=sa_config,
-              q_seq_shards=1,
-          )
-        else:
-          splash_kernel = tokamax_splash_kernel.make_splash_mha(
-              mask=single_head_mask,
-              config=sa_config,
-              q_seq_shards=1,
-          )
+        splash_kernel = tokamax_splash_kernel.make_splash_mha(
+            mask=single_head_mask,
+            config=sa_config,
+            q_seq_shards=1,
+        )
         return splash_kernel
 
       splash_kernel = wrap_ulysses_splash_kernel(mask)
