@@ -46,6 +46,7 @@ from maxtext.common.common_types import (
     AttentionType,
     DecoderBlockType,
     MultimodalInput,
+    ShardMode,
 )
 from maxtext.configs import pyconfig
 from maxtext.layers import linears
@@ -988,26 +989,29 @@ _QWEN3_NEXT_CONFIG = {
 }
 
 
-def _build_qwen3_next_block(layer_idx_offset=0, **overrides):
-  """Builds one Qwen3-Next scannable block; overrides go to the config."""
-  cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, **overrides})
-  block = qwen3.Qwen3NextScannableBlock(
-      config=cfg,
-      mesh=_make_mesh(cfg),
-      model_mode=MODEL_MODE_TRAIN,
-      layer_idx_offset=layer_idx_offset,
-      rngs=nnx.Rngs(0),
-  )
-  return cfg, block
-
-
 class TestQwen3NextScannableBlock(unittest.TestCase):
   """Tests Qwen3-Next's nested local(scan)/global(length-1 scan) decoder block."""
+
+  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
+  BLOCK_CLS = qwen3.Qwen3NextScannableBlock
+
+  @classmethod
+  def _build(cls, layer_idx_offset=0, **overrides):
+    """Builds one scannable block; overrides go to the config, layer_idx_offset to the block."""
+    cfg = _make_config(**{**cls.MODEL_CONFIG, **overrides})
+    block = cls.BLOCK_CLS(
+        config=cfg,
+        mesh=_make_mesh(cfg),
+        model_mode=MODEL_MODE_TRAIN,
+        layer_idx_offset=layer_idx_offset,
+        rngs=nnx.Rngs(0),
+    )
+    return cfg, block
 
   @classmethod
   def setUpClass(cls):
     """Builds the block once; it costs several seconds and no test here mutates it."""
-    cls.cfg, cls.block = _build_qwen3_next_block()
+    cls.cfg, cls.block = cls._build()
 
   def _inputs(self, cfg):
     inputs = jax.random.normal(jax.random.PRNGKey(1), (1, cfg.max_target_length, cfg.emb_dim), dtype=jnp.float32)
@@ -1066,16 +1070,18 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     local-scan-then-global would silently reorder the model, so it is rejected.
     """
     with self.assertRaisesRegex(ValueError, "full-attention layer last"):
-      _build_qwen3_next_block(layer_idx_offset=1)
+      self._build(layer_idx_offset=1)
 
 
 class TestNNXDecoderQwen3Next(unittest.TestCase):
   """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
 
+  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
+
   def _build(self, num_decoder_layers, **overrides):
     """Builds a scanned Qwen3-Next decoder and its shared embedding."""
     cfg = _make_config(
-        **{**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True, **overrides}
+        **{**self.MODEL_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True, **overrides}
     )
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
@@ -1112,7 +1118,7 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
 
     The scan runs over blocks, not layers, so passing the flat list straight
     through would hand block i only ``kv_caches[i]``. Guards
-    ``_apply_qwen3_next_scanned_blocks``, which must also keep
+    ``_apply_qwen3_hybrid_scanned_blocks``, which must also keep
     ``skip_block_remat=True`` on this path rather than falling back to the
     generic (block-rematerialized) branch.
 
@@ -1158,6 +1164,36 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
         np.allclose(np.asarray(before), np.asarray(after)),
         "the remainder block's weights did not affect the output, so it was not applied",
     )
+
+
+# Qwen3.5 repeats Qwen3-Next's hybrid attention period and reuses its scannable
+# block, so it gets the same coverage over its own layer classes and config.
+_QWEN3_5_CONFIG = {
+    **_QWEN3_NEXT_CONFIG,
+    "run_name": "qwen3_5_scannable_block_test",
+    "model_name": "qwen3.5-35b-a3b",
+    # Qwen3.5 uses MRoPE, whose sections must cover rotary_dim / 2 frequencies. The
+    # shipped [11, 11, 10] is sized for the real head_dim (256), not this tiny one
+    # (32 * partial_rotary_factor 0.25 / 2 = 4).
+    "mrope_section": [2, 1, 1],
+}
+
+
+class TestQwen3_5ScannableBlock(TestQwen3NextScannableBlock):
+  """Runs the Qwen3-Next scannable-block tests against Qwen3.5's block."""
+
+  MODEL_CONFIG = _QWEN3_5_CONFIG
+  BLOCK_CLS = qwen3_5.Qwen3_5ScannableBlock
+
+  def test_block_uses_qwen3_5_layers(self):
+    """The block must build Qwen3.5 decoder layers, not Qwen3-Next ones."""
+    self.assertIsInstance(self.block.global_layer, qwen3_5.Qwen3_5DecoderLayer)
+
+
+class TestNNXDecoderQwen3_5(TestNNXDecoderQwen3Next):
+  """Runs the NNXDecoder wiring tests against Qwen3.5."""
+
+  MODEL_CONFIG = _QWEN3_5_CONFIG
 
 
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
@@ -1694,105 +1730,126 @@ class TestNNXDecoderFP8WeightOnly(unittest.TestCase):
     self.assertTrue(jnp.all(jnp.isfinite(logits)))
 
 
-# Unbound forward of the Qwen3.5 scannable block. It is invoked below against a
-# stand-in `self` rather than a real instance, so it is bound here once instead
-# of being called as a dunder at each call site.
-_QWEN3_5_BLOCK_FORWARD = qwen3_5.Qwen3_5ScannableBlock.__call__
+class _StatefulQwen3_5DecoderLayer(nnx.Module):
+  """Stand-in Qwen3.5 sub-layer that exposes the cache and metadata it receives."""
+
+  def __init__(self, *, is_full_attention_layer, **unused_kwargs):
+    self.increment = 10 if is_full_attention_layer else 1
+    self.call_count = nnx.Intermediate(jnp.array(0, dtype=jnp.int32))
+    self.received_kv_cache = nnx.Intermediate(jnp.array(False))
+    self.received_attention_metadata = nnx.Intermediate(jnp.array(False))
+
+  def __call__(self, inputs, *unused_args, kv_cache=None, attention_metadata=None, **unused_kwargs):
+    self.call_count.value += 1
+    self.received_kv_cache.value = jnp.array(kv_cache is not None)
+    self.received_attention_metadata.value = jnp.array(attention_metadata is not None)
+    output = inputs + self.increment
+    if kv_cache is None:
+      return output
+    return output, kv_cache + self.increment
 
 
 class Qwen3_5ScannableBlockKVCacheTest(unittest.TestCase):
   """Qwen3.5 must thread vLLM's externally-managed KV caches through its block.
 
-  `Qwen3_5ScannableBlock.__call__` only touches `self.config` and its
-  `layer_{i}` attributes, so it is exercised here against a stand-in `self`.
-  That keeps the test on CPU and focused on the cache plumbing rather than on
-  building a real MoE block.
+  Qwen3_5ScannableBlock reuses Qwen3NextScannableBlock, whose external-cache path
+  unrolls the stacked local layers and then runs the global layer. The sub-layers
+  are swapped for stand-ins, which keeps the test on CPU and focused on the cache
+  plumbing rather than on building a real MoE block.
   """
 
   CYCLE = 4
 
-  def _fake_block(self):
-    """Builds a stand-in block whose sub-layers record the kwargs they receive."""
-    calls = []
+  def setUp(self):
+    super().setUp()
+    self.config = SimpleNamespace(
+        inhomogeneous_layer_cycle_interval=self.CYCLE,
+        param_scan_axis=1,
+        remat_policy="none",
+        scan_layers=True,
+        shard_mode=ShardMode.AUTO,
+    )
 
-    def make_layer(idx):
-      def layer(x, *args, **kwargs):
-        calls.append({"idx": idx, "args": args, "kwargs": kwargs})
-        return x + 1, f"updated_kv_{idx}"
-
-      return layer
-
-    block = SimpleNamespace(config=SimpleNamespace(inhomogeneous_layer_cycle_interval=self.CYCLE))
-    for i in range(self.CYCLE):
-      setattr(block, f"layer_{i}", make_layer(i))
-    return block, calls
+  def _make_block(self):
+    with mock.patch.object(qwen3_5, "Qwen3_5DecoderLayer", _StatefulQwen3_5DecoderLayer):
+      return qwen3_5.Qwen3_5ScannableBlock(
+          config=self.config,
+          mesh=None,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          rngs=nnx.Rngs(0),
+      )
 
   def _call(self, block, **kwargs):
-    return _QWEN3_5_BLOCK_FORWARD(
-        block,
-        0,  # carry
-        None,  # decoder_segment_ids
-        None,  # decoder_positions
-        True,  # deterministic
-        MODEL_MODE_AUTOREGRESSIVE,
+    return block(
+        jnp.zeros((1, 1, 1)),
+        decoder_segment_ids=None,
+        decoder_positions=None,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
         **kwargs,
     )
 
   @pytest.mark.cpu_only
   def test_each_sublayer_gets_its_own_cache_and_updates_are_returned(self):
-    block, calls = self._fake_block()
-    kv_cache = tuple(f"kv_{i}" for i in range(self.CYCLE))
+    block = self._make_block()
+    kv_cache = tuple(jnp.array(i) for i in range(self.CYCLE))
 
-    carry, updated = self._call(block, kv_cache=kv_cache, attention_metadata={"meta": 1})
+    output, updated = self._call(block, kv_cache=kv_cache, attention_metadata=object())
 
-    self.assertEqual(carry, self.CYCLE)  # every sub-layer ran exactly once
-    self.assertEqual(updated, tuple(f"updated_kv_{i}" for i in range(self.CYCLE)))
-    self.assertEqual([c["kwargs"]["kv_cache"] for c in calls], list(kv_cache))
+    # Every sub-layer ran exactly once: three local layers (+1 each), then the global one (+10).
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 13))
+    np.testing.assert_array_equal(jnp.stack(updated), jnp.array([1, 2, 3, 13]))
+    np.testing.assert_array_equal(block.local_layers.call_count.value, jnp.ones(self.CYCLE - 1, dtype=jnp.int32))
+    np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
     # attention_metadata must reach the sub-layers; without it the attention
     # kernel cannot address vLLM's paged cache.
-    self.assertTrue(all(c["kwargs"]["attention_metadata"] == {"meta": 1} for c in calls))
+    np.testing.assert_array_equal(
+        block.local_layers.received_attention_metadata.value, jnp.ones(self.CYCLE - 1, dtype=jnp.bool_)
+    )
+    np.testing.assert_array_equal(block.global_layer.received_attention_metadata.value, True)
 
   @pytest.mark.cpu_only
   def test_training_path_returns_none_and_passes_no_cache(self):
-    block, calls = self._fake_block()
+    block = self._make_block()
 
-    carry, updated = self._call(block)
+    output, updated = self._call(block)
 
-    self.assertEqual(carry, self.CYCLE)
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 13))
     self.assertIsNone(updated)
-    self.assertTrue(all(c["kwargs"]["kv_cache"] is None for c in calls))
+    np.testing.assert_array_equal(block.local_layers.received_kv_cache.value, jnp.zeros(self.CYCLE - 1, dtype=jnp.bool_))
+    np.testing.assert_array_equal(block.global_layer.received_kv_cache.value, False)
 
   @pytest.mark.cpu_only
   def test_shorter_cache_does_not_index_out_of_range(self):
-    block, calls = self._fake_block()
+    block = self._make_block()
 
-    _, updated = self._call(block, kv_cache=("kv_0",))
+    _, updated = self._call(block, kv_cache=(jnp.array(0),))
 
-    self.assertEqual([c["kwargs"]["kv_cache"] for c in calls], ["kv_0", None, None, None])
     self.assertEqual(len(updated), self.CYCLE)
+    np.testing.assert_array_equal(updated[0], 1)
+    self.assertEqual(updated[1:], (None,) * (self.CYCLE - 1))
 
   @pytest.mark.cpu_only
   def test_flat_per_layer_caches_survive_the_per_block_round_trip(self):
     """vLLM hands over one cache per layer; the scan runs over 4-layer blocks."""
     num_layers = 8
     scan_length = num_layers // self.CYCLE
-    kv_caches = [f"kv_{i}" for i in range(num_layers)]
+    kv_caches = [jnp.array(i) for i in range(num_layers)]
 
     grouped = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, self.CYCLE, stack=False)
-    self.assertEqual(grouped, [("kv_0", "kv_1", "kv_2", "kv_3"), ("kv_4", "kv_5", "kv_6", "kv_7")])
+    self.assertEqual([[int(kv) for kv in group] for group in grouped], [[0, 1, 2, 3], [4, 5, 6, 7]])
 
     # Mimic _apply_layers_sequentially replacing each block entry with the
     # tuple the block returned.
+    block = self._make_block()
     for block_idx in range(scan_length):
-      fake_block, _ = self._fake_block()
-      _, updated = self._call(fake_block, kv_cache=grouped[block_idx])
-      grouped[block_idx] = tuple(f"{kv}_b{block_idx}" for kv in updated)
+      _, grouped[block_idx] = self._call(block, kv_cache=grouped[block_idx])
 
     maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped, scan_length, self.CYCLE, stacked=False)
 
     self.assertEqual(
-        kv_caches,
-        [f"updated_kv_{i % self.CYCLE}_b{i // self.CYCLE}" for i in range(num_layers)],
+        [int(kv) for kv in kv_caches],
+        [i + (10 if i % self.CYCLE == self.CYCLE - 1 else 1) for i in range(num_layers)],
     )
 
 
