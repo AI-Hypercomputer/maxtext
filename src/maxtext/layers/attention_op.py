@@ -1806,6 +1806,28 @@ class AttentionOp(nnx.Module):
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
     key = jnp.transpose(key, axes=(0, 2, 1, 3))
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
+
+    orig_q_len = query.shape[2]
+    orig_kv_len = key.shape[2]
+    pad_q = 0
+    pad_kv = 0
+    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+
+    # Pad sequences to block-sized boundaries upfront for AttentionType.COMPRESSED
+    if self.attention_type == AttentionType.COMPRESSED:
+      if query.shape[2] % self.block_q != 0:
+        pad_q = (self.block_q - (query.shape[2] % self.block_q)) % self.block_q
+        query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
+        if decoder_segment_ids is not None:
+          decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)), constant_values=-1)
+
+      if key.shape[2] % self.block_kv != 0:
+        pad_kv = (self.block_kv - (key.shape[2] % self.block_kv)) % self.block_kv
+        key = jnp.pad(key, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
+        value = jnp.pad(value, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
+        if decoder_segment_ids_kv_in is not None:
+          decoder_segment_ids_kv_in = jnp.pad(decoder_segment_ids_kv_in, ((0, 0), (0, pad_kv)), constant_values=-1)
+
     segment_axis_names_q = None
     segment_axis_names_kv = None
     sink_axis_names = self._logical_to_mesh_axes((HEAD,))
@@ -1969,19 +1991,7 @@ class AttentionOp(nnx.Module):
       splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
     else:
       sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
-      block_q = sa_config.block_q
-      block_kv = sa_config.block_kv
-
-      # Splash requires sequences to be padded to strict block-sized boundaries.
-      # If naturally divisible (condition false), it falls back to exact sequence lengths.
-      if self.attention_type == AttentionType.COMPRESSED and (
-          (query.shape[2] % block_q != 0) or (key.shape[2] % block_kv != 0)
-      ):
-        padded_q_len = ((query.shape[2] + block_q - 1) // block_q) * block_q
-        padded_kv_len = ((key.shape[2] + block_kv - 1) // block_kv) * block_kv
-        mask_shape = (padded_q_len, padded_kv_len)
-      else:
-        mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
+      mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
 
       splash_q_seq_shards = cp_size
 
@@ -1997,8 +2007,8 @@ class AttentionOp(nnx.Module):
             raise NotImplementedError(
                 "Context parallelism is currently not implemented for DeepSeek-V4 HCA Flash Attention."
             )
-          local_kv_len = query.shape[2]
-          compressed_kv_len = max(0, key.shape[2] - query.shape[2] - pad_kv_total)
+          local_kv_len = orig_q_len
+          compressed_kv_len = max(0, orig_kv_len - orig_q_len - pad_kv_total)
           mask = HCAStaticMask(
               shape=mask_shape,
               local_kv_len=local_kv_len,
@@ -2382,27 +2392,6 @@ class AttentionOp(nnx.Module):
           raise NotImplementedError("record_max_logits not supported for legacy splash")
 
       return attention_output, None
-
-    pad_q = 0
-    orig_q_len = None
-    pad_kv = 0
-    orig_kv_len = None
-    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
-    if self.attention_type == AttentionType.COMPRESSED:
-      orig_q_len = query.shape[2]
-      if mask_shape[0] > orig_q_len:
-        pad_q = mask_shape[0] - orig_q_len
-        query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
-        if decoder_segment_ids is not None:
-          decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)), constant_values=-1)
-
-      orig_kv_len = key.shape[2]
-      if mask_shape[1] > orig_kv_len:
-        pad_kv = mask_shape[1] - orig_kv_len
-        key = jnp.pad(key, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
-        value = jnp.pad(value, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
-        if decoder_segment_ids_kv_in is not None:
-          decoder_segment_ids_kv_in = jnp.pad(decoder_segment_ids_kv_in, ((0, 0), (0, pad_kv)), constant_values=-1)
 
     query = self._maybe_shard_with_pspec(query, axis_names_q)
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
