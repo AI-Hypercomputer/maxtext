@@ -16,13 +16,15 @@
 
 This script supports three conversion modes:
 1. Base: Converts a standard Hugging Face model to MaxText format.
+   Also supports on-the-fly FP8 block dequantization for FP8-quantized Hugging Face models
+   (e.g., Qwen 3.5 FP8) by passing `--hf_model_path`.
 2. Adapter: Converts a standalone Hugging Face LoRA adapter to MaxText PEFT format.
    (Requires `hf_lora_adapter_path` in config, and `load_parameters_path` should be empty)
 3. Merged: Merges a Hugging Face LoRA adapter into the base weights during conversion.
    (Requires both `hf_lora_adapter_path` and `load_parameters_path` to be set/not empty)
 
 Key Parameters (to be set in the config file or as command-line overrides):
-  model_name: (Required) The name of the model to convert (e.g., "gemma3-4b").
+  model_name: (Required) The name of the model to convert (e.g., "gemma3-4b", "qwen3.5-35b-a3b").
               Must be a key in `maxtext.utils.globals.HF_IDS`.
   base_output_directory: (Optional) The directory where the converted checkpoint
                          will be saved. Can be a local or GCS path.
@@ -31,22 +33,33 @@ Key Parameters (to be set in the config file or as command-line overrides):
   scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
   --lazy_load_tensors: (bool) If True, uses an on-demand loading strategy to minimize RAM
              usage during conversion. Recommended for large models.
-  --hf_model_path: (Optional) Specifies a local or remote directory containing the base HF weights.
+  --hf_model_path: (Optional) Specifies a local or remote directory / HF repo containing the base HF weights.
   --save_dtype: (Optional) Data type of saved weights. Default to `bfloat16`.
 
 Environment Variables:
   HF_AUTH_TOKEN: (Required) HuggingFace authentication token.
 
 Example Usage:
-  To merge a HF LoRA adapter into base weights and save as a MaxText checkpoint:
+  1. To merge a HF LoRA adapter into base weights and save as a MaxText checkpoint:
 
-   python -m maxtext.checkpoint_conversion.to_maxtext \
-    maxtext/configs/base.yml model_name="gemma3-4b" \
-    load_parameters_path="gs://my-bucket/maxtext-base-weights" \
-    hf_lora_adapter_path="my-user/my-lora-adapter" \
-    base_output_directory="gs://my-bucket/maxtext-merged-output" \
-    hf_access_token=${HF_TOKEN?} hardware=cpu skip_jax_distributed_system=True \
-    scan_layers=True
+     python -m maxtext.checkpoint_conversion.to_maxtext \
+      maxtext/configs/base.yml model_name="gemma3-4b" \
+      load_parameters_path="gs://my-bucket/maxtext-base-weights" \
+      hf_lora_adapter_path="my-user/my-lora-adapter" \
+      base_output_directory="gs://my-bucket/maxtext-merged-output" \
+      hf_access_token=${HF_TOKEN?} hardware=cpu skip_jax_distributed_system=True \
+      scan_layers=True
+
+  2. To convert an FP8-quantized Hugging Face model (with on-the-fly dequantization):
+
+     python -m maxtext.checkpoint_conversion.to_maxtext \
+      src/maxtext/configs/base.yml model_name="qwen3.5-35b-a3b" \
+      base_output_directory="gs://my-bucket/qwen3.5-35b-a3b-dequant" \
+      hardware=cpu skip_jax_distributed_system=True \
+      scan_layers=False \
+      --hf_model_path="Qwen/Qwen3.5-35B-A3B-FP8" \
+      --save_dtype="bfloat16" \
+      --lazy_load_tensors=True
 """
 
 import argparse

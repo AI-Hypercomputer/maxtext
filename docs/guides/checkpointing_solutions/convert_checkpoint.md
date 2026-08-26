@@ -83,8 +83,25 @@ You can find your converted checkpoint files under `${BASE_OUTPUT_DIRECTORY}/0/i
 - `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Google Cloud Storage (GCS) or local.
 - `hardware=cpu`: The conversion script runs on a CPU machine.
 - `checkpoint_storage_use_zarr3` and `checkpoint_storage_use_ocdbt`: These storage flags enable McJAX compatibility when set to True (the default). For Pathways, these should be False.
-- `--hf_model_path` (Optional): Specifies a customized remote directory or local directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
+- `--hf_model_path` (Optional): Specifies a customized remote directory or local directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py) (e.g., openai/gpt-oss-20b). This is also used to point to FP8 quantized models like `Qwen/Qwen3.5-35B-A3B-FP8`.
 - `--save_dtype` (Optional): Specifies the data type of saved model weights. Default to `bfloat16` to save memory.
+
+### Converting FP8 Quantized Checkpoints (On-The-Fly Dequantization)
+
+For fine-grained FP8 block-quantized models on Hugging Face (e.g., `Qwen/Qwen3.5-35B-A3B-FP8`), `to_maxtext.py` automatically detects the quantization configuration from the Hugging Face `config.json` and dequantizes weights on-the-fly during checkpoint conversion into `bfloat16` MaxText checkpoints. This eliminates the need for separate offline dequantization or large intermediate disk storage.
+
+```bash
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    src/maxtext/configs/base.yml \
+    model_name="qwen3.5-35b-a3b" \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    scan_layers=False \
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    --hf_model_path="Qwen/Qwen3.5-35B-A3B-FP8" \
+    --save_dtype="bfloat16" \
+    --lazy_load_tensors=True
+```
 
 ## MaxText to Hugging Face
 
