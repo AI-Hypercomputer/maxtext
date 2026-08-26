@@ -125,6 +125,14 @@ def _batch_signature(dynamic_batch: Any, static_batch: dict[str, Any]) -> Any:
   return (treedef, shapes, static_batch)
 
 
+_REPLICATED_BATCH_DIM_WARNING = (
+    "Loss input with batch dim %d does not divide mesh axis %r (size %d), so that "
+    "dimension is replicated instead of sharded: every device along the axis holds and "
+    "computes the whole micro-batch, %dx the work a sharded one would do there. Results "
+    "stay correct. If it was not deliberate -- a sequence-packed micro-batch is always "
+    "size 1 and has no alternative -- make the micro-batch a multiple of the axis size."
+)
+
 _UNCOMPARABLE_SIGNATURE_WARNING = (
     "Could not compare %s between fwd_bwd calls (%s), so the engine cannot tell whether "
     "the compiled kernel is still valid and will recompile on EVERY fwd_bwd from now on. %s"
@@ -204,7 +212,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compile_requested = False
     self._compiled_signature: Any = None
     self._signature_compare_warned: bool = False
-    self._raiden_syncs: Any = None
+    self._replicated_batch_warned: bool = False
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     model_or_model_mesh_pair = model_creation_utils.from_pretrained(
@@ -549,7 +557,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     sequence-packed micro-batch, always size 1) replicates that dim instead of sharding
     it -- every device holds and computes on the same data with no cross-device split,
     which is correct (there's nothing to reduce back together afterwards) but wastes
-    compute across the axis for that micro-batch.
+    compute across the axis for that micro-batch. That is an N-fold cost, so it warns
+    once per instance rather than living only in this docstring.
     """
     data_sharding = sharding.get_input_data_sharding(self._config, self._mesh)
     data_spec = tuple(data_sharding.spec)
@@ -559,8 +568,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         return None
       rank = jnp.ndim(leaf)
       spec = list(data_spec[:rank])
-      if spec and spec[0] is not None and leaf.shape[0] % self._batch_axis_size(spec[0]):
-        spec[0] = None
+      if spec and spec[0] is not None:
+        axis_size = self._batch_axis_size(spec[0])
+        if leaf.shape[0] % axis_size:
+          # Warn once per instance, not per leaf: this runs under a tree_map over every
+          # loss input, and they normally share a batch dim. Silence here would leave an
+          # N-fold compute cliff visible only in a docstring.
+          if not self._replicated_batch_warned:
+            self._replicated_batch_warned = True
+            logging.warning(_REPLICATED_BATCH_DIM_WARNING, leaf.shape[0], spec[0], axis_size, axis_size)
+          spec[0] = None
       return jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(*spec))
 
     return jax.tree.map(leaf_sharding, dynamic_batch)
@@ -1024,9 +1041,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if staging_transport == "raiden":
       try:
         from tunix.experimental.worker import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
-      except ImportError:
-        logging.warning("tunix.experimental.worker.raiden_synchronizer not found; returning empty metadata.")
-        return []
+      except ImportError as exc:
+        # Fatal, not a warning: Raiden staging was explicitly requested and cannot be
+        # provided. Returning empty metadata instead defers the failure to the caller --
+        # `WeightSyncCoordinator` eventually raises "metadata collection returned an empty
+        # side", which reports a count from another process and never mentions the missing
+        # module, leaving the real cause in this worker's log on another host.
+        raise RuntimeError(
+            "staging_transport='raiden' requires tunix.experimental.worker."
+            "raiden_synchronizer, which the installed tunix does not provide. Install a"
+            " tunix build that ships it, or select a different staging_transport."
+        ) from exc
 
       # 1. Drain all in-flight TPU computations to ensure weights are fully updated
       self._throttler.wait_for_all()
@@ -1114,7 +1139,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
       return all_metadata
 
-    return []
+    # Unknown transport: raise rather than return empty metadata. A typo would otherwise
+    # surface only as the coordinator's "empty side" error, with nothing logged anywhere
+    # naming the transport that was actually asked for.
+    raise ValueError(f"unknown staging_transport {staging_transport!r}; expected 'raiden'.")
 
   def release_weight_sync(self, **kwargs: Any) -> Any:
     """Releases staged weight buffers after transfer completion."""
