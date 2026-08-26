@@ -34,6 +34,7 @@ from maxtext.utils import max_utils
 from maxtext.models.qwen3 import (
     Qwen3NextGatedDeltaNet,
     Qwen3NextFullAttention,
+    Qwen3NextScannableBlock,
     Qwen3NextSparseMoeBlock,
 )
 
@@ -55,63 +56,26 @@ class Qwen3_5SparseMoEBlock(Qwen3NextSparseMoeBlock):
   """Shares same MoE code as Qwen3-Next"""
 
 
-class Qwen3_5ScannableBlock(nnx.Module):
-  """Scanned Structure for Text-only Architecture, explicitly invoking Qwen3_5 layers."""
+class Qwen3_5ScannableBlock(Qwen3NextScannableBlock):
+  """Scanned Structure for Text-only Architecture, explicitly invoking Qwen3_5 layers.
 
-  def __init__(self, config: Config, mesh: Mesh, model_mode: str, quant=None, *, rngs: nnx.Rngs):
-    self.config = config
-    self.mesh = mesh
-    self.model_mode = model_mode
-    self.quant = quant
-    self.rngs = rngs
-    cfg = self.config
+  Qwen3.5 repeats the same hybrid attention period as Qwen3-Next -- several
+  GatedDeltaNet layers followed by one full-attention layer -- so it reuses
+  Qwen3-Next's hierarchical nested scans (an inner scan over the homogeneous
+  linear-attention layers plus a trip-count-one scan over the full-attention
+  layer) and only swaps in the Qwen3.5 decoder layer.
+  """
 
-    # Explicitly instantiate Qwen3_5DecoderLayer here
-    for i in range(cfg.inhomogeneous_layer_cycle_interval):
-      layer_rngs = self.rngs.fork()
-      layer_name = f"layer_{i}"
-      layer = Qwen3_5DecoderLayer(
-          config=self.config,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-          layer_idx=i,
-          rngs=layer_rngs,
-      )
-      setattr(self, layer_name, layer)
-
-  def __call__(
-      self,
-      carry: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      previous_chunk=None,
-      slot: None | int = None,
-      forced_routed_experts: jnp.ndarray | None = None,
-  ) -> tuple[Array, None]:
-    cfg = self.config
-    x = carry
-
-    for i in range(cfg.inhomogeneous_layer_cycle_interval):
-      layer = getattr(self, f"layer_{i}")
-      # forced_routed_experts, when present, is shaped
-      # [inhomogeneous_layer_cycle_interval, batch, seq, top_k]: one slice per
-      # sub-layer in this cycle (see nnx_decoders.py's scan wiring).
-      layer_forced_routed_experts = forced_routed_experts[i] if forced_routed_experts is not None else None
-      x, _ = layer(
-          x,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk,
-          slot,
-          forced_routed_experts=layer_forced_routed_experts,
-      )
-
-    return x, None
+  def _make_decoder_layer(self, *, layer_idx, is_full_attention_layer, rngs):
+    return Qwen3_5DecoderLayer(
+        config=self.config,
+        mesh=self.mesh,
+        model_mode=self.model_mode,
+        quant=self.quant,
+        layer_idx=layer_idx,
+        is_full_attention_layer=is_full_attention_layer,
+        rngs=rngs,
+    )
 
 
 class Qwen3_5DecoderLayer(nnx.Module):
@@ -129,7 +93,15 @@ class Qwen3_5DecoderLayer(nnx.Module):
   """
 
   def __init__(
-      self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      layer_idx: int,
+      quant: None | Quant = None,
+      *,
+      is_full_attention_layer: bool | None = None,
+      rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
@@ -148,8 +120,12 @@ class Qwen3_5DecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    # Determine the type of attention mechanism for the current layer.
-    is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+    # Determine the type of attention mechanism for the current layer. A scanned block
+    # knows each sub-layer's role up front and passes it explicitly, because inside a
+    # scan the layer's position is not recoverable from layer_idx.
+    if is_full_attention_layer is None:
+      is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+    self.is_full_attention_layer = is_full_attention_layer
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
@@ -242,8 +218,10 @@ class Qwen3_5DecoderLayer(nnx.Module):
 
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.
+    # Assigned rather than sown: `sow` appends to a tuple, so the layer's Intermediate
+    # structure would grow on every call, which a `jax.lax.scan` body cannot express.
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+      self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 
     # Final residual connection (after the MoE block)
     layer_output = residual + mlp_output

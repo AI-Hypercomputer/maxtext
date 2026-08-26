@@ -271,6 +271,13 @@ def reshape_forced_routed_experts_for_scan(
   return jnp.reshape(fre, (scan_length, layers_per_cycle) + fre.shape[1:])
 
 
+def _qwen3_hybrid_block_class(config):
+  """Returns the nested-scan block class for a Qwen3-Next-style hybrid decoder."""
+  if config.decoder_block == DecoderBlockType.QWEN3_5:
+    return qwen3_5.Qwen3_5ScannableBlock
+  return qwen3.Qwen3NextScannableBlock
+
+
 def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
   """Process deepstack visual embeddings by adding them to hidden states at visual token positions.
 
@@ -480,7 +487,9 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
-    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+    # Qwen3-Next and Qwen3.5 share the same hybrid attention period, so they share
+    # the same nested-scan block structure.
+    self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -591,8 +600,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
-    elif self.is_qwen3_next:
-      self._init_scanned_qwen3_next(rngs, mesh)
+    elif self.is_qwen3_hybrid:
+      self._init_scanned_qwen3_hybrid(rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -763,8 +772,8 @@ class NNXDecoder(nnx.Module):
         rngs=rngs,
     )
 
-  def _init_scanned_qwen3_next(self, rngs, mesh):
-    """Initializes scanned Qwen3-Next blocks with per-layer (rather than per-block) remat.
+  def _init_scanned_qwen3_hybrid(self, rngs, mesh):
+    """Initializes scanned Qwen3-Next/Qwen3.5 blocks with per-layer (rather than per-block) remat.
 
     Mirrors _init_scanned_gemma4: each block covers one period of the hybrid
     attention pattern and rematerializes its own sub-layers, so the outer apply
@@ -773,13 +782,14 @@ class NNXDecoder(nnx.Module):
     keep producing the same parameter tree.
     """
     config = self.config
+    block_cls = _qwen3_hybrid_block_class(config)
     block_length = config.inhomogeneous_layer_cycle_interval
     scan_length = config.num_decoder_layers // block_length
     num_remaining_layers = config.num_decoder_layers % block_length
     policy = self.get_remat_policy()
     if scan_length > 0:
       self.layers = self._create_scanned_layers(
-          qwen3.Qwen3NextScannableBlock,
+          block_cls,
           length=scan_length,
           metadata_axis_name="layers",
           rngs=rngs,
@@ -790,7 +800,7 @@ class NNXDecoder(nnx.Module):
     if num_remaining_layers > 0:
       # The remainder starts on a period boundary, so it holds only the leading
       # linear-attention layers of a period -- the full-attention layer is last.
-      self.layers_remainder = qwen3.Qwen3NextScannableBlock(
+      self.layers_remainder = block_cls(
           config=config,
           mesh=mesh,
           quant=self.quant,
@@ -2021,8 +2031,8 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
-        elif self.is_qwen3_next:
-          y = self._apply_qwen3_next_scanned_blocks(
+        elif self.is_qwen3_hybrid:
+          y = self._apply_qwen3_hybrid_scanned_blocks(
               y,
               layer_args,
               layer_kwargs,
@@ -2393,8 +2403,8 @@ class NNXDecoder(nnx.Module):
 
     return y
 
-  def _apply_qwen3_next_scanned_blocks(self, y, layer_args, layer_kwargs, kv_caches=None):
-    """Applies the Qwen3-Next scanned blocks.
+  def _apply_qwen3_hybrid_scanned_blocks(self, y, layer_args, layer_kwargs, kv_caches=None):
+    """Applies the Qwen3-Next / Qwen3.5 scanned blocks.
 
     Qwen3NextScannableBlock rematerializes its own sub-layers (a scan over the
     linear-attention layers plus a trip-count-one scan over the full-attention

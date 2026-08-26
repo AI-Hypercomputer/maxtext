@@ -1327,11 +1327,7 @@ class Qwen3NextScannableBlock(nnx.Module):
 
     if self.num_local > 0:
       self.local_layers = nnx_scan.create_scanned_layers(
-          lambda layer_rngs: Qwen3NextDecoderLayer(
-              config=self.config,
-              mesh=self.mesh,
-              model_mode=self.model_mode,
-              quant=self.quant,
+          lambda layer_rngs: self._make_decoder_layer(
               layer_idx=0,
               is_full_attention_layer=False,
               rngs=layer_rngs,
@@ -1345,17 +1341,29 @@ class Qwen3NextScannableBlock(nnx.Module):
       self.local_layers = None
 
     if self.num_global > 0:
-      self.global_layer = Qwen3NextDecoderLayer(
-          config=self.config,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
+      self.global_layer = self._make_decoder_layer(
           layer_idx=full_attention_offset,
           is_full_attention_layer=True,
           rngs=self.rngs,
       )
     else:
       self.global_layer = None
+
+  def _make_decoder_layer(self, *, layer_idx, is_full_attention_layer, rngs):
+    """Builds one sub-layer of the block.
+
+    Subclasses for architectures that share this block structure (e.g. Qwen3.5)
+    override this to swap in their own decoder layer class.
+    """
+    return Qwen3NextDecoderLayer(
+        config=self.config,
+        mesh=self.mesh,
+        model_mode=self.model_mode,
+        quant=self.quant,
+        layer_idx=layer_idx,
+        is_full_attention_layer=is_full_attention_layer,
+        rngs=rngs,
+    )
 
   def _run_layer(self, layer, y, layer_kwargs, kv_cache=None):
     """Invokes one Qwen3NextDecoderLayer, returning (output, updated_kv_cache)."""

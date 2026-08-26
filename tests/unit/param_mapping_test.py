@@ -24,6 +24,7 @@ pytestmark = [pytest.mark.decoupled_target]
 
 from maxtext.checkpoint_conversion.to_maxtext import _build_multi_axis_stacked_tensor
 from maxtext.checkpoint_conversion.utils import param_mapping
+from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
 
 
@@ -141,6 +142,65 @@ class ParamMappingTest(unittest.TestCase):
     global_experts = mapping[f"{global_prefix}-mlp-routed_experts-wi_0"]
     self.assertEqual(len(global_experts), num_experts)
     self.assertEqual(len(global_experts[0]), num_blocks)
+
+  def test_qwen3_5_mapping_scanned(self):
+    """Qwen3.5 reuses Qwen3-Next's nested block scan, but stores its routed experts fused."""
+    num_layers, cycle = 8, 4
+    config = {"text_config": {"num_hidden_layers": num_layers}}
+    maxtext_config = mock.Mock()
+    maxtext_config.inhomogeneous_layer_cycle_interval = cycle
+    maxtext_config.use_multimodal = False
+    mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+
+    num_blocks, num_local = num_layers // cycle, cycle - 1
+    local_prefix = "params-decoder-layers-local_layers"
+    global_prefix = "params-decoder-layers-global_layer"
+    # Linear attention only exists on the local layers, full attention only on the global one.
+    self.assertIn(f"{local_prefix}-attention-in_proj_qkvz-kernel", mapping)
+    self.assertIn(f"{global_prefix}-attention-attention-query-kernel", mapping)
+    self.assertNotIn(f"{global_prefix}-attention-in_proj_qkvz-kernel", mapping)
+    self.assertNotIn(f"{local_prefix}-attention-attention-query-kernel", mapping)
+
+    # local_layers values are nested [block][local]; global_layer is flat over blocks.
+    # A tuple of HF names is a composite source the hook fuses, not a stacking axis.
+    local_val = mapping[f"{local_prefix}-attention-in_proj_qkvz-kernel"]
+    self.assertEqual(len(local_val), num_blocks)
+    self.assertEqual(len(local_val[0]), num_local)
+    self.assertEqual(
+        local_val[0][0],
+        (
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+            "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+        ),
+    )
+    global_val = mapping[f"{global_prefix}-attention-attention-query-kernel"]
+    self.assertEqual(len(global_val), num_blocks)
+    # The full-attention layer is last in the period.
+    self.assertEqual(global_val[0], f"model.language_model.layers.{cycle - 1}.self_attn.q_proj.weight")
+
+    # Fused experts: one HF tensor feeds both wi_0 and wi_1, so it is keyed by the pair
+    # and carries no extra per-expert axis (unlike Qwen3-Next).
+    fused_local = mapping[(f"{local_prefix}-mlp-routed_experts-wi_0", f"{local_prefix}-mlp-routed_experts-wi_1")]
+    self.assertEqual(len(fused_local), num_blocks)
+    self.assertEqual(len(fused_local[0]), num_local)
+    self.assertEqual(fused_local[0][0], "model.language_model.layers.0.mlp.experts.gate_up_proj")
+    fused_global = mapping[(f"{global_prefix}-mlp-routed_experts-wi_0", f"{global_prefix}-mlp-routed_experts-wi_1")]
+    self.assertEqual(len(fused_global), num_blocks)
+
+  def test_qwen3_5_composite_key_uses_the_nested_scan_axes(self):
+    """A composite (tuple) MaxText key must still be recognised as a nested block scan.
+
+    Qwen3.5's fused gate_up_proj is keyed by the (wi_0, wi_1) pair, so a layout
+    check that only looks at `str` keys would place the (blocks, local) axes at
+    the leading positions and silently transpose the weights.
+    """
+    cfg = mock.Mock()
+    cfg.param_scan_axis = 1
+    local_key = "params-decoder-layers-local_layers-mlp-routed_experts-wi_0"
+    self.assertEqual(
+        tensor_handling.stacked_axes((local_key, local_key.replace("wi_0", "wi_1")), cfg, depth=2),
+        tensor_handling.stacked_axes(local_key, cfg, depth=2),
+    )
 
   @staticmethod
   def _indices_from_name(name):
