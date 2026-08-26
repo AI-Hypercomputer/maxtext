@@ -756,6 +756,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         else:
           recurrent_state = recurrent_state[:batch]
 
+    # --- TELEMETRY ---
+    # log_g = -exp(A_log) * softplus(a + dt_bias)
+    log_g_sample = -jnp.exp(self.A_log[...]) * jax.nn.softplus(a + self.dt_bias[...])
+    exp_log_g = jnp.exp(log_g_sample)
+    jax.debug.print("EXP_LOG_G: mean={mean:.8f} min={min:.8f} max={max:.8f}", mean=jnp.mean(exp_log_g), min=jnp.min(exp_log_g), max=jnp.max(exp_log_g))
+    # -----------------
+
     if getattr(cfg, "use_gdn_kernel", False) and getattr(
         cfg, "use_hybrid_gdn", False
     ):

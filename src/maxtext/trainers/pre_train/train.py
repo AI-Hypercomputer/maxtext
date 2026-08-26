@@ -544,6 +544,24 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
       raw_grads,
   )
+
+  # --- GRADIENT TELEMETRY ---
+  global_grad_norm = jnp.sqrt(sum(jnp.sum(g**2) for g in jax.tree_util.tree_leaves(raw_grads)))
+  jax.debug.print("GRAD_NORM_GLOBAL: {norm}", norm=global_grad_norm)
+  
+  def _safe_norm(pytree, path_str=""):
+      leaves, _ = jax.tree_util.tree_flatten(pytree)
+      if not leaves: return
+      n = jnp.sqrt(sum(jnp.sum(g**2) for g in leaves))
+      jax.debug.print(f"GRAD_NORM_{path_str}: {{norm}}", norm=n)
+
+  if isinstance(model, nn.Module) and "params" in raw_grads:
+      _safe_norm(raw_grads["params"].get("token_embedder"), "EMBED")
+      if "decoder" in raw_grads["params"]:
+         _safe_norm(raw_grads["params"]["decoder"].get("layers_0"), "LAYER_0")
+         _safe_norm(raw_grads["params"]["decoder"].get("layers_39"), "LAYER_39")
+  # --------------------------
+
   if config.parameter_memory_host_offload:
     raw_grads = jax.device_put(
         raw_grads,

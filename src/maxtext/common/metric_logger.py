@@ -214,6 +214,12 @@ class MetricLogger:
     if "learning/reward_accuracy" in scalars:
       log_parts.append(f"reward_accuracy: {scalars['learning/reward_accuracy']:.3f}")
 
+    if "learning/grad_norm" in scalars:
+      log_parts.append(f"grad_norm: {scalars['learning/grad_norm']:.3f}")
+      
+    if "learning/raw_grad_norm" in scalars:
+      log_parts.append(f"raw_grad_norm: {scalars['learning/raw_grad_norm']:.3f}")
+
     if self.config.num_experts > 1:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
       log_parts.append(f"moe_lb_loss: {moe_lb_loss:.6f}")
