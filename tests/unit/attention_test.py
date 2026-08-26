@@ -634,6 +634,25 @@ class HCAStaticMaskTest(unittest.TestCase):
     kwargs.setdefault("block_size", 128)
     return _create_mock_flash_op(**kwargs)
 
+  def _make_dot_product_op(self, max_target_length, sliding_window_size=128):
+    config = types.SimpleNamespace(
+        causal_block_size=4,
+        context_parallel_load_balance=False,
+        context_sharding="context",
+        shard_mode="none",
+        debug_sharding=False,
+    )
+    return AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=max_target_length,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=sliding_window_size,
+    )
+
   def test_hca_static_mask_matches_compressor_mask(self):
     test_cases = [
         (512, 128, 128, 0),
@@ -658,23 +677,7 @@ class HCAStaticMaskTest(unittest.TestCase):
             local_window=local_window,
         )
 
-        op = AttentionOp(
-            config=types.SimpleNamespace(
-                causal_block_size=4,
-                context_parallel_load_balance=False,
-                context_sharding="context",
-                moba=False,
-                shard_mode="none",
-                debug_sharding=False,
-            ),
-            num_query_heads=1,
-            num_kv_heads=1,
-            max_target_length=seq_len,
-            mesh=types.SimpleNamespace(shape={}),
-            attention_kernel="dot_product",
-            attention_type=AttentionType.COMPRESSED,
-            sliding_window_size=local_window,
-        )
+        op = self._make_dot_product_op(seq_len, sliding_window_size=local_window)
 
         position_ids = jnp.arange(seq_len)[None, :]
         usable_len = comp_len * compress_ratio
@@ -802,23 +805,7 @@ class HCAStaticMaskTest(unittest.TestCase):
     total_len = l1 + l2
     compress_ratio = 128
     comp_len = total_len // compress_ratio  # 4
-    op = AttentionOp(
-        config=types.SimpleNamespace(
-            causal_block_size=4,
-            context_parallel_load_balance=False,
-            context_sharding="context",
-            moba=False,
-            shard_mode="none",
-            debug_sharding=False,
-        ),
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=total_len,
-        mesh=types.SimpleNamespace(shape={}),
-        attention_kernel="dot_product",
-        attention_type=AttentionType.COMPRESSED,
-        sliding_window_size=128,
-    )
+    op = self._make_dot_product_op(total_len, sliding_window_size=128)
 
     pos = jnp.concatenate([jnp.arange(l1, dtype=jnp.int32), jnp.arange(l2, dtype=jnp.int32)], axis=0)[None, :]
     seg = jnp.concatenate([jnp.ones(l1, dtype=jnp.int32), jnp.full(l2, 2, dtype=jnp.int32)], axis=0)[None, :]
