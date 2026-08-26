@@ -529,10 +529,24 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
     result = self._apply_chat_template(self.gemma4_tokenizer)
     self.assertEqual(result["is_prompt"], [True, False, True, False])
     self.assertEqual(len(result["messages"]), 4)
-    self.assertIn("<|turn>user\nQ1<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", result["messages"][0])
+    self.assertIn("<|turn>user\nQ1<turn|>\n<|turn>model\n", result["messages"][0])
     self.assertIn("A1<turn|>\n", result["messages"][1])
-    self.assertIn("<|turn>user\nQ2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", result["messages"][2])
+    self.assertIn("<|turn>user\nQ2<turn|>\n<|turn>model\n", result["messages"][2])
     self.assertIn("A2<turn|>\n", result["messages"][3])
+
+  def test_apply_chat_template_with_gemma4_reasoning(self):
+    """Verifies that apply_chat_template correctly handles Gemma4 with thinking/reasoning."""
+    example = {
+        "messages": [
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "reasoning": "2+2 is 4.", "content": "4"},
+        ]
+    }
+    result = apply_chat_template(example, self.gemma4_tokenizer, "messages")
+    self.assertEqual(result["is_prompt"], [True, False])
+    self.assertIn("<|turn>user\nWhat is 2+2?<turn|>\n<|turn>model\n<|channel>thought\n", result["messages"][0])
+    self.assertEqual(result["messages"][1], "2+2 is 4.\n<channel|>4<turn|>\n")
+
 
 
 @pytest.mark.external_training
