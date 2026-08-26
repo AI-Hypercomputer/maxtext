@@ -44,7 +44,7 @@ class Qwen3CustomAttention(Attention):
 
     in_features = (self.num_query_heads, self.head_dim)
     out_kernel_axis = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed_attn")
     )
     axis = (-2, -1)
 
