@@ -42,7 +42,7 @@ This demo shows recovery via *checkpoint restore* on a fixed mesh: when a slice 
 
 This guide assumes you already have a **Pathways-enabled GKE cluster** created with `xpk`, and a MaxText Docker image in your Artifact Registry. If you don't:
 
-1. **Install XPK and create a Pathways GKE cluster.** Follow [Running MaxText with XPK](run_maxtext_via_xpk.md) and the [Pathways & XPK cluster guide](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster#xpk). Cluster creation and management is out of scope for this page.
+1. **Install Cluster Toolkit and create a Pathways GKE cluster.** Follow [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md) and the [Pathways & Cluster Toolkit cluster guide](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster#xpk). Cluster creation and management is out of scope for this page.
 2. **Build and upload the MaxText Docker image.** See [Build MaxText](../build_maxtext.md).
 
 ```{note}
@@ -174,7 +174,7 @@ Delete the workload to stop the meter. TPU slices are expensive, so don't skip t
 xpk workload delete --workload=${RUN_NAME?} --cluster=${GKE_CLUSTER?} --project=${PROJECT_ID?} --zone=${ZONE?}
 ```
 
-If you created the cluster only for this demo, delete it too (see the [XPK documentation](https://github.com/AI-Hypercomputer/xpk) for `xpk cluster delete`).
+If you created the cluster only for this demo, delete it too (see the [Cluster Toolkit documentation](https://github.com/AI-Hypercomputer/xpk) for `xpk cluster delete`).
 
 ## Going further
 
@@ -184,6 +184,6 @@ If you created the cluster only for this demo, delete it too (see the [XPK docum
 
 ## More information
 
-- [Running MaxText with XPK](run_maxtext_via_xpk.md)
+- [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md)
 - [Running MaxText via Pathways](run_maxtext_via_pathways.md)
 - [Pathways on Cloud documentation](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro)

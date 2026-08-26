@@ -20,7 +20,7 @@
 
 This guide provides a comprehensive walkthrough for running MaxText workloads on a Google Kubernetes Engine (GKE) cluster using Pathways. Pathways acts as a powerful orchestrator for large-scale JAX jobs on AI Hypercomputer infrastructure.
 
-This document assumes you have already created a Pathways GKE cluster using `xpk`. If you haven't, follow the instructions at the [Google Cloud Pathways & XPK documentation](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster#xpk).
+This document assumes you have already created a Pathways GKE cluster using `xpk`. If you haven't, follow the instructions at the [Google Cloud Pathways & Cluster Toolkit documentation](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster#xpk).
 
 We will cover two primary modes of operation:
 
@@ -31,7 +31,7 @@ We will cover two primary modes of operation:
 
 Before you can run a MaxText workload, you must complete the following setup steps.
 
-1. **Install XPK and its dependencies**. Ensure that the `xpk` command-line tool is installed. For details on installing and configuring XPK with MaxText, see [Running MaxText with XPK](run_maxtext_via_xpk.md).
+1. **Install Cluster Toolkit and its dependencies**. Ensure that the `xpk` command-line tool is installed. For details on installing and configuring Cluster Toolkit with MaxText, see [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md).
 
 2. **Create a GKE cluster** configured for Pathways.
 

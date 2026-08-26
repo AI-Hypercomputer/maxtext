@@ -139,7 +139,7 @@ https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/gpu/a3
 ```bash
 echo "Running 1vm.sh"
 
-# Example command to invoke this script via XPK
+# Example command to invoke this script via Cluster Toolkit
 # python3 xpk/xpk.py workload create --cluster ${GKE_CLUSTER?} \
 # --workload ${RUN_NAME?} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
 # --device-type ${DEVICE_TYPE?} --num-slices 1 \

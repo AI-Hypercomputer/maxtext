@@ -61,7 +61,7 @@ Before starting, ensure you have:
   - **Artifact Registry Writer** (`roles/artifactregistry.writer`) to upload Docker images.
   - **Storage Admin** (`roles/storage.admin`) or **Storage Object Admin** (`roles/storage.objectAdmin`) combined with **Storage Legacy Bucket Reader** (`roles/storage.legacyBucketReader`) on your GCS bucket to read/write checkpoints and logs. (Note: A bucket-level read permission like `storage.buckets.get` is required by JAX/TensorStore to verify bucket existence and metadata; using `roles/storage.objectAdmin` alone will cause a misleading "bucket not found" error).
 - A Hugging Face account with an access token for downloading models.
-- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+- Prerequisites for Cluster Toolkit installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
   - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
@@ -162,11 +162,11 @@ See the **Troubleshooting** section for concise instructions on how to retry or
 resume a failed workload.
 
 Ensure you have a Pathways-ready GKE cluster (as mentioned in Prerequisites) and
-submit the `train_rl.py` script via XPK.
+submit the `train_rl.py` script via Cluster Toolkit.
 
-> **Note:** XPK v0.14.0+ automatically discovers your cluster's location from
+> **Note:** Cluster Toolkit v0.14.0+ automatically discovers your cluster's location from
 > GCP. You don't need to specify `--zone` in the commands below. If using an
-> older XPK version, add `--zone=<ZONE>` to the workload commands.
+> older Cluster Toolkit version, add `--zone=<ZONE>` to the workload commands.
 
 ### Submit GRPO workload
 
@@ -206,7 +206,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 ## Managing Workloads
 
 - **Monitor workload status**: Check Pathways job status: `kubectl get pathwaysjob`. Check pod status: `kubectl get pods`.
-- **Delete a workload**: To remove a failed or unwanted Pathways job, use XPK:
+- **Delete a workload**: To remove a failed or unwanted Pathways job, use Cluster Toolkit:
   ```bash
   xpk workload delete \
       --workload ${RUN_NAME?} \
@@ -231,7 +231,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 - **Workload retry / resume**:
   - **Retry (fresh run)**: Use a unique run name to avoid overwriting
     outputs: `export RUN_NAME=${RUN_NAME?}-retry1 export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items`. Then
-    submit the XPK workload. If "workload already exists" error occurs, pick
+    submit the Cluster Toolkit workload. If "workload already exists" error occurs, pick
     a new name or list jobs: `kubectl get pathwaysjob`.
   - **Resume from checkpoint**: Keep the same `RUN_NAME` and set the
     checkpoint path: `export load_parameters_path=${MAXTEXT_CKPT_PATH?}/checkpoint-0000`. Then submit
@@ -241,4 +241,4 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 
 For more detailed troubleshooting, refer to the
 [MaxText documentation](../../index.md) and
-[XPK documentation](https://github.com/AI-Hypercomputer/xpk).
+[Cluster Toolkit documentation](https://github.com/AI-Hypercomputer/xpk).

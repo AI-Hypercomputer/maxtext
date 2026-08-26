@@ -177,7 +177,7 @@ Because it's additive, β's *absolute* magnitude matters relative to the logit l
 
 ### Layer indices for feature loss
 
-`distill_layer_indices` selects which scanned-layer slices contribute to `feature_loss`. The XPK launcher's default is `[0,1,2,...,7]` — the first 8 layers, irrespective of model depth. Better defaults usually exist:
+`distill_layer_indices` selects which scanned-layer slices contribute to `feature_loss`. The Cluster Toolkit launcher's default is `[0,1,2,...,7]` — the first 8 layers, irrespective of model depth. Better defaults usually exist:
 
 | Goal                                        | Llama-8B (32 layers)                        | Llama-70B (80 layers)      |
 | ------------------------------------------- | ------------------------------------------- | -------------------------- |
