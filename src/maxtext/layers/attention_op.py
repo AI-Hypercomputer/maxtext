@@ -835,6 +835,33 @@ class AttentionOp(nnx.Module):
     logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
+  def _context_parallel_size(self) -> int:
+    """Number of ways the query sequence is actually sharded, per the active rules.
+
+    `config.context_sharding` is derived once from `logical_axis_rules`, but the
+    ambient rules can differ from those - the eval loop runs under
+    `logical_axis_rules_for_eval` when `custom_mesh_and_rule_for_eval` is set.
+    Resolving `activation_q_length` against the ambient rules keeps this count
+    consistent with the PartitionSpec the kernel is sharded with; reading the
+    static field instead lets the two disagree (e.g. a Splash kernel built for
+    one shard handed to a 4-way `shard_map`).
+
+    The Ulysses axis is excluded: under USP the query sequence is split over both
+    the ring and Ulysses axes, but `cp_size` refers to the ring extent alone.
+    """
+    if self.mesh is None:
+      return 1
+    q_seq_axes = self._logical_to_mesh_axes((Q_LENGTH,))[0]
+    if q_seq_axes is None:
+      return 1
+    if isinstance(q_seq_axes, str):
+      q_seq_axes = (q_seq_axes,)
+    return math.prod(
+        self.mesh.shape[axis]
+        for axis in q_seq_axes
+        if axis is not None and axis != self.config.ulysses_context_sharding and axis in self.mesh.shape
+    )
+
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
 
@@ -980,7 +1007,7 @@ class AttentionOp(nnx.Module):
     use_segment_positions = (
         segment_positions is not None
         and self.config.context_parallel_load_balance
-        and (self.mesh is not None and self.mesh.shape.get(self.config.context_sharding, 1) > 1)
+        and self._context_parallel_size() > 1
         and previous_chunk is None
         and model_mode != MODEL_MODE_AUTOREGRESSIVE
     )
@@ -1649,7 +1676,7 @@ class AttentionOp(nnx.Module):
     use_tokamax_ring = tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
     use_ulysses = ulysses_attention.is_context_parallel_ulysses_requested(self.config)
     use_usp = usp_attention.is_context_parallel_usp_requested(self.config)
-    cp_size = self.mesh.shape.get(self.config.context_sharding, 1)
+    cp_size = self._context_parallel_size()
     load_balanced_context_parallel = self.config.context_parallel_load_balance
     if use_tokamax_ring:
       self._validate_tpu_tokamax_ring_runtime(

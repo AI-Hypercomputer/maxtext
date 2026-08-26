@@ -3241,6 +3241,19 @@ class MaxTextConfig(
       eval_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_eval.value)
       self.logical_axis_rules_for_eval = eval_config.get("logical_axis_rules", self.logical_axis_rules)
 
+      # Only the logical rules are swapped for eval; the mesh itself is built once from
+      # the primary rule. Axes the eval rule names but the mesh lacks silently resolve to
+      # "replicated", which is only harmless while those axes would have been size 1.
+      dropped_axes = [axis for axis in eval_config.get("mesh_axes", ()) if axis not in self.mesh_axes]
+      if dropped_axes:
+        logger.warning(
+            "custom_mesh_and_rule_for_eval=%s declares mesh axes %s that are absent from the mesh built for "
+            "custom_mesh_and_rule=%s; they are ignored and any eval rule referencing them is treated as replicated.",
+            self.custom_mesh_and_rule_for_eval.value,
+            dropped_axes,
+            self.custom_mesh_and_rule.value,
+        )
+
     # A. SET RUN NAME AND PATHS
     # If run_name is not set, generate one from the JOBSET_NAME environment variable (if available)
     # or create one from the model name and a timestamp.
