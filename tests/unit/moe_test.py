@@ -452,6 +452,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
       config=SimpleNamespace(
           shard_exp_on_fsdp=False,
           use_2d_fsdp_sharding=False,
+          shard_embed_moe_on_fsdp=False,
           model_name="qwen3.5-35b-a3b",
           check_vma=False,
           moe_fsdp_use_two_stage_all_gather=False,
@@ -1101,6 +1102,86 @@ class RoutedMoeTest(parameterized.TestCase):
       assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
+  def test_shard_embed_moe_on_fsdp(self):
+    if jax.device_count() != 4:
+      self.skipTest("shard_embed_moe_on_fsdp test requires exactly 4 devices")
+
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_block_shard_embed_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        use_tokamax_gmm=True,
+        use_gmm_v2=True,
+        per_device_batch_size=4,
+        ici_fsdp_parallelism=4,
+        shard_embed_moe_on_fsdp=True,
+        max_target_length=128,
+        float32_gate_logits=True,
+        quantization="fp8_full",
+        use_qwix_quantization=True,
+        weight_quantization_calibration_method="fixed,-224,224",
+        act_quantization_calibration_method="fixed,-224,224",
+        bwd_quantization_calibration_method="absmax",
+    )
+
+    def get_fp8_full_qwix_rule_for_test(config):
+      return [
+          qwix.QtRule(
+              module_path=".*",
+              weight_qtype=jnp.float8_e4m3fn,
+              act_qtype=jnp.float8_e4m3fn,
+              bwd_qtype=jnp.float8_e5m2,
+              weight_calibration_method=config.weight_quantization_calibration_method,
+              act_calibration_method=config.act_quantization_calibration_method,
+              bwd_calibration_method=config.bwd_quantization_calibration_method,
+              op_names=("gmm", "ragged_dot"),
+          ),
+      ]
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    # Instantiate QAG-quantized model with shard_embed_moe_on_fsdp
+    model_qag = moe.get_routed_moe(
+        name="MoeBlock",
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.dtype,
+    )
+    quantization_rule = get_fp8_full_qwix_rule_for_test(cfg)
+    quantization_provider = qwix.QtProvider(quantization_rule)
+    model_qag = qwix.quantize_model(model_qag, quantization_provider)
+
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      # Initialize reference unfused model to get initial weights
+      _, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
+
+      variables_qag = model_qag.init({"params": rng_model, "dropout": rng_model}, hidden_states.astype(jnp.float32))
+
+      output_qag, _, _ = jax.jit(model_qag.apply)(variables_qag, hidden_states.astype(jnp.float32))
+
+      self.assertEqual(output_qag.shape, expected_output.shape)
+
+  @pytest.mark.tpu_only
   def test_megablox_context_parallelism(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -1542,26 +1623,36 @@ class RoutedMoeTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {
-          "testcase_name": f"{base_name}_ep{ici_expert_parallelism}",
+          "testcase_name": f"{base_name}_ep{ici_expert_parallelism}" + ("_qag" if shard_embed_moe_on_fsdp else ""),
           "quantization": quantization,
           "use_tokamax_gmm": use_tokamax_gmm,
           "use_gmm_v2": use_gmm_v2,
           "wa_static": wa_static,
           "ici_expert_parallelism": ici_expert_parallelism,
+          "shard_embed_moe_on_fsdp": shard_embed_moe_on_fsdp,
       }
-      for base_name, quantization, use_tokamax_gmm, use_gmm_v2, wa_static, ici_expert_parallelism in [
-          ("megablox_bf16", "", False, False, False, 1),
-          ("megablox_fp8_dynamic", "fp8_full", False, False, False, 1),
-          ("megablox_fp8_static", "fp8_full", False, False, True, 1),
-          ("tokamax_v1_bf16", "", True, False, False, 1),
-          ("tokamax_v1_fp8_dynamic", "fp8_full", True, False, False, 1),
-          ("tokamax_v1_fp8_static", "fp8_full", True, False, True, 1),
-          ("tokamax_v2_bf16", "", True, True, False, 1),
-          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 1),
-          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1),
-          ("tokamax_v2_bf16", "", True, True, False, 4),
-          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 4),
-          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 4),
+      for (
+          base_name,
+          quantization,
+          use_tokamax_gmm,
+          use_gmm_v2,
+          wa_static,
+          ici_expert_parallelism,
+          shard_embed_moe_on_fsdp,
+      ) in [
+          ("megablox_bf16", "", False, False, False, 1, False),
+          ("megablox_fp8_dynamic", "fp8_full", False, False, False, 1, False),
+          ("megablox_fp8_static", "fp8_full", False, False, True, 1, False),
+          ("tokamax_v1_bf16", "", True, False, False, 1, False),
+          ("tokamax_v1_fp8_dynamic", "fp8_full", True, False, False, 1, False),
+          ("tokamax_v1_fp8_static", "fp8_full", True, False, True, 1, False),
+          ("tokamax_v2_bf16", "", True, True, False, 1, False),
+          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 1, False),
+          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, False),
+          ("tokamax_v2_bf16", "", True, True, False, 4, False),
+          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 4, False),
+          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 4, False),
+          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, True),
       ]
   )
   @pytest.mark.skip_on_tpu7x  # TODO(b/543017989): Investigate correctness failures
@@ -1573,6 +1664,7 @@ class RoutedMoeTest(parameterized.TestCase):
       use_gmm_v2: bool,
       wa_static: bool,
       ici_expert_parallelism: int,
+      shard_embed_moe_on_fsdp: bool = False,
       **kwargs,
   ):
     megablox = True
@@ -1590,6 +1682,7 @@ class RoutedMoeTest(parameterized.TestCase):
         use_tokamax_gmm,
         use_gmm_v2,
         ici_expert_parallelism,
+        shard_embed_moe_on_fsdp,
     ):
       return pyconfig.initialize(
           [None, get_test_config_path()],
@@ -1606,6 +1699,7 @@ class RoutedMoeTest(parameterized.TestCase):
           megablox=megablox,
           use_tokamax_gmm=use_tokamax_gmm,
           use_gmm_v2=use_gmm_v2,
+          shard_embed_moe_on_fsdp=shard_embed_moe_on_fsdp,
           quantization=quantization,
           use_qwix_quantization=True,
           weight_quantization_calibration_method=weight_quantization_calibration_method,
@@ -1683,6 +1777,7 @@ class RoutedMoeTest(parameterized.TestCase):
         use_tokamax_gmm=False,
         use_gmm_v2=False,
         ici_expert_parallelism=1,
+        shard_embed_moe_on_fsdp=False,
     )
     # Use normal distribution to generate realistic variances and negative values
     # to guarantee the quantization scale != 1.0, which catches scale-dropping bugs.
@@ -1707,6 +1802,7 @@ class RoutedMoeTest(parameterized.TestCase):
         use_tokamax_gmm=use_tokamax_gmm,
         use_gmm_v2=use_gmm_v2,
         ici_expert_parallelism=ici_expert_parallelism,
+        shard_embed_moe_on_fsdp=shard_embed_moe_on_fsdp,
     )
     devices_array_tgt = maxtext_utils.create_device_mesh(cfg_tgt)
     mesh_tgt = Mesh(devices_array_tgt, cfg_tgt.mesh_axes)

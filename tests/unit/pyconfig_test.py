@@ -429,6 +429,25 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(_normalize_axes(["a", "b"]), ("a", "b"))
     self.assertEqual(_normalize_axes([]), ())
 
+  def test_moe_sharding_strategy_mutual_exclusivity(self):
+    """Ensure that shard_exp_on_fsdp, use_2d_fsdp_sharding, and shard_embed_moe_on_fsdp are mutually exclusive."""
+
+    def init_config(**kwargs):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          **kwargs,
+      )
+
+    with self.assertRaisesRegex(ValueError, "Only one of shard_exp_on_fsdp"):
+      init_config(shard_exp_on_fsdp=True, use_2d_fsdp_sharding=True)
+
+    with self.assertRaisesRegex(ValueError, "Only one of shard_exp_on_fsdp"):
+      init_config(shard_exp_on_fsdp=True, shard_embed_moe_on_fsdp=True)
+
+    with self.assertRaisesRegex(ValueError, "Only one of shard_exp_on_fsdp"):
+      init_config(use_2d_fsdp_sharding=True, shard_embed_moe_on_fsdp=True)
+
   def test_ep_rank_1_raises_on_ep_flags(self):
     """When EP rank is 1 (no EP rules), setting EP-only flags must raise ValueError."""
     # No 'exp' rule -> infer_ep_axes returns () -> EP rank is 1.
@@ -470,6 +489,35 @@ assert train._TF_AVAILABLE is False
     ]
     self.assertEqual(infer_cp_axes(ep_as_cp_rules), ("expert",))
     self.assertEqual(infer_ep_axes(ep_as_cp_rules), ("expert",))
+
+  def test_shard_embed_moe_on_fsdp_requires_quantization(self):
+    """Verifies that a ValueError is raised when shard_embed_moe_on_fsdp
+    is used without fixed weight quantization calibration."""
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_embed_moe_on_fsdp=True,
+          quantization="",
+      )
+
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_embed_moe_on_fsdp=True,
+          quantization="int8",
+          weight_quantization_calibration_method="absmax",
+      )
+
+    # This should not raise
+    pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_embed_moe_on_fsdp=True,
+        quantization="int8",
+        weight_quantization_calibration_method="fixed,-1,1",
+    )
 
 
 if __name__ == "__main__":

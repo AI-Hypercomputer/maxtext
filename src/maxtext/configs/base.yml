@@ -286,6 +286,9 @@ moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
+# Keep embed_moe sharded so we can manually QAG it over FSDP.
+# Requires quantization to be specified and weight_quantization_calibration_method to be fixed (static scaling mode).
+shard_embed_moe_on_fsdp: false
 # use fsdp and fsdp_transpose axes for sharding the moe weights
 use_2d_fsdp_sharding: false
 
