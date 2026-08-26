@@ -29,13 +29,13 @@ You can use a single Vertex AI Tensorboard instance to track and compare metrics
 ## Prerequisites
 
 - Enable [Vertex AI API](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/start/cloud-environment#set_up_a_project) in your Google Cloud console.
-- Assign [Vertex AI User IAM role](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/general/access-control#aiplatform.user) to the service account used by the TPU VMs. This is required to create and access the Vertex AI Tensorboard in Google Cloud console. If you are using XPK for MaxText, the necessary Vertex AI User IAM role will be automatically assigned to your node pools by XPK – no need to assign it manually.
+- Assign [Vertex AI User IAM role](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/general/access-control#aiplatform.user) to the service account used by the TPU VMs. This is required to create and access the Vertex AI Tensorboard in Google Cloud console. If you are using Cluster Toolkit for MaxText, the necessary Vertex AI User IAM role will be automatically assigned to your node pools by Cluster Toolkit – no need to assign it manually.
 
 ## Upload logs to Vertex AI Tensorboard
 
-**Scenario 1: Using XPK to run MaxText on GKE**
+**Scenario 1: Using Cluster Toolkit to run MaxText on GKE**
 
-XPK simplifies MaxText's Vertex AI Tensorboard integration. A Vertex Tensorboard instance and Experiment are automatically created by XPK during workload scheduling. Also, XPK automatically sets the necessary environment variables, eliminating the need to manually configure this in MaxText. Set `use_vertex_tensorboard=False` to avoid setting up Vertex Tensorboard again in MaxText. This is how the configuration will look like for running MaxText via XPK:
+Cluster Toolkit simplifies MaxText's Vertex AI Tensorboard integration. A Vertex Tensorboard instance and Experiment are automatically created by Cluster Toolkit during workload scheduling. Also, Cluster Toolkit automatically sets the necessary environment variables, eliminating the need to manually configure this in MaxText. Set `use_vertex_tensorboard=False` to avoid setting up Vertex Tensorboard again in MaxText. This is how the configuration will look like for running MaxText via Cluster Toolkit:
 
 ```
 use_vertex_tensorboard: False
@@ -43,7 +43,7 @@ vertex_tensorboard_project: ""
 vertex_tensorboard_region: ""
 ```
 
-The above configuration will upload logs in `config.tensorboard_dir` to Vertex Tensorboard instance set as an environment variable by XPK.
+The above configuration will upload logs in `config.tensorboard_dir` to Vertex Tensorboard instance set as an environment variable by Cluster Toolkit.
 
 **Scenario 2: Running MaxText on GCE**
 

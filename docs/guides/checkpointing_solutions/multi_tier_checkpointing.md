@@ -39,9 +39,9 @@ Multi-tier checkpointing stores checkpoints across multiple tiers of storage:
 - **Supported TPU types**: [v4](https://docs.cloud.google.com/tpu/docs/v4), [v5e](https://docs.cloud.google.com/tpu/docs/v5e), [v5p](https://docs.cloud.google.com/tpu/docs/v5p), and [v6e](https://docs.cloud.google.com/tpu/docs/v6e)
 - **Cluster version**: Gke cluster version needs to be later than [1.32.3-gke.1170000](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#existing-cluster).
 
-## Cluster creation using XPK
+## Cluster creation using Cluster Toolkit
 
-To run workloads with Multi-Tier Checkpointing (MTC), you need a Google Kubernetes Engine (GKE) cluster with the necessary drivers and features enabled. You can create a properly configured cluster using the **XPK** or by setting it up manually with `gcloud` commands following [Google Cloud Checkpointing Documentation](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing).
+To run workloads with Multi-Tier Checkpointing (MTC), you need a Google Kubernetes Engine (GKE) cluster with the necessary drivers and features enabled. You can create a properly configured cluster using the **Cluster Toolkit** or by setting it up manually with `gcloud` commands following [Google Cloud Checkpointing Documentation](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing).
 
 The [xpk script](https://github.com/AI-Hypercomputer/xpk/blob/main/xpk.py) provides a streamlined way to create a GKE cluster with all the required MTC settings. The key flags used are:
 
@@ -89,7 +89,7 @@ Let's walk through an example for a large model.
 
 In this scenario, you should configure each pod in that slice with a ramdisk of at least **60 GB**.
 
-### Example XPK cluster creation command
+### Example Cluster Toolkit cluster creation command
 
 1. **Set up environment variables:**
    ```bash
@@ -108,7 +108,7 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
    gcloud config set project ${PROJECT_ID?}
    gcloud config set compute/zone ${ZONE?}
    ```
-3. **Clone the XPK repository:**
+3. **Clone the Cluster Toolkit repository:**
    ```bash
    git clone [https://github.com/AI-Hypercomputer/xpk.git](https://github.com/AI-Hypercomputer/xpk.git)
    ```
@@ -143,7 +143,7 @@ This configuration manages a `multi-tiered checkpointing` system designed for bo
 | `multi_tier_checkpointing_backup_interval_minutes` | The interval, in minutes, for how often a **Multi-tier checkpoint** is saved to backup from local ramdisks.                                                                                                      | `integer` | `None`  |
 | `multi_tier_checkpointing_backup_interval_steps`   | The interval, in steps, for how often a **Multi-tier checkpoint** is saved to backup from local ramdisks.                                                                                                        | `integer` | `None`  |
 
-### Workload creation using XPK
+### Workload creation using Cluster Toolkit
 
 The flags below would give the user access to the ramdisk in their workload:
 
@@ -152,7 +152,7 @@ The flags below would give the user access to the ramdisk in their workload:
 | `--mtc-enabled`       | Enables the Multi-Tier Checkpointing feature, by mounting ramdisk to the workload pods, using csi drivers.                                                                      |
 | `--ramdisk-directory` | Specifies the mount path inside each pod where the high-speed ramdisk will be accessible. Your training application should write its local, emergency checkpoints to this path. |
 
-### Example XPK workload creation command
+### Example Cluster Toolkit workload creation command
 
 1. **Set up environment variables:**
 

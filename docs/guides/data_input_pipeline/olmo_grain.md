@@ -48,7 +48,7 @@ instances, and yields the shapes the MaxText pretrain trainer expects.
 
    See `scripts/run_olmo3_7b_grain_smoke.sh` for a runnable smoke launcher,
    or `src/maxtext/trainers/pre_train/scripts/olmo/` for end-to-end stage-1
-   pretraining launchers (single-host + XPK).
+   pretraining launchers (single-host + Cluster Toolkit).
 
 ## Resume
 

@@ -66,10 +66,10 @@ following access scope during node pool creation:
 
 - `https://www.googleapis.com/auth/cloud-platform`
 
-XPK adds this access scope to the GPU, TPU and CPU node pools, so XPK is the recommended method to create clusters and node-pools in you intend to run your workloads on GKE.
+Cluster Toolkit adds this access scope to the GPU, TPU and CPU node pools, so Cluster Toolkit is the recommended method to create clusters and node-pools in you intend to run your workloads on GKE.
 
-Instructions on how to create clusters using XPK can be
-found [here](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/usage/clusters.md) and how to create workloads using XPK can be found
+Instructions on how to create clusters using Cluster Toolkit can be
+found [here](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/usage/clusters.md) and how to create workloads using Cluster Toolkit can be found
 [here](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/usage/workloads.md).
 
 ```{note}

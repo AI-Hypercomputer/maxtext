@@ -71,4 +71,4 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
          managed_mldiagnostics=True
    ```
 
-Users can deploy the workload across all supported environments, including the standard XPK workload types (**xpk workload create** or **xpk workload create-pathways**) or by running the workload directly on a standalone TPU VM.
+Users can deploy the workload across all supported environments, including the standard Cluster Toolkit workload types (**xpk workload create** or **xpk workload create-pathways**) or by running the workload directly on a standalone TPU VM.
