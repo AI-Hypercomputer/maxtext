@@ -29,7 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.sharding import AxisType, Mesh, NamedSharding
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
@@ -42,6 +42,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
     DEFAULT_MASK_VALUE,
+    Q_LENGTH,
 )
 from maxtext.layers.attention_mla import MLA
 from maxtext.layers.attention_compressed import CompressedAttention
@@ -338,6 +339,15 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+def _stub_mesh_axes(logical_name):
+  """Stands in for `AttentionOp._logical_to_mesh_axes` with no ambient rules bound.
+
+  The query sequence resolves to the mesh's `context` axis so `_context_parallel_size`
+  reads the intended cp_size off the stub mesh; every other logical name is replicated.
+  """
+  return PartitionSpec("context") if logical_name == (Q_LENGTH,) else None
+
+
 class BlockCausalMaskTest(unittest.TestCase):
   """Tests the shared dense and Splash block-causal masks."""
 
@@ -378,6 +388,7 @@ class BlockCausalMaskTest(unittest.TestCase):
         context_parallel_strategy="all_gather",
         context_parallel_load_balance=context_parallel_load_balance,
         context_sharding="context",
+        ulysses_context_sharding="ulysses",
         sa_block_q=4,
         sa_block_kv=4,
         sa_block_kv_compute=4,
@@ -610,7 +621,7 @@ class BlockCausalMaskTest(unittest.TestCase):
             context_parallel_load_balance=load_balanced,
         )
         with (
-            mock.patch.object(AttentionOp, "_logical_to_mesh_axes", return_value=None),
+            mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes),
             mock.patch.object(
                 attention_op.splash_attention_mask,
                 "MultiHeadMask",
