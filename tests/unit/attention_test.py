@@ -635,6 +635,11 @@ class HCAStaticMaskTest(unittest.TestCase):
     return _create_mock_flash_op(**kwargs)
 
   def _make_dot_product_op(self, max_target_length, sliding_window_size=128):
+    device = types.SimpleNamespace(platform="cpu")
+    mesh = types.SimpleNamespace(
+        devices=np.asarray([device], dtype=object),
+        shape={},
+    )
     config = types.SimpleNamespace(
         causal_block_size=4,
         context_parallel_load_balance=False,
@@ -647,7 +652,7 @@ class HCAStaticMaskTest(unittest.TestCase):
         num_query_heads=1,
         num_kv_heads=1,
         max_target_length=max_target_length,
-        mesh=None,
+        mesh=mesh,
         attention_kernel="dot_product",
         attention_type=AttentionType.COMPRESSED,
         sliding_window_size=sliding_window_size,
