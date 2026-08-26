@@ -201,9 +201,13 @@ class MetricLogger:
 
     lm_loss = scalars.get("learning/lm_loss", 0.0)
     perplexity = scalars.get("learning/perplexity", 0.0)
+    try:
+        tw = str(scalars.get('learning/total_weights', 'N/A'))
+    except Exception:
+        tw = "ERROR_FETCHING_FROM_TPU"
     log_parts.extend(
         [
-            f"total_weights: {scalars['learning/total_weights']}",
+            f"total_weights: {tw}",
             f"loss: {loss:.3f}",
             f"lm_loss: {lm_loss:.3f}",
             f"perplexity: {perplexity:.3f}",

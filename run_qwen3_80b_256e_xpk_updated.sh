@@ -12,7 +12,7 @@ export ZONE="southamerica-west1-a"
 # --- Configuration & Automated Image Build ---
 TIMESTAMP=$(date +%m%d%H%M%S)
 export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:dipakg_${TIMESTAMP}"
-export WORKLOAD_NAME="dipakg-qn80b-256e-${TIMESTAMP}-telemetry"
+export WORKLOAD_NAME="dipakg-qn80b-256e-${TIMESTAMP}-final"
 export DEVICE_TYPE="v6e-256"
 export NUM_SLICES=1
 export PRIORITY="very-high"
@@ -111,9 +111,9 @@ MAXTEXT_ARGS_ARRAY=(
   "ici_fsdp_parallelism=-1"
 
   # --- Training & Optimization Hyperparameters ---
-  "steps=500"
+  "steps=20"
   "learning_rate=3e-4"
-  "learning_rate_schedule_steps=500"
+  "learning_rate_schedule_steps=20"
   "warmup_steps_fraction=0.05"
   "muon_weight_decay=0.05"
   "adam_weight_decay=0.05"
@@ -165,9 +165,9 @@ MAXTEXT_ARGS_ARRAY=(
   "tokenizer_type=huggingface"
   "tokenizer_path=assets/tokenizers/qwen3-tokenizer"
   "override_model_config=true"
-  "mhc_expansion_rate=1"
-  "enable_mhc_lite=False"
-  "use_mhc_pallas_kernel=False"
+  "mhc_expansion_rate=4"
+  "enable_mhc_lite=True"
+  "use_mhc_pallas_kernel=True"
   "mhc_pallas_kernel_fwd_block_size=256"
   "mhc_pallas_kernel_bwd_block_size=256"
   "use_gdn_kernel=True"

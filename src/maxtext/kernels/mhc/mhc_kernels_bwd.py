@@ -443,4 +443,12 @@ def post_op_bwd(
       residual,
       config=config,
   )
+  
+  jax.debug.print(
+      "PALLAS_BWD: incoming_d_output_norm={d_in} outgoing_d_x_norm={d_out} outgoing_d_layer_output_norm={d_layer}",
+      d_in=jnp.sqrt(jnp.sum(d_output**2)),
+      d_out=jnp.sqrt(jnp.sum(d_x**2)),
+      d_layer=jnp.sqrt(jnp.sum(d_layer_output**2)),
+  )
+  
   return d_layer_output, d_x, d_h_post, d_residual

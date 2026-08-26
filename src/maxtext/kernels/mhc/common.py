@@ -528,7 +528,7 @@ def mhc_coeffs(
 def pre_apply(x: jax.Array, h_pre: jax.Array) -> jax.Array:
   """Collapses the stream dimension before the wrapped model branch."""
   h_pre_f32 = h_pre.astype(jnp.float32)
-  return jnp.sum(h_pre_f32[:, :, None] * x.astype(jnp.float32), axis=1).astype(jnp.bfloat16)
+  return (jnp.sum(h_pre_f32[:, :, None] * x.astype(jnp.float32), axis=1) * 0.5).astype(jnp.bfloat16)
 
 
 def post_apply(

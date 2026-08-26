@@ -55,7 +55,7 @@ def get_functions(expansion_rate: int):
 
   def reduce(x: Array):
     # (batch, length, streams, dim) -> (batch, length, dim)
-    return jnp.sum(x, axis=2, dtype=x.dtype)
+    return (jnp.sum(x, axis=2, dtype=x.dtype) * 0.5).astype(x.dtype)
 
   return expand, reduce
 
