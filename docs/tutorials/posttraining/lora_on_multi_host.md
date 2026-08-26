@@ -36,7 +36,7 @@ Before starting, ensure you have:
 - Access to a Google Cloud Project with TPU quotas.
 - A Hugging Face account with an access token for downloading models.
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
-- Prerequisites for Cluster Toolkit installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+- Prerequisites for Cluster Toolkit installed (follow [official documentation](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/run_maxtext/run_maxtext_via_cluster_toolkit.md)).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
@@ -162,13 +162,15 @@ This section provides the command to run LoRA Fine-Tuning on a GKE cluster.
 ### Run a Fresh LoRA Fine-Tuning on Hugging Face Dataset
 
 ```bash
-xpk workload create-pathways \
+gcluster job submit \
 --cluster=${GKE_CLUSTER?} \
 --project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload=${RUN_NAME?} \
---tpu-type=${TPU_TYPE?} \
+--location=${ZONE?} \
+--image=${DOCKER_IMAGE?} \
+--name=${RUN_NAME?} \
+--pathways \
+--pathways-gcs-location=/tmp/pw-log \
+--compute-type=${TPU_TYPE?} \
 --num-slices=${NUM_SLICES?} \
 --command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 \
 python3 -m maxtext.trainers.post_train.sft.train_sft \
@@ -207,13 +209,13 @@ If you want to resume training from a previous run or further fine-tune an exist
 If your LoRA adapter is currently in Hugging Face format, you must convert it to MaxText format before it can be loaded. Use the integrated conversion utility:
 
 ```sh
-xpk workload create \
+gcluster job submit \
 --cluster=${GKE_CLUSTER?} \
 --project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload=${RUN_NAME?} \
---tpu-type=${TPU_TYPE?} \
+--location=${ZONE?} \
+--image=${DOCKER_IMAGE?} \
+--name=${RUN_NAME?} \
+--compute-type=${TPU_TYPE?} \
 --num-slices=${NUM_SLICES?} \
 --command="python3 -m maxtext.checkpoint_conversion.to_maxtext \
   model_name=${MODEL?} \
@@ -242,13 +244,15 @@ Once your environment variables and checkpoints are ready, you can start the LoR
 Execute the following command to begin training:
 
 ```bash
-xpk workload create-pathways \
+gcluster job submit \
 --cluster=${GKE_CLUSTER?} \
 --project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload=${RUN_NAME?} \
---tpu-type=${TPU_TYPE?} \
+--location=${ZONE?} \
+--image=${DOCKER_IMAGE?} \
+--name=${RUN_NAME?} \
+--pathways \
+--pathways-gcs-location=/tmp/pw-log \
+--compute-type=${TPU_TYPE?} \
 --num-slices=${NUM_SLICES?} \
 --command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 \
 python3 -m maxtext.trainers.post_train.sft.train_sft \
@@ -284,13 +288,13 @@ Your fine-tuned model checkpoints will be saved here: `$BASE_OUTPUT_DIRECTORY/$R
 After completing the fine-tuning process, your LoRA weights are stored in MaxText/Orbax format. To use these weights with the Hugging Face ecosystem (e.g., for inference or sharing), convert them back using the `to_huggingface.py` script.
 
 ```sh
-xpk workload create \
+gcluster job submit \
 --cluster=${GKE_CLUSTER?} \
 --project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload="${RUN_NAME?}-to-hf" \
---tpu-type=${TPU_TYPE?} \
+--location=${ZONE?} \
+--image=${DOCKER_IMAGE?} \
+--name="${RUN_NAME?}-to-hf" \
+--compute-type=${TPU_TYPE?} \
 --num-slices=1 \
 --command="python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name=${MODEL?} \
