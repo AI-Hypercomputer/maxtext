@@ -5,10 +5,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import jax
 from jax.experimental import mesh_utils
-try:
-  from jax.shard_map import shard_map
-except ImportError:
-  from jax.experimental.shard_map import shard_map
+from jax.experimental.shard_map import shard_map
 from jax.experimental.topologies import get_topology_desc
 import jax.lax as lax
 import jax.numpy as jnp
@@ -41,19 +38,27 @@ def create_mesh(
 ) -> Mesh:
   """Creates a JAX Mesh with explicit control over ICI vs Core parallelism per logical axis.
 
+  In JAX/XLA, TPU v7x hardware has a physical hierarchy:
+    (dim_x, dim_y, dim_z, cores_per_chip)
+  where the 2 cores on each chip form the fastest, innermost dimension (stride 1).
+  To ensure that logical axes with core_parallelism > 1 correctly map to on-chip core
+  pairs (so that collectives along that axis gather core pairs together), the axes
+  are ordered by network intensity:
+    1. Pure ICI axes (core_parallelism == 1) are placed earlier (outer mesh dimensions).
+    2. Core-sharded axes (core_parallelism > 1) are placed last (inner mesh dimensions).
+
   Args:
     devices: Sequence of JAX devices (e.g. from get_v7x_devices).
     axis_names: Tuple/List of logical axis names (e.g., ('row', 'col')).
     ici_parallelism: Mapping of axis name -> ICI parallelism degree.
     core_parallelism: Mapping of axis name -> Core parallelism degree.
-    **kwargs: Can also accept kwargs in the form `ici_<axis>_parallelism` and
+    **kwargs: Accepts kwargs in the form `ici_<axis>_parallelism` and
       `core_<axis>_parallelism`.
 
   Returns:
-    A jax.sharding.Mesh where each axis has size ici_parallelism[axis] *
-    core_parallelism[axis].
+    A jax.sharding.Mesh with correct physical-to-logical mapping.
   """
-  axis_names = tuple(axis_names)
+  axis_names = list(axis_names)
   ici_map = dict(ici_parallelism or {})
   core_map = dict(core_parallelism or {})
 
@@ -66,7 +71,7 @@ def create_mesh(
       axis = k[5:-12]
       core_map[axis] = v
 
-  # Identify hardware topology dimensions: chips and cores per chip
+  # Identify hardware topology dimensions
   coords_set = sorted(list(set(tuple(d.coords) for d in devices)))
   cores_set = sorted(list(set(d.core_on_chip for d in devices)))
   num_chips = len(coords_set)
@@ -87,55 +92,42 @@ def create_mesh(
         f" ({cores_per_chip})."
     )
 
-  # Map chips to ICI logical dimensions using mesh_utils on core-0 representatives
-  chip_rep_devices = [d for d in devices if d.core_on_chip == cores_set[0]]
-  ici_shape = tuple(ici_map.get(ax, 1) for ax in axis_names)
-  ici_chip_mesh = mesh_utils.create_device_mesh(
-      ici_shape, chip_rep_devices, allow_split_physical_axes=True
+  # Order axes by network intensity:
+  # Axes with core_parallelism == 1 use only ICI (lower intensity -> outer dimensions).
+  # Axes with core_parallelism > 1 use fast on-chip cores (highest intensity -> innermost dimension).
+  sorted_axes = sorted(
+      axis_names,
+      key=lambda ax: (core_map.get(ax, 1) > 1, ici_map.get(ax, 1)),
   )
 
-  # Mapping from (chip_coords, core_id) -> device
-  dev_map = {(tuple(d.coords), d.core_on_chip): d for d in devices}
-
-  # Map local cores to core logical dimensions
-  core_shape = tuple(core_map.get(ax, 1) for ax in axis_names)
-  core_mesh = np.array(cores_set).reshape(core_shape)
-
-  # Combine ICI and Core mapping for each logical coordinate in the final mesh
-  final_shape = tuple(
-      ici_map.get(ax, 1) * core_map.get(ax, 1) for ax in axis_names
+  sorted_shape = tuple(
+      ici_map.get(ax, 1) * core_map.get(ax, 1) for ax in sorted_axes
   )
-  device_array = np.empty(final_shape, dtype=object)
+  device_mesh = mesh_utils.create_device_mesh(
+      sorted_shape, devices, allow_split_physical_axes=True
+  )
 
-  for final_idx in np.ndindex(*final_shape):
-    ici_idx = []
-    core_idx = []
-    for dim_i, ax in enumerate(axis_names):
-      core_dim = core_map.get(ax, 1)
-      ici_idx.append(final_idx[dim_i] // core_dim)
-      core_idx.append(final_idx[dim_i] % core_dim)
-
-    rep_dev = ici_chip_mesh[tuple(ici_idx)]
-    core_val = core_mesh[tuple(core_idx)]
-    device_array[final_idx] = dev_map[(tuple(rep_dev.coords), core_val)]
-
-  return Mesh(device_array, axis_names)
+  return Mesh(device_mesh, tuple(sorted_axes))
 
 
 def main():
-  print("=" * 75)
+  print("=" * 70)
   print("1. Simulating TPU v7x devices (topology: tpu7x:2x2x2) via XAOT")
-  print("=" * 75)
+  print("=" * 70)
+  # tpu7x:2x2x2 simulates 8 chips (2x2x2) with 2 cores per chip = 16 v7x devices
   devices = get_v7x_devices(topology_name="tpu7x:2x2x2")
-  print(f"Total simulated devices: {len(devices)} (Device kind: {devices[0].device_kind})")
+  print(
+      f"Total simulated devices: {len(devices)} (Device kind:"
+      f" {devices[0].device_kind})"
+  )
   for d in devices:
-    print(f"  Device {d.id:2d}: coords={d.coords}, core_on_chip={d.core_on_chip}")
+    print(f"  Device {d.id}: coords={d.coords}, core_on_chip={d.core_on_chip}")
 
-  print("\n" + "=" * 75)
+  print("\n" + "=" * 70)
   print("2. Creating 2D Mesh with explicit Core and ICI controls")
-  print("   - 'row': ici=4, core=2 -> total degree = 8 (sharded over cores & ICI)")
-  print("   - 'col': ici=2, core=1 -> total degree = 2 (sharded only over ICI)")
-  print("=" * 75)
+  print("   - 'row': ici=4, core=2 -> total degree = 8 (sharding over cores!)")
+  print("   - 'col': ici=2, core=1 -> total degree = 2 (pure ICI)")
+  print("=" * 70)
 
   mesh = create_mesh(
       devices=devices,
@@ -146,15 +138,13 @@ def main():
       core_col_parallelism=1,
   )
   print(f"Constructed Mesh: {mesh}")
-  print("\nPhysical Device Layout in Mesh [row, col]:")
-  for r in range(mesh.devices.shape[0]):
-    d0 = mesh.devices[r, 0]
-    d1 = mesh.devices[r, 1]
-    print(f"  mesh[row={r}, col=0] -> Dev {d0.id:2d} (coords={d0.coords}, core={d0.core_on_chip}) | mesh[row={r}, col=1] -> Dev {d1.id:2d} (coords={d1.coords}, core={d1.core_on_chip})")
+  print(f"Mesh shape: {mesh.shape}")
+  print("Device IDs in Mesh array:")
+  print(np.vectorize(lambda d: d.id)(mesh.devices))
 
-  print("\n" + "=" * 75)
+  print("\n" + "=" * 70)
   print("3. Defining All-Gather over 'row' axis (ShardMap + XAOT)")
-  print("=" * 75)
+  print("=" * 70)
 
   @jax.jit
   @functools.partial(
@@ -165,10 +155,12 @@ def main():
       check_rep=False,
   )
   def all_gather_row(x):
-    # All-gather over 'row' (fixed 'col'). Gathers across all 8 rows for each column.
+    # x is sharded across ('row', 'col'); all_gather across 'row' produces shape sharded only on 'col'
     return lax.all_gather(x, axis_name="row", axis=0, tiled=True)
 
-  # Abstract input tensor of shape (32, 64)
+  # Abstract input tensor of shape (32, 64) sharded as P("row", "col")
+  # Dimension 0 is sharded across 'row' (size 8), dimension 1 across 'col' (size 2).
+  # Local per-device shape is (32 // 8, 64 // 2) = (4, 32).
   x_sharding = NamedSharding(mesh, P("row", "col"))
   x_abstract = jax.ShapeDtypeStruct((32, 64), jnp.float32, sharding=x_sharding)
 
@@ -185,21 +177,6 @@ def main():
   compiled = lowered.compile()
   print("\n--- XAOT Compilation Successful! ---")
   print(f"Compiled executable: {compiled}")
-
-  print("\n" + "=" * 75)
-  print("4. Physical Device Verification in Replica Groups")
-  print("=" * 75)
-  print("Replica Group 0 (All-gather over 'row' for col=0):")
-  for r in range(mesh.devices.shape[0]):
-    d = mesh.devices[r, 0]
-    print(f"  Row {r}: Device ID {d.id:2d} | coords={d.coords} | core={d.core_on_chip}")
-  print("  -> Contains complete core pairs: (0, 1), (4, 5), (12, 13), (8, 9)")
-
-  print("\nReplica Group 1 (All-gather over 'row' for col=1):")
-  for r in range(mesh.devices.shape[0]):
-    d = mesh.devices[r, 1]
-    print(f"  Row {r}: Device ID {d.id:2d} | coords={d.coords} | core={d.core_on_chip}")
-  print("  -> Contains complete core pairs: (2, 3), (6, 7), (14, 15), (10, 11)")
 
 
 if __name__ == "__main__":
