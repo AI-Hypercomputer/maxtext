@@ -4271,6 +4271,96 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=
         [f"layers.{i}.ffn.experts.{e}.w2.weight" for i in csa_layers] for e in range(num_experts)
     ]
 
+  # 3. MTP Layers (both scanned and unscanned)
+  mtp_num_layers = getattr(maxtext_config, "mtp_num_layers", 0)
+  if mtp_num_layers == 0:
+    mtp_num_layers = config.get("num_nextn_predict_layers", config.get("num_mtp_layers", 0))
+  for j in range(mtp_num_layers):
+    mtp_prefix = f"params-mtp_block-mtp_layer_{j+1}"
+    mapping[f"{mtp_prefix}-mtp_{j+1}_embedding_norm-scale"] = f"mtp.{j}.enorm.weight"
+    mapping[f"{mtp_prefix}-mtp_{j+1}_hidden_state_norm-scale"] = f"mtp.{j}.hnorm.weight"
+    mapping[f"{mtp_prefix}-mtp_{j+1}_final_norm-scale"] = f"mtp.{j}.norm.weight"
+    mapping[f"{mtp_prefix}-mtp_{j+1}_projection-kernel"] = (f"mtp.{j}.e_proj.weight", f"mtp.{j}.h_proj.weight")
+    mapping[f"{mtp_prefix}-hc_head-hc_fn"] = f"mtp.{j}.hc_head_fn"
+    mapping[f"{mtp_prefix}-hc_head-hc_base"] = f"mtp.{j}.hc_head_base"
+    mapping[f"{mtp_prefix}-hc_head-hc_scale"] = f"mtp.{j}.hc_head_scale"
+    
+    prefix = f"{mtp_prefix}-mtp_{j+1}_transformer_layer"
+    hf_prefix = f"mtp.{j}"
+
+    mapping[f"{prefix}-pre_self_attention_layer_norm-scale"] = f"{hf_prefix}.attn_norm.weight"
+    mapping[f"{prefix}-post_self_attention_layer_norm-scale"] = f"{hf_prefix}.ffn_norm.weight"
+    mapping[f"{prefix}-mhc_attention-mhc_norm-scale"] = None
+    mapping[f"{prefix}-mhc_mlp-mhc_norm-scale"] = None
+    
+    mapping[f"{prefix}-mhc_attention-pre_alpha"] = f"{hf_prefix}.hc_attn_fn"
+    mapping[f"{prefix}-mhc_attention-post_alpha"] = f"{hf_prefix}.hc_attn_fn"
+    mapping[f"{prefix}-mhc_attention-res_alpha"] = f"{hf_prefix}.hc_attn_fn"
+    
+    mapping[f"{prefix}-mhc_attention-pre_beta"] = f"{hf_prefix}.hc_attn_base"
+    mapping[f"{prefix}-mhc_attention-post_beta"] = f"{hf_prefix}.hc_attn_base"
+    mapping[f"{prefix}-mhc_attention-res_beta"] = f"{hf_prefix}.hc_attn_base"
+    
+    mapping[f"{prefix}-mhc_attention-pre_alpha_scale"] = f"{hf_prefix}.hc_attn_scale"
+    mapping[f"{prefix}-mhc_attention-post_alpha_scale"] = f"{hf_prefix}.hc_attn_scale"
+    mapping[f"{prefix}-mhc_attention-res_alpha_scale"] = f"{hf_prefix}.hc_attn_scale"
+    
+    mapping[f"{prefix}-mhc_mlp-pre_alpha"] = f"{hf_prefix}.hc_ffn_fn"
+    mapping[f"{prefix}-mhc_mlp-post_alpha"] = f"{hf_prefix}.hc_ffn_fn"
+    mapping[f"{prefix}-mhc_mlp-res_alpha"] = f"{hf_prefix}.hc_ffn_fn"
+    
+    mapping[f"{prefix}-mhc_mlp-pre_beta"] = f"{hf_prefix}.hc_ffn_base"
+    mapping[f"{prefix}-mhc_mlp-post_beta"] = f"{hf_prefix}.hc_ffn_base"
+    mapping[f"{prefix}-mhc_mlp-res_beta"] = f"{hf_prefix}.hc_ffn_base"
+    
+    mapping[f"{prefix}-mhc_mlp-pre_alpha_scale"] = f"{hf_prefix}.hc_ffn_scale"
+    mapping[f"{prefix}-mhc_mlp-post_alpha_scale"] = f"{hf_prefix}.hc_ffn_scale"
+    mapping[f"{prefix}-mhc_mlp-res_alpha_scale"] = f"{hf_prefix}.hc_ffn_scale"
+
+    mapping[f"{prefix}-self_attention-q_norm-scale"] = f"{hf_prefix}.attn.q_norm.weight"
+    mapping[f"{prefix}-self_attention-kv_norm-scale"] = f"{hf_prefix}.attn.kv_norm.weight"
+    mapping[f"{prefix}-self_attention-wq_a-kernel"] = f"{hf_prefix}.attn.wq_a.weight"
+    mapping[f"{prefix}-self_attention-wq_b-kernel"] = f"{hf_prefix}.attn.wq_b.weight"
+    mapping[f"{prefix}-self_attention-wkv-kernel"] = f"{hf_prefix}.attn.wkv.weight"
+    mapping[f"{prefix}-self_attention-sinks"] = f"{hf_prefix}.attn.attn_sink"
+    
+    mapping[f"{prefix}-self_attention-o_a_proj-kernel"] = f"{hf_prefix}.attn.wo_a.weight"
+    mapping[f"{prefix}-self_attention-o_b_proj-kernel"] = f"{hf_prefix}.attn.wo_b.weight"
+    
+    mapping[f"{prefix}-self_attention-csa_compressor-gate_proj-kernel"] = f"{hf_prefix}.attn.compressor.wgate.weight"
+    mapping[f"{prefix}-self_attention-csa_compressor-kv_proj-kernel"] = f"{hf_prefix}.attn.compressor.wkv.weight"
+    mapping[f"{prefix}-self_attention-csa_compressor-kv_norm-scale"] = f"{hf_prefix}.attn.compressor.norm.weight"
+    mapping[f"{prefix}-self_attention-csa_compressor-position_bias"] = f"{hf_prefix}.attn.compressor.ape"
+
+    mapping[f"{prefix}-self_attention-hca_compressor-gate_proj-kernel"] = f"{hf_prefix}.attn.compressor.wgate.weight"
+    mapping[f"{prefix}-self_attention-hca_compressor-kv_proj-kernel"] = f"{hf_prefix}.attn.compressor.wkv.weight"
+    mapping[f"{prefix}-self_attention-hca_compressor-kv_norm-scale"] = f"{hf_prefix}.attn.compressor.norm.weight"
+    mapping[f"{prefix}-self_attention-hca_compressor-position_bias"] = f"{hf_prefix}.attn.compressor.ape"
+
+    mapping[f"{prefix}-self_attention-csa_compressor-indexer-gate_proj-kernel"] = f"{hf_prefix}.attn.indexer.compressor.wgate.weight"
+    mapping[f"{prefix}-self_attention-csa_compressor-indexer-kv_proj-kernel"] = f"{hf_prefix}.attn.indexer.compressor.wkv.weight"
+    mapping[f"{prefix}-self_attention-csa_compressor-indexer-kv_norm-scale"] = f"{hf_prefix}.attn.indexer.compressor.norm.weight"
+    mapping[f"{prefix}-self_attention-csa_compressor-indexer-position_bias"] = f"{hf_prefix}.attn.indexer.compressor.ape"
+    mapping[f"{prefix}-self_attention-csa_compressor-indexer-weights_proj-kernel"] = f"{hf_prefix}.attn.indexer.weights_proj.weight"
+    mapping[f"{prefix}-self_attention-csa_compressor-indexer-q_proj-kernel"] = f"{hf_prefix}.attn.indexer.wq_b.weight"
+
+    mapping[f"{prefix}-mlp-MoeBlock_0-gate-kernel"] = f"{hf_prefix}.ffn.gate.weight"
+    mapping[f"{prefix.replace('params-', 'MoEBiasVar-')}-mlp-MoeBlock_0-gate-bias"] = f"{hf_prefix}.ffn.gate.bias"
+    
+    mapping[f"{prefix}-mlp-shared_experts-wi_0-kernel"] = f"{hf_prefix}.ffn.shared_experts.w1.weight"
+    mapping[f"{prefix}-mlp-shared_experts-wi_1-kernel"] = f"{hf_prefix}.ffn.shared_experts.w3.weight"
+    mapping[f"{prefix}-mlp-shared_experts-wo-kernel"] = f"{hf_prefix}.ffn.shared_experts.w2.weight"
+    
+    mapping[f"{prefix}-mlp-MoeBlock_0-wi_0"] = [
+        f"{hf_prefix}.ffn.experts.{e}.w1.weight" for e in range(num_experts)
+    ]
+    mapping[f"{prefix}-mlp-MoeBlock_0-wi_1"] = [
+        f"{hf_prefix}.ffn.experts.{e}.w3.weight" for e in range(num_experts)
+    ]
+    mapping[f"{prefix}-mlp-MoeBlock_0-wo"] = [
+        f"{hf_prefix}.ffn.experts.{e}.w2.weight" for e in range(num_experts)
+    ]
+
   return mapping
 
 
@@ -4384,6 +4474,16 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
     else:
         return reshape_kernel(input_tensor, target_shape)
 
+  def reshape_mtp_projection(weights, target_shape=None):
+    if saving_to_hf:
+      half = weights.shape[0] // 2
+      e_proj = weights[:half, :].T
+      h_proj = weights[half:, :].T
+      return e_proj, h_proj
+    else:
+      e_proj, h_proj = weights
+      return np.concatenate([e_proj.T, h_proj.T], axis=0)
+
   mapping = {
       "params-token_embedder-embedding": unpad_hf_embedding_layer,
       "params-decoder-logits_dense-kernel": unpad_logits_layer,
@@ -4454,6 +4554,15 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
       _attach_layer_hooks(f"params-decoder-layers_{i}")
     _attach_layer_hooks("params-decoder-scanned_blocks-layers_0")
     _attach_layer_hooks("params-decoder-scanned_blocks-layers_1")
+
+  mtp_num_layers = getattr(maxtext_config, "mtp_num_layers", 0)
+  if mtp_num_layers == 0:
+    mtp_num_layers = config.get("num_nextn_predict_layers", config.get("num_mtp_layers", 0))
+  for j in range(mtp_num_layers):
+    mtp_prefix = f"params-mtp_block-mtp_layer_{j+1}"
+    mapping[f"{mtp_prefix}-mtp_{j+1}_projection-kernel"] = reshape_mtp_projection
+    mapping[f"{mtp_prefix}-hc_head-hc_fn"] = reshape_kernel
+    _attach_layer_hooks(f"{mtp_prefix}-mtp_{j+1}_transformer_layer")
 
   return mapping
 

@@ -188,6 +188,14 @@ class MultiTokenPredictionLayer(nnx.Module):
         kernel_axes=("norm",),
         rngs=rngs,
     )
+    self.final_norm = RMSNorm(
+        num_features=cfg.emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=("norm",),
+        rngs=rngs,
+    )
     self.projection_layer = DenseGeneral(
         in_features_shape=2 * cfg.emb_dim,
         out_features_shape=cfg.emb_dim,
@@ -198,12 +206,31 @@ class MultiTokenPredictionLayer(nnx.Module):
         rngs=rngs,
     )
     # Use MODEL_MODE_TRAIN for initialization; runtime model_mode is passed dynamically.
-    self.transformer_layer = transformer_layer_module(
-        config=cfg,
-        mesh=mesh,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=rngs,
-    )
+    if cfg.decoder_block in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.DEEPSEEK4.value):
+      from maxtext.models import deepseek4  # pylint: disable=import-outside-toplevel
+      from maxtext.layers import mhc  # pylint: disable=import-outside-toplevel
+
+      self.transformer_layer = deepseek4.DeepSeek4DecoderLayer(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs=rngs,
+          layer_idx=0,
+          compress_ratio=0,  # bypass compression, use sliding window
+          is_hash_routing=False,  # not a prefix layer
+      )
+      self.hc_head = mhc.DeepSeek4HyperHead(
+          config=cfg,
+          mesh=mesh,
+          rngs=rngs,
+      )
+    else:
+      self.transformer_layer = transformer_layer_module(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs=rngs,
+      )
 
   @property
   def embedding_norm(self):
@@ -220,6 +247,14 @@ class MultiTokenPredictionLayer(nnx.Module):
   @hidden_state_norm.setter
   def hidden_state_norm(self, module):
     setattr(self, f"mtp_{self.layer_number}_hidden_state_norm", module)
+
+  @property
+  def final_norm(self):
+    return getattr(self, f"mtp_{self.layer_number}_final_norm")
+
+  @final_norm.setter
+  def final_norm(self, module):
+    setattr(self, f"mtp_{self.layer_number}_final_norm", module)
 
   @property
   def projection_layer(self):
@@ -276,6 +311,14 @@ class MultiTokenPredictionLayer(nnx.Module):
       # norm.
       hidden_state_pspec = jax.sharding.NamedSharding(self.mesh, jax.typeof(hidden_state_norm).sharding.spec)
       embedding_norm = jax.reshard(embedding_norm, hidden_state_pspec)
+
+    if (
+        self.config.decoder_block in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.DEEPSEEK4.value)
+        and self.config.mhc_expansion_rate > 1
+    ):
+      from maxtext.layers import mhc as mhc_module  # pylint: disable=import-outside-toplevel
+      mhc_expand, _ = mhc_module.get_functions(self.config.mhc_expansion_rate)
+      embedding_norm = mhc_expand(embedding_norm)
 
     concatenated_features = jnp.concatenate([embedding_norm, hidden_state_norm], axis=-1)
     projected_features = self.projection_layer(concatenated_features)
@@ -457,7 +500,17 @@ class MultiTokenPredictionBlock(nnx.Module):
           model_mode=self.decoder.model_mode,
       )
 
-      mtp_logits = self.decoder.apply_output_head(shared_embedding, mtp_hidden_state, deterministic, model_mode)
+      mtp_hidden_state_to_head = mtp_hidden_state
+      if cfg.mhc_expansion_rate > 1 and cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+        mtp_hidden_state_to_head = mtp_layer.hc_head(mtp_hidden_state)
+      mtp_logits = self.decoder.apply_output_head(
+          shared_embedding,
+          mtp_hidden_state_to_head,
+          deterministic,
+          model_mode,
+          reduce_mhc=False,
+          decoder_norm=mtp_layer.final_norm,
+      )
 
       logits_logical_axes = (
           "activation_embed_and_logits_batch",
