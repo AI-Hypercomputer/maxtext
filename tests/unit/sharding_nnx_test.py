@@ -15,7 +15,6 @@
 """Unit tests for the NNX-specific helpers in maxtext.utils.sharding."""
 
 from dataclasses import dataclass
-from types import SimpleNamespace
 import unittest
 
 from flax import nnx
@@ -24,7 +23,6 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from maxtext.common import train_state_nnx
-from maxtext.common.common_types import ShardMode
 from maxtext.utils import sharding
 import numpy as np
 import optax
@@ -34,7 +32,6 @@ import optax
 class _Cfg:
   pure_nnx: bool = True
   shard_optimizer_over_data: bool = False
-  shard_mode: ShardMode = ShardMode.AUTO
 
 
 class _LinearNNX(nnx.Module):
@@ -182,90 +179,6 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
         ]
     )
     self.assertEqual(n_prev, n_after)
-
-
-class TestGetGradShardings(unittest.TestCase):
-  """Cover get_grad_shardings, which picks the layout gradients reach the optimizer in.
-
-  Only ZeRO-1 *and* explicit sharding together need the override: with ZeRO-1 the
-  optimizer moments are sharded over the `data` axis as well, and explicit sharding
-  refuses to add a gradient sharded P('fsdp') to a moment sharded P(('data','fsdp'))
-  instead of silently reconciling the two the way GSPMD does under `auto`.
-  """
-
-  def setUp(self):
-    self.model = _LinearNNX(rngs=nnx.Rngs(0))
-    self.state_mesh_shardings = _build_state_mesh_shardings(self.model, optax.adam(1e-3))
-    # The parameter layout before the ZeRO-1 overlay, exactly as train_step obtains it.
-    self.params_shardings, _ = sharding.maybe_update_params_sharding_with_opt_nnx(
-        _Cfg(shard_optimizer_over_data=False), self.state_mesh_shardings
-    )
-
-  def _zero1_state_mesh_shardings(self, pspec):
-    """Rewrite every model Param sharding to `pspec`, as the ZeRO-1 overlay does."""
-    mesh = _create_2d_test_mesh()
-    zero1_sharding = NamedSharding(mesh, pspec)
-    state = _build_state_mesh_shardings(self.model, optax.adam(1e-3))
-    for var in jax.tree.leaves(state.model, is_leaf=lambda x: isinstance(x, nnx.Variable)):
-      if isinstance(var, nnx.Param):
-        var.set_value(zero1_sharding)
-    return state
-
-  def test_returns_params_shardings_without_zero1(self):
-    """No ZeRO-1 means the optimizer follows the parameter layout — nothing to override."""
-    cfg = _Cfg(shard_optimizer_over_data=False, shard_mode=ShardMode.EXPLICIT)
-    result = sharding.get_grad_shardings(cfg, self.state_mesh_shardings, self.params_shardings)
-    self.assertIs(result, self.params_shardings)
-
-  def test_returns_params_shardings_under_auto_shard_mode(self):
-    """Under `auto`, GSPMD reconciles the ZeRO-1 mismatch itself — leave gradients alone."""
-    cfg = _Cfg(shard_optimizer_over_data=True, shard_mode=ShardMode.AUTO)
-    result = sharding.get_grad_shardings(cfg, self.state_mesh_shardings, self.params_shardings)
-    self.assertIs(result, self.params_shardings)
-
-  def test_zero1_explicit_nnx_returns_optimizer_layout(self):
-    """ZeRO-1 + explicit + NNX: gradients must target the data-sharded moment layout."""
-    target_pspec = PartitionSpec(("data", "model"))
-    state_mesh_shardings = self._zero1_state_mesh_shardings(target_pspec)
-    cfg = _Cfg(pure_nnx=True, shard_optimizer_over_data=True, shard_mode=ShardMode.EXPLICIT)
-
-    result = sharding.get_grad_shardings(cfg, state_mesh_shardings, self.params_shardings)
-
-    self.assertIsInstance(result, nnx.State)
-    leaves = jax.tree.leaves(result, is_leaf=lambda x: isinstance(x, nnx.Variable))
-    self.assertGreater(len(leaves), 0)
-    for leaf in leaves:
-      self.assertEqual(leaf.get_value().spec, target_pspec)
-
-  def test_zero1_explicit_nnx_matches_ga_params_tree_structure(self):
-    """The result is tree-mapped against ga_params, so it must be Param-only and same-shaped.
-
-    `nnx.split(model, nnx.Param, ...)` drops rngs and other non-Param variables; if
-    get_grad_shardings kept them, the jax.tree.map in gradient_accumulation would raise
-    a structure mismatch rather than mis-shard anything.
-    """
-    state_mesh_shardings = self._zero1_state_mesh_shardings(PartitionSpec(("data", "model")))
-    cfg = _Cfg(pure_nnx=True, shard_optimizer_over_data=True, shard_mode=ShardMode.EXPLICIT)
-
-    result = sharding.get_grad_shardings(cfg, state_mesh_shardings, self.params_shardings)
-
-    _, ga_params, _ = nnx.split(self.model, nnx.Param, ...)
-
-    def is_var(x):
-      return isinstance(x, nnx.Variable)
-
-    self.assertEqual(
-        jax.tree.structure(ga_params, is_leaf=is_var),
-        jax.tree.structure(result, is_leaf=is_var),
-    )
-    self.assertTrue(all(isinstance(leaf, nnx.Param) for leaf in jax.tree.leaves(result, is_leaf=is_var)))
-
-  def test_zero1_explicit_linen_returns_state_params(self):
-    """The Linen train state keeps its shardings under `.params`, not `.model`."""
-    cfg = _Cfg(pure_nnx=False, shard_optimizer_over_data=True, shard_mode=ShardMode.EXPLICIT)
-    linen_state = SimpleNamespace(params={"kernel": "zero1-sharding"})
-    result = sharding.get_grad_shardings(cfg, linen_state, self.params_shardings)
-    self.assertIs(result, linen_state.params)
 
 
 class TestNnxConstructNamedSharding(unittest.TestCase):

@@ -16,21 +16,14 @@
 
 # pylint: disable=too-many-positional-arguments
 
-import os
 import unittest
 from dataclasses import dataclass
 
-# TestGradientAccumulationOutGradShardings needs a mesh whose axes are all larger than
-# one, otherwise every sharding collapses to replicated. Ask XLA for eight host devices
-# before JAX initializes its backend; it skips itself if something got there first.
-os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=8")
-
-# pylint: disable=wrong-import-position
 import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from maxtext.common.common_types import ShardMode
 from maxtext.utils import gradient_accumulation
@@ -255,101 +248,6 @@ class TestGradientAccumulationNNX(unittest.TestCase):
           for gradient in jax.tree.leaves(raw_grads):
             self.assertTrue(jnp.all(jnp.isfinite(gradient)))
             self.assertTrue(jnp.all(gradient == 0))
-
-
-class _WideNNX(nnx.Module):
-  """Linear layer wide enough that its weights divide evenly across a 2-way mesh axis."""
-
-  def __init__(self, rngs: nnx.Rngs):
-    self.linear = nnx.Linear(4, 4, rngs=rngs)
-
-  def __call__(self, x):
-    return self.linear(x)
-
-
-class TestGradientAccumulationOutGradShardings(unittest.TestCase):
-  """Cover the `out_grad_shardings` argument used by ZeRO-1 + explicit sharding.
-
-  Accumulated gradients come out of the scan in the parameter layout. Under ZeRO-1 the
-  optimizer moments are additionally sharded over the `data` axis, and explicit sharding
-  will not implicitly reconcile the two — it raises. `out_grad_shardings` names the layout
-  the gradients must land in, which also lets XLA fuse the cross-replica combine into a
-  single reduce-scatter instead of an all-reduce followed by a slice.
-  """
-
-  def setUp(self):
-    # Both mesh axes have to be larger than one: a size-one axis is dropped from the
-    # sharding type (jax_remove_size_one_mesh_axis_from_type), so every spec would
-    # collapse to a replicated one and the layouts under test would be indistinguishable.
-    # A real `data` axis is also what turns on the unreduced-gradient path in the helper.
-    devices = jax.local_devices()
-    if len(devices) < 4:
-      self.skipTest(
-          "needs at least 4 devices for a 2x2 data-by-fsdp mesh; "
-          "set XLA_FLAGS=--xla_force_host_platform_device_count=8"
-      )
-    self.model = _WideNNX(rngs=nnx.Rngs(0))
-    self.cfg = _Cfg(gradient_accumulation_steps=2, shard_mode=ShardMode.EXPLICIT)
-    self.data = {
-        "inputs": jnp.arange(16.0).reshape(4, 4),
-        "targets": jnp.zeros((4, 4)),
-    }
-    # Explicit axis types, as get_mesh_from_config builds under shard_mode=explicit.
-    self.mesh = Mesh(
-        np.array(devices[:4]).reshape(2, 2),
-        ("data", "fsdp"),
-        axis_types=(AxisType.Explicit, AxisType.Explicit),
-    )
-
-  def _shardings(self, pspec):
-    """A per-Param tree of NamedShardings, shaped like nnx.split(model, nnx.Param, ...)[1]."""
-    _, params, _ = nnx.split(self.model, nnx.Param, ...)
-    return jax.tree.map(lambda _: NamedSharding(self.mesh, pspec), params)
-
-  def _accumulate(self, params_shardings, out_grad_shardings):
-    with jax.set_mesh(self.mesh):
-      return gradient_accumulation.gradient_accumulation_loss_and_grad(
-          _fake_loss_fn,
-          self.cfg,
-          _WideNNX(rngs=nnx.Rngs(0)),
-          params=None,
-          params_shardings=params_shardings,
-          data=self.data,
-          dropout_rng=None,
-          out_grad_shardings=out_grad_shardings,
-      )
-
-  def test_defaults_to_params_shardings(self):
-    """Omitting the argument must keep the previous behaviour: gradients in the param layout."""
-    params_shardings = self._shardings(PartitionSpec("fsdp", None))
-    _, _, raw_grads = self._accumulate(params_shardings, out_grad_shardings=None)
-    kernel_grad = raw_grads["linear"]["kernel"].get_value()
-    self.assertEqual(kernel_grad.sharding.spec, PartitionSpec("fsdp", None))
-
-  def test_out_grad_shardings_sets_the_returned_layout(self):
-    """With ZeRO-1 shardings passed in, the gradients come back data-sharded."""
-    params_shardings = self._shardings(PartitionSpec("fsdp", None))
-    zero1_shardings = self._shardings(PartitionSpec(("data", "fsdp"), None))
-    _, _, raw_grads = self._accumulate(params_shardings, out_grad_shardings=zero1_shardings)
-    kernel_grad = raw_grads["linear"]["kernel"].get_value()
-    self.assertEqual(kernel_grad.sharding.spec, PartitionSpec(("data", "fsdp"), None))
-
-  def test_out_grad_shardings_does_not_change_gradient_values(self):
-    """Re-laying-out the gradients is a pure data movement — the numbers must be identical."""
-    params_shardings = self._shardings(PartitionSpec("fsdp", None))
-    zero1_shardings = self._shardings(PartitionSpec(("data", "fsdp"), None))
-
-    baseline_loss, _, baseline_grads = self._accumulate(params_shardings, out_grad_shardings=None)
-    zero1_loss, _, zero1_grads = self._accumulate(params_shardings, out_grad_shardings=zero1_shardings)
-
-    np.testing.assert_allclose(zero1_loss, baseline_loss, rtol=1e-6)
-    for name in ("kernel", "bias"):
-      np.testing.assert_allclose(
-          np.asarray(zero1_grads["linear"][name].get_value()),
-          np.asarray(baseline_grads["linear"][name].get_value()),
-          rtol=1e-6,
-          err_msg=f"out_grad_shardings changed the {name} gradient; it must only move data",
-      )
 
 
 if __name__ == "__main__":

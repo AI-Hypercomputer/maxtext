@@ -712,13 +712,17 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
+  @pytest.mark.skip_on_tpu7x
   def test_tpu_gemma_zero1_gradient_accumulation_explicit(self):
     """Gemma under ZeRO-1 + gradient accumulation + explicit sharding.
 
-    This is the combination the explicit annotations exist for: with the optimizer
-    moments sharded over the `data` axis, explicit sharding type-checks the gradient
-    layout against the moment layout instead of letting GSPMD reconcile them, so any
-    missing or wrong `out_sharding` in a Gemma layer fails the step outright.
+    Explicit sharding type-checks the sharding of every operation rather than letting
+    GSPMD infer one, so a missing or wrong `out_sharding` in a Gemma layer fails the
+    step outright instead of silently costing a collective. ZeRO-1 and gradient
+    accumulation are in the mix because they layer the optimizer-moment and scan-carry
+    shardings on top, which is where annotations that look fine in a plain forward pass
+    tend to come apart.
     """
     # Gemma 3 reads its local/global attention pattern and rope scaling off the named
     # model config, so it cannot run under the placeholder "default" model name.
@@ -726,9 +730,9 @@ class TrainTests(unittest.TestCase):
         ("gemma", "gemma", "tokenizer.gemma", []),
         ("gemma2", "gemma2", "tokenizer.gemma", []),
         ("gemma3", "gemma3", "tokenizer.gemma3", ["model_name=gemma3-4b", "override_model_config=True"]),
-        # Host offload keeps the parameters in pinned_host, so the gradients are moved
-        # back to device memory before the optimizer update. That move must not also
-        # relayout them out of the ZeRO-1 ("data"-sharded) layout the moments are in.
+        # Host offload keeps the parameters in pinned_host and moves the gradients back to
+        # device memory before the optimizer update, which is a second place the layer
+        # annotations have to line up with what the trainer asks for.
         ("gemma-host-offload", "gemma", "tokenizer.gemma", ["parameter_memory_host_offload=True", "param_scan_axis=0"]),
     ]
     for case, decoder_block, tokenizer, extra_args in families:
@@ -755,14 +759,12 @@ class TrainTests(unittest.TestCase):
             # The splash kernel cannot build a mask for a downscaled Gemma (its sliding
             # window leaves empty blocks); dot product attention keeps the focus on sharding.
             "attention=dot_product",
-            # Both axes must be > 1 for ZeRO-1 to have a "data" axis to shard the moments
-            # over while FSDP still shards the parameters. Filling fsdp with the remaining
-            # devices keeps this valid on 4- and 8-device hosts alike. Note that
-            # data-parallel-only (ici_fsdp_parallelism=1) segfaults the TPU7x compiler,
-            # which is what b/517509898 tracks for the llama2 test above.
-            "ici_data_parallelism=2",
+            # Data-parallel only, matching the llama2 test above: ZeRO-1 needs a "data"
+            # axis to shard the moments over, and MaxTextConfig rejects combining it with
+            # FSDP (the gradients and the moments would end up in different layouts).
+            "ici_data_parallelism=-1",
             "dcn_data_parallelism=1",
-            "ici_fsdp_parallelism=-1",
+            "ici_fsdp_parallelism=1",
             "dcn_fsdp_parallelism=1",
             "gradient_accumulation_steps=4",
             "shard_optimizer_over_data=True",

@@ -731,57 +731,6 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
   return prev_params_shardings, state_mesh_shardings
 
 
-def _extract_param_only(state):
-  """Recursively extract nnx.Param variables from an nnx.State into a nested plain dict.
-
-  Constructs nnx.State({'key': nested_dict, ...}) which produces the same pytree
-  structure as nnx.split(model, nnx.Param, ...)[1], enabling jax.tree.map
-  to work correctly between ga_params (Param-only) and params_shardings.
-  """
-  result = {}
-  for k, v in state.items():
-    if isinstance(v, nnx.Param):
-      result[k] = v
-    elif isinstance(v, nnx.Variable):
-      pass  # skip non-Param variables (RngKey, RngCount, OptVariable, etc.)
-    elif hasattr(v, "items"):
-      sub = _extract_param_only(v)
-      if sub:
-        result[k] = sub
-    else:
-      result[k] = v
-  return result
-
-
-def get_grad_shardings(config, state_mesh_shardings, params_shardings):
-  """Return the shardings the gradients must carry when they reach the optimizer.
-
-  Without Zero-1 the optimizer state follows the parameter layout, so gradients keep
-  `params_shardings`. With `shard_optimizer_over_data` (Zero-1) the optimizer moments
-  are additionally sharded over the `data` mesh axis, and `state_mesh_shardings` has
-  already been rewritten to that layout by `maybe_update_params_sharding_with_opt`.
-
-  Under `shard_mode=auto` GSPMD reconciles the mismatch on its own, but explicit
-  sharding type-checks every op: adding a gradient sharded `P('fsdp')` to a moment
-  sharded `P(('data', 'fsdp'))` is a hard error. Targeting the Zero-1 layout here also
-  lets XLA lower the unreduced-gradient combine as a single reduce-scatter over `data`
-  instead of an all-reduce followed by a slice.
-
-  Args:
-    config: Config with `shard_optimizer_over_data`, `shard_mode` and `pure_nnx`.
-    state_mesh_shardings: Train-state shardings, already updated for Zero-1.
-    params_shardings: Parameter shardings prior to the Zero-1 overlay.
-
-  Returns:
-    A PyTree of shardings matching `params_shardings`' structure.
-  """
-  if not config.shard_optimizer_over_data or config.shard_mode != ShardMode.EXPLICIT:
-    return params_shardings
-  if config.pure_nnx:
-    return nnx.State(_extract_param_only(state_mesh_shardings.model))
-  return state_mesh_shardings.params
-
-
 def maybe_update_params_sharding_with_opt_nnx(
     config: pyconfig.HyperParameters, state_mesh_shardings: nnx.State
 ) -> tuple[nnx.State, nnx.State]:
@@ -805,6 +754,27 @@ def maybe_update_params_sharding_with_opt_nnx(
         (unchanged if shard_optimizer_over_data is False)"""
   # In TrainStateNNX, parameters are under 'model'
   model_shardings = state_mesh_shardings.model
+
+  def _extract_param_only(state):
+    """Recursively extract nnx.Param variables from an nnx.State into a nested plain dict.
+
+    Constructs nnx.State({'key': nested_dict, ...}) which produces the same pytree
+    structure as nnx.split(model, nnx.Param, ...)[1], enabling jax.tree.map
+    to work correctly between ga_params (Param-only) and params_shardings.
+    """
+    result = {}
+    for k, v in state.items():
+      if isinstance(v, nnx.Param):
+        result[k] = v
+      elif isinstance(v, nnx.Variable):
+        pass  # skip non-Param variables (RngKey, RngCount, OptVariable, etc.)
+      elif hasattr(v, "items"):
+        sub = _extract_param_only(v)
+        if sub:
+          result[k] = sub
+      else:
+        result[k] = v
+    return result
 
   # prev_params_shardings must match the pytree structure of ga_params from
   # nnx.split(model, nnx.Param, ...) — Param variables only, no rngs.

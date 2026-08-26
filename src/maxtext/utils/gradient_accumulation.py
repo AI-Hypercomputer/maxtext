@@ -32,7 +32,6 @@ def gradient_accumulation_loss_and_grad(
     params_shardings,
     data,
     dropout_rng,
-    out_grad_shardings=None,
 ):
   """
   Calculates gradients using gradient accumulation.
@@ -57,11 +56,6 @@ def gradient_accumulation_loss_and_grad(
       data: A PyTree of batched data. The leading dimension is assumed
           to be the total batch size (microbatch_size * num_accumulations).
       dropout_rng: JAX PRNGKey for dropout.
-      out_grad_shardings: Optional PyTree of shardings the returned gradients should
-          carry. Defaults to `params_shardings`. Under ZeRO-1 with explicit sharding
-          this is the optimizer-moment layout, so that resolving the `unreduced`
-          annotation lowers to a single reduce-scatter over the "data" axis instead
-          of an all-reduce followed by a slice inside the optimizer.
 
   Returns:
       A tuple containing:
@@ -75,8 +69,6 @@ def gradient_accumulation_loss_and_grad(
     return maybe_shard_with_name(inputs, sharding_names, config.shard_mode, debug_sharding=config.debug_sharding)
 
   is_nnx = isinstance(model, nnx.Module)
-  if out_grad_shardings is None:
-    out_grad_shardings = params_shardings
 
   # For ZeRO-1 + GA, read the resolved "data" axis size from the mesh rather than
   # config.ici_data_parallelism, which may be -1 (auto-fill) and resolves to 1 when
@@ -186,9 +178,7 @@ def gradient_accumulation_loss_and_grad(
     # the scan carry (see above), so it's applied here instead.
     unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
-  # Resolving the annotation against out_grad_shardings emits the cross-replica combine
-  # directly into the layout the optimizer expects (a reduce-scatter under ZeRO-1).
-  raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, out_grad_shardings)
+  raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
   divisor = (
       config.gradient_accumulation_steps if getattr(config, "use_tunix_gradient_accumulation", False) else denominator
   )
