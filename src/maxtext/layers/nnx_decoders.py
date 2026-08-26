@@ -36,7 +36,7 @@ from maxtext.common.common_types import (
     MultimodalInput,
     ShardMode,
 )
-from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
+from maxtext.layers import initializers, linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -1469,13 +1469,23 @@ class NNXDecoder(nnx.Module):
     Bridges NNX to Linen by creating a dictionary that mimics the exact variable
     structure expected by `deepseek_batchsplit.fetch_weights`.
     """
-    state_dict = nnx.state(moe_stack, nnx.Param)
+    state_dict = nnx.state(moe_stack, (nnx.Param, moe.MoEBiasVar))
+    moe_block = state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0"))
+
+    # When param_scan_axis != 0, nnx.Param variables are stacked at param_scan_axis,
+    # but MoEBiasVar (being non-Param) was stacked at axis 0.
+    # Align MoEBiasVar's layer dimension with param_scan_axis for batchsplit.
+    if self.config.routed_bias and self.config.param_scan_axis != 0 and moe_block is not None:
+      bias_var = moe_block["MoeBlock_0"]["gate"]["bias"]
+      bias_val = getattr(bias_var, "value", bias_var)
+      if hasattr(bias_val, "ndim") and bias_val.ndim >= 2:
+        moe_block["MoeBlock_0"]["gate"]["bias"] = jnp.swapaxes(bias_val, 0, self.config.param_scan_axis)
 
     return {
         "pre_self_attention_layer_norm": state_dict["pre_self_attention_layer_norm"],
         "post_self_attention_layer_norm": state_dict["post_self_attention_layer_norm"],
         "self_attention": state_dict["self_attention"],
-        "DeepSeekMoeBlock_0": state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0")),
+        "DeepSeekMoeBlock_0": moe_block,
     }
 
   def _find_next_boundary(self, current_idx, end_idx, engram_indices):

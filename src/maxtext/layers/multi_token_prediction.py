@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """JAX implementation of the Multi Token Prediction https://arxiv.org/pdf/2412.19437"""
+# pylint: disable=no-name-in-module
 
 from typing import Type
 
@@ -22,6 +23,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config, DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
+from maxtext.layers import moe
 from maxtext.layers.decoders import DecoderLayer
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.linears import DenseGeneral
@@ -296,7 +298,9 @@ class MultiTokenPredictionLayer(nnx.Module):
       output = deepseek_batchsplit.batch_split_layer(
           inputs=projected_features,
           positions=position_ids,
-          params=nnx.to_pure_dict(nnx.state(self, nnx.Param), extract_fn)[f"mtp_{self.layer_number}_transformer_layer"],
+          params=nnx.to_pure_dict(nnx.state(self, (nnx.Param, moe.MoEBiasVar)), extract_fn)[
+              f"mtp_{self.layer_number}_transformer_layer"
+          ],
           mesh=self.mesh,
           cfg=self.config,
       )

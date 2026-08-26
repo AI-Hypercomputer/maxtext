@@ -115,7 +115,7 @@ DEEPSEEK3_DIMENSION_NUMBER = {
                         "wi_0": mdn((-2,), (-1,)),
                         "wi_1": mdn((-2,), (-1,)),
                         "wo": mdn((-2,), (-1,)),
-                        "gate": {"kernel": mdn((0,), (-1,)), "bias": None},  # ds3
+                        "gate": {"kernel": mdn((0,), (-1,))},  # ds3
                     },
                     "shared_experts": {
                         "wi_0": {"kernel": mdn((0,), (-1,))},
