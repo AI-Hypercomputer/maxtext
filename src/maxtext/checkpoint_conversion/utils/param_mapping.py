@@ -905,18 +905,14 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   """
   text_cfg = config.get("text_config", config)
   num_main_layers = text_cfg["num_hidden_layers"]
-  num_experts = text_cfg.get("num_experts", text_cfg.get("num_local_experts", maxtext_config.num_experts if hasattr(maxtext_config, "num_experts") else 256))
+  num_experts = text_cfg.get("num_experts")
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
 
   quant_cfg = config.get("quantization_config", {})
-  is_fp8 = (
-      (isinstance(quant_cfg, dict) and quant_cfg.get("quant_method") == "fp8")
-      or ("fp8" in str(getattr(maxtext_config, "hf_model_path", "")).lower())
-      or ("fp8" in str(getattr(maxtext_config, "load_parameters_path", "")).lower())
-      or ("fp8" in str(getattr(maxtext_config, "model_name", "")).lower())
-  )
+  is_fp8 = isinstance(quant_cfg, dict) and quant_cfg.get("quant_method") == "fp8"
 
   def hf_w(key: str):
+    """Maps an HF parameter key to a (weight, scale_inv) tuple if quantized, or returns the key as is."""
     if is_fp8:
       unquantized_patterns = [
           "embed_tokens",
@@ -1214,10 +1210,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   """
 
   def transpose(input_tensor, target_shape=None):
-    input_tensor = maybe_dequantize(input_tensor)
-    if target_shape is not None and not saving_to_hf:
-      return input_tensor.T.reshape(target_shape)
-    return input_tensor.T
+    return maybe_dequantize(input_tensor).T
 
   def reshape_kernel(input_tensor, target_shape):
     if saving_to_hf:
