@@ -1061,14 +1061,57 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # _split_into_chunks) -- construct the per-chunk synchronizers once,
       # matching the persistent-instance-per-cycle pattern the rebind
       # optimization (fewer stale holds) depends on.
+      #
+      # N>1 means N native WeightSynchronizer listener instances are alive in
+      # the same process simultaneously. That's fine for binding, but was NOT
+      # fine for transferring: the tunix orchestrator used to transfer every
+      # chunk in one combined many-to-one call, and the native controller's
+      # own concurrent scheduling for that call segfaulted the trainer
+      # process every time it was tried (confirmed on 4 separate runs,
+      # always immediately after every chunk finished binding). Fixed by
+      # serializing transfers one chunk at a time in
+      # weight_sync_coordinator.py's _run_round -- only one native
+      # WeightSynchronizer's transfer is ever in flight now, regardless of
+      # how many are bound -- so chunking (which is what bounds a rebind
+      # cycle's peak host memory; see _split_into_chunks) is safe to default
+      # on again.
+      # TODO(igorts): Update default to "4" once Tunix release includes serialized chunk transfers.
       num_chunks = max(1, int(os.environ.get("RAIDEN_WEIGHT_SYNC_CHUNKS", "1")))
+      # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
+      # detection tunix's K8sJaxContext.initialize() uses), trainer params
+      # are proxy-backed and Raiden can't bind them in place -- host_stage
+      # pulls them to client host memory first. Direct-TPU trainers skip
+      # that extra copy since their params already live on TPU. Computed on
+      # every call (not just the first): the staging loop below needs it on
+      # every rebind too, not only when constructing self._raiden_syncs.
+      is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
+      chunks = self._split_into_chunks(params_state, num_chunks) if num_chunks > 1 else [params_state]
+      del params_state
+
+      # 3a. Host-stage every chunk (the slow part under Pathways -- each
+      # chunk's device_get() from proxy-backed buffers, tens of seconds to
+      # minutes per chunk) BEFORE constructing any chunk's native listener.
+      # Constructing listeners interleaved with staging (as an earlier
+      # version of this loop did) spreads them out in time -- chunk 0's
+      # listener opens first and chunk N-1's opens last, so by the time
+      # transfers start (serialized, chunk 0 first: see
+      # weight_sync_coordinator.py) chunk 0's listener has been sitting idle
+      # for roughly however long every other chunk took to also stage,
+      # which observed as 90+ seconds on a 4-chunk 30B-A3B run. That's the
+      # leading suspect for a reproducible connection reset specifically on
+      # chunk 0's transfer (confirmed on 2 separate runs, always chunk 0,
+      # never a chunk transferred sooner after its own construction) --
+      # something in the path (most likely an idle-connection timeout in
+      # the Pathways proxy hop, not raiden itself) resetting a
+      # long-idle-but-unused listening socket. Staging everything first and
+      # constructing every listener back-to-back afterward keeps every
+      # chunk's idle-before-first-use window to a few seconds instead.
+      staged_chunks = [
+          raiden_synchronizer.to_host_cpu_state(chunk_state) if is_pathways else chunk_state for chunk_state in chunks
+      ]
+      del chunks
+
       if self._raiden_syncs is None:
-        # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
-        # detection tunix's K8sJaxContext.initialize() uses), trainer params
-        # are proxy-backed and Raiden can't bind them in place -- host_stage
-        # pulls them to client host memory first. Direct-TPU trainers skip
-        # that extra copy since their params already live on TPU.
-        is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
         # worker_index must be unique per chunk (it seeds WorkUnitId's
         # job_replica_id) -- otherwise every chunk's work unit collides under
         # the same id in the handler's registry and only one survives
@@ -1084,14 +1127,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             for i in range(num_chunks)
         ]
 
-      chunks = self._split_into_chunks(params_state, num_chunks) if num_chunks > 1 else [params_state]
-      del params_state
-
       verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
       all_metadata = []
       total_variables = 0
-      for chunk_idx, (sync, chunk_state) in enumerate(zip(self._raiden_syncs, chunks)):
-        sync.bind(chunk_state)
+      for chunk_idx, (sync, chunk_state) in enumerate(zip(self._raiden_syncs, staged_chunks)):
+        # TODO(igorts): Remove try-except fallback once Tunix RaidenSynchronizer.bind supports already_staged.
+        try:
+          sync.bind(chunk_state, already_staged=is_pathways)
+        except TypeError:
+          sync.bind(chunk_state)
 
         # 4. Initiate Device-to-Host transfer to stage this chunk for network
         # transfer before moving on to the next chunk.
