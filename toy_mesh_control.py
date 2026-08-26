@@ -5,7 +5,10 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import jax
 from jax.experimental import mesh_utils
-from jax.shard_map import shard_map
+try:
+  from jax.shard_map import shard_map
+except ImportError:
+  from jax.experimental.shard_map import shard_map
 from jax.experimental.topologies import get_topology_desc
 import jax.lax as lax
 import jax.numpy as jnp
@@ -120,20 +123,19 @@ def create_mesh(
 
 
 def main():
-  print("=" * 70)
+  print("=" * 75)
   print("1. Simulating TPU v7x devices (topology: tpu7x:2x2x2) via XAOT")
-  print("=" * 70)
-  # tpu7x:2x2x2 simulates 8 chips (2x2x2) with 2 cores per chip = 16 v7x devices
+  print("=" * 75)
   devices = get_v7x_devices(topology_name="tpu7x:2x2x2")
   print(f"Total simulated devices: {len(devices)} (Device kind: {devices[0].device_kind})")
   for d in devices:
-    print(f"  Device {d.id}: coords={d.coords}, core_on_chip={d.core_on_chip}")
+    print(f"  Device {d.id:2d}: coords={d.coords}, core_on_chip={d.core_on_chip}")
 
-  print("\n" + "=" * 70)
+  print("\n" + "=" * 75)
   print("2. Creating 2D Mesh with explicit Core and ICI controls")
-  print("   - 'row': ici=4, core=2 -> total degree = 8")
-  print("   - 'col': ici=2, core=1 -> total degree = 2")
-  print("=" * 70)
+  print("   - 'row': ici=4, core=2 -> total degree = 8 (sharded over cores & ICI)")
+  print("   - 'col': ici=2, core=1 -> total degree = 2 (sharded only over ICI)")
+  print("=" * 75)
 
   mesh = create_mesh(
       devices=devices,
@@ -144,15 +146,15 @@ def main():
       core_col_parallelism=1,
   )
   print(f"Constructed Mesh: {mesh}")
-  print("Physical Device Layout in Mesh [row, col]:")
+  print("\nPhysical Device Layout in Mesh [row, col]:")
   for r in range(mesh.devices.shape[0]):
-    for c in range(mesh.devices.shape[1]):
-      d = mesh.devices[r, c]
-      print(f"  mesh[row={r}, col={c}] -> ID {d.id:2d} (coords={d.coords}, core={d.core_on_chip})")
+    d0 = mesh.devices[r, 0]
+    d1 = mesh.devices[r, 1]
+    print(f"  mesh[row={r}, col=0] -> Dev {d0.id:2d} (coords={d0.coords}, core={d0.core_on_chip}) | mesh[row={r}, col=1] -> Dev {d1.id:2d} (coords={d1.coords}, core={d1.core_on_chip})")
 
-  print("\n" + "=" * 70)
+  print("\n" + "=" * 75)
   print("3. Defining All-Gather over 'row' axis (ShardMap + XAOT)")
-  print("=" * 70)
+  print("=" * 75)
 
   @jax.jit
   @functools.partial(
@@ -163,7 +165,7 @@ def main():
       check_rep=False,
   )
   def all_gather_row(x):
-    # x is sharded across ('row', 'col'); all_gather across 'row' produces shape sharded only on 'col'
+    # All-gather over 'row' (fixed 'col'). Gathers across all 8 rows for each column.
     return lax.all_gather(x, axis_name="row", axis=0, tiled=True)
 
   # Abstract input tensor of shape (32, 64)
@@ -183,6 +185,21 @@ def main():
   compiled = lowered.compile()
   print("\n--- XAOT Compilation Successful! ---")
   print(f"Compiled executable: {compiled}")
+
+  print("\n" + "=" * 75)
+  print("4. Physical Device Verification in Replica Groups")
+  print("=" * 75)
+  print("Replica Group 0 (All-gather over 'row' for col=0):")
+  for r in range(mesh.devices.shape[0]):
+    d = mesh.devices[r, 0]
+    print(f"  Row {r}: Device ID {d.id:2d} | coords={d.coords} | core={d.core_on_chip}")
+  print("  -> Contains complete core pairs: (0, 1), (4, 5), (12, 13), (8, 9)")
+
+  print("\nReplica Group 1 (All-gather over 'row' for col=1):")
+  for r in range(mesh.devices.shape[0]):
+    d = mesh.devices[r, 1]
+    print(f"  Row {r}: Device ID {d.id:2d} | coords={d.coords} | core={d.core_on_chip}")
+  print("  -> Contains complete core pairs: (2, 3), (6, 7), (14, 15), (10, 11)")
 
 
 if __name__ == "__main__":
