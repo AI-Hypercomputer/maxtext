@@ -56,6 +56,18 @@ def _create_2d_test_mesh(axis_names=("data", "model")):
   return Mesh(devices=mesh_devices, axis_names=axis_names)
 
 
+def _create_size_one_test_mesh(axis_names):
+  """A mesh with every axis of size one, whatever the runner has.
+
+  TestNnxConstructNamedSharding only checks which axis *name* a logical axis resolves
+  to, and its arrays are deliberately small and odd-shaped (e.g. shape (3,)). Sizing the
+  axes off the ambient device count would make those arrays indivisible as soon as
+  another test module in the same pytest process raises it — for example by setting
+  XLA_FLAGS=--xla_force_host_platform_device_count.
+  """
+  return Mesh(devices=np.array(jax.local_devices()[:1]).reshape((1,) * len(axis_names)), axis_names=axis_names)
+
+
 def _build_state_mesh_shardings(model, tx):
   """Build an nnx.State of NamedShardings mirroring the TrainStateNNX layout.
 
@@ -268,8 +280,8 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
 
   def setUp(self):
     # Mesh needs to contain every axis name the tests reference in partition specs.
-    self.mesh = _create_2d_test_mesh(axis_names=("fsdp", "stage"))
-    # In local test environments (e.g. single-device CPU), all mesh axes have size 1.
+    self.mesh = _create_size_one_test_mesh(axis_names=("fsdp", "stage"))
+    # All mesh axes have size 1.
     # We stub remove_size_one_mesh_axis to act as a no-op so that resolved physical PartitionSpecs
     # are returned unreduced (e.g. retaining "fsdp", "stage", etc.), allowing us to verify naming
     # resolution. The actual size-one axis removal is tested separately in TestGetNNXNamedShardingSizeOneAxes.
