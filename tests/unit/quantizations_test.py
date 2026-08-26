@@ -717,6 +717,52 @@ class MaybeQuantizeModelTest(unittest.TestCase):
     self.assertNotIn("intermediates", state_dict)
 
 
+class EinsumParent(nnx.Module):
+  """Minimal NNX parent for apply_einsum_in_nnx tests."""
+
+  def __init__(self, rngs: nnx.Rngs):
+    self.rngs = rngs
+
+
+class MoEQuantizedEinsumTest(unittest.TestCase):
+  """Tests for MoE quantized einsum helpers."""
+
+  def test_nanoo_fp8_einsum_uses_fnuz_dtypes(self):
+    quant = quantizations.NANOOFp8Quantization()
+    einsum_mod = quant.einsum(dtype=jnp.float32)
+    self.assertEqual(einsum_mod.e4m3_dtype, jnp.float8_e4m3fnuz)
+    self.assertEqual(einsum_mod.e5m2_dtype, jnp.float8_e5m2fnuz)
+
+  def test_create_fp8_einsum(self):
+    for quant_str in ("fp8", "nanoo_fp8"):
+      quant = _configure_quantization(quant_str=quant_str)
+      wrapper = quantizations.create_fp8_einsum(quant, jnp.float32, nnx.Rngs(0))
+      lhs = jnp.ones((4, 8))
+      rhs = jnp.ones((8, 16))
+      result = wrapper("ab,bc->ac", lhs, rhs, mutable=["_overwrite_with_gradient"])
+      self.assertEqual(result.shape, (4, 16))
+
+  def test_apply_einsum_in_nnx_plain_callable(self):
+    parent = EinsumParent(nnx.Rngs(0))
+    lhs = jnp.ones((2, 3))
+    rhs = jnp.ones((3, 4))
+    result = quantizations.apply_einsum_in_nnx(parent, "plain", jnp.einsum, [], "ij,jk->ik", lhs, rhs)
+    expected = jnp.einsum("ij,jk->ik", lhs, rhs)
+    self.assertTrue(jnp.allclose(result, expected))
+
+  def test_apply_einsum_in_nnx_aqt_reuses_wrapper(self):
+    quant = _configure_quantization(quant_str="int8")
+    parent = EinsumParent(nnx.Rngs(0))
+    lhs = jnp.ones((2, 2))
+    rhs = jnp.ones((2, 2))
+    einsum = quant.einsum(mesh_axes=())
+    result1 = quantizations.apply_einsum_in_nnx(parent, "aqt_test", einsum, ["aqt"], "bc,ab->ac", lhs, rhs)
+    wrapper = getattr(parent, "quant_einsum_aqt_test")
+    result2 = quantizations.apply_einsum_in_nnx(parent, "aqt_test", einsum, ["aqt"], "bc,ab->ac", lhs, rhs)
+    self.assertIs(getattr(parent, "quant_einsum_aqt_test"), wrapper)
+    self.assertEqual(result1.shape, result2.shape)
+
+
 class StaticScaleTest(unittest.TestCase):
   """Tests for static scale extraction."""
 
