@@ -59,6 +59,13 @@ import time
 from typing import Any, Callable, List, Sequence
 import absl
 import ml_dtypes
+import numpy as np
+
+# Ensure safetensors and numpy recognize FP8 and BF16 types
+np.float8_e4m3fn = ml_dtypes.float8_e4m3fn
+np.float8_e5m2 = ml_dtypes.float8_e5m2
+np.bfloat16 = ml_dtypes.bfloat16
+
 import flax.linen as nn
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
@@ -74,7 +81,6 @@ from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging, max_utils, maxtext_utils
 from maxtext.utils.globals import HF_IDS
-import numpy as np
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
 
@@ -340,8 +346,15 @@ def get_maxtext_model_info(config):
   return maxtext_abstract_dict, abstract_params_treedef
 
 
+def _recursive_get_tensor(getter, key):
+  """Recursively retrieves tensors from nested tuples or lists of keys."""
+  if isinstance(key, (list, tuple)):
+    return tuple(_recursive_get_tensor(getter, k) for k in key)
+  return getter(key)
+
+
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]],
+    hf_source_keys: List[List[Any]],
     tensor_getter_fn: Callable[[str], np.ndarray],
     hook_fns: Any,
     target_shape: tuple,
@@ -373,10 +386,7 @@ def _build_multi_axis_stacked_tensor(
     layer_tensors_for_expert = []
     # Inner loop iterates through layers for the current expert
     for hf_key_single in layer_keys_for_expert:
-      if isinstance(hf_key_single, (list, tuple)):
-        hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
-      else:
-        hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      hf_tensor_numpy = _recursive_get_tensor(tensor_getter_fn, hf_key_single)
       processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
       layer_tensors_for_expert.append(processed_hf_tensor)
     all_expert_tensors.append(np.stack(layer_tensors_for_expert, axis=0))
@@ -384,7 +394,7 @@ def _build_multi_axis_stacked_tensor(
 
 
 def _build_single_axis_stacked_tensor(
-    hf_source_keys: List[str],
+    hf_source_keys: List[Any],
     tensor_getter_fn: Callable[[str], np.ndarray],
     hook_fns: Any,
     target_shape: tuple,
@@ -421,10 +431,7 @@ def _build_single_axis_stacked_tensor(
   mt_slice_shape = tuple(mt_slice_shape_list)
 
   for hf_key_single in hf_source_keys:
-    if isinstance(hf_key_single, (list, tuple)):
-      hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
-    else:
-      hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+    hf_tensor_numpy = _recursive_get_tensor(tensor_getter_fn, hf_key_single)
     processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
     tensors_to_stack.append(processed_hf_tensor)
 
@@ -450,10 +457,8 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
-      if isinstance(key, (list, tuple)):
-        tensors = tuple(getter(k) for k in key)
-        return apply_hook_fns(tensors, shape, hook)
-      return apply_hook_fns(getter(key), shape, hook)
+      tensors = _recursive_get_tensor(getter, key)
+      return apply_hook_fns(tensors, shape, hook)
 
     load_fn = partial(
         _loader,
@@ -982,6 +987,18 @@ def main(
     # load config
     hf_config_obj = HF_MODEL_CONFIGS[model_key]
     hf_config_dict = hf_config_obj.to_dict()
+    if model_id:
+      try:
+        if os.path.isdir(model_id):
+          config_file = os.path.join(model_id, "config.json")
+        else:
+          config_file = hf_hub_download(repo_id=model_id, filename="config.json", token=hf_token, revision=revision)
+        with open(config_file, "r") as f:
+          loaded_hf_cfg = json.load(f)
+        if "quantization_config" in loaded_hf_cfg:
+          hf_config_dict["quantization_config"] = loaded_hf_cfg["quantization_config"]
+      except Exception as e:
+        max_logging.log(f"Note: Could not load quantization_config from {model_id}: {e}")
     # example of param mapping (gemma2, maxtext:huggingface):
     # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
     #   f"model.layers.{global_layer_idx}.input_layernorm.weight",

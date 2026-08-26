@@ -48,8 +48,15 @@ def _binary_chunked_stack(tensors: List[np.ndarray], axis: int) -> np.ndarray:
   return np.concatenate([left, right], axis=axis)
 
 
+def _recursive_get_tensor(getter, key):
+  """Recursively retrieves tensors from nested tuples or lists of keys."""
+  if isinstance(key, (list, tuple)):
+    return tuple(_recursive_get_tensor(getter, k) for k in key)
+  return getter(key)
+
+
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]],
+    hf_source_keys: List[List[Any]],
     tensor_getter_fn: Callable[[str], np.ndarray],
     hook_fns: Any,
     target_leaf: Any,
@@ -85,7 +92,7 @@ def _build_multi_axis_stacked_tensor(
     layer_tensors_for_expert = []
     # Inner loop iterates through layers for the current expert
     for hf_key_single in layer_keys_for_expert:
-      hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      hf_tensor_numpy = _recursive_get_tensor(tensor_getter_fn, hf_key_single)
       processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
 
       if target_sharding is not None:
@@ -104,7 +111,7 @@ def _build_multi_axis_stacked_tensor(
 
 
 def _build_single_axis_stacked_tensor(
-    hf_source_keys: List[str],
+    hf_source_keys: List[Any],
     tensor_getter_fn: Callable[[str], np.ndarray],
     hook_fns: Any,
     target_leaf: Any,
@@ -142,7 +149,7 @@ def _build_single_axis_stacked_tensor(
 
   tensors_to_stack = []
   for hf_key_single in hf_source_keys:
-    hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+    hf_tensor_numpy = _recursive_get_tensor(tensor_getter_fn, hf_key_single)
     processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
 
     if target_sharding is not None:
@@ -160,11 +167,11 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, leaf, hook):
-      if hasattr(leaf, "sharding"):
-        array = apply_hook_fns(getter(key), leaf.shape, hook)
+      array = apply_hook_fns(_recursive_get_tensor(getter, key), leaf.shape if hasattr(leaf, "shape") else leaf, hook)
+      if hasattr(leaf, "sharding") and leaf.sharding is not None:
         return jax.device_put(array, device=leaf.sharding)
       else:
-        return apply_hook_fns(getter(key), leaf, hook)
+        return array
 
     return partial(
         _loader,
