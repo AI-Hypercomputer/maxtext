@@ -68,9 +68,15 @@ fi
 
 ARTIFACT_DIR="$OUTPUT_DIR/python${PYTHON_VERSION//./_}"
 
-echo "=== Running seed-env with $BASE_REQUIREMENTS ==="
+if [[ "$BASE_REQUIREMENTS" == *post-train* ]]; then
+  SEED_BASE_REQUIREMENTS="$(dirname "$BASE_REQUIREMENTS")/requirements.txt"
+  echo "=== Running seed-env for post-train requirements using base requirements $SEED_BASE_REQUIREMENTS ==="
+else
+  SEED_BASE_REQUIREMENTS="$BASE_REQUIREMENTS"
+  echo "=== Running seed-env with $SEED_BASE_REQUIREMENTS ==="
+fi
 "$SEED_ENV" \
-  --local-requirements "$BASE_REQUIREMENTS" \
+  --local-requirements "$SEED_BASE_REQUIREMENTS" \
   --host-name MaxText \
   --hardware "$HARDWARE" \
   --python-version "$PYTHON_VERSION" \
@@ -99,7 +105,32 @@ strip_exact_pins() {
   sed 's/^\([A-Za-z0-9._-]*\(\[[^]]*\]\)\?\)[[:space:]]*==[[:space:]]*\([^,; ]*\)/\1>=\3/'
 }
 
+if [[ -n "$OVERRIDE_REQUIREMENTS" ]]; then
+  echo "=== Adding overrides from $OVERRIDE_REQUIREMENTS ==="
+
+  uv run --no-project --with toml python3 -c "
+import toml
+path = '$ARTIFACT_DIR/pyproject.toml'
+with open(path) as f: data = toml.load(f)
+if 'tool' not in data: data['tool'] = {}
+if 'uv' not in data['tool']: data['tool']['uv'] = {}
+overrides = []
+with open('$OVERRIDE_REQUIREMENTS') as f:
+  for line in f:
+    line = line.split('#')[0].strip()
+    if line: overrides.append(line)
+data['tool']['uv']['override-dependencies'] = overrides
+with open(path, 'w') as f: toml.dump(data, f)
+"
+fi
+
 if [[ "$BASE_REQUIREMENTS" == *post-train* ]]; then
+  echo "=== Adding post-train base requirements ==="
+  mapfile -t _post_train_base_pkgs < <(
+    expand_requirements "$BASE_REQUIREMENTS" \
+      | strip_exact_pins
+  )
+
   echo "=== Cloning vllm and tpu-inference Github repositories ==="
   WORK_DIR="$(pwd)"
   GITHUB_DEPS="src/dependencies/extra_deps/post_train_github_deps.txt"
@@ -131,33 +162,26 @@ if [[ "$BASE_REQUIREMENTS" == *post-train* ]]; then
   UV_TORCH_BACKEND=cpu VLLM_TARGET_DEVICE=tpu uv add \
     --managed-python \
     --no-sync \
-    --resolution=lowest \
     --directory "$ARTIFACT_DIR" \
+    "${_post_train_base_pkgs[@]}" \
     "${_vllm_pkgs[@]}" \
     "${_tpu_pkgs[@]}"
 fi
 
 if [[ -n "$OVERRIDE_REQUIREMENTS" ]]; then
-  echo "=== Adding overrides from $OVERRIDE_REQUIREMENTS ==="
-
-  # Append [tool.uv] with overrides to the artifact pyproject.toml.
-  # Overrides force specific versions that conflict with the JAX seed lock.
-  {
-    echo ""
-    echo "[tool.uv]"
-    echo "override-dependencies = ["
-    grep -v '^\s*#' "$OVERRIDE_REQUIREMENTS" | grep -v '^\s*$' | sed 's/.*/"&",/' | sed 's/^/  /'
-    echo "]"
-  } >> "$ARTIFACT_DIR/pyproject.toml"
-
   mapfile -t _pkgs < <(grep -v '^\s*#' "$OVERRIDE_REQUIREMENTS" | grep -v '^\s*$')
   uv add \
     --managed-python \
     --no-sync \
-    --resolution=lowest \
     --directory "$ARTIFACT_DIR" \
     "${_pkgs[@]}"
 fi
+
+echo "=== Resolving lock file ==="
+uv lock \
+  --managed-python \
+  --resolution=lowest \
+  --directory "$ARTIFACT_DIR"
 
 echo "=== Exporting updated lock to generated requirements ==="
 uv export \

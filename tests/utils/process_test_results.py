@@ -67,7 +67,12 @@ def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_d
         markers.add(prop.get("value"))
 
   is_integration = "integration_test" in markers
-  is_cpu = "cpu" in os.path.basename(xml_file).lower() or "cpu" in job_name.lower()
+  is_cpu = (
+      "cpu" in os.path.basename(xml_file).lower()
+      or "cpu" in job_name.lower()
+      or "decoupled" in job_name.lower()
+      or "decoupled" in os.path.basename(xml_file).lower()
+  )
 
   if is_integration:
     abs_noise_threshold = ABS_INCREASE_INTEGRATION_SEC
@@ -184,7 +189,7 @@ def main():
     benchmarks = []
     for job, total_time in total_times_by_job.items():
       # Exclude CPU suites from macro-level dashboard tracking to avoid false alerts from CPU runner noise
-      if "cpu" in job.lower():
+      if "cpu" in job.lower() or "decoupled" in job.lower():
         continue
       benchmarks.append(
           {
