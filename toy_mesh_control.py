@@ -1,20 +1,31 @@
-"""Standalone prototype demonstrating explicit core and ICI mesh control for multi-core TPUs (e.g., v7x) with XAOT compilation."""
+"""Standalone prototype demonstrating explicit core and ICI mesh control for multi-core TPU v7x with XAOT compilation."""
 
 import functools
 from typing import Any, Mapping, Sequence
 import numpy as np
 import jax
 from jax.experimental import mesh_utils
-from jax.experimental.shard_map import shard_map
+from jax.shard_map import shard_map
 from jax.experimental.topologies import get_topology_desc
 import jax.lax as lax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 
-def get_simulated_v7x_devices(topology_name: str = "v4:2x2x1") -> Sequence[Any]:
-  """Simulate a multi-core TPU (such as v7x with 2 cores per chip) via XAOT topology description."""
-  topology = get_topology_desc(platform="tpu", topology_name=topology_name)
+def get_v7x_devices(topology_name: str = "tpu7x:2x2x2") -> Sequence[Any]:
+  """Simulate TPU v7x multi-core devices (2 cores per chip) via XAOT topology description.
+
+  For example, `tpu7x:2x2x2` defines a 2x2x2 chip grid (8 chips) with 2 cores
+  per chip = 16 total v7x devices (device_kind: TPU7x).
+  """
+  topology = get_topology_desc(
+      platform="tpu",
+      topology_name=topology_name,
+      chip_config_name="default",
+      chips_per_host_bounds=(2, 2, 1),
+      num_slices=1,
+      wrap=(False, False, False),
+  )
   return topology.devices
 
 
@@ -28,7 +39,7 @@ def create_mesh(
   """Creates a JAX Mesh with explicit control over ICI vs Core parallelism per logical axis.
 
   Args:
-    devices: Sequence of JAX devices (real or simulated via get_topology_desc).
+    devices: Sequence of JAX devices (e.g. from get_v7x_devices).
     axis_names: Tuple/List of logical axis names (e.g., ('row', 'col')).
     ici_parallelism: Mapping of axis name -> ICI parallelism degree.
     core_parallelism: Mapping of axis name -> Core parallelism degree.
@@ -43,7 +54,7 @@ def create_mesh(
   ici_map = dict(ici_parallelism or {})
   core_map = dict(core_parallelism or {})
 
-  # Parse additional kwargs like ici_row_parallelism=2, core_row_parallelism=2
+  # Parse additional kwargs like ici_row_parallelism=4, core_row_parallelism=2
   for k, v in kwargs.items():
     if k.startswith("ici_") and k.endswith("_parallelism"):
       axis = k[4:-12]
@@ -58,21 +69,22 @@ def create_mesh(
   num_chips = len(coords_set)
   cores_per_chip = len(cores_set)
 
-  # Validate products
+  # Validate products match available hardware
   ici_total = int(np.prod([ici_map.get(ax, 1) for ax in axis_names]))
   core_total = int(np.prod([core_map.get(ax, 1) for ax in axis_names]))
 
   if ici_total != num_chips:
     raise ValueError(
-        f"Total ICI parallelism ({ici_total}) must equal number of chips ({num_chips})."
+        f"Total ICI parallelism ({ici_total}) must equal number of chips"
+        f" ({num_chips})."
     )
   if core_total != cores_per_chip:
     raise ValueError(
-        f"Total Core parallelism ({core_total}) must equal cores per chip ({cores_per_chip})."
+        f"Total Core parallelism ({core_total}) must equal cores per chip"
+        f" ({cores_per_chip})."
     )
 
-  # Map chips to ICI logical dimensions
-  # Pick representative device per chip (core 0)
+  # Map chips to ICI logical dimensions using mesh_utils on core-0 representatives
   chip_rep_devices = [d for d in devices if d.core_on_chip == cores_set[0]]
   ici_shape = tuple(ici_map.get(ax, 1) for ax in axis_names)
   ici_chip_mesh = mesh_utils.create_device_mesh(
@@ -108,25 +120,25 @@ def create_mesh(
 
 
 def main():
-  print("=" * 60)
-  print("1. Simulating multi-core TPU (v7x-like with 2 cores/chip) via XAOT")
-  print("=" * 60)
-  # v4:2x2x1 simulates 4 chips (2x2x1) with 2 cores per chip = 8 devices
-  devices = get_simulated_v7x_devices(topology_name="v4:2x2x1")
-  print(f"Total simulated devices: {len(devices)}")
+  print("=" * 70)
+  print("1. Simulating TPU v7x devices (topology: tpu7x:2x2x2) via XAOT")
+  print("=" * 70)
+  # tpu7x:2x2x2 simulates 8 chips (2x2x2) with 2 cores per chip = 16 v7x devices
+  devices = get_v7x_devices(topology_name="tpu7x:2x2x2")
+  print(f"Total simulated devices: {len(devices)} (Device kind: {devices[0].device_kind})")
   for d in devices:
     print(f"  Device {d.id}: coords={d.coords}, core_on_chip={d.core_on_chip}")
 
-  print("\n" + "=" * 60)
+  print("\n" + "=" * 70)
   print("2. Creating 2D Mesh with explicit Core and ICI controls")
-  print("   - 'row': ici=2, core=2 -> total degree = 4")
+  print("   - 'row': ici=4, core=2 -> total degree = 8")
   print("   - 'col': ici=2, core=1 -> total degree = 2")
-  print("=" * 60)
+  print("=" * 70)
 
   mesh = create_mesh(
       devices=devices,
       axis_names=("row", "col"),
-      ici_row_parallelism=2,
+      ici_row_parallelism=4,
       core_row_parallelism=2,
       ici_col_parallelism=2,
       core_col_parallelism=1,
@@ -136,11 +148,11 @@ def main():
   for r in range(mesh.devices.shape[0]):
     for c in range(mesh.devices.shape[1]):
       d = mesh.devices[r, c]
-      print(f"  mesh[row={r}, col={c}] -> ID {d.id} (coords={d.coords}, core={d.core_on_chip})")
+      print(f"  mesh[row={r}, col={c}] -> ID {d.id:2d} (coords={d.coords}, core={d.core_on_chip})")
 
-  print("\n" + "=" * 60)
+  print("\n" + "=" * 70)
   print("3. Defining All-Gather over 'row' axis (ShardMap + XAOT)")
-  print("=" * 60)
+  print("=" * 70)
 
   @jax.jit
   @functools.partial(
@@ -154,9 +166,9 @@ def main():
     # x is sharded across ('row', 'col'); all_gather across 'row' produces shape sharded only on 'col'
     return lax.all_gather(x, axis_name="row", axis=0, tiled=True)
 
-  # Abstract input tensor of shape (16, 32)
+  # Abstract input tensor of shape (32, 64)
   x_sharding = NamedSharding(mesh, P("row", "col"))
-  x_abstract = jax.ShapeDtypeStruct((16, 32), jnp.float32, sharding=x_sharding)
+  x_abstract = jax.ShapeDtypeStruct((32, 64), jnp.float32, sharding=x_sharding)
 
   # Generate and print JAXPR
   jaxpr = jax.make_jaxpr(all_gather_row)(x_abstract)
