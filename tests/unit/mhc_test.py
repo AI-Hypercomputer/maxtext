@@ -34,6 +34,7 @@ from maxtext.layers import attention_mla, linears, mhc, moe
 from maxtext.layers.initializers import nd_dense_init
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
@@ -299,6 +300,21 @@ class TestMHC(parameterized.TestCase):
       np.testing.assert_allclose(row_sums, jnp.ones_like(row_sums), atol=1e-2)
       np.testing.assert_allclose(col_sums, jnp.ones_like(col_sums), atol=1e-2)
 
+  def test_mhc_lite_sharding_eval_shape(self):
+    """Verify that enable_mhc_lite=True works with nnx.eval_shape and nnx_construct_named_sharding."""
+    self._setup_mhc(4, enable_mhc_lite=True)
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+
+      def _create_model():
+        rngs = nnx.Rngs(params=jax.random.key(0), dropout=jax.random.key(42))
+        return mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, rngs)
+
+      abs_model = nnx.eval_shape(_create_model)
+      _, abs_var_state = nnx.split(abs_model)
+      named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, self.mesh)
+      self.assertIsNotNone(named_sharding_state)
+      self.assertFalse(hasattr(abs_model, "permutation_matrices"))
+
   def test_weight_concatenation_equivalence(self):
     """Verify that fused projection matches sequential projections."""
     self._setup_mhc(4)
@@ -562,7 +578,7 @@ class TestMHC(parameterized.TestCase):
         out, _ = module_baseline(self.pre_norm, layer_fn, x=x, mhc_type=HyperConnectionType.MLP_DENSE)
         return out
 
-      (out_base, vjp_base) = jax.vjp(forward_baseline, self.x)
+      out_base, vjp_base = jax.vjp(forward_baseline, self.x)
       cotangent = jax.random.normal(jax.random.PRNGKey(123), self.x.shape, dtype=self.x.dtype)
       (dx_base,) = vjp_base(cotangent)
 
@@ -603,7 +619,7 @@ class TestMHC(parameterized.TestCase):
           out, _ = module_kernel(self.pre_norm, layer_fn, x=x, mhc_type=HyperConnectionType.MLP_DENSE)
           return out
 
-        (out_kern, vjp_kern) = jax.vjp(forward_kernel, self.x)
+        out_kern, vjp_kern = jax.vjp(forward_kernel, self.x)
         (dx_kern,) = vjp_kern(cotangent)
 
       np.testing.assert_allclose(out_kern, out_base, rtol=5e-2, atol=5e-2)

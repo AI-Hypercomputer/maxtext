@@ -236,6 +236,7 @@ moe_dispatch_no_expert_sharding: false
 use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the MoE permute path; valid both with and
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
+moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
@@ -274,6 +275,9 @@ merge_gating_gmm: false
 use_tokamax_gmm: false
 # Whether to use Tokamax GMM v2 for MoE kernel. Requires use_tokamax_gmm=true.
 use_gmm_v2: false
+# Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
+# When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
+use_gmm_v2_heuristic_tiling: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
@@ -282,6 +286,9 @@ moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
+# Keep embed_moe sharded so we can manually QAG it over FSDP.
+# Requires quantization to be specified and weight_quantization_calibration_method to be fixed (static scaling mode).
+shard_embed_moe_on_fsdp: false
 # use fsdp and fsdp_transpose axes for sharding the moe weights
 use_2d_fsdp_sharding: false
 
@@ -595,6 +602,7 @@ logical_axis_rules: [
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
                       # Dense Activations
+                      ['segment_ids_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_mlp', ['tensor', 'tensor_sequence']],
                       # Note activation batch and length also get used in vocab
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],

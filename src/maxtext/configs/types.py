@@ -916,6 +916,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
   )
+  moe_use_direct_token_gather: bool = Field(
+      False,
+      description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -961,6 +965,10 @@ class MoEGeneral(BaseModel):
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
   )
+  shard_embed_moe_on_fsdp: bool = Field(
+      False,
+      description="Keep embed_moe sharded so we can manually QAG it over FSDP.",
+  )
   use_2d_fsdp_sharding: bool = Field(
       False,
       description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
@@ -992,6 +1000,17 @@ class MoEGeneral(BaseModel):
   def validate_moe_chunks(self) -> "MoEGeneral":
     if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_sharding_strategy(self) -> "MoEGeneral":
+    """Ensure that only one MoE FSDP sharding strategy is active at a time."""
+    active_sharding_flags = sum([self.shard_exp_on_fsdp, self.use_2d_fsdp_sharding, self.shard_embed_moe_on_fsdp])
+    if active_sharding_flags > 1:
+      raise ValueError(
+          "Only one of shard_exp_on_fsdp, use_2d_fsdp_sharding, or "
+          "shard_embed_moe_on_fsdp can be True at the same time."
+      )
     return self
 
 
@@ -1052,6 +1071,11 @@ class MoEKernels(BaseModel):
   use_gmm_v2: bool = Field(
       False,
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
+  )
+
+  use_gmm_v2_heuristic_tiling: bool = Field(
+      False,
+      description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
 
 
@@ -3173,6 +3197,18 @@ class MaxTextConfig(
       return yaml.safe_load(f) or {}
 
   @model_validator(mode="after")
+  def validate_shard_embed_moe_on_fsdp(self) -> "MaxTextConfig":
+    """Raise ValueError if shard_embed_moe_on_fsdp is used without fixed weight quantization calibration."""
+    if self.shard_embed_moe_on_fsdp and (
+        self.quantization == "" or not self.weight_quantization_calibration_method.startswith("fixed")
+    ):
+      raise ValueError(
+          "shard_embed_moe_on_fsdp requires quantization to be specified and "
+          "weight_quantization_calibration_method to be fixed (static scaling mode)."
+      )
+    return self
+
+  @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
     Computes all derived values and runs all cross-field validations after initial parsing.
@@ -3905,6 +3941,8 @@ class MaxTextConfig(
             f"Engram vocab size mismatch: expected {self.engram_max_ngram_size - 1} (max_ngram_size - 1), "
             f"but got {self.engram_vocab_bases}."
         )
+    if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
+      raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
     if self.num_experts > 1:
       if self.moe_mlp_dim <= 0:
         raise ValueError("moe_mlp_dim must be positive for MoE models (num_experts > 1)")
@@ -4266,6 +4304,10 @@ class MaxTextConfig(
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
     ]:
@@ -4314,6 +4356,9 @@ class MaxTextConfig(
         raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
+
+    if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
+      raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

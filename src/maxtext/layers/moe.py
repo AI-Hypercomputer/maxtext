@@ -33,6 +33,7 @@ from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import sort_activations
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
@@ -149,6 +150,16 @@ def _sort_activations(
     if use_custom_vjp:
       return _sort_activations_custom(inputs, sort_indices)
     return inputs[sort_indices, ...]
+
+
+def _route_activations(inputs: jax.Array, selected_experts: jax.Array) -> jax.Array:
+  """Groups token activations by expert without materializing Top-K copies."""
+  selected_experts = selected_experts.reshape((inputs.shape[0], -1))
+  # When use_gather_mosaic_kernel=False, use the general JAX backward, which
+  # gathers and sums gradients from all expert copies of each token. The
+  # optimized Mosaic gather-reduce kernel currently requires exactly 8 selected
+  # experts per token and is enabled only by the specialized batch-split path.
+  return sort_activations.route(inputs, selected_experts, use_gather_mosaic_kernel=False)
 
 
 @jax.custom_vjp
@@ -569,7 +580,7 @@ class RoutedMoE(nnx.Module):
               self.rngs.params(),
               (
                   self.num_experts,
-                  self.intermediate_dim,
+                  moe_intermediate_dim,
                   self.moe_expert_input_dim,
               ),
               self.weight_dtype,
@@ -604,7 +615,7 @@ class RoutedMoE(nnx.Module):
               self.rngs.params(),
               (
                   self.num_experts,
-                  self.intermediate_dim,
+                  moe_intermediate_dim,
                   self.moe_expert_input_dim,
               ),
               self.weight_dtype,
@@ -957,11 +968,13 @@ class RoutedMoE(nnx.Module):
       if roll_to_expert_id is not None:
         flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
       sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-      # sort inputs for number of selected experts
-      replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-      sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
-          self.dtype
-      )
+      if self.config.moe_use_direct_token_gather:
+        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts).astype(self.dtype)
+      else:
+        replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
+            self.dtype
+        )
       group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
@@ -1564,6 +1577,7 @@ class RoutedMoE(nnx.Module):
             lhs_vma_axes=lhs_vma_axes,
             rhs_vma_axes=rhs_vma_axes,
             use_gmm_v2=self.config.use_gmm_v2,
+            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
         )
@@ -1587,11 +1601,12 @@ class RoutedMoE(nnx.Module):
       # In the decoding case, the expert axis is instead replicated along the tensor's batch dimension.
       return input_activation.shape[0] > 1
 
-    def explicitly_weight_ag(shard_exp_on_fsdp):
-      if shard_exp_on_fsdp:
-        quantization_rule = qpl.get_current_rule("gmm")
-        if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
-          return True
+    def explicitly_weight_ag():
+      if not (self.config.shard_exp_on_fsdp or self.config.shard_embed_moe_on_fsdp):
+        return False
+      quantization_rule = qpl.get_current_rule("gmm")
+      if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
+        return True
       return False
 
     def maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec):
@@ -1644,8 +1659,7 @@ class RoutedMoE(nnx.Module):
       # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
       # mlp_no_fsdp axis
       if self.config.shard_exp_on_fsdp:
-        quantization_rule = qpl.get_current_rule("gmm")
-        if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
+        if explicitly_weight_ag():
           # special sharding when using static scaling for weights in quantization with shard_exp_on_fsdp
           w0_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
           w1_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
@@ -1659,8 +1673,13 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         w1_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
+      elif self.config.shard_embed_moe_on_fsdp and explicitly_weight_ag():
+        # Keep embed_moe sharded so we can manually QAG it over FSDP
+        w0_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
+        w1_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
+        wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
       else:
-        # These are the main shardings used by default - they use funky rules to AG over FSDP.
+        # Tell XLA to automatically gather the D dimension (e.g. for dynamic absmax scaling)
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
@@ -1683,7 +1702,7 @@ class RoutedMoE(nnx.Module):
       )
 
     is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
-    weight_gather = explicitly_weight_ag(self.config.shard_exp_on_fsdp)
+    weight_gather = explicitly_weight_ag()
     (
         batch_logical_axis,
         input_partition_pspec,
@@ -1899,8 +1918,14 @@ class RoutedMoE(nnx.Module):
     def get_wi_gmm_params():
       wi_gather_axes = []
       if weight_gather:
-        # wi [Experts, In, Hidden] -> Gather Exp(0) and Hidden(2)
-        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
+        # weight_gather implies either exp or embed_moe is sharded.
+        if self.config.shard_exp_on_fsdp:
+          # wi [Experts, In, Hidden] -> Gather Exp(0)
+          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
+        else:
+          # Gather In(1) where embed_moe is sharded.
+          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[1], 1))
+        # Gather Hidden(2)
         wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
       wi_tile_size = (
           self.config.wi_tile_fwd_batch_seq,  # m (LHS batch)
@@ -1918,8 +1943,14 @@ class RoutedMoE(nnx.Module):
     def get_wo_gmm_params():
       wo_gather_axes = []
       if weight_gather:
-        # wo [Experts, Hidden, Out] -> Gather Exp(0) and Hidden(1)
-        wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
+        # weight_gather implies either exp or embed_moe is sharded.
+        if self.config.shard_exp_on_fsdp:
+          # wo [Experts, Hidden, Out] -> Gather Exp(0)
+          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
+        else:
+          # Gather Out(2) where embed_moe is sharded.
+          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[2], 2))
+        # Gather Hidden(1)
         wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
       wo_tile_size = (
           self.config.wo_tile_fwd_batch_seq,  # m (LHS batch)

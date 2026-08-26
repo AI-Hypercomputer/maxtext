@@ -31,6 +31,8 @@ Shape = Sequence[int]
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 
+SEGMENT_ID_BATCH = "segment_ids_batch"
+
 BATCH = "activation_batch"
 BATCH_ATTN = "activation_batch_attn"
 
