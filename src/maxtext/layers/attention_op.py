@@ -332,7 +332,12 @@ class HCAStaticMask(splash_attention_mask.Mask):
     c_idx = cols - self.local_kv_len - self.pad_kv_total
     c_thresh = (rows + 1) // self.compress_ratio
     comp_m = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < self.compressed_kv_len)
-    return local_m | comp_m
+
+    # Padded query rows attend to column 0 so logsumexp is finite in forward pass,
+    # preventing 0.0 * inf = NaN in the backward dkv kernel. Output is discarded by post-kernel slicing.
+    pad_q_m = (rows >= self.local_kv_len) & (cols == 0)
+
+    return local_m | comp_m | pad_q_m
 
   def __eq__(self, other: object):
     if not isinstance(other, type(self)):

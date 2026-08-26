@@ -635,6 +635,7 @@ class HCAStaticMaskTest(unittest.TestCase):
     return _create_mock_flash_op(**kwargs)
 
   def _make_dot_product_op(self, max_target_length, sliding_window_size=128):
+    """Creates a mock dot_product AttentionOp instance with CPU mesh."""
     device = types.SimpleNamespace(platform="cpu")
     mesh = types.SimpleNamespace(
         devices=np.asarray([device], dtype=object),
@@ -1028,7 +1029,12 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
   """Tests packed Transformer Engine attention metadata handling."""
 
   def _call_te_attention(
-      self, sequence_descriptor, config=None, mesh=None, attention_type=AttentionType.GLOBAL, chunk_attn_window_size=None
+      self,
+      sequence_descriptor,
+      config=None,
+      mesh=None,
+      attention_type=AttentionType.GLOBAL,
+      chunk_attn_window_size=None,
   ):
     """Runs TE attention with fake Transformer Engine modules."""
     sequence_descriptor.calls = []
@@ -5020,6 +5026,136 @@ class CompressedAttentionTest(parameterized.TestCase):
     out_dot = self._run_compressed_attention(128, "dot_product", seq_len=489)
     out_flash = self._run_compressed_attention(128, "flash", seq_len=489)
     np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
+
+  @pytest.mark.tpu_only
+  def test_hca_flash_vs_dot_product_unaligned_grads(self):
+    """Verifies gradient numerical equivalence between dot_product and flash attention on unaligned sequences (S=489)."""
+    # --- Case 1: Unpacked single sequence S=489 ---
+    seq_len = 489
+    compress_ratio = 128
+    cfg_dot = self._get_test_config(max_target_length=seq_len)
+    cfg_flash = self._get_test_config(max_target_length=seq_len)
+
+    attn_dot = self._create_compressed_attention_layer(
+        cfg_dot, compress_ratio=compress_ratio, attention_kernel="dot_product"
+    )
+    attn_flash = self._create_compressed_attention_layer(
+        cfg_flash, compress_ratio=compress_ratio, attention_kernel="flash"
+    )
+
+    batch_size = cfg_dot.global_batch_size_to_train_on
+    x = jax.random.normal(jax.random.PRNGKey(0), (batch_size, seq_len, cfg_dot.base_emb_dim))
+    pos = jnp.arange(seq_len, dtype=jnp.int32)[None, :].repeat(batch_size, axis=0)
+    seg = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+    def loss_dot(inp):
+      out, _ = attn_dot(
+          inp,
+          inp,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(out**2)
+
+    def loss_flash(inp):
+      out, _ = attn_flash(
+          inp,
+          inp,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(out**2)
+
+    out_dot, _ = attn_dot(
+        x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_TRAIN
+    )
+    out_flash, _ = attn_flash(
+        x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_TRAIN
+    )
+    np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
+
+    grad_dot = jax.grad(loss_dot)(x)
+    grad_flash = jax.grad(loss_flash)(x)
+
+    self.assertTrue(np.all(np.isfinite(np.array(grad_dot))), "Dot grad contains NaN/Inf for unpacked S=489")
+    self.assertTrue(np.all(np.isfinite(np.array(grad_flash))), "Flash grad contains NaN/Inf for unpacked S=489")
+
+    # --- Case 2: Packed unaligned sequence L1=200, L2=289 (Total=489) ---
+    l1, l2 = 200, 289
+    total_len = l1 + l2
+    cfg_dot_packed = self._get_test_config(max_target_length=total_len)
+    cfg_flash_packed = self._get_test_config(max_target_length=total_len)
+
+    attn_dot_packed = self._create_compressed_attention_layer(
+        cfg_dot_packed, compress_ratio=compress_ratio, attention_kernel="dot_product"
+    )
+    attn_flash_packed = self._create_compressed_attention_layer(
+        cfg_flash_packed, compress_ratio=compress_ratio, attention_kernel="flash"
+    )
+
+    x_packed = jax.random.normal(jax.random.PRNGKey(42), (batch_size, total_len, cfg_dot_packed.base_emb_dim))
+    pos_packed = jnp.broadcast_to(
+        jnp.concatenate([jnp.arange(l1, dtype=jnp.int32), jnp.arange(l2, dtype=jnp.int32)], axis=0)[None, :],
+        (batch_size, total_len),
+    )
+    seg_packed = jnp.broadcast_to(
+        jnp.concatenate([jnp.ones(l1, dtype=jnp.int32), jnp.full(l2, 2, dtype=jnp.int32)], axis=0)[None, :],
+        (batch_size, total_len),
+    )
+
+    out_dot_p, _ = attn_dot_packed(
+        x_packed,
+        x_packed,
+        decoder_segment_ids=seg_packed,
+        inputs_positions=pos_packed,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    out_flash_p, _ = attn_flash_packed(
+        x_packed,
+        x_packed,
+        decoder_segment_ids=seg_packed,
+        inputs_positions=pos_packed,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    np.testing.assert_allclose(np.array(out_flash_p), np.array(out_dot_p), rtol=1e-2, atol=1e-2)
+
+    def loss_dot_packed(inp):
+      out, _ = attn_dot_packed(
+          inp,
+          inp,
+          decoder_segment_ids=seg_packed,
+          inputs_positions=pos_packed,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(out**2)
+
+    def loss_flash_packed(inp):
+      out, _ = attn_flash_packed(
+          inp,
+          inp,
+          decoder_segment_ids=seg_packed,
+          inputs_positions=pos_packed,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(out**2)
+
+    grad_dot_packed = jax.grad(loss_dot_packed)(x_packed)
+    grad_flash_packed = jax.grad(loss_flash_packed)(x_packed)
+
+    self.assertTrue(
+        np.all(np.isfinite(np.array(grad_dot_packed))), "Dot grad contains NaN/Inf for packed unaligned S=489"
+    )
+    self.assertTrue(
+        np.all(np.isfinite(np.array(grad_flash_packed))), "Flash grad contains NaN/Inf for packed unaligned S=489"
+    )
 
   @pytest.mark.tpu_only
   def test_hca_flash_vs_dot_product_packed_crossing_window(self):
