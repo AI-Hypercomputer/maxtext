@@ -1109,13 +1109,14 @@ class TransformerEngineQuantization(Quantization):
           # CGEMM in MLP layer (up projection, down projection)
           if mesh_axes[0] == "embed" and mesh_axes[-1] == "mlp":
             return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
-          elif mesh_axes[0] == "mlp" and mesh_axes[-1] == "embed":
+          elif mesh_axes[0] == "mlp" and mesh_axes[-1] in ("embed", "embed_attn"):
+            # 'embed_attn' covers the flattened attention output projection of Qwen3 hybrid models.
             return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
           elif overlap_policy == TeCommGemmOverlapPolicy.FULL:
             # CGEMM also in Attention layer (QKV projection, output projection)
-            if mesh_axes[0] == "embed" and mesh_axes[-1].startswith("kv"):
+            if mesh_axes[0] == "embed_attn" and mesh_axes[-1].startswith("kv"):
               return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
-            elif mesh_axes[0] == "heads" and mesh_axes[-1] == "embed":
+            elif mesh_axes[0] == "heads" and mesh_axes[-1] == "embed_attn":
               return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
 
         return tex.noop_collective_op_set

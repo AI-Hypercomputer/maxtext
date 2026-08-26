@@ -578,6 +578,7 @@ logical_axis_rules: [
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
                       ['kv_lora', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
                       ["kv_lora_up_proj", []],
+                      ['embed_attn', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
                       # ==========================================
                       # Mixture of Experts (MoE)
                       # ==========================================

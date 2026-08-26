@@ -677,7 +677,7 @@ class Attention(nnx.Module):
       return self.kernel_init(*args) / depth_scaling
 
     kernel_axes = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed_attn", "q_heads", "kv")
     )
     in_features = self.convert_dense_general_inputs_shape(inputs_q_shape)
     out_features = (self.num_query_heads, self.head_dim)
@@ -719,7 +719,7 @@ class Attention(nnx.Module):
     kernel_axes = (
         (None, None, None)
         if self.config.ici_context_autoregressive_parallelism > 1
-        else ("embed", "kv_heads", "kv_head_dim")
+        else ("embed_attn", "kv_heads", "kv_head_dim")
     )
     self._validate_kv_head_sharding(kernel_axes)
 
@@ -769,7 +769,7 @@ class Attention(nnx.Module):
         out_features_shape=(self.num_query_heads + 2 * self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "heads", "kv"),
+        kernel_axes=("embed_attn", "heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -810,13 +810,13 @@ class Attention(nnx.Module):
     in_features = (self.num_query_heads, self.out_head_dim)
     out_features = output_dim
     out_kernel_axis = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed_attn")
     )
     axis = (-2, -1)
 
     if self.is_qwen3_hybrid:
       in_features = self.num_query_heads * self.out_head_dim
-      out_kernel_axis = ("mlp", "embed")
+      out_kernel_axis = ("mlp", "embed_attn")
       axis = (-1,)
 
     return DenseGeneral(

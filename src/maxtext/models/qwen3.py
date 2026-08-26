@@ -516,7 +516,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(self.key_dim * 2 + self.value_dim * 2),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        kernel_axes=("embed", "gdn_head"),
+        kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         rngs=rngs,
     )
@@ -525,7 +525,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(self.num_v_heads * 2),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        kernel_axes=("embed", "gdn_head"),
+        kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         rngs=rngs,
     )
@@ -564,7 +564,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(in_features,),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        kernel_axes=("gdn_head", "embed"),
+        kernel_axes=("gdn_head", "embed_attn"),
         matmul_precision=cfg.matmul_precision,
         rngs=rngs,
     )

@@ -309,6 +309,7 @@ logical_axis_rules: [
       ['gdn_head', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
       ['embed', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
       ['embed', ['fsdp', 'context', 'expert']],
+      ['embed_attn', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
       ['norm', ['tensor']],
       ['layers', 'stage'],
       ['diloco', 'diloco'],
