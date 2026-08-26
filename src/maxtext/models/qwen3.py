@@ -1807,9 +1807,6 @@ class Qwen3NextDecoderLayer(nnx.Module):
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     if self.is_mhc_enabled:
-      mhc_expand, mhc_reduce = mhc.get_functions(self.config.mhc_expansion_rate)
-      inputs = mhc_expand(inputs)
-
       intermediate_inputs, _ = self.mhc_attention(
           self.pre_attention_norm_op,
           self.attention_branch,
@@ -1844,10 +1841,6 @@ class Qwen3NextDecoderLayer(nnx.Module):
       ):
         self.moe_bias_updates = nnx.Intermediate(moe_bias_updates)
 
-      layer_output = mhc_reduce(layer_output)
-      layer_output = nn.with_logical_constraint(
-          layer_output, self.activation_axis_names
-      )
       return layer_output, kv_cache
 
     residual = inputs

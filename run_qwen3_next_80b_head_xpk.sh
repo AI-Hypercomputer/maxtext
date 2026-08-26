@@ -7,7 +7,7 @@ source /usr/local/google/home/muskansh/maxtext_env/bin/activate
 # --- Environment Variables ---
 export PROJECT_ID="tpu-prod-env-one-vm"
 export CLUSTER_NAME="v6e-256-c2b3-b478935789"
-export ZONE="us-central2"
+export ZONE="us-central2-b"
 
 # --- Configuration & Automated Image Build ---
 TIMESTAMP=$(date +%m%d%H%M%S)
@@ -16,10 +16,10 @@ export WORKLOAD_NAME="muskansh-qn80b-${TIMESTAMP}"
 export DEVICE_TYPE="v6e-256"
 export NUM_SLICES=1
 export PRIORITY="very-high"
+export NUM_STEPS=30
 export MAX_RESTARTS=0
-export NUM_STEPS=20
 export MODEL_NAME="qwen3-next-80b-a3b"
-# export BASE_OUTPUT_DIR="gs://darisoy-hlo-dumps/qwen3-next-80b-profiles/run-${TIMESTAMP}"
+export BASE_OUTPUT_DIR="/tmp/maxtext-profiles/run-${TIMESTAMP}"
 
 echo "========================================================================"
 echo "Building and uploading Docker runner image from /usr/local/google/home/muskansh/maxtext"
@@ -28,6 +28,11 @@ echo "========================================================================"
 
 (
   cd /usr/local/google/home/muskansh/maxtext && \
+  if ! docker image inspect maxtext_base_image &> /dev/null; then
+    echo "Local image 'maxtext_base_image' not found. Pulling gcr.io/tpu-prod-env-one-vm/param3_21jul:latest and tagging as maxtext_base_image..."
+    docker pull gcr.io/tpu-prod-env-one-vm/param3_21jul:latest
+    docker tag gcr.io/tpu-prod-env-one-vm/param3_21jul:latest maxtext_base_image
+  fi && \
   CLOUD_IMAGE_NAME="${WORKLOAD_IMAGE}" \
        BASE_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:latest" \
        bash src/dependencies/scripts/docker_upload_runner.sh
@@ -67,27 +72,31 @@ XLA_FLAGS_ARRAY=(
   "--xla_tpu_all_gather_collective_matmul_mode=post_spmd_conservative"
   "--xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd_conservative"
   "--xla_latency_hiding_scheduler_enable_selective_resources=true"
+  "--xla_tpu_enable_ilp_latency_hiding_scheduler=true"
+  "--xla_tpu_enable_all_experimental_scheduler_features=true"
   "--xla_tpu_enable_scheduler_memory_pressure_tracking=true"
   "--xla_tpu_host_transfer_overlap_limit=4"
   "--xla_tpu_aggressive_opt_barrier_removal=ENABLED"
   "--xla_lhs_prioritize_async_depth_over_stall=ENABLED"
+  "--xla_tpu_enable_ag_backward_pipelining=true"
   "--xla_should_allow_loop_variant_parameter_in_chain=ENABLED"
   "--xla_should_add_loop_invariant_op_in_chain=ENABLED"
   "--xla_max_concurrent_host_send_recv=100"
-  "--xla_tpu_rerun_latency_hiding_scheduler_post_sc_assignment=true"
   "--xla_tpu_scheduler_percent_shared_memory_limit=150"
+  "--xla_tpu_rerun_latency_hiding_scheduler_post_sc_assignment=true"
 )
 export XLA_FLAGS="${XLA_FLAGS_ARRAY[*]}"
 
 # --- MaxText Workload Overrides ---
 MAXTEXT_ARGS_ARRAY=(
   "model_name=${MODEL_NAME}"
-  # "base_output_directory=${BASE_OUTPUT_DIR}"
-  "run_name=${WORKLOAD_NAME}"
-  "dataset_type=tfds"
-  "dataset_path=gs://max-datasets-rogue"
-  "dataset_name=c4/en:3.0.1"
-  "eval_dataset_name=c4/en:3.0.1"
+  "base_output_directory=${BASE_OUTPUT_DIR}"
+  "run_name=qwen3_next_convergence"
+  "log_config=false"
+  "debug_sharding=false"
+  "ragged_gather_reduce_fallback=false"
+  "dataset_type=synthetic"
+  "dataset_name=synthetic"
   "dtype=bfloat16"
   "allow_split_physical_axes=True"
   "ici_expert_parallelism=4"
@@ -95,17 +104,20 @@ MAXTEXT_ARGS_ARRAY=(
   "custom_mesh=hybrid_ring_64x4"
   "use_ragged_sort=True"
   "use_random_routing=False"
-  "per_device_batch_size=4"
   "num_moe_token_chunks=2"
-  "opt_type=muon"
+  "per_device_batch_size=8"
+  "opt_type=adamw"
+  "learning_rate=3e-4"
   "max_target_length=2048"
   "ragged_buffer_factor=1.5"
-  "remat_policy=custom"
+  "remat_policy=full"
+  "reuse_example_batch=0"
   "decoder_layer_input=device"
-  "context=device"
-  "reuse_example_batch=1"
   "ici_fsdp_parallelism=-1"
   "steps=${NUM_STEPS}"
+  "sa_q_layout=SEQ_MINOR"
+  "sa_k_layout=HEAD_DIM_MINOR"
+  "sa_v_layout=HEAD_DIM_MINOR"
   "sa_block_q=1024"
   "sa_block_kv=1024"
   "sa_block_kv_compute=512"
@@ -123,24 +135,24 @@ MAXTEXT_ARGS_ARRAY=(
   "sa_use_fused_bwd_kernel=True"
   "sparse_matmul=True"
   "megablox=True"
-  "wi_tile_fwd_batch_seq=512"
-  "wi_tile_dlhs_batch_seq=512"
-  "wi_tile_drhs_batch_seq=512"
-  "wo_tile_fwd_batch_seq=512"
-  "wo_tile_dlhs_batch_seq=512"
-  "wo_tile_drhs_batch_seq=512"
-  "wi_tile_fwd_embed_dim=3072"
-  "wi_tile_fwd_mlp_dim=1536"
-  "wi_tile_dlhs_embed_dim=3072"
-  "wi_tile_dlhs_mlp_dim=1536"
-  "wi_tile_drhs_embed_dim=3072"
-  "wi_tile_drhs_mlp_dim=1536"
-  "wo_tile_fwd_embed_dim=3072"
-  "wo_tile_fwd_mlp_dim=1536"
-  "wo_tile_dlhs_embed_dim=3072"
-  "wo_tile_dlhs_mlp_dim=1536"
-  "wo_tile_drhs_embed_dim=3072"
-  "wo_tile_drhs_mlp_dim=1536"
+  "wi_tile_fwd_batch_seq=256"
+  "wi_tile_dlhs_batch_seq=256"
+  "wi_tile_drhs_batch_seq=256"
+  "wo_tile_fwd_batch_seq=256"
+  "wo_tile_dlhs_batch_seq=256"
+  "wo_tile_drhs_batch_seq=256"
+  "wi_tile_fwd_embed_dim=512"
+  "wi_tile_fwd_mlp_dim=512"
+  "wi_tile_dlhs_embed_dim=512"
+  "wi_tile_dlhs_mlp_dim=512"
+  "wi_tile_drhs_embed_dim=512"
+  "wi_tile_drhs_mlp_dim=512"
+  "wo_tile_fwd_embed_dim=512"
+  "wo_tile_fwd_mlp_dim=512"
+  "wo_tile_dlhs_embed_dim=512"
+  "wo_tile_dlhs_mlp_dim=512"
+  "wo_tile_drhs_embed_dim=512"
+  "wo_tile_drhs_mlp_dim=512"
   "use_tokamax_gmm=True"
   "use_gmm_v2=True"
   "optimizer_memory_host_offload=False"
@@ -148,23 +160,14 @@ MAXTEXT_ARGS_ARRAY=(
   "enable_checkpointing=False"
   "async_checkpointing=False"
   "tokenizer_type=huggingface"
-  "tokenizer_path=assets/tokenizers/qwen3-tokenizer"
-  "override_model_config=true"
-  "mhc_expansion_rate=4"
-  "enable_mhc_lite=True"
-  "use_mhc_pallas_kernel=True"
-  "mhc_pallas_kernel_fwd_block_size=256"
-  "mhc_pallas_kernel_bwd_block_size=256"
-  "use_gdn_kernel=True"
-  "use_hybrid_gdn=True"
+  "tokenizer_path=src/maxtext/assets/tokenizers/qwen3-tokenizer"
+  "abort_on_nan_loss=True"
+  "skip_step_on_spikes=True"
   "profiler=xplane"
-  "profiler_steps=2"
+  "profiler_steps=5"
   "skip_first_n_steps_for_profiler=2"
   "enable_tpu_profiling_options=True"
   "upload_all_profiler_results=False"
-  "enable_tensorboard=False"
-  "abort_on_nan_loss=False"
-  "abort_on_inf_loss=False"
 )
 MAXTEXT_ARGS="${MAXTEXT_ARGS_ARRAY[*]}"
 
@@ -180,7 +183,7 @@ python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml ${M
 # --- XPK Workload Creation ---
 echo "Creating XPK workload: ${WORKLOAD_NAME} on cluster: ${CLUSTER_NAME}"
 
-PYTHONPATH=/usr/local/google/home/muskansh/xpk/src python3 -m xpk.main workload create \
+/usr/local/google/home/muskansh/maxtext_env/bin/python3 -m xpk.main workload create \
   --cluster="${CLUSTER_NAME}" \
   --project="${PROJECT_ID}" \
   --zone="${ZONE}" \
@@ -189,18 +192,21 @@ PYTHONPATH=/usr/local/google/home/muskansh/xpk/src python3 -m xpk.main workload 
   --device-type="${DEVICE_TYPE}" \
   --num-slices="${NUM_SLICES}" \
   --docker-image="${WORKLOAD_IMAGE}" \
-  --enable-debug-logs \
   --workload="${WORKLOAD_NAME}" \
   --command="${RUN_COMMAND}"
 
-LOGS_URL="https://console.cloud.google.com/logs/query;query=resource.type%3D%22k8s_container%22%0Aresource.labels.project_id%3D%22${PROJECT_ID}%22%0Aresource.labels.location%3D%22southamerica-west1%22%0Aresource.labels.cluster_name%3D%22${CLUSTER_NAME}%22%0Aresource.labels.namespace_name%3D%22default%22%0Aresource.labels.pod_name%3A%22${WORKLOAD_NAME}-slice-job-0-0-%22%0Aseverity%3E%3DDEFAULT;storageScope=project;duration=P1D?project=${PROJECT_ID}"
-GKE_URL="https://console.cloud.google.com/kubernetes/service/southamerica-west1/${CLUSTER_NAME}/default/${WORKLOAD_NAME}/details?project=${PROJECT_ID}"
+REGION="${ZONE%-*}"
+LOGS_URL="https://console.cloud.google.com/logs/query;query=resource.type%3D%22k8s_container%22%0Aresource.labels.project_id%3D%22${PROJECT_ID}%22%0Aresource.labels.location%3D%22${REGION}%22%0Aresource.labels.cluster_name%3D%22${CLUSTER_NAME}%22%0Aresource.labels.namespace_name%3D%22default%22%0Aresource.labels.pod_name%3A%22${WORKLOAD_NAME}-slice-job-0-0-%22%0Aseverity%3E%3DDEFAULT;storageScope=project;duration=P1D?project=${PROJECT_ID}"
+GKE_URL="https://console.cloud.google.com/kubernetes/service/${REGION}/${CLUSTER_NAME}/default/${WORKLOAD_NAME}/details?project=${PROJECT_ID}"
+TB_URL="https://tensorboard.corp.google.com/?logdir=${BASE_OUTPUT_DIR}/qwen3_next_convergence/tensorboard"
 
 echo "========================================================================"
-echo "📋 Pantheon Cloud Logging (Worker 0 Logs):"
+echo "Pantheon Cloud Logging (Worker 0 Logs):"
 echo "${LOGS_URL}"
 echo ""
-echo "☸️ GKE Workload Details:"
+echo "GKE Workload Details:"
 echo "${GKE_URL}"
 echo ""
+echo "GCS TensorBoard Link:"
+echo "${TB_URL}"
 echo "========================================================================"

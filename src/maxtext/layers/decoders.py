@@ -881,6 +881,7 @@ class Decoder(nn.Module):
     if cfg.mhc_expansion_rate > 1 and cfg.decoder_block in (
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.QWEN3_NEXT,
     ):
       # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
       y = mhc_expand(y)
@@ -1294,6 +1295,7 @@ class Decoder(nn.Module):
     if cfg.mhc_expansion_rate > 1 and cfg.decoder_block in (
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.QWEN3_NEXT,
     ):
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
         hidden_state = mhc.DeepSeek4HyperHeadToLinen(
