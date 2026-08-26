@@ -16,6 +16,7 @@
 
 from collections.abc import Iterator
 import dataclasses
+import importlib
 from typing import Any
 from unittest import mock
 
@@ -33,6 +34,17 @@ import optax
 import pytest
 
 # training_engine imports tunix, so these tests need the post-training dependency bundle.
+# The engine's default staging transport is Raiden, whose synchronizer ships with the
+# RL tunix build and not with stock tunix. Probe once, the same way the engine does, so
+# this loop exercises the real staging path where Raiden exists and the documented
+# failure where it does not -- rather than passing or failing on which tunix happens to
+# be installed.
+try:
+  importlib.import_module("tunix.experimental.worker.raiden_synchronizer")
+  _RAIDEN_AVAILABLE = True
+except ImportError:
+  _RAIDEN_AVAILABLE = False
+
 pytestmark = [pytest.mark.post_training]
 
 
@@ -97,7 +109,13 @@ class TrainingLoopRunner:
       step_metrics = self.trainer.get_metrics(clear_cache=True)
       history.append(step_metrics)
 
-      _ = self.trainer.prepare_weight_sync()
+      if _RAIDEN_AVAILABLE:
+        _ = self.trainer.prepare_weight_sync()
+      else:
+        # Without the transport the engine must raise rather than hand back empty
+        # metadata, which would fail later and far from the cause.
+        with pytest.raises(RuntimeError, match="raiden_synchronizer"):
+          self.trainer.prepare_weight_sync()
 
     self.trainer.close()
     return history
