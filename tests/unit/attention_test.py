@@ -636,11 +636,8 @@ class HCAStaticMaskTest(unittest.TestCase):
 
   def _make_dot_product_op(self, max_target_length, sliding_window_size=128):
     """Creates a mock dot_product AttentionOp instance with CPU mesh."""
-    device = types.SimpleNamespace(platform="cpu")
-    mesh = types.SimpleNamespace(
-        devices=np.asarray([device], dtype=object),
-        shape={},
-    )
+    devices = np.array(jax.devices()[:1]).reshape((1,))
+    mesh = jax.sharding.Mesh(devices, ("data",))
     config = types.SimpleNamespace(
         causal_block_size=4,
         context_parallel_load_balance=False,

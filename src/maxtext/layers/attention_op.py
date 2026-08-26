@@ -333,11 +333,15 @@ class HCAStaticMask(splash_attention_mask.Mask):
     c_thresh = (rows + 1) // self.compress_ratio
     comp_m = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < self.compressed_kv_len)
 
-    # Padded query rows attend to column 0 so logsumexp is finite in forward pass,
-    # preventing 0.0 * inf = NaN in the backward dkv kernel. Output is discarded by post-kernel slicing.
-    pad_q_m = (rows >= self.local_kv_len) & (cols == 0)
+    # Map each padded query row 1-to-1 to a distinct padding KV column (softmax denominator = 1.0, logsumexp = 0.0).
+    # This eliminates 0 * inf = NaN in backward dkv without cross-talk or gradient bleed into real tokens.
+    if self.pad_kv_total > 0:
+      pad_cols = self.local_kv_len + ((rows - self.local_kv_len) % self.pad_kv_total)
+      pad_m = (rows >= self.local_kv_len) & (cols == pad_cols)
+    else:
+      pad_m = np.zeros((rows.shape[0], cols.shape[1]), dtype=np.bool_)
 
-    return local_m | comp_m | pad_q_m
+    return local_m | comp_m | pad_m
 
   def __eq__(self, other: object):
     if not isinstance(other, type(self)):
