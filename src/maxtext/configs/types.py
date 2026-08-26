@@ -4039,6 +4039,11 @@ class MaxTextConfig(
           "Colocated python data input is only supported with Pathways (single"
           " controller) enabled (`enable_single_controller=True`)."
       )
+    if self.colocated_python_data_input and self.grain_worker_count != 1:
+      raise ValueError(
+          "Colocated python data input (`colocated_python_data_input=True`) only supports "
+          f"`grain_worker_count=1`, got {self.grain_worker_count}."
+      )
     if self.grain_use_elastic_iterator and self.grain_file_type != "arrayrecord":
       raise ValueError(
           "`grain_use_elastic_iterator=True` only supports `grain_file_type=arrayrecord`. "
