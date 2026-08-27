@@ -117,31 +117,33 @@ def get_datasets(
       dataset_list = list(executor.map(create_dataset_from_pattern, paths))
       executor.shutdown(wait=True)
 
-      datasets_dict = dict(zip(mixture_config.keys(), dataset_list))
-
-      for name, ds in datasets_dict.items():
-        datasets_dict[name] = _apply_mapdataset_transforms(
-            ds,
-            shuffle,
-            shuffle_seed,
-            num_epoch,
-            dataloading_host_index,
-            dataloading_host_count,
-            grain_num_threads,
-            grain_prefetch_buffer_size,
-        )
+      for d, _ in enumerate(dataset_list):
+        if shuffle:
+          dataset_list[d] = dataset_list[d].shuffle(seed=shuffle_seed)
+        dataset_list[d] = dataset_list[d].repeat(num_epoch)
 
       # Normalize weights
       total_weight = sum(weights)
-      weights_dict = {name: weight / total_weight for name, weight in zip(mixture_config.keys(), weights)}
+      weights = [weight / total_weight for weight in weights]
 
-      dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
+      # Mix at the MapDataset level so only 1 thread pool is used and single iterator state is preserved
+      dataset = grain.MapDataset.mix(dataset_list, weights)
+      if elastic:
+        return dataset
+      dataset = dataset[dataloading_host_index::dataloading_host_count]
+      dataset = dataset.to_iter_dataset(
+          read_options=grain.ReadOptions(
+              num_threads=grain_num_threads,
+              prefetch_buffer_size=grain_prefetch_buffer_size,
+          )
+      )
       return dataset
     elif ";" in data_file_pattern:
       data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
       assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
       weights = [float(weight) for weight in weights]
-      weights = [round(weight / sum(weights), 4) for weight in weights]
+      total_weight = sum(weights)
+      weights = [weight / total_weight for weight in weights]
 
       # Parallelize file finding (globbing), data source creation, and dataset wrapping
       # File finding and source creation are I/O-bound operations that release the GIL
@@ -149,21 +151,22 @@ def get_datasets(
       dataset_list = list(executor.map(create_dataset_from_pattern, data_file_patterns))
       executor.shutdown(wait=True)
 
-      # Apply shuffle, repeat, sharding, and conversion to IterDataset to each dataset before mixing
       for d, _ in enumerate(dataset_list):
-        dataset_list[d] = _apply_mapdataset_transforms(
-            dataset_list[d],
-            shuffle,
-            shuffle_seed,
-            num_epoch,
-            dataloading_host_index,
-            dataloading_host_count,
-            grain_num_threads,
-            grain_prefetch_buffer_size,
-        )
-      # Use IterDataset.mix instead of MapDataset.mix in order to have per-mixture component checkpoints
-      # for supporting changing the mixture after checkpointing
-      dataset = grain.IterDataset.mix(dataset_list, weights)
+        if shuffle:
+          dataset_list[d] = dataset_list[d].shuffle(seed=shuffle_seed)
+        dataset_list[d] = dataset_list[d].repeat(num_epoch)
+
+      # Mix at the MapDataset level so only 1 thread pool is used and single iterator state is preserved
+      dataset = grain.MapDataset.mix(dataset_list, weights)
+      if elastic:
+        return dataset
+      dataset = dataset[dataloading_host_index::dataloading_host_count]
+      dataset = dataset.to_iter_dataset(
+          read_options=grain.ReadOptions(
+              num_threads=grain_num_threads,
+              prefetch_buffer_size=grain_prefetch_buffer_size,
+          )
+      )
       return dataset
     else:
       # Single pattern case - no need for parallelization
