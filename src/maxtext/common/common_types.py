@@ -172,4 +172,5 @@ class CustomRule(enum.Enum):
   FSDP_2D = "2d-fsdp"
   EP_AS_DP = "ep-as-dp"
   SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
-  DSV3_MLPERF_4K = "dsv3-mlperf-4k"  # ep-as-dp with attention weights sharded on expert
+  # FSDP acts like DP for attn, but FSDP for moe; EP acts like FSDP for attn, and EP for moe
+  FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
