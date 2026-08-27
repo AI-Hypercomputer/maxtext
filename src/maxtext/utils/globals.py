@@ -68,6 +68,7 @@ HF_IDS = {
     "qwen3-vl-30b-a3b": "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "llama3.1-8b": "meta-llama/Llama-3.1-8B",
     "llama3.1-8b-Instruct": "meta-llama/Llama-3.1-8B-Instruct",
+    "llama3.1-8b-fp8": "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8",
     "llama3.1-70b-Instruct": "meta-llama/Llama-3.1-70B-Instruct",
     "llama3.1-70b": "meta-llama/Llama-3.1-70B",
     "llama3.1-405b": "meta-llama/Llama-3.1-405B",

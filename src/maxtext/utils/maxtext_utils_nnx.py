@@ -218,6 +218,7 @@ def nnx_update_sharding_meta(variable, transform_fn):
   return variable
 
 
+
 def nnx_remove_scan_axis(tree, name="layers"):
   """Removes the given scan axis from the PartitionSpec."""
 

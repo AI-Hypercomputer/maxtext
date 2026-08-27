@@ -168,6 +168,7 @@ LLAMA_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "llama3-70b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama3-405b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama3.1-8b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "llama3.1-8b-fp8.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama3.1-70b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama3.1-405b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama3.3-70b.yml"),

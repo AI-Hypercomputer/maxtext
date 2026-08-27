@@ -2457,6 +2457,27 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
     mapping["params-decoder-layers-mlp-wo-kernel"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.mlp.down_proj.weight" for layer_idx in range(n_layers)
     ]
+    mapping["params-decoder-layers-self_attention-query-kernel_scale"] = [
+        f"model.layers.{layer_idx}.self_attn.q_proj.weight_scale" for layer_idx in range(n_layers)
+    ]
+    mapping["params-decoder-layers-self_attention-key-kernel_scale"] = [
+        f"model.layers.{layer_idx}.self_attn.k_proj.weight_scale" for layer_idx in range(n_layers)
+    ]
+    mapping["params-decoder-layers-self_attention-value-kernel_scale"] = [
+        f"model.layers.{layer_idx}.self_attn.v_proj.weight_scale" for layer_idx in range(n_layers)
+    ]
+    mapping["params-decoder-layers-self_attention-out-kernel_scale"] = [
+        f"model.layers.{layer_idx}.self_attn.o_proj.weight_scale" for layer_idx in range(n_layers)
+    ]
+    mapping["params-decoder-layers-mlp-wi_0-kernel_scale"] = [
+        f"model.layers.{layer_idx}.mlp.gate_proj.weight_scale" for layer_idx in range(n_layers)
+    ]
+    mapping["params-decoder-layers-mlp-wi_1-kernel_scale"] = [
+        f"model.layers.{layer_idx}.mlp.up_proj.weight_scale" for layer_idx in range(n_layers)
+    ]
+    mapping["params-decoder-layers-mlp-wo-kernel_scale"] = [
+        f"model.layers.{layer_idx}.mlp.down_proj.weight_scale" for layer_idx in range(n_layers)
+    ]
     mapping["params-decoder-layers-pre_self_attention_layer_norm-scale"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.input_layernorm.weight" for layer_idx in range(n_layers)
     ]
@@ -2480,6 +2501,27 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       mapping[f"params-decoder-layers_{layer_idx}-mlp-wi_0-kernel"] = f"model.layers.{layer_idx}.mlp.gate_proj.weight"
       mapping[f"params-decoder-layers_{layer_idx}-mlp-wi_1-kernel"] = f"model.layers.{layer_idx}.mlp.up_proj.weight"
       mapping[f"params-decoder-layers_{layer_idx}-mlp-wo-kernel"] = f"model.layers.{layer_idx}.mlp.down_proj.weight"
+      mapping[f"params-decoder-layers_{layer_idx}-self_attention-query-kernel_scale"] = (
+          f"model.layers.{layer_idx}.self_attn.q_proj.weight_scale"
+      )
+      mapping[f"params-decoder-layers_{layer_idx}-self_attention-key-kernel_scale"] = (
+          f"model.layers.{layer_idx}.self_attn.k_proj.weight_scale"
+      )
+      mapping[f"params-decoder-layers_{layer_idx}-self_attention-value-kernel_scale"] = (
+          f"model.layers.{layer_idx}.self_attn.v_proj.weight_scale"
+      )
+      mapping[f"params-decoder-layers_{layer_idx}-self_attention-out-kernel_scale"] = (
+          f"model.layers.{layer_idx}.self_attn.o_proj.weight_scale"
+      )
+      mapping[f"params-decoder-layers_{layer_idx}-mlp-wi_0-kernel_scale"] = (
+          f"model.layers.{layer_idx}.mlp.gate_proj.weight_scale"
+      )
+      mapping[f"params-decoder-layers_{layer_idx}-mlp-wi_1-kernel_scale"] = (
+          f"model.layers.{layer_idx}.mlp.up_proj.weight_scale"
+      )
+      mapping[f"params-decoder-layers_{layer_idx}-mlp-wo-kernel_scale"] = (
+          f"model.layers.{layer_idx}.mlp.down_proj.weight_scale"
+      )
       mapping[f"params-decoder-layers_{layer_idx}-pre_self_attention_layer_norm-scale"] = (
           f"model.layers.{layer_idx}.input_layernorm.weight"
       )
@@ -2488,6 +2530,9 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       )
 
   return mapping
+
+
+LLAMA_MAXTEXT_TO_HF_PARAM_MAPPING = LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING
 
 
 def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
@@ -2533,6 +2578,9 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     else:
       return input_tensor.transpose().reshape(target_shape)
 
+  def reshape_scale(input_tensor, target_shape):
+    return input_tensor.reshape(target_shape)
+
   # caveat: hook order does affect result
   # to_huggingface
   query_hook_chain = [scale_query_layer, adjust_rope, reshape_kernel]
@@ -2556,6 +2604,13 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         "params-decoder-layers-mlp-wi_0-kernel": reshape_kernel,
         "params-decoder-layers-mlp-wi_1-kernel": reshape_kernel,
         "params-decoder-layers-mlp-wo-kernel": reshape_kernel,
+        "params-decoder-layers-self_attention-query-kernel_scale": reshape_scale,
+        "params-decoder-layers-self_attention-key-kernel_scale": reshape_scale,
+        "params-decoder-layers-self_attention-value-kernel_scale": reshape_scale,
+        "params-decoder-layers-self_attention-out-kernel_scale": reshape_scale,
+        "params-decoder-layers-mlp-wi_0-kernel_scale": reshape_scale,
+        "params-decoder-layers-mlp-wi_1-kernel_scale": reshape_scale,
+        "params-decoder-layers-mlp-wo-kernel_scale": reshape_scale,
     }
   else:
     for layer_idx in range(nlayers):
@@ -2566,7 +2621,17 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       hook_fns[f"params-decoder-layers_{layer_idx}-mlp-wi_0-kernel"] = reshape_kernel
       hook_fns[f"params-decoder-layers_{layer_idx}-mlp-wi_1-kernel"] = reshape_kernel
       hook_fns[f"params-decoder-layers_{layer_idx}-mlp-wo-kernel"] = reshape_kernel
+      hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-query-kernel_scale"] = reshape_scale
+      hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-key-kernel_scale"] = reshape_scale
+      hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-value-kernel_scale"] = reshape_scale
+      hook_fns[f"params-decoder-layers_{layer_idx}-self_attention-out-kernel_scale"] = reshape_scale
+      hook_fns[f"params-decoder-layers_{layer_idx}-mlp-wi_0-kernel_scale"] = reshape_scale
+      hook_fns[f"params-decoder-layers_{layer_idx}-mlp-wi_1-kernel_scale"] = reshape_scale
+      hook_fns[f"params-decoder-layers_{layer_idx}-mlp-wo-kernel_scale"] = reshape_scale
   return hook_fns
+
+
+LLAMA_MAXTEXT_TO_HF_PARAM_HOOK_FN = LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN
 
 
 def LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN():
@@ -4247,6 +4312,7 @@ PARAM_MAPPING = {
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "llama3.1-8b-fp8": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4301,6 +4367,7 @@ HOOK_FNS = {
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "llama3.1-8b-fp8": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,

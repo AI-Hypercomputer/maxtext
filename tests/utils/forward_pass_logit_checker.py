@@ -263,7 +263,8 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02, clip_logits_epsi
   max_kl_div = kl_divs_per_token.max()
   max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div.item():.2e}")
 
-  assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.2e} exceed the threshold {atol}"
+  if atol is not None:
+    assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.4e} exceed the threshold {atol}"
 
 
 def get_data(golden_data_point, config):
@@ -723,6 +724,36 @@ def main(config, test_args):  # pylint: disable=W0621
       # --- Compare all logits in the sequence (for the first batch item) ---
       # Unsqueeze to add batch dimension for check_kl_divergence: [1, seq, vocab]
       start_index = 1 if test_args.skip_first_token else 0
+
+      # Calculate absolute and relative differences for detailed reporting
+      min_vocab = min(mt_logits_torch.shape[-1], hf_logits_torch.shape[-1])
+      mt_slice = mt_logits_torch[0, start_index:, :min_vocab].float()
+      hf_slice = hf_logits_torch[0, start_index:, :min_vocab].float()
+      abs_diff = torch.abs(mt_slice - hf_slice)
+      safe_hf = torch.where(hf_slice == 0, 1e-8, hf_slice)
+      rel_diff = abs_diff / torch.abs(safe_hf)
+
+      max_abs_diff_val = torch.max(abs_diff).item()
+      max_rel_diff_val = torch.max(rel_diff).item()
+      msg = (
+          "\n[numerical difference]\n"
+          f"Max absolute difference: {max_abs_diff_val:.4e}\n"
+          f"Max relative difference: {max_rel_diff_val:.4e}"
+      )
+      max_logging.log(msg)
+
+      if test_args.atol is not None:
+        max_logging.log("\n[test criteria]")
+        max_logging.log(
+            f"Checking Numerical Differences between train logits and HF logits against "
+            f"atol={test_args.atol} rtol={test_args.rtol}."
+        )
+        rtol_val = float(test_args.rtol)
+        atol_val = float(test_args.atol)
+        assert torch.allclose(
+            mt_slice, hf_slice, rtol=rtol_val, atol=atol_val, equal_nan=False
+        ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
+
       check_kl_divergence(
           mt_logits_torch[0, start_index:].unsqueeze(0),
           hf_logits_torch[0, start_index:].unsqueeze(0),
