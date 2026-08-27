@@ -16,6 +16,8 @@
 """Vision transformer implementation for Gemma4."""
 
 from typing import cast
+import functools
+import operator
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -28,6 +30,230 @@ from maxtext.layers import initializers
 from maxtext.layers import linears
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import normalizations
+
+
+# =============================================================================
+# Gemma-4 vision clipped-linears (Navi upstream contribution)
+# -----------------------------------------------------------------------------
+# The Gemma-4 E2B/E4B vision tower ships per-projection activation clip bounds in
+# the reference (HF) checkpoint: for each of the 7 vision projections
+# (self_attn.{q,k,v,o}_proj and mlp.{gate,up,down}_proj) in each of the 16 encoder
+# blocks, a scalar {input_min,input_max,output_min,output_max} = 16*7*4 = 448
+# checkpoint tensors. The reference forward clamps each projection's input by
+# [input_min,input_max] and its output by [output_min,output_max]. Omitting the
+# clamps produces large activation drift in the image span (empirically KL 4-17
+# on a 340-token teacher-forced parity harness), because a handful of vision
+# activations blow up without the trained saturation. Upstream MaxText marks
+# E2B/E4B multimodal "not yet supported" and does not model these bounds.
+#
+# This module adds them as OPT-IN, checkpoint-resident, NON-TRAINABLE scalars,
+# gated on ``config.use_clipped_linears_for_vit`` (exact no-op when False).
+# Design: plain ``nnx.Param`` bounds (so they map to the canonical ``params``
+# collection and round-trip through the nnx->linen->orbax checkpoint path), plus
+# a leaf-PATH optimizer-freeze mask so the 448 bounds are excluded from optimizer
+# updates and weight decay without a custom nnx.Variable subclass (subclasses are
+# renamed by the linen bridge and silently dropped from the saved checkpoint).
+# A NaN sentinel + ``validate_clip_bounds`` hard-fails on a missing/non-finite
+# bound rather than silently degrading to an identity clamp.
+
+# Leaf-name tokens that identify a clip-bound scalar in a flattened params tree.
+_CLIP_LEAF_TOKENS = ("q_clip", "k_clip", "v_clip", "o_clip", "gate_clip", "up_clip", "down_clip")
+_CLIP_BOUND_NAMES = ("input_min", "input_max", "output_min", "output_max")
+
+
+def _mk_clip_bound(init_val=jnp.nan):
+  """A checkpoint-resident scalar clip bound as a plain ``nnx.Param`` (maps to the
+  canonical ``params`` collection; NaN sentinel marks an unloaded bound)."""
+  return nnx.Param(jnp.asarray(init_val, dtype=jnp.float32))
+
+
+def _is_clip_bound_path(path) -> bool:
+  """True iff a flattened-params key path addresses a clip-bound scalar."""
+  s = "/".join(str(getattr(p, "key", p)) for p in path) if not isinstance(path, str) else path
+  return any(tok in s for tok in _CLIP_LEAF_TOKENS) and any(b in s for b in _CLIP_BOUND_NAMES)
+
+
+def clip_optimizer_freeze_mask(params_tree):
+  """Bool pytree (same structure as ``params_tree``): True for TRAINABLE leaves,
+  False for the immutable clip bounds. Feed to ``optax.masked``/``multi_transform``
+  so the bounds get ``set_to_zero()`` updates. Path-based, so it survives the
+  nnx->linen->orbax round-trip regardless of leaf type erasure."""
+  flat = jax.tree_util.tree_flatten_with_path(params_tree)[0]
+  leaves_mask = [not _is_clip_bound_path(path) for path, _ in flat]
+  treedef = jax.tree_util.tree_structure(params_tree)
+  return jax.tree_util.tree_unflatten(treedef, leaves_mask)
+
+
+def _clip_bound_value(bound, dtype):
+  """Read a clip-bound scalar as a constant: stop_gradient defends the bounds from receiving
+  gradient at the clamp use-site (defense in depth alongside the optimizer freeze mask), so clip-bound
+  gradients can never contaminate gradient statistics even if the freeze mask were misconfigured."""
+  return jax.lax.stop_gradient(bound.value).astype(dtype)
+
+
+def _clip_in(x, cb):
+  """clamp(x, input_min, input_max) in x's dtype; no-op if ``cb`` is None. Bounds are stop_gradient'd."""
+  if cb is None:
+    return x
+  xd = x.dtype
+  return jnp.clip(x, _clip_bound_value(cb.input_min, xd), _clip_bound_value(cb.input_max, xd))
+
+
+def _clip_out(y, cb):
+  """clamp(y, output_min, output_max) in y's dtype; no-op if ``cb`` is None. Bounds are stop_gradient'd."""
+  if cb is None:
+    return y
+  yd = y.dtype
+  return jnp.clip(y, _clip_bound_value(cb.output_min, yd), _clip_bound_value(cb.output_max, yd))
+
+
+class _ClipBounds(nnx.Module):
+  """Holds the four checkpoint-resident scalar clip bounds as ``nnx.Param`` leaves."""
+
+  def __init__(self):
+    self.input_min = _mk_clip_bound()
+    self.input_max = _mk_clip_bound()
+    self.output_min = _mk_clip_bound()
+    self.output_max = _mk_clip_bound()
+
+
+def _make_clip_state():
+  """Four NaN-sentinel scalar bounds (checkpoint-resident, non-trainable)."""
+  return _ClipBounds()
+
+
+def validate_clip_bounds(cb, where=""):
+  """Hard-fail: every bound finite + scalar, and input_min<=input_max, output_min<=output_max.
+  Raises ValueError otherwise. No-op if ``cb`` is None."""
+  if cb is None:
+    return
+  vals = {}
+  for nm in ("input_min", "input_max", "output_min", "output_max"):
+    v = getattr(cb, nm).value
+    if getattr(v, "shape", ()) not in ((), (1,)):
+      raise ValueError(f"Gemma4 vision clip bound '{nm}'{(' @ '+where) if where else ''} has non-scalar "
+                       f"shape {v.shape}; expected scalar.")
+    fv = float(jnp.reshape(v, (-1,))[0])
+    if not bool(jnp.isfinite(jnp.asarray(fv))):
+      raise ValueError(f"Gemma4 vision clip bound '{nm}'{(' @ '+where) if where else ''} = {fv} is non-finite "
+                       f"(missing/NaN/Inf). use_clipped_linears_for_vit=True declares a FINITE clipped model; "
+                       f"refusing to fall back to an identity clamp.")
+    vals[nm] = fv
+  if vals["input_min"] > vals["input_max"]:
+    raise ValueError(f"Gemma4 vision clip bound{(' @ '+where) if where else ''}: input_min={vals['input_min']} "
+                     f"> input_max={vals['input_max']} (a clamp with min>max would empty the interval).")
+  if vals["output_min"] > vals["output_max"]:
+    raise ValueError(f"Gemma4 vision clip bound{(' @ '+where) if where else ''}: output_min={vals['output_min']} "
+                     f"> output_max={vals['output_max']} (a clamp with min>max would empty the interval).")
+
+
+# Expected clipped-module accounting for a Gemma-4 vision tower: 16 encoder blocks x 7 projections
+# (attention q/k/v/o = 4 modules holding q/k/v/o clip states + mlp gate/up/down = 3) -> but the clip
+# STATE lives on 2 modules per block (the Gemma4Attention holding q/k/v/o_clip, and the
+# Gemma4ClippedMlpBlock holding gate/up/down_clip). The scalar bound count is the invariant that matters:
+# 16 blocks x 7 projections x 4 bounds = 448. We validate the projection-level clip states (16x7 = 112).
+EXPECTED_CLIP_PROJECTIONS = 112   # 16 blocks x 7 projections (q,k,v,o,gate,up,down)
+EXPECTED_CLIP_BOUNDS = 448        # 112 projections x 4 scalar bounds
+
+
+def validate_all_vision_clip_bounds(model, *, expected_projections=EXPECTED_CLIP_PROJECTIONS,
+                                    expected_bounds=EXPECTED_CLIP_BOUNDS):
+  """Post-checkpoint-load, pre-first-JIT validation of ALL Gemma-4 vision clip bounds. Fail-closed.
+
+  Walks the model graph, collects every ``_ClipBounds`` module (each carries the 4 scalars for one
+  projection), validates each (finite, scalar, min<=max), and asserts EXACT counts:
+  ``expected_projections`` clip-state modules and ``expected_bounds`` scalar leaves. Raises ValueError on
+  any deficiency. The exact-count check is what prevents a traversal that accidentally finds zero modules
+  from silently "passing".
+  """
+  from flax import nnx  # pylint: disable=import-outside-toplevel
+  n_proj = 0
+  n_bounds = 0
+  for path, mod in nnx.iter_graph(model):
+    # A clip-state module has exactly the four bound leaves.
+    if (hasattr(mod, "input_min") and hasattr(mod, "input_max")
+        and hasattr(mod, "output_min") and hasattr(mod, "output_max")
+        and not isinstance(mod, (int, float))):
+      where = "/".join(str(getattr(p, "key", p)) for p in path) if isinstance(path, (list, tuple)) else str(path)
+      validate_clip_bounds(mod, where)
+      n_proj += 1
+      n_bounds += 4
+  if n_proj != expected_projections:
+    raise ValueError(
+        f"Gemma-4 vision clip validation found {n_proj} clip-state modules, expected exactly "
+        f"{expected_projections} (16 blocks x 7 projections). A mismatch means the clip bounds were not "
+        f"loaded/mapped correctly; refusing to run with a partially-clipped vision tower."
+    )
+  if n_bounds != expected_bounds:
+    raise ValueError(
+        f"Gemma-4 vision clip validation found {n_bounds} clip-bound scalars, expected exactly {expected_bounds}."
+    )
+  return n_proj, n_bounds
+
+
+# Sentinel value marking a padded (phantom) patch position in the Option-S padded-patch contract.
+POSITIONS_PAD_VALUE = -1
+
+
+def option_s_position_sentinel_ok(positions_xy):
+  """Return (all_rows_valid_or_full_sentinel, n_bad_rows) for an Option-S position tensor.
+
+  The padded-patch contract requires every per-patch position row to be EXACTLY one of:
+    * [x, y] with both coordinates >= 0 (a valid patch), or
+    * [POSITIONS_PAD_VALUE, POSITIONS_PAD_VALUE] (a fully-padded sentinel).
+  A MIXED row such as [-1, y] or [x, -1] is malformed: it would be classified as "valid" by the
+  ``(pos == -1).all(axis=-1)`` pad test (silently attended-to as a real patch) yet carry a negative
+  coordinate into pooling. This helper flags such rows so callers can fail closed rather than
+  silently mis-handle them. Pure (numpy/jax-eager friendly); does not allocate on-device state.
+
+  Args:
+    positions_xy: int array [..., 2] of per-patch (x, y) positions.
+  Returns:
+    (ok: bool, n_bad: int) where ok is True iff no malformed (mixed-sentinel) row exists.
+  """
+  import numpy as _np  # local import: this is called eagerly (host) for validation, not in the JIT forward
+  p = _np.asarray(positions_xy)
+  if p.shape[-1] != 2:
+    raise ValueError(f"option_s positions must have last dim 2 (x,y); got shape {p.shape}")
+  is_neg = p == POSITIONS_PAD_VALUE
+  any_neg = is_neg.any(axis=-1)
+  all_neg = is_neg.all(axis=-1)
+  # A row is malformed iff it has SOME sentinel coord but is not FULLY sentinel.
+  bad = _np.logical_and(any_neg, _np.logical_not(all_neg))
+  # Also reject any negative coordinate other than the exact sentinel (e.g. -2), which is never valid.
+  other_neg = _np.logical_and(p < 0, p != POSITIONS_PAD_VALUE).any(axis=-1)
+  bad = _np.logical_or(bad, other_neg)
+  n_bad = int(bad.sum())
+  return (n_bad == 0), n_bad
+
+
+def validate_option_s_positions(positions_xy, where=""):
+  """Hard-fail if any Option-S position row is a malformed mixed sentinel. No-op if positions is None."""
+  if positions_xy is None:
+    return
+  ok, n_bad = option_s_position_sentinel_ok(positions_xy)
+  if not ok:
+    raise ValueError(
+        f"Gemma-4 Option-S position sentinel integrity{(' @ '+where) if where else ''}: found {n_bad} malformed "
+        f"row(s). Every patch position must be [x,y] with both coords >= 0, or [-1,-1] (full sentinel). Mixed "
+        f"rows like [-1, y] / [x, -1] (or other negatives) would be silently treated as valid patches and "
+        f"corrupt pooling; refusing to run."
+    )
+
+
+def option_s_pooled_matches_placeholder(image_mask, n_placeholder):
+  """Return (ok, n_valid_pooled) checking the count of valid pooled image tokens == n_placeholder.
+
+  ``image_mask`` is the [..., K] validity mask returned by the vision pooler (True where a pooled slot
+  received at least one real patch). ``n_placeholder`` is the number of image placeholder positions in the
+  decoder sequence for the SAME sample. The Option-S contract requires these to be equal so that the pooled
+  image tokens scatter 1:1 onto the placeholder rows; a mismatch means the merge would drop or duplicate
+  image tokens regardless of padded-embedding ordering.
+  """
+  import numpy as _np
+  m = _np.asarray(image_mask)
+  n_valid = int(_np.asarray(m).astype(bool).sum())
+  return (n_valid == int(n_placeholder)), n_valid
 
 
 def factorized_posemb(posemb: jax.Array, positions_xy: jax.Array, precision) -> jax.Array:
@@ -409,7 +635,15 @@ class Gemma4VisionRotaryEmbedding(nnx.Module):
 
 
 class Gemma4Attention(attentions.Attention):
-  """Gemma 4 specific Attention module."""
+  """Gemma 4 specific Attention module.
+
+  When ``use_clipped_linears`` is enabled, the q/k/v/o projections apply the
+  per-projection activation clip bounds carried in the Gemma-4 vision checkpoint
+  (input clamp before the matmul, output clamp after). The clamps are wired by
+  overriding the base ``Attention`` projection methods, so the underlying
+  ``DenseGeneral`` weights and their checkpoint key paths are unchanged. When the
+  flag is off, every override is an exact delegate to the base implementation.
+  """
 
   def init_rotary_embedding(self) -> Gemma4VisionRotaryEmbedding:
     """Initializes the rotary position embedding module for Gemma 4 vision."""
@@ -417,6 +651,124 @@ class Gemma4Attention(attentions.Attention):
         base_frequency=self.config.rope_theta_for_vit if hasattr(self.config, "rope_theta_for_vit") else 100,
         rotary_fraction=None,  # Or assume it from config if available
     )
+
+  def enable_vision_clip_bounds(self):
+    """Attach the four checkpoint-resident clip-bound scalars for each of q/k/v/o.
+
+    Called once by ``Gemma4EncoderBlock`` after construction when
+    ``config.use_clipped_linears_for_vit`` is set. Idempotent.
+    """
+    if getattr(self, "_use_clipped_linears", False):
+      return
+    # Fail-closed: the clipped path clamps q/k/v independently, which requires SEPARATE q/k/v projections.
+    # A fused QKV projection would apply a single clamp and silently bypass the per-projection clip semantics.
+    if bool(getattr(self.config, "fused_qkv", False)):
+      raise ValueError(
+          "Gemma-4 vision clipped-linears require fused_qkv=False: the checkpoint carries distinct "
+          "q/k/v activation clip bounds that must be applied per-projection. Refusing to silently clip a "
+          "fused QKV projection."
+      )
+    self._use_clipped_linears = True
+    self.q_clip = _make_clip_state()
+    self.k_clip = _make_clip_state()
+    self.v_clip = _make_clip_state()
+    self.o_clip = _make_clip_state()
+
+  def validate_clip_bounds(self):
+    if not getattr(self, "_use_clipped_linears", False):
+      return
+    validate_clip_bounds(self.q_clip, "q_proj")
+    validate_clip_bounds(self.k_clip, "k_proj")
+    validate_clip_bounds(self.v_clip, "v_proj")
+    validate_clip_bounds(self.o_clip, "o_proj")
+
+  # --- projection overrides: clamp(input) -> DenseGeneral -> clamp(output) ---
+  def query_projection(self, inputs_q, out_sharding=None):
+    if not getattr(self, "_use_clipped_linears", False):
+      return super().query_projection(inputs_q, out_sharding=out_sharding)
+    x = _clip_in(inputs_q, self.q_clip)
+    y = self.query(x, out_sharding=out_sharding)
+    return _clip_out(y, self.q_clip)
+
+  def kv_projection(self, inputs_kv, proj_name, out_sharding=None):
+    if not getattr(self, "_use_clipped_linears", False):
+      return super().kv_projection(inputs_kv, proj_name=proj_name, out_sharding=out_sharding)
+    if proj_name == "key":
+      cb, module = self.k_clip, self.key
+    elif proj_name == "value":
+      cb, module = self.v_clip, self.value
+    else:
+      raise ValueError(f"proj_name must be 'key' or 'value', but got {proj_name}")
+    x = _clip_in(inputs_kv, cb)
+    y = module(x, out_sharding=out_sharding)
+    return _clip_out(y, cb)
+
+  def out_projection(self, out, out_sharding=None):
+    if not getattr(self, "_use_clipped_linears", False):
+      return super().out_projection(out, out_sharding=out_sharding)
+    x = _clip_in(out, self.o_clip)
+    y = self.out(x, out_sharding=out_sharding)
+    return _clip_out(y, self.o_clip)
+
+
+class Gemma4ClippedMlpBlock(linears.MlpBlock):
+  """MlpBlock that applies the Gemma-4 vision per-projection activation clip bounds
+  to the gate (wi_0), up (wi_1) and down (wo) projections.
+
+  Only the non-fused activation path is supported (E2B/E4B use
+  ``activations=("gelu", "linear")`` with ``fused_mlp=False``), because gate and up
+  carry distinct clip bounds. When ``use_clipped_linears`` is off, this delegates to
+  the base ``MlpBlock`` unchanged.
+  """
+
+  def __init__(self, *args, use_clipped_linears=False, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._use_clipped_linears = bool(use_clipped_linears)
+    if self._use_clipped_linears:
+      self.gate_clip = _make_clip_state()  # wi_0
+      self.up_clip = _make_clip_state()    # wi_1
+      self.down_clip = _make_clip_state()  # wo
+
+  def validate_clip_bounds(self):
+    if not self._use_clipped_linears:
+      return
+    validate_clip_bounds(self.gate_clip, "gate_proj")
+    validate_clip_bounds(self.up_clip, "up_proj")
+    validate_clip_bounds(self.down_clip, "down_proj")
+
+  def __call__(self, inputs, decode=False, deterministic=False,
+               intermediate_sharding=None, out_sharding=None):
+    if not self._use_clipped_linears:
+      return super().__call__(inputs, decode=decode, deterministic=deterministic,
+                              intermediate_sharding=intermediate_sharding, out_sharding=out_sharding)
+    cfg = self.config
+    if getattr(cfg, "fused_mlp", False):
+      # Clipped vision MLP requires the unfused path so gate/up get their own output clamps.
+      raise ValueError("Gemma4ClippedMlpBlock requires fused_mlp=False (per-projection clip bounds).")
+    if self.mlp_layer_norm is not None:
+      inputs = self.mlp_layer_norm(inputs)
+    clips = [self.gate_clip, self.up_clip]  # order matches activations ("gelu", "linear") == (gate, up)
+    activations = []
+    for idx, act_fn in enumerate(self.activations):
+      dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+      module = getattr(self, dense_name)
+      x = _clip_in(inputs, clips[idx])
+      x = module(x, out_sharding=intermediate_sharding)
+      x = _clip_out(x, clips[idx])
+      x = linears.checkpoint_name(x, "mlp" + dense_name)
+      if cfg.activations_in_float32:
+        x = x.astype(jnp.float32)
+      x = linears._convert_to_activation_function(act_fn)(x)
+      activations.append(x)
+    x = functools.reduce(operator.mul, activations).astype(self.dtype)
+    x = self.dropout(x, deterministic=deterministic)
+    x = self._maybe_shard_with_logical(x, self.intermediate_logical)
+    x = _clip_in(x, self.down_clip)
+    output = self.wo(x, out_sharding=out_sharding)
+    output = _clip_out(output, self.down_clip)
+    output = linears.checkpoint_name(output, "mlpwo")
+    return output
+
 
 
 class Gemma4EncoderBlock(nnx.Module):
@@ -487,6 +839,11 @@ class Gemma4EncoderBlock(nnx.Module):
         is_vision=True,
         rngs=self.rngs,
     )
+    # Opt-in Gemma-4 vision clipped-linears: attach the q/k/v/o checkpoint-resident
+    # clip bounds and route the projections through the clamp-in/clamp-out overrides.
+    self._use_clipped_linears = bool(getattr(config, "use_clipped_linears_for_vit", False))
+    if self._use_clipped_linears:
+      self.attention.enable_vision_clip_bounds()
 
     self.pre_ffw_norm = normalizations.RMSNorm(
         num_features=config.hidden_size_for_vit,
@@ -506,7 +863,9 @@ class Gemma4EncoderBlock(nnx.Module):
         rngs=self.rngs,
     )
 
-    self.mlp = linears.MlpBlock(
+    mlp_cls = Gemma4ClippedMlpBlock if self._use_clipped_linears else linears.MlpBlock
+    mlp_kwargs = {"use_clipped_linears": True} if self._use_clipped_linears else {}
+    self.mlp = mlp_cls(
         config=config,
         mesh=mesh,
         in_features=config.hidden_size_for_vit,
@@ -516,13 +875,32 @@ class Gemma4EncoderBlock(nnx.Module):
         weight_dtype=config.weight_dtype,
         intermediate_dropout_rate=config.dropout_rate,
         rngs=self.rngs,
+        **mlp_kwargs,
     )
 
-  def __call__(self, x: jax.Array, positions: jax.Array | None = None, deterministic: bool = False) -> jax.Array:
-    """Applies the encoder block (MHSA + MLP) to the inputs."""
+  def __call__(
+      self,
+      x: jax.Array,
+      positions: jax.Array | None = None,
+      deterministic: bool = False,
+      decoder_segment_ids: jax.Array | None = None,
+  ) -> jax.Array:
+    """Applies the encoder block (MHSA + MLP) to the inputs.
+
+    When ``decoder_segment_ids`` is provided, patches carrying distinct segment
+    ids cannot attend to each other. This is used by the padded-patch path
+    (valid patches = segment 1, padded/sentinel patches = segment 2) so that the
+    phantom pad patches are masked out of vision self-attention.
+    """
     x_normed = self.pre_attention_norm(x)
-    # Pass positions to attention for RoPE
-    x_attn, _ = self.attention(x_normed, x_normed, inputs_positions=positions, deterministic=deterministic)
+    # Pass positions to attention for RoPE (+ optional segment mask for padded patches).
+    x_attn, _ = self.attention(
+        x_normed,
+        x_normed,
+        inputs_positions=positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=deterministic,
+    )
     x_attn = self.post_attention_norm(x_attn)
     x_after_attn = x_attn + x
 
@@ -573,34 +951,127 @@ class Gemma4VisionEncoderLayer(nnx.Module):
         nnx.initializers.ones(self.rngs.params(), (config.hidden_size_for_vit,), config.weight_dtype), sharding=(None,)
     )
 
-  def __call__(self, inputs: jax.Array, deterministic: bool = False) -> jax.Array:
-    """Applies the vision encoder layer."""
-    if inputs.ndim == 4:
-      inputs = jnp.expand_dims(inputs, 1)
-    b, n, h, w, c = inputs.shape
-    inputs_flat = jnp.reshape(inputs, (b * n, h, w, c))
+  def __call__(
+      self,
+      inputs: jax.Array,
+      deterministic: bool = False,
+      image_position_ids: jax.Array | None = None,
+  ):
+    """Applies the vision encoder layer.
 
-    x, positions_xy = self.vision_entry(inputs_flat)
+    Two contracts:
+
+    (A) Legacy all-valid (``image_position_ids is None``): ``inputs`` are raw images
+        [B, N, H, W, C] (or [B, H, W, C]); patchify -> full unmasked attention -> pool by the
+        derived positions -> return embeddings only (4D array [B, N, K, D]).
+
+    (B) Padded-patch dynamic-N (``image_position_ids is not None``): ``inputs`` are ALREADY
+        patchified pixel_values with shape [B, L, P*P*C] (or [B, N, L, P*P*C]) and
+        ``image_position_ids`` is [B, L, 2] (or [B, N, L, 2]) with -1 sentinel rows marking padded
+        patches. The pre-patchified patches + REAL positions are fed to VisionEntry, per-patch
+        ``decoder_segment_ids`` (valid=1, pad=2) mask the phantom pad patches out of self-attention,
+        pooling uses the real positions (``avg_pool_by_positions`` maps a -1 patch to a zero-weight
+        bucket), and the VisionExit validity mask is returned. Returns a 2-tuple
+        ``(embeddings[B, N, K, D], image_masks[B*N, K])`` where ``image_masks.sum()`` is the number
+        of valid pooled tokens, threaded to ``merge_mm_embeddings.token_masks`` so exactly the valid
+        pooled tokens land in the image placeholders.
+    """
+    if image_position_ids is None:
+      # ---- Legacy path: raw images -> patchify -> full (unmasked) attention ----
+      # Fail-closed contract guard: the legacy path requires FULL images ([B,N,H,W,C] or [B,H,W,C]).
+      # Pre-patchified inputs ([B,L,F] or [B,N,L,F]) only make sense with per-patch image_position_ids
+      # (the padded-patch path). Refuse to silently mis-handle pre-patchified input as a full image, which
+      # would either crash cryptically or produce wrong pooling.
+      if inputs.ndim not in (4, 5):
+        raise ValueError(
+            "Gemma4 vision legacy path expects full images with shape [B, H, W, C] or [B, N, H, W, C]; "
+            f"got inputs.ndim={inputs.ndim} (shape {tuple(inputs.shape)}). Pre-patchified pixel_values must be "
+            "accompanied by image_position_ids (the padded-patch path). Refusing to silently take the legacy "
+            "all-valid vision path."
+        )
+      if inputs.ndim == 4:
+        inputs = jnp.expand_dims(inputs, 1)
+      b, n, h, w, c = inputs.shape
+      inputs_flat = jnp.reshape(inputs, (b * n, h, w, c))
+
+      x, positions_xy = self.vision_entry(inputs_flat)
+
+      for i in range(self.config.num_hidden_layers_for_vit):
+        layer = getattr(self, f"layer_{i}")
+        x = layer(x, positions=positions_xy, deterministic=deterministic)
+
+      vision_exit_results = self.vision_exit(x, positions_xy=positions_xy)
+      (embeddings, _) = vision_exit_results[0]
+
+      embeddings = (embeddings - self.std_bias.value.astype(embeddings.dtype)) * self.std_scale.value.astype(
+          embeddings.dtype
+      )
+
+      # Unflatten batch and num_images
+      final_x = jnp.reshape(embeddings, (b, n, embeddings.shape[1], embeddings.shape[2]))
+      return final_x
+
+    # ---- Padded-patch dynamic-N path: pre-patchified patches + sentinel positions ----
+    # inputs: [B, L, P*P*C] pre-patchified pixel_values. Support an optional per-image N dim
+    # [B, N, L, F] -> flatten to [B*N, L, F] to match positions.
+    if inputs.ndim == 4:
+      b, n, l, f = inputs.shape
+      patches = jnp.reshape(inputs, (b * n, l, f))
+      pos = jnp.reshape(image_position_ids, (b * n, l, 2))
+    else:
+      assert inputs.ndim == 3, f"padded-patch path expects pre-patchified [B, L, F] patches, got {inputs.shape}"
+      b, l, f = inputs.shape
+      n = 1
+      patches = inputs
+      pos = image_position_ids
+      if pos.ndim == 2:
+        pos = jnp.broadcast_to(pos, (b, l, 2))
+
+    pos = pos.astype(jnp.int32)
+
+    # VisionEntry consumes pre-patchified patches + REAL positions (incl -1 sentinels).
+    x, positions_xy = self.vision_entry(patches, positions_xy=pos)
+
+    # Segment ids: valid patch (any coord != -1) -> 1, padded sentinel patch -> 2. Distinct segments
+    # cannot attend to each other, masking the phantom pad patches out of self-attention.
+    is_pad = (positions_xy == -1).all(axis=-1)  # [B*N, L]
+    decoder_segment_ids = jnp.where(is_pad, 2, 1).astype(jnp.int32)
+
+    # Sanitize padded-patch rows to zero BEFORE attention. Segment masking already prevents pad patches
+    # from influencing valid patches' attention outputs, and pooling excludes pad positions — so for FINITE
+    # pad content the valid outputs are provably invariant (verified byte-identical under 1e6 garbage pad).
+    # However, attention computes q/k/v on ALL rows before masking, so a NON-FINITE (NaN/Inf) pad patch would
+    # produce NaN q/k/v and leak through the softmax normalization into valid rows (NaN*0=NaN). Zeroing pad
+    # rows here makes the isolation hold for arbitrary (incl. non-finite) pad content without changing any
+    # valid output. This is defense-in-depth for malformed processor output; the frozen processor emits finite
+    # pad, which was already invariant.
+    x = jnp.where(is_pad[..., None], jnp.zeros_like(x), x)
 
     for i in range(self.config.num_hidden_layers_for_vit):
       layer = getattr(self, f"layer_{i}")
-      x = layer(x, positions=positions_xy, deterministic=deterministic)
+      x = layer(
+          x,
+          positions=positions_xy,
+          deterministic=deterministic,
+          decoder_segment_ids=decoder_segment_ids,
+      )
 
+    # Pool with REAL positions; avg_pool_by_positions returns (embeddings, validity_mask).
     vision_exit_results = self.vision_exit(x, positions_xy=positions_xy)
-
-    # Return embeddings from VisionExit tuple
-    # vision_exit_results is a tuple of (embeddings, mask) tuples, one for each output length.
-    # We take the first result.
-    (embeddings, _) = vision_exit_results[0]
+    (embeddings, image_masks) = vision_exit_results[0]  # embeddings [B*N, K, D], mask [B*N, K]
 
     embeddings = (embeddings - self.std_bias.value.astype(embeddings.dtype)) * self.std_scale.value.astype(
         embeddings.dtype
     )
 
-    # Unflatten batch and num_images
     final_x = jnp.reshape(embeddings, (b, n, embeddings.shape[1], embeddings.shape[2]))
+    if image_masks is None:
+      image_masks = jnp.ones((b * n, embeddings.shape[1]), dtype=jnp.int32)
+    else:
+      # merge_mm_embeddings does argsort(-token_mask); use int32 so negation/sort is well-defined.
+      image_masks = image_masks.astype(jnp.int32)
 
-    return final_x
+    return final_x, image_masks
 
 
 class Gemma4VisionProjector(nnx.Module):
