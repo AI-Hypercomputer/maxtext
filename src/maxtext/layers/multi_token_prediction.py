@@ -373,9 +373,6 @@ class MultiTokenPredictionBlock(nnx.Module):
       deterministic,
   ) -> dict:
     cfg = self.config
-    # The CP extent lives on the mesh; there is no `context_parallel_size` config
-    # field, so the previous `getattr(cfg, "context_parallel_size", 1)` always
-    # returned the default and left both guards below dead.
     cp_size = self.mesh.shape.get(cfg.context_sharding, 1) if self.mesh is not None else 1
 
     # Under packing, target_mask carries segment IDs (1, 2, ...) rather
@@ -395,9 +392,7 @@ class MultiTokenPredictionBlock(nnx.Module):
       target_ids = jnp.ones_like(input_ids, dtype=jnp.int32)
 
     # CP load_balance shuffles token order via DUAL_CHUNK_SWAP, which breaks
-    # the ppermute-based neighbor fetch in _shift_left_one_cp_aware: the token
-    # after position i in permuted order is not its real successor. Keyed off
-    # what the input pipeline actually did, not off the config flag alone.
+    # the ppermute-based neighbor fetch in _shift_left_one_cp_aware.
     if max_utils.reordered_cp_size(cfg, self.mesh) > 1:
       raise ValueError(
           "MTP does not support context_parallel_load_balance. "
