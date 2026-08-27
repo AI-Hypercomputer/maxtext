@@ -23,7 +23,53 @@ from tiktoken.load import load_tiktoken_bpe
 from sentencepiece import SentencePieceProcessor
 
 
-class TikTokenTokenizer:
+class ChatTemplateMixin:
+  """Mixin to provide Jinja2 chat template rendering for native tokenizers."""
+
+  def apply_chat_template(self, conversation, chat_template=None, add_generation_prompt=False, tokenize=True, **kwargs):
+    """Applies a Jinja2 chat template to a conversation."""
+    if chat_template is None:
+      chat_template = getattr(self, "chat_template", None)
+    if chat_template is None:
+      raise ValueError("Cannot apply chat template because no chat template was provided or set.")
+
+    import jinja2  # pylint: disable=import-outside-toplevel
+
+    env = jinja2.Environment(autoescape=False)
+
+    def raise_exception(message):
+      raise jinja2.exceptions.TemplateError(message)
+
+    env.globals["raise_exception"] = raise_exception
+
+    template = env.from_string(chat_template)
+
+    bos_token = ""
+    eos_token = ""
+    if hasattr(self, "_tokenizer_model"):  # SentencePiece
+      if self.bos_id is not None and self.bos_id >= 0:
+        bos_token = self._tokenizer_model.IdToPiece(self.bos_id)
+      if self.eos_id is not None and self.eos_id >= 0:
+        eos_token = self._tokenizer_model.IdToPiece(self.eos_id)
+    elif hasattr(self, "model"):  # TikToken
+      if self.bos_id is not None and self.bos_id >= 0:
+        bos_token = self.decode([self.bos_id])
+      if self.eos_id is not None and self.eos_id >= 0:
+        eos_token = self.decode([self.eos_id])
+
+    rendered = template.render(
+        messages=conversation,
+        add_generation_prompt=add_generation_prompt,
+        bos_token=bos_token,
+        eos_token=eos_token,
+        **kwargs,
+    )
+    if tokenize:
+      return self.encode(rendered)
+    return rendered
+
+
+class TikTokenTokenizer(ChatTemplateMixin):
   """
   Tokenizing and encoding/decoding text using the Tiktoken tokenizer.
   """
@@ -180,7 +226,7 @@ class TikTokenTokenizer:
     yield s[slice_start:]
 
 
-class SentencePieceTokenizer:
+class SentencePieceTokenizer(ChatTemplateMixin):
   """
   Tokenizing and encoding/decoding text using the native sentencepiece library.
   Supports both local and GCS (gs://) model paths.
@@ -244,6 +290,9 @@ class HFTokenizer:
 
   def decode(self, t: Sequence[int]) -> str:
     return self.tokenizer.decode(t)
+
+  def apply_chat_template(self, *args, **kwargs):
+    return self.tokenizer.apply_chat_template(*args, **kwargs)
 
 
 def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token):
