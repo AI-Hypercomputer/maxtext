@@ -18,6 +18,7 @@
 
 import functools
 import inspect
+import re
 from typing import Any
 import warnings
 
@@ -2032,6 +2033,34 @@ class NNXDecoder(nnx.Module):
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
+    expert_indices = None
+    try:
+
+      def _path_sort_key(path):
+        key = []
+        for part in path:
+          nums = re.findall(r"\d+", str(part))
+          key.append(int(nums[0]) if nums else str(part))
+        return tuple(key)
+
+      intermediates = nnx.state(self, nnx.Intermediate)
+      flat_items = [
+          (path, val.value if hasattr(val, "value") else val)
+          for path, val in intermediates.flat_state()
+          if path and str(path[-1]) == "selected_experts"
+      ]
+      flat_items.sort(key=lambda item: _path_sort_key(item[0]))
+      expert_indices_list = [v for _, v in flat_items]
+      if expert_indices_list:
+        # Scanned blocks already carry a leading layer axis (3D); sequential
+        # layers are 2D and need that axis added before concatenating.
+        expert_indices_list = [v if v.ndim == 3 else jnp.expand_dims(v, axis=0) for v in expert_indices_list]
+        expert_indices = jnp.concatenate(expert_indices_list, axis=0)
+    except Exception:  # pylint: disable=broad-exception-caught
+      expert_indices = None
+
+    if expert_indices is not None:
+      return logits, hidden_state, kv_caches, expert_indices
     return logits, hidden_state, kv_caches
 
   def _apply_deepseek4_scanned_blocks(

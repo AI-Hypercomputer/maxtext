@@ -549,7 +549,7 @@ class Transformer(nnx.Module):
       mutable_collections.append("intermediates")
 
     if self.config.pure_nnx_decoder:
-      logits, hidden_state, kv_caches = self.decoder(
+      res = self.decoder(
           shared_embedding=self.token_embedder,
           decoder_input_tokens=decoder_input_tokens,
           decoder_positions=decoder_positions,
@@ -563,8 +563,13 @@ class Transformer(nnx.Module):
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
       )  # pytype: disable=wrong-keyword-args
+      if isinstance(res, tuple) and len(res) == 4:
+        logits, hidden_state, kv_caches, expert_indices = res
+      else:
+        logits, hidden_state, kv_caches = res
+        expert_indices = None
     else:
-      logits, hidden_state, kv_caches = self.decoder(
+      res = self.decoder(
           shared_embedding=self.token_embedder,
           decoder_input_tokens=decoder_input_tokens,
           decoder_positions=decoder_positions,
@@ -579,6 +584,11 @@ class Transformer(nnx.Module):
           deepstack_visual_embeds=deepstack_visual_embeds,
           mutable=mutable_collections,  # pyrefly: ignore[unexpected-keyword]
       )  # pytype: disable=wrong-keyword-args
+      if isinstance(res, tuple) and len(res) == 4:
+        logits, hidden_state, kv_caches, expert_indices = res
+      else:
+        logits, hidden_state, kv_caches = res
+        expert_indices = None
 
     # If we are initializing the model AND MTP is enabled, we must create
     # dummy target tensors. This allows Flax to trace the MTPBlock and create
@@ -614,6 +624,8 @@ class Transformer(nnx.Module):
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # In vLLM, logits are computed separately after updating the KV cache.
+      if expert_indices is not None:
+        return hidden_state, kv_caches, expert_indices
       return hidden_state, kv_caches
 
     return logits

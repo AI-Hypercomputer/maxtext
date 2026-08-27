@@ -4383,6 +4383,8 @@ class MaxTextConfig(
         "autoregressive": self.ici_autoregressive_parallelism,
         "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
         "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+        "dcp": (1),
+        "pcp": (1),
     }
     self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
@@ -4403,6 +4405,8 @@ class MaxTextConfig(
         "autoregressive": self.dcn_autoregressive_parallelism,
         "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
         "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+        "dcp": (1),
+        "pcp": (1),
     }
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 

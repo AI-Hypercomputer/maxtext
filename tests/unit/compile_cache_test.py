@@ -81,6 +81,10 @@ def test_train_step_cache_hit():
     env["JAX_ENABLE_COMPILATION_CACHE"] = "true"
     env["JAX_COMPILATION_CACHE_DIR"] = temp_dir
     env["JAX_LOG_COMPILES"] = "1"
+    # The tiny model used here compiles in well under JAX's default 1 second
+    # minimum compile time for writing to the persistent cache, so lower the
+    # threshold to ensure the cache is actually populated.
+    env["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
 
     print("Running CPU training subprocess:", " ".join(cmd))
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
