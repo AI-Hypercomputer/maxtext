@@ -21,6 +21,7 @@ import numpy as np
 from maxtext.common.common_types import DecoderBlockType, VisionEncoderBlockType
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
+from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.multimodal import processor_gemma3
@@ -389,6 +390,27 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
     self.assertEqual(mm_processor.reformat_response("Hello world", "gemma3-4b"), "Hello world<end_of_turn>")
     # Multimodal Llama 4 model should append <|eot|>
     self.assertEqual(mm_processor.reformat_response("Hello world", "llama4-17b-16e"), "Hello world<|eot|>")
+
+  def test_input_pipeline_reformat_response_string_and_list(self):
+    # Test list response column (e.g. ChartQA where label = ['186600'])
+    ex_list = {"label": ["186600"]}
+    res_list = input_pipeline_utils.reformat_response(ex_list, "label", "maxtext-omni-gemma3-qwen3")
+    self.assertEqual(res_list["label"], "186600<|im_end|>")
+
+    # Test string response column (e.g. ChartNet where summary = 'This is a chart summary.')
+    ex_str = {"summary": "This is a chart summary."}
+    res_str = input_pipeline_utils.reformat_response(ex_str, "summary", "maxtext-omni-gemma3-qwen3")
+    self.assertEqual(res_str["summary"], "This is a chart summary.<|im_end|>")
+
+    # Test empty list and tuple raise ValueError
+    with self.assertRaises(ValueError):
+      input_pipeline_utils.reformat_response({"label": []}, "label", "maxtext-omni-gemma3-qwen3")
+    # Test empty string raises ValueError
+    with self.assertRaises(ValueError):
+      input_pipeline_utils.reformat_response({"summary": ""}, "summary", "maxtext-omni-gemma3-qwen3")
+    # Test None raises ValueError
+    with self.assertRaises(ValueError):
+      input_pipeline_utils.reformat_response({"label": None}, "label", "maxtext-omni-gemma3-qwen3")
 
   def test_reformat_prompt_text_only_fallback(self):
     # Text-only models should return prompt unchanged
