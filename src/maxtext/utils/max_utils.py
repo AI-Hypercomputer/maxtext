@@ -495,7 +495,7 @@ def create_ring_axis_device_mesh(ici_parallelism, mesh_axes, devices, ring_axis)
 
   coords = np.array([d.coords for d in devices])
   origin, extent = coords.min(axis=0), coords.max(axis=0) - coords.min(axis=0) + 1
-  physical = np.empty(tuple(extent), dtype=object)
+  physical = np.full(tuple(extent), None, dtype=object)
   for device, coord in zip(devices, coords):
     physical[tuple(coord - origin)] = device
   physical = physical.reshape([dim for dim in extent if dim > 1])
@@ -517,8 +517,7 @@ def create_ring_axis_device_mesh(ici_parallelism, mesh_axes, devices, ring_axis)
 
   rings = []
   for i in range(physical.shape[0] // ring_height):
-    columns = range(physical.shape[1] // ring_width)
-    for j in columns if i % 2 == 0 else reversed(columns):
+    for j in range(physical.shape[1] // ring_width):
       left = list(physical[i * ring_height : (i + 1) * ring_height, ring_width * j])
       right = list(physical[i * ring_height : (i + 1) * ring_height, ring_width * j + 1])
       rings.append(left + right[::-1])
