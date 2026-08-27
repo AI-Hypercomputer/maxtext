@@ -2410,6 +2410,58 @@ def QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN(target_shape=None):
   """
   return {}
 
+def _qwen3_8_wrap_config(config):
+  if "text_config" in config:
+    return config
+  return {"text_config": config}
+
+
+def _qwen3_8_rewrite_hf_source(source):
+  if isinstance(source, str):
+    prefix = "model.language_model."
+    if source.startswith(prefix):
+      return "model." + source[len(prefix):]
+    return source
+
+  if isinstance(source, list):
+    return [_qwen3_8_rewrite_hf_source(x) for x in source]
+
+  if isinstance(source, tuple):
+    return tuple(_qwen3_8_rewrite_hf_source(x) for x in source)
+
+  return source
+
+
+def QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(
+    config,
+    maxtext_config,
+    scan_layers=False,
+):
+  mapping = QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(
+      _qwen3_8_wrap_config(config),
+      maxtext_config,
+      scan_layers,
+  )
+
+  return {
+      mt_key: _qwen3_8_rewrite_hf_source(hf_source)
+      for mt_key, hf_source in mapping.items()
+  }
+
+
+def QWEN3_8_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+    config,
+    maxtext_config,
+    scan_layers=False,
+    saving_to_hf=False,
+):
+  return QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+      _qwen3_8_wrap_config(config),
+      maxtext_config,
+      scan_layers,
+      saving_to_hf,
+  )
+
 
 def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """
@@ -4263,6 +4315,7 @@ PARAM_MAPPING = {
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3.8-2.4t-a95b": QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4318,6 +4371,7 @@ HOOK_FNS = {
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3.8-2.4t-a95b" : QWEN3_8_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,

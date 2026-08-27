@@ -1883,6 +1883,60 @@ qwen3_vl_30b_a3b_dict = {
 }
 qwen3_vl_30b_a3b_config = PTConfig(**qwen3_vl_30b_a3b_dict)
 
+qwen3_8_2_4t_a95b_dict = {
+    "architectures": ["Qwen3_5MoeForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "attn_output_gate": True,
+
+    "dtype": "bfloat16",
+
+    "full_attention_interval": 4,
+
+    "head_dim": 256,
+    "hidden_act": "silu",
+    "hidden_size": 8192,
+
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 128,
+    "linear_value_head_dim": 128,
+    "linear_num_key_heads": 16,
+    "linear_num_value_heads": 128,
+
+    "max_position_embeddings": 262144,
+
+    "model_type": "qwen3_5_moe_text",
+
+    "moe_intermediate_size": 2048,
+
+    "mtp_num_hidden_layers": 1,
+    "mtp_use_dedicated_embeddings": False,
+
+    "num_attention_heads": 64,
+    "num_experts": 512,
+    "num_experts_per_tok": 10,
+    "num_hidden_layers": 92,
+    "num_key_value_heads": 4,
+
+    "partial_rotary_factor": 0.25,
+
+    "rms_norm_eps": 1.0e-6,
+
+    "rope_parameters": {
+        "partial_rotary_factor": 0.25,
+        "rope_theta": 10000000,
+        "rope_type": "default",
+    },
+
+    "shared_expert_intermediate_size": 2048,
+
+    "tie_word_embeddings": False,
+    "use_cache": True,
+
+    "vocab_size": 248320,
+}
+
+qwen3_8_2_4t_a95b_config = PTConfig(**qwen3_8_2_4t_a95b_dict)
 
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
@@ -1921,6 +1975,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-30b-a3b-base": qwen3_30b_a3b_base_config,
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
+    "qwen3.8-2.4t-a95b": qwen3_8_2_4t_a95b_config,
     "deepseek2-16b": deepseek2_16b_config,
     "deepseek3-671b": deepseek3_671b_config,
     "deepseek3.2-671b": deepseek32_671b_config,
