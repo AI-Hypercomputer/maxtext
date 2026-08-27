@@ -1023,12 +1023,14 @@ def recover(
               replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
               restored_dict = snapshot_mgr.load(replicated_abstract_dict)
               restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+
               merged = jax.tree.map(
                   lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
                   restored_dict,
                   abstract_dict,
                   is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
               )
+
               m_state = nnx.state(state.model)
               nnx.replace_by_pure_dict(m_state, merged["model"])
               nnx.update(state.model, m_state)
@@ -1046,7 +1048,7 @@ def recover(
           if existing_checkpoint_manager is None:
             raise RuntimeError("No snapshots or persistent checkpoints available to restore from. Cannot recover.")
           _logger.info("Restoring from persistent checkpoint...")
-          restored_state, _ = checkpointing.load_state_if_possible(
+          restored, _ = checkpointing.load_state_if_possible(
               existing_checkpoint_manager,
               None,
               config.load_parameters_path,
@@ -1063,19 +1065,42 @@ def recover(
               expansion_factor_real_data=config.expansion_factor_real_data,
               maxtext_config=config,
           )
-          if hasattr(restored_state, "__getitem__") and "items" in restored_state:
-            restored_state = restored_state["items"]
           if isinstance(model, nn.Module):
+            restored_state = restored["items"] if hasattr(restored, "__getitem__") and "items" in restored else restored
             restored_step = int(restored_state.step)
           else:
-            restored_step = int(restored_state.optimizer.step.value)
+            overlay = restored["items"] if hasattr(restored, "__getitem__") and "items" in restored else restored
+            if isinstance(overlay, train_state_nnx.TrainStateNNX):
+              overlay_model = nnx.to_pure_dict(nnx.state(overlay.model))
+              overlay_opt = nnx.to_pure_dict(nnx.state(overlay.optimizer)) if overlay.optimizer is not None else None
+            elif isinstance(overlay, nnx.State):
+              overlay_dict = overlay.to_pure_dict()
+              overlay_model = overlay_dict.get("model", overlay_dict)
+              overlay_opt = overlay_dict.get("optimizer", None)
+            elif isinstance(overlay, dict):
+              overlay_model = overlay.get("model", overlay)
+              overlay_opt = overlay.get("optimizer", None)
+            else:
+              overlay_model = overlay
+              overlay_opt = None
+
+            m_state = nnx.state(state.model)
+            nnx.replace_by_pure_dict(m_state, overlay_model)
+            nnx.update(state.model, m_state)
+            if overlay_opt is not None and state.optimizer is not None:
+              opt_state = nnx.state(state.optimizer)
+              nnx.replace_by_pure_dict(opt_state, overlay_opt)
+              nnx.update(state.optimizer, opt_state)
+            restored_state = state
+            restored_step = int(state.optimizer.step.value)
 
         if metric_logger_instance is not None:
           metric_logger_instance.learning_rate_schedule = learning_rate_schedule
 
       # Update jax_device_state with the newly built JAX objects
-      if not isinstance(model, nn.Module) and isinstance(restored_state, train_state_nnx.TrainStateNNX):
-        _, restored_state = nnx.split(restored_state)
+      if not isinstance(model, nn.Module):
+        if isinstance(restored_state, train_state_nnx.TrainStateNNX):
+          _, restored_state = nnx.split(restored_state)
       jax_device_state["state"] = restored_state
       jax_device_state["init_rng"] = init_rng
       jax_device_state["model"] = model
