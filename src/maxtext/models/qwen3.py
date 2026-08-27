@@ -1140,32 +1140,39 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         rngs=rngs,
     )
 
-    # 2. Instantiate and apply the shared expert.
-    self.shared_expert = MlpBlock(
-        config=cfg,
-        mesh=mesh,
-        in_features=cfg.emb_dim,
-        intermediate_dim=cfg.moe_mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        quant=self.quant,
-        model_mode=config.model_call_mode,
-        rngs=rngs,
-    )
+    # 2. Instantiate and apply the shared expert, if the config asks for one.
+    # cfg.shared_experts defaults to 0. Building the expert every time puts an
+    # extra full-size MLP in every layer of a dense configuration.
+    self.use_shared_expert = cfg.shared_experts > 0
+    if self.use_shared_expert:
+      self.shared_expert = MlpBlock(
+          config=cfg,
+          mesh=mesh,
+          in_features=cfg.emb_dim,
+          intermediate_dim=cfg.moe_mlp_dim,
+          activations=cfg.mlp_activations,
+          intermediate_dropout_rate=cfg.dropout_rate,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          quant=self.quant,
+          model_mode=config.model_call_mode,
+          rngs=rngs,
+      )
 
-    # 3. Instantiate and apply the gate for the shared expert.
-    self.shared_expert_gate = DenseGeneral(
-        in_features_shape=cfg.emb_dim,
-        out_features_shape=1,
-        use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
-        dtype=cfg.dtype,
-        kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        matmul_precision=cfg.matmul_precision,
-        rngs=rngs,
-    )
+      # 3. Instantiate and apply the gate for the shared expert.
+      self.shared_expert_gate = DenseGeneral(
+          in_features_shape=cfg.emb_dim,
+          out_features_shape=1,
+          use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
+          dtype=cfg.dtype,
+          kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          matmul_precision=cfg.matmul_precision,
+          rngs=rngs,
+      )
+    else:
+      self.shared_expert = None
+      self.shared_expert_gate = None
 
   def __call__(self, hidden_states: Array, deterministic: bool) -> tuple[Array, Array | None]:
     """
@@ -1182,6 +1189,9 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     """
     # 1. Apply the routed experts block.
     routed_output, load_balance_loss, _ = self.routed_experts(hidden_states)
+
+    if not self.use_shared_expert:
+      return routed_output, load_balance_loss
 
     # 2. Apply the shared expert.
     shared_expert_output = self.shared_expert(hidden_states, deterministic=deterministic)
