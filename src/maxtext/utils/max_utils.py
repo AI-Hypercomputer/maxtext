@@ -522,9 +522,7 @@ def create_ring_axis_device_mesh(ici_parallelism, mesh_axes, devices, ring_axis)
       right = list(physical[i * ring_height : (i + 1) * ring_height, ring_width * j + 1])
       rings.append(left + right[::-1])
 
-  mesh = np.empty((len(rings), ring), dtype=object)
-  for i, devices_in_ring in enumerate(rings):
-    mesh[i] = devices_in_ring
+  mesh = np.array(rings, dtype=object)
   other_axes = [size for i, size in enumerate(ici_parallelism) if i != axis]
   mesh = np.moveaxis(mesh.reshape([*other_axes, ring]), -1, axis)
   max_logging.log(f"Laid the '{ring_axis}' mesh axis out as a {ring_height}x{ring_width} physical ring")
