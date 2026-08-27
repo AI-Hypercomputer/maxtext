@@ -862,6 +862,24 @@ class AttentionOp(nnx.Module):
         if axis is not None and axis != self.config.ulysses_context_sharding and axis in self.mesh.shape
     )
 
+  def _load_balanced_context_parallel(self) -> bool:
+    """Whether the load-balanced CP path is valid for this call.
+
+    `context_parallel_load_balance` on its own is not enough. The load-balanced
+    path assumes the batch arrives in DUAL_CHUNK_SWAP order: the mask bakes that
+    permutation into a static `q_sequence`, and `wrap_flash_attention` restores
+    K/V to contiguous order. The input pipeline applies that order once, for one
+    specific cp_size, so the kernel may only take this path when it shards the
+    query exactly that many ways.
+
+    Equality, not `> 1`: a cp=2 train mesh with a cp=4 eval mesh is as wrong as
+    1 vs 4. A mismatch does not raise - it reorders K/V that were never permuted
+    and hands rows a `q_sequence` that lets them attend to the future - so fall
+    back to the plain causal path, which is correct at any shard count.
+    """
+    cp_size = self._context_parallel_size()
+    return cp_size > 1 and max_utils.reordered_cp_size(self.config, self.mesh) == cp_size
+
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
 
@@ -1006,8 +1024,7 @@ class AttentionOp(nnx.Module):
       next_pos = kv_seq_len - 1
     use_segment_positions = (
         segment_positions is not None
-        and self.config.context_parallel_load_balance
-        and self._context_parallel_size() > 1
+        and self._load_balanced_context_parallel()
         and previous_chunk is None
         and model_mode != MODEL_MODE_AUTOREGRESSIVE
     )
@@ -1677,7 +1694,7 @@ class AttentionOp(nnx.Module):
     use_ulysses = ulysses_attention.is_context_parallel_ulysses_requested(self.config)
     use_usp = usp_attention.is_context_parallel_usp_requested(self.config)
     cp_size = self._context_parallel_size()
-    load_balanced_context_parallel = self.config.context_parallel_load_balance
+    load_balanced_context_parallel = self._load_balanced_context_parallel()
     if use_tokamax_ring:
       self._validate_tpu_tokamax_ring_runtime(
           model_mode=model_mode,
