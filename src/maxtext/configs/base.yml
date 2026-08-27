@@ -1113,6 +1113,17 @@ vertex_tensorboard_region: ""
 
 # If set to true, MaxText will perform extra checks using jax.checkify. Note that this will effect performance.
 max_checkify: false
+# Enable tensor distribution debugging across forward and backward passes.
+debug_tensor_distribution: false
+# Filter layers or submodules to debug.
+# Available options:
+#   - "all": Log all intercepted model layers and submodules (default).
+#   - Comma-separated layer indices: e.g. "0,1" to log only layers 0 and 1.
+#   - Comma-separated layer names: e.g. "layers_0,layers_1" or "decoder/layers_0".
+#   - Comma-separated submodule types/names: e.g. "moe", "attention", "router", "mlp".
+debug_tensor_distribution_layers: "all"
+# Step frequency interval (in training steps) for debug tensor logging (e.g. 1 logs every step, 10 logs every 10 steps).
+debug_tensor_distribution_step_interval: 1
 
 # Inference
 inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
