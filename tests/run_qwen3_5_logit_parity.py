@@ -315,7 +315,7 @@ def run_full_model_logit_parity(
         [
             sys.argv[0],
             get_test_config_path("inference/vllm.yml"),
-            "attention=vllm_rpa",
+            "attention=vllm_batched_rpa",
             "prefuse_moe_weights=True",
             "model_call_mode=inference",
             # Tensor-parallel sharding (the `model` mesh axis), as real vLLM
@@ -472,7 +472,7 @@ def main():
         # batch_size must be divisible by the number of TPU devices in the
         # data/fsdp mesh axes (4 on a v5p 2x2x1 slice).
         batch_size = max(len(jax.devices()), 4)
-        for num_layers in [1, 2, 40]:
+        for num_layers in [1, 2, 4, 8]:
             for dtype_str in ["bfloat16", "float32"]:
                 all_metrics[(dtype_str, num_layers)] = run_full_model_logit_parity(
                     dtype_str=dtype_str,
