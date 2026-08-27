@@ -476,7 +476,14 @@ def _gmm_bwd(
         bool,
     ],
     grad: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray | None, jnp.ndarray | None]:
+) -> tuple[
+    jnp.ndarray | qpl.QArray,
+    jnp.ndarray | qpl.QArray,
+    None,
+    None,
+    jnp.ndarray | None,
+    jnp.ndarray | None,
+]:
   """Backward function for throughput GMM VJP."""
   residual_lhs, residual_rhs, group_sizes, group_offset, partial_sum_fwd, lhs_is_qarray, rhs_is_qarray = residual
   num_actual_groups = residual_rhs.shape[0]

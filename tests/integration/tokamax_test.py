@@ -48,7 +48,7 @@ class Train(parameterized.TestCase):
           ("tokamax_v2_bf16", "", True, False, 1, False),
           ("tokamax_v2_bf16_heuristic", "", True, True, 1, False),
           ("tokamax_v2_fp8_full", "fp8_full", True, False, 1, False),
-          ("tokamax_v2_bf16", "", True, False, 2, False ),
+          ("tokamax_v2_bf16", "", True, False, 2, False),
           ("tokamax_v2_fp8_full", "fp8_full", True, False, 2, False),
           ("tokamax_v2_fp8_tag", "fp8_full", True, False, 2, True),
       ]
