@@ -61,14 +61,13 @@ def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
     val_b = val_b.astype(jnp.float32)
 
     max_abs_diff = jnp.max(jnp.abs(val_a - val_b))
-    relative_norm_diff = jnp.linalg.norm(val_a - val_b) / (jnp.linalg.norm(val_a) + 1e-12)
+    relative_norm_diff = jnp.linalg.norm(val_a - val_b) / jnp.linalg.norm(val_a)
 
     log_line = f"{path}" f" | max_abs_diff: {max_abs_diff}" f" | relative_norm_diff: | {relative_norm_diff}"
     log_lines.append(log_line)
-    assert relative_norm_diff < relative_norm_diff_threshold, (
-        f"{path}: relative_norm_diff={relative_norm_diff} exceeds"
-        f" {relative_norm_diff_threshold=}, max_abs_diff={max_abs_diff}"
-    )
+    assert (
+        relative_norm_diff < relative_norm_diff_threshold
+    ), f"relative_norm_diff exceeds {relative_norm_diff_threshold=}"
   diff_summary = "\n".join(log_lines)
   return diff_summary
 
@@ -248,7 +247,7 @@ class MlpBlockTest(unittest.TestCase):
         dtype=jnp.bfloat16,
         weight_dtype=jnp.bfloat16,
         name="mlp",
-        quant=quant,  # pyrefly: ignore[bad-argument-type]
+        quant=quant,
         use_bias=True,
     )
 
@@ -788,16 +787,17 @@ class RoutedMoeTest(parameterized.TestCase):
         rngs=nnx.Rngs(params=rng_model),
     )
 
-    moe_non_chunked.gate.kernel = moe_chunked.gate.kernel
-    moe_non_chunked.wi_0 = moe_chunked.wi_0
-    moe_non_chunked.wi_1 = moe_chunked.wi_1
-    moe_non_chunked.wo = moe_chunked.wo
+    moe_non_chunked.gate.kernel.value = moe_chunked.gate.kernel.value
+    moe_non_chunked.wi_0.value = moe_chunked.wi_0.value
+    moe_non_chunked.wi_1.value = moe_chunked.wi_1.value
+    moe_non_chunked.wo.value = moe_chunked.wo.value
 
     chunked_out, _, _ = moe_chunked(hidden_states)
     non_chunked_out, _, _ = moe_non_chunked(hidden_states)
 
     self.assertTrue(jax.numpy.allclose(chunked_out, non_chunked_out, rtol=1e-01, atol=1e-01, equal_nan=False))
 
+  @pytest.mark.tpu_only
   def test_moe_quantize_token_all_gather(self):
     ep = 4
     weight_quantization_calibration_method = "fixed,-224,224"
@@ -1499,7 +1499,7 @@ class RoutedMoeTest(parameterized.TestCase):
       expected_sorted_indices = jnp.arange(shard_total_tokens)
       # Local expert IDs: repeat local expert index (0, 1, ...) by its count
       expected_sorted_experts_ids = jnp.repeat(
-          jnp.arange(experts_per_shard), expected_local_group_size, total_repeat_length=shard_total_tokens  # pyrefly: ignore[bad-argument-type]
+          jnp.arange(experts_per_shard), expected_local_group_size, total_repeat_length=shard_total_tokens
       )
 
       self.assertTrue(
@@ -2383,7 +2383,7 @@ def test_moe_dispatch_keeps_expert_on_expert_dim(model_name, flag):
   if cfg.moe_dispatch_no_expert_sharding:
     b_spec = remove_expert_from_partition_spec(b_spec, dims_to_peel=(0,))
 
-  e_axes, b_axes = _as_set(e_spec[0] if e_spec is not None else None), _as_set(b_spec[0] if b_spec is not None else None)
+  e_axes, b_axes = _as_set(e_spec[0]), _as_set(b_spec[0])
   assert "expert" in e_axes, "expert dim must be sharded by the 'expert' mesh axis"
   if cfg.moe_dispatch_no_expert_sharding:
     assert "expert" not in b_axes, "flag on: the batch dim must not take 'expert'"

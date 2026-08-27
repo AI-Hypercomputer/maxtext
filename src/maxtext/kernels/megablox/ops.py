@@ -191,7 +191,7 @@ def _gmm_fwd(
     lhs, rhs = _fwd_quantize_activation_and_weight(
         lhs, rhs, quantization_rule, use_gmm_v2, use_manual_quantization, transpose_rhs
     )
-  max_logging.info(f"before QAG: {rhs.shape=}, {lhs.shape=}, {group_sizes.shape=}")
+
   # Quantization All-Gather (QAG) for weight: only supported for following conditions
   if (
       use_tokamax_backend
@@ -203,7 +203,6 @@ def _gmm_fwd(
   ):
     # pyrefly: ignore[bad-assignment]
     rhs = _fwd_gather_weight(rhs, weight_gather_axes)
-  max_logging.info(f"after QAG: {rhs.shape=}, {lhs.shape=}, {group_sizes.shape=}")
 
   # Backend Execution Routing
   if use_tokamax_backend and not use_gmm_v2:
@@ -477,14 +476,7 @@ def _gmm_bwd(
         bool,
     ],
     grad: jnp.ndarray,
-) -> tuple[
-    jnp.ndarray | qpl.QArray,
-    jnp.ndarray | qpl.QArray,
-    None,
-    None,
-    jnp.ndarray | None,
-    jnp.ndarray | None,
-]:
+) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray | None, jnp.ndarray | None]:
   """Backward function for throughput GMM VJP."""
   residual_lhs, residual_rhs, group_sizes, group_offset, partial_sum_fwd, lhs_is_qarray, rhs_is_qarray = residual
   num_actual_groups = residual_rhs.shape[0]

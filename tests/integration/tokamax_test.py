@@ -67,7 +67,7 @@ class Train(parameterized.TestCase):
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
-        "",
+        None,
         get_test_config_path(),
         f"base_output_directory={test_tmpdir}",
         "run_name=test_smoke_train",
