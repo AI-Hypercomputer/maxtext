@@ -91,6 +91,9 @@ def _strip_rng_state(tree):
   Subtrees that become empty after stripping are dropped too, so the result has
   no keys Linen wouldn't also have.
   """
+  if isinstance(tree, nnx.State):
+    non_rng, _ = nnx.split_state(tree, nnx.Not(nnx.RngState), nnx.RngState)
+    return non_rng
   if not isinstance(tree, dict):
     return tree
   out = {}
