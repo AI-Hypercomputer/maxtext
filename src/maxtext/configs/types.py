@@ -253,6 +253,7 @@ ModelName = Literal[
     "gemma4-31b",
     "gemma4-e2b",
     "gemma4-e4b",
+    "maxtext-omni-gemma3-qwen3",
     "qwen2.5-1.5b",
     "qwen2.5-7b",
     "qwen2.5-14b",
@@ -587,6 +588,10 @@ class LogitsAndLoss(BaseModel):
       1,
       description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
   )
+  vocab_tiling_ag_once: bool = Field(
+      False,
+      description="All gather the output head weight once before the tiled loss so the backward reuses it.",
+  )
 
 
 class Attention(BaseModel):
@@ -903,6 +908,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
   )
+  moe_use_direct_token_gather: bool = Field(
+      False,
+      description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -948,6 +957,10 @@ class MoEGeneral(BaseModel):
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
   )
+  shard_embed_moe_on_fsdp: bool = Field(
+      False,
+      description="Keep embed_moe sharded so we can manually QAG it over FSDP.",
+  )
   use_2d_fsdp_sharding: bool = Field(
       False,
       description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
@@ -979,6 +992,17 @@ class MoEGeneral(BaseModel):
   def validate_moe_chunks(self) -> "MoEGeneral":
     if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_sharding_strategy(self) -> "MoEGeneral":
+    """Ensure that only one MoE FSDP sharding strategy is active at a time."""
+    active_sharding_flags = sum([self.shard_exp_on_fsdp, self.use_2d_fsdp_sharding, self.shard_embed_moe_on_fsdp])
+    if active_sharding_flags > 1:
+      raise ValueError(
+          "Only one of shard_exp_on_fsdp, use_2d_fsdp_sharding, or "
+          "shard_embed_moe_on_fsdp can be True at the same time."
+      )
     return self
 
 
@@ -1039,6 +1063,11 @@ class MoEKernels(BaseModel):
   use_gmm_v2: bool = Field(
       False,
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
+  )
+
+  use_gmm_v2_heuristic_tiling: bool = Field(
+      False,
+      description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
 
 
@@ -1289,11 +1318,11 @@ class PipelineParallelism(BaseModel):
 class RematAndOffload(BaseModel):
   """Configuration for gradient checkpointing (rematerialization) and offloading."""
 
-  remat_policy: str = Field(
+  remat_policy: str | None = Field(
       RematPolicy.FULL.value,
       description="The rematerialization policy, trading off speed and memory.",
   )
-  remat_policy_for_vit: str = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
+  remat_policy_for_vit: str | None = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
   decoder_layer_input: RematLocation = Field(
       RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
   )
@@ -1407,6 +1436,10 @@ class DatasetGeneral(BaseModel):
   train_image_column: str | list[str] = Field("image", description="Column name(s) for images in the training data.")
   eval_data_columns: list[str] = Field(["text"], description="Column(s) to use from the evaluation data.")
   eval_image_column: str | list[str] = Field("image", description="Column name(s) for images in evaluation data.")
+  default_prompt: str = Field(
+      "",
+      description="Default prompt injected into the dataset when the prompt column is missing.",
+  )
   packing: bool = Field(
       True,
       description="Whether to pack multiple short examples into a single sequence.",
@@ -1493,6 +1526,14 @@ class GrainDataset(BaseModel):
   grain_data_source_max_workers: int = Field(
       16,
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
+  )
+  grain_index_storage_option: None | Literal["in_memory", "offloaded"] = Field(
+      None,
+      description=(
+          "ArrayRecord reader index storage. None uses the ArrayRecord reader default. Do not use 'offloaded' with "
+          "direct gs:// paths because it can significantly degrade input performance. For Cloud Storage, use a "
+          "filesystem with metadata caching, such as GCSFUSE."
+      ),
   )
   grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
 
@@ -1750,6 +1791,30 @@ class ManifoldConstrainedHyperConnections(BaseModel):
           "Practical only for a small mhc_expansion_rate (e.g., k=4)."
       ),
   )
+  use_mhc_pallas_kernel: bool = Field(
+      False,
+      description=(
+          "Whether to use the Pallas TPU kernel implementation for"
+          " mHC-lite when running on TPU. Requires enable_mhc_lite=True."
+      ),
+  )
+  mhc_pallas_kernel_fwd_block_size: int = Field(
+      256,
+      description="Block size for forward pass of MHC Pallas kernel.",
+  )
+  mhc_pallas_kernel_bwd_block_size: int = Field(
+      128,
+      description=(
+          "Block size for backward pass of MHC Pallas kernel. Default of 128 is"
+          " optimal for TPU v7 memory constraints; 256 is optimal for TPU v6."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_mhc_kernel(self) -> "ManifoldConstrainedHyperConnections":
+    if self.use_mhc_pallas_kernel and not self.enable_mhc_lite:
+      raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
+    return self
 
 
 class DilocoParams(BaseModel):
@@ -1757,11 +1822,26 @@ class DilocoParams(BaseModel):
 
   enable_diloco: bool = Field(False, description="Enable Diloco parallelism")
   diloco_sync_period: int = Field(36, description="Diloco sync period.")
+
+  @model_validator(mode="after")
+  def validate_streaming_diloco_params(self) -> "DilocoParams":
+    """Validates streaming DiLoCo parameters."""
+    if self.enable_streaming_diloco:
+      if not self.enable_diloco:
+        raise ValueError("enable_diloco must be True when enable_streaming_diloco is True.")
+      if self.num_diloco_fragments is None:
+        raise ValueError("num_diloco_fragments must be specified when enable_streaming_diloco is True.")
+      if self.num_diloco_fragments < 2:
+        raise ValueError(
+            f"num_diloco_fragments ({self.num_diloco_fragments}) must be at least 2 when enable_streaming_diloco "
+            "is True (1 for non-scanned parameters, at least 1 for scanned layers)."
+        )
+    return self
+
   diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
   diloco_outer_momentum: float = Field(0.9, description="momentum for outer optimizer.")
   dcn_bandwidth_limit: str = Field(
-      "",
-      description="Programmatic DCN egress bandwidth limit (e.g., '28gbit'). Empty means no limit.",
+      "", description="Programmatic DCN egress bandwidth limit per VM (e.g., '28gbit'). Empty means no limit."
   )
   dcn_bandwidth_burst: str = Field("10mb", description="Burst size for Token Bucket Filter (TBF) traffic shaping.")
   dcn_bandwidth_latency: str = Field(
@@ -1769,6 +1849,40 @@ class DilocoParams(BaseModel):
       description="Latency threshold for Token Bucket Filter (TBF) traffic shaping.",
   )
   dcn_bandwidth_interface: str = Field("eth0", description="Network interface to apply bandwidth limits on.")
+
+  # Streaming DiLoCo parameters
+  enable_streaming_diloco: bool = Field(
+      False,
+      description=(
+          "Enable streaming DiLoCo parallelism (https://arxiv.org/abs/2501.18512). Streaming DiLoCo partitions"
+          " model parameters into fragments and pipelines cross-island synchronization one fragment per inner step,"
+          " overlapping inter-cluster communication with accelerator computation."
+      ),
+  )
+  num_diloco_fragments: int | None = Field(
+      None,
+      description=(
+          "Total number of fragments to partition the model layers into (including 1 fragment for non-scanned"
+          " parameters). Required when enable_streaming_diloco is True."
+      ),
+  )
+  use_sequential_layers: bool = Field(False, description="Whether to sync layers sequentially (or interleaved).")
+  num_communication_overlapping_steps: NonNegativeInt = Field(
+      0, description="Steps of communication overlap with computation. \\tau from the paper."
+  )
+  communication_overlapping_alpha: float = Field(
+      0.0,
+      ge=0.0,
+      le=1.0,
+      description=(
+          "Interpolation factor between local and global parameters. alpha=1"
+          " means no communication between islands, alpha=0 means discards any"
+          " updates done in the inner optimizer in the first"
+          " `num_communication_overlapping_steps` steps. alpha=0.5 does a"
+          " uniform average between the local fragment parameters and the"
+          " globally shared one."
+      ),
+  )
 
 
 class Optimizer(BaseModel):
@@ -2142,6 +2256,7 @@ class ManagedMLDiagnostics(BaseModel):
   )
   managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
   managed_mldiagnostics_region: str = Field("", description="GCP region for managed mldiagnostics.")
+  managed_mldiagnostics_storage_path: str = Field("", description="Storage path for mldiagnostics (profiles, metrics)")
 
 
 class Goodput(BaseModel):
@@ -2381,6 +2496,32 @@ class VLLM(BaseModel):
   )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
+  use_weight_converter: bool = Field(
+      False,
+      description=(
+          "Use an explicit weight converter for trainer->rollout weight sync instead of "
+          "the legacy transfer_state_directly / transfer_state_with_mappings paths."
+      ),
+  )
+  weight_sync_debug: bool = Field(
+      False,
+      description=(
+          "Log the device placement of every operand during trainer->rollout weight "
+          "conversion, and barrier between conversion steps so a device or sharding "
+          "failure names the parameter that caused it. Serializes the sync; use only "
+          "when debugging a weight-sync crash."
+      ),
+  )
+  log_weight_sync_time: bool = Field(
+      False,
+      description=(
+          "Log the wall time of every trainer->rollout weight sync, blocking on the "
+          "rollout state so the number is execution rather than dispatch. Sync 0 is the "
+          "initial load_checkpoint and pays XLA compilation; syncs 1+ reuse those "
+          "executables, so the gap between them is how much of a sync is compilation "
+          "rather than data movement. Adds one barrier per sync."
+      ),
+  )
   vllm_load_format: str = Field(
       "dummy",
       description="Weight load format for vLLM in converter validation. Options:'auto', 'dummy'.",
@@ -2528,6 +2669,10 @@ class RLSpecialTokens(BaseModel):
 
   reasoning_start_token: str = Field("<reasoning>", description="Token to mark the beginning of a reasoning section.")
   reasoning_end_token: str = Field("</reasoning>", description="Token to mark the end of a reasoning section.")
+  reasoning_start_token_in_prompt: bool = Field(
+      False,
+      description="Whether the chat template prefilled the reasoning start token, so it is absent from the completion.",
+  )
   solution_start_token: str = Field("<answer>", description="Token to mark the beginning of a solution section.")
   solution_end_token: str = Field("</answer>", description="Token to mark the end of a solution section.")
 
@@ -2972,8 +3117,10 @@ class MaxTextConfig(
       raise ValueError("TPU USP attention does not support sparse indexer masks.")
     if self.attention_type != "global":
       raise ValueError("TPU USP attention is initially supported only for global causal attention.")
-    if self.context_parallel_load_balance:
-      raise ValueError("TPU USP attention does not support context_parallel_load_balance=True.")
+    if self.context_parallel_load_balance and usp_ring_size % 2 != 0:
+      raise ValueError(
+          "TPU USP attention with context_parallel_load_balance=True requires an even ici_context_parallelism."
+      )
     if self.use_ragged_attention:
       raise ValueError("TPU USP attention does not support ragged attention.")
     if self.attention_sink:
@@ -3042,6 +3189,18 @@ class MaxTextConfig(
       return yaml.safe_load(f) or {}
 
   @model_validator(mode="after")
+  def validate_shard_embed_moe_on_fsdp(self) -> "MaxTextConfig":
+    """Raise ValueError if shard_embed_moe_on_fsdp is used without fixed weight quantization calibration."""
+    if self.shard_embed_moe_on_fsdp and (
+        self.quantization == "" or not self.weight_quantization_calibration_method.startswith("fixed")
+    ):
+      raise ValueError(
+          "shard_embed_moe_on_fsdp requires quantization to be specified and "
+          "weight_quantization_calibration_method to be fixed (static scaling mode)."
+      )
+    return self
+
+  @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
     Computes all derived values and runs all cross-field validations after initial parsing.
@@ -3103,7 +3262,8 @@ class MaxTextConfig(
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
       # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
-      self.managed_mldiagnostics_dir = os.path.join(output_dir, "managed-mldiagnostics")
+      telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
+      self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
           None,
@@ -3648,8 +3808,17 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
-      raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4:
+      match (self.attention, self.use_tokamax_splash):
+        case ("dot_product", _):
+          pass
+        case ("flash", True):
+          pass
+        case _:
+          raise ValueError(
+              "DeepSeek4 is only supported with `dot_product` attention or `flash` attention "
+              "with `use_tokamax_splash=True`."
+          )
     if self.mla_qk_head_chunk_size > 0:
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(
@@ -3675,7 +3844,7 @@ class MaxTextConfig(
       supports_dot_product = self.attention == "dot_product"
       supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
       if not (supports_dot_product or supports_flash_splash):
-        raise NotImplementedError(
+        raise ValueError(
             "Sparse indexer is only supported with dot_product attention or flash attention with tokamax splash."
         )
       if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
@@ -3762,6 +3931,8 @@ class MaxTextConfig(
             f"Engram vocab size mismatch: expected {self.engram_max_ngram_size - 1} (max_ngram_size - 1), "
             f"but got {self.engram_vocab_bases}."
         )
+    if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
+      raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
     if self.num_experts > 1:
       if self.moe_mlp_dim <= 0:
         raise ValueError("moe_mlp_dim must be positive for MoE models (num_experts > 1)")
@@ -3799,6 +3970,20 @@ class MaxTextConfig(
       self.validate_ragged_buffer_factor()
     self.validate_num_moe_emb_chunks()
 
+    if self.enable_diloco and not self.pure_nnx:
+      raise ValueError("enable_diloco=True requires pure_nnx=True (Linen support for DiLoCo has been removed).")
+
+    if self.enable_streaming_diloco:
+      if not self.scan_layers:
+        raise ValueError("enable_streaming_diloco=True requires scan_layers=True.")
+      if self.num_diloco_fragments is not None and self.num_diloco_fragments > 1:
+        num_transformer_fragments = self.num_diloco_fragments - 1
+        if self.num_decoder_layers % num_transformer_fragments != 0:
+          raise ValueError(
+              f"The number of decoder layers ({self.num_decoder_layers}) must be divisible by "
+              f"(num_diloco_fragments - 1) ({num_transformer_fragments}) when enable_streaming_diloco is True."
+          )
+
     # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
       raise ValueError(
@@ -3823,6 +4008,7 @@ class MaxTextConfig(
           "qwen3-vl-30b-a3b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
+          "maxtext-omni-gemma3-qwen3",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
@@ -3844,11 +4030,24 @@ class MaxTextConfig(
     if self.use_sft and self.use_dpo:
       raise ValueError("Only one of `use_sft` or `use_dpo` can be True.")
     if self.shard_mode == ShardMode.EXPLICIT:
-      supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek"}
+      supported_decoders = {
+          "simple",
+          "simple_mlp",
+          "llama2",
+          "deepseek",
+          "qwen3",
+          "qwen3_moe",
+          "qwen3_custom_moe",
+      }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
             f"Decoder '{self.decoder_block.value}' is not supported with 'explicit' sharding. "
-            f"Supported options are: {list(supported_decoders)}."
+            f"Supported options are: {sorted(supported_decoders)}."
+        )
+      if self.use_multimodal:
+        raise ValueError(
+            "'explicit' sharding is not supported with `use_multimodal`; the vision and audio encoders "
+            "have not been onboarded to explicit sharding yet."
         )
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
@@ -4109,6 +4308,10 @@ class MaxTextConfig(
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
     ]:
@@ -4157,6 +4360,9 @@ class MaxTextConfig(
         raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
+
+    if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
+      raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:
@@ -4286,6 +4492,7 @@ class RLConfig(
     LayoutAndSharding,
     InferenceLayout,
     InferenceGeneral,
+    PrefixCaching,
     Decoding,
     IciParallelism,
     DcnParallelism,
@@ -4295,35 +4502,34 @@ class RLConfig(
     ModelArchitecture,
     MTP,
     MoBa,
-    # Advanced Architectures, Tuning, and Optimizers
+    MlaAttention,
+    CompressedAttention,
+    AttentionIndexer,
+    SplashAttention,
+    Qwen3Next,
+    MultimodalGeneral,
     Muon,
     FineTuning,
     Distillation,
-    # Datasets and Loading Compatibility
     DatasetGeneral,
     TfdsDataset,
     HfDataset,
     GrainDataset,
     OlmoGrainDataset,
-    # Inference, Checkpointing, and Monitoring
     EmergencyCheckpointing,
     ElasticTraining,
     InferenceServer,
     InferenceBenchmark,
-    PrefixCaching,
     HloDump,
     Goodput,
     GcpMonitoring,
     ManagedMLDiagnostics,
-    # Positional Embeddings
     PositionalEmbedding,
     Rope,
     YarnRope,
-    # Mixture of Experts
     MoEGeneral,
     MoEKernels,
     DeepSeekMoE,
-    # General MaxText Configs
     RunInfo,
     Checkpointing,
     OrbaxStorage,
@@ -4331,23 +4537,17 @@ class RLConfig(
     Tokenizer,
     AdamW,
     Optimizer,
+    TrainingLoop,
     Quantization,
-    MultimodalGeneral,
     VisionTower,
     VisionProjector,
     AudioEncoder,
-    MlaAttention,
-    CompressedAttention,
-    AttentionIndexer,
-    SplashAttention,
-    Qwen3Next,
-    # Debugging, Profiling, and Telemetry
-    AOT,
     DevelopmentAndDebugging,
     Profiling,
+    AOT,
     Metrics,
     Tensorboard,
-    # For compatibility with trainer in post_train/rl
+    DerivedValues,
     RL,
     RLCluster,
     RLDataset,
@@ -4355,8 +4555,6 @@ class RLConfig(
     RLReward,
     RLSpecialTokens,
     VLLM,
-    TrainingLoop,
-    DerivedValues,
 ):
   """
   Configuration for Reinforcement Learning in MaxText.

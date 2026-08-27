@@ -15,6 +15,8 @@
 
 import unittest
 from absl.testing import absltest
+from types import SimpleNamespace
+from unittest import mock
 from absl.testing import parameterized
 import pytest
 
@@ -25,14 +27,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import Config, DType
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from maxtext.layers.quantizations import Fp8Quantization
+from maxtext.layers.quantizations import configure_quantization, Fp8Quantization
 from maxtext.utils import max_logging, maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
@@ -439,8 +441,118 @@ def get_moe_loop(
   return module
 
 
+@pytest.mark.parametrize(
+    ("expert_parallelism", "batch_partition"),
+    (
+        (1, None),
+        (2, ("fsdp", "expert")),
+    ),
+)
+def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(expert_parallelism, batch_partition):
+  """Sparse MoE only replicates batches when expert routing remains local."""
+  fake_moe = SimpleNamespace(
+      config=SimpleNamespace(
+          shard_exp_on_fsdp=False,
+          use_2d_fsdp_sharding=False,
+          shard_embed_moe_on_fsdp=False,
+          model_name="qwen3.5-35b-a3b",
+          check_vma=False,
+          moe_fsdp_use_two_stage_all_gather=False,
+      ),
+      mesh=SimpleNamespace(shape={"fsdp": 32, "expert": expert_parallelism}),
+      rngs=object(),
+      get_expert_parallelism_size=lambda: expert_parallelism,
+  )
+  original_batch_partition = "fsdp" if expert_parallelism == 1 else ("fsdp", "expert")
+  fake_moe._logical_to_mesh_axes = lambda logical_axes: P(  # pylint: disable=protected-access
+      *(original_batch_partition if axis == "activation_batch" else None for axis in logical_axes)
+  )
+  fake_moe._maybe_shard_with_pspec = lambda value, _pspec, **_kwargs: value  # pylint: disable=protected-access
+
+  inputs = SimpleNamespace(shape=(4, 1024, 2048))
+  gate_logits = SimpleNamespace(shape=(4, 1024, 256))
+  w0 = SimpleNamespace(shape=(256, 2048, 512))
+  w1 = SimpleNamespace(shape=(256, 2048, 512))
+  wo = SimpleNamespace(shape=(256, 512, 2048))
+  captured = {}
+
+  def fake_shard_map(function, *, mesh, in_specs, out_specs, check_vma):
+    del function, mesh, check_vma
+    captured["in_specs"] = in_specs
+    captured["out_specs"] = out_specs
+    return lambda x, *_args: (x, None, None)
+
+  with mock.patch.object(jax, "shard_map", side_effect=fake_shard_map):
+    output, _, _ = moe.RoutedMoE.sparse_matmul(
+        fake_moe,
+        inputs,
+        gate_logits,
+        None,
+        w0,
+        w1,
+        wo,
+        None,
+        None,
+        None,
+    )
+
+  assert output is inputs
+  assert captured["in_specs"][0] == P(batch_partition, None, None)
+  assert captured["in_specs"][1] == P(batch_partition, None, None)
+  assert captured["in_specs"][2] is None
+  assert captured["in_specs"][9] is None
+  assert captured["out_specs"][0] == P(batch_partition, None, None)
+
+
 class RoutedMoeTest(parameterized.TestCase):
   """Routed Mixture of Experts test."""
+
+  @parameterized.parameters(False, True)
+  def test_permute_direct_token_gather_matches_repeat_and_sort(self, compute_gradient):
+    inputs = jnp.arange(24, dtype=jnp.float32).reshape(2, 3, 4)
+    selected_experts = jnp.array(
+        [
+            [[3, 1], [0, 2], [1, 3]],
+            [[2, 0], [3, 2], [0, 1]],
+        ],
+        dtype=jnp.int32,
+    )
+    weights = jnp.arange(12, dtype=jnp.float32).reshape(2, 3, 2)
+    gate_logits = jnp.zeros((2, 3, 4), dtype=jnp.float32)
+
+    def permute(x, use_direct_token_gather):
+      routed_moe = SimpleNamespace(
+          config=SimpleNamespace(
+              decoder_block=None,
+              load_balance_loss_weight=0.0,
+              moe_use_direct_token_gather=use_direct_token_gather,
+              num_experts=4,
+              use_ragged_sort=False,
+              use_ring_of_experts=False,
+          ),
+          dtype=jnp.float32,
+          is_hash_routing=False,
+          num_experts=4,
+          num_experts_per_tok=2,
+          get_expert_parallelism_size=lambda: 1,
+          get_topk=lambda *_args, **_kwargs: (weights, selected_experts),
+          should_update_load_balance=lambda: False,
+      )
+      return moe.RoutedMoE.permute(routed_moe, x, gate_logits, gate_logits)
+
+    if compute_gradient:
+      cotangent = jnp.arange(48, dtype=jnp.float32).reshape(12, 4)
+      expected = jax.grad(lambda x: jnp.sum(permute(x, False)[0] * cotangent))(inputs)
+      result = jax.grad(lambda x: jnp.sum(permute(x, True)[0] * cotangent))(inputs)
+      np.testing.assert_array_equal(result, expected)
+    else:
+      expected = permute(inputs, False)
+      result = permute(inputs, True)
+      for actual_value, expected_value in zip(result, expected):
+        if expected_value is None:
+          self.assertIsNone(actual_value)
+        else:
+          np.testing.assert_array_equal(actual_value, expected_value)
 
   def get_expected_output(self, rng, hidden_states, cfg, mesh):
     """Retrieve expected output from Routed Mixture of Experts."""
@@ -1118,6 +1230,86 @@ class RoutedMoeTest(parameterized.TestCase):
       assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
+  def test_shard_embed_moe_on_fsdp(self):
+    if jax.device_count() != 4:
+      self.skipTest("shard_embed_moe_on_fsdp test requires exactly 4 devices")
+
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_block_shard_embed_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        use_tokamax_gmm=True,
+        use_gmm_v2=True,
+        per_device_batch_size=4,
+        ici_fsdp_parallelism=4,
+        shard_embed_moe_on_fsdp=True,
+        max_target_length=128,
+        float32_gate_logits=True,
+        quantization="fp8_full",
+        use_qwix_quantization=True,
+        weight_quantization_calibration_method="fixed,-224,224",
+        act_quantization_calibration_method="fixed,-224,224",
+        bwd_quantization_calibration_method="absmax",
+    )
+
+    def get_fp8_full_qwix_rule_for_test(config):
+      return [
+          qwix.QtRule(
+              module_path=".*",
+              weight_qtype=jnp.float8_e4m3fn,
+              act_qtype=jnp.float8_e4m3fn,
+              bwd_qtype=jnp.float8_e5m2,
+              weight_calibration_method=config.weight_quantization_calibration_method,
+              act_calibration_method=config.act_quantization_calibration_method,
+              bwd_calibration_method=config.bwd_quantization_calibration_method,
+              op_names=("gmm", "ragged_dot"),
+          ),
+      ]
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    # Instantiate QAG-quantized model with shard_embed_moe_on_fsdp
+    model_qag = moe.get_routed_moe(
+        name="MoeBlock",
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.dtype,
+    )
+    quantization_rule = get_fp8_full_qwix_rule_for_test(cfg)
+    quantization_provider = qwix.QtProvider(quantization_rule)
+    model_qag = qwix.quantize_model(model_qag, quantization_provider)
+
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      # Initialize reference unfused model to get initial weights
+      _, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
+
+      variables_qag = model_qag.init({"params": rng_model, "dropout": rng_model}, hidden_states.astype(jnp.float32))
+
+      output_qag, _, _ = jax.jit(model_qag.apply)(variables_qag, hidden_states.astype(jnp.float32))
+
+      self.assertEqual(output_qag.shape, expected_output.shape)
+
+  @pytest.mark.tpu_only
   def test_megablox_context_parallelism(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -1559,26 +1751,36 @@ class RoutedMoeTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {
-          "testcase_name": f"{base_name}_ep{ici_expert_parallelism}",
+          "testcase_name": f"{base_name}_ep{ici_expert_parallelism}" + ("_qag" if shard_embed_moe_on_fsdp else ""),
           "quantization": quantization,
           "use_tokamax_gmm": use_tokamax_gmm,
           "use_gmm_v2": use_gmm_v2,
           "wa_static": wa_static,
           "ici_expert_parallelism": ici_expert_parallelism,
+          "shard_embed_moe_on_fsdp": shard_embed_moe_on_fsdp,
       }
-      for base_name, quantization, use_tokamax_gmm, use_gmm_v2, wa_static, ici_expert_parallelism in [
-          ("megablox_bf16", "", False, False, False, 1),
-          ("megablox_fp8_dynamic", "fp8_full", False, False, False, 1),
-          ("megablox_fp8_static", "fp8_full", False, False, True, 1),
-          ("tokamax_v1_bf16", "", True, False, False, 1),
-          ("tokamax_v1_fp8_dynamic", "fp8_full", True, False, False, 1),
-          ("tokamax_v1_fp8_static", "fp8_full", True, False, True, 1),
-          ("tokamax_v2_bf16", "", True, True, False, 1),
-          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 1),
-          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1),
-          ("tokamax_v2_bf16", "", True, True, False, 4),
-          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 4),
-          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 4),
+      for (
+          base_name,
+          quantization,
+          use_tokamax_gmm,
+          use_gmm_v2,
+          wa_static,
+          ici_expert_parallelism,
+          shard_embed_moe_on_fsdp,
+      ) in [
+          ("megablox_bf16", "", False, False, False, 1, False),
+          ("megablox_fp8_dynamic", "fp8_full", False, False, False, 1, False),
+          ("megablox_fp8_static", "fp8_full", False, False, True, 1, False),
+          ("tokamax_v1_bf16", "", True, False, False, 1, False),
+          ("tokamax_v1_fp8_dynamic", "fp8_full", True, False, False, 1, False),
+          ("tokamax_v1_fp8_static", "fp8_full", True, False, True, 1, False),
+          ("tokamax_v2_bf16", "", True, True, False, 1, False),
+          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 1, False),
+          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, False),
+          ("tokamax_v2_bf16", "", True, True, False, 4, False),
+          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 4, False),
+          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 4, False),
+          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, True),
       ]
   )
   @pytest.mark.skip_on_tpu7x  # TODO(b/543017989): Investigate correctness failures
@@ -1590,6 +1792,7 @@ class RoutedMoeTest(parameterized.TestCase):
       use_gmm_v2: bool,
       wa_static: bool,
       ici_expert_parallelism: int,
+      shard_embed_moe_on_fsdp: bool = False,
       **kwargs,
   ):
     megablox = True
@@ -1607,6 +1810,7 @@ class RoutedMoeTest(parameterized.TestCase):
         use_tokamax_gmm,
         use_gmm_v2,
         ici_expert_parallelism,
+        shard_embed_moe_on_fsdp,
     ):
       return pyconfig.initialize(
           [None, get_test_config_path()],
@@ -1623,6 +1827,7 @@ class RoutedMoeTest(parameterized.TestCase):
           megablox=megablox,
           use_tokamax_gmm=use_tokamax_gmm,
           use_gmm_v2=use_gmm_v2,
+          shard_embed_moe_on_fsdp=shard_embed_moe_on_fsdp,
           quantization=quantization,
           use_qwix_quantization=True,
           weight_quantization_calibration_method=weight_quantization_calibration_method,
@@ -1700,6 +1905,7 @@ class RoutedMoeTest(parameterized.TestCase):
         use_tokamax_gmm=False,
         use_gmm_v2=False,
         ici_expert_parallelism=1,
+        shard_embed_moe_on_fsdp=False,
     )
     # Use normal distribution to generate realistic variances and negative values
     # to guarantee the quantization scale != 1.0, which catches scale-dropping bugs.
@@ -1724,6 +1930,7 @@ class RoutedMoeTest(parameterized.TestCase):
         use_tokamax_gmm=use_tokamax_gmm,
         use_gmm_v2=use_gmm_v2,
         ici_expert_parallelism=ici_expert_parallelism,
+        shard_embed_moe_on_fsdp=shard_embed_moe_on_fsdp,
     )
     devices_array_tgt = maxtext_utils.create_device_mesh(cfg_tgt)
     mesh_tgt = Mesh(devices_array_tgt, cfg_tgt.mesh_axes)
@@ -1750,6 +1957,111 @@ class RoutedMoeTest(parameterized.TestCase):
     relative_norm_diff_threshold = 0.22 if quantization else 0.012
     diff_summary = compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold)
     max_logging.log("\n" + diff_summary)
+
+
+class GetEinsumTest(parameterized.TestCase):
+  """Tests for the quantized einsums RoutedMoE.get_einsum hands to dense_matmul."""
+
+  def _make_moe(self, quant):
+    """Builds a small RoutedMoE on the dense_matmul path with the given quantization."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="get_einsum_test",
+        enable_checkpointing=False,
+        decoder_block="mixtral",
+        num_experts=4,
+        num_experts_per_tok=2,
+        base_emb_dim=64,
+        base_mlp_dim=32,
+        base_moe_mlp_dim=32,
+        dtype="float32",
+        weight_dtype="float32",
+        megablox=False,
+        sparse_matmul=False,
+        max_target_length=8,
+        per_device_batch_size=1,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    return moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=Mesh(devices_array, cfg.mesh_axes),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=jnp.float32,
+        quant=quant,
+        rngs=nnx.Rngs(0),
+    )
+
+  def _quantization(self, quantization):
+    """Returns the quantization object the config string maps to."""
+    return configure_quantization(
+        pyconfig.initialize(
+            [None, get_test_config_path()],
+            enable_checkpointing=False,
+            quantization=quantization,
+        )
+    )
+
+  def test_fp8_einsum_is_bound(self):
+    model = self._make_moe(Fp8Quantization())
+    einsum_fn = model.get_einsum(einsum_name=moe.WI_0)
+    result = einsum_fn("ab,bc->ac", jnp.ones((2, 3)), jnp.ones((3, 4)))
+    self.assertEqual(result.shape, (2, 4))
+
+  def test_aqt_einsum_is_bound(self):
+    model = self._make_moe(self._quantization("int8"))
+    self.assertIsNone(model.quant_einsums)
+    einsum_fn = model.get_einsum(einsum_name=moe.WI_0)
+    result = einsum_fn("ab,bc->ac", jnp.ones((2, 3)), jnp.ones((3, 4)))
+    self.assertEqual(result.shape, (2, 4))
+
+  def test_unregistered_quant_einsum_name_raises(self):
+    model = self._make_moe(Fp8Quantization())
+    einsum_fn = model.get_einsum(einsum_name="not_registered")
+    with self.assertRaises(ValueError) as ctx:
+      einsum_fn("ab,bc->ac", jnp.ones((2, 3)), jnp.ones((3, 4)))
+    self.assertIn("not_registered", str(ctx.exception))
+    self.assertIn("Available names", str(ctx.exception))
+
+  @parameterized.named_parameters(
+      ("fp8", "fp8", jnp.float8_e4m3fn),
+      ("nanoo_fp8", "nanoo_fp8", jnp.float8_e4m3fnuz),
+  )
+  def test_fp8_einsum_quantizes_both_operands(self, quantization, e4m3_dtype):
+    """The bridged einsum is the plain one with both operands cast to the scheme's e4m3."""
+    model = self._make_moe(self._quantization(quantization))
+    lhs = jax.random.normal(jax.random.PRNGKey(0), (4, 16), dtype=jnp.float32)
+    rhs = jax.random.normal(jax.random.PRNGKey(1), (16, 8), dtype=jnp.float32)
+
+    actual = model.get_einsum(einsum_name=moe.WI_0)("ab,bc->ac", lhs, rhs)
+
+    # The scaling factors start at 1 and are only updated on the backward pass, so a forward
+    # call on a freshly built layer quantizes by a plain cast.
+    quantized = jnp.einsum(
+        "ab,bc->ac", lhs.astype(e4m3_dtype).astype(jnp.float32), rhs.astype(e4m3_dtype).astype(jnp.float32)
+    )
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(quantized))
+    self.assertFalse(np.array_equal(np.asarray(actual), np.asarray(jnp.einsum("ab,bc->ac", lhs, rhs))))
+
+  @parameterized.named_parameters(("fp8", "fp8"), ("nanoo_fp8", "nanoo_fp8"))
+  def test_quantized_dense_matmul_tracks_unquantized(self, quantization):
+    """A quantized MoE layer follows the same layer run unquantized, to within e4m3."""
+    reference = self._make_moe(None)
+    model = self._make_moe(self._quantization(quantization))
+    copy_weights(reference, model)
+
+    inputs = jax.random.normal(jax.random.PRNGKey(42), (1, 8, reference.config.base_emb_dim), dtype=jnp.float32)
+    expected, _, _ = reference(inputs)
+    actual, _, _ = model(inputs)
+
+    self.assertTrue(np.isfinite(actual).all())
+    # e4m3 keeps three mantissa bits, and the layer is quantized at each of wi_0, wi_1 and wo,
+    # so the agreement is loose; it is the same threshold the qwix MoE test above uses.
+    relative_error = np.linalg.norm(actual - expected) / np.linalg.norm(expected)
+    self.assertLess(relative_error, 0.22)
+    self.assertFalse(np.allclose(actual, expected))
 
 
 def make_moe(cfg, mesh):

@@ -244,14 +244,18 @@ class Gpt3MultiHeadAttention(nnx.Module):
     self.KVCache_0 = self.init_kv_caches(inputs_kv_shape=feature_dim) if self.model_mode != MODEL_MODE_TRAIN else None
     if self.fused_qkv:
       self.qkv_proj = self.create_projection_layer(
-          feature_dim, (3, self.num_heads, self.head_dim), ("embed", "qkv", "heads", "kv")
+          feature_dim, (3, self.num_heads, self.head_dim), ("embed_attn", "qkv", "heads", "kv")
       )
     else:
-      self.query = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
-      self.key = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
-      self.value = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
+      self.query = self.create_projection_layer(
+          feature_dim, (self.num_heads, self.head_dim), ("embed_attn", "heads", "kv")
+      )
+      self.key = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed_attn", "heads", "kv"))
+      self.value = self.create_projection_layer(
+          feature_dim, (self.num_heads, self.head_dim), ("embed_attn", "heads", "kv")
+      )
     self.out = self.create_projection_layer(
-        (self.num_heads, self.head_dim), feature_dim[-1], ("heads", "kv", "embed"), axis=(-2, -1)
+        (self.num_heads, self.head_dim), feature_dim[-1], ("heads", "kv", "embed_attn"), axis=(-2, -1)
     )
     self.attention_op = AttentionOp(
         config=config,

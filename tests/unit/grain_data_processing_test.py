@@ -18,6 +18,7 @@ import sys
 import os.path
 import tempfile
 import unittest
+from unittest import mock
 import json
 import numpy as np
 
@@ -179,6 +180,44 @@ class _GrainArrayRecordSetup:
         **overrides,
     }
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
+
+
+class TestGrainArrayRecordDataSource:
+  """Tests ArrayRecord data source construction."""
+
+  @pytest.mark.parametrize(
+      ("grain_index_storage_option", "expected_reader_options"),
+      [
+          (None, None),
+          ("in_memory", {"index_storage_option": "in_memory"}),
+          ("offloaded", {"index_storage_option": "offloaded"}),
+      ],
+  )
+  def test_index_storage_option_passed_to_arrayrecord_reader(self, grain_index_storage_option, expected_reader_options):
+    map_dataset = mock.MagicMock()
+    with (
+        mock.patch.object(grain_data_processing, "find_data_files", return_value=["data.arrayrecord"]),
+        mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource") as data_source,
+        mock.patch.object(grain_data_processing.grain.MapDataset, "source", return_value=map_dataset),
+    ):
+      grain_data_processing.get_datasets(
+          "data.arrayrecord",
+          "arrayrecord",
+          shuffle=False,
+          shuffle_seed=0,
+          shuffle_buffer_size=1,
+          num_epoch=1,
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          grain_worker_count=0,
+          grain_num_threads=1,
+          grain_prefetch_buffer_size=1,
+          grain_data_source_max_workers=1,
+          grain_index_storage_option=grain_index_storage_option,
+          elastic=True,
+      )
+
+    data_source.assert_called_once_with(["data.arrayrecord"], reader_options=expected_reader_options)
 
 
 class GrainArrayRecordProcessingTest(

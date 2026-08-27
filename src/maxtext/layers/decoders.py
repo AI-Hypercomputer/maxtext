@@ -347,7 +347,7 @@ class Decoder(nn.Module):
     """Get remat policy"""
     policy = None
     cfg = self.config
-    if cfg.remat_policy != "none":
+    if cfg.remat_policy and cfg.remat_policy != "none":
       if cfg.remat_policy in ("minimal_with_context", "minimal_flash"):
         # save all
         if cfg.remat_policy == "minimal_flash":
@@ -723,6 +723,7 @@ class Decoder(nn.Module):
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
+            "maxtext-omni-gemma3-qwen3",
         ]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,

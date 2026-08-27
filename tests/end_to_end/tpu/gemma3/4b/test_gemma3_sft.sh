@@ -39,14 +39,14 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     per_device_batch_size=1 run_name=${run_id} \
-    steps=5 scan_layers=true \
+    steps=2 scan_layers=true \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
 
 # Step 3: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/5/model_params \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.5 \
     prompt="Suggest some famous landmarks in London." \

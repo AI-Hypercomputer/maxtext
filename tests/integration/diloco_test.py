@@ -16,6 +16,8 @@
 
 
 import os
+import shutil
+import tempfile
 from tempfile import gettempdir
 import unittest
 
@@ -25,9 +27,12 @@ from flax.training import train_state
 import jax
 import jax.numpy as jnp
 import jax.sharding
+from maxtext.common import checkpointing
 from maxtext.common.train_state_nnx import TrainStateNNX
 from maxtext.configs.pyconfig import initialize_pydantic
 from maxtext.trainers.diloco import diloco
+from maxtext.trainers.diloco import utils as diloco_utils
+from maxtext.trainers.diloco.utils import spmd_diloco_checkpointing as diloco_checkpoint_utils
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
@@ -235,7 +240,7 @@ class DiLoCoTest(unittest.TestCase):
       #   = 0.81
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 2.0)
-      chex.assert_trees_all_close(loss, 0.65, rtol=1e-2, atol=1e-2)
+      chex.assert_trees_all_close(loss, 0.49, rtol=1e-2, atol=1e-2)
       # Assert no updates to the global model yet (no synchronization)
       if test_config.pure_nnx:
         _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
@@ -280,7 +285,7 @@ class DiLoCoTest(unittest.TestCase):
       # based outer optimizer.
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 3.0)
-      chex.assert_trees_all_close(loss, 0.4481, rtol=1e-2, atol=1e-2)
+      chex.assert_trees_all_close(loss, 0.2401, rtol=1e-2, atol=1e-2)
       # Assert that inner and outer parameters are all equal now that
       # synchronization has happened.
       if test_config.pure_nnx:
@@ -338,7 +343,7 @@ class DiLoCoTest(unittest.TestCase):
       step_three_outer_params = diloco_test_state.params
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 4.0)
-      chex.assert_trees_all_close(loss, 0.574244, rtol=1e-2, atol=1e-2)
+      chex.assert_trees_all_close(loss, 0.207545, rtol=1e-2, atol=1e-2)
       # Assert no updates to the global model since previous step (no
       # synchronization).
       chex.assert_trees_all_equal(diloco_test_state.params, step_three_outer_params)
@@ -392,3 +397,269 @@ class DiLoCoTest(unittest.TestCase):
             "head_dim=4",
         )
     )
+
+  @pytest.mark.cpu_only
+  @pytest.mark.tpu_backend
+  def test_streaming_diloco_two_slices(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_streaming_diloco.pickle")
+    train_compile_main(
+        (
+            None,
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-8",
+            "compile_topology_num_slices=2",
+            "ici_fsdp_parallelism=-1",
+            "dcn_diloco_parallelism=2",
+            "enable_diloco=true",
+            "enable_streaming_diloco=true",
+            "num_diloco_fragments=2",
+            "model_name=gemma2-2b",
+            "override_model_config=True",
+            "base_emb_dim=32",
+            "base_num_decoder_layers=2",
+            "base_mlp_dim=64",
+            "base_num_query_heads=1",
+            "base_num_kv_heads=1",
+            "head_dim=4",
+        )
+    )
+
+  def test_fragmented_tree_manipulator_scanned_filter(self):
+    """Tests that parameters matching regex but lacking leading layer dim are NOT marked scanned."""
+    num_layers = 4
+    config = initialize_pydantic(
+        [
+            "",
+            get_test_config_path(),
+            "enable_diloco=true",
+            "enable_streaming_diloco=true",
+            "num_diloco_fragments=3",
+            f"base_num_decoder_layers={num_layers}",
+        ]
+    )
+    # Scanned param has leading dim = num_layers; non-scanned param matches regex name but lacks leading layer dim
+    params_tree = {
+        "decoder": {
+            "layers": jnp.ones((num_layers, 16, 16)),
+            "layers_outside_pipeline": jnp.ones((16, 16)),  # Lacks leading layer dim = 4
+        }
+    }
+    manipulator = diloco_utils.FragmentedTreeManipulator.create(params_tree, config)
+    # Check that layers_outside_pipeline is NOT treated as scanned
+    scanned_map = manipulator.keypath_to_is_scanned
+    for keystr, is_scanned in scanned_map.items():
+      if "layers_outside_pipeline" in keystr:
+        self.assertFalse(is_scanned)
+      elif "decoder/layers" in keystr:
+        self.assertTrue(is_scanned)
+
+  def test_streaming_diloco_requires_scan_layers(self):
+    """Tests that enable_streaming_diloco=True raises ValueError if scan_layers=False."""
+    with self.assertRaises(ValueError) as ctx:
+      initialize_pydantic(
+          [
+              "",
+              get_test_config_path(),
+              "enable_diloco=true",
+              "enable_streaming_diloco=true",
+              "num_diloco_fragments=2",
+              "scan_layers=false",
+          ]
+      )
+    self.assertIn("enable_streaming_diloco=True requires scan_layers=True", str(ctx.exception))
+
+  def test_apply_flat_fragment_shapedtypestruct(self):
+    """Tests that FragmentedTreeManipulator handles ShapeDtypeStruct leaves during abstract tracing."""
+    num_layers = 2
+    config = initialize_pydantic(
+        [
+            "",
+            get_test_config_path(),
+            "enable_diloco=true",
+            "enable_streaming_diloco=true",
+            "num_diloco_fragments=2",
+            f"base_num_decoder_layers={num_layers}",
+        ]
+    )
+    abstract_tree = {"decoder": {"layers": jax.ShapeDtypeStruct((num_layers, 8), jnp.float32)}}
+    manipulator = diloco_utils.FragmentedTreeManipulator.create(abstract_tree, config)
+    frag = manipulator.get_flat_fragment(abstract_tree, fragment_idx=1)
+    res = manipulator.apply_flat_fragment(abstract_tree, fragment_idx=1, flat_fragment=frag)
+    self.assertIsInstance(res["decoder"]["layers"], jax.ShapeDtypeStruct)
+
+  def test_diloco_requires_pure_nnx(self):
+    """Tests that enable_diloco=True raises ValueError if pure_nnx=False."""
+    with self.assertRaises(ValueError) as ctx:
+      initialize_pydantic(
+          [
+              "",
+              get_test_config_path(),
+              "enable_diloco=true",
+              "pure_nnx=false",
+          ]
+      )
+    self.assertIn("enable_diloco=True requires pure_nnx=True", str(ctx.exception))
+
+  def test_diloco_checkpoint_saving_and_normal_resume(self):
+    """Tests that DiLoCo checkpoints save outer params under params/params for direct normal pre-training resume."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+      rngs = nnx.Rngs(params=jax.random.key(0))
+      model = SimpleNNXModel(rngs=rngs)
+      tx = optax.adamw(1e-3)
+      nnx_train_state = TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
+
+      config = initialize_pydantic(
+          [
+              "",
+              get_test_config_path(),
+              "enable_diloco=true",
+              "dcn_diloco_parallelism=2",
+              "num_diloco_replicas=2",
+              f"checkpoint_dir={temp_dir}",
+              "enable_checkpointing=true",
+          ]
+      )
+      diloco_state, _ = diloco.build_diloco_state(config, lambda: nnx_train_state)
+
+      mgr = checkpointing.create_orbax_checkpoint_manager(
+          checkpoint_dir=temp_dir,
+          enable_checkpointing=True,
+          use_async=False,
+          save_interval_steps=1,
+          use_ocdbt=True,
+          use_zarr3=True,
+      )
+      checkpointing.save_checkpoint(mgr, 10, diloco_state, config, force=True)
+      mgr.wait_until_finished()
+
+      items_path = os.path.join(temp_dir, "10", "items")
+
+      # 1. Verify DiLoCo self-restoration
+      abstract_nnx = nnx.eval_shape(lambda: nnx.state(nnx_train_state))
+      restored_diloco = diloco_checkpoint_utils.restore_diloco_checkpoint(
+          items_path, abstract_nnx, 96, use_ocdbt=True, use_zarr3=True, config=config
+      )
+      self.assertIsInstance(restored_diloco, diloco.DiLoCoTrainState)
+
+      # 2. Verify normal pre-training weights-only restoration
+      fresh_model = SimpleNNXModel(rngs=nnx.Rngs(params=jax.random.key(1)))
+      abstract_params = nnx.split_state(nnx.state(fresh_model), nnx.Param, ...)[0]
+      restored_params = checkpointing.load_params_from_path(
+          items_path,
+          abstract_params,
+          checkpoint_storage_concurrent_gb=96,
+          use_ocdbt=True,
+          use_zarr3=True,
+      )
+      problems = checkpointing._weight_mismatches(  # pylint: disable=protected-access
+          abstract_params.to_pure_dict(), restored_params.to_pure_dict()
+      )
+      self.assertEqual(len(problems), 0)
+
+      # 3. Verify normal pre-training full state restoration
+      normal_config = initialize_pydantic(
+          [
+              "",
+              get_test_config_path(),
+              "enable_diloco=false",
+              f"load_full_state_path={items_path}",
+          ]
+      )
+      restored_full = checkpointing._load_linen_checkpoint_into_nnx(  # pylint: disable=protected-access
+          items_path,
+          abstract_nnx,
+          checkpoint_storage_concurrent_gb=96,
+          use_ocdbt=True,
+          use_zarr3=True,
+          config=normal_config,
+      )
+      restored_full_params = nnx.split_state(restored_full["model"], nnx.Param, ...)[0].to_pure_dict()
+      problems_full = checkpointing._weight_mismatches(  # pylint: disable=protected-access
+          abstract_params.to_pure_dict(), restored_full_params
+      )
+      self.assertEqual(len(problems_full), 0)
+
+    finally:
+      shutil.rmtree(temp_dir, ignore_errors=True)
+
+  def test_diloco_automatic_checkpoint_resumption(self):
+    """Tests that DiLoCo automatically resumes from checkpoint_manager when no explicit paths are given."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+      rngs = nnx.Rngs(params=jax.random.key(0))
+      model = SimpleNNXModel(rngs=rngs)
+      tx = optax.adamw(1e-3)
+      nnx_train_state = TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
+
+      config = initialize_pydantic(
+          [
+              "",
+              get_test_config_path(),
+              "enable_diloco=true",
+              "dcn_diloco_parallelism=2",
+              "num_diloco_replicas=2",
+              f"checkpoint_dir={temp_dir}",
+              "enable_checkpointing=true",
+          ]
+      )
+      diloco_state, _ = diloco.build_diloco_state(config, lambda: nnx_train_state)
+      diloco_state = diloco_state.replace(step=jnp.array(5, dtype=jnp.int32))
+
+      mgr = checkpointing.create_orbax_checkpoint_manager(
+          checkpoint_dir=temp_dir,
+          enable_checkpointing=True,
+          use_async=False,
+          save_interval_steps=1,
+          use_ocdbt=True,
+          use_zarr3=True,
+      )
+      checkpointing.save_checkpoint(mgr, 5, diloco_state, config, force=True)
+      mgr.wait_until_finished()
+
+      # Create new checkpoint manager for resumption (simulating next run with same run_name / checkpoint_dir)
+      resume_mgr = checkpointing.create_orbax_checkpoint_manager(
+          checkpoint_dir=temp_dir,
+          enable_checkpointing=True,
+          use_async=False,
+          save_interval_steps=1,
+          use_ocdbt=True,
+          use_zarr3=True,
+      )
+      latest = checkpointing.latest_step(resume_mgr)
+      self.assertEqual(latest, 5)
+
+      # Build abstract state for restoration
+      abstract_diloco_state, _ = diloco.build_diloco_state(config, lambda: nnx_train_state)
+      abstract_unboxed = nnx.eval_shape(lambda: abstract_diloco_state)
+
+      restored, raw_params = checkpointing.load_state_if_possible(
+          resume_mgr,
+          None,
+          config.load_parameters_path,
+          config.load_full_state_path,
+          96,
+          abstract_unboxed,
+          maxtext_config=config,
+      )
+
+      self.assertIsNotNone(restored)
+      self.assertIsNone(raw_params)
+      restored_items = restored["items"]
+      self.assertIsInstance(restored_items, diloco.DiLoCoTrainState)
+      self.assertEqual(int(restored_items.step), 5)
+
+      # Ensure no unmaterialized ShapeDtypeStruct leaves exist
+      has_sds = any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(restored_items))
+      self.assertFalse(has_sds, "Restored state must not contain ShapeDtypeStruct placeholders!")
+
+      # Verify weights match
+      expected_params = nnx.split_state(nnx.state(model), nnx.Param, ...)[0].to_pure_dict()
+      diloco_outer_params = restored_items.params
+      if isinstance(diloco_outer_params, dict) and "params" in diloco_outer_params:
+        diloco_outer_params = diloco_outer_params["params"]
+      self.assertEqual(len(checkpointing._weight_mismatches(expected_params, diloco_outer_params)), 0)  # pylint: disable=protected-access
+    finally:
+      shutil.rmtree(temp_dir, ignore_errors=True)

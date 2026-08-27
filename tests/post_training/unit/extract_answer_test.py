@@ -14,11 +14,12 @@
 
 """Unit tests for utils_rl.extract_answer (CPU-only).
 
-Covers the two-part contract of the boxed-extraction change:
+Covers the answer-extraction contract:
   1. `\\boxed{N}` is extracted (with/without <answer> tags, nested LaTeX,
      multiple boxed, whitespace, negatives, and answer-tag scoping).
   2. Legacy plain-text answers inside the solution tags still work, so
      existing recipes that do not emit `\\boxed` are unaffected.
+  3. Untagged native final prose does not bypass the configured answer format.
 """
 
 import unittest
@@ -101,6 +102,23 @@ class ExtractAnswerTest(unittest.TestCase):
   def test_legacy_last_answer_wins(self):
     got = utils_rl.extract_answer("<answer>1</answer> ... <answer>5</answer>", self.config)
     self.assertEqual(got, "5")
+
+  @pytest.mark.cpu_only
+  def test_qwen_native_final_answer_without_custom_tags_is_not_rewarded(self):
+    """Native prose must not bypass the recipe's required answer tags."""
+    config = SimpleNamespace(
+        reasoning_start_token="<think>",
+        reasoning_end_token="</think>",
+        reasoning_start_token_in_prompt=True,
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+    )
+    response = "We calculate 6 * 7.</think>\nThe final answer is 42."
+
+    self.assertEqual(
+        utils_rl.extract_answer(response, config),
+        utils_rl.FALLBACK_ANSWER,
+    )
 
   # ---- no answer ----
 

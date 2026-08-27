@@ -91,6 +91,7 @@ logical_axis_rules: [
                       # General Weights
                       ['mlp', ['attn_dp', 'model']],
                       ['embed', []],
+                      ['embed_attn', []],
                       ['norm', []],
                       ['layers', []],
                       ['local_layers', []],

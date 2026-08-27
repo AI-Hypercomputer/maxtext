@@ -39,6 +39,7 @@ import optax
 class _Cfg:
   """Subset of HyperParameters used by loss_fn / train_step / eval_step."""
 
+  model_name: str = ""
   micro_batch_size_to_train_on: int = 2
   micro_batch_size_to_eval_on: int = 2
   vocab_size: int = 8
@@ -100,13 +101,71 @@ class _TinyDecoder(nnx.Module):
     return self.proj(h)
 
 
+class GateLogit(nnx.Module):
+  """Router gate stub holding bias parameter."""
+
+  def __init__(self, bias_shape):
+    self.bias = nnx.Param(jnp.zeros(bias_shape))
+
+
+class _MoEBiasStub(nnx.Module):
+  """Sows bias updates for testing."""
+
+  def __init__(self, bias_shape, sow_shape, update_val: float = 1.0):
+    self.gate = GateLogit(bias_shape)
+    self.MoeBlock_0 = self
+    self.DeepSeekMoeBlock_0 = self
+    self.transformer_layer = self
+    self.moe_layers = self
+    self.sow_shape = sow_shape
+    self.update_val = update_val
+
+  def __call__(self):
+    self.sow(
+        nnx.Intermediate,
+        "moe_bias_updates",
+        jnp.full(self.sow_shape, self.update_val),
+    )
+
+
 class _TinyDecoderMoEBias(_TinyDecoder):
-  """`_TinyDecoder` that also sows a `moe_bias_updates` intermediate (DeepSeek routed-bias)."""
+  """`_TinyDecoder` with decoder MoE layers that sow `moe_bias_updates`."""
+
+  def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
+    super().__init__(vocab_size, hidden, rngs=rngs)
+    # Using MoEBiasVar, expected bias shape is (num_layers, num_experts)
+    self.decoder = _MoEBiasStub(bias_shape=(2, 3), sow_shape=(2, 3), update_val=1.0)
 
   def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
     out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
-    # 2-D so the downstream `[0].transpose()` in train_step is shape-valid.
-    self.sow(nnx.Intermediate, "moe_bias_updates", jnp.ones((2, 3)))
+    self.decoder()
+    return out
+
+
+class _TinyDecoderMoEBiasWithMTP(_TinyDecoderMoEBias):
+  """`_TinyDecoderMoEBias` that also includes MTP layers."""
+
+  def __init__(
+      self,
+      vocab_size: int,
+      hidden: int,
+      rngs: nnx.Rngs,
+      num_mtp_layers: int = 2,
+  ):
+    super().__init__(vocab_size, hidden, rngs=rngs)
+    self.num_mtp_layers = num_mtp_layers
+    # Use distinct update values (e.g. 2.0 for layer 1, 3.0 for layer 2)
+    self.mtp_block = nnx.Dict(
+        {
+            f"mtp_layer_{i + 1}": _MoEBiasStub(bias_shape=(3,), sow_shape=(3,), update_val=float(i + 2))
+            for i in range(num_mtp_layers)
+        }
+    )
+
+  def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+    out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
+    for i in range(self.num_mtp_layers):
+      self.mtp_block[f"mtp_layer_{i + 1}"]()
     return out
 
 
@@ -190,9 +249,22 @@ class TestLossFnNNX(unittest.TestCase):
         "mtp_loss",
     ):
       self.assertIn(key, aux)
-    # NNX intermediates are captured into a pure-dict snapshot, then logits attached.
+    # NNX intermediates are captured into a pure-dict snapshot.
     self.assertIsInstance(aux["intermediate_outputs"], dict)
-    self.assertIn("logits", aux["intermediate_outputs"])
+
+  def test_logits_preserved_during_eval_with_mtp(self):
+    """Verifies logits is stored in intermediate_outputs only during eval with MTP target."""
+    cfg, ts = _build_state()
+    cfg.mtp_eval_target_module = 1
+    data = _make_data(batch=cfg.micro_batch_size_to_eval_on, vocab=cfg.vocab_size)
+
+    # 1. During eval: logits must be preserved for acceptance rate calculation
+    _, aux_eval = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=False)
+    self.assertIn("logits", aux_eval["intermediate_outputs"])
+
+    # 2. During training: logits must NOT be stored to avoid memory bloat
+    _, aux_train = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+    self.assertNotIn("logits", aux_train["intermediate_outputs"])
 
   def test_eval_mode_truncates_to_eval_micro_batch(self):
     cfg, ts = _build_state()
@@ -202,6 +274,15 @@ class TestLossFnNNX(unittest.TestCase):
     self.assertTrue(jnp.isfinite(loss))
     # eval truncated batch to 1 → total_weights = seq_len * 1
     self.assertEqual(int(aux["total_weights"]), data["targets_segmentation"].shape[1])
+
+  def test_multimodal_model_accepts_text_only_batch(self):
+    cfg, ts = _build_state()
+    cfg.use_multimodal = True
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    loss, _ = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+
+    self.assertTrue(jnp.isfinite(loss))
 
   def test_indexer_dense_warmup_skips_xent(self):
     cfg, ts = _build_state()
@@ -348,6 +429,59 @@ class TestRoutedBiasReadNNX(unittest.TestCase):
     _, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
     self.assertIsNotNone(aux["moe_bias_updates"])
     np.testing.assert_allclose(np.asarray(aux["moe_bias_updates"][0]), np.ones((2, 3)))
+
+  def test_loss_fn_extracts_mtp_moe_bias_updates(self):
+    """Verifies loss_fn returns mtp_moe_bias_updates with correct shapes and values."""
+    cfg = _Cfg()
+    cfg.routed_bias = True
+    cfg.routed_bias_update_rate = 0.001
+    cfg.mtp_num_layers = 2
+    model = _TinyDecoderMoEBiasWithMTP(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0), num_mtp_layers=2)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    _, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
+    self.assertIsNotNone(aux["mtp_moe_bias_updates"])
+    self.assertEqual(len(aux["mtp_moe_bias_updates"]), 2)
+    # Layer 1 has update 2.0 of shape (3,) and Layer 2 has update 3.0 of shape (3,)
+    np.testing.assert_allclose(np.asarray(aux["mtp_moe_bias_updates"][0]), np.full((3,), 2.0))
+    np.testing.assert_allclose(np.asarray(aux["mtp_moe_bias_updates"][1]), np.full((3,), 3.0))
+
+  def test_train_step_updates_decoder_and_mtp_routed_biases(self):
+    cfg = _Cfg()
+    cfg.routed_bias = True
+    cfg.routed_bias_update_rate = 0.001
+    cfg.mtp_num_layers = 2
+    model = _TinyDecoderMoEBiasWithMTP(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0), num_mtp_layers=2)
+    optimizer = nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param)
+    ts = train_state_nnx.TrainStateNNX(model, optimizer)
+    state_graphdef, state_pure = nnx.split(ts)
+
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    new_state, _ = pre_train.train_step(
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=state_pure,
+        data=data,
+    )
+    # Scanned decoder bias is (num_layers=2, num_experts=3) with update_val=1.0
+    dec_gate = new_state.model.decoder.gate
+    np.testing.assert_allclose(
+        np.asarray(dec_gate.bias.value),
+        np.full((2, 3), 1.0),
+    )
+    # Distinct updates for each MTP layer (2.0 for layer 1, 3.0 for layer 2)
+    mtp1_gate = new_state.model.mtp_block.mtp_layer_1.gate
+    np.testing.assert_allclose(
+        np.asarray(mtp1_gate.bias.value),
+        np.full((3,), 2.0),
+    )
+    mtp2_gate = new_state.model.mtp_block.mtp_layer_2.gate
+    np.testing.assert_allclose(
+        np.asarray(mtp2_gate.bias.value),
+        np.full((3,), 3.0),
+    )
 
   def test_routed_bias_disabled_returns_none(self):
     cfg = _Cfg()  # routed_bias=False

@@ -75,6 +75,7 @@ def gmm(
     qwix_rule: qwix.QtRule | None = None,
     use_manual_quantization: bool = False,  # used in batchsplit
     use_gmm_v2: bool = False,
+    use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
 ):
   """Grouped matrix multiplication operation."""
@@ -106,7 +107,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
@@ -126,6 +127,7 @@ def gmm(
       lhs_vma_axes,
       rhs_vma_axes,
       use_gmm_v2,
+      use_gmm_v2_heuristic_tiling,
       partial_sum,
   )
 
@@ -162,6 +164,7 @@ def _gmm_fwd(
     lhs_vma_axes: tuple = tuple(),
     rhs_vma_axes: tuple = tuple(),
     use_gmm_v2: bool = False,
+    use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
 ) -> tuple[
     jnp.ndarray,
@@ -212,6 +215,7 @@ def _gmm_fwd(
         group_sizes,
         preferred_element_type,
         tiling,
+        use_gmm_v2_heuristic_tiling,
         group_offset,
         partial_sum,
         transpose_rhs,
@@ -371,6 +375,7 @@ def _fwd_run_tokamax_v2(
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype,
     tiling: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
     group_offset: jnp.ndarray | None,
     partial_sum: jnp.ndarray | None,
     transpose_rhs: bool,
@@ -389,18 +394,17 @@ def _fwd_run_tokamax_v2(
 
   lhs_operand = lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs
 
-  custom_fwd_tiling = gmm_v2.TileSizes(
-      tile_m=tiling[0],
-      tile_k=tiling[1],
-      tile_n=tiling[2],
-  )
+  if use_gmm_v2_heuristic_tiling:
+    fwd_tiling = gmm_v2.calculate_tiling
+  else:
+    fwd_tiling = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tiling[2])
 
   out = gmm_v2.gmm_v2(
       lhs=lhs_operand,  # pyrefly: ignore[bad-argument-type]
       rhs=rhs_operand,  # pyrefly: ignore[bad-argument-type]
       group_sizes=group_sizes,
       rhs_scale=rhs_scale,
-      tile_info=custom_fwd_tiling,
+      tile_info=fwd_tiling,
       preferred_element_type=preferred_element_type,
       partial_sum=partial_sum,
       group_offset=group_offset,
@@ -462,6 +466,7 @@ def _gmm_bwd(
     lhs_vma_axes: tuple,
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
+    use_gmm_v2_heuristic_tiling: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -516,6 +521,7 @@ def _gmm_bwd(
       use_manual_quantization,
       interpret,
       lhs_vma_axes,
+      use_gmm_v2_heuristic_tiling,
   )
 
   # 4. DRHS Gradient Execution
@@ -534,6 +540,7 @@ def _gmm_bwd(
       interpret,
       rhs_vma_axes,
       quantization_rule,
+      use_gmm_v2_heuristic_tiling,
   )
 
   # 5. Output Formatting
@@ -659,6 +666,7 @@ def _compute_dlhs(
     use_manual_quantization: bool,
     interpret: bool,
     lhs_vma_axes: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
 ) -> jnp.ndarray:
   """Routes execution of DLHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -671,7 +679,9 @@ def _compute_dlhs(
         use_manual_quantization,
     )
   elif use_tokamax_backend and use_gmm_v2:
-    return _dlhs_run_tokamax_v2(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs)
+    return _dlhs_run_tokamax_v2(
+        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, use_gmm_v2_heuristic_tiling, transpose_rhs
+    )
   else:
     return _dlhs_run_megablox(
         dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs, interpret, lhs_vma_axes
@@ -744,6 +754,7 @@ def _dlhs_run_tokamax_v2(
     group_offset: jnp.ndarray | None,
     lhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
     transpose_rhs: bool,
 ) -> jnp.ndarray:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
@@ -751,7 +762,10 @@ def _dlhs_run_tokamax_v2(
   dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
   dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
 
-  custom_dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+  if use_gmm_v2_heuristic_tiling:
+    dlhs_tiling = gmm_v2.calculate_tiling
+  else:
+    dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
 
   dlhs = gmm_v2.gmm_v2(
       lhs=dlhs_lhs,
@@ -759,7 +773,7 @@ def _dlhs_run_tokamax_v2(
       group_sizes=group_sizes,
       # rhs scale is already applied to dlhs_lhs
       rhs_scale=None,
-      tile_info=custom_dlhs_tiling,
+      tile_info=dlhs_tiling,
       preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
       maybe_quantize_lhs=not isinstance(dlhs_dout, qpl.QArray),
@@ -816,12 +830,15 @@ def _compute_drhs(
     interpret: bool,
     rhs_vma_axes: tuple,
     quantization_rule: qwix.QtRule | None,
+    use_gmm_v2_heuristic_tiling: bool,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
     drhs = _drhs_run_tokamax_v1(drhs_dout, lhs, group_sizes, rhs_dtype, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
-    drhs = _drhs_run_tokamax_v2(drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling)
+    drhs = _drhs_run_tokamax_v2(
+        drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, use_gmm_v2_heuristic_tiling
+    )
   else:
     drhs = _drhs_run_megablox(
         drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, interpret, rhs_vma_axes
@@ -888,6 +905,7 @@ def _drhs_run_tokamax_v2(
     num_actual_groups: int,
     rhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
 ) -> jnp.ndarray:
   """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
@@ -897,7 +915,10 @@ def _drhs_run_tokamax_v2(
   if isinstance(drhs_dout, qpl.QArray):
     rhs_scale = _drhs_prepare_bwd_scale(drhs_dout)
 
-  custom_drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
+  if use_gmm_v2_heuristic_tiling:
+    drhs_tiling = tgmm_v2.calculate_tgmm_tiling
+  else:
+    drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
 
   return tgmm_v2.tgmm_v2(
       lhs=drhs_lhs,
@@ -908,7 +929,7 @@ def _drhs_run_tokamax_v2(
       precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=rhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
-      tile_info=custom_drhs_tiling,
+      tile_info=drhs_tiling,
   )
 
 
