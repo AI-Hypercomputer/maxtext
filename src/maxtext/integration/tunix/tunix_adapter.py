@@ -144,3 +144,10 @@ class TunixMaxTextAdapter(nnx.Module):
       return {}
 
     return self._vllm_weight_mapping.lora_to_hf_mappings()
+
+  def preprocess_src_state(self):
+    """Optional state transform applied by Tunix before the key mapping (see VllmWeightMapping)."""
+    if self.use_no_op_mappings:
+      return None
+
+    return self._vllm_weight_mapping.preprocess_src_state()
