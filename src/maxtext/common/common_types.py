@@ -164,6 +164,8 @@ class HyperConnectionType(enum.Enum):
 
 
 class CustomRule(enum.Enum):
+  """Custom mesh and logical axis rule sets, each backed by a yml in configs/custom_mesh_and_rule."""
+
   DEFAULT = ""
   PURE_FSDP = "pure-fsdp"
   CP_AS_EP = "cp-as-ep"  # Support CP and EP together
