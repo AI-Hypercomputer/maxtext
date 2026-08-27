@@ -4024,11 +4024,24 @@ class MaxTextConfig(
     if self.use_sft and self.use_dpo:
       raise ValueError("Only one of `use_sft` or `use_dpo` can be True.")
     if self.shard_mode == ShardMode.EXPLICIT:
-      supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek"}
+      supported_decoders = {
+          "simple",
+          "simple_mlp",
+          "llama2",
+          "deepseek",
+          "qwen3",
+          "qwen3_moe",
+          "qwen3_custom_moe",
+      }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
             f"Decoder '{self.decoder_block.value}' is not supported with 'explicit' sharding. "
-            f"Supported options are: {list(supported_decoders)}."
+            f"Supported options are: {sorted(supported_decoders)}."
+        )
+      if self.use_multimodal:
+        raise ValueError(
+            "'explicit' sharding is not supported with `use_multimodal`; the vision and audio encoders "
+            "have not been onboarded to explicit sharding yet."
         )
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")

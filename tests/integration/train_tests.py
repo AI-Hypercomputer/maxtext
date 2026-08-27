@@ -13,8 +13,11 @@
 # limitations under the License.
 
 """Tests for train.py with various configs"""
+import json
 import os
+import tempfile
 import unittest
+import numpy as np
 import pytest
 import jax
 
@@ -33,6 +36,23 @@ from tests.utils.test_helpers import (
 def _small_model_base_emb_dim(device_count):
   """Return a tiny embedding dim divisible by local devices."""
   return ((28 + device_count - 1) // device_count) * device_count
+
+
+_MOE_OVERRIDES = ["base_moe_mlp_dim=512", "num_experts=8", "num_experts_per_tok=2"]
+
+# One tiny model per Qwen3 decoder block that supports explicit sharding.
+_QWEN3_MODELS = {
+    "qwen3": ["model_name=qwen3-0.6b"],
+    "qwen3_moe": ["model_name=qwen3-30b-a3b"] + _MOE_OVERRIDES,
+    "qwen3_custom_moe": [
+        "model_name=qwen3-custom-30b-a3b",
+        "attention_output_dim=256",
+        "moe_expert_input_dim=256",
+        # Qwen3CustomMoeDecoderLayer is only registered for the unscanned path.
+        "scan_layers=False",
+    ]
+    + _MOE_OVERRIDES,
+}
 
 
 class TrainTests(unittest.TestCase):
@@ -65,6 +85,22 @@ class TrainTests(unittest.TestCase):
       "base_moe_mlp_dim=32",
       "sparse_matmul=False",
       "megablox=False",
+  ]
+
+  _qwen3_overrides = [
+      "override_model_config=True",
+      "base_num_decoder_layers=2",
+      "base_emb_dim=256",
+      "base_mlp_dim=512",
+      "base_num_query_heads=4",
+      "base_num_kv_heads=4",
+      "head_dim=128",
+      "vocab_size=2048",
+      "max_target_length=256",
+      # The Qwen3 model configs default to a HuggingFace tokenizer that is not
+      # vendored in the repo; use the checked-in tiktoken asset instead.
+      "tokenizer_type=tiktoken",
+      rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
   ]
 
   CONFIGS = {
@@ -588,6 +624,91 @@ class TrainTests(unittest.TestCase):
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
     ]
     train_main(zero1_ga)
+
+  def _qwen3_losses(self, run_name, extra_args):
+    """Trains a tiny Qwen3 model for a few steps and returns its per-step losses."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      metrics_file = os.path.join(tmp_dir, "metrics.txt")
+      train_main(
+          [
+              None,
+              get_test_config_path(),
+              f"base_output_directory={self._base_output_directory}",
+              f"dataset_path={self.dataset_path}",
+              f"run_name={run_name}",
+              f"metrics_file={metrics_file}",
+              "dataset_type=synthetic",
+              "steps=3",
+              "enable_checkpointing=False",
+              "enable_goodput_recording=False",
+          ]
+          + self._qwen3_overrides
+          + list(extra_args)
+      )
+      with open(metrics_file, "rt", encoding="utf8") as f:
+        return [json.loads(line)["learning/loss"] for line in f if line.strip()]
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_tpu_qwen3_explicit_sharding_matches_auto(self):
+    """Explicit sharding only changes how layouts are expressed, so the losses must not move.
+
+    Each decoder block is paired with the parallelism that stresses it most:
+    tensor parallelism puts the `heads` axis on the same mesh axis as the
+    QK-norm scale, and expert parallelism shards the MoE dispatch.
+    """
+    parallelism = {
+        "qwen3": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
+        "qwen3_moe": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
+        "qwen3_custom_moe": [],
+    }
+    for decoder_block, model_args in _QWEN3_MODELS.items():
+      with self.subTest(decoder_block=decoder_block):
+        args = model_args + parallelism[decoder_block]
+        auto_losses = self._qwen3_losses(f"{decoder_block}_auto", args + ["shard_mode=auto"])
+        explicit_losses = self._qwen3_losses(f"{decoder_block}_explicit", args + ["shard_mode=explicit"])
+        print(f"[{decoder_block}] auto losses: {auto_losses}", flush=True)
+        print(f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True)
+        self.assertTrue(auto_losses, "auto run produced no metrics")
+        # The two runs execute the same math, so they match bit-for-bit.
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-6, atol=0.0)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
+  @pytest.mark.skip_on_tpu7x
+  def test_tpu_qwen3_zero1_gradient_accumulation(self):
+    """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
+
+    Under explicit sharding this routes the accumulated gradients through the
+    `reduced`/`unreduced` PartitionSpec labels applied in
+    `maxtext.utils.gradient_accumulation`.
+    """
+    zero1_ga = [
+        "remat_policy=minimal",
+        "per_device_batch_size=2",
+        "ici_data_parallelism=-1",
+        "dcn_data_parallelism=1",
+        "ici_fsdp_parallelism=1",
+        "dcn_fsdp_parallelism=1",
+        "gradient_accumulation_steps=8",
+    ]
+    for decoder_block in ("qwen3", "qwen3_moe"):
+      with self.subTest(decoder_block=decoder_block):
+        args = _QWEN3_MODELS[decoder_block] + zero1_ga
+        baseline = self._qwen3_losses(
+            f"{decoder_block}_ga",
+            args + ["shard_mode=auto", "shard_optimizer_over_data=False"],
+        )
+        sharded = self._qwen3_losses(
+            f"{decoder_block}_ga_zero1",
+            args + ["shard_mode=explicit", "shard_optimizer_over_data=True"],
+        )
+        print(f"[{decoder_block}] auto + GA losses: {baseline}", flush=True)
+        print(f"[{decoder_block}] explicit + ZeRO-1 + GA losses: {sharded}", flush=True)
+        self.assertTrue(baseline, "baseline run produced no metrics")
+        # ZeRO-1 reassociates the gradient all-reduce, so allow a little float slack.
+        np.testing.assert_allclose(sharded, baseline, rtol=1e-4, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
