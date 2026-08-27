@@ -21,10 +21,12 @@
 import datetime
 from functools import partial
 import os
+import time
 from typing import Sequence
 
 from absl import app
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 import jax
 from jax import numpy as jnp
 from maxtext.configs import pyconfig
@@ -79,19 +81,38 @@ def checkpoint_loop(config, state=None):
   # A barrier to sync all hosts before starting to restore checkpoint
   jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
 
-  checkpoint_load_start = datetime.datetime.now()
-  # Delegate checkpoint restoration or state initialization to setup_training_state
-  state, _, _, _, was_restored = maxtext_utils.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
-  jax.block_until_ready(state)
-  checkpoint_load_end = datetime.datetime.now()
+  state = None
 
-  if was_restored:
-    if jax.process_index() == 0:
-      max_logging.log(
-          "STANDALONE CHECKPOINTER : Checkpoint restored in :" f" {checkpoint_load_end - checkpoint_load_start}"
+  if config.standalone_checkpointer_start_from_checkpoint:
+    unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      loaded_state, _ = checkpointing.load_state_if_possible(
+          checkpoint_manager,
+          None,
+          config.load_parameters_path,
+          config.load_full_state_path,
+          config.checkpoint_storage_concurrent_gb,
+          unboxed_abstract_state,
+          config.enable_single_replica_ckpt_restoring,
+          config.dataset_type,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+          enable_orbax_v1=config.enable_orbax_v1,
+          checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+          source_checkpoint_layout=config.source_checkpoint_layout,
+          expansion_factor_real_data=config.expansion_factor_real_data,
+          maxtext_config=config,
       )
-  else:  # Checkpoint was unavailable, fresh state needs to be perturbed with entropy
-    state = add_entropy_to_checkpoint(state)
+      if loaded_state:
+        state = loaded_state.get("items", loaded_state)
+
+  if state is None:
+    # Delegate checkpoint restoration or state initialization to setup_training_state
+    state, _, _, _, _ = maxtext_utils.setup_training_state(model, config, mesh, checkpoint_manager, init_state_fn)
+
+  jax.block_until_ready(state)
+
+  state = add_entropy_to_checkpoint(state)
 
   start_step = get_first_step(model, state)  # this is the start_step for training
   for step in np.arange(start_step, config.steps):
@@ -107,6 +128,39 @@ def checkpoint_loop(config, state=None):
           max_logging.log(
               "STANDALONE CHECKPOINTER : Checkpoint saved in" f" {end_time - start_time} ,step {step}, on host 0"
           )
+          elapsed_time = datetime.datetime.now() - start_time
+          time_to_wait = config.standalone_checkpointer_per_step_interval - elapsed_time.total_seconds()
+          if time_to_wait > 0:
+            time.sleep(time_to_wait)
+        jax.experimental.multihost_utils.sync_global_devices("Barrier after step")
+
+        if config.standalone_checkpointer_enable_restore_in_loop:
+          # Optional OS Page Cache Eviction (for Checkpointing Benchmarks):
+          # When saving a checkpoint to storage and immediately restoring it on the same host,
+          # the Linux kernel OS page cache holds the newly written blocks in RAM.
+          # Without dropping the cache, the restore operation will read from host RAM rather
+          # than actual backing storage (e.g., GCS / Lustre / persistent disk), which artificially
+          # inflates restore speeds and distorts storage benchmark metrics.
+          #
+          # NOTE: Executing this command requires `sudo` privileges on Linux:
+          # `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'`.
+          # It defaults to False for compatibility with standard non-sudo MaxText environments,
+          # and should only be enabled in dedicated benchmarking environments.
+          if jax.process_index() == 0 and config.standalone_checkpointer_drop_page_cache_before_restore:
+            max_logging.log("STANDALONE CHECKPOINTER : Dropping OS page cache before restore...")
+          if config.standalone_checkpointer_drop_page_cache_before_restore:
+            os.system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
+
+          restore_start = datetime.datetime.now()
+          restored_state = checkpoint_manager.restore(int(step))
+          if restored_state:
+            restored_state = restored_state.get("items", restored_state)
+          jax.block_until_ready(restored_state)
+          restore_end = datetime.datetime.now()
+          if jax.process_index() == 0:
+            max_logging.log(
+                f"STANDALONE CHECKPOINTER : Checkpoint restored in {restore_end - restore_start} ,step {step}, on host 0"
+            )
 
   return state
 
