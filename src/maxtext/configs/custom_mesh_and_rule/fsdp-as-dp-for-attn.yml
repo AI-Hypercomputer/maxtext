@@ -22,9 +22,17 @@
 # dense MLP weights keep using FSDP as in ep-as-dp.yml. Outside the core MoE
 # part (between EP all2all) the expert axis carries the batch, so sharding the
 # attention weights on it behaves like FSDP over a much smaller and faster axis:
-# it trades HBM for a cheaper all-gather. This helps when the attention
-# projections are small enough that their FSDP all-gather makes the attention
-# layer latency bound, e.g. DeepSeek V3 at 4k sequence length.
+# it trades HBM for a cheaper all-gather.
+#
+# This is mainly useful for large scale training. The attention weights are
+# small, so once the FSDP rank is large (larger than 512) each shard is tiny and
+# their all-gather is dominated by latency rather than bandwidth, which makes
+# the attention layer latency bound. Sharding the attention weights on the
+# (much smaller) expert axis keeps the per-shard slice large enough that the
+# collective stays bandwidth bound, at the cost of replicating those weights
+# over fsdp / fsdp_transpose. MoE weights are large enough to keep scaling with
+# FSDP, so they are left alone. DeepSeek V3 MLPerf training at 4k sequence
+# length is one such case.
 
 mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert']
 data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert']]
