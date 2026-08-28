@@ -159,7 +159,7 @@ def build_local_sliding_splash_mask(
     mask &= distance < sliding_window_size
   mask = jnp.broadcast_to(mask, (batch, q_seq_len, kv_seq_len))
   if decoder_segment_ids is not None:
-    segment = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :kv_seq_len]
+    segment = (decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :kv_seq_len]) & (decoder_segment_ids[:, None, :kv_seq_len] >= 0)
     mask = jnp.logical_and(mask, segment)
   return mask
 
@@ -2326,7 +2326,7 @@ class AttentionOp(nnx.Module):
                 "Sparse indexer with all-gather context parallelism for flash attention does not support"
                 " attention sinks."
             )
-          indexer_mask = indexer_mask == 0.0
+          indexer_mask = indexer_mask >= DEFAULT_MASK_VALUE * 0.5
           # sa_config blocks are clamped to the global sequence lengths; inside
           # the shard map the query is a sequence shard, and the blocks must
           # divide the sequence lengths the kernel sees exactly.
@@ -2368,7 +2368,7 @@ class AttentionOp(nnx.Module):
 
         if indexer_mask is not None:
           # Convert additive float mask (0.0=attend, negative=masked) to boolean mask for Tokamax splash kernel
-          indexer_mask = indexer_mask == 0.0
+          indexer_mask = indexer_mask >= DEFAULT_MASK_VALUE * 0.5
           padded_q_len = ((indexer_mask.shape[-2] + sa_config.block_q - 1) // sa_config.block_q) * sa_config.block_q
           padded_kv_len = ((indexer_mask.shape[-1] + sa_config.block_kv - 1) // sa_config.block_kv) * sa_config.block_kv
           pad_q = padded_q_len - indexer_mask.shape[-2]
