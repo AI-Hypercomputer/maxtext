@@ -287,7 +287,12 @@ def process_maxtext_param(
     if maxtext_config.scan_layers:
       max_logging.log("\tscan")
       # Case 2: Standard scanned layer. Stacked ONLY on the layer axis.
-      axis_to_slice = maxtext_config.param_scan_axis
+      weight_sample = maxtext_param_weight[0] if isinstance(maxtext_param_weight, list) else maxtext_param_weight
+      axis_to_slice = (
+          maxtext_config.param_scan_axis
+          if getattr(weight_sample, "ndim", 0) > maxtext_config.param_scan_axis
+          else 0
+      )
     else:
       max_logging.log("\tunscan moe")
       # Case 3: Unscanned MoE layer. Stacked ONLY on the expert axis. Assuming expert is axis 0.
@@ -1373,7 +1378,7 @@ def _build_single_axis_stacked_tensor(
 
   if config.scan_layers:
     # If it's a standard scanned layer, we use the configured param_scan_axis.
-    axis_to_stack = config.param_scan_axis
+    axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
   else:
     # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
     axis_to_stack = 0
