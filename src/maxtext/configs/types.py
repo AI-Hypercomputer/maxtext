@@ -3868,6 +3868,15 @@ class MaxTextConfig(
         raise ValueError(
             "Sparse indexer is only supported with dot_product attention or flash attention with tokamax splash."
         )
+      if (
+          self.attention == "flash"
+          and self.context_parallel_strategy == "all_gather"
+          and self.ici_context_parallelism * self.dcn_context_parallelism > 1
+          and self.attention_sink
+      ):
+        raise ValueError(
+            "Sparse indexer with all-gather context parallelism for flash attention does not support attention sinks."
+        )
       if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
         raise ValueError(
             f"`indexer_topk` ({self.indexer_topk}) must be < `max_target_length` ({self.max_target_length}) "
