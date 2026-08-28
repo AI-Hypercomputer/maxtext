@@ -218,6 +218,29 @@ def batch_mesh_axes(mesh, rules=None):
   return frozenset(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
 
 
+def carry_reduced_axes(spec, value):
+  """Copies the `reduced` mesh axes of `value`'s own spec onto `spec`.
+
+  Gradient accumulation marks the parameters it carries through the scan `reduced` over
+  the data axis so their cotangents come out `unreduced` and reduce once after the loop.
+  A spec rebuilt from the logical axis rules has no such tag, so resharding a parameter
+  onto it drops the parameter off the deferred path and its gradient reduces eagerly
+  instead. Copying the tag across keeps it on.
+
+  The tag is left off when it would overlap the partitions, which a PartitionSpec rejects,
+  and when `value` has no spec to read, which is the case outside explicit sharding.
+  """
+  if spec is None or value is None:
+    return spec
+  try:
+    reduced = jax.typeof(value).sharding.spec.reduced
+  except (AttributeError, TypeError):
+    return spec
+  if not reduced or reduced & set(get_mesh_axes_used_by_tensor_spec(spec)):
+    return spec
+  return spec.update(reduced=reduced)
+
+
 def mesh_axes_size(mesh, axes, *, label):
   """Returns the product of mesh sizes for a set of axes."""
   size = 1
