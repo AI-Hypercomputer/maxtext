@@ -1174,7 +1174,12 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       self.shared_expert = None
       self.shared_expert_gate = None
 
-  def __call__(self, hidden_states: Array, deterministic: bool) -> tuple[Array, Array | None]:
+  def __call__(
+      self,
+      hidden_states: Array,
+      deterministic: bool,
+      forced_routed_experts: jnp.ndarray | None = None,
+  ) -> tuple[Array, Array | None]:
     """
     Applies the sparse MoE block to the input hidden states.
 
@@ -1188,7 +1193,9 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         - The load balancing loss from the routed experts, if applicable during training.
     """
     # 1. Apply the routed experts block.
-    routed_output, load_balance_loss, _ = self.routed_experts(hidden_states)
+    routed_output, load_balance_loss, _ = self.routed_experts(
+        hidden_states, forced_routed_experts=forced_routed_experts
+    )
 
     if not self.use_shared_expert:
       return routed_output, load_balance_loss

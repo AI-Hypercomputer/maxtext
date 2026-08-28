@@ -145,6 +145,14 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
+  # Only forward the kwarg when router replay is actually in use, so models
+  # and adapters whose __call__ predates the feature keep working.
+  forced_routing_kwargs = (
+      {"forced_routed_experts": data["forced_routed_experts"]}
+      if "forced_routed_experts" in data
+      else {}
+  )
+
   if is_block_diffusion:
     targets_loss_mask = (data["targets_loss_mask"] != 0) & (data["targets_segmentation"] != 0)
     target_positions = data.get("targets_position", data["inputs_position"])
@@ -209,6 +217,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         mutable=mutable_collections,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
+        **forced_routing_kwargs,
     )
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
@@ -265,6 +274,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
+        **forced_routing_kwargs,
     )
     # mtp_losses and mtp_acceptance subclass nnx.Intermediate, and nnx type filters match
     # subclasses. Pop them before the generic Intermediate pop below, which would otherwise
