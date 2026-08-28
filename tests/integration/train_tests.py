@@ -54,6 +54,19 @@ _QWEN3_MODELS = {
     + _MOE_OVERRIDES,
 }
 
+# One tiny model per Mistral-family decoder block that supports explicit sharding.
+_MISTRAL_MODELS = {
+    "mistral": ["model_name=mistral-7b"],
+    "mixtral": [
+        "model_name=mixtral-8x7b",
+        # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet (a gap it
+        # shares with qwen3_moe), so exercise the sparse_matmul path.
+        "sparse_matmul=True",
+        "megablox=True",
+    ]
+    + _MOE_OVERRIDES,
+}
+
 
 class TrainTests(unittest.TestCase):
   """Tests train.py with various configs"""
@@ -121,6 +134,19 @@ class TrainTests(unittest.TestCase):
       # vendored in the repo; use the checked-in tiktoken asset instead.
       "tokenizer_type=tiktoken",
       rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+  ]
+
+  _mistral_overrides = [
+      "override_model_config=True",
+      "base_num_decoder_layers=2",
+      "base_emb_dim=256",
+      "base_mlp_dim=512",
+      "base_num_query_heads=8",
+      "base_num_kv_heads=8",
+      "head_dim=128",
+      "vocab_size=2048",
+      "max_target_length=256",
+      rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.mistral-v1')}",
   ]
 
   CONFIGS = {
@@ -751,6 +777,95 @@ class TrainTests(unittest.TestCase):
             args + ["shard_mode=auto", "shard_optimizer_over_data=False"],
         )
         sharded = self._qwen3_losses(
+            f"{decoder_block}_ga_zero1",
+            args + ["shard_mode=explicit", "shard_optimizer_over_data=True"],
+        )
+        print(f"[{decoder_block}] auto + GA losses: {baseline}", flush=True)
+        print(f"[{decoder_block}] explicit + ZeRO-1 + GA losses: {sharded}", flush=True)
+        self.assertTrue(baseline, "baseline run produced no metrics")
+        # ZeRO-1 reassociates the gradient all-reduce, so allow a little float slack.
+        np.testing.assert_allclose(sharded, baseline, rtol=1e-4, atol=0.0)
+
+  def _mistral_losses(self, run_name, extra_args):
+    """Trains a tiny Mistral/Mixtral model for a few steps and returns its per-step losses."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      metrics_file = os.path.join(tmp_dir, "metrics.txt")
+      train_main(
+          [
+              None,
+              get_test_config_path(),
+              f"base_output_directory={self._base_output_directory}",
+              f"dataset_path={self.dataset_path}",
+              f"run_name={run_name}",
+              f"metrics_file={metrics_file}",
+              "dataset_type=synthetic",
+              "steps=3",
+              "enable_checkpointing=False",
+              "enable_goodput_recording=False",
+          ]
+          + self._mistral_overrides
+          + list(extra_args)
+      )
+      with open(metrics_file, "rt", encoding="utf8") as f:
+        return [json.loads(line)["learning/loss"] for line in f if line.strip()]
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_tpu_mistral_explicit_sharding_matches_auto(self):
+    """Explicit sharding only changes how layouts are expressed, so the losses must not move.
+
+    Each decoder block is paired with the parallelism that stresses it most:
+    tensor parallelism shards the dense MLP intermediate, and expert parallelism
+    shards the MoE dispatch.
+    """
+    parallelism = {
+        "mistral": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
+        "mixtral": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
+    }
+    # Under expert parallelism the two modes are bit-for-bit. Under tensor parallelism
+    # pinning the MLP intermediate reassociates the backward reduction over the tensor
+    # axis, which drifts by a few ULPs by the third step; the runs stay bit-for-bit if
+    # the same model is run under FSDP instead.
+    rtol = {"mistral": 1e-5, "mixtral": 1e-6}
+    for decoder_block, model_args in _MISTRAL_MODELS.items():
+      with self.subTest(decoder_block=decoder_block):
+        args = model_args + parallelism[decoder_block]
+        auto_losses = self._mistral_losses(f"{decoder_block}_auto", args + ["shard_mode=auto"])
+        explicit_losses = self._mistral_losses(f"{decoder_block}_explicit", args + ["shard_mode=explicit"])
+        print(f"[{decoder_block}] auto losses: {auto_losses}", flush=True)
+        print(f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True)
+        self.assertTrue(auto_losses, "auto run produced no metrics")
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=rtol[decoder_block], atol=0.0)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
+  @pytest.mark.skip_on_tpu7x
+  def test_tpu_mistral_zero1_gradient_accumulation(self):
+    """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
+
+    Under explicit sharding this routes the accumulated gradients through the
+    `reduced`/`unreduced` PartitionSpec labels applied in
+    `maxtext.utils.gradient_accumulation`, and casts the parameters to bf16 before
+    the accumulation scan so the all-gather happens once in low precision.
+    """
+    zero1_ga = [
+        "remat_policy=minimal",
+        "per_device_batch_size=2",
+        "ici_data_parallelism=-1",
+        "dcn_data_parallelism=1",
+        "ici_fsdp_parallelism=1",
+        "dcn_fsdp_parallelism=1",
+        "gradient_accumulation_steps=8",
+    ]
+    for decoder_block, model_args in _MISTRAL_MODELS.items():
+      with self.subTest(decoder_block=decoder_block):
+        args = model_args + zero1_ga
+        baseline = self._mistral_losses(
+            f"{decoder_block}_ga",
+            args + ["shard_mode=auto", "shard_optimizer_over_data=False"],
+        )
+        sharded = self._mistral_losses(
             f"{decoder_block}_ga_zero1",
             args + ["shard_mode=explicit", "shard_optimizer_over_data=True"],
         )

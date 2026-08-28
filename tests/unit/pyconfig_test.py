@@ -245,6 +245,18 @@ class PyconfigTest(unittest.TestCase):
           scan_layers=False,  # Required by the Qwen3-VL deepstack path; unrelated to sharding.
       )
 
+  def test_explicit_sharding_mistral_decoder_support(self):
+    """The Mistral-family decoders that have been onboarded to explicit sharding are accepted."""
+    for decoder_block in ("mistral", "mixtral"):
+      with self.subTest(decoder_block=decoder_block):
+        config = pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            shard_mode="explicit",
+            decoder_block=decoder_block,
+        )
+        self.assertEqual(config.decoder_block.value, decoder_block)
+
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
     self.assertEqual(resolve_config_path(__file__), __file__)
