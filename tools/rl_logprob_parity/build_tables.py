@@ -86,9 +86,9 @@ if mtfull is not None and afull is not None:
   row("35B", "MaxText in vLLM (attn_dp=4 x tp=2; MoE TP-8, EP not reachable)", "bf16 / bf16", "N", "40 (full)", fmt(band(mtfull["logp"][:, :-1].reshape(-1), afull["logp"][:, 1:].reshape(-1))), "true logprobs via prompt_logprobs")
 if afull is not None and vfull is not None:
   row("35B", "calibration: MaxText-in-vLLM engine vs native engine", "bf16 / bf16", "–", "40 (full)", fmt(band(afull["logp"][:, 1:].reshape(-1), vfull["logp"][:, 1:].reshape(-1))), "two samplers vs each other")
-mi = z["infer"] if "infer" in z.files else None
+mi = load(f"{L}/real35b_L3_dp4tp2.npz")
 if mi is not None:
-  row("35B", "MaxText in vLLM (layer harness, attn_dp=4 x tp=2, MoE TP-8)", "bf16 / bf16", "N", "1", hidden(z["train"] - z["h_in"], np.load(f"{L}/real35b_L3_dp4tp2.npz")["infer"] - z["h_in"]), "layer 3 alone")
+  row("35B", "MaxText in vLLM (layer harness, attn_dp=4 x tp=2, MoE TP-8)", "bf16 / bf16", "N", "1", hidden(z["train"] - z["h_in"], mi["infer"] - z["h_in"]), "layer 3 alone")
 
 # ---------------- 397B ----------------
 mo = load(f"{L}/maxtext397_prefix_own.npz"); mr = load(f"{L}/maxtext397_prefix_replay.npz"); t3 = load(f"{L}/torchax397_prefix_dp4tp2_ep1.npz")

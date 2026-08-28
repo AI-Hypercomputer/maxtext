@@ -1,4 +1,5 @@
 #!/bin/bash
+# usage: run_maxtext.sh <script.py> [args]  (MaxText-side env: conda + tpu-inference/vLLM/MaxText worktrees on PYTHONPATH)
 # env: shared conda + private --no-deps dir + tpu-inference/vllm/maxtext(pr4925) worktrees
 export PATH=/mnt/disks/persist/vllm_conda/bin:$PATH
 export TPUINF_WT=/home/wenxindong_google_com/work/tpu-inference/.claude/worktrees/qwen35-maxtext-mapping
@@ -12,4 +13,4 @@ export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 export OUT_DIR=/mnt/disks/persist/pr4925_repro
 mkdir -p $OUT_DIR
 cd $MAXTEXT_WT
-exec python /home/wenxindong_google_com/.claude/jobs/7ea88918/tmp/maxtext_prefix_gen.py "$@"
+exec python "$(cd "$(dirname "$0")" && pwd)/$1" "${@:2}"
