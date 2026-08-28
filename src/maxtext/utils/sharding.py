@@ -255,7 +255,8 @@ def remove_size_one_mesh_axis(spec, mesh):
   if spec is None:
     return None
   new_spec = []  # type: ignore
-  for s in spec:
+  # Iterate `.partitions`: a spec carrying reduced/unreduced axes refuses plain iteration.
+  for s in spec.partitions:
     if s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)  # type: ignore
     elif isinstance(s, tuple):
@@ -282,6 +283,27 @@ def batch_mesh_axes(mesh, rules=None):
   if spec is None or not spec.partitions:
     return frozenset()
   return frozenset(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
+
+
+def without_reduced_axes(value):
+  """`value` resharded without its `reduced` mesh axes.
+
+  Some consumers of a parameter have no reduced/unreduced rule: an elementwise op against
+  an activation sharded on the reduced axis (a bias add), or a convolution. Dropping the
+  tag right before such a consumer is enough. Its transpose still hands the parameter an
+  `unreduced` cotangent, so the gradient stays on the deferred cross-replica reduction that
+  gradient accumulation sets up.
+
+  A no-op when `value` carries no reduced axes or has no spec to read, which is the case
+  outside explicit sharding.
+  """
+  try:
+    spec = jax.typeof(value).sharding.spec
+  except (AttributeError, TypeError):
+    return value
+  if not spec.reduced:
+    return value
+  return reshard(value, P(*spec.partitions, unreduced=spec.unreduced))
 
 
 def mesh_axes_size(mesh, axes, *, label):
@@ -314,7 +336,8 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
   if spec is None or mesh is None or not shape:
     return spec
   new_spec = []
-  for i, s in enumerate(spec):
+  # Iterate `.partitions`: a spec carrying reduced/unreduced axes refuses plain iteration.
+  for i, s in enumerate(spec.partitions):
     if i >= len(shape) or s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)
     else:
@@ -540,6 +563,9 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
     A set of strings, where each string is a mesh axis name used by the
     tensor's sharding spec. Returns an empty set for unsharded tensors.
   """
+  # Read through `.partitions`: a spec carrying reduced/unreduced axes refuses plain iteration.
+  if isinstance(tensor_sharding_spec, P):
+    tensor_sharding_spec = tensor_sharding_spec.partitions
   # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
   tensor_sharding_spec = sum(
       [
