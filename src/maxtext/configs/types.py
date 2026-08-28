@@ -1353,6 +1353,13 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the second MoE layer's output.",
   )
+  moe_combine: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the output of the expert-parallel combine collective"
+          " (reduce-scatter or ragged all-to-all)."
+      ),
+  )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
   value_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the value projection.")
@@ -3580,6 +3587,7 @@ class MaxTextConfig(
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_combine",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -4745,6 +4753,7 @@ class RLConfig(
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_combine",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",

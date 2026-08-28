@@ -375,6 +375,7 @@ mlpwo: 'remat'
 moe_mlpwi_0: 'remat'
 moe_mlpwi_1: 'remat'
 moe_mlpwo: 'remat'
+moe_combine: 'remat' # Output of the expert-parallel combine (reduce-scatter / ragged all-to-all)
 query_proj: 'remat'
 key_proj: 'remat'
 value_proj: 'remat'
