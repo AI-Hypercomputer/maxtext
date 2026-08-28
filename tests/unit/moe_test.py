@@ -1003,8 +1003,9 @@ class RoutedMoeTest(parameterized.TestCase):
     # through `ring_ragged_sort`'s custom_vjp backward (the kernel under
     # test). Without checking this, DCE removes the bwd entirely.
     self.assertEqual(x_grad_ref.shape, x_grad_rs.shape, "Hidden-state grad shape mismatch")
+    x_atol = 8e-2 * jnp.max(jnp.abs(x_grad_ref.astype(jnp.float32)))
     self.assertTrue(
-        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=8e-2),
+        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=x_atol),
         msg=(
             "Hidden-state gradient mismatch: max abs diff="
             f"{jnp.max(jnp.abs(x_grad_rs.astype(jnp.float32) - x_grad_ref.astype(jnp.float32)))}"
@@ -1017,11 +1018,13 @@ class RoutedMoeTest(parameterized.TestCase):
     self.assertEqual(treedef_ref, treedef_rs, "Gradient pytree structures differ")
     for i, (g_ref, g_rs) in enumerate(zip(leaves_ref, leaves_rs)):
       self.assertEqual(g_ref.shape, g_rs.shape, f"Grad shape mismatch at leaf {i}")
+      # Scaled to the leaf: a fixed atol passes a leaf whose whole gradient is below it.
+      atol = 8e-2 * jnp.max(jnp.abs(g_ref.astype(jnp.float32)))
       self.assertTrue(
-          jnp.allclose(g_rs.astype(jnp.float32), g_ref.astype(jnp.float32), rtol=1e-2, atol=8e-2),
+          jnp.allclose(g_rs.astype(jnp.float32), g_ref.astype(jnp.float32), rtol=1e-2, atol=atol),
           msg=(
               f"Gradient mismatch at leaf {i} (shape={g_ref.shape}): "
-              f"max abs diff={jnp.max(jnp.abs(g_rs.astype(jnp.float32) - g_ref.astype(jnp.float32)))}"
+              f"max abs diff={jnp.max(jnp.abs(g_rs.astype(jnp.float32) - g_ref.astype(jnp.float32)))}, {atol=}"
           ),
       )
 
