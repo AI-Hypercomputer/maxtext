@@ -191,6 +191,7 @@ def make_tgmm_configs(
     out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype | None,
     target_zero_ref_bytes: int,
+    quantize_operands: bool = False,
 ):
   """Fills the GMM config for the TGMM kernel."""
   assert out_dtype, "out_dtype cannot be None"
@@ -233,15 +234,24 @@ def make_tgmm_configs(
       size_lhs_sublane=size_lhs_sublane,
   )
 
+  # moe_bwd_inkernel_quant: quantize_operands puts a per-(gm-tile x channel) dynamic e4m3
+  # quantize of BOTH operands inside the inner kernel (signalled to tgmm_inner_kernel via
+  # lhs_cfgs.quant_dtype). Mutually exclusive with a pre-computed per-N rhs_scale.
+  if quantize_operands:
+    assert rhs_scale is None, "quantize_operands is mutually exclusive with rhs_scale"
+    inkernel_q_dtype = jnp.float8_e4m3fn.dtype
+  else:
+    inkernel_q_dtype = None
+
   rhs_quant_block_size_m = size_m
   rhs_cfgs = gmm_v2.InputConfigs(
-      quant_dtype=None,
+      quant_dtype=inkernel_q_dtype,
       quant_block_size=rhs_quant_block_size_m,
       dtype=rhs.dtype,
       has_scale=(rhs_scale is not None),
   )
   lhs_cfgs = gmm_v2.InputConfigs(
-      quant_dtype=None,
+      quant_dtype=inkernel_q_dtype,
       quant_block_size=-1,
       dtype=lhs.dtype,
   )
@@ -334,12 +344,43 @@ def tgmm_inner_kernel(
     rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
     rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
 
-    acc = jax.lax.dot_general(
-        lhs_masked,
-        rhs_masked,
-        (((0,), (0,)), ((), ())),
-        preferred_element_type=jnp.float32,
-    )
+    if cfgs.lhs_cfgs.quant_dtype is not None:
+      # moe_bwd_inkernel_quant: quantize BOTH operands in-kernel with per-(gm-tile x channel)
+      # dynamic scales and rescale the partial product by the scale outer-product before
+      # accumulation (the tgmm_block per-segment pattern, fused into the tile loop -- no dense
+      # XLA-level quantize/amax over the ragged buffer, only valid gm tiles pay). The masked
+      # rows are zero, so they neither perturb the amax nor the product.
+      q_dtype = cfgs.lhs_cfgs.quant_dtype
+      dtype_max = float(jnp.finfo(q_dtype).max)
+      lhs_f = lhs_masked.astype(jnp.float32)
+      rhs_f = rhs_masked.astype(jnp.float32)
+      lhs_scale = jnp.max(jnp.abs(lhs_f), axis=0) / dtype_max  # [tile_k] f32
+      rhs_scale = jnp.max(jnp.abs(rhs_f), axis=0) / dtype_max  # [tile_n] f32
+      # A near-zero scale would give 0 * inf = NaN. An `== 0` guard is NOT enough: for any column
+      # whose amax is nonzero but below ~1.3e-36, `1/scale` OVERFLOWS f32 to inf, the guard does not
+      # fire, and every exactly-zero element in that column becomes 0*inf = NaN. Masked rows are set
+      # to exactly 0 above, so MORE masked rows = more NaN sites -- imbalanced (real) routing makes
+      # small groups and mostly-masked tiles, so it is strictly more exposed than a balanced
+      # synthetic router. Guard on the smallest scale with a finite reciprocal instead.
+      _recip_min = jnp.float32(1.0) / jnp.finfo(jnp.float32).max
+      lhs_inv = jnp.where(lhs_scale > _recip_min, 1.0 / lhs_scale, 0.0)
+      rhs_inv = jnp.where(rhs_scale > _recip_min, 1.0 / rhs_scale, 0.0)
+      lhs_q = (lhs_f * lhs_inv.reshape(1, -1)).astype(q_dtype)
+      rhs_q = (rhs_f * rhs_inv.reshape(1, -1)).astype(q_dtype)
+      acc = jax.lax.dot_general(
+          lhs_q,
+          rhs_q,
+          (((0,), (0,)), ((), ())),
+          preferred_element_type=jnp.float32,
+      )
+      acc = acc * lhs_scale.reshape(-1, 1) * rhs_scale.reshape(1, -1)
+    else:
+      acc = jax.lax.dot_general(
+          lhs_masked,
+          rhs_masked,
+          (((0,), (0,)), ((), ())),
+          preferred_element_type=jnp.float32,
+      )
 
     if not is_new_group:
       acc += acc_ref[...]
@@ -642,6 +683,7 @@ def validate_tgmm_inputs(
         "precision",
         "preferred_element_type",
         "acc_dtype",
+        "quantize_operands",
     ],
 )
 def tgmm_v2(
@@ -658,6 +700,7 @@ def tgmm_v2(
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
+    quantize_operands: bool = False,
 ):
   """Computes a transposed grouped matrix multiplication.
 
@@ -710,6 +753,7 @@ def tgmm_v2(
       out_dtype=preferred_element_type,  # pyrefly: ignore[bad-argument-type]
       acc_dtype=acc_dtype,
       target_zero_ref_bytes=target_zero_ref_bytes,
+      quantize_operands=quantize_operands,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles

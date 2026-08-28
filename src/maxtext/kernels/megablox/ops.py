@@ -77,6 +77,7 @@ def gmm(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    bwd_inkernel_quant: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   if interpret is None:
@@ -107,7 +108,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
@@ -129,6 +130,7 @@ def gmm(
       use_gmm_v2,
       use_gmm_v2_heuristic_tiling,
       partial_sum,
+      bwd_inkernel_quant,
   )
 
 
@@ -166,6 +168,7 @@ def _gmm_fwd(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    bwd_inkernel_quant: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -466,6 +469,7 @@ def _gmm_bwd(
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
     use_gmm_v2_heuristic_tiling: bool,
+    bwd_inkernel_quant: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -497,14 +501,44 @@ def _gmm_bwd(
   #  - dlhs_dout: the incoming gradient used to calculate dlhs.
   #  - drhs_dout: the incoming gradient used to calculate drhs.
 
+  # moe_bwd_inkernel_quant: run the drhs tgmm with BOTH operands quantized in-kernel
+  # (per-gm-tile-per-channel), touching only rows covered by group_sizes. This subsumes three
+  # dense buffer-sized XLA ops -- the per-row lhs re-quantize, the drhs_dout *= lhs.scale
+  # multiply, and the per-N cotangent quantize -- and, because no reduction ever reads past the
+  # valid rows, removes the NaN hazard of amax over uninitialized ragged-buffer tail rows.
+  inkernel_drhs = (
+      bwd_inkernel_quant
+      and use_tokamax_backend
+      and use_gmm_v2
+      and quantization_rule is not None
+      and bool(quantization_rule.bwd_qtype)
+  )
+
   # 1. Scale Application & QArray Unwrapping
   dlhs_dout, drhs_dout, lhs, rhs = _bwd_prepare_inputs(
-      grad, residual_lhs, residual_rhs, group_sizes, use_gmm_v2, transpose_rhs, quantization_rule
+      grad, residual_lhs, residual_rhs, group_sizes, use_gmm_v2, transpose_rhs, quantization_rule,
+      skip_lhs_quant=inkernel_drhs,
   )
 
   # 2. Backward Pass Quantization
   if quantization_rule:
-    dlhs_dout, drhs_dout = _bwd_quantize_gradient(dlhs_dout, drhs_dout, quantization_rule)
+    if inkernel_drhs:
+      # the in-kernel tgmm quantizes drhs_dout ITSELF; quantize ONLY the dlhs cotangent here
+      # (calling the two-sided helper would emit the dense drhs quantize just to discard it).
+      if quantization_rule.bwd_qtype:
+        dlhs_dout = qpl.quantize(
+            # pyrefly: ignore[bad-argument-type]
+            dlhs_dout,
+            quantization_rule.bwd_qtype,
+            channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+            calibration_method=quantization_rule.bwd_calibration_method,
+        )
+      if not isinstance(drhs_dout, qpl.QArray) and drhs_dout.dtype != lhs.dtype:
+        # tgmm requires equal operand widths; the in-kernel path reads the RAW cotangent, so
+        # carry it at the activation width (halves the kernel's cotangent read bytes vs f32).
+        drhs_dout = drhs_dout.astype(lhs.dtype)
+    else:
+      dlhs_dout, drhs_dout = _bwd_quantize_gradient(dlhs_dout, drhs_dout, quantization_rule)
 
   # 3. DLHS Gradient Execution
   dlhs = _compute_dlhs(
@@ -540,6 +574,7 @@ def _gmm_bwd(
       rhs_vma_axes,
       quantization_rule,
       use_gmm_v2_heuristic_tiling,
+      inkernel_quant=inkernel_drhs,
   )
 
   # 5. Output Formatting
@@ -578,8 +613,14 @@ def _bwd_prepare_inputs(
     use_gmm_v2: bool,
     transpose_rhs: bool,
     quantization_rule: qwix.QtRule | None,
+    skip_lhs_quant: bool = False,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray, jnp.ndarray, jnp.ndarray]:
-  """Prepares backward operands."""
+  """Prepares backward operands.
+
+  `skip_lhs_quant=True` (bwd_inkernel_quant) keeps the lhs as the raw wide array: the drhs
+  tgmm quantizes BOTH operands in-kernel over valid gm tiles only, so the dense per-row XLA
+  quantize here (and the drhs_dout *= lhs.scale multiply below) would be buffer-sized overhead.
+  """
 
   # dlhs_dout and drhs_dout can be different when quantization is enabled.
   dlhs_dout = grad
@@ -603,7 +644,7 @@ def _bwd_prepare_inputs(
 
   # GMM2 FWD performs lhs quantization inside kernel, lhs is stored as unquantized dtype
   # in the residual tuple. In BWD, we explicitly quantize lhs.
-  if quantization_rule and quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
+  if quantization_rule and quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not skip_lhs_quant:
     lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
         lhs,
         quantization_rule.act_qtype,
@@ -830,13 +871,14 @@ def _compute_drhs(
     rhs_vma_axes: tuple,
     quantization_rule: qwix.QtRule | None,
     use_gmm_v2_heuristic_tiling: bool,
+    inkernel_quant: bool = False,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
     drhs = _drhs_run_tokamax_v1(drhs_dout, lhs, group_sizes, rhs_dtype, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
     drhs = _drhs_run_tokamax_v2(
-        drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, use_gmm_v2_heuristic_tiling
+        drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, use_gmm_v2_heuristic_tiling,  quantize_operands=inkernel_quant,
     )
   else:
     drhs = _drhs_run_megablox(
@@ -905,6 +947,7 @@ def _drhs_run_tokamax_v2(
     rhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
+    quantize_operands: bool = False,
 ) -> jnp.ndarray:
   """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
@@ -929,6 +972,7 @@ def _drhs_run_tokamax_v2(
       preferred_element_type=rhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
       tile_info=drhs_tiling,
+      quantize_operands=quantize_operands and rhs_scale is None,
   )
 
 
