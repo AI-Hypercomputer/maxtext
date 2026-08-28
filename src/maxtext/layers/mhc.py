@@ -186,10 +186,10 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     )
 
     # Biases
-    if self.config.enable_mhc_lite:
-      res_beta_init_fn = lambda key, shape, dtype: default_bias_init(key, shape, dtype).at[0].set(2.0)
-    else:
-      res_beta_init_fn = default_bias_init
+    # if self.config.enable_mhc_lite:
+    #   res_beta_init_fn = lambda key, shape, dtype: default_bias_init(key, shape, dtype).at[0].set(2.0)
+    # else:
+    res_beta_init_fn = default_bias_init
     self.res_beta = nnx.Param(
         res_beta_init_fn(self.rngs.params(), res_beta_shape, self.weight_dtype),
         out_sharding=res_beta_sharding,
