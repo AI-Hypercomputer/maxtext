@@ -898,7 +898,11 @@ class DeepseekV4Indexer(nnx.Module):
       entry_indices_mask = jnp.arange(compressed_len)
       future_mask = entry_indices_mask[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
 
-    segment_mask = attention_mask[:, :, :compressed_len] if attention_mask is not None else None
+    segment_mask = (
+        attention_mask[:, :, :compressed_len]
+        if attention_mask is not None and model_mode != MODEL_MODE_AUTOREGRESSIVE
+        else None
+    )
     # Autoregressive queries have one row and cannot be partitioned over tensor ranks.
     shard_topk = self.config.indexer_sharded_topk and self.mesh is not None and model_mode != MODEL_MODE_AUTOREGRESSIVE
 

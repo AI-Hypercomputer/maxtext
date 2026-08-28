@@ -14,17 +14,14 @@
 
 """Tests for DeepSeek-V4 CSA indexer activation sharding."""
 
-from pathlib import Path
 import unittest
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import yaml
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
-from flax.linen.partitioning import logical_to_mesh_axes
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, PartitionSpec
 
@@ -41,8 +38,6 @@ BATCH = 2
 SEQ = 64
 RATE = 4
 HEADS = 4
-SCORE_AXES = ("activation_batch", "activation_heads", "activation_length", None)
-CUSTOM_RULE_DIR = Path(pyconfig.__file__).parent / "custom_mesh_and_rule"
 
 
 def make_config(**overrides):
@@ -133,16 +128,6 @@ def indexer_jaxpr(indexer, hidden, q_latent, positions, model_mode=None, rules=N
     return jax.make_jaxpr(lambda s, h, q, p: nnx.merge(graphdef, s)(h, q, p, **kwargs))(
         state, hidden, q_latent, positions
     )
-
-
-def custom_rule_sets():
-  """Loads logical-axis rules from each custom mesh preset."""
-  out = {}
-  for path in sorted(CUSTOM_RULE_DIR.glob("*.yml")):
-    with path.open("r", encoding="utf-8") as file:
-      rules = yaml.safe_load(file)["logical_axis_rules"]
-    out[path.stem] = [(name, tuple(axes) if isinstance(axes, list) else axes) for name, axes in rules]
-  return out
 
 
 class IndexerActivationShardingTest(unittest.TestCase):
