@@ -18,7 +18,7 @@ RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.
 RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
 
 # Install the Google Cloud SDK
-RUN apt-get update && apt-get install -y google-cloud-cli
+RUN apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/*
 
 # Set the default Python version to 3.12
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.12 1
