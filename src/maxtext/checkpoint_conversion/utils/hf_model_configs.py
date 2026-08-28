@@ -2017,6 +2017,7 @@ HF_MODEL_CONFIGS = {
     "cosmos3-super-reasoner": cosmos3_super_reasoner_config,
     "llama3.1-8b": llama31_8b_config,
     "llama3.1-8b-Instruct": llama31_8b_config,
+    "llama3.1-8b-fp8": llama31_8b_config,
     "llama3.1-70b": llama31_70b_config,
     "llama3.1-405b": llama31_405b_config,
     "qwen3-30b-a3b": qwen3_30b_a3b_thinking_2507_config,
