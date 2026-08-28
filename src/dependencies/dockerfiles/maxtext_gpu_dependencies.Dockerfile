@@ -21,7 +21,7 @@ RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.
 RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
 
 # Install the Google Cloud SDK
-RUN apt-get update && apt-get install -y google-cloud-sdk
+RUN apt-get update && apt-get install -y google-cloud-cli
 
 # Set environment variables for Google Cloud SDK
 ENV PATH="/usr/local/google-cloud-sdk/bin:${PATH}"
