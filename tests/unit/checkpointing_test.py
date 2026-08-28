@@ -17,15 +17,19 @@
 import asyncio
 import json
 import os
+import tempfile
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+from flax import nnx
 from flax.training import train_state
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from maxtext.layers import linears
+import orbax.checkpoint as ocp
 from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.checkpoint_conversion.utils.tensor_handling import (
     _binary_chunked_stack,
@@ -510,6 +514,244 @@ class CheckpointErrorHandlerTest(parameterized.TestCase):
         checkpointing.maybe_save_checkpoint(self.mock_manager, self.state, config, data_iterator=None, step=1)
       self.assertIn("Checkpointing failed. GCS failure", str(cm.exception))
       self.assertIs(cm.exception.__cause__, original_error)
+
+
+class FP8DequantizeOnLoadTest(parameterized.TestCase):
+  """Tests for dequantize-on-load parameter restoration."""
+
+  def setUp(self):
+    super().setUp()
+    self.tmp_dir = tempfile.TemporaryDirectory()
+
+  def tearDown(self):
+    self.tmp_dir.cleanup()
+    super().tearDown()
+
+  def test_load_fp8_checkpoint_into_bf16_nnx_model(self):
+    """Loading an FP8 checkpoint into a BF16 NNX model restores dequantized BF16 weights and drops scale."""
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array([[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 0.5]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(2.0, dtype=jnp.float32)
+    bias = jnp.zeros((2,), dtype=jnp.bfloat16)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+            "bias": bias,
+        }
+    }
+
+    path = os.path.join(self.tmp_dir.name, "fp8_ckpt")
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(
+        epath.Path(path),
+        {"params": {"params": ckpt_weights}},
+        force=True,
+    )
+
+    expected_kernel = linears.dequantize_weight(fp8_kernel, scale, compute_dtype=jnp.bfloat16)
+
+    restored = checkpointing.load_params_from_path(path, params_abstract, 8)
+    self.assertIsInstance(restored, nnx.State)
+    pure = restored.to_pure_dict()
+
+    self.assertNotIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.bfloat16)
+    self.assertEqual(pure["linear"]["kernel"].shape, (4, 2))
+    np.testing.assert_allclose(
+        np.array(pure["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_load_fp8_checkpoint_into_fp8_nnx_model(self):
+    """Loading an FP8 checkpoint into an FP8 NNX model preserves FP8 kernel and scale."""
+    class FP8Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.float8_e4m3fn)
+        self.linear.kernel_scale = nnx.Param(jnp.ones((), dtype=jnp.float32))
+
+    model = FP8Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array([[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 0.5]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(3.5, dtype=jnp.float32)
+    bias = jnp.zeros((2,), dtype=jnp.float8_e4m3fn)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+            "bias": bias,
+        }
+    }
+
+    path = os.path.join(self.tmp_dir.name, "fp8_to_fp8_ckpt")
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(
+        epath.Path(path),
+        {"params": {"params": ckpt_weights}},
+        force=True,
+    )
+
+    restored = checkpointing.load_params_from_path(path, params_abstract, 8)
+    self.assertIsInstance(restored, nnx.State)
+    pure = restored.to_pure_dict()
+
+    self.assertIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(pure["linear"]["kernel_scale"].dtype, jnp.float32)
+    np.testing.assert_array_equal(np.array(pure["linear"]["kernel"]), np.array(fp8_kernel))
+    np.testing.assert_array_equal(np.array(pure["linear"]["kernel_scale"]), np.array(scale))
+
+  def test_load_fp8_checkpoint_into_bf16_linen_dict(self):
+    """Loading an FP8 checkpoint into a BF16 Linen parameter dict restores dequantized BF16 weights."""
+    target_weights = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.bfloat16),
+                "bias": jax.ShapeDtypeStruct(shape=(2,), dtype=jnp.bfloat16),
+            }
+        }
+    }
+
+    fp8_kernel = jnp.array([[0.5, 1.0], [0.25, 0.75], [1.5, 0.125], [0.5, 2.0]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(0.5, dtype=jnp.float32)
+    bias = jnp.zeros((2,), dtype=jnp.bfloat16)
+
+    ckpt_weights = {
+        "params": {
+            "linear": {
+                "kernel": fp8_kernel,
+                "kernel_scale": scale,
+                "bias": bias,
+            }
+        }
+    }
+
+    path = os.path.join(self.tmp_dir.name, "fp8_linen_ckpt")
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(
+        epath.Path(path),
+        {"params": ckpt_weights},
+        force=True,
+    )
+
+    expected_kernel = linears.dequantize_weight(fp8_kernel, scale, compute_dtype=jnp.bfloat16)
+
+    restored = checkpointing.load_params_from_path(path, target_weights, 8)
+    self.assertNotIsInstance(restored, nnx.State)
+    self.assertIn("params", restored)
+    self.assertNotIn("kernel_scale", restored["params"]["linear"])
+    self.assertEqual(restored["params"]["linear"]["kernel"].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        np.array(restored["params"]["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_load_fp8_checkpoint_with_per_channel_scale_into_bf16_model(self):
+    """Loading an FP8 checkpoint with per-channel scale dequantizes properly."""
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array([[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 0.5]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array([2.0, 4.0], dtype=jnp.float32)
+    bias = jnp.zeros((2,), dtype=jnp.bfloat16)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+            "bias": bias,
+        }
+    }
+
+    path = os.path.join(self.tmp_dir.name, "fp8_channel_scale_ckpt")
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(
+        epath.Path(path),
+        {"params": {"params": ckpt_weights}},
+        force=True,
+    )
+
+    expected_kernel = linears.dequantize_weight(fp8_kernel, scale, compute_dtype=jnp.bfloat16)
+
+    restored = checkpointing.load_params_from_path(path, params_abstract, 8)
+    pure = restored.to_pure_dict()
+
+    self.assertNotIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        np.array(pure["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_load_fp8_checkpoint_with_moe_scales_into_bf16_model(self):
+    """Loading an FP8 checkpoint with MoE expert weights (wi_0, wi_1, wo) dequantizes properly."""
+    class BF16MoEModel(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.wi_0 = nnx.Param(jnp.zeros((2, 4, 8), dtype=jnp.bfloat16))
+        self.wi_1 = nnx.Param(jnp.zeros((2, 4, 8), dtype=jnp.bfloat16))
+        self.wo = nnx.Param(jnp.zeros((2, 8, 4), dtype=jnp.bfloat16))
+
+    model = BF16MoEModel(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_wi_0 = jnp.array(np.random.randn(2, 4, 8), dtype=jnp.float8_e4m3fn)
+    wi_0_scale = jnp.array(np.random.rand(2, 1, 1), dtype=jnp.float32)
+    fp8_wi_1 = jnp.array(np.random.randn(2, 4, 8), dtype=jnp.float8_e4m3fn)
+    wi_1_scale = jnp.array(np.random.rand(2, 1, 1), dtype=jnp.float32)
+    fp8_wo = jnp.array(np.random.randn(2, 8, 4), dtype=jnp.float8_e4m3fn)
+    wo_scale = jnp.array(np.random.rand(2, 1, 1), dtype=jnp.float32)
+
+    ckpt_weights = {
+        "wi_0": fp8_wi_0,
+        "wi_0_scale": wi_0_scale,
+        "wi_1": fp8_wi_1,
+        "wi_1_scale": wi_1_scale,
+        "wo": fp8_wo,
+        "wo_scale": wo_scale,
+    }
+
+    path = os.path.join(self.tmp_dir.name, "fp8_moe_scale_ckpt")
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(
+        epath.Path(path),
+        {"params": {"params": ckpt_weights}},
+        force=True,
+    )
+
+    expected_wi_0 = linears.dequantize_weight(fp8_wi_0, wi_0_scale, compute_dtype=jnp.bfloat16)
+    expected_wi_1 = linears.dequantize_weight(fp8_wi_1, wi_1_scale, compute_dtype=jnp.bfloat16)
+    expected_wo = linears.dequantize_weight(fp8_wo, wo_scale, compute_dtype=jnp.bfloat16)
+
+    restored = checkpointing.load_params_from_path(path, params_abstract, 8)
+    pure = restored.to_pure_dict()
+
+    self.assertNotIn("wi_0_scale", pure)
+    self.assertNotIn("wi_1_scale", pure)
+    self.assertNotIn("wo_scale", pure)
+    self.assertEqual(pure["wi_0"].dtype, jnp.bfloat16)
+    self.assertEqual(pure["wi_1"].dtype, jnp.bfloat16)
+    self.assertEqual(pure["wo"].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(np.array(pure["wi_0"]), np.array(expected_wi_0), rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(np.array(pure["wi_1"]), np.array(expected_wi_1), rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(np.array(pure["wo"]), np.array(expected_wo), rtol=1e-3, atol=1e-3)
 
 
 if __name__ == "__main__":
