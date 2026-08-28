@@ -543,6 +543,41 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @parameterized.named_parameters(
+      {"testcase_name": "tpu7x_64", "compile_topology": "tpu7x-64"},
+      {"testcase_name": "tpu7x_128", "compile_topology": "tpu7x-128"},
+  )
+  def test_moe_deepseek_batchsplit_lineage(self, compile_topology):
+    try:
+      from maxtext.models import lineage_adapter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+      if lineage_adapter is None:
+        self.skipTest("Lineage adapter not available in open-source export.")
+    except ImportError:
+      self.skipTest("Lineage adapter not available in open-source export.")
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(
+        temp_dir,
+        f"test_moe_deepseek_batchsplit_lineage_{compile_topology}.pickle",
+    )
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            f"compile_topology={compile_topology}",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-test",
+            "use_batch_split_schedule=True",
+            "use_lineage=True",
+            "per_device_batch_size=2",
+            "max_target_length=128",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+        )
+    )
+
   def test_moe_emb_chunking(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_emb_chunking.pickle")
