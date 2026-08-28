@@ -44,11 +44,17 @@ def _align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp
   This is a no-op whenever the two already agree, which includes every
   auto-sharding-equivalent layout for the ordinary layer norms.
   """
-  activation_spec = jax.typeof(y).sharding.spec
+  # Read through `.partitions`: a scale carrying a reduced/unreduced tag (ZeRO-1 +
+  # gradient accumulation) rejects direct indexing. The tags are carried over to the
+  # new spec so the scale keeps its place in the deferred all-reduce.
+  activation_axis = jax.typeof(y).sharding.spec.partitions[-1]
   scale_spec = jax.typeof(scale).sharding.spec
-  if scale_spec[-1] == activation_spec[-1]:
+  if scale_spec.partitions[-1] == activation_axis:
     return scale
-  return jax.sharding.reshard(scale, jax.sharding.PartitionSpec(activation_spec[-1]))
+  return jax.sharding.reshard(
+      scale,
+      jax.sharding.PartitionSpec(activation_axis, unreduced=scale_spec.unreduced, reduced=scale_spec.reduced),
+  )
 
 
 class RMSNorm(nnx.Module):

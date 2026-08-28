@@ -25,17 +25,64 @@ import random
 import os
 import os.path
 
+from flax.linen import partitioning as nn_partitioning
+
 from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.configs import pyconfig
+from maxtext.trainers.pre_train import train, train_compile
 from maxtext.trainers.pre_train.train import main as train_main
+from maxtext.utils import maxtext_utils, sharding
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.trainers.post_train.sft.train_sft_native import main as sft_main
 
+from tests.utils.hlo_test_utils import cross_replica_all_reduce_sizes, split_by_entry_loop
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
+
+# Cross-replica reductions that legitimately run once per microbatch — the summed loss and
+# the token count — are scalars. The smallest DeepSeek parameter gradient is thousands of
+# elements, so this bound separates "a per-microbatch scalar" from "a parameter gradient".
+_MAX_PER_MICROBATCH_REDUCTION_ELEMENTS = 8
 
 
 def generate_random_string(length=10):
   characters = string.ascii_letters  # Include letters, digits, and punctuation
   return "".join(random.choice(characters) for _ in range(length))
+
+
+def compile_train_step(overrides):
+  """AOT-compiles `train.train_step` for a config and returns the compiled executable.
+
+  Mirrors `train_compile.main`, which builds the same executable but does not hand it
+  back. Compiling ahead of time against `compile_topology` means the mesh can be larger
+  than the host's device count, which is what makes a data-parallel training step
+  inspectable from a single-device test runner.
+  """
+  config = pyconfig.initialize([None, get_test_config_path()] + overrides)
+  train_compile.validate_config(config)
+  topology_mesh = train_compile.get_topology_mesh(config)
+  shaped_args, shaped_kwargs, state_mesh_shardings, _, model = train_compile.get_shaped_inputs(topology_mesh, config)
+  # ZeRO-1 moves the params onto the optimizer's layout; gradient accumulation still sees
+  # the pre-ZeRO-1 layout through params_shardings.
+  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+  input_state_mesh_shardings = sharding.build_zero1_input_state_mesh_shardings(
+      config, state_mesh_shardings, params_shardings
+  )
+  data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
+  func, in_shardings, out_shardings, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+      train.train_step, data_sharding, input_state_mesh_shardings, model, config, params_shardings
+  )
+  return train_compile.jit_and_compile(
+      func,
+      shaped_args,
+      shaped_kwargs,
+      topology_mesh,
+      in_shardings,
+      out_shardings,
+      static_argnums,
+      donate_argnums,
+      config,
+      nn_partitioning.axis_rules(config.logical_axis_rules),
+  )
 
 
 class GradientAccumulationTest(unittest.TestCase):
@@ -146,6 +193,49 @@ class GradientAccumulationTest(unittest.TestCase):
           flush=True,
       )
       np.testing.assert_equal(accum_device_tflops, regular_device_tflops)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_deepseek_zero1_reduces_gradients_once_per_step(self):
+    """DeepSeek + ZeRO-1 + gradient accumulation must all-reduce gradients once per step.
+
+    Under explicit sharding the accumulator carries an `unreduced` PartitionSpec tag over
+    the data axis, so each microbatch's gradient is summed locally and the cross-replica
+    reduction happens once, when the accumulated gradient is resharded back after the
+    scan. Losing that tag is silent — the gradients stay numerically identical — and only
+    shows up as the reduction being emitted inside the accumulation loop, once per
+    microbatch. So assert on where the collective sits rather than on the loss.
+    """
+    compiled = compile_train_step(
+        [
+            "run_name=deepseek_zero1_ga_all_reduce",
+            f"base_output_directory={self.base_output_directory}",
+            "enable_checkpointing=False",
+            "enable_goodput_recording=False",
+            "dataset_type=synthetic",
+            "model_name=deepseek3-tiny",
+            "compile_topology=v5e-8",
+            "compile_topology_num_slices=1",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "shard_optimizer_over_data=true",
+            "shard_mode=explicit",
+            "gradient_accumulation_steps=4",
+            "per_device_batch_size=1",
+        ]
+    )
+    inside, outside = split_by_entry_loop(compiled.as_text(), "all-reduce")
+    inside_sizes = cross_replica_all_reduce_sizes(inside)
+    # Guards the assertion below against passing vacuously: if SPMD partitioning stopped
+    # spelling its replica groups over mesh axes, `inside_sizes` would be empty for the
+    # wrong reason.
+    self.assertTrue(cross_replica_all_reduce_sizes(outside), "no cross-replica all-reduce outside the loop")
+    per_microbatch = [size for size in inside_sizes if size > _MAX_PER_MICROBATCH_REDUCTION_ELEMENTS]
+    self.assertEqual(
+        per_microbatch,
+        [],
+        f"gradient all-reduce is still inside the accumulation loop: {per_microbatch} elements per buffer",
+    )
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only

@@ -21,7 +21,7 @@ from jax.sharding import NamedSharding
 from flax import nnx
 
 from maxtext.common.common_types import ShardMode
-from maxtext.utils.sharding import maybe_shard_with_name
+from maxtext.utils.sharding import batch_mesh_axes, get_mesh_axes_used_by_tensor_spec, maybe_shard_with_name
 
 
 def gradient_accumulation_loss_and_grad(
@@ -70,18 +70,15 @@ def gradient_accumulation_loss_and_grad(
 
   is_nnx = isinstance(model, nnx.Module)
 
-  # For ZeRO-1 + GA, read the resolved "data" axis size from the mesh rather than
-  # config.ici_data_parallelism, which may be -1 (auto-fill) and resolves to 1 when
-  # FSDP already consumes every device — in which case data parallelism is not active.
-  param_mesh = jax.tree.leaves(params_shardings)[0].mesh
-  data_parallel_active = config.shard_mode == ShardMode.EXPLICIT and param_mesh.shape.get("data", 1) > 1
-  if data_parallel_active:
-    # reduced/unreduced PartitionSpecs are rejected inside a jax.lax.scan carry: scan
-    # traces its body against an AbstractMesh whose axis types are all Auto, and the
-    # annotations require Explicit axes. Keep plain params_shardings in the carry and
-    # apply the data-parallel all-reduce to the gradients after the scan instead.
-    ga_params_shardings = params_shardings
-    grad_shardings = params_shardings
+  if data_is_only_batch_axis(config, params_shardings):
+    # Params entering the loop are replicated over "data" and the accumulator holds a
+    # per-replica partial sum, so tagging them reduced/unreduced keeps the accumulation
+    # local and the cross-replica all-reduce runs once after the scan instead of once per
+    # microbatch. JAX requires the unreduced set to equal the axes actually contracted
+    # over — the activation batch axes — which is why the pair is only applied when "data"
+    # is the sole batch axis of size > 1.
+    ga_params_shardings = jax.tree.map(update_sharding_for_reduced, params_shardings)
+    grad_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
   else:
     ga_params_shardings = grad_shardings = params_shardings
 
@@ -172,12 +169,7 @@ def gradient_accumulation_loss_and_grad(
   )
   loss = jnp.where(has_weights, loss, 0.0)
   raw_grads = grad_and_loss["grad"]
-  if data_parallel_active:
-    # Mark the gradients unreduced over the "data" axis now that we're outside the
-    # scan; this triggers the cross-replica all-reduce. The annotation can't live in
-    # the scan carry (see above), so it's applied here instead.
-    unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
-    raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
+  # Resharding away from the unreduced spec is what emits the cross-replica all-reduce.
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
   divisor = (
       config.gradient_accumulation_steps if getattr(config, "use_tunix_gradient_accumulation", False) else denominator
@@ -195,10 +187,41 @@ def gradient_accumulation_loss_and_grad(
 
 
 # GA helper functions
+def data_is_only_batch_axis(config, params_shardings) -> bool:
+  """True when "data" is the single batch mesh axis of size > 1 under explicit sharding.
+
+  This is the condition under which the gradient accumulator can carry an `unreduced`
+  tag: JAX requires the unreduced axes to equal the axes actually contracted over, which
+  for a gradient are the mesh axes the activation batch dimension is sharded on.
+
+  The batch axes are read from the resolved mesh rather than `config.ici_data_parallelism`,
+  which may be -1 (auto-fill) and resolves to 1 when FSDP already consumes every device.
+  """
+  if config.shard_mode != ShardMode.EXPLICIT:
+    return False
+  param_shardings = jax.tree.leaves(params_shardings)
+  if not param_shardings:
+    return False
+  try:
+    batch_axes = batch_mesh_axes(param_shardings[0].mesh, rules=config.logical_axis_rules)
+  except (KeyError, ValueError):
+    # No "activation_batch" rule for this mesh: leave the gradients untagged.
+    return False
+  return batch_axes == frozenset({"data"})
+
+
+def _shards_over_data(sharding: NamedSharding) -> bool:
+  """True if the tensor is itself sharded over the data axis."""
+  return "data" in get_mesh_axes_used_by_tensor_spec(sharding.spec)
+
+
 def update_sharding_for_reduced(sharding: NamedSharding) -> NamedSharding:
   """
   Add reduced on data axis of given NamedSharding
   """
+  # A tensor cannot be reduced over an axis it is sharded on; leave those alone.
+  if _shards_over_data(sharding):
+    return sharding
   return sharding.update(spec=sharding.spec.update(reduced={"data"}))
 
 
@@ -206,4 +229,6 @@ def update_sharding_for_unreduced(sharding: NamedSharding) -> NamedSharding:
   """
   Add unreduced on data axis of given NamedSharding
   """
+  if _shards_over_data(sharding):
+    return sharding
   return sharding.update(spec=sharding.spec.update(unreduced={"data"}))
