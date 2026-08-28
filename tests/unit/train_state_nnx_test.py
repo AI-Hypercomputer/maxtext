@@ -85,5 +85,51 @@ class TestTrainStateNNX(unittest.TestCase):
     self.assertIn("inference only", str(cm.exception))
 
 
+class ApplyCheckpointAuxTest(unittest.TestCase):
+  """Resuming must survive a model that stopped holding some transient state."""
+
+  class _Holder(nnx.Module):
+
+    def __init__(self, keep_rngs: bool):
+      self.w = nnx.Param(jnp.zeros((2,)))
+      if keep_rngs:
+        self.rngs = nnx.Rngs(params=0, dropout=1)
+
+  def _aux(self, module):
+    return nnx.state(module, nnx.RngState)
+
+  def test_extra_checkpoint_entries_are_skipped(self):
+    """A checkpoint written before a module dropped its Rngs must still restore.
+
+    nnx.replace_by_pure_dict raises on a key the state does not have, so without this
+    an older checkpoint fails the resume outright.
+    """
+    written = nnx.to_pure_dict(self._aux(self._Holder(keep_rngs=True)))
+    self.assertTrue(written, "the writer must actually have RNG state to drop")
+
+    target = self._aux(self._Holder(keep_rngs=False))
+    train_state_nnx.apply_checkpoint_aux(target, written)  # must not raise
+
+  def test_matching_entries_are_restored(self):
+    source = self._Holder(keep_rngs=True)
+    source.rngs.dropout()  # advance so the saved count is distinguishable
+    written = nnx.to_pure_dict(self._aux(source))
+
+    # nnx.state() returns a copy; the real path merges it back afterwards, so assert
+    # on the state object rather than the module it came from.
+    target = self._aux(self._Holder(keep_rngs=True))
+    train_state_nnx.apply_checkpoint_aux(target, written)
+
+    self.assertEqual(
+        nnx.to_pure_dict(target)["rngs"]["dropout"]["count"],
+        written["rngs"]["dropout"]["count"],
+        "entries the model still holds must be filled from the checkpoint",
+    )
+
+  def test_empty_aux_is_a_noop(self):
+    target = self._aux(self._Holder(keep_rngs=True))
+    train_state_nnx.apply_checkpoint_aux(target, {})
+
+
 if __name__ == "__main__":
   unittest.main()

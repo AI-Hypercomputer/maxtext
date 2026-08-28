@@ -172,7 +172,7 @@ def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
 
   nnx_aux = restored_linen.get("nnx_aux")
   if nnx_aux:
-    nnx.replace_by_pure_dict(aux_state, nnx_aux)
+    train_state_nnx.apply_checkpoint_aux(aux_state, nnx_aux)
 
   return nnx.merge_state(linen_state, aux_state, ephemeral)
 
