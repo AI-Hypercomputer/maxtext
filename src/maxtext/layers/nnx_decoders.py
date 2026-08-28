@@ -1048,9 +1048,7 @@ class NNXDecoder(nnx.Module):
         current_params, current_state, kv_cache_layer = scanned_vars
         forced_routed_experts_layer = None
       elif use_forced_routing:
-        current_params, current_state, forced_routed_experts_layer = (
-            scanned_vars
-        )
+        current_params, current_state, forced_routed_experts_layer = scanned_vars
         kv_cache_layer = None
       else:
         current_params, current_state = scanned_vars
@@ -1138,9 +1136,7 @@ class NNXDecoder(nnx.Module):
         scan_xs = (params, state, forced_routed_experts_scanned)
       else:
         scan_xs = (params, state)
-      final_carry, scanned_state = jax.lax.scan(
-          layer_fn_wrapped, x_in, scan_xs, unroll=unroll
-      )
+      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, scan_xs, unroll=unroll)
       returned_kv_stacked = None
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
@@ -1980,13 +1976,11 @@ class NNXDecoder(nnx.Module):
               )
             # Only the per-layer slices may reach the layers from here on.
             layer_kwargs.pop("forced_routed_experts", None)
-            forced_routed_experts_scanned = (
-                reshape_forced_routed_experts_for_scan(
-                    forced_routed_experts,
-                    num_layers=cfg.num_decoder_layers,
-                    scan_length=scan_length,
-                    layers_per_cycle=cycle_interval,
-                )
+            forced_routed_experts_scanned = reshape_forced_routed_experts_for_scan(
+                forced_routed_experts,
+                num_layers=cfg.num_decoder_layers,
+                scan_length=scan_length,
+                layers_per_cycle=cycle_interval,
             )
             if cfg.decoder_block == DecoderBlockType.MIXTRAL:
               # Mixtral has no ScannableBlock: one scan iteration is one layer,
@@ -1997,9 +1991,7 @@ class NNXDecoder(nnx.Module):
                     " inhomogeneous_layer_cycle_interval == 1; got"
                     f" {cycle_interval}."
                 )
-              forced_routed_experts_scanned = jnp.squeeze(
-                  forced_routed_experts_scanned, axis=1
-              )
+              forced_routed_experts_scanned = jnp.squeeze(forced_routed_experts_scanned, axis=1)
           if kv_caches is not None:
             # Pass the kv_caches list directly to avoid copying in jnp.stack,
             # which breaks vLLM PagedAttention in-place memory updates.
@@ -2033,9 +2025,7 @@ class NNXDecoder(nnx.Module):
                 state_in,
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
-          out_y, out_kv = merged_layer(
-              y_in, *layer_args, kv_cache=kv_in, **valid_kwargs
-          )
+          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
           state_out = nnx.state(merged_layer)
 
           if dynamic_graph_init:
@@ -2105,10 +2095,7 @@ class NNXDecoder(nnx.Module):
                   f" top_k] (4D, per-layer); got ndim={routed_experts.ndim}"
                   f" with shape {routed_experts.shape}."
               )
-            if (
-                routed_experts.ndim == 4
-                and routed_experts.shape[2] != cfg.num_decoder_layers
-            ):
+            if routed_experts.ndim == 4 and routed_experts.shape[2] != cfg.num_decoder_layers:
               # jnp clamps an out-of-range static index, so a short layer axis
               # would silently replay the last slice on every later layer.
               raise ValueError(
@@ -2118,19 +2105,13 @@ class NNXDecoder(nnx.Module):
                   f" {routed_experts.shape}."
               )
             current_kwargs["forced_routed_experts"] = (
-                routed_experts[:, :, lyr, :]
-                if routed_experts.ndim == 4
-                else routed_experts
+                routed_experts[:, :, lyr, :] if routed_experts.ndim == 4 else routed_experts
             )
 
           if cfg.remat_policy != "none":
-            y, kv_cache, new_state, new_graphdef = checkpointed_fn(
-                graphdef, state, y, kv_cache, current_kwargs
-            )
+            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
           else:
-            y, kv_cache, new_state, new_graphdef = pure_layer_fn(
-                graphdef, state, y, kv_cache, current_kwargs
-            )
+            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
 
           if dynamic_graph_init:
             new_layer = nnx.merge(new_graphdef, new_state)

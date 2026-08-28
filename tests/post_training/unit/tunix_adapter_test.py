@@ -40,14 +40,7 @@ class _CallableStubBase:
     self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME)
     self.captured = {}
 
-  def __call__(
-      self,
-      *,
-      decoder_input_tokens,
-      decoder_positions,
-      decoder_segment_ids,
-      forced_routed_experts=None
-  ):
+  def __call__(self, *, decoder_input_tokens, decoder_positions, decoder_segment_ids, forced_routed_experts=None):
     self.captured["decoder_input_tokens"] = decoder_input_tokens
     self.captured["decoder_positions"] = decoder_positions
     self.captured["decoder_segment_ids"] = decoder_segment_ids

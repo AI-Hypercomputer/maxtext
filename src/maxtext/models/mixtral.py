@@ -169,9 +169,7 @@ class MixtralDecoderLayer(nnx.Module):
     # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
     # The `name` represents the weight name in JAX/checkpoints and so the class name
     # is just for readability.
-    mlp_lnx, load_balance_loss, _ = self.MoeBlock_0(
-        hidden_states, forced_routed_experts=forced_routed_experts
-    )
+    mlp_lnx, load_balance_loss, _ = self.MoeBlock_0(hidden_states, forced_routed_experts=forced_routed_experts)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs

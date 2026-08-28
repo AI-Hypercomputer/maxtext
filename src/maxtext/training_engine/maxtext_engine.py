@@ -191,23 +191,13 @@ def router_replay_gen_model_input_fn(
     `targets_segmentation`, and (when present) `forced_routed_experts`.
   """
   token_ids = jnp.asarray(payload.token_ids)
-  token_mask = (
-      jnp.asarray(payload.token_mask)
-      if payload.token_mask is not None
-      else jnp.ones_like(token_ids)
-  )
-  segment_ids = (
-      jnp.asarray(payload.segment_ids)
-      if payload.segment_ids is not None
-      else token_mask
-  )
+  token_mask = jnp.asarray(payload.token_mask) if payload.token_mask is not None else jnp.ones_like(token_ids)
+  segment_ids = jnp.asarray(payload.segment_ids) if payload.segment_ids is not None else token_mask
 
   # TrainerPayload rows are left-padded prompt + right-padded completion, so a
   # plain arange would give the first real token a nonzero RoPE position and
   # shift every token relative to the rollout that produced the routing.
-  positions = jnp.maximum(jnp.cumsum(token_mask != 0, axis=-1) - 1, 0).astype(
-      jnp.int32
-  )
+  positions = jnp.maximum(jnp.cumsum(token_mask != 0, axis=-1) - 1, 0).astype(jnp.int32)
 
   # roll(-1) wraps token 0 into the last position, which is not its real next
   # token; mask that position out instead of training on the wrap-around. Do
@@ -215,9 +205,7 @@ def router_replay_gen_model_input_fn(
   # different sequence.
   targets_segmentation = token_mask.at[:, -1].set(0)
   same_segment = segment_ids[:, :-1] == segment_ids[:, 1:]
-  targets_segmentation = targets_segmentation.at[:, :-1].multiply(
-      same_segment.astype(token_mask.dtype)
-  )
+  targets_segmentation = targets_segmentation.at[:, :-1].multiply(same_segment.astype(token_mask.dtype))
 
   kwargs = {
       "inputs": token_ids,
@@ -278,9 +266,7 @@ def make_router_replay_loss_fn(
     }
     if forced_routed_experts is not None:
       data["forced_routed_experts"] = forced_routed_experts
-    return maxtext_train.loss_fn(
-        model, config, data, dropout_rng=dropout_rng, params=None, is_train=True
-    )
+    return maxtext_train.loss_fn(model, config, data, dropout_rng=dropout_rng, params=None, is_train=True)
 
   return router_replay_loss_fn
 

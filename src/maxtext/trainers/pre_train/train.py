@@ -148,9 +148,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # Only forward the kwarg when router replay is actually in use, so models
   # and adapters whose __call__ predates the feature keep working.
   forced_routing_kwargs = (
-      {"forced_routed_experts": data["forced_routed_experts"]}
-      if "forced_routed_experts" in data
-      else {}
+      {"forced_routed_experts": data["forced_routed_experts"]} if "forced_routed_experts" in data else {}
   )
 
   if is_block_diffusion:
