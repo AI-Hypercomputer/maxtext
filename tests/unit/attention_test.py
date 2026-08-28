@@ -29,7 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.sharding import AxisType, Mesh, NamedSharding
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
@@ -42,6 +42,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
     DEFAULT_MASK_VALUE,
+    Q_LENGTH,
 )
 from maxtext.layers.attention_mla import MLA
 from maxtext.layers.attention_compressed import CompressedAttention
@@ -465,6 +466,21 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+def _stub_mesh_axes(q_axis="context"):
+  """Stands in for `AttentionOp._logical_to_mesh_axes` with no ambient rules bound.
+
+  The query sequence resolves to *q_axis* so `_context_parallel_size` reads the
+  intended cp_size off the stub mesh; every other logical name is replicated.
+  Point *q_axis* at an axis other than `context_sharding` to emulate the eval
+  rules sharding the query somewhere the input pipeline never reordered for.
+  """
+
+  def resolve(logical_name):
+    return PartitionSpec(q_axis) if logical_name == (Q_LENGTH,) else None
+
+  return resolve
+
+
 class BlockCausalMaskTest(unittest.TestCase):
   """Tests the shared dense and Splash block-causal masks."""
 
@@ -498,6 +514,7 @@ class BlockCausalMaskTest(unittest.TestCase):
       attention_type=AttentionType.BLOCK_DIFFUSION,
       context_parallel_size=1,
       context_parallel_load_balance=False,
+      mesh_shape=None,
   ):
     """Builds a minimal flash-attention operator for dispatch tests."""
     config = types.SimpleNamespace(
@@ -505,6 +522,7 @@ class BlockCausalMaskTest(unittest.TestCase):
         context_parallel_strategy="all_gather",
         context_parallel_load_balance=context_parallel_load_balance,
         context_sharding="context",
+        ulysses_context_sharding="ulysses",
         sa_block_q=4,
         sa_block_kv=4,
         sa_block_kv_compute=4,
@@ -526,7 +544,7 @@ class BlockCausalMaskTest(unittest.TestCase):
     device = types.SimpleNamespace(platform="cpu")
     mesh = types.SimpleNamespace(
         devices=np.asarray([device], dtype=object),
-        shape={"context": context_parallel_size},
+        shape={"context": context_parallel_size} if mesh_shape is None else mesh_shape,
     )
     return AttentionOp(
         config=config,
@@ -736,19 +754,67 @@ class BlockCausalMaskTest(unittest.TestCase):
             context_parallel_size=cp_size,
             context_parallel_load_balance=load_balanced,
         )
-        with (
-            mock.patch.object(AttentionOp, "_logical_to_mesh_axes", return_value=None),
-            mock.patch.object(
-                attention_op.splash_attention_mask,
-                "MultiHeadMask",
-                side_effect=RuntimeError("mask captured"),
-            ) as make_multi_head_mask,
-            self.assertRaisesRegex(RuntimeError, "mask captured"),
-        ):
-          op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
-
-        selected_mask = make_multi_head_mask.call_args.kwargs["masks"][0]
+        selected_mask = self._capture_splash_mask(op, query)
         self.assertIsInstance(selected_mask, expected_mask_type)
+
+  def _capture_splash_mask(self, op, query, q_axis="context"):
+    """Runs `tpu_flash_attention` far enough to see which mask it built."""
+    with (
+        mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes(q_axis)),
+        mock.patch.object(
+            attention_op.splash_attention_mask,
+            "MultiHeadMask",
+            side_effect=RuntimeError("mask captured"),
+        ) as make_multi_head_mask,
+        self.assertRaisesRegex(RuntimeError, "mask captured"),
+    ):
+      op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+    return make_multi_head_mask.call_args.kwargs["masks"][0]
+
+  def test_tpu_splash_load_balances_only_when_the_loader_reordered(self):
+    """The LB mask requires the batch to carry the loader's DUAL_CHUNK_SWAP order.
+
+    The input pipeline reorders once, for `mesh[context_sharding]` under the
+    *train* rules. `custom_mesh_and_rule_for_eval` can leave the query sharded a
+    different number of ways at eval, and the LoadBalanced* masks bake the
+    permutation into a static `q_sequence` - applying one to an unpermuted batch
+    lets rows attend to the future instead of raising. So the kernel may only
+    load balance when its own shard count equals the one the loader used;
+    otherwise it falls back to the plain causal mask, correct at any count.
+
+    Note the criterion is the count, not the axis name: the last case shards the
+    query on `expert` while the loader reordered off `context`, and 4 == 4 makes
+    that permutation valid.
+    """
+    query = jnp.zeros((1, 8, 1, 8))
+    cases = (
+        # q axis (eval rules), mesh, reorder extent (train rules), expected mask
+        ("context", {"context": 4}, 4, attention_op.LoadBalancedCausalMask),
+        ("expert", {"context": 1, "expert": 4}, 1, splash_attention_mask.CausalMask),
+        ("expert", {"context": 2, "expert": 4}, 2, splash_attention_mask.CausalMask),
+        ("expert", {"context": 4, "expert": 4}, 4, attention_op.LoadBalancedCausalMask),
+    )
+
+    for q_axis, mesh_shape, reorder_size, expected_mask_type in cases:
+      with self.subTest(q_axis=q_axis, mesh_shape=mesh_shape):
+        op = self._make_flash_op(
+            attention_type=AttentionType.GLOBAL,
+            context_parallel_load_balance=True,
+            mesh_shape=mesh_shape,
+        )
+        self.assertEqual(max_utils.reordered_cp_size(op.config, op.mesh), reorder_size)
+        selected_mask = self._capture_splash_mask(op, query, q_axis=q_axis)
+        self.assertIsInstance(selected_mask, expected_mask_type)
+
+  def test_tpu_splash_skips_load_balancing_when_flag_is_off(self):
+    """With the flag off the loader never reorders, so neither may the kernel."""
+    op = self._make_flash_op(
+        attention_type=AttentionType.GLOBAL,
+        context_parallel_size=4,
+        context_parallel_load_balance=False,
+    )
+    selected_mask = self._capture_splash_mask(op, jnp.zeros((1, 8, 1, 8)))
+    self.assertIsInstance(selected_mask, splash_attention_mask.CausalMask)
 
 
 class AttentionTypeResolutionTest(unittest.TestCase):

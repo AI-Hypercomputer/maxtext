@@ -2849,6 +2849,22 @@ def _normalize_axes(axes: Any) -> tuple[str, ...]:
   return ()
 
 
+def axes_for_logical(logical_axis_rules: list, logical_axis: str) -> tuple[str, ...]:
+  """Return the physical axes *logical_axis* is mapped to by *logical_axis_rules*.
+
+  Args:
+    logical_axis_rules: The list of ``[logical_name, physical_axes]`` pairs.
+    logical_axis: The logical axis name to look up.
+
+  Returns:
+    A (possibly empty) tuple of physical axis name strings.
+  """
+  for rule in logical_axis_rules:
+    if rule and len(rule) >= 2 and rule[0] == logical_axis:
+      return _normalize_axes(rule[1])
+  return ()
+
+
 def infer_cp_axes(logical_axis_rules: list) -> tuple[str, ...]:
   """Infer which physical mesh axis/axes serve as Context Parallelism (CP).
 
@@ -2863,10 +2879,7 @@ def infer_cp_axes(logical_axis_rules: list) -> tuple[str, ...]:
     A tuple of physical axis name strings that act as CP.  Empty if the
     ``activation_length`` logical axis is not found in the rules.
   """
-  for rule in logical_axis_rules:
-    if rule and len(rule) >= 2 and rule[0] == "activation_length":
-      return _normalize_axes(rule[1])
-  return ()
+  return axes_for_logical(logical_axis_rules, "activation_length")
 
 
 def infer_ep_axes(logical_axis_rules: list) -> tuple[str, ...]:
@@ -3266,6 +3279,38 @@ class MaxTextConfig(
     else:
       eval_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_eval.value)
       self.logical_axis_rules_for_eval = eval_config.get("logical_axis_rules", self.logical_axis_rules)
+
+      # Only the logical rules are swapped for eval; the mesh itself is built once from
+      # the primary rule. Axes the eval rule names but the mesh lacks silently resolve to
+      # "replicated", which is only harmless while those axes would have been size 1.
+      dropped_axes = [axis for axis in eval_config.get("mesh_axes", ()) if axis not in self.mesh_axes]
+      if dropped_axes:
+        logger.warning(
+            "custom_mesh_and_rule_for_eval=%s declares mesh axes %s that are absent from the mesh built for "
+            "custom_mesh_and_rule=%s; they are ignored and any eval rule referencing them is treated as replicated.",
+            self.custom_mesh_and_rule_for_eval.value,
+            dropped_axes,
+            self.custom_mesh_and_rule.value,
+        )
+
+      # The input pipeline reorders the batch once, for the CP extent of the
+      # *train* rules. When the eval rule shards the query differently the
+      # permutation no longer matches, so `AttentionOp` falls back to the plain
+      # causal path at eval. Correct, but a silent loss of load balancing.
+      train_q_axes = axes_for_logical(self.logical_axis_rules, "activation_q_length")
+      eval_q_axes = axes_for_logical(self.logical_axis_rules_for_eval, "activation_q_length")
+      if self.context_parallel_load_balance and train_q_axes != eval_q_axes:
+        logger.warning(
+            "context_parallel_load_balance=True but activation_q_length maps to %s under "
+            "custom_mesh_and_rule=%s and to %s under custom_mesh_and_rule_for_eval=%s. The input pipeline "
+            "reorders for the train extent only, so load balancing is disabled at eval; eval attention runs "
+            "unbalanced (the last CP shard does ~2*cp/(cp+1) of the average work). Everything outside the "
+            "sequence-quadratic term stays balanced.",
+            list(train_q_axes),
+            self.custom_mesh_and_rule.value,
+            list(eval_q_axes),
+            self.custom_mesh_and_rule_for_eval.value,
+        )
 
     # A. SET RUN NAME AND PATHS
     # If run_name is not set, generate one from the JOBSET_NAME environment variable (if available)

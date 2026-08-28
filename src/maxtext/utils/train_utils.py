@@ -302,10 +302,14 @@ def setup_train_loop(config, recorder, devices=None):
       ):
         raise ValueError("Packing is only supported for load balanced ring attention with context parallelism for GPU.")
 
-    # Apply reordering wrapper to data iterators if context parallelism is enabled
+    # Apply reordering wrapper to data iterators if context parallelism is enabled.
+    # `reordered_cp_size` is the single source of truth for the permutation the
+    # batch carries; consumers that assume it (the LoadBalanced* Splash masks,
+    # MTP's shift-by-one) read the same helper rather than re-deriving it.
     data_iterator_for_loader = data_iterator
+    reorder_cp_size = max_utils.reordered_cp_size(config, mesh)
     with jax.set_mesh(mesh):
-      if context_parallel_size > 1 and config.context_parallel_load_balance:
+      if reorder_cp_size > 1:
 
         # Determine load balancing reorder strategy.
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
@@ -322,7 +326,7 @@ def setup_train_loop(config, recorder, devices=None):
           reorder_strategy = config.context_parallel_reorder_strategy
 
         reorder_fn = maxtext_utils.get_reorder_callable(
-            context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
+            reorder_cp_size, config.shard_mode, reorder_strategy, config.hardware
         )
         # data_iterator itself stays unwrapped because checkpointing dispatches on
         # its concrete type; only batch consumers receive the reordered view.
