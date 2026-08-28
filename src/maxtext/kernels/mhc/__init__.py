@@ -13,6 +13,7 @@
 # limitations under the License.
 """MaxText mHC-lite Pallas kernel package."""
 
+from maxtext.kernels.mhc.api import hbm_specs
 from maxtext.kernels.mhc.api import MhcCoeffGradients
 from maxtext.kernels.mhc.api import MhcCoeffOutputs
 from maxtext.kernels.mhc.api import MhcCoeffParams
@@ -35,4 +36,5 @@ __all__ = [
     "MhcCoeffOutputs",
     "MhcCoeffGradients",
     "UnsupportedInputError",
+    "hbm_specs",
 ]

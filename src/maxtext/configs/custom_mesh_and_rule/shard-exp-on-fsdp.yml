@@ -69,6 +69,7 @@ logical_axis_rules: [
                       # General Weights
                       ['mlp', ['fsdp_transpose']],
                       ['embed', ['fsdp', 'context', 'expert']],
+                      ['embed_attn', ['fsdp', 'context', 'expert']],
                       ['norm', []],
                       ['layers', 'stage'],
                   ]

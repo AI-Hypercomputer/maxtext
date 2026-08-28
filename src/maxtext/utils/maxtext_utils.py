@@ -39,6 +39,8 @@ from maxtext.common.common_types import (
 from maxtext.configs import pyconfig
 from maxtext.configs import types
 from maxtext.multimodal import processor as mm_processor
+from maxtext.trainers.diloco import diloco
+from maxtext.trainers.diloco import utils as diloco_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -167,14 +169,29 @@ def get_shaped_batch(config, batch_sharding=None):
     shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
     shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   if config.use_multimodal:
-    image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
-    )
-    shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
-    # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
-    # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
-    if "llama4" in config.model_name:
-      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
+    is_video = getattr(config, "video_max_grid_t", None) is not None
+    if is_video:
+      max_t = config.video_max_grid_t
+      max_h = config.video_max_grid_h
+      max_w = config.video_max_grid_w
+      tps = config.temporal_patch_size_for_vit
+      patch = config.patch_size_for_vit
+      channels = config.num_channels_for_vit
+      batch_size = config.micro_batch_size_to_train_on
+      video_shape = (batch_size, channels, max_t * tps, max_h * patch, max_w * patch)
+      video_mask_shape = (batch_size, 1, max_t * tps, max_h * patch, max_w * patch)
+      shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
+      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
+      shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
+    else:
+      image_shape = mm_processor.get_dummy_image_shape_for_init(
+          config.model_name, batch_size=config.micro_batch_size_to_train_on
+      )
+      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
+      # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
+      # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
+      if "llama4" in config.model_name:
+        shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)
@@ -1775,28 +1792,34 @@ def setup_initial_state(
             ),
         )
         overlay = restored if is_emergency else restored["items"]
-        overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
+        if not (config.enable_diloco and isinstance(overlay, diloco.DiLoCoTrainState)):
+          # Standard Flax NNX branch: overlay weights into the initialized TrainStateNNX.
+          overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
 
-        def _has_shape_dtype_struct(tree):
-          return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
+          def _has_shape_dtype_struct(tree):
+            return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
 
-        def _merge_restored_overlay(ckpt_node, init_node):
-          """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
-          if _has_shape_dtype_struct(ckpt_node):
-            if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
-              res = {}
-              for k in init_node:
-                if k in ckpt_node:
-                  res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
-                else:
-                  res[k] = init_node[k]
-              return res
-            else:
-              return init_node
-          return ckpt_node
+          def _merge_restored_overlay(ckpt_node, init_node):
+            """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
+            if _has_shape_dtype_struct(ckpt_node):
+              if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
+                res = {}
+                for k in init_node:
+                  if k in ckpt_node:
+                    res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
+                  else:
+                    res[k] = init_node[k]
+                return res
+              else:
+                return init_node
+            return ckpt_node
 
-        merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
-        nnx.replace_by_pure_dict(state, merged)
+          merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
+          nnx.replace_by_pure_dict(state, merged)
+        else:
+          # DiLoCo branch: The restored checkpoint for DiLoCo is already a complete DiLoCoTrainState
+          # (containing inner_state, outer_opt_state, params, step) rather than a bare parameter mapping.
+          state = overlay
     else:
       if restored:
         if isinstance(
@@ -1832,8 +1855,17 @@ def setup_initial_state(
             state = state.replace(params=merged_params)
           else:
             state = state.replace(params=raw_params)
+
   if not config.pure_nnx:
     state = max_utils.unbox_logicallypartioned(state)
+  if config.enable_diloco:
+    state = diloco_utils.setup_diloco_initial_state(
+        state=state,
+        config=config,
+        mesh=mesh,
+        state_mesh_shardings=state_mesh_shardings,
+        restored=restored,
+    )
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 

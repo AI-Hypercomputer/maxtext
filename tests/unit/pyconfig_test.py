@@ -22,7 +22,7 @@ import unittest
 
 from maxtext.configs import pyconfig
 from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
-from maxtext.configs.types import _normalize_axes, infer_cp_axes, infer_ep_axes
+from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
@@ -39,6 +39,48 @@ class PyconfigTest(unittest.TestCase):
     )
 
     self.assertTrue(config.quantization is None or config.quantization == "")
+
+  def test_gmm_v2_heuristic_tiling_requires_gmm_v2(self):
+    with self.assertRaisesRegex(ValueError, "`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`."):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          use_gmm_v2_heuristic_tiling=True,
+          use_gmm_v2=False,
+      )
+
+  def test_managed_mldiagnostics_storage_path(self):
+    # Test completely omitting the parameter (defaults to "" from base.yml)
+    config_omitted = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_1",
+        base_output_directory="gs://base_dir1",
+    )
+    self.assertEqual(
+        config_omitted.managed_mldiagnostics_dir,
+        "gs://base_dir1/test_run_1/managed-mldiagnostics",
+    )
+
+    config_none = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_2",
+        base_output_directory="gs://base_dir2",
+        managed_mldiagnostics_storage_path="",
+    )
+    self.assertEqual(
+        config_none.managed_mldiagnostics_dir,
+        "gs://base_dir2/test_run_2/managed-mldiagnostics",
+    )
+
+    config_custom = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_3",
+        base_output_directory="gs://base_dir3",
+        managed_mldiagnostics_storage_path="gs://custom_base",
+    )
+    self.assertEqual(
+        config_custom.managed_mldiagnostics_dir,
+        "gs://custom_base/test_run_3/managed-mldiagnostics",
+    )
 
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
@@ -77,6 +119,52 @@ class PyconfigTest(unittest.TestCase):
     )
     with self.assertRaises(ValueError):
       config_inference.ici_fsdp_parallelism = 4
+
+  def _zero1_config(self, **kwargs):
+    return pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_optimizer_over_data=True,
+        **kwargs,
+    )
+
+  def test_zero1_without_fsdp_is_allowed(self):
+    """Data-parallel-only Zero-1 is the supported configuration."""
+    config = self._zero1_config(ici_data_parallelism=-1, ici_fsdp_parallelism=1)
+    self.assertTrue(config.shard_optimizer_over_data)
+
+  def test_zero1_with_mesh_axes_omitting_fsdp_allowed(self):
+    """Custom mesh_axes that omit 'fsdp' or 'fsdp_transpose' do not raise KeyError."""
+    self.assertEqual(_resolved_fsdp_size(["data", "tensor"], [2, 4], 8), 1)
+
+  def test_zero1_with_fsdp_raises_error(self):
+    """Zero-1 shards the optimizer moments over "data" on top of the parameter layout.
+
+    FSDP shards the parameters over "fsdp", so the two together leave the gradients
+    sharded P('fsdp', ...) while the moments they are added to are sharded
+    P(('data', 'fsdp'), ...) — an outright type error under explicit sharding, and an
+    extra collective under auto. The combination is refused when the config is built.
+    """
+    with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
+      self._zero1_config(ici_data_parallelism=1, ici_fsdp_parallelism=2)
+
+  def test_zero1_with_fsdp_transpose_raises_error(self):
+    with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
+      self._zero1_config(ici_data_parallelism=1, ici_fsdp_parallelism=1, ici_fsdp_transpose_parallelism=2)
+
+  def test_zero1_with_autofilled_fsdp_raises_error(self):
+    """`ici_fsdp_parallelism=-1` absorbs whatever data parallelism leaves behind.
+
+    The check has to resolve the -1 the way mesh creation later will, otherwise this
+    config — four-way FSDP on a v5p-8 — would slip through and fail at trace time.
+    """
+    with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
+      self._zero1_config(
+          compile_topology="v5p-8",
+          compile_topology_num_slices=1,
+          ici_data_parallelism=2,
+          ici_fsdp_parallelism=-1,
+      )
 
   def test_overriding_model(self):
     config = pyconfig.initialize(
@@ -121,6 +209,41 @@ class PyconfigTest(unittest.TestCase):
         model_name="qwen3-30b-a3b-base",
     )
     self.assertEqual(config.tokenizer_path, "Qwen/Qwen3-30B-A3B-Base")
+
+  def test_explicit_sharding_qwen3_decoder_support(self):
+    """The Qwen3 decoders that have been onboarded to explicit sharding are accepted."""
+    for decoder_block in ("qwen3", "qwen3_moe", "qwen3_custom_moe"):
+      with self.subTest(decoder_block=decoder_block):
+        config = pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            shard_mode="explicit",
+            decoder_block=decoder_block,
+        )
+        self.assertEqual(config.decoder_block.value, decoder_block)
+
+    # Qwen3-Next and Qwen3.5 use gated-delta-net linear attention, and the
+    # Qwen3-VL/Omni encoders are multimodal; neither is onboarded yet.
+    for decoder_block in ("qwen3_next", "qwen3_5"):
+      with self.subTest(decoder_block=decoder_block):
+        with self.assertRaisesRegex(Exception, "not supported with 'explicit' sharding"):
+          pyconfig.initialize(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+              skip_jax_distributed_system=True,
+              shard_mode="explicit",
+              decoder_block=decoder_block,
+          )
+
+    with self.assertRaisesRegex(Exception, "not supported with `use_multimodal`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          model_name="qwen3-vl-4b",
+          override_model_config=True,
+          use_multimodal=True,
+          scan_layers=False,  # Required by the Qwen3-VL deepstack path; unrelated to sharding.
+      )
 
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
@@ -387,6 +510,25 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(_normalize_axes(["a", "b"]), ("a", "b"))
     self.assertEqual(_normalize_axes([]), ())
 
+  def test_moe_sharding_strategy_mutual_exclusivity(self):
+    """Ensure that shard_exp_on_fsdp, use_2d_fsdp_sharding, and shard_embed_moe_on_fsdp are mutually exclusive."""
+
+    def init_config(**kwargs):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          **kwargs,
+      )
+
+    with self.assertRaisesRegex(ValueError, "Only one of shard_exp_on_fsdp"):
+      init_config(shard_exp_on_fsdp=True, use_2d_fsdp_sharding=True)
+
+    with self.assertRaisesRegex(ValueError, "Only one of shard_exp_on_fsdp"):
+      init_config(shard_exp_on_fsdp=True, shard_embed_moe_on_fsdp=True)
+
+    with self.assertRaisesRegex(ValueError, "Only one of shard_exp_on_fsdp"):
+      init_config(use_2d_fsdp_sharding=True, shard_embed_moe_on_fsdp=True)
+
   def test_ep_rank_1_raises_on_ep_flags(self):
     """When EP rank is 1 (no EP rules), setting EP-only flags must raise ValueError."""
     # No 'exp' rule -> infer_ep_axes returns () -> EP rank is 1.
@@ -428,6 +570,35 @@ assert train._TF_AVAILABLE is False
     ]
     self.assertEqual(infer_cp_axes(ep_as_cp_rules), ("expert",))
     self.assertEqual(infer_ep_axes(ep_as_cp_rules), ("expert",))
+
+  def test_shard_embed_moe_on_fsdp_requires_quantization(self):
+    """Verifies that a ValueError is raised when shard_embed_moe_on_fsdp
+    is used without fixed weight quantization calibration."""
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_embed_moe_on_fsdp=True,
+          quantization="",
+      )
+
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_embed_moe_on_fsdp=True,
+          quantization="int8",
+          weight_quantization_calibration_method="absmax",
+      )
+
+    # This should not raise
+    pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_embed_moe_on_fsdp=True,
+        quantization="int8",
+        weight_quantization_calibration_method="fixed,-1,1",
+    )
 
 
 if __name__ == "__main__":

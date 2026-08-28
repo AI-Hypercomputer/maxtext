@@ -827,13 +827,40 @@ class TrainCompile(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "linen_scanned", "scan_layers": "true", "enable_nnx": "False"},
-      {"testcase_name": "nnx_scanned", "scan_layers": "true", "enable_nnx": "True"},
+      {
+          "testcase_name": "linen_scanned_dot_product",
+          "scan_layers": "true",
+          "enable_nnx": "False",
+          "attention": "dot_product",
+      },
+      {
+          "testcase_name": "linen_scanned_flash",
+          "scan_layers": "true",
+          "enable_nnx": "False",
+          "attention": "flash",
+      },
+      {
+          "testcase_name": "nnx_scanned_dot_product",
+          "scan_layers": "true",
+          "enable_nnx": "True",
+          "attention": "dot_product",
+      },
+      {
+          "testcase_name": "nnx_scanned_flash",
+          "scan_layers": "true",
+          "enable_nnx": "True",
+          "attention": "flash",
+      },
   )
   @pytest.mark.cpu_only
-  def test_deepseek4(self, scan_layers, enable_nnx):
+  def test_deepseek4(
+      self,
+      scan_layers,
+      enable_nnx,
+      attention="dot_product",
+  ):
     # test deepseek4 compile across Linen and NNX
-    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}_{enable_nnx}.pickle"
+    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}_{enable_nnx}_{attention}.pickle"
     train_compile_main(
         (
             "",
@@ -846,7 +873,16 @@ class TrainCompile(parameterized.TestCase):
             "per_device_batch_size=1",
             "max_target_length=1024",
             f"scan_layers={scan_layers}",
-            "attention=dot_product",
+            f"attention={attention}",
+            "use_tokamax_splash=True",
+            "sa_block_q=128",
+            "sa_block_kv=128",
+            "sa_block_kv_compute=128",
+            "sa_block_q_dkv=128",
+            "sa_block_kv_dkv=128",
+            "sa_block_kv_dkv_compute=128",
+            "sa_block_q_dq=128",
+            "sa_block_kv_dq=128",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             f"enable_nnx={enable_nnx}",
@@ -1154,7 +1190,8 @@ class TrainCompile(parameterized.TestCase):
             "base_emb_dim=256",
             "base_mlp_dim=256",
             "base_num_decoder_layers=2",
-            "ici_data_parallelism=4",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
             "shard_optimizer_over_data=true",
             "shard_mode=explicit",
         )

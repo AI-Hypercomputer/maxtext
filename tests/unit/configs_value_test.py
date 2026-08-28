@@ -237,6 +237,30 @@ class ConfigTest(absltest.TestCase):
     self.assertTrue(config.use_indexer)
     self.assertEqual(config.attention_type, "mla")
 
+  def test_indexer_all_gather_context_parallelism_rejects_attention_sink(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_indexer=True",
+        "q_lora_rank=1",
+        "attention_sink=True",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=all_gather",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "does not support attention sinks"):
+        pyconfig.initialize(argv)
+
   def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
     base_args = [
         "",
@@ -488,6 +512,29 @@ class ConfigTest(absltest.TestCase):
 
     self.assertTrue(config.packing)
 
+  def test_tpu_usp_config_validation_accepts_load_balance(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=usp",
+        "context_parallel_load_balance=True",
+        "ici_context_parallelism=2",
+        "ici_context_usp_ulysses_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.context_parallel_load_balance)
+
   def test_context_usp_ulysses_parallelism_requires_usp(self):
     argv = [
         "",
@@ -522,7 +569,11 @@ class ConfigTest(absltest.TestCase):
         "skip_jax_distributed_system=True",
     ]
     cases = [
-        (["context_parallel_load_balance=True"], ["context_parallel_load_balance=False"], "load_balance"),
+        (
+            ["context_parallel_load_balance=True", "ici_context_parallelism=3"],
+            ["context_parallel_load_balance=False", "ici_context_parallelism=2"],
+            "even ici_context_parallelism",
+        ),
         (["attention=dot_product"], ["attention=flash"], "attention=flash"),
         (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
         (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),

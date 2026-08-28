@@ -138,13 +138,17 @@ def get_datasets(
     mixture_config_path=None,
     elastic=False,
     hf_access_token=None,
+    grain_index_storage_option=None,
 ):
   """Load dataset from array_record files for using with grain"""
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
       files = find_data_files(pattern, hf_access_token=hf_access_token)
-      source = grain.ArrayRecordDataSource(files)
+      reader_options = (
+          {"index_storage_option": grain_index_storage_option} if grain_index_storage_option is not None else None
+      )
+      source = grain.ArrayRecordDataSource(files, reader_options=reader_options)
       return grain.MapDataset.source(source)
 
     # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
@@ -492,6 +496,7 @@ def make_grain_train_iterator(
       grain_num_threads=config.grain_num_threads,
       grain_prefetch_buffer_size=config.grain_prefetch_buffer_size,
       grain_data_source_max_workers=config.grain_data_source_max_workers,
+      grain_index_storage_option=config.grain_index_storage_option,
       mixture_config_path=config.grain_train_mixture_config_path,
       elastic=config.grain_use_elastic_iterator,
       hf_access_token=getattr(config, "hf_access_token", None),
@@ -599,6 +604,7 @@ def make_grain_eval_iterator(
       grain_num_threads=config.grain_num_threads_eval,
       grain_prefetch_buffer_size=config.grain_prefetch_buffer_size_eval,
       grain_data_source_max_workers=config.grain_data_source_max_workers,
+      grain_index_storage_option=config.grain_index_storage_option,
       hf_access_token=getattr(config, "hf_access_token", None),
   )
 

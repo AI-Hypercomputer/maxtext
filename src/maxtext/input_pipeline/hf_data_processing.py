@@ -104,6 +104,26 @@ def add_default_prompt_if_missing(dataset, text_columns, config):
   return dataset
 
 
+def format_sharegpt(example):
+  """Convert a ShareGPT conversation into query and response fields."""
+  query = ""
+  response = ""
+  conversations = example.get("conversations", [])
+  if not isinstance(conversations, list):
+    raise TypeError(f"Expected 'conversations' to be a list, got {type(conversations).__name__}.")
+  for turn in conversations:
+    if not isinstance(turn, dict):
+      continue
+    if turn.get("from") == "human":
+      query = turn.get("value", "")
+    elif turn.get("from") == "gpt":
+      response = turn.get("value", "")
+      break
+  example["query"] = query
+  example["response"] = [response]
+  return example
+
+
 def vision_sft_preprocessing_pipeline(
     dataset,
     config,
@@ -115,6 +135,14 @@ def vision_sft_preprocessing_pipeline(
     global_batch_size,
 ):
   """pipeline for multimodal SFT with HF dataset"""
+
+  if (
+      image_column == "video"
+      and "conversations" in dataset.features
+      and len(text_columns) == 2
+      and text_columns[0] not in dataset.features
+  ):
+    dataset = dataset.map(format_sharegpt)
 
   assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
   # Tunix GA requires per-micro-batch slicing at the data level,
@@ -163,6 +191,7 @@ def vision_sft_preprocessing_pipeline(
           "column": text_columns[0],
           "image_placeholder": config.image_placeholder,
           "model_name": config.model_name,
+          "video_placeholder": getattr(config, "video_placeholder", "<|video|>"),
       },
   )
   dataset = dataset.map(

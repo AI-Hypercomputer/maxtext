@@ -14,8 +14,15 @@
 
 """Trainer abstractions.
 
-Defines the core Trainer interface, data payload interfaces, and on-device
-metrics structures (WeightedMetric, MetricsBuffer) used by the training loop.
+Defines the core Trainer interface, republishes the data types shared with
+Tunix (WeightedMetric, LossOutput, TrainerPayload), and defines the on-device
+MetricsBuffer used by the training loop.
+
+Note: this module imports Tunix, so `training_engine` requires MaxText's
+post-training dependency bundle (`google-tunix`, declared in
+`tpu-post-train-requirements.txt`) rather than the base install. That is
+acceptable because `training_engine` is post-training tier by intent and
+nothing under `src/` imports it.
 """
 
 from __future__ import annotations
@@ -27,60 +34,44 @@ from typing import Any
 
 import flax.struct
 import jax
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 
+# The shared trainer data types below are deliberately Tunix's, re-exported
+# rather than redefined. Do not "fix" this by declaring local copies.
+#
+# `training_engine` is driven by Tunix's TrainerWorker, so a Tunix loss function
+# (e.g. `tunix.rl.algo_core.grpo_loss_fn`) returns a `tunix.sft.utils.LossOutput`.
+# MaxText previously declared its own field-identical `LossOutput`/`WeightedMetric`,
+# which made every `isinstance` check in `maxtext_engine.diff_wrapper` miss on a
+# Tunix loss and fail with "Unsupported return type from loss function". Sharing
+# the class object makes those checks pass by construction, and removes a
+# duplicate that had already drifted (the two `compute_scale` implementations
+# applied `eps` and `min_denom` in opposite orders).
+#
+# `TrainerPayload` is adopted for a related reason: what actually reaches
+# `fwd_bwd` at runtime is Tunix's `RLTrainerPayload`, which was never a subclass
+# of MaxText's identically-named class, so the annotation described a type that
+# never appeared.
+#
+# WeightedMetric must come from `tunix.sft.utils`, NOT from
+# `tunix.experimental.metrics.metrics` -- the latter declares a same-named class
+# whose `compute()` and `compute_scale()` raise NotImplementedError.
+#
+# `__all__` below declares them part of this module's public surface, which is what
+# keeps pylint from reporting them as unused imports. Do not use the redundant-alias
+# form (`X as X`) instead: MaxText's pylint config does not recognise that convention
+# and reports `C0414 useless-import-alias` for every one of them.
+from tunix.experimental.common.datatypes import TrainerPayload
+from tunix.sft.utils import LossOutput
+from tunix.sft.utils import WeightedMetric
 
-@flax.struct.dataclass
-class WeightedMetric:
-  """A metric that requires weighted reduction.
-
-  Attributes:
-    unreduced_sum: Sum of the metric values across tokens/examples.
-    denominator: Weight or count of valid tokens/examples.
-    eps: Optional epsilon added to denominator for numerical stability.
-    min_denom: Optional minimum bound for the denominator.
-  """
-
-  unreduced_sum: jax.Array
-  denominator: jax.Array
-  eps: float | None = flax.struct.field(default=None, pytree_node=False)
-  min_denom: float | None = flax.struct.field(default=None, pytree_node=False)
-
-  def compute_scale(self) -> jax.Array:
-    """Safely computes the scale factor (1 / denominator) with bounds.
-
-    Returns:
-      Safe scaling factor array preventing division-by-zero NaNs.
-    """
-    denom = self.denominator
-    if self.min_denom is not None:
-      denom = jax.numpy.maximum(denom, self.min_denom)
-    if self.eps is not None:
-      denom = denom + self.eps
-    safe_denom = jax.numpy.where(denom == 0, 1.0, denom)
-    scale = 1.0 / safe_denom
-    return jax.numpy.where(denom == 0, 0.0, scale)
-
-  def compute(self) -> jax.Array:
-    """Safely computes total / count with numerical stability bounds.
-
-    Returns:
-      Reduced metric array equal to unreduced_sum * compute_scale().
-    """
-    return self.unreduced_sum * self.compute_scale()
-
-
-@flax.struct.dataclass
-class LossOutput:
-  """Output of a loss function containing unreduced primary loss and aux metrics.
-
-  Attributes:
-    primary_loss: The main loss to be optimized.
-    aux_metrics: A dictionary of auxiliary metrics.
-  """
-
-  primary_loss: WeightedMetric
-  aux_metrics: dict[str, Any] = flax.struct.field(default_factory=dict)
+__all__ = [
+    "AbstractTrainingEngine",
+    "LossOutput",
+    "MetricsBuffer",
+    "TrainerPayload",
+    "TrainingConfig",
+    "WeightedMetric",
+]
 
 
 @flax.struct.dataclass
@@ -100,28 +91,6 @@ class MetricsBuffer:
   scalar_metrics: dict[str, jax.Array] = flax.struct.field(default_factory=dict)
   aggregation_fns: dict[str, Callable[[jax.Array], Any]] = flax.struct.field(default_factory=dict, pytree_node=False)
   mode: str = flax.struct.field(default="train", pytree_node=False)
-
-
-@dataclasses.dataclass(kw_only=True)
-class TrainerPayload(abc.ABC):
-  """Base class for packed micro-batches ready for gradient descent.
-
-  The base carries only what generic machinery must read to stay
-  algorithm-agnostic. Algorithm-specific tensors live on subclasses and are
-  reached by the trainer's gen_model_input_fn, not by the generic loop. Users
-  subclass this to carry their own fields.
-
-  Attributes:
-    token_ids: [B, T] token IDs. By default, structured as left-padded prompt
-      tokens concatenated with right-padded completion tokens.
-    token_mask: [B, T] token mask to differentiate padding tokens from valid
-      tokens.
-    segment_ids: Optional [B, T] packing segment ids.
-  """
-
-  token_ids: ArrayLike
-  token_mask: ArrayLike
-  segment_ids: ArrayLike | None = None
 
 
 @dataclasses.dataclass
@@ -157,11 +126,15 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def with_loss_fn(self, customized_fn: Callable[..., Any]) -> None:
+  def with_loss_fn(self, customized_fn: Callable[..., Any], has_aux: bool = False) -> "AbstractTrainingEngine":
     """Updates the trainer's loss function.
 
     Args:
       customized_fn: Custom loss function callable.
+      has_aux: Whether `customized_fn` returns auxiliary output alongside the loss.
+
+    Returns:
+      self, for chaining.
     """
 
   @abc.abstractmethod
@@ -187,18 +160,26 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: TrainerPayload) -> None:
+  def fwd_bwd(self, payload: TrainerPayload, **kwargs: Any) -> None:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
 
     Args:
       payload: Packed micro-batch payload for training.
+      **kwargs: Implementation-specific options.
     """
 
   @abc.abstractmethod
-  def update(self) -> None:
-    """Executes a model weight update step using accumulated gradients."""
+  def update(self, **kwargs: Any) -> int:
+    """Executes a model weight update step using accumulated gradients.
+
+    Args:
+      **kwargs: Implementation-specific options.
+
+    Returns:
+      The train step count after the update.
+    """
 
   @abc.abstractmethod
   def eval_step(self, payload: TrainerPayload, **kwargs: Any) -> None:
@@ -253,6 +234,10 @@ class AbstractTrainingEngine(abc.ABC):
     Returns:
       Synchronization endpoints or file coordinates for weight transfer.
     """
+
+  @abc.abstractmethod
+  def release_weight_sync(self, **kwargs: Any) -> Any:
+    """Releases staged weight buffers after transfer completion."""
 
   @property
   @abc.abstractmethod

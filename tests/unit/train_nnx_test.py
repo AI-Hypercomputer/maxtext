@@ -133,7 +133,8 @@ class _TinyDecoderMoEBias(_TinyDecoder):
 
   def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
     super().__init__(vocab_size, hidden, rngs=rngs)
-    self.decoder = _MoEBiasStub(bias_shape=(3, 2), sow_shape=(2, 3), update_val=1.0)
+    # Using MoEBiasVar, expected bias shape is (num_layers, num_experts)
+    self.decoder = _MoEBiasStub(bias_shape=(2, 3), sow_shape=(2, 3), update_val=1.0)
 
   def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
     out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
@@ -273,6 +274,15 @@ class TestLossFnNNX(unittest.TestCase):
     self.assertTrue(jnp.isfinite(loss))
     # eval truncated batch to 1 → total_weights = seq_len * 1
     self.assertEqual(int(aux["total_weights"]), data["targets_segmentation"].shape[1])
+
+  def test_multimodal_model_accepts_text_only_batch(self):
+    cfg, ts = _build_state()
+    cfg.use_multimodal = True
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    loss, _ = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+
+    self.assertTrue(jnp.isfinite(loss))
 
   def test_indexer_dense_warmup_skips_xent(self):
     cfg, ts = _build_state()
@@ -455,11 +465,11 @@ class TestRoutedBiasReadNNX(unittest.TestCase):
         state=state_pure,
         data=data,
     )
-    # Scanned decoder bias is (num_experts=3, num_layers=2) with update_val=1.0
+    # Scanned decoder bias is (num_layers=2, num_experts=3) with update_val=1.0
     dec_gate = new_state.model.decoder.gate
     np.testing.assert_allclose(
         np.asarray(dec_gate.bias.value),
-        np.full((3, 2), 1.0),
+        np.full((2, 3), 1.0),
     )
     # Distinct updates for each MTP layer (2.0 for layer 1, 3.0 for layer 2)
     mtp1_gate = new_state.model.mtp_block.mtp_layer_1.gate

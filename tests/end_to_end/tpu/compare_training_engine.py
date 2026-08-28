@@ -420,6 +420,17 @@ def verification_harness(
   state_graphdef, state_pure = nnx.split(ts_baseline)
 
   engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+  # Check what __init__ built before the injections below throw it away. create_training_optimizer
+  # returns a raw optax GradientTransformation, but TrainStateNNX.apply_gradients and
+  # checkpointing.CheckpointState both require an nnx.Optimizer, so a constructor that skips the
+  # wrap yields an engine that cannot train or checkpoint. The overwrites below are what let that
+  # regression ship unnoticed; this assert is the tripwire.
+  assert isinstance(
+      engine.optimizer, nnx.Optimizer
+  ), f"MaxTextTrainingEngine.__init__ must build an nnx.Optimizer, got {type(engine.optimizer).__name__}"
+  # The engine's own model/optimizer are replaced here because the "default" path compares against
+  # a hand-written TinyDecoder, which from_pretrained would never produce. Weight-level coverage of
+  # the constructor therefore has to live outside this harness.
   engine.model = model_e
   engine.optimizer = opt_e
   engine.state = train_state_nnx.TrainStateNNX(model_e, opt_e)
@@ -498,14 +509,21 @@ def assert_step_parity(
       and float(np.mean(metrics_baseline["scalar"]["learning/lm_loss"])) != 0.0
   ):
     loss_baseline = float(np.mean(metrics_baseline["scalar"]["learning/lm_loss"]))
-  loss_engine = float(
-      np.mean(
-          metrics_engine_buf.scalar_metrics.get(
-              "learning/loss",
-              metrics_engine_buf.scalar_metrics.get("loss", 0.0),
-          )
-      )
-  )
+  # The engine records its primary loss as a WeightedMetric (unreduced sum + denominator) in
+  # `weighted_metrics`, so it never lands in `scalar_metrics`. Reduce it here; fall back to
+  # `scalar_metrics` for losses that were recorded as plain scalars.
+  loss_engine_weighted = metrics_engine_buf.weighted_metrics.get("loss")
+  if loss_engine_weighted is not None:
+    loss_engine = float(np.mean(_to_numpy(loss_engine_weighted.compute())))
+  else:
+    loss_engine = float(
+        np.mean(
+            metrics_engine_buf.scalar_metrics.get(
+                "learning/loss",
+                metrics_engine_buf.scalar_metrics.get("loss", 0.0),
+            )
+        )
+    )
   is_16_bit_model = any(hasattr(v, "dtype") and str(v.dtype) in ("bfloat16", "float16") for v in state_b_leaves)
   # Cross-entropy loss across large vocabularies (e.g. 151,936 tokens for Llama-3.1-8B)
   # sums exponential terms; when weights drift by ~1e-5 across multi-step IEEE-754 accumulation,
@@ -585,8 +603,10 @@ def verify_parity_with_train_py(
 
       ctx.engine.fwd_bwd(payload)
       ctx.engine.update()
-      metrics_list = ctx.engine.get_metrics(clear_cache=True)
-      metrics_e_buf = metrics_list[-1] if metrics_list else abstract_engine.MetricsBuffer(id=step)
+      metrics_e_buf = ctx.engine.get_metrics(clear_cache=True)
+      # Fail rather than comparing against the empty buffer: an empty stand-in is what let
+      # a step that recorded nothing compare as loss=0.0 instead of failing.
+      assert metrics_e_buf.id != maxtext_engine.EMPTY_METRICS_BUFFER_ID, f"engine recorded no metrics at step {step}"
       assert_step_parity(step, ctx.ts_baseline, ctx.engine.state, metrics_b, metrics_e_buf)
 
 
@@ -628,8 +648,10 @@ def verify_auxiliary_metrics_and_telemetry_parity(
 
       ctx.engine.fwd_bwd(payload)
       ctx.engine.update()
-      metrics_list = ctx.engine.get_metrics(clear_cache=True)
-      metrics_e_buf = metrics_list[-1] if metrics_list else abstract_engine.MetricsBuffer(id=step)
+      metrics_e_buf = ctx.engine.get_metrics(clear_cache=True)
+      # Fail rather than comparing against the empty buffer: an empty stand-in is what let
+      # a step that recorded nothing compare as loss=0.0 instead of failing.
+      assert metrics_e_buf.id != maxtext_engine.EMPTY_METRICS_BUFFER_ID, f"engine recorded no metrics at step {step}"
       assert_step_parity(
           step,
           ctx.ts_baseline,
@@ -724,8 +746,10 @@ def verify_gradient_accumulation_parity(
         raise ParityVerificationError(f"Step {step}: Expected accumulated_grads to be non-None before" " update()")
 
       ctx.engine.update()
-      metrics_list = ctx.engine.get_metrics(clear_cache=True)
-      metrics_e_buf = metrics_list[-1] if metrics_list else abstract_engine.MetricsBuffer(id=step)
+      metrics_e_buf = ctx.engine.get_metrics(clear_cache=True)
+      # Fail rather than comparing against the empty buffer: an empty stand-in is what let
+      # a step that recorded nothing compare as loss=0.0 instead of failing.
+      assert metrics_e_buf.id != maxtext_engine.EMPTY_METRICS_BUFFER_ID, f"engine recorded no metrics at step {step}"
 
       if ctx.engine.micro_step_count != 0:
         raise ParityVerificationError(

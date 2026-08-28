@@ -78,6 +78,9 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   # "bias": scalar, common module
   # "hc_base": scalar, in mhc head
   # "post_beta", "pre_beta", "res_beta": scalar, in mhc
+  # "A_log": scalar / 1D per head, in gdn linear attention
+  # "conv1d": depthwise 1D convolution
+  # "shared_expert_gate": scalar projection (output_dim = 1)
   if any(
       any(
           x in segment
@@ -91,9 +94,12 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
               "hc_base",
               "sinks",
               "tid2eid",
+              "A_log",
+              "conv1d",
+              "shared_expert_gate",
           )
       )
-      or segment == "bias"
+      or (segment.endswith("bias") and segment != "position_bias")
       for segment in path
   ):
     return None
@@ -101,15 +107,17 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   # 2 Special weights
   # 2.1 Special weights: MoE, [0, L, -2, -1]
   # L (optional) stands for layer when scan_layers=True
-  if "MoeBlock_0" in path:
+  if _is_path_contain_any(("MoeBlock_0", "routed_experts", "moe_block", "GptOssMlp"), path):
     # exclude gate
-    if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
+    if _is_path_contain_any(("wi", "wi_0", "wi_1", "wo"), path):
       return mdn((-2,), (-1,))
 
-  # 2.2 Special weights: Self attention
-  elif "self_attention" in path:
+  # 2.2 Special weights: Self attention / Attention
+  elif _is_path_contain_any(("self_attention", "GptOssAttention", "attention"), path):
     # Attention output projection: [0, L, -2, -1]
-    if "out" in path:
+    # For standard attention (e.g. self_attention, GptOssAttention), out projection reduces over (0, -2).
+    # Note: Qwen3-Next full attention flattens heads into a 2D projection, so it uses standard weights mdn((0,), (-1,)).
+    if "out" in path and _is_path_contain_any(("self_attention", "GptOssAttention"), path):
       return mdn((0, -2), (-1,))
     # Block-diagonal grouped linear layer: [n_groups, L, in_features_per_group, out_features_per_group]
     elif "o_a_proj" in path:

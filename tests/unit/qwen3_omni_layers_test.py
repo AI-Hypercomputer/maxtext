@@ -39,6 +39,7 @@ from maxtext.layers.embeddings import (
 from maxtext.layers.decoders import deepstack_process
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.multimodal.processor_qwen3_omni import (
+    get_video_second_per_grid,
     maybe_pad_video_values_to_max_grid,
     preprocess_video,
 )
@@ -88,6 +89,15 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
 
 # Initialize config once for all tests
 base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
+
+
+def test_video_second_per_grid_uses_sampled_fps():
+  assert get_video_second_per_grid(sample_fps=2.0, temporal_patch_size=2) == 1.0
+  assert get_video_second_per_grid(sample_fps=4.0, temporal_patch_size=2) == 0.5
+  with pytest.raises(ValueError, match="sample_fps must be positive"):
+    get_video_second_per_grid(sample_fps=0.0, temporal_patch_size=2)
+
+
 jax_config = pyconfig.initialize(
     ["", base_config_path],
     model_name="qwen3-omni-30b-a3b",

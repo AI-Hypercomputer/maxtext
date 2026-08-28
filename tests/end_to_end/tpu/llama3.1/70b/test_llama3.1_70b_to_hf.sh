@@ -30,4 +30,7 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=$SCAN_LAYERS \
     weight_dtype=bfloat16 \
-    --parallel_threads=2
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    checkpoint_storage_concurrent_gb=48 \
+    skip_jax_distributed_system=true

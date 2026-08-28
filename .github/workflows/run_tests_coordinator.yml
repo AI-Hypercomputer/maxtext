@@ -61,6 +61,7 @@ jobs:
   setup-parameters:
     name: Setup Parameters
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       worker_groups: ${{ steps.set-params.outputs.worker_groups }}
       total_workers: ${{ steps.set-params.outputs.total_workers }}

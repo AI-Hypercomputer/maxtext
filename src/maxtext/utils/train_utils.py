@@ -17,6 +17,7 @@
 
 import subprocess
 import jax
+import optax
 import functools
 import orbax.checkpoint.pathways as ocp_pathways
 from functools import partial
@@ -32,6 +33,7 @@ from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
+from maxtext.utils import diloco_sharding
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -300,10 +302,14 @@ def setup_train_loop(config, recorder, devices=None):
       ):
         raise ValueError("Packing is only supported for load balanced ring attention with context parallelism for GPU.")
 
-    # Apply reordering wrapper to data iterators if context parallelism is enabled
+    # Apply reordering wrapper to data iterators if context parallelism is enabled.
+    # `reordered_cp_size` is the single source of truth for the permutation the
+    # batch carries; consumers that assume it (the LoadBalanced* Splash masks,
+    # MTP's shift-by-one) read the same helper rather than re-deriving it.
     data_iterator_for_loader = data_iterator
+    reorder_cp_size = max_utils.reordered_cp_size(config, mesh)
     with jax.set_mesh(mesh):
-      if context_parallel_size > 1 and config.context_parallel_load_balance:
+      if reorder_cp_size > 1:
 
         # Determine load balancing reorder strategy.
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
@@ -320,7 +326,7 @@ def setup_train_loop(config, recorder, devices=None):
           reorder_strategy = config.context_parallel_reorder_strategy
 
         reorder_fn = maxtext_utils.get_reorder_callable(
-            context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
+            reorder_cp_size, config.shard_mode, reorder_strategy, config.hardware
         )
         # data_iterator itself stays unwrapped because checkpointing dispatches on
         # its concrete type; only batch consumers receive the reordered view.
@@ -352,6 +358,15 @@ def setup_train_loop(config, recorder, devices=None):
         # logical_axis_rules (e.g. concat_embed on the MTP kernel). Tracing shapes
         # without a mesh skips sharding resolution, so it avoids the crash.
         state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
+
+    if isinstance(state, diloco.DiLoCoTrainState):
+      state_params = state.params
+      if hasattr(state_mesh_shardings, "model"):
+        _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
+      else:
+        state_mesh_shardings_params = state_mesh_shardings.params
+    elif config.pure_nnx:
+      with nn_partitioning.axis_rules(config.logical_axis_rules):
         _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
         _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
     else:
@@ -360,18 +375,27 @@ def setup_train_loop(config, recorder, devices=None):
 
     if config.enable_diloco:
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
+        outer_params_sharding = (
+            state_mesh_shardings_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
+            if isinstance(state_mesh_shardings_params, nnx.State)
+            else state_mesh_shardings_params
+        )
+        if not isinstance(state, diloco.DiLoCoTrainState):
+          state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
+        else:
+          outer_opt_state_sharding = (
+              optax.TraceState(trace=outer_params_sharding),
+              optax.EmptyState(),
+          )
 
         # create state_mesh_shardings for the DilocoState
-        step_mesh = state_mesh_shardings.optimizer.step.mesh if config.pure_nnx else state_mesh_shardings.step.mesh
-        inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
+        step_mesh = state_mesh_shardings.optimizer.step.mesh
+        inner_state_shardings = diloco_sharding.add_diloco_to_sharding(state_mesh_shardings)
         state_mesh_shardings = diloco.DiLoCoTrainState(
             inner_state_shardings,
             # Match the outer params' pure-dict structure (build_diloco_state stores
             # outer_params via to_pure_dict), so the sharding tree matches the state tree.
-            state_mesh_shardings_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-            if config.pure_nnx
-            else state_mesh_shardings_params,
+            outer_params_sharding,
             outer_opt_state_sharding,
             jax.sharding.NamedSharding(  # pyrefly: ignore[bad-argument-type]
                 mesh=step_mesh, spec=jax.sharding.PartitionSpec()
