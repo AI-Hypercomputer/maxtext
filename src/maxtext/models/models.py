@@ -41,6 +41,11 @@ from maxtext.utils import max_utils
 # The network: Transformer Definitions
 # ------------------------------------------------------------------------------
 
+_FORCED_ROUTING_NEEDS_PURE_NNX = (
+    "Forced routing (router replay) is only implemented for the pure-NNX decoder (NNXDecoder). "
+    "Use the NNX model path with pure_nnx_decoder=True (both are the defaults)."
+)
+
 
 class TransformerLinenPure(nn.Module):
   """An autoregressive transformer model."""
@@ -143,6 +148,7 @@ class TransformerLinenPure(nn.Module):
       nnx_method=None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -205,6 +211,9 @@ class TransformerLinenPure(nn.Module):
           bidirectional_mask=bidirectional_mask_image,
           bidirectional_mask_video=bidirectional_mask_video,
       )
+
+    if forced_routed_experts is not None:
+      raise NotImplementedError(_FORCED_ROUTING_NEEDS_PURE_NNX)
 
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.shared_embedding,
@@ -462,6 +471,7 @@ class Transformer(nnx.Module):
       decoder_target_mask: jax.Array | None = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -562,6 +572,7 @@ class Transformer(nnx.Module):
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
+          forced_routed_experts=forced_routed_experts,
       )  # pytype: disable=wrong-keyword-args
       if isinstance(res, tuple) and len(res) == 4:
         logits, hidden_state, kv_caches, expert_indices = res
@@ -569,6 +580,9 @@ class Transformer(nnx.Module):
         logits, hidden_state, kv_caches = res
         expert_indices = None
     else:
+      if forced_routed_experts is not None:
+        raise NotImplementedError(_FORCED_ROUTING_NEEDS_PURE_NNX)
+
       res = self.decoder(
           shared_embedding=self.token_embedder,
           decoder_input_tokens=decoder_input_tokens,

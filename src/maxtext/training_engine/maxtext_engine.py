@@ -31,6 +31,7 @@ from flax.traverse_util import flatten_dict
 from flax.traverse_util import unflatten_dict
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from maxtext.common import common_types
 from maxtext.common import train_state_nnx
@@ -143,6 +144,129 @@ _UNCOMPARABLE_STRUCTURE_HINT = (
     "dtypes, which compare cleanly. Recompilation stays correct, but the cost is now paid "
     "every step, so this is worth reporting rather than living with."
 )
+
+
+@dataclasses.dataclass(kw_only=True)
+class RouterReplayTrainerPayload(abstract_engine.TrainerPayload):
+  """A TrainerPayload extension carrying forced router-replay expert decisions.
+
+  Pairs with `router_replay_gen_model_input_fn` (via `with_gen_model_input_fn`)
+  and `make_router_replay_loss_fn` (via `with_loss_fn`) below to let a caller
+  (e.g. an RL rollout that already computed expert routing decisions) replay
+  them during the forward pass instead of letting the model's gate re-route.
+
+  Attributes:
+    token_ids: Inherited from TrainerPayload; redeclared here (rather than
+      relying only on inheritance) so static-analysis tools that can't
+      introspect tunix's `TrainerPayload` dataclass still resolve these as
+      valid constructor keyword arguments.
+    token_mask: See TrainerPayload.
+    segment_ids: See TrainerPayload.
+    forced_routed_experts: Optional `[batch, seq, top_k]` (or
+      `[batch, seq, num_layers, top_k]` for a distinct routing per layer)
+      array of expert indices to replay, overriding the model's normal top-k
+      routing. `-1` marks a padded/unused slot. See
+      `check_forced_routing_support` in `maxtext.configs.types` for which
+      decoder_blocks accept this.
+  """
+
+  token_ids: ArrayLike
+  token_mask: ArrayLike
+  segment_ids: ArrayLike | None = None
+  forced_routed_experts: ArrayLike | None = None
+
+
+def router_replay_gen_model_input_fn(payload: RouterReplayTrainerPayload) -> dict[str, Any]:
+  """Adapts a RouterReplayTrainerPayload into router_replay_loss_fn's kwargs.
+
+  Output keys are unpacked directly as `loss_fn(model, **kwargs)` by
+  `_fwd_bwd_kernel`, so they must match the loss function's parameter names --
+  they are not nested inside a `data` dict.
+
+  Args:
+    payload: A RouterReplayTrainerPayload (or subclass).
+
+  Returns:
+    `inputs`, `inputs_position`, `inputs_segmentation`, `targets`,
+    `targets_segmentation`, and (when present) `forced_routed_experts`.
+  """
+  token_ids = jnp.asarray(payload.token_ids)
+  token_mask = jnp.asarray(payload.token_mask) if payload.token_mask is not None else jnp.ones_like(token_ids)
+  segment_ids = jnp.asarray(payload.segment_ids) if payload.segment_ids is not None else token_mask
+
+  # TrainerPayload rows are left-padded prompt + right-padded completion, so a
+  # plain arange would give the first real token a nonzero RoPE position and
+  # shift every token relative to the rollout that produced the routing.
+  positions = jnp.maximum(jnp.cumsum(token_mask != 0, axis=-1) - 1, 0).astype(jnp.int32)
+
+  # roll(-1) wraps token 0 into the last position, which is not its real next
+  # token; mask that position out instead of training on the wrap-around. Do
+  # the same wherever a packed segment ends, since the next row belongs to a
+  # different sequence.
+  targets_segmentation = token_mask.at[:, -1].set(0)
+  same_segment = segment_ids[:, :-1] == segment_ids[:, 1:]
+  targets_segmentation = targets_segmentation.at[:, :-1].multiply(same_segment.astype(token_mask.dtype))
+
+  kwargs = {
+      "inputs": token_ids,
+      "inputs_position": positions,
+      "inputs_segmentation": segment_ids,
+      "targets": jnp.roll(token_ids, -1, axis=-1),
+      "targets_segmentation": targets_segmentation,
+  }
+  forced_routed_experts = getattr(payload, "forced_routed_experts", None)
+  if forced_routed_experts is not None:
+    kwargs["forced_routed_experts"] = jnp.asarray(forced_routed_experts)
+  return kwargs
+
+
+def make_router_replay_loss_fn(
+    config: pyconfig.HyperParameters, dropout_rng: jax.Array | None = None
+) -> Callable[..., Any]:
+  """Builds a loss fn with the flat kwarg names router_replay_gen_model_input_fn
+  produces, wrapping train.loss_fn's `(model, config, data, ...)` calling
+  convention so the pair can be used together via `with_gen_model_input_fn` +
+  `with_loss_fn` (see `_fwd_bwd_kernel`'s `loss_callable(mdl, **b)` call).
+
+  Args:
+    config: The MaxText config to pass through to `train.loss_fn`.
+    dropout_rng: Required when `config.enable_dropout` is set.
+
+  Returns:
+    A callable `(model, inputs, inputs_position, inputs_segmentation,
+    targets, targets_segmentation, forced_routed_experts=None)` suitable for
+    `MaxTextTrainingEngine.with_loss_fn`.
+
+  Raises:
+    ValueError: If dropout is enabled but no `dropout_rng` was supplied.
+  """
+  if config.enable_dropout and dropout_rng is None:
+    raise ValueError(
+        "make_router_replay_loss_fn requires a dropout_rng when config.enable_dropout is set; "
+        "pass one, or set enable_dropout=False for router replay."
+    )
+
+  def router_replay_loss_fn(
+      model,
+      inputs,
+      inputs_position,
+      inputs_segmentation,
+      targets,
+      targets_segmentation,
+      forced_routed_experts=None,
+  ):
+    data = {
+        "inputs": inputs,
+        "inputs_position": inputs_position,
+        "inputs_segmentation": inputs_segmentation,
+        "targets": targets,
+        "targets_segmentation": targets_segmentation,
+    }
+    if forced_routed_experts is not None:
+      data["forced_routed_experts"] = forced_routed_experts
+    return maxtext_train.loss_fn(model, config, data, dropout_rng=dropout_rng, params=None, is_train=True)
+
+  return router_replay_loss_fn
 
 
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
