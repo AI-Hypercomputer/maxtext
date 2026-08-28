@@ -135,6 +135,19 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
+def _additive_to_boolean_mask(mask: Array) -> Array:
+  """Convert additive mask (large negative=masked, >=0=attend) to boolean mask.
+
+  Args:
+    mask: Additive mask where DEFAULT_MASK_VALUE (large negative) = masked,
+          and values >= 0 = attend.
+
+  Returns:
+    Boolean mask where True = attend, False = masked.
+  """
+  return mask >= DEFAULT_MASK_VALUE * 0.5
+
+
 def build_local_sliding_splash_mask(
     batch: int,
     decoder_segment_ids: Array | None,
@@ -184,7 +197,7 @@ def build_compressed_splash_mask(
   uncompressed = build_local_sliding_splash_mask(
       b, decoder_segment_ids, segment_positions, q_seq_len, s_len, sliding_window_size
   )
-  compressed_keep = compressed_mask.reshape(b, q_seq_len, c_len) >= DEFAULT_MASK_VALUE * 0.5
+  compressed_keep = _additive_to_boolean_mask(compressed_mask.reshape(b, q_seq_len, c_len))
   return jnp.concatenate([uncompressed, compressed_keep], axis=-1)
 
 
@@ -1797,7 +1810,7 @@ class AttentionOp(nnx.Module):
       if q_seq_len % eff:
         raise ValueError(
             f"compressed_use_dynamic_splash: query length {q_seq_len} must be a multiple of "
-            f"min({name}={blk}, q_len) = {eff}."
+            f"min({name}={blk}, q_seq_len) = {eff}."
         )
 
     bool_mask = build_compressed_splash_mask(
@@ -2326,7 +2339,7 @@ class AttentionOp(nnx.Module):
                 "Sparse indexer with all-gather context parallelism for flash attention does not support"
                 " attention sinks."
             )
-          indexer_mask = indexer_mask >= DEFAULT_MASK_VALUE * 0.5
+          indexer_mask = _additive_to_boolean_mask(indexer_mask)
           # sa_config blocks are clamped to the global sequence lengths; inside
           # the shard map the query is a sequence shard, and the blocks must
           # divide the sequence lengths the kernel sees exactly.
@@ -2368,7 +2381,7 @@ class AttentionOp(nnx.Module):
 
         if indexer_mask is not None:
           # Convert additive float mask (0.0=attend, negative=masked) to boolean mask for Tokamax splash kernel
-          indexer_mask = indexer_mask >= DEFAULT_MASK_VALUE * 0.5
+          indexer_mask = _additive_to_boolean_mask(indexer_mask)
           padded_q_len = ((indexer_mask.shape[-2] + sa_config.block_q - 1) // sa_config.block_q) * sa_config.block_q
           padded_kv_len = ((indexer_mask.shape[-1] + sa_config.block_kv - 1) // sa_config.block_kv) * sa_config.block_kv
           pad_q = padded_q_len - indexer_mask.shape[-2]
@@ -2397,7 +2410,7 @@ class AttentionOp(nnx.Module):
 
           attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
           if indexer_mask.dtype != jnp.bool_:
-            indexer_mask = indexer_mask >= DEFAULT_MASK_VALUE * 0.5
+            indexer_mask = _additive_to_boolean_mask(indexer_mask)
 
           if record_max_logits:
             attention_output, max_logits = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
