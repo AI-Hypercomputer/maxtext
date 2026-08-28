@@ -245,6 +245,7 @@ ModelName = Literal[
     "deepseek3-671b",
     "deepseek3-671b-2dfsdp",
     "deepseek3-671b-batchsplit",
+    "deepseek3-671b-lineage",
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
@@ -1165,6 +1166,28 @@ class DeepSeekMoE(BaseModel):
       1,
       description="Factor by which to split the batch into micro-batches. Only used if use_batch_split_schedule is True.",
   )
+  use_lineage: bool = Field(
+      False,
+      description="Whether to use Lineage DeepSeek-V3 execution.",
+  )
+
+  @model_validator(mode="after")
+  def validate_lineage(self) -> "DeepSeekMoE":
+    """Validates that Lineage DeepSeek-V3 execution requirements are met."""
+    if self.use_lineage:
+      scan_layers = getattr(self, "scan_layers", None)
+      if scan_layers is not None and not scan_layers:
+        raise ValueError("use_lineage=True requires scan_layers=True.")
+      decoder_block = getattr(self, "decoder_block", None)
+      if (
+          decoder_block is not None
+          and decoder_block != DecoderBlockType.DEEPSEEK
+      ):
+        raise ValueError(
+            "use_lineage=True requires decoder_block='deepseek', got"
+            f" decoder_block={decoder_block!r}."
+        )
+    return self
 
 
 class Qwen3Next(BaseModel):
@@ -4856,6 +4879,37 @@ class MaxTextConfig(
             f"max_target_length={self.max_target_length}."
         )
 
+    if self.use_lineage:
+      if not self.scan_layers:
+        raise ValueError("use_lineage=True requires scan_layers=True.")
+      if self.decoder_block != DecoderBlockType.DEEPSEEK:
+        raise ValueError(
+            "use_lineage=True requires decoder_block='deepseek', got"
+            f" decoder_block={self.decoder_block!r}."
+        )
+      if self.attention_type == "global":
+        self.attention_type = "mla"
+      elif self.attention_type != "mla":
+        raise ValueError(
+            "use_lineage=True requires attention_type='mla', got"
+            f" attention_type={self.attention_type!r}."
+        )
+      rope_type = getattr(self, "rope_type", None)
+      if rope_type == RopeType.DEFAULT:
+        setattr(self, "rope_type", RopeType.YARN)
+      elif getattr(rope_type, "value", rope_type) != "yarn":
+        raise ValueError(
+            "use_lineage=True requires rope_type='yarn', got"
+            f" rope_type={rope_type!r}."
+        )
+      if self.capacity_factor <= 0:
+        self.capacity_factor = 0.5
+      if self.param_scan_axis not in (0, 1):
+        raise ValueError(
+            "use_lineage=True requires param_scan_axis in (0, 1), got"
+            f" {self.param_scan_axis}."
+        )
+
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
         "diloco": self.ici_diloco_parallelism,
@@ -4877,7 +4931,13 @@ class MaxTextConfig(
         "dcp": (1),
         "pcp": (1),
     }
-    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+    ici_parallelism = getattr(self, "ici_parallelism", None)
+    if ici_parallelism is None or len(ici_parallelism) != len(self.mesh_axes):
+      setattr(
+          self,
+          "ici_parallelism",
+          [ici_map.get(axis, 1) for axis in self.mesh_axes],
+      )
 
     dcn_map = {
         "diloco": self.dcn_diloco_parallelism,
@@ -4899,7 +4959,13 @@ class MaxTextConfig(
         "dcp": (1),
         "pcp": (1),
     }
-    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+    dcn_parallelism = getattr(self, "dcn_parallelism", None)
+    if dcn_parallelism is None or len(dcn_parallelism) != len(self.mesh_axes):
+      setattr(
+          self,
+          "dcn_parallelism",
+          [dcn_map.get(axis, 1) for axis in self.mesh_axes],
+      )
 
     # Zero-1 (`shard_optimizer_over_data`) shards the optimizer moments over the "data"
     # axis on top of whatever layout the parameters already have. FSDP shards the
@@ -5298,9 +5364,21 @@ class RLConfig(
       }
 
     ici_map = get_parallelism_map("ici")
-    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+    ici_parallelism = getattr(self, "ici_parallelism", None)
+    if ici_parallelism is None or len(ici_parallelism) != len(self.mesh_axes):
+      setattr(
+          self,
+          "ici_parallelism",
+          [ici_map.get(axis, 1) for axis in self.mesh_axes],
+      )
 
     dcn_map = get_parallelism_map("dcn")
-    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+    dcn_parallelism = getattr(self, "dcn_parallelism", None)
+    if dcn_parallelism is None or len(dcn_parallelism) != len(self.mesh_axes):
+      setattr(
+          self,
+          "dcn_parallelism",
+          [dcn_map.get(axis, 1) for axis in self.mesh_axes],
+      )
 
     return self
