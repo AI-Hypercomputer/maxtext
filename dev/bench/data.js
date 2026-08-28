@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787919609852,
+  "lastUpdate": 1787935469146,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -18780,6 +18780,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total DECOUPLED Tests Duration",
             "value": 23.78400000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 54,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Zachary Charles",
+            "username": "zcharles8",
+            "email": "zachcharles@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "ab9f7c50c4934f75d893b295a4e9e8b3012e11da",
+          "message": "Support partitioned optimizer state sharding propagation and MaskedNode filtering in Zero-1.\n\n- Updates maybe_update_params_sharding_with_opt_nnx in sharding.py to recursively collect momentum (mu) trees across multiple optimizer branches (e.g. Muon + Adam partitioned optimizers).\n- Filters out non-NamedSharding nodes (such as optax.MaskedNode placeholders) when constructing the parameter sharding lookup dictionary to prevent corrupting parameter pytree structures during Zero-1 sharding propagation.\n- Hardens create_sharding to default empty/None logical-to-mesh specs to P().\n- Adds unit tests in sharding_nnx_test.py verifying that partitioned optimizers containing MaskedNode placeholders correctly assign valid NamedSharding to all model parameters.\n\nPiperOrigin-RevId: 972583684",
+          "timestamp": "2026-08-28T14:39:57Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/ab9f7c50c4934f75d893b295a4e9e8b3012e11da"
+        },
+        "date": 1787935468471,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 71.198,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 9,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1778.816,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 78,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1435.616,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 78,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 61.195,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 11,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 78.11399999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 406.76799999999986,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 27,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 2523.379,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 202,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 53.862,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 21.477000000000025,
             "unit": "sec"
           },
           {
