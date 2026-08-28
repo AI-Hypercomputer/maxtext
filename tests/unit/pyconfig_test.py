@@ -40,6 +40,14 @@ class PyconfigTest(unittest.TestCase):
 
     self.assertTrue(config.quantization is None or config.quantization == "")
 
+  def test_gmm_v2_heuristic_tiling_requires_gmm_v2(self):
+    with self.assertRaisesRegex(ValueError, "`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`."):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          use_gmm_v2_heuristic_tiling=True,
+          use_gmm_v2=False,
+      )
+
   def test_managed_mldiagnostics_storage_path(self):
     # Test completely omitting the parameter (defaults to "" from base.yml)
     config_omitted = pyconfig.initialize(
@@ -155,6 +163,41 @@ class PyconfigTest(unittest.TestCase):
         model_name="qwen3-30b-a3b-base",
     )
     self.assertEqual(config.tokenizer_path, "Qwen/Qwen3-30B-A3B-Base")
+
+  def test_explicit_sharding_qwen3_decoder_support(self):
+    """The Qwen3 decoders that have been onboarded to explicit sharding are accepted."""
+    for decoder_block in ("qwen3", "qwen3_moe", "qwen3_custom_moe"):
+      with self.subTest(decoder_block=decoder_block):
+        config = pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            shard_mode="explicit",
+            decoder_block=decoder_block,
+        )
+        self.assertEqual(config.decoder_block.value, decoder_block)
+
+    # Qwen3-Next and Qwen3.5 use gated-delta-net linear attention, and the
+    # Qwen3-VL/Omni encoders are multimodal; neither is onboarded yet.
+    for decoder_block in ("qwen3_next", "qwen3_5"):
+      with self.subTest(decoder_block=decoder_block):
+        with self.assertRaisesRegex(Exception, "not supported with 'explicit' sharding"):
+          pyconfig.initialize(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+              skip_jax_distributed_system=True,
+              shard_mode="explicit",
+              decoder_block=decoder_block,
+          )
+
+    with self.assertRaisesRegex(Exception, "not supported with `use_multimodal`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          model_name="qwen3-vl-4b",
+          override_model_config=True,
+          use_multimodal=True,
+          scan_layers=False,  # Required by the Qwen3-VL deepstack path; unrelated to sharding.
+      )
 
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
@@ -421,6 +464,25 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(_normalize_axes(["a", "b"]), ("a", "b"))
     self.assertEqual(_normalize_axes([]), ())
 
+  def test_moe_sharding_strategy_mutual_exclusivity(self):
+    """Ensure that shard_exp_on_fsdp, use_2d_fsdp_sharding, and shard_embed_moe_on_fsdp are mutually exclusive."""
+
+    def init_config(**kwargs):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          **kwargs,
+      )
+
+    with self.assertRaisesRegex(ValueError, "Only one of shard_exp_on_fsdp"):
+      init_config(shard_exp_on_fsdp=True, use_2d_fsdp_sharding=True)
+
+    with self.assertRaisesRegex(ValueError, "Only one of shard_exp_on_fsdp"):
+      init_config(shard_exp_on_fsdp=True, shard_embed_moe_on_fsdp=True)
+
+    with self.assertRaisesRegex(ValueError, "Only one of shard_exp_on_fsdp"):
+      init_config(use_2d_fsdp_sharding=True, shard_embed_moe_on_fsdp=True)
+
   def test_ep_rank_1_raises_on_ep_flags(self):
     """When EP rank is 1 (no EP rules), setting EP-only flags must raise ValueError."""
     # No 'exp' rule -> infer_ep_axes returns () -> EP rank is 1.
@@ -462,6 +524,35 @@ assert train._TF_AVAILABLE is False
     ]
     self.assertEqual(infer_cp_axes(ep_as_cp_rules), ("expert",))
     self.assertEqual(infer_ep_axes(ep_as_cp_rules), ("expert",))
+
+  def test_shard_embed_moe_on_fsdp_requires_quantization(self):
+    """Verifies that a ValueError is raised when shard_embed_moe_on_fsdp
+    is used without fixed weight quantization calibration."""
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_embed_moe_on_fsdp=True,
+          quantization="",
+      )
+
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_embed_moe_on_fsdp=True,
+          quantization="int8",
+          weight_quantization_calibration_method="absmax",
+      )
+
+    # This should not raise
+    pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_embed_moe_on_fsdp=True,
+        quantization="int8",
+        weight_quantization_calibration_method="fixed,-1,1",
+    )
 
 
 if __name__ == "__main__":

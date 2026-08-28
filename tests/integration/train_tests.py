@@ -13,8 +13,11 @@
 # limitations under the License.
 
 """Tests for train.py with various configs"""
+import json
 import os
+import tempfile
 import unittest
+import numpy as np
 import pytest
 import jax
 
@@ -33,6 +36,23 @@ from tests.utils.test_helpers import (
 def _small_model_base_emb_dim(device_count):
   """Return a tiny embedding dim divisible by local devices."""
   return ((28 + device_count - 1) // device_count) * device_count
+
+
+_MOE_OVERRIDES = ["base_moe_mlp_dim=512", "num_experts=8", "num_experts_per_tok=2"]
+
+# One tiny model per Qwen3 decoder block that supports explicit sharding.
+_QWEN3_MODELS = {
+    "qwen3": ["model_name=qwen3-0.6b"],
+    "qwen3_moe": ["model_name=qwen3-30b-a3b"] + _MOE_OVERRIDES,
+    "qwen3_custom_moe": [
+        "model_name=qwen3-custom-30b-a3b",
+        "attention_output_dim=256",
+        "moe_expert_input_dim=256",
+        # Qwen3CustomMoeDecoderLayer is only registered for the unscanned path.
+        "scan_layers=False",
+    ]
+    + _MOE_OVERRIDES,
+}
 
 
 class TrainTests(unittest.TestCase):
@@ -54,6 +74,53 @@ class TrainTests(unittest.TestCase):
       "vocab_size=32",
       # Allow higher unsharded percentage because downscaled models make fixed-size FP8 history tensors relatively larger.
       "sharding_tolerance=0.1",
+  ]
+
+  _moe_expert_overrides = [
+      "decoder_block=mixtral",
+      "num_experts=4",
+      "num_experts_per_tok=2",
+      "base_moe_mlp_dim=32",
+  ]
+
+  # Routes the MoE layer through dense_matmul, which is what runs wherever the megablox and
+  # ragged kernels are unavailable.
+  _moe_model_overrides = _moe_expert_overrides + [
+      "sparse_matmul=False",
+      "megablox=False",
+  ]
+
+  # The sparse_matmul path, where megablox builds and uses the gmm quantization rule for real
+  # rather than falling back to ragged_dot.
+  _moe_sparse_model_overrides = _moe_expert_overrides + [
+      "sparse_matmul=True",
+      "megablox=True",
+  ]
+
+  # Every operand has to divide into its tile, and the default tiles are far larger than a
+  # downscaled model. The embedding dim is 28 or 32 depending on the device count, so 4 is
+  # the largest tile that fits it either way.
+  _megablox_tile_overrides = [
+      f"{matrix}_tile_{direction}_{dim}={size}"
+      for matrix in ("wi", "wo")
+      for direction in ("fwd", "dlhs", "drhs")
+      for dim, size in (("batch_seq", 16), ("embed_dim", 4), ("mlp_dim", 16))
+  ]
+
+  _qwen3_overrides = [
+      "override_model_config=True",
+      "base_num_decoder_layers=2",
+      "base_emb_dim=256",
+      "base_mlp_dim=512",
+      "base_num_query_heads=8",
+      "base_num_kv_heads=8",
+      "head_dim=128",
+      "vocab_size=2048",
+      "max_target_length=256",
+      # The Qwen3 model configs default to a HuggingFace tokenizer that is not
+      # vendored in the repo; use the checked-in tiktoken asset instead.
+      "tokenizer_type=tiktoken",
+      rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
   ]
 
   CONFIGS = {
@@ -135,6 +202,33 @@ class TrainTests(unittest.TestCase):
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
+      "moe": [  # tests a MoE model, to be combined with a quantization
+          None,
+          get_test_config_path(),
+          f"base_output_directory={_base_output_directory}",
+          "run_name=runner_test",
+          "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+      ]
+      + _small_model_overrides
+      + _moe_model_overrides,
+      "moe_sparse": [  # tests a MoE model on the sparse_matmul path, to be combined with a quantization
+          None,
+          get_test_config_path(),
+          f"base_output_directory={_base_output_directory}",
+          "run_name=runner_test",
+          "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+      ]
+      + _small_model_overrides
+      + _moe_sparse_model_overrides
+      + _megablox_tile_overrides,
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
           get_test_config_path(),
@@ -287,6 +381,42 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_nanoo_fp8(self):
     train_main(TrainTests.CONFIGS["nanoo_fp8"] + ["attention=dot_product"])
+
+  # The quantized MoE tests below carry no hardware marker on purpose. They cover how the
+  # quantized einsums are bound to the MoE layer, which breaks on every backend when it breaks,
+  # and both fp8 flavors are emulated in XLA rather than needing hardware support.
+  @pytest.mark.integration_test
+  def test_moe_int8(self):
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=int8"])
+
+  @pytest.mark.integration_test
+  def test_moe_fp8(self):
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=fp8"])
+
+  @pytest.mark.integration_test
+  def test_moe_nanoo_fp8(self):
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=nanoo_fp8"])
+
+  @pytest.mark.integration_test
+  def test_moe_fp8_token_dropping(self):
+    # capacity_factor > 0 adds the dispatch and combine einsums to the ones above.
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=fp8", "capacity_factor=1.25"])
+
+  # The sparse_matmul tests below carry no hardware marker for the same reasons. What they cover
+  # is an attribute read during tracing rather than anything a kernel does, and megablox runs the
+  # quantized grouped matmul on CPU through its interpret mode.
+  @pytest.mark.integration_test
+  def test_moe_fp8_sparse_matmul(self):
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=fp8"])
+
+  @pytest.mark.integration_test
+  def test_moe_nanoo_fp8_sparse_matmul(self):
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=nanoo_fp8"])
+
+  # int8 takes the `quant_dg` branch of the same read, which the fp8 tests never reach.
+  @pytest.mark.integration_test
+  def test_moe_int8_sparse_matmul(self):
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=int8"])
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.integration_test
@@ -545,6 +675,91 @@ class TrainTests(unittest.TestCase):
     ]
     train_main(zero1_ga)
 
+  def _qwen3_losses(self, run_name, extra_args):
+    """Trains a tiny Qwen3 model for a few steps and returns its per-step losses."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      metrics_file = os.path.join(tmp_dir, "metrics.txt")
+      train_main(
+          [
+              None,
+              get_test_config_path(),
+              f"base_output_directory={self._base_output_directory}",
+              f"dataset_path={self.dataset_path}",
+              f"run_name={run_name}",
+              f"metrics_file={metrics_file}",
+              "dataset_type=synthetic",
+              "steps=3",
+              "enable_checkpointing=False",
+              "enable_goodput_recording=False",
+          ]
+          + self._qwen3_overrides
+          + list(extra_args)
+      )
+      with open(metrics_file, "rt", encoding="utf8") as f:
+        return [json.loads(line)["learning/loss"] for line in f if line.strip()]
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_tpu_qwen3_explicit_sharding_matches_auto(self):
+    """Explicit sharding only changes how layouts are expressed, so the losses must not move.
+
+    Each decoder block is paired with the parallelism that stresses it most:
+    tensor parallelism puts the `heads` axis on the same mesh axis as the
+    QK-norm scale, and expert parallelism shards the MoE dispatch.
+    """
+    parallelism = {
+        "qwen3": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
+        "qwen3_moe": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
+        "qwen3_custom_moe": [],
+    }
+    for decoder_block, model_args in _QWEN3_MODELS.items():
+      with self.subTest(decoder_block=decoder_block):
+        args = model_args + parallelism[decoder_block]
+        auto_losses = self._qwen3_losses(f"{decoder_block}_auto", args + ["shard_mode=auto"])
+        explicit_losses = self._qwen3_losses(f"{decoder_block}_explicit", args + ["shard_mode=explicit"])
+        print(f"[{decoder_block}] auto losses: {auto_losses}", flush=True)
+        print(f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True)
+        self.assertTrue(auto_losses, "auto run produced no metrics")
+        # The two runs execute the same math, so they match bit-for-bit.
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-6, atol=0.0)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
+  @pytest.mark.skip_on_tpu7x
+  def test_tpu_qwen3_zero1_gradient_accumulation(self):
+    """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
+
+    Under explicit sharding this routes the accumulated gradients through the
+    `reduced`/`unreduced` PartitionSpec labels applied in
+    `maxtext.utils.gradient_accumulation`.
+    """
+    zero1_ga = [
+        "remat_policy=minimal",
+        "per_device_batch_size=2",
+        "ici_data_parallelism=-1",
+        "dcn_data_parallelism=1",
+        "ici_fsdp_parallelism=1",
+        "dcn_fsdp_parallelism=1",
+        "gradient_accumulation_steps=8",
+    ]
+    for decoder_block in ("qwen3", "qwen3_moe"):
+      with self.subTest(decoder_block=decoder_block):
+        args = _QWEN3_MODELS[decoder_block] + zero1_ga
+        baseline = self._qwen3_losses(
+            f"{decoder_block}_ga",
+            args + ["shard_mode=auto", "shard_optimizer_over_data=False"],
+        )
+        sharded = self._qwen3_losses(
+            f"{decoder_block}_ga_zero1",
+            args + ["shard_mode=explicit", "shard_optimizer_over_data=True"],
+        )
+        print(f"[{decoder_block}] auto + GA losses: {baseline}", flush=True)
+        print(f"[{decoder_block}] explicit + ZeRO-1 + GA losses: {sharded}", flush=True)
+        self.assertTrue(baseline, "baseline run produced no metrics")
+        # ZeRO-1 reassociates the gradient all-reduce, so allow a little float slack.
+        np.testing.assert_allclose(sharded, baseline, rtol=1e-4, atol=0.0)
+
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
   @pytest.mark.scheduled_only
@@ -708,14 +923,23 @@ class TrainTests(unittest.TestCase):
         "dataset_type=synthetic",
         "remat_policy=minimal",
         "per_device_batch_size=1",
-        "ici_expert_parallelism=-1",
-        "ici_fsdp_parallelism=1",
+        "ici_expert_parallelism=4",
+        "ici_fsdp_parallelism=-1",
         "use_ring_of_experts=True",
         "model_name=deepseek3-test",
         "eval_per_device_batch_size=0.25",
         "eval_interval=3",
         "eval_steps=1",
         "custom_mesh_and_rule_for_eval=ep-as-cp",
+        "use_tokamax_splash=true",
+        "sa_block_q=1024",
+        "sa_block_kv=1024",
+        "sa_block_kv_compute=1024",
+        "sa_block_q_dkv=1024",
+        "sa_block_kv_dkv=1024",
+        "sa_block_kv_dkv_compute=1024",
+        "sa_block_q_dq=1024",
+        "sa_block_kv_dq=1024",
         "override_model_config=true",
         "base_num_decoder_layers=7",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",

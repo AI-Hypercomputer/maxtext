@@ -29,7 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.sharding import AxisType, Mesh, NamedSharding
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
@@ -42,6 +42,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
     DEFAULT_MASK_VALUE,
+    Q_LENGTH,
 )
 from maxtext.layers.attention_mla import MLA
 from maxtext.layers.attention_compressed import CompressedAttention
@@ -78,6 +79,7 @@ class JaxFlashAttentionTest(unittest.TestCase):
     key = jnp.array([[[[10.0], [0.0]]]], dtype=jnp.float32)
     value = jnp.array([[[[1.0], [3.0]]]], dtype=jnp.float32)
     mask = jnp.array([[True, True], [True, False]])
+    mask_obj = splash_attention_mask.NumpyMask(mask)
 
     output = jax_flash_attention.flash_attention_block_masked(
         query,
@@ -86,7 +88,7 @@ class JaxFlashAttentionTest(unittest.TestCase):
         segment_ids=None,
         block_kv=2,
         block_q=1,
-        mask=mask,
+        mask=mask_obj,
         mask_value=mask_value,
         cap=cap,
     )
@@ -94,6 +96,132 @@ class JaxFlashAttentionTest(unittest.TestCase):
     logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
     logits = jnp.tanh(logits / cap) * cap
     logits = jnp.where(mask[None, None, :, :], logits, mask_value)
+    expected = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+
+  def test_flash_attention_block_masked_per_example_mask(self):
+    batch, heads, q_len, kv_len, head_dim = 2, 2, 8, 16, 4
+    rng = np.random.default_rng(0)
+    query = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    mask = np.tril(np.ones((batch, q_len, kv_len), dtype=bool), k=kv_len - q_len)
+    mask[1, :, ::3] = False  # each batch item gets a different sparsity pattern
+    mask = jnp.asarray(mask)
+
+    def block_masked_qkv(q, k, v):
+      return jax_flash_attention.flash_attention_block_masked(
+          q,
+          k,
+          v,
+          segment_ids=None,
+          block_kv=4,
+          block_q=4,
+          mask=mask,
+          mask_value=-1.0e9,
+          logits_dtype=jnp.float32,
+          loop_unroll=False,
+          fuse_logits=False,
+      )
+
+    def block_masked(q):
+      return block_masked_qkv(q, key, value)
+
+    def dense_qkv(q, k, v):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", q, k)
+      logits = jnp.where(mask[:, None, :, :], logits, -1.0e9)
+      return jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), v)
+
+    def dense(q):
+      return dense_qkv(q, key, value)
+
+    np.testing.assert_allclose(np.asarray(block_masked(query)), np.asarray(dense(query)), rtol=1e-4, atol=1e-4)
+
+    grads_block = jax.grad(lambda q, k, v: jnp.sum(block_masked_qkv(q, k, v) ** 2), argnums=(0, 1, 2))(query, key, value)
+    grads_dense = jax.grad(lambda q, k, v: jnp.sum(dense_qkv(q, k, v) ** 2), argnums=(0, 1, 2))(query, key, value)
+    for grad_block, grad_dense in zip(grads_block, grads_dense):
+      np.testing.assert_allclose(np.asarray(grad_block), np.asarray(grad_dense), rtol=1e-3, atol=1e-3)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=4,
+        block_q=4,
+        mask=mask,
+        mask_value=-1.0e9,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+        fuse_logits=False,
+        save_residuals=True,
+    )
+    np.testing.assert_allclose(np.asarray(output), np.asarray(dense(query)), rtol=1e-4, atol=1e-4)
+    dense_logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    dense_max_logits = jnp.max(jnp.where(mask[:, None, :, :], dense_logits, -1.0e9), axis=-1)
+    np.testing.assert_allclose(np.asarray(stats["max_logits"]), np.asarray(dense_max_logits), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_block_masked_non_divisible_blocks(self):
+    batch, heads, seq_len, head_dim = 1, 1, 192, 4
+    rng = np.random.default_rng(0)
+    query = jnp.asarray(rng.normal(size=(batch, heads, seq_len, head_dim)), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, seq_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, seq_len, head_dim)), dtype=jnp.float32)
+    mask = jnp.ones((seq_len, seq_len), dtype=bool)
+
+    with self.assertRaisesRegex(ValueError, "must be divisible by block_q"):
+      jax_flash_attention.flash_attention_block_masked(
+          query,
+          key,
+          value,
+          segment_ids=None,
+          block_kv=64,
+          block_q=128,
+          mask=mask,
+          mask_value=-1.0e9,
+      )
+
+    with self.assertRaisesRegex(ValueError, "must be divisible by block_kv"):
+      jax_flash_attention.flash_attention_block_masked(
+          query,
+          key,
+          value,
+          segment_ids=None,
+          block_kv=128,
+          block_q=64,
+          mask=mask,
+          mask_value=-1.0e9,
+      )
+
+  def test_flash_attention_block_masked_causal_mask(self):
+    cap = 1.0
+    mask_value = -1.0e9
+    query = jnp.array([[[[10.0], [10.0]]]], dtype=jnp.float32)
+    key = jnp.array([[[[10.0], [0.0]]]], dtype=jnp.float32)
+    value = jnp.array([[[[1.0], [3.0]]]], dtype=jnp.float32)
+    mask_obj = splash_attention_mask.CausalMask((2, 2))
+
+    output = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=2,
+        block_q=1,
+        mask=mask_obj,
+        mask_value=mask_value,
+        cap=cap,
+    )
+
+    mask_arr = mask_obj[:, :]
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.tanh(logits / cap) * cap
+    logits = jnp.where(mask_arr[None, None, :, :], logits, mask_value)
     expected = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
     np.testing.assert_allclose(
         np.asarray(output),
@@ -338,6 +466,21 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+def _stub_mesh_axes(q_axis="context"):
+  """Stands in for `AttentionOp._logical_to_mesh_axes` with no ambient rules bound.
+
+  The query sequence resolves to *q_axis* so `_context_parallel_size` reads the
+  intended cp_size off the stub mesh; every other logical name is replicated.
+  Point *q_axis* at an axis other than `context_sharding` to emulate the eval
+  rules sharding the query somewhere the input pipeline never reordered for.
+  """
+
+  def resolve(logical_name):
+    return PartitionSpec(q_axis) if logical_name == (Q_LENGTH,) else None
+
+  return resolve
+
+
 class BlockCausalMaskTest(unittest.TestCase):
   """Tests the shared dense and Splash block-causal masks."""
 
@@ -347,8 +490,11 @@ class BlockCausalMaskTest(unittest.TestCase):
         causal_block_size=4,
         context_parallel_load_balance=False,
         context_sharding="context",
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
     )
-    mesh = types.SimpleNamespace(shape={})
+    mesh = Mesh(jax.devices()[:1], ["context"])
     kwargs = {}
     if attention_type is not None:
       kwargs["attention_type"] = attention_type
@@ -368,6 +514,7 @@ class BlockCausalMaskTest(unittest.TestCase):
       attention_type=AttentionType.BLOCK_DIFFUSION,
       context_parallel_size=1,
       context_parallel_load_balance=False,
+      mesh_shape=None,
   ):
     """Builds a minimal flash-attention operator for dispatch tests."""
     config = types.SimpleNamespace(
@@ -375,6 +522,7 @@ class BlockCausalMaskTest(unittest.TestCase):
         context_parallel_strategy="all_gather",
         context_parallel_load_balance=context_parallel_load_balance,
         context_sharding="context",
+        ulysses_context_sharding="ulysses",
         sa_block_q=4,
         sa_block_kv=4,
         sa_block_kv_compute=4,
@@ -397,7 +545,7 @@ class BlockCausalMaskTest(unittest.TestCase):
     device = types.SimpleNamespace(platform="cpu")
     mesh = types.SimpleNamespace(
         devices=np.asarray([device], dtype=object),
-        shape={"context": context_parallel_size},
+        shape={"context": context_parallel_size} if mesh_shape is None else mesh_shape,
     )
     return AttentionOp(
         config=config,
@@ -475,13 +623,20 @@ class BlockCausalMaskTest(unittest.TestCase):
         causal_block_size=4,
         context_parallel_load_balance=True,
         context_sharding="context",
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
     )
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest("Need at least 2 devices to test chunk mask")
+    mesh = Mesh(devices[:2], ["context"])
     op = AttentionOp(
         config=config,
         num_query_heads=1,
         num_kv_heads=1,
         max_target_length=sequence_length,
-        mesh=types.SimpleNamespace(shape={"context": 2}),
+        mesh=mesh,
         attention_kernel="dot_product",
         attention_type=AttentionType.BLOCK_DIFFUSION,
     )
@@ -600,19 +755,67 @@ class BlockCausalMaskTest(unittest.TestCase):
             context_parallel_size=cp_size,
             context_parallel_load_balance=load_balanced,
         )
-        with (
-            mock.patch.object(AttentionOp, "_logical_to_mesh_axes", return_value=None),
-            mock.patch.object(
-                attention_op.splash_attention_mask,
-                "MultiHeadMask",
-                side_effect=RuntimeError("mask captured"),
-            ) as make_multi_head_mask,
-            self.assertRaisesRegex(RuntimeError, "mask captured"),
-        ):
-          op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
-
-        selected_mask = make_multi_head_mask.call_args.kwargs["masks"][0]
+        selected_mask = self._capture_splash_mask(op, query)
         self.assertIsInstance(selected_mask, expected_mask_type)
+
+  def _capture_splash_mask(self, op, query, q_axis="context"):
+    """Runs `tpu_flash_attention` far enough to see which mask it built."""
+    with (
+        mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes(q_axis)),
+        mock.patch.object(
+            attention_op.splash_attention_mask,
+            "MultiHeadMask",
+            side_effect=RuntimeError("mask captured"),
+        ) as make_multi_head_mask,
+        self.assertRaisesRegex(RuntimeError, "mask captured"),
+    ):
+      op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+    return make_multi_head_mask.call_args.kwargs["masks"][0]
+
+  def test_tpu_splash_load_balances_only_when_the_loader_reordered(self):
+    """The LB mask requires the batch to carry the loader's DUAL_CHUNK_SWAP order.
+
+    The input pipeline reorders once, for `mesh[context_sharding]` under the
+    *train* rules. `custom_mesh_and_rule_for_eval` can leave the query sharded a
+    different number of ways at eval, and the LoadBalanced* masks bake the
+    permutation into a static `q_sequence` - applying one to an unpermuted batch
+    lets rows attend to the future instead of raising. So the kernel may only
+    load balance when its own shard count equals the one the loader used;
+    otherwise it falls back to the plain causal mask, correct at any count.
+
+    Note the criterion is the count, not the axis name: the last case shards the
+    query on `expert` while the loader reordered off `context`, and 4 == 4 makes
+    that permutation valid.
+    """
+    query = jnp.zeros((1, 8, 1, 8))
+    cases = (
+        # q axis (eval rules), mesh, reorder extent (train rules), expected mask
+        ("context", {"context": 4}, 4, attention_op.LoadBalancedCausalMask),
+        ("expert", {"context": 1, "expert": 4}, 1, splash_attention_mask.CausalMask),
+        ("expert", {"context": 2, "expert": 4}, 2, splash_attention_mask.CausalMask),
+        ("expert", {"context": 4, "expert": 4}, 4, attention_op.LoadBalancedCausalMask),
+    )
+
+    for q_axis, mesh_shape, reorder_size, expected_mask_type in cases:
+      with self.subTest(q_axis=q_axis, mesh_shape=mesh_shape):
+        op = self._make_flash_op(
+            attention_type=AttentionType.GLOBAL,
+            context_parallel_load_balance=True,
+            mesh_shape=mesh_shape,
+        )
+        self.assertEqual(max_utils.reordered_cp_size(op.config, op.mesh), reorder_size)
+        selected_mask = self._capture_splash_mask(op, query, q_axis=q_axis)
+        self.assertIsInstance(selected_mask, expected_mask_type)
+
+  def test_tpu_splash_skips_load_balancing_when_flag_is_off(self):
+    """With the flag off the loader never reorders, so neither may the kernel."""
+    op = self._make_flash_op(
+        attention_type=AttentionType.GLOBAL,
+        context_parallel_size=4,
+        context_parallel_load_balance=False,
+    )
+    selected_mask = self._capture_splash_mask(op, jnp.zeros((1, 8, 1, 8)))
+    self.assertIsInstance(selected_mask, splash_attention_mask.CausalMask)
 
 
 class AttentionTypeResolutionTest(unittest.TestCase):
@@ -716,9 +919,18 @@ class LoadBalancedMaskTest(unittest.TestCase):
 
   def test_dot_product_local_mask_uses_segment_positions(self):
     config = types.SimpleNamespace(
-        context_parallel_load_balance=True, context_sharding="context", compressed_use_dynamic_splash=False
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        using_pipeline_parallelism=False,
+        logical_axis_rules=[["segment_ids_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
     )
-    mesh = types.SimpleNamespace(shape={"context": 4})
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Need at least 4 devices to test chunk mask")
+    mesh = Mesh(devices[:4], ["context"])
     seq_len = 16
     sliding_window_size = 4
     positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
@@ -753,8 +965,19 @@ class LoadBalancedMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected_mask)
 
   def test_dot_product_chunk_mask_uses_segment_positions(self):
-    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
-    mesh = types.SimpleNamespace(shape={"context": 4})
+    config = types.SimpleNamespace(
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        using_pipeline_parallelism=False,
+        logical_axis_rules=[["segment_ids_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
+    )
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Need at least 4 devices to test chunk mask")
+    mesh = Mesh(devices[:4], ["context"])
     seq_len = 16
     chunk_size = 4
     positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
@@ -3482,20 +3705,24 @@ class MLATest(attention_test_util.MLATestBase):
           "ici_context_parallelism": 4,
           "indexer_topk": 32,
       },
-  )
-  @pytest.mark.skip(
-      reason="Indexer with all-gather context parallelism diverges from the dot_product reference; fix tracked in #4947."
+      {
+          "testcase_name": "no_lb_cp2_seq384",
+          "context_parallel_load_balance": False,
+          "ici_context_parallelism": 2,
+          "indexer_topk": 256,
+          "max_target_length": 384,
+      },
   )
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel_with_indexer(
-      self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256
+      self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256, max_target_length=512
   ):
     """Test equivalence between dot_product MLA + Indexer and all-gather flash attention + context parallelism + Indexer"""
     config_arguments = {
         "per_device_batch_size": 1.0,
         "run_name": "test",
         "enable_checkpointing": False,
-        "max_target_length": 512,
+        "max_target_length": max_target_length,
         "sa_block_q": 128,
         "sa_block_kv": 128,
         "sa_block_kv_compute": 128,

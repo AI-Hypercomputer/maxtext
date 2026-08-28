@@ -14,6 +14,7 @@
 
 """DeepSeek Manifold-Constrained Hyper Connections (mHC) Layer."""
 
+import functools
 import itertools
 import math
 from typing import Callable
@@ -30,6 +31,7 @@ from maxtext.layers.initializers import default_bias_init, default_scalar_init, 
 from maxtext.layers.normalizations import RMSNorm
 
 
+@functools.lru_cache(maxsize=None)
 def get_permutation_matrices(k: int) -> Array:
   """Generates all permutation matrices of size k.
 
@@ -136,7 +138,6 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       res_out_dim = num_perms
       res_beta_shape = (num_perms,)
       res_beta_sharding = (None,)
-      self.permutation_matrices = get_permutation_matrices(self.k)
     else:
       res_out_dim = self.k * self.k
       res_beta_shape = (self.k, self.k)
@@ -218,7 +219,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       # Use float32 for numerical stability during softmax
       weights = jax.nn.softmax(intermediate.astype(jnp.float32), axis=-1).astype(self.dtype)
       # Sum the permutation matrices with the weights
-      permutation_matrices = self.permutation_matrices.astype(self.dtype)
+      permutation_matrices = get_permutation_matrices(self.k).astype(self.dtype)
       output = jnp.einsum(
           "bsn,nkm -> bskm",
           weights,
@@ -281,7 +282,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       layer_input, context = mhc_kernel.pre(
           x,
           weights,
-          jnp.asarray(self.permutation_matrices, self.dtype),
+          jnp.asarray(get_permutation_matrices(self.k), self.dtype),
           config=kernel_config,
       )
     else:

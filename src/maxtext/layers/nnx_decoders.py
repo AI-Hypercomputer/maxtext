@@ -18,6 +18,7 @@
 
 import functools
 import inspect
+import re
 from typing import Any
 import warnings
 
@@ -36,7 +37,7 @@ from maxtext.common.common_types import (
     MultimodalInput,
     ShardMode,
 )
-from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
+from maxtext.layers import initializers, linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -1361,6 +1362,7 @@ class NNXDecoder(nnx.Module):
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
+            "maxtext-omni-gemma3-qwen3",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1469,13 +1471,23 @@ class NNXDecoder(nnx.Module):
     Bridges NNX to Linen by creating a dictionary that mimics the exact variable
     structure expected by `deepseek_batchsplit.fetch_weights`.
     """
-    state_dict = nnx.state(moe_stack, nnx.Param)
+    state_dict = nnx.state(moe_stack, (nnx.Param, moe.MoEBiasVar))
+    moe_block = state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0"))
+
+    # When param_scan_axis != 0, nnx.Param variables are stacked at param_scan_axis,
+    # but MoEBiasVar (being non-Param) was stacked at axis 0.
+    # Align MoEBiasVar's layer dimension with param_scan_axis for batchsplit.
+    if self.config.routed_bias and self.config.param_scan_axis != 0 and moe_block is not None:
+      bias_var = moe_block["MoeBlock_0"]["gate"]["bias"]
+      bias_val = getattr(bias_var, "value", bias_var)
+      if hasattr(bias_val, "ndim") and bias_val.ndim >= 2:
+        moe_block["MoeBlock_0"]["gate"]["bias"] = jnp.swapaxes(bias_val, 0, self.config.param_scan_axis)
 
     return {
         "pre_self_attention_layer_norm": state_dict["pre_self_attention_layer_norm"],
         "post_self_attention_layer_norm": state_dict["post_self_attention_layer_norm"],
         "self_attention": state_dict["self_attention"],
-        "DeepSeekMoeBlock_0": state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0")),
+        "DeepSeekMoeBlock_0": moe_block,
     }
 
   def _find_next_boundary(self, current_idx, end_idx, engram_indices):
@@ -2022,6 +2034,34 @@ class NNXDecoder(nnx.Module):
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
+    expert_indices = None
+    try:
+
+      def _path_sort_key(path):
+        key = []
+        for part in path:
+          nums = re.findall(r"\d+", str(part))
+          key.append(int(nums[0]) if nums else str(part))
+        return tuple(key)
+
+      intermediates = nnx.state(self, nnx.Intermediate)
+      flat_items = [
+          (path, val.value if hasattr(val, "value") else val)
+          for path, val in intermediates.flat_state()
+          if path and str(path[-1]) == "selected_experts"
+      ]
+      flat_items.sort(key=lambda item: _path_sort_key(item[0]))
+      expert_indices_list = [v for _, v in flat_items]
+      if expert_indices_list:
+        # Scanned blocks already carry a leading layer axis (3D); sequential
+        # layers are 2D and need that axis added before concatenating.
+        expert_indices_list = [v if v.ndim == 3 else jnp.expand_dims(v, axis=0) for v in expert_indices_list]
+        expert_indices = jnp.concatenate(expert_indices_list, axis=0)
+    except Exception:  # pylint: disable=broad-exception-caught
+      expert_indices = None
+
+    if expert_indices is not None:
+      return logits, hidden_state, kv_caches, expert_indices
     return logits, hidden_state, kv_caches
 
   def _apply_deepseek4_scanned_blocks(
