@@ -102,6 +102,11 @@ def gradient_accumulation_loss_and_grad(
     ga_params = params
 
   ga_params = jax.tree.map(_maybe_shard_with_name, ga_params, ga_params_shardings)
+
+  def _to_grad_dtype(arr):
+    """Downcast float32 leaves to config.grad_dtype."""
+    return arr.astype(config.grad_dtype) if arr.dtype == jnp.float32 else arr
+
   if is_nnx:
     grad_func = nnx.value_and_grad(_loss_fn, argnums=0, has_aux=True)
   else:
@@ -133,7 +138,9 @@ def gradient_accumulation_loss_and_grad(
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["indexer_loss"] += aux["indexer_loss"]
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
-    acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
+    acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
+        lambda x, y: y + x.astype(y.dtype), cur_batch_gradient, acc_grad_and_loss["grad"]
+    )
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
     return acc_grad_and_loss, aux
 
@@ -145,7 +152,7 @@ def gradient_accumulation_loss_and_grad(
     return jnp.swapaxes(reshaped_batch_arr, 0, 1)
 
   data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-  init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
+  init_grad = jax.tree_util.tree_map(lambda p: _to_grad_dtype(jnp.zeros_like(p)), ga_params)
   init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, grad_shardings)
   init_grad_and_loss = {
       "loss": 0.0,  # accumulates xent_sum across microbatches
@@ -183,7 +190,7 @@ def gradient_accumulation_loss_and_grad(
       config.gradient_accumulation_steps if getattr(config, "use_tunix_gradient_accumulation", False) else denominator
   )
   raw_grads = jax.tree_util.tree_map(
-      lambda arr: jnp.where(has_weights, arr / divisor, jnp.zeros_like(arr)),
+      lambda arr: jnp.where(has_weights, arr / divisor, jnp.zeros_like(arr)).astype(arr.dtype),
       raw_grads,
   )
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
