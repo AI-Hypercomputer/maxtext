@@ -358,6 +358,31 @@ class Checkpointing(BaseModel):
       description="Subdirectory to move checkpoints to before deletion. (Ignored if directory is prefixed with gs://)",
   )
   checkpoint_todelete_full_path: str | None = Field(None, description="Full path to move checkpoints to before deletion.")
+  standalone_checkpointer_per_step_interval: float = Field(
+      0.0,
+      description="Interval in seconds between iterations in standalone checkpointer benchmark loop.",
+  )
+  standalone_checkpointer_drop_page_cache_before_restore: bool = Field(
+      False,
+      description=(
+          "Whether to execute sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' before restoring a checkpoint in"
+          " standalone_checkpointer loop (use for storage benchmarking only)."
+      ),
+  )
+  standalone_checkpointer_enable_restore_in_loop: bool = Field(
+      True,
+      description=(
+          "In standalone_checkpointer loop, whether to restore checkpoint after saving in each step (defaults to True"
+          " for bidirectional storage read/write benchmarking)."
+      ),
+  )
+  standalone_checkpointer_start_from_checkpoint: bool = Field(
+      False,
+      description=(
+          "In standalone_checkpointer, whether to start by attempting to load an existing checkpoint before setting"
+          " up training state (for checkpoint restore benchmarking)."
+      ),
+  )
   force_unroll: bool = Field(
       False,
       description="During param-only checkpoint generation, whether to unroll the loop.",
@@ -3886,6 +3911,15 @@ class MaxTextConfig(
         raise ValueError(
             "Sparse indexer is only supported with dot_product attention or flash attention with tokamax splash."
         )
+      if (
+          self.attention == "flash"
+          and self.context_parallel_strategy == "all_gather"
+          and self.ici_context_parallelism * self.dcn_context_parallelism > 1
+          and self.attention_sink
+      ):
+        raise ValueError(
+            "Sparse indexer with all-gather context parallelism for flash attention does not support attention sinks."
+        )
       if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
         raise ValueError(
             f"`indexer_topk` ({self.indexer_topk}) must be < `max_target_length` ({self.max_target_length}) "
@@ -4441,6 +4475,8 @@ class MaxTextConfig(
         "autoregressive": self.ici_autoregressive_parallelism,
         "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
         "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+        "dcp": (1),
+        "pcp": (1),
     }
     self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
@@ -4461,6 +4497,8 @@ class MaxTextConfig(
         "autoregressive": self.dcn_autoregressive_parallelism,
         "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
         "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+        "dcp": (1),
+        "pcp": (1),
     }
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 

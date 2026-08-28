@@ -1542,12 +1542,14 @@ class RoutedMoE(nnx.Module):
         )
 
     def get_quantization_dtypes():
-      lhs_quantize_dtype, rhs_quantize_dtype = None, None
-      if self.quant is not None:
-        quant_dg = self.quant.quant_dg
-        lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
-        rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
-      return lhs_quantize_dtype, rhs_quantize_dtype
+      # AQT describes its numerics through a `quant_dg`, while the fp8 schemes just name the
+      # dtype they quantize to. Under qwix there is no quantization object here at all, and
+      # the gmm takes its rule from the qwix rule instead.
+      quant_dg = getattr(self.quant, "quant_dg", None)
+      if quant_dg is not None:
+        return quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype(), quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
+      quantize_dtype = getattr(self.quant, "quantize_dtype", None)
+      return quantize_dtype, quantize_dtype
 
     def gmm(
         inputs,
@@ -3221,6 +3223,9 @@ class RoutedMoE(nnx.Module):
     batch_size, seq_len, emb_dim = inputs.shape
     hidden_states = jnp.reshape(inputs, (batch_size * seq_len, emb_dim))
     gating_output = jnp.reshape(gate_logits, (batch_size * seq_len, self.num_experts))
+
+    _, top_k_indices = jax.lax.top_k(gating_output, self.num_experts_per_tok)
+    self.selected_experts = nnx.Intermediate(top_k_indices)
 
     # Concatenate gate and up projections: [E, D, H] + [E, D, H] -> [E, D, 2H]
     # fused_moe_func splits this internally: gate=w1[..., :H], up=w1[..., H:]

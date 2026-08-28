@@ -2115,6 +2115,59 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_tuple = None
 
       if self.config.use_tokamax_splash:
+        if indexer_mask is not None and cp_size > 1:
+          # Dynamic Tokamax Splash derives its Pallas grid from each shard-local
+          # mask, which is unsupported under sharding; the native block-sparse
+          # implementation consumes the runtime mask without a data-dependent
+          # device-local grid.
+          if sinks is not None:
+            # cp_size comes from the mesh axis named by context_sharding, which
+            # custom mesh rules can point at an axis the config validation does
+            # not cover.
+            raise ValueError(
+                "Sparse indexer with all-gather context parallelism for flash attention does not support"
+                " attention sinks."
+            )
+          indexer_mask = indexer_mask == 0.0
+          # sa_config blocks are clamped to the global sequence lengths; inside
+          # the shard map the query is a sequence shard, and the blocks must
+          # divide the sequence lengths the kernel sees exactly.
+          block_q = math.gcd(sa_config.block_q, query.shape[2])
+          block_kv = math.gcd(sa_config.block_kv, key.shape[2])
+          if record_max_logits:
+            attention_output, stats = jax_flash_attention.flash_attention_block_masked(
+                query,
+                key,
+                value,
+                decoder_segment_ids_tuple,
+                block_kv=block_kv,
+                block_q=block_q,
+                mask=indexer_mask,
+                mask_value=DEFAULT_MASK_VALUE,
+                cap=attn_logits_soft_cap,
+                save_residuals=True,
+                logits_dtype=query.dtype,
+                loop_unroll=False,
+                fuse_logits=False,
+            )
+            return attention_output, stats["max_logits"]
+
+          attention_output = jax_flash_attention.flash_attention_block_masked(
+              query,
+              key,
+              value,
+              decoder_segment_ids_tuple,
+              block_kv=block_kv,
+              block_q=block_q,
+              mask=indexer_mask,
+              mask_value=DEFAULT_MASK_VALUE,
+              cap=attn_logits_soft_cap,
+              logits_dtype=query.dtype,
+              loop_unroll=False,
+              fuse_logits=False,
+          )
+          return attention_output, None
+
         if indexer_mask is not None:
           # Convert additive float mask (0.0=attend, negative=masked) to boolean mask for Tokamax splash kernel
           indexer_mask = indexer_mask == 0.0

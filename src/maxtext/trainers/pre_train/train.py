@@ -18,7 +18,7 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 
-from typing import Any, Sequence
+from typing import Any, Sequence, TypedDict
 import datetime
 import functools
 import os
@@ -78,6 +78,17 @@ from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
+
+
+class EncoderKwargs(TypedDict, total=False):
+  """Multimodal encoder arguments forwarded to the model."""
+
+  encoder_images: Any
+  encoder_image_masks: Any
+  encoder_videos: Any
+  encoder_video_masks: Any
+  encoder_video_grid_thw: Any
+
 
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
@@ -144,6 +155,19 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # parameters in the model and checkpoints. Only pass image inputs when present.
   encoder_images = data.get("images") if config.use_multimodal else None
   encoder_image_masks = data.get("image_masks") if config.use_multimodal else None
+  is_video = "video_grid_thw" in data
+  encoder_kwargs: EncoderKwargs
+  if is_video:
+    encoder_kwargs = {
+        "encoder_videos": encoder_images,
+        "encoder_video_masks": encoder_image_masks,
+        "encoder_video_grid_thw": data.get("video_grid_thw"),
+    }
+  else:
+    encoder_kwargs = {
+        "encoder_images": encoder_images,
+        "encoder_image_masks": encoder_image_masks,
+    }
   mutable_collections = ["intermediates"]
   if config.mtp_num_layers > 0 and is_train:
     # The single model.apply call now triggers the entire chain if MTP is enabled:
@@ -179,8 +203,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         data["inputs"],
         data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
-        encoder_images=encoder_images,
-        encoder_image_masks=encoder_image_masks,
+        **encoder_kwargs,
         enable_dropout=config.enable_dropout if is_train else False,
         rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
         mutable=mutable_collections,
@@ -238,8 +261,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
-        encoder_images=encoder_images,
-        encoder_image_masks=encoder_image_masks,
+        **encoder_kwargs,
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],

@@ -76,15 +76,35 @@ class TrainTests(unittest.TestCase):
       "sharding_tolerance=0.1",
   ]
 
-  # Routes the MoE layer through dense_matmul, which is what runs wherever the megablox and
-  # ragged kernels are unavailable.
-  _moe_model_overrides = [
+  _moe_expert_overrides = [
       "decoder_block=mixtral",
       "num_experts=4",
       "num_experts_per_tok=2",
       "base_moe_mlp_dim=32",
+  ]
+
+  # Routes the MoE layer through dense_matmul, which is what runs wherever the megablox and
+  # ragged kernels are unavailable.
+  _moe_model_overrides = _moe_expert_overrides + [
       "sparse_matmul=False",
       "megablox=False",
+  ]
+
+  # The sparse_matmul path, where megablox builds and uses the gmm quantization rule for real
+  # rather than falling back to ragged_dot.
+  _moe_sparse_model_overrides = _moe_expert_overrides + [
+      "sparse_matmul=True",
+      "megablox=True",
+  ]
+
+  # Every operand has to divide into its tile, and the default tiles are far larger than a
+  # downscaled model. The embedding dim is 28 or 32 depending on the device count, so 4 is
+  # the largest tile that fits it either way.
+  _megablox_tile_overrides = [
+      f"{matrix}_tile_{direction}_{dim}={size}"
+      for matrix in ("wi", "wo")
+      for direction in ("fwd", "dlhs", "drhs")
+      for dim, size in (("batch_seq", 16), ("embed_dim", 4), ("mlp_dim", 16))
   ]
 
   _qwen3_overrides = [
@@ -92,8 +112,8 @@ class TrainTests(unittest.TestCase):
       "base_num_decoder_layers=2",
       "base_emb_dim=256",
       "base_mlp_dim=512",
-      "base_num_query_heads=4",
-      "base_num_kv_heads=4",
+      "base_num_query_heads=8",
+      "base_num_kv_heads=8",
       "head_dim=128",
       "vocab_size=2048",
       "max_target_length=256",
@@ -195,6 +215,20 @@ class TrainTests(unittest.TestCase):
       ]
       + _small_model_overrides
       + _moe_model_overrides,
+      "moe_sparse": [  # tests a MoE model on the sparse_matmul path, to be combined with a quantization
+          None,
+          get_test_config_path(),
+          f"base_output_directory={_base_output_directory}",
+          "run_name=runner_test",
+          "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+      ]
+      + _small_model_overrides
+      + _moe_sparse_model_overrides
+      + _megablox_tile_overrides,
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
           get_test_config_path(),
@@ -367,6 +401,22 @@ class TrainTests(unittest.TestCase):
   def test_moe_fp8_token_dropping(self):
     # capacity_factor > 0 adds the dispatch and combine einsums to the ones above.
     train_main(TrainTests.CONFIGS["moe"] + ["quantization=fp8", "capacity_factor=1.25"])
+
+  # The sparse_matmul tests below carry no hardware marker for the same reasons. What they cover
+  # is an attribute read during tracing rather than anything a kernel does, and megablox runs the
+  # quantized grouped matmul on CPU through its interpret mode.
+  @pytest.mark.integration_test
+  def test_moe_fp8_sparse_matmul(self):
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=fp8"])
+
+  @pytest.mark.integration_test
+  def test_moe_nanoo_fp8_sparse_matmul(self):
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=nanoo_fp8"])
+
+  # int8 takes the `quant_dg` branch of the same read, which the fp8 tests never reach.
+  @pytest.mark.integration_test
+  def test_moe_int8_sparse_matmul(self):
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=int8"])
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.integration_test

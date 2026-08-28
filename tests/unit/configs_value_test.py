@@ -237,6 +237,30 @@ class ConfigTest(absltest.TestCase):
     self.assertTrue(config.use_indexer)
     self.assertEqual(config.attention_type, "mla")
 
+  def test_indexer_all_gather_context_parallelism_rejects_attention_sink(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_indexer=True",
+        "q_lora_rank=1",
+        "attention_sink=True",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=all_gather",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "does not support attention sinks"):
+        pyconfig.initialize(argv)
+
   def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
     base_args = [
         "",

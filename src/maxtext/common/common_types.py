@@ -164,6 +164,8 @@ class HyperConnectionType(enum.Enum):
 
 
 class CustomRule(enum.Enum):
+  """Custom mesh and logical axis rule sets, each backed by a yml in configs/custom_mesh_and_rule."""
+
   DEFAULT = ""
   PURE_FSDP = "pure-fsdp"
   CP_AS_EP = "cp-as-ep"  # Support CP and EP together
@@ -172,4 +174,4 @@ class CustomRule(enum.Enum):
   FSDP_2D = "2d-fsdp"
   EP_AS_DP = "ep-as-dp"
   SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
-  DSV3_MLPERF_4K = "dsv3-mlperf-4k"  # ep-as-dp with attention weights sharded on expert
+  FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
