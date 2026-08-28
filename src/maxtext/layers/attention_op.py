@@ -197,6 +197,11 @@ def build_compressed_splash_mask(
   uncompressed = build_local_sliding_splash_mask(
       b, decoder_segment_ids, segment_positions, q_seq_len, s_len, sliding_window_size
   )
+  # Reshape with explicit dimension validation to avoid silent errors
+  expected_size = b * q_seq_len * c_len
+  actual_size = compressed_mask.size
+  if expected_size != actual_size:
+    raise ValueError(f"Dimension mismatch: cannot reshape {compressed_mask.shape} to ({b}, {q_seq_len}, {c_len}). Expected size {expected_size}, got {actual_size}")
   compressed_keep = _additive_to_boolean_mask(compressed_mask.reshape(b, q_seq_len, c_len))
   return jnp.concatenate([uncompressed, compressed_keep], axis=-1)
 
