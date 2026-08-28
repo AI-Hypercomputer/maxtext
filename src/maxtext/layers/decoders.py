@@ -27,7 +27,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Config, DecoderBlockType, ShardMode
+from maxtext.common.common_types import Config, DecoderBlockType, ShardMode, is_fp8_dtype
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.layers import linears
 from maxtext.layers import mhc
@@ -828,10 +828,11 @@ class Decoder(nn.Module):
         logits = logits / cfg.final_logits_soft_cap
         logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
+      logits_weight_dtype = cfg.dtype if is_fp8_dtype(cfg.weight_dtype) else cfg.weight_dtype
       logits = linears.dense_general(
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
-          weight_dtype=cfg.weight_dtype,
+          weight_dtype=logits_weight_dtype,
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=("embed_vocab", "vocab"),
           shard_mode=cfg.shard_mode,

@@ -28,6 +28,32 @@ PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
 
+
+def is_fp8_dtype(dtype: Any) -> bool:
+  """Checks whether a dtype is an FP8 data type."""
+  if dtype is None:
+    return False
+  if isinstance(dtype, str):
+    return dtype in (
+        "float8_e4m3fn",
+        "float8_e5m2",
+        "float8_e4m3fnuz",
+        "float8_e5m2fnuz",
+        "float8_e4m3b11fnuz",
+    )
+  if hasattr(dtype, "value") and isinstance(dtype.value, str):
+    return is_fp8_dtype(dtype.value)
+  fp8_types = [jnp.float8_e4m3fn, jnp.float8_e5m2]
+  for attr in ("float8_e4m3fnuz", "float8_e5m2fnuz", "float8_e4m3b11fnuz"):
+    if hasattr(jnp, attr):
+      fp8_types.append(getattr(jnp, attr))
+  try:
+    canon_dtype = jnp.dtype(dtype)
+    return canon_dtype in fp8_types
+  except (TypeError, ValueError):
+    return False
+
+
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 

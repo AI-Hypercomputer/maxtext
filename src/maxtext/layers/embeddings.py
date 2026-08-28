@@ -25,7 +25,7 @@ from jax.sharding import Mesh, NamedSharding
 
 from flax import nnx
 
-from maxtext.common.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from maxtext.common.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType, is_fp8_dtype
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 from maxtext.utils import max_logging
@@ -125,13 +125,12 @@ class Embed(nnx.Module):
     self.mesh = mesh
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
-    self.attend_dtype = attend_dtype
-
+    embed_weight_dtype = self.dtype if is_fp8_dtype(self.config.weight_dtype) else self.config.weight_dtype
     self.embedding = nnx.Param(
         embedding_init(
             rngs.params(),
             (self.num_embeddings, self.num_features),
-            self.config.weight_dtype,
+            embed_weight_dtype,
         ),
         sharding=("vocab", "embed_vocab"),
     )
