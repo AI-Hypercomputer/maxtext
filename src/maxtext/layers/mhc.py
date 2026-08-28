@@ -90,7 +90,7 @@ class _SplitAxesRMSNorm(nnx.Module):
     x = jnp.asarray(x, jnp.float32)
     mean2 = jnp.mean(jax.lax.square(x), axis=(-2, -1), keepdims=True)
     y = jnp.asarray(x * jax.lax.rsqrt(mean2 + self.epsilon), self.dtype)
-    scale = jnp.asarray(self.scale.get_value(), self.dtype)
+    scale = jnp.asarray(self.scale[...], self.dtype)
     return y * scale
 
 

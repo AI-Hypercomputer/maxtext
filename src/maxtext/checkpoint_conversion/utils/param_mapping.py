@@ -4172,7 +4172,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     def mhc_concat_fn(input_tensors, target_shape=None):
       if len(input_tensors) != 3:
         raise ValueError(f"mhc_concat_fn expected 3 tensors (pre, post, res), got {len(input_tensors)}")
-      tensors = [np.asarray(t).reshape((-1, t.shape[-1])) for t in input_tensors]
+      tensors = [arr.reshape((-1, arr.shape[-1])) for arr in map(np.asarray, input_tensors)]
       res = np.transpose(np.concatenate(tensors, axis=1))
       return res.reshape(target_shape) if target_shape is not None else res
 
