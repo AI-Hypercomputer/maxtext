@@ -68,10 +68,10 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     run_name=${run_id} \
     rl.loss_algo='grpo' \
     scan_layers=True \
-    num_batches=5 \
+    num_batches=2 \
     batch_size=4 \
     train_micro_batch_size=1 \
-    num_test_batches=5 \
+    num_test_batches=2 \
     model_name=${MODEL_NAME} \
     enable_single_controller=True \
     checkpoint_storage_use_zarr3=False \
@@ -95,7 +95,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 # Step 3: Run inference on the checkpoint produced by the RL run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/5/model_params \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.85 \
     prompt='Suggest some famous landmarks in London.' \

@@ -795,7 +795,11 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
     vision_block = mm_processor._get_vision_block(self.config)  # pylint: disable=protected-access
     model_name = getattr(self.config, "model_name", None)
-    if vision_block in ["qwen3_omni", "qwen3_vl", "qwen3_5"]:
+    if (
+        vision_block is None
+        or not getattr(self.config, "use_multimodal", False)
+        or vision_block in ["qwen3_omni", "qwen3_vl", "qwen3_5"]
+    ):
       return preprocessed_image
     elif model_name and model_name.startswith("qwen"):
       raise ValueError(

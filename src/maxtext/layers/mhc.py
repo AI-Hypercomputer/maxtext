@@ -310,9 +310,13 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
           1.0,
           eps=1e-6,
       )
-      # Moving away from einsum seems to allow XLA to perform better fusions
-      # bskd, bsk -> bsd
-      layer_input = jnp.sum(x * jnp.expand_dims(pre_mapping, axis=3), axis=2)
+      # bskd, bsk -> bsd (fused contracted GEMM)
+      layer_input = jnp.einsum(
+          "bsk,bskd->bsd",
+          pre_mapping,
+          x,
+          precision=self.matmul_precision,
+      )
 
     # 3. Pre-norm
     layer_input = norm_fn(layer_input)
@@ -358,9 +362,13 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
     res_mapping = self.res_mapping(h_res)
 
-    # Moving away from einsum seems to allow XLA to perform better fusions
-    # bskd,bskm -> bsmd
-    res_out = jnp.sum(jnp.expand_dims(x, axis=3) * jnp.expand_dims(res_mapping, axis=4), axis=2)
+    # bskm,bskd -> bsmd (fused contracted GEMM)
+    res_out = jnp.einsum(
+        "bskm,bskd->bsmd",
+        res_mapping,
+        x,
+        precision=self.matmul_precision,
+    )
     return res_out + post_out, metadata
 
 

@@ -211,15 +211,27 @@ class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
 
     # Registered Qwen vision models bypass image padding
     for vb in ["qwen3_vl", "qwen3_omni", "qwen3_5"]:
-      transform = PadOrTrimToMaxLength(max_length=128, pad_id=0, config=SimpleNamespace(vision_encoder_block=vb))
+      transform = PadOrTrimToMaxLength(
+          max_length=128, pad_id=0, config=SimpleNamespace(vision_encoder_block=vb, use_multimodal=True)
+      )
       self.assertIs(transform._pad_image_and_mask(dummy_output), dummy_output)  # pylint: disable=protected-access
 
-    # Unregistered Qwen model raises ValueError
+    # Unregistered Qwen model raises ValueError when use_multimodal=True
     unreg_transform = PadOrTrimToMaxLength(
-        max_length=128, pad_id=0, config=SimpleNamespace(vision_encoder_block="unregistered", model_name="qwen3-future")
+        max_length=128,
+        pad_id=0,
+        config=SimpleNamespace(vision_encoder_block="unregistered", model_name="qwen3-future", use_multimodal=True),
     )
     with self.assertRaisesRegex(ValueError, "registered in `PadOrTrimToMaxLength`"):
       unreg_transform._pad_image_and_mask(dummy_output)  # pylint: disable=protected-access
+
+    # Text-only Qwen model (use_multimodal=False) bypasses error and returns preprocessed_image
+    text_transform = PadOrTrimToMaxLength(
+        max_length=128,
+        pad_id=0,
+        config=SimpleNamespace(vision_encoder_block=None, model_name="qwen3-0.6b", use_multimodal=False),
+    )
+    self.assertIs(text_transform._pad_image_and_mask(dummy_output), dummy_output)  # pylint: disable=protected-access
 
     # None pixel_values raises ValueError
     with self.assertRaisesRegex(ValueError, "must have pixel_values"):

@@ -112,6 +112,7 @@ EXCLUDED_FILES=(
   '^\.github/scripts/'
   '^tools/'
   '\.md$'
+  'src/maxtext/version.py$'
 )
 
 # Loop through every changed file

@@ -25,6 +25,9 @@ MODEL_NAME='gemma3-4b'
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 MULTIMODAL_SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned_multimodal/${run_id}/0/items
 
+# Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
+export DATASET_PATH=${DATASET_PATH:-gs://maxtext-dataset}
+
 # Step 1: Install google-jetstream
 python3 -m pip install google-jetstream@https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip --no-deps
 
@@ -44,21 +47,28 @@ python3 -m maxtext.inference.decode \
     prompt=\'Describe\ image\ \<start_of_image\>\' \
     image_path=\'tests/assets/test_image.jpg\' \
     attention=\'dot_product\' \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    enable_single_controller=${use_pathways} \
     skip_jax_distributed_system=True
 
 # Step 3: Run SFT on the MaxText checkpoint on ChartQA dataset
+if [ -n "${run_id}" ]; then
+  gcloud storage rm --recursive "${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}" || true
+fi
 python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/post_train/sft-vision-chartqa.yml \
     run_name=${run_id} \
     model_name=${MODEL_NAME} \
     per_device_batch_size=1 \
     max_prefill_predict_length=1024 \
     max_target_length=2048 \
-    steps=5 \
+    steps=2 \
     scan_layers=true \
     async_checkpointing=False \
     attention=\'dot_product\' \
-    dataset_type=hf hf_path=parquet \
-    hf_train_files=gs://aireenmei-multipod/dataset/hf/chartqa/train-* \
+    dataset_type=hf \
+    hf_path=parquet \
+    hf_train_files=${DATASET_PATH}/hf/chartqa/train-* \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/multimodal/sft \
     load_parameters_path=${MULTIMODAL_SCANNED_CKPT_PATH} \
     dtype=bfloat16 \
@@ -66,13 +76,14 @@ python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DI
     sharding_tolerance=0.05 \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
+    checkpoint_storage_concurrent_gb=30 \
     enable_single_controller=${use_pathways} \
     grain_worker_count=0
 
 # Step 4: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}/checkpoints/4/items \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_prefill_predict_length=272 \
@@ -84,4 +95,8 @@ python3 -m maxtext.inference.decode \
     tokenizer_type=huggingface \
     prompt=\'Describe\ image\ \<start_of_image\>\' \
     image_path=\'tests/assets/test_image.jpg\' \
-    attention=\'dot_product\' skip_jax_distributed_system=True
+    attention=\'dot_product\' \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    enable_single_controller=${use_pathways} \
+    skip_jax_distributed_system=True

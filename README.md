@@ -16,7 +16,11 @@
 
 # MaxText
 
-[![MaxText Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml/badge.svg)](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml?query=event%3Aschedule)
+[![MaxText Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml/badge.svg?event=schedule)](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml)
+[![PyPI version](https://img.shields.io/pypi/v/maxtext)](https://pypi.org/project/maxtext/)
+
+[**Documentation**](https://maxtext.readthedocs.io/en)
+| [**Release Notes**](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/release_notes.md)
 
 > **_NOTE:_** We recommend customers use the latest [PyPI release](https://pypi.org/project/maxtext/) (see [installation guide](docs/install_maxtext.md)) or corresponding [pre-built container images](docs/tutorials/build_maxtext.md#pre-built-maxtext-docker-images), while the `main` branch is not expected to be production-ready.
 >
@@ -45,6 +49,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 ## 🔥 Latest news 🔥
 
 - [August 5, 2026] DeepSeek V4 Flash (284B) is now supported. See the [user guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/deepseek/Run_DeepSeek.md) for checkpoint conversion and evaluation details.
+- [August 3, 2026] Tokamax GMM v2 is now available for MoE kernel. See the [MoE configuration guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/reference/core_concepts/moe_configuration.md) for details on how to enable it.
 - [July 15, 2026] RL is now supported for Qwen3 30B and GPT-OSS 20B. See the [Qwen3 30B RL tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_qwen3_30b.html) and [GPT-OSS 20B RL tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_gptoss_20b.html) for details.
 - [June 9, 2026] Qwen3.5 35B & 397B is now [supported](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/moe/run_qwen_moe.md).
 - [May 29, 2026] A new eval framework is now available for running lm-eval, evalchemy, and custom benchmarks against MaxText checkpoints. See the [Evaluation guide](https://maxtext.readthedocs.io/en/latest/guides/eval_framework.html) to get started.
@@ -54,16 +59,16 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 - [April 13, 2026] Kimi-K2 is now supported, along with MuonClip optimizer. Try the [kimi-k2-1t](https://github.com/AI-Hypercomputer/maxtext/blob/fa5b5ebf9a8e4f7a33bd88eae051dc21f3147791/src/maxtext/configs/models/kimi-k2-1t.yml) config and check the [user guide](https://github.com/AI-Hypercomputer/maxtext/blob/fa5b5ebf9a8e4f7a33bd88eae051dc21f3147791/tests/end_to_end/tpu/kimi/Run_Kimi.md).
 - [April 10, 2026] [DeepSeek-V3.2](https://arxiv.org/pdf/2512.02556) is now supported, featuring DeepSeek Sparse Attention for long context. Try it out with the [deepseek3.2-671b](https://github.com/AI-Hypercomputer/maxtext/blob/20d93f62a91899dbbb8f23562973d75104411d3a/src/maxtext/configs/models/deepseek3.2-671b.yml) config. See the [user guide](https://github.com/AI-Hypercomputer/maxtext/blob/20d93f62a91899dbbb8f23562973d75104411d3a/tests/end_to_end/tpu/deepseek/Run_DeepSeek.md) for more details.
 - [April 2, 2026] Gemma 4 multi-modal models (26B MoE, 31B dense) are now supported! Try them out with our [gemma4-26b](https://github.com/AI-Hypercomputer/maxtext/blob/cdc587f0935a5e2d6f8287b96669cf2e87a0acdc/src/maxtext/configs/models/gemma4-26b.yml) and [gemma4-31b](https://github.com/AI-Hypercomputer/maxtext/blob/cdc587f0935a5e2d6f8287b96669cf2e87a0acdc/src/maxtext/configs/models/gemma4-31b.yml) configs. For more details, see [Run_Gemma4.md](https://github.com/AI-Hypercomputer/maxtext/blob/cdc587f0935a5e2d6f8287b96669cf2e87a0acdc/tests/end_to_end/tpu/gemma4/Run_Gemma4.md).
+
+<details>
+<summary><b>View full news archive</b></summary>
+
 - [March 6, 2026] New features from DeepSeek-AI are now supported: Conditional Memory via Scalable Lookup ([Engram](https://arxiv.org/abs/2601.07372)) and Manifold-Constrained Hyper-Connections ([mHC](https://arxiv.org/abs/2512.24880)). Try them out with our [deepseek-custom](https://github.com/AI-Hypercomputer/maxtext/blob/92f55e3d8123e225c2714a9bac40dd0a7f89efb0/src/maxtext/configs/models/deepseek-custom.yml) starter config.
 - [March 5, 2026] New `tpu-post-train` [target in PyPI](https://pypi.org/project/maxtext). Please also use this installation option for running vllm_decode. See the [MaxText installation instructions](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) for more info.
 - [March 5, 2026] [Qwen3-Next](https://github.com/AI-Hypercomputer/maxtext/blob/7656eb8d1c9eb0dd91e617a6fdf6ad805221221a/tests/end_to_end/tpu/qwen/next/run_qwen3_next.md) is now supported.
 - [February 27, 2026] New MaxText structure! MaxText has been restructured according to [RESTRUCTURE.md](https://github.com/AI-Hypercomputer/maxtext/blob/1b9e38aa0a19b6018feb3aed757406126b6953a1/RESTRUCTURE.md). Please feel free to share your thoughts and feedback.
 - [December 22, 2025] [Muon optimizer](https://kellerjordan.github.io/posts/muon) is now supported.
 - [December 10, 2025] DeepSeek V3.1 is now supported. Use existing configs for [DeepSeek V3 671B](https://github.com/AI-Hypercomputer/maxtext/blob/7656eb8d1c9eb0dd91e617a6fdf6ad805221221a/src/maxtext/configs/models/deepseek3-671b.yml) and load in V3.1 checkpoint to use model.
-
-<details>
-<summary><b>View full news archive</b></summary>
-
 - [December 9, 2025] [New RL and SFT Notebook tutorials](https://github.com/AI-Hypercomputer/maxtext/tree/7656eb8d1c9eb0dd91e617a6fdf6ad805221221a/src/maxtext/examples) are available.
 - [December 4, 2025] The [ReadTheDocs documentation site](https://maxtext.readthedocs.io/en/latest/index.html) has been reorganized.
 - [December 3, 2025] Multi-host support for GSPO and GRPO is now available via [new RL tutorials](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html).
