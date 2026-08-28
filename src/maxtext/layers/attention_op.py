@@ -158,8 +158,8 @@ def build_local_sliding_splash_mask(
     mask &= distance < sliding_window_size
   mask = jnp.broadcast_to(mask, (batch, q_seq_len, kv_seq_len))
   if decoder_segment_ids is not None:
-    segment = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
-    mask = jnp.logical_and(mask, segment[..., :kv_seq_len])
+    segment = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :kv_seq_len]
+    mask = jnp.logical_and(mask, segment)
   return mask
 
 
@@ -2240,7 +2240,7 @@ class AttentionOp(nnx.Module):
 
           attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
           if indexer_mask.dtype != jnp.bool_:
-            indexer_mask = jnp.isclose(indexer_mask, 0.0)
+            indexer_mask = indexer_mask >= DEFAULT_MASK_VALUE * 0.5
 
           if record_max_logits:
             attention_output, max_logits = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
