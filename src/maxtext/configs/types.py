@@ -66,6 +66,8 @@ class DType(str, Enum):
   BFLOAT16 = "bfloat16"
   FLOAT32 = "float32"
   FLOAT16 = "float16"
+  FLOAT8_E4M3FN = "float8_e4m3fn"
+  FLOAT8_E5M2 = "float8_e5m2"
 
 
 class MatmulPrecision(str, Enum):
@@ -223,6 +225,7 @@ ModelName = Literal[
     "llama3-70b",
     "llama3.1-70b-Instruct",
     "llama3.1-8b",
+    "llama3.1-8b-fp8",
     "llama3.1-70b",
     "llama3.1-405b",
     "llama3.3-70b",
@@ -456,6 +459,13 @@ class Quantization(BaseModel):
   quantization: None | QuantizationType = Field(
       QuantizationType.NONE,
       description="Activates quantization for transformer layers.",
+  )
+  unquantized_modules: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of submodule names or name patterns to keep unquantized in model dtype "
+          "(e.g. bfloat16) even when weight_dtype is FP8."
+      ),
   )
   replicate_quant_scale: bool = Field(
       False,

@@ -207,6 +207,178 @@ class DenseGeneralTest(unittest.TestCase):
   def test_axis_0(self):
     self._run_dense_test(0, 2, (3, 4, 8))
 
+  def test_dequantize_weight_scalar(self):
+    w = jnp.ones((4, 8), dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(0.5, dtype=jnp.float32)
+    w_dequant = linears.dequantize_weight(w, scale, compute_dtype=jnp.bfloat16)
+    self.assertEqual(w_dequant.shape, (4, 8))
+    self.assertEqual(w_dequant.dtype, jnp.bfloat16)
+    np.testing.assert_allclose(w_dequant, np.full((4, 8), 0.5, dtype=np.float32), rtol=1e-3)
+
+  def test_dequantize_weight_per_channel(self):
+    w = jnp.ones((4, 8), dtype=jnp.float8_e4m3fn)
+    scale = jnp.arange(1, 9, dtype=jnp.float32)
+    w_dequant = linears.dequantize_weight(w, scale, compute_dtype=jnp.bfloat16)
+    self.assertEqual(w_dequant.shape, (4, 8))
+    expected = np.tile(np.arange(1, 9, dtype=np.float32), (4, 1))
+    np.testing.assert_allclose(w_dequant, expected, rtol=1e-3)
+
+  def test_dequantize_weight_block_wise(self):
+    w = jnp.ones((4, 8), dtype=jnp.float8_e4m3fn)
+    scale = jnp.array([[2.0, 3.0], [4.0, 5.0]], dtype=jnp.float32)  # 2x2 blocks of size 2x4
+    w_dequant = linears.dequantize_weight(w, scale, compute_dtype=jnp.bfloat16)
+    self.assertEqual(w_dequant.shape, (4, 8))
+    expected = np.block([[np.full((2, 4), 2.0), np.full((2, 4), 3.0)], [np.full((2, 4), 4.0), np.full((2, 4), 5.0)]])
+    np.testing.assert_allclose(w_dequant, expected, rtol=1e-3)
+
+  def test_fp8_e4m3fn_dense_general(self):
+    batch_size = 2
+    in_features = 4
+    out_features = 8
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        rngs=self.rngs,
+    )
+
+    self.assertEqual(layer.kernel[...].dtype, jnp.float8_e4m3fn)
+    self.assertIsNotNone(layer.kernel_scale)
+    self.assertEqual(layer.kernel_scale[...].shape, ())
+
+    inputs = jnp.ones((batch_size, in_features), dtype=jnp.bfloat16)
+    outputs = layer(inputs)
+
+    self.assertEqual(outputs.shape, (batch_size, out_features))
+    self.assertEqual(outputs.dtype, jnp.bfloat16)
+
+  def test_fp8_e5m2_dense_general(self):
+    batch_size = 2
+    in_features = 4
+    out_features = 8
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float8_e5m2,
+        dtype=jnp.bfloat16,
+        rngs=self.rngs,
+    )
+
+    self.assertEqual(layer.kernel[...].dtype, jnp.float8_e5m2)
+    self.assertIsNotNone(layer.kernel_scale)
+
+    inputs = jnp.ones((batch_size, in_features), dtype=jnp.bfloat16)
+    outputs = layer(inputs)
+
+    self.assertEqual(outputs.shape, (batch_size, out_features))
+    self.assertEqual(outputs.dtype, jnp.bfloat16)
+
+  def test_fp8_block_wise_scale(self):
+    in_features = 128
+    out_features = 256
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        block_size=64,
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+
+    self.assertEqual(layer.kernel[...].shape, (128, 256))
+    self.assertEqual(layer.kernel_scale[...].shape, (2, 4))
+    self.assertEqual(layer.scale_axes, ("embed", "mlp"))
+
+    inputs = jnp.ones((2, in_features), dtype=jnp.bfloat16)
+    outputs = layer(inputs)
+    self.assertEqual(outputs.shape, (2, out_features))
+
+  def test_kernel_scale_sharding_inference(self):
+    # Test block scale sharding
+    layer_block = linears.DenseGeneral(
+        in_features_shape=64,
+        out_features_shape=128,
+        weight_dtype=jnp.float8_e4m3fn,
+        block_size=32,
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+    self.assertEqual(layer_block.scale_axes, ("embed", "mlp"))
+
+    # Test scalar scale sharding
+    layer_scalar = linears.DenseGeneral(
+        in_features_shape=64,
+        out_features_shape=128,
+        weight_dtype=jnp.float8_e4m3fn,
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+    self.assertEqual(layer_scalar.scale_axes, ())
+
+    # Test per-channel scale sharding
+    layer_channel = linears.DenseGeneral(
+        in_features_shape=64,
+        out_features_shape=128,
+        weight_dtype=jnp.float8_e4m3fn,
+        scale_shape=(1, 128),
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+    self.assertEqual(layer_channel.scale_axes, (None, "mlp"))
+
+  def test_fp8_slice_bounds(self):
+    in_features = 64
+    out_features = 128
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        block_size=32,
+        rngs=self.rngs,
+    )
+    inputs = jnp.ones((2, in_features), dtype=jnp.bfloat16)
+    sliced_outputs = layer(inputs, slice_bounds=(0, 32))
+    self.assertEqual(sliced_outputs.shape, (2, 32))
+    self.assertEqual(sliced_outputs.dtype, jnp.bfloat16)
+
+    full_outputs = layer(inputs)
+    np.testing.assert_allclose(sliced_outputs, full_outputs[:, :32], rtol=1e-3, atol=1e-3)
+
+  def test_dequantize_weight_block_divisibility(self):
+    w = jnp.ones((64, 128), dtype=jnp.float8_e4m3fn)
+    scale_valid = jnp.ones((2, 4), dtype=jnp.float32) * 2.0
+    dequant = linears.dequantize_weight(w, scale_valid, compute_dtype=jnp.bfloat16)
+    self.assertEqual(dequant.shape, (64, 128))
+    self.assertEqual(dequant.dtype, jnp.bfloat16)
+    np.testing.assert_allclose(dequant, 2.0, rtol=1e-3, atol=1e-3)
+
+    scale_invalid = jnp.ones((3, 5), dtype=jnp.float32)
+    with self.assertRaises(ValueError):
+      linears.dequantize_weight(w, scale_invalid, compute_dtype=jnp.bfloat16)
+
+  def test_deepseek_v4_grouped_linear_fp8(self):
+    layer = linears.DeepSeekV4GroupedLinear(
+        in_features_per_group=16,
+        out_features=128,
+        n_groups=4,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+    self.assertIsNotNone(layer.kernel_scale)
+    self.assertEqual(layer.scale_axes, ())
+    inputs = jnp.ones((2, 4, 16), dtype=jnp.bfloat16)
+    out = layer(inputs)
+    self.assertEqual(out.shape, (2, 4, 32))
+    self.assertEqual(out.dtype, jnp.bfloat16)
+
 
 class MlpBlockTest(unittest.TestCase):
   """Tests for MlpBlock."""

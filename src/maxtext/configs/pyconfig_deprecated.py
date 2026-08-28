@@ -437,6 +437,7 @@ def validate_model_name(s: str) -> bool:
       "llama3-8b",
       "llama3-70b",
       "llama3.1-8b",
+      "llama3.1-8b-fp8",
       "llama3.1-70b",
       "llama3.1-405b",
       "llama3.3-70b",
