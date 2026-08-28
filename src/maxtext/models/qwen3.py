@@ -25,7 +25,7 @@ import jax
 import jax.nn
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P
 import jax.numpy as jnp
 
 from flax import linen as nn
@@ -184,23 +184,27 @@ def naive_jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
-def jax_chunk_gated_delta_rule(
+def _gdn_chunk_prepare(
     query: Array,
     key: Array,
     value: Array,
     g: Array,
     beta: Array,
-    chunk_size: int = 64,
-    initial_state: None | Array = None,
-    use_qk_norm_in_gdn: bool = False,
-    compute_dtype: jnp.dtype = jnp.bfloat16,
-) -> tuple[Array, None | Array]:
-  """Optimized JAX implementation of Gated Delta Rule."""
-  # =========================================================================
-  # STAGE 1: PREPARATION & PADDING
-  # =========================================================================
-  initial_dtype = query.dtype
+    chunk_size: int,
+    use_qk_norm_in_gdn: bool,
+    compute_dtype: jnp.dtype,
+) -> tuple[tuple[Array, ...], tuple[int, ...]]:
+  """Builds the per-chunk WY factors consumed by the inter-chunk recurrence.
 
+  This is STAGE 1 + STAGE 2 of the chunked gated delta rule: normalize, pad to a
+  whole number of chunks, and solve for the WY representation of each chunk. The
+  returned `xs` are transposed so the leading axis is the chunk index, ready for
+  `lax.scan`.
+
+  Returns:
+    A pair `(xs, meta)` where `xs = (w, u, q, k, g_cumsum)` and
+    `meta = (batch, seq_len, num_heads, k_dim, v_dim, pad_len)`.
+  """
   if use_qk_norm_in_gdn:
     query = l2norm(query, dim=-1, eps=1e-6)
     key = l2norm(key, dim=-1, eps=1e-6)
@@ -283,40 +287,51 @@ def jax_chunk_gated_delta_rule(
   w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
   w_chunks = w_chunks.astype(compute_dtype)
 
-  # =========================================================================
-  # STAGE 3: INTER-CHUNK RECURRENCE (Scan)
-  # =========================================================================
+  # Transpose so the chunk index leads, ready for `lax.scan`.
   scan_perm_vec = (1, 0, 2, 3, 4)
   scan_perm_scl = (1, 0, 2, 3)
 
-  w_scan = w_chunks.transpose(scan_perm_vec)
-  u_scan = u_chunks.transpose(scan_perm_vec)
-  k_scan = k_c.transpose(scan_perm_vec)
-  q_scan = q_c.transpose(scan_perm_vec)
-  g_scan = g_cumsum.transpose(scan_perm_scl)
+  xs = (
+      w_chunks.transpose(scan_perm_vec),
+      u_chunks.transpose(scan_perm_vec),
+      q_c.transpose(scan_perm_vec),
+      k_c.transpose(scan_perm_vec),
+      g_cumsum.transpose(scan_perm_scl),
+  )
+  return xs, (B, seq_len, H, K_dim, V_dim, pad_len)
 
-  if initial_state is None:
-    h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32)
+
+def _gdn_scan_body(carry, args, *, chunk_size: int, compute_output: bool, propagate_transition: bool):
+  """One inter-chunk step of the gated delta rule (STAGE 3).
+
+  The chunk recurrence is affine in the incoming state `h`:
+
+      h_out = (gamma * I - k_tilde^T @ w) @ h + k_tilde^T @ u   ==  M @ h + U
+      o     = (q_g - attn_i @ w) @ h + attn_i @ u
+
+  `propagate_transition` additionally carries the composed transition `M` for all
+  chunks seen so far, which is what lets context parallelism combine the per-rank
+  results with a prefix scan (see `jax_chunk_gated_delta_rule_cp`).
+  """
+  if propagate_transition:
+    h, m = carry
   else:
-    h_init = initial_state.astype(jnp.float32)
+    h, m = carry, None
+  w, u, q, k, g = args
+  prec = jax.lax.Precision.HIGHEST
 
-  xs = (w_scan, u_scan, q_scan, k_scan, g_scan)
+  # --- Delta Rule Subtraction (v_prime and v_new) ---
+  # w serves as k_cumdecay, u serves as value_intra
+  v_prime = jnp.matmul(w.astype(jnp.float32), h, precision=prec)
+  v_new = u.astype(jnp.float32) - v_prime
 
-  def scan_body(h, args):
-    w, u, q, k, g = args
-    prec = jax.lax.Precision.HIGHEST
-
-    # --- Output Computation ---
+  o_c = None
+  if compute_output:
     # 1. Inter-chunk: q(dtype) * exp(g)(f32) -> f32
     q_g = q.astype(jnp.float32) * jnp.exp(g)[..., None]
     attn_inter = jnp.matmul(q_g, h, precision=prec)
 
-    # 2. Delta Rule Subtraction (v_prime and v_new)
-    # w serves as k_cumdecay, u serves as value_intra
-    v_prime = jnp.matmul(w.astype(jnp.float32), h, precision=prec)
-    v_new = u.astype(jnp.float32) - v_prime
-
-    # 3. Intra-chunk: q(dtype) @ k(dtype) -> f32
+    # 2. Intra-chunk: q(dtype) @ k(dtype) -> f32
     attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=prec)
     attn = attn.astype(jnp.float32)
 
@@ -331,36 +346,146 @@ def jax_chunk_gated_delta_rule(
     # Note: We do NOT multiply attn_i by beta here. The Delta rule mathematically
     # absorbed beta inside v_new (via u).
 
-    # 4. Combine Core Output
+    # 3. Combine Core Output
     term2 = jnp.matmul(attn_i, v_new, precision=prec)
     o_c = attn_inter + term2
 
-    # --- State Update ---
-    g_i_last_exp = jnp.exp(g[..., -1, None, None])
-    h_new = h * g_i_last_exp
+  # --- State Update ---
+  g_i_last_exp = jnp.exp(g[..., -1, None, None])
+  h_new = h * g_i_last_exp
 
-    # Apply Delta Rule K decay to state
-    g_diff_exp_state = jnp.exp(g[..., -1, None] - g)[..., None]
-    k_i_g_diff = k.astype(jnp.float32) * g_diff_exp_state
+  # Apply Delta Rule K decay to state
+  g_diff_exp_state = jnp.exp(g[..., -1, None] - g)[..., None]
+  k_i_g_diff = k.astype(jnp.float32) * g_diff_exp_state
 
-    update_term = jnp.matmul(k_i_g_diff.swapaxes(-1, -2), v_new, precision=prec)
-    h_new = h_new + update_term
+  update_term = jnp.matmul(k_i_g_diff.swapaxes(-1, -2), v_new, precision=prec)
+  h_new = h_new + update_term
 
+  if not propagate_transition:
     return h_new, o_c
 
-  final_h, o_chunks = lax.scan(scan_body, h_init, xs)
+  # M_new = (gamma * I - k_tilde^T @ w) @ M, kept in the low-rank form so the cost
+  # is 2 * K^2 * C rather than a dense K^3 product.
+  w_f32 = w.astype(jnp.float32)
+  m_new = m * g_i_last_exp - jnp.matmul(k_i_g_diff.swapaxes(-1, -2), jnp.matmul(w_f32, m, precision=prec), precision=prec)
+  return (h_new, m_new), o_c
 
-  # =========================================================================
-  # STAGE 4: FINALIZATION
-  # =========================================================================
+
+def _gdn_finalize(o_chunks, meta, initial_dtype) -> Array:
+  """STAGE 4: un-chunk the scan outputs and drop the chunk padding."""
+  B, seq_len, H, _, V_dim, pad_len = meta
   o = o_chunks.transpose(1, 0, 3, 2, 4)
   o = o.reshape(B, -1, H, V_dim)
-
   if pad_len > 0:
     o = o[:, :seq_len, :, :]
+  return o.astype(initial_dtype)
 
-  o = o.astype(initial_dtype)
 
+def jax_chunk_gated_delta_rule(
+    query: Array,
+    key: Array,
+    value: Array,
+    g: Array,
+    beta: Array,
+    chunk_size: int = 64,
+    initial_state: None | Array = None,
+    use_qk_norm_in_gdn: bool = False,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+) -> tuple[Array, None | Array]:
+  """Optimized JAX implementation of Gated Delta Rule."""
+  initial_dtype = query.dtype
+
+  xs, meta = _gdn_chunk_prepare(query, key, value, g, beta, chunk_size, use_qk_norm_in_gdn, compute_dtype)
+  B, _, H, K_dim, V_dim, _ = meta
+
+  if initial_state is None:
+    h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32)
+  else:
+    h_init = initial_state.astype(jnp.float32)
+
+  scan_body = functools.partial(_gdn_scan_body, chunk_size=chunk_size, compute_output=True, propagate_transition=False)
+  final_h, o_chunks = lax.scan(scan_body, h_init, xs)
+
+  o = _gdn_finalize(o_chunks, meta, initial_dtype)
+  return o, (final_h if initial_state is not None else None)
+
+
+def jax_chunk_gated_delta_rule_cp(
+    query: Array,
+    key: Array,
+    value: Array,
+    g: Array,
+    beta: Array,
+    initial_state: None | Array = None,
+    *,
+    cp_axis_name: str,
+    chunk_size: int = 64,
+    use_qk_norm_in_gdn: bool = False,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+) -> tuple[Array, None | Array]:
+  """Context-parallel gated delta rule. Must be called inside a `shard_map`.
+
+  Each rank owns a contiguous slice of the sequence. Because the chunk recurrence
+  is affine in the incoming state, a rank's whole shard collapses to a single
+  affine map `(M_r, U_r)`; combining shards is then a prefix scan over those maps.
+
+  The cross-rank payload is `M_r` of shape `(B, H, K, K)` plus `U_r` of shape
+  `(B, H, K, V)` -- **independent of sequence length**, unlike softmax-attention
+  context parallelism which exchanges O(S) key/value tensors.
+
+  Three phases:
+    1. Local pass from a zero state, carrying the composed transition `M_r`.
+       Outputs are skipped here since the true incoming state is not known yet.
+    2. `all_gather` the `(M_r, U_r)` pairs and build the exclusive prefix, giving
+       each rank its true incoming state.
+    3. Local pass again with the correct incoming state, reusing the WY factors
+       computed in phase 1, now emitting outputs.
+
+  Args:
+    cp_axis_name: Mesh axis the sequence is sharded over, as named inside the
+      enclosing `shard_map`.
+
+  Returns:
+    `(output, final_state)` with the same convention as
+    `jax_chunk_gated_delta_rule`. `final_state` is the *global* end-of-sequence
+    state, identical on every rank.
+  """
+  initial_dtype = query.dtype
+
+  xs, meta = _gdn_chunk_prepare(query, key, value, g, beta, chunk_size, use_qk_norm_in_gdn, compute_dtype)
+  B, _, H, K_dim, V_dim, _ = meta
+
+  # --- Phase 1: local affine map, starting from a zero state. ---
+  h_zero = jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32)
+  m_identity = jnp.broadcast_to(jnp.eye(K_dim, dtype=jnp.float32), (B, H, K_dim, K_dim))
+  state_only_body = functools.partial(
+      _gdn_scan_body, chunk_size=chunk_size, compute_output=False, propagate_transition=True
+  )
+  (u_local, m_local), _ = lax.scan(state_only_body, (h_zero, m_identity), xs)
+
+  # --- Phase 2: exchange the affine maps and take the exclusive prefix. ---
+  if initial_state is None:
+    h_global = jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32)
+  else:
+    h_global = initial_state.astype(jnp.float32)
+
+  # (cp, B, H, K, K) and (cp, B, H, K, V): constant in sequence length.
+  m_all = jax.lax.all_gather(m_local, cp_axis_name, axis=0, tiled=False)
+  u_all = jax.lax.all_gather(u_local, cp_axis_name, axis=0, tiled=False)
+
+  def prefix_body(h, m_u):
+    m_r, u_r = m_u
+    h_next = jnp.matmul(m_r, h, precision=jax.lax.Precision.HIGHEST) + u_r
+    return h_next, h  # emit the state *entering* rank r (exclusive prefix)
+
+  final_h, h_incoming = lax.scan(prefix_body, h_global, (m_all, u_all))
+  h_init = jax.lax.dynamic_index_in_dim(h_incoming, jax.lax.axis_index(cp_axis_name), axis=0, keepdims=False)
+
+  # --- Phase 3: local pass with the true incoming state. ---
+  output_body = functools.partial(_gdn_scan_body, chunk_size=chunk_size, compute_output=True, propagate_transition=False)
+  _, o_chunks = lax.scan(output_body, h_init, xs)
+
+  o = _gdn_finalize(o_chunks, meta, initial_dtype)
   return o, (final_h if initial_state is not None else None)
 
 
@@ -569,6 +694,32 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         rngs=rngs,
     )
 
+  def _context_parallel_axis(self, seq_len: int) -> tuple[str | None, int]:
+    """Returns the mesh axis the sequence is sharded over, and its size.
+
+    Returns `(None, 1)` when context parallelism is off or does not apply (single
+    token decode steps, or a sequence that cannot be split evenly).
+    """
+    axis = getattr(self.config, "context_sharding", "context")
+    if self.mesh is None or axis not in self.mesh.axis_names:
+      return None, 1
+    size = self.mesh.shape[axis]
+    if size <= 1 or seq_len <= 1:
+      return None, 1
+    if seq_len % size != 0:
+      raise ValueError(
+          f"GDN context parallelism requires the sequence length ({seq_len}) to be divisible by the "
+          f"'{axis}' mesh axis size ({size})."
+      )
+    if getattr(self.config, "context_parallel_load_balance", False):
+      raise ValueError(
+          "GDN context parallelism requires context_parallel_load_balance=False. The gated delta rule "
+          "is a sequential recurrence, so each rank must own a contiguous, in-order slice of the "
+          "sequence; the load-balancing reorder interleaves chunks across ranks and would silently "
+          "compute the wrong result."
+      )
+    return axis, size
+
   def __call__(
       self,
       hidden_states: Array,
@@ -581,6 +732,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # hidden_states: (B, S, E)
     cfg = self.config
     batch, seq_len, _ = hidden_states.shape
+    cp_axis_name, cp_size = self._context_parallel_axis(seq_len)
 
     active_cache = kv_cache if kv_cache is not None else self.cache
 
@@ -626,6 +778,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           dims=(0,),
           allow_remove_axes=True,
       )
+      # Keep the sequence sharded under context parallelism. Replicating it here would
+      # all-gather the whole sequence and defeat the point of splitting it in the first
+      # place; the causal depthwise conv below only needs a `gdn_conv_kernel_dim - 1`
+      # token halo, which the SPMD partitioner emits as a collective-permute.
+      if cp_size > 1:
+        qkvz_pspec = P(qkvz_pspec[0], cp_axis_name, *qkvz_pspec[2:])
       qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
       mixed_qkvz = jax.lax.with_sharding_constraint(mixed_qkvz, qkvz_sharding)
 
@@ -677,7 +835,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             truncate_sharded_tensor,
         )
         from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
       except ImportError as e:
         raise ImportError(
             "GDN attention kernel require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
@@ -700,8 +857,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       mixed_qkv = jax.shard_map(
           lambda q, k, v: jnp.concatenate([q, k, v], axis=-1),
           mesh=self.mesh,
-          in_specs=(P_spec(attn_data, attn_head),) * 3,
-          out_specs=P_spec(attn_data, attn_head),
+          in_specs=(P(attn_data, attn_head),) * 3,
+          out_specs=P(attn_data, attn_head),
           check_vma=False,
       )(q_flat, k_flat, v_flat)
 
@@ -906,6 +1063,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           dims=(0,),
           allow_remove_axes=True,
       )
+      # Under context parallelism the sequence stays sharded inside the shard_map and
+      # the recurrence is stitched back together with a prefix scan over the per-rank
+      # affine maps. The recurrent state itself is never sequence-sharded, so
+      # `state_pspec` is unchanged and stays replicated across the context axis.
+      if cp_size > 1:
+        qkv_pspec = P(qkv_pspec[0], cp_axis_name, *qkv_pspec[2:])
+        g_beta_pspec = P(g_beta_pspec[0], cp_axis_name, *g_beta_pspec[2:])
 
       @functools.partial(
           jax.shard_map,
@@ -925,6 +1089,19 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           check_vma=False,
       )
       def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h):
+        if cp_size > 1:
+          return jax_chunk_gated_delta_rule_cp(
+              query=q,
+              key=k,
+              value=v,
+              g=g_val,
+              beta=beta_val,
+              cp_axis_name=cp_axis_name,
+              chunk_size=cfg.gdn_chunk_size,
+              initial_state=init_h,
+              use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+              compute_dtype=cfg.dtype,
+          )
         return jax_chunk_gated_delta_rule(
             query=q,
             key=k,
