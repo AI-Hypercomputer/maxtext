@@ -90,6 +90,15 @@ are covered:
           use_weight_converter=true debug_converter=true \
           <plus the common flags above>
 
+    Setting `use_weight_converter=false use_standalone_converter=true` with the
+    same flags instead runs the pre-WeightConverter per-model converter
+    (`Qwen3MaxTextToVLLMConverter` / `Qwen35MaxTextToVLLMConverter` /
+    `Gemma4MaxTextToVLLMConverter` in `torchax_converter/*_moe.py`), for A/B
+    comparison. This is the real legacy baseline for mode 2: tunix's generic
+    `transfer_state_with_mappings` has no MoE/expert coverage for these models,
+    so `use_weight_converter=false` alone still runs the new rule-table
+    converter for them.
+
 Currently this validator supports: qwen3-30b-a3b, qwen3-30b-a3b-base, qwen3-235b-a22b, gemma4-26b.
 """
 
@@ -101,9 +110,10 @@ import io
 import json
 import logging
 import os
+import re
 import tempfile
 import time
-from typing import Sequence
+from typing import Optional, Sequence
 
 from absl import app
 import jax
@@ -113,19 +123,34 @@ from flax import traverse_util
 import numpy as np
 import transformers
 import tunix.generate.utils as tunix_utils
-from tunix.rl.reshard import reshard_pytree
-from vllm import LLM
-from vllm import SamplingParams
+from tunix.generate import mappings
+from tunix.generate.vllm_sampler import VllmConfig
 import pathwaysutils
+import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
+
+# Registers MaxTextForCausalLM with tpu_inference's model registry and applies
+# patch_kv_cache_manager() (correct FP32 GDN recurrent-state cache dtype --
+# see PR #4770, "Fix Qwen 3.5 35B RL gibberish output issue"). vLLM's
+# vllm.general_plugins entry point is supposed to call this automatically, but
+# both train_rl.py and vllm_decode.py call it explicitly rather than relying
+# on that -- this validator must do the same, or vLLM boots without the patch
+# and Qwen3.5's GDN recurrent state silently degrades to bf16 across decode
+# steps, producing fluent-looking-but-wrong ("gibberish") generation despite
+# perfectly correct weights.
+adapter.register()
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.integration.vllm.torchax_converter.base import GREEN
 from maxtext.integration.vllm.torchax_converter.base import RESET
 from maxtext.integration.vllm.torchax_converter.base import timer
+from maxtext.integration.vllm.maxtext_vllm_rollout import (
+    MaxTextVllmSampler,
+    _create_model_converter,
+    prepare_direct_sync_additional_config,
+)
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
-from maxtext.integration.vllm.weight_converter import WeightConverter, MODEL_TO_CONVERSION_RULES
 from maxtext.configs import types
 from maxtext.utils import model_creation_utils
 
@@ -198,6 +223,39 @@ def _tpu_inference_compat_patches():
   orig_bulk = tunix_utils._bulk_align_and_unstack  # pylint: disable=protected-access
   orig_unstack = tunix_utils._unstack_scanned_param  # pylint: disable=protected-access
 
+  try:
+    from tpu_inference.runner import kv_cache as tpu_kv_cache  # pylint: disable=import-outside-toplevel
+    orig_get_kv_cache_shape_with_mesh = tpu_kv_cache.get_kv_cache_shape_with_mesh
+
+    def _compat_kv_cache_shape(*args, **kwargs):
+      from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel
+      from tpu_inference import utils as common_utils  # pylint: disable=import-outside-toplevel
+
+      mesh = kwargs.get("mesh", args[0] if len(args) > 0 else None)
+      use_mla = kwargs.get("use_mla", args[6] if len(args) > 6 else False)
+      kv_heads = kwargs.get("actual_num_kv_heads", args[3] if len(args) > 3 else None)
+
+      if mesh is not None and kv_heads is not None and not use_mla:
+        tp_axis_name = getattr(ShardingAxisName, "KV_HEAD", ShardingAxisName.ATTN_HEAD)
+        model_cnt = common_utils.get_mesh_shape_product(mesh, tp_axis_name)
+        if not model_cnt:
+          tp_axis_name = ShardingAxisName.ATTN_HEAD
+          model_cnt = common_utils.get_mesh_shape_product(mesh, tp_axis_name)
+        if model_cnt and model_cnt > 0 and kv_heads % model_cnt != 0:
+          padded_kv_heads = common_utils.get_padded_num_heads(kv_heads, model_cnt)
+          if "actual_num_kv_heads" in kwargs:
+            kwargs["actual_num_kv_heads"] = padded_kv_heads
+          elif len(args) > 3:
+            args = list(args)
+            args[3] = padded_kv_heads
+
+      return orig_get_kv_cache_shape_with_mesh(*args, **kwargs)
+
+    tpu_kv_cache.get_kv_cache_shape_with_mesh = _compat_kv_cache_shape
+  except (ImportError, AttributeError):
+    tpu_kv_cache = None
+    orig_get_kv_cache_shape_with_mesh = None
+
   def _compat_wsc(x, shardings):
     try:
       return orig_wsc(x, shardings)
@@ -233,6 +291,8 @@ def _tpu_inference_compat_patches():
     tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
     tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
     tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
+    if orig_get_kv_cache_shape_with_mesh is not None and tpu_kv_cache is not None:
+      tpu_kv_cache.get_kv_cache_shape_with_mesh = orig_get_kv_cache_shape_with_mesh
 
 
 # ---------------------------------------------------------------------------
@@ -347,76 +407,45 @@ class _SyncPhase:
     print("=" * 80, flush=True)
 
 
-def _reshard_and_assign_converted(maxtext_vllm_state, golden_llm_state, llm):
-  """Reshards a converted state onto the vLLM runner and assigns it.
-
-  Extracted so the benchmark path can run (and time) the reshard without also
-  running generation -- previously this lived inline *after* the
-  `debug_converter` early return, so the phase it timed was unreachable in
-  exactly the configuration used for A/B comparison.
-  """
-  if isinstance(golden_llm_state, nnx.State):
-    state_dict = golden_llm_state.to_pure_dict() if hasattr(golden_llm_state, "to_pure_dict") else dict(golden_llm_state)
-  else:
-    state_dict = golden_llm_state
-
-  src_flat = traverse_util.flatten_dict(maxtext_vllm_state)
-  spec_flat = traverse_util.flatten_dict(state_dict)
-
-  resharded_flat = tunix_utils._reshard_in_chunks(  # pylint: disable=protected-access
-      src_flat,
-      spec_flat,
-      reshard_pytree,
-      chunk_size=128,
-      delete_spec_buffers=True,
-  )
-  resharded_weights = traverse_util.unflatten_dict(resharded_flat)
-
-  if isinstance(golden_llm_state, nnx.State):
-    nnx.update(golden_llm_state, resharded_weights)
-  elif hasattr(golden_llm_state, "update"):
-    golden_llm_state.update(resharded_weights)
-  elif isinstance(golden_llm_state, dict):
-    golden_llm_state.update(resharded_weights)
-  else:
-    llm.llm_engine.model_executor.driver_worker.model_runner.model.state = resharded_weights
-  return golden_llm_state
-
-
-def _sync_model_runner_state(llm, golden_llm_state) -> None:
-  """Syncs the updated golden_llm_state into the model runner's model and leaves."""
-  model_runner = getattr(
-      getattr(
-          getattr(getattr(llm, "llm_engine", None), "model_executor", None),
-          "driver_worker",
-          None,
-      ),
-      "model_runner",
-      None,
-  )
-  if model_runner is None:
-    return
-  if hasattr(model_runner, "model") and isinstance(golden_llm_state, nnx.State):
-    nnx.update(model_runner.model, golden_llm_state)
-  if hasattr(model_runner, "state"):
-    if isinstance(model_runner.state, nnx.State):
-      model_runner.state_leaves = tuple(jax.tree_util.tree_leaves(model_runner.state))
-    else:
-      model_runner.state_leaves = model_runner.state
-    logging.info("Updated model_runner.state_leaves after weight assignment.")
-
-
 # ---------------------------------------------------------------------------
 # Debugging helpers
 # ---------------------------------------------------------------------------
 
 
+def _flatten_weight_dict(state) -> dict:
+  """Flattens a weight tree into one flat, dotted-string-keyed dict of arrays.
+
+  The debug helpers below (`_check_key_coverage`, `_log_weight_stats`,
+  `_upload_tensors_to_gcs`) were written assuming a target already shaped
+  like mode 2's flat HF dict (`.keys()` gives real parameter names directly).
+  Mode 1's target is a nested `nnx.State` (`.keys()` gives one top-level
+  attribute name, and indexing into it gives a sub-State, not a leaf array --
+  the `AttributeError: No attribute 'shape' in State` these helpers hit
+  otherwise). Routing both through this first normalizes them to the same
+  flat shape regardless of which mode produced them.
+  """
+  if hasattr(state, "to_pure_dict"):
+    state = state.to_pure_dict()
+  flat = traverse_util.flatten_dict(state)
+  return {".".join(str(k) for k in key): (v.value if hasattr(v, "value") else v) for key, v in flat.items()}
+
+
+# Matches a layer index in either naming convention seen here: HF-style
+# "...layers.3...." (mode 2) or MaxText's own "...layers_3...." (mode 1).
+_LAYER_INDEX_RE = re.compile(r"layers[._](\d+)\b")
+
+
+def _layer_index(key: str) -> Optional[int]:
+  m = _LAYER_INDEX_RE.search(key)
+  return int(m.group(1)) if m else None
+
+
 def _is_layer0_key(key: str) -> bool:
-  return ".layers.0." in key
+  return _layer_index(key) == 0
 
 
 def _is_non_layer_key(key: str) -> bool:
-  return "layers." not in key
+  return _layer_index(key) is None
 
 
 def _weight_stats_str(arr) -> str:
@@ -456,6 +485,76 @@ def _log_weight_stats(converted_state: dict, vllm_state: dict, compare: bool) ->
       logging.info("  [VLLM-REF]  %s | %s", key, _weight_stats_str(vllm_state[key]))
       logging.info("  [DIFF]      %s | rel_frobenius=%.6f", key, rel_frob)
   logging.info("=" * 80)
+
+
+def _leaf_path_signature(state) -> dict:
+  """Maps every leaf's flattened path to (shape, dtype), for structural diffing.
+
+  Paths are rendered manually rather than via `jax.tree_util.keystr`: some
+  leaves (notably ones grafted in by a structurally-mismatched `nnx.update`)
+  have a path whose single key is itself a raw Python string rather than a
+  proper DictKey/GetAttrKey/SequenceKey entry -- `keystr` silently iterates a
+  bare string character-by-character instead of treating it as one key,
+  turning "model.decoder.decoder_norm.scale" into "['m']['o']['d']...". That
+  silent mis-rendering would hide exactly the anomaly this function exists to
+  surface, so such a key is rendered whole and tagged `#raw` instead.
+  """
+  flat, _ = jax.tree_util.tree_flatten_with_path(state)
+  result = {}
+  for path, leaf in flat:
+    parts = []
+    for p in path:
+      if isinstance(p, str):
+        parts.append(f"{p}#raw")
+        continue
+      key = getattr(p, "key", None)
+      if key is None:
+        key = getattr(p, "name", None)
+      if key is None:
+        key = getattr(p, "idx", None)
+      parts.append(str(key) if key is not None else repr(p))
+    result[".".join(parts)] = (getattr(leaf, "shape", None), getattr(leaf, "dtype", None))
+  return result
+
+
+def _check_leaf_structure_unchanged(before: dict, after: dict, label: str) -> None:
+  """Warns if sampler.update_params() changed the *structure* of the rollout state.
+
+  update_params() is documented to only overwrite leaf *values* in place --
+  the rollout's own pytree shape is fixed the moment vLLM boots it. tpu_inference
+  caches that initial pytree structure (`_state_treedef` in
+  tpu_inference/models/common/model_loader.py) and reuses it on every forward
+  pass; if the leaf count or path set differs after our sync, the model
+  runner's cached compiled function fails with an opaque "Too many/few leaves
+  for PyTreeDef" error at the *next* forward pass, with no indication of which
+  key caused it. This check surfaces that mismatch immediately after sync,
+  while the offending key(s) are still visible, instead of leaving it to
+  surface (expensively, and without a key name) during generation.
+  """
+  added = sorted(set(after) - set(before))
+  removed = sorted(set(before) - set(after))
+  if len(after) == len(before) and not added and not removed:
+    logging.info("%s: rollout state leaf structure unchanged (%d leaves).", label, len(after))
+    return
+  logging.error(
+      "%s: rollout state leaf structure CHANGED by sampler.update_params() -- "
+      "%d leaves before sync, %d after (%+d). The model runner's cached "
+      "compiled function will fail with a PyTreeDef mismatch on the next "
+      "forward pass unless this is resolved.",
+      label,
+      len(before),
+      len(after),
+      len(after) - len(before),
+  )
+  if added:
+    logging.error("  %d new leaf path(s) after sync, e.g.: %s", len(added), added[:10])
+  if removed:
+    logging.error("  %d leaf path(s) that disappeared after sync, e.g.: %s", len(removed), removed[:10])
+  changed = sorted(k for k in set(before) & set(after) if before[k] != after[k])
+  if changed:
+    logging.error("  %d leaf(ves) with changed (shape, dtype) at the same path, e.g.:", len(changed))
+    for k in changed[:10]:
+      logging.error("    %s: before=%s after=%s", k, before[k], after[k])
 
 
 def _check_key_coverage(llm_state: dict, converted_state: dict) -> None:
@@ -541,33 +640,6 @@ def _upload_tensors_to_gcs(converted_state: dict, gcs_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_weight_converter(model_name: str, direct: bool, config, tp: int) -> WeightConverter:
-  """Builds a WeightConverter in whichever of its two modes applies.
-
-  Mode 1 (`direct=True`, `rules=None`): vLLM runs `MaxTextForCausalLM`, so the
-  conversion is structural only -- unroll the scanned decoder layers and fuse
-  MoE `wi_0`/`wi_1` into the rollout's pre-fused `wi`.
-
-  Mode 2 (`direct=False`, rule table): vLLM runs its own HuggingFace-shaped
-  model, so weights are renamed and restructured per `MODEL_TO_CONVERSION_RULES`.
-  """
-  if direct:
-    logging.info("WeightConverter mode 1: direct MaxText-to-MaxText (rules=None).")
-    print("WeightConverter mode 1: direct MaxText-to-MaxText (rules=None).", flush=True)
-    return WeightConverter(rules=None, config=config, tp=tp)
-
-  rules = MODEL_TO_CONVERSION_RULES.get(model_name, MODEL_TO_CONVERSION_RULES["qwen3_moe"])
-  if rules is None:
-    raise ValueError(
-        f"{model_name} has no HuggingFace-target conversion rules, so mode 2 "
-        "cannot be validated for it. Re-run with vllm_hf_overrides selecting "
-        "MaxTextForCausalLM to validate the direct path (mode 1) instead."
-    )
-  logging.info("WeightConverter mode 2: torchax rules (%d rules, tp=%d).", len(rules), tp)
-  print(f"WeightConverter mode 2: torchax rules ({len(rules)} rules, tp={tp}).", flush=True)
-  return WeightConverter(rules=rules, tp=tp)
-
-
 class ConverterValidationConfig(types.RLConfig):
   """Configuration dataclass for converter validation and benchmarking."""
 
@@ -597,6 +669,16 @@ def validate_converter(argv) -> None:
   Single-slice (num_trainer_slices == -1): trainer and sampler share all devices.
   Multislice: first num_trainer_slices slices go to MaxText, the next
   num_samplers_slices slices go to vLLM.
+
+  Weight sync itself is delegated to `MaxTextVllmSampler.update_params`, the
+  same entry point train_rl.py's production rollout uses (via
+  `MaxTextVllmRollout`). That keeps this validator honest about what actually
+  ships: mode 1 (direct MaxText-to-MaxText) exercises tunix's legacy
+  `transfer_state_directly` when `use_weight_converter=false` and the new
+  `WeightConverter(rules=None)` when `true`; mode 2 (MaxText-to-HuggingFace)
+  exercises tunix's legacy `transfer_state_with_mappings` (via
+  `to_hf_key_mappings`) or the new `WeightConverter(rules=MODEL_TO_CONVERSION_RULES[...])`,
+  selected the same way production selects them (`_create_model_converter`).
   """
   trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
       argv, config_class=ConverterValidationConfig
@@ -614,44 +696,38 @@ def validate_converter(argv) -> None:
   gcs_debug_path = getattr(trainer_config, "gcs_debug_path", "")
   benchmark_weight_sync = getattr(trainer_config, "benchmark_weight_sync", False)
 
-  if len(trainer_devices) > sampler_config.rollout_tensor_parallelism:
-    target_dev_count = sampler_config.rollout_tensor_parallelism
-    # Group devices by host / task so subslice bounds align with host bounds (e.g. 2,2,1)
-    by_host = collections.defaultdict(list)
-    for d in trainer_devices:
-      task = getattr(d, "logical_task", getattr(d, "task_id", getattr(d, "host_id", 0)))
-      by_host[task].append(d)
-
-    selected_devices = []
-    for host_devs in by_host.values():
-      selected_devices.extend(host_devs)
-      if len(selected_devices) >= target_dev_count:
-        break
-    trainer_devices = selected_devices[:target_dev_count]
-    sampler_devices = selected_devices[:target_dev_count]
-    logging.info(
-        "Clipping devices to rollout_tensor_parallelism=%d on host %s: %s",
-        target_dev_count,
-        getattr(trainer_devices[0], "logical_task", "unknown"),
-        trainer_devices,
+  # MaxTextVllmSampler needs a tokenizer up front (it wraps it immediately in
+  # its constructor), not just for the chat-template branch of the old
+  # llm.generate() call, so load it once and reuse it for both.
+  tokenizer_path = getattr(trainer_config, "tokenizer_path", None) or vllm_model_name_mapping[trainer_config.model_name]
+  try:
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        token=getattr(trainer_config, "hf_access_token", None) or None,
     )
-
-  multislice = trainer_devices is not sampler_devices
+  except Exception as exc:  # pylint: disable=broad-except
+    logging.warning("Failed to load tokenizer with token (%s), retrying with token=None...", exc)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path, token=None)
 
   logging.info("Creating MaxText model with %d devices...", len(trainer_devices))
+  # wrap_with_tunix_adapter=True gives `model` a "base" root (matching what
+  # production's rollout_actor looks like) *and* a to_hf_mappings() method,
+  # so the same model_state and the same mapping_config feed every sync path
+  # below -- legacy direct, legacy HF-mapping, and both WeightConverter modes.
   model, mesh = model_creation_utils.from_pretrained(
       trainer_config,
       devices=trainer_devices,
       model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      wrap_with_tunix_adapter=True,
   )
   print(f"{GREEN}MaxText model loaded successfully{RESET}")
   print(f"Model: {trainer_config.model_name}")
   print(f"Mesh: {mesh}")
 
   print("=" * 80)
-  print("Converting weights to vLLM format")
+  print("Extracting MaxText weights")
   print("=" * 80)
-  model_state = {"base": nnx.state(model)}
+  model_state = nnx.state(model, nnx.Param)
 
   for path, leaf in jax.tree_util.tree_flatten_with_path(model_state)[0]:
     if hasattr(leaf, "shape") and hasattr(leaf, "sharding"):
@@ -659,38 +735,56 @@ def validate_converter(argv) -> None:
       logging.info("Name: %s, shape: %s", path_str, leaf.shape)
       logging.info("\tSharding: %s", leaf.sharding)
 
-  print("=" * 80)
-  print(f"Loading vLLM model (load_format={vllm_load_format})...")
-  print("=" * 80)
-  # load_format="dummy" skips loading real weights — converted MaxText weights
-  # are assigned afterwards.  Pass vllm_load_format=auto to load an HF checkpoint
-  # for reference stats comparison before assignment.
-  dp_size = (
-      sampler_config.rollout_data_parallelism
-      if sampler_config.rollout_data_parallelism > 0
-      else max(1, len(sampler_devices) // sampler_config.rollout_tensor_parallelism)
+  try:
+    mapping_config = mappings.MappingConfig.build(
+        mapping_obj=getattr(trainer_config, "rollout_mapping_config", None),
+        model=model,
+        backend="vllm_jax",
+    )
+  except Exception as exc:  # pylint: disable=broad-except
+    # Models without a registered legacy StandaloneVllmWeightMapping entry
+    # (e.g. gemma4-26b, whose converter is always the standalone
+    # Gemma4MaxTextToVLLMConverter -- never the legacy to_hf_key_mappings
+    # path) raise here. That mapping is never consulted for such models, so
+    # fall back to an empty one instead of failing the whole run.
+    logging.warning(
+        "Could not build legacy to_hf mapping_config for %s (%s); the sampler will rely "
+        "entirely on its converter for weight sync.",
+        trainer_config.model_name,
+        exc,
+    )
+    mapping_config = mappings.MappingConfig()
+
+  del model, mesh
+  gc.collect()
+  jax.clear_caches()
+
+  # Resolve tensor/data/expert parallelism together (not just tensor/data) so that
+  # whatever device budget is left over after tensor_parallel_size (e.g. because TP
+  # is capped below the KV-head count) gets spent as expert_parallel_size -- sharding
+  # MoE experts across those chips -- instead of silently falling back to plain
+  # data_parallel_size, which replicates the entire model (all experts included) once
+  # per replica. Reuses the same resolver train_rl.py uses for the production rollout
+  # path, so validate_converter.py's parallelism math stays consistent with it.
+  rollout_kwargs = model_creation_utils.get_rollout_kwargs_for_parallelism(sampler_config, len(sampler_devices))
+  # The rollout mesh is deliberately separate from the trainer mesh above --
+  # it spans only sampler_devices, exactly like the mesh MaxTextVllmRollout
+  # receives in production. VllmSampler derives tensor/data parallel size,
+  # expert_parallelism and the multislice device_indexes pin all from this
+  # mesh (see VllmSampler._vllm_config), so no manual "sharding" bookkeeping
+  # is needed here anymore.
+  sampler_mesh = jax.sharding.Mesh(
+      np.array(sampler_devices).reshape(-1, rollout_kwargs["tensor_parallel_size"]),
+      ("data", "model"),
   )
-  vllm_kwargs = {
-      "model": getattr(trainer_config, "vllm_model_path", None) or vllm_model_name_mapping[trainer_config.model_name],
-      "max_model_len": trainer_config.max_target_length,
-      "load_format": vllm_load_format,
-      "data_parallel_size": dp_size,
-      "tensor_parallel_size": sampler_config.rollout_tensor_parallelism,
-      "gpu_memory_utilization": 0.55,
-      "num_gpu_blocks_override": 512,
-      "async_scheduling": getattr(sampler_config, "async_scheduling", False),
-  }
+
   vllm_hf_overrides = getattr(trainer_config, "vllm_hf_overrides", None) or getattr(
       getattr(trainer_config, "vllm", None), "vllm_hf_overrides", None
   )
-  if vllm_hf_overrides:
-    if isinstance(vllm_hf_overrides, str):
-      vllm_kwargs["hf_overrides"] = ast.literal_eval(vllm_hf_overrides)
-    else:
-      vllm_kwargs["hf_overrides"] = vllm_hf_overrides
-  # Conditionally add max_num_batched_tokens only for qwen3.5
-  if trainer_config.model_name == "qwen3.5-35b-a3b":
-    vllm_kwargs["max_num_batched_tokens"] = 16384
+  # Mode 1 (direct MaxText-to-MaxText) is selected the same way production
+  # selects it: vllm_hf_overrides names MaxTextForCausalLM, so vLLM
+  # instantiates the MaxText adapter model instead of an HF-shaped one.
+  direct_maxtext_sync = "MaxTextForCausalLM" in str(vllm_hf_overrides)
 
   additional_config = {}
   vllm_additional_config = getattr(trainer_config, "vllm_additional_config", None) or getattr(
@@ -706,105 +800,175 @@ def validate_converter(argv) -> None:
         additional_config.update(ast.literal_eval(vconfig))
     else:
       additional_config.update(vconfig)
-  if multislice:
-    # Pin vLLM to its assigned sampler devices so it doesn't overlap with trainer.
-    additional_config["sharding"] = {
-        "sharding_strategy": {
-            "device_indexes": [d.id for d in sampler_devices],
-        }
-    }
 
-  if additional_config:
-    vllm_kwargs["additional_config"] = additional_config
-
-  llm = LLM(**vllm_kwargs)
-  print("\n" + "=" * 80)
-  golden_llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
-
-  vllm_hf_overrides = (
-      getattr(trainer_config, "vllm_hf_overrides", None)
-      or getattr(getattr(trainer_config, "vllm", None), "vllm_hf_overrides", None)
-      or ""
-  )
-  force_maxtext = "MaxTextForCausalLM" in str(vllm_hf_overrides)
   use_weight_converter = additional_config.get("use_weight_converter", False) or getattr(
       trainer_config, "use_weight_converter", False
   )
-
-  if getattr(trainer_config, "use_standalone_converter", False) or getattr(
+  use_standalone_converter = getattr(trainer_config, "use_standalone_converter", False) or getattr(
       getattr(trainer_config, "vllm", None), "use_standalone_converter", False
-  ):
-    if trainer_config.model_name.startswith("gemma4"):
-      converter = Gemma4MaxTextToVLLMConverter(trainer_config, mesh)
-    elif trainer_config.model_name.startswith("qwen3.5"):
-      converter = Qwen35MaxTextToVLLMConverter(trainer_config, mesh)
-    else:
-      converter = Qwen3MaxTextToVLLMConverter(trainer_config, mesh)
-    with timer("Overall Conversion"):
-      maxtext_vllm_state = converter.convert(model_state)
-    del model_state, model, mesh, converter
-  elif force_maxtext and not use_weight_converter:
-    # Legacy Direct Sync path: transfer_state_directly from tunix
-    logging.info(
-        "Branch 2 (Direct Sync): Testing fallback tunix transfer_state_directly() (use_weight_converter is False)."
-    )
-    # transfer_state_directly converts, reshards and assigns in one call, so
-    # this single phase is what the converter arm's convert + reshard phases
-    # sum to. Reported under one label to make that correspondence explicit.
-    with _SyncPhase("tunix transfer_state_directly (convert+reshard+assign)") as phase:
-      tunix_utils.transfer_state_directly(
-          src_state=model_state,
-          dst_state=golden_llm_state,
-          reshard_fn=reshard_pytree,
-          delete_dst_buffers=True,
-          reshard_chunk_size=128,
-      )
-      phase.block_on(golden_llm_state)
-    del model_state, model, mesh
-    maxtext_vllm_state = None
-  else:
-    # New WeightConverter pipeline. Both of its modes are exercised here:
-    #   force_maxtext  -> mode 1, rules=None, direct MaxText-to-MaxText
-    #   otherwise      -> mode 2, rule table, MaxText-to-HuggingFace (torchax)
-    converter = _build_weight_converter(
-        model_name=trainer_config.model_name,
-        direct=force_maxtext,
-        config=trainer_config,
-        tp=sampler_config.rollout_tensor_parallelism,
-    )
-    with _SyncPhase("WeightConverter.convert (conversion only)") as phase:
-      maxtext_vllm_state = converter.convert(model_state, target_state=golden_llm_state)
-      phase.block_on(maxtext_vllm_state)
-    del model_state, model, mesh, converter
+  )
 
-  gc.collect()
-  jax.clear_caches()
+  # For direct MaxText sync with MoE + TP>1, forces the target's prefused
+  # `wi` layout so each shard gets its local gate chunk followed by its local
+  # up chunk -- required for correctness, and easy to omit by hand in
+  # vllm_additional_config, so apply it the same way production does.
+  additional_config = prepare_direct_sync_additional_config(
+      additional_config,
+      direct_maxtext_sync=direct_maxtext_sync,
+      num_experts=getattr(trainer_config, "num_experts", 1),
+      tensor_parallel_size=rollout_kwargs["tensor_parallel_size"],
+  )
+
+  init_with_random_weights = vllm_load_format == "dummy"
+  # load_format="dummy" (the default) skips loading real weights -- converted
+  # MaxText weights are assigned afterwards via sampler.update_params().  Pass
+  # vllm_load_format=auto to load an HF checkpoint instead, for reference
+  # stats comparison before assignment.
+  vllm_engine_kwargs = {
+      "model": getattr(trainer_config, "vllm_model_path", None) or vllm_model_name_mapping[trainer_config.model_name],
+      "max_model_len": trainer_config.max_target_length,
+      "num_gpu_blocks_override": 512,
+      "async_scheduling": getattr(sampler_config, "async_scheduling", False),
+  }
+  if not init_with_random_weights:
+    vllm_engine_kwargs["load_format"] = vllm_load_format
+  if vllm_hf_overrides:
+    vllm_engine_kwargs["hf_overrides"] = (
+        ast.literal_eval(vllm_hf_overrides) if isinstance(vllm_hf_overrides, str) else vllm_hf_overrides
+    )
+  # Conditionally add max_num_batched_tokens only for qwen3.5
+  if trainer_config.model_name == "qwen3.5-35b-a3b":
+    vllm_engine_kwargs["max_num_batched_tokens"] = 16384
+
+  vllm_config = VllmConfig(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
+      mesh=sampler_mesh,
+      hbm_utilization=getattr(trainer_config, "hbm_utilization_vllm", 0.6),
+      init_with_random_weights=init_with_random_weights,
+      tensor_parallel_size=rollout_kwargs["tensor_parallel_size"],
+      data_parallel_size=rollout_kwargs["data_parallel_size"],
+      expert_parallel_size=rollout_kwargs["expert_parallel_size"],
+      reshard_chunk_size=16,
+      mapping_config=mapping_config,
+      additional_config=additional_config,
+      engine_kwargs=vllm_engine_kwargs,
+  )
+
+  # Converter selection:
+  #   use_standalone_converter=True  -> mode 2 legacy (pre-WeightConverter
+  #     per-model converter: Qwen3MaxTextToVLLMConverter / Qwen35MaxTextToVLLMConverter /
+  #     Gemma4MaxTextToVLLMConverter in torchax_converter/*_moe.py). This is the
+  #     real "legacy" comparison point for mode 2 -- tunix's generic
+  #     transfer_state_with_mappings (legacy to_hf_key_mappings) has no MoE/
+  #     expert coverage for these models, so it's not a usable A/B baseline.
+  #     These converters emit the same flat "vllm_model.*"-keyed dict either
+  #     way, which is exactly what VllmSampler._assign_converted_state expects
+  #     for an HF-shaped (flat) target, so they plug into `converter=` directly.
+  #   otherwise -> the same helper train_rl.py uses in production, so
+  #     mode 1/2 x legacy/new selection here can never drift from what ships:
+  #       direct_maxtext_sync=True,  use_weight_converter=True  -> mode 1 new     (WeightConverter(rules=None))
+  #       direct_maxtext_sync=True,  use_weight_converter=False -> mode 1 legacy  (tunix transfer_state_directly)
+  #       direct_maxtext_sync=False, use_weight_converter=True  -> mode 2 new     (WeightConverter(rules=MODEL_TO_CONVERSION_RULES[...]))
+  #       direct_maxtext_sync=False, use_weight_converter=False -> mode 2 "legacy" only in the sense of
+  #         falling back toward tunix to_hf_key_mappings; for qwen3-30b-a3b/qwen3-235b-a22b (MoE,
+  #         already have a MODEL_TO_CONVERSION_RULES entry) _create_model_converter keeps preferring
+  #         the rule-table converter here regardless of this flag, for the reason above -- use
+  #         use_standalone_converter=True instead to get an actual legacy mode 2 comparison.
+  print("=" * 80)
+  print(
+      f"Building converter (direct_maxtext_sync={direct_maxtext_sync}, "
+      f"use_weight_converter={use_weight_converter}, use_standalone_converter={use_standalone_converter})..."
+  )
+  print("=" * 80)
+  if use_standalone_converter:
+    if trainer_config.model_name.startswith("gemma4"):
+      converter = Gemma4MaxTextToVLLMConverter(trainer_config, sampler_mesh)
+    elif trainer_config.model_name.startswith("qwen3.5"):
+      converter = Qwen35MaxTextToVLLMConverter(trainer_config, sampler_mesh)
+    else:
+      converter = Qwen3MaxTextToVLLMConverter(trainer_config, sampler_mesh)
+  else:
+    converter = _create_model_converter(
+        model_name=trainer_config.model_name,
+        config=trainer_config,
+        mesh=sampler_mesh,
+        use_hf_mapping=not direct_maxtext_sync,
+        use_weight_converter=use_weight_converter,
+        debug=debug_converter,
+    )
+
+  print("=" * 80)
+  print(f"Booting vLLM via MaxTextVllmSampler (load_format={vllm_load_format})...")
+  print("=" * 80)
+  sampler = MaxTextVllmSampler(
+      tokenizer=tokenizer,
+      config=vllm_config,
+      converter=converter,
+      direct_maxtext_sync=direct_maxtext_sync,
+      scan_axis=getattr(trainer_config, "param_scan_axis", 1),
+      layer_pattern_length=getattr(trainer_config, "inhomogeneous_layer_cycle_interval", None),
+  )
+  golden_llm_state = sampler.transformer_state
+  # Captured before any sync so a post-sync structural change (which will
+  # otherwise surface only as an opaque PyTreeDef mismatch during generation)
+  # can be caught and reported with the actual offending key(s) -- see
+  # _check_leaf_structure_unchanged.
+  pre_sync_leaf_signature = _leaf_path_signature(golden_llm_state)
 
   # --- Debug checks (key coverage, weight stats, GCS upload) ---------------
-  if debug_converter and maxtext_vllm_state is not None:
+  # Calling converter.convert() directly here (rather than through
+  # sampler.update_params()) keeps this a conversion-only cost when
+  # benchmark_weight_sync is off -- WeightConverter.convert() is documented
+  # pure, so this doesn't disturb the state sampler.update_params() converts
+  # again below. Legacy paths (converter is None) have no intermediate dict
+  # to inspect, so these checks only apply to the WeightConverter arms.
+  maxtext_vllm_state = None
+  if debug_converter and converter is not None:
+    with _SyncPhase(f"{type(converter).__name__}.convert (conversion only)") as phase:
+      maxtext_vllm_state = converter.convert(model_state, target_state=golden_llm_state)
+      phase.block_on(maxtext_vllm_state)
+
+    gc.collect()
+    jax.clear_caches()
+
+    # Normalize both to a flat dotted-key dict first: golden_llm_state is a
+    # nested nnx.State for mode 1 (direct MaxText target) but already a flat
+    # HF-shaped dict for mode 2, and maxtext_vllm_state mirrors whichever
+    # shape the converter targeted -- these helpers only understand the flat
+    # form.
+    flat_golden_llm_state = _flatten_weight_dict(golden_llm_state)
+    flat_maxtext_vllm_state = _flatten_weight_dict(maxtext_vllm_state)
+
     print("=" * 80)
     print("Checking key coverage and shapes...")
     print("=" * 80)
-    _check_key_coverage(golden_llm_state, maxtext_vllm_state)
+    _check_key_coverage(flat_golden_llm_state, flat_maxtext_vllm_state)
 
     compare_stats = vllm_load_format != "dummy"
-    _log_weight_stats(maxtext_vllm_state, golden_llm_state, compare=compare_stats)
+    _log_weight_stats(flat_maxtext_vllm_state, flat_golden_llm_state, compare=compare_stats)
 
     if gcs_debug_path:
       with timer("GCS tensor upload"):
-        _upload_tensors_to_gcs(maxtext_vllm_state, gcs_debug_path)
+        _upload_tensors_to_gcs(flat_maxtext_vllm_state, gcs_debug_path)
 
-  # --- Reshard (benchmark path) --------------------------------------------
-  # Run and time the reshard *before* the debug_converter return, so the two
-  # arms are compared over the same work. Without this, `debug_converter=true`
-  # -- the natural A/B configuration -- times conversion alone in the converter
-  # arm against convert+reshard+assign in the tunix arm.
-  resharded_already = False
-  if benchmark_weight_sync and use_weight_converter and maxtext_vllm_state is not None:
-    with _SyncPhase("WeightConverter reshard+assign") as phase:
-      _reshard_and_assign_converted(maxtext_vllm_state, golden_llm_state, llm)
-      phase.block_on(golden_llm_state)
-    resharded_already = True
+  # --- Weight sync via sampler.update_params() ------------------------------
+  # Legacy paths always pay for the full sync here (transfer_state_directly /
+  # transfer_state_with_mappings can't be split into convert-only). The
+  # WeightConverter arms only pay for it when generation will actually run,
+  # or when benchmark_weight_sync explicitly asks to compare convert+reshard+assign
+  # against the legacy arm's single all-in-one call.
+  run_full_sync = (not debug_converter) or (converter is None) or benchmark_weight_sync
+  sync_label = (
+      f"sampler.update_params via {type(converter).__name__} (convert+reshard+assign)"
+      if converter is not None
+      else "sampler.update_params via legacy tunix sync (convert+reshard+assign)"
+  )
+  if run_full_sync:
+    with _SyncPhase(sync_label) as phase:
+      sampler.update_params(model_state)
+      phase.block_on(sampler.transformer_state)
+    _check_leaf_structure_unchanged(
+        pre_sync_leaf_signature, _leaf_path_signature(sampler.transformer_state), sync_label
+    )
 
   if benchmark_weight_sync:
     _SyncPhase.report()
@@ -818,242 +982,13 @@ def validate_converter(argv) -> None:
     logging.info("debug_converter=true: skipping weight assignment and generation.")
     return
 
-  # --- Weight assignment ----------------------------------------------------
-  if force_maxtext:
-    if use_weight_converter and maxtext_vllm_state is not None and not resharded_already:
-      with timer("Resharding and assigning converted weights to vLLM model"):
-        _reshard_and_assign_converted(maxtext_vllm_state, golden_llm_state, llm)
-
-    _sync_model_runner_state(llm, golden_llm_state)
-
-    num_assigned = len(jax.tree_util.tree_leaves(golden_llm_state))
-    logging.info("ASSIGNMENT COMPLETE: Assigned %d weights, Skipped 0 weights", num_assigned)
-    print(f"ASSIGNMENT COMPLETE: Assigned {num_assigned} weights, Skipped 0 weights", flush=True)
-    if hasattr(llm, "reset_prefix_cache") and callable(llm.reset_prefix_cache):
-      llm.reset_prefix_cache()
-  else:
-    if isinstance(maxtext_vllm_state, dict) and any(isinstance(v, dict) for v in maxtext_vllm_state.values()):
-      maxtext_vllm_state = {
-          ".".join(str(k) for k in key): v for key, v in traverse_util.flatten_dict(maxtext_vllm_state).items()
-      }
-
-    with timer(f"Assigning {len(maxtext_vllm_state)} weights to vLLM model"):
-      # MaxText native (and some legacy) models unroll the scan_layers when vLLM explicitly asks for scan_layers=False.
-      # Our WeightConverter might output a single tensor with axis [48, ...] under '.layers.'.
-      # We must unroll it so it maps linearly to golden_llm_state's 'layers_0', 'layers_1'.
-      # Only unroll for MaxText targets (they have '.layers.', while HF has '.layers.0.')
-      if any(".layers." in k and not k.split(".layers.")[1][0].isdigit() for k in maxtext_vllm_state):
-        expanded = {}
-        is_inhomogeneous = any(".layer_0." in k for k in maxtext_vllm_state)
-        default_num_blocks = 10 if is_inhomogeneous else getattr(trainer_config, "base_num_decoder_layers", 48)
-
-        for k, v in maxtext_vllm_state.items():
-          if ".layers." in k and not k.split(".layers.")[1][0].isdigit():
-            val = v if hasattr(v, "shape") else v.value
-            num_blocks = default_num_blocks
-            scan_axis = 0
-            if hasattr(val, "shape") and len(val.shape) > 1:
-              if default_num_blocks in val.shape:
-                scan_axis = val.shape.index(default_num_blocks)
-
-            slot = None
-            for s in range(10):
-              if f".layer_{s}." in k:
-                slot = s
-                break
-
-            if slot is not None:
-              cycle_interval = getattr(trainer_config, "inhomogeneous_layer_cycle_interval", 4)
-              for i in range(num_blocks):
-                global_idx = i * cycle_interval + slot
-                new_k = k.replace(f".layers.layer_{slot}.", f".layers_{global_idx}.")
-                expanded[new_k] = val.take(i, axis=scan_axis)
-            else:
-              for i in range(num_blocks):
-                new_k = k.replace(".layers.", f".layers_{i}.")
-                expanded[new_k] = val.take(i, axis=scan_axis)
-          else:
-            expanded[k] = v
-        maxtext_vllm_state = expanded
-
-      assigned_count = 0
-      skipped_keys = []
-      for key in list(maxtext_vllm_state.keys()):
-        weight = maxtext_vllm_state.pop(key)
-        weight_array = weight.value if hasattr(weight, "value") else weight
-
-        # Strip 'vllm_model.' prefix if the golden state doesn't use it (e.g., HF Qwen)
-        search_key = key
-        if (
-            search_key.startswith("vllm_model.")
-            and search_key not in golden_llm_state
-            and getattr(golden_llm_state, "__class__", type).__name__ != "State"
-        ):
-          search_key = search_key[len("vllm_model.") :]
-        if "model" in golden_llm_state and not search_key.startswith("model."):
-          search_key = f"model.{search_key}"
-        elif "model" not in golden_llm_state and search_key.startswith("model."):
-          search_key = search_key[len("model.") :]
-
-        if (
-            search_key not in golden_llm_state
-            and ".experts." in search_key
-            and ".experts.routed_experts." not in search_key
-        ):
-          alt_key = search_key.replace(".experts.", ".experts.routed_experts.", 1)
-          if alt_key in golden_llm_state:
-            search_key = alt_key
-
-        if search_key in golden_llm_state:
-          target_obj = golden_llm_state[search_key]
-
-          # Match shape dynamically (vLLM TPU uses [in, out] but HF converter outputs [out, in])
-          target_shape = (
-              target_obj.shape
-              if hasattr(target_obj, "shape")
-              else getattr(getattr(target_obj, "value", target_obj), "shape", None)
-          )
-          if target_shape and weight_array.shape != target_shape:
-            if weight_array.shape[::-1] == target_shape:
-              weight_array = weight_array.T
-            elif (
-                len(weight_array.shape) == 3
-                and weight_array.shape[0] == target_shape[0]
-                and weight_array.shape[1] == target_shape[2]
-                and weight_array.shape[2] == target_shape[1]
-            ):
-              weight_array = jnp.transpose(weight_array, (0, 2, 1))
-            else:
-              logging.warning("Shape mismatch for %s: expected %s, got %s", search_key, target_shape, weight_array.shape)
-
-          # Extract sharding safely
-          dst_sharding = (
-              target_obj.sharding
-              if hasattr(target_obj, "sharding")
-              else getattr(getattr(target_obj, "value", target_obj), "sharding", None)
-          )
-          if dst_sharding and getattr(weight_array, "sharding", None) != dst_sharding:
-            resharded_val = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
-          else:
-            resharded_val = weight_array
-          if hasattr(golden_llm_state, "__setitem__"):
-            golden_llm_state[search_key] = resharded_val
-          else:
-            setattr(golden_llm_state, search_key, resharded_val)
-          assigned_count += 1
-        elif "." in search_key:
-          parts = search_key.split(".")
-          if parts[0] not in golden_llm_state:
-            skipped_keys.append(f"{search_key} (root '{parts[0]}' not in golden_llm_state)")
-            continue
-          obj = golden_llm_state
-          for p in parts[:-1]:
-            p_key = int(p) if p.isdigit() else p
-            try:
-              if hasattr(obj, "__getitem__"):
-                obj = obj[p_key]
-              else:
-                obj = getattr(obj, p)
-            except (KeyError, AttributeError):
-              obj = None
-              break
-          if obj is None:
-            skipped_keys.append(f"{search_key} (subpath not found in golden_llm_state)")
-            continue
-          last_p = int(parts[-1]) if parts[-1].isdigit() else parts[-1]
-          target_obj = obj[last_p]
-
-          # Match shape dynamically (vLLM TPU uses [in, out] but HF converter outputs [out, in])
-          target_shape = (
-              target_obj.shape
-              if hasattr(target_obj, "shape")
-              else getattr(getattr(target_obj, "value", target_obj), "shape", None)
-          )
-          if target_shape and weight_array.shape != target_shape:
-            if weight_array.shape[::-1] == target_shape:
-              weight_array = weight_array.T
-            elif (
-                len(weight_array.shape) == 3
-                and weight_array.shape[0] == target_shape[0]
-                and weight_array.shape[1] == target_shape[2]
-                and weight_array.shape[2] == target_shape[1]
-            ):
-              weight_array = jnp.transpose(weight_array, (0, 2, 1))
-            elif len(weight_array.shape) == 3 and len(target_shape) == 3:
-              if (
-                  weight_array.shape[0] == target_shape[0]
-                  and weight_array.shape[2] == target_shape[2]
-                  and target_shape[1] % weight_array.shape[1] == 0
-              ):
-                weight_array = jnp.repeat(weight_array, target_shape[1] // weight_array.shape[1], axis=1)
-              elif (
-                  weight_array.shape[0] == target_shape[0]
-                  and weight_array.shape[1] == target_shape[1]
-                  and target_shape[2] > weight_array.shape[2]
-              ):
-                tp = 4
-                chunk_size = weight_array.shape[2] // (tp * 2)
-                arr = weight_array.reshape(weight_array.shape[0], weight_array.shape[1], tp, 2, chunk_size)
-                target_chunk_size = target_shape[2] // (tp * 2)
-                pad_amount = target_chunk_size - chunk_size
-                arr_pad = jnp.pad(arr, ((0, 0), (0, 0), (0, 0), (0, 0), (0, pad_amount)))
-                weight_array = arr_pad.reshape(target_shape)
-              elif (
-                  weight_array.shape[0] == target_shape[0]
-                  and weight_array.shape[2] == target_shape[2]
-                  and target_shape[1] > weight_array.shape[1]
-              ):
-                pad_amount = target_shape[1] - weight_array.shape[1]
-                weight_array = jnp.pad(weight_array, ((0, 0), (0, pad_amount), (0, 0)))
-              else:
-                logging.warning(
-                    "Shape mismatch for %s: expected %s, got %s", search_key, target_shape, weight_array.shape
-                )
-            else:
-              logging.warning("Shape mismatch for %s: expected %s, got %s", search_key, target_shape, weight_array.shape)
-
-          dst_sharding = (
-              target_obj.sharding
-              if hasattr(target_obj, "sharding")
-              else getattr(getattr(target_obj, "value", target_obj), "sharding", None)
-          )
-          if dst_sharding and getattr(weight_array, "sharding", None) != dst_sharding:
-            resharded_val = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
-          else:
-            resharded_val = weight_array
-          if hasattr(obj, "__setitem__"):
-            obj[last_p] = resharded_val
-          else:
-            setattr(obj, str(last_p), resharded_val)
-          assigned_count += 1
-        else:
-          skipped_keys.append(f"{search_key} (no match)")
-
-      logging.info("ASSIGNMENT COMPLETE: Assigned %d weights, Skipped %d weights", assigned_count, len(skipped_keys))
-      print(f"ASSIGNMENT COMPLETE: Assigned {assigned_count} weights, Skipped {len(skipped_keys)} weights")
-      if skipped_keys:
-        for sk in skipped_keys[:15]:
-          logging.warning("SKIPPED WEIGHT: %s", sk)
-          print(f"SKIPPED WEIGHT: {sk}")
-        print(
-            "ALL KEYS IN GOLDEN_LLM_STATE CONTAINING MLP:",
-            [k for k in (golden_llm_state.keys() if hasattr(golden_llm_state, "keys") else []) if "mlp" in str(k)],
-        )
-
-      _sync_model_runner_state(llm, golden_llm_state)
+  num_synced = len(jax.tree_util.tree_leaves(sampler.transformer_state))
+  logging.info("ASSIGNMENT COMPLETE: synced %d weight leaves via sampler.update_params", num_synced)
+  print(f"ASSIGNMENT COMPLETE: synced {num_synced} weight leaves via sampler.update_params", flush=True)
 
   # --- Generation test ------------------------------------------------------
-  sampling_params = SamplingParams(
-      temperature=0.0,
-      max_tokens=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
-  )
   prompt = getattr(trainer_config, "prompt", "Paris is")
   if getattr(trainer_config, "use_chat_template", False):
-    tokenizer_path = getattr(trainer_config, "tokenizer_path", None) or vllm_model_name_mapping[trainer_config.model_name]
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        tokenizer_path,
-        token=getattr(trainer_config, "hf_access_token", None),
-    )
     messages = [{"role": "user", "content": prompt}]
     prompt = tokenizer.apply_chat_template(
         messages,
@@ -1064,10 +999,12 @@ def validate_converter(argv) -> None:
   elif trainer_config.model_name.startswith("gemma4") and not prompt.startswith("<bos>"):
     prompt = "<bos>" + prompt
 
+  max_generation_steps = trainer_config.max_target_length - trainer_config.max_prefill_predict_length
   print("\n" + "=" * 80)
   print("Generation test after weight transfer:")
   with timer("Generation"):
-    print(llm.generate(prompt, sampling_params=sampling_params, use_tqdm=False))
+    output = sampler([prompt], max_generation_steps=max_generation_steps, temperature=0.0)
+  print(output.text)
   print("validate_converter completed successfully", flush=True)
 
 

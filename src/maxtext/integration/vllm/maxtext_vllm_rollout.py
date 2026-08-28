@@ -46,7 +46,6 @@ from maxtext.integration.vllm.weight_converter import (
     WeightConverter,
     MODEL_TO_CONVERSION_RULES,
 )
-from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 
 # Sentinel distinguishing "this model has no entry" from "this model has an
 # entry whose value is None", which means direct-sync-only.
@@ -81,7 +80,12 @@ def _create_model_converter(
   if not use_hf_mapping and not use_weight_converter:
     # Default MaxText-to-MaxText sync uses legacy transfer_state_directly unless explicitly opted in
     if model_name.startswith("gemma4"):
-      return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+      try:
+        from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
+        return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+      except ImportError:
+        logging.warning("Gemma4MaxTextToVLLMConverter could not be imported; falling back to direct sync.")
+        return None
     return None
 
   rule_table = _rule_table_for(model_name)
@@ -449,8 +453,9 @@ class MaxTextVllmSampler(VllmSampler):
       scan_axis: int = 1,
       layer_pattern_length: Optional[int] = None,
   ):
-    super().__init__(tokenizer=tokenizer, config=config)
+    super().__init__(tokenizer=tokenizer, config=config, converter=converter)
     self._converter = converter
+    self.converter = converter
     self._direct_maxtext_sync = direct_maxtext_sync
     self._scan_axis = scan_axis
     self._layer_pattern_length = layer_pattern_length
