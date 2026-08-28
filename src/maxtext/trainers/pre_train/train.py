@@ -45,7 +45,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
-from flax import linen as nn, nnx
+from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
@@ -996,6 +996,22 @@ def recover(
             elastic_manager.active_slice_indices,
         )
       else:
+        def _safe_replace(state_obj, pure_dict):
+          if not isinstance(pure_dict, dict):
+            return
+          current_flat = dict(nnx.statelib.to_flat_state(state_obj))
+          flat_pure = traverse_util.flatten_dict(pure_dict)
+          filtered_pure = {}
+          for kp, v in flat_pure.items():
+            if kp in current_flat:
+              filtered_pure[kp] = v
+            else:
+              int_kp = tuple(int(x) if str(x).isdigit() else x for x in kp)
+              if int_kp in current_flat:
+                filtered_pure[int_kp] = v
+          if filtered_pure:
+            nnx.replace_by_pure_dict(state_obj, traverse_util.unflatten_dict(filtered_pure))
+
         snapshot_loaded = False
         if snapshot_mgr is not None and snapshot_mgr.latest is not None:
           try:
@@ -1032,10 +1048,10 @@ def recover(
               )
 
               m_state = nnx.state(state.model)
-              nnx.replace_by_pure_dict(m_state, merged["model"])
+              _safe_replace(m_state, merged["model"])
               nnx.update(state.model, m_state)
               opt_state = nnx.state(state.optimizer)
-              nnx.replace_by_pure_dict(opt_state, merged["optimizer"])
+              _safe_replace(opt_state, merged["optimizer"])
               nnx.update(state.optimizer, opt_state)
               restored_state = state
 
@@ -1085,11 +1101,11 @@ def recover(
               overlay_opt = None
 
             m_state = nnx.state(state.model)
-            nnx.replace_by_pure_dict(m_state, overlay_model)
+            _safe_replace(m_state, overlay_model)
             nnx.update(state.model, m_state)
             if overlay_opt is not None and state.optimizer is not None:
               opt_state = nnx.state(state.optimizer)
-              nnx.replace_by_pure_dict(opt_state, overlay_opt)
+              _safe_replace(opt_state, overlay_opt)
               nnx.update(state.optimizer, opt_state)
             restored_state = state
             restored_step = int(state.optimizer.step.value)
@@ -1372,6 +1388,7 @@ def train_loop(config, recorder, state=None):
           watchdog.watchdog("step-stack-status", timeout=60),
           watchdog.watchdog("step-timebomb", timeout=15 * 60, repeat=False),
       ):
+        is_scale_up = False
         try:
           # Scale-up check at the end of the step (only if elastic snapshot)
           if elastic_utils.elastic_snapshot(config) and elastic_manager.available_inactive_slices:
@@ -1395,6 +1412,7 @@ def train_loop(config, recorder, state=None):
             _logger.error("[!] Elastic event detected around step %d", python_vars["step"])
             elastic_utils.record_elastic_event_start(recorder, config)
             needs_recovery = True
+            is_scale_up = isinstance(e, pathways_manager.ScaleUpSignalError)
           else:
             # Checkpoint mode or non-elastic error: bubble to elastic_retry
             elastic_utils.maybe_bubble_elastic_exception(config, e)
@@ -1408,8 +1426,17 @@ def train_loop(config, recorder, state=None):
         if needs_recovery:
           needs_recovery = False
 
-          # Slice Failure Recovery
-          recover(jax_device_state, python_vars, immutable_data)
+          if is_scale_up:
+            _logger.info("[*] Scale up signal caught: resharding active state directly (device-to-device)...")
+            recover(
+                jax_device_state,
+                python_vars,
+                immutable_data,
+                active_state=jax_device_state["state"],
+            )
+          else:
+            # Slice Failure Recovery
+            recover(jax_device_state, python_vars, immutable_data)
 
           # Save snapshot across the newly recovered mesh layout
           save_snapshot(snapshot_mgr, jax_device_state["state"], python_vars["step"], model)

@@ -233,10 +233,17 @@ class RemoteIterator:
     directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
     if self.elastic:
       # ElasticIterator state is a single global scalar shared by all shards,
-      # so we write one fixed file (from process 0 only) and every process
+      # so we write one fixed file (from first active process) and every process
       # reads the same file on restore — this survives elastic resizes that
       # change `jax.process_count()`.
-      if jax.process_index() == 0:
+      if hasattr(step_array, "sharding") and hasattr(step_array.sharding, "mesh") and step_array.sharding.mesh is not None:
+        first_pid = min(d.process_index for d in step_array.sharding.mesh.devices.flat)
+      elif hasattr(step_array, "devices"):
+        first_pid = min(d.process_index for d in step_array.devices())
+      else:
+        first_pid = 0
+
+      if jax.process_index() == first_pid:
         directory.mkdir(parents=True, exist_ok=True)
         filename = directory / "process_0.json"
         filename.write_text(json.dumps(self.iterator.get_state(), indent=4))  # pyrefly: ignore[missing-attribute]
