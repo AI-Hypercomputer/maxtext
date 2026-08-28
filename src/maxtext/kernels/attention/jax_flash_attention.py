@@ -42,10 +42,13 @@ def flash_attention_block_masked(
     segment_ids: SegmentIds | None,
     block_kv: int,
     block_q: int,
-    mask: mask_lib.Mask,
+    mask: mask_lib.Mask | jax.Array,
     mask_value: float,
     cap: Optional[float] = None,
     save_residuals: bool = False,
+    logits_dtype: jax.typing.DTypeLike = jnp.bfloat16,
+    loop_unroll: int | bool = True,
+    fuse_logits: bool = True,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]]:
   """Computes masked flash attention using block-sparse masking.
 
@@ -62,12 +65,22 @@ def flash_attention_block_masked(
       other. It stores the segment ids of the query and key/value sequences.
     block_kv: Block size for the key/value sequence dimension.
     block_q: Block size for the query sequence dimension.
-    mask: The full attention mask with shape of (q_seq_len, kv_seq_len). This
-      mask will be used for all batches.
+    mask: The full attention mask. A rank-2 mask with shape
+      (q_seq_len, kv_seq_len) is shared by every batch item. A rank-3 mask with
+      shape (batch_size, q_seq_len, kv_seq_len) supplies an independent mask
+      for each batch item.
     mask_value: The value to use for masked-out attention scores.
     cap: Optional cap for attention logits. This helps to prevent extremely
       large logits: capped_logits = jnp.tanh(logits / attn_logits_soft_cap) *
       attn_logits_soft_cap
+    logits_dtype: Preferred element type for the fused query-key product that
+      forms the attention probabilities; pass the query dtype when
+      full-precision logits are required.
+    loop_unroll: Unroll setting for the block loops; True fully unrolls, which
+      is prohibitive for long sequences with a runtime mask.
+    fuse_logits: Wrap the logits computation in a must-fuse XLA metadata call.
+      The wrapper does not support reverse-mode differentiation inside a
+      sharded computation; pass False when gradients are required.
     save_residuals: Whether to save residuals. If True, returns a tuple of
       (output, dict=(logsumexp, max_logits)). Both `logsumexp` and `max_logits`
       are of shape (batch_size, num_kv_heads, num_q_heads // num_kv_heads,
@@ -94,14 +107,25 @@ def flash_attention_block_masked(
       )
   )
 
+  if q_seq_len % block_q != 0:
+    raise ValueError(f"q_seq_len {q_seq_len} must be divisible by block_q {block_q}")
+  if kv_seq_len % block_kv != 0:
+    raise ValueError(f"kv_seq_len {kv_seq_len} must be divisible by block_kv {block_kv}")
+
   # Calculate the number of key/value and query blocks.
   num_kv_blocks = kv_seq_len // block_kv
   num_q_blocks = q_seq_len // block_q
 
   mask_array = mask[:, :]
-  # Before applying the segment mask, we need to broadcast the mask in batch
-  # dimension since we have same logic for all batches.
-  mask_full = jnp.broadcast_to(mask_array[None, :, :], (batch_size, q_seq_len, kv_seq_len))
+  if mask_array.ndim == 2:
+    # A rank-2 mask is shared by every item in the batch.
+    mask_full = jnp.broadcast_to(mask_array[None, :, :], (batch_size, q_seq_len, kv_seq_len))
+  else:
+    if mask_array.shape != (batch_size, q_seq_len, kv_seq_len):
+      raise ValueError(
+          f"Batched attention mask must have shape {(batch_size, q_seq_len, kv_seq_len)}, got {mask_array.shape}."
+      )
+    mask_full = mask_array
 
   if segment_ids is not None:
     segment_ids_q = segment_ids.q[:, :, None]
@@ -200,7 +224,7 @@ def flash_attention_block_masked(
               "bxhqc,bxkc->bxhqk",
               q_slice,
               k_j_slice,
-              preferred_element_type=jnp.bfloat16,
+              preferred_element_type=logits_dtype,
           )
           if cap is not None:
             s_i_j = jnp.tanh(s_i_j / cap)
@@ -209,7 +233,10 @@ def flash_attention_block_masked(
           p_i_j = jnp.exp(s_i_j - m_i_j[..., None])
           return p_i_j
 
-        p_i_j = must_fuse_call("1")(fuse_this)(q_slice, k_j_slice, mask_value, broadcasted_mask, m_i_j)
+        if fuse_logits:
+          p_i_j = must_fuse_call("1")(fuse_this)(q_slice, k_j_slice, mask_value, broadcasted_mask, m_i_j)
+        else:
+          p_i_j = fuse_this(q_slice, k_j_slice, mask_value, broadcasted_mask, m_i_j)
         l_i_j = p_i_j.sum(axis=-1)
         assert m_i_j.shape == m_i_slice.shape
         m_i_new = jnp.maximum(m_i_slice, m_i_j)
@@ -254,11 +281,11 @@ def flash_attention_block_masked(
 
       return output, l, m
 
-    output, l, m = jax.lax.fori_loop(0, num_q_blocks, inner_loop_body, (output, l, m), unroll=True)
+    output, l, m = jax.lax.fori_loop(0, num_q_blocks, inner_loop_body, (output, l, m), unroll=loop_unroll)
 
     return (output, l, m)
 
-  output, l, m = jax.lax.fori_loop(0, num_kv_blocks, outer_loop_body, (output, l, m), unroll=True)
+  output, l, m = jax.lax.fori_loop(0, num_kv_blocks, outer_loop_body, (output, l, m), unroll=loop_unroll)
 
   # Reshape the output to drop the size one dimension at index 2,
   # which corresponds to `num_q_heads // num_kv_heads` when

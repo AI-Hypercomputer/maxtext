@@ -103,6 +103,100 @@ class JaxFlashAttentionTest(unittest.TestCase):
         atol=1e-2,
     )
 
+  def test_flash_attention_block_masked_per_example_mask(self):
+    batch, heads, q_len, kv_len, head_dim = 2, 2, 8, 16, 4
+    rng = np.random.default_rng(0)
+    query = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    mask = np.tril(np.ones((batch, q_len, kv_len), dtype=bool), k=kv_len - q_len)
+    mask[1, :, ::3] = False  # each batch item gets a different sparsity pattern
+    mask = jnp.asarray(mask)
+
+    def block_masked_qkv(q, k, v):
+      return jax_flash_attention.flash_attention_block_masked(
+          q,
+          k,
+          v,
+          segment_ids=None,
+          block_kv=4,
+          block_q=4,
+          mask=mask,
+          mask_value=-1.0e9,
+          logits_dtype=jnp.float32,
+          loop_unroll=False,
+          fuse_logits=False,
+      )
+
+    def block_masked(q):
+      return block_masked_qkv(q, key, value)
+
+    def dense_qkv(q, k, v):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", q, k)
+      logits = jnp.where(mask[:, None, :, :], logits, -1.0e9)
+      return jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), v)
+
+    def dense(q):
+      return dense_qkv(q, key, value)
+
+    np.testing.assert_allclose(np.asarray(block_masked(query)), np.asarray(dense(query)), rtol=1e-4, atol=1e-4)
+
+    grads_block = jax.grad(lambda q, k, v: jnp.sum(block_masked_qkv(q, k, v) ** 2), argnums=(0, 1, 2))(query, key, value)
+    grads_dense = jax.grad(lambda q, k, v: jnp.sum(dense_qkv(q, k, v) ** 2), argnums=(0, 1, 2))(query, key, value)
+    for grad_block, grad_dense in zip(grads_block, grads_dense):
+      np.testing.assert_allclose(np.asarray(grad_block), np.asarray(grad_dense), rtol=1e-3, atol=1e-3)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=4,
+        block_q=4,
+        mask=mask,
+        mask_value=-1.0e9,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+        fuse_logits=False,
+        save_residuals=True,
+    )
+    np.testing.assert_allclose(np.asarray(output), np.asarray(dense(query)), rtol=1e-4, atol=1e-4)
+    dense_logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    dense_max_logits = jnp.max(jnp.where(mask[:, None, :, :], dense_logits, -1.0e9), axis=-1)
+    np.testing.assert_allclose(np.asarray(stats["max_logits"]), np.asarray(dense_max_logits), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_block_masked_non_divisible_blocks(self):
+    batch, heads, seq_len, head_dim = 1, 1, 192, 4
+    rng = np.random.default_rng(0)
+    query = jnp.asarray(rng.normal(size=(batch, heads, seq_len, head_dim)), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, seq_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, seq_len, head_dim)), dtype=jnp.float32)
+    mask = jnp.ones((seq_len, seq_len), dtype=bool)
+
+    with self.assertRaisesRegex(ValueError, "must be divisible by block_q"):
+      jax_flash_attention.flash_attention_block_masked(
+          query,
+          key,
+          value,
+          segment_ids=None,
+          block_kv=64,
+          block_q=128,
+          mask=mask,
+          mask_value=-1.0e9,
+      )
+
+    with self.assertRaisesRegex(ValueError, "must be divisible by block_kv"):
+      jax_flash_attention.flash_attention_block_masked(
+          query,
+          key,
+          value,
+          segment_ids=None,
+          block_kv=128,
+          block_q=64,
+          mask=mask,
+          mask_value=-1.0e9,
+      )
+
   def test_flash_attention_block_masked_causal_mask(self):
     cap = 1.0
     mask_value = -1.0e9
@@ -3544,18 +3638,24 @@ class MLATest(attention_test_util.MLATestBase):
           "ici_context_parallelism": 4,
           "indexer_topk": 32,
       },
+      {
+          "testcase_name": "no_lb_cp2_seq384",
+          "context_parallel_load_balance": False,
+          "ici_context_parallelism": 2,
+          "indexer_topk": 256,
+          "max_target_length": 384,
+      },
   )
-  @pytest.mark.skip_on_tpu7x  # TODO(b/552989368): Investigate MLA Indexer all-gather CP failure on TPU7x
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel_with_indexer(
-      self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256
+      self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256, max_target_length=512
   ):
     """Test equivalence between dot_product MLA + Indexer and all-gather flash attention + context parallelism + Indexer"""
     config_arguments = {
         "per_device_batch_size": 1.0,
         "run_name": "test",
         "enable_checkpointing": False,
-        "max_target_length": 512,
+        "max_target_length": max_target_length,
         "sa_block_q": 128,
         "sa_block_kv": 128,
         "sa_block_kv_compute": 128,
