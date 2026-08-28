@@ -761,6 +761,70 @@ class TrainTests(unittest.TestCase):
         np.testing.assert_allclose(sharded, baseline, rtol=1e-4, atol=0.0)
 
   @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
+  @pytest.mark.skip_on_tpu7x
+  def test_tpu_gemma_zero1_gradient_accumulation_explicit(self):
+    """Gemma under ZeRO-1 + gradient accumulation + explicit sharding.
+
+    Explicit sharding type-checks the sharding of every operation rather than letting
+    GSPMD infer one, so a missing or wrong `out_sharding` in a Gemma layer fails the
+    step outright instead of silently costing a collective. ZeRO-1 and gradient
+    accumulation are in the mix because they layer the optimizer-moment and scan-carry
+    shardings on top, which is where annotations that look fine in a plain forward pass
+    tend to come apart.
+    """
+    # Gemma 3 reads its local/global attention pattern and rope scaling off the named
+    # model config, so it cannot run under the placeholder "default" model name.
+    families = [
+        ("gemma", "gemma", "tokenizer.gemma", []),
+        ("gemma2", "gemma2", "tokenizer.gemma", []),
+        ("gemma3", "gemma3", "tokenizer.gemma3", ["model_name=gemma3-4b", "override_model_config=True"]),
+        # Host offload keeps the parameters in pinned_host and moves the gradients back to
+        # device memory before the optimizer update, which is a second place the layer
+        # annotations have to line up with what the trainer asks for.
+        ("gemma-host-offload", "gemma", "tokenizer.gemma", ["parameter_memory_host_offload=True", "param_scan_axis=0"]),
+    ]
+    for case, decoder_block, tokenizer, extra_args in families:
+      with self.subTest(case=case):
+        gemma_zero1_ga = [
+            None,
+            get_test_config_path(),
+            f"base_output_directory={self._base_output_directory}",
+            "run_name=runner_test",
+            f"dataset_path={self.dataset_path}",
+            "steps=3",
+            "enable_checkpointing=False",
+            "enable_goodput_recording=False",
+            "dataset_type=synthetic",
+            "remat_policy=minimal",
+            "max_target_length=512",
+            "per_device_batch_size=2",
+            "base_emb_dim=256",
+            "base_mlp_dim=512",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_num_decoder_layers=2",
+            "head_dim=64",
+            # The splash kernel cannot build a mask for a downscaled Gemma (its sliding
+            # window leaves empty blocks); dot product attention keeps the focus on sharding.
+            "attention=dot_product",
+            # Data-parallel only, matching the llama2 test above: ZeRO-1 needs a "data"
+            # axis to shard the moments over, and MaxTextConfig rejects combining it with
+            # FSDP (the gradients and the moments would end up in different layouts).
+            "ici_data_parallelism=-1",
+            "dcn_data_parallelism=1",
+            "ici_fsdp_parallelism=1",
+            "dcn_fsdp_parallelism=1",
+            "gradient_accumulation_steps=4",
+            "shard_optimizer_over_data=True",
+            "shard_mode=explicit",
+            f"decoder_block={decoder_block}",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', tokenizer)}",
+        ] + extra_args
+        train_main(gemma_zero1_ga)
+
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   @pytest.mark.scheduled_only
   @pytest.mark.skip(reason="b/489133823. Previously transient in b/462548581.")

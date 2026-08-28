@@ -395,6 +395,17 @@ def create_sharding(mesh, logical_names, rules=None):
   return NamedSharding(mesh, spec)
 
 
+def _truncate_pspec(pspec: P, out_ndim: int) -> P:
+  """Drop trailing entries of a PartitionSpec, keeping any unreduced/reduced annotation.
+
+  Slicing a PartitionSpec directly raises once it carries an unreduced/reduced set — and
+  the annotation describes a cross-replica state of the whole array, not of a particular
+  dimension, so it has to survive the truncation. Gradient accumulation marks gradients
+  unreduced over "data" before resharding them, which is how such specs get here.
+  """
+  return P(*pspec.partitions[:out_ndim], unreduced=pspec.unreduced, reduced=pspec.reduced)
+
+
 def truncate_out_sharding(out_sharding, out_ndim: int):
   """Truncates out_sharding if tensor ndim is less than out_sharding pspec length."""
   if out_sharding is None:
@@ -403,11 +414,11 @@ def truncate_out_sharding(out_sharding, out_ndim: int):
     if len(out_sharding.spec) > out_ndim:
       return NamedSharding(
           out_sharding.mesh,
-          P(*out_sharding.spec[:out_ndim]),
+          _truncate_pspec(out_sharding.spec, out_ndim),
       )
   elif isinstance(out_sharding, P):
     if len(out_sharding) > out_ndim:
-      return P(*out_sharding[:out_ndim])
+      return _truncate_pspec(out_sharding, out_ndim)
   elif isinstance(out_sharding, (tuple, list)):
     if len(out_sharding) > out_ndim:
       return tuple(out_sharding[:out_ndim])

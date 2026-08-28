@@ -22,7 +22,7 @@ import unittest
 
 from maxtext.configs import pyconfig
 from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
-from maxtext.configs.types import _normalize_axes, infer_cp_axes, infer_ep_axes
+from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
@@ -119,6 +119,52 @@ class PyconfigTest(unittest.TestCase):
     )
     with self.assertRaises(ValueError):
       config_inference.ici_fsdp_parallelism = 4
+
+  def _zero1_config(self, **kwargs):
+    return pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_optimizer_over_data=True,
+        **kwargs,
+    )
+
+  def test_zero1_without_fsdp_is_allowed(self):
+    """Data-parallel-only Zero-1 is the supported configuration."""
+    config = self._zero1_config(ici_data_parallelism=-1, ici_fsdp_parallelism=1)
+    self.assertTrue(config.shard_optimizer_over_data)
+
+  def test_zero1_with_mesh_axes_omitting_fsdp_allowed(self):
+    """Custom mesh_axes that omit 'fsdp' or 'fsdp_transpose' do not raise KeyError."""
+    self.assertEqual(_resolved_fsdp_size(["data", "tensor"], [2, 4], 8), 1)
+
+  def test_zero1_with_fsdp_raises_error(self):
+    """Zero-1 shards the optimizer moments over "data" on top of the parameter layout.
+
+    FSDP shards the parameters over "fsdp", so the two together leave the gradients
+    sharded P('fsdp', ...) while the moments they are added to are sharded
+    P(('data', 'fsdp'), ...) — an outright type error under explicit sharding, and an
+    extra collective under auto. The combination is refused when the config is built.
+    """
+    with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
+      self._zero1_config(ici_data_parallelism=1, ici_fsdp_parallelism=2)
+
+  def test_zero1_with_fsdp_transpose_raises_error(self):
+    with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
+      self._zero1_config(ici_data_parallelism=1, ici_fsdp_parallelism=1, ici_fsdp_transpose_parallelism=2)
+
+  def test_zero1_with_autofilled_fsdp_raises_error(self):
+    """`ici_fsdp_parallelism=-1` absorbs whatever data parallelism leaves behind.
+
+    The check has to resolve the -1 the way mesh creation later will, otherwise this
+    config — four-way FSDP on a v5p-8 — would slip through and fail at trace time.
+    """
+    with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
+      self._zero1_config(
+          compile_topology="v5p-8",
+          compile_topology_num_slices=1,
+          ici_data_parallelism=2,
+          ici_fsdp_parallelism=-1,
+      )
 
   def test_overriding_model(self):
     config = pyconfig.initialize(
