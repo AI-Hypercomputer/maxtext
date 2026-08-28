@@ -83,13 +83,25 @@ class SyntheticDataIterator:
         SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
 
-    tokens = jax.random.randint(
-        jax.random.PRNGKey(0),
-        (config.global_batch_size_to_load, config.max_target_length + 1),
-        0,
-        config.vocab_size,
-        dtype=jnp.int32,
-    )
+    if getattr(config, "synthetic_data_distribution", "uniform") == "zipf":
+      alpha = 1.25
+      ranks = np.arange(1, config.vocab_size + 1, dtype=np.float64)
+      probs = 1.0 / (ranks ** alpha)
+      probs /= probs.sum()
+      flat_size = config.global_batch_size_to_load * (config.max_target_length + 1)
+      np.random.seed(42)
+      np_tokens = np.random.choice(config.vocab_size, size=flat_size, p=probs).reshape(
+          config.global_batch_size_to_load, config.max_target_length + 1
+      ).astype(np.int32)
+      tokens = jnp.array(np_tokens)
+    else:
+      tokens = jax.random.randint(
+          jax.random.PRNGKey(0),
+          (config.global_batch_size_to_load, config.max_target_length + 1),
+          0,
+          config.vocab_size,
+          dtype=jnp.int32,
+      )
 
     sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
     batch_positions = jnp.broadcast_to(
