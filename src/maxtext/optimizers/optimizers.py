@@ -18,11 +18,12 @@
 import re
 import jax
 import jax.numpy as jnp
-
-import optax
-from optax.contrib._muon import muon
 from maxtext.common.common_types import DecoderBlockType
+from maxtext.optimizers.muon import muon as sharded_muon
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
+from maxtext.utils.sharded_muon_utils import get_sharded_muon_weight_dimension_numbers
+import optax
+from optax.contrib._muon import muon as optax_muon
 
 
 def _get_path_mask_fn(patterns, match_returns_true=True):
@@ -166,7 +167,7 @@ def skip_step_on_spikes(
   return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
-def get_optimizer(config, learning_rate_schedule, model=None):
+def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   """Create optimizer."""
   if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -193,38 +194,71 @@ def get_optimizer(config, learning_rate_schedule, model=None):
   elif config.opt_type == "sgd":
     base_opt = optax.sgd(learning_rate_schedule)
   elif config.opt_type == "muon":
-    # extract muon dimension number from model structure
-    if model is not None:
-      muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config)
-    else:
-      raise ValueError("Please specify model to extract muon dimension number.")
-
+    muon_type = getattr(config, "muon_type", "maxtext_muon")
     if config.decoder_block == DecoderBlockType.DEEPSEEK4:
       ns_coeffs = [(3.4445, -4.7750, 2.0315)] * 8 + [(2.0, -1.5, 0.5)] * 2
       ns_steps = 10
     else:
       ns_coeffs = (3.4445, -4.7750, 2.0315)
-      ns_steps = 5
+      ns_steps = getattr(config, "muon_ns_steps", 5)
 
-    muon_kwargs = {
-        # Shared parameters: "nesterov" uses default
-        "learning_rate": learning_rate_schedule,
-        "eps": config.adam_eps,
-        "mu_dtype": config.mu_dtype,
-        # Muon-specific parameters: "weight_decay_mask", "adaptive" uses default
-        "beta": config.muon_beta,
-        "weight_decay": config.muon_weight_decay,
-        "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
-        "consistent_rms": config.muon_consistent_rms,
-        "ns_coeffs": ns_coeffs,
-        "ns_steps": ns_steps,
-        # AdamW-specific parameters
-        "adam_b1": config.adam_b1,
-        "adam_b2": config.adam_b2,
-        "adam_eps_root": config.adam_eps_root,
-        "adam_weight_decay": config.adam_weight_decay,
-    }
-    base_opt = muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
+    if muon_type in ("optax", "optax_muon"):
+      if model is not None:
+        muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config)
+      else:
+        raise ValueError("Please specify model to extract muon dimension number.")
+
+      muon_kwargs = {
+          # Shared parameters: "nesterov" uses default
+          "learning_rate": learning_rate_schedule,
+          "eps": config.adam_eps,
+          "mu_dtype": config.mu_dtype,
+          # Muon-specific parameters: "weight_decay_mask", "adaptive" uses default
+          "beta": config.muon_beta,
+          "weight_decay": config.muon_weight_decay,
+          "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
+          "consistent_rms": config.muon_consistent_rms,
+          "ns_coeffs": ns_coeffs,
+          "ns_steps": ns_steps,
+          # AdamW-specific parameters
+          "adam_b1": config.adam_b1,
+          "adam_b2": config.adam_b2,
+          "adam_eps_root": config.adam_eps_root,
+          "adam_weight_decay": config.adam_weight_decay,
+      }
+      base_opt = optax_muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
+    elif muon_type in ("maxtext", "maxtext_muon", "sharded", "sharded_muon"):
+      if model is not None:
+        muon_weight_dimension_numbers = get_sharded_muon_weight_dimension_numbers(model, config, mesh=mesh)
+      else:
+        raise ValueError("Please specify model to extract muon dimension number.")
+
+      use_all_to_all = getattr(config, "muon_use_all_to_all", True)
+
+      muon_kwargs = {
+          # Shared parameters: "nesterov" uses default
+          "learning_rate": learning_rate_schedule,
+          "eps": config.adam_eps,
+          "mu_dtype": config.mu_dtype,
+          # Muon-specific parameters: "weight_decay_mask", "adaptive" uses default
+          "beta": config.muon_beta,
+          "weight_decay": config.muon_weight_decay,
+          "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
+          "consistent_rms": config.muon_consistent_rms,
+          "ns_coeffs": ns_coeffs,
+          "ns_steps": ns_steps,
+          "use_all_to_all": use_all_to_all,
+          # AdamW-specific parameters
+          "adam_b1": config.adam_b1,
+          "adam_b2": config.adam_b2,
+          "adam_eps_root": config.adam_eps_root,
+          "adam_weight_decay": config.adam_weight_decay,
+      }
+      base_opt = sharded_muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
+    else:
+      raise ValueError(
+          f"Unsupported muon_type: {muon_type}. Must be 'maxtext_muon' (or" " 'maxtext') or 'optax_muon' (or 'optax')."
+      )
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
