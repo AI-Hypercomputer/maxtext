@@ -29,6 +29,7 @@ from flax import struct
 from flax.training import train_state
 import jax
 from jax.experimental import multihost_utils
+import jax.numpy as jnp
 from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.common import checkpoint_context
 from maxtext.common import emergency_checkpointing
@@ -36,6 +37,7 @@ from maxtext.common import grain_utility
 from maxtext.common import train_state_nnx
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline import synthetic_data_processing
+from maxtext.layers import quantizations
 from maxtext.trainers.diloco.utils import spmd_diloco_checkpointing as diloco_checkpoint_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils import exceptions
@@ -656,6 +658,142 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
     )
 
 
+def _get_checkpoint_metadata_tree(ckptr: Any, ckpt_path: epath.Path) -> Any:
+  """Safely retrieves the metadata tree for an Orbax checkpoint."""
+  try:
+    metadata = ckptr.metadata(ckpt_path)
+    if metadata is None:
+      return None
+    if hasattr(metadata, "item_metadata"):
+      metadata = metadata.item_metadata
+    if hasattr(metadata, "tree"):
+      return metadata.tree
+    return metadata
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.log(f"Warning: Failed to retrieve checkpoint metadata from {ckpt_path}: {e}")
+    return None
+
+
+def _find_matching_meta_subtree(want_bare: Any, meta_tree: Any) -> Any:
+  """Unwraps metadata tree wrappers (e.g. 'params', 'model_params') to align with want_bare."""
+  if not isinstance(want_bare, dict) or not isinstance(meta_tree, dict):
+    return meta_tree
+
+  want_keys = set(want_bare.keys())
+  if want_keys and want_keys.issubset(meta_tree.keys()):
+    return meta_tree
+
+  for wrapper in ("params", "model_params", "model", "items"):
+    if wrapper in meta_tree and isinstance(meta_tree[wrapper], dict):
+      sub = meta_tree[wrapper]
+      if want_keys and want_keys.issubset(sub.keys()):
+        return sub
+      if wrapper == "params" and "params" in sub and isinstance(sub["params"], dict):
+        if want_keys and want_keys.issubset(sub["params"].keys()):
+          return sub["params"]
+
+  return meta_tree
+
+
+def _augment_target_with_scales(want_node: Any, meta_node: Any) -> Any:
+  """Augments `want_node` with companion scales from `meta_node` if present in checkpoint but not in want."""
+  if not isinstance(want_node, dict) or not isinstance(meta_node, dict):
+    return want_node
+
+  augmented = {}
+  for k, v in want_node.items():
+    scale_key = f"{k}_scale"
+    meta_scale = meta_node.get(scale_key) if isinstance(meta_node, dict) else None
+    if not isinstance(v, dict) and scale_key not in want_node and meta_scale is not None:
+      # Dequantize-on-load: Target wants unquantized weights, but checkpoint has companion scale.
+      meta_param = meta_node.get(k)
+      param_dtype = getattr(meta_param, "dtype", getattr(v, "dtype", jnp.bfloat16))
+      augmented[k] = jax.ShapeDtypeStruct(
+          shape=getattr(v, "shape", getattr(meta_param, "shape", ())),
+          dtype=param_dtype,
+          sharding=getattr(v, "sharding", None),
+      )
+      augmented[scale_key] = jax.ShapeDtypeStruct(
+          shape=getattr(meta_scale, "shape", ()),
+          dtype=getattr(meta_scale, "dtype", jnp.float32),
+          sharding=None,
+      )
+    elif isinstance(v, dict):
+      augmented[k] = _augment_target_with_scales(
+          v,
+          meta_node.get(k) if isinstance(meta_node, dict) else None,
+      )
+    else:
+      if k not in augmented:
+        augmented[k] = v
+
+  return augmented
+
+
+def _augment_want_with_scales(want: Any, meta_tree: Any, is_nnx: bool, restore_key: str) -> Any:
+  """Augments the target params dictionary with scales from checkpoint metadata if needed."""
+  if meta_tree is None:
+    return want
+
+  if is_nnx or restore_key in ("model_params", "model"):
+    meta_weights = _find_matching_meta_subtree(want, meta_tree)
+    return _augment_target_with_scales(want, meta_weights)
+  else:
+    # Linen: want is {"params": bare_weights} or bare_weights
+    if isinstance(want, dict) and "params" in want and len(want) == 1:
+      want_bare = want["params"]
+      meta_weights = _find_matching_meta_subtree(want_bare, meta_tree)
+      augmented_bare = _augment_target_with_scales(want_bare, meta_weights)
+      return {"params": augmented_bare}
+    else:
+      meta_weights = _find_matching_meta_subtree(want, meta_tree)
+      return _augment_target_with_scales(want, meta_weights)
+
+
+def maybe_dequantize_restored_params(restored_weights: Any, want: Any) -> Any:
+  """Dequantizes restored weights if checkpoint contained companion scales but want did not.
+
+  For each parameter dictionary containing a weight and its companion scale (e.g. 'kernel' and
+  'kernel_scale', or 'wi_0' and 'wi_0_scale') where the target model (`want`) does not expect the scale,
+  dynamically dequantizes the weight to the target compute dtype using `dequantize_weight` from
+  `maxtext.layers.quantizations` and removes the companion scale from the restored parameter dictionary.
+
+  Args:
+    restored_weights: The restored parameter PyTree from the checkpoint.
+    want: The expected parameter PyTree structure / ShapeDtypeStructs.
+
+  Returns:
+    The parameter PyTree with dequantized weights and omitted companion scales where applicable.
+  """
+  if not isinstance(restored_weights, dict):
+    return restored_weights
+
+  consumed_scales = set()
+  out = {}
+
+  for k, v in restored_weights.items():
+    scale_key = f"{k}_scale"
+    has_scale = scale_key in restored_weights
+    want_expects_scale = isinstance(want, dict) and scale_key in want
+
+    if has_scale and not want_expects_scale:
+      target_param = want.get(k) if isinstance(want, dict) else None
+      target_dtype = getattr(target_param, "dtype", jnp.bfloat16)
+
+      weight = v
+      scale = restored_weights[scale_key]
+      out[k] = quantizations.dequantize_weight(weight, scale, compute_dtype=target_dtype)
+      consumed_scales.add(scale_key)
+
+  for k, v in restored_weights.items():
+    if k in consumed_scales or k in out:
+      continue
+    want_sub = want.get(k) if isinstance(want, dict) else None
+    out[k] = maybe_dequantize_restored_params(v, want_sub)
+
+  return out
+
+
 def load_params_from_path(
     load_parameters_from_path,
     abstract_unboxed_params,
@@ -683,11 +821,6 @@ def load_params_from_path(
   if restore_key not in ("model_params", "model"):
     restore_key = "params"
 
-  if restore_key in ("model_params", "model"):
-    params_collection = want
-  else:
-    params_collection = {"params": want} if is_nnx else want
-
   # Memory optimization: restore only the "params" key (the checkpoint may also hold opt_state/step);
   # partial_load drops the rest. The abstract carries shape/dtype/sharding directly.
   context = checkpoint_context.build_context(
@@ -710,6 +843,13 @@ def load_params_from_path(
     except Exception as e:  # pylint: disable=broad-except
       max_logging.log(f"Skipping pre-load shape check, checkpoint metadata unreadable: {e}")
       stored = None
+
+    augmented_want = _augment_want_with_scales(want, stored, is_nnx, restore_key)
+    if restore_key in ("model_params", "model"):
+      params_collection = augmented_want
+    else:
+      params_collection = {"params": augmented_want} if is_nnx else augmented_want
+
     if isinstance(stored, dict):
       stored_collection = stored.get(restore_key)
       if restore_key == "params" and is_nnx and isinstance(stored_collection, dict):
@@ -731,6 +871,10 @@ def load_params_from_path(
   else:
     restored_weights = restored_collection["params"] if is_nnx else restored_collection
 
+  # Dequantize if checkpoint had companion kernel_scale and target want is unquantized.
+  restored_weights = maybe_dequantize_restored_params(restored_weights, want)
+  if not is_nnx:
+    restored_collection = restored_weights
   _raise_on_weight_mismatch(want, restored_weights)
   if is_nnx:
     nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
