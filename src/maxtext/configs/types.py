@@ -914,6 +914,39 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  moe_bwd_inkernel_quant: bool = Field(
+      False,
+      description=(
+          "Quantize the MoE backward-gmm operands INSIDE the ragged kernels instead of with dense "
+          "XLA-level quantize ops. The dense quantize/amax ops process every row of the ragged "
+          "buffer at its STATIC size (worst-case at ragged_buffer_factor<=0); the in-kernel path "
+          "touches only the valid group_sizes rows/tiles, and no reduction ever reads "
+          "uninitialized buffer tail rows. drhs: tgmm quantizes BOTH operands in-kernel "
+          "(per-gm-tile-per-channel e4m3). Requires use_tokamax_gmm + use_gmm_v2 + an fp8 qwix "
+          "bwd_qtype; falls back to the XLA quantize otherwise. For performance improvement at "
+          "dropless (worst-case) ragged buffer sizes."
+      ),
+  )
+  bwd_quantization_dtype: Literal["e5m2", "e4m3"] = Field(
+      "e5m2",
+      description=(
+          "fp8 dtype for the BACKWARD (gradient) quantization in the fp8_full qwix recipe: 'e5m2' "
+          "(default) or 'e4m3'."
+      ),
+  )
+  moe_ring_cotangent_ag: bool = Field(
+      False,
+      description=(
+          "Run the BACKWARD cotangent all-gather of the ring-of-experts combine reduce-scatter on "
+          "a TensorCore Pallas ring kernel instead of the XLA collective (which can serialize on "
+          "the SparseCore collective-offload queue). Forward is unchanged. For performance "
+          "improvement; numerically equal to lax.all_gather."
+      ),
+  )
+  moe_quantize_token_all_gather: bool = Field(
+      False,
+      description="Whether to quantize token activations to FP8 before All-Gather across EP shards in Ring of Experts.",
+  )
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
       description=(
@@ -1370,6 +1403,15 @@ class RematAndOffload(BaseModel):
   moe_mlpwi_0: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the first part of a gated MoE's output.",
+  )
+  moe_x_sorted: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the routed (post-dispatch, expert-sorted) MoE input plus its small "
+          "routing/metadata bundle. 'device' saves them across the remat boundary so the backward "
+          "does not re-run the dispatch token all-gather and sort; the expert GMMs re-run from the "
+          "saved tensor. Default 'remat' recomputes (existing behavior)."
+      ),
   )
   moe_mlpwi_1: RematLocation = Field(
       RematLocation.REMAT,
@@ -3604,6 +3646,7 @@ class MaxTextConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
@@ -4796,6 +4839,7 @@ class RLConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",

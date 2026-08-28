@@ -14,6 +14,7 @@
 """Mixture of Experts (MoE) tests."""
 
 import unittest
+from absl.testing import absltest
 from types import SimpleNamespace
 from unittest import mock
 from absl.testing import parameterized
@@ -795,6 +796,133 @@ class RoutedMoeTest(parameterized.TestCase):
     non_chunked_out, _, _ = moe_non_chunked(hidden_states)
 
     self.assertTrue(jax.numpy.allclose(chunked_out, non_chunked_out, rtol=1e-01, atol=1e-01, equal_nan=False))
+
+  @pytest.mark.tpu_only
+  def test_moe_quantize_token_all_gather(self):
+    ep = 4
+    weight_quantization_calibration_method = "fixed,-224,224"
+    act_quantization_calibration_method = "fixed,-224,224"
+
+    def _build_cfg(moe_quantize_token_all_gather: bool):
+      return pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="moe_quantize_token_all_gather_test",
+          enable_checkpointing=False,
+          model_name="mixtral-8x7b",
+          weight_dtype="float32",
+          dtype="bfloat16",
+          per_device_batch_size=1,
+          max_target_length=128,
+          float32_gate_logits=True,
+          ici_expert_parallelism=ep,
+          sparse_matmul=True,
+          megablox=False,
+          use_tokamax_gmm=True,
+          use_gmm_v2=True,
+          use_ring_of_experts=True,
+          mlp_bias=True,
+          moe_quantize_token_all_gather=moe_quantize_token_all_gather,
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          weight_quantization_calibration_method=weight_quantization_calibration_method,
+          act_quantization_calibration_method=act_quantization_calibration_method,
+          bwd_quantization_calibration_method="absmax",
+          wi_tile_fwd_batch_seq=128,
+          wi_tile_dlhs_batch_seq=128,
+          wi_tile_dlhs_embed_dim=256,
+          wi_tile_drhs_batch_seq=128,
+          wo_tile_fwd_batch_seq=128,
+          wo_tile_fwd_embed_dim=256,
+          wo_tile_dlhs_batch_seq=128,
+          wo_tile_dlhs_mlp_dim=256,
+          wo_tile_drhs_batch_seq=128,
+      )
+
+    def _build_model(cfg, mesh):
+      model = moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+      def get_fp8_full_qwix_rule_for_test(config: Config):
+        return [
+            qwix.QtRule(
+                module_path=".*",
+                weight_qtype=jnp.float8_e4m3fn,
+                act_qtype=jnp.float8_e4m3fn,
+                bwd_qtype=jnp.float8_e5m2,
+                weight_calibration_method=config.weight_quantization_calibration_method,
+                act_calibration_method=config.act_quantization_calibration_method,
+                bwd_calibration_method=config.bwd_quantization_calibration_method,
+                op_names=("gmm", "ragged_dot"),
+            ),
+        ]
+
+      quantization_rule = get_fp8_full_qwix_rule_for_test(cfg)
+      quantization_provider = qwix.QtProvider(quantization_rule)
+      model = qwix.quantize_model(model, quantization_provider)
+      return model
+
+    def _loss_and_grad(model, variables, hidden_states):
+      def loss_fn(params, x):
+        out, lb_loss, _ = model.apply({"params": params}, x)
+        loss = jnp.mean(out.astype(jnp.float32) ** 2)
+        if lb_loss is not None:
+          loss = loss + lb_loss.astype(jnp.float32)
+        return loss, out
+
+      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))(variables["params"], hidden_states)
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+
+    cfg_ref = _build_cfg(moe_quantize_token_all_gather=False)
+    hidden_states = jax.random.normal(
+        rng_hidden_states,
+        (
+            int(cfg_ref.per_device_batch_size) * device_count,
+            cfg_ref.max_target_length,
+            cfg_ref.base_emb_dim,
+        ),
+        dtype=cfg_ref.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg_ref)
+    mesh = Mesh(devices_array, cfg_ref.mesh_axes)
+
+    model_ref = _build_model(cfg_ref, mesh)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+      variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      (_, output_ref), (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+
+    cfg_tgt = _build_cfg(moe_quantize_token_all_gather=True)
+    model_tgt = _build_model(cfg_tgt, mesh)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_tgt.logical_axis_rules):
+      variables_tgt = model_tgt.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      (_, output_tgt), (grads_tgt, x_grad_tgt) = _loss_and_grad(model_tgt, variables_tgt, hidden_states)
+
+    tree_ref = {
+        "output": output_ref,
+        "state_grad": x_grad_ref,
+        "var_grad": grads_ref,
+    }
+    tree_tgt = {
+        "output": output_tgt,
+        "state_grad": x_grad_tgt,
+        "var_grad": grads_tgt,
+    }
+
+    relative_norm_diff_threshold = 0.22
+    diff_summary = compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold)
+    max_logging.log("\n" + diff_summary)
 
   @pytest.mark.tpu_only
   @pytest.mark.skip(reason="Correctness fails after adding EP. (b/540041424)")
@@ -2430,4 +2558,4 @@ class FusedMlpMoETest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

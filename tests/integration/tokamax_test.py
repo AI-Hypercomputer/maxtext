@@ -39,16 +39,18 @@ class Train(parameterized.TestCase):
           "use_gmm_v2": use_gmm_v2,
           "use_gmm_v2_heuristic_tiling": use_gmm_v2_heuristic_tiling,
           "ici_expert_parallelism": ici_expert_parallelism,
+          "moe_quantize_token_all_gather": moe_quantize_token_all_gather,
       }
-      for base_name, quantization, use_gmm_v2, use_gmm_v2_heuristic_tiling, ici_expert_parallelism in [
-          ("tokamax_v1_bf16", "", False, False, 1),
-          ("tokamax_v1_fp8", "fp8", False, False, 1),  # not quantize gmm
-          ("tokamax_v1_fp8_full", "fp8_full", False, False, 1),  # quantize gmm
-          ("tokamax_v2_bf16", "", True, False, 1),
-          ("tokamax_v2_bf16_heuristic", "", True, True, 1),
-          ("tokamax_v2_fp8_full", "fp8_full", True, False, 1),
-          ("tokamax_v2_bf16", "", True, False, 2),
-          ("tokamax_v2_fp8_full", "fp8_full", True, False, 2),
+      for base_name, quantization, use_gmm_v2, use_gmm_v2_heuristic_tiling, ici_expert_parallelism, moe_quantize_token_all_gather in [
+          ("tokamax_v1_bf16", "", False, False, 1, False),
+          ("tokamax_v1_fp8", "fp8", False, False, 1, False),  # not quantize gmm
+          ("tokamax_v1_fp8_full", "fp8_full", False, False, 1, False),  # quantize gmm
+          ("tokamax_v2_bf16", "", True, False, 1, False),
+          ("tokamax_v2_bf16_heuristic", "", True, True, 1, False),
+          ("tokamax_v2_fp8_full", "fp8_full", True, False, 1, False),
+          ("tokamax_v2_bf16", "", True, False, 2, False),
+          ("tokamax_v2_fp8_full", "fp8_full", True, False, 2, False),
+          ("tokamax_v2_fp8_tag", "fp8_full", True, False, 2, True),
       ]
   )
   @pytest.mark.tpu_only
@@ -58,6 +60,7 @@ class Train(parameterized.TestCase):
       use_gmm_v2: bool,
       use_gmm_v2_heuristic_tiling: bool,
       ici_expert_parallelism: int,
+      moe_quantize_token_all_gather: bool = False,
   ):
     """Smoke train with small config."""
     sharding_tolerance = 0.22 if ici_expert_parallelism > 1 else 2e-2
@@ -113,6 +116,7 @@ class Train(parameterized.TestCase):
         "use_tokamax_splash=False",
         # quantization
         f"quantization={quantization}",
+        f"moe_quantize_token_all_gather={moe_quantize_token_all_gather}",
         "use_qwix_quantization=True",
         "weight_quantization_calibration_method=fixed,-224,224",
         "act_quantization_calibration_method=fixed,-224,224",
