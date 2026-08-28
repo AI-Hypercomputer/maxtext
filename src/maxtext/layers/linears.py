@@ -41,6 +41,7 @@ from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
+from maxtext.utils.sharding import without_reduced_axes
 
 
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
@@ -465,7 +466,8 @@ class DenseGeneral(nnx.Module):
     )
 
     if self.bias is not None:
-      bias = jnp.asarray(self.bias[...], self.dtype)
+      # The add broadcasts the bias against batch-sharded activations, which a `reduced` bias rejects.
+      bias = without_reduced_axes(jnp.asarray(self.bias[...], self.dtype))
       if slice_bounds is not None:
         begin, end = slice_bounds
         bias = bias[..., begin:end]

@@ -67,11 +67,17 @@ from maxtext.utils.sharding import (
     maybe_shard_with_logical,
     maybe_shard_with_name,
     remove_incompatible_mesh_axes_from_partition_spec,
+    without_reduced_axes,
 )
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
 # -----------------------------------------
+
+
+def _conv_general_dilated_without_reduced_kernel(lhs, rhs, *args, **kwargs):
+  """`lax.conv_general_dilated` on a kernel stripped of its `reduced` axes, which convolution has no rule for."""
+  return lax.conv_general_dilated(lhs, without_reduced_axes(rhs), *args, **kwargs)
 
 
 def gdn_context_axes(cfg) -> tuple[str, ...]:
@@ -595,6 +601,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         param_dtype=get_weight_dtype(cfg, "conv1d"),
         kernel_init=conv_kernel_init,
         precision=cfg.matmul_precision,
+        conv_general_dilated=_conv_general_dilated_without_reduced_kernel,
         rngs=rngs,
     )
 
