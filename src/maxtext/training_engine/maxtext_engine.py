@@ -1040,7 +1040,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if staging_transport == "raiden":
       try:
-        from tunix.experimental.worker import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+        from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
       except ImportError as exc:
         # Fatal, not a warning: Raiden staging was explicitly requested and cannot be
         # provided. Returning empty metadata instead defers the failure to the caller --

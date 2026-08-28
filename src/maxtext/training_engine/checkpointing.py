@@ -119,7 +119,7 @@ class CheckpointManager:
       )
       save_args["optimizer_state"] = optimizer_cp_args
 
-    if checkpoint_state.accumulated_metrics is not None:
+    if checkpoint_state.accumulated_metrics:
       jax.block_until_ready(checkpoint_state.accumulated_metrics)
       metrics_cp_args = ocp.args.PyTreeSave(
           item=checkpoint_state.accumulated_metrics,
