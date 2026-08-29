@@ -39,6 +39,7 @@ _MODEL_TO_BLOCKS = {
     "qwen3.5-397b-a17b": ("qwen3_5", "qwen3_5"),
     # Stitched model
     "maxtext-omni-gemma3-qwen3": ("gemma3", "qwen3"),
+    "maxtext-omni-qwen3-vl-14b": ("qwen3_vl", "qwen3"),
 }
 
 
@@ -145,7 +146,7 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
   if "maxtext-omni" in getattr(config, "model_name", ""):
     from maxtext.experimental.omni_poc.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
 
-    return processor_maxtext_omni.get_image_offsets_omni(vision_block, decoder_block, processor_output)
+    return processor_maxtext_omni.get_image_offsets_omni(vision_block, decoder_block, processor_output, config=config)
   elif vision_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import get_image_offsets_gemma3  # pylint: disable=import-outside-toplevel
 
@@ -233,7 +234,7 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.experimental.omni_poc.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
 
     return processor_maxtext_omni.add_extra_tokens_for_omni(
-        tokens, vision_block, decoder_block, processor_output=processor_output
+        tokens, vision_block, decoder_block, processor_output=processor_output, config=config
     )
   elif vision_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel

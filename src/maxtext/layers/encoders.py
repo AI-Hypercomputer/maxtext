@@ -177,6 +177,16 @@ class MultimodalMLPProjector(nnx.Module):
     self.activation = activations.get(self.activation_name.lower(), jax.nn.gelu)
 
     current_in = in_features * self.tokens_per_block
+
+    # Qwen-identical Pre-LayerNorm on the spatially merged patch tokens
+    if "qwen" in vision_block_str:
+      self.ln_q = nnx.LayerNorm(
+          num_features=current_in,
+          epsilon=getattr(config, "normalization_layer_epsilon", 1e-6),
+          dtype=config.dtype_mm,
+          rngs=rngs,
+      )
+
     for i in range(self.num_layers):
       current_out = out_features if i == self.num_layers - 1 else self.hidden_size
       layer = linears.DenseGeneral(
@@ -202,6 +212,10 @@ class MultimodalMLPProjector(nnx.Module):
       batch_size, seq_len, in_dim = x.shape
       num_blocks = seq_len // self.tokens_per_block
       x = x.reshape((batch_size, num_blocks, self.tokens_per_block * in_dim))
+
+    # Apply Qwen Pre-LayerNorm if present
+    if hasattr(self, "ln_q"):
+      x = self.ln_q(x)
 
     for i in range(self.num_layers):
       linear_layer = getattr(self, f"custom_linear_{i}")

@@ -1,0 +1,88 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Config for Pretraining / Aligning Omni-Qwen3-VL-14B custom MLP projector
+# on ChartNet (human_verified subset) on TPU v4-128 (128 devices) for 3 Epochs.
+
+base_config: "maxtext-omni-qwen3-vl-14b.yml"
+
+use_sft: true
+use_tunix_gradient_accumulation: false
+use_multimodal: true
+sft_train_on_completion_only: true
+packing: false
+freeze_vision_encoder_params: true
+
+# Pretrain ONLY the custom MLP projector to align Qwen 3 VL vision features with Qwen 3 14B text space
+trainable_parameters_mask: ["custom_linear", "ln_q"]
+
+# Learning rate and schedule for projector alignment on 128 devices
+learning_rate: 3.e-4
+lr_schedule_type: 'cosine'
+warmup_steps_fraction: 0.05
+learning_rate_final_fraction: 0.1
+adamw_mask: ['.*norm.*', '.*bias.*']
+gradient_clipping_threshold: 1.0
+
+# -------------- HF pipeline (ibm-granite/ChartNet - human_verified) --------------
+dataset_type: hf
+tokenizer_type: "huggingface"
+tokenizer_path: "Qwen/Qwen3-14B"
+hf_path: 'ibm-granite/ChartNet'
+hf_name: 'human_verified'
+train_split: 'train'
+hf_eval_split: 'test'
+
+# Image column
+train_image_column: 'image'
+eval_image_column: 'image'
+
+# Text columns: ['prompt', 'csv']
+train_data_columns: ['prompt', 'csv']
+eval_data_columns: ['prompt', 'csv']
+default_prompt: "Extract the data table from this chart in CSV format."
+
+# Checkpoint paths
+load_parameters_path: "gs://yuchenhou-maxtext-logs/omni_checkpoints/qwen3-vl-14b-3mlp/0/items"
+base_output_directory: "gs://yuchenhou-maxtext-logs/experimental/omni_qwen_14b/pretrain"
+run_name: "omni_qwen3_vl_14b_pretrain_chartnet"
+
+# Data loader settings (in-process data loading to prevent TPU worker subprocess conflict)
+grain_worker_count: 0
+grain_worker_count_eval: 0
+
+# Training schedule for 3 full epochs
+per_device_batch_size: 1
+num_epoch: 3
+steps: 2172
+checkpoint_period: 100
+log_period: 1
+save_checkpoint_on_completion: true
+async_checkpointing: true
+
+# Evaluation settings (disabled)
+eval_interval: -1
+eval_steps: 0
+
+# Sequence length & attention settings
+max_prefill_predict_length: 1024
+max_target_length: 2048
+max_num_images_per_example: 1
+scan_layers: false
+attention: "dot_product"
+
+# Parallelism settings for 14B on TPU (Tensor Parallelism = 4)
+ici_fsdp_parallelism: 1
+ici_tensor_parallelism: 4
+

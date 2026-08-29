@@ -28,10 +28,6 @@ python src/maxtext/experimental/omni_poc/utils/decode_omni.py \
 
 """
 
-import maxtext
-# Eagerly initialize core MaxText C++ and model dependencies
-_ = (maxtext.Mesh, maxtext.pyconfig, maxtext.models, maxtext.model_creation_utils)
-
 import functools
 import os
 import random
@@ -102,44 +98,23 @@ def load_omni_config(yaml_path, checkpoint_path):
   """Loads custom omni config YAML and converts overrides onto base.yml."""
   custom_cfg = omegaconf.OmegaConf.to_container(omegaconf.OmegaConf.load(yaml_path), resolve=True)
   base_yml = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
-  num_devs = len(jax.devices())
-  per_dev_bs = 1.0 / num_devs
   argv = [
       sys.argv[0],
       base_yml,
       "override_model_config=True",
       "skip_jax_distributed_system=True",
       "ici_fsdp_parallelism=1",
-      "ici_data_parallelism=1",
-      "ici_autoregressive_parallelism=1",
       "ici_tensor_parallelism=-1",
-      f"per_device_batch_size={per_dev_bs}",
-      "async_checkpointing=False",
       f"load_parameters_path={checkpoint_path}",
   ]
 
-  if "max_prefill_predict_length" not in custom_cfg:
-    argv.append("max_prefill_predict_length=1024")
-  if "max_target_length" not in custom_cfg:
-    argv.append("max_target_length=2048")
-
   omni_skip_keys = {
-      # Custom omni YAML keys not in base.yml
       "vision_load_path",
       "llm_load_path",
       "stitched_output_path",
       "vision_model_name",
       "llm_model_name",
       "base_config",
-      "model_name",
-      # Batch and parallelism keys overridden for single-sample decoding
-      "per_device_batch_size",
-      "eval_per_device_batch_size",
-      "ici_fsdp_parallelism",
-      "ici_data_parallelism",
-      "ici_tensor_parallelism",
-      "ici_autoregressive_parallelism",
-      "ici_expert_parallelism",
   }
   for k, v in custom_cfg.items():
     if k in omni_skip_keys:
@@ -156,18 +131,13 @@ def load_omni_config(yaml_path, checkpoint_path):
       skip_jax_distributed_system=True,
       log_config=False,
   )
-  # Explicitly set model_name and single-sample batch sizes on the frozen config
-  object.__setattr__(config, "model_name", "maxtext-omni-gemma3-qwen3")
-  object.__setattr__(config, "micro_batch_size_to_train_on", 1)
-  object.__setattr__(config, "global_batch_size_to_train_on", 1)
-  object.__setattr__(config, "per_device_batch_size", per_dev_bs)
   return config
 
 
 @functools.partial(jax.jit, static_argnums=(0,))
-def _prefill_step(model, params, tokens, positions, segment_ids, images):
-  """Executes initial prefill pass and initializes the KV cache."""
-  logits, mutated_vars = model.apply(
+def _forward_step(model, params, tokens, positions, segment_ids, images):
+  """Executes a single forward pass of the model and returns output logits."""
+  return model.apply(
       {"params": params},
       decoder_input_tokens=tokens,
       decoder_positions=positions,
@@ -175,55 +145,11 @@ def _prefill_step(model, params, tokens, positions, segment_ids, images):
       encoder_images=images,
       enable_dropout=False,
       model_mode="prefill",
-      mutable=["cache"],
   )
-  return logits, mutated_vars["cache"]
-
-
-@functools.partial(jax.jit, static_argnums=(0,))
-def _ar_step(model, params, cache, token, position):
-  """Executes a single-token autoregressive step reusing the KV cache."""
-  logits, mutated_vars = model.apply(
-      {"params": params, "cache": cache},
-      decoder_input_tokens=token,
-      decoder_positions=position,
-      decoder_segment_ids=None,
-      encoder_images=None,
-      enable_dropout=False,
-      model_mode="autoregressive",
-      mutable=["cache"],
-  )
-  return logits, mutated_vars["cache"]
-
-
-@functools.partial(jax.jit, static_argnums=(0, 5))
-def _generate_loop(model, params, cache, first_token, start_pos, num_steps: int):
-  """Executes the remaining autoregressive generation loop on TPU using jax.lax.scan without host syncs."""
-
-  def step_fn(carry, _):
-    current_cache, current_token, current_pos = carry
-    logits, mutated_vars = model.apply(
-        {"params": params, "cache": current_cache},
-        decoder_input_tokens=current_token,
-        decoder_positions=current_pos,
-        decoder_segment_ids=None,
-        encoder_images=None,
-        enable_dropout=False,
-        model_mode="autoregressive",
-        mutable=["cache"],
-    )
-    next_token = jnp.argmax(logits[:, 0:1, :], axis=-1).astype(jnp.int32)  # shape: [1, 1]
-    next_pos = current_pos + 1
-    new_cache = mutated_vars["cache"]
-    return (new_cache, next_token, next_pos), next_token
-
-  init_carry = (cache, first_token, start_pos)
-  _, generated_tokens_seq = jax.lax.scan(step_fn, init_carry, None, length=num_steps)
-  return generated_tokens_seq
 
 
 def decode_omni_sample(model, params, config, mesh, tokenizer, prompt_str, pil_image, max_new_tokens=128):
-  """Runs prefill and autoregressive decoding for a single multimodal sample with KV caching."""
+  """Runs prefill and autoregressive decoding for a single multimodal sample."""
   # Preprocess image
   image_np = np.array(pil_image.convert("RGB"), dtype=np.uint8)
   processed_image = mm_processor.preprocess_image_for_training(image_np, config)
@@ -251,55 +177,46 @@ def decode_omni_sample(model, params, config, mesh, tokenizer, prompt_str, pil_i
       processor_output=processed_image,
   ).tolist()
 
-  # Pad token sequence to fixed config.max_prefill_predict_length
+  # Pad token sequence to fixed config.max_target_length
   true_length = len(combined_tokens)
-  prefill_len = config.max_prefill_predict_length
-  if true_length > prefill_len:
+  seq_len = config.max_target_length
+  if true_length > seq_len:
     raise ValueError(
         f"The combined length of expanded prompt and vision tokens ({true_length}) "
-        f"exceeds config.max_prefill_predict_length ({prefill_len}). "
-        "Please increase max_prefill_predict_length in your model config."
+        f"exceeds config.max_target_length ({seq_len}). "
+        "Please increase max_target_length in your model config."
     )
   pad_token = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-  padded_tokens = combined_tokens + [pad_token] * (prefill_len - true_length)
+  padded_tokens = combined_tokens + [pad_token] * (seq_len - true_length)
 
-  tokens = np.array([padded_tokens[:prefill_len]], dtype=np.int32)
-  positions = np.tile(np.arange(prefill_len, dtype=np.int32), (1, 1))
-  segment_ids = np.zeros((1, prefill_len), dtype=np.int32)
+  tokens = np.array([padded_tokens[:seq_len]], dtype=np.int32)
+  positions = np.tile(np.arange(seq_len, dtype=np.int32), (1, 1))
+  segment_ids = np.zeros((1, seq_len), dtype=np.int32)
   segment_ids[:, :true_length] = 1
 
-  # Autoregressive decoding with KV cache
-  eos_token_id = tokenizer.eos_token_id
-  tokens_to_decode = []
+  # Autoregressive decoding loop
+  generated_tokens = []
+  curr_len = true_length
 
   with jax.set_mesh(mesh):
-    # Initial prefill pass (computes ViT embeddings and initializes KV cache)
-    logits, cache = _prefill_step(model, params, tokens, positions, segment_ids, mock_image)
-    first_token_id = int(jnp.argmax(logits[0, true_length - 1, :]))
-    tokens_to_decode.append(first_token_id)
+    # Initial prefill pass
+    logits = _forward_step(model, params, tokens, positions, segment_ids, mock_image)
 
-    # Autoregressive generation
-    if max_new_tokens > 1 and first_token_id != eos_token_id:
-      # Step 1 of AR: transitions cache metadata from cache_batch_prefill to cache_batch
-      first_token_arr = jnp.array([[first_token_id]], dtype=np.int32)
-      first_pos_arr = jnp.array([[true_length]], dtype=np.int32)
-      logits_1, ar_cache = _ar_step(model, params, cache, first_token_arr, first_pos_arr)
-      second_token_id = int(jnp.argmax(logits_1[0, 0, :]))
-      tokens_to_decode.append(second_token_id)
+    for _ in range(max_new_tokens):
+      next_token_id = int(jnp.argmax(logits[0, curr_len - 1, :]))
+      if next_token_id == tokenizer.eos_token_id:
+        break
+      generated_tokens.append(next_token_id)
+      if curr_len >= seq_len:
+        break
+      tokens[0, curr_len] = next_token_id
+      curr_len += 1
 
-      # Remaining AR steps inside jax.lax.scan (all steps use cache_batch metadata)
-      num_scan_steps = min(max_new_tokens - 2, config.max_target_length - config.max_prefill_predict_length - 2)
-      num_scan_steps = max(0, num_scan_steps)
-      if num_scan_steps > 0 and second_token_id != eos_token_id:
-        second_token_arr = jnp.array([[second_token_id]], dtype=np.int32)
-        second_pos_arr = jnp.array([[true_length + 1]], dtype=np.int32)
-        ar_tokens_seq = _generate_loop(model, params, ar_cache, second_token_arr, second_pos_arr, num_scan_steps)
-        for tok in np.array(ar_tokens_seq).reshape(-1).tolist():
-          if tok == eos_token_id:
-            break
-          tokens_to_decode.append(tok)
+      # Update segment IDs and positions and do the next autoregressive step
+      segment_ids[0, :curr_len] = 1
+      logits = _forward_step(model, params, tokens, positions, segment_ids, mock_image)
 
-  return tokenizer.decode(tokens_to_decode, skip_special_tokens=True).strip()
+  return tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
 
 
 def run_evaluation(checkpoint_path, config, num_samples=5, description="Omni Model", max_new_tokens=128):
@@ -353,7 +270,7 @@ def run_evaluation(checkpoint_path, config, num_samples=5, description="Omni Mod
 
     max_logging.log(
         f"""
-Sample {idx+1}/{len(sample_indices)} (Index {i}):
+Sample {idx+1} (Index {i}):
   Question: {sample['query']}
   Ground Truth: {sample['label']}
   Model Response: {model_response}

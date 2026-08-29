@@ -25,6 +25,18 @@ python3 -m benchmarks.multimodal.multimodal_eval MaxText/configs/base.yml \
   max_prefill_predict_length=550 max_target_length=570 per_device_batch_size=1 \
   hf_path=HuggingFaceM4/ChartQA hf_eval_split=test
 
+# Qwen3-vl-4b on a single TPU v4-8 VM
+python3 -m benchmarks.multimodal.multimodal_eval MaxText/configs/base.yml \
+  model_name=qwen3-vl-4b tokenizer_path=Qwen/Qwen3-VL-4B-Instruct \
+  tokenizer_type=huggingface \
+  load_parameters_path=$YOUR_PARAMS_PATH \
+  base_output_directory=$YOUR_GCS_PATH \
+  per_device_batch_size=1 run_name=mmeval_test steps=1 async_checkpointing=false \
+  scan_layers=false use_multimodal=true attention=\'dot_product\' \
+  max_prefill_predict_length=1024 max_target_length=1050 per_device_batch_size=1 \
+  hf_path=HuggingFaceM4/ChartQA hf_eval_split=test ici_tensor_parallelism=4 \
+  --num_examples=50
+
 # Llama4-17b-16e on a TPU v5p-128 cluster (images resized to 336x336 for simplicity)
 python -m benchmarks.multimodal.multimodal_eval \
   MaxText/configs/base.yml model_name=llama4-17b-16e \
@@ -115,27 +127,29 @@ class ParsedDatasetExample:
   answer: Optional[str] = None
 
 
-def parse_dataset_example(example, hf_dataset_name, local_args):
+def parse_dataset_example(example, hf_dataset_name, local_args=None):
   """Parse a single example from the HuggingFace dataset."""
   parsed_example = ParsedDatasetExample()
   if hf_dataset_name == "HuggingFaceM4/ChartQA":
     parsed_example.question = example["query"]
     parsed_example.image_np = np.asarray(example["image"].convert("RGB"))  # Convert PIL object to np array
-    parsed_example.answer = example["label"][0]
+    label = example["label"]
+    parsed_example.answer = label[0] if isinstance(label, (list, tuple)) else label
   else:
     raise ValueError(f"Unsupported dataset: {hf_dataset_name}")
 
   # Resize the image if specified. This helps simplify the llama4's tiling, so we have a fixed input size
-  if local_args.image_resize != -1:
+  image_resize = getattr(local_args, "image_resize", -1) if local_args is not None else -1
+  if image_resize != -1:
     pil_img = Image.fromarray(parsed_example.image_np)
-    pil_img = pil_img.resize((local_args.image_resize, local_args.image_resize))
+    pil_img = pil_img.resize((image_resize, image_resize))
     parsed_example.image_np = np.asarray(pil_img.convert("RGB"))
 
   return parsed_example
 
 
 def construct_prompt(
-    parsed_dataset_example: ParsedDatasetExample, config, local_args, system_message: Optional[str] = None
+    parsed_dataset_example: ParsedDatasetExample, config, local_args=None, system_message: Optional[str] = None
 ):
   """Construct prompt from a parsed dataset example."""
   image_placeholder = config.image_placeholder
@@ -144,20 +158,28 @@ def construct_prompt(
       if parsed_dataset_example.choices
       else ""
   )
-  if local_args.ckpt_type == "base":
+  ckpt_type = getattr(local_args, "ckpt_type", "base") if local_args is not None else "base"
+  if ckpt_type == "base":
     prompt = DEFAULT_PROMPT_TEMPLATE.format(
         image_placeholder=image_placeholder,
         question=parsed_dataset_example.question,
         choices=choices_text if choices_text else "N/A",
     )
-    if config.use_multimodal and "qwen3-omni" in config.model_name:
+    decoder_block = mm_processor._get_decoder_block(config)  # pylint: disable=protected-access
+    model_name = getattr(config, "model_name", None)
+    if config.use_multimodal and decoder_block in ["qwen3", "qwen3_moe", "qwen3_5"]:
       prompt = mm_processor.reformat_prompt(
           prompt,
           image_placeholder,
           config.model_name,
           num_images=1,
       )
-  elif local_args.ckpt_type == "sft":
+    elif config.use_multimodal and model_name and "qwen" in model_name:
+      raise ValueError(
+          f"Qwen multimodal model '{model_name}' with decoder_block '{decoder_block}' was not "
+          f"registered for prompt reformatting in `construct_prompt`."
+      )
+  elif ckpt_type == "sft":
     prompt = mm_processor.reformat_prompt(
         parsed_dataset_example.question,
         image_placeholder,
@@ -165,7 +187,7 @@ def construct_prompt(
         num_images=1 if config.use_multimodal else 0,
     )
   else:
-    raise ValueError(f"Unsupported ckpt_type: {local_args.ckpt_type}")
+    raise ValueError(f"Unsupported ckpt_type: {ckpt_type}")
 
   prompt = system_message + "\n\n" + prompt if system_message else prompt
   return prompt

@@ -38,14 +38,19 @@ DECODER_SPECIAL_TOKENS = {
 }
 
 
-def get_image_offsets_omni(vision_block, decoder_block, processor_output=None):
+def get_image_offsets_omni(vision_block, decoder_block, processor_output=None, config=None):
   """Calculate the increase in total token count after inserting visual token sequences."""
+  if vision_block in ["qwen3_vl", "qwen3_omni", "qwen3_5"]:
+    from maxtext.multimodal.processor_qwen3_omni import get_mm_offsets_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+    return get_mm_offsets_qwen3_omni(config, processor_output)
+
   if vision_block not in VISION_TOKENS_PER_IMAGE or decoder_block not in DECODER_SPECIAL_TOKENS:
     raise ValueError(f"Stitched model not supported for vision='{vision_block}', decoder='{decoder_block}'.")
 
   num_tokens_per_image = VISION_TOKENS_PER_IMAGE[vision_block]
   has_images = processor_output is not None and processor_output.pixel_values is not None
-  num_images = processor_output.pixel_values.shape[0] if has_images else 1
+  num_images = processor_output.pixel_values.shape[0] if has_images else 0
   # +num_tokens_per_image for image_pad, -1 for original placeholder
   return (num_tokens_per_image - 1) * num_images
 
@@ -56,6 +61,7 @@ def add_extra_tokens_for_omni(
     decoder_block,
     processor_output=None,
     num_tokens_per_image=None,
+    config=None,
 ):
   """Expands <|image_pad|> placeholders or prepends vision tokens if missing.
 
@@ -64,6 +70,11 @@ def add_extra_tokens_for_omni(
     automatically prepends the vision sequence: [<|vision_start|>, <|image_pad|>*N, <|vision_end|>].
   - Otherwise, returns the original tokens unchanged.
   """
+  if vision_block in ["qwen3_vl", "qwen3_omni", "qwen3_5"]:
+    from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+    return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
+
   if vision_block not in VISION_TOKENS_PER_IMAGE or decoder_block not in DECODER_SPECIAL_TOKENS:
     raise ValueError(f"Stitched model not supported for vision='{vision_block}', decoder='{decoder_block}'.")
 
@@ -106,8 +117,9 @@ def add_extra_tokens_for_omni(
 
 def get_bidirectional_mask_vision_omni(vision_block, decoder_block, decoder_input_tokens):
   """Generates bidirectional attention mask for vision tokens in stitched models."""
-  if vision_block not in VISION_TOKENS_PER_IMAGE or decoder_block not in DECODER_SPECIAL_TOKENS:
-    raise ValueError(f"Stitched model not supported for vision='{vision_block}', decoder='{decoder_block}'.")
+  if decoder_block not in DECODER_SPECIAL_TOKENS:
+    raise ValueError(f"Stitched model not supported for decoder='{decoder_block}'.")
 
   image_pad_id = DECODER_SPECIAL_TOKENS[decoder_block]["image_pad"]
   return decoder_input_tokens == image_pad_id
+

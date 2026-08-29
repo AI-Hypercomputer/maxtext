@@ -28,10 +28,6 @@ JAX_PLATFORMS=cpu python -m maxtext.experimental.omni_poc.utils.stitch_checkpoin
     --stitched_output_path=gs://YOUR_BUCKET_NAME/checkpoints/omni-gemma3-qwen3-4b/0/items
 """
 
-import maxtext
-# Eagerly initialize core MaxText C++ and model dependencies before train.py
-_ = (maxtext.Mesh, maxtext.pyconfig, maxtext.models, maxtext.model_creation_utils)
-
 import os
 from typing import Any, Dict
 
@@ -39,6 +35,7 @@ from absl import app, flags
 from etils import epath
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import omegaconf
 from orbax import checkpoint as ocp
 
@@ -105,11 +102,32 @@ def _restore_subtrees_from_path(
     return restored
 
 
-def _assemble(k: str, v: Any, stitched_subtrees: Dict[str, Any]) -> Any:
+def _init_leaf(path: tuple, leaf: Any, rng: jax.Array) -> Any:
+  """Initializes a concrete array for an abstract leaf based on parameter path and role."""
+  if not isinstance(leaf, jax.ShapeDtypeStruct):
+    return leaf
+
+  path_str = "/".join(str(p.key if hasattr(p, "key") else getattr(p, "name", p)) for p in path).lower()
+
+  # LayerNorm / RMSNorm scale or weight parameters: initialize to 1.0
+  if "scale" in path_str or ("norm" in path_str and "weight" in path_str) or ("ln_q" in path_str and "scale" in path_str):
+    max_logging.log(f"  Initializing norm scale parameter to ones: {path_str} {leaf.shape}")
+    return jnp.ones(leaf.shape, dtype=leaf.dtype)
+
+  # Bias parameters: initialize to 0.0
+  if "bias" in path_str:
+    max_logging.log(f"  Initializing bias parameter to zeros: {path_str} {leaf.shape}")
+    return jnp.zeros(leaf.shape, dtype=leaf.dtype)
+
+  # Standard linear weights / kernels: initialize to normal(mean=0, std=0.02)
+  return jax.random.normal(rng, leaf.shape, dtype=leaf.dtype) * 0.02
+
+
+def _assemble(k: str, v: Any, stitched_subtrees: Dict[str, Any], rng: jax.Array) -> Any:
   """Merges restored parameter subtrees with fresh target model initial values.
 
   If a sub-module name is present in stitched_subtrees, we restore it.
-  If it's missing (e.g. the new vision projector), we keep the fresh random initialization.
+  If it's missing (e.g. the new vision projector), we initialize concrete weights properly.
   """
   if k in stitched_subtrees:  # e.g., k is vision_encoder, decoder, or token_embedder
     restored_val = stitched_subtrees[k]
@@ -118,18 +136,27 @@ def _assemble(k: str, v: Any, stitched_subtrees: Dict[str, Any]) -> Any:
       merged_module = {}
       for sub_module_name, fresh_weights in v.items():
         if sub_module_name in restored_val:
-          # If the sub-module (e.g. Gemma3VisionEncoderLayer_0) exists in the checkpoint, load it
+          # If the sub-module exists in the checkpoint, load it
           merged_module[sub_module_name] = restored_val[sub_module_name]
         else:
-          # If the sub-module is missing from the checkpoint (e.g. the new projector), keep its fresh random weights
-          merged_module[sub_module_name] = fresh_weights
+          # If the sub-module is missing from the checkpoint (e.g. the new projector), initialize fresh weights
+          max_logging.log(f"Initializing fresh weights for new sub-module: '{k}.{sub_module_name}'")
+          sub_rng = jax.random.fold_in(rng, hash(sub_module_name) & 0xFFFFFFFF)
+          merged_module[sub_module_name] = jax.tree_util.tree_map_with_path(
+              lambda p, leaf: _init_leaf(p, leaf, sub_rng),
+              fresh_weights,
+          )
       return merged_module
     # k is pointing to a single tensor
     return restored_val
 
-  # k is a new layer (not in stitched_subtrees), keep fresh random init
-  max_logging.log(f"Keeping fresh random normal initialization for new layer: '{k}'")
-  return v
+  # k is a new layer (not in stitched_subtrees), keep fresh init
+  max_logging.log(f"Initializing fresh weights for new layer: '{k}'")
+  layer_rng = jax.random.fold_in(rng, hash(k) & 0xFFFFFFFF)
+  return jax.tree_util.tree_map_with_path(
+      lambda p, leaf: _init_leaf(p, leaf, layer_rng),
+      v,
+  )
 
 
 def stitch_and_save_checkpoints(
@@ -165,22 +192,16 @@ def stitch_and_save_checkpoints(
   mesh = maxtext_utils.get_mesh_from_config(config)
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
 
-  # 1. Generate full target model with initial random weights
-  max_logging.log("Generating target omni model from config with initial random weights...")
-  with jax.set_mesh(mesh):
-    if config.pure_nnx:
-      rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
-      model = model_creation_utils.from_config(config, mesh=mesh, rngs=rngs)
-      init_params = nnx.state(model, nnx.Param)
-    else:
-      model = model_creation_utils.from_config(config, jax.devices())
-      _, _, init_params = maxtext_utils.init_initial_state(model, None, config, is_training=False, key=init_rng)
+  # 1. Generate full target model abstractly via eval_shape (zero device memory allocation)
+  max_logging.log("Generating target omni model abstract structure from config...")
+  _, abstract_model = model_creation_utils.create_nnx_abstract_model(
+      config, mesh=mesh, rng_key=init_rng
+  )
+  init_params = nnx.state(abstract_model, nnx.Param)
 
   # Convert to pure pytree for easier processing
-  is_nnx = isinstance(init_params, nnx.State)
-  params_dict = init_params.to_pure_dict() if is_nnx else init_params
+  params_dict = init_params.to_pure_dict()
   inner_params = params_dict.get("params", params_dict)
-
   inner_params = jax.tree.map(_unwrap_var, inner_params, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
   # Wrap pytree into a Checkpointer object for partial checkpoint restoration
@@ -208,7 +229,7 @@ def stitch_and_save_checkpoints(
     vision_restored = _restore_subtrees_from_path(vision_checkpoint_path, vision_abstract, ckptr)
     stitched_subtrees["vision_encoder"] = vision_restored["vision_encoder"]
 
-  # 3. Restore LLM Decoder subtrees from Model B
+  # 3. Restore LLM Decoder and token_embedder subtrees from Model B
   llm_keys = [k for k in ["decoder", "token_embedder"] if k in inner_params]
   if llm_keys and llm_checkpoint_path:
     max_logging.log(f"Restoring LLM subtrees ({llm_keys}) from {llm_checkpoint_path}...")
@@ -218,7 +239,7 @@ def stitch_and_save_checkpoints(
       stitched_subtrees[k] = llm_restored[k]
 
   # 4. Assemble: Vision (Model A) + LLM (Model B) + Random Init Projector
-  stitched_inner = {k: _assemble(k, v, stitched_subtrees) for k, v in inner_params.items()}
+  stitched_inner = {k: _assemble(k, v, stitched_subtrees, init_rng) for k, v in inner_params.items()}
   final_params = {"params": stitched_inner}
 
   # 5. Save unified parameter tree to output_checkpoint_path
@@ -257,7 +278,6 @@ def main(argv):
       "vision_model_name",
       "llm_model_name",
       "base_config",
-      "model_name",
   }
   omni_kwargs = {}
   cleaned_argv = []
@@ -294,10 +314,13 @@ def main(argv):
 
   if not any(arg.startswith("skip_jax_distributed_system=") for arg in cleaned_argv):
     cleaned_argv.append("skip_jax_distributed_system=True")
+  if not any(arg.startswith("ici_fsdp_parallelism=") for arg in cleaned_argv):
+    cleaned_argv.append("ici_fsdp_parallelism=1")
+  if not any(arg.startswith("ici_tensor_parallelism=") for arg in cleaned_argv):
+    cleaned_argv.append("ici_tensor_parallelism=1")
 
   # Initialize MaxText config using standard train.initialize
   config, _ = initialize(cleaned_argv)
-  object.__setattr__(config, "model_name", "maxtext-omni-gemma3-qwen3")
   # Extract paths from command-line arguments or FLAGS
   vision_path = FLAGS.vision_load_path or omni_kwargs.get("vision_load_path")
   llm_path = FLAGS.llm_load_path or omni_kwargs.get("llm_load_path")

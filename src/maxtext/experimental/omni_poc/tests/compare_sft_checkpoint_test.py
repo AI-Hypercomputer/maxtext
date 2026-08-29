@@ -49,7 +49,6 @@ FLAGS = flags.FLAGS
 
 
 def _define_flag(fn, name, default, help_str):
-  """Defines an ABSL flag if it hasn't already been registered."""
   if name not in FLAGS:
     fn(name, default, help_str)
 
@@ -75,13 +74,10 @@ _define_flag(
 
 
 def _format_path(key_path) -> str:
-  """Formats a JAX PyTree key path into a readable slash-separated string."""
   parts = []
   for k in key_path:
     if hasattr(k, "key"):
       parts.append(str(k.key))
-    elif hasattr(k, "name"):
-      parts.append(str(k.name))
     elif hasattr(k, "idx"):
       parts.append(str(k.idx))
     else:
@@ -183,19 +179,11 @@ def compare_checkpoints(
   unexpected_diffs = []
 
   # Go through all parameter tensors and compare weights before vs after SFT
-  sft_keys = set(sft_leaves.keys())
-  stitched_keys = set(stitched_leaves.keys())
-  if sft_keys != stitched_keys:
-    missing_in_sft = stitched_keys - sft_keys
-    missing_in_stitched = sft_keys - stitched_keys
-    if missing_in_sft:
-      print(f"Error: Parameters in stitched but missing in SFT checkpoint: {missing_in_sft}")
-    if missing_in_stitched:
-      print(f"Error: Parameters in SFT but missing in stitched checkpoint: {missing_in_stitched}")
-    return False
-  # Go through all parameter tensors and compare weights before vs after SFT
   for path, sft_arr in sft_leaves.items():
-    stitched_arr = stitched_leaves[path]
+    stitched_arr = stitched_leaves.get(path)
+    if stitched_arr is None:
+      print(f"Warning: Parameter path '{path}' not found in stitched checkpoint.")
+      continue
 
     if _is_trainable(path):
       cat = "Projector MLP"

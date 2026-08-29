@@ -1,0 +1,64 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Config for SFT Omni-Gemma3-Qwen3 on TPU v4-128 (128 devices) for 2 Epochs
+
+base_config: "maxtext-omni-gemma3-qwen3.yml"
+
+use_sft: true
+use_tunix_gradient_accumulation: false
+use_multimodal: true
+sft_train_on_completion_only: true
+packing: false
+freeze_vision_encoder_params: true
+learning_rate: 3.e-4
+
+# Train ONLY the custom MLP projector by freezing all other parameters
+trainable_parameters_mask: ["custom_linear"]
+
+# -------------- HF pipeline --------------
+dataset_type: hf
+tokenizer_type: "huggingface"
+tokenizer_path: "Qwen/Qwen3-4B"
+hf_path: 'HuggingFaceM4/ChartQA'
+train_split: 'train'
+hf_eval_split: 'val'
+train_data_columns: ['query', 'label']
+eval_data_columns: ['query', 'label']
+
+# Checkpoint paths (override via CLI if needed)
+load_parameters_path: "gs://yuchenhou-maxtext-logs/omni-gemma3-qwen3/multimodal/pretrain_chartnet/omni_pretrain_chartnet_embedder_only/checkpoints/17000/items"
+base_output_directory: "gs://yuchenhou-maxtext-logs/omni-gemma3-qwen3/multimodal/sft_after_chartnet"
+run_name: "omni_sft_chartqa_v4_128"
+
+# Training schedule for 5 epochs on v4-128 (128 chips * 1 = global batch size 128):
+# 28,288 examples * 5 / 128 = 1105 steps
+per_device_batch_size: 1
+num_epoch: 5
+steps: 1105
+checkpoint_period: 100
+log_period: 1
+save_checkpoint_on_completion: true
+async_checkpointing: true
+
+# Evaluation settings
+eval_interval: 100
+eval_steps: 10
+
+# Sequence length & attention settings
+max_prefill_predict_length: 1024
+max_target_length: 1600
+max_num_images_per_example: 1
+scan_layers: true
+attention: "dot_product"
