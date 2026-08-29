@@ -474,7 +474,9 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         log_dir=trainer_config.tensorboard_dir,
         skip_first_n_steps=trainer_config.skip_first_n_steps_for_profiler,
         profiler_steps=trainer_config.profiler_steps,
+        # Skip setting tracer levels.
         set_profile_options=False,
+        enable_continuous_profiling=trainer_config.enable_continuous_profiling,
     )
 
   # Parse vllm_additional_config
