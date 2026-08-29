@@ -63,7 +63,7 @@ def csa_streamindex_score_kernel(
   out_ref[...] = (acc * softmax_scale).astype(out_ref.dtype)
 
 
-def csa_streamindex_score(
+def _csa_streamindex_score_pallas_fwd(
     q: jax.Array,
     compressed: jax.Array,
     weights: jax.Array,
@@ -74,29 +74,11 @@ def csa_streamindex_score(
     head_chunk: int = 32,
     interpret: bool = False,
 ) -> jax.Array:
-  """Computes CSA StreamIndex scores using a fused Pallas TPU kernel.
-
-  Args:
-    q: Query tensor of shape [batch_size, seq_len, num_heads, head_dim].
-    compressed: Compressed KV tensor of shape [batch_size, compressed_len, head_dim].
-    weights: Indexer weights tensor of shape [batch_size, seq_len, num_heads].
-    softmax_scale: Scaling factor applied post-ReLU (typically head_dim**-0.5).
-    block_q: Query sequence block size (default 128).
-    block_w: Compressed window block size (default 512).
-    head_chunk: Number of heads processed per accumulation step in VMEM (default 32).
-    interpret: If True, executes via JAX interpreter on CPU.
-
-  Returns:
-    Index scores tensor of shape [batch_size, seq_len, compressed_len] in float32.
-  """
+  """Forward implementation using fused Pallas TPU kernel."""
   batch_size, seq_len, num_heads, head_dim = q.shape
   _, compressed_len, comp_head_dim = compressed.shape
   assert comp_head_dim == head_dim, f"{comp_head_dim=} != {head_dim=}"
   assert weights.shape == (batch_size, seq_len, num_heads), f"{weights.shape=} != {(batch_size, seq_len, num_heads)=}"
-
-  q = jax.lax.stop_gradient(q)
-  compressed = jax.lax.stop_gradient(compressed)
-  weights = jax.lax.stop_gradient(weights)
 
   padded_s = ((seq_len + block_q - 1) // block_q) * block_q
   padded_w = ((compressed_len + block_w - 1) // block_w) * block_w
@@ -134,7 +116,95 @@ def csa_streamindex_score(
       interpret=interpret,
   )(q, compressed, weights)
 
-  return jax.lax.stop_gradient(out[:, :seq_len, :compressed_len])
+  return out[:, :seq_len, :compressed_len]
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7))
+def csa_streamindex_score(
+    q: jax.Array,
+    compressed: jax.Array,
+    weights: jax.Array,
+    softmax_scale: float,
+    block_q: int = 128,
+    block_w: int = 1024,
+    head_chunk: int = 32,
+    interpret: bool = False,
+) -> jax.Array:
+  """Computes CSA StreamIndex scores using a fused Pallas TPU kernel.
+
+  Differentiable via jax.custom_vjp: executes fused Pallas kernel in forward pass,
+  and evaluates reference autograd in backward pass.
+
+  Args:
+    q: Query tensor of shape [batch_size, seq_len, num_heads, head_dim].
+    compressed: Compressed KV tensor of shape [batch_size, compressed_len, head_dim].
+    weights: Indexer weights tensor of shape [batch_size, seq_len, num_heads].
+    softmax_scale: Scaling factor applied post-ReLU (typically head_dim**-0.5).
+    block_q: Query sequence block size (default 128).
+    block_w: Compressed window block size (default 1024).
+    head_chunk: Number of heads processed per accumulation step in VMEM (default 32).
+    interpret: If True, executes via JAX interpreter on CPU.
+
+  Returns:
+    Index scores tensor of shape [batch_size, seq_len, compressed_len] in float32.
+  """
+  return _csa_streamindex_score_pallas_fwd(
+      q,
+      compressed,
+      weights,
+      softmax_scale=softmax_scale,
+      block_q=block_q,
+      block_w=block_w,
+      head_chunk=head_chunk,
+      interpret=interpret,
+  )
+
+
+def _csa_streamindex_score_fwd(
+    q: jax.Array,
+    compressed: jax.Array,
+    weights: jax.Array,
+    softmax_scale: float,
+    block_q: int = 128,
+    block_w: int = 1024,
+    head_chunk: int = 32,
+    interpret: bool = False,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
+  out = _csa_streamindex_score_pallas_fwd(
+      q,
+      compressed,
+      weights,
+      softmax_scale=softmax_scale,
+      block_q=block_q,
+      block_w=block_w,
+      head_chunk=head_chunk,
+      interpret=interpret,
+  )
+  return out, (q, compressed, weights)
+
+
+def _csa_streamindex_score_bwd(
+    softmax_scale: float,
+    block_q: int,
+    block_w: int,
+    head_chunk: int,
+    interpret: bool,
+    res: tuple[jax.Array, jax.Array, jax.Array],
+    g: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  del block_q, block_w, head_chunk, interpret
+  q, compressed, weights = res
+  _, vjp_fn = jax.vjp(
+      functools.partial(reference_csa_streamindex_score, softmax_scale=softmax_scale),
+      q,
+      compressed,
+      weights,
+  )
+  dq, dk, dw = vjp_fn(g)
+  return dq, dk, dw
+
+
+csa_streamindex_score.defvjp(_csa_streamindex_score_fwd, _csa_streamindex_score_bwd)
 
 
 def reference_csa_streamindex_score(

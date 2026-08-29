@@ -128,6 +128,62 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
     out = fn(q, compressed, weights).block_until_ready()
     self.assertEqual(out.shape, (b, s, w))
 
+  def test_vjp_backward_parity(self):
+    """Verifies that backward gradients of custom VJP match reference autograd."""
+    key1, key2, key3, key4 = jax.random.split(self.key, 4)
+    b, s, w, h, d = 2, 256, 128, 32, 64
+    scale = d**-0.5
+    q = jax.random.normal(key1, (b, s, h, d), dtype=jnp.bfloat16)
+    compressed = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
+    weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
+    cotangent = jax.random.normal(key4, (b, s, w), dtype=jnp.float32)
+
+    def loss_kernel(q, k, w):
+      out = csa_streamindex.csa_streamindex_score(
+          q, k, w, softmax_scale=scale, block_q=128, block_w=128, interpret=True
+      )
+      return jnp.sum(out * cotangent)
+
+    def loss_ref(q, k, w):
+      out = csa_streamindex.reference_csa_streamindex_score(
+          q, k, w, softmax_scale=scale
+      )
+      return jnp.sum(out * cotangent)
+
+    _, (dq_k, dk_k, dw_k) = jax.value_and_grad(loss_kernel, argnums=(0, 1, 2))(q, compressed, weights)
+    _, (dq_r, dk_r, dw_r) = jax.value_and_grad(loss_ref, argnums=(0, 1, 2))(q, compressed, weights)
+
+    np.testing.assert_allclose(dw_k, dw_r, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(dq_k.astype(jnp.float32), dq_r.astype(jnp.float32), rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(dk_k.astype(jnp.float32), dk_r.astype(jnp.float32), rtol=1e-3, atol=1e-3)
+
+  def test_tpu_backward_smoke(self):
+    """Verifies that backward pass compiles and runs on TPU hardware."""
+    if jax.default_backend() != "tpu":
+      self.skipTest("TPU hardware required for backward smoke test.")
+    b, s, h, d = 1, 1024, 64, 128
+    w = s // 4
+    scale = d**-0.5
+    key1, key2, key3, key4 = jax.random.split(self.key, 4)
+    q = jax.random.normal(key1, (b, s, h, d), dtype=jnp.bfloat16)
+    compressed = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
+    weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
+    cotangent = jax.random.normal(key4, (b, s, w), dtype=jnp.float32)
+
+    @jax.jit
+    def grad_fn(q, k, w):
+      def loss(q, k, w):
+        out = csa_streamindex.csa_streamindex_score(
+            q, k, w, softmax_scale=scale, block_q=128, block_w=512, interpret=False
+        )
+        return jnp.sum(out * cotangent)
+      return jax.grad(loss, argnums=(0, 1, 2))(q, k, w)
+
+    dq, dk, dw = grad_fn(q, compressed, weights)
+    self.assertEqual(dq.shape, q.shape)
+    self.assertEqual(dk.shape, compressed.shape)
+    self.assertEqual(dw.shape, weights.shape)
+
 
 class TestDeepseekv4IndexerIntegration(unittest.TestCase):
   """Integration tests for Deepseekv4Indexer with CSA StreamIndex kernel dispatch."""
