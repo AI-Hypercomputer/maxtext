@@ -233,3 +233,193 @@ def reference_csa_streamindex_score(
   scores = jnp.einsum("bhsd,bhwd->bhsw", q_trans, compressed_kv)
   scores = jax.nn.relu(scores) * softmax_scale
   return jnp.einsum("bhsw,bsh->bsw", scores, weights.astype(jnp.float32))
+
+
+def csa_streamindex_score_head_major_kernel(
+    q_ref,        # [num_heads, block_q, head_dim]
+    k_ref,        # [block_w, head_dim]
+    w_ref,        # [block_q, num_heads]
+    out_ref,      # [block_q, block_w]
+    *,
+    softmax_scale: float,
+    head_chunk: int = 32,
+):
+  """Pallas TPU kernel for head-major [num_heads, block_q, head_dim] input."""
+  q = q_ref[...]
+  k = k_ref[...]
+  w = w_ref[...]
+
+  # Swap to [block_q, num_heads, head_dim] in VMEM for 128-sublane VPU vector register alignment
+  q_shd = jnp.swapaxes(q, 0, 1)
+  block_q, num_heads, head_dim = q_shd.shape
+  block_w, _ = k.shape
+
+  acc = jnp.zeros((block_q, block_w), dtype=jnp.float32)
+
+  for h_start in range(0, num_heads, head_chunk):
+    h_end = min(h_start + head_chunk, num_heads)
+    q_c = q_shd[:, h_start:h_end, :]
+    w_c = w[:, h_start:h_end].astype(jnp.float32)
+
+    scores_c = jnp.einsum(
+        "shd,wd->shw",
+        q_c,
+        k,
+        preferred_element_type=jnp.float32,
+    )
+    scores_c = jnp.maximum(scores_c, 0.0)
+    chunk_acc = jnp.sum(scores_c * w_c[:, :, None], axis=1)
+    acc = acc + chunk_acc
+
+  out_ref[...] = (acc * softmax_scale).astype(out_ref.dtype)
+
+
+def _csa_streamindex_score_head_major_pallas_fwd(
+    q: jax.Array,
+    compressed: jax.Array,
+    weights: jax.Array,
+    *,
+    softmax_scale: float,
+    block_q: int = 128,
+    block_w: int = 1024,
+    head_chunk: int = 32,
+    interpret: bool = False,
+) -> jax.Array:
+  """Forward implementation using fused Pallas TPU kernel for head-major [B, H, S, D] q."""
+  batch_size, num_heads, seq_len, head_dim = q.shape
+  _, compressed_len, comp_head_dim = compressed.shape
+  assert comp_head_dim == head_dim, f"{comp_head_dim=} != {head_dim=}"
+  assert weights.shape == (batch_size, seq_len, num_heads), f"{weights.shape=} != {(batch_size, seq_len, num_heads)=}"
+
+  padded_s = ((seq_len + block_q - 1) // block_q) * block_q
+  padded_w = ((compressed_len + block_w - 1) // block_w) * block_w
+
+  if padded_s > seq_len:
+    pad_s = padded_s - seq_len
+    q = jnp.pad(q, ((0, 0), (0, 0), (0, pad_s), (0, 0)))
+    weights = jnp.pad(weights, ((0, 0), (0, pad_s), (0, 0)))
+  if padded_w > compressed_len:
+    pad_w = padded_w - compressed_len
+    compressed = jnp.pad(compressed, ((0, 0), (0, pad_w), (0, 0)))
+
+  grid = (batch_size, padded_s // block_q, padded_w // block_w)
+
+  in_specs = [
+      pl.BlockSpec((None, num_heads, block_q, head_dim), lambda b, i, j: (b, 0, i, 0)),
+      pl.BlockSpec((None, block_w, head_dim), lambda b, i, j: (b, j, 0)),
+      pl.BlockSpec((None, block_q, num_heads), lambda b, i, j: (b, i, 0)),
+  ]
+  out_specs = pl.BlockSpec((None, block_q, block_w), lambda b, i, j: (b, i, j))
+
+  out = pl.pallas_call(
+      functools.partial(
+          csa_streamindex_score_head_major_kernel,
+          softmax_scale=softmax_scale,
+          head_chunk=head_chunk,
+      ),
+      in_specs=in_specs,
+      out_specs=out_specs,
+      grid=grid,
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel", "parallel", "arbitrary"),
+      ),
+      out_shape=jax.ShapeDtypeStruct((batch_size, padded_s, padded_w), jnp.float32),
+      interpret=interpret,
+  )(q, compressed, weights)
+
+  return out[:, :seq_len, :compressed_len]
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7))
+def csa_streamindex_score_head_major(
+    q: jax.Array,
+    compressed: jax.Array,
+    weights: jax.Array,
+    softmax_scale: float,
+    block_q: int = 128,
+    block_w: int = 1024,
+    head_chunk: int = 32,
+    interpret: bool = False,
+) -> jax.Array:
+  """Computes CSA StreamIndex scores using head-major [B, H, S, D] q layout.
+
+  Eliminates sublane padding and register spilling on TPU v5p when H < 128.
+  """
+  return _csa_streamindex_score_head_major_pallas_fwd(
+      q,
+      compressed,
+      weights,
+      softmax_scale=softmax_scale,
+      block_q=block_q,
+      block_w=block_w,
+      head_chunk=head_chunk,
+      interpret=interpret,
+  )
+
+
+def _csa_streamindex_score_head_major_fwd(
+    q: jax.Array,
+    compressed: jax.Array,
+    weights: jax.Array,
+    softmax_scale: float,
+    block_q: int = 128,
+    block_w: int = 1024,
+    head_chunk: int = 32,
+    interpret: bool = False,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
+  out = _csa_streamindex_score_head_major_pallas_fwd(
+      q,
+      compressed,
+      weights,
+      softmax_scale=softmax_scale,
+      block_q=block_q,
+      block_w=block_w,
+      head_chunk=head_chunk,
+      interpret=interpret,
+  )
+  return out, (q, compressed, weights)
+
+
+def _csa_streamindex_score_head_major_bwd(
+    softmax_scale: float,
+    block_q: int,
+    block_w: int,
+    head_chunk: int,
+    interpret: bool,
+    res: tuple[jax.Array, jax.Array, jax.Array],
+    g: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  del block_q, block_w, head_chunk, interpret
+  q, compressed, weights = res
+  _, vjp_fn = jax.vjp(
+      functools.partial(reference_csa_streamindex_score_head_major, softmax_scale=softmax_scale),
+      q,
+      compressed,
+      weights,
+  )
+  dq, dk, dw = vjp_fn(g)
+  return dq, dk, dw
+
+
+csa_streamindex_score_head_major.defvjp(
+    _csa_streamindex_score_head_major_fwd,
+    _csa_streamindex_score_head_major_bwd,
+)
+
+
+def reference_csa_streamindex_score_head_major(
+    q: jax.Array,
+    compressed: jax.Array,
+    weights: jax.Array,
+    *,
+    softmax_scale: float,
+) -> jax.Array:
+  """Reference score computation for head-major q layout [B, H, S, D]."""
+  b, h, s, d = q.shape
+  _, w, _ = compressed.shape
+  q_fp32 = q.astype(jnp.float32)
+  compressed_kv = jnp.broadcast_to(compressed[:, None, :, :], (b, h, w, d)).astype(jnp.float32)
+  scores = jnp.einsum("bhsd,bhwd->bhsw", q_fp32, compressed_kv)
+  scores = jax.nn.relu(scores) * softmax_scale
+  return jnp.einsum("bhsw,bsh->bsw", scores, weights.astype(jnp.float32))
+

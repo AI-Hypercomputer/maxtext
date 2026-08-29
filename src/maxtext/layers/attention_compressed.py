@@ -890,13 +890,14 @@ class DeepseekV4Indexer(nnx.Module):
 
     # --- TOP-K ROUTING MATH (Executes in both Prefill and AR) ---
     q = self.q_proj(q_latent).reshape((batch_size, seq_len, self.index_n_heads, self.index_head_dim))
+    q = jnp.transpose(q, (0, 2, 1, 3))
+    q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
 
     block_q = 128
     use_kernel = getattr(self.config, "use_csa_streamindex_kernel", False) and (seq_len >= block_q)
 
     if use_kernel:
-      q_seq_major = self.rotary_emb(q, position_ids, unsqueeze_dim=2)
       mesh = getattr(self.config, "mesh", None) or getattr(self, "mesh", None)
       if mesh is None:
         try:
@@ -928,7 +929,7 @@ class DeepseekV4Indexer(nnx.Module):
             check_vma=False,
         )
         def _shard_mapped_streamindex(local_q, local_comp, local_weights):
-          return csa_streamindex.csa_streamindex_score(
+          return csa_streamindex.csa_streamindex_score_head_major(
               q=local_q,
               compressed=local_comp,
               weights=local_weights,
@@ -937,10 +938,10 @@ class DeepseekV4Indexer(nnx.Module):
               block_w=1024,
               head_chunk=32,
           )
-        index_scores = _shard_mapped_streamindex(q_seq_major, compressed, weights)
+        index_scores = _shard_mapped_streamindex(q, compressed, weights)
       else:
-        index_scores = csa_streamindex.csa_streamindex_score(
-            q=q_seq_major,
+        index_scores = csa_streamindex.csa_streamindex_score_head_major(
+            q=q,
             compressed=compressed,
             weights=weights,
             softmax_scale=self.softmax_scale,
@@ -949,8 +950,6 @@ class DeepseekV4Indexer(nnx.Module):
             head_chunk=32,
         )
     else:
-      q = jnp.transpose(q, (0, 2, 1, 3))
-      q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
       compressed_kv = jnp.expand_dims(compressed, axis=1)
       compressed_kv = jnp.broadcast_to(
           compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim)
