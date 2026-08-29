@@ -98,6 +98,10 @@ def _create_model_converter(
 
   if model_name.startswith("gemma4"):
     return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+  if model_name.startswith("qwen3.5"):
+    return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
+  if model_name.startswith("qwen3-30"):
+    return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
 
   # For all other models, return None to fallback to transfer_state_with_mappings()
 
