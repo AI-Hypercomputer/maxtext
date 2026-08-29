@@ -557,6 +557,27 @@ def _check_leaf_structure_unchanged(before: dict, after: dict, label: str) -> No
       logging.error("    %s: before=%s after=%s", k, before[k], after[k])
 
 
+def _find_char_split_corruption(state) -> list:
+  """Finds top-level `state` entries whose value is a dotted string iterated character-by-character.
+
+  This is the corruption behind the mode-2 (native vLLM torch model) crash
+  where `torch.func.functional_call`'s `swap_tensor` raises "{...} is not an
+  instance of torch.Tensor" against a deeply nested single-character dict.
+
+  Deliberately inspects `state` itself (one level, via `.items()`), not
+  `jax.tree_util.tree_leaves(state)`: a fully-recursive flatten would walk
+  *through* the corrupted dict down to whatever real value sits at its
+  bottom, hiding the anomaly. A value is flagged only when it is a plain
+  dict whose keys are *all* single characters -- e.g. `{'l': {'l': {'m':
+  ...}}}`, which is exactly what `"vllm_model.language_model...weight"`
+  looks like after being iterated one character at a time. Real leaves
+  (arrays) and mode 1's nested `nnx.State`/`nnx.Variable` values never match
+  this shape, so this has no false positives on the working path.
+  """
+  items = state.items() if hasattr(state, "items") else []
+  return [(k, v) for k, v in items if isinstance(v, dict) and v and all(isinstance(c, str) and len(c) == 1 for c in v)]
+
+
 def _check_key_coverage(llm_state: dict, converted_state: dict) -> None:
   """Check key coverage and shapes between vLLM state and converted state.
 
@@ -969,6 +990,28 @@ def validate_converter(argv) -> None:
     _check_leaf_structure_unchanged(
         pre_sync_leaf_signature, _leaf_path_signature(sampler.transformer_state), sync_label
     )
+    # Localizes the mode-2 "{...} is not an instance of torch.Tensor" crash:
+    # does the corruption already exist in the state tunix just wrote, before
+    # generation (and torchax/vLLM) ever touch it?
+    corrupted = _find_char_split_corruption(sampler.transformer_state)
+    if corrupted:
+      logging.error(
+          "CORRUPTION FOUND BEFORE GENERATION: %d entries in sampler.transformer_state "
+          "already have the char-split pattern (dict keyed by single characters) right "
+          "after sampler.update_params() -- the bug is in the weight-sync path (tunix "
+          "and/or this converter), not downstream in torchax/vLLM. First key(s): %s",
+          len(corrupted),
+          [k for k, _ in corrupted][:5],
+      )
+    else:
+      logging.info(
+          "Post-sync state clean: no char-split corruption pattern found in %d "
+          "top-level entries of sampler.transformer_state right after "
+          "sampler.update_params(). If generation still crashes with the nested "
+          "single-character dict error, the corruption is introduced downstream "
+          "(torchax/vLLM), after tunix hands off a correct state.",
+          len(list(sampler.transformer_state.items())) if hasattr(sampler.transformer_state, "items") else -1,
+      )
 
   if benchmark_weight_sync:
     _SyncPhase.report()
