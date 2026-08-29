@@ -49,6 +49,13 @@ High-level overview of MaxText design, JAX/XLA choices, and how components inter
 
 Key concepts including checkpointing strategies, quantization, tiling, and Mixture of Experts (MoE) configuration.
 ```
+
+```{grid-item-card} ⚖️ Training Engine vs. Tunix
+:link: reference/training_engine_tunix_parity
+:link-type: doc
+
+Measured numerical parity, step time, and HBM of `MaxTextTrainingEngine` against Tunix `PeftTrainer` v2.
+```
 ````
 
 ## 📚 API Reference
@@ -64,5 +71,6 @@ reference/performance_metrics
 reference/models
 reference/architecture
 reference/core_concepts
+reference/training_engine_tunix_parity
 reference/api.rst
 ```
