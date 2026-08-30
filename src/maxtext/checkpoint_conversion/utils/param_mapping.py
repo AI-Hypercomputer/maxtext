@@ -4217,6 +4217,181 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   return mapping
 
 
+def GLM5_3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText parameter keys to HuggingFace parameter keys for GLM-5.3-Flash."""
+  mapping = {}
+
+  mapping["params-token_embedder-embedding"] = "model.language_model.embed_tokens.weight"
+  mapping["params-decoder-decoder_norm-scale"] = "model.language_model.norm.weight"
+  mapping["params-decoder-logits_dense-kernel"] = "lm_head.weight"
+
+  num_layers = maxtext_config.base_num_decoder_layers
+  first_k_dense_replace = getattr(maxtext_config, "first_num_dense_layers", 3)
+  num_experts = getattr(maxtext_config, "num_experts", 288)
+
+  if scan_layers:
+    raise NotImplementedError("Scanned layers conversion for GLM-5.3-Flash is not yet implemented.")
+  else:
+    for i in range(num_layers):
+      prefix = f"params-decoder-layers_{i}"
+
+      mapping[f"{prefix}-input_layernorm-scale"] = f"model.language_model.layers.{i}.input_layernorm.weight"
+      mapping[f"{prefix}-post_attention_layernorm-scale"] = (
+          f"model.language_model.layers.{i}.post_attention_layernorm.weight"
+      )
+
+      mapping[f"{prefix}-attn_hc-base"] = f"model.language_model.layers.{i}.hc_attn_base"
+      mapping[f"{prefix}-attn_hc-fn"] = f"model.language_model.layers.{i}.hc_attn_fn"
+      mapping[f"{prefix}-attn_hc-scale"] = f"model.language_model.layers.{i}.hc_attn_scale"
+
+      mapping[f"{prefix}-ffn_hc-base"] = f"model.language_model.layers.{i}.hc_ffn_base"
+      mapping[f"{prefix}-ffn_hc-fn"] = f"model.language_model.layers.{i}.hc_ffn_fn"
+      mapping[f"{prefix}-ffn_hc-scale"] = f"model.language_model.layers.{i}.hc_ffn_scale"
+
+      mapping[f"{prefix}-attention-q_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.q_proj.weight"
+      mapping[f"{prefix}-attention-k_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.k_proj.weight"
+      mapping[f"{prefix}-attention-v_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.v_proj.weight"
+      mapping[f"{prefix}-attention-conv1d-kernel"] = (
+          f"model.language_model.layers.{i}.self_attn.q_conv1d.weight",
+          f"model.language_model.layers.{i}.self_attn.k_conv1d.weight",
+          f"model.language_model.layers.{i}.self_attn.v_conv1d.weight",
+      )
+      mapping[f"{prefix}-attention-f_a_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.f_a_proj.weight"
+      mapping[f"{prefix}-attention-f_b_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.f_b_proj.weight"
+      mapping[f"{prefix}-attention-g_a_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.g_a_proj.weight"
+      mapping[f"{prefix}-attention-g_b_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.g_b_proj.weight"
+      mapping[f"{prefix}-attention-b_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.b_proj.weight"
+      mapping[f"{prefix}-attention-A_log"] = f"model.language_model.layers.{i}.self_attn.A_log"
+      mapping[f"{prefix}-attention-dt_bias"] = f"model.language_model.layers.{i}.self_attn.dt_bias"
+      mapping[f"{prefix}-attention-o_norm-scale"] = f"model.language_model.layers.{i}.self_attn.o_norm.weight"
+      mapping[f"{prefix}-attention-o_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.o_proj.weight"
+
+      if i < first_k_dense_replace:
+        mapping[f"{prefix}-mlp-gate_proj-kernel"] = (
+            f"model.language_model.layers.{i}.mlp.gate_proj.weight",
+            f"model.language_model.layers.{i}.mlp.gate_proj.weight_scale_inv",
+        )
+        mapping[f"{prefix}-mlp-up_proj-kernel"] = (
+            f"model.language_model.layers.{i}.mlp.up_proj.weight",
+            f"model.language_model.layers.{i}.mlp.up_proj.weight_scale_inv",
+        )
+        mapping[f"{prefix}-mlp-down_proj-kernel"] = (
+            f"model.language_model.layers.{i}.mlp.down_proj.weight",
+            f"model.language_model.layers.{i}.mlp.down_proj.weight_scale_inv",
+        )
+      else:
+        mapping[f"{prefix}-mlp-routed_experts-gate-kernel"] = f"model.language_model.layers.{i}.mlp.gate.weight"
+        mapping[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = (
+            f"model.language_model.layers.{i}.mlp.shared_experts.gate_proj.weight",
+            f"model.language_model.layers.{i}.mlp.shared_experts.gate_proj.weight_scale_inv",
+        )
+        mapping[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = (
+            f"model.language_model.layers.{i}.mlp.shared_experts.up_proj.weight",
+            f"model.language_model.layers.{i}.mlp.shared_experts.up_proj.weight_scale_inv",
+        )
+        mapping[f"{prefix}-mlp-shared_expert-wo-kernel"] = (
+            f"model.language_model.layers.{i}.mlp.shared_experts.down_proj.weight",
+            f"model.language_model.layers.{i}.mlp.shared_experts.down_proj.weight_scale_inv",
+        )
+        mapping[f"{prefix}-mlp-routed_experts-wi_0"] = [
+            (
+                f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight",
+                f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv",
+            )
+            for e in range(num_experts)
+        ]
+        mapping[f"{prefix}-mlp-routed_experts-wi_1"] = [
+            (
+                f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight",
+                f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv",
+            )
+            for e in range(num_experts)
+        ]
+        mapping[f"{prefix}-mlp-routed_experts-wo"] = [
+            (
+                f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight",
+                f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv",
+            )
+            for e in range(num_experts)
+        ]
+
+  return mapping
+
+
+def GLM5_3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Returns hook functions for transforming weights between MaxText and HuggingFace for GLM-5.3-Flash."""
+
+  def transpose(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
+    return input_tensor.T
+
+  def conv1d_hook(tensors, target_shape=None):
+    if isinstance(tensors, (list, tuple)):
+      parts = [t.cpu().float().numpy() if hasattr(t, "cpu") else t for t in tensors]
+      concat = np.concatenate(parts, axis=0)
+      return concat.transpose(2, 1, 0)
+    else:
+      if hasattr(tensors, "cpu"):
+        tensors = tensors.cpu().float().numpy()
+      return tensors.transpose(2, 1, 0)
+
+  def dequant_transpose_hook(tensors, target_shape=None, block_size=128):
+    if isinstance(tensors, (list, tuple)):
+      w, s = tensors
+      if hasattr(w, "cpu"):
+        w = w.cpu().float().numpy()
+      if hasattr(s, "cpu"):
+        s = s.cpu().float().numpy()
+      w = w.astype(np.float32)
+      s = s.astype(np.float32)
+      s_exp = np.repeat(np.repeat(s, block_size, axis=0), block_size, axis=1)
+      return (w * s_exp).T
+    else:
+      if hasattr(tensors, "cpu"):
+        tensors = tensors.cpu().float().numpy()
+      return tensors.T
+
+  hooks = {
+      "params-decoder-logits_dense-kernel": transpose,
+  }
+
+  num_layers = maxtext_config.base_num_decoder_layers
+  first_k_dense_replace = getattr(maxtext_config, "first_num_dense_layers", 3)
+
+  for i in range(num_layers):
+    prefix = f"params-decoder-layers_{i}"
+
+    hooks[f"{prefix}-attn_hc-fn"] = transpose
+    hooks[f"{prefix}-ffn_hc-fn"] = transpose
+
+    hooks[f"{prefix}-attention-q_proj-kernel"] = transpose
+    hooks[f"{prefix}-attention-k_proj-kernel"] = transpose
+    hooks[f"{prefix}-attention-v_proj-kernel"] = transpose
+    hooks[f"{prefix}-attention-conv1d-kernel"] = conv1d_hook
+    hooks[f"{prefix}-attention-f_a_proj-kernel"] = transpose
+    hooks[f"{prefix}-attention-f_b_proj-kernel"] = transpose
+    hooks[f"{prefix}-attention-g_a_proj-kernel"] = transpose
+    hooks[f"{prefix}-attention-g_b_proj-kernel"] = transpose
+    hooks[f"{prefix}-attention-b_proj-kernel"] = transpose
+    hooks[f"{prefix}-attention-o_proj-kernel"] = transpose
+
+    if i < first_k_dense_replace:
+      hooks[f"{prefix}-mlp-gate_proj-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-up_proj-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-down_proj-kernel"] = dequant_transpose_hook
+    else:
+      hooks[f"{prefix}-mlp-routed_experts-gate-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-shared_expert-wo-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-routed_experts-wi_0"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-routed_experts-wi_1"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-routed_experts-wo"] = dequant_transpose_hook
+
+  return hooks
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4268,6 +4443,7 @@ PARAM_MAPPING = {
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b-pt": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.3-flash": GLM5_3_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -4318,6 +4494,7 @@ HOOK_FNS = {
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.3-flash": GLM5_3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,

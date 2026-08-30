@@ -205,8 +205,12 @@ class LazyHFLoader:
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
     with self._ram_lock:
-      with safe_open(local_path, framework="np", device="cpu") as f:
-        return f.get_tensor(key)
+      try:
+        with safe_open(local_path, framework="np", device="cpu") as f:
+          return f.get_tensor(key)
+      except AttributeError:
+        with safe_open(local_path, framework="pt", device="cpu") as f:
+          return f.get_tensor(key)
 
 
 class LazyTensor:

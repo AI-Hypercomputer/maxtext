@@ -565,6 +565,7 @@ class MlpBlock(nnx.Module):
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
+        DecoderBlockType.GLM5_3,
     ):
       return functools.partial(normalizations.RMSNorm, num_features=num_features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
