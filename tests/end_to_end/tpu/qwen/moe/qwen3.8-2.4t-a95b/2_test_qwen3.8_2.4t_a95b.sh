@@ -85,7 +85,7 @@ echo "using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
 
 SCANNED_CKPT_PATH=gs://yujiedeng-maxtext-dev/model_bringup/model_zoo/qwem3_8_mt_scanned/scanned/0/items
 
-UNSCANNED_CKPT_PATH=gs://yujiedeng-maxtext-dev/model_bringup/model_zoo/qwem3_8_mt_unscanned/unscanned-v2/0//items
+UNSCANNED_CKPT_PATH=gs://yujiedeng-maxtext-dev/model_bringup/model_zoo/qwem3_8_mt_unscanned/unscanned-v2/0/items
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ UNSCANNED_CKPT_PATH=gs://yujiedeng-maxtext-dev/model_bringup/model_zoo/qwem3_8_m
 # Same convention as the Qwen3.5 E2E test.
 # ---------------------------------------------------------------------------
 
-export DATASET_PATH=gs://YOUR_BUCKET/maxtext-dataset
+export DATASET_PATH=gs://maxtext-dataset
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ GOLDEN_LOGITS_DISK_LOCATION="/deps/tests/assets/golden_logits/golden_data_${MODE
 if [ ! -f "${GOLDEN_LOGITS_DISK_LOCATION}" ]; then
 
   # FILL THIS IN.
-  GOLDEN_LOGITS_PATH=gs://YOUR_BUCKET/qwen3.8-2.4t-a95b/golden_data_qwen3.8-2.4t-a95b.jsonl
+  GOLDEN_LOGITS_PATH=gs://yujiedeng-maxtext-dev/model_bringup/test/qwen3.8-2.4t-a95b/golden_data_qwen3.8-2.4t-a95b.jsonl
 
   GOLDEN_LOGITS_DISK_LOCATION=/tmp/golden_data.jsonl
 
