@@ -18,7 +18,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, Config, HyperConnectionType, ModelMode
+from maxtext.common.common_types import Array, Config, HyperConnectionType, MODEL_MODE_TRAIN
 from maxtext.layers import initializers, linears, mhc
 from maxtext.layers.normalizations import RMSNorm
 
@@ -57,7 +57,7 @@ class Glm5NextAttention(nnx.Module):
       self,
       config: Config,
       mesh: Mesh,
-      model_mode: ModelMode,
+      model_mode: str,
       rngs: nnx.Rngs,
   ):
     self.config = config
@@ -290,7 +290,7 @@ class Glm5NextDecoderLayer(nnx.Module):
       self,
       config: Config,
       mesh: Mesh,
-      model_mode: ModelMode,
+      model_mode: str,
       layer_idx: int,
       rngs: nnx.Rngs,
   ):
@@ -347,7 +347,7 @@ class Glm5NextDecoderLayer(nnx.Module):
       decoder_segment_ids: Array | None = None,
       decoder_positions: Array | None = None,
       deterministic: bool = True,
-      model_mode: ModelMode = "train",
+      model_mode: str = MODEL_MODE_TRAIN,
   ) -> tuple[Array, None]:
     """Forward pass for GLM-5.3-Flash Decoder Layer."""
     x = inputs
