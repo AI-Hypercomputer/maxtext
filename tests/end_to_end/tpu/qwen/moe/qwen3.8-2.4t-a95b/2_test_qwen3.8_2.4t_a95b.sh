@@ -50,6 +50,36 @@
 
 set -ex
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
+
+export MAXTEXT_REPO_ROOT="${REPO_ROOT}"
+export MAXTEXT_CONFIGS_DIR="${REPO_ROOT}/src/maxtext/configs"
+
+# Local XPK checkout must win over the /deps copy from the base image.
+export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
+
+cd "${REPO_ROOT}"
+
+echo "===== SOURCE CHECK ====="
+echo "REPO_ROOT=${REPO_ROOT}"
+echo "MAXTEXT_REPO_ROOT=${MAXTEXT_REPO_ROOT}"
+echo "MAXTEXT_CONFIGS_DIR=${MAXTEXT_CONFIGS_DIR}"
+echo "PYTHONPATH=${PYTHONPATH}"
+
+python3 - <<'PY'
+import maxtext.configs.pyconfig as pyconfig
+import maxtext.configs.types as types
+
+print("pyconfig =", pyconfig.__file__)
+print("types    =", types.__file__)
+
+assert pyconfig.__file__.startswith("/app/"), pyconfig.__file__
+assert types.__file__.startswith("/app/"), types.__file__
+
+print("PASS: using layered MaxText source")
+PY
+
 export MODEL_NAME='qwen3.8-2.4t-a95b'
 export TOKENIZER_PATH='Qwen/Qwen3.8-2.4T-A95B'
 
@@ -129,7 +159,43 @@ fi
 # 256 physical chips should therefore expose 512 JAX devices.
 # ---------------------------------------------------------------------------
  
+python3 - <<'PY'
+import os
 
+from maxtext.configs import pyconfig
+import maxtext.configs.pyconfig as pyconfig_module
+
+print("pyconfig module:", pyconfig_module.__file__)
+print("MAXTEXT_CONFIGS_DIR:", os.environ["MAXTEXT_CONFIGS_DIR"])
+
+assert pyconfig_module.__file__.startswith("/app/")
+assert os.environ["MAXTEXT_CONFIGS_DIR"].startswith("/app/")
+
+cfg = pyconfig.initialize(
+    [
+        os.path.join("/app/src/maxtext", "train.py"),
+        os.path.join(
+            os.environ["MAXTEXT_CONFIGS_DIR"],
+            "base.yml",
+        ),
+    ],
+    skip_jax_distributed_system=True,
+    model_name="qwen3.8-2.4t-a95b",
+    run_name="q38-pre-logit-check",
+    base_output_directory="/tmp/q38-pre-logit-check",
+)
+
+print("model_name    =", cfg.model_name)
+print("decoder_block =", cfg.decoder_block)
+print("layers        =", cfg.base_num_decoder_layers)
+print("experts       =", cfg.num_experts)
+
+assert cfg.model_name == "qwen3.8-2.4t-a95b"
+assert cfg.base_num_decoder_layers == 92
+assert cfg.num_experts == 512
+
+print("PASS: Qwen3.8 config before logit verification")
+PY
 
 # ===========================================================================
 # 2.1 Forward-logit correctness
