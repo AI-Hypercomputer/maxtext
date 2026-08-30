@@ -541,7 +541,7 @@ def main(config, test_args):  # pylint: disable=W0621
 
       # Mask out vision placeholder tokens for KL calculation
       ignore_token_ids = []
-      if "qwen3" in config.model_name.lower():
+      if config.use_multimodal and "qwen3" in config.model_name.lower():
         from maxtext.multimodal.processor_qwen3_omni import QwenTokens  # pylint: disable=import-outside-toplevel
 
         qwen_tokens = QwenTokens(config)
