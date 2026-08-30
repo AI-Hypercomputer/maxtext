@@ -198,6 +198,7 @@ def jax_chunk_gated_delta_rule(
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
     use_pallas: bool = False,
+    cp_axis: None | str = None,
 ) -> tuple[Array, None | Array]:
   """Optimized JAX implementation of Gated Delta Rule."""
   # =========================================================================
@@ -294,16 +295,15 @@ def jax_chunk_gated_delta_rule(
   # =========================================================================
   # STAGE 3: INTER-CHUNK RECURRENCE (Scan)
   # =========================================================================
-  if use_pallas:
+  # The fused kernel returns before the scan below, so it cannot compose the
+  # recurrent state across context-parallel (sequence-sharded) shards. When a
+  # cp_axis is set the sequence is sharded, so fall through to the scan path,
+  # which is where per-shard state composition belongs. The kernel stays on for
+  # the common non-context-parallel case.
+  if use_pallas and cp_axis is None:
     # Fused Pallas TPU kernel: the whole sequential walk runs in one kernel
     # with the recurrent state held in VMEM instead of round-tripping
     # through HBM on every lax.scan iteration.
-    #
-    # NOTE: this fused path threads a single `initial_state` (h0) and returns
-    # `final_h`, but returns before any code below, so it does not compose the
-    # recurrent state across context-parallel (sequence-sharded) shards. Callers
-    # that shard the sequence must compose per-shard state around this call;
-    # otherwise every shard recurs from h0 (each starting from a zero state).
     h0 = (
         jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32) if initial_state is None else initial_state.astype(jnp.float32)
     )
