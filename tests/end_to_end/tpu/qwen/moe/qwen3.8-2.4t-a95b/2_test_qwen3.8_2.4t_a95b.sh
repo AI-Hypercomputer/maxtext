@@ -231,9 +231,9 @@ python3 -m tests.utils.forward_pass_logit_checker \
   ici_tensor_parallelism=1 \
   ici_fsdp_parallelism=32 \
   ici_expert_parallelism=8 \
-  weight_dtype=float32 \
-  dtype=float32 \
-  activations_in_float32=true \
+  weight_dtype=bfloat16 \
+  dtype=bfloat16 \
+  activations_in_float32=false \
   matmul_precision=highest \
   float32_logits=true \
   float32_qk_product=true \
