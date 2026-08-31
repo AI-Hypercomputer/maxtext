@@ -626,12 +626,20 @@ def main(config, test_args):  # pylint: disable=W0621
       from transformers import Qwen3VLForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
       model_class = Qwen3VLForConditionalGeneration
+    elif "glm5" in config.model_name.lower():
+      from transformers import AutoModelForImageTextToText  # pylint: disable=import-outside-toplevel
+
+      model_class = AutoModelForImageTextToText
     else:
       model_class = AutoModelForCausalLM
 
     hf_model = model_class.from_pretrained(
-        test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
+        test_args.hf_model_path,
+        torch_dtype=torch_dtype,
+        token=hf_token,
+        trust_remote_code=test_args.trust_remote_code,
     )
+    hf_model = hf_model.to(torch_dtype)
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
       max_logging.log(f"Loading HF PEFT LoRA adapter from {hf_lora_path}")

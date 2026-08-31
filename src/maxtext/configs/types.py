@@ -241,6 +241,7 @@ ModelName = Literal[
     "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
+    "glm5.3-flash",
     "gemma-7b",
     "gemma-2b",
     "gemma2-2b",
@@ -1121,6 +1122,19 @@ class DeepSeekMoE(BaseModel):
       1,
       description="Factor by which to split the batch into micro-batches. Only used if use_batch_split_schedule is True.",
   )
+
+
+class Glm53Flash(BaseModel):
+  """Configuration specific to GLM-5.3-Flash."""
+
+  linear_conv_kernel_dim: int = Field(4, description="Kernel size for the 1D convolution in the linear attention (KDA).")
+  linear_head_dim: int = Field(128, description="Head dimension in the linear attention (KDA).")
+  linear_num_heads: int = Field(64, description="Number of heads in the linear attention (KDA).")
+  linear_lower_bound: float = Field(
+      -5.0, description="Safe lower bound for the forget gate decay rate in linear attention."
+  )
+  swiglu_limit: float = Field(10.0, description="Clamping limit for SwiGLU activations.")
+  mhc_eps: float = Field(1e-6, description="Epsilon for manifold-constrained hyper connections.")
 
 
 class Qwen3Next(BaseModel):
@@ -3004,6 +3018,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    Glm53Flash,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,

@@ -61,6 +61,7 @@ from maxtext.models import (
     qwen3,
     qwen3_custom,
     qwen3_5,
+    glm5_next,
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
@@ -496,6 +497,10 @@ class Decoder(nn.Module):
         return [olmo3.Olmo3ScannableBlockToLinen] if self.config.scan_layers else [olmo3.Olmo3DecoderLayerToLinen]
       case DecoderBlockType.ENVY:
         return [envy.EnvyScannableBlockToLinen] if self.config.scan_layers else [envy.EnvyDecoderLayerToLinen]
+      case DecoderBlockType.GLM5_3:
+        if self.config.scan_layers:
+          raise NotImplementedError("scan_layers=true is not yet supported for GLM5.")
+        return [glm5_next.Glm5NextDecoderLayerToLinen]
 
       case _:
         # Default case to handle any unknown decoder block types.
@@ -532,10 +537,14 @@ class Decoder(nn.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
+        # GLM5 does not yet implement a multi-layer scannable block.
+        DecoderBlockType.GLM5_3: [glm5_next.Glm5NextDecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
       raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
+    if cfg.decoder_block == DecoderBlockType.GLM5_3 and cfg.scan_layers:
+      raise NotImplementedError("scan_layers=true is not yet supported for GLM5.")
     return layer_map[cfg.decoder_block]
 
   def set_remat_policy(self, block_layers, policy):
@@ -641,6 +650,7 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
+        DecoderBlockType.GLM5_3,
     ):
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
@@ -1227,7 +1237,12 @@ class Decoder(nn.Module):
                   "is_moe_layer": (lyr + 1) % self.config.interleave_moe_layer_step == 0,
               }
 
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
+            if cfg.decoder_block in (
+                DecoderBlockType.QWEN3_NEXT,
+                DecoderBlockType.QWEN3_5,
+                DecoderBlockType.DEEPSEEK4,
+                DecoderBlockType.GLM5_3,
+            ):
               layer_kwargs = {"layer_idx": lyr}
             if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
               layer_call_kwargs["decoder_input_tokens"] = decoder_input_tokens
@@ -1284,6 +1299,8 @@ class Decoder(nn.Module):
             mesh=mesh,
             name="hc_head",
         )(y)
+      elif cfg.decoder_block == DecoderBlockType.GLM5_3:
+        hidden_state = jnp.mean(y, axis=2, dtype=y.dtype)
       else:
         # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
         hidden_state = mhc_reduce(y)
