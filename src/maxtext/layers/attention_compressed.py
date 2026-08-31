@@ -892,9 +892,9 @@ class DeepseekV4Indexer(nnx.Module):
       compressed_kv = jnp.broadcast_to(
           compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim)
       )
-      q_fp32 = q.astype(jnp.float32)
+      q = q.astype(jnp.float32)
       compressed_kv = compressed_kv.astype(jnp.float32)
-      scores = jnp.einsum("bhsd,bhwd->bhsw", q_fp32, compressed_kv)
+      scores = jnp.einsum("bhsd,bhwd->bhsw", q, compressed_kv)
       scores = jax.nn.relu(scores) * self.softmax_scale
       index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights)
 
