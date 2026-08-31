@@ -225,13 +225,13 @@ class TestDeepseekv4IndexerIntegration(unittest.TestCase):
 
     np.testing.assert_array_equal(out_kernel, out_einsum)
 
-  def test_ar_decode_fallback(self):
-    """Verifies that when seq_len < 128, einsum path is used."""
-    config_kernel = self._get_config(use_csa_streamindex_kernel=True)
-    b, s, emb_dim, q_lora = 1, 64, config_kernel.emb_dim, config_kernel.q_lora_rank
+  def test_indexer_einsum_when_disabled(self):
+    """Verifies that when use_csa_streamindex_kernel=False, einsum path is used."""
+    config_einsum = self._get_config(use_csa_streamindex_kernel=False)
+    b, s, emb_dim, q_lora = 1, 128, config_einsum.emb_dim, config_einsum.q_lora_rank
 
     indexer = DeepseekV4Indexer(
-        config=config_kernel,
+        config=config_einsum,
         compress_ratio=4,
         rotary_embedding=self.rotary,
         rngs=nnx.Rngs(0),

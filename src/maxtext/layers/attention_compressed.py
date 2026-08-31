@@ -428,15 +428,6 @@ def prime_prefill_cache_state(
       cache.overlap_gate.set_value(overlap_gate_to_write)
 
 
-def _as_nd_init(init_fn: Any) -> Any:
-  """Adapts a 2/3-arg Flax initializer to a 5-arg NdInitializer if needed."""
-  def wrapped(key, shape, dtype, *args, **kwargs):
-    try:
-      return init_fn(key, shape, dtype, *args, **kwargs)
-    except TypeError:
-      return init_fn(key, shape, dtype)
-  return wrapped
-
 
 class BaseDeepseekCompressor(nnx.Module):
   """Shared base class for DeepSeek-V4 long-range attention compressors.
@@ -464,7 +455,6 @@ class BaseDeepseekCompressor(nnx.Module):
   ):
     self.config = config
     self.compress_rate = compress_ratio
-    kernel_init = _as_nd_init(kernel_init)
     self.head_dim = config.head_dim
     self.dtype = config.dtype
     self.weight_dtype = config.weight_dtype
@@ -712,7 +702,6 @@ class DeepseekV4Indexer(nnx.Module):
     """
     self.config = config
     self.compress_rate = compress_ratio
-    kernel_init = _as_nd_init(kernel_init)
     self.index_n_heads = config.indexer_n_heads
     self.index_head_dim = config.indexer_head_dim
     self.index_topk = config.indexer_topk
@@ -893,58 +882,14 @@ class DeepseekV4Indexer(nnx.Module):
     q = jnp.transpose(q, (0, 2, 1, 3))
     q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
-
-    block_q = 128
-    use_kernel = getattr(self.config, "use_csa_streamindex_kernel", False) and (seq_len >= block_q)
-
-    if use_kernel:
-      mesh = getattr(self.config, "mesh", None) or getattr(self, "mesh", None)
-      if mesh is None:
-        try:
-          mesh = maxtext_utils.get_mesh_from_config(self.config)
-        except (AttributeError, ValueError, KeyError):
-          mesh = None
-      total_batch_shards = 1
-      if mesh is not None:
-        for axis_name in ("data", "fsdp", "fsdp_transpose", "expert", "context"):
-          if axis_name in mesh.shape:
-            total_batch_shards *= mesh.shape[axis_name]
-      if mesh is not None and total_batch_shards > 1 and (batch_size % total_batch_shards == 0):
-        q_pspec = jax.sharding.PartitionSpec(
-            ("data", "fsdp", "fsdp_transpose", "expert", "context"),
-            None,
-            None,
-            None,
-        )
-        out_pspec = jax.sharding.PartitionSpec(
-            ("data", "fsdp", "fsdp_transpose", "expert", "context"),
-            None,
-            None,
-        )
-        @functools.partial(
-            jax.shard_map,
-            mesh=mesh,
-            in_specs=(q_pspec, out_pspec, out_pspec),
-            out_specs=out_pspec,
-            check_vma=False,
-        )
-        def _shard_mapped_streamindex(local_q, local_comp, local_weights):
-          return csa_streamindex.csa_streamindex_score_head_major(
-              q=local_q,
-              compressed=local_comp,
-              weights=local_weights,
-              softmax_scale=self.softmax_scale,
-              compress_rate=self.compress_rate,
-          )
-        index_scores = _shard_mapped_streamindex(q, compressed, weights)
-      else:
-        index_scores = csa_streamindex.csa_streamindex_score_head_major(
-            q=q,
-            compressed=compressed,
-            weights=weights,
-            softmax_scale=self.softmax_scale,
-            compress_rate=self.compress_rate,
-        )
+    if self.config.use_csa_streamindex_kernel:
+      index_scores = csa_streamindex.csa_streamindex_score_head_major(
+          q=q,
+          compressed=compressed,
+          weights=weights,
+          softmax_scale=self.softmax_scale,
+          compress_rate=self.compress_rate,
+      )
     else:
       compressed_kv = jnp.expand_dims(compressed, axis=1)
       compressed_kv = jnp.broadcast_to(
@@ -965,7 +910,7 @@ class DeepseekV4Indexer(nnx.Module):
       future_mask = (block_positions[:, None, :] + self.compress_rate) > (position_ids[:, :, None] + 1)
 
     # Apply the mask to the scores if not already applied by the kernel
-    if not use_kernel:
+    if not self.config.use_csa_streamindex_kernel:
       index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
     combined_invalid = future_mask
