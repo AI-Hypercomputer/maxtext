@@ -1,3 +1,17 @@
+# Copyright 2026 Ant Group. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Unit tests for KDA (Kimi Delta Attention) module.
 
 Tests cover:
@@ -6,7 +20,7 @@ Tests cover:
   - Naive KDA: recurrent Delta Rule reference impl vs kernel precision
   - Backward (VJP): activation gradients, weight gradients, determinism, bf16
   - QK L2 norm: applied outside kernel, matching Megatron
-  - Real config: loading a KDA model config and running KimiDeltaAttention
+  - Context parallelism: kernel-level CP equivalence and load_balance rejection
 
 Precision comparison uses _assert_close (atol+rtol+ULP fallback),
 adapted from gla_compare_test.py.
@@ -31,6 +45,11 @@ except ImportError:
   TOKAMAX_AVAILABLE = False
 
 from maxtext.layers import attention_kda
+
+# The chunk_kda kernel tests exercise tokamax Pallas TPU kernels and multi-chip
+# CP; mark the module tpu_only so CPU-only testbeds skip them (consistent with
+# kernels_test.py) while they run on TPU hosts.
+pytestmark = pytest.mark.tpu_only
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +139,8 @@ class _MockKdaConfig:
     self.use_qk_norm = True
     self.use_kda_safe_gate = True
     self.kda_lower_bound = -5.0
-    self.packing_max_segments_per_sample = 25
+    self.max_segments_per_seq = 25
+    self.context_sharding = "context"
 
     for k, v in overrides.items():
       setattr(self, k, v)
@@ -191,7 +211,7 @@ class TestKimiDeltaAttention:
   def test_sequence_padding(self, mesh):
     """Non-divisible sequence lengths should be handled via padding."""
     attn = self._make_attn(mesh)
-    B, T, D = 1, 100, 128  # 100 not divisible by chunk_size=64
+    B, T, D = 1, 100, 128  # 100 not divisible by the KDA chunk alignment (64)
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
     with mesh:
       output, _ = attn(x)
@@ -212,7 +232,11 @@ class TestKimiDeltaAttention:
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, hidden_dim))
     # 1-based segment_ids, 0 = padding
     seg_ids = jnp.array(
-        [[1, 1, 1, 2, 2, 2, 3, 3] + [0] * (T - 8), [1, 1, 2, 2, 2, 2, 3, 3] + [0] * (T - 8)], dtype=jnp.int32
+        [
+            [1, 1, 1, 2, 2, 2, 3, 3] + [0] * (T - 8),
+            [1, 1, 2, 2, 2, 2, 3, 3] + [0] * (T - 8),
+        ],
+        dtype=jnp.int32,
     )
     with mesh:
       o, _ = attn(x, decoder_segment_ids=seg_ids)
@@ -224,7 +248,11 @@ class TestKimiDeltaAttention:
   def test_segment_ids_padding_alignment(self, mesh):
     """When T % 64 != 0, segment_ids should be padded along with hidden_states."""
     attn = self._make_attn(mesh)
-    B, T, hidden_dim = 1, 100, 128  # 100 not divisible by chunk_size=64
+    B, T, hidden_dim = (
+        1,
+        100,
+        128,
+    )  # 100 not divisible by the KDA chunk alignment (64)
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, hidden_dim))
     # segment_ids shorter than padded length (100 -> 128 after pad)
     seg_ids = jnp.array([[1, 1, 1, 2, 2, 2, 3, 3] + [0] * (T - 8)], dtype=jnp.int32)
@@ -306,7 +334,7 @@ class TestChunkKda:
     g = jax.nn.log_sigmoid(jax.random.normal(keys[3], (B, T, H, K))) * 0.3
     beta = jax.nn.sigmoid(jax.random.normal(keys[4], (B, T, H)))
 
-    o, _ = chunk_kda(q, k, v, g, beta, scale=K**-0.5, chunk_size=64)
+    o, _ = chunk_kda(q, k, v, g, beta, scale=K**-0.5)
     assert o.shape == (B, T, H, V)
     assert not jnp.any(jnp.isnan(o))
 
@@ -397,7 +425,7 @@ class TestNaiveKda:
 
     scale = K**-0.5
 
-    o_kernel, _ = chunk_kda(q, k, v, g, beta, scale=scale, chunk_size=64)
+    o_kernel, _ = chunk_kda(q, k, v, g, beta, scale=scale)
     o_naive = _naive_kda_recurrent(q, k, v, g, beta, scale)
 
     assert not jnp.any(jnp.isnan(o_naive)), "Naive output contains NaN"
@@ -491,7 +519,7 @@ class TestNaiveKda:
 
     scale = K**-0.5
 
-    o_kernel, _ = chunk_kda(q, k, v, g, beta, scale=scale, chunk_size=64)
+    o_kernel, _ = chunk_kda(q, k, v, g, beta, scale=scale)
     o_naive = _naive_kda_recurrent(
         q.astype(jnp.float32),
         k.astype(jnp.float32),
@@ -696,7 +724,10 @@ class TestShortConvolution:
 
     # With segment_ids: cross-segment contributions should be masked out.
     seg_ids = jnp.array(
-        [[1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0], [1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 0, 0, 0, 0, 0, 0]],
+        [
+            [1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 0, 0, 0, 0, 0, 0],
+        ],
         dtype=jnp.int32,
     )
     out_seg = conv(x, segment_ids=seg_ids)
@@ -707,7 +738,10 @@ class TestShortConvolution:
 
     # Row independence: changing row 1's segment_ids should not affect row 0.
     seg_alt = jnp.array(
-        [[1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0], [1, 1, 1, 4, 4, 4, 2, 2, 5, 5, 0, 0, 0, 0, 0, 0]],
+        [
+            [1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 4, 4, 4, 2, 2, 5, 5, 0, 0, 0, 0, 0, 0],
+        ],
         dtype=jnp.int32,
     )
     out_alt = conv(x, segment_ids=seg_alt)
@@ -747,14 +781,16 @@ class TestShortConvolution:
 
     # CP: shard input along T, run conv inside shard_map with "context" axis.
     xs = jax.lax.with_sharding_constraint(
-        x, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "context", None))
+        x,
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "context", None)),
     )
 
     # Uniform segment_ids — no cross-segment masking, so halo tokens are
     # the true left-context and output should match reference.
     seg_ids = jnp.ones((B, T), dtype=jnp.int32)
     segs = jax.lax.with_sharding_constraint(
-        seg_ids, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "context"))
+        seg_ids,
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "context")),
     )
 
     @functools.partial(
@@ -797,14 +833,6 @@ class TestKdaCp:
     n_devices = (len(devices) // cp_size) * cp_size
     return jax.sharding.Mesh(np.array(devices[:n_devices]).reshape(cp_size, -1), ("context", "x"))
 
-  def _cp_config(self, **overrides):
-    return _MockKdaConfig(
-        context_parallel_size=2,
-        context_parallel_strategy="all_gather",
-        context_parallel_load_balance=False,
-        **overrides,
-    )
-
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   def test_kda_cp_equivalence(self):
@@ -814,7 +842,6 @@ class TestKdaCp:
 
     cp_size = 2
     mesh_cp = self._cp_mesh(cp_size=cp_size)
-    mesh_ref = jax.sharding.Mesh(jax.devices(), ("x",))
 
     B, T, H, K, V = 2, 128, 4, 128, 128
     key = jax.random.PRNGKey(42)
@@ -830,12 +857,12 @@ class TestKdaCp:
     scale = float(K**-0.5)
 
     # --- Reference: non-CP run ---
-    ref_o, _ = chunk_kda(q, k, v, g, beta, scale=scale, chunk_size=64, segment_ids=seg_ids, N_max=1)
+    ref_o, _ = chunk_kda(q, k, v, g, beta, scale=scale, segment_ids=seg_ids, max_num_segments=1)
 
-    # --- CP run: shard along T, call chunk_kda with cp_context ---
-    from tokamax._src.ops.experimental.kda.cp_utils import CPContext
+    # --- CP run: shard along T, call chunk_kda with context_parallel_metadata ---
+    from tokamax._src.ops.experimental.kda.cp_utils import ContextParallelMetadata
 
-    cp_ctx = CPContext(mesh=mesh_cp, axis_name="context")
+    cp_ctx = ContextParallelMetadata(mesh=mesh_cp, axis_name="context")
 
     # Shard all inputs along T (axis 1).
     pspec_4d = jax.sharding.PartitionSpec(None, "context", None, None)
@@ -867,11 +894,9 @@ class TestKdaCp:
           g_loc,
           beta_loc,
           scale=scale,
-          chunk_size=64,
           segment_ids=seg_loc,
-          disable_recompute=True,
-          N_max=1,
-          cp_context=cp_ctx,
+          max_num_segments=1,
+          context_parallel_metadata=cp_ctx,
       )
       return o_loc
 
@@ -883,15 +908,11 @@ class TestKdaCp:
     # CP output should match reference within tolerance.
     _assert_close(cp_o_full, ref_o, "kda_cp_equivalence", atol=5e-3, rtol=1e-3)
 
-  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
+  @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   def test_kda_cp_rejects_load_balance(self):
     """KDA CP should raise ValueError when load_balance is enabled."""
-    mesh = jax.sharding.Mesh(jax.devices(), ("x",))
-    cfg = _MockKdaConfig(
-        context_parallel_size=2,
-        context_parallel_strategy="all_gather",
-        context_parallel_load_balance=True,
-    )
+    mesh = self._cp_mesh(cp_size=2)
+    cfg = _MockKdaConfig(context_parallel_load_balance=True)
     rngs = nnx.Rngs(0)
     with mesh:
       attn = attention_kda.KimiDeltaAttention(
@@ -908,9 +929,7 @@ class TestKdaCp:
   def test_kda_no_cp_without_load_balance_ok(self):
     """KDA without CP (cp_size=1) should succeed."""
     mesh = jax.sharding.Mesh(jax.devices(), ("x",))
-    cfg = _MockKdaConfig(
-        context_parallel_size=1,  # CP=1, no actual CP but validates config check path
-    )
+    cfg = _MockKdaConfig()
     rngs = nnx.Rngs(0)
     with mesh:
       attn = attention_kda.KimiDeltaAttention(
