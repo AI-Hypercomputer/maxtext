@@ -25,6 +25,7 @@ import os
 
 from absl import app
 
+import numpy as np
 import optax
 
 import pathwaysutils  # pylint: disable=unused-import
@@ -389,6 +390,25 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
             mtp_moe_bias_updates = []
           mtp_moe_bias_updates.append(val)
 
+  te_moe_capacity_overflow = jnp.asarray(False)
+  te_moe_max_total_recv_tokens = jnp.asarray(0, dtype=jnp.int32)
+  te_moe_recv_capacity_per_rank = jnp.asarray(0, dtype=jnp.int32)
+  if config.te_moe_block:
+    overflow_values = maxtext_utils.collect_intermediates_by_suffix(
+        intermediate_outputs, "te_moe_capacity_overflow"
+    )
+    total_recv_values = maxtext_utils.collect_intermediates_by_suffix(
+        intermediate_outputs, "te_moe_total_recv_tokens"
+    )
+    capacity_values = maxtext_utils.collect_intermediates_by_suffix(
+        intermediate_outputs, "te_moe_recv_capacity_per_rank"
+    )
+    if not overflow_values or not total_recv_values or not capacity_values:
+      raise ValueError("te_moe_block=True did not produce TE MoE receive-capacity intermediates.")
+    te_moe_capacity_overflow = jnp.any(jnp.concatenate(overflow_values))
+    te_moe_max_total_recv_tokens = jnp.max(jnp.concatenate(total_recv_values))
+    te_moe_recv_capacity_per_rank = jnp.min(jnp.concatenate(capacity_values))
+
   # Add the model's primary output to the intermediates dict so it can be used
   # by the acceptance rate calculation in eval_step.
   if not is_train and config.mtp_eval_target_module > 0:
@@ -404,6 +424,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "moe_bias_updates": moe_bias_updates,
       "mtp_moe_bias_updates": mtp_moe_bias_updates,
       "mtp_loss": mtp_loss,
+      "te_moe_capacity_overflow": te_moe_capacity_overflow,
+      "te_moe_max_total_recv_tokens": te_moe_max_total_recv_tokens,
+      "te_moe_recv_capacity_per_rank": te_moe_recv_capacity_per_rank,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
   return loss, aux
@@ -551,6 +574,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   moe_bias_updates = aux.get("moe_bias_updates")
   mtp_moe_bias_updates = aux.get("mtp_moe_bias_updates")
   mtp_loss = aux.get("mtp_loss", 0.0)
+  te_moe_capacity_overflow = aux.get("te_moe_capacity_overflow", jnp.asarray(False))
+  te_moe_max_total_recv_tokens = aux.get("te_moe_max_total_recv_tokens", jnp.asarray(0, dtype=jnp.int32))
+  te_moe_recv_capacity_per_rank = aux.get("te_moe_recv_capacity_per_rank", jnp.asarray(0, dtype=jnp.int32))
   new_opt_state = None
   bias_metrics = {}
 
@@ -699,6 +725,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/indexer_loss": indexer_loss,
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
+      "learning/te_moe_capacity_overflow": te_moe_capacity_overflow.astype(jnp.int32),
+      "learning/te_moe_max_total_recv_tokens": te_moe_max_total_recv_tokens,
+      "learning/te_moe_recv_capacity_per_rank": te_moe_recv_capacity_per_rank,
   }
   scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
@@ -907,6 +936,7 @@ def training_loop_iteration(
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
   python_vars["last_step_completion"] = last_step_completion
+  return metrics
 
 
 def train_loop(config, recorder, state=None):
@@ -1038,13 +1068,53 @@ def train_loop(config, recorder, state=None):
   }
 
   _job_completed_gracefully = False
+  te_moe_overflow_window = []
   try:
     python_vars["last_step_completion"] = datetime.datetime.now()
 
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
-      training_loop_iteration(jax_device_state, python_vars, immutable_data)
+      step = python_vars["step"]
+      metrics = training_loop_iteration(jax_device_state, python_vars, immutable_data)
       python_vars["step"] += 1
+
+      if config.te_moe_block:
+        te_moe_overflow_window.append(
+            (
+                int(step),
+                metrics["scalar"]["learning/te_moe_capacity_overflow"],
+                metrics["scalar"]["learning/te_moe_max_total_recv_tokens"],
+                metrics["scalar"]["learning/te_moe_recv_capacity_per_rank"],
+            )
+        )
+        check_overflow = (
+            len(te_moe_overflow_window) == config.te_ep_overflow_check_every_n_steps
+            or step == config.steps - 1
+        )
+        if check_overflow:
+          checked_window = jax.device_get(tuple(te_moe_overflow_window))
+          overflowing_steps = [entry for entry in checked_window if bool(np.asarray(entry[1]))]
+          te_moe_overflow_window.clear()
+        else:
+          overflowing_steps = []
+
+        if overflowing_steps:
+          overflow_step = overflowing_steps[0][0]
+          observed = max(int(np.asarray(entry[2])) for entry in overflowing_steps)
+          capacity = min(int(np.asarray(entry[3])) for entry in overflowing_steps)
+          prof.deactivate()
+          message = (
+              "TE MoE receive capacity overflow at training step "
+              f"{overflow_step} (detected at the {config.te_ep_overflow_check_every_n_steps}-step "
+              f"check ending at step {step}): "
+              f"observed padded receive demand {observed} exceeds "
+              f"recv_capacity_per_rank {capacity} "
+              f"(te_ep_receive_capacity_factor={config.te_ep_receive_capacity_factor}). "
+              "The optimizer update was skipped; increase te_ep_receive_capacity_factor, "
+              "or set it to null to reserve worst-case dropless capacity."
+          )
+          max_logging.error(message)
+          raise RuntimeError(message)
 
     # Unpack state for post-loop actions
     state = jax_device_state["state"]

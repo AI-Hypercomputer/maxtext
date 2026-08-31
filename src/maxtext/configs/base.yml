@@ -228,6 +228,13 @@ load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
+te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE layers
+# A capacity of 1.0 corresponds to the aligned perfectly balanced routing capacity.
+# A capacity of 1.5 corresponds to 1.5 times the aligned perfectly balanced routing capacity, providing extra buffer for routing imbalances.
+# null means the TE EP receive capacity is set to the dropless worst case where overflow will never happen, at the cost of higher memory usage.
+te_ep_receive_capacity_factor: null # factor over TE EP's aligned perfectly balanced receive capacity; null reserves the dropless worst case
+te_ep_overflow_check_every_n_steps: 20 # host checks buffered TE EP overflow results at this training-step interval
+te_gmm_quantization: "" # quantization mode for TE GMM matmuls, must be specified when te_moe_block is true.
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).

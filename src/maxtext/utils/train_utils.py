@@ -333,6 +333,9 @@ def setup_train_loop(config, recorder, devices=None):
     # Create data_loader AFTER reordering wrapper is applied
     data_loader = create_dataloader(config, mesh, data_iterator_for_loader, recorder, rampup_manager)
 
+    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    max_utils.maybe_bootstrap_te_moe(config, mesh, shaped_batch)
+
     state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )

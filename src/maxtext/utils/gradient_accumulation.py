@@ -186,7 +186,16 @@ def gradient_accumulation_loss_and_grad(
       lambda arr: jnp.where(has_weights, arr / divisor, jnp.zeros_like(arr)),
       raw_grads,
   )
+  scanned_aux = aux
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
+  if "te_moe_capacity_overflow" in scanned_aux:
+    aux["te_moe_capacity_overflow"] = jnp.any(scanned_aux["te_moe_capacity_overflow"], axis=0)
+    aux["te_moe_max_total_recv_tokens"] = jnp.max(
+        scanned_aux["te_moe_max_total_recv_tokens"], axis=0
+    )
+    aux["te_moe_recv_capacity_per_rank"] = jnp.min(
+        scanned_aux["te_moe_recv_capacity_per_rank"], axis=0
+    )
 
   if is_nnx:
     nnx.update(model, grad_and_loss["rest_state"])

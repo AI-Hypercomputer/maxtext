@@ -353,7 +353,8 @@ class GateLogit(nnx.Module):
       quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
       self._quant_dot_general_name = f"{type(dot_general_linen).__name__}_0"
       setattr(self, self._quant_dot_general_name, quant_dot_general)
-      dummy_inputs = jnp.zeros((1, *self.in_features_shape), dtype=self.dtype)
+      block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE block scaling
+      dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
       self(dummy_inputs, _initializing=True)
     else:
       self._quant_dot_general_name = None
@@ -3194,6 +3195,91 @@ class RoutedMoE(nnx.Module):
     wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
     return w0_kernel, w1_kernel, wo_kernel
 
+  def _te_moe_block(
+      self,
+      inputs: jax.Array,
+      gate_kernel: jax.Array,
+      wi_kernel: jax.Array,
+      wo_kernel: jax.Array,
+      w0_bias: jax.Array | None,
+      w1_bias: jax.Array | None,
+      wo_bias: jax.Array | None,
+      out_sharding: NamedSharding | None = None,
+  ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
+    """Run TransformerEngine's fused EP MoEBlock using MaxText-owned params."""
+    try:
+      from transformer_engine.jax import moe as te_moe  # pylint: disable=import-outside-toplevel
+    except ImportError as exc:
+      raise ImportError("te_moe_block=True requires TransformerEngine JAX MoE support. Please upgrade to the latest version of TransformerEngine.") from exc
+
+    if self.config.norm_topk_prob:
+      raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
+    if self.config.use_random_routing:
+      raise ValueError("te_moe_block=True does not support use_random_routing=True.")
+    if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+      raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
+    if not self.config.te_gmm_quantization:
+      raise ValueError("te_gmm_quantization must be specified when te_moe_block=True. te_gmm_quantization=te_no_quant is supported for BF16.")
+    if self.quant is None or not hasattr(self.quant, "get_moe_block_quantizer_sets"):
+      raise ValueError("te_moe_block=True requires TransformerEngine quantization or te_gmm_quantization=te_no_quant.")
+
+    expert_bias = None
+    if self.config.routed_bias:
+      expert_bias = jnp.asarray(self.gate.bias[...], jnp.float32)
+
+    fsdp_size = self.mesh.shape.get("fsdp", 1)
+    ep_size = self.mesh.shape.get(self._expert_parallelism_name, 1)
+    if self.num_experts % ep_size != 0:
+      raise ValueError(
+          f"num_experts={self.num_experts} must be divisible by EP size={ep_size}."
+      )
+
+    fc1_quantizer_set, fc2_quantizer_set = self.quant.get_moe_block_quantizer_sets(
+        self.config.te_gmm_quantization,
+        # Dispatch buffers have one group per (fsdp, ep, local_expert),
+        # while model weights retain their global expert-group shape until
+        # TE's grouped-GEMM partitioning gathers the quantized FSDP shard.
+        n_token_groups=fsdp_size * self.num_experts,
+        n_expert_groups=self.num_experts,
+    )
+
+    output, lb_loss, total_recv_tokens = te_moe.moe(
+        inputs,
+        gate_kernel,
+        wi_kernel,
+        wo_kernel,
+        w0_bias,
+        w1_bias,
+        wo_bias,
+        expert_bias,
+        num_experts=self.num_experts,
+        num_experts_per_tok=self.num_experts_per_tok,
+        activation_type=self.config.mlp_activations[0],
+        score_function=self.config.routed_score_func or "softmax",
+        use_pre_softmax=False,
+        num_groups=None if self.config.n_routing_groups <= 0 else self.config.n_routing_groups,
+        group_topk=None if self.config.topk_routing_group <= 0 else self.config.topk_routing_group,
+        scaling_factor=self.config.routed_scaling_factor,
+        aux_loss_coeff=self.config.load_balance_loss_weight,
+        apply_topk_weights_early=True,
+        quantizer_sets=(fc1_quantizer_set, fc2_quantizer_set),
+        ep_axis=self._expert_parallelism_name,
+        data_parallelism_axes=("fsdp",),
+        input_axes=("activation_batch", "activation_norm_length", None),
+        gate_kernel_axes=self.kernel_axes,
+        wi_kernel_axes=self.wi_kernel_axes,
+        wo_kernel_axes=self.wo_kernel_axes,
+        dtype=self.dtype,
+        recv_capacity_per_rank=max_utils.get_te_moe_recv_capacity_per_rank(),
+    )
+    recv_capacity_per_rank = max_utils.get_te_moe_recv_capacity_per_rank()
+    output = output.astype(self.dtype)
+    if lb_loss is not None:
+      lb_loss = lb_loss.astype(self.dtype)
+    if out_sharding is not None:
+      output = jax.lax.with_sharding_constraint(output, out_sharding)
+    return output, lb_loss, (total_recv_tokens, jnp.asarray(recv_capacity_per_rank, dtype=jnp.int32))
+
   def __call__(
       self,
       inputs: jax.Array,
@@ -3216,8 +3302,38 @@ class RoutedMoE(nnx.Module):
     """
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
+
+    if cfg.te_moe_block and gate_inputs is not None:
+      raise ValueError("te_moe_block=True does not support separate gate_inputs.")
+    if cfg.te_moe_block and quantizations.in_serve_mode(self.quant):
+      raise ValueError("te_moe_block=True does not support serve-mode quantized weights.")
+
     gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
+
+    if cfg.te_moe_block:
+      gate_kernel = jnp.asarray(self.gate.kernel[...], self.dtype)
+      wi_kernel = jnp.asarray(self.wi[...], self.dtype)
+      wo_kernel = jnp.asarray(self.wo[...], self.dtype)
+      if self.per_expert_scale is not None:
+        wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
+      if cfg.mlp_bias:
+        w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
+        w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype)
+        wo_bias = jnp.asarray(self.wo_bias[...], self.dtype)
+      else:
+        w0_bias, w1_bias, wo_bias = None, None, None
+      return self._te_moe_block(
+          inputs,
+          gate_kernel,
+          wi_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
+          out_sharding,
+      )
+
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
