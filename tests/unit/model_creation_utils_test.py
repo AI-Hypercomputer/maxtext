@@ -199,9 +199,7 @@ class TestAlignCheckpointToModelShapes(unittest.TestCase):
     """Transposed 2D arrays must transpose to align ckpt (2, 3) to model (3, 2)."""
     ckpt = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)
     model = jnp.zeros((3, 2), dtype=jnp.float32)
-    out = _align_checkpoint_to_model_shapes(
-        ckpt, model, ("moe_layers", "expert")
-    )
+    out = _align_checkpoint_to_model_shapes(ckpt, model, ("moe_layers", "expert"))
     out_np = np.asarray(out)
     self.assertEqual(out_np.shape, (3, 2))
     np.testing.assert_array_equal(out_np, np.asarray(ckpt.T))
@@ -209,14 +207,10 @@ class TestAlignCheckpointToModelShapes(unittest.TestCase):
   def test_transposed_2d_shapes_with_sharded_model(self):
     """Transposed 2D arrays should align and assume the model array's sharding."""
     mesh = jax.sharding.Mesh(jax.local_devices()[:1], ("x",))
-    sharding = jax.sharding.NamedSharding(
-        mesh, jax.sharding.PartitionSpec("x", None)
-    )
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", None))
     ckpt = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)
     model = jax.device_put(jnp.zeros((3, 2), dtype=jnp.float32), sharding)
-    out = _align_checkpoint_to_model_shapes(
-        ckpt, model, ("moe_layers", "expert")
-    )
+    out = _align_checkpoint_to_model_shapes(ckpt, model, ("moe_layers", "expert"))
     out_np = np.asarray(out)
     self.assertEqual(out_np.shape, (3, 2))
     self.assertEqual(out.sharding, sharding)
