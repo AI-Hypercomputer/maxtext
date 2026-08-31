@@ -85,6 +85,33 @@ def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul
   return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
 
 
+def _align_bias_with_output(bias: Array, output: Array) -> Array:
+  """Reshards a bias onto the sharding of the output axes it is added to.
+
+  A bias is stored with the trailing `kernel_axes` layout, which is a parameter
+  layout: an out-projection carries `embed_attn` -> `fsdp`, while the activation it
+  is added to carries `activation_embed` -> `tensor` on that same axis. Adding them
+  directly under `ShardMode.EXPLICIT` would place `fsdp` on two axes of the result,
+  which JAX rejects, so align the bias with the activation instead. Under
+  `ShardMode.AUTO` GSPMD inserts the same all-gather on its own.
+
+  This is a no-op whenever the two already agree, which is every layout in which the
+  bias axes are unsharded or sharded exactly as the output is.
+
+  Args:
+    bias: The bias, broadcast against the trailing axes of `output`.
+    output: The result of the contraction the bias is added to.
+
+  Returns:
+    The bias, resharded if needed.
+  """
+  out_spec = jax.typeof(output).sharding.spec
+  wanted = PartitionSpec(*out_spec.partitions[output.ndim - bias.ndim :])
+  if jax.typeof(bias).sharding.spec == wanted:
+    return bias
+  return jax.sharding.reshard(bias, wanted)
+
+
 def _compute_dot_general_nnx(
     inputs,
     kernel,
@@ -330,6 +357,8 @@ class DenseGeneral(nnx.Module):
       if slice_bounds is not None:
         begin, end = slice_bounds
         bias = bias[..., begin:end]
+      if self.shard_mode == ShardMode.EXPLICIT:
+        bias = _align_bias_with_output(bias, output)
       output += bias
     return output
 

@@ -758,6 +758,39 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @parameterized.named_parameters(
+      ("expert_parallelism", "ici_expert_parallelism=8"),
+      ("tensor_parallelism", "ici_tensor_parallelism=8"),
+  )
+  def test_moe_gpt_oss_20b_explicit_sharding(self, parallelism):
+    """AOT test for gpt-oss under explicit sharding.
+
+    RoutedMoE.dense_matmul is not onboarded to explicit sharding yet, so only the
+    sparse_matmul path is compiled here.
+    """
+    compiled_trainstep_file = f"/tmp/test_moe_gpt_oss_20b_explicit_sharding_{parallelism}.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-16",
+            "compile_topology_num_slices=1",
+            "model_name=gpt-oss-20b",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "shard_mode=explicit",
+            "ici_fsdp_parallelism=1",
+            parallelism,
+        )
+    )
+
   def test_gpt3_6b(self):
     compiled_trainstep_file = "/tmp/test_gpt3_6b"
     train_compile_main(
@@ -769,6 +802,28 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "model_name=gpt3-6b",
             "per_device_batch_size=1",
+        )
+    )
+
+  @parameterized.named_parameters(("fused_qkv", True), ("unfused_qkv", False))
+  def test_gpt3_6b_explicit_sharding(self, fused_qkv):
+    """AOT test for gpt3 under explicit sharding, with tensor parallelism on the heads axis."""
+    compiled_trainstep_file = f"/tmp/test_gpt3_6b_explicit_sharding_{fused_qkv}"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=gpt3-6b",
+            "per_device_batch_size=1",
+            "shard_mode=explicit",
+            # gpt3-6b.yml sets fused_qkv, so flipping it needs the override.
+            "override_model_config=true",
+            f"fused_qkv={fused_qkv}",
+            "ici_fsdp_parallelism=1",
+            "ici_tensor_parallelism=4",
         )
     )
 

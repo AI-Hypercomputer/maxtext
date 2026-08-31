@@ -16,6 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import functools
 from typing import Any, Optional
 
 import jax
@@ -27,7 +28,19 @@ from jax.sharding import Mesh, NamedSharding
 from flax import linen as nn
 from flax import nnx
 
-from maxtext.common.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
+from maxtext.common.common_types import (
+    Config,
+    DType,
+    AxisNames,
+    BATCH,
+    LENGTH,
+    EMBED,
+    HEAD,
+    D_KV,
+    Array,
+    MODEL_MODE_TRAIN,
+    ShardMode,
+)
 from maxtext.inference import kvcache
 from maxtext.layers import initializers, nnx_wrappers
 from maxtext.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
@@ -38,6 +51,7 @@ from maxtext.layers.initializers import Initializer, NdInitializer, nd_dense_ini
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, truncate_out_sharding
 
 # -----------------------------------------
 # The Normalization Layer specific for GPT3
@@ -53,6 +67,7 @@ class Gpt3LayerNorm(nnx.Module):
       epsilon: float = 1e-6,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
+      shard_mode: ShardMode = ShardMode.AUTO,
       kernel_axes: tuple[None | str, ...] = (),
       scale_init: Initializer = nn.initializers.zeros,
       use_bias: bool = True,
@@ -64,6 +79,7 @@ class Gpt3LayerNorm(nnx.Module):
     self.epsilon = epsilon
     self.dtype = dtype
     self.weight_dtype = weight_dtype
+    self.shard_mode = shard_mode
     self.kernel_axes = kernel_axes
     self.scale_init = scale_init
     self.use_bias = use_bias
@@ -98,6 +114,13 @@ class Gpt3LayerNorm(nnx.Module):
       scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
+
+    # out_sharding must be None in auto shard mode
+    if self.shard_mode != ShardMode.EXPLICIT:
+      out_sharding = None
+    if out_sharding is not None:
+      out_sharding = truncate_out_sharding(out_sharding, normed_inputs.ndim)
+
     # broadcast second inputs and element-wise mul
     output = jnp.einsum(
         "i...k,...k->i...k",
@@ -241,6 +264,21 @@ class Gpt3MultiHeadAttention(nnx.Module):
     self.prefill_cache_axis_order = (1, 2, 0, 3)
     self.ar_cache_axis_order = (1, 2, 0, 3)
     self.use_ragged_attention = False
+
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+    )
+    # Physical shardings used to pin projection outputs under ShardMode.EXPLICIT. In
+    # ShardMode.AUTO the callees ignore them and let GSPMD infer the layout.
+    rules = get_logical_axis_rules()
+    self.qkv_sharding = create_sharding(mesh, self.query_axis_names, rules=rules)
+    # The fused projection emits (batch, length, 3, heads, head_dim); the size-3 axis
+    # holding q/k/v is never sharded, so it maps to None.
+    fused_qkv_axis_names = self.query_axis_names[:2] + (None,) + self.query_axis_names[2:]
+    self.fused_qkv_sharding = create_sharding(mesh, fused_qkv_axis_names, rules=rules)
     self.KVCache_0 = self.init_kv_caches(inputs_kv_shape=feature_dim) if self.model_mode != MODEL_MODE_TRAIN else None
     if self.fused_qkv:
       self.qkv_proj = self.create_projection_layer(
@@ -293,21 +331,25 @@ class Gpt3MultiHeadAttention(nnx.Module):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         use_bias=self.use_bias,
+        shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
         rngs=self.rngs,
     )
 
-  def qkv_projection(self, projection_layer: Any, inputs: Array):
+  def qkv_projection(self, projection_layer: Any, inputs: Array, out_sharding: NamedSharding | None = None):
     """Fused QKV projection"""
-    qkv_proj = projection_layer(inputs)
+    qkv_proj = projection_layer(inputs, out_sharding=out_sharding)
 
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
+    # Unlike the fused projection in layers/attentions.py, gpt3 keeps q, k and v on
+    # their own (never sharded) axis, so a plain slice splits them evenly under any
+    # tensor parallelism and no shard_map is needed.
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
     return query, key, value
 
-  def projection(self, projection_layer: Any, inputs: Array) -> Array:
+  def projection(self, projection_layer: Any, inputs: Array, out_sharding: NamedSharding | None = None) -> Array:
     """individual projection for one of q, k and v."""
-    proj = projection_layer(inputs)
+    proj = projection_layer(inputs, out_sharding=out_sharding)
     return proj
 
   def init_kv_caches(self, inputs_kv_shape: tuple[int, ...]):
@@ -354,24 +396,25 @@ class Gpt3MultiHeadAttention(nnx.Module):
       previous_chunk: Any = None,
       kv_cache: Array | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      out_sharding: NamedSharding | None = None,
   ):
-    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+    inputs_q = self._maybe_shard_with_logical(inputs_q, self.input_axis_names)
     if self.fused_qkv:
-      query, key, value = self.qkv_projection(self.qkv_proj, inputs_q)
+      query, key, value = self.qkv_projection(self.qkv_proj, inputs_q, out_sharding=self.fused_qkv_sharding)
     else:
-      query = self.projection(self.query, inputs_q)
-      key = self.projection(self.key, inputs_q)
-      value = self.projection(self.value, inputs_q)
+      query = self.projection(self.query, inputs_q, out_sharding=self.qkv_sharding)
+      key = self.projection(self.key, inputs_q, out_sharding=self.qkv_sharding)
+      value = self.projection(self.value, inputs_q, out_sharding=self.qkv_sharding)
 
     depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
     query /= depth_scaling
 
     # annotate with sharding constraint.
-    query = nn.with_logical_constraint(query, self.query_axis_names)
+    query = self._maybe_shard_with_logical(query, self.query_axis_names)
     query = checkpoint_name(query, "query_proj")
-    key = nn.with_logical_constraint(key, self.key_axis_names)
+    key = self._maybe_shard_with_logical(key, self.key_axis_names)
     key = checkpoint_name(key, "key_proj")
-    value = nn.with_logical_constraint(value, self.value_axis_names)
+    value = self._maybe_shard_with_logical(value, self.value_axis_names)
     value = checkpoint_name(value, "value_proj")
 
     cached_values = [None, None]
@@ -380,10 +423,10 @@ class Gpt3MultiHeadAttention(nnx.Module):
 
     out = self.attention_op(query, key, value, decoder_segment_ids, None, model_mode, cached_values)
 
-    out = nn.with_logical_constraint(out, self.out_axis_names)
+    out = self._maybe_shard_with_logical(out, self.out_axis_names)
 
     # apply output projection,  output dim is set to the input dim.
-    out = self.projection(self.out, out)
+    out = self.projection(self.out, out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
 
@@ -412,9 +455,26 @@ class Gpt3DecoderLayer(nnx.Module):
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
+    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.mlp_activation_axis_names = ("activation_batch", "activation_length", "activation_mlp")
+
+    # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
+    # ShardMode.AUTO the callees ignore them and let GSPMD infer the layout.
+    rules = get_logical_axis_rules()
+    self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=rules)
+    self.mlp_intermediate_sharding = create_sharding(mesh, self.mlp_activation_axis_names, rules=rules)
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+        extra_stack_level=1,
+    )
+
     self.pre_self_attention_norm = Gpt3LayerNorm(
         num_features=dummy_inputs_shape[-1],
         dtype=config.dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
         reductions_in_fp32=False,
@@ -463,8 +523,6 @@ class Gpt3DecoderLayer(nnx.Module):
 
     self.dropout = linears.Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
 
-    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-
   def __call__(
       self,
       inputs,
@@ -482,11 +540,11 @@ class Gpt3DecoderLayer(nnx.Module):
     if isinstance(inputs, tuple):
       inputs = inputs[0]
 
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx = self.pre_self_attention_norm(inputs)
+    lnx = self.pre_self_attention_norm(inputs, out_sharding=self.out_sharding)
 
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
 
     # Self-attention block
     assert (
@@ -501,17 +559,23 @@ class Gpt3DecoderLayer(nnx.Module):
         previous_chunk=previous_chunk,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
+        out_sharding=self.out_sharding,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
     attention_lnx += inputs
     # MLP block.
-    mlp_lnx = self.mlp(attention_lnx, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self.mlp(
+        attention_lnx,
+        deterministic=deterministic,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
+    )
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     layer_output = attention_lnx + mlp_lnx
     layer_output = self.dropout(layer_output, deterministic=deterministic)
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
     if getattr(self.config, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))

@@ -1409,6 +1409,7 @@ class NNXDecoder(nnx.Module):
       return functools.partial(
           gpt3.Gpt3LayerNorm,
           num_features=num_features,
+          shard_mode=self.config.shard_mode,
           reductions_in_fp32=False,
           use_bias=True,
           rngs=rngs,
