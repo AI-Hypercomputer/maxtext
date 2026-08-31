@@ -231,6 +231,3 @@ def reference_csa_streamindex_score(
   return index_scores
 
 
-# Backward compatibility aliases
-csa_streamindex_score_head_major = csa_streamindex_score
-reference_csa_streamindex_score_head_major = reference_csa_streamindex_score
