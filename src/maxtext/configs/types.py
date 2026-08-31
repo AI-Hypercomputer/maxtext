@@ -4935,4 +4935,32 @@ class RLConfig(
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
+    def get_parallelism_map(prefix: str) -> dict[str, int]:
+      return {
+          "diloco": getattr(self, f"{prefix}_diloco_parallelism"),
+          "data": getattr(self, f"{prefix}_data_parallelism"),
+          "stage": getattr(self, f"{prefix}_pipeline_parallelism"),
+          "fsdp": getattr(self, f"{prefix}_fsdp_parallelism"),
+          "fsdp_transpose": getattr(self, f"{prefix}_fsdp_transpose_parallelism"),
+          "sequence": getattr(self, f"{prefix}_sequence_parallelism"),
+          "context": getattr(self, f"{prefix}_context_parallelism"),
+          "context_usp_ulysses": getattr(self, f"{prefix}_context_usp_ulysses_parallelism"),
+          "context_autoregressive": getattr(self, f"{prefix}_context_autoregressive_parallelism"),
+          "tensor": getattr(self, f"{prefix}_tensor_parallelism"),
+          "tensor_sequence": getattr(self, f"{prefix}_tensor_sequence_parallelism"),
+          "model": getattr(self, f"{prefix}_tensor_parallelism"),
+          "expert": getattr(self, f"{prefix}_expert_parallelism"),
+          "autoregressive": getattr(self, f"{prefix}_autoregressive_parallelism"),
+          "attn_dp": 1,
+          "attn_dp_expert": 1,
+          "dcp": 1,
+          "pcp": 1,
+      }
+
+    ici_map = get_parallelism_map("ici")
+    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+
+    dcn_map = get_parallelism_map("dcn")
+    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+
     return self
