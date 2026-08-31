@@ -1230,36 +1230,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       num_chunks = max(1, int(os.environ.get("RAIDEN_WEIGHT_SYNC_CHUNKS", "1")))
       # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
       # detection tunix's K8sJaxContext.initialize() uses), trainer params
-      # are proxy-backed and Raiden can't bind them in place -- host_stage
-      # pulls them to client host memory first. Direct-TPU trainers skip
-      # that extra copy since their params already live on TPU. Computed on
-      # every call (not just the first): the staging loop below needs it on
-      # every rebind too, not only when constructing self._raiden_syncs.
+      # are proxy-backed. With FFI (weight_synchronizer_ffi), Raiden binds
+      # directly to device arrays on Pathways TPU workers without host CPU staging.
+      # When FFI is not available, host_stage pulls them to client host memory first.
       is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
+      use_ffi = os.environ.get("RAIDEN_USE_FFI", "").lower() in ("true", "1") or (
+          is_pathways and getattr(raiden_synchronizer, "_raiden_ffi", None) is not None
+      )
       chunks = self._split_into_chunks(params_state, num_chunks) if num_chunks > 1 else [params_state]
       del params_state
 
-      # 3a. Host-stage every chunk (the slow part under Pathways -- each
-      # chunk's device_get() from proxy-backed buffers, tens of seconds to
-      # minutes per chunk) BEFORE constructing any chunk's native listener.
-      # Constructing listeners interleaved with staging (as an earlier
-      # version of this loop did) spreads them out in time -- chunk 0's
-      # listener opens first and chunk N-1's opens last, so by the time
-      # transfers start (serialized, chunk 0 first: see
-      # weight_sync_coordinator.py) chunk 0's listener has been sitting idle
-      # for roughly however long every other chunk took to also stage,
-      # which observed as 90+ seconds on a 4-chunk 30B-A3B run. That's the
-      # leading suspect for a reproducible connection reset specifically on
-      # chunk 0's transfer (confirmed on 2 separate runs, always chunk 0,
-      # never a chunk transferred sooner after its own construction) --
-      # something in the path (most likely an idle-connection timeout in
-      # the Pathways proxy hop, not raiden itself) resetting a
-      # long-idle-but-unused listening socket. Staging everything first and
-      # constructing every listener back-to-back afterward keeps every
-      # chunk's idle-before-first-use window to a few seconds instead.
-      staged_chunks = [
-          raiden_synchronizer.to_host_cpu_state(chunk_state) if is_pathways else chunk_state for chunk_state in chunks
-      ]
+      # 3a. Host-stage every chunk (the slow part under Pathways when FFI is not
+      # used -- each chunk's device_get() from proxy-backed buffers, tens of seconds
+      # to minutes per chunk) BEFORE constructing any chunk's native listener.
+      # Under FFI, weights remain on device and host staging is bypassed completely.
+      if is_pathways and not use_ffi:
+        staged_chunks = [raiden_synchronizer.to_host_cpu_state(chunk_state) for chunk_state in chunks]
+      else:
+        staged_chunks = chunks
       del chunks
 
       if self._raiden_syncs is None:
@@ -1267,16 +1255,29 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         # job_replica_id) -- otherwise every chunk's work unit collides under
         # the same id in the handler's registry and only one survives
         # registration.
-        self._raiden_syncs = [
-            raiden_synchronizer.RaidenSynchronizer(
-                job_name="trainer",
-                worker_index=jax.process_index() if num_chunks == 1 else (jax.process_index() * num_chunks + i + 1),
-                auto_h2d=False,
-                host_stage=is_pathways,
-                parallelism=4,
-            )
-            for i in range(num_chunks)
-        ]
+        try:
+          self._raiden_syncs = [
+              raiden_synchronizer.RaidenSynchronizer(
+                  job_name="trainer",
+                  worker_index=jax.process_index() if num_chunks == 1 else (jax.process_index() * num_chunks + i + 1),
+                  auto_h2d=False,
+                  host_stage=False if use_ffi else is_pathways,
+                  use_ffi=use_ffi,
+                  parallelism=4,
+              )
+              for i in range(num_chunks)
+          ]
+        except TypeError:
+          self._raiden_syncs = [
+              raiden_synchronizer.RaidenSynchronizer(
+                  job_name="trainer",
+                  worker_index=jax.process_index() if num_chunks == 1 else (jax.process_index() * num_chunks + i + 1),
+                  auto_h2d=False,
+                  host_stage=is_pathways,
+                  parallelism=4,
+              )
+              for i in range(num_chunks)
+          ]
 
       verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
       all_metadata = []
@@ -1284,7 +1285,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       for chunk_idx, (sync, chunk_state) in enumerate(zip(self._raiden_syncs, staged_chunks)):
         # TODO(igorts): Remove try-except fallback once Tunix RaidenSynchronizer.bind supports already_staged.
         try:
-          sync.bind(chunk_state, already_staged=is_pathways)
+          sync.bind(chunk_state, already_staged=is_pathways and not use_ffi)
         except TypeError:
           sync.bind(chunk_state)
 
