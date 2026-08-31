@@ -198,7 +198,7 @@ class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
     self.assertEqual(processed["messages"][0] + processed["messages"][1], true_full_str)
 
   def test_empty_or_none_reasoning(self):
-    """Verifies that empty string or None reasoning behaves like non-thinking."""
+    """Verifies that empty string or None reasoning behaves like non-thinking without injecting thought tags."""
     for reasoning_val in ["", None]:
       sample = {
           "messages": [
@@ -209,6 +209,8 @@ class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
       if reasoning_val is None:
         del sample["messages"][1]["reasoning"]
 
+      true_full_str = self.tokenizer.apply_chat_template(sample["messages"], add_generation_prompt=False, tokenize=False)
+
       processed = input_pipeline_utils.apply_chat_template(
           example={"messages": list(sample["messages"])},
           tokenizer_model=self.tokenizer,
@@ -216,8 +218,22 @@ class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
       )
 
       self.assertEqual(len(processed["messages"]), 2)
-      self.assertTrue(processed["messages"][0].endswith("<|turn>model\n"))
-      self.assertEqual(processed["messages"][1], "Hello!<turn|>\n")
+      self.assertEqual(processed["is_prompt"], [True, False])
+
+      prompt_seg = processed["messages"][0]
+      completion_seg = processed["messages"][1]
+
+      self.assertEqual(prompt_seg + completion_seg, true_full_str)
+      self.assertTrue(prompt_seg.endswith("<|turn>model\n"))
+      self.assertEqual(completion_seg, "Hello!<turn|>\n")
+
+      # Explicitly verify no thought tags exist in prompt or completion
+      self.assertNotIn("<|channel>", prompt_seg)
+      self.assertNotIn("<channel|>", prompt_seg)
+      self.assertNotIn("<|channel>", completion_seg)
+      self.assertNotIn("<channel|>", completion_seg)
+      self.assertNotIn("thought", prompt_seg)
+      self.assertNotIn("thought", completion_seg)
 
   def test_invalid_system_message_position(self):
     """Verifies that system message not at index 0 raises ValueError."""
@@ -380,6 +396,53 @@ class SFTPromptMaskingEdgeCasesTest(unittest.TestCase):
     trained_ids = [int(t) for t in targets if t != self.unk_id]
     trained_text = self.tokenizer.decode(trained_ids)
     self.assertEqual(trained_text, "The capital of France is Paris.<turn|>\n")
+    self.assertNotIn("<|channel>", trained_text)
+    self.assertNotIn("<channel|>", trained_text)
+    self.assertNotIn("thought", trained_text)
+
+  def test_sft_prompt_masking_empty_reasoning(self):
+    """Ensures that when reasoning field is present but empty (''), no thought tags are added and targets only contain completion."""
+    sample = {
+        "messages": [
+            {"role": "user", "content": "What is the capital of Japan?"},
+            {"role": "assistant", "reasoning": "", "content": "Tokyo"},
+        ]
+    }
+
+    processed = input_pipeline_utils.apply_chat_template(
+        example={"messages": sample["messages"]},
+        tokenizer_model=self.tokenizer,
+        data_column_name="messages",
+    )
+
+    tok_example = input_pipeline_utils.tokenization(
+        example=processed,
+        hf_tokenizer=self.tokenizer,
+        truncation=False,
+        max_length=4096,
+        column_names=["messages"],
+    )
+
+    masker = input_pipeline_utils.SFTPromptMasking(
+        text_column_name="messages",
+        completion_only=True,
+        max_target_length=4096,
+        unk_id=self.unk_id,
+    )
+
+    sft_out = masker.map(tok_example)
+    inputs = sft_out["inputs"]
+    targets = sft_out["targets"]
+
+    self.assertEqual(len(inputs), len(targets))
+
+    prompt_len = len(tok_example["messages"][0])
+    for i in range(prompt_len):
+      self.assertEqual(targets[i], self.unk_id)
+
+    trained_ids = [int(t) for t in targets if t != self.unk_id]
+    trained_text = self.tokenizer.decode(trained_ids)
+    self.assertEqual(trained_text, "Tokyo<turn|>\n")
     self.assertNotIn("<|channel>", trained_text)
     self.assertNotIn("<channel|>", trained_text)
     self.assertNotIn("thought", trained_text)
