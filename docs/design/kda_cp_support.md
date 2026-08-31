@@ -2,7 +2,7 @@
 
 ## Summary
 
-This PR integrates KDA (Kimi Delta Attention) into MaxText with tokamax backend and CP (context parallelism) support. It adds the `KimiDeltaAttention` layer, `ShortConvolution`, QKV/beta/gate projections, and CP-aware causal convolution boundary handling. The `CPContext` mechanism passes context information to the `chunk_kda` kernel for coordinated recurrent state across CP ranks.
+This PR integrates KDA (Kimi Delta Attention) into MaxText with tokamax backend and CP (context parallelism) support. It adds the `KimiDeltaAttention` layer, `ShortConvolution`, QKV/beta/gate projections, and CP-aware causal convolution boundary handling. The `ContextParallelMetadata` mechanism passes context information to the `chunk_kda` kernel for coordinated recurrent state across CP ranks.
 
 ## Design
 
@@ -15,13 +15,13 @@ No CP:
 CP (cp_size > 1):
   [B, T/cp, E] → QKV proj → SHARD_MAP(ShortConv w/ halo)  ← independent conv shard_map
                            → SiLU + L2Norm
-                           → CPContext(mesh, "context")      ← constructed outside shard_map
+                           → ContextParallelMetadata(mesh, "context")      ← constructed outside shard_map
                            → _inject_context_on_T + _wsc     ← partition spec fixup
-                           → SHARD_MAP(chunk_kda)            ← cp_context passed in
+                           → SHARD_MAP(chunk_kda)            ← context_parallel_metadata passed in
                            → [B, T/cp, E]
 ```
 
-Key difference from MLA CP: MLA relies on splash attention kernel internally doing implicit all_gather K/V → local attention; KDA does not rely on all_gather. Instead, `CPContext` lets the kernel coordinate recurrent state across ranks during forward/backward.
+Key difference from MLA CP: MLA relies on splash attention kernel internally doing implicit all_gather K/V → local attention; KDA does not rely on all_gather. Instead, `ContextParallelMetadata` lets the kernel coordinate recurrent state across ranks during forward/backward.
 
 ### Plan 1: `halo_exchange_for_conv` (`utils/cp_utils.py`, new file)
 
@@ -51,20 +51,20 @@ Key design decisions:
 - `check_vma=False`: FlashAttention custom rules may falsely report VMA errors
 - Zero-overhead fallback when no CP: follows the original path exactly
 
-### Plan 3: chunk_kda CPContext + Partition Spec (`attention_kda.py`)
+### Plan 3: chunk_kda ContextParallelMetadata + Partition Spec (`attention_kda.py`)
 
-#### 3a. CPContext Construction (outside shard_map)
+#### 3a. ContextParallelMetadata Construction (outside shard_map)
 
 ```python
 try:
-    from cp_utils import CPContext
+    from tokamax._src.ops.experimental.kda.cp_utils import ContextParallelMetadata
 except ImportError:
-    CPContext = None
+    ContextParallelMetadata = None
 
-cp_ctx = CPContext(mesh=self.mesh, axis_name="context")
+cp_ctx = ContextParallelMetadata(mesh=self.mesh, axis_name="context")
 ```
 
-`CPContext` is a frozen dataclass. `mesh` and `axis_name` are set at construction time; chain metadata fields are populated internally by `chunk_kda`.
+`ContextParallelMetadata` is a frozen dataclass. `mesh` and `axis_name` are set at construction time; chain metadata fields are populated internally by `chunk_kda`.
 
 #### 3b. Partition Spec Injection
 
@@ -82,7 +82,7 @@ Applied to `qkv_pspec`, `beta_pspec`, `seg_pspec` when CP is enabled, followed b
 
 #### 3c. chunk_kda shard_map
 
-Under CP, pass through `cp_context=cp_ctx` and `segment_ids` to the `chunk_kda` kernel.
+Under CP, pass through `context_parallel_metadata=cp_ctx` and `segment_ids` to the `chunk_kda` kernel.
 
 segment_ids handling:
 - **varlen**: pass through as-is
@@ -95,8 +95,8 @@ The Delta Rule's recurrent state `S_t = f(S_{t-1}, k_t, v_t, beta_t)` depends on
 Runtime check (added at the `__call__` entry of `attention_kda.py`):
 
 ```python
-if (getattr(cfg, "context_parallel_size", 1) > 1
-        and getattr(cfg, "context_parallel_load_balance", False)):
+cp_size = self.mesh.shape.get(cfg.context_sharding, 1)
+if cp_size > 1 and getattr(cfg, "context_parallel_load_balance", False):
     raise ValueError(
         "KDA CP does not support context_parallel_load_balance. "
         "Recurrent state S depends on exact token order; DUAL_CHUNK_SWAP "
@@ -113,7 +113,7 @@ batch["inputs_segmentation"]   ← [B, T], seg=0 = padding
     ▼
 KimiDeltaAttention.__call__(decoder_segment_ids)
     │
-    ├── chunk_size padding: pad to chunk size (64) multiple
+    ├── T-padding: pad sequence to a multiple of the chunk alignment (64)
     │
     ├── ShortConvolution: halo_exchange_for_conv(segment_ids)
     │     cross-segment boundary masking inside conv
@@ -140,11 +140,11 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 
 ## Key Constraints
 
-1. **CPContext availability**: Raise `ImportError` with a clear message when CPContext is unavailable; do not silently fall back.
+1. **ContextParallelMetadata availability**: Raise `ImportError` with a clear message when ContextParallelMetadata is unavailable; do not silently fall back.
 
 2. **ShortConvolution halo shard_map is required**: Under CP, conv needs to read historical tokens across ranks. Without shard_map → each rank independently left-zero-pads → causal sequence is split into independent segments → **correctness bug**. Without CP, falls back to `jnp.pad`, zero overhead.
 
-3. **conv and chunk_kda are two independent shard_maps**: Non-nested. conv only needs `ppermute`; chunk_kda needs `CPContext`. Separate shard_maps give independent XLA boundaries with resource release in between.
+3. **conv and chunk_kda are two independent shard_maps**: Non-nested. conv only needs `ppermute`; chunk_kda needs `ContextParallelMetadata`. Separate shard_maps give independent XLA boundaries with resource release in between.
 
 4. **KDA does not use the `apply_attention` dispatcher**: KDA has its own QKV projection + SiLU + L2Norm + beta/gate projections and does not share the interface with `AttentionOp`.
 
@@ -153,8 +153,8 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 ## Backward Compatibility
 
 - `halo_exchange_for_conv`: degrades to `jnp.pad` when no CP, zero overhead
-- ShortConv shard_map: only activated when `context_parallel_size > 1`
-- CPContext import: `try/except`, raise `ImportError` with clear message if unavailable
+- ShortConv shard_map: only activated when `cp_size > 1` (derived from the mesh's `context_sharding` axis)
+- ContextParallelMetadata import: `try/except`, raise `ImportError` with clear message if unavailable
 - segment_ids dummy: auto-construct `jnp.ones` when no varlen + CP
 
 ## Test Plan

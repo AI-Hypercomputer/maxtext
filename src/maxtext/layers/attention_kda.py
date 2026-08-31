@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Google LLC
+# Copyright 2026 Ant Group. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,14 +14,15 @@
 
 """Kimi Delta Attention (KDA) Layer Implementation.
 
-This module implements the KDA (Kimi Delta Attention) layer. KDA is a linear attention mechanism with Delta Rule correction,
-featuring:
+KDA is a linear attention mechanism with Delta Rule correction, featuring:
   - Depthwise causal 1D convolution for local dependency modeling
-  - Numerically safe gate mechanism
-  - Q/K L2 normalization
+  - Optional numerically safe gate (sigmoid lower-bound) mechanism
+  - Optional Q/K L2 normalization
 
-The implementation delegates to ``tokamax.kimi_delta_attention`` for the
-chunk-parallel Delta Rule computation.
+The layer computes Q/K/V projections, short convolutions, gate/beta
+projections, and delegates the chunk-parallel Delta Rule recurrence to
+``tokamax._src.ops.experimental.kda.api.kimi_delta_attention`` via
+``maxtext.kernels.kda.chunk_kda``.
 """
 
 
@@ -38,9 +39,11 @@ from maxtext.kernels.kda import chunk_kda
 # KDA depends on tokamax at runtime, but import should succeed because
 # tokamax is a mandatory dependency for KDA models.
 try:
-  from tokamax._src.ops.experimental.kda.cp_utils import CPContext as TokamaxCPContext
+  from tokamax._src.ops.experimental.kda.cp_utils import (
+      ContextParallelMetadata as TokamaxContextParallelMetadata,
+  )
 except ImportError:
-  TokamaxCPContext = None
+  TokamaxContextParallelMetadata = None
 
 from maxtext.common.common_types import Config, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.layers import linears
@@ -49,7 +52,8 @@ from maxtext.utils.sharding import logical_to_mesh_axes
 from maxtext.utils.cp_utils import halo_exchange_for_conv
 
 
-# Chunk size for KDA kernel (matching Megatron convention).
+# Sequence is padded to a multiple of this size before the KDA kernel, so
+# TPU-friendly fixed shapes are used (matching the Megatron chunk convention).
 _KDA_CHUNK_SIZE = 64
 
 
@@ -294,7 +298,9 @@ class KimiDeltaAttention(nnx.Module):
         rngs=rngs,
     )
 
-    # Gate parameters (matching Megatron kda.py:299-330)
+    # Gate parameters (matching Megatron kda.py:299-330). Params keep the
+    # Megatron names (A_log / dt_bias) but are passed to tokamax as `a_log`
+    # and `delta_time_bias` inside the shard_map below.
     # A_log: [num_key_heads] — log of diagonal decay matrix
     A_init_range = (1.0, 16.0)
     A = jax.random.uniform(
@@ -322,8 +328,17 @@ class KimiDeltaAttention(nnx.Module):
     self.dt_bias = nnx.Param(inv_dt)
 
     # Axis names for shard_map (tokamax kernels cannot be auto-partitioned).
-    self.qkv_axis_names = ("activation_batch", "activation_norm_length", "activation_heads", "activation_kv")
-    self.beta_axis_names = ("activation_batch", "activation_norm_length", "activation_heads")
+    self.qkv_axis_names = (
+        "activation_batch",
+        "activation_norm_length",
+        "activation_heads",
+        "activation_kv",
+    )
+    self.beta_axis_names = (
+        "activation_batch",
+        "activation_norm_length",
+        "activation_heads",
+    )
 
   def _logical_to_mesh_axes(self, logical_name):
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=self.config.logical_axis_rules)
@@ -356,6 +371,21 @@ class KimiDeltaAttention(nnx.Module):
     del layer_idx  # Not used
 
     cfg = self.config
+
+    # Context-parallel size derived from the mesh (the CP axis name is
+    # cfg.context_sharding, default "context"); this mirrors attention_op.py.
+    cp_size = self.mesh.shape.get(cfg.context_sharding, 1)
+
+    # KDA Delta Rule relies on sequential recurrent state S_t = f(S_{t-1}, ...).
+    # load_balance's DUAL_CHUNK_SWAP reorder breaks token order, invalidating
+    # the sequential dependency. Reject this combination up front.
+    if cp_size > 1 and getattr(cfg, "context_parallel_load_balance", False):
+      raise ValueError(
+          "KDA CP does not support context_parallel_load_balance. "
+          "Recurrent state S depends on exact token order; DUAL_CHUNK_SWAP "
+          "reorder breaks the sequential dependency. Set "
+          "context_parallel_load_balance=false when using KDA with CP."
+      )
 
     if model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise NotImplementedError("KDA autoregressive mode not yet implemented.")
@@ -395,19 +425,28 @@ class KimiDeltaAttention(nnx.Module):
         # the "context" mesh axis. Without this wrap, halo_exchange_for_conv
         # would silently degrade to zero-pad (causal-conv at every CP shard
         # boundary would be wrong). This applies to all CP strategies.
-        if getattr(cfg, "context_parallel_size", 1) > 1:
+        if cp_size > 1:
           conv_flat_pspec = self._logical_to_mesh_axes(("activation_batch", "activation_norm_length", None))
           conv_seg_pspec = (
               self._logical_to_mesh_axes(("activation_batch", "activation_norm_length"))
               if decoder_segment_ids is not None
               else None
           )
-          q_conv_mod, k_conv_mod, v_conv_mod = self.q_conv, self.k_conv, self.v_conv
+          q_conv_mod, k_conv_mod, v_conv_mod = (
+              self.q_conv,
+              self.k_conv,
+              self.v_conv,
+          )
 
           @functools.partial(
               jax.shard_map,
               mesh=self.mesh,
-              in_specs=(conv_flat_pspec, conv_flat_pspec, conv_flat_pspec, conv_seg_pspec),
+              in_specs=(
+                  conv_flat_pspec,
+                  conv_flat_pspec,
+                  conv_flat_pspec,
+                  conv_seg_pspec,
+              ),
               out_specs=(conv_flat_pspec, conv_flat_pspec, conv_flat_pspec),
               check_vma=False,
           )
@@ -462,29 +501,20 @@ class KimiDeltaAttention(nnx.Module):
           "Set use_kda_safe_gate=True to enable lower_bound clamping.",
           stacklevel=2,
       )
-    n_max = cfg.packing_max_segments_per_sample if cfg.packing_max_segments_per_sample > 0 else None
-
-    # KDA Delta Rule relies on sequential recurrent state S_t = f(S_{t-1}, ...).
-    # load_balance's DUAL_CHUNK_SWAP reorder breaks token order, invalidating
-    # the sequential dependency.  Reject this combination at runtime.
-    if getattr(cfg, "context_parallel_size", 1) > 1 and getattr(cfg, "context_parallel_load_balance", False):
-      raise ValueError(
-          "KDA CP does not support context_parallel_load_balance. "
-          "Recurrent state S depends on exact token order; DUAL_CHUNK_SWAP "
-          "reorder breaks the sequential dependency. Set "
-          "context_parallel_load_balance=false when using KDA with CP."
-      )
+    n_max = cfg.max_segments_per_seq if cfg.max_segments_per_seq > 0 else None
 
     # Call KDA kernel via shard_map (tokamax kernels cannot be auto-partitioned).
     with jax.named_scope("kda_kernel"):
       qkv_pspec = self._logical_to_mesh_axes(self.qkv_axis_names)
       beta_pspec = self._logical_to_mesh_axes(self.beta_axis_names)
       a_log_pspec = self._logical_to_mesh_axes(("activation_heads",))
-      dt_bias_2d_pspec = self._logical_to_mesh_axes(("activation_heads", "activation_kv"))
+      delta_time_bias_2d_pspec = self._logical_to_mesh_axes(("activation_heads", "activation_kv"))
       seg_pspec = self._logical_to_mesh_axes(("activation_batch", "activation_norm_length"))
 
-      # Reshape dt_bias from [H*K] to [H, K] for proper head-dim sharding.
-      dt_bias_2d = self.dt_bias.value.reshape(self.num_key_heads, self.key_head_dim)
+      # Reshape the dt_bias param from [H*K] to [H, K] for head-dim sharding.
+      # (Tokamax's argument name is delta_time_bias; the nnx param is named
+      # dt_bias to match the Megatron reference.)
+      delta_time_bias_2d = self.dt_bias.value.reshape(self.num_key_heads, self.key_head_dim)
 
       # Inject "context" on the T axis so the shard_map sees the correct
       # per-rank shard layout.  logical_to_mesh_axes may map the LENGTH
@@ -496,7 +526,7 @@ class KimiDeltaAttention(nnx.Module):
           spec[t_axis] = "context"
         return jax.sharding.PartitionSpec(*spec)
 
-      if getattr(cfg, "context_parallel_size", 1) > 1:
+      if cp_size > 1:
         qkv_pspec = _inject_context_on_T(qkv_pspec)
         beta_pspec = _inject_context_on_T(beta_pspec)
         seg_pspec = _inject_context_on_T(seg_pspec)
@@ -504,7 +534,12 @@ class KimiDeltaAttention(nnx.Module):
         def _wsc(x, pspec):
           return jax.lax.with_sharding_constraint(x, jax.sharding.NamedSharding(self.mesh, pspec))
 
-        q, k, v, g = _wsc(q, qkv_pspec), _wsc(k, qkv_pspec), _wsc(v, qkv_pspec), _wsc(g, qkv_pspec)
+        q, k, v, g = (
+            _wsc(q, qkv_pspec),
+            _wsc(k, qkv_pspec),
+            _wsc(v, qkv_pspec),
+            _wsc(g, qkv_pspec),
+        )
         beta = _wsc(beta, beta_pspec)
         if decoder_segment_ids is not None:
           decoder_segment_ids = _wsc(decoder_segment_ids, seg_pspec)
@@ -512,61 +547,74 @@ class KimiDeltaAttention(nnx.Module):
       # CP: tokamax kernel derives CP metadata from segment_ids.
       # Always pass a seg arg when CP is active so the kernel can
       # compute cu_seqlens / chain fields via one small all_gather.
-      has_seg = decoder_segment_ids is not None or getattr(cfg, "context_parallel_size", 1) > 1
-      base_in_specs = (qkv_pspec, qkv_pspec, qkv_pspec, qkv_pspec, beta_pspec, a_log_pspec, dt_bias_2d_pspec)
+      has_seg = decoder_segment_ids is not None or cp_size > 1
+      base_in_specs = (
+          qkv_pspec,
+          qkv_pspec,
+          qkv_pspec,
+          qkv_pspec,
+          beta_pspec,
+          a_log_pspec,
+          delta_time_bias_2d_pspec,
+      )
       in_specs = base_in_specs + ((seg_pspec,) if has_seg else ())
 
-      # CPContext lives outside shard_map — it is a frozen dataclass that
-      # holds the mesh identity.  tokamax's chunk_kda derives the per-rank
-      # chain fields (cu_seqlens, is_first_rank, …) internally from
-      # segment_ids, then passes the completed context to the kernel.
+      # ContextParallelMetadata lives outside shard_map — it is a frozen
+      # dataclass that holds the mesh identity. tokamax's chunk_kda derives
+      # the per-rank chain fields (cu_seqlens, is_first_rank, …) internally
+      # from segment_ids, then passes the completed metadata to the kernel.
       cp_ctx = None
-      if getattr(cfg, "context_parallel_size", 1) > 1:
-        if TokamaxCPContext is None:
+      if cp_size > 1:
+        if TokamaxContextParallelMetadata is None:
           raise ImportError(
               "KDA context parallelism requires "
-              "tokamax._src.ops.experimental.kda.cp_utils.CPContext, "
+              "tokamax._src.ops.experimental.kda.cp_utils.ContextParallelMetadata, "
               "but it failed to import. Refusing to run: CP would silently "
               "break recurrent state across ranks."
           )
-        cp_ctx = TokamaxCPContext(mesh=self.mesh, axis_name="context")
+        cp_ctx = TokamaxContextParallelMetadata(mesh=self.mesh, axis_name="context")
 
-      @functools.partial(jax.shard_map, mesh=self.mesh, in_specs=in_specs, out_specs=qkv_pspec, check_vma=False)
+      @functools.partial(
+          jax.shard_map,
+          mesh=self.mesh,
+          in_specs=in_specs,
+          out_specs=qkv_pspec,
+          check_vma=False,
+      )
       def _shard_map_chunk_kda(*args):
-        q, k, v, g, beta, A_log, dt_bias_2d, *rest = args
+        q, k, v, g, beta, a_log, delta_time_bias_2d, *rest = args
         seg = rest[0] if rest else None
+        max_num_segments = n_max
 
         # CP: provide a dummy seg (all-ones) so the kernel has
         # segment_ids to derive cu_seqlens from, even when the user
         # hasn't supplied real segmentation info.
-        if seg is None and getattr(cfg, "context_parallel_size", 1) > 1:
+        if seg is None and cp_size > 1:
           seg = jnp.ones(q.shape[:2], dtype=jnp.int32)
+          max_num_segments = 1
 
-        dt_bias_flat = dt_bias_2d.reshape(-1)
+        delta_time_bias_flat = delta_time_bias_2d.reshape(-1)
         o, _ = chunk_kda(
             q=q,
             k=k,
             v=v,
             g=g,
             beta=beta,
-            A_log=A_log,
-            dt_bias=dt_bias_flat,
+            a_log=a_log,
+            delta_time_bias=delta_time_bias_flat,
             segment_ids=seg,
             scale=scale,
-            chunk_size=_KDA_CHUNK_SIZE,
             initial_state=None,
             output_final_state=False,
-            use_qk_l2norm_in_kernel=False,
+            use_qk_l2norm=False,
             use_gate_in_kernel=True,
-            safe_gate=safe_gate,
             lower_bound=lower_bound,
-            disable_recompute=True,
-            N_max=n_max,
-            cp_context=cp_ctx,
+            max_num_segments=max_num_segments,
+            context_parallel_metadata=cp_ctx,
         )
         return o
 
-      kda_args = (q, k, v, g, beta, self.A_log.value, dt_bias_2d)
+      kda_args = (q, k, v, g, beta, self.A_log.value, delta_time_bias_2d)
       if has_seg:
         if decoder_segment_ids is not None:
           kda_args = kda_args + (decoder_segment_ids,)

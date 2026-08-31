@@ -764,26 +764,27 @@ class KdaAttention(BaseModel):
   use_kda_lora: bool = Field(
       False,
       description=(
-          "Whether to use LoRA (Low-Rank Adaptation) style decomposition in KDA layers. "
-          "When True, uses low-rank factorization for KDA computation. "
-          "When False, uses full-rank projections. "
-          "Default matches the reference Megatron implementation."
+          "Reserved for a future LoRA (Low-Rank Adaptation) KDA variant. "
+          "The current KimiDeltaAttention layer only implements the full-rank "
+          "(no-LoRA) path and does not read this flag."
       ),
   )
   use_kda_safe_gate: bool = Field(
       False,
       description=(
-          "Whether to use numerically safe gate computation in KDA layers. "
-          "When True, applies value clamping and safe operations to prevent gate value explosion "
-          "during training."
+          "Whether to use the numerically safe (sigmoid lower-bound) gate path in KDA "
+          "layers instead of the standard softplus activation. When True, "
+          "``kda_lower_bound`` is passed to the tokamax kernel as ``lower_bound``; "
+          "when False the kernel uses its standard gate activation."
       ),
   )
   kda_lower_bound: float = Field(
       0.0,
       description=(
-          "Lower bound for gate values in KDA layers. Prevents gate values from "
-          "becoming too small (highly negative) during training, which can cause numerical instability. "
-          "Default 0.0 means no lower bound; -5.0 is a common choice."
+          "Lower bound for the sigmoid gate path in KDA layers, used only when "
+          "``use_kda_safe_gate=True``. Passed to the tokamax kernel as "
+          "``lower_bound`` (which requires a value in ``[-5, 0)``). "
+          "-5.0 is a common choice."
       ),
   )
 
