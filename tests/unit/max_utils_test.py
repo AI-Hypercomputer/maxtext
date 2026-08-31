@@ -186,6 +186,16 @@ class RingAxisDeviceMeshTest(unittest.TestCase):
     self.assertEqual(mesh.shape, (1, 1, 8, 4))
     self.assertEqual(sorted(d.id for d in mesh.flatten()), sorted(d.id for d in devices))
 
+  def test_transposes_grid_to_align_with_logical_axes(self):
+    """Test that a 4x32 grid is transposed to 32x4 to align with logical axes."""
+    # Create a 4x32 physical device grid
+    devices = [self.FakeDevice(x * 32 + y, (x, y, 0)) for x in range(4) for y in range(32)]
+    # Set ici_parallelism with two non-trivial other axes (32, 4) and ring=8 for tensor.
+    # This should trigger alignment: 4x32 physical grid → 32x4 to match logical axes shape.
+    mesh = max_utils.create_ring_axis_device_mesh([1, 32, 8, 4], self.AXES, devices, "tensor")
+    self.assertEqual(mesh.shape, (1, 32, 8, 4))
+    self.assertEqual(sorted(d.id for d in mesh.flatten()), sorted(d.id for d in devices))
+
 
 class FillUnspecifiedMeshAxesTest(unittest.TestCase):
   """Tests for fill_unspecified_mesh_axes."""
