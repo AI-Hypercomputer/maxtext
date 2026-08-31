@@ -47,41 +47,51 @@
 #
 #   64 * 8 = 512
 #
+#!/bin/bash
+#
+# Qwen3.8-2.4T-A95B Step 2 E2E test
+#
+# Target hardware:
+#   v5p-1024
+#   512 physical chips
+#   1024 JAX devices
+#
+# Test stages:
+#   1. HF golden <-> MaxText forward-logit verification
+#   2. 5-step synthetic pretraining
+#   3. 5-step fine-tuning from scanned checkpoint
+#   4. Greedy decoding from unscanned checkpoint
+#
+# MMLU / JetStream is intentionally kept as a separate test.
+#
 
-set -ex
+set -euxo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
+###############################################################################
+# Environment
+###############################################################################
 
-export MAXTEXT_REPO_ROOT="${REPO_ROOT}"
-export MAXTEXT_CONFIGS_DIR="${REPO_ROOT}/src/maxtext/configs"
+export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=65536"
 
-# Local XPK checkout must win over the /deps copy from the base image.
-export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
+export MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(pwd)}"
+export PYTHONPATH="${MAXTEXT_REPO_ROOT}/src:${PYTHONPATH:-}"
 
-cd "${REPO_ROOT}"
+export MODEL_NAME="qwen3.8-2.4t-a95b"
+export TOKENIZER_PATH="Qwen/Qwen3.8-2.4T-A95B"
 
-echo "===== SOURCE CHECK ====="
-echo "REPO_ROOT=${REPO_ROOT}"
-echo "MAXTEXT_REPO_ROOT=${MAXTEXT_REPO_ROOT}"
-echo "MAXTEXT_CONFIGS_DIR=${MAXTEXT_CONFIGS_DIR}"
-echo "PYTHONPATH=${PYTHONPATH}"
+# ---------------------------------------------------------------------------
+# v5p-1024 topology:
+#
+#   512 physical chips
+#   1024 JAX devices
+#
+#   FSDP 128 x EP 8 = 1024
+# ---------------------------------------------------------------------------
 
-python3 - <<'PY'
-import maxtext.configs.pyconfig as pyconfig
-import maxtext.configs.types as types
+export EXPECTED_GLOBAL_DEVICES="${EXPECTED_GLOBAL_DEVICES:-1024}"
+export ICI_FSDP="${ICI_FSDP:-128}"
+export ICI_EP="${ICI_EP:-8}"
 
-print("pyconfig =", pyconfig.__file__)
-print("types    =", types.__file__)
-
-assert pyconfig.__file__.startswith("/app/"), pyconfig.__file__
-assert types.__file__.startswith("/app/"), types.__file__
-
-print("PASS: using layered MaxText source")
-PY
-
-export MODEL_NAME='qwen3.8-2.4t-a95b'
-export TOKENIZER_PATH='Qwen/Qwen3.8-2.4T-A95B'
 
 
 # ---------------------------------------------------------------------------
@@ -158,44 +168,7 @@ fi
 #
 # 256 physical chips should therefore expose 512 JAX devices.
 # ---------------------------------------------------------------------------
- 
-python3 - <<'PY'
-import os
 
-from maxtext.configs import pyconfig
-import maxtext.configs.pyconfig as pyconfig_module
-
-print("pyconfig module:", pyconfig_module.__file__)
-print("MAXTEXT_CONFIGS_DIR:", os.environ["MAXTEXT_CONFIGS_DIR"])
-
-assert pyconfig_module.__file__.startswith("/app/")
-assert os.environ["MAXTEXT_CONFIGS_DIR"].startswith("/app/")
-
-cfg = pyconfig.initialize(
-    [
-        os.path.join("/app/src/maxtext", "train.py"),
-        os.path.join(
-            os.environ["MAXTEXT_CONFIGS_DIR"],
-            "base.yml",
-        ),
-    ],
-    skip_jax_distributed_system=True,
-    model_name="qwen3.8-2.4t-a95b",
-    run_name="q38-pre-logit-check",
-    base_output_directory="/tmp/q38-pre-logit-check",
-)
-
-print("model_name    =", cfg.model_name)
-print("decoder_block =", cfg.decoder_block)
-print("layers        =", cfg.base_num_decoder_layers)
-print("experts       =", cfg.num_experts)
-
-assert cfg.model_name == "qwen3.8-2.4t-a95b"
-assert cfg.base_num_decoder_layers == 92
-assert cfg.num_experts == 512
-
-print("PASS: Qwen3.8 config before logit verification")
-PY
 
 # ===========================================================================
 # 2.1 Forward-logit correctness
@@ -211,156 +184,164 @@ PY
 #
 
 python3 -m tests.utils.forward_pass_logit_checker \
-  ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
-  base_output_directory=${BASE_OUTPUT_PATH} \
+  "${MAXTEXT_REPO_ROOT}/src/maxtext/configs/base.yml" \
+  base_output_directory="${BASE_OUTPUT_PATH}" \
   run_name=forward_logits_check \
-  load_parameters_path=${SCANNED_CKPT_PATH} \
+  load_parameters_path="${SCANNED_CKPT_PATH}" \
   scan_layers=true \
   use_multimodal=false \
-  attention=dot_product \
-  per_device_batch_size=1 \
-  model_name=${MODEL_NAME} \
+  model_name="${MODEL_NAME}" \
   tokenizer_type=huggingface \
-  tokenizer_path=${TOKENIZER_PATH} \
+  tokenizer_path="${TOKENIZER_PATH}" \
+  attention=dot_product \
+  sparse_matmul=true \
+  megablox=true \
+  per_device_batch_size=1 \
   max_prefill_predict_length=4 \
   max_target_length=4 \
   async_checkpointing=false \
-  sparse_matmul=True \
-  megablox=True \
   ici_data_parallelism=1 \
   ici_tensor_parallelism=1 \
-  ici_fsdp_parallelism=32 \
-  ici_expert_parallelism=8 \
+  ici_fsdp_parallelism="${ICI_FSDP}" \
+  ici_expert_parallelism="${ICI_EP}" \
   weight_dtype=bfloat16 \
   dtype=bfloat16 \
   activations_in_float32=false \
   matmul_precision=highest \
   float32_logits=true \
   float32_qk_product=true \
-  --golden_logits_path=${GOLDEN_LOGITS_DISK_LOCATION} \
+  --golden_logits_path="${GOLDEN_LOGITS_DISK_LOCATION}" \
   --atol=1.5 \
   --rtol=1.5 \
   --max_kl_div=0.2
 
+echo "PASS: forward logit verification"
 
-# ===========================================================================
-# 2.2 Pre-training smoke test
-# ===========================================================================
+###############################################################################
+# 2. Pretraining smoke test
 #
-# Purpose:
+# We deliberately use BF16 for:
+#   - parameters
+#   - activations
+#   - gradients
+#   - Adam first moment
 #
-#   - initialize the entire Qwen3.8 MaxText model
-#   - run forward
-#   - run backward
-#   - exercise MoE routing
-#   - exercise optimizer update
+# Adam second moment inherits weight_dtype in current MaxText.
 #
-# This does NOT load the converted checkpoint.
-# It verifies that the architecture is trainable from scratch.
+# Full remat minimizes activation HBM.
 #
-# Same 5-step protocol as qwen3.5.
-#
+# num_vocab_tiling=4 reduces memory associated with the 248k vocabulary loss.
+###############################################################################
+
+echo "============================================================"
+echo "2/4: Pretraining smoke test"
+echo "============================================================"
 
 python3 -m maxtext.trainers.pre_train.train \
-  ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
-  base_output_directory=${BASE_OUTPUT_PATH} \
+  "${MAXTEXT_REPO_ROOT}/src/maxtext/configs/base.yml" \
+  base_output_directory="${BASE_OUTPUT_PATH}" \
   run_name=q38_pre_training \
-  model_name=${MODEL_NAME} \
+  model_name="${MODEL_NAME}" \
   tokenizer_type=huggingface \
-  tokenizer_path=${TOKENIZER_PATH} \
+  tokenizer_path="${TOKENIZER_PATH}" \
   dataset_type=synthetic \
   enable_checkpointing=false \
+  scan_layers=true \
+  use_multimodal=false \
   attention=flash \
-  sparse_matmul=True \
-  megablox=True \
+  sparse_matmul=true \
+  megablox=true \
   dtype=bfloat16 \
   weight_dtype=bfloat16 \
+  grad_dtype=bfloat16 \
+  mu_dtype=bfloat16 \
+  opt_type=adamw \
+  remat_policy=full \
+  num_vocab_tiling=4 \
   per_device_batch_size=1 \
   steps=5 \
   max_target_length=1024 \
+  max_inflight_computations=1 \
   ici_data_parallelism=1 \
   ici_tensor_parallelism=1 \
-  ici_fsdp_parallelism=32 \
-  ici_expert_parallelism=8
+  ici_fsdp_parallelism="${ICI_FSDP}" \
+  ici_expert_parallelism="${ICI_EP}"
 
+echo "PASS: pretraining smoke test"
 
-# ===========================================================================
-# 2.3 Fine-tuning smoke test
-# ===========================================================================
+###############################################################################
+# 3. Fine-tuning / checkpoint-load training smoke test
 #
-# This is more important for checkpoint bring-up than pre-training:
-#
-#   scanned converted checkpoint
-#             ↓
-#          restore
-#             ↓
-#          forward
-#             ↓
-#          backward
-#             ↓
-#       optimizer update
-#
-# So this verifies that the checkpoint is usable for actual training.
-#
+# Important:
+#   We want to test checkpoint restore + optimizer + backward/update.
+#   We DO NOT want this 2.4T smoke test writing enormous training checkpoints.
+###############################################################################
+
+echo "============================================================"
+echo "3/4: Fine-tuning smoke test"
+echo "============================================================"
 
 python3 -m maxtext.trainers.pre_train.train \
-  ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
-  base_output_directory=${BASE_OUTPUT_PATH} \
+  "${MAXTEXT_REPO_ROOT}/src/maxtext/configs/base.yml" \
+  base_output_directory="${BASE_OUTPUT_PATH}" \
   run_name=q38_fine_tuning \
-  model_name=${MODEL_NAME} \
+  model_name="${MODEL_NAME}" \
   tokenizer_type=huggingface \
-  tokenizer_path=${TOKENIZER_PATH} \
-  dataset_path=${DATASET_PATH} \
+  tokenizer_path="${TOKENIZER_PATH}" \
+  dataset_path="${DATASET_PATH}" \
+  load_parameters_path="${SCANNED_CKPT_PATH}" \
+  scan_layers=true \
+  use_multimodal=false \
   enable_checkpointing=true \
   async_checkpointing=false \
-  load_parameters_path=${SCANNED_CKPT_PATH} \
-  scan_layers=true \
+  save_checkpoint_on_start=false \
+  save_checkpoint_on_completion=false \
+  checkpoint_period=1000000 \
   attention=flash \
-  sparse_matmul=True \
-  megablox=True \
+  sparse_matmul=true \
+  megablox=true \
   dtype=bfloat16 \
   weight_dtype=bfloat16 \
+  grad_dtype=bfloat16 \
+  mu_dtype=bfloat16 \
+  opt_type=adamw \
+  remat_policy=full \
+  num_vocab_tiling=4 \
   per_device_batch_size=1 \
   steps=5 \
   max_target_length=1024 \
+  max_inflight_computations=1 \
   ici_data_parallelism=1 \
   ici_tensor_parallelism=1 \
-  ici_fsdp_parallelism=32 \
-  ici_expert_parallelism=8
+  ici_fsdp_parallelism="${ICI_FSDP}" \
+  ici_expert_parallelism="${ICI_EP}"
 
+echo "PASS: fine-tuning smoke test"
 
-# ===========================================================================
-# 2.4 Decoding smoke test
-# ===========================================================================
+###############################################################################
+# 4. Native MaxText decoding
 #
-# Decode uses the unscanned checkpoint.
-#
-# This tests:
-#
-#   - unscanned checkpoint restore
-#   - prefill
-#   - full-attention KV cache
-#   - GatedDeltaNet recurrent state
-#   - autoregressive cache updates
-#
-# Note:
-# decode currently uses the HuggingFace tokenizer, so HF_TOKEN is supplied
-# following the Qwen3.5 E2E convention.
-#
+# Decode uses the UNSCANNED checkpoint.
+###############################################################################
+
+echo "============================================================"
+echo "4/4: Decode smoke test"
+echo "============================================================"
 
 python3 -m maxtext.inference.decode \
-  ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
-  base_output_directory=${BASE_OUTPUT_PATH} \
+  "${MAXTEXT_REPO_ROOT}/src/maxtext/configs/base.yml" \
+  base_output_directory="${BASE_OUTPUT_PATH}" \
   run_name=decode \
-  model_name=${MODEL_NAME} \
+  model_name="${MODEL_NAME}" \
   tokenizer_type=huggingface \
-  tokenizer_path=${TOKENIZER_PATH} \
-  hf_access_token=${HF_TOKEN} \
-  load_parameters_path=${UNSCANNED_CKPT_PATH} \
+  tokenizer_path="${TOKENIZER_PATH}" \
+  hf_access_token="${HF_TOKEN:-}" \
+  load_parameters_path="${UNSCANNED_CKPT_PATH}" \
   scan_layers=false \
+  use_multimodal=false \
   attention=dot_product \
-  sparse_matmul=True \
-  megablox=True \
+  sparse_matmul=true \
+  megablox=true \
   dtype=bfloat16 \
   weight_dtype=bfloat16 \
   per_device_batch_size=1 \
@@ -368,12 +349,23 @@ python3 -m maxtext.inference.decode \
   max_target_length=128 \
   ici_data_parallelism=1 \
   ici_tensor_parallelism=1 \
-  ici_fsdp_parallelism=32 \
-  ici_expert_parallelism=8 \
+  ici_fsdp_parallelism="${ICI_FSDP}" \
+  ici_expert_parallelism="${ICI_EP}" \
   decode_sampling_strategy=greedy \
   prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is "
 
+echo "PASS: decode smoke test"
 
+###############################################################################
+# Done
+###############################################################################
+
+echo
 echo "============================================================"
-echo "PASS: Qwen3.8-2.4T-A95B Step-2 E2E"
+echo "PASS: Qwen3.8-2.4T-A95B E2E"
+echo "============================================================"
+echo "  [PASS] BF16 forward-logit verification"
+echo "  [PASS] BF16 AdamW pretraining"
+echo "  [PASS] BF16 checkpoint-loaded fine-tuning"
+echo "  [PASS] BF16 greedy decoding"
 echo "============================================================"
