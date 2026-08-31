@@ -59,6 +59,7 @@ import time
 from typing import Any, Callable, List, Sequence
 import absl
 import ml_dtypes
+import flax
 import flax.linen as nn
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
@@ -322,10 +323,24 @@ def get_maxtext_model_info(config):
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   # Get abstract model structure (name, shape) without materializing the weights to save memory.
-  # Extract the 'params' collection from the abstract model state. This focuses checkpoint
-  # conversion on trainable model parameters; variables outside the 'params' collection
-  # (such as non-trainable state or optimizer buffers) are not included.
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  # Merge all persistent collections from the abstract model state (e.g. 'params' and custom variables
+  # like 'MoEBiasVar').
+  def _deep_merge(dict1, dict2):
+    res = dict(dict1)
+    for k, v in dict2.items():
+      if k in res and isinstance(res[k], dict) and isinstance(v, dict):
+        res[k] = _deep_merge(res[k], v)
+      else:
+        res[k] = v
+    return res
+
+  abstract_vars = maxtext_utils.get_abstract_param(maxtext_model_flax, config)
+  abstract_params_tree = {}
+  for collection in abstract_vars.values():
+    if isinstance(collection, dict):
+      abstract_params_tree = _deep_merge(abstract_params_tree, collection)
+    elif isinstance(collection, flax.core.FrozenDict):
+      abstract_params_tree = _deep_merge(abstract_params_tree, flax.core.unfreeze(collection))
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
       abstract_params_tree,
