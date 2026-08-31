@@ -1124,8 +1124,8 @@ class DeepSeekMoE(BaseModel):
   )
 
 
-class Glm5Next(BaseModel):
-  """Configuration specific to GLM-5.3-Flash / GLM-5-Next models."""
+class Glm53Flash(BaseModel):
+  """Configuration specific to GLM-5.3-Flash."""
 
   linear_conv_kernel_dim: int = Field(4, description="Kernel size for the 1D convolution in the linear attention (KDA).")
   linear_head_dim: int = Field(128, description="Head dimension in the linear attention (KDA).")
@@ -3018,7 +3018,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
-    Glm5Next,
+    Glm53Flash,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -4676,7 +4676,6 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
-    Glm5Next,
     MultimodalGeneral,
     Muon,
     FineTuning,

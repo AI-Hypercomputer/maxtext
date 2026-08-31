@@ -1427,7 +1427,7 @@ elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
 
-################################## GLM-5.3-Flash / GLM-5-Next Specific Configs ##################################
+################################## GLM-5.3-Flash Specific Configs ##################################
 linear_conv_kernel_dim: 4
 linear_head_dim: 128
 linear_num_heads: 64

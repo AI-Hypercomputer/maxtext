@@ -4227,83 +4227,112 @@ def GLM5_3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
 
   num_layers = maxtext_config.base_num_decoder_layers
   first_k_dense_replace = getattr(maxtext_config, "first_num_dense_layers", 3)
+  cycle_interval = getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", 4)
   num_experts = getattr(maxtext_config, "num_experts", 288)
 
-  if scan_layers:
-    raise NotImplementedError("Scanned layers conversion for GLM-5.3-Flash is not yet implemented.")
-  else:
-    for i in range(num_layers):
-      prefix = f"params-decoder-layers_{i}"
+  for i in range(num_layers):
+    prefix = f"params-decoder-layers_{i}"
+    hf_prefix = f"model.language_model.layers.{i}"
 
-      mapping[f"{prefix}-input_layernorm-scale"] = f"model.language_model.layers.{i}.input_layernorm.weight"
-      mapping[f"{prefix}-post_attention_layernorm-scale"] = (
-          f"model.language_model.layers.{i}.post_attention_layernorm.weight"
+    mapping[f"{prefix}-input_layernorm-scale"] = f"{hf_prefix}.input_layernorm.weight"
+    mapping[f"{prefix}-post_attention_layernorm-scale"] = f"{hf_prefix}.post_attention_layernorm.weight"
+
+    for mt_name, hf_name in (("attn_hc", "hc_attn"), ("ffn_hc", "hc_ffn")):
+      mapping[f"{prefix}-{mt_name}-mhc_norm-scale"] = None
+      for part in ("pre", "post", "res"):
+        mapping[f"{prefix}-{mt_name}-{part}_alpha"] = f"{hf_prefix}.{hf_name}_fn"
+        mapping[f"{prefix}-{mt_name}-{part}_beta"] = f"{hf_prefix}.{hf_name}_base"
+        mapping[f"{prefix}-{mt_name}-{part}_alpha_scale"] = f"{hf_prefix}.{hf_name}_scale"
+
+    is_sparse_attn = (i + 1) % cycle_interval == 0
+    if is_sparse_attn:
+      mapping[f"{prefix}-attention-q_a_proj-kernel"] = (
+          f"{hf_prefix}.self_attn.q_a_proj.weight",
+          f"{hf_prefix}.self_attn.q_a_proj.weight_scale_inv",
       )
-
-      for mt_name, hf_name in (("attn_hc", "hc_attn"), ("ffn_hc", "hc_ffn")):
-        mapping[f"{prefix}-{mt_name}-mhc_norm-scale"] = None
-        for part in ("pre", "post", "res"):
-          mapping[f"{prefix}-{mt_name}-{part}_alpha"] = f"model.language_model.layers.{i}.{hf_name}_fn"
-          mapping[f"{prefix}-{mt_name}-{part}_beta"] = f"model.language_model.layers.{i}.{hf_name}_base"
-          mapping[f"{prefix}-{mt_name}-{part}_alpha_scale"] = f"model.language_model.layers.{i}.{hf_name}_scale"
-
-      mapping[f"{prefix}-attention-q_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.q_proj.weight"
-      mapping[f"{prefix}-attention-k_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.k_proj.weight"
-      mapping[f"{prefix}-attention-v_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.v_proj.weight"
+      mapping[f"{prefix}-attention-q_a_layernorm-scale"] = f"{hf_prefix}.self_attn.q_a_layernorm.weight"
+      mapping[f"{prefix}-attention-q_b_proj-kernel"] = (
+          f"{hf_prefix}.self_attn.q_b_proj.weight",
+          f"{hf_prefix}.self_attn.q_b_proj.weight_scale_inv",
+      )
+      mapping[f"{prefix}-attention-kv_a_proj_with_mqa-kernel"] = (
+          f"{hf_prefix}.self_attn.kv_a_proj_with_mqa.weight",
+          f"{hf_prefix}.self_attn.kv_a_proj_with_mqa.weight_scale_inv",
+      )
+      mapping[f"{prefix}-attention-kv_a_layernorm-scale"] = f"{hf_prefix}.self_attn.kv_a_layernorm.weight"
+      mapping[f"{prefix}-attention-kv_b_proj-kernel"] = f"{hf_prefix}.self_attn.kv_b_proj.weight"
+      mapping[f"{prefix}-attention-o_proj-kernel"] = (
+          f"{hf_prefix}.self_attn.o_proj.weight",
+          f"{hf_prefix}.self_attn.o_proj.weight_scale_inv",
+      )
+    else:
+      mapping[f"{prefix}-attention-q_proj-kernel"] = f"{hf_prefix}.self_attn.q_proj.weight"
+      mapping[f"{prefix}-attention-k_proj-kernel"] = f"{hf_prefix}.self_attn.k_proj.weight"
+      mapping[f"{prefix}-attention-v_proj-kernel"] = f"{hf_prefix}.self_attn.v_proj.weight"
       mapping[f"{prefix}-attention-conv1d-kernel"] = (
-          f"model.language_model.layers.{i}.self_attn.q_conv1d.weight",
-          f"model.language_model.layers.{i}.self_attn.k_conv1d.weight",
-          f"model.language_model.layers.{i}.self_attn.v_conv1d.weight",
+          f"{hf_prefix}.self_attn.q_conv1d.weight",
+          f"{hf_prefix}.self_attn.k_conv1d.weight",
+          f"{hf_prefix}.self_attn.v_conv1d.weight",
       )
-      mapping[f"{prefix}-attention-f_a_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.f_a_proj.weight"
-      mapping[f"{prefix}-attention-f_b_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.f_b_proj.weight"
-      mapping[f"{prefix}-attention-g_a_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.g_a_proj.weight"
-      mapping[f"{prefix}-attention-g_b_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.g_b_proj.weight"
-      mapping[f"{prefix}-attention-b_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.b_proj.weight"
-      mapping[f"{prefix}-attention-A_log"] = f"model.language_model.layers.{i}.self_attn.A_log"
-      mapping[f"{prefix}-attention-dt_bias"] = f"model.language_model.layers.{i}.self_attn.dt_bias"
-      mapping[f"{prefix}-attention-o_norm-scale"] = f"model.language_model.layers.{i}.self_attn.o_norm.weight"
-      mapping[f"{prefix}-attention-o_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.o_proj.weight"
+      mapping[f"{prefix}-attention-f_a_proj-kernel"] = f"{hf_prefix}.self_attn.f_a_proj.weight"
+      mapping[f"{prefix}-attention-f_b_proj-kernel"] = f"{hf_prefix}.self_attn.f_b_proj.weight"
+      mapping[f"{prefix}-attention-g_a_proj-kernel"] = f"{hf_prefix}.self_attn.g_a_proj.weight"
+      mapping[f"{prefix}-attention-g_b_proj-kernel"] = f"{hf_prefix}.self_attn.g_b_proj.weight"
+      mapping[f"{prefix}-attention-b_proj-kernel"] = f"{hf_prefix}.self_attn.b_proj.weight"
+      mapping[f"{prefix}-attention-A_log"] = f"{hf_prefix}.self_attn.A_log"
+      mapping[f"{prefix}-attention-dt_bias"] = f"{hf_prefix}.self_attn.dt_bias"
+      mapping[f"{prefix}-attention-o_norm-scale"] = f"{hf_prefix}.self_attn.o_norm.weight"
+      mapping[f"{prefix}-attention-o_proj-kernel"] = f"{hf_prefix}.self_attn.o_proj.weight"
 
-      if i < first_k_dense_replace:
-        mapping[f"{prefix}-mlp-wi_0-kernel"] = f"model.language_model.layers.{i}.mlp.gate_proj.weight"
-        mapping[f"{prefix}-mlp-wi_1-kernel"] = f"model.language_model.layers.{i}.mlp.up_proj.weight"
-        mapping[f"{prefix}-mlp-wo-kernel"] = f"model.language_model.layers.{i}.mlp.down_proj.weight"
-      else:
-        mapping[f"{prefix}-mlp-routed_experts-gate-kernel"] = f"model.language_model.layers.{i}.mlp.gate.weight"
-        mapping[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = (
-            f"model.language_model.layers.{i}.mlp.shared_experts.gate_proj.weight",
-            f"model.language_model.layers.{i}.mlp.shared_experts.gate_proj.weight_scale_inv",
-        )
-        mapping[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = (
-            f"model.language_model.layers.{i}.mlp.shared_experts.up_proj.weight",
-            f"model.language_model.layers.{i}.mlp.shared_experts.up_proj.weight_scale_inv",
-        )
-        mapping[f"{prefix}-mlp-shared_expert-wo-kernel"] = (
-            f"model.language_model.layers.{i}.mlp.shared_experts.down_proj.weight",
-            f"model.language_model.layers.{i}.mlp.shared_experts.down_proj.weight_scale_inv",
-        )
-        mapping[f"{prefix}-mlp-routed_experts-wi_0"] = [
-            (
-                f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight",
-                f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv",
-            )
-            for e in range(num_experts)
-        ]
-        mapping[f"{prefix}-mlp-routed_experts-wi_1"] = [
-            (
-                f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight",
-                f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv",
-            )
-            for e in range(num_experts)
-        ]
-        mapping[f"{prefix}-mlp-routed_experts-wo"] = [
-            (
-                f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight",
-                f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv",
-            )
-            for e in range(num_experts)
-        ]
+    if i < first_k_dense_replace:
+      mapping[f"{prefix}-mlp-wi_0-kernel"] = (
+          f"{hf_prefix}.mlp.gate_proj.weight",
+          f"{hf_prefix}.mlp.gate_proj.weight_scale_inv",
+      )
+      mapping[f"{prefix}-mlp-wi_1-kernel"] = (
+          f"{hf_prefix}.mlp.up_proj.weight",
+          f"{hf_prefix}.mlp.up_proj.weight_scale_inv",
+      )
+      mapping[f"{prefix}-mlp-wo-kernel"] = (
+          f"{hf_prefix}.mlp.down_proj.weight",
+          f"{hf_prefix}.mlp.down_proj.weight_scale_inv",
+      )
+    else:
+      mapping[f"{prefix}-mlp-MoeBlock_0-gate-kernel"] = f"{hf_prefix}.mlp.gate.weight"
+      mapping[f"{prefix}-mlp-MoeBlock_0-gate-bias"] = f"{hf_prefix}.mlp.gate.e_score_correction_bias"
+      mapping[f"{prefix}-mlp-MoeBlock_0-wi_0"] = [
+          (
+              f"{hf_prefix}.mlp.experts.{e}.gate_proj.weight",
+              f"{hf_prefix}.mlp.experts.{e}.gate_proj.weight_scale_inv",
+          )
+          for e in range(num_experts)
+      ]
+      mapping[f"{prefix}-mlp-MoeBlock_0-wi_1"] = [
+          (
+              f"{hf_prefix}.mlp.experts.{e}.up_proj.weight",
+              f"{hf_prefix}.mlp.experts.{e}.up_proj.weight_scale_inv",
+          )
+          for e in range(num_experts)
+      ]
+      mapping[f"{prefix}-mlp-MoeBlock_0-wo"] = [
+          (
+              f"{hf_prefix}.mlp.experts.{e}.down_proj.weight",
+              f"{hf_prefix}.mlp.experts.{e}.down_proj.weight_scale_inv",
+          )
+          for e in range(num_experts)
+      ]
+      mapping[f"{prefix}-mlp-shared_experts-wi_0-kernel"] = (
+          f"{hf_prefix}.mlp.shared_experts.gate_proj.weight",
+          f"{hf_prefix}.mlp.shared_experts.gate_proj.weight_scale_inv",
+      )
+      mapping[f"{prefix}-mlp-shared_experts-wi_1-kernel"] = (
+          f"{hf_prefix}.mlp.shared_experts.up_proj.weight",
+          f"{hf_prefix}.mlp.shared_experts.up_proj.weight_scale_inv",
+      )
+      mapping[f"{prefix}-mlp-shared_experts-wo-kernel"] = (
+          f"{hf_prefix}.mlp.shared_experts.down_proj.weight",
+          f"{hf_prefix}.mlp.shared_experts.down_proj.weight_scale_inv",
+      )
 
   return mapping
 
@@ -4347,30 +4376,48 @@ def GLM5_3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
     return np.ones(target_shape, dtype=np.float32)
 
   def mhc_split_fn_pre(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
     return np.transpose(input_tensor[0:4, :])
 
   def mhc_split_fn_post(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
     return np.transpose(input_tensor[4:8, :])
 
   def mhc_split_fn_res(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
     return np.transpose(input_tensor[8:24, :])
 
   def mhc_split_base_pre(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
     return input_tensor[0:4]
 
   def mhc_split_base_post(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
     return input_tensor[4:8]
 
   def mhc_split_base_res(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
     return input_tensor[8:24].reshape(target_shape)
 
   def mhc_split_scale_pre(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
     return np.asarray(input_tensor[0:1]).reshape(target_shape)
 
   def mhc_split_scale_post(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
     return np.asarray(input_tensor[1:2]).reshape(target_shape)
 
   def mhc_split_scale_res(input_tensor, target_shape=None):
+    if hasattr(input_tensor, "cpu"):
+      input_tensor = input_tensor.cpu().float().numpy()
     return np.asarray(input_tensor[2:3]).reshape(target_shape)
 
   hooks = {
@@ -4379,6 +4426,7 @@ def GLM5_3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
 
   num_layers = maxtext_config.base_num_decoder_layers
   first_k_dense_replace = getattr(maxtext_config, "first_num_dense_layers", 3)
+  cycle_interval = getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", 4)
 
   for i in range(num_layers):
     prefix = f"params-decoder-layers_{i}"
@@ -4395,29 +4443,37 @@ def GLM5_3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
       hooks[f"{prefix}-{mt_name}-post_alpha_scale"] = mhc_split_scale_post
       hooks[f"{prefix}-{mt_name}-res_alpha_scale"] = mhc_split_scale_res
 
-    hooks[f"{prefix}-attention-q_proj-kernel"] = transpose
-    hooks[f"{prefix}-attention-k_proj-kernel"] = transpose
-    hooks[f"{prefix}-attention-v_proj-kernel"] = transpose
-    hooks[f"{prefix}-attention-conv1d-kernel"] = conv1d_hook
-    hooks[f"{prefix}-attention-f_a_proj-kernel"] = transpose
-    hooks[f"{prefix}-attention-f_b_proj-kernel"] = transpose
-    hooks[f"{prefix}-attention-g_a_proj-kernel"] = transpose
-    hooks[f"{prefix}-attention-g_b_proj-kernel"] = transpose
-    hooks[f"{prefix}-attention-b_proj-kernel"] = transpose
-    hooks[f"{prefix}-attention-o_proj-kernel"] = transpose
+    is_sparse_attn = (i + 1) % cycle_interval == 0
+    if is_sparse_attn:
+      hooks[f"{prefix}-attention-q_a_proj-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-attention-q_b_proj-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-attention-kv_a_proj_with_mqa-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-attention-kv_b_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-o_proj-kernel"] = dequant_transpose_hook
+    else:
+      hooks[f"{prefix}-attention-q_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-k_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-v_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-conv1d-kernel"] = conv1d_hook
+      hooks[f"{prefix}-attention-f_a_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-f_b_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-g_a_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-g_b_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-b_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-o_proj-kernel"] = transpose
 
     if i < first_k_dense_replace:
-      hooks[f"{prefix}-mlp-wi_0-kernel"] = transpose
-      hooks[f"{prefix}-mlp-wi_1-kernel"] = transpose
-      hooks[f"{prefix}-mlp-wo-kernel"] = transpose
+      hooks[f"{prefix}-mlp-wi_0-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-wi_1-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-wo-kernel"] = dequant_transpose_hook
     else:
-      hooks[f"{prefix}-mlp-routed_experts-gate-kernel"] = transpose
-      hooks[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = dequant_transpose_hook
-      hooks[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = dequant_transpose_hook
-      hooks[f"{prefix}-mlp-shared_expert-wo-kernel"] = dequant_transpose_hook
-      hooks[f"{prefix}-mlp-routed_experts-wi_0"] = dequant_transpose_hook
-      hooks[f"{prefix}-mlp-routed_experts-wi_1"] = dequant_transpose_hook
-      hooks[f"{prefix}-mlp-routed_experts-wo"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-MoeBlock_0-gate-kernel"] = transpose
+      hooks[f"{prefix}-mlp-MoeBlock_0-wi_0"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-MoeBlock_0-wi_1"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-MoeBlock_0-wo"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-shared_experts-wi_0-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-shared_experts-wi_1-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-shared_experts-wo-kernel"] = dequant_transpose_hook
 
   return hooks
 

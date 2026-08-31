@@ -604,9 +604,8 @@ def main(config, test_args):  # pylint: disable=W0621
 
   else:
     """Comparing maxtext model with HF model on-the-fly"""
-    if test_args.hf_model_path == "" and not HF_IDS.get(config.model_name):
-      raise ValueError("run_hf_model requires hf_model_path or a model_name registered in HF_IDS")
-    hf_model_path = test_args.hf_model_path or HF_IDS.get(config.model_name)
+    if test_args.hf_model_path == "":
+      raise ValueError("run_hf_model requires hf_model_path")
 
     hf_token = config.hf_access_token
     # Map MaxText config.dtype to PyTorch dtype
@@ -634,42 +633,12 @@ def main(config, test_args):  # pylint: disable=W0621
     else:
       model_class = AutoModelForCausalLM
 
-    hf_config = None
-    if test_args.hf_overrides:
-      import ast  # pylint: disable=import-outside-toplevel
-      import json  # pylint: disable=import-outside-toplevel
-      from transformers import AutoConfig  # pylint: disable=import-outside-toplevel
-
-      if isinstance(test_args.hf_overrides, str):
-        try:
-          overrides = json.loads(test_args.hf_overrides)
-        except json.JSONDecodeError:
-          overrides = ast.literal_eval(test_args.hf_overrides)
-      else:
-        overrides = test_args.hf_overrides
-
-      hf_config = AutoConfig.from_pretrained(hf_model_path, token=hf_token, trust_remote_code=test_args.trust_remote_code)
-      for k, v in overrides.items():
-        if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, k):
-          setattr(hf_config.text_config, k, v)
-        setattr(hf_config, k, v)
-        max_logging.log(f"Overriding HF config {k} = {v}")
-
-    if hf_config is not None:
-      hf_model = model_class.from_pretrained(
-          hf_model_path,
-          config=hf_config,
-          torch_dtype=torch_dtype,
-          token=hf_token,
-          trust_remote_code=test_args.trust_remote_code,
-      )
-    else:
-      hf_model = model_class.from_pretrained(
-          hf_model_path,
-          torch_dtype=torch_dtype,
-          token=hf_token,
-          trust_remote_code=test_args.trust_remote_code,
-      )
+    hf_model = model_class.from_pretrained(
+        test_args.hf_model_path,
+        torch_dtype=torch_dtype,
+        token=hf_token,
+        trust_remote_code=test_args.trust_remote_code,
+    )
     hf_model = hf_model.to(torch_dtype)
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
@@ -820,13 +789,6 @@ if __name__ == "__main__":
       default="linen",
       choices=["linen", "nnx"],
       help="Checkpoint format to load: 'linen' (default) or 'nnx'.",
-  )
-  parser.add_argument(
-      "--hf_overrides",
-      type=str,
-      required=False,
-      default="",
-      help="HuggingFace config overrides formatted as a JSON/dict string, e.g. '{\"num_hidden_layers\": 1}'.",
   )
   parser.add_argument(
       "--trust_remote_code", type=bool, required=False, default=True, help="from_pretrained: trust_remote_code"

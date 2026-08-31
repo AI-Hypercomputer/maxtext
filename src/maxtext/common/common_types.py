@@ -119,7 +119,6 @@ class DecoderBlockType(enum.Enum):
   DEEPSEEK4 = "deepseek4"
   ENVY = "envy"
   GLM5_3 = "glm5_3"
-  GLM5_NEXT = "glm5_next"
 
 
 class VisionEncoderBlockType(enum.Enum):

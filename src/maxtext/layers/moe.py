@@ -252,9 +252,7 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate):
   flat_indices = top_k_indices.ravel()
   # one_hot rather than bincount: bincount clips out-of-range values, so the -1
   # padding that forced routing uses would all be counted as expert 0.
-  expert_counts = jnp.sum(
-      jax.nn.one_hot(flat_indices, num_experts, dtype=jnp.int32), axis=0
-  )
+  expert_counts = jnp.sum(jax.nn.one_hot(flat_indices, num_experts, dtype=jnp.int32), axis=0)
   total_tokens = jnp.sum(expert_counts)
   average_load = total_tokens / num_experts
   direction = jnp.sign(average_load - expert_counts)
@@ -345,7 +343,7 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5")):
         # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
         self.bias = MoEBiasVar(
             default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
@@ -409,7 +407,7 @@ class GateLogit(nnx.Module):
       output = linears._convert_to_activation_function(self.score_func)(output)
 
     # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+    if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5")):
       pre_bias_logits = output
 
     if self.use_bias:
@@ -771,61 +769,43 @@ class RoutedMoE(nnx.Module):
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-        top_k_weights = jnp.take_along_axis(
-            router_probs, gather_indices, axis=-1
-        ).astype(self.dtype)
+        top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
       else:
-        top_k_weights = jnp.take_along_axis(
-            gate_logits, gather_indices, axis=-1
-        )
+        top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
     else:
       if self.config.use_random_routing:
         if rngs is None:
           raise ValueError("The random key cannot be None for random routing.")
         # Reuse the 'params' RNG stream to ensure random routing
-        rng = (
-            rngs.params()
-            if hasattr(rngs, "params") and callable(getattr(rngs, "params"))
-            else rngs
-        )
-        top_k_weights, top_k_indices = random_routing(
-            rng, gate_logits, self.num_experts_per_tok
-        )
+        rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
+        top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
         return top_k_weights, top_k_indices
 
       if self.is_hash_routing:
         if input_ids is None:
-          raise ValueError(
-              "input_ids cannot be None when is_hash_routing is True"
-          )
+          raise ValueError("input_ids cannot be None when is_hash_routing is True")
         # Access the static routing table
         tid2eid_int = self.tid2eid.value
         # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
         tid2eid_int = tid2eid_int.astype(jnp.int32)
         # Cast input_ids to int32 to safely index the hash routing table
         top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
-        top_k_weights = jnp.take_along_axis(
-            pre_bias_logits, top_k_indices, axis=-1
-        )
+        top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
       # NOTE: deepseek2 has a different pattern
-      elif self.config.model_name.startswith(
-          ("deepseek3", "deepseek4", "kimi-k2")
-      ):
-        top_k_weights, top_k_indices = self.deepseek_routing(
-            gate_logits, pre_bias_logits
-        )
+      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5")):
+        top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-        top_k_weights = jnp.take_along_axis(
-            router_probs, top_k_indices, axis=-1
-        ).astype(self.dtype)
+        top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
       else:
-        top_k_weights, top_k_indices = jax.lax.top_k(
-            gate_logits, self.num_experts_per_tok
-        )
+        top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
+    if self.config.decoder_block in (
+        ctypes.DecoderBlockType.DEEPSEEK,
+        ctypes.DecoderBlockType.DEEPSEEK4,
+        ctypes.DecoderBlockType.GLM5_3,
+    ):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -834,9 +814,7 @@ class RoutedMoE(nnx.Module):
         if valid_token_mask is not None:
           # Padding must stay out of the softmax denominator or it rescales the
           # real slots. Large-negative, not -inf: a fully-padded token would be NaN.
-          top_k_weights = jnp.where(
-              valid_token_mask, top_k_weights, jnp.finfo(jnp.float32).min / 2
-          )
+          top_k_weights = jnp.where(valid_token_mask, top_k_weights, jnp.finfo(jnp.float32).min / 2)
         top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
 
       if valid_token_mask is not None:
@@ -924,7 +902,7 @@ class RoutedMoE(nnx.Module):
       - top_k_indices: `(batch, seq, num_experts_per_tok)` array of indices
         identifying the selected experts for each token.
     """
-    expert_mask = 1 if self.config.n_routing_groups == -1 else self.expert_group_mask(gate_logits)
+    expert_mask = 1 if self.config.n_routing_groups in (-1, 1) else self.expert_group_mask(gate_logits)
     _, top_k_indices = jax.lax.top_k(
         jnp.where(expert_mask > 0, gate_logits, -jnp.inf),
         k=self.num_experts_per_tok,
@@ -945,16 +923,21 @@ class RoutedMoE(nnx.Module):
         layer_act = self.activation_fn(layer_w0 * 1.702)
         glu = jnp.multiply(layer_w0, layer_act)
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
-      elif (
-          self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4)
-          and self.config.mlp_activations_limit > 0.0
-      ):
-        # DeepSeek V4 uses bounds to clip the SwiGLU activations
-        layer_w0 = jnp.clip(layer_w0, min=None, max=self.config.mlp_activations_limit)
+      elif self.config.decoder_block in (
+          ctypes.DecoderBlockType.DEEPSEEK,
+          ctypes.DecoderBlockType.DEEPSEEK4,
+          ctypes.DecoderBlockType.GLM5_3,
+      ) and (self.config.mlp_activations_limit > 0.0 or getattr(self.config, "swiglu_limit", 0.0) > 0.0):
+        limit = (
+            self.config.mlp_activations_limit
+            if self.config.mlp_activations_limit > 0.0
+            else getattr(self.config, "swiglu_limit", 10.0)
+        )
+        layer_w0 = jnp.clip(layer_w0, min=None, max=limit)
         layer_w1 = jnp.clip(
             layer_w1,
-            min=-self.config.mlp_activations_limit,
-            max=self.config.mlp_activations_limit,
+            min=-limit,
+            max=limit,
         )
         layer_act = self.activation_fn(layer_w0)
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
@@ -979,9 +962,7 @@ class RoutedMoE(nnx.Module):
     inputs_shape = inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(
-        gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts
-    )
+    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
 
     lb_loss = None
     # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
@@ -1061,9 +1042,7 @@ class RoutedMoE(nnx.Module):
       # Must precede roll_to_expert_id: `(-1 - roll) % num_experts` wraps padding
       # onto a real expert id, so a mask computed after it sees no padding at all.
       if forced_routed_experts is not None:
-        valid_mask = valid_expert_mask(
-            flatten_selected_experts, self.num_experts
-        )
+        valid_mask = valid_expert_mask(flatten_selected_experts, self.num_experts)
 
       if roll_to_expert_id is not None:
         flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
@@ -1071,28 +1050,20 @@ class RoutedMoE(nnx.Module):
       if forced_routed_experts is not None:
         # Spread padding round-robin: it carries zero weight but still counts in
         # group_size, so under ragged_buffer_factor > 0 it can evict real tokens.
-        dummy_indices = (
-            jnp.arange(flatten_selected_experts.shape[0]) % self.num_experts
-        )
-        flatten_selected_experts_safe = jnp.where(
-            valid_mask, flatten_selected_experts, dummy_indices
-        )
+        dummy_indices = jnp.arange(flatten_selected_experts.shape[0]) % self.num_experts
+        flatten_selected_experts_safe = jnp.where(valid_mask, flatten_selected_experts, dummy_indices)
       else:
         flatten_selected_experts_safe = flatten_selected_experts
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(
-            inputs_2d, flatten_selected_experts_safe
-        ).astype(self.dtype)
+        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe).astype(self.dtype)
       else:
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
         sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
             self.dtype
         )
-      group_size = jnp.bincount(
-          flatten_selected_experts_safe, length=self.num_experts
-      )
+      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -1765,7 +1736,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5")):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -2395,21 +2366,19 @@ class RoutedMoE(nnx.Module):
     ):
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
-        output0, output1, gmm_fn, routing, route_metadata, wo_bias = (
-            moe_emb_chunking(
-                x,
-                logits,
-                pre_bias_logits,
-                w0,
-                w1,
-                w0_bias,
-                w1_bias,
-                wo_bias,
-                sharded_input_ids,
-                rngs,
-                embed_dim,
-                forced_routed_experts=forced_routed_experts,
-            )
+        output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
+            x,
+            logits,
+            pre_bias_logits,
+            w0,
+            w1,
+            w0_bias,
+            w1_bias,
+            wo_bias,
+            sharded_input_ids,
+            rngs,
+            embed_dim,
+            forced_routed_experts=forced_routed_experts,
         )
       else:
         x, routing, route_metadata = route(
@@ -2604,9 +2573,7 @@ class RoutedMoE(nnx.Module):
             wo_bias,
             None if sharded_input_ids is None else sharded_input_ids[:, sl],
             rngs,
-            None
-            if forced_routed_experts is None
-            else forced_routed_experts[:, sl, :],
+            None if forced_routed_experts is None else forced_routed_experts[:, sl, :],
         )
         if self.config.moe_chunk_barrier:
           _prev = out_c
@@ -2641,7 +2608,7 @@ class RoutedMoE(nnx.Module):
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length", None)
     pre_bias_logits_logical_axes = (
         (batch_logical_axis, "activation_norm_length", None)
-        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2"))
+        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5"))
         else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
@@ -2709,9 +2676,7 @@ class RoutedMoE(nnx.Module):
             jnp.arange(weights.shape[0])[:, None, None],
             ("activation_batch", None, None),
         ),
-        self._maybe_shard_with_logical(
-            jnp.arange(weights.shape[1])[:, None], ("activation_length", None)
-        ),
+        self._maybe_shard_with_logical(jnp.arange(weights.shape[1])[:, None], ("activation_length", None)),
         safe_indices,
     )
     weight_sharding = (
@@ -2726,13 +2691,9 @@ class RoutedMoE(nnx.Module):
       # so accumulate with `.add()` instead: padding slots always carry a
       # zero weight, so summing duplicates is safe and avoids silently
       # dropping a real weight update.
-      update_weights = update_weights.at[index_update].add(
-          safe_weights, out_sharding=weight_sharding
-      )
+      update_weights = update_weights.at[index_update].add(safe_weights, out_sharding=weight_sharding)
     else:
-      update_weights = update_weights.at[index_update].set(
-          safe_weights, out_sharding=weight_sharding
-      )
+      update_weights = update_weights.at[index_update].set(safe_weights, out_sharding=weight_sharding)
     return update_weights
 
   def get_context_partition_and_sub_seq(self, seq_len):
@@ -3005,7 +2966,7 @@ class RoutedMoE(nnx.Module):
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5")):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
@@ -3333,10 +3294,7 @@ class RoutedMoE(nnx.Module):
     It does not compute lb_loss or bias_updates (inference-only).
     """
     if forced_routed_experts is not None:
-      raise NotImplementedError(
-          "Forced routing via forced_routed_experts is not supported with"
-          " fused_moe_matmul."
-      )
+      raise NotImplementedError("Forced routing via forced_routed_experts is not supported with" " fused_moe_matmul.")
     try:
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
@@ -3606,19 +3564,31 @@ class RoutedAndSharedMoE(nnx.Module):
     )
 
     shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
-    self.shared_experts = linears.MlpBlock(
-        mesh=self.mesh,
-        in_features=self.moe_expert_input_dim,
-        intermediate_dim=self.config.shared_experts * shared_expert_mlp_dim,
-        activations=self.config.mlp_activations,
-        kernel_init=self.kernel_init,
-        intermediate_dropout_rate=self.config.dropout_rate,
-        dtype=self.config.dtype,
-        weight_dtype=self.config.weight_dtype,
-        config=self.config,
-        quant=self.quant,
-        rngs=self.rngs,
-    )
+    if self.config.decoder_block == ctypes.DecoderBlockType.GLM5_3:
+      from maxtext.models import glm5_next  # pylint: disable=import-outside-toplevel
+
+      self.shared_experts = glm5_next.Glm5NextDenseMLP(
+          config=self.config,
+          mesh=self.mesh,
+          in_features=self.moe_expert_input_dim,
+          intermediate_dim=self.config.shared_experts * shared_expert_mlp_dim,
+          quant=self.quant,
+          rngs=self.rngs,
+      )
+    else:
+      self.shared_experts = linears.MlpBlock(
+          mesh=self.mesh,
+          in_features=self.moe_expert_input_dim,
+          intermediate_dim=self.config.shared_experts * shared_expert_mlp_dim,
+          activations=self.config.mlp_activations,
+          kernel_init=self.kernel_init,
+          intermediate_dropout_rate=self.config.dropout_rate,
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          config=self.config,
+          quant=self.quant,
+          rngs=self.rngs,
+      )
 
   @property
   def routed_moe(self):
