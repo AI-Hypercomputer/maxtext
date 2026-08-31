@@ -140,39 +140,80 @@ class GlobalRMSNorm(RMSNorm):
     return y_flat.reshape(input_shape)
 
 
-def Qwen3NextRMSNorm(
-    num_features: int,
-    epsilon: float = 1e-6,
-    dtype: DType = None,
-    weight_dtype: DType = None,
-    shard_mode=None,
-    kernel_axes=None,
-    parameter_memory_host_offload=None,
-    *,
-    rngs: nnx.Rngs,
-):
-  """
-  Used for input and post attention layernorms
-  in Qwen3NextDecoderLayer.
+class Qwen3NextRMSNorm(RMSNorm):
+  """RMS normalization for Qwen3 and Qwen3.5 models.
 
-  This normalization layer is specific to Qwen3-Next. Key characteristics:
-  1.  The learnable scale parameter `scale` is initialized to ZEROS.
-  2.  The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
-      This matches the PyTorch implementation of Qwen3NextRMSNorm.
-
+  This normalization layer is specific to Qwen3 and Qwen3.5. Key characteristics:
+  1. The learnable scale parameter `scale` is initialized to ZEROS.
+  2. The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
+  3. The normalization and scale multiplication are computed in float32 before casting
+     to self.dtype, matching Hugging Face's Qwen3 / Qwen3.5 implementation:
+     `output = (norm(x.float()) * (1.0 + weight.float())).type_as(x)`.
+     This prevents catastrophic precision loss when adding small scale offsets (~1e-3)
+     to 1.0 in bfloat16, which only has 7 mantissa bits (ULP 0.0078 at 1.0).
   """
 
-  return nnx.data(
-      RMSNorm(
-          num_features=num_features,
-          epsilon=epsilon,
-          dtype=dtype,
-          weight_dtype=weight_dtype,
-          scale_init=linen_initializers.zeros,
-          scale_offset=1.0,
-          rngs=rngs,
-      )
-  )
+  def __init__(
+      self,
+      num_features: int,
+      epsilon: float = 1e-6,
+      dtype: Any = jnp.float32,
+      weight_dtype: Any = jnp.float32,
+      shard_mode: ShardMode = ShardMode.AUTO,
+      kernel_axes: tuple[None | str, ...] = (),
+      scale_init: Initializer = linen_initializers.zeros,
+      parameter_memory_host_offload: bool = False,
+      scale_offset: float = 1.0,
+      with_scale: bool = True,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    super().__init__(
+        num_features=num_features,
+        epsilon=epsilon,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        shard_mode=shard_mode,
+        kernel_axes=kernel_axes,
+        scale_init=scale_init,
+        parameter_memory_host_offload=parameter_memory_host_offload,
+        scale_offset=scale_offset,
+        with_scale=with_scale,
+        rngs=rngs,
+    )
+
+  def __call__(self, x: jnp.ndarray, out_sharding: NamedSharding | None = None) -> jnp.ndarray:
+    """Applies layer normalization on the input with float32 scaling."""
+    x_fp32 = jnp.asarray(x, jnp.float32)
+    mean2 = jnp.mean(lax.square(x_fp32), axis=-1, keepdims=True)
+    normed = x_fp32 * lax.rsqrt(mean2 + self.epsilon)
+
+    # out_sharding must be None in auto shard mode
+    if self.shard_mode != ShardMode.EXPLICIT:
+      out_sharding = None
+
+    if out_sharding is not None:
+      out_sharding = truncate_out_sharding(out_sharding, x.ndim)
+
+    if not self.with_scale:
+      y = jnp.asarray(normed, self.dtype)
+      if out_sharding is not None:
+        y = jax.lax.with_sharding_constraint(y, out_sharding)
+      return y
+
+    scale = self.scale.get_value()
+    # Move scale to device if parameter offloading is enabled
+    if self.parameter_memory_host_offload:
+      max_logging.log("normalizations.py: Moving scale parameter to device")
+      scale = jax.device_put(scale, max_utils.device_space())
+
+    scale_fp32 = jnp.asarray(scale, jnp.float32)
+    effective_scale = scale_fp32 + self.scale_offset
+    if self.shard_mode == ShardMode.EXPLICIT:
+      effective_scale = _align_scale_with_normalized_axis(effective_scale, normed)
+
+    y = jnp.einsum("...k,k->...k", normed, effective_scale, out_sharding=out_sharding)
+    return jnp.asarray(y, self.dtype)
 
 
 class Qwen3NextRMSNormGated(nnx.Module):
@@ -199,7 +240,7 @@ class Qwen3NextRMSNormGated(nnx.Module):
         RMSNorm(
             num_features=num_features,
             epsilon=self.epsilon,
-            dtype=dtype,
+            dtype=jnp.float32,
             weight_dtype=weight_dtype,
             scale_init=nnx.initializers.ones,
             rngs=rngs,
@@ -273,7 +314,7 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
 
 
 Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
-    RMSNorm,
+    Qwen3NextRMSNorm,
     base_metadata_fn=variable_to_logically_partitioned,
     scale_init=linen_initializers.zeros,
     scale_offset=1.0,

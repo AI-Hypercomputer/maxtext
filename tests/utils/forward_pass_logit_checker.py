@@ -73,6 +73,8 @@ python3 -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml \
 import argparse
 import functools
 import os
+
+os.environ.setdefault("HF_HOME", "/dev/shm/hf_cache")
 from pathlib import Path
 import sys
 import absl

@@ -246,6 +246,8 @@ QWEN_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "qwen3-480b-a35b.yml"),
     os.path.join(CONFIGS_DIR, "models", "qwen3-next-80b-a3b.yml"),
     os.path.join(CONFIGS_DIR, "models", "qwen3-omni-30b-a3b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "qwen3.5-35b-a3b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "qwen3.5-35b-a3b-fp8.yml"),
 ]
 
 

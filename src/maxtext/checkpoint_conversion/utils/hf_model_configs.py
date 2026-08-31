@@ -1931,6 +1931,8 @@ HF_MODEL_CONFIGS = {
     "qwen3-next-80b-a3b": qwen3_next_80b_a3b_config,
     "qwen3.5-397b-a17b": qwen3_5_397b_a17b_config,
     "qwen3.5-35b-a3b": qwen3_5_35b_a3b_config,
+    "qwen3.5-35b-a3b-fp8": qwen3_5_35b_a3b_config,
+    "qwen3.5-35b-fp8": qwen3_5_35b_a3b_config,
     "mixtral-8x7b": mixtral_8x7b_config,
     "mixtral-8x22b": mixtral_8x22b_config,
     "olmo3-7b": olmo3_7b_config,
