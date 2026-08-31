@@ -21,19 +21,9 @@ import jax.numpy as jnp
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.configs import pyconfig
 from maxtext.layers import mhc
-from maxtext.models.glm5_next import Glm5NextAttention, Glm5NextDecoderLayer
+from maxtext.models.glm5_next import Glm5NextAttention, Glm5NextDecoderLayer, Glm5NextDenseMLP
 import numpy as np
 import torch
-from torch import nn as torch_nn
-import torch.nn.functional as F
-
-
-def np_to_torch(x):
-  return torch.from_numpy(np.array(x, dtype=np.float32))
-
-
-def torch_to_jnp(x):
-  return jnp.array(x.detach().cpu().numpy(), dtype=jnp.float32)
 
 
 class Glm5NextVsReferenceTest(unittest.TestCase):
@@ -41,17 +31,19 @@ class Glm5NextVsReferenceTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.config = pyconfig.initialize_pydantic([
-        "src/maxtext/configs/base.yml",
-        "model_name=glm5.3-flash",
-        "base_num_decoder_layers=1",
-        "scan_layers=false",
-        "override_model_config=true",
-        "dtype=float32",
-        "weight_dtype=float32",
-        "per_device_batch_size=1",
-        "max_target_length=64",
-    ])
+    self.config = pyconfig.initialize_pydantic(
+        [
+            "src/maxtext/configs/base.yml",
+            "model_name=glm5.3-flash",
+            "base_num_decoder_layers=1",
+            "scan_layers=false",
+            "override_model_config=true",
+            "dtype=float32",
+            "weight_dtype=float32",
+            "per_device_batch_size=1",
+            "max_target_length=64",
+        ]
+    )
     self.mesh = jax.sharding.Mesh(jax.devices()[:1], ("data",))
     self.rngs = nnx.Rngs(0)
     torch.manual_seed(42)
@@ -61,6 +53,7 @@ class Glm5NextVsReferenceTest(unittest.TestCase):
     """Tests MaxText ManifoldConstrainedHyperConnections against reference implementation."""
     mhc_jax = mhc.ManifoldConstrainedHyperConnections(
         config=self.config,
+        dim=self.config.emb_dim,
         mesh=self.mesh,
         rngs=self.rngs,
     )
@@ -70,7 +63,7 @@ class Glm5NextVsReferenceTest(unittest.TestCase):
     def dummy_norm(inp):
       return inp
 
-    def dummy_branch(inputs_q, inputs_kv, **kwargs):
+    def dummy_branch(inputs_q, inputs_kv=None, **kwargs):
       return inputs_q * 0.5, None
 
     out_jax, _ = mhc_jax(
@@ -83,12 +76,12 @@ class Glm5NextVsReferenceTest(unittest.TestCase):
     self.assertFalse(np.isnan(np.asarray(out_jax)).any())
 
   def test_dense_mlp_layer(self):
-    """Tests MaxText MlpBlock with SwiGLU against PyTorch reference."""
-    from maxtext.layers import linears
-
-    mlp_jax = linears.MlpBlock(
+    """Tests MaxText Glm5NextDenseMLP with SwiGLU clamping."""
+    mlp_jax = Glm5NextDenseMLP(
         config=self.config,
         mesh=self.mesh,
+        in_features=self.config.emb_dim,
+        intermediate_dim=self.config.mlp_dim,
         model_mode="train",
         rngs=self.rngs,
     )
@@ -96,6 +89,7 @@ class Glm5NextVsReferenceTest(unittest.TestCase):
     x_np = np.random.randn(b, s, d).astype(np.float32)
     out_jax = mlp_jax(jnp.array(x_np))
     self.assertEqual(out_jax.shape, (b, s, d))
+    self.assertFalse(np.isnan(np.asarray(out_jax)).any())
 
   def test_kda_attention_layer(self):
     """Tests MaxText Glm5NextAttention against PyTorch reference delta attention logic."""

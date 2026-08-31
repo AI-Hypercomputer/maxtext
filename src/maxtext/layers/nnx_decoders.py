@@ -828,6 +828,8 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.GLM5_3,
+          DecoderBlockType.GLM5_NEXT,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1193,12 +1195,16 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
-        DecoderBlockType.GLM5_3: get_scannable(glm5_next.Glm5NextDecoderLayer, glm5_next.Glm5NextScannableBlock),
-        DecoderBlockType.GLM5_NEXT: get_scannable(glm5_next.Glm5NextDecoderLayer, glm5_next.Glm5NextScannableBlock),
+        # GLM5 does not yet implement a multi-layer scannable block.
+        DecoderBlockType.GLM5_3: [glm5_next.Glm5NextDecoderLayer],
+        DecoderBlockType.GLM5_NEXT: [glm5_next.Glm5NextDecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
       raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
+
+    if cfg.decoder_block in (DecoderBlockType.GLM5_3, DecoderBlockType.GLM5_NEXT) and cfg.scan_layers:
+      raise NotImplementedError("scan_layers=true is not yet supported for GLM5.")
 
     return layer_map[cfg.decoder_block]
 

@@ -498,11 +498,9 @@ class Decoder(nn.Module):
       case DecoderBlockType.ENVY:
         return [envy.EnvyScannableBlockToLinen] if self.config.scan_layers else [envy.EnvyDecoderLayerToLinen]
       case DecoderBlockType.GLM5_3 | DecoderBlockType.GLM5_NEXT:
-        return (
-            [glm5_next.Glm5NextScannableBlockToLinen]
-            if self.config.scan_layers
-            else [glm5_next.Glm5NextDecoderLayerToLinen]
-        )
+        if self.config.scan_layers:
+          raise NotImplementedError("scan_layers=true is not yet supported for GLM5.")
+        return [glm5_next.Glm5NextDecoderLayerToLinen]
 
       case _:
         # Default case to handle any unknown decoder block types.
@@ -539,12 +537,15 @@ class Decoder(nn.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
-        DecoderBlockType.GLM5_3: get_scannable(glm5_next.Glm5NextDecoderLayer, glm5_next.Glm5NextScannableBlock),
-        DecoderBlockType.GLM5_NEXT: get_scannable(glm5_next.Glm5NextDecoderLayer, glm5_next.Glm5NextScannableBlock),
+        # GLM5 does not yet implement a multi-layer scannable block.
+        DecoderBlockType.GLM5_3: [glm5_next.Glm5NextDecoderLayer],
+        DecoderBlockType.GLM5_NEXT: [glm5_next.Glm5NextDecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
       raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
+    if cfg.decoder_block in (DecoderBlockType.GLM5_3, DecoderBlockType.GLM5_NEXT) and cfg.scan_layers:
+      raise NotImplementedError("scan_layers=true is not yet supported for GLM5.")
     return layer_map[cfg.decoder_block]
 
   def set_remat_policy(self, block_layers, policy):

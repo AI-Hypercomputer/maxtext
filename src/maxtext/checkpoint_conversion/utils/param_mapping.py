@@ -4240,13 +4240,12 @@ def GLM5_3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
           f"model.language_model.layers.{i}.post_attention_layernorm.weight"
       )
 
-      mapping[f"{prefix}-attn_hc-base"] = f"model.language_model.layers.{i}.hc_attn_base"
-      mapping[f"{prefix}-attn_hc-fn"] = f"model.language_model.layers.{i}.hc_attn_fn"
-      mapping[f"{prefix}-attn_hc-scale"] = f"model.language_model.layers.{i}.hc_attn_scale"
-
-      mapping[f"{prefix}-ffn_hc-base"] = f"model.language_model.layers.{i}.hc_ffn_base"
-      mapping[f"{prefix}-ffn_hc-fn"] = f"model.language_model.layers.{i}.hc_ffn_fn"
-      mapping[f"{prefix}-ffn_hc-scale"] = f"model.language_model.layers.{i}.hc_ffn_scale"
+      for mt_name, hf_name in (("attn_hc", "hc_attn"), ("ffn_hc", "hc_ffn")):
+        mapping[f"{prefix}-{mt_name}-mhc_norm-scale"] = None
+        for part in ("pre", "post", "res"):
+          mapping[f"{prefix}-{mt_name}-{part}_alpha"] = f"model.language_model.layers.{i}.{hf_name}_fn"
+          mapping[f"{prefix}-{mt_name}-{part}_beta"] = f"model.language_model.layers.{i}.{hf_name}_base"
+          mapping[f"{prefix}-{mt_name}-{part}_alpha_scale"] = f"model.language_model.layers.{i}.{hf_name}_scale"
 
       mapping[f"{prefix}-attention-q_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.q_proj.weight"
       mapping[f"{prefix}-attention-k_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.k_proj.weight"
@@ -4267,18 +4266,9 @@ def GLM5_3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
       mapping[f"{prefix}-attention-o_proj-kernel"] = f"model.language_model.layers.{i}.self_attn.o_proj.weight"
 
       if i < first_k_dense_replace:
-        mapping[f"{prefix}-mlp-gate_proj-kernel"] = (
-            f"model.language_model.layers.{i}.mlp.gate_proj.weight",
-            f"model.language_model.layers.{i}.mlp.gate_proj.weight_scale_inv",
-        )
-        mapping[f"{prefix}-mlp-up_proj-kernel"] = (
-            f"model.language_model.layers.{i}.mlp.up_proj.weight",
-            f"model.language_model.layers.{i}.mlp.up_proj.weight_scale_inv",
-        )
-        mapping[f"{prefix}-mlp-down_proj-kernel"] = (
-            f"model.language_model.layers.{i}.mlp.down_proj.weight",
-            f"model.language_model.layers.{i}.mlp.down_proj.weight_scale_inv",
-        )
+        mapping[f"{prefix}-mlp-wi_0-kernel"] = f"model.language_model.layers.{i}.mlp.gate_proj.weight"
+        mapping[f"{prefix}-mlp-wi_1-kernel"] = f"model.language_model.layers.{i}.mlp.up_proj.weight"
+        mapping[f"{prefix}-mlp-wo-kernel"] = f"model.language_model.layers.{i}.mlp.down_proj.weight"
       else:
         mapping[f"{prefix}-mlp-routed_experts-gate-kernel"] = f"model.language_model.layers.{i}.mlp.gate.weight"
         mapping[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = (
@@ -4352,6 +4342,37 @@ def GLM5_3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
         tensors = tensors.cpu().float().numpy()
       return tensors.T
 
+  def ones_norm(input_tensor, target_shape=None):
+    del input_tensor
+    return np.ones(target_shape, dtype=np.float32)
+
+  def mhc_split_fn_pre(input_tensor, target_shape=None):
+    return np.transpose(input_tensor[0:4, :])
+
+  def mhc_split_fn_post(input_tensor, target_shape=None):
+    return np.transpose(input_tensor[4:8, :])
+
+  def mhc_split_fn_res(input_tensor, target_shape=None):
+    return np.transpose(input_tensor[8:24, :])
+
+  def mhc_split_base_pre(input_tensor, target_shape=None):
+    return input_tensor[0:4]
+
+  def mhc_split_base_post(input_tensor, target_shape=None):
+    return input_tensor[4:8]
+
+  def mhc_split_base_res(input_tensor, target_shape=None):
+    return input_tensor[8:24].reshape(target_shape)
+
+  def mhc_split_scale_pre(input_tensor, target_shape=None):
+    return np.asarray(input_tensor[0:1]).reshape(target_shape)
+
+  def mhc_split_scale_post(input_tensor, target_shape=None):
+    return np.asarray(input_tensor[1:2]).reshape(target_shape)
+
+  def mhc_split_scale_res(input_tensor, target_shape=None):
+    return np.asarray(input_tensor[2:3]).reshape(target_shape)
+
   hooks = {
       "params-decoder-logits_dense-kernel": transpose,
   }
@@ -4362,8 +4383,17 @@ def GLM5_3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
   for i in range(num_layers):
     prefix = f"params-decoder-layers_{i}"
 
-    hooks[f"{prefix}-attn_hc-fn"] = transpose
-    hooks[f"{prefix}-ffn_hc-fn"] = transpose
+    for mt_name in ("attn_hc", "ffn_hc"):
+      hooks[f"{prefix}-{mt_name}-mhc_norm-scale"] = ones_norm
+      hooks[f"{prefix}-{mt_name}-pre_alpha"] = mhc_split_fn_pre
+      hooks[f"{prefix}-{mt_name}-post_alpha"] = mhc_split_fn_post
+      hooks[f"{prefix}-{mt_name}-res_alpha"] = mhc_split_fn_res
+      hooks[f"{prefix}-{mt_name}-pre_beta"] = mhc_split_base_pre
+      hooks[f"{prefix}-{mt_name}-post_beta"] = mhc_split_base_post
+      hooks[f"{prefix}-{mt_name}-res_beta"] = mhc_split_base_res
+      hooks[f"{prefix}-{mt_name}-pre_alpha_scale"] = mhc_split_scale_pre
+      hooks[f"{prefix}-{mt_name}-post_alpha_scale"] = mhc_split_scale_post
+      hooks[f"{prefix}-{mt_name}-res_alpha_scale"] = mhc_split_scale_res
 
     hooks[f"{prefix}-attention-q_proj-kernel"] = transpose
     hooks[f"{prefix}-attention-k_proj-kernel"] = transpose
@@ -4377,9 +4407,9 @@ def GLM5_3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
     hooks[f"{prefix}-attention-o_proj-kernel"] = transpose
 
     if i < first_k_dense_replace:
-      hooks[f"{prefix}-mlp-gate_proj-kernel"] = dequant_transpose_hook
-      hooks[f"{prefix}-mlp-up_proj-kernel"] = dequant_transpose_hook
-      hooks[f"{prefix}-mlp-down_proj-kernel"] = dequant_transpose_hook
+      hooks[f"{prefix}-mlp-wi_0-kernel"] = transpose
+      hooks[f"{prefix}-mlp-wi_1-kernel"] = transpose
+      hooks[f"{prefix}-mlp-wo-kernel"] = transpose
     else:
       hooks[f"{prefix}-mlp-routed_experts-gate-kernel"] = transpose
       hooks[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = dequant_transpose_hook
