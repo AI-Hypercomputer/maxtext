@@ -89,9 +89,7 @@ def _tiny_qwen35_kwargs(seq_len, batch_size, num_experts, top_k, **overrides):
 class DummyConfig:
   """Minimal stand-in for MaxTextConfig, for direct RoutedMoE method calls."""
 
-  def __init__(
-      self, model_name="default", decoder_block=ctypes.DecoderBlockType.DEFAULT
-  ):
+  def __init__(self, model_name="default", decoder_block=ctypes.DecoderBlockType.DEFAULT):
     self.model_name = model_name
     self.decoder_block = decoder_block
     self.norm_topk_prob = False
@@ -114,11 +112,7 @@ class DummyRoutedMoE:
     self.num_experts_per_tok = 2
     self.num_experts = 3
     self.is_hash_routing = False
-    self.per_expert_scale = (
-        None
-        if per_expert_scale is None
-        else nnx.Param(jnp.asarray(per_expert_scale))
-    )
+    self.per_expert_scale = None if per_expert_scale is None else nnx.Param(jnp.asarray(per_expert_scale))
 
   def _maybe_shard_with_logical(self, x, spec):
     return x
@@ -158,14 +152,8 @@ class ForcedRoutingTest(unittest.TestCase):
     # Check that weights are extracted correctly and softmaxed
     # For token 0: indices 2, 1 -> logits 3.0, 2.0 -> softmax([3.0, 2.0])
     # For token 1: indices 0, 2 -> logits 4.0, 6.0 -> softmax([4.0, 6.0])
-    expected_weights = jax.nn.softmax(
-        jnp.array([[[3.0, 2.0], [4.0, 6.0]]]).astype(jnp.float32), axis=-1
-    )
-    self.assertTrue(
-        jax.numpy.allclose(
-            top_k_weights, expected_weights, rtol=1e-5, atol=1e-5
-        )
-    )
+    expected_weights = jax.nn.softmax(jnp.array([[[3.0, 2.0], [4.0, 6.0]]]).astype(jnp.float32), axis=-1)
+    self.assertTrue(jax.numpy.allclose(top_k_weights, expected_weights, rtol=1e-5, atol=1e-5))
 
   def test_gemma4_softmax(self):
     config = DummyConfig(decoder_block=ctypes.DecoderBlockType.GEMMA4)
@@ -188,15 +176,9 @@ class ForcedRoutingTest(unittest.TestCase):
     # For Gemma 4, it applies softmax to gate_logits first!
 
     expected_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-    expected_weights = jnp.take_along_axis(
-        expected_probs, forced_routed_experts, axis=-1
-    )
+    expected_weights = jnp.take_along_axis(expected_probs, forced_routed_experts, axis=-1)
 
-    self.assertTrue(
-        jax.numpy.allclose(
-            top_k_weights, expected_weights, rtol=1e-5, atol=1e-5
-        )
-    )
+    self.assertTrue(jax.numpy.allclose(top_k_weights, expected_weights, rtol=1e-5, atol=1e-5))
 
   def test_reshape_and_update_weights(self):
     config = DummyConfig()
@@ -205,9 +187,7 @@ class ForcedRoutingTest(unittest.TestCase):
     weights = jnp.array([[[0.1, 0.2], [0.3, 0.4]]])  # (1, 2, 2)
     indices = jnp.array([[[2, -1], [-1, 1]]])  # (1, 2, 2)
 
-    update_weights = moe.RoutedMoE.reshape_and_update_weights(
-        model, weights, indices, safe_updates=True
-    )
+    update_weights = moe.RoutedMoE.reshape_and_update_weights(model, weights, indices, safe_updates=True)
 
     # Expected shape: (1, 2, 3) where 3 is num_experts!
     # For token 0: index 2 -> 0.1. Index -1 -> mapped to 0 but weight 0.0!
@@ -216,11 +196,7 @@ class ForcedRoutingTest(unittest.TestCase):
     # So for expert 0: 0.0. Expert 1: 0.4. Expert 2: 0.0.
     expected_update_weights = jnp.array([[[0.0, 0.0, 0.1], [0.0, 0.4, 0.0]]])
 
-    self.assertTrue(
-        jax.numpy.allclose(
-            update_weights, expected_update_weights, rtol=1e-5, atol=1e-5
-        )
-    )
+    self.assertTrue(jax.numpy.allclose(update_weights, expected_update_weights, rtol=1e-5, atol=1e-5))
 
   def test_reshape_and_update_weights_duplicate_indices_use_add_not_set(self):
     """A regression test for the `.set()` -> `.add()` scatter-safety fix.
@@ -239,17 +215,11 @@ class ForcedRoutingTest(unittest.TestCase):
     weights = jnp.array([[[0.3, 0.7]]])  # (1, 1, 2)
     indices = jnp.array([[[1, 1]]])  # (1, 1, 2)
 
-    update_weights = moe.RoutedMoE.reshape_and_update_weights(
-        model, weights, indices, safe_updates=True
-    )
+    update_weights = moe.RoutedMoE.reshape_and_update_weights(model, weights, indices, safe_updates=True)
 
     # `.add()` must sum both contributions at expert index 1.
     expected_update_weights = jnp.array([[[0.0, 1.0, 0.0]]])
-    self.assertTrue(
-        jax.numpy.allclose(
-            update_weights, expected_update_weights, rtol=1e-5, atol=1e-5
-        )
-    )
+    self.assertTrue(jax.numpy.allclose(update_weights, expected_update_weights, rtol=1e-5, atol=1e-5))
 
 
 class CheckForcedRoutingSupportTest(unittest.TestCase):
@@ -310,13 +280,9 @@ class UnsupportedConfigGuardTest(unittest.TestCase):
     ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
     positions = jnp.arange(self.seq_len, dtype=jnp.int32)[None, :]
     segmentation = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-    forced = jnp.zeros(
-        (self.batch_size, self.seq_len, self.top_k), dtype=jnp.int32
-    )
+    forced = jnp.zeros((self.batch_size, self.seq_len, self.top_k), dtype=jnp.int32)
 
-    model = models.transformer_as_linen(
-        config=cfg, mesh=mesh, quant=None, model_mode="train"
-    )
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
     params = model.init(
         {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)},
         ids,
@@ -357,9 +323,7 @@ class UnsupportedConfigGuardTest(unittest.TestCase):
     ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
     positions = jnp.arange(self.seq_len, dtype=jnp.int32)[None, :]
     segmentation = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-    model = models.transformer_as_linen(
-        config=cfg, mesh=mesh, quant=None, model_mode="train"
-    )
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
     params = model.init(
         {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)},
         ids,
@@ -396,12 +360,8 @@ class UnsupportedConfigGuardTest(unittest.TestCase):
     ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
     positions = jnp.arange(self.seq_len, dtype=jnp.int32)[None, :]
     segmentation = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-    forced = jnp.zeros(
-        (self.batch_size, self.seq_len, self.top_k), dtype=jnp.int32
-    )
-    model = models.transformer_as_linen(
-        config=cfg, mesh=mesh, quant=None, model_mode="train"
-    )
+    forced = jnp.zeros((self.batch_size, self.seq_len, self.top_k), dtype=jnp.int32)
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
     params = model.init(
         {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)},
         ids,
@@ -440,9 +400,7 @@ class ReshapeForcedRoutedExpertsForScanTest(unittest.TestCase):
 
     # [batch, seq, num_layers, top_k], where every entry for layer L is L.
     layer_ids = jnp.arange(num_decoder_layers, dtype=jnp.int32)
-    forced_routed_experts = jnp.broadcast_to(
-        layer_ids[None, None, :, None], (batch, seq, num_decoder_layers, top_k)
-    )
+    forced_routed_experts = jnp.broadcast_to(layer_ids[None, None, :, None], (batch, seq, num_decoder_layers, top_k))
 
     scanned = reshape_forced_routed_experts_for_scan(
         forced_routed_experts,
@@ -451,9 +409,7 @@ class ReshapeForcedRoutedExpertsForScanTest(unittest.TestCase):
         layers_per_cycle=cycle_interval,
     )
 
-    self.assertEqual(
-        scanned.shape, (scan_length, cycle_interval, batch, seq, top_k)
-    )
+    self.assertEqual(scanned.shape, (scan_length, cycle_interval, batch, seq, top_k))
     # Layer L must land at scanned[L // cycle_interval, L % cycle_interval],
     # since jax.lax.scan slices axis 0 (scan_length) automatically per outer
     # iteration, then the ScannableBlock's static loop indexes axis 0 of the
@@ -480,9 +436,7 @@ class ReshapeForcedRoutedExpertsForScanTest(unittest.TestCase):
         layers_per_cycle=layers_per_cycle,
     )
 
-    self.assertEqual(
-        scanned.shape, (scan_length, layers_per_cycle, batch, seq, top_k)
-    )
+    self.assertEqual(scanned.shape, (scan_length, layers_per_cycle, batch, seq, top_k))
     for sub_idx in range(layers_per_cycle):
       self.assertTrue((scanned[0, sub_idx] == forced_routed_experts).all())
 
@@ -514,9 +468,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     os.environ["NEW_MODEL_DESIGN"] = "1"
     os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-  def _assert_forced_routing_loss_finite(
-      self, cfg, seq_len, batch_size, forced_experts, label
-  ):
+  def _assert_forced_routing_loss_finite(self, cfg, seq_len, batch_size, forced_experts, label):
     """Builds a real model for `cfg`, runs train.loss_fn with a batch carrying
 
     `forced_experts`, and asserts the resulting loss is finite.
@@ -525,9 +477,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     rng = jax.random.PRNGKey(42)
 
-    tokens = jnp.array(
-        ([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32
-    )
+    tokens = jnp.array(([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32)
     inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_size, 1))
     positions = jnp.tile(
         jnp.expand_dims(jnp.arange(seq_len, dtype=jnp.int32), axis=0),
@@ -545,9 +495,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
         "forced_routed_experts": forced_experts,
     }
 
-    model = models.transformer_as_linen(
-        config=cfg, mesh=mesh, quant=None, model_mode="train"
-    )
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
     init_params_rng, init_dropout_rng = jax.random.split(rng)
     params = model.init(
         {"params": init_params_rng, "dropout": init_dropout_rng},
@@ -568,18 +516,13 @@ class TrainerRouterReplayTest(unittest.TestCase):
 
     self.assertIsNotNone(loss)
     self.assertFalse(jnp.isnan(loss), "Loss must not be NaN")
-    print(
-        f"\n[Trainer Router Replay][{label}] Computed loss with forced routing"
-        f" + padding: {loss}"
-    )
+    print(f"\n[Trainer Router Replay][{label}] Computed loss with forced routing" f" + padding: {loss}")
     return loss, aux
 
   def _loss_for_routing(self, cfg, seq_len, batch_size, forced_experts):
     """train.loss_fn for one routing, reusing fixed params so losses compare."""
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
-    tokens = jnp.array(
-        ([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32
-    )
+    tokens = jnp.array(([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32)
     inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_size, 1))
     positions = jnp.tile(
         jnp.expand_dims(jnp.arange(seq_len, dtype=jnp.int32), axis=0),
@@ -587,9 +530,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
     segmentation = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
-    model = models.transformer_as_linen(
-        config=cfg, mesh=mesh, quant=None, model_mode="train"
-    )
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
     params_rng, dropout_rng = jax.random.split(jax.random.PRNGKey(42))
     params = model.init(
         {"params": params_rng, "dropout": dropout_rng},
@@ -618,9 +559,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
     return float(loss)
 
-  def _assert_routing_is_load_bearing(
-      self, cfg, seq_len, batch_size, forced_a, forced_b, label
-  ):
+  def _assert_routing_is_load_bearing(self, cfg, seq_len, batch_size, forced_a, forced_b, label):
     """Two different replays must give two different losses.
 
     Every "loss is finite" assertion in this class also passes when
@@ -631,9 +570,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     loss_a = self._loss_for_routing(cfg, seq_len, batch_size, forced_a)
     loss_b = self._loss_for_routing(cfg, seq_len, batch_size, forced_b)
     loss_none = self._loss_for_routing(cfg, seq_len, batch_size, None)
-    print(
-        f"\n[Router Replay][{label}] a={loss_a} b={loss_b} unforced={loss_none}"
-    )
+    print(f"\n[Router Replay][{label}] a={loss_a} b={loss_b} unforced={loss_none}")
     self.assertNotAlmostEqual(
         loss_a,
         loss_b,
@@ -672,13 +609,9 @@ class TrainerRouterReplayTest(unittest.TestCase):
     # paths end-to-end, not just in isolated unit tests.
     forced_experts = forced_experts.at[:, -2:, :].set(-1)
 
-    self._assert_forced_routing_loss_finite(
-        cfg, seq_len, batch_size, forced_experts, "qwen3.5"
-    )
+    self._assert_forced_routing_loss_finite(cfg, seq_len, batch_size, forced_experts, "qwen3.5")
 
-  def _qwen35_cfg(
-      self, seq_len, batch_size, num_experts, top_k, run_name, **overrides
-  ):
+  def _qwen35_cfg(self, seq_len, batch_size, num_experts, top_k, run_name, **overrides):
     return _init_test_cfg(
         extra_args=["attention=dot_product"],
         **_tiny_qwen35_kwargs(
@@ -707,9 +640,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
     a = jnp.tile(jnp.array([0, 1], jnp.int32), (batch_size, seq_len, 1))
     b = jnp.tile(jnp.array([2, 3], jnp.int32), (batch_size, seq_len, 1))
-    self._assert_routing_is_load_bearing(
-        cfg, seq_len, batch_size, a, b, "qwen3.5 unscanned"
-    )
+    self._assert_routing_is_load_bearing(cfg, seq_len, batch_size, a, b, "qwen3.5 unscanned")
 
   def test_per_layer_routing_is_not_broadcast_unscanned(self):
     """4D per-layer replay must land layer L's routing on layer L.
@@ -762,9 +693,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
         inhomogeneous_layer_cycle_interval=cycle_interval,
     )
     layer_ids = jnp.arange(layers, dtype=jnp.int32) % num_experts
-    per_layer = jnp.broadcast_to(
-        layer_ids[None, None, :, None], (batch_size, seq_len, layers, top_k)
-    )
+    per_layer = jnp.broadcast_to(layer_ids[None, None, :, None], (batch_size, seq_len, layers, top_k))
     self._assert_routing_is_load_bearing(
         cfg,
         seq_len,
@@ -809,9 +738,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     forced_experts = forced_experts.at[:, :, 1].set(3)
     forced_experts = forced_experts.at[:, -2:, :].set(-1)
 
-    self._assert_forced_routing_loss_finite(
-        cfg, seq_len, batch_size, forced_experts, "gemma4"
-    )
+    self._assert_forced_routing_loss_finite(cfg, seq_len, batch_size, forced_experts, "gemma4")
 
   def test_loss_fn_with_forced_routed_experts_scanned_qwen3_5(self):
     """Qwen3.5 supports forced routing together with `scan_layers=True` (see
@@ -848,9 +775,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
     forced_experts = forced_experts.at[:, -2:, :, :].set(-1)
 
-    self._assert_forced_routing_loss_finite(
-        cfg, seq_len, batch_size, forced_experts, "scanned qwen3.5"
-    )
+    self._assert_forced_routing_loss_finite(cfg, seq_len, batch_size, forced_experts, "scanned qwen3.5")
 
   def test_loss_fn_with_forced_routed_experts_scanned_mixtral(self):
     """Mixtral has no ScannableBlock wrapper: every scan iteration is exactly
@@ -891,9 +816,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
     forced_experts = forced_experts.at[:, -2:, :, :].set(-1)
 
-    self._assert_forced_routing_loss_finite(
-        cfg, seq_len, batch_size, forced_experts, "scanned mixtral"
-    )
+    self._assert_forced_routing_loss_finite(cfg, seq_len, batch_size, forced_experts, "scanned mixtral")
 
   def test_forced_routing_reproduces_unforced_output_when_all_experts_selected(
       self,
@@ -932,9 +855,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
-    tokens = jnp.array(
-        ([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32
-    )
+    tokens = jnp.array(([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32)
     inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_size, 1))
     positions = jnp.tile(
         jnp.expand_dims(jnp.arange(seq_len, dtype=jnp.int32), axis=0),
@@ -942,9 +863,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
     segmentation = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
-    model = models.transformer_as_linen(
-        config=cfg, mesh=mesh, quant=None, model_mode="train"
-    )
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
     init_params_rng, init_dropout_rng = jax.random.split(jax.random.PRNGKey(0))
     params = model.init(
         {"params": init_params_rng, "dropout": init_dropout_rng},
@@ -1010,10 +929,7 @@ class GetTopkUnforcedRegressionTest(unittest.TestCase):
         float(jnp.sum(top_k_weights)),
         config.routed_scaling_factor,
         places=4,
-        msg=(
-            "DeepSeek weights must keep routed_scaling_factor; norm_topk_prob"
-            " must not re-normalize them."
-        ),
+        msg=("DeepSeek weights must keep routed_scaling_factor; norm_topk_prob" " must not re-normalize them."),
     )
 
   def test_per_expert_scale_applies_when_norm_topk_prob_is_false(self):
@@ -1025,19 +941,11 @@ class GetTopkUnforcedRegressionTest(unittest.TestCase):
     model = DummyRoutedMoE(config, per_expert_scale=scale)
 
     gate_logits = jnp.array([[[1.0, 2.0, 0.5]]])
-    top_k_weights, top_k_indices = moe.RoutedMoE.get_topk(
-        model, gate_logits, gate_logits
-    )
+    top_k_weights, top_k_indices = moe.RoutedMoE.get_topk(model, gate_logits, gate_logits)
 
-    unscaled_model = DummyRoutedMoE(
-        DummyConfig(decoder_block=ctypes.DecoderBlockType.GEMMA4)
-    )
-    unscaled_weights, _ = moe.RoutedMoE.get_topk(
-        unscaled_model, gate_logits, gate_logits
-    )
-    expected = unscaled_weights * jnp.take_along_axis(
-        jnp.asarray(scale)[None, None, :], top_k_indices, axis=-1
-    )
+    unscaled_model = DummyRoutedMoE(DummyConfig(decoder_block=ctypes.DecoderBlockType.GEMMA4))
+    unscaled_weights, _ = moe.RoutedMoE.get_topk(unscaled_model, gate_logits, gate_logits)
+    expected = unscaled_weights * jnp.take_along_axis(jnp.asarray(scale)[None, None, :], top_k_indices, axis=-1)
 
     self.assertTrue(
         jnp.allclose(top_k_weights, expected, rtol=1e-5, atol=1e-5),
@@ -1051,18 +959,12 @@ class GetTopkUnforcedRegressionTest(unittest.TestCase):
     model = DummyRoutedMoE(config, per_expert_scale=scale)
 
     gate_logits = jnp.array([[[1.0, 2.0, 0.5]]])
-    top_k_weights, top_k_indices = moe.RoutedMoE.get_topk(
-        model, gate_logits, gate_logits
-    )
+    top_k_weights, top_k_indices = moe.RoutedMoE.get_topk(model, gate_logits, gate_logits)
 
     # Normalization happens before scaling, so dividing the scale back out must
     # leave weights summing to 1.
-    applied = jnp.take_along_axis(
-        jnp.asarray(scale)[None, None, :], top_k_indices, axis=-1
-    )
-    self.assertAlmostEqual(
-        float(jnp.sum(top_k_weights / applied)), 1.0, places=4
-    )
+    applied = jnp.take_along_axis(jnp.asarray(scale)[None, None, :], top_k_indices, axis=-1)
+    self.assertAlmostEqual(float(jnp.sum(top_k_weights / applied)), 1.0, places=4)
 
 
 class PaddingExcludedFromSoftmaxTest(unittest.TestCase):
@@ -1080,6 +982,7 @@ class PaddingExcludedFromSoftmaxTest(unittest.TestCase):
       norm_topk_prob,
       decoder_block=ctypes.DecoderBlockType.MIXTRAL,
   ):
+    """Computes top-k routing weights with forced routed experts."""
     config = DummyConfig(model_name="mixtral-8x7b", decoder_block=decoder_block)
     config.norm_topk_prob = norm_topk_prob
     config.routed_scaling_factor = 1.0
@@ -1122,17 +1025,13 @@ class ForcedRoutingGradientTest(unittest.TestCase):
   """
 
   def test_gate_logits_receive_gradient_under_forced_routing(self):
-    config = DummyConfig(
-        model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL
-    )
+    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
     config.routed_scaling_factor = 1.0
     model = DummyRoutedMoE(config)
     forced = jnp.array([[[1, -1], [0, 2]]])
 
     def loss(gate_logits):
-      weights, _ = moe.RoutedMoE.get_topk(
-          model, gate_logits, gate_logits, forced_routed_experts=forced
-      )
+      weights, _ = moe.RoutedMoE.get_topk(model, gate_logits, gate_logits, forced_routed_experts=forced)
       return jnp.sum(weights**2)
 
     grads = jax.grad(loss)(jnp.array([[[0.0, 1.0, 5.0], [2.0, 0.5, 1.0]]]))
@@ -1140,9 +1039,7 @@ class ForcedRoutingGradientTest(unittest.TestCase):
     self.assertGreater(float(jnp.max(jnp.abs(grads))), 0.0)
 
   def test_fully_padded_token_has_zero_gradient(self):
-    config = DummyConfig(
-        model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL
-    )
+    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
     config.routed_scaling_factor = 1.0
     model = DummyRoutedMoE(config)
 
@@ -1168,9 +1065,7 @@ class OutOfRangeExpertIdTest(unittest.TestCase):
   """
 
   def _model(self):
-    config = DummyConfig(
-        model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL
-    )
+    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
     config.routed_scaling_factor = 1.0
     model = DummyRoutedMoE(config)
     model.num_experts = 4
@@ -1214,12 +1109,8 @@ class LoadBalanceUpdatePaddingTest(unittest.TestCase):
   """
 
   def test_padding_does_not_change_the_update(self):
-    with_padding = moe.calculate_load_balance_updates(
-        jnp.array([[[-1, -1], [0, 2]]]), 3, 0.1
-    )
-    without_padding = moe.calculate_load_balance_updates(
-        jnp.array([[[0, 2]]]), 3, 0.1
-    )
+    with_padding = moe.calculate_load_balance_updates(jnp.array([[[-1, -1], [0, 2]]]), 3, 0.1)
+    without_padding = moe.calculate_load_balance_updates(jnp.array([[[0, 2]]]), 3, 0.1)
     self.assertTrue(jnp.array_equal(with_padding, without_padding))
 
 
@@ -1231,9 +1122,7 @@ class GetTopkForcedRoutingParityTest(unittest.TestCase):
     model = DummyRoutedMoE(config)
     gate_logits = jnp.array([[[1.0, 2.0, 0.5], [0.25, -1.0, 3.0]]])
 
-    unforced_weights, unforced_indices = moe.RoutedMoE.get_topk(
-        model, gate_logits, gate_logits
-    )
+    unforced_weights, unforced_indices = moe.RoutedMoE.get_topk(model, gate_logits, gate_logits)
     forced_weights, forced_indices = moe.RoutedMoE.get_topk(
         model, gate_logits, gate_logits, forced_routed_experts=unforced_indices
     )
@@ -1253,9 +1142,7 @@ class GetTopkForcedRoutingParityTest(unittest.TestCase):
     self._assert_parity(config)
 
   def test_parity_gemma4(self):
-    self._assert_parity(
-        DummyConfig(decoder_block=ctypes.DecoderBlockType.GEMMA4)
-    )
+    self._assert_parity(DummyConfig(decoder_block=ctypes.DecoderBlockType.GEMMA4))
 
 
 class RaggedSortGuardTest(unittest.TestCase):
@@ -1296,9 +1183,7 @@ class RaggedSortGuardTest(unittest.TestCase):
     )
 
   def test_forced_routing_without_ragged_sort_is_allowed(self):
-    model = self._make_model(
-        self._permute_config(use_ragged_sort=False, use_ring_of_experts=True)
-    )
+    model = self._make_model(self._permute_config(use_ragged_sort=False, use_ring_of_experts=True))
     forced = jnp.array([[[0, 1], [2, -1]]], dtype=jnp.int32)
     sorted_inputs = self._run_permute(model, forced)[0]
     self.assertEqual(sorted_inputs.shape[-1], 4)
@@ -1321,9 +1206,7 @@ class RaggedSortPaddingSentinelTest(unittest.TestCase):
   NUM_EXPERTS = 3
 
   def _counts_and_order(self, flat_indices):
-    counts = jax.nn.one_hot(
-        flat_indices, self.NUM_EXPERTS, dtype=jnp.int32
-    ).sum(axis=0)
+    counts = jax.nn.one_hot(flat_indices, self.NUM_EXPERTS, dtype=jnp.int32).sum(axis=0)
     return counts, jnp.argsort(flat_indices)
 
   def test_num_experts_sentinel_is_excluded_from_counts_and_sorts_last(self):
@@ -1337,9 +1220,7 @@ class RaggedSortPaddingSentinelTest(unittest.TestCase):
 
     # Everything past group_offsets[num_experts] is padding, and nothing before
     # it is -- so no shard window can reach a padded slot.
-    total_real = int(
-        jnp.cumulative_sum(counts, include_initial=True)[self.NUM_EXPERTS]
-    )
+    total_real = int(jnp.cumulative_sum(counts, include_initial=True)[self.NUM_EXPERTS])
     self.assertEqual(total_real, int(jnp.sum(padded >= 0)))
     reordered = padded[order]
     self.assertTrue(bool(jnp.all(reordered[:total_real] >= 0)))
@@ -1349,9 +1230,7 @@ class RaggedSortPaddingSentinelTest(unittest.TestCase):
     """Guards the reason for the remap: -1 breaks the offsets."""
     padded = jnp.array([0, -1, 2, 1, -1, 0], dtype=jnp.int32)
     counts, order = self._counts_and_order(padded)
-    total_real = int(
-        jnp.cumulative_sum(counts, include_initial=True)[self.NUM_EXPERTS]
-    )
+    total_real = int(jnp.cumulative_sum(counts, include_initial=True)[self.NUM_EXPERTS])
     # The count is right, but padding sorts first, so the first `total_real`
     # rows are not the real ones.
     self.assertEqual(total_real, int(jnp.sum(padded >= 0)))
@@ -1423,9 +1302,7 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
     # Replay a fixed routing, with the tail of every sequence marked unused so
     # the -1 padding path is exercised on both sides.
     top_k = cfg_ref.num_experts_per_tok
-    forced = jnp.zeros(
-        (tokens, cfg_ref.max_target_length, top_k), dtype=jnp.int32
-    )
+    forced = jnp.zeros((tokens, cfg_ref.max_target_length, top_k), dtype=jnp.int32)
     forced = forced.at[:, :, 0].set(1)
     if top_k > 1:
       forced = forced.at[:, :, 1].set(3)
@@ -1434,9 +1311,7 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
     def run(cfg, variables=None):
       mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
       model = self._build_model(cfg, mesh)
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(
-          cfg.logical_axis_rules
-      ):
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
         if variables is None:
           variables = model.init(
               {"params": rng_model, "dropout": rng_model},

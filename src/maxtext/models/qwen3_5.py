@@ -99,11 +99,7 @@ class Qwen3_5ScannableBlock(nnx.Module):
       # forced_routed_experts, when present, is shaped
       # [inhomogeneous_layer_cycle_interval, batch, seq, top_k]: one slice per
       # sub-layer in this cycle (see nnx_decoders.py's scan wiring).
-      layer_forced_routed_experts = (
-          forced_routed_experts[i]
-          if forced_routed_experts is not None
-          else None
-      )
+      layer_forced_routed_experts = forced_routed_experts[i] if forced_routed_experts is not None else None
       x, _ = layer(
           x,
           decoder_segment_ids,

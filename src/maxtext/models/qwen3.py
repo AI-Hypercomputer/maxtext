@@ -1193,9 +1193,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         - The load balancing loss from the routed experts, if applicable during training.
     """
     # 1. Apply the routed experts block.
-    routed_output, load_balance_loss, _ = self.routed_experts(
-        hidden_states, forced_routed_experts=forced_routed_experts
-    )
+    routed_output, load_balance_loss, _ = self.routed_experts(hidden_states, forced_routed_experts=forced_routed_experts)
 
     if not self.use_shared_expert:
       return routed_output, load_balance_loss
