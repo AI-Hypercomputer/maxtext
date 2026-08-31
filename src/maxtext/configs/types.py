@@ -5456,6 +5456,8 @@ class MaxTextConfig(
           "llama2",
           "llama4",
           "deepseek",
+          "gpt3",
+          "gpt_oss",
           "mistral",
           "mixtral",
           "qwen2",
