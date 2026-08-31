@@ -16,7 +16,6 @@
 
 
 import enum
-import functools
 from typing import Any, Optional, Tuple
 
 import jax
@@ -24,7 +23,6 @@ import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
 
 from flax import nnx
 
@@ -426,7 +424,6 @@ def prime_prefill_cache_state(
 
       cache.overlap_kv.set_value(overlap_kv_to_write)
       cache.overlap_gate.set_value(overlap_gate_to_write)
-
 
 
 class BaseDeepseekCompressor(nnx.Module):
