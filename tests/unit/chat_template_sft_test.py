@@ -107,6 +107,39 @@ class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
     self.assertTrue(prompt_seg.endswith("<|turn>model\n"))
     self.assertEqual(completion_seg, "The capital of France is Paris.<turn|>\n")
 
+    # Verify that no thinking channel tags (<|channel>thought\n or <channel|>) are injected
+    self.assertNotIn("<|channel>", prompt_seg)
+    self.assertNotIn("<channel|>", prompt_seg)
+    self.assertNotIn("<|channel>", completion_seg)
+    self.assertNotIn("<channel|>", completion_seg)
+
+  def test_absent_reasoning_field_does_not_add_thought_channel_tags(self):
+    """Explicitly verifies that when the reasoning field is not present, no thought tags are added."""
+    sample = {
+        "messages": [
+            {"role": "user", "content": "Calculate 2 + 2"},
+            {"role": "assistant", "content": "4"},
+        ]
+    }
+
+    processed = input_pipeline_utils.apply_chat_template(
+        example={"messages": list(sample["messages"])},
+        tokenizer_model=self.tokenizer,
+        data_column_name="messages",
+    )
+
+    prompt_seg = processed["messages"][0]
+    completion_seg = processed["messages"][1]
+
+    # Prompt must end at model turn boundary without entering thought channel
+    self.assertEqual(prompt_seg, "<bos><|turn>user\nCalculate 2 + 2<turn|>\n<|turn>model\n")
+    self.assertEqual(completion_seg, "4<turn|>\n")
+
+    self.assertNotIn("<|channel>", prompt_seg)
+    self.assertNotIn("<channel|>", prompt_seg)
+    self.assertNotIn("<|channel>", completion_seg)
+    self.assertNotIn("<channel|>", completion_seg)
+
   def test_multi_turn_with_thinking(self):
     """Verifies multi-turn conversation with independent turn formatting."""
     turn1 = [
@@ -301,8 +334,55 @@ class SFTPromptMaskingEdgeCasesTest(unittest.TestCase):
         unk_id=self.unk_id,
     )
 
+  def test_sft_prompt_masking_without_reasoning(self):
+    """Ensures that for conversations without reasoning, no thought tags exist and targets only contain the plain completion."""
+    sample = {
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "What is the capital of France?"},
+            {"role": "assistant", "content": "The capital of France is Paris."},
+        ]
+    }
+
+    processed = input_pipeline_utils.apply_chat_template(
+        example={"messages": sample["messages"]},
+        tokenizer_model=self.tokenizer,
+        data_column_name="messages",
+    )
+
+    tok_example = input_pipeline_utils.tokenization(
+        example=processed,
+        hf_tokenizer=self.tokenizer,
+        truncation=False,
+        max_length=4096,
+        column_names=["messages"],
+    )
+
+    masker = input_pipeline_utils.SFTPromptMasking(
+        text_column_name="messages",
+        completion_only=True,
+        max_target_length=4096,
+        unk_id=self.unk_id,
+    )
+
     sft_out = masker.map(tok_example)
-    np.testing.assert_array_equal(sft_out["inputs"], sft_out["targets"])
+    inputs = sft_out["inputs"]
+    targets = sft_out["targets"]
+
+    self.assertEqual(len(inputs), len(targets))
+
+    # All prompt tokens must be masked in targets
+    prompt_len = len(tok_example["messages"][0])
+    for i in range(prompt_len):
+      self.assertEqual(targets[i], self.unk_id, f"Prompt token at {i} was not masked!")
+
+    # Decode unmasked targets and verify plain response without any thought channel tokens
+    trained_ids = [int(t) for t in targets if t != self.unk_id]
+    trained_text = self.tokenizer.decode(trained_ids)
+    self.assertEqual(trained_text, "The capital of France is Paris.<turn|>\n")
+    self.assertNotIn("<|channel>", trained_text)
+    self.assertNotIn("<channel|>", trained_text)
+    self.assertNotIn("thought", trained_text)
 
 
 if __name__ == "__main__":
