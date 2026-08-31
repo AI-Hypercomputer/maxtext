@@ -236,8 +236,8 @@ def _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs):
 
   # Find the longest common prefix where prompt ends and completion begins
   common_len = 0
-  for fid, pid in zip(full_tokens, prompt_tokens):
-    if fid == pid:
+  for full_id, prompt_id in zip(full_tokens, prompt_tokens):
+    if full_id == prompt_id:
       common_len += 1
     else:
       break
