@@ -180,10 +180,7 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
         "unscanned format before loading with vLLM (vllm.yml sets scan_layers=False)."
     )
   if len(ckpt_shape) == 2 and ckpt_shape == model_shape[::-1]:
-    ckpt_arr = jnp.transpose(ckpt_arr)
-    ckpt_shape = ckpt_arr.shape
-    if ckpt_shape == model_shape:
-      return jax.device_put(ckpt_arr, model_arr.sharding)
+    return jax.device_put(jnp.transpose(ckpt_arr), model_arr.sharding)
 
   axes = _normalize_logical_axes(logical_axes)
   if axes is None or len(axes) != len(model_shape):
