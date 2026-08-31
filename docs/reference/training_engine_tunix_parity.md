@@ -15,16 +15,17 @@ of the trainer, not of the workload.
 | Numerical parity, `gradient_accumulation_steps=1`  | **Equivalent.** Identical loss; gradients agree to `rel_l2` 3.0e-4             |
 | Numerical parity, GA > 1 with ragged micro-batches | **Diverge.** `rel_l2` 0.68. MaxText matches the exact gradient; Tunix does not |
 | Step time, GA=1, 16 tokens                         | MaxText **34.7 ms** vs. Tunix 64.0 ms (**1.85x**)                              |
-| Step time, GA=1, 1024 tokens                       | MaxText **59.7 ms** vs. Tunix 74.7 ms (**1.25x**)                              |
+| Step time, GA=1, 8192 tokens                       | MaxText 479.6 ms vs. Tunix 493.2 ms (**1.03x — parity**)                       |
 | TPU-busy time/step, GA=1, 1024 tokens              | MaxText **44.3 ms** vs. Tunix 63.7 ms (**1.44x**)                              |
 | `update()` alone                                   | Tunix **8.2 ms** vs. MaxText 14.0 ms — the one phase Tunix wins                |
 | Peak HBM/device, GA=1                              | MaxText **1.78 GiB** vs. Tunix 8.65 GiB (**4.9x**)                             |
 | Metrics recorded per step                          | MaxText **22** vs. Tunix 2                                                     |
 
-MaxText's lead comes entirely from `fwd_bwd` and it **shrinks as the workload grows** —
-2.75x at 16 tokens, 1.46x at 1024. The gap is a fixed ~13 GiB of extra memory traffic in
-Tunix's kernel, so it is a constant that real workloads amortize. Do not quote the
-small-shape numbers as a general result.
+**On step time alone the two trainers are equivalent at production sequence lengths.**
+MaxText's lead is a short-sequence effect that amortizes away completely: 1.85x at 16
+tokens, 1.21x at 2048, **1.03x at 8192** (§4). Do not quote the small-shape numbers as a
+general result. The HBM difference, by contrast, is flat in sequence length and does not
+amortize.
 
 ## Environment
 
@@ -152,14 +153,22 @@ profiler attached. `fwd_bwd` is per micro-step, `total` is a whole update.
 | ----------- | ----------------- | ---------------- | ------------- | --------------- | -------------- | ----------- | --------- |
 | 16 tokens   | 20.4 ms           | 14.3 ms          | **34.7 ms**   | 56.0 ms         | 8.0 ms         | 64.0 ms     | **1.85x** |
 | 1024 tokens | 45.6 ms           | 14.0 ms          | **59.7 ms**   | 66.5 ms         | 8.2 ms         | 74.7 ms     | **1.25x** |
+| 2048 tokens | 70.3 ms           | 14.0 ms          | **84.5 ms**   | 93.8 ms         | 8.2 ms         | 102.1 ms    | **1.21x** |
+| 4096 tokens | 175.1 ms          | 13.9 ms          | **189.1 ms**  | 195.1 ms        | 8.7 ms         | 203.9 ms    | **1.08x** |
+| 8192 tokens | 465.0 ms          | 14.4 ms          | **479.6 ms**  | 484.8 ms        | 8.3 ms         | 493.2 ms    | **1.03x** |
 
-`fwd_bwd` alone goes 2.75x → 1.46x between the two shapes. Tunix's kernel carries a roughly
-constant ~13 GiB of extra memory traffic (§6), so the absolute penalty barely moves while
-the useful work grows — which is exactly why the ratio collapses. **At production sequence
-lengths, expect the two `fwd_bwd` implementations to converge further.**
+**The step-time advantage amortizes away.** `fwd_bwd` goes 2.75x → 1.46x → 1.34x → 1.11x →
+1.04x across the sweep. At 8192 tokens the two trainers are within run-to-run noise of each
+other, so **step time is not a reason to prefer either.** The peak-HBM difference (§5) is
+flat in sequence length and does *not* amortize; that is the durable one.
 
-`update` is the one phase Tunix wins, by ~6 ms, at both shapes. Breaking MaxText's 14.0 ms
-down:
+The small-shape gap is Tunix's replicated gradient tree — roughly constant extra memory
+traffic against a workload that grows. It does not survive: by 4096 tokens the two kernels
+access the same bytes and by 8192 MaxText accesses *more* (§6), yet the times have already
+converged, because both are compute-bound by then.
+
+`update` is the one phase Tunix wins, by ~6 ms, and it is flat in sequence length — so it
+matters at 16 tokens and is a rounding error at 8192. Breaking MaxText's 14.0 ms down:
 
 | MaxText `update()` at 1024 tokens |         |
 | --------------------------------- | ------- |
@@ -238,10 +247,14 @@ Measured one trainer per process.
 | ---------------------------------- | ------------- | --------- |
 | Peak HBM/device, GA=1, 16 tokens   | **1.766 GiB** | 8.636 GiB |
 | Peak HBM/device, GA=1, 1024 tokens | **1.782 GiB** | 8.648 GiB |
+| Peak HBM/device, GA=1, 2048 tokens | **1.787 GiB** | 8.653 GiB |
+| Peak HBM/device, GA=1, 4096 tokens | **1.787 GiB** | 8.652 GiB |
+| Peak HBM/device, GA=1, 8192 tokens | **1.791 GiB** | 8.642 GiB |
 | Peak HBM/device, GA=2, 1024 tokens | **1.807 GiB** | 4.790 GiB |
 
-MaxText's footprint is flat in sequence length at this size; Tunix's is dominated by the
-replicated gradient tree, which is also flat. The 64x sequence increase moves neither.
+Both footprints are flat in sequence length — a 512x increase moves neither, because both
+are dominated by parameters and optimizer state, and Tunix's additionally by the replicated
+gradient tree. **Unlike the step-time gap (§4), this one does not amortize.**
 
 Gradient-tree placement explains it:
 
@@ -275,15 +288,22 @@ From `Compiled.cost_analysis()` / `memory_analysis()` on the `fwd_bwd` executabl
 | Bare-executable time | 19.4 ms             | 56.6 ms       | 43.9 ms               | 67.5 ms         |
 
 Both trainers issue the same arithmetic — at 1024 tokens 1080.7 vs. 1082.4 GFLOP, a 0.2%
-difference. Tunix moves **+14.7 GiB** at 16 tokens and **+13.1 GiB** at 1024: a constant,
-matching the replicated gradient tree that has to be written and read regardless of
-sequence length. That constant is the entire step-time gap, and it is why the gap is 2.9x
-at the small shape and 1.5x at the large one.
+difference. What differs at small shapes is memory traffic, and Tunix's excess is roughly
+constant, matching the replicated gradient tree it writes and reads regardless of sequence
+length:
 
-Neither kernel is at roofline here — 1080 GFLOP in 43.9 ms is ~25 TFLOP/s across 8 devices,
-and 9.58 GiB in 43.9 ms is ~220 GiB/s — so these numbers characterize kernel *structure* on
-a 0.6B f32 model, not achievable throughput. Treat the ratios as an upper bound on what a
-production-shaped workload would show.
+| Tunix bytes accessed − MaxText | 16 tok        | 1024 tok  | 2048 tok  | 4096 tok | 8192 tok      |
+| ------------------------------ | ------------- | --------- | --------- | -------- | ------------- |
+|                                | **+14.7 GiB** | +13.1 GiB | +13.0 GiB | −0.7 GiB | **−12.4 GiB** |
+
+The constant explains the small-shape gap and its collapse. It does not explain the large
+shapes: by 4096 tokens the two kernels access the same bytes and by 8192 **MaxText accesses
+more** (72.3 vs. 59.9 GiB), yet MaxText is still marginally ahead on wall clock. Both are
+compute-bound there, and the arithmetic is the same, so the times converge.
+
+Neither kernel is at roofline at the small shapes — 1080 GFLOP in 43.9 ms is ~25 TFLOP/s
+across 8 devices — so those numbers characterize kernel *structure* on a 0.6B f32 model
+rather than achievable throughput. The 8192-token point is the one to generalize from.
 
 The GA=1 and GA=2 columns are byte-identical (22.72 vs. 22.67 GiB), confirming the
 accumulator's sharding never reaches the kernel signature.
