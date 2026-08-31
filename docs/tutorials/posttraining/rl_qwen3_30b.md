@@ -72,7 +72,7 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ### Option 2: Converting from a Hugging Face checkpoint
 
-Refer to [Hugging Face to MaxText](hf-to-maxtext) to convert a Hugging Face checkpoint to MaxText format. You can find an example script to convert `qwen3-30b-a3b-base`model to MaxText format [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/30b/test_qwen3_to_mt.sh). After conversion finishes, set `MAXTEXT_CKPT_PATH` to the converted MaxText checkpoint path.
+Refer to [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a Hugging Face checkpoint to MaxText format. You can find an example script to convert `qwen3-30b-a3b-base`model to MaxText format [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/30b/test_qwen3_to_mt.sh). After conversion finishes, set `MAXTEXT_CKPT_PATH` to the converted MaxText checkpoint path.
 
 ```bash
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
@@ -84,7 +84,7 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ### Build and Upload MaxText Docker Image
 
-For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext.md).
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../build_maxtext.md).
 
 ### Submit your workload
 
@@ -135,4 +135,4 @@ For a complete list of collected metrics, see the [Tunix Metrics Documentation](
 
 ## Convert Checkpoint to Hugging Face Format
 
-Refer to [MaxText to Hugging Face](maxtext-to-hf) to convert a MaxText checkpoint back to Hugging Face format. You can find an example script to convert `qwen3-30b-a3b-base`model to Hugging Face format [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/30b/test_qwen3_to_hf.sh).
+Refer to [MaxText to Hugging Face](../../guides/checkpointing_solutions/convert_checkpoint.md#maxtext-to-hugging-face) to convert a MaxText checkpoint back to Hugging Face format. You can find an example script to convert `qwen3-30b-a3b-base`model to Hugging Face format [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/30b/test_qwen3_to_hf.sh).

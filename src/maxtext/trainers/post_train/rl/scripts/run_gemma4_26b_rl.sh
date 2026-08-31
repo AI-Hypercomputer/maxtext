@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This script launches a Reinforcement Learning (RL) training workload for the
-# gemma4-e4b model on a GKE cluster using XPK.
+# gemma4-26b model on a GKE cluster using XPK.
 
 set -e
 
@@ -13,20 +13,20 @@ if ! pip show xpk &> /dev/null; then
 fi
 
 # --- Environment Variables ---
-export PROJECT_ID="${PROJECT_ID:-}" # GCP project ID where the v6e cluster is deployed
-export CLUSTER_NAME="${CLUSTER_NAME:-}" # Name of your v6e (Trillium) cluster
-export ZONE="${ZONE:-}" # Zone where your v6e cluster is deployed
+export PROJECT_ID="${PROJECT_ID:-}" # GCP project ID where the v7x cluster is deployed
+export CLUSTER_NAME="${CLUSTER_NAME:-}" # Name of your v7x (Ironwood) cluster
+export ZONE="${ZONE:-}" # Zone where your v7x cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-}" # GCS bucket path for outputs (e.g., gs://my-bucket/outputs)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-}" # GCS path of the MaxText checkpoint you want to fine-tune from (e.g., gs://my-bucket/checkpoints/maxtext-ckpt)
-export TPU_TYPE="v6e-32"
+export TPU_TYPE="tpu7x-4x4x4" # v7x (Ironwood) 4x4x4 = 64-chip slice (tpu7x-standard-4t, 4 chips/VM)
 export WORKLOAD_NAME="rl-$(date +%Y%m%d-%H%M)"
 
 # Pathways component images, pinned to specific versions (mirrors the reference config).
 # Note: --server-image is used for BOTH the Pathways resource-manager server and the
 # workers; in the reference config the worker and pathwaysServer images are identical.
-export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:d03068b39a8a2fab0621086ccb7c9445ce17ad34f1520159ca4ecd395346a162"
-export PATHWAYS_PROXY_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@sha256:6342a3cae2818d2f887d396e9ae4156b3316f79fef186d71ff16d535b44e1724"
+export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:6f5031086c3d603f275763c933e85e587e9332be1642fff515e9ecb52374950b"
+export PATHWAYS_PROXY_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@sha256:8ffcc48a7bbd093a9071e0842ed7055d09d140d75f2b6c0a98bdb76cac77c44e"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
@@ -55,7 +55,7 @@ if [ -z "$MAXTEXT_CKPT_PATH" ]; then
     exit 1
 fi
 
-# XLA Flags (tuned for v6e / Trillium)
+# XLA Flags (tuned for v7x / Ironwood)
 XLA_FLAGS="--xla_tpu_scoped_vmem_limit_kib=65536 \
 --xla_tpu_bf16_emission_mode=NATIVE_EMISSION \
 --xla_tpu_enable_sparse_core_reduce_scatter_v2=true \
@@ -92,9 +92,9 @@ VLLM_ENGINE_READY_TIMEOUT_S=7200 \
 RPA_D_BLOCK_SIZES=1,1024,1,512 \
 TOKENIZERS_PARALLELISM=False \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
-model_name=gemma4-e4b \
+model_name=gemma4-26b \
 tokenizer_type=huggingface \
-tokenizer_path=google/gemma-4-E4B \
+tokenizer_path=google/gemma-4-26B-A4B \
 run_name=$WORKLOAD_NAME \
 async_scheduling=True \
 base_output_directory=$BASE_OUTPUT_DIRECTORY \
@@ -112,8 +112,8 @@ sa_use_fused_bwd_kernel=True \
 sa_block_q=1024 \
 sa_block_kv=1024 \
 sa_block_kv_compute=512 \
-sa_block_q_dkv=1024 \
-sa_block_kv_dkv=1024 \
+sa_block_q_dkv=2048 \
+sa_block_kv_dkv=2048 \
 sa_block_kv_dkv_compute=256 \
 mu_dtype=bfloat16 \
 grad_dtype=bfloat16 \
@@ -122,7 +122,6 @@ batch_size=128 \
 num_batches=500 \
 learning_rate_schedule_steps=500 \
 num_test_batches=5 \
-eval_interval=100 \
 rl.num_generations=8 \
 rl.num_iterations=1 \
 rl.grpo_beta=0.05 \
@@ -140,28 +139,27 @@ eval_dataset_name=nvidia/OpenMathInstruct-2 \
 eval_split=test \
 learning_rate=1e-6 \
 max_prefill_predict_length=512 \
-max_target_length=4096 \
+max_target_length=8192 \
 kv_cache_buffer=512 \
-max_num_seqs=16 \
-max_num_batched_tokens=2048 \
+max_num_seqs=256 \
+max_num_batched_tokens=8192 \
 rollout_data_parallelism=8 \
-rollout_tensor_parallelism=2 \
-rollout_expert_parallelism=1 \
-rl.reshard_chunk_size=420 \
-enable_dp_attention=True \
-hbm_utilization_vllm=0.5 \
+rollout_tensor_parallelism=1 \
+rollout_expert_parallelism=8 \
+rl.reshard_chunk_size=50 \
+enable_dp_attention=False \
+hbm_utilization_vllm=0.8 \
 scan_layers=False \
 allow_split_physical_axes=True \
 enable_tunix_perf_metrics=True \
 checkpoint_period=25 \
 max_num_checkpoints_to_keep=30 \
 enable_checkpointing=True \
-train_micro_batch_size=1 \
-rollout_micro_batch_size=16 \
-ici_tensor_parallelism=2 \
+train_micro_batch_size=8 \
+rollout_micro_batch_size=128 \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
 vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
-vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"gemma4-e4b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": true, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
+vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"gemma4-26b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
 # Workload Creation
 xpk workload create-pathways \
