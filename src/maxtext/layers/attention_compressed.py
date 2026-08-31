@@ -686,7 +686,7 @@ class DeepseekV4Indexer(nnx.Module):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
       quant: Optional[Quant] = None,
       rngs: Optional[nnx.Rngs] = None,
   ):
@@ -945,7 +945,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
