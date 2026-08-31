@@ -14,6 +14,7 @@
 
 import os
 import unittest
+from absl.testing import parameterized
 import numpy as np
 import pytest
 from transformers import AutoTokenizer
@@ -26,7 +27,7 @@ GEMMA4_TOKENIZER_PATH = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "gemma4-
 
 
 @pytest.mark.external_training
-class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
+class ChatTemplateGemma4ThinkingTest(parameterized.TestCase):
   """Tests chat template formatting and thinking channel boundaries for Gemma 4."""
 
   @classmethod
@@ -79,8 +80,13 @@ class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
     # Verify no premature <channel|> tag in the prompt
     self.assertNotIn("<channel|>", prompt_seg)
 
-  def test_single_turn_without_thinking(self):
-    """Verifies standard conversational turn without reasoning field."""
+  @parameterized.named_parameters(
+      ("absent_reasoning_field", "OMITTED"),
+      ("empty_string_reasoning", ""),
+      ("none_reasoning", None),
+  )
+  def test_turn_without_thinking(self, reasoning_val):
+    """Verifies that omitted, empty string, or None reasoning produces clean output without thought tags."""
     sample = {
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -88,6 +94,8 @@ class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
             {"role": "assistant", "content": "The capital of France is Paris."},
         ]
     }
+    if reasoning_val != "OMITTED":
+      sample["messages"][2]["reasoning"] = reasoning_val
 
     true_full_str = self.tokenizer.apply_chat_template(sample["messages"], add_generation_prompt=False, tokenize=False)
 
@@ -112,33 +120,8 @@ class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
     self.assertNotIn("<channel|>", prompt_seg)
     self.assertNotIn("<|channel>", completion_seg)
     self.assertNotIn("<channel|>", completion_seg)
-
-  def test_absent_reasoning_field_does_not_add_thought_channel_tags(self):
-    """Explicitly verifies that when the reasoning field is not present, no thought tags are added."""
-    sample = {
-        "messages": [
-            {"role": "user", "content": "Calculate 2 + 2"},
-            {"role": "assistant", "content": "4"},
-        ]
-    }
-
-    processed = input_pipeline_utils.apply_chat_template(
-        example={"messages": list(sample["messages"])},
-        tokenizer_model=self.tokenizer,
-        data_column_name="messages",
-    )
-
-    prompt_seg = processed["messages"][0]
-    completion_seg = processed["messages"][1]
-
-    # Prompt must end at model turn boundary without entering thought channel
-    self.assertEqual(prompt_seg, "<bos><|turn>user\nCalculate 2 + 2<turn|>\n<|turn>model\n")
-    self.assertEqual(completion_seg, "4<turn|>\n")
-
-    self.assertNotIn("<|channel>", prompt_seg)
-    self.assertNotIn("<channel|>", prompt_seg)
-    self.assertNotIn("<|channel>", completion_seg)
-    self.assertNotIn("<channel|>", completion_seg)
+    self.assertNotIn("thought", prompt_seg)
+    self.assertNotIn("thought", completion_seg)
 
   def test_multi_turn_with_thinking(self):
     """Verifies multi-turn conversation with independent turn formatting."""
@@ -197,44 +180,6 @@ class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
     self.assertEqual(processed["is_prompt"], [True, False])
     self.assertEqual(processed["messages"][0] + processed["messages"][1], true_full_str)
 
-  def test_empty_or_none_reasoning(self):
-    """Verifies that empty string or None reasoning behaves like non-thinking without injecting thought tags."""
-    for reasoning_val in ["", None]:
-      sample = {
-          "messages": [
-              {"role": "user", "content": "Hi"},
-              {"role": "assistant", "reasoning": reasoning_val, "content": "Hello!"},
-          ]
-      }
-      if reasoning_val is None:
-        del sample["messages"][1]["reasoning"]
-
-      true_full_str = self.tokenizer.apply_chat_template(sample["messages"], add_generation_prompt=False, tokenize=False)
-
-      processed = input_pipeline_utils.apply_chat_template(
-          example={"messages": list(sample["messages"])},
-          tokenizer_model=self.tokenizer,
-          data_column_name="messages",
-      )
-
-      self.assertEqual(len(processed["messages"]), 2)
-      self.assertEqual(processed["is_prompt"], [True, False])
-
-      prompt_seg = processed["messages"][0]
-      completion_seg = processed["messages"][1]
-
-      self.assertEqual(prompt_seg + completion_seg, true_full_str)
-      self.assertTrue(prompt_seg.endswith("<|turn>model\n"))
-      self.assertEqual(completion_seg, "Hello!<turn|>\n")
-
-      # Explicitly verify no thought tags exist in prompt or completion
-      self.assertNotIn("<|channel>", prompt_seg)
-      self.assertNotIn("<channel|>", prompt_seg)
-      self.assertNotIn("<|channel>", completion_seg)
-      self.assertNotIn("<channel|>", completion_seg)
-      self.assertNotIn("thought", prompt_seg)
-      self.assertNotIn("thought", completion_seg)
-
   def test_invalid_system_message_position(self):
     """Verifies that system message not at index 0 raises ValueError."""
     sample = {
@@ -254,7 +199,7 @@ class ChatTemplateGemma4ThinkingTest(unittest.TestCase):
 
 
 @pytest.mark.external_training
-class SFTPromptMaskingEdgeCasesTest(unittest.TestCase):
+class SFTPromptMaskingEdgeCasesTest(parameterized.TestCase):
   """Tests end-to-end tokenization and loss masking behavior."""
 
   @classmethod
@@ -350,8 +295,16 @@ class SFTPromptMaskingEdgeCasesTest(unittest.TestCase):
         unk_id=self.unk_id,
     )
 
-  def test_sft_prompt_masking_without_reasoning(self):
-    """Ensures that for conversations without reasoning, no thought tags exist and targets only contain the plain completion."""
+    sft_out = masker.map(tok_example)
+    np.testing.assert_array_equal(sft_out["inputs"], sft_out["targets"])
+
+  @parameterized.named_parameters(
+      ("omitted_reasoning_field", "OMITTED"),
+      ("empty_string_reasoning", ""),
+      ("none_reasoning", None),
+  )
+  def test_sft_prompt_masking_non_thinking(self, reasoning_val):
+    """Ensures that for non-thinking conversations, no thought tags exist and targets only contain plain completion."""
     sample = {
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -359,6 +312,8 @@ class SFTPromptMaskingEdgeCasesTest(unittest.TestCase):
             {"role": "assistant", "content": "The capital of France is Paris."},
         ]
     }
+    if reasoning_val != "OMITTED":
+      sample["messages"][2]["reasoning"] = reasoning_val
 
     processed = input_pipeline_utils.apply_chat_template(
         example={"messages": sample["messages"]},
@@ -400,53 +355,6 @@ class SFTPromptMaskingEdgeCasesTest(unittest.TestCase):
     self.assertNotIn("<channel|>", trained_text)
     self.assertNotIn("thought", trained_text)
 
-  def test_sft_prompt_masking_empty_reasoning(self):
-    """Ensures that when reasoning field is present but empty (''), no thought tags are added and targets only contain completion."""
-    sample = {
-        "messages": [
-            {"role": "user", "content": "What is the capital of Japan?"},
-            {"role": "assistant", "reasoning": "", "content": "Tokyo"},
-        ]
-    }
-
-    processed = input_pipeline_utils.apply_chat_template(
-        example={"messages": sample["messages"]},
-        tokenizer_model=self.tokenizer,
-        data_column_name="messages",
-    )
-
-    tok_example = input_pipeline_utils.tokenization(
-        example=processed,
-        hf_tokenizer=self.tokenizer,
-        truncation=False,
-        max_length=4096,
-        column_names=["messages"],
-    )
-
-    masker = input_pipeline_utils.SFTPromptMasking(
-        text_column_name="messages",
-        completion_only=True,
-        max_target_length=4096,
-        unk_id=self.unk_id,
-    )
-
-    sft_out = masker.map(tok_example)
-    inputs = sft_out["inputs"]
-    targets = sft_out["targets"]
-
-    self.assertEqual(len(inputs), len(targets))
-
-    prompt_len = len(tok_example["messages"][0])
-    for i in range(prompt_len):
-      self.assertEqual(targets[i], self.unk_id)
-
-    trained_ids = [int(t) for t in targets if t != self.unk_id]
-    trained_text = self.tokenizer.decode(trained_ids)
-    self.assertEqual(trained_text, "Tokyo<turn|>\n")
-    self.assertNotIn("<|channel>", trained_text)
-    self.assertNotIn("<channel|>", trained_text)
-    self.assertNotIn("thought", trained_text)
-
 
 if __name__ == "__main__":
-  unittest.main()
+  parameterized.absltest.main()
