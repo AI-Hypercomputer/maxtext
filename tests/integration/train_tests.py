@@ -166,6 +166,31 @@ class TrainTests(unittest.TestCase):
       rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
   ]
 
+  _llama4_overrides = [
+      "model_name=llama4-17b-16e",
+      "override_model_config=True",
+      # Four layers with a MoE step of 2 covers every Llama4 layer variant exactly once:
+      # chunked+dense, chunked+MoE, chunked+dense and global (NoPE) + MoE. The NoPE
+      # interval and the layer cycle interval are both 4 in the model config already.
+      "base_num_decoder_layers=4",
+      "interleave_moe_layer_step=2",
+      "base_emb_dim=256",
+      "base_mlp_dim=512",
+      "base_moe_mlp_dim=256",
+      "base_num_query_heads=8",
+      "base_num_kv_heads=8",
+      "num_experts=8",
+      "vocab_size=2048",
+      "max_target_length=256",
+      # Keep the chunked attention window under the sequence length so the chunk mask
+      # is actually exercised rather than degenerating into full attention.
+      "chunk_attn_window_size=128",
+      # The Llama4 model configs default to a HuggingFace tokenizer that is not
+      # vendored in the repo; use the checked-in tiktoken asset instead.
+      "tokenizer_type=tiktoken",
+      rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+  ]
+
   # Kimi-K2 runs on the deepseek decoder block, so this is the explicit-sharding coverage
   # for MLA attention and for the shared-expert, sigmoid-routed MoE. Keeping
   # first_num_dense_layers=1 below four layers leaves one dense and three MoE layers, so
@@ -982,6 +1007,37 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  def test_tpu_llama4_explicit_sharding_matches_auto(self):
+    """Explicit sharding only changes how layouts are expressed, so the losses must not move.
+
+    A Llama4 model interleaves dense and MoE layers, so it is run under both of the
+    parallelisms that stress them: tensor parallelism shards the dense MLP
+    intermediate, and expert parallelism shards the MoE dispatch.
+    """
+    parallelism = {
+        "tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
+        "expert": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
+    }
+    # Under tensor parallelism the two modes are bit-for-bit. Under expert parallelism
+    # pinning the activations reassociates the reductions inside the MoE block, so the
+    # loss drifts by a few ULPs by the third step. The drift is ~5e-7 at this size but
+    # grows with the expert dimensions, so leave the bound loose.
+    rtol = {"tensor": 1e-6, "expert": 1e-4}
+    for name, parallelism_args in parallelism.items():
+      with self.subTest(parallelism=name):
+        auto_losses = self._losses(
+            f"llama4_{name}_auto", self._llama4_overrides, parallelism_args + ["shard_mode=auto"]
+        )
+        explicit_losses = self._losses(
+            f"llama4_{name}_explicit", self._llama4_overrides, parallelism_args + ["shard_mode=explicit"]
+        )
+        print(f"[llama4/{name}] auto losses: {auto_losses}", flush=True)
+        print(f"[llama4/{name}] explicit losses: {explicit_losses}", flush=True)
+        self.assertTrue(auto_losses, "auto run produced no metrics")
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=rtol[name], atol=0.0)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
   # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
   @pytest.mark.skip_on_tpu7x
   def test_tpu_qwen2_kimi_zero1_gradient_accumulation(self):
@@ -1018,6 +1074,39 @@ class TrainTests(unittest.TestCase):
         self.assertTrue(baseline, "baseline run produced no metrics")
         # ZeRO-1 reassociates the gradient all-reduce, so allow a little float slack.
         np.testing.assert_allclose(sharded, baseline, rtol=1e-4, atol=0.0)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
+  @pytest.mark.skip_on_tpu7x
+  def test_tpu_llama4_zero1_gradient_accumulation(self):
+    """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
+
+    Under explicit sharding this routes the accumulated gradients through the
+    `reduced`/`unreduced` PartitionSpec labels applied in
+    `maxtext.utils.gradient_accumulation`, and casts the parameters to bf16 before the
+    accumulation scan so the all-gather happens once in low precision.
+    """
+    zero1_ga = [
+        "remat_policy=minimal",
+        "per_device_batch_size=2",
+        "ici_data_parallelism=-1",
+        "dcn_data_parallelism=1",
+        "ici_fsdp_parallelism=1",
+        "dcn_fsdp_parallelism=1",
+        "gradient_accumulation_steps=8",
+    ]
+    baseline = self._losses(
+        "llama4_ga", self._llama4_overrides, zero1_ga + ["shard_mode=auto", "shard_optimizer_over_data=False"]
+    )
+    sharded = self._losses(
+        "llama4_ga_zero1", self._llama4_overrides, zero1_ga + ["shard_mode=explicit", "shard_optimizer_over_data=True"]
+    )
+    print(f"[llama4] auto + GA losses: {baseline}", flush=True)
+    print(f"[llama4] explicit + ZeRO-1 + GA losses: {sharded}", flush=True)
+    self.assertTrue(baseline, "baseline run produced no metrics")
+    # ZeRO-1 reassociates the gradient all-reduce, so allow a little float slack.
+    np.testing.assert_allclose(sharded, baseline, rtol=1e-4, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only

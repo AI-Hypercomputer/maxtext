@@ -694,14 +694,22 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     # Shift the inputs left and right as per LLaMA's specific behavior
     inputs_shifted_left = jnp.concatenate([inputs[..., 1:], inputs[..., :1]], axis=-1)
     inputs_shifted_right = jnp.concatenate([inputs[..., -1:], inputs[..., :-1]], axis=-1)
-    inputs_shifted = jax.lax.select(
-        jnp.tile(
-            jnp.mod(jnp.arange(self.embedding_dims, dtype=jnp.int32), 2),
-            inputs.shape[:-1] + (1,),
-        ),
-        inputs_shifted_right,
-        inputs_shifted_left,
-    )
+    # `lax.select` requires the predicate to match the cases in shape and, under
+    # ShardMode.EXPLICIT, in sharding too. Tiling the 1-D mask to the full input shape yields a
+    # replicated [B, S, N, H] predicate, which is rejected once the inputs are sharded.
+    # Broadcasting the 1-D mask through `jnp.where` selects exactly the same elements -- verified
+    # bit-for-bit in both the forward pass and the gradient -- and carries no sharding of its own.
+    # It is used only under explicit sharding so that ShardMode.AUTO keeps the XLA fusion, and
+    # hence the exact floating-point rounding, it has today.
+    is_odd_dim = jnp.mod(jnp.arange(self.embedding_dims, dtype=jnp.int32), 2)
+    if self.shard_mode == ShardMode.EXPLICIT:
+      inputs_shifted = jnp.where(is_odd_dim.astype(bool), inputs_shifted_right, inputs_shifted_left)
+    else:
+      inputs_shifted = jax.lax.select(
+          jnp.tile(is_odd_dim, inputs.shape[:-1] + (1,)),
+          inputs_shifted_right,
+          inputs_shifted_left,
+      )
 
     # Determine positions if not provided
     if position is None:
