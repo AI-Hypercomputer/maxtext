@@ -43,8 +43,16 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
     with timer("Convert MoE Weights"):
       self._convert_moe(model_state)
 
-    # Protect JAX compilation by enforcing bfloat16
-    self.vllm_state = {key: weight.astype(jnp.bfloat16) for key, weight in self.vllm_state.items()}
+    # Protect JAX compilation by enforcing bfloat16 -- except A_log, which
+    # vLLM's GDN module keeps in float32: the short conv history is bf16, but
+    # the recurrent state it gates is accumulated in fp32 (see PR #4770's
+    # hybrid_cache_utils.py). MaxText itself stores A_log in weight_dtype
+    # (bf16 here), so this needs an explicit upcast, not just "skip the
+    # downcast" -- leaving it alone would keep it at bf16, not fix it.
+    self.vllm_state = {
+        key: (weight.astype(jnp.float32) if key.endswith(".A_log") else weight.astype(jnp.bfloat16))
+        for key, weight in self.vllm_state.items()
+    }
 
     return self.vllm_state
 
@@ -109,8 +117,15 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
               jnp.concatenate([q_tp_shards[t], k_tp_shards[t], v_tp_shards[t]], axis=0) for t in range(tp_size)
           ]
 
-          self.vllm_state[f"{prefix}.self_attn.qkv_proj.weight"] = jnp.concatenate(tp_interleaved, axis=0)
-          self.vllm_state[f"{prefix}.self_attn.o_proj.weight"] = jnp.transpose(o_layers[rep], (1, 0))
+          # Same (in_features, out_features) convention as the GDN weights
+          # below: vLLM's linear kernel computes `x @ w` directly, so qkv_proj
+          # needs the opposite transpose from PyTorch's (out, in) nn.Linear
+          # convention, while o_proj (unlike qkv_proj) already comes out of
+          # MaxText's DenseGeneral in (in, out) order and needs none.
+          self.vllm_state[f"{prefix}.self_attn.qkv_proj.weight"] = jnp.transpose(
+              jnp.concatenate(tp_interleaved, axis=0), (1, 0)
+          )
+          self.vllm_state[f"{prefix}.self_attn.o_proj.weight"] = o_layers[rep]
           self.vllm_state[f"{prefix}.self_attn.q_norm.weight"] = qnorm_layers[rep]
           self.vllm_state[f"{prefix}.self_attn.k_norm.weight"] = knorm_layers[rep]
 
@@ -157,7 +172,12 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
           qkvz_interleaved = [
               jnp.concatenate([q_shards[s], k_shards[s], v_shards[s], z_shards[s]], axis=0) for s in range(tp_size)
           ]
-          self.vllm_state[f"{prefix}.linear_attn.in_proj_qkvz.weight"] = jnp.concatenate(qkvz_interleaved, axis=0)
+          # vLLM's GDN kernel stores this weight as (in_features, out_features)
+          # -- unlike the (out, in) convention used by the full-attention
+          # qkv_proj/o_proj above -- so it needs the opposite transpose.
+          self.vllm_state[f"{prefix}.linear_attn.in_proj_qkvz.weight"] = jnp.transpose(
+              jnp.concatenate(qkvz_interleaved, axis=0), (1, 0)
+          )
 
           # Extract MaxText GDN BA Layout
           t_m_ba = jnp.transpose(ba_layers[rep], (1, 0))
@@ -171,9 +191,15 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
           a_shards = jnp.split(a, tp_size, axis=0)
 
           ba_interleaved = [jnp.concatenate([b_shards[s], a_shards[s]], axis=0) for s in range(tp_size)]
-          self.vllm_state[f"{prefix}.linear_attn.in_proj_ba.weight"] = jnp.concatenate(ba_interleaved, axis=0)
+          self.vllm_state[f"{prefix}.linear_attn.in_proj_ba.weight"] = jnp.transpose(
+              jnp.concatenate(ba_interleaved, axis=0), (1, 0)
+          )
 
-          self.vllm_state[f"{prefix}.linear_attn.out_proj.weight"] = jnp.transpose(out_layers[rep], (1, 0))
+          # out_layers[rep] already comes out of MaxText's DenseGeneral in
+          # (in_features, out_features) order -- vLLM's GDN out_proj wants
+          # exactly that, so (unlike the full-attention o_proj above) no
+          # transpose here.
+          self.vllm_state[f"{prefix}.linear_attn.out_proj.weight"] = out_layers[rep]
           self.vllm_state[f"{prefix}.linear_attn.conv1d.weight"] = jnp.transpose(conv_layers[rep], (2, 1, 0))
           self.vllm_state[f"{prefix}.linear_attn.A_log"] = A_log_layers[rep]
           self.vllm_state[f"{prefix}.linear_attn.dt_bias"] = dt_bias_layers[rep]
@@ -248,8 +274,13 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
         p = f"vllm_model.language_model.model.layers.{i}"
 
         self.vllm_state[f"{p}.mlp.gate.weight"] = router_weights[rep]
-        self.vllm_state[f"{p}.mlp.experts.w13_weight"] = w13_layers[rep]
-        self.vllm_state[f"{p}.mlp.experts.w2_weight"] = down_layers[rep]
+        # vLLM nests the routed-expert weights one level deeper than the
+        # router (`mlp.experts.routed_experts.*`, not `mlp.experts.*`) --
+        # missing that segment means these never match spec_flat during
+        # sync, so the routed experts (the bulk of a MoE model's params)
+        # silently stay at their random dummy-init value.
+        self.vllm_state[f"{p}.mlp.experts.routed_experts.w13_weight"] = w13_layers[rep]
+        self.vllm_state[f"{p}.mlp.experts.routed_experts.w2_weight"] = down_layers[rep]
 
         if has_shared:
           sh_g, sh_u = sh_gate_layers[rep], sh_up_layers[rep]
@@ -263,8 +294,10 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
               axis=1,
           ).reshape(-1, sh_g.shape[1])
 
-          self.vllm_state[f"{p}.mlp.shared_expert.gate_up_proj.weight"] = shared_gate_up
-          self.vllm_state[f"{p}.mlp.shared_expert.down_proj.weight"] = sh_down_layers[rep]
+          # Same (in_features, out_features) convention as the GDN in_proj/out_proj
+          # weights above -- neither of these was transposed into it yet.
+          self.vllm_state[f"{p}.mlp.shared_expert.gate_up_proj.weight"] = jnp.transpose(shared_gate_up, (1, 0))
+          self.vllm_state[f"{p}.mlp.shared_expert.down_proj.weight"] = jnp.transpose(sh_down_layers[rep], (1, 0))
 
           if "shared_expert_gate" in mlp_block:
             self.vllm_state[f"{p}.mlp.shared_expert_gate.weight"] = sh_gate_router_layers[rep]
