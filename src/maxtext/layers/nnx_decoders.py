@@ -38,7 +38,7 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.configs.types import check_forced_routing_support
-from maxtext.layers import initializers, linears, mhc, moe, normalizations, quantizations
+from maxtext.layers import linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -2574,25 +2574,3 @@ class NNXDecoder(nnx.Module):
           _add(m)
 
     return layers
-
-
-def decoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-    rngs: nnx.Rngs,
-    model_mode: str,
-    quant: None | Quant = None,
-):
-  """Creates a Decoder module"""
-  module = nnx_wrappers.to_linen(
-      NNXDecoder,
-      config=config,
-      mesh=mesh,
-      model_mode=model_mode,
-      rngs=rngs,
-      quant=quant,
-      name="decoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module
