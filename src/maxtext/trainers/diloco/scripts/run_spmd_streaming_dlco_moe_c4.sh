@@ -103,6 +103,8 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && unset XLA_FLAGS && export LIBTPU
              run_name=${RUNNAME} \
              save_config_to_gcs=true \
              base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+             dataset_type=grain \
+             grain_file_type=tfrecord \
              dataset_path=${DATASET_PATH} \
              dataset_name='c4/en:3.0.1' \
              eval_dataset_name='c4/en:3.0.1' \

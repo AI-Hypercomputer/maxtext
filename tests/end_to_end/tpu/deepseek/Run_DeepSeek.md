@@ -115,7 +115,9 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     weight_dtype=bfloat16 \
     megablox=False \
     sparse_matmul=False \
-    dataset_type=synthetic
+    dataset_type=grain \
+    grain_file_type=tfrecord \
+    dataset_path=${DATASET_PATH?}
 ```
 
 ## Fine-tuning
@@ -128,6 +130,8 @@ One example command to run general finetuning with V3 on v5p-256.
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     run_name=matmul_fine_tuning \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH?} \
     load_parameters_path=${SCANNED_CKPT_PATH?} \
     per_device_batch_size=1 \
@@ -153,6 +157,8 @@ Fine-tuning with MTP on v5p-256
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     run_name=deepseek_mtp_finetuning \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH?} \
     load_parameters_path=${SCANNED_CKPT_PATH?} \
     per_device_batch_size=1 \
