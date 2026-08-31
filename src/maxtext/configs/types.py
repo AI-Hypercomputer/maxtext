@@ -66,6 +66,8 @@ class DType(str, Enum):
   BFLOAT16 = "bfloat16"
   FLOAT32 = "float32"
   FLOAT16 = "float16"
+  FLOAT8_E4M3FN = "float8_e4m3fn"
+  FLOAT8_E5M2 = "float8_e5m2"
 
 
 class MatmulPrecision(str, Enum):
@@ -223,6 +225,7 @@ ModelName = Literal[
     "llama3-70b",
     "llama3.1-70b-Instruct",
     "llama3.1-8b",
+    "llama3.1-8b-fp8",
     "llama3.1-70b",
     "llama3.1-405b",
     "llama3.3-70b",

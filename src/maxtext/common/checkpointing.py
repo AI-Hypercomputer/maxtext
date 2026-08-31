@@ -30,10 +30,12 @@ from flax import struct
 from flax.training import train_state
 from grain.experimental import ElasticIterator
 import jax
+import jax.numpy as jnp
 from maxtext.checkpoint_conversion.utils.load_dynamic import load_safetensors_dynamic_state
 from maxtext.common import emergency_checkpointing
 from maxtext.common import grain_utility
 from maxtext.common import train_state_nnx
+from maxtext.layers import linears
 from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
 from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
@@ -701,6 +703,150 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
   return orbax_cloud_logger
 
 
+def _get_checkpoint_metadata_tree(ckptr: Any, ckpt_path: epath.Path) -> Any:
+  """Safely retrieves the metadata tree for an Orbax checkpoint."""
+  try:
+    metadata = ckptr.metadata(ckpt_path)
+    if metadata is None:
+      return None
+    if hasattr(metadata, "item_metadata"):
+      metadata = metadata.item_metadata
+    if hasattr(metadata, "tree"):
+      return metadata.tree
+    return metadata
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.log(f"Warning: Failed to retrieve checkpoint metadata from {ckpt_path}: {e}")
+    return None
+
+
+def _find_matching_meta_subtree(want_bare: Any, meta_tree: Any) -> Any:
+  """Unwraps metadata tree wrappers (e.g. 'params', 'model_params') to align with want_bare."""
+  if not isinstance(want_bare, dict) or not isinstance(meta_tree, dict):
+    return meta_tree
+
+  want_keys = set(want_bare.keys())
+  if want_keys and want_keys.issubset(meta_tree.keys()):
+    return meta_tree
+
+  for wrapper in ("params", "model_params", "model", "items"):
+    if wrapper in meta_tree and isinstance(meta_tree[wrapper], dict):
+      sub = meta_tree[wrapper]
+      if want_keys and want_keys.issubset(sub.keys()):
+        return sub
+      if wrapper == "params" and "params" in sub and isinstance(sub["params"], dict):
+        if want_keys and want_keys.issubset(sub["params"].keys()):
+          return sub["params"]
+
+  return meta_tree
+
+
+def _augment_target_with_scales(want_node: Any, meta_node: Any) -> Any:
+  """Augments `want_node` with `kernel_scale` from `meta_node` if present in checkpoint but not in want."""
+  if not isinstance(want_node, dict) or not isinstance(meta_node, dict):
+    return want_node
+
+  augmented = {}
+  has_kernel = "kernel" in want_node
+  has_kernel_scale = "kernel_scale" in want_node
+  meta_has_kernel_scale = "kernel_scale" in meta_node
+
+  if has_kernel and not has_kernel_scale and meta_has_kernel_scale:
+    # Mode C: Target wants unquantized weights, but checkpoint has companion kernel_scale.
+    want_kernel = want_node["kernel"]
+    meta_scale = meta_node["kernel_scale"]
+    meta_kernel = meta_node.get("kernel")
+
+    # Restore kernel with stored dtype (e.g. float8) to avoid Orbax converting before dequantization
+    kernel_dtype = getattr(meta_kernel, "dtype", getattr(want_kernel, "dtype", jnp.bfloat16))
+    augmented["kernel"] = jax.ShapeDtypeStruct(
+        shape=getattr(want_kernel, "shape", getattr(meta_kernel, "shape", ())),
+        dtype=kernel_dtype,
+        sharding=getattr(want_kernel, "sharding", None),
+    )
+    augmented["kernel_scale"] = jax.ShapeDtypeStruct(
+        shape=getattr(meta_scale, "shape", ()),
+        dtype=getattr(meta_scale, "dtype", jnp.float32),
+        sharding=None,
+    )
+  elif has_kernel:
+    augmented["kernel"] = want_node["kernel"]
+
+  for k, v in want_node.items():
+    if k == "kernel":
+      continue
+    augmented[k] = _augment_target_with_scales(
+        v,
+        meta_node.get(k) if isinstance(meta_node, dict) else None,
+    )
+
+  return augmented
+
+
+def _augment_want_with_scales(want: Any, meta_tree: Any, is_nnx: bool, restore_key: str) -> Any:
+  """Augments the target params dictionary with scales from checkpoint metadata if needed."""
+  if meta_tree is None:
+    return want
+
+  if is_nnx or restore_key in ("model_params", "model"):
+    meta_weights = _find_matching_meta_subtree(want, meta_tree)
+    return _augment_target_with_scales(want, meta_weights)
+  else:
+    # Linen: want is {"params": bare_weights} or bare_weights
+    if isinstance(want, dict) and "params" in want and len(want) == 1:
+      want_bare = want["params"]
+      meta_weights = _find_matching_meta_subtree(want_bare, meta_tree)
+      augmented_bare = _augment_target_with_scales(want_bare, meta_weights)
+      return {"params": augmented_bare}
+    else:
+      meta_weights = _find_matching_meta_subtree(want, meta_tree)
+      return _augment_target_with_scales(want, meta_weights)
+
+
+def maybe_dequantize_restored_params(restored_weights: Any, want: Any) -> Any:
+  """Dequantizes restored weights if checkpoint contained companion kernel_scale but want did not.
+
+  For each parameter dictionary containing both 'kernel' and 'kernel_scale' where the target
+  model (`want`) does not expect 'kernel_scale', dynamically dequantizes 'kernel' to the
+  target compute dtype using `dequantize_weight` from `maxtext.layers.linears` and removes
+  'kernel_scale' from the restored parameter dictionary.
+
+  Args:
+    restored_weights: The restored parameter PyTree from the checkpoint.
+    want: The expected parameter PyTree structure / ShapeDtypeStructs.
+
+  Returns:
+    The parameter PyTree with dequantized kernels and omitted kernel_scale where applicable.
+  """
+  if not isinstance(restored_weights, dict):
+    return restored_weights
+
+  has_kernel = "kernel" in restored_weights
+  has_scale = "kernel_scale" in restored_weights
+  want_expects_scale = isinstance(want, dict) and "kernel_scale" in want
+
+  if has_kernel and has_scale and not want_expects_scale:
+    target_kernel = want.get("kernel") if isinstance(want, dict) else None
+    target_dtype = getattr(target_kernel, "dtype", jnp.bfloat16)
+
+    kernel = restored_weights["kernel"]
+    scale = restored_weights["kernel_scale"]
+    dequantized_kernel = linears.dequantize_weight(kernel, scale, compute_dtype=target_dtype)
+
+    out = {"kernel": dequantized_kernel}
+    for k, v in restored_weights.items():
+      if k in ("kernel", "kernel_scale"):
+        continue
+      want_sub = want.get(k) if isinstance(want, dict) else None
+      out[k] = maybe_dequantize_restored_params(v, want_sub)
+    return out
+
+  out = {}
+  for k, v in restored_weights.items():
+    want_sub = want.get(k) if isinstance(want, dict) else None
+    out[k] = maybe_dequantize_restored_params(v, want_sub)
+  return out
+
+
 def load_params_from_path(
     load_parameters_from_path,
     abstract_unboxed_params,
@@ -723,11 +869,6 @@ def load_params_from_path(
   if restore_key not in ("model_params", "model"):
     restore_key = "params"
 
-  if restore_key in ("model_params", "model"):
-    params_collection = want
-  else:
-    params_collection = {"params": want} if is_nnx else want
-
   # *_concurrent_gb should be set for large models, the default is 96.
   max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
   ckptr = ocp.Checkpointer(
@@ -739,13 +880,22 @@ def load_params_from_path(
       )
   )
 
+  ckpt_path = epath.Path(load_parameters_from_path)
+  meta_tree = _get_checkpoint_metadata_tree(ckptr, ckpt_path)
+  augmented_want = _augment_want_with_scales(want, meta_tree, is_nnx, restore_key)
+
+  if restore_key in ("model_params", "model"):
+    params_collection = augmented_want
+  else:
+    params_collection = {"params": augmented_want} if is_nnx else augmented_want
+
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint
   # (which itself may be a dictionary containing a key named 'params' or 'model').
   restore_args = ocp.checkpoint_utils.construct_restore_args(params_collection)
   restored = ckptr.restore(
-      epath.Path(load_parameters_from_path),
+      ckpt_path,
       item={restore_key: params_collection},
       transforms={},
       restore_args={restore_key: restore_args},
@@ -756,6 +906,11 @@ def load_params_from_path(
     restored_weights = restored_collection
   else:
     restored_weights = restored_collection["params"] if is_nnx else restored_collection
+
+  # Dequantize if checkpoint had companion kernel_scale and target want is unquantized.
+  restored_weights = maybe_dequantize_restored_params(restored_weights, want)
+  if not is_nnx:
+    restored_collection = restored_weights
 
   # `transforms={}` lets Orbax return an unmaterialized leaf for a weight the checkpoint lacks,
   # and a stored array at its own shape rather than the target's. Either reaches the model and

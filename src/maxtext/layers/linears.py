@@ -29,11 +29,11 @@ from jax.ad_checkpoint import checkpoint_name
 from flax import nnx
 import flax.linen as nn
 
-from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config
+from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config, Shape
 from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.layers import normalizations
-from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
+from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned, Initializer
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -74,7 +74,119 @@ def canonicalize_tuple(x):
     return (x,)
 
 
-def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul_precision, quant):
+def _canonicalize_dtype(dtype: Any) -> jnp.dtype:
+  """Canonicalizes a dtype string, DType enum, or jnp.dtype to jnp.dtype."""
+  if isinstance(dtype, str):
+    if hasattr(jnp, dtype):
+      return getattr(jnp, dtype)
+    return jnp.dtype(dtype)
+  if hasattr(dtype, "value") and isinstance(dtype.value, str):
+    # Handle DType enum
+    if hasattr(jnp, dtype.value):
+      return getattr(jnp, dtype.value)
+    return jnp.dtype(dtype.value)
+  return jnp.dtype(dtype)
+
+
+def _is_fp8_dtype(dtype: Any) -> bool:
+  """Checks whether a dtype is an FP8 data type."""
+  if dtype is None:
+    return False
+  try:
+    canon_dtype = _canonicalize_dtype(dtype)
+  except (TypeError, ValueError):
+    return False
+
+  fp8_types = [jnp.float8_e4m3fn, jnp.float8_e5m2]
+  for attr in ("float8_e4m3fnuz", "float8_e5m2fnuz", "float8_e4m3b11fnuz"):
+    if hasattr(jnp, attr):
+      fp8_types.append(getattr(jnp, attr))
+  return canon_dtype in fp8_types
+
+
+def dequantize_weight(
+    w: Array,
+    scale: Array | None,
+    compute_dtype: DType = jnp.bfloat16,
+) -> Array:
+  """Dequantizes weight tensor `w` dynamically to `compute_dtype` using `scale`.
+
+  Supports:
+    1. No scale (scale is None): simply casts w to compute_dtype.
+    2. Scalar scale: scalar multiplication.
+    3. Same rank / broadcastable scale (per-channel, per-axis): broadcast multiply.
+    4. Block-wise scale (e.g. 2D or N-D block scale): block broadcast multiply.
+  """
+  if scale is None:
+    return w.astype(compute_dtype)
+
+  scale = jnp.asarray(scale, compute_dtype)
+  w_c = w.astype(compute_dtype)
+
+  # Case 1: Scalar scale (e.g. shape () or (1,))
+  if scale.ndim == 0 or scale.size == 1:
+    return w_c * scale.reshape(())
+
+  # Case 2: Matching shape
+  if scale.shape == w.shape:
+    return w_c * scale
+
+  # Case 3: Same rank and broadcastable / block-wise
+  if scale.ndim == w.ndim:
+    is_broadcastable = True
+    is_block_scaled = False
+    for s_dim, w_dim in zip(scale.shape, w.shape):
+      if s_dim != 1 and s_dim != w_dim:
+        is_broadcastable = False
+        if s_dim > 1 and w_dim > s_dim:
+          is_block_scaled = True
+        break
+    if is_broadcastable:
+      return w_c * scale
+    if is_block_scaled:
+      # Block-wise scaling with same rank
+      if all(w_dim % s_dim == 0 for w_dim, s_dim in zip(w.shape, scale.shape)):
+        interleaved_shape = tuple(
+            dim for s_dim, w_dim in zip(scale.shape, w.shape) for dim in (s_dim, w_dim // s_dim)
+        )
+        scale_expanded_shape = tuple(dim for s_dim in scale.shape for dim in (s_dim, 1))
+        return (w_c.reshape(interleaved_shape) * scale.reshape(scale_expanded_shape)).reshape(w.shape)
+      else:
+        # Non-divisible block size fallback with repeat and slicing
+        scale_expanded = scale
+        for axis, (s_dim, w_dim) in enumerate(zip(scale.shape, w.shape)):
+          b_size = int(np.ceil(w_dim / s_dim))
+          scale_expanded = jnp.repeat(scale_expanded, b_size, axis=axis)
+        slices = tuple(slice(0, dim) for dim in w.shape)
+        return w_c * scale_expanded[slices]
+
+  # Case 4: Scale rank < weight rank
+  # Check if scale matches trailing dimensions (e.g. (N,) for (M, N))
+  if w.shape[-scale.ndim:] == scale.shape:
+    return w_c * scale
+  # Check if scale matches leading dimensions (e.g. (M,) for (M, N))
+  if w.shape[:scale.ndim] == scale.shape:
+    expanded_shape = scale.shape + (1,) * (w.ndim - scale.ndim)
+    return w_c * scale.reshape(expanded_shape)
+
+  # General fallback
+  try:
+    return w_c * scale
+  except ValueError:
+    return w_c * jnp.broadcast_to(scale, w.shape)
+
+
+def _compute_dot_general(
+    inputs,
+    kernel,
+    kernel_axes,
+    axis,
+    contract_ind,
+    matmul_precision,
+    quant,
+    kernel_scale: Array | None = None,
+    compute_dtype: DType | None = None,
+):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
   matmul_precision = lax.Precision(matmul_precision)
@@ -82,6 +194,15 @@ def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul
     dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
     dot_general = dot_general_cls()
     return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
+
+  if compute_dtype is None:
+    compute_dtype = inputs.dtype
+
+  if _is_fp8_dtype(kernel.dtype) or kernel_scale is not None:
+    kernel = dequantize_weight(kernel, kernel_scale, compute_dtype=compute_dtype)
+  else:
+    kernel = jnp.asarray(kernel, compute_dtype)
+
   return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
 
 
@@ -94,6 +215,8 @@ def _compute_dot_general_nnx(
     quant_dot_general: nnx_wrappers.ToNNX | None,
     initializing: bool,
     out_sharding: NamedSharding | None = None,
+    kernel_scale: Array | None = None,
+    compute_dtype: DType | None = None,
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -106,6 +229,14 @@ def _compute_dot_general_nnx(
   if out_sharding is not None:
     out_ndim = (inputs.ndim - len(axis)) + (kernel.ndim - len(contract_ind))
     out_sharding = truncate_out_sharding(out_sharding, out_ndim)
+
+  if compute_dtype is None:
+    compute_dtype = inputs.dtype
+
+  if _is_fp8_dtype(kernel.dtype) or kernel_scale is not None:
+    kernel = dequantize_weight(kernel, kernel_scale, compute_dtype=compute_dtype)
+  else:
+    kernel = jnp.asarray(kernel, compute_dtype)
 
   return dot_general(
       inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision, out_sharding=out_sharding
@@ -132,6 +263,12 @@ class DenseGeneral(nnx.Module):
       mesh: Mesh | None = None,
       use_two_stage_all_gather: bool = False,
       debug_sharding: bool = False,
+      has_scale: bool | None = None,
+      kernel_scale_init: Initializer | None = None,
+      scale_shape: Shape | None = None,
+      scale_axes: tuple[None | str, ...] | None = None,
+      scale_dtype: DType = jnp.float32,
+      block_size: int | tuple[int, ...] | None = None,
       *,  # Following arguments are keyword-only
       rngs: nnx.Rngs = None,
   ):
@@ -158,13 +295,19 @@ class DenseGeneral(nnx.Module):
         transpose XLA emits for a single combined 2-axis all-gather.
       debug_sharding: when True, log the logical/physical sharding of the
         two-stage all-gather constraints to the sharding dump files.
+      has_scale: whether to initialize a separate scale parameter (kernel_scale).
+      kernel_scale_init: initializer function for kernel_scale.
+      scale_shape: explicit shape for kernel_scale.
+      scale_axes: logical axes for partitioning kernel_scale.
+      scale_dtype: dtype of kernel_scale (default: float32).
+      block_size: block size for block-wise quantization scales.
       rngs: RNG state for initialization in nnx.
     """
     self.in_features_shape = canonicalize_tuple(in_features_shape)
     self.out_features_shape = canonicalize_tuple(out_features_shape)
     self.axis = canonicalize_tuple(axis)
-    self.weight_dtype = weight_dtype
-    self.dtype = dtype
+    self.weight_dtype = _canonicalize_dtype(weight_dtype)
+    self.dtype = _canonicalize_dtype(dtype)
     self.kernel_init = kernel_init
     self.kernel_axes = kernel_axes
     self.quant = quant
@@ -175,6 +318,9 @@ class DenseGeneral(nnx.Module):
     self.mesh = mesh
     self.use_two_stage_all_gather = use_two_stage_all_gather
     self.debug_sharding = debug_sharding
+    self.has_scale = has_scale
+    self.scale_dtype = _canonicalize_dtype(scale_dtype)
+    self.block_size = block_size
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -182,26 +328,99 @@ class DenseGeneral(nnx.Module):
     kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
     if not quantizations.in_serve_mode(self.quant):
+      init_dtype = jnp.float32 if _is_fp8_dtype(self.weight_dtype) else self.weight_dtype
+      try:
+        kernel_val = self.kernel_init(
+            rngs.params(),
+            kernel_shape,
+            init_dtype,
+            kernel_in_axis,
+            kernel_out_axis,
+        )
+      except (TypeError, ValueError):
+        kernel_val = self.kernel_init(
+            rngs.params(),
+            kernel_shape,
+            self.dtype,
+            kernel_in_axis,
+            kernel_out_axis,
+        )
+      if _is_fp8_dtype(self.weight_dtype):
+        finfo = jnp.finfo(self.weight_dtype)
+        kernel_val = jnp.clip(kernel_val, float(finfo.min), float(finfo.max)).astype(self.weight_dtype)
+
       self.kernel = nnx.Param(
-          self.kernel_init(
-              rngs.params(),
-              kernel_shape,
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
+          kernel_val,
           sharding=self.kernel_axes,
       )
 
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
+      try:
+        bias_val = default_bias_init(rngs.params(), bias_shape, self.weight_dtype)
+      except (TypeError, ValueError):
+        bias_val = default_bias_init(rngs.params(), bias_shape, self.dtype).astype(self.weight_dtype)
       self.bias = nnx.Param(
-          default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+          bias_val,
           sharding=bias_axes,
       )
     else:
       self.bias = None
+
+    if has_scale is None:
+      should_have_scale = (
+          _is_fp8_dtype(self.weight_dtype)
+          or (kernel_scale_init is not None)
+          or (scale_shape is not None)
+      )
+    else:
+      should_have_scale = has_scale
+
+    if should_have_scale and not quantizations.in_serve_mode(self.quant):
+      if scale_shape is not None:
+        resolved_scale_shape = canonicalize_tuple(scale_shape)
+      elif block_size is not None:
+        if isinstance(block_size, int):
+          resolved_scale_shape = tuple(int(np.ceil(d / block_size)) for d in kernel_shape)
+        else:
+          resolved_scale_shape = tuple(
+              int(np.ceil(d / b)) for d, b in zip(kernel_shape, block_size)
+          )
+      else:
+        resolved_scale_shape = ()
+
+      if scale_axes is not None:
+        resolved_scale_axes = scale_axes
+      else:
+        if len(resolved_scale_shape) == 0:
+          resolved_scale_axes = ()
+        elif len(resolved_scale_shape) == len(kernel_shape):
+          padded_kernel_axes = self.kernel_axes + (None,) * (len(kernel_shape) - len(self.kernel_axes))
+          resolved_scale_axes = tuple(
+              ax if s_dim > 1 else None
+              for ax, s_dim in zip(padded_kernel_axes, resolved_scale_shape)
+          )
+        elif len(resolved_scale_shape) == len(self.out_features_shape) and resolved_scale_shape == self.out_features_shape:
+          resolved_scale_axes = self.kernel_axes[-len(self.out_features_shape) :]
+        elif len(resolved_scale_shape) == len(self.in_features_shape) and resolved_scale_shape == self.in_features_shape:
+          resolved_scale_axes = self.kernel_axes[: len(self.in_features_shape)]
+        else:
+          resolved_scale_axes = tuple(None for _ in resolved_scale_shape)
+
+      actual_scale_init = kernel_scale_init if kernel_scale_init is not None else jax.nn.initializers.ones
+      self.scale_axes = resolved_scale_axes
+      self.kernel_scale = nnx.Param(
+          actual_scale_init(
+              rngs.params(),
+              resolved_scale_shape,
+              self.scale_dtype,
+          ),
+          sharding=resolved_scale_axes,
+      )
+    else:
+      self.scale_axes = None
+      self.kernel_scale = None
 
     if quant:
       dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
@@ -286,6 +505,7 @@ class DenseGeneral(nnx.Module):
     if quantizations.in_serve_mode(self.quant):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
+      kernel_scale = None
     else:
       kernel = getattr(self.kernel, "value", self.kernel)
       if hasattr(kernel, "value"):
@@ -294,7 +514,15 @@ class DenseGeneral(nnx.Module):
       if self.parameter_memory_host_offload:
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
         kernel = jax.device_put(kernel, max_utils.device_space())
-      kernel = jnp.asarray(kernel, self.dtype)
+      if self.kernel_scale is not None:
+        kernel_scale = self.kernel_scale[...]
+        if self.parameter_memory_host_offload:
+          kernel_scale = jax.device_put(kernel_scale, max_utils.device_space())
+      else:
+        kernel_scale = None
+
+      if not _is_fp8_dtype(kernel.dtype) and kernel_scale is None:
+        kernel = jnp.asarray(kernel, self.dtype)
 
     if slice_bounds is not None:
       if self.quant is not None:
@@ -320,6 +548,8 @@ class DenseGeneral(nnx.Module):
         self.quant_dot_general if slice_bounds is None else None,
         _initializing,
         out_sharding,
+        kernel_scale=kernel_scale,
+        compute_dtype=self.dtype,
     )
 
     if self.bias is not None:
@@ -346,6 +576,12 @@ def dense_general(
     shard_mode: ShardMode = ShardMode.AUTO,
     matmul_precision: str = "default",
     parameter_memory_host_offload: bool = False,
+    has_scale: bool | None = None,
+    kernel_scale_init: Initializer | None = None,
+    scale_shape: Shape | None = None,
+    scale_axes: tuple[None | str, ...] | None = None,
+    scale_dtype: DType = jnp.float32,
+    block_size: int | tuple[int, ...] | None = None,
     name: None | str = None,
 ):
   """Creates a DenseGeneral Linen module using nnx.bridge.to_linen.
@@ -365,6 +601,12 @@ def dense_general(
     shard_mode: indicating the shard mode
     matmul_precision: Precision for matrix multiplication.
     parameter_memory_host_offload: Determines whether to offload params to host
+    has_scale: whether to initialize a separate scale parameter (kernel_scale).
+    kernel_scale_init: initializer function for kernel_scale.
+    scale_shape: explicit shape for kernel_scale.
+    scale_axes: logical axes for partitioning kernel_scale.
+    scale_dtype: dtype of kernel_scale (default: float32).
+    block_size: block size for block-wise quantization scales.
     name: name passed to the ToLinen Module
   """
   if not (inputs_shape is not None) ^ (in_features_shape is not None):
@@ -389,6 +631,12 @@ def dense_general(
       shard_mode=shard_mode,
       matmul_precision=matmul_precision,
       parameter_memory_host_offload=parameter_memory_host_offload,
+      has_scale=has_scale,
+      kernel_scale_init=kernel_scale_init,
+      scale_shape=scale_shape,
+      scale_axes=scale_axes,
+      scale_dtype=scale_dtype,
+      block_size=block_size,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
@@ -686,6 +934,12 @@ class DeepSeekV4GroupedLinear(nnx.Module):
       kernel_axes: tuple[None | str, ...] = ("groups", "embed", "mlp"),
       matmul_precision: str = "default",
       parameter_memory_host_offload: bool = False,
+      has_scale: bool | None = None,
+      kernel_scale_init: Initializer | None = None,
+      scale_shape: Shape | None = None,
+      scale_axes: tuple[None | str, ...] | None = None,
+      scale_dtype: DType = jnp.float32,
+      block_size: int | tuple[int, ...] | None = None,
       *,
       rngs: nnx.Rngs,
   ):
@@ -701,6 +955,12 @@ class DeepSeekV4GroupedLinear(nnx.Module):
       kernel_axes: logical axes for partitioning the kernel.
       matmul_precision: Precision for matrix multiplication.
       parameter_memory_host_offload: Determines whether to offload params to host
+      has_scale: whether to initialize a separate scale parameter (kernel_scale).
+      kernel_scale_init: initializer function for kernel_scale.
+      scale_shape: explicit shape for kernel_scale.
+      scale_axes: logical axes for partitioning kernel_scale.
+      scale_dtype: dtype of kernel_scale (default: float32).
+      block_size: block size for block-wise quantization scales.
       rngs: RNG state for initialization in nnx.
     """
     if out_features % n_groups != 0:
@@ -711,12 +971,15 @@ class DeepSeekV4GroupedLinear(nnx.Module):
     self.n_groups = n_groups
     self.out_features_per_group = out_features // n_groups
 
-    self.weight_dtype = weight_dtype
-    self.dtype = dtype
+    self.weight_dtype = _canonicalize_dtype(weight_dtype)
+    self.dtype = _canonicalize_dtype(dtype)
     self.kernel_init = kernel_init
     self.kernel_axes = kernel_axes
     self.matmul_precision = matmul_precision
     self.parameter_memory_host_offload = parameter_memory_host_offload
+    self.has_scale = has_scale
+    self.scale_dtype = _canonicalize_dtype(scale_dtype)
+    self.block_size = block_size
 
     # Kernel shape splits the projection up into a batched representation
     kernel_shape = (self.n_groups, self.in_features_per_group, self.out_features_per_group)
@@ -727,16 +990,75 @@ class DeepSeekV4GroupedLinear(nnx.Module):
     kernel_in_axis = (1,)
     kernel_out_axis = (2,)
 
+    try:
+      kernel_val = self.kernel_init(
+          rngs.params(),
+          kernel_shape,
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+    except (TypeError, ValueError):
+      kernel_val = self.kernel_init(
+          rngs.params(),
+          kernel_shape,
+          self.dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      ).astype(self.weight_dtype)
+
     self.kernel = nnx.Param(
-        self.kernel_init(
-            rngs.params(),
-            kernel_shape,
-            self.weight_dtype,
-            kernel_in_axis,
-            kernel_out_axis,
-        ),
+        kernel_val,
         sharding=self.kernel_axes,
     )
+
+    if has_scale is None:
+      should_have_scale = (
+          _is_fp8_dtype(self.weight_dtype)
+          or (kernel_scale_init is not None)
+          or (scale_shape is not None)
+      )
+    else:
+      should_have_scale = has_scale
+
+    if should_have_scale:
+      if scale_shape is not None:
+        resolved_scale_shape = canonicalize_tuple(scale_shape)
+      elif block_size is not None:
+        if isinstance(block_size, int):
+          resolved_scale_shape = tuple(int(np.ceil(d / block_size)) for d in kernel_shape)
+        else:
+          resolved_scale_shape = tuple(
+              int(np.ceil(d / b)) for d, b in zip(kernel_shape, block_size)
+          )
+      else:
+        resolved_scale_shape = ()
+
+      if scale_axes is not None:
+        resolved_scale_axes = scale_axes
+      else:
+        if len(resolved_scale_shape) == 0:
+          resolved_scale_axes = ()
+        elif len(resolved_scale_shape) == len(kernel_shape):
+          padded_kernel_axes = self.kernel_axes + (None,) * (len(kernel_shape) - len(self.kernel_axes))
+          resolved_scale_axes = tuple(
+              ax if s_dim > 1 else None
+              for ax, s_dim in zip(padded_kernel_axes, resolved_scale_shape)
+          )
+        else:
+          resolved_scale_axes = tuple(None for _ in resolved_scale_shape)
+
+      actual_scale_init = kernel_scale_init if kernel_scale_init is not None else jax.nn.initializers.ones
+      self.kernel_scale = nnx.Param(
+          actual_scale_init(
+              rngs.params(),
+              resolved_scale_shape,
+              self.scale_dtype,
+          ),
+          sharding=resolved_scale_axes,
+      )
+    else:
+      self.kernel_scale = None
 
   def __call__(self, inputs: Array) -> Array:
     """Applies a batched grouped linear transformation to the inputs.
@@ -754,7 +1076,17 @@ class DeepSeekV4GroupedLinear(nnx.Module):
     if self.parameter_memory_host_offload:
       max_logging.log("linear.py: Moving parameter grouped_linear kernel to device")
       kernel = jax.device_put(kernel, max_utils.device_space())
-    kernel = jnp.asarray(kernel, self.dtype)
+    if self.kernel_scale is not None:
+      kernel_scale = self.kernel_scale[...]
+      if self.parameter_memory_host_offload:
+        kernel_scale = jax.device_put(kernel_scale, max_utils.device_space())
+    else:
+      kernel_scale = None
+
+    if _is_fp8_dtype(kernel.dtype) or kernel_scale is not None:
+      kernel = dequantize_weight(kernel, kernel_scale, compute_dtype=self.dtype)
+    else:
+      kernel = jnp.asarray(kernel, self.dtype)
 
     # Perform a batched matrix multiplication using einsum with explicit precision.
     # We use jnp.einsum instead of explicitly flattening and using lax.dot_general
@@ -785,6 +1117,12 @@ def deepseek_v4_grouped_linear(
     kernel_axes: tuple[None | str, ...] = ("groups", "embed", "mlp"),
     matmul_precision: str = "default",
     parameter_memory_host_offload: bool = False,
+    has_scale: bool | None = None,
+    kernel_scale_init: Initializer | None = None,
+    scale_shape: Shape | None = None,
+    scale_axes: tuple[None | str, ...] | None = None,
+    scale_dtype: DType = jnp.float32,
+    block_size: int | tuple[int, ...] | None = None,
     name: None | str = None,
 ):
   """Creates a DeepSeekV4GroupedLinear Linen module using nnx.bridge.to_linen."""
@@ -799,6 +1137,12 @@ def deepseek_v4_grouped_linear(
       kernel_axes=kernel_axes,
       matmul_precision=matmul_precision,
       parameter_memory_host_offload=parameter_memory_host_offload,
+      has_scale=has_scale,
+      kernel_scale_init=kernel_scale_init,
+      scale_shape=scale_shape,
+      scale_axes=scale_axes,
+      scale_dtype=scale_dtype,
+      block_size=block_size,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
