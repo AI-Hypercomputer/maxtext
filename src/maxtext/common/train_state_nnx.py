@@ -58,7 +58,7 @@ class TrainStateNNX(nnx.Module):
 
 # On-disk checkpoint format.
 #
-# A pure_nnx run saves in the same on-disk layout as a Linen run, so the two are
+# A run saves in the same on-disk layout that Linen used, so old and new checkpoints are
 # interchangeable. The NNX state pure dict differs from Linen's in three ways, all
 # reshaped below at save time:
 #   1. top-level keys: {model, optimizer:{step, opt_state}} -> {params:{params:...}, step, opt_state}
@@ -232,7 +232,7 @@ def to_checkpoint_dict(state: nnx.State | nnx.Module):
   """Reshapes an nnx.State into the on-disk checkpoint layout.
 
   Weights (nnx.Param) map to the Linen `params` collection and the optimizer to
-  opt_state/step, so pure_nnx and Linen checkpoints stay interchangeable. Everything else that
+  opt_state/step, so NNX and Linen checkpoints stay interchangeable. Everything else that
   must persist -- rngs/dropout, batch stats, and any custom variable -- goes under an `nnx_aux`
   subtree. Works on a concrete state (save) or an abstract state (restore target).
   """

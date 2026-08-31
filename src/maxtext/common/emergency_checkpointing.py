@@ -65,7 +65,7 @@ def create_emergency_checkpoint_manager(
 
   persistent_p = gcs_utils.mkdir_and_check_permissions(persistent_checkpoint_dir)
 
-  # pure_nnx saves via to_checkpoint_dict (Linen params/opt_state/step plus an nnx_aux
+  # Checkpoints are saved via to_checkpoint_dict (Linen params/opt_state/step plus an nnx_aux
   # subtree), but the emergency manager restores against the abstract it is built with.
   # Convert it the same way so it matches what is on disk; restore reshapes back to NNX.
   if isinstance(abstract_state, nnx.State):

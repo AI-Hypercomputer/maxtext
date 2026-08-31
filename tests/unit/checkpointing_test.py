@@ -494,7 +494,6 @@ class CheckpointErrorHandlerTest(parameterized.TestCase):
     """Unexpected checkpointing errors should raise RuntimeError with original error chained."""
     config = mock.Mock()
     config.checkpoint_period = 1
-    config.pure_nnx = True
     config.enable_diloco = False
     config.async_checkpointing = False
     config.enable_continuous_checkpointing = False

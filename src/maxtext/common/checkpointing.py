@@ -181,7 +181,7 @@ def _load_linen_checkpoint_into_nnx(
     use_zarr3,
     config=None,
 ):
-  """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
+  """Restores a Linen-layout checkpoint into an NNX state.
 
   Restores a Linen-shape target that includes `nnx_aux`, then reshapes back via
   `_linen_items_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
@@ -219,7 +219,7 @@ def _restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   """Reshapes a restored Linen-layout tree into the NNX state.
 
   Raises if the checkpoint is missing a weight. Every NNX restore path ends here: the load
-  itself is the Linen one, since pure_nnx reads and writes the Linen on-disk layout.
+  itself is the Linen one, since MaxText reads and writes the Linen on-disk layout.
   """
   _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen), config=config)
   return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
@@ -299,7 +299,7 @@ def _load_full_state_from_path(
 
   if enable_orbax_v1:
     if source_checkpoint_layout == "orbax":
-      # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+      # Checkpoints are saved in the Linen on-disk layout; reshape back into the NNX state.
       if isinstance(abstract_unboxed_pre_state, nnx.State):
         return _load_linen_checkpoint_into_nnx(
             path,
@@ -327,7 +327,7 @@ def _load_full_state_from_path(
         sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
         pre_transformed_state = ocp_v1.load_pytree(path, sharded_abstract_state)
       state = conversion_fn(pre_transformed_state)
-      # The conversion fn returns MaxText's on-disk (Linen) layout, which is what pure_nnx reads,
+      # The conversion fn returns MaxText's on-disk (Linen) layout, which is what we read,
       # so NNX needs the same reshape as every other restore. An NNX state passes through.
       if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(state, nnx.State):
         state = _restored_linen_to_nnx(state, abstract_unboxed_pre_state, config=maxtext_config)
@@ -335,7 +335,7 @@ def _load_full_state_from_path(
     else:
       raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
   else:
-    # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+    # Checkpoints are saved in the Linen on-disk layout; reshape back into the NNX state.
     if isinstance(abstract_unboxed_pre_state, nnx.State):
       return _load_linen_checkpoint_into_nnx(
           path,
@@ -512,7 +512,7 @@ def load_state_if_possible(
      set.
   """
 
-  # pure_nnx saves in the Linen on-disk layout, so every branch below loads the same tree Linen
+  # Checkpoints are saved in the Linen on-disk layout, so every branch below loads the same tree Linen
   # does: the NNX abstract is converted to that layout going in, and what comes back is reshaped
   # into the NNX state on the way out.
   is_nnx = isinstance(abstract_unboxed_pre_state, (nnx.State, train_state_nnx.TrainStateNNX))
@@ -867,12 +867,8 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   if step is not None:
     actual_step = int(step)
   else:
-    if config.pure_nnx:
-      # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
-      actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
-    else:
-      # Linen TrainState has .step attribute
-      actual_step = int(state.step) - 1
+    # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
+    actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
 
   # Determine if a checkpoint save should be forced, overriding the usual
   # `config.checkpoint_period` logic.
@@ -952,8 +948,8 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
 
   if config and getattr(config, "enable_diloco", False):
     state = diloco_checkpoint_utils.to_diloco_checkpoint_dict(state, config)
-  elif config and getattr(config, "pure_nnx", False):
-    # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
+  elif config:
+    # Save in the Linen on-disk layout so NNX and Linen checkpoints are interchangeable.
     if isinstance(state, nnx.State):
       state = train_state_nnx.to_checkpoint_dict(state)
 
