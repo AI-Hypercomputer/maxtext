@@ -1062,6 +1062,28 @@ def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu
     }
 
 
+def reordered_cp_size(config, mesh) -> int:
+  """The cp_size the input pipeline reordered the batch with; 1 if it did not.
+
+  `setup_train_loop` wraps the data iterators once, at setup, using
+  ``mesh.shape[config.context_sharding]`` resolved against the *train*
+  `logical_axis_rules`. Everything that assumes the batch carries that
+  DUAL_CHUNK_SWAP permutation - the ``LoadBalanced*`` Splash masks, the
+  contiguous-order restore of K/V in `wrap_flash_attention`, MTP's
+  shift-by-one - has to key off this number and not off whatever shard count
+  the ambient rules imply. The two can differ: the eval step runs under
+  `logical_axis_rules_for_eval` when `custom_mesh_and_rule_for_eval` is set,
+  so a train mesh with no CP can hand the kernel a 4-way sharded query over a
+  batch that was never reordered.
+
+  Returns 1 whenever the batch is in natural token order, i.e. load balancing
+  is off or the CP axis is absent from the mesh / of size 1.
+  """
+  if mesh is None or not getattr(config, "context_parallel_load_balance", False):
+    return 1
+  return mesh.shape.get(config.context_sharding, 1)
+
+
 @staticmethod
 def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
   """
@@ -1302,7 +1324,7 @@ def transformer_engine_context():
     )
     with global_shard_guard(mesh_resource):
       yield
-  except (ImportError, AttributeError):
+  except Exception:  # pylint: disable=broad-exception-caught
     yield
 
 

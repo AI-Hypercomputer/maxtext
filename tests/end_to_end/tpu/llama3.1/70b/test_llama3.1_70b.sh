@@ -57,7 +57,7 @@ python3 -m maxtext.trainers.pre_train.train \
     dataset_path=${DATASET_PATH} tokenizer_type="huggingface" \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     per_device_batch_size=1 run_name=${run_id} \
-    max_target_length=2048 steps=5 async_checkpointing=false \
+    max_target_length=2048 steps=2 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     model_name=${MODEL_NAME} scan_layers=false use_multimodal=${USE_MULTIMODAL} \
     ici_tensor_parallelism=4
@@ -66,7 +66,7 @@ python3 -m maxtext.trainers.pre_train.train \
 if [ ${USE_MULTIMODAL} == true ]; then
     python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} tokenizer_type="huggingface" \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/4/items \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 run_name=${run_id} \
     max_prefill_predict_length=272 max_target_length=300 steps=1 async_checkpointing=false \
     scan_layers=false use_multimodal=true \
@@ -75,7 +75,7 @@ if [ ${USE_MULTIMODAL} == true ]; then
 else
     python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} tokenizer_type="huggingface" \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/4/items \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 run_name=${run_id} \
     max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \

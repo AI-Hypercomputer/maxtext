@@ -210,6 +210,7 @@ def get_dataset(
     split: str,
     dataloading_host_index: int,
     dataloading_host_count: int,
+    data_dir: str | None = None,
     enable_data_shuffling: bool = False,
     data_shuffle_seed: int = 0,
     shard_in_read: bool = False,
@@ -224,13 +225,13 @@ def get_dataset(
             num_input_pipelines=dataloading_host_count,
         ),
     )
-    ds_builder = tfds.builder(dataset_name)
+    ds_builder = tfds.builder(dataset_name, data_dir=data_dir)
     ds_builder.download_and_prepare()
     ds = ds_builder.as_dataset(split=split, read_config=read_config, shuffle_files=enable_data_shuffling)
   else:
     # shard dataset after reading
     read_config = tfds.ReadConfig(shuffle_seed=data_shuffle_seed)
-    ds_builder = tfds.builder(dataset_name)
+    ds_builder = tfds.builder(dataset_name, data_dir=data_dir)
     ds = ds_builder.as_dataset(split=split, read_config=read_config, shuffle_files=enable_data_shuffling)
     ds = ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
   return ds
@@ -255,6 +256,7 @@ def preprocess_train_dataset(
     max_target_length: int,
     shuffle_buffer_size: int,
     data_shuffle_seed: int,
+    is_tokenized_dataset: bool = False,
 ) -> tf.data.Dataset:
   """Preprocess the training dataset."""
   if sp_tokenizer.pad_id is not None:
@@ -264,13 +266,20 @@ def preprocess_train_dataset(
   else:
     pad_id = -1
 
-  train_ds = train_ds.map(
-      lambda x: TokenizeOp(tokenizer_model=sp_tokenizer, features=x, data_keys=("targets",)),
-      num_parallel_calls=AUTOTUNE,
-  )
+  # Skip tokenization/chunking for pre-tokenized data (e.g. integer 'ids'):
+  # 1. TokenizeOp expects string inputs, not integer IDs.
+  # 2. reduce_concat_tokens/split_tokens strip padding via bool-cast, dropping
+  #    valid token ID 0.
+  # 3. sequence_packing directly packs pre-tokenized documents preserving
+  #    segment boundaries.
+  if not is_tokenized_dataset:
+    train_ds = train_ds.map(
+        lambda x: TokenizeOp(tokenizer_model=sp_tokenizer, features=x, data_keys=("targets",)),
+        num_parallel_calls=AUTOTUNE,
+    )
+    train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
+    train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
 
-  train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
-  train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
   train_ds = sequence_packing.pack_dataset(train_ds, max_target_length, pad_id=pad_id)
   train_ds = train_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
@@ -328,17 +337,24 @@ def make_c4_mlperf_train_iterator(
     global_mesh,
     process_indices,
 ):
-  """Make train iterator of customized C4 dataset for mlperf gpt3 training."""
+  """Make train iterator of customized C4 dataset for mlperf training."""
+  train_col = config.train_data_columns[0]
+  is_tokenized_dataset = not config.tokenize_train_data
+  # Fall back to commonly used train2 train_split for processed dataset
+  train_split = getattr(config, "train_split", "train2")
+  train_data_dir = getattr(config, "dataset_path", None)
+
   train_ds = get_dataset(
       dataset_name=config.dataset_name,
-      split="train2",
+      split=train_split,
       dataloading_host_index=process_indices.index(jax.process_index()),
       dataloading_host_count=len(process_indices),
+      data_dir=train_data_dir,
       enable_data_shuffling=config.enable_data_shuffling,
       data_shuffle_seed=config.data_shuffle_seed,
   )
 
-  train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
+  train_ds = rekey(train_ds, {"inputs": None, "targets": train_col})
   sp_tokenizer = get_tokenizer(
       config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos, config.hf_access_token
   )
@@ -349,6 +365,7 @@ def make_c4_mlperf_train_iterator(
       max_target_length=config.max_target_length,
       shuffle_buffer_size=128,
       data_shuffle_seed=config.data_shuffle_seed,
+      is_tokenized_dataset=is_tokenized_dataset,
   )
   train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh)
   return train_multihost_gen
@@ -359,44 +376,38 @@ def make_c4_mlperf_eval_iterator(
     global_mesh,
     process_indices,
 ):
-  """Make eval iterator of customized C4 dataset for mlperf gpt3 training."""
-  eval_split = "None"
-  if config.eval_dataset_name == "c4/en:3.0.5":
-    is_tokenized_dataset = True
-  elif config.eval_dataset_name == "c4/en:3.0.4":
-    is_tokenized_dataset = False
-    eval_split = "validation_24567exp"
-  elif config.eval_dataset_name in ["c4/en:3.0.1", "c4/en:3.0.8", "c4/en:3.0.9"]:
-    is_tokenized_dataset = False
-    eval_split = "validation"
-  else:
-    raise ValueError(
-        f"{config.eval_dataset_name=} should be one of "
-        "('c4/en:3.0.1', 'c4/en:3.0.4', 'c4/en:3.0.5', "
-        "'c4/en:3.0.8', 'c4/en:3.0.9')"
-    )
+  """Make eval iterator of customized C4 dataset for mlperf training."""
+  eval_col = config.eval_data_columns[0]
+  is_tokenized_dataset = not config.tokenize_eval_data
+  eval_split = getattr(config, "eval_split", None)
+  # Fall back to commonly used eval split for processed dataset
+  if eval_split is None:
+    if config.eval_dataset_name == "c4/en:3.0.4":
+      eval_split = "validation_24567exp"
+    elif config.eval_dataset_name in [
+        "c4/en:3.0.1",
+        "c4/en:3.0.5",
+        "c4/en:3.0.8",
+        "c4/en:3.0.9",
+    ]:
+      eval_split = "validation"
+    else:
+      raise ValueError(
+          f"{config.eval_dataset_name=} should be one of "
+          "('c4/en:3.0.1', 'c4/en:3.0.4', 'c4/en:3.0.5', "
+          "'c4/en:3.0.8', 'c4/en:3.0.9')"
+      )
 
-  if is_tokenized_dataset:
-    eval_ds = get_dataset(
-        dataset_name=config.eval_dataset_name,
-        split="validation_tokenized_5662seqs",
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
-        enable_data_shuffling=False,
-    )
-    # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
-    #   mainly to avoid eval sequences change depending on the number of hosts
-    eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
-  else:
-    eval_ds = get_dataset(
-        dataset_name=config.eval_dataset_name,
-        split=eval_split,
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
-        enable_data_shuffling=False,
-    )
-
-    eval_ds = rekey(eval_ds, {"inputs": None, "targets": "text"})
+  eval_data_dir = getattr(config, "dataset_path", None)
+  eval_ds = get_dataset(
+      dataset_name=config.eval_dataset_name,
+      split=eval_split,
+      dataloading_host_index=process_indices.index(jax.process_index()),
+      dataloading_host_count=len(process_indices),
+      data_dir=eval_data_dir,
+      enable_data_shuffling=False,
+  )
+  eval_ds = rekey(eval_ds, {"inputs": None, "targets": eval_col})
 
   sp_tokenizer = get_tokenizer(
       config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos, config.hf_access_token

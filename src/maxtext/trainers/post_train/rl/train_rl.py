@@ -97,6 +97,8 @@ def _tpu_inference_compat_patches():
   orig_bulk = tunix_utils._bulk_align_and_unstack  # pylint: disable=protected-access
   orig_unstack = tunix_utils._unstack_scanned_param  # pylint: disable=protected-access
 
+  orig_moe_weights = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)
+
   def _compat_wsc(x, shardings):
     try:
       return orig_wsc(x, shardings)
@@ -125,6 +127,10 @@ def _tpu_inference_compat_patches():
   tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
   tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
   tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
+
+  if orig_moe_weights is not None:
+    tunix_utils._MOE_MLP_WEIGHTS = frozenset([*orig_moe_weights, "wo"])  # pylint: disable=protected-access
+
   try:
     yield
   finally:
@@ -132,6 +138,8 @@ def _tpu_inference_compat_patches():
     tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
     tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
     tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
+    if orig_moe_weights is not None:
+      tunix_utils._MOE_MLP_WEIGHTS = orig_moe_weights  # pylint: disable=protected-access
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
@@ -139,7 +147,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "0"
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout, requires_maxtext_scanned_weight_unroll
+from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
@@ -485,11 +493,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list, config_class=types.RLConfig)
 
-  rl_rollout_engine = (
-      functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
-      if trainer_config.use_standalone_converter or requires_maxtext_scanned_weight_unroll(trainer_config)
-      else "vllm"
-  )
+  rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
 
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
@@ -525,7 +529,11 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           top_k=trainer_config.decode_sampling_top_k,
           rollout_vllm_model_version=trainer_config.tokenizer_path,
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
-          rollout_vllm_tpu_backend_type="jax",
+          rollout_vllm_tpu_backend_type=getattr(
+              trainer_config,
+              "vllm_tpu_backend_type",
+              "maxtext" if "MaxText" in str(trainer_config.vllm_hf_overrides.get("architectures", [])) else "jax",
+          ),
           rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
           rollout_vllm_additional_config=rollout_additional_config,
           rollout_vllm_init_with_random_weights=True,

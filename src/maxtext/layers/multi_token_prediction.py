@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """JAX implementation of the Multi Token Prediction https://arxiv.org/pdf/2412.19437"""
+# pylint: disable=no-name-in-module
 
 from typing import Type
 
@@ -22,12 +23,14 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config, DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
+from maxtext.layers import moe
 from maxtext.layers.decoders import DecoderLayer
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import deepseek_batchsplit
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.globals import EPS
@@ -296,7 +299,9 @@ class MultiTokenPredictionLayer(nnx.Module):
       output = deepseek_batchsplit.batch_split_layer(
           inputs=projected_features,
           positions=position_ids,
-          params=nnx.to_pure_dict(nnx.state(self, nnx.Param), extract_fn)[f"mtp_{self.layer_number}_transformer_layer"],
+          params=nnx.to_pure_dict(nnx.state(self, (nnx.Param, moe.MoEBiasVar)), extract_fn)[
+              f"mtp_{self.layer_number}_transformer_layer"
+          ],
           mesh=self.mesh,
           cfg=self.config,
       )
@@ -372,7 +377,7 @@ class MultiTokenPredictionBlock(nnx.Module):
       deterministic,
   ) -> dict:
     cfg = self.config
-    cp_size = getattr(cfg, "context_parallel_size", 1)
+    cp_size = self.mesh.shape.get(cfg.context_sharding, 1) if self.mesh is not None else 1
 
     # Under packing, target_mask carries segment IDs (1, 2, ...) rather
     # than a 0/1 loss mask. Normalize to 0/1 so downstream
@@ -392,7 +397,7 @@ class MultiTokenPredictionBlock(nnx.Module):
 
     # CP load_balance shuffles token order via DUAL_CHUNK_SWAP, which breaks
     # the ppermute-based neighbor fetch in _shift_left_one_cp_aware.
-    if cp_size > 1 and getattr(cfg, "context_parallel_load_balance", False):
+    if max_utils.reordered_cp_size(cfg, self.mesh) > 1:
       raise ValueError(
           "MTP does not support context_parallel_load_balance. "
           "DUAL_CHUNK_SWAP reorder breaks the ppermute-based neighbor "

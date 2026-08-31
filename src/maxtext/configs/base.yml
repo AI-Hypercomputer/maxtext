@@ -64,6 +64,15 @@ checkpoint_todelete_subdir: None
 # Full path to move checkpoints to before deletion.
 checkpoint_todelete_full_path: None
 
+# Interval in seconds between iterations in standalone checkpointer benchmark loop
+standalone_checkpointer_per_step_interval: 0.0
+# Whether to execute sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' before restoring a checkpoint in standalone_checkpointer loop
+standalone_checkpointer_drop_page_cache_before_restore: false
+# Whether to also restore checkpoint after saving in each step of standalone_checkpointer loop
+standalone_checkpointer_enable_restore_in_loop: true
+# Whether to start by attempting to load an existing checkpoint in standalone_checkpointer
+standalone_checkpointer_start_from_checkpoint: false
+
 force_unroll: false # during generate_param_only_checkpoint should we unroll the loop?
 
 # checkpointing using orbax has two important parameters: array driver
@@ -236,6 +245,7 @@ moe_dispatch_no_expert_sharding: false
 use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the MoE permute path; valid both with and
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
+moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
@@ -274,6 +284,9 @@ merge_gating_gmm: false
 use_tokamax_gmm: false
 # Whether to use Tokamax GMM v2 for MoE kernel. Requires use_tokamax_gmm=true.
 use_gmm_v2: false
+# Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
+# When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
+use_gmm_v2_heuristic_tiling: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
@@ -282,6 +295,9 @@ moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
+# Keep embed_moe sharded so we can manually QAG it over FSDP.
+# Requires quantization to be specified and weight_quantization_calibration_method to be fixed (static scaling mode).
+shard_embed_moe_on_fsdp: false
 # use fsdp and fsdp_transpose axes for sharding the moe weights
 use_2d_fsdp_sharding: false
 
@@ -571,6 +587,7 @@ logical_axis_rules: [
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
                       ['kv_lora', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
                       ["kv_lora_up_proj", []],
+                      ['embed_attn', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
                       # ==========================================
                       # Mixture of Experts (MoE)
                       # ==========================================
@@ -590,6 +607,7 @@ logical_axis_rules: [
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
                       # Dense Activations
+                      ['segment_ids_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_mlp', ['tensor', 'tensor_sequence']],
                       # Note activation batch and length also get used in vocab
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
@@ -703,6 +721,10 @@ num_slices: -1
 # reducing peak memory usage. This is highly recommended for models with large
 # vocabularies (e.g., Gemma). Set to a value greater than 1 to enable.
 num_vocab_tiling: 1
+# If set to true then all gather the output head weight once before the tiled loss so the backward
+# reuses it instead of re-gathering per chunk. Faster when steps are short enough to expose
+# the gathers; holds the gathered head in memory for the backward.
+vocab_tiling_ag_once: false
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
@@ -811,6 +833,10 @@ grain_ram_budget_mb: 1024 # RAM budget (MB) for auto-tuning worker count. Only u
 grain_num_threads_eval: 16
 grain_prefetch_buffer_size_eval: 500
 grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
+# ArrayRecord index storage: null (reader default), 'in_memory', or 'offloaded'.
+# Do not use 'offloaded' with direct gs:// paths because it can significantly degrade input performance.
+# For Cloud Storage, use a filesystem with metadata caching, such as GCSFUSE.
+grain_index_storage_option: null
 grain_shuffle_buffer_size: 100 # shuffle buffer when using sequential access formats such as Parquet, TFRecord.
 grain_use_elastic_iterator: false # For elastic training, set to this true and packing=false
 # for using pathways
@@ -903,6 +929,7 @@ managed_mldiagnostics: false # Whether to enable the managed diagnostics
 managed_mldiagnostics_on_demand_profiling: true # Enable on-demand profiling server by default
 managed_mldiagnostics_run_group: ""  # Optional. Used to group multiple runs.
 managed_mldiagnostics_region: "" # Optional. GCP region for managed mldiagnostics. If empty, it will be auto-detected by the SDK.
+managed_mldiagnostics_storage_path: "" # Optional parameter to use a separate storage path for mldiagnostic data (profile, telemetry etc.) than the base directory path.
 
 # Dump HLO and jaxpr options
 dump_hlo: false
@@ -942,6 +969,14 @@ dcn_bandwidth_burst: "10mb"
 dcn_bandwidth_latency: "50ms"
 # The network interface to apply throttling rules to.
 dcn_bandwidth_interface: "eth0"
+
+# Streaming DiLoCo params
+enable_streaming_diloco: false
+num_diloco_fragments: null
+use_sequential_layers: false
+num_communication_overlapping_steps: 0
+communication_overlapping_alpha: 0.0
+
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0

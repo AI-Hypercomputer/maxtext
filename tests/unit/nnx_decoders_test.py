@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# pylint: disable=unbalanced-tuple-unpacking
 """Unit tests for nnx_decoders module.
 
 Tests cover:
@@ -1163,6 +1164,7 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "model_name=gemma4-e2b",
             "scan_layers=False",
             "attention=dot_product",
+            "remat_policy=none",
             "num_decoder_layers=3",
             "num_kv_shared_layers=1",
             "base_emb_dim=128",
