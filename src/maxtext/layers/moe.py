@@ -206,7 +206,7 @@ def _gather_replicated_custom_fwd(
 def _gather_replicated_custom_bwd(num_repeats: int, residuals: jax.Array, grads: jax.Array) -> tuple[jax.Array, None]:
   """Backward pass of the custom vjp for `_gather_replicated_activations()`."""
   sort_indices = residuals
-  inverse_indices = jnp.empty_like(sort_indices).at[sort_indices].set(jnp.arange(sort_indices.shape[0]))
+  inverse_indices = jnp.zeros_like(sort_indices).at[sort_indices].set(jnp.arange(sort_indices.shape[0]))
   unsorted_grads = grads[inverse_indices, ...]
   reshaped_grads = unsorted_grads.reshape(-1, num_repeats, *unsorted_grads.shape[1:])
   # Match the cotangent-dtype accumulation used by the transpose of `jnp.repeat`.
