@@ -186,6 +186,38 @@ fi
 python3 -m tests.utils.forward_pass_logit_checker \
   "${MAXTEXT_REPO_ROOT}/src/maxtext/configs/base.yml" \
   base_output_directory="${BASE_OUTPUT_PATH}" \
+  run_name=forward_logits_check_unscanned \
+  load_parameters_path="${UNSCANNED_CKPT_PATH}" \
+  scan_layers=false \
+  use_multimodal=false \
+  model_name="${MODEL_NAME}" \
+  tokenizer_type=huggingface \
+  tokenizer_path="${TOKENIZER_PATH}" \
+  attention=dot_product \
+  sparse_matmul=true \
+  megablox=true \
+  per_device_batch_size=1 \
+  max_prefill_predict_length=4 \
+  max_target_length=4 \
+  async_checkpointing=false \
+  ici_data_parallelism=1 \
+  ici_tensor_parallelism=1 \
+  ici_fsdp_parallelism="${ICI_FSDP}" \
+  ici_expert_parallelism="${ICI_EP}" \
+  weight_dtype=float32 \
+  dtype=float32 \
+  activations_in_float32=true \
+  matmul_precision=highest \
+  float32_logits=true \
+  float32_qk_product=true \
+  --golden_logits_path="${GOLDEN_LOGITS_DISK_LOCATION}" \
+  --atol=1.5 \
+  --rtol=1.5 \
+  --max_kl_div=0.2
+
+python3 -m tests.utils.forward_pass_logit_checker \
+  "${MAXTEXT_REPO_ROOT}/src/maxtext/configs/base.yml" \
+  base_output_directory="${BASE_OUTPUT_PATH}" \
   run_name=forward_logits_check \
   load_parameters_path="${SCANNED_CKPT_PATH}" \
   scan_layers=true \
@@ -204,9 +236,9 @@ python3 -m tests.utils.forward_pass_logit_checker \
   ici_tensor_parallelism=1 \
   ici_fsdp_parallelism="${ICI_FSDP}" \
   ici_expert_parallelism="${ICI_EP}" \
-  weight_dtype=bfloat16 \
-  dtype=bfloat16 \
-  activations_in_float32=false \
+  weight_dtype=float32 \
+  dtype=float32 \
+  activations_in_float32=true \
   matmul_precision=highest \
   float32_logits=true \
   float32_qk_product=true \
