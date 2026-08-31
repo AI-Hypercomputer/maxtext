@@ -17,10 +17,10 @@
 import asyncio
 import dataclasses
 import json
+import logging
 from typing import Any, Optional
 
 from etils import epath
-import grain
 from grain import experimental as grain_experimental
 from grain import python
 import jax
@@ -42,18 +42,28 @@ def _process_filename(process_index: int, process_count: int) -> str:
 
 
 def _state_to_text(iterator) -> str:
-  """Serializes an iterator's state (grain DatasetIterator -> json, else bytes)."""
-  if isinstance(iterator, grain.DatasetIterator):
-    return json.dumps(iterator.get_state(), indent=4)
-  return iterator.get_state().decode()
+  """Serializes an iterator state (grain DatasetIterator -> json, else bytes)."""
+  raw_state = iterator.get_state()
+  if isinstance(raw_state, bytes):
+    return raw_state.decode("utf-8")
+  elif isinstance(raw_state, str):
+    return raw_state
+  else:
+    return json.dumps(raw_state, indent=4)
 
 
 def _set_state_from_text(iterator, text: str) -> None:
   """Inverse of :func:`_state_to_text`."""
-  if isinstance(iterator, grain.DatasetIterator):
-    iterator.set_state(json.loads(text))
-  else:
-    iterator.set_state(text.encode())
+  try:
+    state = json.loads(text)
+  except (ValueError, json.JSONDecodeError) as e:
+    logging.debug("Failed to decode iterator state as JSON (%s), falling back to raw bytes.", e)
+    state = text.encode("utf-8")
+  try:
+    iterator.set_state(state)
+  except (TypeError, AttributeError) as e:
+    logging.debug("Iterator failed to set state directly (%s), falling back to UTF-8 bytes.", e)
+    iterator.set_state(text.encode("utf-8"))
 
 
 async def no_op():
@@ -352,10 +362,13 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp_v0.CheckpointHandler)
 
     def save_single_process(item, process_index, process_count):
       filename = directory / f"process_{process_index}-of-{process_count}.json"
-      if isinstance(item, grain.DatasetIterator):
-        state = json.dumps(item.get_state(), indent=4)
+      raw_state = item.get_state()
+      if isinstance(raw_state, bytes):
+        state = raw_state.decode("utf-8")
+      elif isinstance(raw_state, str):
+        state = raw_state
       else:
-        state = item.get_state().decode()
+        state = json.dumps(raw_state, indent=4)
       filename.write_text(state)
 
     if isinstance(item, list):
@@ -395,12 +408,17 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp_v0.CheckpointHandler)
       filename = directory / f"process_{process_index}-of-{process_count}.json"
       if not filename.exists():
         raise ValueError(f"File {filename} does not exist.")
-      state = filename.read_text()
-      if isinstance(item, grain.DatasetIterator):
-        state = json.loads(state)
-      else:
-        state = state.encode()
-      item.set_state(state)
+      state_text = filename.read_text()
+      try:
+        state = json.loads(state_text)
+      except (ValueError, json.JSONDecodeError) as e:
+        logging.debug("Failed to decode state file %s as JSON (%s), falling back to bytes.", filename, e)
+        state = state_text.encode("utf-8")
+      try:
+        item.set_state(state)
+      except (TypeError, AttributeError) as e:
+        logging.debug("Item failed to set state directly (%s), falling back to UTF-8 bytes.", e)
+        item.set_state(state_text.encode("utf-8"))
       return item
 
     if isinstance(item, list):

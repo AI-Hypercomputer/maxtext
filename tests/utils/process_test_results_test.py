@@ -108,10 +108,11 @@ class ProcessTestResultsTest(unittest.TestCase):
         "tpu-unit": 20.0,
         "cpu-unit": 30.0,
         "cpu-torch-reference": 40.0,
+        "decoupled": 25.0,
     }
     benchmarks = []
     for job, total_time in total_times_by_job.items():
-      if "cpu" in job.lower():
+      if "cpu" in job.lower() or "decoupled" in job.lower():
         continue
       benchmarks.append({"name": f"Total {job.upper()} Tests Duration", "value": total_time})
 
@@ -120,6 +121,7 @@ class ProcessTestResultsTest(unittest.TestCase):
     self.assertIn("Total TPU-UNIT Tests Duration", names)
     self.assertNotIn("Total CPU-UNIT Tests Duration", names)
     self.assertNotIn("Total CPU-TORCH-REFERENCE Tests Duration", names)
+    self.assertNotIn("Total DECOUPLED Tests Duration", names)
 
 
 if __name__ == "__main__":

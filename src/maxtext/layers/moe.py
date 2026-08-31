@@ -3289,6 +3289,7 @@ class RoutedMoE(nnx.Module):
     try:
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
+      from tpu_inference import envs as tpu_inference_envs
       from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
     except ImportError as e:
       raise ImportError("fused_moe_matmul requires the tpu-inference package.") from e
@@ -3318,6 +3319,12 @@ class RoutedMoE(nnx.Module):
         self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4)
     )
 
+    kwargs = {}
+    if hasattr(tpu_inference_envs, "SC_KERNEL_THRESHOLD"):
+      kwargs["sc_kernel_threshold"] = tpu_inference_envs.SC_KERNEL_THRESHOLD
+    if hasattr(tpu_inference_envs, "SC_KERNEL_COL_CHUNK_SIZE"):
+      kwargs["sc_kernel_col_chunk_size"] = tpu_inference_envs.SC_KERNEL_COL_CHUNK_SIZE
+
     output_2d = fused_moe_func(
         hidden_states=hidden_states,
         w1=fused_kernel,
@@ -3333,6 +3340,7 @@ class RoutedMoE(nnx.Module):
         use_ep=use_ep,
         activation=activation,
         scoring_fn=scoring_fn,
+        **kwargs,
     )
 
     # Reshape output 2D [T, D] -> 3D [B, S, D]

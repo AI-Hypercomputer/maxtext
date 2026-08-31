@@ -650,9 +650,9 @@ class CombinedDistillationStrategy(DistillationStrategy):
 class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
   """Custom CheckpointManager that uses MaxText's native handlers.
 
-  Model and optimizer are delegated to Tunix's v1 ``Checkpointer`` unchanged.
-  The Grain input pipeline is added as an extra ``"iter"`` checkpointable via
-  ``GrainCheckpointable``, which wraps MaxText's ``GrainCheckpointHandler``.
+  Model and optimizer are delegated to Tunix's CheckpointManager.
+  The Grain input pipeline is added as an extra ``"iter"`` item handler via
+  MaxText's ``GrainCheckpointHandler``.
   """
 
   def __init__(
@@ -662,9 +662,51 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
       student_config: Any,
       options: checkpoint.CheckpointManagerOptions | None = None,
   ):
-    super().__init__(root_directory=root_directory, options=options)
+    super().__init__(root_directory=None, options=options)
     self.student_config = student_config
     self._iterator = raw_iterator
+    self._checkpoint_manager = None
+
+    if root_directory is not None:
+      item_handlers = {
+          "model_params": checkpoint.PyTreeCheckpointHandler(),
+          "optimizer_state": checkpoint.PyTreeCheckpointHandler(),
+          "custom_metadata": checkpoint.JsonCheckpointHandler(),
+          "iter": grain_utility.GrainCheckpointHandler(),
+      }
+      self._checkpoint_manager = checkpoint.CheckpointManager(
+          root_directory,
+          item_handlers=item_handlers,
+          options=options or getattr(tunix_checkpoint_manager, "_DEFAULT_CHECKPOINTING_OPTIONS", None),
+      )
+
+  def latest_step(self) -> int | None:
+    """Returns the latest step."""
+    if getattr(self, "_checkpoint_manager", None) is None:
+      return None
+    return self._checkpoint_manager.latest_step()
+
+  def all_steps(self, return_format: Any = None) -> Sequence[int]:
+    """Returns all available steps."""
+    if getattr(self, "_checkpoint_manager", None) is None:
+      return []
+    return self._checkpoint_manager.all_steps(return_format)
+
+  def should_save(self, step: int) -> bool:
+    """Checks whether the checkpoint should be saved at the given step."""
+    if getattr(self, "_checkpoint_manager", None) is None:
+      return False
+    return self._checkpoint_manager.should_save(step)
+
+  def close(self):
+    """Closes the checkpoint manager."""
+    if getattr(self, "_checkpoint_manager", None) is not None:
+      self._checkpoint_manager.close()
+
+  def wait_until_finished(self):
+    """Blocks until all outstanding checkpoint operations are complete."""
+    if getattr(self, "_checkpoint_manager", None) is not None:
+      self._checkpoint_manager.wait_until_finished()
 
   def save(
       self,
@@ -675,8 +717,10 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
       force=False,
       custom_metadata=None,
   ):
-    """Saves model, optimizer and the Grain input pipeline state."""
-    if self._checkpointer is None:
+    """Saves the checkpoint including the input pipeline state (if available)."""
+    if getattr(self, "_checkpoint_manager", None) is None:
+      return False
+    if not force and not self._checkpoint_manager.should_save(step):
       return False
 
     # Standard Tunix Logic for Model/Optimizer.
@@ -687,12 +731,21 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
     else:
       params = nnx.state(target_model)
 
-    checkpointables: dict[str, Any] = {"model_params": params}
-    # Exclude optimizer state when learn_to_init_mode is active.
-    exclude_opt = self.student_config.learn_to_init_mode
+    # Define standard SaveArgs once to reuse
+    default_save_args = checkpoint.SaveArgs()
+    cp_save_args = {
+        "model_params": checkpoint.args.PyTreeSave(
+            item=params, save_args=jax.tree.map(lambda _: default_save_args, params)
+        ),
+    }
+    # Exclude optimizer state if the flag is set OR if learn_to_init_mode is active.
+    exclude_opt = self.student_config.learn_to_init_mode if self.student_config is not None else False
 
     if optimizer is not None and not exclude_opt:
-      checkpointables["optimizer_state"] = nnx.state(optimizer, nnx.optimizer.OptState)
+      optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
+      cp_save_args["optimizer_state"] = checkpoint.args.PyTreeSave(
+          item=optimizer_state, save_args=jax.tree.map(lambda _: default_save_args, optimizer_state)
+      )
 
     if self._iterator is not None:
       # Follow MaxText's logic to handle multi-process saving
@@ -710,45 +763,80 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
         local_iter = data_iter.local_iterator if hasattr(data_iter, "local_iterator") else data_iter
         grain_iters_to_save.append((local_iter, process_index, process_count_total))
 
-      checkpointables["iter"] = grain_utility.GrainCheckpointable(
-          save_args=grain_utility.GrainCheckpointSave(item=grain_iters_to_save)  # pyrefly: ignore[bad-assignment]
-      )
+      # Use GrainCheckpointSave wrapper
+      # pyrefly: ignore[bad-assignment]
+      cp_save_args["iter"] = grain_utility.GrainCheckpointSave(item=grain_iters_to_save)
 
-    return self._save_checkpointables(step, checkpointables, force, custom_metadata)
+    return self._checkpoint_manager.save(
+        step,
+        args=checkpoint.args.Composite(**cp_save_args),
+        custom_metadata=custom_metadata or {},
+        force=force,
+    )
 
-  def maybe_restore(  # pyrefly: ignore[bad-override]
+  def maybe_restore(
       self,
       model: Any,
       optimizer: Any = None,
+      step: int | None = None,
       restore_only_lora_params: bool = False,
   ) -> tuple[int, dict[str, Any]]:
-    """Restores model + optimizer by delegating to upstream Tunix.
+    """Restores model + optimizer from Orbax CheckpointManager.
 
     Unwraps `ModelBundle` if present (we only restore `student_model`).
 
     Returns:
       (restored step, custom_metadata dict). Step is 0 if no checkpoint exists.
     """
-    if self._checkpointer is None:
+    if getattr(self, "_checkpoint_manager", None) is None:
       return 0, {}
+
+    if step is None:
+      step = self.latest_step()
+      if step is None:
+        return 0, {}
 
     target_model = getattr(model, "student_model", model)
+    if restore_only_lora_params:
+      params = nnx.state(target_model, nnx.LoRAParam)
+    else:
+      params = nnx.state(target_model)
 
-    step, custom_metadata = super().maybe_restore(
-        model=target_model,  # pyrefly: ignore[bad-argument-type]
-        optimizer=optimizer,
-        restore_only_lora_params=restore_only_lora_params,
+    step_metadata = self._checkpoint_manager.metadata(step)
+    available_items = (
+        step_metadata.item_handlers if (step_metadata is not None and step_metadata.item_handlers is not None) else None
     )
-    if step == 0:
+
+    restore_args = {}
+    if available_items is None or "model_params" in available_items:
+      restore_args["model_params"] = checkpoint.args.PyTreeRestore(item=params)
+
+    if optimizer is not None and (available_items is None or "optimizer_state" in available_items):
+      opt_state = nnx.state(optimizer, nnx.optimizer.OptState)
+      restore_args["optimizer_state"] = checkpoint.args.PyTreeRestore(item=opt_state)
+
+    if not restore_args:
       return 0, {}
 
+    restored = self._checkpoint_manager.restore(
+        step,
+        args=checkpoint.args.Composite(**restore_args),
+    )
+
+    if restored is not None:
+      if "model_params" in restored:
+        nnx.update(target_model, restored["model_params"])
+      if optimizer is not None and "optimizer_state" in restored:
+        nnx.update(optimizer, restored["optimizer_state"])
+
+    custom_metadata = step_metadata.custom_metadata if step_metadata is not None else {}
     max_logging.log(f"Restored from checkpoint step {step}.")
 
     return step, dict(custom_metadata or {})
 
   def restore_iterator(self):
     """Restores the iterator using MaxText's logic."""
-    if self._checkpointer is None or self._iterator is None:
+    if getattr(self, "_checkpoint_manager", None) is None or self._iterator is None:
       return None
 
     step = self.latest_step()
@@ -761,18 +849,12 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
       data_iter = self._iterator
       local_iter = data_iter.local_iterator if hasattr(data_iter, "local_iterator") else data_iter
 
-      self._checkpointer.load_checkpointables(
-          step,
-          {"iter": grain_utility.GrainCheckpointable(restore_args=grain_utility.GrainCheckpointRestore(item=local_iter))},
-      )
+      restore_args = grain_utility.GrainCheckpointRestore(item=local_iter)
+
+      self._checkpoint_manager.restore(step, args=checkpoint.args.Composite(iter=restore_args))
       # Since Grain restores in-place via set_state(), we return the original object
       return self._iterator
 
     except Exception as e:  # pylint: disable=broad-exception-caught
       max_logging.log(f"Warning: Could not restore input pipeline: {e}")
       return None
-
-  def wait_until_finished(self):
-    """Blocks until all outstanding checkpoint operations are complete."""
-    if self._checkpointer is not None:
-      self._checkpointer.wait()
