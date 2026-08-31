@@ -53,8 +53,8 @@ directory that contains a `tunix/` checkout will shadow the installed package:
   cd tests/end_to_end/tpu/perf_parity && python qwen3_maxtext_profile.py [--scan]
 """
 
+import argparse
 import os
-import sys
 import time
 
 from flax.linen import partitioning as nn_partitioning
@@ -67,16 +67,24 @@ import qwen3_common as qc
 from transformers import AutoTokenizer
 from tunix.experimental.train import peft_trainer_v2
 
-def _build_config(num_devices: int, scan_layers: bool):
-  """Builds the MaxText config for a qwen3-0.6b matched to the tunix run."""
+
+def _build_config(spec: qc.RunSpec, scan_layers: bool):
+  """Builds the MaxText config for a qwen3-0.6b matched to the tunix run.
+
+  `per_device_batch_size` describes the *micro*-batch. MaxText's own
+  `gradient_accumulation_steps` is left at 1 deliberately: it would have base.yml split
+  the loaded batch into micro-batches itself, whereas here the trainer is handed one
+  micro-batch at a time and does the accumulating.
+  """
   return pyconfig.initialize(
       [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
       model_name="qwen3-0.6b",
       run_name="perf_parity_qwen3_0p6b",
       base_output_directory=os.path.join(os.getcwd(), "maxtext_out"),
-      max_target_length=qc.SEQ_LEN,
-      per_device_batch_size=qc.BATCH_SIZE / num_devices,
-      ici_fsdp_parallelism=num_devices,
+      max_target_length=spec.seq,
+      per_device_batch_size=spec.per_device_batch,
+      ici_fsdp_parallelism=spec.fsdp,
+      ici_tensor_parallelism=spec.tp,
       # The three overrides that match tunix's defaults; see the module docstring.
       dtype="float32",
       weight_dtype="float32",
@@ -94,22 +102,26 @@ def _build_config(num_devices: int, scan_layers: bool):
 
 
 def main() -> None:
-  scan_layers = "--scan" in sys.argv
-  profile_dir = qc.profile_dir("qwen3-0.6b-maxtext" + ("-scan" if scan_layers else ""))
-
-  devices = jax.devices()
-  print(f"devices: {len(devices)} x {devices[0].device_kind}", flush=True)
+  parser = qc.add_common_args(argparse.ArgumentParser())
+  parser.add_argument("--scan", action="store_true", help="use MaxText's scanned decoder")
+  args = parser.parse_args()
+  spec = qc.RunSpec(args)
+  scan_layers = args.scan
+  profile_dir = qc.profile_dir(spec.tag("qwen3-0.6b-maxtext" + ("-scan" if scan_layers else "")))
+  print(spec.describe(), flush=True)
 
   tokenizer = AutoTokenizer.from_pretrained(qc.TOKENIZER_ID)
-  dataset = qc.make_dataset()
+  dataset = qc.make_dataset_for(spec)
 
-  config = _build_config(len(devices), scan_layers)
+  config = _build_config(spec, scan_layers)
   print(f"scan_layers={config.scan_layers}  attention={config.attention}  remat={config.remat_policy}", flush=True)
 
   build_start = time.perf_counter()
-  # mesh=None, so MaxText builds its own mesh from the ici_* settings and returns it.
+  # mesh=None, so MaxText builds its own mesh from the ici_* settings -- but over the
+  # devices this run was given, which may be a subset of the host's.
   model, mesh = model_creation_utils.from_pretrained(
       config,
+      devices=spec.devices,
       wrap_with_tunix_adapter=True,
       tokenizer_pad_id=tokenizer.pad_token_id,
   )
@@ -119,8 +131,8 @@ def main() -> None:
   optimizer = optax.inject_hyperparams(optax.sgd)(learning_rate=optax.constant_schedule(qc.LEARNING_RATE))
   trainer_config = peft_trainer_v2.TrainingConfig(
       eval_every_n_steps=20000,
-      max_steps=qc.MAX_STEPS,
-      gradient_accumulation_steps=qc.ACCUM_STEPS,
+      max_steps=spec.steps,
+      gradient_accumulation_steps=spec.ga,
   )
   trainer = peft_trainer_v2.PeftTrainer(model, optimizer, trainer_config)
   trainer = trainer.with_gen_model_input_fn(qc.make_gen_model_input_fn(tokenizer.pad_token_id))
@@ -135,7 +147,7 @@ def main() -> None:
       trainer.train(dataset, skip_jit=False)
       jax.effects_barrier()
 
-  timer.report(f"maxtext qwen3-0.6b (scan_layers={scan_layers})")
+  timer.report(f"maxtext qwen3-0.6b (scan_layers={scan_layers})", group=spec.ga)
   print(f"trace written to {profile_dir}", flush=True)
 
 

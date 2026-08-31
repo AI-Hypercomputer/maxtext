@@ -24,6 +24,7 @@ directory that contains a `tunix/` checkout will shadow the installed package:
   cd tests/end_to_end/tpu/perf_parity && python qwen3_tunix_profile.py
 """
 
+import argparse
 import time
 
 from flax import nnx
@@ -34,10 +35,15 @@ from transformers import AutoTokenizer
 from tunix.experimental.train import peft_trainer_v2
 from tunix.models.qwen3 import model as qwen3_model
 
-_PROFILE_DIR = qc.profile_dir("qwen3-0.6b-tunix")
-
 
 def create_sharded_model(config, rngs, mesh):
+  """Initialises Qwen3 straight into its sharded layout.
+
+  Building under `nnx.jit` with the partition spec applied inside means the full
+  replicated parameter tree is never materialised on one device, which is what MaxText's
+  `from_pretrained` does on the other arms.
+  """
+
   @nnx.jit
   def _init(rngs):
     model = qwen3_model.Qwen3(config, rngs=rngs)
@@ -52,17 +58,20 @@ def create_sharded_model(config, rngs, mesh):
 
 
 def main() -> None:
-  devices = jax.devices()
-  print(f"devices: {len(devices)} x {devices[0].device_kind}", flush=True)
+  spec = qc.RunSpec(qc.add_common_args(argparse.ArgumentParser()).parse_args())
+  profile_dir = qc.profile_dir(spec.tag("qwen3-0.6b-tunix"))
+  print(spec.describe(), flush=True)
 
   tokenizer = AutoTokenizer.from_pretrained(qc.TOKENIZER_ID)
-  dataset = qc.make_dataset()
+  dataset = qc.make_dataset_for(spec)
 
-  # Every chip, sharded on `fsdp`. `ShardingConfig.get_default_sharding()` names both
-  # `fsdp` and `tp`, so the mesh has to carry both axes even at tp=1.
+  # Sharded on `fsdp`. `ShardingConfig.get_default_sharding()` names both `fsdp` and
+  # `tp`, so the mesh has to carry both axes even at tp=1. Passing an explicit device
+  # list is what lets a 2-device mesh run on a 4-chip host.
   mesh = jax.make_mesh(
-      (len(devices), 1),
+      (spec.fsdp, spec.tp),
       ("fsdp", "tp"),
+      devices=spec.devices,
       axis_types=(jax.sharding.AxisType.Auto,) * 2,
   )
   print(f"mesh: {mesh}", flush=True)
@@ -77,23 +86,25 @@ def main() -> None:
 
   with mesh:
     optimizer = optax.inject_hyperparams(optax.sgd)(learning_rate=optax.constant_schedule(qc.LEARNING_RATE))
+    # `max_steps` counts optimizer steps, not micro steps: the loop breaks on
+    # `_train_steps >= max_steps`, and `_train_steps` only advances on an update.
     trainer_config = peft_trainer_v2.TrainingConfig(
         eval_every_n_steps=20000,
-        max_steps=qc.MAX_STEPS,
-        gradient_accumulation_steps=qc.ACCUM_STEPS,
+        max_steps=spec.steps,
+        gradient_accumulation_steps=spec.ga,
     )
     trainer = peft_trainer_v2.PeftTrainer(model, optimizer, trainer_config)
     trainer = trainer.with_gen_model_input_fn(qc.make_gen_model_input_fn(tokenizer.pad_token_id))
     timer = qc.StepTimer()
     trainer.with_training_hooks(timer)
 
-    print(f"tracing to {_PROFILE_DIR}", flush=True)
-    with jax.profiler.trace(log_dir=_PROFILE_DIR):
+    print(f"tracing to {profile_dir}", flush=True)
+    with jax.profiler.trace(log_dir=profile_dir):
       trainer.train(dataset, skip_jit=False)
       jax.effects_barrier()
 
-  timer.report("tunix qwen3-0.6b")
-  print(f"trace written to {_PROFILE_DIR}", flush=True)
+  timer.report("tunix qwen3-0.6b", group=spec.ga)
+  print(f"trace written to {profile_dir}", flush=True)
 
 
 if __name__ == "__main__":

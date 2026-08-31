@@ -64,6 +64,7 @@ directory that contains a `tunix/` checkout will shadow the installed package:
   cd tests/end_to_end/tpu/perf_parity && python qwen3_engine_profile.py
 """
 
+import argparse
 import os
 import statistics
 import time
@@ -78,19 +79,24 @@ import qwen3_common as qc
 from transformers import AutoTokenizer
 from tunix.experimental.train import peft_trainer_v2
 
-_PROFILE_DIR = qc.profile_dir("qwen3-0.6b-engine")
 
+def _build_config(spec: qc.RunSpec):
+  """The qwen3_maxtext_profile.py config, plus the optimizer overrides listed above.
 
-def _build_config(num_devices: int):
-  """The qwen3_maxtext_profile.py config, plus the optimizer overrides listed above."""
+  `gradient_accumulation_steps` stays at 1 no matter what `--ga` says. The engine reads
+  no accumulation setting at all -- `_micro_step_count` counts `fwd_bwd` calls since the
+  last `update()` -- so putting the real value here would only mislead base.yml's batch
+  arithmetic into splitting `per_device_batch_size` a second time.
+  """
   return pyconfig.initialize(
       [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
       model_name="qwen3-0.6b",
       run_name="perf_parity_qwen3_0p6b_engine",
       base_output_directory=os.path.join(os.getcwd(), "maxtext_out"),
-      max_target_length=qc.SEQ_LEN,
-      per_device_batch_size=qc.BATCH_SIZE / num_devices,
-      ici_fsdp_parallelism=num_devices,
+      max_target_length=spec.seq,
+      per_device_batch_size=spec.per_device_batch,
+      ici_fsdp_parallelism=spec.fsdp,
+      ici_tensor_parallelism=spec.tp,
       dtype="float32",
       weight_dtype="float32",
       remat_policy="none",
@@ -107,9 +113,9 @@ def _build_config(num_devices: int):
       gradient_clipping_threshold=0.0,
       warmup_steps_fraction=0.0,
       learning_rate_final_fraction=1.0,
-      learning_rate_schedule_steps=qc.MAX_STEPS,
-      steps=qc.MAX_STEPS,
-      gradient_accumulation_steps=qc.ACCUM_STEPS,
+      learning_rate_schedule_steps=spec.steps,
+      steps=spec.steps,
+      gradient_accumulation_steps=1,
   )
 
 
@@ -146,13 +152,14 @@ def _report_nnx_graph_cost(engine) -> None:
 
 
 def main() -> None:
-  devices = jax.devices()
-  print(f"devices: {len(devices)} x {devices[0].device_kind}", flush=True)
+  spec = qc.RunSpec(qc.add_common_args(argparse.ArgumentParser()).parse_args())
+  profile_dir = qc.profile_dir(spec.tag("qwen3-0.6b-engine"))
+  print(spec.describe(), flush=True)
 
   tokenizer = AutoTokenizer.from_pretrained(qc.TOKENIZER_ID)
-  dataset = qc.make_dataset()
+  dataset = qc.make_dataset_for(spec)
 
-  config = _build_config(len(devices))
+  config = _build_config(spec)
   print(
       f"scan_layers={config.scan_layers}  attention={config.attention}  "
       f"remat={config.remat_policy}  opt={config.opt_type}  clip={config.gradient_clipping_threshold}",
@@ -161,7 +168,7 @@ def main() -> None:
 
   # Built here rather than left to the engine: `wrap_with_tunix_adapter=True` requires a
   # mesh up front, since the adapter is constructed under it.
-  mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
+  mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(config, devices=spec.devices), config.mesh_axes)
 
   build_start = time.perf_counter()
   engine = maxtext_engine.MaxTextTrainingEngine(
@@ -183,36 +190,43 @@ def main() -> None:
   # drives it.
   timer = qc.StepTimer()
   fwd_bwd_s, update_s = [], []
-  print(f"tracing to {_PROFILE_DIR}", flush=True)
-  with jax.profiler.trace(log_dir=_PROFILE_DIR):
+  print(f"tracing to {profile_dir}", flush=True)
+  with jax.profiler.trace(log_dir=profile_dir):
     timer.on_train_start(engine)
     # Compiled inside the trace so its cost lands in the same place PeftTrainer's does:
     # in the first step of the profile rather than before it.
     engine.compile(dataset[0])
-    for payload in dataset:
-      timer.on_train_step_start(engine)
-      t0 = time.perf_counter()
-      engine.fwd_bwd(payload)
+    # `spec.ga` micro-batches per optimizer step. The engine takes accumulation from the
+    # call pattern rather than from config, so this loop *is* the GA setting: the first
+    # `fwd_bwd` after an `update()` starts a fresh accumulator and the rest fold into it.
+    # The hook fires before every `fwd_bwd`, matching where tunix fires it, so
+    # `report(group=...)` sums each run of `ga` gaps back into one optimizer step.
+    for step in range(spec.steps):
+      for micro in range(spec.ga):
+        timer.on_train_step_start(engine)
+        t0 = time.perf_counter()
+        engine.fwd_bwd(dataset[step * spec.ga + micro])
+        fwd_bwd_s.append(time.perf_counter() - t0)
       t1 = time.perf_counter()
       engine.update()
-      fwd_bwd_s.append(t1 - t0)
       update_s.append(time.perf_counter() - t1)
     engine.close()
     timer.on_train_end(engine)
     jax.effects_barrier()
 
-  timer.report("maxtext qwen3-0.6b + MaxTextTrainingEngine")
+  timer.report("maxtext qwen3-0.6b + MaxTextTrainingEngine", group=spec.ga)
   # Split the step in two. Both halves include a blocking `wait_for_next`, so this does not
   # separate host work from waiting -- but it does say which of the engine's two dispatches
-  # the time sits behind, which is the first thing to know when the step is 4x PeftTrainer's.
+  # the time sits behind. Under GA the fwd_bwd figure is per micro-batch and the update
+  # figure is per optimizer step, so the two only add up after scaling by `ga`.
   print(
       "  fwd_bwd / update : "
-      f"{statistics.median(fwd_bwd_s[qc.WARMUP_STEPS:]) * 1e3:.1f}ms / "
-      f"{statistics.median(update_s[qc.WARMUP_STEPS:]) * 1e3:.1f}ms (medians)"
+      f"{statistics.median(fwd_bwd_s[qc.WARMUP_STEPS * spec.ga:]) * 1e3:.1f}ms per micro / "
+      f"{statistics.median(update_s[qc.WARMUP_STEPS:]) * 1e3:.1f}ms per step (medians)"
   )
   _report_nnx_graph_cost(engine)
   print(f"train steps completed: {engine.train_step}", flush=True)
-  print(f"trace written to {_PROFILE_DIR}", flush=True)
+  print(f"trace written to {profile_dir}", flush=True)
 
 
 if __name__ == "__main__":
