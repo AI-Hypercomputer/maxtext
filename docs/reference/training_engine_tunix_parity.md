@@ -14,10 +14,17 @@ of the trainer, not of the workload.
 | -------------------------------------------------- | ------------------------------------------------------------------------------ |
 | Numerical parity, `gradient_accumulation_steps=1`  | **Equivalent.** Identical loss; gradients agree to `rel_l2` 3.0e-4             |
 | Numerical parity, GA > 1 with ragged micro-batches | **Diverge.** `rel_l2` 0.68. MaxText matches the exact gradient; Tunix does not |
-| Step time, GA=1                                    | MaxText **34.9 ms** vs. Tunix 66.8 ms (**1.91x**)                              |
-| Step time, GA=4                                    | MaxText **103.6 ms** vs. Tunix 236.6 ms (**2.28x**)                            |
-| Peak HBM/device, GA=1                              | MaxText **1.77 GiB** vs. Tunix 7.52 GiB (**4.3x**)                             |
+| Step time, GA=1, 16 tokens                         | MaxText **34.7 ms** vs. Tunix 64.0 ms (**1.85x**)                              |
+| Step time, GA=1, 1024 tokens                       | MaxText **59.7 ms** vs. Tunix 74.7 ms (**1.25x**)                              |
+| TPU-busy time/step, GA=1, 1024 tokens              | MaxText **44.3 ms** vs. Tunix 63.7 ms (**1.44x**)                              |
+| `update()` alone                                   | Tunix **8.2 ms** vs. MaxText 14.0 ms — the one phase Tunix wins                |
+| Peak HBM/device, GA=1                              | MaxText **1.78 GiB** vs. Tunix 8.65 GiB (**4.9x**)                             |
 | Metrics recorded per step                          | MaxText **22** vs. Tunix 2                                                     |
+
+MaxText's lead comes entirely from `fwd_bwd` and it **shrinks as the workload grows** —
+2.75x at 16 tokens, 1.46x at 1024. The gap is a fixed ~13 GiB of extra memory traffic in
+Tunix's kernel, so it is a constant that real workloads amortize. Do not quote the
+small-shape numbers as a general result.
 
 ## Environment
 
@@ -28,9 +35,9 @@ of the trainer, not of the workload.
 | Model                     | Qwen3-0.6B, `scan_layers=True`, f32 weights/activations/grads                |
 | Checkpoint                | `gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items`       |
 | Loss                      | `tunix.rl.algo_core.grpo_loss_fn`, `loss_agg_mode="token-mean"`, `beta=0.04` |
-| Batch                     | 8 sequences, `max_target_length=64`, prompt 8 / completion 8 tokens          |
+| Batch                     | 8 sequences; `--seq` tokens split evenly between prompt and completion       |
 | `jax` / `jaxlib` / `flax` | 0.11.1 / 0.11.1 / 0.12.9                                                     |
-| MaxText commit            | `dcafaa2ef`                                                                  |
+| MaxText commit            | `671cec44d`                                                                  |
 | Tunix                     | source checkout containing `tunix/experimental/train/peft_trainer_v2.py`     |
 
 `gradient_clipping_threshold=0.0` throughout: MaxText clips inside its update kernel and
@@ -49,14 +56,19 @@ uses for the engine-vs-`train_step` parity check.
 python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=both --ga=1 --batch=8 --iters=8
 python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=both --ga=4 --batch=8 --iters=8 --ragged
 
-# Peak HBM: one trainer per process, so the reading belongs to that trainer alone.
-python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=maxtext --ga=1 --batch=8 --skip-ref
-python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=tunix   --ga=1 --batch=8 --skip-ref
+# Step time and peak HBM: one trainer per process, so the reading belongs to that trainer
+# alone, and no --xprof, so tracing overhead does not land in the wall clock.
+python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=maxtext --ga=1 --batch=8 --seq=1024 --skip-ref
+python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=tunix   --ga=1 --batch=8 --seq=1024 --skip-ref
 
 # Compiled-kernel FLOPs / bytes-accessed, and xplane traces.
 python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=both --ga=1 --skip-ref --kernel-bench
-python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=maxtext --ga=1 --skip-ref --xprof=/tmp/xprof
+python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=maxtext --ga=1 --seq=1024 --skip-ref --xprof=/tmp/xprof
 ```
+
+`--seq` sets the tokens per example, split evenly between prompt and completion. It
+defaults to 16 to keep the numerics runs cheap; use a realistic length for any step-time
+claim, because the trainers converge as the shape grows (§4).
 
 ## 1. End-to-end GRPO test
 
@@ -133,20 +145,33 @@ difference.
 
 ## 4. Step time
 
-Both trainers measured back to back in one process under identical conditions. Times are
-medians over 8 iterations; `fwd_bwd` is per micro-step, `total` is a whole update.
+Medians over 8 iterations, after 2 untimed warmup updates, one trainer per process and no
+profiler attached. `fwd_bwd` is per micro-step, `total` is a whole update.
 
-|      | MaxText `fwd_bwd` | MaxText `update` | MaxText total | Tunix `fwd_bwd` | Tunix `update` | Tunix total | Speedup   |
-| ---- | ----------------- | ---------------- | ------------- | --------------- | -------------- | ----------- | --------- |
-| GA=1 | 20.4 ms           | 14.4 ms          | **34.9 ms**   | 57.7 ms         | 8.9 ms         | 66.8 ms     | **1.91x** |
-| GA=4 | 20.9 ms           | 18.0 ms          | **103.6 ms**  | 56.9 ms         | 9.3 ms         | 236.6 ms    | **2.28x** |
+|             | MaxText `fwd_bwd` | MaxText `update` | MaxText total | Tunix `fwd_bwd` | Tunix `update` | Tunix total | Speedup   |
+| ----------- | ----------------- | ---------------- | ------------- | --------------- | -------------- | ----------- | --------- |
+| 16 tokens   | 20.4 ms           | 14.3 ms          | **34.7 ms**   | 56.0 ms         | 8.0 ms         | 64.0 ms     | **1.85x** |
+| 1024 tokens | 45.6 ms           | 14.0 ms          | **59.7 ms**   | 66.5 ms         | 8.2 ms         | 74.7 ms     | **1.25x** |
 
-An independent GA=1 run reproduced 34.6 ms vs. 64.2 ms (1.86x), which is the scale of
-run-to-run spread.
+`fwd_bwd` alone goes 2.75x → 1.46x between the two shapes. Tunix's kernel carries a roughly
+constant ~13 GiB of extra memory traffic (§6), so the absolute penalty barely moves while
+the useful work grows — which is exactly why the ratio collapses. **At production sequence
+lengths, expect the two `fwd_bwd` implementations to converge further.**
 
-Tunix's `update` is genuinely faster (8.9 ms vs. 14.4 ms) — MaxText's `update()` re-runs
-`nnx.split(self._state)` on every call, which is a known and already-flagged `TODO` in
-`maxtext_engine.py`. It does not come close to paying for the `fwd_bwd` difference.
+`update` is the one phase Tunix wins, by ~6 ms, at both shapes. Breaking MaxText's 14.0 ms
+down:
+
+| MaxText `update()` at 1024 tokens |         |
+| --------------------------------- | ------- |
+| On device (`jit__update_kernel`)  | 0.71 ms |
+| `MetricsRecorder._record_metric`  | ~2.8 ms |
+| `nnx.split(self._state)`          | ~1.7 ms |
+| Other host-side work              | ~8.8 ms |
+
+Measured by no-op'ing `_record_metric` (13.78 → 10.95 ms) and by timing `nnx.split` on its
+own. Tunix's `update` is 8.2 ms wall clock against 0.86 ms on device, so both trainers are
+host-bound here; MaxText is just ~6 ms more so. Neither the metrics recorder nor the
+`nnx.split` `TODO` in `maxtext_engine.py` accounts for the whole difference on its own.
 
 ### Where the `fwd_bwd` gap is *not*
 
@@ -159,14 +184,64 @@ Stripping the Python wrapper off and calling the compiled executable directly:
 
 The wrapper costs ~1.4 ms on both sides. The gap is entirely inside the compiled program.
 
+## 4b. Reading the traces: why xprof flatters Tunix
+
+The xplane traces below are the authority for device time, but the **trace viewer's step
+statistics are not usable for MaxText**, and anyone comparing the two side by side will
+reach the wrong conclusion unless they know why.
+
+Counting `ph=="X"` events on the `/device:TPU:0` `XLA Modules` line, 8 iterations, GA=1:
+
+| 1024 tokens           | MaxText                            | Tunix                               |
+| --------------------- | ---------------------------------- | ----------------------------------- |
+| fwd/bwd module        | `jit_first_kernel` 8x **41.74 ms** | `jit__fwd_bwd_step` 8x **62.81 ms** |
+| update module         | `jit__update_kernel` 8x 0.71 ms    | `jit__update_step` 8x 0.86 ms       |
+| Total TPU-busy        | **354.5 ms**                       | 509.4 ms                            |
+| **TPU-busy per step** | **44.3 ms**                        | **63.7 ms** (1.44x)                 |
+| XLA module executions | **424**                            | **16**                              |
+| `Steps` line entries  | 424, median **0.012 ms**           | 16, median 36.7 ms                  |
+
+MaxText runs 424 XLA modules where Tunix runs 16. The extra 408 (~51 per step) are tiny
+eager dispatches from `MetricsRecorder._record_metric`, which calls `jnp.atleast_1d` /
+`jnp.append` once per metric per micro-step: `jit_atleast_1d` x29, `jit_equal` x4,
+`jit__where` x4, `jit_multiply` x5, `jit_maximum` x2, `jit_true_divide` x2, `jit_add` x2.
+
+They cost only ~2.8 ms of wall clock, but they have two effects that matter for profiling:
+
+1. **xprof's step detection splits on module boundaries**, so MaxText's reported step time
+   is computed over 424 fake steps with a 0.012 ms median. That statistic is meaningless.
+   Read total TPU-busy time instead.
+2. In the trace viewer MaxText's device row is a picket fence of sub-0.1 ms slivers next to
+   Tunix's two clean bars, which reads as "MaxText is busier and therefore slower". It is
+   not: MaxText's row contains 44.3 ms of work per step against Tunix's 63.7 ms.
+
+Attaching the profiler also penalizes MaxText disproportionately, because per-dispatch trace
+overhead is multiplied by 51: `update` measures 14.0 ms untraced and 27.0 ms traced, while
+Tunix's goes 8.2 → 18.5 ms. **All wall-clock figures in §4 are from untraced runs** for
+that reason.
+
+Two further cautions when comparing against traces from elsewhere:
+
+- Trace **after warmup**. Tracing a cold loop drops a ~570 ms
+  `PjRtCApiClient::CompileAndLoad(jit__update_kernel)` into the middle of the window, since
+  MaxText's donated update kernel re-lowers against the post-donation parameter layout.
+  `_time_loop` runs `_WARMUP = 2` untimed updates outside the trace context.
+- A MaxText trace and a Tunix trace captured by different people on different models and
+  meshes cannot be compared for trainer overhead at all. Only a same-model, same-mesh,
+  same-batch, back-to-back run isolates the trainer.
+
 ## 5. Peak HBM, and the root cause
 
 Measured one trainer per process.
 
-|                       | MaxText       | Tunix v2  |
-| --------------------- | ------------- | --------- |
-| Peak HBM/device, GA=1 | **1.766 GiB** | 7.517 GiB |
-| Peak HBM/device, GA=4 | **1.779 GiB** | 3.988 GiB |
+|                                    | MaxText       | Tunix v2  |
+| ---------------------------------- | ------------- | --------- |
+| Peak HBM/device, GA=1, 16 tokens   | **1.766 GiB** | 8.636 GiB |
+| Peak HBM/device, GA=1, 1024 tokens | **1.782 GiB** | 8.648 GiB |
+| Peak HBM/device, GA=2, 1024 tokens | **1.807 GiB** | 4.790 GiB |
+
+MaxText's footprint is flat in sequence length at this size; Tunix's is dominated by the
+replicated gradient tree, which is also flat. The 64x sequence increase moves neither.
 
 Gradient-tree placement explains it:
 
@@ -184,27 +259,34 @@ sharding XLA derives from the parameters". That does not hold here — `nnx.jit`
 size. MaxText pins both `in_shardings` and `out_shardings` on its `_fwd_bwd_kernel`.
 
 **The persistent accumulator that PR #1934 adds fixes the memory, not the compute.** At
-GA=2 the accumulator *is* sharded and peak HBM drops 7.52 → 3.99 GiB, but the kernel is
-untouched and `fwd_bwd` stays at 56.9 ms.
+GA=2 the accumulator *is* sharded and peak HBM drops 8.65 → 4.79 GiB, but the kernel is
+untouched: `fwd_bwd` stays at 71.4 ms and its bytes-accessed at 22.7 GiB, byte-identical to
+GA=1.
 
 ## 6. Compiled-kernel analysis
 
 From `Compiled.cost_analysis()` / `memory_analysis()` on the `fwd_bwd` executable:
 
-|                                                               | MaxText GA=1     | Tunix GA=1       | Tunix GA=2    |
-| ------------------------------------------------------------- | ---------------- | ---------------- | ------------- |
-| GFLOPs                                                        | 17.0             | 18.8             | 18.8          |
-| Bytes accessed                                                | **2.24 GiB**     | **16.97 GiB**    | **16.97 GiB** |
-| Argument size                                                 | 0.278 GiB        | 2.498 GiB        | 2.498 GiB     |
-| Output size                                                   | 0.278 GiB        | 2.498 GiB        | 2.498 GiB     |
-| Temp size                                                     | 0.257 GiB        | 3.565 GiB        | 3.565 GiB     |
-| `all-gather` / `all-reduce` / `reduce-scatter` / `all-to-all` | 12 / 6 / 12 / 18 | 10 / 9 / 12 / 17 | —             |
-| Bare-executable time                                          | 18.7 ms          | 56.7 ms          | 56.9 ms       |
+|                      | 16 tok: **MaxText** | 16 tok: Tunix | 1024 tok: **MaxText** | 1024 tok: Tunix |
+| -------------------- | ------------------- | ------------- | --------------------- | --------------- |
+| GFLOPs               | 17.0                | 18.8          | 1080.7                | 1082.4          |
+| Bytes accessed       | **2.24 GiB**        | **16.97 GiB** | **9.58 GiB**          | **22.72 GiB**   |
+| Temp size            | 0.257 GiB           | 3.565 GiB     | 1.565 GiB             | 3.928 GiB       |
+| Bare-executable time | 19.4 ms             | 56.6 ms       | 43.9 ms               | 67.5 ms         |
 
-Same arithmetic (17.0 vs. 18.8 GFLOP), **7.6x the memory traffic** and 13.9x the temp
-buffer. The kernel is bandwidth-bound, and 7.6x traffic for 3.0x time is what that looks
-like. The GA=1 and GA=2 columns being byte-identical confirms the accumulator's sharding
-never reaches the kernel signature.
+Both trainers issue the same arithmetic — at 1024 tokens 1080.7 vs. 1082.4 GFLOP, a 0.2%
+difference. Tunix moves **+14.7 GiB** at 16 tokens and **+13.1 GiB** at 1024: a constant,
+matching the replicated gradient tree that has to be written and read regardless of
+sequence length. That constant is the entire step-time gap, and it is why the gap is 2.9x
+at the small shape and 1.5x at the large one.
+
+Neither kernel is at roofline here — 1080 GFLOP in 43.9 ms is ~25 TFLOP/s across 8 devices,
+and 9.58 GiB in 43.9 ms is ~220 GiB/s — so these numbers characterize kernel *structure* on
+a 0.6B f32 model, not achievable throughput. Treat the ratios as an upper bound on what a
+production-shaped workload would show.
+
+The GA=1 and GA=2 columns are byte-identical (22.72 vs. 22.67 GiB), confirming the
+accumulator's sharding never reaches the kernel signature.
 
 The actionable conclusion is that there is nothing to port here: MaxText's explicit
 `in_shardings`/`out_shardings` on the fwd/bwd kernel are precisely the thing v2 lacks.
@@ -269,30 +351,38 @@ timings off that test is reading the eager path.
 
 ## Profiles
 
-xplane traces of the steady-state loop only (warmup and compilation excluded), with
-`StepTraceAnnotation` step boundaries and `fwd_bwd`/`update` region annotations:
+xplane traces of the steady-state loop only — 2 untimed warmup updates run before
+`start_trace`, so no compilation lands inside the window — with `StepTraceAnnotation` step
+boundaries and `fwd_bwd`/`update` region annotations:
 
 ```text
-gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-29/maxtext_ga1_bs8/
-gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-29/tunix_ga1_bs8/
-gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-29/maxtext_ga4_bs8/
-gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-29/tunix_ga4_bs8/
+gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/maxtext_ga1_bs8_seq16/
+gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/tunix_ga1_bs8_seq16/
+gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/maxtext_ga1_bs8_seq1024/
+gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/tunix_ga1_bs8_seq1024/
+gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/maxtext_ga2_bs8_seq1024/
+gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/tunix_ga2_bs8_seq1024/
 ```
 
 Each holds `plugins/profile/<timestamp>/t1v-n-c9d27794-w-0.xplane.pb`. Raw JSON results for
-the four profiled runs are under `.../raw_results/`. View with:
+every run, traced and untraced, are under `.../raw_results/`. View with:
 
 ```bash
-tensorboard --logdir gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-29/maxtext_ga1_bs8
+tensorboard --logdir gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/maxtext_ga1_bs8_seq1024
 ```
 
-Step times **from the profiled runs** are inflated by tracing overhead and are not the
-performance numbers above; they are listed here only so the traces can be matched to
-numbers:
+Read **total TPU-busy time**, not the trace viewer's step statistics — see §4b for why the
+latter is not meaningful for MaxText.
 
-| Run               | `fwd_bwd` | `update` | Total    | Peak HBM  |
-| ----------------- | --------- | -------- | -------- | --------- |
-| `maxtext_ga1_bs8` | 23.8 ms   | 25.0 ms  | 48.6 ms  | 1.766 GiB |
-| `tunix_ga1_bs8`   | 62.5 ms   | 25.7 ms  | 88.1 ms  | 7.517 GiB |
-| `maxtext_ga4_bs8` | 24.1 ms   | 29.5 ms  | 127.8 ms | 1.779 GiB |
-| `tunix_ga4_bs8`   | 60.7 ms   | 19.4 ms  | 262.4 ms | 3.988 GiB |
+Wall clock **from the profiled runs** is inflated by tracing overhead, unevenly between the
+two trainers, and is not the performance numbers above. Listed only so the traces can be
+matched to numbers:
+
+| Run                       | `fwd_bwd` | `update` | Total    | Peak HBM  | TPU-busy/step |
+| ------------------------- | --------- | -------- | -------- | --------- | ------------- |
+| `maxtext_ga1_bs8_seq16`   | 23.3 ms   | 25.9 ms  | 49.4 ms  | 1.766 GiB | **19.3 ms**   |
+| `tunix_ga1_bs8_seq16`     | 59.0 ms   | 19.0 ms  | 78.2 ms  | 8.636 GiB | 53.0 ms       |
+| `maxtext_ga1_bs8_seq1024` | 48.7 ms   | 27.0 ms  | 76.1 ms  | 1.782 GiB | **44.3 ms**   |
+| `tunix_ga1_bs8_seq1024`   | 70.7 ms   | 18.5 ms  | 89.2 ms  | 8.648 GiB | 63.7 ms       |
+| `maxtext_ga2_bs8_seq1024` | 51.3 ms   | 25.8 ms  | 128.0 ms | 1.807 GiB | —             |
+| `tunix_ga2_bs8_seq1024`   | 71.4 ms   | 19.5 ms  | 162.2 ms | 4.790 GiB | —             |

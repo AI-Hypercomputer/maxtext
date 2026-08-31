@@ -535,6 +535,9 @@ def _bench(fn, iters, block=True):
 # Set from --xprof; `tag` is rebound per trainer so each gets its own xplane directory.
 _XPROF = {"dir": None, "tag": None}
 
+# Untimed, untraced updates run before the measurement window opens.
+_WARMUP = 2
+
 
 @contextlib.contextmanager
 def _maybe_trace():
@@ -551,9 +554,20 @@ def _maybe_trace():
     jax.profiler.stop_trace()
 
 
-def _time_loop(fwd_bwd, update, examples, iters, leaves_fn):
-  """Median wall clock of one full update, plus the peak HBM the whole run touched."""
+def _time_loop(fwd_bwd, update, examples, iters, leaves_fn, warmup=_WARMUP):
+  """Median wall clock of one full update, plus the peak HBM the whole run touched.
+
+  The warmup runs outside `_maybe_trace`. It is not just noise reduction: MaxText's update
+  kernel is donated, and its first post-donation invocation re-lowers against the new
+  parameter layout, so tracing from a cold loop drops a ~570 ms `CompileAndLoad` in the
+  middle of the window and makes the trace unreadable next to a warm one.
+  """
   fwd_times, update_times = [], []
+  for _ in range(warmup):
+    for ex in examples:
+      fwd_bwd(ex)
+    update()
+  jax.block_until_ready(leaves_fn())
   with _maybe_trace() as trace_path:
     for step in range(iters):
       # StepTraceAnnotation gives xprof real step boundaries, so the trace viewer can
@@ -595,6 +609,14 @@ def main():
   )
   ap.add_argument("--ga", type=int, default=1)
   ap.add_argument("--batch", type=int, default=8)
+  ap.add_argument(
+      "--seq",
+      type=int,
+      default=16,
+      help="tokens per example, split evenly between prompt and completion. The default is "
+      "deliberately tiny so the numerics run stays cheap; raise it to compare step time at "
+      "a size where the matmuls, not the dispatch overhead, dominate.",
+  )
   ap.add_argument("--iters", type=int, default=5)
   ap.add_argument("--ragged", action="store_true", help="unequal valid-token counts per micro-batch")
   ap.add_argument(
@@ -616,9 +638,9 @@ def main():
   ap.add_argument("--out", default=None)
   args = ap.parse_args()
 
-  prompt_len, completion_len = 8, 8
+  prompt_len = completion_len = args.seq // 2
   if args.ragged and args.ga > 1:
-    valid = [completion_len, 2, 5, 1, 8, 3, 7, 4][: args.ga]
+    valid = [round(completion_len * f) for f in (1.0, 0.25, 0.625, 0.125, 1.0, 0.375, 0.875, 0.5)][: args.ga]
   else:
     valid = [completion_len] * args.ga
 
@@ -626,6 +648,7 @@ def main():
       gradient_accumulation_steps=args.ga,
       micro_batch_size_to_train_on=args.batch,
       per_device_batch_size=max(1, args.batch // jax.device_count()),
+      max_target_length=max(64, args.seq),
   )
   mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
   algo_config = _GrpoConfig()
@@ -656,6 +679,7 @@ def main():
       "trainer": args.trainer + ("+eager" if args.no_compile and args.trainer == "maxtext" else ""),
       "ga": args.ga,
       "batch": args.batch,
+      "seq": args.seq,
       "valid_lens": valid,
       "devices": jax.device_count(),
   }
@@ -693,7 +717,7 @@ def main():
   _XPROF["dir"] = args.xprof
   with mesh:
     for name in which:
-      _XPROF["tag"] = f"{name}_ga{args.ga}_bs{args.batch}"
+      _XPROF["tag"] = f"{name}_ga{args.ga}_bs{args.batch}_seq{args.seq}"
       if args.profile:
         import cProfile  # pylint: disable=import-outside-toplevel
         import pstats  # pylint: disable=import-outside-toplevel
