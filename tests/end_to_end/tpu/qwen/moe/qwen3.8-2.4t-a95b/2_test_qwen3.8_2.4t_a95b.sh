@@ -90,9 +90,9 @@ export BASE_OUTPUT_PATH=gs://yujiedeng-maxtext-dev/model_bringup/test/qwen3.8-2.
 #
 #   FSDP 128 x EP 8 = 1024
 # ---------------------------------------------------------------------------
-export ICI_FSDP=32
+export ICI_FSDP=64
 export ICI_EP=8
-export DCN_FSDP=4
+export DCN_FSDP=1
 
 # ---------------------------------------------------------------------------
 # Torch is needed by forward_pass_logit_checker.py
