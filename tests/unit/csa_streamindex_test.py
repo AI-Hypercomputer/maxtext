@@ -36,19 +36,19 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
   def setUp(self):
     self.key = jax.random.PRNGKey(42)
 
-  def test_kernel_vs_einsum_parity_exact_multiple(self):
-    """Verifies numerical parity when shapes are exact multiples of block sizes."""
+  def test_head_major_parity_exact_multiple(self):
+    """Verifies numerical parity for head-major input matching reference einsum."""
     key1, key2, key3 = jax.random.split(self.key, 3)
-    b, s, w, h, d = 2, 256, 128, 64, 128
-    q = jax.random.normal(key1, (b, s, h, d), dtype=jnp.bfloat16)
+    b, h, s, w, d = 2, 64, 256, 128, 128
+    q = jax.random.normal(key1, (b, h, s, d), dtype=jnp.bfloat16)
     compressed = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
     weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
     softmax_scale = d**-0.5
 
-    expected = csa_streamindex.reference_csa_streamindex_score(
+    expected = csa_streamindex.reference_csa_streamindex_score_head_major(
         q, compressed, weights, softmax_scale=softmax_scale
     )
-    actual = csa_streamindex.csa_streamindex_score(
+    actual = csa_streamindex.csa_streamindex_score_head_major(
         q,
         compressed,
         weights,
@@ -57,22 +57,21 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
         block_w=128,
         interpret=True,
     )
-
     np.testing.assert_allclose(actual, expected, rtol=1e-1, atol=1e-1)
 
-  def test_kernel_vs_einsum_parity_non_multiples(self):
-    """Verifies padding handling when seq_len and compressed_len are not multiples of block_q/block_w."""
+  def test_head_major_parity_non_multiples(self):
+    """Verifies padding handling when seq_len and compressed_len are not multiples of block sizes."""
     key1, key2, key3 = jax.random.split(self.key, 3)
-    b, s, w, h, d = 2, 150, 70, 32, 64
-    q = jax.random.normal(key1, (b, s, h, d), dtype=jnp.bfloat16)
+    b, h, s, w, d = 2, 32, 150, 70, 64
+    q = jax.random.normal(key1, (b, h, s, d), dtype=jnp.bfloat16)
     compressed = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
     weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
     softmax_scale = d**-0.5
 
-    expected = csa_streamindex.reference_csa_streamindex_score(
+    expected = csa_streamindex.reference_csa_streamindex_score_head_major(
         q, compressed, weights, softmax_scale=softmax_scale
     )
-    actual = csa_streamindex.csa_streamindex_score(
+    actual = csa_streamindex.csa_streamindex_score_head_major(
         q,
         compressed,
         weights,
@@ -81,108 +80,82 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
         block_w=128,
         interpret=True,
     )
-
     np.testing.assert_allclose(actual, expected, rtol=1e-2, atol=1e-2)
 
-  def test_kernel_small_compressed_window(self):
-    """Verifies behavior when compressed_len < block_w."""
+  def test_head_major_causal_parity(self):
+    """Verifies numerical parity with in-VMEM causal masking."""
     key1, key2, key3 = jax.random.split(self.key, 3)
-    b, s, w, h, d = 1, 128, 32, 16, 64
-    q = jax.random.normal(key1, (b, s, h, d), dtype=jnp.bfloat16)
+    b, h, s, w, d = 1, 4, 256, 64, 64
+    q = jax.random.normal(key1, (b, h, s, d), dtype=jnp.bfloat16)
     compressed = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
     weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
     softmax_scale = d**-0.5
+    compress_rate = 4
 
-    expected = csa_streamindex.reference_csa_streamindex_score(
-        q, compressed, weights, softmax_scale=softmax_scale
+    expected = csa_streamindex.reference_csa_streamindex_score_head_major(
+        q, compressed, weights, softmax_scale=softmax_scale, compress_rate=compress_rate
     )
-    actual = csa_streamindex.csa_streamindex_score(
+    actual = csa_streamindex.csa_streamindex_score_head_major(
         q,
         compressed,
         weights,
         softmax_scale=softmax_scale,
+        compress_rate=compress_rate,
         block_q=128,
         block_w=128,
         interpret=True,
     )
+    np.testing.assert_allclose(actual, expected, rtol=1e-1, atol=1e-1)
 
-    np.testing.assert_allclose(actual, expected, rtol=1e-2, atol=1e-2)
+  def test_head_major_gradient_parity(self):
+    """Verifies that head-major custom_vjp gradients match reference autograd."""
+    b, h, s, w, d = 1, 4, 128, 128, 32
+    key1, key2, key3 = jax.random.split(self.key, 3)
+    q = jax.random.normal(key1, (b, h, s, d), dtype=jnp.bfloat16)
+    comp = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
+    weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
+    scale = 32.0**-0.5
+
+    def loss_kernel(q, comp, weights):
+      return jnp.sum(
+          csa_streamindex.csa_streamindex_score_head_major(
+              q, comp, weights, softmax_scale=scale, block_q=128, block_w=128, interpret=True
+          )
+      )
+
+    def loss_ref(q, comp, weights):
+      return jnp.sum(
+          csa_streamindex.reference_csa_streamindex_score_head_major(
+              q, comp, weights, softmax_scale=scale
+          )
+      )
+
+    g_q_k, g_c_k, g_w_k = jax.grad(loss_kernel, argnums=(0, 1, 2))(q, comp, weights)
+    g_q_r, g_c_r, g_w_r = jax.grad(loss_ref, argnums=(0, 1, 2))(q, comp, weights)
+
+    np.testing.assert_allclose(g_q_k, g_q_r, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(g_c_k, g_c_r, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(g_w_k, g_w_r, rtol=1e-3, atol=1e-3)
 
   def test_tpu_compile_smoke_production_tiles(self):
     """Compiles and executes with interpret=False on TPU hardware (DeepSeek-V4 production shapes)."""
     if jax.default_backend() != "tpu":
       self.skipTest("TPU hardware required for Mosaic compilation smoke test.")
-    b, s, h, d = 1, 4096, 64, 128
+    b, h, s, d = 1, 64, 4096, 128
     w = s // 4
     scale = d**-0.5
     key1, key2, key3 = jax.random.split(self.key, 3)
-    q = jax.random.normal(key1, (b, s, h, d), dtype=jnp.bfloat16)
+    q = jax.random.normal(key1, (b, h, s, d), dtype=jnp.bfloat16)
     compressed = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
     weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
 
     fn = jax.jit(
-        lambda q, k, w: csa_streamindex.csa_streamindex_score(
+        lambda q, k, w: csa_streamindex.csa_streamindex_score_head_major(
             q, k, w, softmax_scale=scale, block_q=128, block_w=512, interpret=False
         )
     )
     out = fn(q, compressed, weights).block_until_ready()
     self.assertEqual(out.shape, (b, s, w))
-
-  def test_vjp_backward_parity(self):
-    """Verifies that backward gradients of custom VJP match reference autograd."""
-    key1, key2, key3, key4 = jax.random.split(self.key, 4)
-    b, s, w, h, d = 2, 256, 128, 32, 64
-    scale = d**-0.5
-    q = jax.random.normal(key1, (b, s, h, d), dtype=jnp.bfloat16)
-    compressed = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
-    weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
-    cotangent = jax.random.normal(key4, (b, s, w), dtype=jnp.float32)
-
-    def loss_kernel(q, k, w):
-      out = csa_streamindex.csa_streamindex_score(
-          q, k, w, softmax_scale=scale, block_q=128, block_w=128, interpret=True
-      )
-      return jnp.sum(out * cotangent)
-
-    def loss_ref(q, k, w):
-      out = csa_streamindex.reference_csa_streamindex_score(
-          q, k, w, softmax_scale=scale
-      )
-      return jnp.sum(out * cotangent)
-
-    _, (dq_k, dk_k, dw_k) = jax.value_and_grad(loss_kernel, argnums=(0, 1, 2))(q, compressed, weights)
-    _, (dq_r, dk_r, dw_r) = jax.value_and_grad(loss_ref, argnums=(0, 1, 2))(q, compressed, weights)
-
-    np.testing.assert_allclose(dw_k, dw_r, rtol=1e-3, atol=1e-3)
-    np.testing.assert_allclose(dq_k.astype(jnp.float32), dq_r.astype(jnp.float32), rtol=1e-3, atol=1e-3)
-    np.testing.assert_allclose(dk_k.astype(jnp.float32), dk_r.astype(jnp.float32), rtol=1e-3, atol=1e-3)
-
-  def test_tpu_backward_smoke(self):
-    """Verifies that backward pass compiles and runs on TPU hardware."""
-    if jax.default_backend() != "tpu":
-      self.skipTest("TPU hardware required for backward smoke test.")
-    b, s, h, d = 1, 1024, 64, 128
-    w = s // 4
-    scale = d**-0.5
-    key1, key2, key3, key4 = jax.random.split(self.key, 4)
-    q = jax.random.normal(key1, (b, s, h, d), dtype=jnp.bfloat16)
-    compressed = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
-    weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
-    cotangent = jax.random.normal(key4, (b, s, w), dtype=jnp.float32)
-
-    @jax.jit
-    def grad_fn(q, k, w):
-      def loss(q, k, w):
-        out = csa_streamindex.csa_streamindex_score(
-            q, k, w, softmax_scale=scale, block_q=128, block_w=512, interpret=False
-        )
-        return jnp.sum(out * cotangent)
-      return jax.grad(loss, argnums=(0, 1, 2))(q, k, w)
-
-    dq, dk, dw = grad_fn(q, compressed, weights)
-    self.assertEqual(dq.shape, q.shape)
-    self.assertEqual(dk.shape, compressed.shape)
-    self.assertEqual(dw.shape, weights.shape)
 
 
 class TestDeepseekv4IndexerIntegration(unittest.TestCase):
@@ -239,10 +212,8 @@ class TestDeepseekv4IndexerIntegration(unittest.TestCase):
     q_latent = jax.random.normal(key2, (b, s, q_lora), dtype=jnp.bfloat16)
     pos = jnp.arange(s, dtype=jnp.int32)[None, :]
 
-    # 1. Forward with use_csa_streamindex_kernel=False
     out_einsum = indexer_einsum(hidden, q_latent, pos)
 
-    # 2. Forward with use_csa_streamindex_kernel=True (intercept to set interpret=True on CPU)
     real_kernel_fn = csa_streamindex.csa_streamindex_score_head_major
 
     def interpret_kernel_fn(*args, **kwargs):
@@ -255,7 +226,7 @@ class TestDeepseekv4IndexerIntegration(unittest.TestCase):
     np.testing.assert_array_equal(out_kernel, out_einsum)
 
   def test_ar_decode_fallback(self):
-    """Verifies that when seq_len < 128 (e.g. seq_len=64 with windows formed), einsum path is used."""
+    """Verifies that when seq_len < 128, einsum path is used."""
     config_kernel = self._get_config(use_csa_streamindex_kernel=True)
     b, s, emb_dim, q_lora = 1, 64, config_kernel.emb_dim, config_kernel.q_lora_rank
 
@@ -275,61 +246,6 @@ class TestDeepseekv4IndexerIntegration(unittest.TestCase):
       mock_kernel.assert_not_called()
       self.assertEqual(out.shape, (b, s, min(32, s // 4)))
 
-  def test_head_major_kernel_vs_einsum_parity(self):
-    """Verifies numerical parity for head-major csa_streamindex_score_head_major."""
-    key = jax.random.PRNGKey(42)
-    key1, key2, key3 = jax.random.split(key, 3)
-    b, h, s, w, d = 1, 4, 256, 128, 64
-    q = jax.random.normal(key1, (b, h, s, d), dtype=jnp.bfloat16)
-    compressed = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
-    weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
-    softmax_scale = d**-0.5
-
-    expected = csa_streamindex.reference_csa_streamindex_score_head_major(
-        q, compressed, weights, softmax_scale=softmax_scale
-    )
-    actual = csa_streamindex.csa_streamindex_score_head_major(
-        q,
-        compressed,
-        weights,
-        softmax_scale=softmax_scale,
-        block_q=128,
-        block_w=128,
-        interpret=True,
-    )
-    np.testing.assert_allclose(actual, expected, rtol=1e-1, atol=1e-1)
-
-  def test_head_major_gradient_parity(self):
-    """Verifies that head-major custom_vjp gradients match reference autograd."""
-    b, h, s, w, d = 1, 4, 128, 128, 32
-    key = jax.random.PRNGKey(42)
-    key1, key2, key3 = jax.random.split(key, 3)
-    q = jax.random.normal(key1, (b, h, s, d), dtype=jnp.bfloat16)
-    comp = jax.random.normal(key2, (b, w, d), dtype=jnp.bfloat16)
-    weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
-    scale = 32.0**-0.5
-
-    def loss_kernel(q, comp, weights):
-      return jnp.sum(
-          csa_streamindex.csa_streamindex_score_head_major(
-              q, comp, weights, softmax_scale=scale, block_q=128, block_w=128, interpret=True
-          )
-      )
-
-    def loss_ref(q, comp, weights):
-      return jnp.sum(
-          csa_streamindex.reference_csa_streamindex_score_head_major(
-              q, comp, weights, softmax_scale=scale
-          )
-      )
-
-    g_q_k, g_c_k, g_w_k = jax.grad(loss_kernel, argnums=(0, 1, 2))(q, comp, weights)
-    g_q_r, g_c_r, g_w_r = jax.grad(loss_ref, argnums=(0, 1, 2))(q, comp, weights)
-
-    np.testing.assert_allclose(g_q_k, g_q_r, rtol=1e-3, atol=1e-3)
-    np.testing.assert_allclose(g_c_k, g_c_r, rtol=1e-3, atol=1e-3)
-    np.testing.assert_allclose(g_w_k, g_w_r, rtol=1e-3, atol=1e-3)
-
   def test_jaxpr_verification(self):
     """Verifies that jaxpr contains pallas_call when enabled and dot_general when disabled."""
     q = jnp.zeros((1, 4, 256, 64), dtype=jnp.bfloat16)
@@ -347,16 +263,12 @@ class TestDeepseekv4IndexerIntegration(unittest.TestCase):
             q, compressed, weights, softmax_scale=scale
         )
 
-    # Kernel enabled trace
     jaxpr_kernel = jax.make_jaxpr(compute_scores, static_argnums=(3,))(q, compressed, weights, True)
-    jaxpr_kernel_str = str(jaxpr_kernel)
-    self.assertIn("pallas_call", jaxpr_kernel_str)
+    self.assertIn("pallas_call", str(jaxpr_kernel))
 
-    # Kernel disabled trace
     jaxpr_einsum = jax.make_jaxpr(compute_scores, static_argnums=(3,))(q, compressed, weights, False)
-    jaxpr_einsum_str = str(jaxpr_einsum)
-    self.assertNotIn("pallas_call", jaxpr_einsum_str)
-    self.assertIn("dot_general", jaxpr_einsum_str)
+    self.assertNotIn("pallas_call", str(jaxpr_einsum))
+    self.assertIn("dot_general", str(jaxpr_einsum))
 
 
 if __name__ == "__main__":

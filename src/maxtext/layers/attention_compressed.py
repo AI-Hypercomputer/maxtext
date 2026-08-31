@@ -934,9 +934,7 @@ class DeepseekV4Indexer(nnx.Module):
               compressed=local_comp,
               weights=local_weights,
               softmax_scale=self.softmax_scale,
-              block_q=block_q,
-              block_w=1024,
-              head_chunk=32,
+              compress_rate=self.compress_rate,
           )
         index_scores = _shard_mapped_streamindex(q, compressed, weights)
       else:
@@ -945,9 +943,7 @@ class DeepseekV4Indexer(nnx.Module):
             compressed=compressed,
             weights=weights,
             softmax_scale=self.softmax_scale,
-            block_q=block_q,
-            block_w=1024,
-            head_chunk=32,
+            compress_rate=self.compress_rate,
         )
     else:
       compressed_kv = jnp.expand_dims(compressed, axis=1)
@@ -968,8 +964,9 @@ class DeepseekV4Indexer(nnx.Module):
       block_positions = position_ids[:, : usable_len : self.compress_rate]
       future_mask = (block_positions[:, None, :] + self.compress_rate) > (position_ids[:, :, None] + 1)
 
-    # Apply the mask to the scores
-    index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
+    # Apply the mask to the scores if not already applied by the kernel
+    if not use_kernel:
+      index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
     combined_invalid = future_mask
     if attention_mask is not None:
