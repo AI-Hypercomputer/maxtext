@@ -73,12 +73,14 @@ set -euxo pipefail
 
 export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=65536"
 
-export MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(pwd)}"
-export PYTHONPATH="${MAXTEXT_REPO_ROOT}/src:${PYTHONPATH:-}"
+export MAXTEXT_REPO_ROOT=/app
+export PYTHONPATH=/app/src
 
 export MODEL_NAME="qwen3.8-2.4t-a95b"
 export TOKENIZER_PATH="Qwen/Qwen3.8-2.4T-A95B"
 export BASE_OUTPUT_PATH=gs://yujiedeng-maxtext-dev/model_bringup/test/qwen3.8-2.4t-a95b/e2e/$(date +%Y-%m-%d-%H-%M)
+
+
 
 # ---------------------------------------------------------------------------
 # v5p-1024 topology:
