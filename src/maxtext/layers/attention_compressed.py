@@ -883,7 +883,7 @@ class DeepseekV4Indexer(nnx.Module):
     q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
     if self.config.use_csa_streamindex_kernel:
-      index_scores = csa_streamindex.csa_streamindex_score_head_major(
+      index_scores = csa_streamindex.csa_streamindex_score(
           q=q,
           compressed=compressed,
           weights=weights,

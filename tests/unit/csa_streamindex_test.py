@@ -36,8 +36,8 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
   def setUp(self):
     self.key = jax.random.PRNGKey(42)
 
-  def test_head_major_parity_exact_multiple(self):
-    """Verifies numerical parity for head-major input matching reference einsum."""
+  def test_parity_exact_multiple(self):
+    """Verifies numerical parity matching reference einsum on exact block multiples."""
     key1, key2, key3 = jax.random.split(self.key, 3)
     b, h, s, w, d = 2, 64, 256, 128, 128
     q = jax.random.normal(key1, (b, h, s, d), dtype=jnp.bfloat16)
@@ -45,10 +45,10 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
     weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
     softmax_scale = d**-0.5
 
-    expected = csa_streamindex.reference_csa_streamindex_score_head_major(
+    expected = csa_streamindex.reference_csa_streamindex_score(
         q, compressed, weights, softmax_scale=softmax_scale
     )
-    actual = csa_streamindex.csa_streamindex_score_head_major(
+    actual = csa_streamindex.csa_streamindex_score(
         q,
         compressed,
         weights,
@@ -59,7 +59,7 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
     )
     np.testing.assert_allclose(actual, expected, rtol=1e-1, atol=1e-1)
 
-  def test_head_major_parity_non_multiples(self):
+  def test_parity_non_multiples(self):
     """Verifies padding handling when seq_len and compressed_len are not multiples of block sizes."""
     key1, key2, key3 = jax.random.split(self.key, 3)
     b, h, s, w, d = 2, 32, 150, 70, 64
@@ -68,10 +68,10 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
     weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
     softmax_scale = d**-0.5
 
-    expected = csa_streamindex.reference_csa_streamindex_score_head_major(
+    expected = csa_streamindex.reference_csa_streamindex_score(
         q, compressed, weights, softmax_scale=softmax_scale
     )
-    actual = csa_streamindex.csa_streamindex_score_head_major(
+    actual = csa_streamindex.csa_streamindex_score(
         q,
         compressed,
         weights,
@@ -82,7 +82,7 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
     )
     np.testing.assert_allclose(actual, expected, rtol=1e-2, atol=1e-2)
 
-  def test_head_major_causal_parity(self):
+  def test_causal_mask_parity(self):
     """Verifies numerical parity with in-VMEM causal masking."""
     key1, key2, key3 = jax.random.split(self.key, 3)
     b, h, s, w, d = 1, 4, 256, 64, 64
@@ -92,10 +92,10 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
     softmax_scale = d**-0.5
     compress_rate = 4
 
-    expected = csa_streamindex.reference_csa_streamindex_score_head_major(
+    expected = csa_streamindex.reference_csa_streamindex_score(
         q, compressed, weights, softmax_scale=softmax_scale, compress_rate=compress_rate
     )
-    actual = csa_streamindex.csa_streamindex_score_head_major(
+    actual = csa_streamindex.csa_streamindex_score(
         q,
         compressed,
         weights,
@@ -107,8 +107,8 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
     )
     np.testing.assert_allclose(actual, expected, rtol=1e-1, atol=1e-1)
 
-  def test_head_major_gradient_parity(self):
-    """Verifies that head-major custom_vjp gradients match reference autograd."""
+  def test_gradient_parity(self):
+    """Verifies that custom_vjp gradients match reference autograd."""
     b, h, s, w, d = 1, 4, 128, 128, 32
     key1, key2, key3 = jax.random.split(self.key, 3)
     q = jax.random.normal(key1, (b, h, s, d), dtype=jnp.bfloat16)
@@ -118,14 +118,14 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
 
     def loss_kernel(q, comp, weights):
       return jnp.sum(
-          csa_streamindex.csa_streamindex_score_head_major(
+          csa_streamindex.csa_streamindex_score(
               q, comp, weights, softmax_scale=scale, block_q=128, block_w=128, interpret=True
           )
       )
 
     def loss_ref(q, comp, weights):
       return jnp.sum(
-          csa_streamindex.reference_csa_streamindex_score_head_major(
+          csa_streamindex.reference_csa_streamindex_score(
               q, comp, weights, softmax_scale=scale
           )
       )
@@ -150,7 +150,7 @@ class TestCsaStreamIndexScoreKernel(unittest.TestCase):
     weights = jax.random.normal(key3, (b, s, h), dtype=jnp.float32)
 
     fn = jax.jit(
-        lambda q, k, w: csa_streamindex.csa_streamindex_score_head_major(
+        lambda q, k, w: csa_streamindex.csa_streamindex_score(
             q, k, w, softmax_scale=scale, block_q=128, block_w=512, interpret=False
         )
     )
@@ -214,13 +214,13 @@ class TestDeepseekv4IndexerIntegration(unittest.TestCase):
 
     out_einsum = indexer_einsum(hidden, q_latent, pos)
 
-    real_kernel_fn = csa_streamindex.csa_streamindex_score_head_major
+    real_kernel_fn = csa_streamindex.csa_streamindex_score
 
     def interpret_kernel_fn(*args, **kwargs):
       kwargs["interpret"] = True
       return real_kernel_fn(*args, **kwargs)
 
-    with mock.patch.object(csa_streamindex, "csa_streamindex_score_head_major", side_effect=interpret_kernel_fn):
+    with mock.patch.object(csa_streamindex, "csa_streamindex_score", side_effect=interpret_kernel_fn):
       out_kernel = indexer_kernel(hidden, q_latent, pos)
 
     np.testing.assert_array_equal(out_kernel, out_einsum)
@@ -241,7 +241,7 @@ class TestDeepseekv4IndexerIntegration(unittest.TestCase):
     q_latent = jnp.ones((b, s, q_lora), dtype=jnp.bfloat16)
     pos = jnp.arange(s, dtype=jnp.int32)[None, :]
 
-    with mock.patch.object(csa_streamindex, "csa_streamindex_score_head_major") as mock_kernel:
+    with mock.patch.object(csa_streamindex, "csa_streamindex_score") as mock_kernel:
       out = indexer(hidden, q_latent, pos)
       mock_kernel.assert_not_called()
       self.assertEqual(out.shape, (b, s, min(32, s // 4)))
@@ -255,11 +255,11 @@ class TestDeepseekv4IndexerIntegration(unittest.TestCase):
 
     def compute_scores(q, compressed, weights, use_kernel):
       if use_kernel:
-        return csa_streamindex.csa_streamindex_score_head_major(
+        return csa_streamindex.csa_streamindex_score(
             q, compressed, weights, softmax_scale=scale, block_q=128, block_w=128
         )
       else:
-        return csa_streamindex.reference_csa_streamindex_score_head_major(
+        return csa_streamindex.reference_csa_streamindex_score(
             q, compressed, weights, softmax_scale=scale
         )
 

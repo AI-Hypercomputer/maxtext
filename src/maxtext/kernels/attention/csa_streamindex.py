@@ -30,7 +30,7 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
 
-def csa_streamindex_score_head_major_kernel(
+def csa_streamindex_score_kernel(
     q_ref,        # [num_heads, block_q, head_dim]
     k_ref,        # [block_w, head_dim]
     w_ref,        # [block_q, num_heads]
@@ -39,7 +39,7 @@ def csa_streamindex_score_head_major_kernel(
     softmax_scale: float,
     compress_rate: int = 0,
 ):
-  """Fused Pallas TPU kernel for head-major [num_heads, block_q, head_dim] input with 2D MXU matmul."""
+  """Fused Pallas TPU kernel with 2D MXU matmul."""
   num_heads, block_q, head_dim = q_ref.shape
   block_w, _ = k_ref.shape
 
@@ -70,7 +70,7 @@ def csa_streamindex_score_head_major_kernel(
   out_ref[...] = s_weighted.astype(out_ref.dtype)
 
 
-def _csa_streamindex_score_head_major_pallas_fwd(
+def _csa_streamindex_score_pallas_fwd(
     q: jax.Array,
     compressed: jax.Array,
     weights: jax.Array,
@@ -114,7 +114,7 @@ def _csa_streamindex_score_head_major_pallas_fwd(
 
   out = pl.pallas_call(
       functools.partial(
-          csa_streamindex_score_head_major_kernel,
+          csa_streamindex_score_kernel,
           softmax_scale=softmax_scale,
           compress_rate=compress_rate,
       ),
@@ -132,7 +132,7 @@ def _csa_streamindex_score_head_major_pallas_fwd(
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7))
-def csa_streamindex_score_head_major(
+def csa_streamindex_score(
     q: jax.Array,
     compressed: jax.Array,
     weights: jax.Array,
@@ -143,7 +143,7 @@ def csa_streamindex_score_head_major(
     interpret: bool = False,
 ) -> jax.Array:
   """Computes CSA StreamIndex scores using head-major [B, H, S, D] q layout with 2D MXU matmul."""
-  return _csa_streamindex_score_head_major_pallas_fwd(
+  return _csa_streamindex_score_pallas_fwd(
       q,
       compressed,
       weights,
@@ -155,7 +155,7 @@ def csa_streamindex_score_head_major(
   )
 
 
-def _csa_streamindex_score_head_major_fwd(
+def _csa_streamindex_score_fwd(
     q: jax.Array,
     compressed: jax.Array,
     weights: jax.Array,
@@ -165,7 +165,7 @@ def _csa_streamindex_score_head_major_fwd(
     block_w: int | None = None,
     interpret: bool = False,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
-  out = _csa_streamindex_score_head_major_pallas_fwd(
+  out = _csa_streamindex_score_pallas_fwd(
       q,
       compressed,
       weights,
@@ -178,7 +178,7 @@ def _csa_streamindex_score_head_major_fwd(
   return out, (q, compressed, weights)
 
 
-def _csa_streamindex_score_head_major_bwd(
+def _csa_streamindex_score_bwd(
     softmax_scale: float,
     compress_rate: int,
     block_q: int | None,
@@ -191,7 +191,7 @@ def _csa_streamindex_score_head_major_bwd(
   q, compressed, weights = res
   _, vjp_fn = jax.vjp(
       functools.partial(
-          reference_csa_streamindex_score_head_major,
+          reference_csa_streamindex_score,
           softmax_scale=softmax_scale,
           compress_rate=compress_rate,
       ),
@@ -203,12 +203,12 @@ def _csa_streamindex_score_head_major_bwd(
   return dq, dk, dw
 
 
-csa_streamindex_score_head_major.defvjp(
-    _csa_streamindex_score_head_major_fwd, _csa_streamindex_score_head_major_bwd
+csa_streamindex_score.defvjp(
+    _csa_streamindex_score_fwd, _csa_streamindex_score_bwd
 )
 
 
-def reference_csa_streamindex_score_head_major(
+def reference_csa_streamindex_score(
     q: jax.Array,
     compressed: jax.Array,
     weights: jax.Array,
@@ -216,7 +216,7 @@ def reference_csa_streamindex_score_head_major(
     softmax_scale: float,
     compress_rate: int = 0,
 ) -> jax.Array:
-  """Reference score computation matching the pure JAX einsum path for head-major q."""
+  """Reference score computation matching the pure JAX einsum path."""
   scores = jnp.einsum("bhsd,bwd->bhsw", q.astype(jnp.float32), compressed.astype(jnp.float32))
   scores = jax.nn.relu(scores) * softmax_scale
   index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights.astype(jnp.float32))
@@ -231,6 +231,6 @@ def reference_csa_streamindex_score_head_major(
   return index_scores
 
 
-# Public aliases for standard naming conventions
-csa_streamindex_score = csa_streamindex_score_head_major
-reference_csa_streamindex_score = reference_csa_streamindex_score_head_major
+# Backward compatibility aliases
+csa_streamindex_score_head_major = csa_streamindex_score
+reference_csa_streamindex_score_head_major = reference_csa_streamindex_score
