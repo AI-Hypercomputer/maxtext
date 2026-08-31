@@ -105,11 +105,13 @@ def _align_bias_with_output(bias: Array, output: Array) -> Array:
   Returns:
     The bias, resharded if needed.
   """
-  out_spec = jax.typeof(output).sharding.spec
-  wanted = PartitionSpec(*out_spec.partitions[output.ndim - bias.ndim :])
+  out_sharding = jax.typeof(output).sharding
+  wanted = PartitionSpec(*out_sharding.spec.partitions[output.ndim - bias.ndim :])
   if jax.typeof(bias).sharding.spec == wanted:
     return bias
-  return jax.sharding.reshard(bias, wanted)
+  # Take the mesh from the output rather than passing a bare PartitionSpec, which would
+  # resolve against an ambient mesh context that is not guaranteed to be entered here.
+  return jax.sharding.reshard(bias, NamedSharding(out_sharding.mesh, wanted))
 
 
 def _compute_dot_general_nnx(
