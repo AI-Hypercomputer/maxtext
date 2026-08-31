@@ -78,8 +78,6 @@ class GptOssDecoderLayer(nnx.Module):
 
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
-    # Physical sharding used to pin sublayer outputs under ShardMode.EXPLICIT. In
-    # ShardMode.AUTO the callees ignore it and let GSPMD infer the layout.
     self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
     self._maybe_shard_with_logical = functools.partial(
         maybe_shard_with_logical,

@@ -39,6 +39,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.utils.sharding import maybe_shard_with_name
+from maxtext.utils.sharding import maybe_shard_with_pspec
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
@@ -85,33 +86,23 @@ def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul
   return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
 
 
-def _align_bias_with_output(bias: Array, output: Array) -> Array:
-  """Reshards a bias onto the sharding of the output axes it is added to.
+def _align_bias_with_output(bias: Array, output: Array, shard_mode: ShardMode, debug_sharding: bool = False) -> Array:
+  """Reshards a bias onto the sharding of the trailing output axes it is added to.
 
-  A bias is stored with the trailing `kernel_axes` layout, which is a parameter
-  layout: an out-projection carries `embed_attn` -> `fsdp`, while the activation it
-  is added to carries `activation_embed` -> `tensor` on that same axis. Adding them
-  directly under `ShardMode.EXPLICIT` would place `fsdp` on two axes of the result,
-  which JAX rejects, so align the bias with the activation instead. Under
-  `ShardMode.AUTO` GSPMD inserts the same all-gather on its own.
-
-  This is a no-op whenever the two already agree, which is every layout in which the
-  bias axes are unsharded or sharded exactly as the output is.
-
-  Args:
-    bias: The bias, broadcast against the trailing axes of `output`.
-    output: The result of the contraction the bias is added to.
-
-  Returns:
-    The bias, resharded if needed.
+  Under explicit sharding the bias keeps its `kernel_axes` parameter layout
+  (`embed_attn` -> `fsdp`) while `output` carries the activation layout
+  (`activation_embed` -> `tensor`) on that axis, so adding them directly would map one
+  mesh axis onto two axes of the result. A no-op when the two already agree.
   """
-  out_sharding = jax.typeof(output).sharding
-  wanted = PartitionSpec(*out_sharding.spec.partitions[output.ndim - bias.ndim :])
-  if jax.typeof(bias).sharding.spec == wanted:
+  if shard_mode != ShardMode.EXPLICIT:
     return bias
-  # Take the mesh from the output rather than passing a bare PartitionSpec, which would
-  # resolve against an ambient mesh context that is not guaranteed to be entered here.
-  return jax.sharding.reshard(bias, NamedSharding(out_sharding.mesh, wanted))
+  out_sharding = jax.typeof(output).sharding
+  bias_spec = PartitionSpec(*out_sharding.spec.partitions[output.ndim - bias.ndim :])
+  if jax.typeof(bias).sharding.spec == bias_spec:
+    return bias
+  return maybe_shard_with_pspec(
+      bias, bias_spec, out_sharding.mesh, shard_mode, debug_sharding=debug_sharding, extra_stack_level=1
+  )
 
 
 def _compute_dot_general_nnx(
@@ -359,8 +350,7 @@ class DenseGeneral(nnx.Module):
       if slice_bounds is not None:
         begin, end = slice_bounds
         bias = bias[..., begin:end]
-      if self.shard_mode == ShardMode.EXPLICIT:
-        bias = _align_bias_with_output(bias, output)
+      bias = _align_bias_with_output(bias, output, self.shard_mode, self.debug_sharding)
       output += bias
     return output
 

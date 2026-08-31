@@ -115,9 +115,7 @@ _GEMMA3 = {
     "head_dim": 16,
 }
 
-# GPT-OSS routes every token through a RoutedMoE. `dense_matmul` has not been onboarded
-# to explicit sharding, so the sparse path is the one to exercise; with the TPU kernels
-# switched off it lowers to jax.lax.ragged_dot, which runs on the host devices here.
+# With the TPU kernels off the sparse path lowers to ragged_dot, which runs on CPU.
 _GPT_OSS = {
     "decoder_block": "gpt_oss",
     "num_experts": 4,
@@ -128,15 +126,12 @@ _GPT_OSS = {
     "use_tokamax_gmm": False,
 }
 
-# Layers onboarded to explicit sharding, as (case name, layer class, extra config,
-# extra constructor kwargs).
+# Layers onboarded to explicit sharding, as (name, layer class, config, ctor kwargs).
 _SHARD_MODE_LAYERS = [
     ("gemma", gemma.GemmaDecoderLayer, {"decoder_block": "gemma"}, {}),
     ("gemma2", gemma2.Gemma2DecoderLayer, {"decoder_block": "gemma2"}, {}),
     ("gemma3", gemma3.Gemma3DecoderLayer, _GEMMA3, {}),
     ("gemma3_scannable_block", gemma3.Gemma3ScannableBlock, _GEMMA3, {}),
-    # Both QKV layouts, because only the fused one has to keep the q/k/v axis of its
-    # 5-D projection off the mesh before slicing it apart.
     ("gpt3", gpt3.Gpt3DecoderLayer, {"decoder_block": "gpt3", "fused_qkv": False}, {}),
     ("gpt3_fused_qkv", gpt3.Gpt3DecoderLayer, {"decoder_block": "gpt3", "fused_qkv": True}, {}),
     ("gpt_oss", gpt_oss.GptOssDecoderLayer, _GPT_OSS, {"attention_type": attentions.AttentionType.GLOBAL}),

@@ -763,11 +763,7 @@ class TrainCompile(parameterized.TestCase):
       ("tensor_parallelism", "ici_tensor_parallelism=8"),
   )
   def test_moe_gpt_oss_20b_explicit_sharding(self, parallelism):
-    """AOT test for gpt-oss under explicit sharding.
-
-    RoutedMoE.dense_matmul is not onboarded to explicit sharding yet, so only the
-    sparse_matmul path is compiled here.
-    """
+    """AOT test for gpt-oss under explicit sharding, on the sparse_matmul path."""
     compiled_trainstep_file = f"/tmp/test_moe_gpt_oss_20b_explicit_sharding_{parallelism}.pickle"
     train_compile_main(
         (
@@ -819,7 +815,6 @@ class TrainCompile(parameterized.TestCase):
             "model_name=gpt3-6b",
             "per_device_batch_size=1",
             "shard_mode=explicit",
-            # gpt3-6b.yml sets fused_qkv, so flipping it needs the override.
             "override_model_config=true",
             f"fused_qkv={fused_qkv}",
             "ici_fsdp_parallelism=1",

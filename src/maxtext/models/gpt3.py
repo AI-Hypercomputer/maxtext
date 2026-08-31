@@ -271,12 +271,9 @@ class Gpt3MultiHeadAttention(nnx.Module):
         shard_mode=config.shard_mode,
         debug_sharding=config.debug_sharding,
     )
-    # Physical shardings used to pin projection outputs under ShardMode.EXPLICIT. In
-    # ShardMode.AUTO the callees ignore them and let GSPMD infer the layout.
     rules = get_logical_axis_rules()
     self.qkv_sharding = create_sharding(mesh, self.query_axis_names, rules=rules)
-    # The fused projection emits (batch, length, 3, heads, head_dim); the size-3 axis
-    # holding q/k/v is never sharded, so it maps to None.
+    # The size-3 q/k/v axis of the fused projection is never sharded.
     fused_qkv_axis_names = self.query_axis_names[:2] + (None,) + self.query_axis_names[2:]
     self.fused_qkv_sharding = create_sharding(mesh, fused_qkv_axis_names, rules=rules)
     self.KVCache_0 = self.init_kv_caches(inputs_kv_shape=feature_dim) if self.model_mode != MODEL_MODE_TRAIN else None
@@ -341,9 +338,6 @@ class Gpt3MultiHeadAttention(nnx.Module):
     qkv_proj = projection_layer(inputs, out_sharding=out_sharding)
 
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
-    # Unlike the fused projection in layers/attentions.py, gpt3 keeps q, k and v on
-    # their own (never sharded) axis, so a plain slice splits them evenly under any
-    # tensor parallelism and no shard_map is needed.
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
     return query, key, value
 
@@ -458,8 +452,6 @@ class Gpt3DecoderLayer(nnx.Module):
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
     self.mlp_activation_axis_names = ("activation_batch", "activation_length", "activation_mlp")
 
-    # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
-    # ShardMode.AUTO the callees ignore them and let GSPMD infer the layout.
     rules = get_logical_axis_rules()
     self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=rules)
     self.mlp_intermediate_sharding = create_sharding(mesh, self.mlp_activation_axis_names, rules=rules)

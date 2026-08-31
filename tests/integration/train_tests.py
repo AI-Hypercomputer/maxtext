@@ -56,16 +56,12 @@ _QWEN3_MODELS = {
 
 _GPT_OSS = [
     "model_name=gpt-oss-20b",
-    # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet (a gap it
-    # shares with mixtral and qwen3_moe), so exercise the sparse_matmul path.
+    # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet.
     "sparse_matmul=True",
     "megablox=True",
 ] + _MOE_OVERRIDES
 
-# One tiny model per GPT-family decoder block that supports explicit sharding. gpt3 is
-# listed twice because only the fused projection has to keep the q/k/v axis of its 5-D
-# output off the mesh before slicing q, k and v apart, and gpt-oss is listed twice
-# because only tensor parallelism shards the heads axis its YaRN rope broadcasts over.
+# One tiny model per GPT-family decoder block that supports explicit sharding.
 _GPT_MODELS = {
     "gpt3_fused_qkv": ["model_name=gpt3-6b", "fused_qkv=True"],
     "gpt3": ["model_name=gpt3-6b", "fused_qkv=False"],
@@ -155,8 +151,6 @@ class TrainTests(unittest.TestCase):
       rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
   ]
 
-  # gpt3 and gpt-oss both come with num_query_heads == num_kv_heads here: gpt3 asserts
-  # on it, and it keeps the two families on one shared override list.
   _gpt_overrides = [
       "override_model_config=True",
       "base_num_decoder_layers=2",
@@ -894,11 +888,9 @@ class TrainTests(unittest.TestCase):
   def test_tpu_gpt_explicit_sharding_matches_auto(self):
     """Explicit sharding only changes how layouts are expressed, so the losses must not move.
 
-    Each decoder block is paired with the parallelism that stresses it most: tensor
-    parallelism shards the attention heads and the dense MLP intermediate, which is
-    what the gpt3 fused QKV projection has to split around and what the gpt-oss YaRN
-    rope has to broadcast its frequencies over, and expert parallelism shards the
-    gpt-oss MoE dispatch.
+    Each case is paired with the parallelism that stresses it most: tensor parallelism
+    shards the attention heads and the dense MLP intermediate, and expert parallelism
+    shards the gpt-oss MoE dispatch.
     """
     parallelism = {
         "gpt3_fused_qkv": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
@@ -906,12 +898,8 @@ class TrainTests(unittest.TestCase):
         "gpt_oss": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
         "gpt_oss_tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
     }
-    # gpt3 is the only decoder block here with biased projections, so explicit sharding
-    # has to reshard every bias onto the layout of the activation it is added to. That
-    # reassociates the bias-gradient reductions, which leaves step 0 bit-for-bit and
-    # drifts by a few ULPs per step afterwards (~5e-5 by step 2 on v5p). gpt-oss under
-    # tensor parallelism is bit-for-bit; under expert parallelism the grouped matmul
-    # reassociates its own reductions and drifts by a few ULPs.
+    # gpt3's bias reshard reassociates the bias-gradient reductions (~5e-5 by step 2 on
+    # v5p); gpt-oss drifts a few ULPs through the grouped matmul under expert parallelism.
     rtol = {"gpt3_fused_qkv": 1e-4, "gpt3": 1e-4, "gpt_oss": 1e-5, "gpt_oss_tensor": 1e-6}
     for case, model_args in _GPT_MODELS.items():
       with self.subTest(case=case):
