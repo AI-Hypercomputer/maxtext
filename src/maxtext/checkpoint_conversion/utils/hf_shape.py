@@ -1317,6 +1317,8 @@ HF_SHAPE = {
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-a3b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.5-35b-a3b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.5-35b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
 }
