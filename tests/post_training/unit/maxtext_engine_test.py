@@ -22,6 +22,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
+from flax import struct
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
@@ -61,7 +62,7 @@ class DummyStatefulNNXModel(nnx.Module):
     self.calls = nnx.BatchStat(jnp.array(0.0))
 
 
-@dataclasses.dataclass(kw_only=True)
+@struct.dataclass(frozen=True, kw_only=True)
 class DummyPayload(abstract_engine.TrainerPayload):
   token_ids: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
   token_mask: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
