@@ -25,17 +25,27 @@ with nothing cut.
 Everything that is not the model lives here rather than being duplicated per arm, so
 "only the model differs" is enforced by construction instead of by eyeballing a diff.
 
-`_SEQ_LEN` is 1024, not the 256 the gemma4 pair used. At 256 the step was far too small
+`SEQ_LEN` is 1024, not the 256 the gemma4 pair used. At 256 the step was far too small
 to see past host and compile overhead -- the gemma4 traces showed a 64 ms device step
 inside a 2.6 s wall step. 1024 puts roughly 30 TFLOPs of real work in each step, which
 is enough for the device time to be the thing being measured.
+
+Gradient accumulation means the same thing in both trainers, but neither is told it the
+same way. Tunix reads `gradient_accumulation_steps` off its `TrainingConfig`, consumes
+one dataset item per *micro* step and applies an update every `ga`-th one, and counts
+`max_steps` in optimizer steps -- so a `ga`-way run needs `ga * steps` dataset items. The
+MaxText engine reads no such config: `_micro_step_count` is driven purely by how many
+`fwd_bwd` calls the caller makes before each `update()`. Both therefore run a global
+batch of `batch * ga` per optimizer step, with the micro-batch held at `batch`.
 """
 
+import argparse
 import os
 import statistics
 import time
 from typing import Any, List
 
+import jax
 import numpy as np
 from tunix.rl import common
 from tunix.sft import hooks
@@ -64,6 +74,81 @@ PROFILE_ROOT = os.environ.get("PERF_PARITY_PROFILE_ROOT", "perf_parity_traces")
 def profile_dir(arm: str) -> str:
   """Trace destination for one arm, e.g. `qwen3-0.6b-tunix`."""
   return os.path.join(PROFILE_ROOT, arm)
+
+
+def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+  """Adds the flags every arm honours. Defaults reproduce the original 4-device run."""
+  parser.add_argument("--ga", type=int, default=ACCUM_STEPS, help="micro-batches per optimizer step")
+  parser.add_argument("--devices", type=int, default=None, help="use only the first N local devices")
+  parser.add_argument("--fsdp", type=int, default=None, help="fsdp mesh axis (default: fills the devices)")
+  parser.add_argument("--tp", type=int, default=1, help="tensor-parallel mesh axis")
+  parser.add_argument("--batch", type=int, default=BATCH_SIZE, help="examples per micro-batch")
+  parser.add_argument("--seq", type=int, default=SEQ_LEN, help="tokens per example")
+  parser.add_argument("--steps", type=int, default=MAX_STEPS, help="optimizer steps, warmup included")
+  return parser
+
+
+class RunSpec:
+  """Resolved shape of one run: which devices, what mesh, how much data.
+
+  Kept as one object so the three arms cannot drift apart on the parts that are supposed
+  to be held fixed. `devices` is a prefix of `jax.devices()` rather than the whole list,
+  which is how a 2-device mesh is run on a 4-chip host without restricting the runtime.
+  """
+
+  def __init__(self, args: argparse.Namespace):
+    all_devices = jax.devices()
+    if args.devices is not None and not 0 < args.devices <= len(all_devices):
+      raise ValueError(f"--devices={args.devices} but only {len(all_devices)} are visible")
+    self.devices = all_devices[: args.devices] if args.devices else all_devices
+    self.tp = args.tp
+    self.fsdp = args.fsdp if args.fsdp else len(self.devices) // self.tp
+    if self.fsdp * self.tp != len(self.devices):
+      raise ValueError(
+          f"mesh fsdp={self.fsdp} x tp={self.tp} = {self.fsdp * self.tp} does not cover " f"{len(self.devices)} devices"
+      )
+    self.ga = args.ga
+    self.batch = args.batch
+    self.seq = args.seq
+    self.steps = args.steps
+
+  @property
+  def micro_steps(self) -> int:
+    """Dataset items consumed: tunix takes one per micro step, and so does the engine."""
+    return self.steps * self.ga
+
+  @property
+  def global_batch(self) -> int:
+    return self.batch * self.ga
+
+  @property
+  def per_device_batch(self) -> float:
+    """MaxText's `per_device_batch_size`, which describes the *micro*-batch."""
+    return self.batch / len(self.devices)
+
+  def tag(self, arm: str) -> str:
+    """Profile subdirectory. Only non-default shapes are suffixed, so the original
+    4-device ga=1 traces keep the paths they were written under."""
+    parts = []
+    if self.ga != ACCUM_STEPS:
+      parts.append(f"ga{self.ga}")
+    if len(self.devices) != len(jax.devices()):
+      parts.append(f"d{len(self.devices)}")
+    if self.tp != 1:
+      parts.append(f"fsdp{self.fsdp}tp{self.tp}")
+    if self.batch != BATCH_SIZE:
+      parts.append(f"b{self.batch}")
+    if self.seq != SEQ_LEN:
+      parts.append(f"s{self.seq}")
+    return "-".join([arm] + parts)
+
+  def describe(self) -> str:
+    return (
+        f"devices={len(self.devices)} ({self.devices[0].device_kind})  "
+        f"mesh fsdp={self.fsdp} tp={self.tp}  ga={self.ga}  "
+        f"micro-batch={self.batch}x{self.seq}  global-batch={self.global_batch}  "
+        f"steps={self.steps} ({self.micro_steps} micro)"
+    )
 
 
 def make_gen_model_input_fn(pad_id: int):
@@ -103,6 +188,11 @@ def make_dataset(
   return dataset
 
 
+def make_dataset_for(spec: RunSpec) -> List[Any]:
+  """`make_dataset` sized for one run -- `ga * steps` micro-batches."""
+  return make_dataset(num_steps=spec.micro_steps, batch_size=spec.batch, seq_len=spec.seq)
+
+
 class StepTimer(hooks.TrainingHooks):
   """Records the wall-clock cadence of the training loop, step by step.
 
@@ -113,6 +203,11 @@ class StepTimer(hooks.TrainingHooks):
   steps. Taking the median over the post-warmup steps then gives the steady-state step
   time without needing the profile at all -- which matters, because a 5M-event cap makes
   `trace.json.gz` unreadable for runs this size.
+
+  Under gradient accumulation the hook fires once per *micro* step, so `report(group=ga)`
+  sums each run of `ga` consecutive gaps back into one optimizer step. Group boundaries
+  line up because tunix applies its update on the last micro step of each group, and the
+  engine arm calls the hook before each `fwd_bwd` for the same reason.
   """
 
   def __init__(self):
@@ -138,12 +233,17 @@ class StepTimer(hooks.TrainingHooks):
   def on_eval_step_end(self, train_ctx, eval_loss):
     pass
 
-  def report(self, label: str, warmup: int = WARMUP_STEPS) -> None:
+  def report(self, label: str, warmup: int = WARMUP_STEPS, group: int = 1) -> None:
     """Prints the total, the first-step (compile) cost and the steady-state step time."""
-    deltas = [b - a for a, b in zip(self.starts, self.starts[1:])]
+    gaps = [b - a for a, b in zip(self.starts, self.starts[1:])]
+    if group > 1:
+      # Sum whole groups only; a trailing partial group has no update in it.
+      deltas = [sum(gaps[i : i + group]) for i in range(0, len(gaps) - group + 1, group)]
+    else:
+      deltas = gaps
     total = (self.train_end or time.perf_counter()) - (self.train_start or 0.0)
     print(f"\n===== {label}")
-    print(f"  steps dispatched : {len(self.starts)}")
+    print(f"  steps dispatched : {len(self.starts)}" + (f" micro ({group} per step)" if group > 1 else ""))
     print(f"  train() total    : {total:.1f}s (includes compilation)")
     if deltas:
       print(f"  step 0 -> 1      : {deltas[0]:.3f}s (compile lands here)")
