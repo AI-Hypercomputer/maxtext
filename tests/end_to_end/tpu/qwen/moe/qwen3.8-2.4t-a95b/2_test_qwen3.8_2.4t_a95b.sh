@@ -78,6 +78,7 @@ export PYTHONPATH="${MAXTEXT_REPO_ROOT}/src:${PYTHONPATH:-}"
 
 export MODEL_NAME="qwen3.8-2.4t-a95b"
 export TOKENIZER_PATH="Qwen/Qwen3.8-2.4T-A95B"
+export BASE_OUTPUT_PATH=gs://yujiedeng-maxtext-dev/model_bringup/test/qwen3.8-2.4t-a95b/e2e/$(date +%Y-%m-%d-%H-%M)
 
 # ---------------------------------------------------------------------------
 # v5p-1024 topology:
