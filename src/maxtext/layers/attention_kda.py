@@ -94,15 +94,20 @@ class ShortConvolution(nnx.Module):
         )
     )
 
-  def __call__(self, x: jnp.ndarray, segment_ids: jnp.ndarray | None = None) -> jnp.ndarray:
+  def __call__(
+      self,
+      x: jnp.ndarray,
+      segment_ids: jnp.ndarray | None = None,
+      cp_axis_name: str = "context",
+  ) -> jnp.ndarray:
     B, T, F = x.shape
     if F != self.features:
       raise ValueError(f"Input features {F} != {self.features}")
 
-    x_padded = halo_exchange_for_conv(x, self.kernel_size - 1, axis_name="context")
+    x_padded = halo_exchange_for_conv(x, self.kernel_size - 1, axis_name=cp_axis_name)
 
     if segment_ids is not None:
-      seg_padded = halo_exchange_for_conv(segment_ids, self.kernel_size - 1, axis_name="context")
+      seg_padded = halo_exchange_for_conv(segment_ids, self.kernel_size - 1, axis_name=cp_axis_name)
       # Stack per-tap masks once so the loop body has no tap-dependent
       # broadcasts beyond the slice itself.
       masks = [
@@ -373,8 +378,10 @@ class KimiDeltaAttention(nnx.Module):
     cfg = self.config
 
     # Context-parallel size derived from the mesh (the CP axis name is
-    # cfg.context_sharding, default "context"); this mirrors attention_op.py.
-    cp_size = self.mesh.shape.get(cfg.context_sharding, 1)
+    # cfg.context_sharding, default "context"; it may also be "expert" for
+    # expert-as-context). This mirrors attention_op.py.
+    cp_axis_name = cfg.context_sharding
+    cp_size = self.mesh.shape.get(cp_axis_name, 1)
 
     # KDA Delta Rule relies on sequential recurrent state S_t = f(S_{t-1}, ...).
     # load_balance's DUAL_CHUNK_SWAP reorder breaks token order, invalidating
@@ -389,6 +396,33 @@ class KimiDeltaAttention(nnx.Module):
 
     if model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise NotImplementedError("KDA autoregressive mode not yet implemented.")
+
+    # Packed/varlen execution: tokamax requires a static positive
+    # max_num_segments whenever segment_ids are supplied without
+    # initial_state (see tokamax .../kda/api.py). maxtext surfaces this as
+    # `max_segments_per_seq`, which defaults to -1 (unset) — fail fast with
+    # a config-level message instead of erroring deep in kernel binding.
+    if decoder_segment_ids is not None and cfg.max_segments_per_seq <= 0:
+      raise ValueError(
+          "KDA with packed sequences (decoder_segment_ids) requires "
+          f"`max_segments_per_seq` to be a positive integer, got "
+          f"{cfg.max_segments_per_seq}. Set `max_segments_per_seq` in your "
+          "config to a static upper bound on the number of packed segments "
+          "per sequence."
+      )
+
+    def _inject_cp_axis_on_T(pspec, t_axis=1):
+      """Overwrite the T axis of *pspec* with the CP axis name.
+
+      logical_to_mesh_axes may map the LENGTH logical axis to a different
+      mesh axis, or to None, because the activation_norm_length rules do not
+      cover every CP strategy (notably expert-as-context). Overwrite
+      unconditionally so shard_map always sees the correct per-rank sequence
+      shards on the axis the collectives (halo exchange, CP state merge) use.
+      """
+      spec = list(pspec)
+      spec[t_axis] = cp_axis_name
+      return jax.sharding.PartitionSpec(*spec)
 
     B, T_orig, _ = hidden_states.shape
     T = T_orig
@@ -422,13 +456,16 @@ class KimiDeltaAttention(nnx.Module):
         # Under CP, ShortConvolution needs to pull kernel_size-1 tokens
         # of left context from the previous CP rank via ppermute — which
         # is a collective and so must run inside a shard_map that exposes
-        # the "context" mesh axis. Without this wrap, halo_exchange_for_conv
-        # would silently degrade to zero-pad (causal-conv at every CP shard
-        # boundary would be wrong). This applies to all CP strategies.
+        # the CP mesh axis (cfg.context_sharding). Without this wrap,
+        # halo_exchange_for_conv would silently degrade to zero-pad
+        # (causal-conv at every CP shard boundary would be wrong). This
+        # applies to all CP strategies.
         if cp_size > 1:
-          conv_flat_pspec = self._logical_to_mesh_axes(("activation_batch", "activation_norm_length", None))
+          conv_flat_pspec = _inject_cp_axis_on_T(
+              self._logical_to_mesh_axes(("activation_batch", "activation_norm_length", None))
+          )
           conv_seg_pspec = (
-              self._logical_to_mesh_axes(("activation_batch", "activation_norm_length"))
+              _inject_cp_axis_on_T(self._logical_to_mesh_axes(("activation_batch", "activation_norm_length")))
               if decoder_segment_ids is not None
               else None
           )
@@ -451,16 +488,16 @@ class KimiDeltaAttention(nnx.Module):
               check_vma=False,
           )
           def _conv_with_halo(qf, kf, vf, seg):
-            qf = q_conv_mod(qf, segment_ids=seg)
-            kf = k_conv_mod(kf, segment_ids=seg)
-            vf = v_conv_mod(vf, segment_ids=seg)
+            qf = q_conv_mod(qf, segment_ids=seg, cp_axis_name=cp_axis_name)
+            kf = k_conv_mod(kf, segment_ids=seg, cp_axis_name=cp_axis_name)
+            vf = v_conv_mod(vf, segment_ids=seg, cp_axis_name=cp_axis_name)
             return qf, kf, vf
 
           q_flat, k_flat, v_flat = _conv_with_halo(q_flat, k_flat, v_flat, decoder_segment_ids)
         else:
-          q_flat = self.q_conv(q_flat, segment_ids=decoder_segment_ids)
-          k_flat = self.k_conv(k_flat, segment_ids=decoder_segment_ids)
-          v_flat = self.v_conv(v_flat, segment_ids=decoder_segment_ids)
+          q_flat = self.q_conv(q_flat, segment_ids=decoder_segment_ids, cp_axis_name=cp_axis_name)
+          k_flat = self.k_conv(k_flat, segment_ids=decoder_segment_ids, cp_axis_name=cp_axis_name)
+          v_flat = self.v_conv(v_flat, segment_ids=decoder_segment_ids, cp_axis_name=cp_axis_name)
 
         q = q_flat.reshape(B, T, self.num_query_heads, self.key_head_dim)
         k = k_flat.reshape(B, T, self.num_key_heads, self.key_head_dim)
@@ -516,20 +553,13 @@ class KimiDeltaAttention(nnx.Module):
       # dt_bias to match the Megatron reference.)
       delta_time_bias_2d = self.dt_bias.value.reshape(self.num_key_heads, self.key_head_dim)
 
-      # Inject "context" on the T axis so the shard_map sees the correct
-      # per-rank shard layout.  logical_to_mesh_axes may map the LENGTH
-      # axis to None (size-1 stripping / Flax rule precedence) — we
-      # explicitly set it to "context" when CP is active.
-      def _inject_context_on_T(pspec, t_axis=1):
-        spec = list(pspec)
-        if spec[t_axis] is None:
-          spec[t_axis] = "context"
-        return jax.sharding.PartitionSpec(*spec)
-
+      # Force the CP axis onto the T axis of every pspec so the shard_map
+      # sees the correct per-rank shard layout and the collectives run on
+      # the axis the sequence is actually sharded over.
       if cp_size > 1:
-        qkv_pspec = _inject_context_on_T(qkv_pspec)
-        beta_pspec = _inject_context_on_T(beta_pspec)
-        seg_pspec = _inject_context_on_T(seg_pspec)
+        qkv_pspec = _inject_cp_axis_on_T(qkv_pspec)
+        beta_pspec = _inject_cp_axis_on_T(beta_pspec)
+        seg_pspec = _inject_cp_axis_on_T(seg_pspec)
 
         def _wsc(x, pspec):
           return jax.lax.with_sharding_constraint(x, jax.sharding.NamedSharding(self.mesh, pspec))
@@ -572,7 +602,7 @@ class KimiDeltaAttention(nnx.Module):
               "but it failed to import. Refusing to run: CP would silently "
               "break recurrent state across ranks."
           )
-        cp_ctx = TokamaxContextParallelMetadata(mesh=self.mesh, axis_name="context")
+        cp_ctx = TokamaxContextParallelMetadata(mesh=self.mesh, axis_name=cp_axis_name)
 
       @functools.partial(
           jax.shard_map,

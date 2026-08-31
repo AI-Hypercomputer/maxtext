@@ -129,14 +129,15 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 
 | File | Change | Lines |
 |------|--------|:----:|
-| `layers/attention_kda.py` | **New**: `KimiDeltaAttention`, `ShortConvolution`, CP support | ~586 |
-| `kernels/kda/__init__.py` | **New**: `chunk_kda()` entry point | ~84 |
-| `kernels/kda/tokamax.py` | **New**: tokamax backend adapter | ~99 |
-| `utils/cp_utils.py` | **New**: `halo_exchange_for_conv` | ~66 |
-| `configs/types.py` | **Modified**: `KdaAttention` config class | +48 |
-| `tests/unit/kda_attention_test.py` | **New**: KDA layer + conv halo + CP equivalence tests | ~914 |
+| `layers/attention_kda.py` | **New**: `KimiDeltaAttention`, `ShortConvolution`, CP support | ~673 |
+| `kernels/kda/__init__.py` | **New**: `chunk_kda()` entry point | ~99 |
+| `kernels/kda/tokamax.py` | **New**: tokamax backend adapter | ~130 |
+| `utils/cp_utils.py` | **New**: `halo_exchange_for_conv` | ~79 |
+| `configs/types.py` | **Modified**: `KdaAttention` config class + validators | +~90 |
+| `tests/unit/kda_attention_test.py` | **New**: KDA layer + conv halo + CP fwd/bwd + config guard tests | ~1186 |
+| `scripts/dev/kda_e2e_smoke.py` | **New**: standalone e2e smoke training (dev use) | ~200 |
 | `docs/design/kda_cp_support.md` | **New**: design doc | — |
-| **Total** | | **~1979** |
+| **Total** | | **~2560** |
 
 ## Key Constraints
 
@@ -162,6 +163,11 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 | Test | Coverage |
 |------|----------|
 | `test_short_conv_no_cp` | halo degrades to causal pad without CP |
-| `test_short_conv_cp_halo` | conv under CP>1 equals single-rank reference |
-| `test_kda_cp_equivalence` | CP multi-rank forward equals single-rank |
+| `test_short_conv_cp_halo` | conv under CP>1 equals single-rank reference; parametrized over segment layouts: uniform, boundary on the rank split, and a segment spanning both ranks (halo + segment-mask interaction) |
+| `test_kda_cp_equivalence` | kernel-level CP multi-rank forward equals single-rank, parametrized CP=2 and CP=4 |
+| `test_kda_cp_backward` | CP gradients (dq/dk/dv/dg/dbeta) equal the non-CP reference |
+| `test_kda_cp_full_layer_dummy_segments` | full layer under CP with no user segment_ids: covers the internal dummy-segment synthesis path, forward equivalence and backward finiteness |
 | `test_kda_cp_rejects_load_balance` | CP+load_balance raises ValueError |
+| `test_packed_segment_no_leak_within_row` | packed segments inside one row are structurally isolated in both directions |
+| `test_l2_normalize_produces_unit_norm` | `_l2_normalize` yields unit L2 norm and preserves direction |
+| `TestKdaConfigGuards` | config-time guards: safe-gate/lower_bound range, `use_kda_lora=True` rejection, packing without `max_segments_per_seq` |

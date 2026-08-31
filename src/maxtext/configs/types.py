@@ -757,8 +757,8 @@ class KdaAttention(BaseModel):
       ge=0,
       description=(
           "Convolution kernel dimension for linear attention layers (KDA). "
-          "This specifies the size of the 1D convolution applied to keys for local dependency modeling. "
-          "Default 4 matches the reference Megatron implementation."
+          "This specifies the size of the depthwise causal 1D convolution applied to Q, K and V "
+          "for local dependency modeling. Default 4 matches the reference Megatron implementation."
       ),
   )
   use_kda_lora: bool = Field(
@@ -794,6 +794,31 @@ class KdaAttention(BaseModel):
     if not math.isfinite(v):
       raise ValueError(f"kda_lower_bound must be finite, got {v}")
     return v
+
+  @field_validator("use_kda_lora")
+  @classmethod
+  def _check_use_kda_lora_not_set(cls, v: bool) -> bool:
+    if v:
+      raise ValueError(
+          "use_kda_lora=True is not implemented: KimiDeltaAttention only "
+          "implements the full-rank (no-LoRA) path. Leave it False."
+      )
+    return v
+
+  @model_validator(mode="after")
+  def _check_safe_gate_lower_bound(self):
+    """Cross-field guard: the sigmoid gate path requires lower_bound in [-5, 0).
+
+    Rejects invalid combinations at config time instead of failing deep in
+    tokamax kernel binding (tokamax enforces the same range on `lower_bound`).
+    """
+    if self.use_kda_safe_gate and not (-5.0 <= self.kda_lower_bound < 0.0):
+      raise ValueError(
+          "use_kda_safe_gate=True requires kda_lower_bound in [-5, 0) "
+          f"(the tokamax sigmoid gate path constraint), got "
+          f"kda_lower_bound={self.kda_lower_bound}. A common choice is -5.0."
+      )
+    return self
 
 
 class AttentionIndexer(BaseModel):

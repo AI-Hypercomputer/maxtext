@@ -150,9 +150,7 @@ def main():
   rngs = nnx.Rngs(0)
   with mesh:
     model = TinyKdaLM(cfg, mesh, args.num_layers, rngs=rngs)
-  n_params = sum(
-      v.size for v in jax.tree.leaves(nnx.state(model)) if isinstance(v, (jax.Array, np.ndarray))
-  )
+  n_params = sum(v.size for v in jax.tree.leaves(nnx.state(model)) if isinstance(v, (jax.Array, np.ndarray)))
   print(f"model params: {n_params / 1e6:.1f}M")
 
   data = make_dataset(seed=42, num_seqs=4096, seq_len=args.seq_len)
@@ -175,9 +173,7 @@ def main():
   @nnx.jit
   def eval_loss(model, tokens):
     logits = model(tokens[:, :-1])
-    return optax.softmax_cross_entropy_with_integer_labels(
-        logits=logits.astype(jnp.float32), labels=tokens[:, 1:]
-    ).mean()
+    return optax.softmax_cross_entropy_with_integer_labels(logits=logits.astype(jnp.float32), labels=tokens[:, 1:]).mean()
 
   perm_rng = np.random.default_rng(1)
   losses = []
