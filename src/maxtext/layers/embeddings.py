@@ -675,8 +675,7 @@ class YarnRotaryEmbedding(nnx.Module):
     if self.dot_pairwise and not self.pairwise:
       raise ValueError("rope_dot_pairwise=True requires rope_pairwise=True.")
 
-    # The gathered frequencies are [batch, length, half_dim]; the trailing axis is a slice of
-    # the head dimension, which is never sharded.
+    # freqs are [batch, length, half_dim]; the trailing head-dim slice is never sharded.
     self.freqs_sharding = (
         create_sharding(mesh, ("activation_batch", "activation_length", None))
         if shard_mode == ShardMode.EXPLICIT
@@ -824,10 +823,6 @@ class YarnRotaryEmbedding(nnx.Module):
         half_dim = h // 2
         if self.dot_pairwise:
           cos, sin = self._cos_sin(position, repeat_interleave=True)  # shape: [B, S, 1, dim]
-          if self.shard_mode == ShardMode.EXPLICIT:
-            rotated_sharding = NamedSharding(self.mesh, jax.typeof(inputs).sharding.spec)
-            cos = jnp.broadcast_to(cos, inputs.shape, out_sharding=rotated_sharding)
-            sin = jnp.broadcast_to(sin, inputs.shape, out_sharding=rotated_sharding)
           # Swap-and-sign [x_0, x_1, ...] -> [-x_1, x_0, ...] as a matmul against the block-skew
           # matrix I_{half_dim} (x) [[0, 1], [-1, 0]], avoiding the rank-5 reshape relayout copies.
           p_swap = jnp.kron(jnp.eye(half_dim, dtype=inputs.dtype), jnp.asarray([[0, 1], [-1, 0]], dtype=inputs.dtype))
@@ -846,10 +841,6 @@ class YarnRotaryEmbedding(nnx.Module):
           cos, sin = self._cos_sin(position)  # shape: [B, S, 1, half_dim]
           cos = cos[..., jnp.newaxis]
           sin = sin[..., jnp.newaxis]
-          if self.shard_mode == ShardMode.EXPLICIT:
-            rotated_sharding = NamedSharding(self.mesh, jax.typeof(pairs).sharding.spec)
-            cos = jnp.broadcast_to(cos, pairs.shape, out_sharding=rotated_sharding)
-            sin = jnp.broadcast_to(sin, pairs.shape, out_sharding=rotated_sharding)
           swapped = jnp.flip(pairs, axis=-1)
           sign = jnp.asarray([-1.0, 1.0], dtype=jnp.float32)
           rotated_pairs = pairs * cos + swapped * sin * sign
@@ -873,14 +864,6 @@ class YarnRotaryEmbedding(nnx.Module):
 
       inputs_complex = first_half + 1j * second_half  # shape: [b, s, n, half_dim]
       # Apply the rotary transformation via complex multiplication.
-      # Broadcast the [b, s, 1, half_dim] frequencies onto the layout of the activations they
-      # multiply, so that a sharded heads axis (e.g. tensor parallelism) is preserved.
-      rotated_sharding = (
-          NamedSharding(self.mesh, jax.typeof(inputs_complex).sharding.spec)
-          if self.shard_mode == ShardMode.EXPLICIT
-          else None
-      )
-      freqs = jnp.broadcast_to(freqs, inputs_complex.shape, out_sharding=rotated_sharding)
       rotated = jnp.multiply(inputs_complex, freqs)  # shape: [b, s, n, half_dim]
 
       # Convert the complex result back to a real tensor.
