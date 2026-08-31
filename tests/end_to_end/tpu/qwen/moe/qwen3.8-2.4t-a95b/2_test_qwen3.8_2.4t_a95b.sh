@@ -90,12 +90,9 @@ export BASE_OUTPUT_PATH=gs://yujiedeng-maxtext-dev/model_bringup/test/qwen3.8-2.
 #
 #   FSDP 128 x EP 8 = 1024
 # ---------------------------------------------------------------------------
-
-export EXPECTED_GLOBAL_DEVICES="${EXPECTED_GLOBAL_DEVICES:-1024}"
-export ICI_FSDP="${ICI_FSDP:-128}"
-export ICI_EP="${ICI_EP:-8}"
-
-
+export ICI_FSDP=32
+export ICI_EP=8
+export DCN_FSDP=4
 
 # ---------------------------------------------------------------------------
 # Torch is needed by forward_pass_logit_checker.py
@@ -207,6 +204,8 @@ python3 -m tests.utils.forward_pass_logit_checker \
   ici_tensor_parallelism=1 \
   ici_fsdp_parallelism="${ICI_FSDP}" \
   ici_expert_parallelism="${ICI_EP}" \
+  dcn_fsdp_parallelism="${DCN_FSDP}" \
+  dcn_data_parallelism=1 \
   weight_dtype=float32 \
   dtype=float32 \
   activations_in_float32=true \
@@ -239,6 +238,8 @@ python3 -m tests.utils.forward_pass_logit_checker \
   ici_tensor_parallelism=1 \
   ici_fsdp_parallelism="${ICI_FSDP}" \
   ici_expert_parallelism="${ICI_EP}" \
+  dcn_fsdp_parallelism="${DCN_FSDP}" \
+  dcn_data_parallelism=1 \
   weight_dtype=float32 \
   dtype=float32 \
   activations_in_float32=true \
@@ -300,7 +301,9 @@ python3 -m maxtext.trainers.pre_train.train \
   ici_data_parallelism=1 \
   ici_tensor_parallelism=1 \
   ici_fsdp_parallelism="${ICI_FSDP}" \
-  ici_expert_parallelism="${ICI_EP}"
+  ici_expert_parallelism="${ICI_EP}" \
+  dcn_fsdp_parallelism="${DCN_FSDP}" \
+dcn_data_parallelism=1 \
 
 echo "PASS: pretraining smoke test"
 
@@ -349,7 +352,8 @@ python3 -m maxtext.trainers.pre_train.train \
   ici_data_parallelism=1 \
   ici_tensor_parallelism=1 \
   ici_fsdp_parallelism="${ICI_FSDP}" \
-  ici_expert_parallelism="${ICI_EP}"
+  ici_expert_parallelism="${ICI_EP}" \
+  dcn_data_parallelism=1
 
 echo "PASS: fine-tuning smoke test"
 
@@ -386,6 +390,8 @@ python3 -m maxtext.inference.decode \
   ici_tensor_parallelism=1 \
   ici_fsdp_parallelism="${ICI_FSDP}" \
   ici_expert_parallelism="${ICI_EP}" \
+  dcn_fsdp_parallelism="${DCN_FSDP}" \
+  dcn_data_parallelism=1 \
   decode_sampling_strategy=greedy \
   prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is "
 
