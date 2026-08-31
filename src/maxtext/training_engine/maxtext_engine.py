@@ -1230,24 +1230,28 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       num_chunks = max(1, int(os.environ.get("RAIDEN_WEIGHT_SYNC_CHUNKS", "1")))
       # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
       # detection tunix's K8sJaxContext.initialize() uses), trainer params
-      # are proxy-backed. With FFI (weight_synchronizer_ffi), Raiden binds
-      # directly to device arrays on Pathways TPU workers without host CPU staging.
-      # When FFI is not available, host_stage pulls them to client host memory first.
+      # are proxy-backed. Raiden must use FFI (weight_synchronizer_ffi) to bind
+      # directly to device arrays on Pathways TPU workers without host CPU staging,
+      # avoiding client host OOM and multi-minute proxy transfer timeouts.
       is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
-      use_ffi = os.environ.get("RAIDEN_USE_FFI", "").lower() in ("true", "1") or (
-          is_pathways and getattr(raiden_synchronizer, "_raiden_ffi", None) is not None
-      )
+      if is_pathways:
+        if getattr(raiden_synchronizer, "_raiden_ffi", None) is None:
+          raise RuntimeError(
+              "Under Pathways (JAX_PLATFORMS=proxy), Raiden weight synchronization "
+              "requires weight_synchronizer_ffi (from tpu_raiden_jax) to avoid client host OOM "
+              "and proxy staging timeouts. However, _raiden_ffi is not available in "
+              "tunix.experimental.weight_sync.raiden_synchronizer. Please ensure a "
+              "compatible tpu_raiden_jax wheel with FFI support is installed."
+          )
+        use_ffi = True
+      else:
+        use_ffi = os.environ.get("RAIDEN_USE_FFI", "").lower() in ("true", "1")
+
       chunks = self._split_into_chunks(params_state, num_chunks) if num_chunks > 1 else [params_state]
       del params_state
 
-      # 3a. Host-stage every chunk (the slow part under Pathways when FFI is not
-      # used -- each chunk's device_get() from proxy-backed buffers, tens of seconds
-      # to minutes per chunk) BEFORE constructing any chunk's native listener.
-      # Under FFI, weights remain on device and host staging is bypassed completely.
-      if is_pathways and not use_ffi:
-        staged_chunks = [raiden_synchronizer.to_host_cpu_state(chunk_state) for chunk_state in chunks]
-      else:
-        staged_chunks = chunks
+      # Under FFI or direct TPU, weights remain on device and host staging is bypassed.
+      staged_chunks = chunks
       del chunks
 
       if self._raiden_syncs is None:
