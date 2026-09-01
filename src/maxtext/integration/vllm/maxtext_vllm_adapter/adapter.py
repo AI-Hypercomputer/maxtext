@@ -128,6 +128,23 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       f"num_lanes={num_lanes}, tp={tp}, attn_dp={attn_dp}, ep={ep}, moe_mlp_tp_size={moe_mlp_tp_size}"
   )
 
+  # The native tpu-inference model paths derive use_ep from
+  # parallel_config.enable_expert_parallel, but the mesh built by
+  # ShardingConfigManager.from_vllm_config takes expert parallelism only from
+  # additional_config's sharding_strategy. MaxText derives use_ep from the mesh, so
+  # --enable-expert-parallel alone leaves the experts unsharded here while the native
+  # implementation of the same model runs expert-parallel. Warn rather than fail, since
+  # the run is still correct, only sharded differently than the flag suggests.
+  expert_shard_degree = ep * sharding_config.attn_dp_expert_size
+  if vllm_config.parallel_config.enable_expert_parallel and expert_shard_degree == 1:
+    max_logging.warning(
+        "--enable-expert-parallel was requested but the mesh has no expert shards "
+        f"(expert={ep}, attn_dp_expert={sharding_config.attn_dp_expert_size}), so MaxText will shard the MoE over "
+        "the MLP dimension instead of the expert dimension. The vLLM flag does not reach the JAX mesh; set "
+        'expert_parallelism in the vLLM additional_config sharding_strategy, e.g. \'{"sharding": '
+        '{"sharding_strategy": {"expert_parallelism": <num_devices>}}}\', to actually shard experts.'
+    )
+
   # Replicate the number of KV heads if its less than the total degree of model parallelism
   if kv_tp_size % num_kv_heads == 0 and num_kv_heads < kv_tp_size:
     max_logging.log(
@@ -152,8 +169,15 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     while (padded_hidden_size // moe_mlp_tp_size) < (2 * num_lanes):
       padded_hidden_size = next_power_of_two(padded_hidden_size + 1)
 
-    max_logging.log(
-        f"Padding moe_intermediate_size from {hidden_size} to {padded_hidden_size} to match MLP MoE requirements."
+    # This inflates every expert weight, so it is a real memory/FLOP cost rather than a
+    # cosmetic reshape: at moe_mlp_tp_size=4 a 512-wide MoE is padded to 1024 (2x the MoE
+    # weights), and at moe_mlp_tp_size=8 to 2048 (4x). Log it at WARNING so it is visible
+    # under vLLM's logging configuration, which does not surface absl INFO records.
+    max_logging.warning(
+        f"Padding moe_intermediate_size from {hidden_size} to {padded_hidden_size} to match MLP MoE requirements "
+        f"(moe_mlp_tp_size={moe_mlp_tp_size}, 2*num_lanes={2 * num_lanes}). This multiplies the MoE weights and "
+        f"MoE FLOPs by {padded_hidden_size / hidden_size:g}x. Consider sharding the MoE over the expert axis "
+        f"instead, by setting expert_parallelism in the vLLM additional_config sharding_strategy."
     )
     overrides["padded_base_moe_mlp_dim"] = padded_hidden_size
 
