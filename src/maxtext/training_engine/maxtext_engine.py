@@ -1199,27 +1199,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         use_ffi = os.environ.get("RAIDEN_USE_FFI", "").lower() in ("true", "1")
 
       if self._raiden_sync is None:
-        try:
-          self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
-              job_name="trainer",
-              worker_index=jax.process_index(),
-              auto_h2d=False,
-              use_ffi=use_ffi,
-              parallelism=4,
-          )
-        except TypeError:
-          self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
-              job_name="trainer",
-              worker_index=jax.process_index(),
-              auto_h2d=False,
-              parallelism=4,
-          )
+        self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
+            job_name="trainer",
+            worker_index=jax.process_index(),
+            auto_h2d=False,
+            use_ffi=use_ffi,
+            parallelism=4,
+        )
 
       self._raiden_sync.bind(params_state)
       del params_state
 
       # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
-      if self._raiden_sync.active or self._raiden_sync.bound:
+      if self._raiden_sync.bound:
         self._raiden_sync.d2h()
 
       verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
