@@ -90,8 +90,8 @@ export BASE_OUTPUT_PATH=gs://yujiedeng-maxtext-dev/model_bringup/test/qwen3.8-2.
 #
 #   FSDP 128 x EP 8 = 1024
 # ---------------------------------------------------------------------------
-export ICI_FSDP=32
-export ICI_EP=8
+export ICI_FSDP=1
+export ICI_EP=-1
 export DCN_FSDP=1
 
 # ---------------------------------------------------------------------------
@@ -206,9 +206,9 @@ python3 -m tests.utils.forward_pass_logit_checker \
   ici_expert_parallelism="${ICI_EP}" \
   dcn_fsdp_parallelism="${DCN_FSDP}" \
   dcn_data_parallelism=1 \
-  weight_dtype=float16 \
-  dtype=float16 \
-  activations_in_float32=false \
+  weight_dtype=float32 \
+  dtype=float32 \
+  activations_in_float32=true \
   matmul_precision=highest \
   float32_logits=true \
   float32_qk_product=true \
@@ -240,9 +240,9 @@ python3 -m tests.utils.forward_pass_logit_checker \
   ici_expert_parallelism="${ICI_EP}" \
   dcn_fsdp_parallelism="${DCN_FSDP}" \
   dcn_data_parallelism=1 \
-  weight_dtype=float16 \
-  dtype=float16 \
-  activations_in_float32=false \
+  weight_dtype=float32 \
+  dtype=float32 \
+  activations_in_float32=true \
   matmul_precision=highest \
   float32_logits=true \
   float32_qk_product=true \
