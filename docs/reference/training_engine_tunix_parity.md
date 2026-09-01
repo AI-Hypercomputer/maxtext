@@ -20,8 +20,9 @@ of the trainer, not of the workload.
 | `update()` alone                                   | Tunix **8.2 ms** vs. MaxText 14.0 ms — the one phase Tunix wins                |
 | Peak HBM/device, GA=1                              | MaxText **1.78 GiB** vs. Tunix 8.65 GiB (**4.9x**)                             |
 | Metrics recorded per step                          | MaxText **22** vs. Tunix 2                                                     |
-| Engine host step path, after the §9 fix            | qwen3-0.6b **1.80x** faster; qwen3.5-35b-a3b 1.004x — a fixed ~70 ms saving   |
-| 23-step loop wall clock, after the §9 fix          | qwen3-0.6b 8.9 → **6.3 s**; qwen3.5-35b-a3b 56.3 → **55.7 s**                 |
+| Engine host step path, after the §9 fix            | qwen3-0.6b **1.80x** faster; qwen3.5-35b-a3b 1.004x — a fixed ~70 ms saving    |
+| 23-step loop wall clock, after the §9 fix          | qwen3-0.6b 8.9 → **6.3 s**; qwen3.5-35b-a3b 56.3 → **55.7 s**                  |
+| Engine host step path at GA=8, after the §9 fix    | qwen3-0.6b **5.76x** faster — the saving is per micro-batch                    |
 
 **On step time alone the two trainers are equivalent at production sequence lengths.**
 MaxText's lead is a short-sequence effect that amortizes away completely: 1.85x at 16
@@ -87,6 +88,11 @@ python qwen3_engine_profile.py --model qwen3.5-35b-a3b  --tp 2 --scan   --seq 10
 # arm refuses --model/--scan: it implements one architecture and has no scanned variant.
 python qwen3_maxtext_profile.py --tp 8 --seq 1024 --no-trace   # MaxText model, Tunix trainer
 python qwen3_tunix_profile.py   --tp 8 --seq 1024 --no-trace   # Tunix model, Tunix trainer
+
+# The GA=8 rows in §9, on a 4-device host. --ga is the only change; fsdp fills the devices.
+python qwen3_engine_profile.py  --ga 8 --no-trace
+python qwen3_maxtext_profile.py --ga 8 --no-trace
+python qwen3_tunix_profile.py   --ga 8 --no-trace
 ```
 
 The "before" rows come from the same commands with only
@@ -399,24 +405,24 @@ Measured as an A/B on `src/maxtext/training_engine/{maxtext_engine,inflight_thro
 alone, everything else held fixed. `--no-trace`, 23 steps, last 19 after warmup, batch 8 x
 seq 1024, GA=1, f32, `optax.sgd(1e-5)`, no clipping, on the same 8-device v7x host.
 
-| ms/step, untraced | median | mean | max | `fwd_bwd` / `update` |
-| ------------------------------------------------ | ---------- | ------ | ------ | --------------- |
-| **qwen3-0.6b**, `tp=8`, unscanned — before        | 161.6      | 216.0  | 464.1  | 38.7 / 122.0 ms |
-| **qwen3-0.6b**, `tp=8`, unscanned — after         | **89.8**   | 89.8   | 90.2   | 15.9 / 74.0 ms  |
-| speedup                                           | **1.80x**  | 2.41x  |        |                 |
-| **qwen3.5-35b-a3b**, `tp=2`, scanned — before     | 2322.5     | 2339.6 | 2641.8 | 13.6 / 2309.3 ms |
-| **qwen3.5-35b-a3b**, `tp=2`, scanned — after      | **2314.0** | 2314.0 | 2314.6 | 7.9 / 2306.1 ms |
-| speedup                                           | 1.004x     | 1.011x |        |                 |
+| ms/step, untraced                             | median     | mean   | max    | `fwd_bwd` / `update` |
+| --------------------------------------------- | ---------- | ------ | ------ | -------------------- |
+| **qwen3-0.6b**, `tp=8`, unscanned — before    | 161.6      | 216.0  | 464.1  | 38.7 / 122.0 ms      |
+| **qwen3-0.6b**, `tp=8`, unscanned — after     | **89.8**   | 89.8   | 90.2   | 15.9 / 74.0 ms       |
+| speedup                                       | **1.80x**  | 2.41x  |        |                      |
+| **qwen3.5-35b-a3b**, `tp=2`, scanned — before | 2322.5     | 2339.6 | 2641.8 | 13.6 / 2309.3 ms     |
+| **qwen3.5-35b-a3b**, `tp=2`, scanned — after  | **2314.0** | 2314.0 | 2314.6 | 7.9 / 2306.1 ms      |
+| speedup                                       | 1.004x     | 1.011x |        |                      |
 
 **The saving is a fixed quantity of host time, not a percentage**, so the two rows are the
 same fix seen from opposite ends. What it is worth on a given workload is set by two things:
 
-* **How big the NNX module graph is.** The cost removed is two graph traversals per step,
+- **How big the NNX module graph is.** The cost removed is two graph traversals per step,
   which scale with node count. Scanning collapses a decoder stack into one stacked node
   set, so the *larger* model here has the *smaller* graph — 70 parameter leaves scanned
   against qwen3-0.6b's 310 unscanned — and its `nnx.split` costs 5.0/4.7 ms against
   21.3/22.3 ms. Model size is the wrong intuition for this; `scan_layers` is the right one.
-* **How long the device is busy.** Host work that fits inside the step's device time is
+- **How long the device is busy.** Host work that fits inside the step's device time is
   free. qwen3-0.6b at 1024 tokens is ~82 ms of TPU-busy, so ~70 ms of host work was mostly
   exposed; qwen3.5-35b-a3b is 2.3 s of TPU-busy, so nearly all of it hides.
 
@@ -427,17 +433,55 @@ graph twice per step, and the GC pauses that follow land on whichever step is un
 visible as qwen3-0.6b's 464 ms worst step against a 161.6 ms median. Removing the
 allocation removes the pauses on both models.
 
+### Gradient accumulation multiplies the saving
+
+The two bullets above set what the fix is worth per *step*. Gradient accumulation changes
+the arithmetic, because the removed `nnx.split(model, nnx.Param, ...)` sits in `fwd_bwd`,
+which runs once per **micro** step — so the saving scales with GA while the update-side
+part does not. GA=1 measures the fix at its weakest.
+
+Re-run at GA=8, everything else held as above and the same A/B on the engine files alone.
+A different host from the table above — 4-device v6e rather than 8-device v7x — so read
+these rows against each other, not against the GA=1 rows:
+
+| qwen3-0.6b, unscanned, batch 8 x seq 1024, GA=8 | median    | mean   | max    | `fwd_bwd` / `update` |
+| ----------------------------------------------- | --------- | ------ | ------ | -------------------- |
+| fsdp=4, before                                  | 3421.0    | 3297.1 | 3430.1 | 355.8 / 79.5 ms      |
+| **fsdp=4, after**                               | **593.6** | 616.8  | 1034.8 | 60.6 / 83.5 ms       |
+| speedup                                         | **5.76x** | 5.35x  |        |                      |
+
+**5.76x at GA=8 against 1.80x at GA=1**, on the same model. The per-micro-step `fwd_bwd`
+falls 355.8 → 60.6 ms and is paid eight times, while `update` is flat at ~80 ms and is paid
+once; multiplying out, 8 x 295.2 = 2362 ms of the 2827 ms saved is the `fwd_bwd` side. This
+is the same fixed quantity of host time as before, just charged per micro-batch: 28
+unscanned decoder layers walked eight times a step instead of once.
+
+It also moves the trainer comparison. §4 found the two trainers equivalent on step time at
+production sequence lengths, which held at GA=1; at GA=8 they separate, because
+`PeftTrainer` walks the graph per micro step too:
+
+| GA=8, fsdp=4, batch 8 x seq 1024 | median    | mean   |
+| -------------------------------- | --------- | ------ |
+| MaxText model + **engine**       | **593.6** | 616.8  |
+| MaxText model + `PeftTrainer`    | 1178.0    | 1032.7 |
+| tunix model + `PeftTrainer`      | 900.7     | 881.4  |
+
+Against the identical model the engine is **1.98x** on the median, and **1.52x** against
+the tunix-model baseline. The `PeftTrainer` + MaxText-model row is bimodal — it alternates
+between ~700 ms and ~1180 ms steps, which is why its mean sits 145 ms *below* its median —
+so treat that row as a range rather than a point.
+
 ### End-to-end wall clock
 
 The per-step figures above are medians; total run time follows the **mean**, so it credits
 the fix with the tail as well. Same two shapes, same `--no-trace` runs, timed from outside:
 
-| wall clock                             | qwen3-0.6b `tp=8` | qwen3.5-35b-a3b `tp=2 --scan` |
-| -------------------------------------- | ----------------- | ----------------------------- |
-| 23-step loop — before                  | 8.9 s             | 56.3 s                        |
-| **23-step loop — after**               | **6.3 s**         | **55.7 s**                    |
-| in-process total — before → after      | 18.0 → **15.4 s** | 62.6 → **62.0 s**             |
-| `python qwen3_engine_profile.py …`     | 27.7 → **25.3 s** | 72.2 → **71.7 s**             |
+| wall clock                         | qwen3-0.6b `tp=8` | qwen3.5-35b-a3b `tp=2 --scan` |
+| ---------------------------------- | ----------------- | ----------------------------- |
+| 23-step loop — before              | 8.9 s             | 56.3 s                        |
+| **23-step loop — after**           | **6.3 s**         | **55.7 s**                    |
+| in-process total — before → after  | 18.0 → **15.4 s** | 62.6 → **62.0 s**             |
+| `python qwen3_engine_profile.py …` | 27.7 → **25.3 s** | 72.2 → **71.7 s**             |
 
 The loop times are the means times 23, to within measurement noise: qwen3-0.6b 211.4 → 89.8
 ms predicts 2.80 s saved against 2.6 s observed, qwen3.5-35b-a3b 2340.0 → 2314.0 ms predicts
@@ -447,12 +491,12 @@ previous paragraph describes, which the median hides and the wall clock does not
 
 Everything outside the loop is fixed per-run cost that the fix does not touch:
 
-| per-run overhead                        | qwen3-0.6b | qwen3.5-35b-a3b |
-| --------------------------------------- | ---------- | --------------- |
-| interpreter + JAX/MaxText import        | ~9.9 s     | ~9.7 s          |
-| config + tokenizer + dataset            | ~4.7 s     | ~4.2 s          |
-| engine build                            | 3.8 s      | 1.6 s           |
-| `engine.compile()`                      | 0.6 s      | 0.5 s           |
+| per-run overhead                 | qwen3-0.6b | qwen3.5-35b-a3b |
+| -------------------------------- | ---------- | --------------- |
+| interpreter + JAX/MaxText import | ~9.9 s     | ~9.7 s          |
+| config + tokenizer + dataset     | ~4.7 s     | ~4.2 s          |
+| engine build                     | 3.8 s      | 1.6 s           |
+| `engine.compile()`               | 0.6 s      | 0.5 s           |
 
 Two readings there are easy to get wrong. `engine.compile()` looks nearly free because
 `jax.jit` lowering is lazy — XLA compilation happens on the first call, inside the loop, and
@@ -464,12 +508,12 @@ decoder layer rather than 28.
 **Against `PeftTrainer` driving the identical model**, which is the control that isolates
 trainer from model, the engine closes to within a few ms on both:
 
-| ms/step, untraced, median | qwen3-0.6b `tp=8` | qwen3.5-35b-a3b `tp=2 --scan` |
-| ----------------------------------- | -------- | ---------- |
-| engine, before                      | 161.6    | 2322.5     |
-| **engine, after**                   | **89.8** | **2314.0** |
-| same MaxText model + `PeftTrainer`  | 83.4     | 2303.1     |
-| engine's remaining deficit          | 1.077x   | 1.005x     |
+| ms/step, untraced, median          | qwen3-0.6b `tp=8` | qwen3.5-35b-a3b `tp=2 --scan` |
+| ---------------------------------- | ----------------- | ----------------------------- |
+| engine, before                     | 161.6             | 2322.5                        |
+| **engine, after**                  | **89.8**          | **2314.0**                    |
+| same MaxText model + `PeftTrainer` | 83.4              | 2303.1                        |
+| engine's remaining deficit         | 1.077x            | 1.005x                        |
 
 **`qwen3.5-35b-a3b` constrains the mesh.** It has 2 KV heads, so `--tp 8` is rejected by the
 sharding checks, and unscanned it does not fit in HBM at any batch size or remat policy
