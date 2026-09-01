@@ -632,6 +632,7 @@ class HCAStaticMaskTest(unittest.TestCase):
     kwargs.setdefault("attention_type", AttentionType.COMPRESSED)
     kwargs.setdefault("max_target_length", 512)
     kwargs.setdefault("block_size", 128)
+    kwargs.setdefault("use_tokamax_splash", True)
     return _create_mock_flash_op(**kwargs)
 
   def _make_dot_product_op(self, max_target_length, sliding_window_size=128):
@@ -658,18 +659,19 @@ class HCAStaticMaskTest(unittest.TestCase):
 
   def test_hca_static_mask_matches_compressor_mask(self):
     test_cases = [
-        (512, 128, 128, 0),
-        (1024, 128, 128, 64),
-        (512, 128, None, 0),  # full causal local attention
-        (384, 128, 128, 128),
-        (489, 128, 128, 23),  # unaligned sequence length 489
+        (512, 128, 128, 0, 512),
+        (1024, 128, 128, 64, 1024),
+        (512, 128, None, 0, 512),  # full causal local attention
+        (384, 128, 128, 128, 384),
+        (489, 128, 128, 23, 512),  # unaligned sequence length 489 with query padded to 512
+        (1017, 128, 128, 128, 1024),  # S=1017 edge case with query padded to 1024 and 1 block KV padding
     ]
 
-    for seq_len, compress_ratio, local_window, pad_kv in test_cases:
-      with self.subTest(seq_len=seq_len, ratio=compress_ratio, window=local_window, pad=pad_kv):
+    for seq_len, compress_ratio, local_window, pad_kv, padded_q_len in test_cases:
+      with self.subTest(seq_len=seq_len, ratio=compress_ratio, window=local_window, pad=pad_kv, padded_q=padded_q_len):
         comp_len = max(0, seq_len // max(1, compress_ratio))
         total_kv_len = seq_len + pad_kv + comp_len
-        shape = (seq_len, total_kv_len)
+        shape = (padded_q_len, total_kv_len)
 
         mask = attention_op.HCAStaticMask(
             shape=shape,
@@ -704,7 +706,14 @@ class HCAStaticMaskTest(unittest.TestCase):
         expected_mask = np.array(ref_mask[0, 0] == 0.0)
 
         actual_mask = mask[:, :]
-        np.testing.assert_array_equal(actual_mask, expected_mask)
+        # Real query rows (0..seq_len) must match dot product reference mask
+        np.testing.assert_array_equal(actual_mask[:seq_len, :], expected_mask)
+
+        # Every row (including padded query rows) must have at least one active connection
+        self.assertTrue(
+            np.all(np.any(actual_mask, axis=-1)),
+            "Found an all-False softmax row in HCAStaticMask (would cause NaN in softmax).",
+        )
 
   def test_hca_static_mask_equality_and_hash(self):
     mask1 = attention_op.HCAStaticMask(
@@ -760,8 +769,8 @@ class HCAStaticMaskTest(unittest.TestCase):
         attention_type=AttentionType.COMPRESSED,
         max_target_length=512,
     )
-    query = jnp.zeros((1, 1, 512, 128))
-    key = jnp.zeros((1, 1, 640, 128))
+    query = jnp.zeros((1, 512, 1, 128))
+    key = jnp.zeros((1, 640, 1, 128))
     with self.assertRaisesRegex(ValueError, "indexer_mask must be provided for CSA"):
       op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=4)
 
@@ -771,8 +780,8 @@ class HCAStaticMaskTest(unittest.TestCase):
         max_target_length=512,
         use_tokamax_splash=True,
     )
-    query = jnp.zeros((1, 1, 512, 128))
-    key = jnp.zeros((1, 1, 640, 128))
+    query = jnp.zeros((1, 512, 1, 128))
+    key = jnp.zeros((1, 640, 1, 128))
     with (
         unittest.mock.patch.object(op, "_maybe_shard_with_pspec", side_effect=lambda x, p: x),
         unittest.mock.patch.object(op, "_logical_to_mesh_axes", return_value=(None,)),
@@ -795,8 +804,8 @@ class HCAStaticMaskTest(unittest.TestCase):
         context_parallel_size=2,
         max_target_length=512,
     )
-    query = jnp.zeros((1, 1, 512, 128))
-    key = jnp.zeros((1, 1, 640, 128))
+    query = jnp.zeros((1, 512, 1, 128))
+    key = jnp.zeros((1, 640, 1, 128))
     with self.assertRaisesRegex(
         NotImplementedError, "Context parallelism is currently not implemented for DeepSeek-V4 HCA Flash Attention"
     ):
@@ -842,8 +851,8 @@ class HCAStaticMaskTest(unittest.TestCase):
         attention_type=AttentionType.COMPRESSED,
         max_target_length=512,
     )
-    query = jnp.zeros((1, 1, 512, 128))
-    key = jnp.zeros((1, 1, 516, 128))
+    query = jnp.zeros((1, 512, 1, 128))
+    key = jnp.zeros((1, 516, 1, 128))
     with self.assertRaisesRegex(ValueError, "compress_ratio must be provided for AttentionType.COMPRESSED"):
       op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=None)
     with self.assertRaisesRegex(ValueError, "compress_ratio must be provided for AttentionType.COMPRESSED"):

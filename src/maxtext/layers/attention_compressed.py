@@ -651,13 +651,14 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
           cache=cache,
       )
 
-    # Skip causal mask generation when using static flash attention (HCAStaticMask),
-    # during decoding (seq_len == 1), or if no blocks were pooled.
-    if self.attention_kernel == "flash":
-      return compressed_kv, None
+    # During decoding (seq_len == 1) or if no blocks were pooled, return a zero mask
     if seq_len == 1 or compressed_len == 0:
       compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
       return compressed_kv, compressed_mask
+
+    # Skip dense causal mask generation when using static flash attention (HCAStaticMask)
+    if self.attention_kernel == "flash":
+      return compressed_kv, None
 
     # Construct a causal mask preventing early queries from attending to future compressed blocks
     usable_len = compressed_len * self.compress_rate
@@ -1599,6 +1600,12 @@ class CompressedAttention(Attention):
       total_kv_len = kv.shape[1] + (compressed_kv.shape[1] if compressed_kv is not None else 0)
       block_size = self.config.sa_block_kv
       pad_kv_total = (block_size - (total_kv_len % block_size)) % block_size
+
+      # Guarantee padding KV columns exist whenever query padding is required
+      block_q = self.config.sa_block_q
+      pad_q = (block_q - (inputs_q.shape[1] % block_q)) % block_q
+      if pad_q > 0 and pad_kv_total == 0:
+        pad_kv_total = block_size
 
       if pad_kv_total > 0:
         if compressed_kv is not None:

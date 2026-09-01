@@ -294,6 +294,10 @@ class HCAStaticMask(splash_attention_mask.Mask):
       raise ValueError(f"compress_ratio must be positive, got {compress_ratio}")
     self._shape = shape
     self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
+    if self._shape[0] > self.local_kv_len and pad_kv_total <= 0:
+      raise ValueError(
+          f"pad_kv_total must be > 0 when query sequence is padded (shape[0]={self._shape[0]} > local_kv_len={self.local_kv_len})."
+      )
     self.compressed_kv_len = (
         compressed_kv_len if compressed_kv_len is not None else max(1, self.local_kv_len // compress_ratio)
     )
@@ -2009,6 +2013,8 @@ class AttentionOp(nnx.Module):
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
       elif self.attention_type == AttentionType.COMPRESSED:
+        if not self.config.use_tokamax_splash:
+          raise ValueError("AttentionType.COMPRESSED flash attention requires use_tokamax_splash=True.")
         if compress_ratio is None or compress_ratio <= 0:
           raise ValueError("compress_ratio must be provided for AttentionType.COMPRESSED flash attention.")
         if compress_ratio > 4:
