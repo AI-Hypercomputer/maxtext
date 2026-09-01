@@ -54,6 +54,7 @@ from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 from maxtext.utils import max_utils
 from maxtext.inference import kvcache
+from maxtext.kernels.attention.gated_delta_rule_attention import pallas_chunk_gated_delta_rule
 
 
 # -----------------------------------------
@@ -186,6 +187,43 @@ def naive_jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
+@functools.partial(jax.jit, static_argnames=['base_size'])
+def invert_hybrid(S, base_size=128):
+    """Hardware-aware Hybrid Block + Log-Depth Neumann Solver."""
+    chunk_size = S.shape[-1]
+    
+    # BASE CASE: Matrix is small enough for the MXU. Trigger pure Neumann.
+    if chunk_size <= base_size:
+        S_strict = jnp.tril(S, k=-1)
+        identity = jnp.eye(chunk_size, dtype=S.dtype)
+        A = identity - S_strict
+        E = jnp.tril(S_strict @ S_strict, k=-1)
+        
+        steps = int(math.ceil(math.log2(chunk_size)))
+        for _ in range(steps - 1):
+            A = jnp.tril(A + A @ E)
+            E = jnp.tril(E @ E, k=-1)
+        return A
+    
+    # RECURSIVE CASE: Matrix is too big. Slice into 4 quadrants.
+    half = chunk_size // 2
+    S11 = S[..., :half, :half]
+    S22 = S[..., half:, half:]
+    S21 = S[..., half:, :half]
+    
+    inv_S11 = invert_hybrid(S11, base_size)
+    inv_S22 = invert_hybrid(S22, base_size)
+    
+    # -A22^-1 @ A21 @ A11^-1
+    inv_S21 = jnp.matmul(-inv_S22, jnp.matmul(S21, inv_S11, precision=jax.lax.Precision.HIGHEST), precision=jax.lax.Precision.HIGHEST)
+    
+    zeros = jnp.zeros_like(inv_S11)
+    top_half = jnp.concatenate([inv_S11, zeros], axis=-1)
+    bottom_half = jnp.concatenate([inv_S21, inv_S22], axis=-1)
+    
+    return jnp.concatenate([top_half, bottom_half], axis=-2)
+
+
 def jax_chunk_gated_delta_rule(
     query: Array,
     key: Array,
@@ -270,11 +308,12 @@ def jax_chunk_gated_delta_rule(
   S = S * jnp.exp(g_diff)
   S = jnp.where(mask, S, 0.0)
 
-  # Inversion (A) - Strictly float32
-  identity = jnp.eye(chunk_size, dtype=jnp.float32)
-  identity_broadcasted = jnp.broadcast_to(identity, S.shape)
+  # # Inversion (A) - Strictly float32
+  # identity = jnp.eye(chunk_size, dtype=jnp.float32)
+  # identity_broadcasted = jnp.broadcast_to(identity, S.shape)
 
-  A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+  # A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+  A = invert_hybrid(S, base_size=256)
 
   # 5. WY Factors
   v_beta = v_c * beta_c[..., None]
@@ -875,6 +914,19 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           initial_state=recurrent_state,  # pyrefly: ignore[bad-argument-type]
           use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
           compute_dtype=cfg.dtype,
+      )
+    elif getattr(cfg, "use_gdn_kernel", False):
+      core_attn_out, next_recurrent_state = pallas_chunk_gated_delta_rule(
+          query=query,
+          key=key,
+          value=value,
+          g=g,
+          beta=beta,
+          chunk_size=cfg.gdn_chunk_size,
+          initial_state=recurrent_state,
+          use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+          compute_dtype=cfg.dtype,
+          mesh=self.mesh,
       )
     elif self.mesh is not None:
       logical_rules = get_logical_axis_rules()
