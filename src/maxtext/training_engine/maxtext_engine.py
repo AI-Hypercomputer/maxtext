@@ -20,7 +20,7 @@ the MaxRL AbstractTrainer interface without running an outer loop.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import dataclasses
 import os
 from typing import Any
@@ -351,6 +351,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._state: Any = None
     self._accumulated_grads: Any = None
     self._micro_step_count = 0
+    # Set when this run resumed from an intra-step checkpoint, cleared once the step it
+    # resumed into completes and its finished state has been checkpointed.
+    self._resumed_mid_step = False
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
     # `create_training_optimizer` returns a raw optax GradientTransformation. `TrainStateNNX.apply_gradients`
     # calls `optimizer.update(model, grads)`, which is the nnx.Optimizer signature, and
@@ -882,6 +885,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_grads = None
     self._micro_step_count = 0
     self._train_step += 1
+
+    if self._resumed_mid_step:
+      # This is the step the run resumed into, and it just finished. The checkpoint on disk
+      # for it is still the partial one. Orbax's save-interval policy will not save this step
+      # again.
+      self._resumed_mid_step = False
+      self.save_checkpoint(metadata={"step": self.train_step}, force=True)
+
     return self.train_step
 
   def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
@@ -918,21 +929,25 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
 
-    step = kwargs.get("step", self.train_step)
-    force_ckpt_save = kwargs.get("force", False)
+    step = kwargs.pop("step", None)
+    if step is None and isinstance(metadata, Mapping):
+      step = metadata.get("step")
+    if step is None:
+      # checkpoint for incomplete train step is saved for self.train_step+1
+      # because update() is not called yet to increment train_step;
+      # checkpoint for completed step is saved for self.train_step because update() increments train_step
+      step = self.train_step + 1 if self._micro_step_count > 0 else self.train_step
 
-    custom_metadata = {}
     if self._micro_step_count > 0:
       logging.info(
           "Saving intra-step checkpoint at step %d (micro_step_count=%d).",
           step,
           self._micro_step_count,
       )
-      force_ckpt_save = True
-      custom_metadata["micro_step_count"] = self._micro_step_count
     else:
       logging.info("Saving checkpoint at step %d.", step)
 
+    custom_metadata = {}
     if metadata:
       # Metadata from Orchestrator
       custom_metadata["additional_metadata"] = metadata
@@ -946,9 +961,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             # a list, and restore_checkpoint iterates it back into the recorder's buffer.
             accumulated_metrics=self._metrics_recorder.get_metrics_history(clear_cache=False),
             accumulated_grads=self._accumulated_grads,
+            # Recorded by the CheckpointManager into custom_metadata, so that a later save
+            # at this same step can tell it supersedes this one.
+            micro_step_count=self._micro_step_count,
         ),
         custom_metadata=custom_metadata,
-        force_ckpt_save=force_ckpt_save,
+        **kwargs,
     )
     if ckpt_saved:
       logging.info("Checkpoint saved at step %d.", step)
@@ -977,7 +995,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return None
 
     logging.info("Checkpoint restored from step %d.", restored_step)
-    self.train_step = restored_step
 
     if restored_checkpoint_state.accumulated_metrics:
       buffers = []
@@ -1004,15 +1021,35 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._metrics_recorder._metrics_buffer = buffers
 
     restored_additional_metadata = None
+    # Checkpoint with no metadata says nothing about how far into its step it
+    # got, and must not inherit the count from whatever this engine was doing before.
+    self._micro_step_count = 0
     if restored_metadata:
       self._micro_step_count = restored_metadata.get("micro_step_count", 0)
       restored_additional_metadata = restored_metadata.get("additional_metadata", None)
 
-    # Restore intra-step state if it exists.
-    if restored_checkpoint_state.accumulated_grads:
+    if self._micro_step_count > 0:
+      logging.info(
+          "Restored intra-step checkpoint at step %d (micro_step_count=%d).",
+          restored_step,
+          self._micro_step_count,
+      )
+      # update() will increment the step after applying the accumulated gradients
+      self.train_step = restored_step - 1
+      # The checkpoint at `restored_step` holds a partially accumulated step. Once that step
+      # completes, `update` replaces it with the finished state.
+      self._resumed_mid_step = True
+    else:
+      self.train_step = restored_step
+      self._resumed_mid_step = False
+
+    # Restore intra-step state if it exists. Gated on the count because for a complete step
+    # `restored_checkpoint_state.accumulated_grads` is just the value this engine passed in
+    # above, which the branch above has already discarded.
+    if self._micro_step_count > 0 and restored_checkpoint_state.accumulated_grads:
       self._accumulated_grads = restored_checkpoint_state.accumulated_grads
 
-      if self._micro_step_count > 0 and self._metrics_recorder._metrics_buffer:  # pylint: disable=protected-access
+      if self._metrics_recorder._metrics_buffer:  # pylint: disable=protected-access
         active_buf = self._metrics_recorder.get_step_metrics(restored_step)
         if active_buf and "loss" in active_buf.weighted_metrics:
           wm = active_buf.weighted_metrics["loss"]
@@ -1149,9 +1186,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if staging_transport == "raiden":
       try:
-        from tunix.experimental.worker import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+        # pylint: disable=g-import-not-at-top,import-outside-toplevel
+        from tunix.experimental.weight_sync import raiden_synchronizer
       except ImportError:
-        logging.warning("tunix.experimental.worker.raiden_synchronizer not found; returning empty metadata.")
+        logging.warning("tunix.experimental.weight_sync.raiden_synchronizer not found; returning empty metadata.")
         return []
 
       # 1. Drain all in-flight TPU computations to ensure weights are fully updated
@@ -1251,12 +1289,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return True
 
   def close(self) -> None:
-    """Closes the trainer and its associated resources."""
+    """Closes the trainer, writes buffered metrics and final checkpoint."""
     if self._raiden_syncs:
       for sync in self._raiden_syncs:
         if hasattr(sync, "close"):
           sync.close()
       self._raiden_syncs = None
-    self._throttler.cleanup()
-    self._metrics_recorder.cleanup()
+
+    self.save_checkpoint(metadata=None, force=True)
     self._checkpoint_manager.close()
+
+    # Write the metrics and cleanup metrics logger resources
+    self._throttler.cleanup()
+
+    # Cleanup metrics recorder resources after saving the checkpoint, ensuring all buffered metrics are saved properly
+    self._metrics_recorder.cleanup()
