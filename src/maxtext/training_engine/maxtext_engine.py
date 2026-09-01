@@ -1244,8 +1244,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Releases staged weight buffers after transfer completion."""
     if self._raiden_sync:
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
-      if hasattr(self._raiden_sync, "release_host_arrays"):
-        self._raiden_sync.release_host_arrays()
     return True
 
   def close(self) -> None:
