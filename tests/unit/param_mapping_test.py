@@ -245,6 +245,23 @@ class ParamMappingTest(unittest.TestCase):
         np.testing.assert_array_equal(out[f"b{b}_l{l}"], value_of(b, l))
 
   # Specific tests with assertions
+  def test_deepseek4_mhc_reshaped_hooks(self):
+    config = {"num_hidden_layers": 1, "n_routed_experts": 2}
+    maxtext_config = mock.Mock()
+    prefix = "params-decoder-layers_0-mhc_attention"
+    keys = tuple(f"{prefix}-{name}_alpha" for name in ("pre", "post", "res"))
+    hf_weight = np.arange(24 * 8, dtype=np.float32).reshape(24, 8)
+
+    from_hf = param_mapping.DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config)
+    split_weights = (
+        from_hf[keys[0]](hf_weight, (4, 2, 4)),
+        from_hf[keys[1]](hf_weight, (4, 2, 4)),
+        from_hf[keys[2]](hf_weight, (4, 2, 16)),
+    )
+
+    to_hf = param_mapping.DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, saving_to_hf=True)
+    np.testing.assert_array_equal(to_hf[keys](split_weights, hf_weight.shape), hf_weight)
+
   def test_reshape_kernel_hook(self):
     config = {
         "text_config": {"num_hidden_layers": 2, "hidden_size": 256},

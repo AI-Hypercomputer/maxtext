@@ -4094,13 +4094,16 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
 
   # Functions for mHC split
   def mhc_split_fn_pre(input_tensor, target_shape=None):
-    return np.transpose(input_tensor[0:4, :])
+    tensor = np.transpose(input_tensor[0:4, :])
+    return tensor.reshape(target_shape) if target_shape is not None else tensor
 
   def mhc_split_fn_post(input_tensor, target_shape=None):
-    return np.transpose(input_tensor[4:8, :])
+    tensor = np.transpose(input_tensor[4:8, :])
+    return tensor.reshape(target_shape) if target_shape is not None else tensor
 
   def mhc_split_fn_res(input_tensor, target_shape=None):
-    return np.transpose(input_tensor[8:24, :])
+    tensor = np.transpose(input_tensor[8:24, :])
+    return tensor.reshape(target_shape) if target_shape is not None else tensor
 
   def mhc_split_base_pre(input_tensor, target_shape=None):
     return input_tensor[0:4]
@@ -4169,7 +4172,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     def mhc_concat_fn(input_tensors, target_shape=None):
       if len(input_tensors) != 3:
         raise ValueError(f"mhc_concat_fn expected 3 tensors (pre, post, res), got {len(input_tensors)}")
-      tensors = [np.asarray(t) for t in input_tensors]
+      tensors = [arr.reshape((-1, arr.shape[-1])) for arr in map(np.asarray, input_tensors)]
       res = np.transpose(np.concatenate(tensors, axis=1))
       return res.reshape(target_shape) if target_shape is not None else res
 

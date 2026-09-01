@@ -1383,6 +1383,7 @@ mhc_pallas_kernel_fwd_block_size: 256
 # TPU v7x if we go higher. For TPU v6 (Trillium), there is more VMEM, so 256
 # works and provides better results.
 mhc_pallas_kernel_bwd_block_size: 128
+mhc_split_axis_contraction: False
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.

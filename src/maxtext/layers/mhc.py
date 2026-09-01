@@ -77,6 +77,25 @@ def sinkhorn(t, iters=20):
   return t.astype(initial_dtype)
 
 
+class _SplitAxesRMSNorm(nnx.Module):
+  """RMS normalization across the mHC rate and embedding axes."""
+
+  def __init__(self, rate: int, dim: int, dtype, weight_dtype, epsilon: float, rngs: nnx.Rngs):
+    self.dtype = dtype
+    self.epsilon = epsilon
+    self.scale = nnx.Param(
+        jax.nn.initializers.ones(rngs.params(), (rate, dim), weight_dtype),
+        out_sharding=(None, "activation_embed"),
+    )
+
+  def __call__(self, x: Array) -> Array:
+    x = jnp.asarray(x, jnp.float32)
+    mean2 = jnp.mean(jax.lax.square(x), axis=(-2, -1), keepdims=True)
+    y = jnp.asarray(x * jax.lax.rsqrt(mean2 + self.epsilon), self.dtype)
+    scale = jnp.asarray(self.scale[...], self.dtype)
+    return y * scale
+
+
 class ManifoldConstrainedHyperConnections(nnx.Module):
   """Implements Manifold-Constrained Hyper-Connections (mHC).
 
@@ -109,15 +128,24 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     if getattr(self.config, "use_mhc_pallas_kernel", False) and not self.config.enable_mhc_lite:
       raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
 
-    # Norm layer
-    self.mhc_norm = RMSNorm(
-        num_features=self.k * self.dim,
-        dtype=self.config.dtype,
-        weight_dtype=self.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=self.config.normalization_layer_epsilon,
-        rngs=self.rngs,
-    )
+    if self.config.mhc_split_axis_contraction:
+      self.mhc_norm = _SplitAxesRMSNorm(
+          rate=self.k,
+          dim=self.dim,
+          dtype=self.config.dtype,
+          weight_dtype=self.weight_dtype,
+          epsilon=self.config.normalization_layer_epsilon,
+          rngs=self.rngs,
+      )
+    else:
+      self.mhc_norm = RMSNorm(
+          num_features=self.k * self.dim,
+          dtype=self.config.dtype,
+          weight_dtype=self.weight_dtype,
+          kernel_axes=("norm",),
+          epsilon=self.config.normalization_layer_epsilon,
+          rngs=self.rngs,
+      )
 
     # Scalars
     self.res_alpha_scale = nnx.Param(
@@ -143,15 +171,23 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       res_beta_shape = (self.k, self.k)
       res_beta_sharding = (None, None)
 
-    # Weight matrices
     scale_init = nd_dense_init(1.0, "fan_in", "normal")
-    in_axis = 0
-    out_axis = 1
-    weight_sharding_axis_name = ("activation_embed", None)
+    if self.config.mhc_split_axis_contraction:
+      in_axis = (0, 1)
+      out_axis = 2
+      weight_sharding_axis_name = (None, "activation_embed", None)
+      res_alpha_shape = (self.k, self.dim, res_out_dim)
+      alpha_shape = (self.k, self.dim, self.k)
+    else:
+      in_axis = 0
+      out_axis = 1
+      weight_sharding_axis_name = ("activation_embed", None)
+      res_alpha_shape = (self.k * self.dim, res_out_dim)
+      alpha_shape = (self.k * self.dim, self.k)
     self.res_alpha = nnx.Param(
         scale_init(
             self.rngs.params(),
-            (self.k * self.dim, res_out_dim),
+            res_alpha_shape,
             self.weight_dtype,
             in_axis=in_axis,
             out_axis=out_axis,
@@ -161,7 +197,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.pre_alpha = nnx.Param(
         scale_init(
             self.rngs.params(),
-            (self.k * self.dim, self.k),
+            alpha_shape,
             self.weight_dtype,
             in_axis=in_axis,
             out_axis=out_axis,
@@ -171,7 +207,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.post_alpha = nnx.Param(
         scale_init(
             self.rngs.params(),
-            (self.k * self.dim, self.k),
+            alpha_shape,
             self.weight_dtype,
             in_axis=in_axis,
             out_axis=out_axis,
@@ -287,8 +323,11 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       )
     else:
       with jax.named_scope("mhc_norm"):
-        # 1. Flatten the tensor, and RMS normalization
-        norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
+        if self.config.mhc_split_axis_contraction:
+          norm_x = self.mhc_norm(x)
+        else:
+          # 1. Flatten the tensor, and RMS normalization
+          norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
 
       # Fused Projections
       pre_alpha = jnp.asarray(self.pre_alpha[...], self.dtype)
@@ -298,7 +337,11 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
 
       # MatMul on normalized input
-      h_concat = jnp.einsum("bsm,mn -> bsn", norm_x, alpha_concat, precision=self.matmul_precision)
+      if self.config.mhc_split_axis_contraction:
+        # Keeping the TP-sharded embed axis separate avoids gathering it before contraction.
+        h_concat = jnp.einsum("bskd,kdn -> bsn", norm_x, alpha_concat, precision=self.matmul_precision)
+      else:
+        h_concat = jnp.einsum("bsm,mn -> bsn", norm_x, alpha_concat, precision=self.matmul_precision)
       h_pre = h_concat[..., : self.k]
       h_post = h_concat[..., self.k : 2 * self.k]
       h_res = h_concat[..., 2 * self.k :]
