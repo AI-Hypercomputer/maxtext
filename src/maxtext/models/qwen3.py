@@ -32,7 +32,7 @@ from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH, MODEL_MODE_AUTOREGRESSIVE
-from maxtext.common.common_types import KV_BATCH, KV_HEAD
+from maxtext.common.common_types import KV_BATCH, KV_HEAD, ShardMode
 from maxtext.utils.sharding import (
     create_sharding,
     get_logical_axis_rules,
@@ -1457,15 +1457,22 @@ class AttentionWithNorm(nnx.Module):
 
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
     # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
-    self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
-    self.mlp_intermediate_sharding = create_sharding(mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules())
-    self._maybe_shard_with_logical = functools.partial(
-        maybe_shard_with_logical,
-        mesh=mesh,
-        shard_mode=config.shard_mode,
-        debug_sharding=config.debug_sharding,
-        extra_stack_level=1,
-    )
+    if config.shard_mode == ShardMode.EXPLICIT:
+      self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+      self.mlp_intermediate_sharding = create_sharding(
+          mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules()
+      )
+      self._maybe_shard_with_logical = functools.partial(
+          maybe_shard_with_logical,
+          mesh=mesh,
+          shard_mode=config.shard_mode,
+          debug_sharding=config.debug_sharding,
+          extra_stack_level=1,
+      )
+    else:
+      self.out_sharding = None
+      self.mlp_intermediate_sharding = None
+      self._maybe_shard_with_logical = lambda inputs, *args, **kwargs: inputs
 
     # Corresponds to Qwen3's `input_layernorm`
     self.pre_self_attention_layer_norm = RMSNorm(
