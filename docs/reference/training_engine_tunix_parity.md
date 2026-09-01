@@ -17,9 +17,10 @@ of the trainer, not of the workload.
 | Step time, GA=1, 16 tokens                         | MaxText **34.7 ms** vs. Tunix 64.0 ms (**1.85x**)                              |
 | Step time, GA=1, 8192 tokens                       | MaxText 479.6 ms vs. Tunix 493.2 ms (**1.03x — parity**)                       |
 | TPU-busy time/step, GA=1, 1024 tokens              | MaxText **44.3 ms** vs. Tunix 63.7 ms (**1.44x**)                              |
-| `update()` alone                                   | Tunix **8.2 ms** vs. MaxText 14.0 ms — the one phase Tunix wins                |
+| `update()` alone                                   | Tunix **8.2 ms** vs. MaxText 14.6 ms — the one phase Tunix wins                |
 | Peak HBM/device, GA=1                              | MaxText **1.78 GiB** vs. Tunix 8.65 GiB (**4.9x**)                             |
 | Metrics recorded per step                          | MaxText **23** vs. Tunix 2; `gradient_norm` now matches Tunix bit for bit      |
+| Cost of that gradient norm                         | ~0.6 ms/update — 0.7% of a GA=1 step, unmeasurable on device at GA=8           |
 | Engine host step path, after the §9 fix            | qwen3-0.6b **1.80x** faster; qwen3.5-35b-a3b 1.004x — a fixed ~70 ms saving    |
 | 23-step loop wall clock, after the §9 fix          | qwen3-0.6b 8.9 → **6.3 s**; qwen3.5-35b-a3b 56.3 → **55.7 s**                  |
 | Engine host step path at GA=8, after the §9 fix    | qwen3-0.6b **2.19x**/step at identical TPU-busy; 1.45x on loop wall clock      |
@@ -104,7 +105,15 @@ PERF_PARITY_PROFILE_ROOT=gs://your-bucket/run python qwen3_engine_profile.py --g
 
 The "before" rows come from the same commands with only
 `src/maxtext/training_engine/{maxtext_engine,inflight_throttler}.py` reverted to the fix's
-parent commit, so nothing but the engine differs.
+parent commit, so nothing but the engine differs. §7's cost-of-the-gradient-norm A/B is the
+same recipe against the norm commit's parent, at `--ga 1` because that is where one update
+per step makes the norm most visible:
+
+```bash
+git checkout <norm-commit>^ -- src/maxtext/training_engine/maxtext_engine.py
+python qwen3_engine_profile.py --ga 1 --no-trace   # repeat; the delta is ~0.6 ms/step
+git checkout HEAD -- src/maxtext/training_engine/maxtext_engine.py
+```
 
 The arms report the steady-state window and nothing else, so §9's wall-clock table was timed
 from outside — `time python qwen3_engine_profile.py …` for the end-to-end row, and the loop
@@ -232,6 +241,16 @@ host-bound here; MaxText is just ~6 ms more so. Neither the metrics recorder nor
 **§9 closes most of this row.** The `nnx.split` line is now served from a cached pure state
 and the metric fetch has been moved off the blocking path; what is left is the two
 `nnx.update` publish calls, which are kept on purpose.
+
+This table was measured before §7's always-on gradient norm, so its MaxText column is one
+`optax.global_norm`-equivalent reduction short of what the engine does today, while Tunix's
+8.2 ms always included one. Re-measured as a two-run A/B at GA=1 on the §9 host — the shape
+where the norm is most exposed, since the update kernel runs once per step rather than once
+per eight micro-batches — the norm costs **~0.6 ms per update**: 81.8 / 82.1 ms per step with
+it against 81.3 / 81.5 without, `update` 65.9 / 66.2 against 65.6 / 65.9 ms. Carrying that
+delta across hosts puts this table's `update` at ~14.6 ms against Tunix's 8.2 ms, with the
+row now comparing equal work. Nothing else in this section moves: the norm lives entirely
+inside `_update_kernel`, so `fwd_bwd` and the totals' sequence-length trend are unchanged.
 
 ### Where the `fwd_bwd` gap is *not*
 
@@ -408,6 +427,22 @@ same tensor Tunix reduces. MaxText therefore records **23** metrics per step, an
 `learning/grad_norm` ↔ `gradient_norm` row of `compare_training_engine.py`'s aux map, which
 previously found nothing on the engine side to compare, now runs.
 
+**It costs ~0.6 ms per update, and nothing at all on device.** Measured two ways on
+qwen3-0.6b at batch 8 x seq 1024. At GA=1, where one update lands on every step and the norm
+is therefore at its most exposed, two runs per arm give 81.8 / 82.1 ms per step with the norm
+against 81.3 / 81.5 without — 0.7% of a step. At GA=8 that same fixed cost is spread over
+eight micro-batches and disappears: TPU-busy per optimizer step reads 568.0 ms with the norm
+against 570.7 without, i.e. below the trace's own noise, and `jit__update_kernel` goes 2.692
+→ 2.641 ms. XLA fuses the reduction into an update kernel that already streams every gradient
+leaf, so there is no extra pass over the gradients to pay for. **The engine's lead in §9 was
+therefore never a matter of skipping work Tunix was doing.**
+
+One consequence worth stating: the always-on norm removed the last reason for the engine's
+`_update_marker` helper, a one-element array the update kernel returned purely to give
+`InflightThrottler` something cheap to block on. The norm is an output of the same executable,
+so it serves that role directly — which is exactly what Tunix v2 does with
+`_last_update_grad_norm`.
+
 ## 8. Known issue: MaxText logs a different loss than it optimizes
 
 At GA=4 on the ragged batch above:
@@ -453,6 +488,11 @@ seq 1024, GA=1, f32, `optax.sgd(1e-5)`, no clipping, on the same 8-device v7x ho
 The `trace` column is the xplane directory each row's shape was separately profiled in;
 full paths and the caveat about compilation landing inside those windows are in
 [Profiles](#profiles). The timings themselves are from the untraced runs.
+
+Both arms here predate §7's always-on gradient norm, which leaves the A/B itself untouched —
+the fix is host-side and the norm is device-side — and puts today's `after` row ~0.6 ms
+higher in absolute terms. The GA=8 table below was re-run on top of the norm, so its rows are
+current.
 
 **The saving is a fixed quantity of host time, not a percentage**, so the two rows are the
 same fix seen from opposite ends. What it is worth on a given workload is set by two things:
