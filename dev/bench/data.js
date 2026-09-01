@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788266461073,
+  "lastUpdate": 1788282056090,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -21498,6 +21498,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total DECOUPLED Tests Duration",
             "value": 24.777000000000022,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 54,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "651a5e90d01c92d29e1a39e408dbe505230e355b",
+          "message": "Merge pull request #5067 from AI-Hypercomputer:emma/fix-qwen3-logit-check\n\nPiperOrigin-RevId: 974555394",
+          "timestamp": "2026-09-01T16:59:20Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/651a5e90d01c92d29e1a39e408dbe505230e355b"
+        },
+        "date": 1788282055358,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 70.69000000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 9,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1603.2300000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 80,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1412.0200000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 80,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 61.156,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 11,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 78.53,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 351.88199999999983,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 26,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 2528.6329999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 203,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 53.811,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 17.702000000000023,
             "unit": "sec"
           },
           {
