@@ -220,13 +220,13 @@ class QuantizationFlagTest(unittest.TestCase):
 
   def test_backends_that_may_draw_at_apply_time_keep_rngs(self):
     """AQT's config enables jax.uniform RNG, so it must never be opted out silently."""
-    for cls in (
-        quantizations.AqtQuantization,
-        quantizations.QwixQuantization,
-        quantizations.Fp8Quantization,
-        quantizations.NANOOFp8Quantization,
-    ):
+    for cls in (quantizations.AqtQuantization, quantizations.QwixQuantization):
       self.assertTrue(cls.needs_apply_rngs, f"{cls.__name__} must keep its RNGs")
+
+  def test_fp8_backends_opt_out(self):
+    """Flax's fp8 ops scale from amax history, so they never draw at apply time."""
+    for cls in (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization):
+      self.assertFalse(cls.needs_apply_rngs, f"{cls.__name__} must release the bridge's Rngs")
 
   def test_every_backend_declares_the_flag(self):
     """Every backend must carry the flag, so the call sites can read it directly.
@@ -263,6 +263,38 @@ class ApplyTimeRngTest(unittest.TestCase):
     dense = _make_dense(_MisdeclaredQuant())
     with self.assertRaises(flax_errors.InvalidRngError):
       dense(jnp.ones((2, 8), jnp.float32))
+
+
+class Fp8BackendRngStateTest(unittest.TestCase):
+  """The fp8 backends run on CPU, so they can be exercised for real here.
+
+  Asserting the flag only records what we believe about Flax; applying the layer is what
+  would catch a future Flax release that starts drawing, since the released bridge would
+  raise `InvalidRngError` rather than quietly lose its RNGs.
+  """
+
+  BACKENDS = (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization)
+
+  def test_backends_hold_no_rng_state(self):
+    for cls in self.BACKENDS:
+      with self.subTest(backend=cls.__name__):
+        self.assertEqual(_rng_state_paths(_make_dense(cls())), [])
+
+  def test_backends_still_apply(self):
+    x = jnp.ones((2, 8), jnp.float32)
+    for cls in self.BACKENDS:
+      with self.subTest(backend=cls.__name__):
+        out = _make_dense(cls())(x)
+        self.assertEqual(out.shape, (2, 4))
+        self.assertTrue(jnp.all(jnp.isfinite(out)))
+
+  def test_rng_state_does_not_grow_with_layer_count(self):
+    """The unrolled decoder is where a per-wrapper leak turns into a per-layer cost."""
+    counts = [
+        sum(len(_rng_state_paths(_make_dense(quantizations.Fp8Quantization(), seed=i))) for i in range(n))
+        for n in (1, 2, 8)
+    ]
+    self.assertEqual(counts, [0, 0, 0], f"fp8 RNG state must not scale with layer count, got {counts}")
 
 
 class TransformerEngineRecipeRngTest(unittest.TestCase):

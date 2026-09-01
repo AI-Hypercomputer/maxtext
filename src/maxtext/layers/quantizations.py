@@ -318,6 +318,9 @@ class QwixEinsum(nn.Module):
 class Fp8Quantization(Quantization):
   """Configures Fp8 quantization for NVIDIA GPUs"""
 
+  # Flax's fp8 ops scale from amax history, never from make_rng at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
+
   quant_mode = "train"
   # The forward dtype, for callers that quantize an operand themselves rather than through
   # `dot_general_cls` or `einsum`, such as the grouped matmul in MoE.
@@ -409,6 +412,9 @@ class Fp8Einsum(nn.Module):
 @dataclass
 class NANOOFp8Quantization(Quantization):
   """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
+
+  # Same as Fp8Quantization: nn.NANOOFp8DotGeneralOp never draws at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
 
   quant_mode = "train"
   quantize_dtype = jnp.float8_e4m3fnuz
