@@ -4604,7 +4604,12 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
   """Tests to validate AttentionOp masking logic for DeepSeek-V4 attention patterns."""
 
   def setUp(self):
-    self.config = pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], run_name="test")
+    self.config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+    )
 
   def test_generate_attention_mask_local_sliding(self):
     """Verifies AttentionType.LOCAL_SLIDING enforces both causal and sliding window constraints."""
@@ -4702,7 +4707,87 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     # Compressed block (last c_len cols) follows compressed_mask strictly
     np.testing.assert_allclose(mask_np[:, s_len], DEFAULT_MASK_VALUE)
     np.testing.assert_allclose(mask_np[:, s_len + 1], 0.0)
-    print("Mask logic for uncompressed & compressed attention passed perfectly.")
+
+  def test_generate_attention_mask_packed_sequences(self):
+    """Verifies that AttentionType.COMPRESSED properly handles packed document sequences.
+
+    In packed sequence training (e.g. C4), multiple documents are concatenated in a single sequence buffer.
+    segment_positions resets to 0 at the start of each packed document.
+    Tokens in subsequent documents must be able to attend to preceding tokens in the same document within the sliding window,
+    and cross-document attention must be masked out.
+    """
+    batch_size = 1
+    # Document 1: 4 tokens (buffer indices 0..3), Document 2: 4 tokens (buffer indices 4..7)
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+    sliding_window_size = 3
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=sliding_window_size,
+    )
+
+    q_dummy = jnp.zeros((batch_size, s_len, 1, 128))
+    k_dummy = jnp.zeros((batch_size, kv_len, 1, 128))
+
+    # Document 1 has segment_id=1, Document 2 has segment_id=2
+    decoder_segment_ids = jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], dtype=jnp.int32)
+    # Positions reset to 0 for Document 2
+    segment_positions = jnp.array([[0, 1, 2, 3, 0, 1, 2, 3]], dtype=jnp.int32)
+
+    compressed_mask = jnp.zeros((batch_size, 1, s_len, c_len), dtype=jnp.float32)
+
+    mask = op.generate_attention_mask(
+        query=q_dummy,
+        key=k_dummy,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode="train",
+        compressed_mask=compressed_mask,
+        segment_positions=segment_positions,
+    )
+
+    self.assertEqual(mask.shape, (batch_size, 1, 1, s_len, kv_len))
+    mask_np = np.array(mask)[0, 0, 0]
+
+    # --- Document 1 Verification (Tokens 0..3) ---
+    # Token 0 attends to Token 0 (self), blocked from future tokens (1..7)
+    self.assertEqual(mask_np[0, 0], 0.0)
+    self.assertEqual(mask_np[0, 1], DEFAULT_MASK_VALUE)
+
+    # Token 3 attends to Tokens 1..3 within window of size 3, blocked from Token 0 (out of window)
+    self.assertEqual(mask_np[3, 0], DEFAULT_MASK_VALUE)  # out of window (3 - 0 >= 3)
+    self.assertEqual(mask_np[3, 1], 0.0)
+    self.assertEqual(mask_np[3, 2], 0.0)
+    self.assertEqual(mask_np[3, 3], 0.0)
+    self.assertEqual(mask_np[3, 4], DEFAULT_MASK_VALUE)  # future
+
+    # --- Document 2 Verification (Tokens 4..7) ---
+    # Token 4 (1st token of Doc 2) must NOT attend to Doc 1 tokens (0..3)
+    for j in range(4):
+      self.assertEqual(mask_np[4, j], DEFAULT_MASK_VALUE, msg=f"Token 4 should not attend to Doc 1 token {j}")
+    # Token 4 attends to itself
+    self.assertEqual(mask_np[4, 4], 0.0)
+    self.assertEqual(mask_np[4, 5], DEFAULT_MASK_VALUE)  # future
+
+    # Token 5 attends to Token 4 and Token 5 (self)
+    self.assertEqual(mask_np[5, 3], DEFAULT_MASK_VALUE)  # Doc 1 token
+    self.assertEqual(mask_np[5, 4], 0.0)
+    self.assertEqual(mask_np[5, 5], 0.0)
+    self.assertEqual(mask_np[5, 6], DEFAULT_MASK_VALUE)  # future
+
+    # Token 7 attends to Tokens 5, 6, 7 (within window 3 in Doc 2), blocked from Token 4 (out of window) and Doc 1
+    self.assertEqual(mask_np[7, 3], DEFAULT_MASK_VALUE)  # Doc 1 token
+    self.assertEqual(mask_np[7, 4], DEFAULT_MASK_VALUE)  # out of window (7 - 4 >= 3)
+    self.assertEqual(mask_np[7, 5], 0.0)
+    self.assertEqual(mask_np[7, 6], 0.0)
+    self.assertEqual(mask_np[7, 7], 0.0)
 
   def test_generate_attention_mask_compressed_all_modes(self):
     """Verifies AttentionType.COMPRESSED across train, prefill, and autoregressive modes."""
@@ -4734,6 +4819,12 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
         compressed_mask=c_mask_4d,
     )
     self.assertEqual(mask_train.shape, (batch_size, 1, s_len, kv_len))
+    mask_train_np = np.array(mask_train)[0, 0]
+    self.assertEqual(mask_train_np[0, 0], 0.0)
+    self.assertEqual(mask_train_np[0, 1], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_train_np[3, 0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_train_np[3, 1], 0.0)
+    np.testing.assert_allclose(mask_train_np[:, s_len:], 0.0)
 
     # 2. Prefill mode (batch_size=2, 5D compressed_mask with segment_positions)
     c_mask_5d = jnp.zeros((batch_size, 1, 1, s_len, c_len), dtype=jnp.float32)
@@ -4747,12 +4838,18 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
         segment_positions=seg_pos,
     )
     self.assertEqual(mask_prefill.shape, (batch_size, 1, 1, s_len, kv_len))
+    mask_prefill_np = np.array(mask_prefill)[0, 0, 0]
+    self.assertEqual(mask_prefill_np[0, 0], 0.0)
+    self.assertEqual(mask_prefill_np[0, 1], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_prefill_np[3, 0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_prefill_np[3, 1], 0.0)
+    np.testing.assert_allclose(mask_prefill_np[:, s_len:], 0.0)
 
     # 3. Autoregressive mode (q_seq_len=1, batch_size=2, decoder_segment_ids)
     q_ar = jnp.zeros((batch_size, 1, 1, 128))
     k_ar = jnp.zeros((batch_size, kv_len, 1, 128))
     c_mask_ar = jnp.zeros((batch_size, 1, 1, c_len), dtype=jnp.float32)
-    seg_ids = jnp.ones((batch_size, 16), dtype=jnp.int32)
+    seg_ids = jnp.ones((batch_size, kv_len), dtype=jnp.int32)
     mask_ar = op.generate_attention_mask(
         query=q_ar,
         key=k_ar,
@@ -4761,6 +4858,8 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
         compressed_mask=c_mask_ar,
     )
     self.assertEqual(mask_ar.shape, (batch_size, 1, 1, 1, kv_len))
+    mask_ar_np = np.array(mask_ar)[0, 0, 0, 0]
+    np.testing.assert_allclose(mask_ar_np[s_len:], 0.0)
 
     # 4. Compressed mask is None (fallback to uncompressed mask shape)
     mask_none = op.generate_attention_mask(
@@ -4772,6 +4871,177 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     )
     self.assertEqual(mask_none.ndim, 4)
     self.assertEqual(mask_none.shape[-1], kv_len)
+    mask_none_np = np.array(mask_none)[0, 0]
+    self.assertEqual(mask_none_np[0, 0], 0.0)
+    self.assertEqual(mask_none_np[0, 1], DEFAULT_MASK_VALUE)
+
+  def test_generate_attention_mask_compressed_chunked_prefill(self):
+    """Verifies AttentionType.COMPRESSED with chunked prefill where q_seq_len < s_len and segment_positions is provided."""
+    batch_size = 1
+    q_len = 4
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+    sliding_window_size = 3
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=sliding_window_size,
+    )
+
+    q_dummy = jnp.zeros((batch_size, q_len, 1, 128))
+    k_dummy = jnp.zeros((batch_size, kv_len, 1, 128))
+    # previous_chunk has 4 tokens processed previously -> next_pos = 4
+    previous_chunk = jnp.zeros((batch_size, 4, 1, 128))
+    # segment_positions only covers the current query chunk tokens [4, 5, 6, 7]
+    segment_positions = jnp.arange(4, 8, dtype=jnp.int32)[None, :]
+    compressed_mask = jnp.zeros((batch_size, 1, 1, q_len, c_len), dtype=jnp.float32)
+
+    mask = op.generate_attention_mask(
+        query=q_dummy,
+        key=k_dummy,
+        decoder_segment_ids=None,
+        model_mode="prefill",
+        previous_chunk=previous_chunk,
+        compressed_mask=compressed_mask,
+        segment_positions=segment_positions,
+    )
+
+    self.assertEqual(mask.shape, (batch_size, 1, 1, q_len, kv_len))
+    mask_np = np.array(mask)[0, 0, 0]
+
+    # Row 0 (query token at global pos 4):
+    # Within sliding window of size 3: keys at positions 2, 3, 4 are valid (dist: 2, 1, 0).
+    # Keys 0, 1 are out-of-window (dist: 4, 3 >= 3). Keys 5, 6, 7 are future (dist < 0).
+    self.assertEqual(mask_np[0, 0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 1], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 2], 0.0)
+    self.assertEqual(mask_np[0, 3], 0.0)
+    self.assertEqual(mask_np[0, 4], 0.0)
+    self.assertEqual(mask_np[0, 5], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 6], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 7], DEFAULT_MASK_VALUE)
+
+    # Row 3 (query token at global pos 7):
+    # Within sliding window 3: keys 5, 6, 7 are valid (dist: 2, 1, 0). Keys 0..4 are out of window.
+    self.assertEqual(mask_np[3, 4], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[3, 5], 0.0)
+    self.assertEqual(mask_np[3, 6], 0.0)
+    self.assertEqual(mask_np[3, 7], 0.0)
+
+    # Compressed KV blocks (indices s_len..kv_len-1) match compressed_mask (all 0.0)
+    np.testing.assert_allclose(mask_np[:, s_len:], 0.0)
+
+  def test_generate_attention_mask_compressed_ar_without_segment_ids(self):
+    """Verifies AttentionType.COMPRESSED autoregressive decode when decoder_segment_ids is None."""
+    batch_size = 1
+    q_len = 1
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+    sliding_window_size = 3
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=sliding_window_size,
+    )
+
+    q_dummy = jnp.zeros((batch_size, q_len, 1, 128))
+    k_dummy = jnp.zeros((batch_size, kv_len, 1, 128))
+    # Query is at position s_len - 1 = 7 in the uncompressed cache
+    segment_positions = jnp.array([[s_len - 1]], dtype=jnp.int32)
+    compressed_mask = jnp.zeros((batch_size, 1, 1, q_len, c_len), dtype=jnp.float32)
+
+    mask = op.generate_attention_mask(
+        query=q_dummy,
+        key=k_dummy,
+        decoder_segment_ids=None,
+        model_mode="autoregressive",
+        compressed_mask=compressed_mask,
+        segment_positions=segment_positions,
+    )
+
+    self.assertEqual(mask.shape, (batch_size, 1, 1, q_len, kv_len))
+    mask_np = np.array(mask)[0, 0, 0, 0]
+
+    # Query token at position 7:
+    # Within sliding window 3: keys 5, 6, 7 are valid (dist: 2, 1, 0).
+    # Keys 0..4 are out-of-window (dist >= 3).
+    self.assertEqual(mask_np[0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[4], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[5], 0.0)
+    self.assertEqual(mask_np[6], 0.0)
+    self.assertEqual(mask_np[7], 0.0)
+
+    # Compressed KV blocks are valid
+    np.testing.assert_allclose(mask_np[s_len:], 0.0)
+
+  def test_generate_attention_mask_compressed_load_balanced_context_parallel(self):
+    """Verifies that AttentionType.COMPRESSED correctly uses segment_positions under load-balanced CP."""
+    config = types.SimpleNamespace(
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        using_pipeline_parallelism=False,
+        logical_axis_rules=[["segment_ids_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
+    )
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Need at least 4 devices to test load balanced CP")
+    mesh = Mesh(devices[:4], ["context"])
+    seq_len = 16
+    c_len = 2
+    kv_len = seq_len + c_len
+    sliding_window_size = 4
+    positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
+    query = jnp.zeros((1, seq_len, 1, 128))
+    key = jnp.zeros((1, kv_len, 1, 128))
+    decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
+    compressed_mask = jnp.zeros((1, 1, seq_len, c_len), dtype=jnp.float32)
+
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=kv_len,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=sliding_window_size,
+    )
+
+    mask = op.generate_attention_mask(
+        query,
+        key,
+        decoder_segment_ids,
+        MODEL_MODE_TRAIN,
+        compressed_mask=compressed_mask,
+        segment_positions=positions,
+    )
+
+    expected_uncompressed_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
+    for r, q_pos in enumerate(np.asarray(positions[0])):
+      for c, kv_pos in enumerate(np.asarray(positions[0])):
+        if q_pos - sliding_window_size < kv_pos <= q_pos:
+          expected_uncompressed_mask[r, c] = True
+
+    mask_np = np.asarray(mask)[0, 0, 0] if mask.ndim == 5 else np.asarray(mask)[0, 0]
+    np.testing.assert_array_equal(mask_np[:, :seq_len] == 0.0, expected_uncompressed_mask)
+    np.testing.assert_array_equal(mask_np[:, seq_len:], 0.0)
 
 
 class CompressedAttentionTest(parameterized.TestCase):
