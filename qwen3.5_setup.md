@@ -38,20 +38,21 @@ To reproduce the exact environment, check out the following branches or cherry-p
 - **Branch with all changes**: `igorts/qwen3.5-35b`
 - **Review PR Branch (FFI engine changes only)**: `igorts/raiden-ffi` (commit `346a62144`)
 
-If starting from `origin/main`, cherry-pick the following commits in order:
+If starting from `origin/main`, note that **Yixuan Wang's Qwen3.5-35B weight conversion commits have already merged into `origin/main` via [PR #5045](https://github.com/AI-Hypercomputer/maxtext/pull/5045) (commit `4521fc568`, Sep 1, 2026)**.
 
-| Commit Hash | Author / Origin | Description |
-|---|---|---|
-| `71535dcfc` | Anisha Mazumder | Make three silent failures in the Raiden training path visible |
-| `3db9d12b2` | Anisha Mazumder | Fix the Raiden synchronizer import path and empty-metrics checkpointing |
-| `106e7efdf` | Yixuan Wang | Qwen3.5-35B-A3B direct weight conversion |
-| `0cfca938d` | Yixuan Wang | Fix for MaxText to vLLM HF layout conversion |
-| `75a6e8206` | Yixuan Wang | Fallback to standalone converter in `maxtext_vllm_rollout` |
-| `65f9cdccb` | Yixuan Wang | Fallback for torchax converter |
-| `03bb0e143` | Igor Tsvetkov | Stage all weight sync chunks before listener creation with fallback |
-| `346a62144` | Igor Tsvetkov | feat(training_engine): support Raiden-FFI weight sync and adopt single synchronizer |
+The remaining unmerged commits to cherry-pick onto `origin/main` are:
+
+| Commit Hash | Author / Origin | PR / Status | Description |
+|---|---|---|---|
+| `71535dcfc` | Anisha Mazumder | [PR #5018](https://github.com/AI-Hypercomputer/maxtext/pull/5018) (Open) | Make three silent failures in the Raiden training path visible |
+| `3db9d12b2` | Anisha Mazumder | Branch `anisha/raiden-import-and-metrics-fix` | Fix the Raiden synchronizer import path and empty-metrics checkpointing |
+| `03bb0e143` | Igor Tsvetkov | Local commit | Stage all weight sync chunks before listener creation with fallback |
+| `346a62144` | Igor Tsvetkov | Branch `igorts/raiden-ffi` (Under Review) | Support Raiden-FFI weight sync and adopt single synchronizer |
+
+*(Already Merged in `origin/main` via PR #5045: `106e7efdf`, `0cfca938d`, `75a6e8206`, `65f9cdccb`)*
 
 ```bash
+# Option 1: Directly checkout the full branch containing all changes:
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 git fetch origin igorts/qwen3.5-35b
@@ -62,7 +63,9 @@ git checkout igorts/qwen3.5-35b
 - **Repository**: `https://github.com/google/tunix.git`
 - **Branch with all changes**: `igorts/qwen3.5-35b`
 
-This branch builds upon Lance Wang's Raiden FFI branch (`origin/lancewang/enable-raiden-ffi-20260831`, commit `93f4bbcb`) with 7 required fixes:
+This branch builds upon Lance Wang's Raiden FFI branch (`origin/lancewang/enable-raiden-ffi-20260831`, commit `93f4bbcb`, open in [PR #2059](https://github.com/google/tunix/pull/2059)). *(Note: Lance's earlier [PR #2054](https://github.com/google/tunix/pull/2054) - "Bootstrap rollout policy from target state" - has already merged into `origin/main`)*.
+
+The 7 required fixes on top of Lance's branch are:
 
 | Commit Hash | Description |
 |---|---|
