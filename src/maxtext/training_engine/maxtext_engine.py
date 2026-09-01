@@ -1204,7 +1204,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
               job_name="trainer",
               worker_index=jax.process_index(),
               auto_h2d=False,
-              host_stage=False if use_ffi else is_pathways,
               use_ffi=use_ffi,
               parallelism=4,
           )
@@ -1213,18 +1212,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
               job_name="trainer",
               worker_index=jax.process_index(),
               auto_h2d=False,
-              host_stage=is_pathways,
               parallelism=4,
           )
 
-      try:
-        self._raiden_sync.bind(params_state, already_staged=is_pathways and not use_ffi)
-      except TypeError:
-        self._raiden_sync.bind(params_state)
+      self._raiden_sync.bind(params_state)
       del params_state
 
       # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
-      if self._raiden_sync.active:
+      if self._raiden_sync.active or self._raiden_sync.bound:
         self._raiden_sync.d2h()
 
       verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
@@ -1249,7 +1244,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Releases staged weight buffers after transfer completion."""
     if self._raiden_sync:
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
-      self._raiden_sync.release_host_arrays()
+      if hasattr(self._raiden_sync, "release_host_arrays"):
+        self._raiden_sync.release_host_arrays()
     return True
 
   def close(self) -> None:
