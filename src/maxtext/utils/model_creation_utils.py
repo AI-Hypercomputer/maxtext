@@ -415,8 +415,18 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
     if not isinstance(restore_arg, ocp.ArrayRestoreArgs):
       return restore_arg
     stored_meta = _lookup_stored_meta(path)
+    dtype = restore_arg.dtype
+    if dtype is not None and jax.dtypes.issubdtype(dtype, jax.dtypes.prng_key):
+      dtype = jnp.uint32
+    if dtype is None and stored_meta is not None and hasattr(stored_meta, "dtype"):
+      dtype = stored_meta.dtype
+    if dtype is None:
+      dtype = jnp.bfloat16
+
     if stored_meta is None:
       missing_paths.append(f"  {'.'.join(_key_str(k) for k in path)}")
+      if restore_arg.dtype != dtype:
+        return dataclasses.replace(restore_arg, dtype=dtype)
       return restore_arg
     if _is_orbax_array_metadata(stored_meta):
       stored_shape = tuple(stored_meta.shape)
@@ -434,14 +444,18 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
           path_str = f"  {'.'.join(_key_str(k) for k in path)}: stored={stored_shape} -> model={restore_arg.global_shape}"
           if _stored_shape_evenly_shardable(restore_arg, stored_shape):
             mismatched_paths_sharded.append(path_str)
-            return dataclasses.replace(restore_arg, global_shape=stored_shape, shape=stored_shape)
+            return dataclasses.replace(restore_arg, global_shape=stored_shape, shape=stored_shape, dtype=dtype)
 
           mismatched_paths_replicated.append(path_str)
           return dataclasses.replace(
-              restore_arg, global_shape=None, shape=None, sharding=replicated, mesh=None, mesh_axes=None
+              restore_arg, global_shape=None, shape=None, sharding=replicated, mesh=None, mesh_axes=None, dtype=dtype
           )
       else:
         found_array_count[0] += 1
+        if restore_arg.dtype != dtype:
+          return dataclasses.replace(restore_arg, dtype=dtype)
+    elif restore_arg.dtype != dtype:
+      return dataclasses.replace(restore_arg, dtype=dtype)
     return restore_arg
 
   fixed = jax.tree_util.tree_map_with_path(_fix_one, restore_args, is_leaf=lambda x: isinstance(x, ocp.ArrayRestoreArgs))
@@ -941,6 +955,8 @@ def from_pretrained(
 
   with mesh:
     if config.load_parameters_path:
+      # For Tunix checkpoints (output of CheckpointManager), direct the single-item
+      # Checkpointer directly to the `model_params` subfolder to read PyTree metadata.
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
@@ -950,13 +966,14 @@ def from_pretrained(
           )
       )
 
-      # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
-      # Rather than passing the entire abstract state, which could unnecessarily restore opt_state and
-      # waste memory, we instead restore the params field of the checkpoint (which itself may be a dictionary
-      #  containing a key named 'params').
+      load_params_path = epath.Path(config.load_parameters_path)
+      try:
+        if (load_params_path / "model_params").exists():
+          load_params_path = load_params_path / "model_params"
+      except Exception:  # pylint: disable=broad-except
+        pass
 
-      # Get the structure of checkpoint in `config.load_parameters_path`
-      metadata = ckptr.metadata(config.load_parameters_path)
+      metadata = ckptr.metadata(load_params_path)
       if metadata is None or metadata.item_metadata is None:
         max_logging.log(
             f"ERROR: No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
@@ -1009,9 +1026,17 @@ def from_pretrained(
       # serve-mode quantized models store their scale factors and integer payloads in custom AQT variable
       # types (e.g. `qrhs.frozen`), which are NOT subclasses of `nnx.Param`. Negative filtering with
       # `not isinstance(...)` safely retains all weight-like leaves while excluding transient runtime state.
-      param_state = sharded_state.filter(
-          lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
-      )
+      def _is_weight_param(path, var):
+        if isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)):
+          return False
+        val = var.get_value() if hasattr(var, "get_value") else getattr(var, "value", None)
+        if val is not None:
+          dtype = getattr(val, "dtype", None)
+          if dtype is not None and jax.dtypes.issubdtype(dtype, jax.dtypes.prng_key):
+            return False
+        return True
+
+      param_state = sharded_state.filter(_is_weight_param)
       is_nnx_checkpoint = True
       if (
           "params" in metadata.item_metadata.tree.keys()
@@ -1120,7 +1145,7 @@ def from_pretrained(
       jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
       restored = ckptr.restore(
-          epath.Path(config.load_parameters_path),
+          epath.Path(load_params_path),
           item=item_to_restore,
           transforms={},
           restore_args=restore_args,
