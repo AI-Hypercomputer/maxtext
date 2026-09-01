@@ -29,78 +29,60 @@ kubectl get nodes
 
 ---
 
-## 2. Git Repositories, Branches & Commits
+## 2. Git Repositories & Working Branches
 
-To reproduce the exact environment, check out the following branches or cherry-pick the specified commits.
+The end-to-end RL training stack spans two primary repositories: **MaxText** (training engine) and **Tunix** (distributed orchestrator and rollout worker).
 
-### A. MaxText
-- **Repository**: `https://github.com/AI-Hypercomputer/maxtext.git`
-- **Branch with all changes**: `igorts/qwen3.5-35b`
-- **Review PR Branch (FFI engine changes only)**: `igorts/raiden-ffi` (commit `346a62144`)
+### Recommended Setup: Use the Verified Working Branches
 
-If starting from `origin/main`, note that **Yixuan Wang's Qwen3.5-35B weight conversion commits have already merged into `origin/main` via [PR #5045](https://github.com/AI-Hypercomputer/maxtext/pull/5045) (commit `4521fc568`, Sep 1, 2026)**.
-
-The remaining unmerged commits to cherry-pick onto `origin/main` are:
-
-| Commit Hash | Author / Origin | PR / Status | Description |
-|---|---|---|---|
-| `71535dcfc` | Anisha Mazumder | [PR #5018](https://github.com/AI-Hypercomputer/maxtext/pull/5018) (Open) | Make three silent failures in the Raiden training path visible |
-| `3db9d12b2` | Anisha Mazumder | Branch `anisha/raiden-import-and-metrics-fix` | Fix the Raiden synchronizer import path and empty-metrics checkpointing |
-| `03bb0e143` | Igor Tsvetkov | Local commit | Stage all weight sync chunks before listener creation with fallback |
-| `346a62144` | Igor Tsvetkov | Branch `igorts/raiden-ffi` (Under Review) | Support Raiden-FFI weight sync and adopt single synchronizer |
-
-*(Already Merged in `origin/main` via PR #5045: `106e7efdf`, `0cfca938d`, `75a6e8206`, `65f9cdccb`)*
+The quickest and most reliable way to reproduce these runs is to check out the verified working branches directly. These branches contain the full working integration including features that are currently under review in upstream pull requests:
 
 ```bash
-# Option 1: Directly checkout the full branch containing all changes:
+# 1. Clone MaxText and checkout the working branch
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 git fetch origin igorts/qwen3.5-35b
 git checkout igorts/qwen3.5-35b
-```
+cd ..
 
-### B. Tunix
-- **Repository**: `https://github.com/google/tunix.git`
-- **Branch with all changes**: `igorts/qwen3.5-35b`
-
-This branch builds upon Lance Wang's Raiden FFI branch (`origin/lancewang/enable-raiden-ffi-20260831`, commit `93f4bbcb`, open in [PR #2059](https://github.com/google/tunix/pull/2059)). *(Note: Lance's earlier [PR #2054](https://github.com/google/tunix/pull/2054) - "Bootstrap rollout policy from target state" - has already merged into `origin/main`)*.
-
-The 7 required fixes on top of Lance's branch are:
-
-| Commit Hash | Description |
-|---|---|
-| `3e0a51f9` | `fix(weight_sync)`: fix `policy_version` tracking when `sync_request` is None |
-| `aecf784c` | `WIP`: multi-rollout worker discovery and FFI compatibility fixes |
-| `e52fcddc` | `clean`: remove obsolete `host_stage` and align with Lance's FFI design |
-| `5d9ec73c` | `feat`: configure k8s launcher, MaxText vLLM adapter, and Pathways jobset for `mlperf-v5p` |
-| `e0dba1e3` | `fix(k8s_launcher)`: set default 4-host trainer slice for `mlperf-v5p` and disable `hf_xet` |
-| `1feb677d` | `fix(k8s_launcher)`: assign `ROLLOUT_MESH_TP=2` and `ROLLOUT_MESH_FSDP=2` unconditionally for `mlperf-v5p` |
-| `bb89edf9` | `fix(k8s_launcher)`: assign batch size and `train_micro_batch_size` unconditionally for `mlperf-v5p` |
-
-```bash
+# 2. Clone Tunix and checkout the working branch
 git clone https://github.com/google/tunix.git
 cd tunix
 git fetch origin igorts/qwen3.5-35b
 git checkout igorts/qwen3.5-35b
+cd ..
 ```
 
-### C. XPK (Pathways Workload Jobset Template)
-- **Repository**: `https://github.com/igorts-git/xpk.git`
-- **Branch**: `igorts/fix-headless-init-restart-policy` (commit `5a372dd`)
-- **Fix**: Omit `restartPolicy: Always` for init containers in `src/xpk/templates/pathways_workload_create.yaml.j2` when running in headless mode, avoiding pod lifecycle stalls under Kubernetes 1.28+.
+---
 
-```bash
-git clone https://github.com/igorts-git/xpk.git
-cd xpk
-git checkout igorts/fix-headless-init-restart-policy
-pip install -e .
-```
+### Upstream PR Status & Technical Context
 
-### D. TPU-Inference & vLLM
-Pre-installed inside the Docker image:
-- `vllm-project/tpu-inference`: `main` (clean)
-- `vllm-project/vllm`: commit `2131b597b` (clean)
-No local cherry-picks required.
+If you are maintaining a custom branch or rebasing onto `origin/main`, the table below outlines what each repository branch contains and the status of upstream Pull Requests:
+
+#### A. MaxText (`AI-Hypercomputer/maxtext`)
+The `igorts/qwen3.5-35b` branch incorporates the following components:
+- **Qwen3.5-35B-A3B Model & Weight Converter**: Support for loading and converting weights between MaxText and vLLM layouts. *(Already merged into `main` via [PR #5045](https://github.com/AI-Hypercomputer/maxtext/pull/5045))*.
+- **Raiden FFI Engine Integration**: High-performance device-to-host tensor transfer without host CPU proxy staging under Pathways. Prevents client-host OOM and eliminates multi-minute transfer timeouts. *(In review on PR branch [`igorts/raiden-ffi`](https://github.com/AI-Hypercomputer/maxtext/tree/igorts/raiden-ffi))*.
+- **Raiden Error Visibility & Checkpoint Guard**: Surfaces silent failures during weight staging and handles empty metrics PyTrees cleanly during checkpointing. *(In review in [PR #5018](https://github.com/AI-Hypercomputer/maxtext/pull/5018))*.
+- **Weight Staging Listener Synchronization**: Ensures all tensor chunks are staged prior to listener registration.
+
+#### B. Tunix (`google/tunix`)
+The `igorts/qwen3.5-35b` branch incorporates the following components:
+- **Rollout Target State Bootstrapping**: Initializes rollout policy state directly from target model parameters. *(Already merged into `main` via [PR #2054](https://github.com/google/tunix/pull/2054))*.
+- **Raiden FFI Pathways Weight Sync**: Implements the rollout delegate for zero-copy weight receipt via Raiden FFI. *(In review in [PR #2059](https://github.com/google/tunix/pull/2059))*.
+- **`mlperf-v5p` Cluster Target Profile**: Adds the pre-configured `--target=mlperf-v5p` profile to `k8s_launcher.sh` (4-host TPU v5p trainer, 1-host TPU v5p rollout, mesh topologies `FSDP=8, TP=2` and `TP=2, FSDP=2`).
+- **Multi-Worker Discovery & Network Stability**: Fixes `policy_version` tracking when sync requests are pending, improves multi-rollout worker discovery, and sets `HF_HUB_DISABLE_XET=1` to prevent Hugging Face download hangs in GKE containers.
+
+#### C. TPU-Inference & vLLM
+Pre-installed inside the Docker image; no separate branch or cherry-picking needed:
+- `vllm-project/tpu-inference`: `main`
+- `vllm-project/vllm`: commit `2131b597b`
+
+#### D. XPK (Pathways Workload Template - Optional)
+If you launch workloads via `xpk workload create --headless` directly instead of `k8s_launcher.sh`, note that Kubernetes 1.28+ clusters require omitting `restartPolicy: Always` on headless init containers to prevent JobSet completion stalls:
+- Repository: `https://github.com/igorts-git/xpk.git`
+- Branch: `igorts/fix-headless-init-restart-policy` (commit `5a372dd`)
+*(Note: Not required if launching via `k8s_launcher.sh`)*.
 
 ---
 
