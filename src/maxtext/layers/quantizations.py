@@ -80,9 +80,9 @@ _TILE_SIZE = "tile_size"  # Tile size for subchannel
 class Quantization:
   """Base class for quantization configurations"""
 
-  # Whether this backend's dot_general draws RNGs at apply time, as AQT stochastic
-  # rounding does. False lets the Linen->NNX bridge drop its forked Rngs after init;
-  # the default makes opting out deliberate.
+  # Whether this backend's dot_general draws RNGs at apply time, as AQT and NVFP4
+  # stochastic rounding do. False lets the Linen->NNX bridge drop its forked Rngs after
+  # init; the default makes opting out deliberate.
   needs_apply_rngs: ClassVar[bool] = True
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
@@ -1067,9 +1067,6 @@ def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_
 class TransformerEngineQuantization(Quantization):
   """Class for TransformerEngine quantization recipes."""
 
-  # TE's dense() takes its scales from the tensors, never from make_rng at apply time.
-  needs_apply_rngs: ClassVar[bool] = False
-
   def __init__(self, config):
     """Initialize TransformerEngine quantization."""
 
@@ -1105,6 +1102,19 @@ class TransformerEngineQuantization(Quantization):
     if recipe_name not in RECIPES:
       raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")
     return RECIPES[recipe_name]()
+
+  @property
+  def needs_apply_rngs(self) -> bool:
+    """Whether this recipe draws RNGs at apply time.
+
+    Only NVFP4 does, and only while stochastic rounding is on: TE draws ``sr_rng`` for
+    the DGRAD quantizer. The other recipes take their scales from the tensors.
+    """
+    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+    if not isinstance(self._recipe, recipe.NVFP4BlockScaling):  # pytype: disable=module-attr
+      return False
+    return not self._recipe.disable_stochastic_rounding
 
   def get_block_size(self):
     """Get the block size for quantization for recipes that require blocks.

@@ -25,11 +25,13 @@ down two properties: a backend that declares it does not draw at apply time leav
 RNG state behind, and that state does not grow with the layer count.
 """
 
+import types
 import unittest
 
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+from flax import errors as flax_errors
 from flax import nnx
 
 from maxtext.layers import linears
@@ -69,6 +71,33 @@ class _DefaultQuant(quantizations.Quantization):
   def dot_general_cls(self, mesh_axes=()):
     del mesh_axes
     return _StubDotGeneral
+
+
+class _SrRngDotGeneral(nn.Module):
+  """Stand-in for NVFP4's dot_general, which draws `sr_rng` at apply time."""
+
+  @nn.compact
+  def __call__(self, inputs, kernel, dims, precision=None, **kwargs):
+    del kwargs
+    self.make_rng("sr_rng")
+    contracting, batch = dims
+    return jax.lax.dot_general(inputs, kernel, (contracting, batch), precision=precision)
+
+
+class _DrawingQuant(quantizations.Quantization):
+  """A backend that draws at apply time, as NVFP4 stochastic rounding does."""
+
+  quant_mode = "train"
+
+  def dot_general_cls(self, mesh_axes=()):
+    del mesh_axes
+    return _SrRngDotGeneral
+
+
+class _MisdeclaredQuant(_DrawingQuant):
+  """A drawing backend that wrongly claims it does not draw."""
+
+  needs_apply_rngs = False
 
 
 def _rng_state_paths(module) -> list[str]:
@@ -189,9 +218,6 @@ class QuantizationFlagTest(unittest.TestCase):
   def test_base_class_defaults_to_keeping_rngs(self):
     self.assertTrue(quantizations.Quantization.needs_apply_rngs)
 
-  def test_transformer_engine_opts_out(self):
-    self.assertFalse(quantizations.TransformerEngineQuantization.needs_apply_rngs)
-
   def test_backends_that_may_draw_at_apply_time_keep_rngs(self):
     """AQT's config enables jax.uniform RNG, so it must never be opted out silently."""
     for cls in (
@@ -207,16 +233,62 @@ class QuantizationFlagTest(unittest.TestCase):
 
     `AqtQuantization` and `QwixQuantization` sit outside the `Quantization` hierarchy
     and declare it themselves. A backend that is missing it raises AttributeError at
-    the call site rather than silently taking a default.
+    the call site rather than silently taking a default. `TransformerEngineQuantization`
+    is excluded because its answer depends on the recipe, so it derives the flag per
+    instance; `TransformerEngineRecipeRngTest` covers it.
     """
     for cls in (
         quantizations.AqtQuantization,
         quantizations.QwixQuantization,
         quantizations.Fp8Quantization,
         quantizations.NANOOFp8Quantization,
-        quantizations.TransformerEngineQuantization,
     ):
       self.assertIsInstance(cls.needs_apply_rngs, bool, f"{cls.__name__} must declare needs_apply_rngs")
+
+
+class ApplyTimeRngTest(unittest.TestCase):
+  """A backend that draws at apply time must keep the bridge's forked `Rngs`.
+
+  This is the NVFP4 case: TE draws `sr_rng` for the DGRAD quantizer, and `ToNNX` passes
+  the wrapped module only the streams it still holds, so releasing the fork leaves the
+  Linen apply with no RNGs at all.
+  """
+
+  def test_drawing_backend_still_runs(self):
+    out = _make_dense(_DrawingQuant())(jnp.ones((2, 8), jnp.float32))
+    self.assertEqual(out.shape, (2, 4))
+
+  def test_opting_out_a_drawing_backend_fails_loudly(self):
+    """Pins the coupling that broke NVFP4, so a wrong opt-out cannot pass silently."""
+    dense = _make_dense(_MisdeclaredQuant())
+    with self.assertRaises(flax_errors.InvalidRngError):
+      dense(jnp.ones((2, 8), jnp.float32))
+
+
+class TransformerEngineRecipeRngTest(unittest.TestCase):
+  """Only NVFP4 with stochastic rounding on draws at apply time."""
+
+  # te_nvfp4 and te_nvfp4_no_rht both leave disable_stochastic_rounding at its False
+  # default, so both draw; disable_rht does not affect rounding.
+  EXPECTED = {
+      "te_fp8_delayedscaling": False,
+      "te_fp8_currentscaling": False,
+      "te_mxfp8": False,
+      "te_nvfp4": True,
+      "te_nvfp4_no_rht": True,
+  }
+
+  def test_flag_follows_the_recipe(self):
+    try:
+      import transformer_engine  # pylint: disable=import-outside-toplevel,unused-import  # pytype: disable=import-error
+    except ImportError:
+      self.skipTest("TransformerEngine is not installed")
+
+    for name, expected in self.EXPECTED.items():
+      with self.subTest(recipe=name):
+        config = types.SimpleNamespace(quantization=name, te_comm_gemm_overlap=None)
+        quant = quantizations.TransformerEngineQuantization(config)
+        self.assertEqual(quant.needs_apply_rngs, expected)
 
 
 if __name__ == "__main__":
