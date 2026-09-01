@@ -178,7 +178,11 @@ class PyconfigTest(unittest.TestCase):
 
   def test_zero1_with_fsdp_transpose_raises_error(self):
     with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
-      self._zero1_config(ici_data_parallelism=1, ici_fsdp_parallelism=1, ici_fsdp_transpose_parallelism=2)
+      self._zero1_config(
+          ici_data_parallelism=1,
+          ici_fsdp_parallelism=1,
+          ici_fsdp_transpose_parallelism=2,
+      )
 
   def test_zero1_with_autofilled_fsdp_raises_error(self):
     """`ici_fsdp_parallelism=-1` absorbs whatever data parallelism leaves behind.
@@ -220,7 +224,10 @@ class PyconfigTest(unittest.TestCase):
   def test_overriding_model_in_sft(self):
     # TODO: Update MAXTEXT_PKG_DIR after repo restructuring is complete.
     config = pyconfig.initialize(
-        [os.path.join("maxtext.trainers.post_train.sft.train_sft"), get_post_train_test_config_path("sft")],
+        [
+            os.path.join("maxtext.trainers.post_train.sft.train_sft"),
+            get_post_train_test_config_path("sft"),
+        ],
         skip_jax_distributed_system=True,
         model_name="llama3.1-8b",
         override_model_config=True,
@@ -256,7 +263,10 @@ class PyconfigTest(unittest.TestCase):
       with self.subTest(decoder_block=decoder_block):
         with self.assertRaisesRegex(Exception, "not supported with 'explicit' sharding"):
           pyconfig.initialize(
-              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+              [
+                  os.path.join(MAXTEXT_PKG_DIR, "train.py"),
+                  get_test_config_path(),
+              ],
               skip_jax_distributed_system=True,
               shard_mode="explicit",
               decoder_block=decoder_block,
@@ -305,7 +315,10 @@ class PyconfigTest(unittest.TestCase):
   def test_config_file_mapping(self):
     for module, relative_path in _CONFIG_FILE_MAPPING.items():
       full_path = os.path.join(MAXTEXT_CONFIGS_DIR, relative_path)
-      self.assertTrue(os.path.isfile(full_path), f"Default config for '{module}' not found at {full_path}")
+      self.assertTrue(
+          os.path.isfile(full_path),
+          f"Default config for '{module}' not found at {full_path}",
+      )
 
   def test_module_from_path(self):
     import maxtext.trainers.pre_train.train as train_module  # pylint: disable=import-outside-toplevel
@@ -358,7 +371,13 @@ assert train._TF_AVAILABLE is False
 
   def test_unknown_module_falls_back_to_base_yml(self):
     """An unknown module should fall back to base.yml with a warning (not raise)."""
-    config = pyconfig.initialize_pydantic(["/custom_rl/module.py", "run_name=test", "skip_jax_distributed_system=True"])
+    config = pyconfig.initialize_pydantic(
+        [
+            "/custom_rl/module.py",
+            "run_name=test",
+            "skip_jax_distributed_system=True",
+        ]
+    )
     self.assertEqual(config.run_name, "test")
 
   def test_identical_override_allowed(self):
@@ -585,9 +604,15 @@ assert train._TF_AVAILABLE is False
     }
     for flag_name, (_, bad_value) in ep_disabled_flags.items():
       with self.subTest(flag=flag_name):
-        with self.assertRaises(ValueError, msg=f"{flag_name}={bad_value} should raise when EP rank is 1"):
+        with self.assertRaises(
+            ValueError,
+            msg=f"{flag_name}={bad_value} should raise when EP rank is 1",
+        ):
           pyconfig.initialize(
-              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+              [
+                  os.path.join(MAXTEXT_PKG_DIR, "train.py"),
+                  get_test_config_path(),
+              ],
               skip_jax_distributed_system=True,
               **{flag_name: bad_value},
           )
@@ -699,6 +724,49 @@ assert train._TF_AVAILABLE is False
           val_yaml,
           f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
       )
+
+  def test_sparse_delta_loading_without_base_yml(self):
+    """Verifies that a sparse config correctly merges on top of types.py defaults."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+      f.write("run_name: sparse_test\nsteps: 42\nbase_emb_dim: 1024\n")
+      sparse_yml_path = f.name
+    try:
+      cfg = pyconfig.initialize_pydantic(["", sparse_yml_path, "skip_jax_distributed_system=True"])
+      self.assertEqual(cfg.run_name, "sparse_test")
+      self.assertEqual(cfg.steps, 42)
+      self.assertEqual(cfg.base_emb_dim, 1024)
+      # Unspecified parameters should come from types.py defaults
+      self.assertEqual(cfg.base_num_decoder_layers, 16)
+      self.assertEqual(cfg.dataset_type.value, "synthetic")
+    finally:
+      if os.path.exists(sparse_yml_path):
+        os.remove(sparse_yml_path)
+
+  def test_dynamic_env_var_overrides(self):
+    """Verifies that any field in MaxTextConfig can be overridden via M_<PARAM> env var."""
+    os.environ["M_STEPS"] = "777"
+    os.environ["M_PER_DEVICE_BATCH_SIZE"] = "32"
+    os.environ["M_GCS_METRICS"] = "True"
+    os.environ["M_LORA_RANK"] = "8"
+    try:
+      cfg = pyconfig.initialize_pydantic(["", "run_name=env_test", "skip_jax_distributed_system=True"])
+      self.assertEqual(cfg.steps, 777)
+      self.assertEqual(cfg.per_device_batch_size, 32.0)
+      self.assertEqual(cfg.gcs_metrics, True)
+      self.assertEqual(cfg.lora.lora_rank, 8)
+    finally:
+      os.environ.pop("M_STEPS", None)
+      os.environ.pop("M_PER_DEVICE_BATCH_SIZE", None)
+      os.environ.pop("M_GCS_METRICS", None)
+      os.environ.pop("M_LORA_RANK", None)
+
+  def test_explicit_shard_mode_with_default_decoder_block(self):
+    """Verifies that shard_mode=explicit succeeds when decoder_block takes its default value."""
+    cfg = pyconfig.initialize_pydantic(
+        ["", "run_name=explicit_test", "shard_mode=explicit", "skip_jax_distributed_system=True"]
+    )
+    self.assertEqual(cfg.shard_mode, pyconfig.types.ShardMode.EXPLICIT)
+    self.assertEqual(cfg.decoder_block, pyconfig.types.DecoderBlockType.LLAMA2)
 
 
 if __name__ == "__main__":
