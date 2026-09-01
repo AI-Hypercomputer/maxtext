@@ -152,6 +152,7 @@ from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
 from maxtext.utils import max_logging, max_utils, model_creation_utils
+from maxtext.utils.model_creation_utils import get_rollout_kwargs_for_parallelism
 
 
 _RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset((DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5))
@@ -196,66 +197,6 @@ def get_dataset(
     max_logging.log(f"Loaded Hugging Face dataset {dataset_name} with split {split}. Size: {len(data)}")
 
   return data
-
-
-def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
-  """Get rollout kwargs for vLLM rollout when using data parallelism."""
-  dp = sampler_config.rollout_data_parallelism
-  tp = sampler_config.rollout_tensor_parallelism
-  ep = sampler_config.rollout_expert_parallelism
-
-  # -1 means "auto-derive from the other two". At most one can be -1.
-  num_auto = sum(1 for x in [tp, dp, ep] if x == -1)
-  if num_auto > 1:
-    raise ValueError(
-        "At most one of rollout_tensor_parallelism, rollout_data_parallelism, "
-        "rollout_expert_parallelism can be -1 (auto-derived).\n"
-        f"Currently resolved values:\n"
-        f"  - rollout_tensor_parallelism = {tp}\n"
-        f"  - rollout_data_parallelism = {dp}\n"
-        f"  - rollout_expert_parallelism = {ep}\n\n"
-        "To fix this, you must explicitly define at least two of these parameters in your command line arguments.\n"
-        "For example, try adding 'rollout_tensor_parallelism=4' to your command."
-    )
-
-  if dp == -1:
-    if num_sampler_devices % (tp * ep) != 0:
-      raise ValueError(
-          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
-          f"rollout_tensor_parallelism({tp}) * rollout_expert_parallelism({ep}) "
-          f"when rollout_data_parallelism is -1."
-      )
-    dp = num_sampler_devices // tp // ep
-  elif tp == -1:
-    if num_sampler_devices % (dp * ep) != 0:
-      raise ValueError(
-          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
-          f"rollout_data_parallelism({dp}) * rollout_expert_parallelism({ep}) "
-          f"when rollout_tensor_parallelism is -1."
-      )
-    tp = num_sampler_devices // dp // ep
-  elif ep == -1:
-    if num_sampler_devices % (tp * dp) != 0:
-      raise ValueError(
-          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
-          f"rollout_tensor_parallelism({tp}) * rollout_data_parallelism({dp}) "
-          f"when rollout_expert_parallelism is -1."
-      )
-    ep = num_sampler_devices // tp // dp
-  elif tp * dp * ep != num_sampler_devices:
-    raise ValueError(
-        f"rollout_tensor_parallelism({tp}) * "
-        f"rollout_data_parallelism({dp}) * "
-        f"rollout_expert_parallelism({ep}) "
-        f"!= len(sampler_devices)({num_sampler_devices})"
-    )
-
-  rollout_kwargs = {}
-  rollout_kwargs["tensor_parallel_size"] = tp
-  rollout_kwargs["data_parallel_size"] = dp
-  rollout_kwargs["expert_parallel_size"] = ep
-
-  return rollout_kwargs
 
 
 def prepare_train_and_eval_dataset(

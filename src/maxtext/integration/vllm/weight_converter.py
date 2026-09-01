@@ -431,6 +431,8 @@ MODEL_TO_CONVERSION_RULES = {
         ),
     ],
 }
+# Backward compatibility alias
+_MODEL_TO_CONVERSION_RULES = MODEL_TO_CONVERSION_RULES
 
 
 # ==========================================
