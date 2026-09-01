@@ -40,6 +40,7 @@ batch of `batch * ga` per optimizer step, with the micro-batch held at `batch`.
 """
 
 import argparse
+import contextlib
 import os
 import statistics
 import time
@@ -76,6 +77,21 @@ def profile_dir(arm: str) -> str:
   return os.path.join(PROFILE_ROOT, arm)
 
 
+def maybe_trace(log_dir: str, spec: "RunSpec"):
+  """The profiler around the timed loop, unless `--no-trace` asked for it to be left off.
+
+  Tracing is not free and it is not free *evenly*: the profiler charges per dispatch, so an
+  arm that issues dozens of tiny eager ops per step pays far more for being watched than one
+  that issues two. MaxText's `update` reads 27.0 ms traced against 14.0 ms untraced where
+  tunix goes 8.2 -> 18.5 ms, so a traced A/B flatters whichever side dispatches less. Quote
+  `--no-trace` numbers for wall clock and traced ones for where the time went.
+  """
+  if not spec.trace:
+    return contextlib.nullcontext()
+  print(f"tracing to {log_dir}", flush=True)
+  return jax.profiler.trace(log_dir=log_dir)
+
+
 def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
   """Adds the flags every arm honours. Defaults reproduce the original 4-device run."""
   parser.add_argument("--ga", type=int, default=ACCUM_STEPS, help="micro-batches per optimizer step")
@@ -85,6 +101,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
   parser.add_argument("--batch", type=int, default=BATCH_SIZE, help="examples per micro-batch")
   parser.add_argument("--seq", type=int, default=SEQ_LEN, help="tokens per example")
   parser.add_argument("--steps", type=int, default=MAX_STEPS, help="optimizer steps, warmup included")
+  parser.add_argument("--no-trace", dest="trace", action="store_false", help="skip xprof; wall clock only")
   return parser
 
 
@@ -111,6 +128,7 @@ class RunSpec:
     self.batch = args.batch
     self.seq = args.seq
     self.steps = args.steps
+    self.trace = args.trace
 
   @property
   def micro_steps(self) -> int:
