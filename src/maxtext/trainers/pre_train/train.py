@@ -394,15 +394,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   te_moe_max_total_recv_tokens = jnp.asarray(0, dtype=jnp.int32)
   te_moe_recv_capacity_per_rank = jnp.asarray(0, dtype=jnp.int32)
   if config.te_moe_block:
-    overflow_values = maxtext_utils.collect_intermediates_by_suffix(
-        intermediate_outputs, "te_moe_capacity_overflow"
-    )
-    total_recv_values = maxtext_utils.collect_intermediates_by_suffix(
-        intermediate_outputs, "te_moe_total_recv_tokens"
-    )
-    capacity_values = maxtext_utils.collect_intermediates_by_suffix(
-        intermediate_outputs, "te_moe_recv_capacity_per_rank"
-    )
+    overflow_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_capacity_overflow")
+    total_recv_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_total_recv_tokens")
+    capacity_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_recv_capacity_per_rank")
     if not overflow_values or not total_recv_values or not capacity_values:
       raise ValueError("te_moe_block=True did not produce TE MoE receive-capacity intermediates.")
     te_moe_capacity_overflow = jnp.any(jnp.concatenate(overflow_values))
@@ -1088,8 +1082,7 @@ def train_loop(config, recorder, state=None):
             )
         )
         check_overflow = (
-            len(te_moe_overflow_window) == config.te_ep_overflow_check_every_n_steps
-            or step == config.steps - 1
+            len(te_moe_overflow_window) == config.te_ep_overflow_check_every_n_steps or step == config.steps - 1
         )
         if check_overflow:
           checked_window = jax.device_get(tuple(te_moe_overflow_window))

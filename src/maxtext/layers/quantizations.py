@@ -1077,7 +1077,7 @@ class TransformerEngineQuantization(Quantization):
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     RECIPES = {
-        "te_no_quant": lambda: None, 
+        "te_no_quant": lambda: None,
         "te_fp8_delayedscaling": recipe.DelayedScaling,
         "te_fp8_currentscaling": recipe.Float8CurrentScaling,
         "te_mxfp8": recipe.MXFP8BlockScaling,
@@ -1224,7 +1224,6 @@ class TransformerEngineQuantization(Quantization):
       n_expert_groups: int,
   ):
     """Create a TransformerEngine quantizer set for TE MoEBlock grouped GEMMs."""
-    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
     from transformer_engine.jax.quantize import (  # pylint: disable=import-outside-toplevel
         QuantizerFactory,
         QuantizerSet,

@@ -104,11 +104,11 @@ class QuantizationType(str, Enum):
 
 
 class TEGroupedGemmQuantizationType(str, Enum):
-    """Supported quantization schemes for TE grouped GEMM in MoE layers."""
+  """Supported quantization schemes for TE grouped GEMM in MoE layers."""
 
-    EMPTY = ""
-    TE_NO_QUANT = "te_no_quant" # Default precision, e.g. BF16, without quantization
-    TE_MXFP8 = "te_mxfp8"
+  EMPTY = ""
+  TE_NO_QUANT = "te_no_quant"  # Default precision, e.g. BF16, without quantization
+  TE_MXFP8 = "te_mxfp8"
 
 
 class TeCommGemmOverlapPolicy(str, Enum):
@@ -907,7 +907,8 @@ class MoEGeneral(BaseModel):
       description=(
           "TE EP receive-capacity factor relative to aligned perfectly balanced routing. "
           "A value of 1.0 corresponds to the aligned perfectly balanced routing capacity."
-          "A value of 1.5 corresponds to 1.5 times the aligned perfectly balanced routing capacity, and can be used to provide extra buffer for routing imbalances."
+          "A value of 1.5 corresponds to 1.5 times the aligned perfectly balanced routing capacity,"
+          " and can be used to provide extra buffer for routing imbalances."
           "The capacity is capped at the dropless worst case. None (the default) reserves the worst-case capacity."
       ),
   )

@@ -1272,9 +1272,7 @@ def maybe_bootstrap_te_moe(config, mesh, shaped_batch):
         record_ep_bootstrap_signature_for_moe,
     )
   except ImportError as exc:
-    raise ImportError(
-        "te_moe_block=True requires TransformerEngine with JAX EP MoE support."
-    ) from exc
+    raise ImportError("te_moe_block=True requires TransformerEngine with JAX EP MoE support.") from exc
 
   ep_axis = "expert"
   fsdp_axis = "fsdp"
@@ -1318,8 +1316,7 @@ def maybe_bootstrap_te_moe(config, mesh, shaped_batch):
     return
   if _te_moe_bootstrap_signature is not None:
     raise ValueError(
-        f"TE MoE EP was already bootstrapped with {_te_moe_bootstrap_signature}, "
-        f"but this run needs {signature}."
+        f"TE MoE EP was already bootstrapped with {_te_moe_bootstrap_signature}, " f"but this run needs {signature}."
     )
 
   with jax.set_mesh(mesh), mesh:

@@ -3210,7 +3210,10 @@ class RoutedMoE(nnx.Module):
     try:
       from transformer_engine.jax import moe as te_moe  # pylint: disable=import-outside-toplevel
     except ImportError as exc:
-      raise ImportError("te_moe_block=True requires TransformerEngine JAX MoE support. Please upgrade to the latest version of TransformerEngine.") from exc
+      raise ImportError(
+          "te_moe_block=True requires TransformerEngine JAX MoE support. "
+          "Please upgrade to the latest version of TransformerEngine."
+      ) from exc
 
     if self.config.norm_topk_prob:
       raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
@@ -3219,7 +3222,10 @@ class RoutedMoE(nnx.Module):
     if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
       raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
     if not self.config.te_gmm_quantization:
-      raise ValueError("te_gmm_quantization must be specified when te_moe_block=True. te_gmm_quantization=te_no_quant is supported for BF16.")
+      raise ValueError(
+          "te_gmm_quantization must be specified when te_moe_block=True. "
+          "te_gmm_quantization=te_no_quant is supported for BF16."
+      )
     if self.quant is None or not hasattr(self.quant, "get_moe_block_quantizer_sets"):
       raise ValueError("te_moe_block=True requires TransformerEngine quantization or te_gmm_quantization=te_no_quant.")
 
@@ -3230,9 +3236,7 @@ class RoutedMoE(nnx.Module):
     fsdp_size = self.mesh.shape.get("fsdp", 1)
     ep_size = self.mesh.shape.get(self._expert_parallelism_name, 1)
     if self.num_experts % ep_size != 0:
-      raise ValueError(
-          f"num_experts={self.num_experts} must be divisible by EP size={ep_size}."
-      )
+      raise ValueError(f"num_experts={self.num_experts} must be divisible by EP size={ep_size}.")
 
     fc1_quantizer_set, fc2_quantizer_set = self.quant.get_moe_block_quantizer_sets(
         self.config.te_gmm_quantization,
