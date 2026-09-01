@@ -363,7 +363,7 @@ def jax_chunk_gated_delta_rule(
 
   o = o.astype(initial_dtype)
 
-  return o, (final_h if initial_state is not None else None)
+  return o, (final_h.astype(compute_dtype) if initial_state is not None else None)
 
 
 def jax_ar_gated_delta_rule(
@@ -970,6 +970,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           next_conv_state = next_conv_state[:orig_cache_batch]
           next_recurrent_state = next_recurrent_state[:orig_cache_batch]
 
+    next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
 
