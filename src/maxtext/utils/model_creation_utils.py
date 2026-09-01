@@ -65,7 +65,12 @@ try:
 except ImportError:
 
   def _is_orbax_array_metadata(x):
-    return hasattr(x, "shape") and hasattr(x, "sharding") and hasattr(x, "dtype") and not isinstance(x, jax.Array)
+    return (
+        hasattr(x, "shape")
+        and hasattr(x, "sharding")
+        and hasattr(x, "dtype")
+        and not isinstance(x, jax.Array)
+    )
 
 
 # Logical axis names whose padding semantics are "replicate the existing values"
@@ -75,13 +80,16 @@ _VLLM_REPEAT_AXES = frozenset({"kv_heads", ("expert", "model")})
 # Logical axis names whose padding semantics are "append zeros at the end"
 # (e.g. MoE MLP-dim padding to satisfy the GMM_v2 kernel's per-shard size
 # constraint, set in src/maxtext/integration/vllm/maxtext_vllm_adapter/adapter.py).
-_VLLM_ZERO_PAD_AXES = frozenset({"mlp_moe", "activation_mlp", ("attn_dp", "model")})
+_VLLM_ZERO_PAD_AXES = frozenset(
+    {"mlp_moe", "activation_mlp", ("attn_dp", "model")}
+)
 
 
 def _normalize_logical_axes(axes):
   """Coerce an axes value (PartitionSpec / tuple / None / leaf marker) to a plain tuple or None.
 
-  ``nnx.get_partition_spec`` returns a tree of :class:`jax.sharding.PartitionSpec`
+  ``nnx.get_partition_spec`` returns a tree of
+  :class:`jax.sharding.PartitionSpec`
   leaves whose entries are logical axis names, ``None`` (unsharded), or nested
   tuples (multi-axis sharding).  PartitionSpec is iterable, so ``tuple(spec)``
   yields the per-axis entries directly.
@@ -123,8 +131,9 @@ def _zero_pad_axis(arr, axis, extra):
     if shards_along_axis > 1:
       if extra % shards_along_axis != 0:
         raise ValueError(
-            f"Cannot per-shard zero-pad axis {axis}: extra={extra} not divisible by "
-            f"shards_along_axis={shards_along_axis} (sharding spec entry {partition!r})."
+            f"Cannot per-shard zero-pad axis {axis}: extra={extra} not"
+            f" divisible by shards_along_axis={shards_along_axis} (sharding"
+            f" spec entry {partition!r})."
         )
       per_shard_extra = extra // shards_along_axis
       pad_width[axis] = (0, per_shard_extra)
@@ -175,40 +184,53 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
     return jax.device_put(ckpt_arr, model_arr.sharding)
   if len(ckpt_shape) != len(model_shape):
     raise ValueError(
-        f"Checkpoint and model arrays have different ranks: {ckpt_shape} vs {model_shape}. "
-        "If the checkpoint was saved with scan_layers=True (stacked layers), convert it to "
-        "unscanned format before loading with vLLM (vllm.yml sets scan_layers=False)."
+        f"Checkpoint and model arrays have different ranks: {ckpt_shape} vs"
+        f" {model_shape}. If the checkpoint was saved with scan_layers=True"
+        " (stacked layers), convert it to unscanned format before loading with"
+        " vLLM (vllm.yml sets scan_layers=False)."
     )
+  if len(ckpt_shape) == 2 and ckpt_shape == model_shape[::-1]:
+    ckpt_arr = jnp.transpose(ckpt_arr)
+    ckpt_shape = ckpt_arr.shape
+    if ckpt_shape == model_shape:
+      return jax.device_put(ckpt_arr, model_arr.sharding)
+
   axes = _normalize_logical_axes(logical_axes)
   if axes is None or len(axes) != len(model_shape):
     axes = (None,) * len(model_shape)
 
   result = ckpt_arr
-  for axis, (ckpt_dim, model_dim, axis_name) in enumerate(zip(ckpt_shape, model_shape, axes)):
+  for axis, (ckpt_dim, model_dim, axis_name) in enumerate(
+      zip(ckpt_shape, model_shape, axes)
+  ):
     if model_dim == ckpt_dim:
       continue
     if axis_name in _VLLM_ZERO_PAD_AXES:
       if model_dim < ckpt_dim:
         raise ValueError(
-            f"axis {axis} (logical={axis_name!r}): model_dim={model_dim} smaller than "
-            f"ckpt_dim={ckpt_dim}; shapes ckpt={ckpt_shape} model={model_shape}"
+            f"axis {axis} (logical={axis_name!r}): model_dim={model_dim}"
+            f" smaller than ckpt_dim={ckpt_dim}; shapes ckpt={ckpt_shape}"
+            f" model={model_shape}"
         )
       result = _zero_pad_axis(result, axis, model_dim - ckpt_dim)
     elif axis_name in _VLLM_REPEAT_AXES:
       if model_dim % ckpt_dim != 0:
         raise ValueError(
-            f"axis {axis} (logical={axis_name!r}): model_dim={model_dim} not divisible by "
-            f"ckpt_dim={ckpt_dim}; shapes ckpt={ckpt_shape} model={model_shape}"
+            f"axis {axis} (logical={axis_name!r}): model_dim={model_dim} not"
+            f" divisible by ckpt_dim={ckpt_dim}; shapes ckpt={ckpt_shape}"
+            f" model={model_shape}"
         )
       result = jnp.repeat(result, model_dim // ckpt_dim, axis=axis)
     else:
       if model_dim % ckpt_dim != 0:
         raise ValueError(
-            f"Cannot align axis {axis} (logical={axis_name!r}): model_dim={model_dim} not "
-            f"divisible by ckpt_dim={ckpt_dim}, and axis is not registered in _VLLM_REPEAT_AXES "
-            f"({sorted(str(x) for x in _VLLM_REPEAT_AXES)}) or "
-            f"_VLLM_ZERO_PAD_AXES ({sorted(str(x) for x in _VLLM_ZERO_PAD_AXES)}). "
-            f"Full shapes ckpt={ckpt_shape} model={model_shape}"
+            f"Cannot align axis {axis} (logical={axis_name!r}):"
+            f" model_dim={model_dim} not divisible by ckpt_dim={ckpt_dim}, and"
+            " axis is not registered in _VLLM_REPEAT_AXES"
+            f" ({sorted(str(x) for x in _VLLM_REPEAT_AXES)}) or"
+            " _VLLM_ZERO_PAD_AXES"
+            f" ({sorted(str(x) for x in _VLLM_ZERO_PAD_AXES)}). Full shapes"
+            f" ckpt={ckpt_shape} model={model_shape}"
         )
       result = jnp.repeat(result, model_dim // ckpt_dim, axis=axis)
   return jax.device_put(result, model_arr.sharding)
@@ -217,7 +239,8 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
 def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
   """Fuse separate wi_0/wi_1 checkpoint entries into a single wi when model uses fused layout.
 
-  This properly interleaves the gate and up projections based on the target tensor
+  This properly interleaves the gate and up projections based on the target
+  tensor
   parallelism (TP) sharding, ensuring that each device receives its respective
   slice of both wi_0 and wi_1. It also applies any necessary MLP-dim padding
   on a per-shard basis to satisfy kernel constraints.
@@ -300,14 +323,18 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
 
     # Concatenate along the inner chunk dimension to interleave the shards
     # Shape becomes: (..., n_shards, target_chunk_size * 2)
-    wi_interleaved = jnp.concatenate([padded_chunked_wi_0, padded_chunked_wi_1], axis=-1)
+    wi_interleaved = jnp.concatenate(
+        [padded_chunked_wi_0, padded_chunked_wi_1], axis=-1
+    )
 
     # Flatten the n_shards dimension back out to match the final model shape, drop wi_0/wi_1.
     new_node = {k: v for k, v in ckpt_node.items() if k not in ("wi_0", "wi_1")}
     new_node["wi"] = wi_interleaved.reshape(*wi_model.shape)
     return new_node
 
-  return jax.tree_util.tree_map_with_path(_maybe_fuse, ckpt_tree, is_leaf=_is_fusion_site)
+  return jax.tree_util.tree_map_with_path(
+      _maybe_fuse, ckpt_tree, is_leaf=_is_fusion_site
+  )
 
 
 def _partition_size(partition, mesh):
@@ -343,10 +370,13 @@ def _stored_shape_evenly_shardable(restore_arg, stored_shape):
   return True
 
 
-def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mesh):
+def _fix_restore_args_for_shape_mismatch(
+    restore_args, stored_metadata_tree, mesh
+):
   """Adjust restore_args for arrays whose checkpoint shape differs from the model shape.
 
-  When the model is initialized with padded shapes (e.g. KV heads padded to match
+  When the model is initialized with padded shapes (e.g. KV heads padded to
+  match
   TP size, or MoE MLP dim padded for the GMM_v2 kernel) but the checkpoint was
   saved with smaller shapes, Orbax will reject the restore because the provided
   ``global_shape`` is incompatible with the stored shape.
@@ -365,8 +395,17 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
      and is required for correctness when sharded loading is impossible.
 
   Uses tree_map_with_path so each ArrayRestoreArgs is looked up by path in the
-  metadata dict — avoids ordering/count mismatches from flattening two trees with
+  metadata dict — avoids ordering/count mismatches from flattening two trees
+  with
   different pytree node types (e.g. nnx.State vs plain dict) independently.
+
+  Args:
+    restore_args: Pytree of ArrayRestoreArgs.
+    stored_metadata_tree: Pytree of stored checkpoint metadata.
+    mesh: JAX device mesh.
+
+  Returns:
+    Updated restore_args pytree.
   """
   replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
@@ -420,45 +459,76 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
       return restore_arg
     if _is_orbax_array_metadata(stored_meta):
       stored_shape = tuple(stored_meta.shape)
-      if restore_arg.global_shape is not None and restore_arg.global_shape != stored_shape:
+      if (
+          restore_arg.global_shape is not None
+          and restore_arg.global_shape != stored_shape
+      ):
         # Check for scanned vs unscanned rank mismatch
         if len(stored_shape) != len(restore_arg.global_shape):
           rank_mismatched_paths.append(
-              f"  {'.'.join(_key_str(k) for k in path)}: "
-              f"checkpoint shape {stored_shape} (rank {len(stored_shape)}) "
-              f"vs model shape {restore_arg.global_shape} (rank {len(restore_arg.global_shape)})"
+              f"  {'.'.join(_key_str(k) for k in path)}: checkpoint shape"
+              f" {stored_shape} (rank {len(stored_shape)}) vs model shape"
+              f" {restore_arg.global_shape} (rank"
+              f" {len(restore_arg.global_shape)})"
           )
         else:
           # Handle the shape mismatch logic for padding/sharding
           found_array_count[0] += 1
-          path_str = f"  {'.'.join(_key_str(k) for k in path)}: stored={stored_shape} -> model={restore_arg.global_shape}"
+          path_str = (
+              f"  {'.'.join(_key_str(k) for k in path)}: stored={stored_shape}"
+              f" -> model={restore_arg.global_shape}"
+          )
           if _stored_shape_evenly_shardable(restore_arg, stored_shape):
             mismatched_paths_sharded.append(path_str)
-            return dataclasses.replace(restore_arg, global_shape=stored_shape, shape=stored_shape)
+            return dataclasses.replace(
+                restore_arg, global_shape=stored_shape, shape=stored_shape
+            )
 
           mismatched_paths_replicated.append(path_str)
           return dataclasses.replace(
-              restore_arg, global_shape=None, shape=None, sharding=replicated, mesh=None, mesh_axes=None
+              restore_arg,
+              global_shape=None,
+              shape=None,
+              sharding=replicated,
+              mesh=None,
+              mesh_axes=None,
           )
       else:
         found_array_count[0] += 1
     return restore_arg
 
-  fixed = jax.tree_util.tree_map_with_path(_fix_one, restore_args, is_leaf=lambda x: isinstance(x, ocp.ArrayRestoreArgs))
+  fixed = jax.tree_util.tree_map_with_path(
+      _fix_one,
+      restore_args,
+      is_leaf=lambda x: isinstance(x, ocp.ArrayRestoreArgs),
+  )
 
   if rank_mismatched_paths:
     sample = "\n".join(rank_mismatched_paths[:5])
-    more = f"\n  ... and {len(rank_mismatched_paths) - 5} more" if len(rank_mismatched_paths) > 5 else ""
-    raise ValueError(f"Checkpoint rank mismatches detected ({len(rank_mismatched_paths)}" f" arrays):\n{sample}{more}")
+    more = (
+        f"\n  ... and {len(rank_mismatched_paths) - 5} more"
+        if len(rank_mismatched_paths) > 5
+        else ""
+    )
+    raise ValueError(
+        f"Checkpoint rank mismatches detected ({len(rank_mismatched_paths)}"
+        f" arrays):\n{sample}{more}"
+    )
 
   # Detect structural mismatch (e.g. scanned checkpoint loaded into unscanned model).
   # In that case the checkpoint tree has "layers" (all layers stacked) but the model
   # expects "layers_0", "layers_1", etc., so _lookup_stored_meta returns None for every
   # layer parameter and nearly all paths end up in missing_paths.
-  total_arrays = found_array_count[0] + len(rank_mismatched_paths) + len(missing_paths)
+  total_arrays = (
+      found_array_count[0] + len(rank_mismatched_paths) + len(missing_paths)
+  )
   if total_arrays > 0 and len(missing_paths) / total_arrays > 0.8:
     sample = "\n".join(missing_paths[:5])
-    more = f"\n  ... and {len(missing_paths) - 5} more" if len(missing_paths) > 5 else ""
+    more = (
+        f"\n  ... and {len(missing_paths) - 5} more"
+        if len(missing_paths) > 5
+        else ""
+    )
     raise ValueError(
         f"Checkpoint structure mismatch: {len(missing_paths)} of {total_arrays}"
         " model parameter paths were not found in the checkpoint.\nExample"
@@ -467,13 +537,16 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
 
   if mismatched_paths_sharded:
     max_logging.log(
-        f"Checkpoint shape mismatches ({len(mismatched_paths_sharded)} arrays): loading sharded at "
-        "stored shape and padding each local shard after restore.\n" + "\n".join(mismatched_paths_sharded)
+        f"Checkpoint shape mismatches ({len(mismatched_paths_sharded)} arrays):"
+        " loading sharded at stored shape and padding each local shard after"
+        " restore.\n"
+        + "\n".join(mismatched_paths_sharded)
     )
   if mismatched_paths_replicated:
     max_logging.log(
-        f"Checkpoint shape mismatches ({len(mismatched_paths_replicated)} arrays): loading with replicated "
-        "sharding (stored shape not evenly partitionable across mesh) and expanding after restore.\n"
+        f"Checkpoint shape mismatches ({len(mismatched_paths_replicated)}"
+        " arrays): loading with replicated sharding (stored shape not evenly"
+        " partitionable across mesh) and expanding after restore.\n"
         + "\n".join(mismatched_paths_replicated)
     )
   return fixed
@@ -523,44 +596,103 @@ def from_config(
   """
   if mesh is None:
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
-  model = create_model(config, mesh, model_mode=model_mode, rngs=rngs, quant_mode_str=quant_mode_str)
+  model = create_model(
+      config,
+      mesh,
+      model_mode=model_mode,
+      rngs=rngs,
+      quant_mode_str=quant_mode_str,
+  )
 
   # Return only the model
   return model
 
 
-def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
+def get_transformer_model(
+    config,
+    mesh,
+    quant,
+    model_mode: str = MODEL_MODE_TRAIN,
+    rngs: nnx.Rngs | None = None,
+):
   """Returns the transformer model based on the configuration."""
   if rngs is not None:
-    return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
+    return models.Transformer(
+        config, mesh, quant=quant, rngs=rngs, model_mode=model_mode
+    )
   else:
-    return models.transformer_as_linen(config, mesh, quant=quant, model_mode=model_mode)
+    return models.transformer_as_linen(
+        config, mesh, quant=quant, model_mode=model_mode
+    )
 
 
 def create_model(
-    config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None, *, quant_mode_str: str = "train"
+    config,
+    mesh,
+    model_mode: str = MODEL_MODE_TRAIN,
+    rngs: nnx.Rngs | None = None,
+    *,
+    quant_mode_str: str = "train",
 ):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
-  quant = quantizations.configure_quantization(config, quant_mode_str=quant_mode_str)
-  model = get_transformer_model(config, mesh, quant, model_mode=model_mode, rngs=rngs)
+  quant = quantizations.configure_quantization(
+      config, quant_mode_str=quant_mode_str
+  )
+  model = get_transformer_model(
+      config, mesh, quant, model_mode=model_mode, rngs=rngs
+  )
   model = quantizations.maybe_quantize_model(model, config)
   return model
 
 
 def get_nnx_create_model_fn(
-    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, *, quant_mode_str: str = "train"
+    config,
+    mesh=None,
+    devices=None,
+    model_mode=MODEL_MODE_TRAIN,
+    rng_key=None,
+    *,
+    quant_mode_str: str = "train",
 ) -> Callable:
+  """Returns a factory callable that creates and initializes an NNX model.
+
+  Args:
+    config: Model and runtime configuration.
+    mesh: JAX device mesh.
+    devices: Optional hardware devices.
+    model_mode: Operational mode of the model (e.g. TRAIN, PREFILL).
+    rng_key: RNG key for random operations.
+    quant_mode_str: Quantization mode string (e.g. "train", "serve").
+
+  Returns:
+    A zero-argument callable that returns an NNX model instance.
+  """
 
   def _create_model():
-    rngs = maxtext_utils_nnx.create_nnx_rngs(config, model_mode=model_mode, rng_key=rng_key)
-    return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode, quant_mode_str=quant_mode_str)
+    rngs = maxtext_utils_nnx.create_nnx_rngs(
+        config, model_mode=model_mode, rng_key=rng_key
+    )
+    return from_config(
+        config,
+        devices,
+        mesh,
+        rngs=rngs,
+        model_mode=model_mode,
+        quant_mode_str=quant_mode_str,
+    )
 
   return _create_model
 
 
 def create_nnx_abstract_model(
-    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, *, quant_mode_str: str = "train"
+    config,
+    mesh=None,
+    devices=None,
+    model_mode=MODEL_MODE_TRAIN,
+    rng_key=None,
+    *,
+    quant_mode_str: str = "train",
 ) -> tuple[Callable, nnx.Module]:
   """Creates an abstract NNX model.
 
@@ -569,12 +701,20 @@ def create_nnx_abstract_model(
 
   Returns:
     A tuple containing (create_model_fn, abstract_model):
-      create_model_fn: A zero-argument callable that produces a new model instance.
+      create_model_fn: A zero-argument callable that produces a new model
+      instance.
       abstract_model: The stateful NNX model instance in an abstract state.
   """
 
   with nn.logical_axis_rules(config.logical_axis_rules):
-    _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
+    _create_model = get_nnx_create_model_fn(
+        config,
+        mesh,
+        devices,
+        model_mode,
+        rng_key,
+        quant_mode_str=quant_mode_str,
+    )
     # Use nnx.eval_shape + our scan-axis-aware sharding helper instead of
     # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
     # param_scan_axis / nnx.PARTITION_NAME metadata set by _create_scanned_layers,
@@ -587,7 +727,9 @@ def create_nnx_abstract_model(
     if mesh is None:
       mesh = abs_model.mesh
     graphdef, abs_var_state = nnx.split(abs_model)
-    named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
+    named_sharding_state = sharding.nnx_construct_named_sharding(
+        abs_var_state, mesh
+    )
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,
@@ -596,20 +738,35 @@ def create_nnx_abstract_model(
     return _create_model, nnx.merge(graphdef, abstract_state)
 
 
-def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
+def create_nnx_sharded_model_hybrid(
+    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None
+):
   """Creates a sharded model for hybrid NNX modules containing Linen sub-modules.
 
   DEPRECATED: This function is a transitional utility for the Linen-to-NNX
   migration. It should be removed once all model components are ported to
   pure NNX modules.
 
-  This function specifically handles the complexity of "mixed" state initialization,
+  This function specifically handles the complexity of "mixed" state
+  initialization,
   where logical sharding annotations must be resolved for both NNX native
   Parameters and legacy Linen variables wrapped via the NNX-Linen bridge.
   It ensures that both systems correctly respect the provided mesh and
   logical axis rules during the abstraction/sharding planning phase.
+
+  Args:
+    config: Configuration object.
+    mesh: JAX device mesh.
+    devices: Optional hardware devices.
+    model_mode: Operational mode of the model (e.g. TRAIN, PREFILL).
+    rng_key: RNG key for random operations.
+
+  Returns:
+    Sharded NNX model instance.
   """
-  _create_model_partial = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key)
+  _create_model_partial = get_nnx_create_model_fn(
+      config, mesh, devices, model_mode, rng_key
+  )
 
   with nn.logical_axis_rules(config.logical_axis_rules):
     abstract_model = nnx.eval_shape(_create_model_partial)
@@ -658,15 +815,18 @@ def setup_configs_and_devices(
     **extra_kwargs,
 ):
   """Setup device allocation and configs for training and inference.
-  This API is particularly useful for Reinforcement Learning where we might split the available
-  devices into separate mesh for trainer and sampler
+
+  This API is particularly useful for Reinforcement Learning where we might
+  split the available devices into separate mesh for trainer and sampler
   """
   if argv is None:
     argv = [""]
 
   combined_kwargs = dict(kwargs) if kwargs else {}
   combined_kwargs.update(extra_kwargs)
-  config = pyconfig.initialize_pydantic(argv, config_class=config_class, **combined_kwargs)
+  config = pyconfig.initialize_pydantic(
+      argv, config_class=config_class, **combined_kwargs
+  )
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running on a single slice")
@@ -676,16 +836,23 @@ def setup_configs_and_devices(
     if num_vms >= 2 and config.use_pathways:
       # Multiple hosts with Pathways - potentially split devices for trainer and sampler
       # based on trainer_devices_fraction and sampler_devices_fraction
-      max_logging.log(f"{num_vms} VMs detected, allocating trainer and sampler devices, and using Pathways.")
+      max_logging.log(
+          f"{num_vms} VMs detected, allocating trainer and sampler devices, and"
+          " using Pathways."
+      )
       num_devices = len(devices)
       num_trainer_devices = int(num_devices * config.trainer_devices_fraction)
       num_sampler_devices = int(num_devices * config.sampler_devices_fraction)
       trainer_devices = devices[:num_trainer_devices]
       sampler_devices = devices[num_devices - num_sampler_devices :]
       if config.trainer_devices_fraction != 1.0:
-        max_logging.log(f"Using first {len(trainer_devices)} devices as Trainer devices")
+        max_logging.log(
+            f"Using first {len(trainer_devices)} devices as Trainer devices"
+        )
       if config.sampler_devices_fraction != 1.0:
-        max_logging.log(f"Using last {len(sampler_devices)} devices as Sampler devices")
+        max_logging.log(
+            f"Using last {len(sampler_devices)} devices as Sampler devices"
+        )
     trainer_config = config
     sampler_config = config
   elif config.num_trainer_slices > 0 and config.num_samplers_slices > 0:
@@ -695,7 +862,10 @@ def setup_configs_and_devices(
       devices_by_slice[d.slice_index].append(d)
     slice_indices = sorted(devices_by_slice.keys())
 
-    if len(slice_indices) < config.num_trainer_slices + config.num_samplers_slices:
+    if (
+        len(slice_indices)
+        < config.num_trainer_slices + config.num_samplers_slices
+    ):
       raise ValueError("Not enough slices for trainer and samplers")
 
     trainer_devices = []
@@ -703,78 +873,122 @@ def setup_configs_and_devices(
       trainer_devices.extend(devices_by_slice[slice_indices[i]])
 
     sampler_devices = []
-    for i in range(config.num_trainer_slices, config.num_trainer_slices + config.num_samplers_slices):
+    for i in range(
+        config.num_trainer_slices,
+        config.num_trainer_slices + config.num_samplers_slices,
+    ):
       sampler_devices.extend(devices_by_slice[slice_indices[i]])
 
-    trainer_devices_per_slice = len(trainer_devices) // config.num_trainer_slices
+    trainer_devices_per_slice = (
+        len(trainer_devices) // config.num_trainer_slices
+    )
     trainer_fsdp = trainer_devices_per_slice
     tp = config.ici_tensor_parallelism
     if tp > 1:
       if trainer_devices_per_slice % tp != 0:
         raise ValueError(
-            f"trainer_devices_per_slice ({trainer_devices_per_slice}) must be divisible by tensor parallelism ({tp})"
+            f"trainer_devices_per_slice ({trainer_devices_per_slice}) must be"
+            f" divisible by tensor parallelism ({tp})"
         )
-      if config.ici_fsdp_parallelism != -1 and config.ici_fsdp_parallelism * tp != trainer_devices_per_slice:
+      if (
+          config.ici_fsdp_parallelism != -1
+          and config.ici_fsdp_parallelism * tp != trainer_devices_per_slice
+      ):
         raise ValueError(
-            f"ici_fsdp_parallelism ({config.ici_fsdp_parallelism}) * ici_tensor_parallelism ({tp}) must equal "
-            f"devices_per_slice ({trainer_devices_per_slice})"
+            f"ici_fsdp_parallelism ({config.ici_fsdp_parallelism}) *"
+            f" ici_tensor_parallelism ({tp}) must equal devices_per_slice"
+            f" ({trainer_devices_per_slice})"
         )
       trainer_fsdp = trainer_devices_per_slice // tp
 
     trainer_kwargs = dict(combined_kwargs)
-    trainer_kwargs.update(
-        {
-            "num_slices": config.num_trainer_slices,
-            "ici_fsdp_parallelism": trainer_fsdp,
-            "ici_tensor_parallelism": tp,
-            "dcn_data_parallelism": config.num_trainer_slices,
-        }
-    )
+    trainer_kwargs.update({
+        "num_slices": config.num_trainer_slices,
+        "ici_fsdp_parallelism": trainer_fsdp,
+        "ici_tensor_parallelism": tp,
+        "dcn_data_parallelism": config.num_trainer_slices,
+    })
 
     sampler_kwargs = dict(combined_kwargs)
-    sampler_kwargs.update(
-        {
-            "num_slices": config.num_samplers_slices,
-            "ici_fsdp_parallelism": len(sampler_devices) // config.num_samplers_slices,
-            "ici_tensor_parallelism": -1,
-            "dcn_data_parallelism": config.num_samplers_slices,
-        }
+    sampler_kwargs.update({
+        "num_slices": config.num_samplers_slices,
+        "ici_fsdp_parallelism": (
+            len(sampler_devices) // config.num_samplers_slices
+        ),
+        "ici_tensor_parallelism": -1,
+        "dcn_data_parallelism": config.num_samplers_slices,
+    })
+
+    trainer_config = pyconfig.initialize_pydantic(
+        argv, config_class=config_class, **trainer_kwargs
+    )
+    sampler_config = pyconfig.initialize_pydantic(
+        argv, config_class=config_class, **sampler_kwargs
     )
 
-    trainer_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **trainer_kwargs)
-    sampler_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **sampler_kwargs)
-
   else:
-    raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
+    raise ValueError(
+        "num_trainer_slices and num_samplers_slices should be both -1 or"
+        " positive"
+    )
 
   return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
-def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices, tokenizer_pad_id=None):
+def create_models_and_meshes(
+    trainer_config,
+    sampler_config,
+    trainer_devices,
+    sampler_devices,
+    tokenizer_pad_id=None,
+):
   """Create reference and actor models and their respective meshes.
-  This API is particularly useful for Reinforcement Learning (RL) where we need 2 models (wrapped in TunixMaxTextAdapter
-  so that they are compatible with default Tunix APIs) and meshes for reference, actor and rollout (which can be disjoint
-  in case of disaggreggated RL training).
+
+  This API is particularly useful for Reinforcement Learning (RL) where we need
+  2 models (wrapped in TunixMaxTextAdapter so that they are compatible with
+  default Tunix APIs) and meshes for reference, actor and rollout (which can be
+  disjoint in case of disaggreggated RL training).
 
   `tokenizer_pad_id`: optional pad token id. When provided, plumbs through to
   TunixMaxTextAdapter so it can synthesize segment_ids that mask pad positions
-  from attention (otherwise trainer attends to pad tokens, corrupting log-probs).
+  from attention (otherwise trainer attends to pad tokens, corrupting
+  log-probs).
+
+  Args:
+    trainer_config: Configuration for trainer model.
+    sampler_config: Configuration for sampler model.
+    trainer_devices: Devices allocated for trainer.
+    sampler_devices: Devices allocated for sampler.
+    tokenizer_pad_id: Optional pad token ID for TunixMaxTextAdapter.
+
+  Returns:
+    Tuple of (reference_model, reference_mesh, actor_model, actor_mesh,
+    rollout_mesh).
   """
-  max_logging.log("Creating reference model and also meshes for reference and rollout")
+  max_logging.log(
+      "Creating reference model and also meshes for reference and rollout"
+  )
   reference_model, reference_mesh = from_pretrained(
       trainer_config,
       devices=trainer_devices,
       wrap_with_tunix_adapter=True,
       tokenizer_pad_id=tokenizer_pad_id,
   )
-  devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
+  devices_array = maxtext_utils.create_device_mesh(
+      sampler_config, sampler_devices
+  )
   rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
 
   if trainer_config.load_checkpoint_only_once:
-    max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
+    max_logging.log(
+        "Creating policy model by copying reference model instead of restoring"
+        " from checkpoint again."
+    )
     with reference_mesh:
       actor_base_model = nnx.clone(reference_model.base)
-      use_no_op_mappings = "maxtext_config" in trainer_config.vllm_additional_config
+      use_no_op_mappings = (
+          "maxtext_config" in trainer_config.vllm_additional_config
+      )
       # TunixMaxTextAdapter wraps MaxText models to be compatible with Tunix's default APIs
       # The weight mappings for vllm (which is interfaced to from MaxText via Tunix) are model specific.
       # The mappings are defined inside src/maxtext/integration/tunix/weight_mapping
@@ -786,7 +1000,10 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
       actor_model.config = None  # pyrefly: ignore[missing-attribute]
     actor_mesh = reference_mesh
   else:
-    max_logging.log("Creating policy model with same config as reference model on trainer mesh")
+    max_logging.log(
+        "Creating policy model with same config as reference model on trainer"
+        " mesh"
+    )
     actor_model, actor_mesh = from_pretrained(
         trainer_config,
         devices=trainer_devices,
@@ -802,7 +1019,9 @@ def verify_and_sync_scan_layers(config):
   if not config.load_parameters_path:
     return config
 
-  custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
+  custom_metadata = checkpointing.load_checkpoint_metadata(
+      config.load_parameters_path
+  )
   saved_scan_layers = custom_metadata.get("scan_layers")
   if not isinstance(saved_scan_layers, bool):
     return config
@@ -815,18 +1034,28 @@ def verify_and_sync_scan_layers(config):
   model_fields_set = getattr(pydantic_config, "model_fields_set", None)
 
   # If model metadata tracking isn't supported, fall back to matching check (True)
-  is_explicit = "scan_layers" in model_fields_set if model_fields_set is not None else True
+  is_explicit = (
+      "scan_layers" in model_fields_set
+      if model_fields_set is not None
+      else True
+  )
 
   if is_explicit:
     if saved_scan_layers != config.scan_layers:
       raise ValueError(
-          f"Configuration mismatch: Your run specifies scan_layers={config.scan_layers}, "
-          f"but the checkpoint was saved with scan_layers={saved_scan_layers}."
+          "Configuration mismatch: Your run specifies"
+          f" scan_layers={config.scan_layers}, but the checkpoint was saved"
+          f" with scan_layers={saved_scan_layers}."
       )
   else:
-    max_logging.log(f"Setting scan_layers={saved_scan_layers} loaded from checkpoint metadata.")
+    max_logging.log(
+        f"Setting scan_layers={saved_scan_layers} loaded from checkpoint"
+        " metadata."
+    )
     # pyrefly: ignore[missing-attribute]
-    new_pydantic_config = pydantic_config.model_copy(update={"scan_layers": saved_scan_layers})
+    new_pydantic_config = pydantic_config.model_copy(
+        update={"scan_layers": saved_scan_layers}
+    )
     # Wrap back in HyperParameters if the original config was wrapped
     if getattr(config, "_pydantic_config", None) is not None:
       config = pyconfig.HyperParameters(new_pydantic_config)
@@ -869,7 +1098,10 @@ def from_pretrained(
       # Otherwise every host would race to download from HF and concurrently write the same
       # GCS checkpoint, wasting work and risking corruption.
       if jax.process_index() == 0:
-        max_logging.warning("Checkpoint path is not provided, converting checkpoint to orbax format for MaxText")
+        max_logging.warning(
+            "Checkpoint path is not provided, converting checkpoint to orbax"
+            " format for MaxText"
+        )
 
         # This is an empirically derived value. This simulated devices is needed such that orbax creates multiple
         # shards of the checkpoint. Without simulating multiple devices, when running on CPU orbax created a single
@@ -903,10 +1135,16 @@ def from_pretrained(
         try:
           subprocess.run(to_maxtext_cmd, env=conversion_env, check=True)
         except subprocess.CalledProcessError as e:
-          raise RuntimeError(f"Checkpoint conversion failed with exit code {e.returncode}") from e
+          raise RuntimeError(
+              f"Checkpoint conversion failed with exit code {e.returncode}"
+          ) from e
 
-      jax.experimental.multihost_utils.sync_global_devices("from_pretrained_convert_checkpoint")
-    load_parameters_path = epath.Path(config.base_output_directory) / "0" / "items"
+      jax.experimental.multihost_utils.sync_global_devices(
+          "from_pretrained_convert_checkpoint"
+      )
+    load_parameters_path = (
+        epath.Path(config.base_output_directory) / "0" / "items"
+    )
     # Create a copied Pydantic model with the updated values
     pydantic_config = getattr(config, "_pydantic_config", config)
     new_config = pydantic_config.model_copy(  # pyrefly: ignore[missing-attribute]
@@ -929,10 +1167,14 @@ def from_pretrained(
   specs = nnx.get_partition_spec(_abs_state_for_specs)
 
   if config.pure_nnx:
-    model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
+    model = maxtext_utils_nnx.create_nnx_sharded_model(
+        abstract_model, _create_model, mesh=mesh
+    )
     # TODO: print debug_sharding info
   else:
-    model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
+    model = create_nnx_sharded_model_hybrid(
+        config, mesh, devices, model_mode, rng_key
+    )
 
   sharded_state = nnx.state(model)
 
@@ -959,13 +1201,15 @@ def from_pretrained(
       metadata = ckptr.metadata(config.load_parameters_path)
       if metadata is None or metadata.item_metadata is None:
         max_logging.log(
-            f"ERROR: No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
-            "Please check your load_parameters_path, the path may be missing, empty, "
-            "or point to a parent directory rather than the checkpoint step directory "
+            "ERROR: No valid Orbax checkpoint found at"
+            f" '{config.load_parameters_path}'. Please check your"
+            " load_parameters_path, the path may be missing, empty, or point"
+            " to a parent directory rather than the checkpoint step directory "
         )
         raise ValueError(
-            f"No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
-            "Please check your load_parameters_path."
+            "No valid Orbax checkpoint found at"
+            f" '{config.load_parameters_path}'. Please check your"
+            " load_parameters_path."
         )
 
       def _adjust_target_for_moe_fusion(target, meta_tree, is_nnx):
@@ -973,31 +1217,46 @@ def from_pretrained(
           return target
         new_target = {}
         for k, v in target.items():
-          if k == "wi" and "wi" not in meta_tree and "wi_0" in meta_tree and "wi_1" in meta_tree:
+          if (
+              k == "wi"
+              and "wi" not in meta_tree
+              and "wi_0" in meta_tree
+              and "wi_1" in meta_tree
+          ):
             if not is_nnx:
               arr = v
               half_dim = arr.shape[-1] // 2
               new_target["wi_0"] = jax.ShapeDtypeStruct(
-                  shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                  shape=arr.shape[:-1] + (half_dim,),
+                  dtype=arr.dtype,
+                  sharding=arr.sharding,
               )
               new_target["wi_1"] = jax.ShapeDtypeStruct(
-                  shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                  shape=arr.shape[:-1] + (half_dim,),
+                  dtype=arr.dtype,
+                  sharding=arr.sharding,
               )
             else:
               arr = v["value"]
               half_dim = arr.shape[-1] // 2
               new_target["wi_0"] = {
                   "value": jax.ShapeDtypeStruct(
-                      shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                      shape=arr.shape[:-1] + (half_dim,),
+                      dtype=arr.dtype,
+                      sharding=arr.sharding,
                   )
               }
               new_target["wi_1"] = {
                   "value": jax.ShapeDtypeStruct(
-                      shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                      shape=arr.shape[:-1] + (half_dim,),
+                      dtype=arr.dtype,
+                      sharding=arr.sharding,
                   )
               }
           else:
-            new_target[k] = _adjust_target_for_moe_fusion(v, meta_tree.get(k, {}), is_nnx)
+            new_target[k] = _adjust_target_for_moe_fusion(
+                v, meta_tree.get(k, {}), is_nnx
+            )
 
         return new_target
 
@@ -1010,7 +1269,9 @@ def from_pretrained(
       # types (e.g. `qrhs.frozen`), which are NOT subclasses of `nnx.Param`. Negative filtering with
       # `not isinstance(...)` safely retains all weight-like leaves while excluding transient runtime state.
       param_state = sharded_state.filter(
-          lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+          lambda path, var: not isinstance(
+              var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)
+          )
       )
       is_nnx_checkpoint = True
       if (
@@ -1026,11 +1287,15 @@ def from_pretrained(
         )
 
         target_for_restore = _adjust_target_for_moe_fusion(
-            target_for_restore, metadata.item_metadata.tree["params"]["params"], False
+            target_for_restore,
+            metadata.item_metadata.tree["params"]["params"],
+            False,
         )
 
         item_to_restore = {"params": {"params": target_for_restore}}
-        base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+        base_restore_args = ocp.checkpoint_utils.construct_restore_args(
+            target_for_restore
+        )
         restore_args = {
             "params": {
                 "params": _fix_restore_args_for_shape_mismatch(
@@ -1084,11 +1349,19 @@ def from_pretrained(
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
         has_base_key = "base" in metadata.item_metadata.tree
-        meta_tree_for_params = metadata.item_metadata.tree.get("base", metadata.item_metadata.tree)
-        target_for_restore = _adjust_target_for_moe_fusion(target_for_restore, meta_tree_for_params, True)
-        item_to_restore = {"base": target_for_restore} if has_base_key else target_for_restore
+        meta_tree_for_params = metadata.item_metadata.tree.get(
+            "base", metadata.item_metadata.tree
+        )
+        target_for_restore = _adjust_target_for_moe_fusion(
+            target_for_restore, meta_tree_for_params, True
+        )
+        item_to_restore = (
+            {"base": target_for_restore} if has_base_key else target_for_restore
+        )
         restore_args = _fix_restore_args_for_shape_mismatch(
-            ocp.checkpoint_utils.construct_restore_args(target_for_restore), meta_tree_for_params, mesh
+            ocp.checkpoint_utils.construct_restore_args(target_for_restore),
+            meta_tree_for_params,
+            mesh,
         )
         restore_args = {"base": restore_args} if has_base_key else restore_args
 
@@ -1099,10 +1372,14 @@ def from_pretrained(
         # Check if the path contains any name containing 'custom' which indicates a customized layer.
         # If yes, skip freeing device memory for this node and its children so they can be
         # initialized with random values.
-        is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
+        is_custom = any(
+            "custom_linear" in str(getattr(p, "key", p)) for p in path
+        )
         if (
             isinstance(node, nnx.Variable)
-            and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+            and not isinstance(
+                node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)
+            )
             and not is_custom
         ):
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
@@ -1112,12 +1389,20 @@ def from_pretrained(
           for leaf in jax.tree_util.tree_leaves(inner):
             if isinstance(leaf, jax.Array) and not leaf.is_deleted():
               leaf.delete()
-        elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
+        elif (
+            isinstance(node, jax.Array)
+            and not node.is_deleted()
+            and not is_custom
+        ):
           node.delete()
 
         return node
 
-      jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+      jax.tree_util.tree_map_with_path(
+          _free_device_memory,
+          sharded_state,
+          is_leaf=lambda n: isinstance(n, nnx.Variable),
+      )
 
       restored = ckptr.restore(
           epath.Path(config.load_parameters_path),
@@ -1131,7 +1416,9 @@ def from_pretrained(
         checkpoint = jax.tree.map(
             lambda v: v["value"],
             restored_root,
-            is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+            is_leaf=lambda x: isinstance(x, dict)
+            and "value" in x
+            and not isinstance(x.get("value"), dict),
         )
       else:
         checkpoint = restored["params"]["params"]
@@ -1176,10 +1463,23 @@ def from_pretrained(
         del restored
 
         def _filter_to_model_keys(ckpt, model):
-          """Recursively keep only keys present in model, dropping checkpoint-only fields (e.g. to_nnx__rngs)."""
+          """Recursively keep only keys present in model, dropping checkpoint-only fields.
+
+          Args:
+            ckpt: Checkpoint dictionary.
+            model: Model array dictionary.
+
+          Returns:
+            Filtered checkpoint dictionary containing only keys present in
+            model.
+          """
           if not hasattr(ckpt, "items") or not hasattr(model, "items"):
             return ckpt
-          return {k: _filter_to_model_keys(ckpt[k], model[k]) for k in model if k in ckpt}
+          return {
+              k: _filter_to_model_keys(ckpt[k], model[k])
+              for k in model
+              if k in ckpt
+          }
 
         checkpoint = _filter_to_model_keys(checkpoint, model_arrays)
 
@@ -1197,7 +1497,9 @@ def from_pretrained(
           # qvalue+scale arrays), not a single jax.Array. Shape alignment
           # only makes sense for full-precision kernels — quantized payloads
           # are saved in the exact shape the model expects, so pass through.
-          if not isinstance(ckpt, (jax.Array, jax.ShapeDtypeStruct, np.ndarray)):
+          if not isinstance(
+              ckpt, (jax.Array, jax.ShapeDtypeStruct, np.ndarray)
+          ):
             return ckpt
           return _align_checkpoint_to_model_shapes(ckpt, model_arr, axes)
 
@@ -1205,10 +1507,11 @@ def from_pretrained(
         nnx.update(model, checkpoint)
       else:
         raise ValueError(
-            f"Checkpoint restore from '{config.load_parameters_path}' yielded no parameters. "
-            "This usually means the checkpoint format is incompatible with the model configuration "
-            "(e.g. a scanned checkpoint loaded with scan_layers=False, or vice versa). "
-            "Please ensure the checkpoint format matches the scan_layers setting."
+            f"Checkpoint restore from '{config.load_parameters_path}' yielded"
+            " no parameters. This usually means the checkpoint format is"
+            " incompatible with the model configuration (e.g. a scanned"
+            " checkpoint loaded with scan_layers=False, or vice versa). Please"
+            " ensure the checkpoint format matches the scan_layers setting."
         )
 
     if wrap_with_tunix_adapter:
@@ -1230,9 +1533,12 @@ def from_pretrained(
 def setup_decode_state_from_nnx(model, config, rng, mesh):
   """Setup decode state by loading an NNX or NNX-RL checkpoint into a linen TrainState.
 
-  Calls from_pretrained (which handles NNX and NNX-RL 'base'-nested checkpoints and
-  applies mesh sharding internally), then extracts nnx.Param values into a plain dict
-  for the linen TrainState. For linen checkpoints, use maxtext_utils.setup_decode_state instead.
+  Calls from_pretrained (which handles NNX and NNX-RL 'base'-nested checkpoints
+  and
+  applies mesh sharding internally), then extracts nnx.Param values into a plain
+  dict
+  for the linen TrainState. For linen checkpoints, use
+  maxtext_utils.setup_decode_state instead.
 
   Args:
     model: the flax linen model to initialize
@@ -1244,11 +1550,17 @@ def setup_decode_state_from_nnx(model, config, rng, mesh):
     state: linen TrainState with params loaded from the NNX checkpoint
     state_mesh_annotations: the mesh annotations for the state
   """
-  init_state_fn = partial(maxtext_utils.init_initial_state, model, None, config, False, rng)
-  _, state_mesh_annotations, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, False)
+  init_state_fn = partial(
+      maxtext_utils.init_initial_state, model, None, config, False, rng
+  )
+  _, state_mesh_annotations, _ = maxtext_utils.get_abstract_state(
+      config, mesh, init_state_fn, False
+  )
 
   # Load the NNX model; from_pretrained handles sharding via jax.jit(out_shardings=...).
-  nnx_model = from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE)
+  nnx_model = from_pretrained(
+      config, mesh=mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE
+  )
 
   # Extract nnx.Param values, converting the State pytree to a plain nested dict.
   def _state_to_dict(tree):

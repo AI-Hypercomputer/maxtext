@@ -18,19 +18,17 @@ import dataclasses
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
-
+from absl.testing import absltest
+from flax import nnx
+import flax.linen as nn
+from flax.training import train_state
 import jax
 import jax.numpy as jnp
-import numpy as np
-import flax.linen as nn
-from flax import nnx
 from jax.sharding import Mesh
-from orbax import checkpoint as ocp
-import pytest
-
-from flax.training import train_state
+from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
+from maxtext.common.common_types import MODEL_MODE_PREFILL
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -42,6 +40,9 @@ from maxtext.utils.model_creation_utils import (
     _zero_pad_axis,
 )
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+from orbax import checkpoint as ocp
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +195,33 @@ class TestAlignCheckpointToModelShapes(unittest.TestCase):
     model = jnp.zeros((2, 4), dtype=jnp.float32)
     out = _align_checkpoint_to_model_shapes(ckpt, model, ("a", "b"))
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ckpt))
+
+  def test_transposed_2d_shapes_align_correctly(self):
+    """Transposed 2D arrays must transpose to align ckpt (2, 3) to model (3, 2)."""
+    ckpt = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)
+    model = jnp.zeros((3, 2), dtype=jnp.float32)
+    out = _align_checkpoint_to_model_shapes(
+        ckpt, model, ("moe_layers", "expert")
+    )
+    out_np = np.asarray(out)
+    self.assertEqual(out_np.shape, (3, 2))
+    np.testing.assert_array_equal(out_np, np.asarray(ckpt.T))
+
+  def test_transposed_2d_shapes_with_sharded_model(self):
+    """Transposed 2D arrays should align and assume the model array's sharding."""
+    mesh = jax.sharding.Mesh(jax.local_devices()[:1], ("x",))
+    sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("x", None)
+    )
+    ckpt = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)
+    model = jax.device_put(jnp.zeros((3, 2), dtype=jnp.float32), sharding)
+    out = _align_checkpoint_to_model_shapes(
+        ckpt, model, ("moe_layers", "expert")
+    )
+    out_np = np.asarray(out)
+    self.assertEqual(out_np.shape, (3, 2))
+    self.assertEqual(out.sharding, sharding)
+    np.testing.assert_array_equal(out_np, np.asarray(ckpt.T))
 
   def test_kv_heads_repeat_layout(self):
     """KV-head axis must use jnp.repeat: [h0, h0, h1, h1], NOT [h0, h1, h0, h1]."""
@@ -628,6 +656,12 @@ class TestCreateNnxModel(unittest.TestCase):
   def setUp(self):
     self.config = _make_config()
     self.mesh = _make_mesh(self.config)
+    patcher = patch(
+        "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+    )
+    self.mock_load_meta = patcher.start()
+    self.mock_load_meta.return_value = {"scan_layers": True}
+    self.addCleanup(patcher.stop)
 
   def test_no_checkpoint_returns_model_and_mesh(self):
     """Without load_parameters_path, should return the model cleanly."""
@@ -673,7 +707,7 @@ class TestCreateNnxModel(unittest.TestCase):
     meta.item_metadata.tree.get.return_value = {}
     return meta
 
-  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.ocp")
   def test_load_nnx_checkpoint(self, mock_ocp):
     """NNX-format checkpoint: restored values are wrapped under a 'value' key."""
     # Echo back the `item` argument passed by from_pretrained to ckptr.restore.
@@ -692,7 +726,7 @@ class TestCreateNnxModel(unittest.TestCase):
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
-  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.ocp")
   def test_load_linen_checkpoint(self, mock_ocp):
     """Linen-format checkpoint: restored values are nested under 'params'/'params'."""
     # Echo back the `item` argument passed by from_pretrained to ckptr.restore.
@@ -711,9 +745,15 @@ class TestCreateNnxModel(unittest.TestCase):
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
-  @patch("maxtext.utils.model_creation_utils.ocp")
-  def test_load_checkpoint_with_custom_vision_projector(self, mock_ocp):
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.ocp")
+  def test_load_checkpoint_with_custom_vision_projector(
+      self, mock_ocp, mock_load_meta
+  ):
     """NNX checkpoint loading with customized_mlp vision projector runs _free_device_memory cleanly."""
+    mock_load_meta.return_value = {"scan_layers": False}
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
     mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
@@ -737,9 +777,13 @@ class TestCreateNnxModel(unittest.TestCase):
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
-  @patch("maxtext.utils.model_creation_utils.ocp")
-  def test_checkpoint_load_error_propagates(self, mock_ocp):
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.ocp")
+  def test_checkpoint_load_error_propagates(self, mock_ocp, mock_load_meta):
     """Non-mismatch exceptions during checkpoint loading should propagate directly."""
+    mock_load_meta.return_value = {"scan_layers": True}
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.side_effect = RuntimeError("disk on fire")
     mock_ocp.Checkpointer.return_value = mock_ckptr
@@ -749,7 +793,9 @@ class TestCreateNnxModel(unittest.TestCase):
     with self.assertRaises(RuntimeError):
       model_creation_utils.from_pretrained(cfg, self.mesh)
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_scan_layers_mismatch_raises_error(self, mock_load_meta):
     """ValueError is raised if run specifies scan_layers=True but checkpoint specifies scan_layers=False."""
     mock_load_meta.return_value = {"scan_layers": False}
@@ -766,8 +812,10 @@ class TestCreateNnxModel(unittest.TestCase):
         str(context.exception),
     )
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
-  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.ocp")
   def test_scan_layers_match_no_error(self, mock_ocp, mock_load_meta):
     """If the run specifies scan_layers=True and the checkpoint matches, it proceeds without error."""
     mock_load_meta.return_value = {"scan_layers": True}
@@ -787,8 +835,10 @@ class TestCreateNnxModel(unittest.TestCase):
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
-  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.ocp")
   def test_scan_layers_missing_metadata_no_error(self, mock_ocp, mock_load_meta):
     """Skip verification and proceed if custom_metadata lacks 'scan_layers'."""
     mock_load_meta.return_value = {}
@@ -826,7 +876,10 @@ class TestSetupDecodeStateFromNnx(unittest.TestCase):
     linen_model = model_creation_utils.from_config(self.config, mesh=self.mesh, rngs=None)
 
     # Now patch from_pretrained so setup_decode_state_from_nnx never touches a checkpoint.
-    with patch("maxtext.utils.model_creation_utils.from_pretrained", return_value=real_nnx_model) as mock_fp:
+    with patch(
+        "maxtext.src.maxtext.utils.model_creation_utils.from_pretrained",
+        return_value=real_nnx_model,
+    ) as mock_fp:
       state, state_mesh_annotations = model_creation_utils.setup_decode_state_from_nnx(
           linen_model, self.config, self.rng, self.mesh
       )
@@ -864,7 +917,9 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
   def setUp(self):
     self.mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("x",))
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_sync_to_false_when_implicit(self, mock_load_meta):
     """If scan_layers is not explicit, sync scan_layers to False from checkpoint metadata."""
     mock_load_meta.return_value = {"scan_layers": False}
@@ -874,7 +929,7 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     # Pre-assertions
     pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
     self.assertTrue(cfg.scan_layers)  # default is True
-    self.assertNotIn("scan_layers", pydantic_cfg.model_fields_set)
+    self.assertNotIn("scan_layers", pydantic_cfg.model_fields_set)  # pyrefly: ignore[missing-attribute]
 
     # Call verify_and_sync_scan_layers
     synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
@@ -882,9 +937,11 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     # Post-assertions
     self.assertFalse(synced_cfg.scan_layers)
     synced_pydantic_cfg = getattr(synced_cfg, "_pydantic_config", synced_cfg)
-    self.assertFalse(synced_pydantic_cfg.scan_layers)
+    self.assertFalse(synced_pydantic_cfg.scan_layers)  # pyrefly: ignore[missing-attribute]
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_sync_to_true_when_implicit(self, mock_load_meta):
     """If scan_layers is not explicit, sync scan_layers to True from checkpoint metadata."""
     mock_load_meta.return_value = {"scan_layers": True}
@@ -893,7 +950,9 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
     self.assertTrue(synced_cfg.scan_layers)
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_explicit_match_raises_no_error(self, mock_load_meta):
     """If scan_layers is explicit and matches checkpoint metadata, no error is raised."""
     mock_load_meta.return_value = {"scan_layers": True}
@@ -902,12 +961,14 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     # Pre-assertions
     pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
     self.assertTrue(cfg.scan_layers)
-    self.assertIn("scan_layers", pydantic_cfg.model_fields_set)
+    self.assertIn("scan_layers", pydantic_cfg.model_fields_set)  # pyrefly: ignore[missing-attribute]
 
     synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
     self.assertTrue(synced_cfg.scan_layers)
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_explicit_mismatch_raises_value_error(self, mock_load_meta):
     """If scan_layers is explicit and mismatches checkpoint metadata, ValueError is raised."""
     mock_load_meta.return_value = {"scan_layers": False}
@@ -916,15 +977,17 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     # Pre-assertions
     pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
     self.assertTrue(cfg.scan_layers)
-    self.assertIn("scan_layers", pydantic_cfg.model_fields_set)
+    self.assertIn("scan_layers", pydantic_cfg.model_fields_set)  # pyrefly: ignore[missing-attribute]
 
     with self.assertRaises(ValueError) as context:
       model_creation_utils.verify_and_sync_scan_layers(cfg)
 
     self.assertIn("Configuration mismatch", str(context.exception))
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
-  @patch("maxtext.utils.model_creation_utils.max_logging.log")
+  @patch(
+      "maxtext.src.maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.max_logging.log")
   def test_sync_log_and_early_return(self, mock_log, mock_load_meta):
     """Test that we log only when auto-resolution actually changes scan_layers, and early return otherwise."""
     # Scenario A: saved_scan_layers == config.scan_layers (default True).
@@ -946,10 +1009,6 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     mock_log.assert_called_once_with("Setting scan_layers=False loaded from checkpoint metadata.")
 
 
-if __name__ == "__main__":
-  unittest.main()
-
-
 class TestFromPretrainedAuth(unittest.TestCase):
   """Tests for Hugging Face authentication in from_pretrained."""
 
@@ -959,10 +1018,10 @@ class TestFromPretrainedAuth(unittest.TestCase):
     meta.item_metadata.tree.get.return_value = {}
     return meta
 
-  @patch("maxtext.utils.model_creation_utils.ocp")
-  @patch("maxtext.utils.model_creation_utils.subprocess.run")
-  @patch("maxtext.utils.model_creation_utils.get_token")
-  @patch("maxtext.utils.model_creation_utils.epath.Path")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.subprocess.run")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.get_token")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.epath.Path")
   def test_auth_success_with_config_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
     config = _make_config(
         convert_checkpoint_if_possible=True,
@@ -990,10 +1049,10 @@ class TestFromPretrainedAuth(unittest.TestCase):
     self.assertEqual(called_env.get("HF_TOKEN"), "config_token")
     mock_get_token.assert_not_called()
 
-  @patch("maxtext.utils.model_creation_utils.ocp")
-  @patch("maxtext.utils.model_creation_utils.subprocess.run")
-  @patch("maxtext.utils.model_creation_utils.get_token")
-  @patch("maxtext.utils.model_creation_utils.epath.Path")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.subprocess.run")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.get_token")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.epath.Path")
   def test_auth_success_with_cached_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
     config = _make_config(
         convert_checkpoint_if_possible=True,
@@ -1023,10 +1082,10 @@ class TestFromPretrainedAuth(unittest.TestCase):
     called_env = mock_run.call_args[1].get("env", {})
     self.assertEqual(called_env.get("HF_TOKEN"), "cached_token")
 
-  @patch("maxtext.utils.model_creation_utils.ocp")
-  @patch("maxtext.utils.model_creation_utils.subprocess.run")
-  @patch("maxtext.utils.model_creation_utils.get_token")
-  @patch("maxtext.utils.model_creation_utils.epath.Path")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.subprocess.run")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.get_token")
+  @patch("maxtext.src.maxtext.utils.model_creation_utils.epath.Path")
   def test_auth_failure_no_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
     config = _make_config(
         convert_checkpoint_if_possible=True,
@@ -1045,3 +1104,7 @@ class TestFromPretrainedAuth(unittest.TestCase):
       model_creation_utils.from_pretrained(config, mesh)
 
     mock_run.assert_not_called()
+
+
+if __name__ == "__main__":
+  absltest.main()
