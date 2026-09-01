@@ -18,13 +18,68 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, Config, HyperConnectionType, MODEL_MODE_TRAIN
+from maxtext.common.common_types import (
+    Array,
+    Config,
+    HyperConnectionType,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
+    MODEL_MODE_TRAIN,
+)
+from maxtext.inference import kvcache
 from maxtext.layers import initializers, linears, mhc, moe, nnx_wrappers
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.utils import max_utils
 
 
 def l2norm(t: Array, eps: float = 1e-6) -> Array:
   return t * jax.lax.rsqrt(jnp.sum(t * t, axis=-1, keepdims=True) + eps)
+
+
+def scan_kimi_delta_attention(q, k, v, g, beta, mask=None, initial_state=None):
+  """Scan Kimi Delta Attention across sequence dimension."""
+  q = q.astype(jnp.float32)
+  k = k.astype(jnp.float32)
+  v = v.astype(jnp.float32)
+  g = g.astype(jnp.float32)
+  beta = beta.astype(jnp.float32)
+
+  q_norm = l2norm(q, eps=1e-6) * (q.shape[-1] ** -0.5)
+  k_norm = l2norm(k, eps=1e-6)
+  g_exp = jnp.exp(g)
+
+  if mask is not None:
+    mask_f = (mask != 0).astype(jnp.float32)
+    k_norm = k_norm * mask_f[..., None, None]
+    q_norm = q_norm * mask_f[..., None, None]
+    beta = beta * mask_f[..., None]
+    g_exp = jnp.where(mask_f[..., None, None] != 0, g_exp, 1.0)
+
+  b, _, h, d = q.shape
+  if initial_state is None:
+    init_state = jnp.zeros((b, h, d, d), dtype=jnp.float32)
+  else:
+    init_state = initial_state.astype(jnp.float32)
+
+  def step(state, inputs):
+    q_i, k_i, v_i, g_i, b_i = inputs
+    state = state * g_i[..., :, None]
+    kv_mem = jnp.einsum("bhkd,bhk->bhd", state, k_i)
+    delta = (v_i - kv_mem) * b_i[..., None]
+    new_state = state + jnp.einsum("bhk,bhd->bhkd", k_i, delta)
+    out = jnp.einsum("bhkd,bhk->bhd", new_state, q_i)
+    return new_state, out
+
+  xs = (
+      jnp.swapaxes(q_norm, 0, 1),
+      jnp.swapaxes(k_norm, 0, 1),
+      jnp.swapaxes(v, 0, 1),
+      jnp.swapaxes(g_exp, 0, 1),
+      jnp.swapaxes(beta, 0, 1),
+  )
+  final_state, outs = jax.lax.scan(step, init_state, xs)
+  outs = jnp.swapaxes(outs, 0, 1)
+  return outs, final_state
 
 
 class Glm5NextAttention(nnx.Module):
@@ -49,6 +104,7 @@ class Glm5NextAttention(nnx.Module):
     self.head_dim = config.linear_head_dim
     self.kda_conv_size = config.linear_conv_kernel_dim
     self.conv_dim = self.num_heads * self.head_dim
+    self.linear_lower_bound = getattr(config, "linear_lower_bound", -5.0)
 
     # Projections
     self.q_proj = linears.DenseGeneral(
@@ -139,6 +195,39 @@ class Glm5NextAttention(nnx.Module):
         mesh=self.mesh,
         rngs=self.rngs,
     )
+
+    # 1D Depthwise Convolution over concatenated (Q, K, V)
+    self.conv1d = nnx.Conv(
+        in_features=3 * self.conv_dim,
+        out_features=3 * self.conv_dim,
+        kernel_size=(self.kda_conv_size,),
+        feature_group_count=3 * self.conv_dim,
+        use_bias=False,
+        padding="VALID",
+        dtype=self.dtype,
+        param_dtype=self.weight_dtype,
+        rngs=self.rngs,
+    )
+
+    # Forget gate learnable parameters
+    self.A_log = nnx.Param(
+        jnp.zeros((self.num_heads,), dtype=self.weight_dtype),
+        out_sharding=("heads",),
+    )
+    self.dt_bias = nnx.Param(
+        jnp.zeros((self.conv_dim,), dtype=self.weight_dtype),
+        out_sharding=("heads",),
+    )
+
+    # Output normalization and projection
+    self.o_norm = RMSNorm(
+        num_features=self.head_dim,
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        epsilon=config.normalization_layer_epsilon,
+        kernel_axes=("head_dim",),
+        rngs=self.rngs,
+    )
     self.o_proj = linears.DenseGeneral(
         self.conv_dim,
         self.emb_dim,
@@ -151,117 +240,144 @@ class Glm5NextAttention(nnx.Module):
         rngs=self.rngs,
     )
 
-    # Conv1D on concatenated Q, K, V
-    conv_features = 3 * self.conv_dim
-    self.conv1d = nnx.Conv(
-        in_features=conv_features,
-        out_features=conv_features,
-        kernel_size=(self.kda_conv_size,),
-        feature_group_count=conv_features,
-        use_bias=False,
-        padding="VALID",
-        rngs=self.rngs,
-    )
-
-    self.A_log = nnx.Param(
-        jnp.zeros((self.num_heads,), dtype=self.weight_dtype),
-    )
-    self.dt_bias = nnx.Param(
-        jnp.zeros((self.conv_dim,), dtype=self.weight_dtype),
-    )
-
-    self.o_norm = RMSNorm(
-        num_features=self.head_dim,
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        epsilon=config.normalization_layer_epsilon,
-        kernel_axes=("head_dim",),
-        rngs=self.rngs,
-    )
+    if self.model_mode != MODEL_MODE_TRAIN:
+      batch_size, _ = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+      self.cache = kvcache.KVCache(
+          max_prefill_length=config.max_prefill_predict_length,
+          max_target_length=config.max_target_length,
+          batch=batch_size,
+          key_seq_len=1,
+          value_seq_len=1,
+          key_heads=self.num_heads,
+          value_heads=self.num_heads,
+          key_head_size=self.head_dim,
+          value_head_size=self.head_dim,
+          dtype=self.dtype,
+          is_gdn=True,
+          conv_kernel_size=self.kda_conv_size,
+          conv_dim=3 * self.conv_dim,
+          model_mode=self.model_mode,
+          rngs=self.rngs,
+      )
+    else:
+      self.cache = None
 
   def __call__(
       self,
       inputs_q: Array,
       inputs_kv: Array | None = None,
+      decoder_segment_ids: Array | None = None,
+      decoder_positions: Array | None = None,
+      model_mode: str = MODEL_MODE_TRAIN,
       **kwargs,
   ) -> tuple[Array, None]:
     x = inputs_q
     b, s, _ = x.shape
 
-    q = self.q_proj(x)
-    k = self.k_proj(x)
-    v = self.v_proj(x)
+    if decoder_segment_ids is not None:
+      mask = decoder_segment_ids != 0
+      x_masked = jnp.where(mask[..., None], x, 0.0)
+    else:
+      x_masked = x
 
-    # 1D causal convolution on concatenated (q, k, v)
+    # Projections
+    q = self.q_proj(x_masked)
+    k = self.k_proj(x_masked)
+    v = self.v_proj(x_masked)
+
+    # 1D Conv over concatenated [q, k, v]
     qkv = jnp.concatenate([q, k, v], axis=-1)
-    pad_qkv = jnp.pad(qkv, ((0, 0), (self.kda_conv_size - 1, 0), (0, 0)))
-    conv_out = jax.nn.silu(self.conv1d(pad_qkv))
-    q, k, v = jnp.split(conv_out, 3, axis=-1)
+    conv_kernel_size = self.kda_conv_size
 
-    # Per-head update strength (beta).
-    b_val = self.b_proj(x)
-    beta = jax.nn.sigmoid(b_val)[..., None]
+    conv_state = None
+    recurrent_state = None
+    next_conv_state = None
 
-    # Per-channel forget gate.
-    f_a = self.f_a_proj(x)
+    if self.cache is not None and model_mode != MODEL_MODE_TRAIN:
+      recurrent_state, conv_state = self.cache.get_gdn_states()
+      conv_input = jnp.concatenate([conv_state, qkv], axis=1)
+
+      if decoder_segment_ids is not None:
+        valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1)
+
+        def extract_state(c_in, v_len):
+          return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
+
+        next_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
+      else:
+        next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+    else:
+      conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
+
+    conv_out = self.conv1d(conv_input)
+    conv_out = conv_out[:, -s:, :]
+    qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(self.dtype)
+
+    q_conv, k_conv, v_conv = jnp.split(qkv_conv, 3, axis=-1)
+    q = jnp.reshape(q_conv, (b, s, self.num_heads, self.head_dim))
+    k = jnp.reshape(k_conv, (b, s, self.num_heads, self.head_dim))
+    v = jnp.reshape(v_conv, (b, s, self.num_heads, self.head_dim))
+
+    # Gates
+    beta = jax.nn.sigmoid(self.b_proj(x_masked))
+    f_a = self.f_a_proj(x_masked)
     f_b = self.f_b_proj(f_a)
-    decay_rate = jnp.exp(self.A_log[...].astype(jnp.float32))[None, None, :, None]
-    f_per_channel = jnp.reshape(f_b + self.dt_bias[...], (b, s, self.num_heads, self.head_dim))
-    g_log = -5.0 * jax.nn.sigmoid(decay_rate * f_per_channel)
-    g = jnp.exp(g_log)
+    f_b = jnp.reshape(f_b, (b, s, self.num_heads, self.head_dim))
+    dt_bias = jnp.reshape(self.dt_bias[...], (1, 1, self.num_heads, self.head_dim))
+    decay_rate = jnp.exp(self.A_log[None, None, :, None])
+    if self.linear_lower_bound is not None:
+      g = self.linear_lower_bound * jax.nn.sigmoid(decay_rate * (f_b + dt_bias))
+    else:
+      g_softplus = jnp.where(f_b + dt_bias > 20.0, f_b + dt_bias, jax.nn.softplus(f_b + dt_bias))
+      g = -decay_rate * g_softplus
 
-    # Output gate
-    g_a = self.g_a_proj(x)
-    g_b = self.g_b_proj(g_a)
-    gate = jnp.reshape(g_b, (b, s, self.num_heads, self.head_dim))
+    if s == 1 and model_mode == MODEL_MODE_AUTOREGRESSIVE:
+      q_step = q[:, 0].astype(jnp.float32)
+      k_step = k[:, 0].astype(jnp.float32)
+      v_step = v[:, 0].astype(jnp.float32)
+      g_step = g[:, 0].astype(jnp.float32)
+      beta_step = beta[:, 0].astype(jnp.float32)
 
-    # Reshape into [B, S, H, D]
-    q = jnp.reshape(q, (b, s, self.num_heads, self.head_dim))
-    k = jnp.reshape(k, (b, s, self.num_heads, self.head_dim))
-    v = jnp.reshape(v, (b, s, self.num_heads, self.head_dim))
+      q_norm = l2norm(q_step, eps=1e-6) * (self.head_dim**-0.5)
+      k_norm = l2norm(k_step, eps=1e-6)
+      g_exp = jnp.exp(g_step)
 
-    # L2 Norm and scale
-    q = l2norm(q) * (self.head_dim**-0.5)
-    k = l2norm(k)
+      if recurrent_state is None:
+        curr_state = jnp.zeros((b, self.num_heads, self.head_dim, self.head_dim), dtype=jnp.float32)
+      else:
+        curr_state = recurrent_state.astype(jnp.float32)
 
-    def scan_step(state, inputs):
-      g_t, q_t, k_t, v_t, beta_t = inputs
-      g_t = g_t[..., None]
-      state = state * g_t
-      kv_mem = jnp.einsum("hde,hd->he", state, k_t)
-      delta = (v_t - kv_mem) * beta_t
-      state = state + jnp.einsum("hd,he->hde", k_t, delta)
-      out_t = jnp.einsum("hde,hd->he", state, q_t)
-      return state, out_t
-
-    init_state = jnp.zeros((b, self.num_heads, self.head_dim, self.head_dim), dtype=q.dtype)
-
-    def scan_over_seq(init_s, q_seq, k_seq, v_seq, b_seq, g_seq):
-      _, seq_out = jax.lax.scan(
-          scan_step,
-          init_s,
-          (g_seq, q_seq, k_seq, v_seq, b_seq),
+      curr_state = curr_state * g_exp[..., :, None]
+      kv_mem = jnp.einsum("bhkd,bhk->bhd", curr_state, k_norm)
+      delta = (v_step - kv_mem) * beta_step[..., None]
+      next_recurrent_state = curr_state + jnp.einsum("bhk,bhd->bhkd", k_norm, delta)
+      attn_out = jnp.einsum("bhkd,bhk->bhd", next_recurrent_state, q_norm)
+      attn_out = jnp.expand_dims(attn_out, axis=1)
+    else:
+      attn_out, next_recurrent_state = scan_kimi_delta_attention(
+          q, k, v, g, beta, mask=decoder_segment_ids, initial_state=recurrent_state
       )
-      return seq_out
 
-    inputs_q_t = jnp.swapaxes(q, 0, 1)
-    inputs_k_t = jnp.swapaxes(k, 0, 1)
-    inputs_v_t = jnp.swapaxes(v, 0, 1)
-    inputs_b_t = jnp.swapaxes(beta, 0, 1)
-    inputs_g_t = jnp.swapaxes(g, 0, 1)
+    if self.cache is not None and model_mode != MODEL_MODE_TRAIN:
+      self.cache.update_gdn_states(
+          next_recurrent_state.astype(self.dtype),
+          next_conv_state.astype(self.dtype),
+      )
 
-    scan_vmap = jax.vmap(scan_over_seq, in_axes=(0, 1, 1, 1, 1, 1), out_axes=1)
-    scan_out = scan_vmap(init_state, inputs_q_t, inputs_k_t, inputs_v_t, inputs_b_t, inputs_g_t)
-    scan_out = jnp.swapaxes(scan_out, 0, 1)
+    # Output gating & norm
+    g_a = self.g_a_proj(x_masked)
+    g_b = self.g_b_proj(g_a)
+    g_b = jnp.reshape(g_b, (b, s, self.num_heads, self.head_dim))
 
-    norm_out = self.o_norm(scan_out) * jax.nn.sigmoid(gate)
-    norm_flat = jnp.reshape(norm_out, (b, s, self.conv_dim))
-    output = self.o_proj(norm_flat)
-    return output, None
+    normed = self.o_norm(attn_out.astype(self.dtype))
+    gated = normed * jax.nn.sigmoid(g_b.astype(jnp.float32)).astype(self.dtype)
+    gated_flat = jnp.reshape(gated, (b, s, self.conv_dim))
+    out = self.o_proj(gated_flat)
+    return out, None
 
 
 class Glm5NextSparseAttention(nnx.Module):
-  """GLM-5.3-Flash MLA / DeepSeek Sparse Attention Layer for inhomogeneous layers."""
+  """GLM-5.3-Flash MLA (Multi-Head Latent Attention) / Sparse Attention Layer."""
 
   def __init__(
       self,
@@ -363,12 +479,33 @@ class Glm5NextSparseAttention(nnx.Module):
         rngs=self.rngs,
     )
 
+    if self.model_mode != MODEL_MODE_TRAIN:
+      batch_size, _ = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+      self.cache = kvcache.KVCache(
+          max_prefill_length=config.max_prefill_predict_length,
+          max_target_length=config.max_target_length,
+          batch=batch_size,
+          key_seq_len=1,
+          value_seq_len=1,
+          key_heads=self.num_heads,
+          value_heads=self.num_heads,
+          key_head_size=self.qk_nope_head_dim,
+          value_head_size=self.v_head_dim,
+          dtype=self.dtype,
+          is_gdn=False,
+          model_mode=self.model_mode,
+          rngs=self.rngs,
+      )
+    else:
+      self.cache = None
+
   def __call__(
       self,
       inputs_q: Array,
       inputs_kv: Array | None = None,
       decoder_segment_ids: Array | None = None,
       decoder_positions: Array | None = None,
+      model_mode: str = MODEL_MODE_TRAIN,
       **kwargs,
   ) -> tuple[Array, None]:
     x = inputs_q
@@ -386,24 +523,56 @@ class Glm5NextSparseAttention(nnx.Module):
     k = kv_b[..., : self.qk_nope_head_dim]
     v = kv_b[..., self.qk_nope_head_dim :]
 
-    # [B, H, S, D]
-    q = jnp.swapaxes(q, 1, 2)
-    k = jnp.swapaxes(k, 1, 2)
-    v = jnp.swapaxes(v, 1, 2)
+    if self.cache is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE and s == 1:
+      cached_prefill, cached_ar = self.cache(k, v, decoder_segment_ids, model_mode=model_mode)
+      k_p, v_p, seg_p = cached_prefill
+      k_a, v_a, seg_a, _ = cached_ar
+      k_all = jnp.concatenate([k_p, k_a], axis=1)  # [B, max_target_length, H, D]
+      v_all = jnp.concatenate([v_p, v_a], axis=1)  # [B, max_target_length, H, D]
+      seg_all = jnp.concatenate([seg_p, seg_a], axis=1)  # [B, max_target_length]
 
-    # Scaled dot-product causal attention
-    scores = jnp.einsum("bhqd,bhkd->bhqk", q, k) * self.scaling
+      # [B, H, 1, D]
+      q = jnp.swapaxes(q, 1, 2)
+      # [B, H, max_target_length, D]
+      k_all = jnp.swapaxes(k_all, 1, 2)
+      v_all = jnp.swapaxes(v_all, 1, 2)
 
-    causal_mask = jnp.tril(jnp.ones((s, s), dtype=jnp.bool_))
-    mask_value = -1e9
-    scores = jnp.where(causal_mask[None, None, :, :], scores, mask_value)
+      scores = jnp.einsum("bhqd,bhkd->bhqk", q, k_all) * self.scaling
+      mask = seg_all[:, None, None, :] != 0
+      scores = jnp.where(mask, scores, -1e9)
 
-    attn_weights = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(self.dtype)
-    attn_out = jnp.einsum("bhqk,bhkd->bhqd", attn_weights, v)
+      attn_weights = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(self.dtype)
+      attn_out = jnp.einsum("bhqk,bhkd->bhqd", attn_weights, v_all)
+      attn_out = jnp.swapaxes(attn_out, 1, 2)
+      attn_out = jnp.reshape(attn_out, (b, s, self.num_heads * self.v_head_dim))
+    else:
+      if self.cache is not None and model_mode == MODEL_MODE_PREFILL:
+        self.cache(k, v, decoder_segment_ids, model_mode=model_mode)
 
-    # [B, S, H * D]
-    attn_out = jnp.swapaxes(attn_out, 1, 2)
-    attn_out = jnp.reshape(attn_out, (b, s, self.num_heads * self.v_head_dim))
+      # [B, H, S, D]
+      q = jnp.swapaxes(q, 1, 2)
+      k = jnp.swapaxes(k, 1, 2)
+      v = jnp.swapaxes(v, 1, 2)
+
+      # Scaled dot-product causal attention
+      scores = jnp.einsum("bhqd,bhkd->bhqk", q, k) * self.scaling
+
+      causal_mask = jnp.tril(jnp.ones((s, s), dtype=jnp.bool_))
+      if decoder_segment_ids is not None:
+        seg_mask = (decoder_segment_ids[:, None, :] != 0) & (decoder_segment_ids[:, :, None] != 0)
+        full_mask = causal_mask[None, :, :] & seg_mask
+        mask_value = -1e9
+        scores = jnp.where(full_mask[:, None, :, :], scores, mask_value)
+      else:
+        mask_value = -1e9
+        scores = jnp.where(causal_mask[None, None, :, :], scores, mask_value)
+
+      attn_weights = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(self.dtype)
+      attn_out = jnp.einsum("bhqk,bhkd->bhqd", attn_weights, v)
+
+      # [B, S, H * D]
+      attn_out = jnp.swapaxes(attn_out, 1, 2)
+      attn_out = jnp.reshape(attn_out, (b, s, self.num_heads * self.v_head_dim))
 
     out = self.o_proj(attn_out)
     return out, None
@@ -591,6 +760,10 @@ class Glm5NextDecoderLayer(nnx.Module):
         branch_fn=self.attention,
         x=x,
         mhc_type=HyperConnectionType.ATTENTION,
+        decoder_segment_ids=decoder_segment_ids,
+        decoder_positions=decoder_positions,
+        model_mode=model_mode,
+        deterministic=deterministic,
     )
 
     ffn_type = HyperConnectionType.MLP_MOE if self.is_moe else HyperConnectionType.MLP_DENSE
