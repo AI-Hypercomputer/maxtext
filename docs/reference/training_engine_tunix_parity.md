@@ -20,6 +20,7 @@ of the trainer, not of the workload.
 | `update()` alone                                   | Tunix **8.2 ms** vs. MaxText 14.0 ms — the one phase Tunix wins                |
 | Peak HBM/device, GA=1                              | MaxText **1.78 GiB** vs. Tunix 8.65 GiB (**4.9x**)                             |
 | Metrics recorded per step                          | MaxText **22** vs. Tunix 2                                                     |
+| Engine host step path, after the §9 fix            | qwen3-0.6b **1.80x** faster; qwen3.5-35b-a3b 1.004x — a fixed ~70 ms saving   |
 
 **On step time alone the two trainers are equivalent at production sequence lengths.**
 MaxText's lead is a short-sequence effect that amortizes away completely: 1.85x at 16
@@ -70,6 +71,26 @@ python tests/end_to_end/tpu/compare_tunix_trainer.py --trainer=maxtext --ga=1 --
 `--seq` sets the tokens per example, split evenly between prompt and completion. It
 defaults to 16 to keep the numerics runs cheap; use a realistic length for any step-time
 claim, because the trainers converge as the shape grows (§4).
+
+§9's host-path A/B uses a second harness, `tests/end_to_end/tpu/perf_parity/`, which drives
+one arm per process over a synthetic dataset and takes the mesh and model as flags:
+
+```bash
+cd tests/end_to_end/tpu/perf_parity   # the arms import qwen3_common as a sibling
+
+# The two §9 shapes. --no-trace for wall clock; drop it to write an xplane trace.
+python qwen3_engine_profile.py --model qwen3-0.6b       --tp 8          --seq 1024 --no-trace
+python qwen3_engine_profile.py --model qwen3.5-35b-a3b  --tp 2 --scan   --seq 1024 --no-trace
+
+# The same shape under Tunix's trainer, for the trainer-vs-trainer comparison. The tunix
+# arm refuses --model/--scan: it implements one architecture and has no scanned variant.
+python qwen3_maxtext_profile.py --tp 8 --seq 1024 --no-trace   # MaxText model, Tunix trainer
+python qwen3_tunix_profile.py   --tp 8 --seq 1024 --no-trace   # Tunix model, Tunix trainer
+```
+
+The "before" rows come from the same commands with only
+`src/maxtext/training_engine/{maxtext_engine,inflight_throttler}.py` reverted to the fix's
+parent commit, so nothing but the engine differs.
 
 ## 1. End-to-end GRPO test
 
@@ -181,6 +202,10 @@ Measured by no-op'ing `_record_metric` (13.78 → 10.95 ms) and by timing `nnx.s
 own. Tunix's `update` is 8.2 ms wall clock against 0.86 ms on device, so both trainers are
 host-bound here; MaxText is just ~6 ms more so. Neither the metrics recorder nor the
 `nnx.split` `TODO` in `maxtext_engine.py` accounts for the whole difference on its own.
+
+**§9 closes most of this row.** The `nnx.split` line is now served from a cached pure state
+and the metric fetch has been moved off the blocking path; what is left is the two
+`nnx.update` publish calls, which are kept on purpose.
 
 ### Where the `fwd_bwd` gap is *not*
 
@@ -355,6 +380,65 @@ Gradients are unaffected; this is a reporting bug only. The fix is to reduce the
 loss metric as `Σ unreduced_sum / Σ denominator` instead of letting it hit the `np.mean`
 fallback.
 
+## 9. Host step path: the fix, measured on two models
+
+The `update()` breakdown in §4 and the dispatch count in §7 both point at host work rather
+than at kernels. Three changes address it, none of them touching a compiled program: a pure
+`nnx.State` mirror carried across steps in place of a per-step `nnx.split` of the module
+graph, dropping a `mean_loss` the update kernel discards, and deferring the metrics write
+until after the next dispatch so its device-to-host read overlaps live work.
+
+Measured as an A/B on `src/maxtext/training_engine/{maxtext_engine,inflight_throttler}.py`
+alone, everything else held fixed. `--no-trace`, 23 steps, last 19 after warmup, batch 8 x
+seq 1024, GA=1, f32, `optax.sgd(1e-5)`, no clipping, on the same 8-device v7x host.
+
+| ms/step, untraced | median | mean | max | `fwd_bwd` / `update` |
+| ------------------------------------------------ | ---------- | ------ | ------ | --------------- |
+| **qwen3-0.6b**, `tp=8`, unscanned — before        | 161.6      | 216.0  | 464.1  | 38.7 / 122.0 ms |
+| **qwen3-0.6b**, `tp=8`, unscanned — after         | **89.8**   | 89.8   | 90.2   | 15.9 / 74.0 ms  |
+| speedup                                           | **1.80x**  | 2.41x  |        |                 |
+| **qwen3.5-35b-a3b**, `tp=2`, scanned — before     | 2322.5     | 2339.6 | 2641.8 | 13.6 / 2309.3 ms |
+| **qwen3.5-35b-a3b**, `tp=2`, scanned — after      | **2314.0** | 2314.0 | 2314.6 | 7.9 / 2306.1 ms |
+| speedup                                           | 1.004x     | 1.011x |        |                 |
+
+**The saving is a fixed quantity of host time, not a percentage**, so the two rows are the
+same fix seen from opposite ends. What it is worth on a given workload is set by two things:
+
+* **How big the NNX module graph is.** The cost removed is two graph traversals per step,
+  which scale with node count. Scanning collapses a decoder stack into one stacked node
+  set, so the *larger* model here has the *smaller* graph — 70 parameter leaves scanned
+  against qwen3-0.6b's 310 unscanned — and its `nnx.split` costs 5.0/4.7 ms against
+  21.3/22.3 ms. Model size is the wrong intuition for this; `scan_layers` is the right one.
+* **How long the device is busy.** Host work that fits inside the step's device time is
+  free. qwen3-0.6b at 1024 tokens is ~82 ms of TPU-busy, so ~70 ms of host work was mostly
+  exposed; qwen3.5-35b-a3b is 2.3 s of TPU-busy, so nearly all of it hides.
+
+**The tail improves even where the median does not.** qwen3.5-35b-a3b's worst step drops
+2641.8 → 2314.6 ms and its mean converges onto its median, a 327 ms jitter reduction on a
+model whose median moved 8.5 ms. Each `nnx.split` allocates a large short-lived object
+graph twice per step, and the GC pauses that follow land on whichever step is unlucky —
+visible as qwen3-0.6b's 464 ms worst step against a 161.6 ms median. Removing the
+allocation removes the pauses on both models.
+
+**Against `PeftTrainer` driving the identical model**, which is the control that isolates
+trainer from model, the engine closes to within a few ms on both:
+
+| ms/step, untraced, median | qwen3-0.6b `tp=8` | qwen3.5-35b-a3b `tp=2 --scan` |
+| ----------------------------------- | -------- | ---------- |
+| engine, before                      | 161.6    | 2322.5     |
+| **engine, after**                   | **89.8** | **2314.0** |
+| same MaxText model + `PeftTrainer`  | 83.4     | 2303.1     |
+| engine's remaining deficit          | 1.077x   | 1.005x     |
+
+**`qwen3.5-35b-a3b` constrains the mesh.** It has 2 KV heads, so `--tp 8` is rejected by the
+sharding checks, and unscanned it does not fit in HBM at any batch size or remat policy
+tried. `--tp 2 --scan` is the shape that runs on 8 devices. Tunix has no implementation of
+this architecture, so its column is absent above: the 35b comparison is engine against
+`PeftTrainer` over the same MaxText model, not model against model.
+
+Traced, the same A/B reads 271.4 → 92.8 ms and 2350.0 → 2315.2 ms. Those are the numbers
+that match the profiles below, and they overstate the win — see §4b.
+
 ## Calling `compile()` is load-bearing
 
 `MaxTextTrainingEngine.compile(dummy_batch)` must be called before the first `fwd_bwd`, or
@@ -390,6 +474,20 @@ every run, traced and untraced, are under `.../raw_results/`. View with:
 ```bash
 tensorboard --logdir gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/maxtext_ga1_bs8_seq1024
 ```
+
+The §9 A/B traces, engine-only, `before/` being this fix's parent commit and `after/` the
+fix, at the two shapes in that section:
+
+```text
+gs://chengnuojin-xprof/engine-hostpath-20260901/base/qwen3-0.6b-engine-fsdp1tp8/
+gs://chengnuojin-xprof/engine-hostpath-20260901/head/qwen3-0.6b-engine-fsdp1tp8/
+gs://chengnuojin-xprof/engine-hostpath-20260901/base/qwen3.5-35b-a3b-engine-scan-fsdp4tp2/
+gs://chengnuojin-xprof/engine-hostpath-20260901/head/qwen3.5-35b-a3b-engine-scan-fsdp4tp2/
+```
+
+Compilation *is* inside these windows — the engine arm calls `compile()` under the trace on
+purpose, so the first step carries it — so read from the steady-state region, not the whole
+trace.
 
 Read **total TPU-busy time**, not the trace viewer's step statistics — see §4b for why the
 latter is not meaningful for MaxText.

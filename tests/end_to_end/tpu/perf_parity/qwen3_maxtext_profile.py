@@ -78,7 +78,7 @@ def _build_config(spec: qc.RunSpec, scan_layers: bool):
   """
   return pyconfig.initialize(
       [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
-      model_name="qwen3-0.6b",
+      model_name=spec.model,
       run_name="perf_parity_qwen3_0p6b",
       base_output_directory=os.path.join(os.getcwd(), "maxtext_out"),
       max_target_length=spec.seq,
@@ -102,12 +102,9 @@ def _build_config(spec: qc.RunSpec, scan_layers: bool):
 
 
 def main() -> None:
-  parser = qc.add_common_args(argparse.ArgumentParser())
-  parser.add_argument("--scan", action="store_true", help="use MaxText's scanned decoder")
-  args = parser.parse_args()
-  spec = qc.RunSpec(args)
-  scan_layers = args.scan
-  profile_dir = qc.profile_dir(spec.tag("qwen3-0.6b-maxtext" + ("-scan" if scan_layers else "")))
+  spec = qc.RunSpec(qc.add_common_args(argparse.ArgumentParser()).parse_args())
+  scan_layers = spec.scan
+  profile_dir = qc.profile_dir(spec.tag(f"{spec.model}-maxtext" + ("-scan" if scan_layers else "")))
   print(spec.describe(), flush=True)
 
   tokenizer = AutoTokenizer.from_pretrained(qc.TOKENIZER_ID)
@@ -146,7 +143,7 @@ def main() -> None:
       trainer.train(dataset, skip_jit=False)
       jax.effects_barrier()
 
-  timer.report(f"maxtext qwen3-0.6b (scan_layers={scan_layers})", group=spec.ga)
+  timer.report(f"maxtext {spec.model} (scan_layers={scan_layers})", group=spec.ga)
   if spec.trace:
     print(f"trace written to {profile_dir}", flush=True)
 

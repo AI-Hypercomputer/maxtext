@@ -65,6 +65,9 @@ ACCUM_STEPS = 1
 VOCAB_SIZE = 151936
 
 TOKENIZER_ID = "Qwen/Qwen3-0.6B"
+# The model both trainers can run. `--model` moves the MaxText-side arms off it; the tunix
+# arm cannot follow, since tunix implements this one architecture and not the others.
+MODEL_NAME = "qwen3-0.6b"
 
 # Where each arm writes its xprof trace. Set `PERF_PARITY_PROFILE_ROOT` to a GCS bucket to
 # collect them somewhere durable; the destination has no bearing on the measurement, and
@@ -102,6 +105,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
   parser.add_argument("--seq", type=int, default=SEQ_LEN, help="tokens per example")
   parser.add_argument("--steps", type=int, default=MAX_STEPS, help="optimizer steps, warmup included")
   parser.add_argument("--no-trace", dest="trace", action="store_false", help="skip xprof; wall clock only")
+  parser.add_argument("--model", default=MODEL_NAME, help="MaxText model_name; the tunix arm only has qwen3-0.6b")
+  parser.add_argument("--scan", action="store_true", help="use MaxText's scanned decoder")
   return parser
 
 
@@ -129,6 +134,8 @@ class RunSpec:
     self.seq = args.seq
     self.steps = args.steps
     self.trace = args.trace
+    self.model = args.model
+    self.scan = args.scan
 
   @property
   def micro_steps(self) -> int:

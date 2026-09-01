@@ -54,9 +54,11 @@ something to equalise away:
 `_compile_requested`, `fwd_bwd` takes the eager path and runs `jax.value_and_grad`
 op-by-op.
 
-Unlike `qwen3_maxtext_profile.py` this arm has no `--scan` switch: only the unscanned
-variant has actually been run through the engine, and an unexercised code path here would
-be worth less than the line it saves.
+`--model` and `--scan` move this arm off the shared shape. The tunix arm cannot follow --
+it implements one architecture -- so past qwen3-0.6b the comparison is engine against
+`PeftTrainer` over the *same* MaxText model, which is the pairing that isolates the trainer
+anyway. A model with few KV heads constrains `--tp`: qwen3.5-35b-a3b has 2, so `--tp 8` is
+rejected by the sharding checks and `--tp 2 --scan` is the shape that runs on 8 devices.
 
 Run from this directory -- the arms import `qwen3_common` as a sibling, and a working
 directory that contains a `tunix/` checkout will shadow the installed package:
@@ -90,7 +92,7 @@ def _build_config(spec: qc.RunSpec):
   """
   return pyconfig.initialize(
       [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
-      model_name="qwen3-0.6b",
+      model_name=spec.model,
       run_name="perf_parity_qwen3_0p6b_engine",
       base_output_directory=os.path.join(os.getcwd(), "maxtext_out"),
       max_target_length=spec.seq,
@@ -100,7 +102,7 @@ def _build_config(spec: qc.RunSpec):
       dtype="float32",
       weight_dtype="float32",
       remat_policy="none",
-      scan_layers=False,
+      scan_layers=spec.scan,
       enable_dropout=False,
       enable_checkpointing=False,
       convert_checkpoint_if_possible=False,
@@ -164,7 +166,7 @@ def _report_nnx_graph_cost(engine) -> None:
 
 def main() -> None:
   spec = qc.RunSpec(qc.add_common_args(argparse.ArgumentParser()).parse_args())
-  profile_dir = qc.profile_dir(spec.tag("qwen3-0.6b-engine"))
+  profile_dir = qc.profile_dir(spec.tag(f"{spec.model}-engine" + ("-scan" if spec.scan else "")))
   print(spec.describe(), flush=True)
 
   tokenizer = AutoTokenizer.from_pretrained(qc.TOKENIZER_ID)
@@ -224,7 +226,7 @@ def main() -> None:
     timer.on_train_end(engine)
     jax.effects_barrier()
 
-  timer.report("maxtext qwen3-0.6b + MaxTextTrainingEngine", group=spec.ga)
+  timer.report(f"maxtext {spec.model} + MaxTextTrainingEngine (scan_layers={spec.scan})", group=spec.ga)
   # Split the step in two. Both halves include a blocking `wait_for_next`, so this does not
   # separate host work from waiting -- but it does say which of the engine's two dispatches
   # the time sits behind. Under GA the fwd_bwd figure is per micro-batch and the update

@@ -59,6 +59,11 @@ def create_sharded_model(config, rngs, mesh):
 
 def main() -> None:
   spec = qc.RunSpec(qc.add_common_args(argparse.ArgumentParser()).parse_args())
+  if spec.model != qc.MODEL_NAME or spec.scan:
+    # tunix builds one architecture as a `ModuleList`. There is no scanned variant to ask
+    # for and no other model to switch to, so failing here beats silently benchmarking
+    # qwen3-0.6b under a header that claims otherwise.
+    raise ValueError(f"the tunix arm has only unscanned {qc.MODEL_NAME}, not --model {spec.model} --scan")
   profile_dir = qc.profile_dir(spec.tag("qwen3-0.6b-tunix"))
   print(spec.describe(), flush=True)
 
