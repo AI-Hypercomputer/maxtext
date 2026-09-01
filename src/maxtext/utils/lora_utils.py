@@ -746,6 +746,12 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
+  # Match the nesting the checkpoint actually has, so the guided restore lines up instead of
+  # falling back to a shapeless read that the walk below then cannot follow.
+  layout_keys = _maxtext_layout_keys(lora_restore_path)
+  for key in reversed(layout_keys):
+    target_for_restore = {key: target_for_restore}
+
   sharding_tree = jax.tree.map(lambda x: getattr(x, "sharding", None), target_for_restore)
   restore_args_tree = ocp.checkpoint_utils.construct_restore_args(target_for_restore, sharding_tree)
 
@@ -762,6 +768,10 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.log(f"Guided restore failed: {e}. Falling back to basic restore.")
     restored_lora_params = ocp.PyTreeCheckpointer().restore(lora_restore_path)
+
+  for key in layout_keys:
+    if isinstance(restored_lora_params, dict) and key in restored_lora_params:
+      restored_lora_params = restored_lora_params[key]
 
   # Post processing
   def _map_to_state(path, variable):
@@ -819,6 +829,22 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
 # trees use `nnx.State` (a Mapping that is not a dict) and Variable-wrapped
 # leaves, so a separate set of walkers is needed. The math (W += B @ A * s)
 # is identical to the Linen path.
+
+
+def _maxtext_layout_keys(restore_path):
+  """Returns the keys to descend through before reaching the model tree.
+
+  An adapter saved in MaxText's layout sits under a `params` item, with Flax's `params` collection
+  inside it. One written straight from `nnx.state(model)` is already model-shaped and needs none.
+  """
+  try:
+    tree = ocp.PyTreeCheckpointer().metadata(restore_path).item_metadata
+  except Exception:  # pylint: disable=broad-exception-caught
+    return ()
+  inner = tree.get("params") if tree is not None and "params" in tree else None
+  if inner is not None and "params" in inner:
+    return ("params", "params")
+  return ()
 
 
 def _is_nnx_branch(x):

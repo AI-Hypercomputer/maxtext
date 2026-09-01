@@ -27,7 +27,7 @@ echo "PACKAGE_DIR: $PACKAGE_DIR"
 
 set -e
 
-export LOCAL_IMAGE_NAME=maxtext_base_image
+export LOCAL_IMAGE_NAME=mesa_maxtext_base_image_trainrl
 export PROJECT=$(gcloud config get-value project)
 
 # Set environment variables

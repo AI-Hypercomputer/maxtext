@@ -30,7 +30,11 @@ class StandaloneVllmWeightMapping:
   """Mapping MaxText model weights to vLLM's model weights."""
 
   def __getattr__(self, name):
-    if name.startswith("llama3.1"):
+    # "llama3", not "llama3.1": Llama 3 and 3.1 share this mapping -- the constant is
+    # LLAMA3_VLLM_MAPPING, not LLAMA31_ -- and their MaxText configs are identical apart from a
+    # comment. Matching only the 3.1 prefix left llama3-8b raising "vLLM weight mapping not found"
+    # from RL, after SFT and DPO had already run on it.
+    if name.startswith("llama3"):
       return LLAMA3_VLLM_MAPPING
     elif name.startswith("qwen2"):
       return QWEN2_VLLM_MAPPING
