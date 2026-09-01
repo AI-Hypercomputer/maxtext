@@ -610,6 +610,7 @@ class BlockCausalMaskTest(unittest.TestCase):
         attention_kernel="flash",
         attention_type=attention_type,
     )
+
   def test_dense_and_splash_masks_match(self):
     sequence_length = 10
     block_size = 4
