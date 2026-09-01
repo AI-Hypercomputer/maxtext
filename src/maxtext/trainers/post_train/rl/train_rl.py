@@ -147,7 +147,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "0"
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
+from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout, requires_maxtext_scanned_weight_unroll
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
@@ -488,6 +488,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
               "hf_overrides": trainer_config.vllm_hf_overrides,
               "enable_expert_parallel": sampler_config.enable_expert_parallel,
               "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
+              "trust_remote_code": True,
               # Ensures vLLM model initializes with correct dtype (not float32 default)
               "dtype": trainer_config.weight_dtype.value,
           },

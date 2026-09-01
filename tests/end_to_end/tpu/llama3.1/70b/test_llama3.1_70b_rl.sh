@@ -54,7 +54,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 # Step 3: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/items \
     tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.6 \
