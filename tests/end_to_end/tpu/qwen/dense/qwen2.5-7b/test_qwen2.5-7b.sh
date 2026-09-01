@@ -12,6 +12,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 export MODEL_NAME='qwen2.5-7b'
 export HF_MODEL_ID='Qwen/Qwen2.5-7B-Instruct'
 export TOKENIZER_PATH=${HF_MODEL_ID}

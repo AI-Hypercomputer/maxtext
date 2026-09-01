@@ -42,12 +42,18 @@
 # Install custom libtpu only
 ## bash src/dependencies/scripts/setup.sh MODE=libtpu-only LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
 
+# Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + optional TensorFlow/JetStream
+## bash src/dependencies/scripts/setup.sh MODE=stable TF=true
+
 # ==================================
 # GPU EXAMPLES
 # ==================================
 
 # Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt
 ## bash src/dependencies/scripts/setup.sh MODE=stable DEVICE=gpu
+
+# Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt + optional TensorFlow/JetStream
+## bash src/dependencies/scripts/setup.sh MODE=stable DEVICE=gpu TF=true
 
 # Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt + specified jax, jaxlib, jax-cuda12-plugin, jax-cuda12-pjrt
 ## bash src/dependencies/scripts/setup.sh MODE=stable DEVICE=gpu JAX_VERSION=0.4.13
@@ -159,6 +165,11 @@ if [[ -z "$WORKFLOW" ]]; then
   export WORKFLOW=pre-training
 fi
 
+# Set default value for $TF (default false for local setups; docker builds pass TF=true)
+if [[ -z "$TF" ]]; then
+  export TF="${tf:-false}"
+fi
+
 # Unset optional variables if set to NONE
 unset_optional_vars() {
     local optional_vars=("JAX_VERSION" "LIBTPU_VERSION" "LIBTPU_GCS_PATH")
@@ -216,7 +227,11 @@ install_maxtext_with_deps() {
     fi
     echo "Installing requirements from $dep_name"
     python3 -m uv pip install --resolution=lowest -r "$dep_name"
-    python3 -m src.dependencies.scripts.install_pre_train_extra_deps
+    if [[ "$TF" == "true" ]]; then
+        python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+    else
+        python3 -m src.dependencies.scripts.install_pre_train_extra_deps
+    fi
 
     install_maxtext_package_without_deps
 }
