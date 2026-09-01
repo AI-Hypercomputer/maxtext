@@ -98,13 +98,13 @@ def main() -> None:
     timer = qc.StepTimer()
     trainer.with_training_hooks(timer)
 
-    print(f"tracing to {profile_dir}", flush=True)
-    with jax.profiler.trace(log_dir=profile_dir):
+    with qc.maybe_trace(profile_dir, spec):
       trainer.train(dataset, skip_jit=False)
       jax.effects_barrier()
 
   timer.report("tunix qwen3-0.6b", group=spec.ga)
-  print(f"trace written to {profile_dir}", flush=True)
+  if spec.trace:
+    print(f"trace written to {profile_dir}", flush=True)
 
 
 if __name__ == "__main__":

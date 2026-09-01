@@ -201,8 +201,7 @@ def main() -> None:
   # drives it.
   timer = qc.StepTimer()
   fwd_bwd_s, update_s = [], []
-  print(f"tracing to {profile_dir}", flush=True)
-  with jax.profiler.trace(log_dir=profile_dir):
+  with qc.maybe_trace(profile_dir, spec):
     timer.on_train_start(engine)
     # Compiled inside the trace so its cost lands in the same place PeftTrainer's does:
     # in the first step of the profile rather than before it.
@@ -237,7 +236,8 @@ def main() -> None:
   )
   _report_nnx_graph_cost(engine)
   print(f"train steps completed: {engine.train_step}", flush=True)
-  print(f"trace written to {profile_dir}", flush=True)
+  if spec.trace:
+    print(f"trace written to {profile_dir}", flush=True)
 
 
 if __name__ == "__main__":
