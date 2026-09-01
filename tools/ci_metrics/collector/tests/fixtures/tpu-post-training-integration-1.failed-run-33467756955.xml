@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="7" tests="9" time="133.572" timestamp="2026-09-01T03:56:07.326708+00:00" hostname="linux-x86-ct6e-180-4tpu-ss64f-runner-zdlc4-workflow"><testcase classname="tests.post_training.integration.inference_router_replay_test.InferenceRouterReplayExtractionTest" name="test_extract_router_replay_from_inference" time="37.073"><properties><property name="marker" value="post_training" /><property name="marker" value="integration_test" /><property name="marker" value="tpu_only" /></properties></testcase><testcase classname="tests.post_training.integration.maxtext_engine_grpo_loss_test.MaxTextEngineGrpoLossTest" name="test_grpo_loss_drives_a_training_step" time="32.902"><properties><property name="marker" value="external_training" /><property name="marker" value="post_training" /><property name="marker" value="integration_test" /><property name="marker" value="tpu_only" /></properties><failure message="AssertionError: nan not greater than 0.0 : no parameter moved, so no training happened">self = &lt;tests.post_training.integration.maxtext_engine_grpo_loss_test.MaxTextEngineGrpoLossTest testMethod=test_grpo_loss_drives_a_training_step&gt;
+
+    def test_grpo_loss_drives_a_training_step(self):
+      cfg = _config()
+      mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      algo_config = _GrpoConfig()
+    
+      engine = maxtext_engine.MaxTextTrainingEngine(
+          cfg,
+          mesh=mesh,
+          # grpo_loss_fn calls the model with Tunix's signature, so the adapter wrap is
+          # needed for the loss itself, not only for weight sync.
+          wrap_with_tunix_adapter=True,
+          tokenizer_pad_id=_PAD_ID,
+      )
+      self.assertEqual(type(engine.model).__name__, "TunixMaxTextAdapter")
+    
+      # Tunix's loss is used directly, with no adapter closure. Setting a gen_model_input_fn
+      # tells the engine to invoke the loss Tunix's way, `loss_fn(model, **inputs)`, and the
+      # dict below is already exactly grpo_loss_fn's keyword arguments -- which is what the
+      # orchestrator's own `_grpo_model_input` produces in the real pipeline.
+      returned = engine.with_loss_fn(algo_core.grpo_loss_fn, has_aux=True).with_gen_model_input_fn(
+          lambda payload: {
+              "train_example": payload,
+              "algo_config": algo_config,
+              "pad_id": _PAD_ID,
+              "eos_id": _EOS_ID,
+          }
+      )
+      self.assertIs(returned, engine)
+    
+      payload = _train_example(engine.model, algo_config)
+      before = _param_leaves(engine.model)
+    
+      engine.fwd_bwd(payload)
+      new_step = engine.update()
+    
+      after = _param_leaves(engine.model)
+      max_delta = max(float(jnp.max(jnp.abs(a - b))) for a, b in zip(after, before))
+    
+      # Half one of the gate: real gradients reached the weights.
+&gt;     self.assertGreater(max_delta, 0.0, "no parameter moved, so no training happened")
+E     AssertionError: nan not greater than 0.0 : no parameter moved, so no training happened
+
+tests/post_training/integration/maxtext_engine_grpo_loss_test.py:210: AssertionError</failure></testcase><testcase classname="tests.post_training.integration.sft_trainer_correctness_test.SFTTrainerCorrectnessTest" name="test_sft_trainer_correctness" time="0.003"><skipped type="pytest.skip" message="Logit output test fragile, failing on jax upgrade to 0.6.2 b/425997645">/__w/maxtext/maxtext/tests/post_training/integration/sft_trainer_correctness_test.py:180: Logit output test fragile, failing on jax upgrade to 0.6.2 b/425997645</skipped></testcase><testcase classname="tests.post_training.integration.single_host_train_rl_test.RLTrainerIntegrationTests" name="test_GRPO_workflow_maxtext_on_vllm" time="0.003"><skipped type="pytest.skip" message="unconditional skip">/__w/maxtext/maxtext/tests/post_training/integration/single_host_train_rl_test.py:164: unconditional skip</skipped></testcase><testcase classname="tests.post_training.integration.single_host_train_rl_test.RLTrainerIntegrationTests" name="test_GRPO_workflow_vllm_native" time="0.003"><skipped type="pytest.skip" message="unconditional skip">/__w/maxtext/maxtext/tests/post_training/integration/single_host_train_rl_test.py:171: unconditional skip</skipped></testcase><testcase classname="tests.post_training.integration.single_host_train_rl_test.RLTrainerIntegrationTests" name="test_GSPO_workflow_maxtext_on_vllm" time="0.003"><skipped type="pytest.skip" message="unconditional skip">/__w/maxtext/maxtext/tests/post_training/integration/single_host_train_rl_test.py:178: unconditional skip</skipped></testcase><testcase classname="tests.post_training.integration.single_host_train_rl_test.RLTrainerIntegrationTests" name="test_GSPO_workflow_vllm_native" time="0.003"><skipped type="pytest.skip" message="unconditional skip">/__w/maxtext/maxtext/tests/post_training/integration/single_host_train_rl_test.py:185: unconditional skip</skipped></testcase><testcase classname="tests.post_training.integration.single_host_train_rl_test.RLTrainerIntegrationTests" name="test_rl_train_maxtext_on_vllm" time="0.003"><skipped type="pytest.skip" message="unconditional skip">/__w/maxtext/maxtext/tests/post_training/integration/single_host_train_rl_test.py:192: unconditional skip</skipped></testcase><testcase classname="tests.post_training.integration.single_host_train_rl_test.RLTrainerIntegrationTests" name="test_rl_train_native" time="0.003"><skipped type="pytest.skip" message="unconditional skip">/__w/maxtext/maxtext/tests/post_training/integration/single_host_train_rl_test.py:199: unconditional skip</skipped></testcase></testsuite></testsuites>
