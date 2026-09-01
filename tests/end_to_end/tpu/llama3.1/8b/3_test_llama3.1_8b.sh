@@ -3,6 +3,11 @@
 # huggingface-cli download meta-llama/Llama-3.1-8B-Instruct --local-dir $CHECKPOINT_ORIGINAL
 
 # Or download the DeepSeek llama 8B model
+
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
 export CHECKPOINT_ORIGINAL=/mnt/disks/persist/checkpoints/huggingface/DeepSeek-R1-Distill-Llama-8B
 huggingface-cli download deepseek-ai/DeepSeek-R1-Distill-Llama-8B --local-dir $CHECKPOINT_ORIGINAL
 

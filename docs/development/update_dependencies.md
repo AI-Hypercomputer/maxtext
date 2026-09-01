@@ -144,6 +144,19 @@ python3 src/dependencies/scripts/generate_decoupled_requirements.py
 
 The `decoupled-requirements` pre-commit hook fails when a change under `src/dependencies/requirements/` leaves this file stale.
 
+### Optional TensorFlow and JetStream dependencies
+
+Optional TensorFlow, SeqIO, and JetStream dependencies are listed with pinned versions in `src/dependencies/extra_deps/tf_requirements.txt` and installed with `--no-deps` when `--with-tf` is passed to `install_pre_train_extra_deps.py`.
+
+To update `src/dependencies/extra_deps/tf_requirements.txt` when upgrading TensorFlow or JetStream, run `src/dependencies/scripts/generate_tf_requirements.py`. This script invokes `uv pip compile` using `tpu-requirements.txt` as a strict constraint file (`-c`) to prevent conflicts with core MaxText dependencies and writes only the pinned delta to `src/dependencies/extra_deps/tf_requirements.txt`:
+
+```bash
+python3 src/dependencies/scripts/generate_tf_requirements.py \
+  --tensorflow-version 2.20.0 \
+  --tensorflow-text-version 2.20.1 \
+  --jetstream-commit 29329e8e73820993f77cfc8efe34eb2a73f5de98
+```
+
 ## Step 4: Verify the new dependencies
 
 Finally, test that the new dependencies install correctly and that MaxText runs

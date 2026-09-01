@@ -99,6 +99,28 @@ strip_exact_pins() {
   sed 's/^\([A-Za-z0-9._-]*\(\[[^]]*\]\)\?\)[[:space:]]*==[[:space:]]*\([^,; ]*\)/\1>=\3/'
 }
 
+if [[ -n "$OVERRIDE_REQUIREMENTS" ]]; then
+  echo "=== Adding overrides from $OVERRIDE_REQUIREMENTS ==="
+
+  # Append [tool.uv] with overrides to the artifact pyproject.toml.
+  # Overrides force specific versions that conflict with the JAX seed lock.
+  {
+    echo ""
+    echo "[tool.uv]"
+    echo "override-dependencies = ["
+    grep -v '^\s*#' "$OVERRIDE_REQUIREMENTS" | grep -v '^\s*$' | sed 's/.*/"&",/' | sed 's/^/  /'
+    echo "]"
+  } >> "$ARTIFACT_DIR/pyproject.toml"
+
+  mapfile -t _pkgs < <(grep -v '^\s*#' "$OVERRIDE_REQUIREMENTS" | grep -v '^\s*$')
+  uv add \
+    --managed-python \
+    --no-sync \
+    --resolution=lowest \
+    --directory "$ARTIFACT_DIR" \
+    "${_pkgs[@]}"
+fi
+
 if [[ "$BASE_REQUIREMENTS" == *post-train* ]]; then
   echo "=== Cloning vllm and tpu-inference Github repositories ==="
   WORK_DIR="$(pwd)"
@@ -135,28 +157,6 @@ if [[ "$BASE_REQUIREMENTS" == *post-train* ]]; then
     --directory "$ARTIFACT_DIR" \
     "${_vllm_pkgs[@]}" \
     "${_tpu_pkgs[@]}"
-fi
-
-if [[ -n "$OVERRIDE_REQUIREMENTS" ]]; then
-  echo "=== Adding overrides from $OVERRIDE_REQUIREMENTS ==="
-
-  # Append [tool.uv] with overrides to the artifact pyproject.toml.
-  # Overrides force specific versions that conflict with the JAX seed lock.
-  {
-    echo ""
-    echo "[tool.uv]"
-    echo "override-dependencies = ["
-    grep -v '^\s*#' "$OVERRIDE_REQUIREMENTS" | grep -v '^\s*$' | sed 's/.*/"&",/' | sed 's/^/  /'
-    echo "]"
-  } >> "$ARTIFACT_DIR/pyproject.toml"
-
-  mapfile -t _pkgs < <(grep -v '^\s*#' "$OVERRIDE_REQUIREMENTS" | grep -v '^\s*$')
-  uv add \
-    --managed-python \
-    --no-sync \
-    --resolution=lowest \
-    --directory "$ARTIFACT_DIR" \
-    "${_pkgs[@]}"
 fi
 
 echo "=== Exporting updated lock to generated requirements ==="

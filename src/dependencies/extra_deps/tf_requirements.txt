@@ -1,0 +1,16 @@
+clu==0.0.12
+dm-tree==0.1.10
+editdistance==0.8.1
+einops==0.8.2
+google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
+promise==2.3
+pyglove==0.4.5
+seqio==0.0.20
+simple-parsing==0.1.9
+tensorboard==2.20.0
+tensorboard-data-server==0.7.2
+tensorflow==2.20.0
+tensorflow-datasets==4.9.10
+tensorflow-metadata==1.21.0
+tensorflow-text==2.20.1
+wrapt==2.4.1
