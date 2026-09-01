@@ -1,0 +1,68 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example command to run SFT on TPU VM:
+# python3 -m maxtext.experimental.omni_poc.train_sft_omni \
+#   src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml
+
+# Inherit model architecture from maxtext-omni-gemma3-qwen3.yml
+
+base_config: "../maxtext-omni-gemma3-qwen3.yml"
+
+use_sft: true
+use_tunix_gradient_accumulation: false
+use_multimodal: true
+sft_train_on_completion_only: true
+packing: false
+freeze_vision_encoder_params: true
+learning_rate: 2.e-4
+
+# Train ONLY the custom MLP projector by freezing all other parameters
+trainable_parameters_mask: ["custom_linear"]
+
+# -------------- HF pipeline --------------
+dataset_type: hf
+tokenizer_type: "huggingface"
+tokenizer_path: "Qwen/Qwen3-4B"
+hf_path: 'HuggingFaceM4/ChartQA'
+train_split: 'train'
+hf_eval_split: 'val'
+train_data_columns: ['query', 'label']
+eval_data_columns: ['query', 'label']
+
+# Checkpoint paths (override via CLI for your bucket)
+load_parameters_path: "gs://YOUR_BUCKET/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items"
+base_output_directory: "gs://YOUR_BUCKET/sft_multimodal_omni_output"
+run_name: "sft_omni_chartqa"
+
+# Training schedule (5 epochs = 8840 steps, 1 epoch = 1768 steps)
+per_device_batch_size: 4
+num_epoch: 5
+steps: 8841
+checkpoint_period: 500
+log_period: 1
+save_checkpoint_on_completion: true
+async_checkpointing: true
+
+# Evaluation settings
+eval_interval: 500
+eval_steps: 50
+
+# Sequence length & attention settings
+max_prefill_predict_length: 1024
+max_target_length: 1600
+max_num_images_per_example: 1
+scan_layers: true
+attention: "dot_product"
+

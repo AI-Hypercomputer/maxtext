@@ -776,3 +776,10 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
     """Blocks until all outstanding checkpoint operations are complete."""
     if self._checkpointer is not None:
       self._checkpointer.wait()
+
+  def close(self) -> None:
+    """Closes the checkpoint manager."""
+    super().close()
+    if getattr(self, "_checkpointer", None) is not None:
+      if hasattr(self._checkpointer, "close"):
+        self._checkpointer.close()  # pytype: disable=attribute-error

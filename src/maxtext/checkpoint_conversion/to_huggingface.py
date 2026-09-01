@@ -118,17 +118,6 @@ flags.DEFINE_string(
     "the instruction-tuned one).",
 )
 
-flags.DEFINE_integer(
-    "parallel_threads",
-    4,
-    "Number of threads used for parallel saving of weights. Lower this value to reduce peak host RAM usage.",
-)
-flags.register_validator(
-    "parallel_threads",
-    lambda value: value > 0,
-    message="--parallel_threads must be a positive integer.",
-)
-
 FLAGS = flags.FLAGS
 
 
@@ -453,14 +442,7 @@ def _transform_and_save_weights(
       raise ValueError("Error: No weights were transformed. Check mappings and parameter paths.")
 
     max_logging.log("\nSaving HuggingFace model...")
-    save_model_files(
-        transformed_hf_weights,
-        hf_config_obj,
-        tokenizer,
-        processor,
-        output_directory,
-        parallel_threads=FLAGS.parallel_threads,
-    )
+    save_model_files(transformed_hf_weights, hf_config_obj, tokenizer, processor, output_directory)
     max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
 
   max_logging.log(f"Elapse for transform and save: {(time.time() - start) / 60:.2f} min")

@@ -28,6 +28,7 @@ jobs:
   qa:
     name: "Pre-commit Linters"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:

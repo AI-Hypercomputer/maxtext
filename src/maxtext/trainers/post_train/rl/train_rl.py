@@ -97,6 +97,8 @@ def _tpu_inference_compat_patches():
   orig_bulk = tunix_utils._bulk_align_and_unstack  # pylint: disable=protected-access
   orig_unstack = tunix_utils._unstack_scanned_param  # pylint: disable=protected-access
 
+  orig_moe_weights = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)
+
   def _compat_wsc(x, shardings):
     try:
       return orig_wsc(x, shardings)
@@ -125,6 +127,10 @@ def _tpu_inference_compat_patches():
   tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
   tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
   tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
+
+  if orig_moe_weights is not None:
+    tunix_utils._MOE_MLP_WEIGHTS = frozenset([*orig_moe_weights, "wo"])  # pylint: disable=protected-access
+
   try:
     yield
   finally:
@@ -132,6 +138,8 @@ def _tpu_inference_compat_patches():
     tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
     tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
     tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
+    if orig_moe_weights is not None:
+      tunix_utils._MOE_MLP_WEIGHTS = orig_moe_weights  # pylint: disable=protected-access
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"

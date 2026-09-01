@@ -253,6 +253,7 @@ ModelName = Literal[
     "gemma4-31b",
     "gemma4-e2b",
     "gemma4-e4b",
+    "maxtext-omni-gemma3-qwen3",
     "qwen2.5-1.5b",
     "qwen2.5-7b",
     "qwen2.5-14b",
@@ -357,6 +358,31 @@ class Checkpointing(BaseModel):
       description="Subdirectory to move checkpoints to before deletion. (Ignored if directory is prefixed with gs://)",
   )
   checkpoint_todelete_full_path: str | None = Field(None, description="Full path to move checkpoints to before deletion.")
+  standalone_checkpointer_per_step_interval: float = Field(
+      0.0,
+      description="Interval in seconds between iterations in standalone checkpointer benchmark loop.",
+  )
+  standalone_checkpointer_drop_page_cache_before_restore: bool = Field(
+      False,
+      description=(
+          "Whether to execute sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' before restoring a checkpoint in"
+          " standalone_checkpointer loop (use for storage benchmarking only)."
+      ),
+  )
+  standalone_checkpointer_enable_restore_in_loop: bool = Field(
+      True,
+      description=(
+          "In standalone_checkpointer loop, whether to restore checkpoint after saving in each step (defaults to True"
+          " for bidirectional storage read/write benchmarking)."
+      ),
+  )
+  standalone_checkpointer_start_from_checkpoint: bool = Field(
+      False,
+      description=(
+          "In standalone_checkpointer, whether to start by attempting to load an existing checkpoint before setting"
+          " up training state (for checkpoint restore benchmarking)."
+      ),
+  )
   force_unroll: bool = Field(
       False,
       description="During param-only checkpoint generation, whether to unroll the loop.",
@@ -903,6 +929,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
   )
+  moe_use_direct_token_gather: bool = Field(
+      False,
+      description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -948,6 +978,10 @@ class MoEGeneral(BaseModel):
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
   )
+  shard_embed_moe_on_fsdp: bool = Field(
+      False,
+      description="Keep embed_moe sharded so we can manually QAG it over FSDP.",
+  )
   use_2d_fsdp_sharding: bool = Field(
       False,
       description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
@@ -979,6 +1013,17 @@ class MoEGeneral(BaseModel):
   def validate_moe_chunks(self) -> "MoEGeneral":
     if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_sharding_strategy(self) -> "MoEGeneral":
+    """Ensure that only one MoE FSDP sharding strategy is active at a time."""
+    active_sharding_flags = sum([self.shard_exp_on_fsdp, self.use_2d_fsdp_sharding, self.shard_embed_moe_on_fsdp])
+    if active_sharding_flags > 1:
+      raise ValueError(
+          "Only one of shard_exp_on_fsdp, use_2d_fsdp_sharding, or "
+          "shard_embed_moe_on_fsdp can be True at the same time."
+      )
     return self
 
 
@@ -1039,6 +1084,11 @@ class MoEKernels(BaseModel):
   use_gmm_v2: bool = Field(
       False,
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
+  )
+
+  use_gmm_v2_heuristic_tiling: bool = Field(
+      False,
+      description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
 
 
@@ -2227,6 +2277,7 @@ class ManagedMLDiagnostics(BaseModel):
   )
   managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
   managed_mldiagnostics_region: str = Field("", description="GCP region for managed mldiagnostics.")
+  managed_mldiagnostics_storage_path: str = Field("", description="Storage path for mldiagnostics (profiles, metrics)")
 
 
 class Goodput(BaseModel):
@@ -2779,6 +2830,27 @@ class DerivedValues(BaseModel):
 # ----------------------------------------------------------------------------
 
 
+# Decoder blocks that support router replay (`forced_routed_experts`). All are
+# homogeneous-MoE, so a 4D layer axis is just the decoder layer index;
+# interleaved architectures (Llama4/Envy) would need a MoE-only counter.
+# Requires the pure-NNX decoder. GEMMA4 is unscanned-only (see nnx_decoders.py).
+FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS = (
+    DecoderBlockType.QWEN3_5,
+    DecoderBlockType.MIXTRAL,
+    DecoderBlockType.GEMMA4,
+)
+
+
+def check_forced_routing_support(decoder_block: DecoderBlockType) -> None:
+  """Raises NotImplementedError if `decoder_block` does not support router replay."""
+  if decoder_block not in FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS:
+    raise NotImplementedError(
+        "Forced routing (router replay) is only supported for decoder_block in"
+        f" {FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS}; got"
+        f" decoder_block={decoder_block!r}."
+    )
+
+
 def _normalize_axes(axes: Any) -> tuple[str, ...]:
   """Normalize a logical-rule mapping value to a tuple of axis name strings.
 
@@ -2798,6 +2870,22 @@ def _normalize_axes(axes: Any) -> tuple[str, ...]:
   return ()
 
 
+def axes_for_logical(logical_axis_rules: list, logical_axis: str) -> tuple[str, ...]:
+  """Return the physical axes *logical_axis* is mapped to by *logical_axis_rules*.
+
+  Args:
+    logical_axis_rules: The list of ``[logical_name, physical_axes]`` pairs.
+    logical_axis: The logical axis name to look up.
+
+  Returns:
+    A (possibly empty) tuple of physical axis name strings.
+  """
+  for rule in logical_axis_rules:
+    if rule and len(rule) >= 2 and rule[0] == logical_axis:
+      return _normalize_axes(rule[1])
+  return ()
+
+
 def infer_cp_axes(logical_axis_rules: list) -> tuple[str, ...]:
   """Infer which physical mesh axis/axes serve as Context Parallelism (CP).
 
@@ -2812,10 +2900,7 @@ def infer_cp_axes(logical_axis_rules: list) -> tuple[str, ...]:
     A tuple of physical axis name strings that act as CP.  Empty if the
     ``activation_length`` logical axis is not found in the rules.
   """
-  for rule in logical_axis_rules:
-    if rule and len(rule) >= 2 and rule[0] == "activation_length":
-      return _normalize_axes(rule[1])
-  return ()
+  return axes_for_logical(logical_axis_rules, "activation_length")
 
 
 def infer_ep_axes(logical_axis_rules: list) -> tuple[str, ...]:
@@ -2870,6 +2955,20 @@ def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   emb_scale = base_scale + int(rem > 1)
   layer_scale = base_scale
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
+
+
+def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
+  """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
+
+  `maxtext_utils.fill_unspecified_mesh_axes` hands the single -1 entry whatever devices the
+  other axes leave over, so config validation has to do the same to see the sizes a run will
+  really get. A -1 that cannot be resolved here (an unknown device count, say) counts as 1;
+  mesh creation raises on its own if it is still unresolvable there.
+  """
+  specified = prod(size for size in parallelism if size != -1)
+  leftover = num_devices // specified if specified > 0 and num_devices > 0 and num_devices % specified == 0 else 1
+  sizes = {axis: leftover if size == -1 else size for axis, size in zip(mesh_axes, parallelism)}
+  return max(sizes.get("fsdp", 1), 1) * max(sizes.get("fsdp_transpose", 1), 1)
 
 
 # ----------------------------------------------------------------------------
@@ -3159,6 +3258,18 @@ class MaxTextConfig(
       return yaml.safe_load(f) or {}
 
   @model_validator(mode="after")
+  def validate_shard_embed_moe_on_fsdp(self) -> "MaxTextConfig":
+    """Raise ValueError if shard_embed_moe_on_fsdp is used without fixed weight quantization calibration."""
+    if self.shard_embed_moe_on_fsdp and (
+        self.quantization == "" or not self.weight_quantization_calibration_method.startswith("fixed")
+    ):
+      raise ValueError(
+          "shard_embed_moe_on_fsdp requires quantization to be specified and "
+          "weight_quantization_calibration_method to be fixed (static scaling mode)."
+      )
+    return self
+
+  @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
     Computes all derived values and runs all cross-field validations after initial parsing.
@@ -3204,6 +3315,38 @@ class MaxTextConfig(
       eval_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_eval.value)
       self.logical_axis_rules_for_eval = eval_config.get("logical_axis_rules", self.logical_axis_rules)
 
+      # Only the logical rules are swapped for eval; the mesh itself is built once from
+      # the primary rule. Axes the eval rule names but the mesh lacks silently resolve to
+      # "replicated", which is only harmless while those axes would have been size 1.
+      dropped_axes = [axis for axis in eval_config.get("mesh_axes", ()) if axis not in self.mesh_axes]
+      if dropped_axes:
+        logger.warning(
+            "custom_mesh_and_rule_for_eval=%s declares mesh axes %s that are absent from the mesh built for "
+            "custom_mesh_and_rule=%s; they are ignored and any eval rule referencing them is treated as replicated.",
+            self.custom_mesh_and_rule_for_eval.value,
+            dropped_axes,
+            self.custom_mesh_and_rule.value,
+        )
+
+      # The input pipeline reorders the batch once, for the CP extent of the
+      # *train* rules. When the eval rule shards the query differently the
+      # permutation no longer matches, so `AttentionOp` falls back to the plain
+      # causal path at eval. Correct, but a silent loss of load balancing.
+      train_q_axes = axes_for_logical(self.logical_axis_rules, "activation_q_length")
+      eval_q_axes = axes_for_logical(self.logical_axis_rules_for_eval, "activation_q_length")
+      if self.context_parallel_load_balance and train_q_axes != eval_q_axes:
+        logger.warning(
+            "context_parallel_load_balance=True but activation_q_length maps to %s under "
+            "custom_mesh_and_rule=%s and to %s under custom_mesh_and_rule_for_eval=%s. The input pipeline "
+            "reorders for the train extent only, so load balancing is disabled at eval; eval attention runs "
+            "unbalanced (the last CP shard does ~2*cp/(cp+1) of the average work). Everything outside the "
+            "sequence-quadratic term stays balanced.",
+            list(train_q_axes),
+            self.custom_mesh_and_rule.value,
+            list(eval_q_axes),
+            self.custom_mesh_and_rule_for_eval.value,
+        )
+
     # A. SET RUN NAME AND PATHS
     # If run_name is not set, generate one from the JOBSET_NAME environment variable (if available)
     # or create one from the model name and a timestamp.
@@ -3220,7 +3363,8 @@ class MaxTextConfig(
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
       # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
-      self.managed_mldiagnostics_dir = os.path.join(output_dir, "managed-mldiagnostics")
+      telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
+      self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
           None,
@@ -3804,6 +3948,15 @@ class MaxTextConfig(
         raise ValueError(
             "Sparse indexer is only supported with dot_product attention or flash attention with tokamax splash."
         )
+      if (
+          self.attention == "flash"
+          and self.context_parallel_strategy == "all_gather"
+          and self.ici_context_parallelism * self.dcn_context_parallelism > 1
+          and self.attention_sink
+      ):
+        raise ValueError(
+            "Sparse indexer with all-gather context parallelism for flash attention does not support attention sinks."
+        )
       if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
         raise ValueError(
             f"`indexer_topk` ({self.indexer_topk}) must be < `max_target_length` ({self.max_target_length}) "
@@ -3888,6 +4041,8 @@ class MaxTextConfig(
             f"Engram vocab size mismatch: expected {self.engram_max_ngram_size - 1} (max_ngram_size - 1), "
             f"but got {self.engram_vocab_bases}."
         )
+    if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
+      raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
     if self.num_experts > 1:
       if self.moe_mlp_dim <= 0:
         raise ValueError("moe_mlp_dim must be positive for MoE models (num_experts > 1)")
@@ -3963,6 +4118,7 @@ class MaxTextConfig(
           "qwen3-vl-30b-a3b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
+          "maxtext-omni-gemma3-qwen3",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
@@ -3984,11 +4140,29 @@ class MaxTextConfig(
     if self.use_sft and self.use_dpo:
       raise ValueError("Only one of `use_sft` or `use_dpo` can be True.")
     if self.shard_mode == ShardMode.EXPLICIT:
-      supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek"}
+      supported_decoders = {
+          "simple",
+          "simple_mlp",
+          "llama2",
+          "deepseek",
+          "mistral",
+          "mixtral",
+          "qwen3",
+          "qwen3_moe",
+          "qwen3_custom_moe",
+          "gemma",
+          "gemma2",
+          "gemma3",
+      }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
             f"Decoder '{self.decoder_block.value}' is not supported with 'explicit' sharding. "
-            f"Supported options are: {list(supported_decoders)}."
+            f"Supported options are: {sorted(supported_decoders)}."
+        )
+      if self.use_multimodal:
+        raise ValueError(
+            "'explicit' sharding is not supported with `use_multimodal`; the vision and audio encoders "
+            "have not been onboarded to explicit sharding yet."
         )
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
@@ -4213,17 +4387,34 @@ class MaxTextConfig(
         raise ValueError("Only supports <= 1 for now, more workers results in duplicated data")
     elif self.dataset_type == DatasetType.GRAIN:
       use_hf_parquet = self.hf_path and self.grain_file_type == "parquet"
+      use_tfds_tfrecord_train = (
+          self.grain_file_type == "tfrecord" and self.dataset_path and self.dataset_name and self.train_split
+      )
+      use_tfds_tfrecord_eval = (
+          self.grain_file_type == "tfrecord" and self.dataset_path and self.eval_dataset_name and self.eval_split
+      )
 
-      if not self.grain_train_files and not self.grain_train_mixture_config_path and not use_hf_parquet:
+      if (
+          not self.grain_train_files
+          and not self.grain_train_mixture_config_path
+          and not use_hf_parquet
+          and not use_tfds_tfrecord_train
+      ):
         raise ValueError(
             "When dataset_type=grain, set grain_train_files, "
-            "grain_train_mixture_config_path, or use hf_path with grain_file_type=parquet."
+            "grain_train_mixture_config_path, use hf_path with grain_file_type=parquet, or use dataset_path, "
+            "dataset_name, and train_split with grain_file_type=tfrecord."
         )
-      if self.eval_interval > 0 and not self.grain_eval_files and not use_hf_parquet:
-        raise ValueError("Please specify grain_eval_files (or hf_path with parquet) or set eval_interval to <=0.")
+      if self.eval_interval > 0 and not self.grain_eval_files and not use_hf_parquet and not use_tfds_tfrecord_eval:
+        raise ValueError(
+            "Please specify grain_eval_files, use hf_path with grain_file_type=parquet, or use dataset_path, "
+            "eval_dataset_name, and eval_split with grain_file_type=tfrecord; otherwise set eval_interval to <=0."
+        )
     elif self.dataset_type == DatasetType.TFDS:
       logger.warning(
-          "tfds pipeline is deprecated. Use dataset_type=grain, grain_file_type=tfrecord, and provide grain_train_files."
+          "tfds pipeline is deprecated. Use dataset_type=grain and grain_file_type=tfrecord. You can keep the same "
+          "dataset_path, dataset_name, train_split, eval_dataset_name, and eval_split settings to automatically construct "
+          "the file paths. Alternatively, provide grain_train_files or grain_eval_files for custom file paths."
       )
       if self.use_dpo:
         raise ValueError(
@@ -4249,6 +4440,10 @@ class MaxTextConfig(
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
     ]:
@@ -4298,6 +4493,9 @@ class MaxTextConfig(
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
 
+    if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
+      raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
+
     for val in self.compress_ratios:
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
@@ -4336,6 +4534,8 @@ class MaxTextConfig(
         "autoregressive": self.ici_autoregressive_parallelism,
         "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
         "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+        "dcp": (1),
+        "pcp": (1),
     }
     self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
@@ -4356,8 +4556,28 @@ class MaxTextConfig(
         "autoregressive": self.dcn_autoregressive_parallelism,
         "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
         "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+        "dcp": (1),
+        "pcp": (1),
     }
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+
+    # Zero-1 (`shard_optimizer_over_data`) shards the optimizer moments over the "data"
+    # axis on top of whatever layout the parameters already have. FSDP shards the
+    # parameters over "fsdp", so combining the two leaves the gradients sharded
+    # P('fsdp', ...) while the moments they are added to are sharded P(('data', 'fsdp'), ...).
+    # Under `shard_mode=explicit` that add is a hard type error, and under `auto` GSPMD
+    # only papers over it with an extra collective. Keep the two mutually exclusive.
+    if self.shard_optimizer_over_data:
+      fsdp_size = _resolved_fsdp_size(
+          self.mesh_axes, self.ici_parallelism, self.num_target_devices // max(self.num_slices, 1)
+      ) * _resolved_fsdp_size(self.mesh_axes, self.dcn_parallelism, self.num_slices)
+      if fsdp_size > 1:
+        raise ValueError(
+            "`shard_optimizer_over_data` (Zero-1) cannot be combined with FSDP: the resolved "
+            f"fsdp/fsdp_transpose mesh axes have a combined size of {fsdp_size}. Set "
+            "`ici_fsdp_parallelism` and `ici_fsdp_transpose_parallelism` (and their `dcn_` "
+            "counterparts) to 1, or turn off `shard_optimizer_over_data`."
+        )
 
     # Diloco params
     # Resolve dcn_diloco_parallelism=-1 if left unspecified, using the same convention as dcn_data_parallelism.
@@ -4714,5 +4934,33 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+
+    def get_parallelism_map(prefix: str) -> dict[str, int]:
+      return {
+          "diloco": getattr(self, f"{prefix}_diloco_parallelism"),
+          "data": getattr(self, f"{prefix}_data_parallelism"),
+          "stage": getattr(self, f"{prefix}_pipeline_parallelism"),
+          "fsdp": getattr(self, f"{prefix}_fsdp_parallelism"),
+          "fsdp_transpose": getattr(self, f"{prefix}_fsdp_transpose_parallelism"),
+          "sequence": getattr(self, f"{prefix}_sequence_parallelism"),
+          "context": getattr(self, f"{prefix}_context_parallelism"),
+          "context_usp_ulysses": getattr(self, f"{prefix}_context_usp_ulysses_parallelism"),
+          "context_autoregressive": getattr(self, f"{prefix}_context_autoregressive_parallelism"),
+          "tensor": getattr(self, f"{prefix}_tensor_parallelism"),
+          "tensor_sequence": getattr(self, f"{prefix}_tensor_sequence_parallelism"),
+          "model": getattr(self, f"{prefix}_tensor_parallelism"),
+          "expert": getattr(self, f"{prefix}_expert_parallelism"),
+          "autoregressive": getattr(self, f"{prefix}_autoregressive_parallelism"),
+          "attn_dp": 1,
+          "attn_dp_expert": 1,
+          "dcp": 1,
+          "pcp": 1,
+      }
+
+    ici_map = get_parallelism_map("ici")
+    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+
+    dcn_map = get_parallelism_map("dcn")
+    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     return self

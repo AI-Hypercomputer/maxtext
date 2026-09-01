@@ -41,6 +41,12 @@ from maxtext.utils import max_utils
 # The network: Transformer Definitions
 # ------------------------------------------------------------------------------
 
+_FORCED_ROUTING_NEEDS_PURE_NNX = (
+    "Forced routing (router replay) is only implemented for the pure-NNX"
+    " decoder (NNXDecoder). Use the NNX model path with pure_nnx_decoder=True"
+    " (both are the defaults)."
+)
+
 
 class TransformerLinenPure(nn.Module):
   """An autoregressive transformer model."""
@@ -143,6 +149,7 @@ class TransformerLinenPure(nn.Module):
       nnx_method=None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -205,6 +212,9 @@ class TransformerLinenPure(nn.Module):
           bidirectional_mask=bidirectional_mask_image,
           bidirectional_mask_video=bidirectional_mask_video,
       )
+
+    if forced_routed_experts is not None:
+      raise NotImplementedError(_FORCED_ROUTING_NEEDS_PURE_NNX)
 
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.shared_embedding,
@@ -462,6 +472,7 @@ class Transformer(nnx.Module):
       decoder_target_mask: jax.Array | None = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -549,7 +560,7 @@ class Transformer(nnx.Module):
       mutable_collections.append("intermediates")
 
     if self.config.pure_nnx_decoder:
-      logits, hidden_state, kv_caches = self.decoder(
+      res = self.decoder(
           shared_embedding=self.token_embedder,
           decoder_input_tokens=decoder_input_tokens,
           decoder_positions=decoder_positions,
@@ -562,9 +573,18 @@ class Transformer(nnx.Module):
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
+          forced_routed_experts=forced_routed_experts,
       )  # pytype: disable=wrong-keyword-args
+      if isinstance(res, tuple) and len(res) == 4:
+        logits, hidden_state, kv_caches, expert_indices = res
+      else:
+        logits, hidden_state, kv_caches = res
+        expert_indices = None
     else:
-      logits, hidden_state, kv_caches = self.decoder(
+      if forced_routed_experts is not None:
+        raise NotImplementedError(_FORCED_ROUTING_NEEDS_PURE_NNX)
+
+      res = self.decoder(
           shared_embedding=self.token_embedder,
           decoder_input_tokens=decoder_input_tokens,
           decoder_positions=decoder_positions,
@@ -579,6 +599,11 @@ class Transformer(nnx.Module):
           deepstack_visual_embeds=deepstack_visual_embeds,
           mutable=mutable_collections,  # pyrefly: ignore[unexpected-keyword]
       )  # pytype: disable=wrong-keyword-args
+      if isinstance(res, tuple) and len(res) == 4:
+        logits, hidden_state, kv_caches, expert_indices = res
+      else:
+        logits, hidden_state, kv_caches = res
+        expert_indices = None
 
     # If we are initializing the model AND MTP is enabled, we must create
     # dummy target tensors. This allows Flax to trace the MTPBlock and create
@@ -614,6 +639,8 @@ class Transformer(nnx.Module):
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # In vLLM, logits are computed separately after updating the KV cache.
+      if expert_indices is not None:
+        return hidden_state, kv_caches, expert_indices
       return hidden_state, kv_caches
 
     return logits

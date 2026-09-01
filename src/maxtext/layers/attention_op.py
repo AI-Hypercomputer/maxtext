@@ -47,6 +47,7 @@ from maxtext.common.common_types import (
     CACHE_SCALE_SEQUENCE,
     CACHE_SEQUENCE,
     Config,
+    SEGMENT_ID_BATCH,
     DECODE_BATCH,
     DECODE_LENGTH,
     DECODING_ACTIVE_SEQUENCE_INDICATOR,
@@ -952,6 +953,51 @@ class AttentionOp(nnx.Module):
     logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
+  def _context_parallel_size(self) -> int:
+    """Number of ways the query sequence is actually sharded, per the active rules.
+
+    `config.context_sharding` is derived once from `logical_axis_rules`, but the
+    ambient rules can differ from those - the eval loop runs under
+    `logical_axis_rules_for_eval` when `custom_mesh_and_rule_for_eval` is set.
+    Resolving `activation_q_length` against the ambient rules keeps this count
+    consistent with the PartitionSpec the kernel is sharded with; reading the
+    static field instead lets the two disagree (e.g. a Splash kernel built for
+    one shard handed to a 4-way `shard_map`).
+
+    The Ulysses axis is excluded: under USP the query sequence is split over both
+    the ring and Ulysses axes, but `cp_size` refers to the ring extent alone.
+    """
+    if self.mesh is None:
+      return 1
+    q_seq_axes = self._logical_to_mesh_axes((Q_LENGTH,))[0]
+    if q_seq_axes is None:
+      return 1
+    if isinstance(q_seq_axes, str):
+      q_seq_axes = (q_seq_axes,)
+    return math.prod(
+        self.mesh.shape[axis]
+        for axis in q_seq_axes
+        if axis is not None and axis != self.config.ulysses_context_sharding and axis in self.mesh.shape
+    )
+
+  def _load_balanced_context_parallel(self) -> bool:
+    """Whether the load-balanced CP path is valid for this call.
+
+    `context_parallel_load_balance` on its own is not enough. The load-balanced
+    path assumes the batch arrives in DUAL_CHUNK_SWAP order: the mask bakes that
+    permutation into a static `q_sequence`, and `wrap_flash_attention` restores
+    K/V to contiguous order. The input pipeline applies that order once, for one
+    specific cp_size, so the kernel may only take this path when it shards the
+    query exactly that many ways.
+
+    Equality, not `> 1`: a cp=2 train mesh with a cp=4 eval mesh is as wrong as
+    1 vs 4. A mismatch does not raise - it reorders K/V that were never permuted
+    and hands rows a `q_sequence` that lets them attend to the future - so fall
+    back to the plain causal path, which is correct at any shard count.
+    """
+    cp_size = self._context_parallel_size()
+    return cp_size > 1 and max_utils.reordered_cp_size(self.config, self.mesh) == cp_size
+
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
 
@@ -1075,6 +1121,12 @@ class AttentionOp(nnx.Module):
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
       seg_kv = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+
+      # With TSP/CP, all-gather seq dim prior to broadcast to avoid large all-to-all on broadcasted ids.
+      key_sharding = self._logical_to_mesh_axes((SEGMENT_ID_BATCH, None))
+      decoder_segment_ids = self._maybe_shard_with_pspec(decoder_segment_ids, key_sharding)
+      seg_kv = self._maybe_shard_with_pspec(seg_kv, key_sharding)
+
       mask = (decoder_segment_ids[:, :, None] == seg_kv[:, None, :]) & (seg_kv[:, None, :] >= 0)
       mask = mask[:, None, None, :, :]
 
@@ -1090,8 +1142,7 @@ class AttentionOp(nnx.Module):
       next_pos = kv_seq_len - 1
     use_segment_positions = (
         segment_positions is not None
-        and self.config.context_parallel_load_balance
-        and (self.mesh is not None and self.mesh.shape.get(self.config.context_sharding, 1) > 1)
+        and self._load_balanced_context_parallel()
         and previous_chunk is None
         and model_mode != MODEL_MODE_AUTOREGRESSIVE
     )
@@ -1782,8 +1833,8 @@ class AttentionOp(nnx.Module):
     use_tokamax_ring = tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
     use_ulysses = ulysses_attention.is_context_parallel_ulysses_requested(self.config)
     use_usp = usp_attention.is_context_parallel_usp_requested(self.config)
-    cp_size = self.mesh.shape.get(self.config.context_sharding, 1)
-    load_balanced_context_parallel = self.config.context_parallel_load_balance
+    cp_size = self._context_parallel_size()
+    load_balanced_context_parallel = self._load_balanced_context_parallel()
     if use_tokamax_ring:
       self._validate_tpu_tokamax_ring_runtime(
           model_mode=model_mode,
@@ -2305,6 +2356,59 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_tuple = None
 
       if self.config.use_tokamax_splash:
+        if indexer_mask is not None and cp_size > 1:
+          # Dynamic Tokamax Splash derives its Pallas grid from each shard-local
+          # mask, which is unsupported under sharding; the native block-sparse
+          # implementation consumes the runtime mask without a data-dependent
+          # device-local grid.
+          if sinks is not None:
+            # cp_size comes from the mesh axis named by context_sharding, which
+            # custom mesh rules can point at an axis the config validation does
+            # not cover.
+            raise ValueError(
+                "Sparse indexer with all-gather context parallelism for flash attention does not support"
+                " attention sinks."
+            )
+          indexer_mask = indexer_mask == 0.0
+          # sa_config blocks are clamped to the global sequence lengths; inside
+          # the shard map the query is a sequence shard, and the blocks must
+          # divide the sequence lengths the kernel sees exactly.
+          block_q = math.gcd(sa_config.block_q, query.shape[2])
+          block_kv = math.gcd(sa_config.block_kv, key.shape[2])
+          if record_max_logits:
+            attention_output, stats = jax_flash_attention.flash_attention_block_masked(
+                query,
+                key,
+                value,
+                decoder_segment_ids_tuple,
+                block_kv=block_kv,
+                block_q=block_q,
+                mask=indexer_mask,
+                mask_value=DEFAULT_MASK_VALUE,
+                cap=attn_logits_soft_cap,
+                save_residuals=True,
+                logits_dtype=query.dtype,
+                loop_unroll=False,
+                fuse_logits=False,
+            )
+            return attention_output, stats["max_logits"]
+
+          attention_output = jax_flash_attention.flash_attention_block_masked(
+              query,
+              key,
+              value,
+              decoder_segment_ids_tuple,
+              block_kv=block_kv,
+              block_q=block_q,
+              mask=indexer_mask,
+              mask_value=DEFAULT_MASK_VALUE,
+              cap=attn_logits_soft_cap,
+              logits_dtype=query.dtype,
+              loop_unroll=False,
+              fuse_logits=False,
+          )
+          return attention_output, None
+
         if indexer_mask is not None:
           # Convert additive float mask (0.0=attend, negative=masked) to boolean mask for Tokamax splash kernel
           indexer_mask = indexer_mask == 0.0
