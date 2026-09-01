@@ -120,13 +120,21 @@ def _build_config(spec: qc.RunSpec):
 
 
 def _report_nnx_graph_cost(engine) -> None:
-  """Times the host-side NNX graph traversals the engine repeats on every step.
+  """Times the host-side NNX graph traversals: the two the engine still pays, and the two it
+  no longer does.
 
-  `fwd_bwd` calls `nnx.split(model, nnx.Param, ...)` then `nnx.update(model, ...)`, and
-  `update` calls `nnx.split(state)` then `nnx.update(state, ...)` -- four full traversals
-  of an unrolled 28-layer graph per step, none of them jitted and none of them dependent
-  on the device. PeftTrainer v2 pays this once. Measured after the loop, with the device
-  idle, so what is timed is pure Python.
+  The engine used to call `nnx.split(model, nnx.Param, ...)` then `nnx.update(model, ...)` in
+  `fwd_bwd`, and `nnx.split(state)` then `nnx.update(state, ...)` in `update` -- four full
+  traversals of an unrolled 28-layer graph per step, none jitted and none dependent on the
+  device, where PeftTrainer v2 pays for them once. Both `split`s are now served from the pure
+  state the engine carries across steps, so the figures below split into what a step costs
+  (the two `update`s) and what the cache saves (the two `split`s).
+
+  The `update`s are deliberately kept. They are the publish barrier: they are what keeps
+  `engine.model`, `save_checkpoint` and `prepare_weight_sync` reading the same weights the
+  kernels just produced, rather than a snapshot the engine happens to be training on.
+
+  Measured after the loop with the device idle, so what is timed is pure Python.
   """
   model = engine.model
   state = engine.state
@@ -142,11 +150,14 @@ def _report_nnx_graph_cost(engine) -> None:
   _, params, rest = nnx.split(model, nnx.Param, ...)
   _, state_pure = nnx.split(state)
   print(
-      "  host nnx graph   : "
-      f"split(model)={timeit(lambda: nnx.split(model, nnx.Param, ...)):.1f}ms  "
+      "  host nnx graph   : paid per step  "
       f"update(model)={timeit(lambda: nnx.update(model, rest)):.1f}ms  "
+      f"update(state)={timeit(lambda: nnx.update(state, state_pure)):.1f}ms"
+  )
+  print(
+      "                   : saved by cache  "
+      f"split(model)={timeit(lambda: nnx.split(model, nnx.Param, ...)):.1f}ms  "
       f"split(state)={timeit(lambda: nnx.split(state)):.1f}ms  "
-      f"update(state)={timeit(lambda: nnx.update(state, state_pure)):.1f}ms  "
       f"[{len(jax.tree.leaves(params))} param leaves]"
   )
 
