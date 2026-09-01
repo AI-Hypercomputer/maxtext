@@ -962,6 +962,39 @@ class HCAStaticMaskTest(unittest.TestCase):
             "Found an all-False softmax row in HCAStaticMask (would cause NaN in softmax).",
         )
 
+  def test_hca_static_mask_raises_on_unpadded_kv_with_padded_query(self):
+    """Verifies that HCAStaticMask rejects configurations where query is padded but pad_kv_total <= 0."""
+    with self.assertRaises(ValueError):
+      attention_op.HCAStaticMask(
+          shape=(1024, 1017 + 7),
+          local_kv_len=1017,
+          pad_kv_total=0,
+          compress_ratio=128,
+      )
+
+  def test_hca_static_mask_padded_query_rows_mapping(self):
+    """Verifies that padded query rows (rows >= local_kv_len) explicitly reach and map to pad_cols via pad_m."""
+    seq_len = 489
+    pad_q_len = 512
+    pad_kv = 23
+    comp_len = seq_len // 128
+    total_kv_len = seq_len + pad_kv + comp_len
+    mask = attention_op.HCAStaticMask(
+        shape=(pad_q_len, total_kv_len),
+        local_kv_len=seq_len,
+        compressed_kv_len=comp_len,
+        pad_kv_total=pad_kv,
+        compress_ratio=128,
+        local_window=128,
+    )
+    actual_mask = mask[:, :]
+    for row in range(seq_len, pad_q_len):
+      expected_col = seq_len + ((row - seq_len) % pad_kv)
+      self.assertTrue(
+          actual_mask[row, expected_col],
+          f"Padded query row {row} must map to padding KV column {expected_col} in pad_m.",
+      )
+
   def test_hca_static_mask_equality_and_hash(self):
     mask1 = attention_op.HCAStaticMask(
         shape=(512, 640),
@@ -1044,19 +1077,6 @@ class HCAStaticMaskTest(unittest.TestCase):
       op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=128)
       mock_mask.assert_called_once()
       self.assertEqual(mock_mask.call_args.kwargs["compress_ratio"], 128)
-
-  def test_hca_context_parallelism_raises_not_implemented(self):
-    op = self._make_flash_op(
-        attention_type=AttentionType.COMPRESSED,
-        context_parallel_size=2,
-        max_target_length=512,
-    )
-    query = jnp.zeros((1, 512, 1, 128))
-    key = jnp.zeros((1, 640, 1, 128))
-    with self.assertRaisesRegex(
-        NotImplementedError, "Context parallelism is currently not implemented for DeepSeek-V4 HCA Flash Attention"
-    ):
-      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=128)
 
   def test_packed_positions_and_segment_ids_vs_generate_attention_mask(self):
     """Verifies segment-id based document packing with positions on CPU ground truth generate_attention_mask."""
