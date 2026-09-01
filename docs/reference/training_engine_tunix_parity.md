@@ -21,6 +21,7 @@ of the trainer, not of the workload.
 | Peak HBM/device, GA=1                              | MaxText **1.78 GiB** vs. Tunix 8.65 GiB (**4.9x**)                             |
 | Metrics recorded per step                          | MaxText **22** vs. Tunix 2                                                     |
 | Engine host step path, after the §9 fix            | qwen3-0.6b **1.80x** faster; qwen3.5-35b-a3b 1.004x — a fixed ~70 ms saving   |
+| 23-step loop wall clock, after the §9 fix          | qwen3-0.6b 8.9 → **6.3 s**; qwen3.5-35b-a3b 56.3 → **55.7 s**                 |
 
 **On step time alone the two trainers are equivalent at production sequence lengths.**
 MaxText's lead is a short-sequence effect that amortizes away completely: 1.85x at 16
@@ -91,6 +92,12 @@ python qwen3_tunix_profile.py   --tp 8 --seq 1024 --no-trace   # Tunix model, Tu
 The "before" rows come from the same commands with only
 `src/maxtext/training_engine/{maxtext_engine,inflight_throttler}.py` reverted to the fix's
 parent commit, so nothing but the engine differs.
+
+The arms report the steady-state window and nothing else, so §9's wall-clock table was timed
+from outside — `time python qwen3_engine_profile.py …` for the end-to-end row, and the loop
+and phase splits from temporary `time.perf_counter()` marks around `engine.compile()` and the
+step loop. Reproducing those three rows means re-adding the marks; the last row needs only
+`time`.
 
 ## 1. End-to-end GRPO test
 
@@ -419,6 +426,40 @@ model whose median moved 8.5 ms. Each `nnx.split` allocates a large short-lived 
 graph twice per step, and the GC pauses that follow land on whichever step is unlucky —
 visible as qwen3-0.6b's 464 ms worst step against a 161.6 ms median. Removing the
 allocation removes the pauses on both models.
+
+### End-to-end wall clock
+
+The per-step figures above are medians; total run time follows the **mean**, so it credits
+the fix with the tail as well. Same two shapes, same `--no-trace` runs, timed from outside:
+
+| wall clock                             | qwen3-0.6b `tp=8` | qwen3.5-35b-a3b `tp=2 --scan` |
+| -------------------------------------- | ----------------- | ----------------------------- |
+| 23-step loop — before                  | 8.9 s             | 56.3 s                        |
+| **23-step loop — after**               | **6.3 s**         | **55.7 s**                    |
+| in-process total — before → after      | 18.0 → **15.4 s** | 62.6 → **62.0 s**             |
+| `python qwen3_engine_profile.py …`     | 27.7 → **25.3 s** | 72.2 → **71.7 s**             |
+
+The loop times are the means times 23, to within measurement noise: qwen3-0.6b 211.4 → 89.8
+ms predicts 2.80 s saved against 2.6 s observed, qwen3.5-35b-a3b 2340.0 → 2314.0 ms predicts
+0.60 s against 0.6 s observed. On loop time qwen3-0.6b is **1.41x**, less than its 1.80x
+median because the before-arm's mean sits 52 ms above its median — the same GC pauses the
+previous paragraph describes, which the median hides and the wall clock does not.
+
+Everything outside the loop is fixed per-run cost that the fix does not touch:
+
+| per-run overhead                        | qwen3-0.6b | qwen3.5-35b-a3b |
+| --------------------------------------- | ---------- | --------------- |
+| interpreter + JAX/MaxText import        | ~9.9 s     | ~9.7 s          |
+| config + tokenizer + dataset            | ~4.7 s     | ~4.2 s          |
+| engine build                            | 3.8 s      | 1.6 s           |
+| `engine.compile()`                      | 0.6 s      | 0.5 s           |
+
+Two readings there are easy to get wrong. `engine.compile()` looks nearly free because
+`jax.jit` lowering is lazy — XLA compilation happens on the first call, inside the loop, and
+lands in the warmup steps the steady-state window drops (~4.2 s for qwen3-0.6b, ~2.5 s for
+qwen3.5-35b-a3b). And the *larger* model builds in less than half the time of the smaller
+one, for the same reason it gains less from the fix: scanned, it compiles and constructs one
+decoder layer rather than 28.
 
 **Against `PeftTrainer` driving the identical model**, which is the control that isolates
 trainer from model, the engine closes to within a few ms on both:
