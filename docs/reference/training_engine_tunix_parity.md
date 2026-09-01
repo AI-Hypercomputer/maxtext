@@ -22,7 +22,8 @@ of the trainer, not of the workload.
 | Metrics recorded per step                          | MaxText **22** vs. Tunix 2                                                     |
 | Engine host step path, after the §9 fix            | qwen3-0.6b **1.80x** faster; qwen3.5-35b-a3b 1.004x — a fixed ~70 ms saving    |
 | 23-step loop wall clock, after the §9 fix          | qwen3-0.6b 8.9 → **6.3 s**; qwen3.5-35b-a3b 56.3 → **55.7 s**                  |
-| Engine host step path at GA=8, after the §9 fix    | qwen3-0.6b **5.76x** faster — the saving is per micro-batch                    |
+| Engine host step path at GA=8, after the §9 fix    | qwen3-0.6b **2.08x** faster, at identical TPU-busy time                        |
+| Engine at GA=8, whole PR vs. `59f49ac90^`          | qwen3-0.6b **5.76x** — §9's host fix plus the fused accumulation kernel        |
 
 **On step time alone the two trainers are equivalent at production sequence lengths.**
 MaxText's lead is a short-sequence effect that amortizes away completely: 1.85x at 16
@@ -191,6 +192,12 @@ profiler attached. `fwd_bwd` is per micro-step, `total` is a whole update.
 | 4096 tokens | 175.1 ms          | 13.9 ms          | **189.1 ms**  | 195.1 ms        | 8.7 ms         | 203.9 ms    | **1.08x** |
 | 8192 tokens | 465.0 ms          | 14.4 ms          | **479.6 ms**  | 484.8 ms        | 8.3 ms         | 493.2 ms    | **1.03x** |
 
+These are wall clock with no profiler attached, on purpose (§4b). The 16- and 1024-token
+rows were also captured under xprof, so the device-time side of them can be checked:
+`gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/{maxtext,tunix}_ga1_bs8_seq{16,1024}/`.
+Do not read wall clock off those — attaching the profiler inflates MaxText's more than
+Tunix's.
+
 **The step-time advantage amortizes away.** `fwd_bwd` goes 2.75x → 1.46x → 1.34x → 1.11x →
 1.04x across the sweep. At 8192 tokens the two trainers are within run-to-run noise of each
 other, so **step time is not a reason to prefer either.** The peak-HBM difference (§5) is
@@ -247,6 +254,14 @@ Counting `ph=="X"` events on the `/device:TPU:0` `XLA Modules` line, 8 iteration
 | **TPU-busy per step** | **44.3 ms**                        | **63.7 ms** (1.44x)                 |
 | XLA module executions | **424**                            | **16**                              |
 | `Steps` line entries  | 424, median **0.012 ms**           | 16, median 36.7 ms                  |
+
+Both columns are read straight out of these two traces, which are the same shape captured
+back to back:
+
+```text
+gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/maxtext_ga1_bs8_seq1024/
+gs://chengnuojin-xprof/maxtext-vs-tunix-2026-08-31/tunix_ga1_bs8_seq1024/
+```
 
 MaxText runs 424 XLA modules where Tunix runs 16. The extra 408 (~51 per step) are tiny
 eager dispatches from `MetricsRecorder._record_metric`, which calls `jnp.atleast_1d` /
@@ -405,14 +420,18 @@ Measured as an A/B on `src/maxtext/training_engine/{maxtext_engine,inflight_thro
 alone, everything else held fixed. `--no-trace`, 23 steps, last 19 after warmup, batch 8 x
 seq 1024, GA=1, f32, `optax.sgd(1e-5)`, no clipping, on the same 8-device v7x host.
 
-| ms/step, untraced                             | median     | mean   | max    | `fwd_bwd` / `update` |
-| --------------------------------------------- | ---------- | ------ | ------ | -------------------- |
-| **qwen3-0.6b**, `tp=8`, unscanned — before    | 161.6      | 216.0  | 464.1  | 38.7 / 122.0 ms      |
-| **qwen3-0.6b**, `tp=8`, unscanned — after     | **89.8**   | 89.8   | 90.2   | 15.9 / 74.0 ms       |
-| speedup                                       | **1.80x**  | 2.41x  |        |                      |
-| **qwen3.5-35b-a3b**, `tp=2`, scanned — before | 2322.5     | 2339.6 | 2641.8 | 13.6 / 2309.3 ms     |
-| **qwen3.5-35b-a3b**, `tp=2`, scanned — after  | **2314.0** | 2314.0 | 2314.6 | 7.9 / 2306.1 ms      |
-| speedup                                       | 1.004x     | 1.011x |        |                      |
+| ms/step, untraced                             | median     | mean   | max    | `fwd_bwd` / `update` | trace                                                                              |
+| --------------------------------------------- | ---------- | ------ | ------ | -------------------- | ---------------------------------------------------------------------------------- |
+| **qwen3-0.6b**, `tp=8`, unscanned — before    | 161.6      | 216.0  | 464.1  | 38.7 / 122.0 ms      | `gs://chengnuojin-xprof/engine-hostpath-20260901/base/qwen3-0.6b-engine-fsdp1tp8/` |
+| **qwen3-0.6b**, `tp=8`, unscanned — after     | **89.8**   | 89.8   | 90.2   | 15.9 / 74.0 ms       | `gs://chengnuojin-xprof/engine-hostpath-20260901/head/qwen3-0.6b-engine-fsdp1tp8/` |
+| speedup                                       | **1.80x**  | 2.41x  |        |                      |                                                                                    |
+| **qwen3.5-35b-a3b**, `tp=2`, scanned — before | 2322.5     | 2339.6 | 2641.8 | 13.6 / 2309.3 ms     | `.../engine-hostpath-20260901/base/qwen3.5-35b-a3b-engine-scan-fsdp4tp2/`          |
+| **qwen3.5-35b-a3b**, `tp=2`, scanned — after  | **2314.0** | 2314.0 | 2314.6 | 7.9 / 2306.1 ms      | `.../engine-hostpath-20260901/head/qwen3.5-35b-a3b-engine-scan-fsdp4tp2/`          |
+| speedup                                       | 1.004x     | 1.011x |        |                      |                                                                                    |
+
+The `trace` column is the xplane directory each row's shape was separately profiled in;
+full paths and the caveat about compilation landing inside those windows are in
+[Profiles](#profiles). The timings themselves are from the untraced runs.
 
 **The saving is a fixed quantity of host time, not a percentage**, so the two rows are the
 same fix seen from opposite ends. What it is worth on a given workload is set by two things:
@@ -440,36 +459,66 @@ the arithmetic, because the removed `nnx.split(model, nnx.Param, ...)` sits in `
 which runs once per **micro** step — so the saving scales with GA while the update-side
 part does not. GA=1 measures the fix at its weakest.
 
-Re-run at GA=8, everything else held as above and the same A/B on the engine files alone.
-A different host from the table above — 4-device v6e rather than 8-device v7x — so read
-these rows against each other, not against the GA=1 rows:
+Re-run at GA=8, everything else held as above and the same A/B on the engine files alone —
+`before` is those two files at `98e6886e8^`. A different host from the table above, 4-device
+v6e rather than 8-device v7x, so read these rows against each other and not against the GA=1
+rows. TPU-busy is the `XLA Ops` line of the core planes in the linked traces, over the 6
+optimizer steps each covers:
 
-| qwen3-0.6b, unscanned, batch 8 x seq 1024, GA=8 | median    | mean   | max    | `fwd_bwd` / `update` |
-| ----------------------------------------------- | --------- | ------ | ------ | -------------------- |
-| fsdp=4, before                                  | 3421.0    | 3297.1 | 3430.1 | 355.8 / 79.5 ms      |
-| **fsdp=4, after**                               | **593.6** | 616.8  | 1034.8 | 60.6 / 83.5 ms       |
-| speedup                                         | **5.76x** | 5.35x  |        |                      |
+| qwen3-0.6b, unscanned, batch 8 x seq 1024, GA=8 | median    | mean   | max    | `fwd_bwd` / `update` | TPU-busy/step | trace                                                                                           |
+| ----------------------------------------------- | --------- | ------ | ------ | -------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
+| fsdp=4, before                                  | 1233.0    | 1094.8 | 1274.0 | 72.2 / 129.3 ms      | 570.6 ms      | `gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/base-hostpath-only/qwen3-0.6b-engine-ga8/` |
+| **fsdp=4, after**                               | **593.6** | 616.8  | 1034.8 | 60.6 / 83.5 ms       | **570.7 ms**  | `gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/head/qwen3-0.6b-engine-ga8/`               |
+| speedup                                         | **2.08x** | 1.78x  |        |                      | 1.000x        |                                                                                                 |
 
-**5.76x at GA=8 against 1.80x at GA=1**, on the same model. The per-micro-step `fwd_bwd`
-falls 355.8 → 60.6 ms and is paid eight times, while `update` is flat at ~80 ms and is paid
-once; multiplying out, 8 x 295.2 = 2362 ms of the 2827 ms saved is the `fwd_bwd` side. This
-is the same fixed quantity of host time as before, just charged per micro-batch: 28
-unscanned decoder layers walked eight times a step instead of once.
+**2.08x at GA=8 against 1.80x at GA=1**, on the same model. The two traces are the cleanest
+evidence in this document that the fix is host-only: TPU-busy is 570.6 vs 570.7 ms/step and
+the accumulation kernel is the *same XLA module hash* on both sides, so the entire 639 ms is
+host time that stopped being exposed. Device utilization goes 46% → 96%. What the traces do
+show changing is the module *launch* count — 1028 dispatches over 6 steps before, 680 after —
+which is the deferred metrics write, not the graph walk.
+
+The GA scaling is why 2.08x beats 1.80x, but only modestly: the graph walk is per micro step
+and so is paid 8 times, while `update`'s share is paid once. Against that, the more
+micro-steps there are the more device time there is per optimizer step for host work to hide
+behind, which pushes the other way.
+
+**The whole engine change in this PR, not just §9's fix, is worth more.** Taking `before` all
+the way back to `59f49ac90^` — both engine commits reverted, which is *not* the A/B this
+section is about — gives 3421.0 → 593.6 ms, **5.76x**. That extra factor is not host time:
+
+| qwen3-0.6b GA=8, engine at       | median    | TPU-busy/step | module launches / 6 steps | per-micro kernel |
+| -------------------------------- | --------- | ------------- | ------------------------- | ---------------- |
+| `59f49ac90^` (before the PR)     | 3421.0    | 2301.2 ms     | 14048                     | 287.1 ms         |
+| `98e6886e8^` (after §9's parent) | 1233.0    | 570.6 ms      | 1028                      | 72.2 ms          |
+| PR head                          | **593.6** | **570.7 ms**  | 680                       | 72.2 ms          |
+
+Trace: `gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/base/qwen3-0.6b-engine-ga8/`.
+`59f49ac90` is what moves the device: tracing the kernels under `nn_partitioning.axis_rules`
+folds the accumulation into the compiled program, so the 14048 launches — ~2340 per step,
+close to 310 parameter leaves x 8 micro-batches of eager `jit_add` — collapse into one
+`jit_accum_kernel` per micro step, and per-micro device time falls 287.1 → 72.2 ms.
 
 It also moves the trainer comparison. §4 found the two trainers equivalent on step time at
 production sequence lengths, which held at GA=1; at GA=8 they separate, because
 `PeftTrainer` walks the graph per micro step too:
 
-| GA=8, fsdp=4, batch 8 x seq 1024 | median    | mean   |
-| -------------------------------- | --------- | ------ |
-| MaxText model + **engine**       | **593.6** | 616.8  |
-| MaxText model + `PeftTrainer`    | 1178.0    | 1032.7 |
-| tunix model + `PeftTrainer`      | 900.7     | 881.4  |
+| GA=8, fsdp=4, batch 8 x seq 1024 | median    | mean   | TPU-busy/step | util    | trace                                                                              |
+| -------------------------------- | --------- | ------ | ------------- | ------- | ---------------------------------------------------------------------------------- |
+| MaxText model + **engine**       | **593.6** | 616.8  | 570.7 ms      | **96%** | `gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/head/qwen3-0.6b-engine-ga8/`  |
+| MaxText model + `PeftTrainer`    | 1178.0    | 1032.7 | 617.7 ms      | 52%     | `gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/head/qwen3-0.6b-maxtext-ga8/` |
+| tunix model + `PeftTrainer`      | 900.7     | 881.4  | 728.5 ms      | 81%     | `gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/head/qwen3-0.6b-tunix-ga8/`   |
 
-Against the identical model the engine is **1.98x** on the median, and **1.52x** against
-the tunix-model baseline. The `PeftTrainer` + MaxText-model row is bimodal — it alternates
-between ~700 ms and ~1180 ms steps, which is why its mean sits 145 ms *below* its median —
-so treat that row as a range rather than a point.
+Against the identical model the engine is **1.98x** on the median, and **1.52x** against the
+tunix-model baseline. The `PeftTrainer` + MaxText-model row is bimodal — it alternates
+between ~700 ms and ~1180 ms steps, which is why its mean sits 145 ms *below* its median — so
+treat that row as a range rather than a point.
+
+The traces make the mechanism explicit, and it is not the one the wall clock suggests. The
+**MaxText model is the faster of the two on device** — 617.7 vs 728.5 ms of TPU-busy per step
+— and still loses by 277 ms of wall clock under the same trainer, because `PeftTrainer` leaves
+it only 52% utilized. Swapping the trainer, not the model, is what recovers that: the same
+MaxText model under the engine runs at 96%.
 
 ### End-to-end wall clock
 
@@ -573,6 +622,28 @@ gs://chengnuojin-xprof/engine-hostpath-20260901/head/qwen3.5-35b-a3b-engine-scan
 Compilation *is* inside these windows — the engine arm calls `compile()` under the trace on
 purpose, so the first step carries it — so read from the steady-state region, not the whole
 trace.
+
+The GA=8 traces backing §9's "Gradient accumulation multiplies the saving", on the 4-device
+v6e host. `--steps 6` rather than the default 23, to keep the xplane files under ~1 GiB;
+3 warmup steps then 3 measured, so there are 6 optimizer steps and 48 micro-batches in each
+window:
+
+```text
+gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/base/qwen3-0.6b-engine-ga8/                 # 59f49ac90^, both engine commits reverted
+gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/base-hostpath-only/qwen3-0.6b-engine-ga8/   # 98e6886e8^, §9's own A/B
+gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/head/qwen3-0.6b-engine-ga8/
+gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/head/qwen3-0.6b-maxtext-ga8/
+gs://chengnuojin-xprof/engine-hostpath-ga8-20260901/head/qwen3-0.6b-tunix-ga8/
+```
+
+Each holds `plugins/profile/<timestamp>/t1v-n-76d392d5-w-0.xplane.pb`. The TPU-busy figures
+in §9 are the `XLA Ops` line of one core plane divided by 6; the module-launch counts are the
+event count on `XLA Modules`.
+
+These traces show the uneven tracing overhead this section warns about, at GA=8 and from the
+side that matters: the engine arm reads 593.7 ms/step traced against 593.6 untraced, while
+`PeftTrainer` goes 900.7 → 1080.5 (tunix model) and 1178.0 → 1701.5 (MaxText model). Quote
+the `--no-trace` wall clock; take only device time from these.
 
 Read **total TPU-busy time**, not the trace viewer's step statistics — see §4b for why the
 latter is not meaningful for MaxText.
