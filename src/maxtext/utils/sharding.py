@@ -18,6 +18,7 @@
 from collections.abc import Iterable
 import inspect  # for debugging only
 from pathlib import Path
+from typing import Any
 
 from flax import linen as nn, nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
