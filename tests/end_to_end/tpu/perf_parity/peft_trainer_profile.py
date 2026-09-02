@@ -48,10 +48,15 @@ Deliberately not equalised, because it is part of what is being compared: MaxTex
 `use_flash_attention` at its default of False. The chosen kernel is logged.
 
 Not named after a model: `--model` selects one, and this arm is the PeftTrainer side of
-the 35b trainer comparison as well as the 0.6b one. Note that on qwen3.5-35b-a3b it runs
-only at `--ga 1`; every `--ga > 1` OOMs on a GA-depth-independent 161.94 G fp32 copy of
-the parameter tree that `GradientAccumulator` allocates off the single-microstep fast
-path. See `RESULTS-qwen35-35b-20260902.md` §2.
+the 35b trainer comparison as well as the 0.6b one. On qwen3.5-35b-a3b it runs only at
+`--ga 1` against the tunix revision MaxText pins (`c4ec573`, in
+`src/dependencies/extra_deps/post_train_github_deps.txt`): every `--ga > 1` OOMs in
+`jit__update_step`, needing 161.4 G of HLO temporaries against 94.74 G. Tunix
+`44a35eeaf` fixes it -- `GradientAccumulator.reset()` zeroes with `v[...] * 0` rather than
+`jnp.zeros_like`, which inside the traced update loses the operand's sharding and
+materialises the whole 129 G parameter tree. Reverting only that line on tunix head brings
+the 161.41 G back byte for byte. Past that commit both arms run to GA=8. See
+`RESULTS-qwen35-35b-ep-20260902.md` §6.
 
 Run from this directory -- the arms import `perf_parity_common` as a sibling, and a working
 directory that contains a `tunix/` checkout will shadow the installed package:
@@ -91,6 +96,10 @@ def _build_config(spec: qc.RunSpec, scan_layers: bool):
       per_device_batch_size=spec.per_device_batch,
       ici_fsdp_parallelism=spec.fsdp,
       ici_tensor_parallelism=spec.tp,
+      ici_expert_parallelism=spec.ep,
+      # Both default off and both require an expert axis; `RunSpec` rejects them at --ep 1.
+      use_ring_of_experts=spec.ring_of_experts,
+      use_ragged_sort=spec.ragged_sort,
       # The three overrides that match tunix's defaults; see the module docstring.
       dtype="float32",
       weight_dtype="float32",

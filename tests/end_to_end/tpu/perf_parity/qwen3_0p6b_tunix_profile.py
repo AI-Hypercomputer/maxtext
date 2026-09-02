@@ -70,6 +70,10 @@ def main() -> None:
     # for and no other model to switch to, so failing here beats silently benchmarking
     # qwen3-0.6b under a header that claims otherwise.
     raise ValueError(f"the tunix arm has only unscanned {qc.MODEL_NAME}, not --model {spec.model} --scan")
+  if spec.ep != 1:
+    # qwen3-0.6b is dense, and `ShardingConfig.get_default_sharding()` names only `fsdp`
+    # and `tp`, so there is no expert axis for the mesh below to carry.
+    raise ValueError(f"the tunix arm has no expert axis; --ep {spec.ep} is meaningless on a dense model")
   profile_dir = qc.profile_dir(spec.tag("qwen3-0.6b-tunix"))
   print(spec.describe(), flush=True)
 

@@ -20,9 +20,14 @@ of the four arms take `--model` and have been run at both sizes on this rig:
   * `qwen3-0.6b` (the default) -- the shape all four arms can run, and the only one the
     tunix arm can, since tunix implements that architecture and not the others. Runs
     unscanned at `--tp 8` on 8 devices.
-  * `qwen3.5-35b-a3b` -- MaxText-side arms only, and only as `--tp 2 --scan`: the model has
-    2 KV heads, so `--tp 8` is rejected by the sharding checks, and unscanned it OOMs. See
-    `RESULTS-qwen35-35b-20260902.md`.
+  * `qwen3.5-35b-a3b` -- MaxText-side arms only, and always `--scan` (unscanned it OOMs).
+    Two mesh shapes have been measured: `--tp 2`, and `--ep 8 --ring-of-experts
+    --ragged-sort` over its 256 experts. `--tp 8` is rejected by the sharding checks
+    because the model has 2 KV heads. See `RESULTS-qwen35-35b-20260902.md`.
+
+`--ep` is the third mesh axis and it is what gates the two MoE kernel flags: MaxText reads
+the EP rank off `logical_axis_rules` (`exp` -> the `expert` physical axis) rather than off
+an int, and refuses `use_ring_of_experts` / `use_ragged_sort` when that rank is 1.
 
 `qwen3_0p6b_tunix_profile.py` is the one arm named after a model, because it is the one arm
 locked to one.
@@ -102,6 +107,17 @@ def profile_dir(arm: str) -> str:
   return os.path.join(PROFILE_ROOT, arm)
 
 
+# base.yml's `enable_tpu_profiling_options: true` block, verbatim -- see
+# `maxtext.common.profiler.Profiler.__init__`. This rig calls `jax.profiler.trace` directly
+# rather than going through `Profiler`, so the same advanced configuration has to be built
+# here to get the same trace.
+TPU_PROFILING_OPTIONS = {
+    "tpu_num_chips_to_profile_per_task": 1,
+    "tpu_num_sparse_core_tiles_to_trace": 1,
+    "tpu_num_sparse_cores_to_trace": 2,
+}
+
+
 def maybe_trace(log_dir: str, spec: "RunSpec"):
   """The profiler around the timed loop, unless `--no-trace` asked for it to be left off.
 
@@ -110,11 +126,24 @@ def maybe_trace(log_dir: str, spec: "RunSpec"):
   that issues two. MaxText's `update` reads 27.0 ms traced against 14.0 ms untraced where
   tunix goes 8.2 -> 18.5 ms, so a traced A/B flatters whichever side dispatches less. Quote
   `--no-trace` numbers for wall clock and traced ones for where the time went.
+
+  `TPU_PROFILING_OPTIONS` is on by default because the default profiler *silently drops
+  events* under `--ragged-sort`: the sort kernels emit on the order of a million SparseCore
+  events per step, the device trace fills, and what lands is a clipped subset -- one
+  `jit_accum_kernel` execution reading 225.99 ms against a real 724 ms, with no warning
+  anywhere. Capping the SparseCore tiles and cores traced, and profiling one chip per task
+  rather than all four, keeps the XLA-module timeline intact. Pass `--no-tpu-profiling-options`
+  to go back to the unrestricted capture; the cap is a *coverage* restriction, so a trace
+  taken with it holds one chip's device plane, which is the one these arms read anyway.
   """
   if not spec.trace:
     return contextlib.nullcontext()
-  print(f"tracing to {log_dir}", flush=True)
-  return jax.profiler.trace(log_dir=log_dir)
+  options = None
+  if spec.tpu_profiling_options:
+    options = jax.profiler.ProfileOptions()
+    options.advanced_configuration = dict(TPU_PROFILING_OPTIONS)
+  print(f"tracing to {log_dir}  (advanced tpu options: {spec.tpu_profiling_options})", flush=True)
+  return jax.profiler.trace(log_dir=log_dir, profiler_options=options)
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -123,10 +152,29 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
   parser.add_argument("--devices", type=int, default=None, help="use only the first N local devices")
   parser.add_argument("--fsdp", type=int, default=None, help="fsdp mesh axis (default: fills the devices)")
   parser.add_argument("--tp", type=int, default=1, help="tensor-parallel mesh axis")
+  parser.add_argument("--ep", type=int, default=1, help="expert-parallel mesh axis; MoE models only")
+  parser.add_argument(
+      "--ring-of-experts",
+      dest="ring_of_experts",
+      action="store_true",
+      help="MoE dispatch as a ring over the expert axis instead of all-to-all; needs --ep > 1",
+  )
+  parser.add_argument(
+      "--ragged-sort",
+      dest="ragged_sort",
+      action="store_true",
+      help="Pallas ragged-sort kernels in the MoE permute path; needs --ep > 1",
+  )
   parser.add_argument("--batch", type=int, default=BATCH_SIZE, help="examples per micro-batch")
   parser.add_argument("--seq", type=int, default=SEQ_LEN, help="tokens per example")
   parser.add_argument("--steps", type=int, default=MAX_STEPS, help="optimizer steps, warmup included")
   parser.add_argument("--no-trace", dest="trace", action="store_false", help="skip xprof; wall clock only")
+  parser.add_argument(
+      "--no-tpu-profiling-options",
+      dest="tpu_profiling_options",
+      action="store_false",
+      help="drop base.yml's advanced TPU profiling caps; the raw capture drops events under --ragged-sort",
+  )
   parser.add_argument("--model", default=MODEL_NAME, help="MaxText model_name; the tunix arm only has qwen3-0.6b")
   parser.add_argument("--scan", action="store_true", help="use MaxText's scanned decoder")
   return parser
@@ -146,16 +194,27 @@ class RunSpec:
       raise ValueError(f"--devices={args.devices} but only {len(all_devices)} are visible")
     self.devices = all_devices[: args.devices] if args.devices else all_devices
     self.tp = args.tp
-    self.fsdp = args.fsdp if args.fsdp else len(self.devices) // self.tp
-    if self.fsdp * self.tp != len(self.devices):
+    self.ep = args.ep
+    self.fsdp = args.fsdp if args.fsdp else len(self.devices) // (self.tp * self.ep)
+    if self.fsdp * self.tp * self.ep != len(self.devices):
       raise ValueError(
-          f"mesh fsdp={self.fsdp} x tp={self.tp} = {self.fsdp * self.tp} does not cover " f"{len(self.devices)} devices"
+          f"mesh fsdp={self.fsdp} x tp={self.tp} x ep={self.ep} = {self.fsdp * self.tp * self.ep} "
+          f"does not cover {len(self.devices)} devices"
       )
+    self.ring_of_experts = args.ring_of_experts
+    self.ragged_sort = args.ragged_sort
+    # MaxText infers the EP rank from `logical_axis_rules` (the `exp` rule maps to the
+    # `expert` physical axis), and rejects both flags outright when that rank is 1 --
+    # `types.py` raises "When EP rank is 1, use_ring_of_experts must be False". Catching it
+    # here names the flag that is missing rather than the invariant that broke.
+    if (self.ring_of_experts or self.ragged_sort) and self.ep == 1:
+      raise ValueError("--ring-of-experts / --ragged-sort need an expert axis; pass --ep > 1")
     self.ga = args.ga
     self.batch = args.batch
     self.seq = args.seq
     self.steps = args.steps
     self.trace = args.trace
+    self.tpu_profiling_options = args.tpu_profiling_options
     self.model = args.model
     self.scan = args.scan
 
@@ -183,6 +242,12 @@ class RunSpec:
       parts.append(f"d{len(self.devices)}")
     if self.tp != 1:
       parts.append(f"fsdp{self.fsdp}tp{self.tp}")
+    if self.ep != 1:
+      parts.append(f"fsdp{self.fsdp}ep{self.ep}" if self.tp == 1 else f"ep{self.ep}")
+    if self.ring_of_experts:
+      parts.append("roe")
+    if self.ragged_sort:
+      parts.append("rsort")
     if self.batch != BATCH_SIZE:
       parts.append(f"b{self.batch}")
     if self.seq != SEQ_LEN:
@@ -190,9 +255,12 @@ class RunSpec:
     return "-".join([arm] + parts)
 
   def describe(self) -> str:
+    moe = [name for name, on in (("ring_of_experts", self.ring_of_experts), ("ragged_sort", self.ragged_sort)) if on]
     return (
         f"devices={len(self.devices)} ({self.devices[0].device_kind})  "
-        f"mesh fsdp={self.fsdp} tp={self.tp}  ga={self.ga}  "
+        f"mesh fsdp={self.fsdp} tp={self.tp} ep={self.ep}  "
+        + (f"moe={'+'.join(moe)}  " if moe else "")
+        + f"ga={self.ga}  "
         f"micro-batch={self.batch}x{self.seq}  global-batch={self.global_batch}  "
         f"steps={self.steps} ({self.micro_steps} micro)"
     )
