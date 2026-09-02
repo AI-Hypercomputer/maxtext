@@ -27,6 +27,7 @@ from typing import Any
 
 from absl import logging
 from flax import nnx
+from flax import struct
 from flax.traverse_util import flatten_dict
 from flax.traverse_util import unflatten_dict
 import jax
@@ -145,7 +146,13 @@ _UNCOMPARABLE_STRUCTURE_HINT = (
 )
 
 
-@dataclasses.dataclass(kw_only=True)
+# Frozen to match tunix's `TrainerPayload`, which is a
+# `flax.struct.dataclass(frozen=True, kw_only=True)`. Python refuses to derive a
+# non-frozen dataclass from a frozen one, so a plain `dataclasses.dataclass`
+# here fails at import time with "cannot inherit non-frozen dataclass from a
+# frozen one". `struct.dataclass` also keeps the subclass registered as a
+# pytree, so it can still cross a `jit` boundary.
+@struct.dataclass(frozen=True, kw_only=True)
 class RouterReplayTrainerPayload(abstract_engine.TrainerPayload):
   """A TrainerPayload extension carrying forced router-replay expert decisions.
 
@@ -1237,12 +1244,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # optimization (fewer stale holds) depends on.
       num_chunks = max(1, int(os.environ.get("RAIDEN_WEIGHT_SYNC_CHUNKS", "1")))
       if self._raiden_syncs is None:
-        # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
-        # detection tunix's K8sJaxContext.initialize() uses), trainer params
-        # are proxy-backed and Raiden can't bind them in place -- host_stage
-        # pulls them to client host memory first. Direct-TPU trainers skip
-        # that extra copy since their params already live on TPU.
-        is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
+        # Proxy-backed (Pathways) params used to need `host_stage=True` to pull
+        # them into client host memory before binding. The synchronizer now
+        # detects the proxy runtime itself and binds them via the Raiden FFI
+        # without the host round-trip, and no longer accepts the argument.
         # worker_index must be unique per chunk (it seeds WorkUnitId's
         # job_replica_id) -- otherwise every chunk's work unit collides under
         # the same id in the handler's registry and only one survives
@@ -1252,7 +1257,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
                 job_name="trainer",
                 worker_index=jax.process_index() if num_chunks == 1 else (jax.process_index() * num_chunks + i + 1),
                 auto_h2d=False,
-                host_stage=is_pathways,
                 parallelism=4,
             )
             for i in range(num_chunks)
@@ -1295,7 +1299,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._raiden_syncs:
       for sync in self._raiden_syncs:
         logging.vlog(1, "Trainer Raiden metrics: %s", sync.metrics())
-        sync.release_host_arrays()
+        # `release_host_arrays()` used to drop the staged references here. The
+        # synchronizer now clears them itself at the start of the next bind, so
+        # there is nothing to release between rounds and the method is gone.
     return True
 
   def close(self) -> None:
