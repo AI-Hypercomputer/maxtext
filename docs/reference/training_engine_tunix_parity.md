@@ -431,19 +431,22 @@ Two further v2 behaviours worth knowing when reading its metrics:
 
 In the other direction, MaxText's `gradient_norm` used to be emitted only from the
 spike-skipping path, so it read NaN whenever `skip_step_on_spikes` was off — which is
-base.yml's default. **Fixed here**: `_update_kernel` now computes it on every update, in
-float32, exactly where Tunix's `_update_step` computes `optax.global_norm`. The two agree
-bit for bit on the same batch, at GA=1 and under accumulation:
+base.yml's default. **Fixed**, here and independently in `202a89ab8`, which landed on main
+while this was in review: `_update_kernel` now computes it on every update, in float32,
+exactly where Tunix's `_update_step` computes `optax.global_norm`. The two agree bit for bit
+on the same batch, at GA=1 and under accumulation:
 
 | `--trainer=both`, qwen3-0.6b | MaxText `gradient_norm` | Tunix `grad_norm` |
 | ---------------------------- | ----------------------- | ----------------- |
 | GA=1, batch 8                | 59.77279281616211       | 59.77279281616211 |
 | GA=8, batch 8                | 18.25168800354004       | 18.25168800354004 |
 
-Taken after clipping, which is what `learning/grad_norm` means in
-`trainers/pre_train/train.py`; with `gradient_clipping_threshold=0.0` — the setting used
-throughout this document, and Tunix's only behaviour, since it never clips — that is the
-same tensor Tunix reduces. MaxText therefore records **23** metrics per step, and the
+Taken *before* clipping, following `202a89ab8`: that is where Tunix's `optax.global_norm`
+sits, since its clipping (when a caller configures any) is a link in the optax chain that
+runs afterwards. In `train.py`'s vocabulary this is `learning/raw_grad_norm` rather than
+`learning/grad_norm`, and the distinction is invisible in every measurement here —
+`gradient_clipping_threshold=0.0` throughout this document, and Tunix never clips at all, so
+the two are the same tensor. MaxText therefore records **23** metrics per step, and the
 `learning/grad_norm` ↔ `gradient_norm` row of `compare_training_engine.py`'s aux map, which
 previously found nothing on the engine side to compare, now runs.
 
