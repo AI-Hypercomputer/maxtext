@@ -187,20 +187,27 @@ def _deferred_all_reduce_shardings(config: Any, mesh: Any, params_shardings: Any
   - not explicit sharding, where reduced/unreduced specs do not exist;
   - a mesh with any non-Explicit axis, which those specs are also rejected on. A caller can
     hand the engine an all-Auto mesh regardless of `config.shard_mode`;
-  - "data" is not the only mesh axis of size > 1 that the activation batch dimension is
-    sharded over. A gradient contracts over the batch, and JAX requires the unreduced set
-    to be exactly the contracted axes -- with `data` and `fsdp` both on the batch it
-    rejects the backward pass outright ("unreduced axes should be equal to the contracting
+  - any mesh axis other than "data" has size > 1. JAX requires the unreduced set to be
+    exactly the axes the gradient contracts over, and "data" is the only one the tag ever
+    names, so a second axis over any contracted dimension makes the backward pass illegal.
+    `fsdp` gets there through the batch ("unreduced axes should be equal to the contracting
     specs. Got unreduced axes=frozenset({'data'}) and contracting spec=(('data', 'fsdp'),
-    None)"). Widening the tag to both is not the fix: a parameter sharded over `fsdp`
-    cannot also be unreduced over it. Read the batch axes off the resolved mesh rather
-    than `config.ici_data_parallelism`, which may still be -1 (auto-fill).
+    None)") and `tensor` through the feature dimension ("... and contracting spec=('data',
+    None, 'tensor')"). Widening the tag is not the fix in either case: a parameter sharded
+    over `fsdp` or `tensor` cannot also be unreduced over it. So the rule is the blunt one
+    -- pure data parallelism or no deferral -- rather than a list of the axes known to
+    break, which is how `tensor` was missed. Read the mesh that resolved rather than
+    `config.ici_*_parallelism`, which may still be -1 (auto-fill).
+  - the batch dimension is not sharded over "data" after all, leaving no cross-replica
+    partial to defer and nothing for the tag to describe.
   """
   if getattr(config, "shard_mode", None) != common_types.ShardMode.EXPLICIT:
     return None, None
   if mesh is None or mesh.shape.get(_DATA_AXIS, 1) <= 1:
     return None, None
   if any(axis_type != jax.sharding.AxisType.Explicit for axis_type in mesh.axis_types):
+    return None, None
+  if any(size > 1 for axis, size in mesh.shape.items() if axis != _DATA_AXIS):
     return None, None
   try:
     batch_axes = sharding.batch_mesh_axes(mesh, rules=config.logical_axis_rules)
