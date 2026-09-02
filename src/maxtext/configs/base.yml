@@ -200,6 +200,14 @@ logits_via_embedding: false
 normalize_embedding_logits: true  # whether to normalize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
+# Compute the untied LM head's weight gradient with a hand-written backward pass that contracts straight into the
+# kernel's stored orientation, instead of letting autodiff emit transpose(dot(...)) and hoping XLA folds it away.
+# Under shard_mode: explicit that fold never happens, because the Sharding custom-call on every dot output is a
+# barrier algsimp will not cross, so the gradient is left sharded on its minor-most dimension and loses the
+# all-reduce -> reduce-scatter fusion (see docs/guides/optimization/shard_mode_performance.md). The stored kernel
+# and its initialization are untouched, so no checkpoint conversion is needed; gradients differ from the default
+# rule only by floating-point reassociation. No effect under shard_mode: auto, where XLA folds the transpose itself.
+lm_head_weight_grad_in_kernel_order: false
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the Indexer across the unsharded local heads dimension natively.

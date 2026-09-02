@@ -604,6 +604,15 @@ class LogitsAndLoss(BaseModel):
   )
   logits_dot_in_fp32: bool = Field(False, description="Use fp32 for the logits dot product for stability.")
   cast_logits_to_fp32: bool = Field(True, description="Whether to cast the final logits to fp32.")
+  lm_head_weight_grad_in_kernel_order: bool = Field(
+      False,
+      description=(
+          "Compute the untied LM head's weight gradient directly in the kernel's stored axis order via a "
+          "custom_vjp, so autodiff emits no transpose after the gradient dot. Recovers the weight-gradient "
+          "reduce-scatter that shard_mode=explicit otherwise loses, leaving the stored kernel and its "
+          "initialization untouched. No effect under shard_mode=auto."
+      ),
+  )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
@@ -3266,6 +3275,17 @@ class MaxTextConfig(
       raise ValueError(
           "shard_embed_moe_on_fsdp requires quantization to be specified and "
           "weight_quantization_calibration_method to be fixed (static scaling mode)."
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_lm_head_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Reject lm_head_weight_grad_in_kernel_order where it cannot be honored."""
+    if not self.lm_head_weight_grad_in_kernel_order:
+      return self
+    if self.logits_via_embedding:
+      raise ValueError(
+          "lm_head_weight_grad_in_kernel_order only applies to the untied LM head, but logits_via_embedding is True."
       )
     return self
 

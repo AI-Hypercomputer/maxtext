@@ -85,6 +85,104 @@ def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul
   return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
 
 
+def _aval_sharding(value):
+  """The sharding carried by `value`'s type, or None when it carries none.
+
+  Under `shard_mode: explicit` every aval knows its own sharding, so this is how
+  a hand-written backward pass pins its outputs to the same layout the default
+  transpose rule would have produced.
+  """
+  try:
+    sharding = jax.typeof(value).sharding
+  except Exception:  # pylint: disable=broad-except
+    return None
+  spec = getattr(sharding, "spec", None)
+  if spec is None or all(p is None for p in spec):
+    return None
+  return sharding
+
+
+def _restore_axis_order(value, produced_axes):
+  """Permute `value` so that its axis j is the operand's original axis j.
+
+  `produced_axes[i]` names the original axis that dot_general placed at position
+  i. For every layout this path is enabled for the mapping is already the
+  identity, so the transpose is elided rather than merely folded later.
+  """
+  produced_axes = tuple(produced_axes)
+  if produced_axes == tuple(range(len(produced_axes))):
+    return value
+  return lax.transpose(value, tuple(produced_axes.index(j) for j in range(len(produced_axes))))
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def _dot_general_kernel_ordered_grad(inputs, kernel, dimension_numbers, precision, out_sharding):
+  """`lax.dot_general` whose weight gradient is emitted in stored-kernel layout.
+
+  JAX's default transpose rule builds the kernel gradient as
+  `transpose(dot(g, inputs))`. XLA normally folds that transpose back into the
+  dot, but under `shard_mode: explicit` every dot output carries a `Sharding`
+  custom-call and algebraic simplification will not fold across it. The
+  transpose then survives to codegen, which leaves the gradient sharded on its
+  minor-most dimension -- the one position where XLA declines to fuse the
+  weight-gradient all-reduce into a reduce-scatter. See
+  docs/guides/optimization/shard_mode_performance.md for the measurements.
+
+  Writing the backward pass by hand avoids the transpose instead of relying on
+  XLA to undo it: `dk` is contracted straight into the kernel's own axis order.
+  That reassociates the sum, so the gradients match the default rule to float
+  rounding (~1e-7 relative) rather than bit for bit.
+  """
+  return lax.dot_general(inputs, kernel, dimension_numbers, precision=precision, out_sharding=out_sharding)
+
+
+def _dot_general_kernel_ordered_grad_fwd(inputs, kernel, dimension_numbers, precision, out_sharding):
+  out = lax.dot_general(inputs, kernel, dimension_numbers, precision=precision, out_sharding=out_sharding)
+  return out, (inputs, kernel)
+
+
+def _dot_general_kernel_ordered_grad_bwd(dimension_numbers, precision, out_sharding, res, g):
+  """Backward pass for `_dot_general_kernel_ordered_grad`."""
+  del out_sharding  # Constrains the forward output only.
+  inputs, kernel = res
+  (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dimension_numbers
+  if lhs_batch or rhs_batch:
+    raise ValueError("_dot_general_kernel_ordered_grad does not support batch dimensions.")
+  lhs_free = tuple(i for i in range(inputs.ndim) if i not in lhs_contract)
+  rhs_free = tuple(i for i in range(kernel.ndim) if i not in rhs_contract)
+  n_lhs_free = len(lhs_free)
+
+  # dk contracts the free input axes against g's leading axes, which correspond
+  # to them one for one. The result carries the kernel's contracting axes (in
+  # ascending operand order) followed by its free axes -- the kernel's own order
+  # whenever it is stored in_features-major.
+  dk = lax.dot_general(
+      inputs,
+      g,
+      ((lhs_free, tuple(range(n_lhs_free))), ((), ())),
+      precision=precision,
+      out_sharding=_aval_sharding(kernel),
+  )
+  dk_axes = tuple(rhs_contract[lhs_contract.index(a)] for a in sorted(lhs_contract)) + rhs_free
+  dk = _restore_axis_order(dk, dk_axes)
+
+  # dx contracts g's trailing axes against the kernel's free axes, likewise
+  # paired one for one.
+  dx = lax.dot_general(
+      g,
+      kernel,
+      ((tuple(range(n_lhs_free, g.ndim)), rhs_free), ((), ())),
+      precision=precision,
+      out_sharding=_aval_sharding(inputs),
+  )
+  dx_axes = lhs_free + tuple(lhs_contract[rhs_contract.index(a)] for a in sorted(rhs_contract))
+  dx = _restore_axis_order(dx, dx_axes)
+  return dx, dk
+
+
+_dot_general_kernel_ordered_grad.defvjp(_dot_general_kernel_ordered_grad_fwd, _dot_general_kernel_ordered_grad_bwd)
+
+
 def _compute_dot_general_nnx(
     inputs,
     kernel,
@@ -94,6 +192,7 @@ def _compute_dot_general_nnx(
     quant_dot_general: nnx_wrappers.ToNNX | None,
     initializing: bool,
     out_sharding: NamedSharding | None = None,
+    weight_grad_in_kernel_order: bool = False,
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -106,6 +205,11 @@ def _compute_dot_general_nnx(
   if out_sharding is not None:
     out_ndim = (inputs.ndim - len(axis)) + (kernel.ndim - len(contract_ind))
     out_sharding = truncate_out_sharding(out_sharding, out_ndim)
+
+  if weight_grad_in_kernel_order:
+    return _dot_general_kernel_ordered_grad(
+        inputs, kernel, ((axis, contract_ind), ((), ())), matmul_precision, out_sharding
+    )
 
   return dot_general(
       inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision, out_sharding=out_sharding
@@ -132,6 +236,7 @@ class DenseGeneral(nnx.Module):
       mesh: Mesh | None = None,
       use_two_stage_all_gather: bool = False,
       debug_sharding: bool = False,
+      weight_grad_in_kernel_order: bool = False,
       *,  # Following arguments are keyword-only
       rngs: nnx.Rngs = None,
   ):
@@ -158,6 +263,16 @@ class DenseGeneral(nnx.Module):
         transpose XLA emits for a single combined 2-axis all-gather.
       debug_sharding: when True, log the logical/physical sharding of the
         two-stage all-gather constraints to the sharding dump files.
+      weight_grad_in_kernel_order: compute the weight gradient with a hand-written
+        backward pass that contracts straight into the kernel's stored axis order,
+        rather than letting autodiff emit `transpose(dot(...))` and relying on XLA
+        to fold the transpose away. See
+        docs/guides/optimization/shard_mode_performance.md section 4.3 for why
+        that fold does not happen under `shard_mode: explicit`. The stored kernel
+        and its initialization are untouched, so no checkpoint conversion is
+        needed; the gradients differ from the default rule only by floating-point
+        reassociation. Only takes effect under `shard_mode: explicit`; ignored
+        when the layer is quantized.
       rngs: RNG state for initialization in nnx.
     """
     self.in_features_shape = canonicalize_tuple(in_features_shape)
@@ -175,6 +290,7 @@ class DenseGeneral(nnx.Module):
     self.mesh = mesh
     self.use_two_stage_all_gather = use_two_stage_all_gather
     self.debug_sharding = debug_sharding
+    self.weight_grad_in_kernel_order = weight_grad_in_kernel_order
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -311,15 +427,26 @@ class DenseGeneral(nnx.Module):
       out_sharding = None
 
     contract_ind = tuple(range(0, len(self.axis)))
+    quant_dot_general = self.quant_dot_general if slice_bounds is None else None
+    # The hand-written weight gradient only pays off where XLA refuses to fold
+    # the transpose away, and it has to own the whole dot to do it -- so it is
+    # off under auto sharding and under any quantized path.
+    weight_grad_in_kernel_order = (
+        self.weight_grad_in_kernel_order
+        and self.shard_mode == ShardMode.EXPLICIT
+        and self.quant is None
+        and quant_dot_general is None
+    )
     output = _compute_dot_general_nnx(
         inputs,
         kernel,
         norm_axis,
         contract_ind,
         self.matmul_precision,
-        self.quant_dot_general if slice_bounds is None else None,
+        quant_dot_general,
         _initializing,
         out_sharding,
+        weight_grad_in_kernel_order,
     )
 
     if self.bias is not None:
@@ -346,6 +473,7 @@ def dense_general(
     shard_mode: ShardMode = ShardMode.AUTO,
     matmul_precision: str = "default",
     parameter_memory_host_offload: bool = False,
+    weight_grad_in_kernel_order: bool = False,
     name: None | str = None,
 ):
   """Creates a DenseGeneral Linen module using nnx.bridge.to_linen.
@@ -365,6 +493,8 @@ def dense_general(
     shard_mode: indicating the shard mode
     matmul_precision: Precision for matrix multiplication.
     parameter_memory_host_offload: Determines whether to offload params to host
+    weight_grad_in_kernel_order: compute the weight gradient directly in the
+      kernel's stored axis order; see DenseGeneral for details.
     name: name passed to the ToLinen Module
   """
   if not (inputs_shape is not None) ^ (in_features_shape is not None):
@@ -389,6 +519,7 @@ def dense_general(
       shard_mode=shard_mode,
       matmul_precision=matmul_precision,
       parameter_memory_host_offload=parameter_memory_host_offload,
+      weight_grad_in_kernel_order=weight_grad_in_kernel_order,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
