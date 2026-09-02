@@ -684,7 +684,12 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     raise AssertionError(f"Could not shard {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}") from e
   pspec = sharding.spec
 
-  if "data" in jax.tree.leaves(pspec):
+  # `tuple(pspec)`, not `pspec`: a PartitionSpec is a pytree *leaf*, so flattening one gives
+  # back the spec itself and this guard never fired. Its entries are what have to be walked,
+  # and they nest -- a dimension sharded over two axes is a tuple. Without this, a leaf
+  # already sharded over "data" gets a second one and `NamedSharding` rejects the result
+  # outright (`DuplicateSpecError: P(('data', 'data'), None)`).
+  if "data" in jax.tree.leaves(tuple(pspec)):
     return sharding
 
   for idx, (size, partition) in enumerate(zip(sharded_shape, pspec)):

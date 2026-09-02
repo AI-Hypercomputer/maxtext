@@ -58,6 +58,9 @@ EMPTY_METRICS_BUFFER_ID = -1
 # by `_check_pure_state_reusable`.
 _MODEL_STATE_KEY = "model"
 
+# Where the same split puts the `nnx.Optimizer`, including the optax state Zero-1 shards.
+_OPTIMIZER_STATE_KEY = "optimizer"
+
 _PURE_STATE_FALLBACK_WARNING = (
     "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
     "update will re-walk the NNX module graph. That is correct but slow -- the two "
@@ -220,6 +223,58 @@ def _deferred_all_reduce_shardings(config: Any, mesh: Any, params_shardings: Any
       jax.tree.map(lambda s: _tag_sharding(s, "reduced"), params_shardings),
       jax.tree.map(lambda s: _tag_sharding(s, "unreduced"), params_shardings),
   )
+
+
+_ZERO1_DECLINED_WARNING = (
+    "`shard_optimizer_over_data` (Zero-1) is set, but this engine cannot honour it (%s), so the "
+    "optimizer state stays replicated over the data axis. Logged once per engine instance."
+)
+
+
+def _zero1_active(config: Any, mesh: Any) -> str | None:
+  """Returns why Zero-1 cannot run here, or None when it can.
+
+  Zero-1 shards the optimizer's parameter-shaped state over the data axis, so each replica
+  keeps and updates 1/N of the moments. The engine implements it by resharding the
+  gradients and the parameters onto that same layout inside `_update_kernel` and gathering
+  the new parameters back on the way out, which needs the reshards to be real ops on a
+  mesh whose axes are `Explicit` -- under `auto` the layout is GSPMD's to choose and these
+  would be hints it may ignore, giving a silently replicated optimizer again.
+
+  The flag being off is a reason like any other, so a single call answers "should this run"
+  rather than leaving the caller to test the flag as well.
+  """
+  if not getattr(config, "shard_optimizer_over_data", False):
+    return "it is not enabled"
+  if getattr(config, "shard_mode", None) != common_types.ShardMode.EXPLICIT:
+    return "it needs shard_mode=explicit"
+  if mesh is None:
+    return "the engine has no mesh"
+  if mesh.shape.get(_DATA_AXIS, 1) <= 1:
+    return f"the mesh has no {_DATA_AXIS!r} axis to shard the optimizer over"
+  if any(axis_type != jax.sharding.AxisType.Explicit for axis_type in mesh.axis_types):
+    return "the mesh has non-Explicit axes"
+  return None
+
+
+def _zero1_sharding(mesh: Any, aval: Any, base: jax.sharding.NamedSharding | None) -> jax.sharding.NamedSharding | None:
+  """Returns `base` with the data axis added, or None to leave the value where it is.
+
+  Thin wrapper over the pre-train path's `add_data_to_sharding` so the parameters, the
+  gradients and the optimizer moments are placed by one function of `(shape, base
+  sharding)`. That is what makes them agree without matching up two pytrees: a moment
+  mirrors its parameter's shape and starts from its layout, so it lands on the same spec.
+  A value with no dimension the data axis divides -- a scalar `count`, an odd-sized bias --
+  comes back unchanged and stays replicated, on all three trees alike.
+  """
+  if base is None or not hasattr(aval, "shape"):
+    return None
+  try:
+    target = sharding.add_data_to_sharding(mesh, (), aval, base)
+  except AssertionError:
+    # add_data_to_sharding rejects a shape it cannot shard; leave the value replicated.
+    return None
+  return None if target == base else target
 
 
 def _conform_accumulator(value: Any, target: jax.sharding.NamedSharding) -> Any:
@@ -468,6 +523,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._reduced_params_shardings: Any = None
     self._unreduced_grad_shardings: Any = None
     self._plain_grad_shardings: Any = None
+    # Set together by `_compile_for_batch` when Zero-1 is on: the parameters as
+    # `_update_kernel` shards them to meet the optimizer state, and as it hands them back.
+    # `None` keeps the whole update on the replicated layout. See `_zero1_active`.
+    self._zero1_params_shardings: Any = None
+    self._gathered_params_shardings: Any = None
+    self._zero1_warned = False
     self._micro_step_count = 0
     # Set when this run resumed from an intra-step checkpoint, cleared once the step it
     # resumed into completes and its finished state has been checkpointed.
@@ -734,6 +795,82 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return
     self._params_pure, self._rest_pure, self._state_pure = params_pure, rest_pure, new_state_pure
 
+  def _note_zero1_declined(self, reason: str) -> None:
+    """Says once that Zero-1 was asked for and not done, which used to happen in silence.
+
+    Nothing here is wrong when Zero-1 declines -- the run is correct, just without the
+    saving -- so this is a warning rather than an error, and once rather than per compile.
+    """
+    if getattr(self._config, "shard_optimizer_over_data", False) and not self._zero1_warned:
+      self._zero1_warned = True
+      logging.warning(_ZERO1_DECLINED_WARNING, reason)
+
+  def _zero1_shardings_for(self, params_pure: Any, params_shardings: Any) -> Any:
+    """Returns the Zero-1 sharding tree for the parameters, or None to keep them replicated."""
+    declined = _zero1_active(self._config, self._mesh)
+    if declined is not None:
+      self._note_zero1_declined(declined)
+      return None
+
+    def target(leaf, base):
+      sharded = _zero1_sharding(self._mesh, leaf, base)
+      return base if sharded is None else sharded
+
+    return jax.tree.map(target, params_pure, params_shardings)
+
+  def _shard_optimizer_state_over_data(self) -> None:
+    """Moves the optimizer's parameter-shaped state onto the Zero-1 layout, in place.
+
+    `nnx.Optimizer` allocates the moments eagerly, as `zeros_like` of each parameter, so
+    they arrive replicated over the data axis however `shard_optimizer_over_data` is set --
+    which is why the flag has so far been a silent no-op here. Resharding them once, before
+    `_compile_for_batch` reads the state's layout back off the arrays, is all it takes for
+    the rest of the engine to follow: the update kernel's in/out shardings are derived from
+    exactly these arrays.
+
+    Every leaf is placed by `_zero1_sharding`, moments and bookkeeping alike, rather than
+    by walking for the ones named `mu`/`nu`. A scalar `count` has no dimension to shard and
+    comes back untouched, and a partitioned optimizer (Muon's `muon`/`adam` branches) needs
+    no special case. Idempotent: a leaf already carrying the data axis is left alone, so a
+    recompile or a restored checkpoint re-runs this for free.
+    """
+    if _zero1_active(self._config, self._mesh) is not None:
+      return
+    state_pure = self._read_state_pure()
+    if _OPTIMIZER_STATE_KEY not in state_pure:
+      return
+
+    moved = False
+
+    def place(leaf):
+      nonlocal moved
+      target = _zero1_sharding(self._mesh, leaf, self._mesh_sharding(leaf))
+      if target is None:
+        return leaf
+      moved = True
+      return jax.device_put(leaf, target)
+
+    optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
+    if not moved:
+      return
+    with self._sharding_ctx():
+      nnx.update(self._state, nnx.State({_OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping}))
+    self._invalidate_pure_state()
+    self._refresh_pure_state()
+
+  def _reshard_model_params(self, state_pure: Any, params_shardings: Any) -> Any:
+    """Returns `state_pure` with its `nnx.Param` leaves moved onto `params_shardings`.
+
+    Used twice inside `_update_kernel`, in opposite directions: down to the Zero-1 layout
+    the optimizer state lives on, then back up to the replicated one the forward pass and
+    the kernel's `out_shardings` expect. Only parameters move -- the optimizer state is
+    already where it belongs, and the rngs and batch statistics alongside it have no
+    Zero-1 layout to speak of.
+    """
+    params_pure, rest_pure = nnx.split_state(state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
+    params_pure = jax.tree.map(jax.sharding.reshard, params_pure, params_shardings)
+    return self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
+
   def _fwd_bwd_kernel(self, params, rest, batch, acc_grads=None, acc_denom=None):
     """Executes a single forward and backward pass and folds the result into the accumulator.
 
@@ -851,13 +988,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     grad_norm = None
     is_skipped_val = None
     if state_pure is not None:
-      if self._plain_grad_shardings is not None:
-        # The gradients arrive `unreduced`: a per-replica partial sum over this step's
-        # micro-batches. Resharding them back is what emits the single cross-replica
-        # all-reduce that replaces the one every micro-batch used to pay. First, so that
-        # everything below -- the division, the norm, clipping, the optimizer -- sees
-        # ordinary gradients and needs no tag handling of its own.
-        accumulated_grads = jax.tree.map(jax.sharding.reshard, accumulated_grads, self._plain_grad_shardings)
+      # Where the gradients have to land before the optimizer can use them. Under Zero-1
+      # that is the sharded layout the moments live on; otherwise the plain parameter one.
+      grad_target = self._zero1_params_shardings
+      if grad_target is None:
+        grad_target = self._plain_grad_shardings
+      if grad_target is not None:
+        # Resharding away from `unreduced` -- a per-replica partial sum over this step's
+        # micro-batches -- is what emits the single cross-replica reduction that replaces
+        # the one every micro-batch used to pay. First, so that everything below (the
+        # division, the norm, clipping, the optimizer) sees ordinary gradients and needs
+        # no tag handling of its own. When the deferral is off but Zero-1 is on, the same
+        # line is just the local slice onto the optimizer's layout.
+        accumulated_grads = jax.tree.map(jax.sharding.reshard, accumulated_grads, grad_target)
+      if self._zero1_params_shardings is not None:
+        # Meet the gradients and the moments on the sharded layout. Free -- slicing a
+        # replicated array is local -- and it is what makes the optimizer's arithmetic,
+        # and the memory traffic under it, run on 1/N of every parameter.
+        state_pure = self._reshard_model_params(state_pure, self._zero1_params_shardings)
       # This one division is the whole normalization. A zero total means every micro-batch
       # was empty; yield zeros rather than a NaN, as `gradient_accumulation.py` does.
       has_weights = accumulated_denominator > 0
@@ -885,6 +1033,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         else:
           local_state.apply_gradients(grads)
       _, new_state_pure = nnx.split(local_state)
+      if self._zero1_params_shardings is not None:
+        # The one all-gather Zero-1 costs: each replica updated its own slice of every
+        # parameter, and the forward pass needs all of them. The moments stay behind,
+        # sharded, which is the whole point.
+        new_state_pure = self._reshard_model_params(new_state_pure, self._gathered_params_shardings)
       return new_state_pure, grad_norm, is_skipped_val
     return state_pure, grad_norm, is_skipped_val
 
@@ -1004,6 +1157,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # The only place the graphs are walked: a recompile is when they may legitimately have
     # changed shape, and everything after is maintained as plain pytrees.
     self._refresh_pure_state()
+    # Before the shardings below are read off the state: this is what puts the optimizer
+    # moments on the Zero-1 layout, and `state_mesh_shardings` has to see them there.
+    self._shard_optimizer_state_over_data()
     state_pure = self._read_state_pure()
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
 
@@ -1029,6 +1185,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._reduced_params_shardings, self._unreduced_grad_shardings = _deferred_all_reduce_shardings(
           self._config, self._mesh, params_shardings
       )
+      # Zero-1 lives entirely inside `_update_kernel`, so it changes no kernel signature:
+      # the parameters cross every jit boundary replicated exactly as before, and only the
+      # optimizer state -- already moved above -- is stored sharded.
+      self._zero1_params_shardings = self._zero1_shardings_for(params_pure, params_shardings)
+      self._gathered_params_shardings = params_shardings if self._zero1_params_shardings is not None else None
       grad_shardings = self._unreduced_grad_shardings
       if grad_shardings is None:
         grad_shardings = params_shardings
@@ -1056,6 +1217,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._reduced_params_shardings = None
       self._unreduced_grad_shardings = None
       self._plain_grad_shardings = None
+      # `_zero1_shardings_for` is not reached on this branch, so the request is declined here.
+      self._note_zero1_declined(_zero1_active(self._config, self._mesh))
+      self._zero1_params_shardings = None
+      self._gathered_params_shardings = None
 
     # 1. JIT Compile Micro FWD/BWD Pass.
     #
