@@ -743,6 +743,11 @@ class CompressedAttention(BaseModel):
   compressed_rope_max_timescale: int = Field(
       160000, description="If positive, used for Compressed Sparse/Heavy Attention."
   )
+  compressed_use_dynamic_splash: bool = Field(
+      False,
+      description="Route COMPRESSED and LOCAL_SLIDING train attention to tokamax splash on TPU. Requires "
+      "use_tokamax_splash=true.",
+  )
 
 
 class AttentionIndexer(BaseModel):
@@ -4077,6 +4082,11 @@ class MaxTextConfig(
               "DeepSeek4 is only supported with `dot_product` attention or `flash` attention "
               "with `use_tokamax_splash=True`."
           )
+    if self.compressed_use_dynamic_splash and not self.use_tokamax_splash:
+      raise ValueError(
+          "`compressed_use_dynamic_splash` requires `use_tokamax_splash=true`; without it the boolean mask "
+          "would be silently ignored by the non-tokamax splash branches."
+      )
     if self.mla_qk_head_chunk_size > 0:
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(

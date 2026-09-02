@@ -540,6 +540,7 @@ class BlockCausalMaskTest(unittest.TestCase):
         sa_use_base2_exp=False,
         use_tokamax_splash=False,
         use_jax_splash=False,
+        compressed_use_dynamic_splash=False,
     )
     device = types.SimpleNamespace(platform="cpu")
     mesh = types.SimpleNamespace(
