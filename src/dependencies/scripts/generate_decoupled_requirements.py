@@ -54,7 +54,15 @@ EXCLUDED_GCLOUD_PACKAGES = (
     "grpcio-status",
     "ml-goodput-measurement",
     "proto-plus",
+    "xprof",
 )
+
+# Versions this environment pins away from the source lock. tokamax 0.0.13 imports xprof at module
+# scope, and maxtext imports tokamax from megablox, so with xprof filtered out above every test that
+# reaches maxtext.layers.moe fails to collect. 0.0.12 is the last release that does not need xprof,
+# so the decoupled environment stays free of the Cloud clients without holding the hardware locks
+# back. Drop this once tokamax no longer requires xprof, or once xprof is safe to install here.
+PINNED_PACKAGES = {"tokamax": "tokamax==0.0.12"}
 # google-pasta is a tensorflow dependency that only provides `pasta`; it has no Cloud surface.
 KEPT_GCLOUD_PACKAGES = ("google-pasta",)
 
@@ -67,6 +75,7 @@ EXCLUDED_ACCELERATOR_PREFIXES = (
     "jax-cuda",
     "libtpu",
     "nvidia-cuda-",
+    "nvidia-cudnn-",
     "transformer-engine",
 )
 EXCLUDED_ACCELERATOR_SUFFIXES = ("-cu12",)
@@ -129,10 +138,19 @@ def validate_lock(source: str, source_name: str) -> None:
       )
 
 
+def _apply_pin(line: str, name: str) -> str:
+  """Returns the line with a PINNED_PACKAGES version substituted, keeping any environment marker."""
+  pinned = PINNED_PACKAGES.get(name)
+  if pinned is None:
+    return line
+  marker = line.split(";", 1)[1] if ";" in line else None
+  return f"{pinned} ;{marker}" if marker else pinned
+
+
 def render_decoupled_requirements(source: str, source_name: str) -> str:
   """Returns the decoupled requirements text derived from a hardware requirements text."""
   kept = [
-      line
+      _apply_pin(line, name)
       for line in source.splitlines()
       if (name := _distribution_name(line)) and not _is_gcloud(name) and not _is_accelerator(name)
   ]

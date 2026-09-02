@@ -91,19 +91,47 @@ def TokenizeOp(tokenizer_model, features: Features, data_keys: Iterable[str] = (
 ########## Functions used by HF pipeline
 
 
-def reformat_prompt(example, column, image_placeholder, model_name):
+def is_video_file(path):
+  if not isinstance(path, str):
+    return False
+  video_extensions = (".mp4", ".avi", ".mkv", ".webm", ".mov")
+  return path.lower().endswith(video_extensions)
+
+
+def reformat_prompt(
+    example,
+    column,
+    image_placeholder,
+    model_name,
+    video_placeholder="<|video|>",
+):
   """reformat prompt for multimodal SFT"""
-  if isinstance(example["images"], list):
-    num_images = len(example["images"])
-  else:
-    num_images = 1
-  example[column] = mm_processor.reformat_prompt(example[column], image_placeholder, model_name, num_images)
+  media = example.get("images")
+  if media is None:
+    media = []
+  elif not isinstance(media, list):
+    media = [media]
+  contains_video = bool(media) and is_video_file(media[0])
+
+  example[column] = mm_processor.reformat_prompt(
+      prompt=example[column],
+      image_placeholder=image_placeholder,
+      model_name=model_name,
+      num_images=0 if contains_video else len(media),
+      video_placeholder=video_placeholder,
+      num_videos=len(media) if contains_video else 0,
+  )
   return example
 
 
 def reformat_response(example, column, model_name):
   """reformat response for multimodal SFT"""
-  example[column] = mm_processor.reformat_response(example[column][0], model_name)
+  val = example[column]
+  if not val:
+    raise ValueError(f"Response column '{column}' cannot be empty or None: {val}")
+  response = val[0] if isinstance(val, (list, tuple)) else val
+
+  example[column] = mm_processor.reformat_response(response, model_name)
   return example
 
 
@@ -124,6 +152,10 @@ def pre_process_image_sft(example, image_column, config):
   """pre-process image for multimodal SFT"""
 
   def _process_image_fn(image):
+    is_video = is_video_file(image) or (isinstance(image, list) and image and is_video_file(image[0]))
+    if is_video:
+      return mm_processor.preprocess_image_for_training(image, config)
+
     if isinstance(image, list):
       image = [np.array(mm_utils.convert_to_RGB(img)) for img in image]
     else:
@@ -603,27 +635,32 @@ class ParseFeatures(grain.MapTransform):
     example.ParseFromString(element)
     features = example.features.feature
 
-    missing = [c for c in self.data_columns if c not in features]
-    if missing:
-      raise ValueError(
-          f"Column {missing} not found in dataset. Available columns: {sorted(features.keys())}. "
-          "Please set train_data_columns or eval_data_columns accordingly."
-      )
-
     parsed = {}
     for col in self.data_columns:
-      if col in features:
-        f = features[col]
-
-        # Dynamically check proto field type instead of relying on the tokenize flag
-        if len(f.float_list.value) > 0:
-          parsed[col] = np.array(f.float_list.value, dtype=np.float32)
-        elif len(f.int64_list.value) > 0:
-          parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
-        elif len(f.bytes_list.value) > 0:
-          parsed[col] = np.array(f.bytes_list.value, dtype=object)
+      target_col = col
+      if col not in features:
+        # Fallback alias: support bidirectional mapping between 'text' and 'messages'
+        if col == "text" and "messages" in features:
+          target_col = "messages"
+        elif col == "messages" and "text" in features:
+          target_col = "text"
         else:
-          parsed[col] = np.array([])
+          raise ValueError(
+              f"Column '{col}' not found in dataset. Available columns: {sorted(features.keys())}. "
+              "Please set train_data_columns or eval_data_columns accordingly."
+          )
+
+      f = features[target_col]
+
+      # Dynamically check proto field type instead of relying on the tokenize flag
+      if len(f.float_list.value) > 0:
+        parsed[col] = np.array(f.float_list.value, dtype=np.float32)
+      elif len(f.int64_list.value) > 0:
+        parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
+      elif len(f.bytes_list.value) > 0:
+        parsed[col] = np.array(f.bytes_list.value, dtype=object)
+      else:
+        parsed[col] = np.array([])
 
     # Reshape the flattened arrays back to 2D [seq_len, top_k]
     seq_len = len(parsed.get("inputs", []))
@@ -790,6 +827,9 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     if not isinstance(preprocessed_image, mm_utils.PreprocessorOutput):
       raise TypeError(f"Input must be multimodal_utils.PreprocessorOutput, but got {type(preprocessed_image)}")
 
+    if getattr(preprocessed_image, "video_values", None) is not None:
+      return preprocessed_image
+
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
@@ -929,6 +969,16 @@ class ExtractImagesAndMasks(grain.MapTransform):
       raise TypeError(f"'images' must be of type PreprocessorOutput, but got {type(preprocessed_image)}")
 
     output = element.copy()
+    if getattr(preprocessed_image, "video_values", None) is not None:
+      output["images"] = preprocessed_image.video_values
+      if getattr(preprocessed_image, "video_mask", None) is not None:
+        output["image_masks"] = preprocessed_image.video_mask
+      if getattr(preprocessed_image, "video_grid_thw", None) is not None:
+        output["video_grid_thw"] = preprocessed_image.video_grid_thw
+      if getattr(preprocessed_image, "video_second_per_grid", None) is not None:
+        output["second_per_grids"] = preprocessed_image.video_second_per_grid
+      return output
+
     output["images"] = preprocessed_image.pixel_values  # pyrefly: ignore[unsupported-operation]
     if preprocessed_image.pixel_mask is not None:
       output["image_masks"] = preprocessed_image.pixel_mask
@@ -966,6 +1016,18 @@ class FoldImagesIntoBatch(grain.MapTransform):
     """Applies the folding transformation to the 'images' field if present."""
     images = element.get("images")
     if images is None:
+      return element
+
+    video_grid_thw = element.get("video_grid_thw")
+    if video_grid_thw is not None and images.ndim > len(self.target_shape):
+      element["images"] = images.reshape(-1, *images.shape[2:])
+      image_masks = element.get("image_masks")
+      if image_masks is not None:
+        element["image_masks"] = image_masks.reshape(-1, *image_masks.shape[2:])
+      element["video_grid_thw"] = video_grid_thw.reshape(-1, video_grid_thw.shape[-1])
+      second_per_grids = element.get("second_per_grids")
+      if second_per_grids is not None:
+        element["second_per_grids"] = second_per_grids.reshape(-1)
       return element
 
     # If ndim is greater than the expected ndim for a batched image tensor,
@@ -1143,8 +1205,6 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     # correct when training force-resizes all images to the same grid.
     if image_grid_thw is not None and image_grid_thw.ndim == 3:
       image_grid_thw = image_grid_thw[0]
-    if video_grid_thw is not None and video_grid_thw.ndim == 3:
-      video_grid_thw = video_grid_thw[0]
 
     # Call the standalone get_rope_index function from multimodal_utils
     from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
@@ -1172,7 +1232,8 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
       # Drop metadata that is not part of the training shaped batch.
       element.pop(f"{self.data_column}_mrope_deltas", None)
       element.pop("image_grid_thw", None)
-      element.pop("video_grid_thw", None)
+      if getattr(self.config, "video_max_grid_t", None) is None:
+        element.pop("video_grid_thw", None)
       element.pop("audio_lengths", None)
       element.pop("second_per_grids", None)
 

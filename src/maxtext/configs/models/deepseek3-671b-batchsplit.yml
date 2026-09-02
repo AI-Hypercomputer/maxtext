@@ -73,6 +73,7 @@ logical_axis_rules: [
     ['activation_norm_length_moe', []],
     ['activation_heads', []],
     ['embed', ['fsdp']],
+    ['embed_attn', ['fsdp']],
     ['embed_moe', ['fsdp']],
     ['embed_vocab', ['fsdp']],
     ['embed_no_exp', ['fsdp']],

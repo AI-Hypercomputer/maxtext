@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# pylint: disable=unbalanced-tuple-unpacking
 """Unit tests for nnx_decoders module.
 
 Tests cover:

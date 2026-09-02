@@ -533,7 +533,7 @@ class DiLoCoTest(unittest.TestCase):
           use_zarr3=True,
       )
       checkpointing.save_checkpoint(mgr, 10, diloco_state, config, force=True)
-      mgr.wait_until_finished()
+      checkpointing.wait_until_finished(mgr)
 
       items_path = os.path.join(temp_dir, "10", "items")
 
@@ -617,7 +617,7 @@ class DiLoCoTest(unittest.TestCase):
           use_zarr3=True,
       )
       checkpointing.save_checkpoint(mgr, 5, diloco_state, config, force=True)
-      mgr.wait_until_finished()
+      checkpointing.wait_until_finished(mgr)
 
       # Create new checkpoint manager for resumption (simulating next run with same run_name / checkpoint_dir)
       resume_mgr = checkpointing.create_orbax_checkpoint_manager(

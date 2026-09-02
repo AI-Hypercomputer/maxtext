@@ -64,6 +64,9 @@ set_xla_metadata = xla_metadata.set_xla_metadata
 
 DISPATCH = "dispatch"
 COMBINE = "combine"
+WI_0 = "wi_0"
+WI_1 = "wi_1"
+WO = "wo"
 
 
 @struct.dataclass
@@ -223,6 +226,15 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
   return top_k_weights, top_k_indices
 
 
+def valid_expert_mask(indices, num_experts):
+  """True where an expert id is real.
+
+  Forced routing marks unused slots with -1, and any out-of-range id is treated
+  the same way.
+  """
+  return (indices >= 0) & (indices < num_experts)
+
+
 def calculate_load_balance_updates(top_k_indices, num_experts, rate):
   """
   Computes a bias adjustment update based on expert load.
@@ -238,9 +250,10 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate):
       update: The value to add to the expert bias. Shape (num_experts,).
   """
   flat_indices = top_k_indices.ravel()
-  expert_counts = jnp.bincount(flat_indices, length=num_experts)
-
-  total_tokens = flat_indices.size
+  # one_hot rather than bincount: bincount clips out-of-range values, so the -1
+  # padding that forced routing uses would all be counted as expert 0.
+  expert_counts = jnp.sum(jax.nn.one_hot(flat_indices, num_experts, dtype=jnp.int32), axis=0)
+  total_tokens = jnp.sum(expert_counts)
   average_load = total_tokens / num_experts
   direction = jnp.sign(average_load - expert_counts)
   output = direction * rate
@@ -330,14 +343,14 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      # DSV3 was using nnx.Param and that code we are keeping the same
-      self.bias = nnx.Param(
-          default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
-          out_sharding=bias_axes,
-      )
-      if self.model_name.startswith("deepseek4"):
-        # DSV4 uses MoEBiasVar to naturally isolate from sequence-wise updates
+      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
         self.bias = MoEBiasVar(
+            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            out_sharding=bias_axes,
+        )
+      else:
+        self.bias = nnx.Param(
             default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
             out_sharding=bias_axes,
         )
@@ -394,7 +407,7 @@ class GateLogit(nnx.Module):
       output = linears._convert_to_activation_function(self.score_func)(output)
 
     # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(("deepseek3", "deepseek4")):
+    if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
       pre_bias_logits = output
 
     if self.use_bias:
@@ -497,6 +510,16 @@ class RoutedMoE(nnx.Module):
     else:
       self._expert_parallelism_name = "expert"
 
+    if isinstance(self.quant, (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization)):
+      einsum_names = [WI_0, WI_1, WO]
+      if self.config.capacity_factor > 0:
+        einsum_names += [DISPATCH, COMBINE]
+      self.quant_einsums = nnx.Dict(
+          {name: quantizations.create_fp8_einsum(self.quant, self.dtype, self.rngs) for name in einsum_names}
+      )
+    else:
+      self.quant_einsums = None
+
     self.gate = GateLogit(
         in_features_shape=self.moe_expert_input_dim,
         out_features_shape=self.num_experts,
@@ -580,7 +603,7 @@ class RoutedMoE(nnx.Module):
               self.rngs.params(),
               (
                   self.num_experts,
-                  self.intermediate_dim,
+                  moe_intermediate_dim,
                   self.moe_expert_input_dim,
               ),
               self.weight_dtype,
@@ -615,7 +638,7 @@ class RoutedMoE(nnx.Module):
               self.rngs.params(),
               (
                   self.num_experts,
-                  self.intermediate_dim,
+                  moe_intermediate_dim,
                   self.moe_expert_input_dim,
               ),
               self.weight_dtype,
@@ -725,47 +748,81 @@ class RoutedMoE(nnx.Module):
     """
     return self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and not self.is_hash_routing
 
-  def get_topk(self, gate_logits, pre_bias_logits, rngs=None, input_ids=None):
+  def get_topk(
+      self,
+      gate_logits,
+      pre_bias_logits,
+      rngs=None,
+      input_ids=None,
+      forced_routed_experts=None,
+  ):
     """get topk."""
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
-    if self.config.use_random_routing:
-      if rngs is None:
-        raise ValueError("The random key cannot be None for random routing.")
-      # Reuse the 'params' RNG stream to ensure random routing
-      rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
-      top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
-      return top_k_weights, top_k_indices
-
-    if self.is_hash_routing:
-      if input_ids is None:
-        raise ValueError("input_ids cannot be None when is_hash_routing is True")
-      # Access the static routing table
-      tid2eid_int = self.tid2eid.value
-      # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
-      tid2eid_int = tid2eid_int.astype(jnp.int32)
-      # Cast input_ids to int32 to safely index the hash routing table
-      top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
-      top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
-    # NOTE: deepseek2 has a different pattern
-    elif self.config.model_name.startswith(("deepseek3", "deepseek4")):
-      top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
-    elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
-      router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-      _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-      top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+    valid_token_mask = None
+    if forced_routed_experts is not None:
+      top_k_indices = forced_routed_experts
+      # Any id outside [0, num_experts) is an unused slot, same as the -1 sentinel.
+      valid_token_mask = valid_expert_mask(top_k_indices, self.num_experts)
+      # Gather at 0, not -1: take_along_axis would wrap -1 onto the last expert and
+      # that value reaches the softmax denominator before the mask zeroes it.
+      gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
+      if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
+        router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
+        top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
+      else:
+        top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
     else:
-      top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+      if self.config.use_random_routing:
+        if rngs is None:
+          raise ValueError("The random key cannot be None for random routing.")
+        # Reuse the 'params' RNG stream to ensure random routing
+        rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
+        top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
+        return top_k_weights, top_k_indices
+
+      if self.is_hash_routing:
+        if input_ids is None:
+          raise ValueError("input_ids cannot be None when is_hash_routing is True")
+        # Access the static routing table
+        tid2eid_int = self.tid2eid.value
+        # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
+        tid2eid_int = tid2eid_int.astype(jnp.int32)
+        # Cast input_ids to int32 to safely index the hash routing table
+        top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
+        top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
+      # NOTE: deepseek2 has a different pattern
+      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+        top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
+      elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
+        router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
+        _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+        top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+      else:
+        top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
     if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
+      if valid_token_mask is not None:
+        top_k_weights = top_k_weights * valid_token_mask
     else:
       if self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
+        if valid_token_mask is not None:
+          # Padding must stay out of the softmax denominator or it rescales the
+          # real slots. Large-negative, not -inf: a fully-padded token would be NaN.
+          top_k_weights = jnp.where(valid_token_mask, top_k_weights, jnp.finfo(jnp.float32).min / 2)
         top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+
+      if valid_token_mask is not None:
+        top_k_weights = top_k_weights * valid_token_mask
 
       # Normalization of router weights (e.g. used by Qwen3, Gemma4).
       if self.config.norm_topk_prob:
-        top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
+        weight_sum = top_k_weights.sum(axis=-1, keepdims=True)
+        if valid_token_mask is not None:
+          # A fully-padded token sums to zero; 0/0 would NaN the whole batch loss.
+          weight_sum = jnp.where(weight_sum == 0, 1.0, weight_sum)
+        top_k_weights /= weight_sum
 
       if self.per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
@@ -889,16 +946,20 @@ class RoutedMoE(nnx.Module):
       rngs=None,
       roll_to_expert_id=None,
       input_ids=None,
+      forced_routed_experts=None,
   ):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids)
+    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
+
     lb_loss = None
+    # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
+    probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
     if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
-      softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+      softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
       lb_loss = self.load_balance_loss(selected_experts, softmax_probs)
 
     if self.should_update_load_balance():
@@ -928,6 +989,15 @@ class RoutedMoE(nnx.Module):
     buffer_size = None
     if use_ragged_in_permute:
       topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
+      if forced_routed_experts is not None:
+        # Padding -> a virtual expert past the last real one: ring_ragged_sort
+        # sorts by argsort but counts with one_hot, so -1 would sort before
+        # expert 0 while counting as nothing and offset every shard's window.
+        topk_indices_2d = jnp.where(
+            valid_expert_mask(topk_indices_2d, self.config.num_experts),
+            topk_indices_2d,
+            self.config.num_experts,
+        )
       # roll_to_expert_id is not directly used in the kernel, ep axis id is directly called
       if self.config.ragged_buffer_factor > 0.0:
         balanced_size = (bsz_times_seq_len // num_expert_parallelism) * self.num_experts_per_tok
@@ -960,17 +1030,31 @@ class RoutedMoE(nnx.Module):
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
 
+      # Must precede roll_to_expert_id: `(-1 - roll) % num_experts` wraps padding
+      # onto a real expert id, so a mask computed after it sees no padding at all.
+      if forced_routed_experts is not None:
+        valid_mask = valid_expert_mask(flatten_selected_experts, self.num_experts)
+
       if roll_to_expert_id is not None:
         flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
-      sorted_selected_experts = jnp.argsort(flatten_selected_experts)
+
+      if forced_routed_experts is not None:
+        # Spread padding round-robin: it carries zero weight but still counts in
+        # group_size, so under ragged_buffer_factor > 0 it can evict real tokens.
+        dummy_indices = jnp.arange(flatten_selected_experts.shape[0]) % self.num_experts
+        flatten_selected_experts_safe = jnp.where(valid_mask, flatten_selected_experts, dummy_indices)
+      else:
+        flatten_selected_experts_safe = flatten_selected_experts
+
+      sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts).astype(self.dtype)
+        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe).astype(self.dtype)
       else:
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
         sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
             self.dtype
         )
-      group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
+      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -1425,6 +1509,7 @@ class RoutedMoE(nnx.Module):
       w1_bias,
       wo_bias,
       input_ids=None,
+      forced_routed_experts=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
@@ -1484,12 +1569,14 @@ class RoutedMoE(nnx.Module):
         )
 
     def get_quantization_dtypes():
-      lhs_quantize_dtype, rhs_quantize_dtype = None, None
-      if self.quant is not None:
-        quant_dg = self.quant.quant_dg
-        lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
-        rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
-      return lhs_quantize_dtype, rhs_quantize_dtype
+      # AQT describes its numerics through a `quant_dg`, while the fp8 schemes just name the
+      # dtype they quantize to. Under qwix there is no quantization object here at all, and
+      # the gmm takes its rule from the qwix rule instead.
+      quant_dg = getattr(self.quant, "quant_dg", None)
+      if quant_dg is not None:
+        return quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype(), quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
+      quantize_dtype = getattr(self.quant, "quantize_dtype", None)
+      return quantize_dtype, quantize_dtype
 
     def gmm(
         inputs,
@@ -1572,6 +1659,7 @@ class RoutedMoE(nnx.Module):
             lhs_vma_axes=lhs_vma_axes,
             rhs_vma_axes=rhs_vma_axes,
             use_gmm_v2=self.config.use_gmm_v2,
+            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
         )
@@ -1595,11 +1683,12 @@ class RoutedMoE(nnx.Module):
       # In the decoding case, the expert axis is instead replicated along the tensor's batch dimension.
       return input_activation.shape[0] > 1
 
-    def explicitly_weight_ag(shard_exp_on_fsdp):
-      if shard_exp_on_fsdp:
-        quantization_rule = qpl.get_current_rule("gmm")
-        if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
-          return True
+    def explicitly_weight_ag():
+      if not (self.config.shard_exp_on_fsdp or self.config.shard_embed_moe_on_fsdp):
+        return False
+      quantization_rule = qpl.get_current_rule("gmm")
+      if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
+        return True
       return False
 
     def maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec):
@@ -1638,7 +1727,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(("deepseek3", "deepseek4")):
+      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -1652,8 +1741,7 @@ class RoutedMoE(nnx.Module):
       # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
       # mlp_no_fsdp axis
       if self.config.shard_exp_on_fsdp:
-        quantization_rule = qpl.get_current_rule("gmm")
-        if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
+        if explicitly_weight_ag():
           # special sharding when using static scaling for weights in quantization with shard_exp_on_fsdp
           w0_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
           w1_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
@@ -1667,8 +1755,13 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         w1_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
+      elif self.config.shard_embed_moe_on_fsdp and explicitly_weight_ag():
+        # Keep embed_moe sharded so we can manually QAG it over FSDP
+        w0_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
+        w1_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
+        wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
       else:
-        # These are the main shardings used by default - they use funky rules to AG over FSDP.
+        # Tell XLA to automatically gather the D dimension (e.g. for dynamic absmax scaling)
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
@@ -1691,7 +1784,7 @@ class RoutedMoE(nnx.Module):
       )
 
     is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
-    weight_gather = explicitly_weight_ag(self.config.shard_exp_on_fsdp)
+    weight_gather = explicitly_weight_ag()
     (
         batch_logical_axis,
         input_partition_pspec,
@@ -1719,7 +1812,16 @@ class RoutedMoE(nnx.Module):
     decoder_tokens_pspec = maybe_replicate_incompatible_batch(decoder_tokens_pspec, input_ids)
     output_pspec = maybe_replicate_incompatible_batch(output_pspec, inputs)
 
-    def roe_ag_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None):
+    def roe_ag_and_route(
+        x,
+        logits,
+        pre_bias_logits,
+        num_ep,
+        expert_shard_id,
+        rngs,
+        input_ids=None,
+        forced_routed_experts=None,
+    ):
       # The ring-of-experts strategy first duplicates the inputs to all
       # expert shards, and then routes within each shard.
 
@@ -1727,6 +1829,14 @@ class RoutedMoE(nnx.Module):
       x, logits, pre_bias_logits = tuple(
           jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True) for z in (x, logits, pre_bias_logits)
       )
+      if forced_routed_experts is not None:
+        # Must follow the same all-gather as logits: routing is done on the
+        # gathered batch, so a shard-local replay would not line up.
+        forced_routed_experts = jax.lax.all_gather(
+            forced_routed_experts,
+            axis_name=self._expert_parallelism_name,
+            tiled=True,
+        )
 
       # "Route" tokens within each shard.
       num_experts_per_shard = self.config.num_experts // num_ep
@@ -1747,6 +1857,7 @@ class RoutedMoE(nnx.Module):
           roll_to_expert_id=num_experts_per_shard * expert_shard_id,
           rngs=rngs,
           input_ids=input_ids,
+          forced_routed_experts=forced_routed_experts,
       )
       return (
           x,
@@ -1767,7 +1878,16 @@ class RoutedMoE(nnx.Module):
           ),
       )
 
-    def ra2a_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None):
+    def ra2a_and_route(
+        x,
+        logits,
+        pre_bias_logits,
+        num_ep,
+        expert_shard_id,
+        rngs,
+        input_ids=None,
+        forced_routed_experts=None,
+    ):
       local_sorted_indices = None
       all_shards_group_sizes = None
       reshaped_group_sizes = None
@@ -1787,6 +1907,7 @@ class RoutedMoE(nnx.Module):
           self.config.use_custom_sort_vjp,
           rngs,
           input_ids=input_ids,
+          forced_routed_experts=forced_routed_experts,
       )
 
       if num_ep > 1:
@@ -1868,7 +1989,14 @@ class RoutedMoE(nnx.Module):
           ),
       )
 
-    def route(x, logits, pre_bias_logits, rngs, input_ids=None):
+    def route(
+        x,
+        logits,
+        pre_bias_logits,
+        rngs,
+        input_ids=None,
+        forced_routed_experts=None,
+    ):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
       expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
@@ -1882,6 +2010,7 @@ class RoutedMoE(nnx.Module):
             expert_shard_id,
             rngs,
             input_ids=input_ids,
+            forced_routed_experts=forced_routed_experts,
         )
       else:
         return ra2a_and_route(
@@ -1892,6 +2021,7 @@ class RoutedMoE(nnx.Module):
             expert_shard_id,
             rngs,
             input_ids=input_ids,
+            forced_routed_experts=forced_routed_experts,
         )
 
     def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
@@ -1907,8 +2037,14 @@ class RoutedMoE(nnx.Module):
     def get_wi_gmm_params():
       wi_gather_axes = []
       if weight_gather:
-        # wi [Experts, In, Hidden] -> Gather Exp(0) and Hidden(2)
-        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
+        # weight_gather implies either exp or embed_moe is sharded.
+        if self.config.shard_exp_on_fsdp:
+          # wi [Experts, In, Hidden] -> Gather Exp(0)
+          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
+        else:
+          # Gather In(1) where embed_moe is sharded.
+          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[1], 1))
+        # Gather Hidden(2)
         wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
       wi_tile_size = (
           self.config.wi_tile_fwd_batch_seq,  # m (LHS batch)
@@ -1926,8 +2062,14 @@ class RoutedMoE(nnx.Module):
     def get_wo_gmm_params():
       wo_gather_axes = []
       if weight_gather:
-        # wo [Experts, Hidden, Out] -> Gather Exp(0) and Hidden(1)
-        wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
+        # weight_gather implies either exp or embed_moe is sharded.
+        if self.config.shard_exp_on_fsdp:
+          # wo [Experts, Hidden, Out] -> Gather Exp(0)
+          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
+        else:
+          # Gather Out(2) where embed_moe is sharded.
+          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[2], 2))
+        # Gather Hidden(1)
         wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
       wo_tile_size = (
           self.config.wo_tile_fwd_batch_seq,  # m (LHS batch)
@@ -2111,6 +2253,7 @@ class RoutedMoE(nnx.Module):
         sharded_input_ids,
         rngs,
         embed_dim,
+        forced_routed_experts=None,
     ):
       """Overlap token all-gather and GMM computation along embedding dimension."""
       num_ep = self.get_expert_parallelism_size()
@@ -2130,6 +2273,7 @@ class RoutedMoE(nnx.Module):
           expert_shard_id,
           chunk_rngs_key,
           input_ids=sharded_input_ids,
+          forced_routed_experts=forced_routed_experts,
       )
 
       if self.config.mlp_bias:
@@ -2164,6 +2308,7 @@ class RoutedMoE(nnx.Module):
             expert_shard_id,
             chunk_rngs_key,
             input_ids=sharded_input_ids,
+            forced_routed_experts=forced_routed_experts,
         )
         return (next_x, next_ps0, next_ps1, chunk_idx + 1), None
 
@@ -2208,6 +2353,7 @@ class RoutedMoE(nnx.Module):
         wo_bias,
         sharded_input_ids,
         rngs,
+        forced_routed_experts=None,
     ):
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
@@ -2223,9 +2369,17 @@ class RoutedMoE(nnx.Module):
             sharded_input_ids,
             rngs,
             embed_dim,
+            forced_routed_experts=forced_routed_experts,
         )
       else:
-        x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+        x, routing, route_metadata = route(
+            x,
+            logits,
+            pre_bias_logits,
+            rngs,
+            input_ids=sharded_input_ids,
+            forced_routed_experts=forced_routed_experts,
+        )
         mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
 
         if self.config.mlp_bias:
@@ -2331,6 +2485,10 @@ class RoutedMoE(nnx.Module):
             wo_bias_pspec,
             decoder_tokens_pspec,
             P(),  # Replicate the input key
+            # Reuse gate_logits_pspec (which forced_routed_experts is sharded
+            # with below); recomputing it would skip
+            # maybe_replicate_incompatible_batch.
+            gate_logits_pspec if forced_routed_experts is not None else None,
         ),
         out_specs=(
             output_pspec,
@@ -2351,6 +2509,7 @@ class RoutedMoE(nnx.Module):
         wo_bias,
         sharded_input_ids,
         rngs,
+        forced_routed_experts=None,
     ):
       # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
       # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
@@ -2370,6 +2529,7 @@ class RoutedMoE(nnx.Module):
             wo_bias,
             sharded_input_ids,
             rngs,
+            forced_routed_experts,
         )
 
       # Chunked ring-of-experts pipeline: split the per-shard tokens along the
@@ -2404,6 +2564,7 @@ class RoutedMoE(nnx.Module):
             wo_bias,
             None if sharded_input_ids is None else sharded_input_ids[:, sl],
             rngs,
+            None if forced_routed_experts is None else forced_routed_experts[:, sl, :],
         )
         if self.config.moe_chunk_barrier:
           _prev = out_c
@@ -2438,7 +2599,7 @@ class RoutedMoE(nnx.Module):
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length", None)
     pre_bias_logits_logical_axes = (
         (batch_logical_axis, "activation_norm_length", None)
-        if self.config.model_name.startswith(("deepseek3", "deepseek4"))
+        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2"))
         else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
@@ -2452,6 +2613,12 @@ class RoutedMoE(nnx.Module):
         pre_bias_logits_pspec,
         logical_axes=pre_bias_logits_logical_axes,
     )
+    if forced_routed_experts is not None:
+      forced_routed_experts = self._maybe_shard_with_pspec(
+          forced_routed_experts,
+          gate_logits_pspec,
+          logical_axes=gate_logits_logical_axes,
+      )
 
     w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
     w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
@@ -2475,27 +2642,49 @@ class RoutedMoE(nnx.Module):
         wo_bias,
         input_ids,
         self.rngs,
+        forced_routed_experts,
     )
 
-  def reshape_and_update_weights(self, weights, indices):
-    """reshape and update weights."""
+  def reshape_and_update_weights(self, weights, indices, safe_updates=False):
+    """Reshape and update weights.
+
+    safe_updates (forced routing): padding is masked to (index 0, weight 0) and
+    the scatter accumulates instead of setting.
+    """
     # input of weights and indices: (batch_size, seq_len, num_experts_per_tok)
     # output of updated weights: (batch_size, seq_len, num_experts)
     update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
+    if safe_updates:
+      valid_mask = indices >= 0
+      safe_indices = jnp.where(valid_mask, indices, 0)
+      safe_weights = jnp.where(valid_mask, weights, 0.0)
+    else:
+      safe_indices = indices
+      safe_weights = weights
+
     index_update = (
         self._maybe_shard_with_logical(
             jnp.arange(weights.shape[0])[:, None, None],
             ("activation_batch", None, None),
         ),
         self._maybe_shard_with_logical(jnp.arange(weights.shape[1])[:, None], ("activation_length", None)),
-        indices,
+        safe_indices,
     )
     weight_sharding = (
         create_sharding(self.mesh, ("activation_batch", "activation_length", None))
         if self.config.shard_mode == ShardMode.EXPLICIT
         else None
     )
-    update_weights = update_weights.at[index_update].set(weights, out_sharding=weight_sharding)
+    if safe_updates:
+      # Forced routing may replay duplicate expert indices for the same token
+      # (e.g. multiple padding slots mapped to index 0). `.set()` with
+      # duplicate indices has undefined ordering in the underlying scatter,
+      # so accumulate with `.add()` instead: padding slots always carry a
+      # zero weight, so summing duplicates is safe and avoids silently
+      # dropping a real weight update.
+      update_weights = update_weights.at[index_update].add(safe_weights, out_sharding=weight_sharding)
+    else:
+      update_weights = update_weights.at[index_update].set(safe_weights, out_sharding=weight_sharding)
     return update_weights
 
   def get_context_partition_and_sub_seq(self, seq_len):
@@ -2690,7 +2879,8 @@ class RoutedMoE(nnx.Module):
     summed_expert_mask = jnp.sum(expert_mask, axis=2)
     # Get fraction of tokens dispatched to each expert
     # jnp.mean over axis=1 (sequence length) isolates the token density per sequence.
-    density = jnp.mean(summed_expert_mask, axis=1)
+    # divide by top_k so that sum(density) == 1 across experts (Switch Transformer topk=1)
+    density = jnp.mean(summed_expert_mask, axis=1) / self.num_experts_per_tok
     # get fraction of probability allocated to each expert
     # jnp.mean over axis=1 isolates the routing probability per sequence.
     density_prob = jnp.mean(logits, axis=1)
@@ -2716,15 +2906,22 @@ class RoutedMoE(nnx.Module):
       return jnp.einsum
 
     if self.quant:
+      op_id = einsum_name if einsum_name is not None else "einsum"
 
-      def aqt_einsum(*args, **kwargs):  # pylint: disable=unused-argument
+      def quant_einsum(*args, **kwargs):  # pylint: disable=unused-argument
         # simply skip kwargs, since aqt einsum doesn't support any kwargs
         # like precision
-        is_aqt = not isinstance(self.quant, quantizations.Fp8Quantization)
-        kw = {"mesh_axes": rhs_mesh_axes} if is_aqt else {"dtype": self.dtype}
-        return self.quant.einsum(**kw)(*args)  # pytype: disable=attribute-error
+        if self.quant_einsums is not None:
+          if op_id not in self.quant_einsums:
+            raise ValueError(
+                f"Einsum name '{op_id}' is not registered in quant_einsums. "
+                f"Available names: {list(self.quant_einsums.keys())}"
+            )
+          return self.quant_einsums[op_id](*args, mutable=["_overwrite_with_gradient"])
+        einsum = self.quant.einsum(mesh_axes=rhs_mesh_axes)  # pytype: disable=attribute-error
+        return quantizations.apply_einsum_in_nnx(self, op_id, einsum, ["aqt"], *args)
 
-      einsum_op = aqt_einsum
+      einsum_op = quant_einsum
     else:
       einsum_op = jnp.einsum
     return einsum_op
@@ -2754,23 +2951,39 @@ class RoutedMoE(nnx.Module):
       w1_bias,
       wo_bias,
       input_ids=None,
+      forced_routed_experts=None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4")):
+    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
       )
-    top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs, input_ids=input_ids)
+    if forced_routed_experts is not None:
+      forced_routed_experts = self._maybe_shard_with_logical(
+          forced_routed_experts,
+          ("activation_batch_moe", "activation_length_moe", None),
+      )
+    top_k_weights, top_k_indices = self.get_topk(
+        gate_logits,
+        pre_bias_logits,
+        self.rngs,
+        input_ids=input_ids,
+        forced_routed_experts=forced_routed_experts,
+    )
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
       inputs = inputs * router_scores
     else:
-      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+      weights = self.reshape_and_update_weights(
+          top_k_weights,
+          top_k_indices,
+          safe_updates=(forced_routed_experts is not None),
+      )
     matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
     # Calculate load balance loss
@@ -2928,7 +3141,7 @@ class RoutedMoE(nnx.Module):
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes, einsum_name=WI_0)(
             mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -2942,7 +3155,7 @@ class RoutedMoE(nnx.Module):
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes, einsum_name=WI_1)(
             mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -2956,7 +3169,7 @@ class RoutedMoE(nnx.Module):
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
+        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes, einsum_name=WO)(
             mlp_down_einsum,
             layer_multiply,
             wo_kernel,
@@ -3006,7 +3219,7 @@ class RoutedMoE(nnx.Module):
           ),
       )
       with jax.named_scope("wi_0"):
-        layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
+        layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes, einsum_name=WI_0)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -3015,7 +3228,7 @@ class RoutedMoE(nnx.Module):
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
       with jax.named_scope("wi_1"):
-        layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
+        layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes, einsum_name=WI_1)(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -3026,7 +3239,7 @@ class RoutedMoE(nnx.Module):
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
 
       with jax.named_scope("wo"):
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
+        intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes, einsum_name=WO)(
             "BSEH,EHM -> BSEM",
             layer_multiply,
             wo_kernel,
@@ -3039,7 +3252,11 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = adc.checkpoint_name(adc.checkpoint_name(intermediate_layer, "mlpwo"), "moe_mlpwo")
       with jax.named_scope("weight_sum"):
         if is_llama4_decoder_layer:
-          weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
+          weights = self.reshape_and_update_weights(
+              jnp.ones_like(top_k_weights),
+              top_k_indices,
+              safe_updates=(forced_routed_experts is not None),
+          )
         if self.config.float32_weight_sum:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
           weights = weights.astype(jnp.float32)
@@ -3060,12 +3277,15 @@ class RoutedMoE(nnx.Module):
       w0_kernel=None,
       w1_kernel=None,
       fused_kernel=None,
+      forced_routed_experts=None,
   ) -> tuple[jax.Array, None, None]:
     """Fused MoE via tpu_inference fused_moe_func (vllm_rpa path only).
 
     fused_moe_func handles routing, GMM, and weighted combination internally.
     It does not compute lb_loss or bias_updates (inference-only).
     """
+    if forced_routed_experts is not None:
+      raise NotImplementedError("Forced routing via forced_routed_experts is not supported with" " fused_moe_matmul.")
     try:
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
@@ -3077,6 +3297,9 @@ class RoutedMoE(nnx.Module):
     batch_size, seq_len, emb_dim = inputs.shape
     hidden_states = jnp.reshape(inputs, (batch_size * seq_len, emb_dim))
     gating_output = jnp.reshape(gate_logits, (batch_size * seq_len, self.num_experts))
+
+    _, top_k_indices = jax.lax.top_k(gating_output, self.num_experts_per_tok)
+    self.selected_experts = nnx.Intermediate(top_k_indices)
 
     # Concatenate gate and up projections: [E, D, H] + [E, D, H] -> [E, D, 2H]
     # fused_moe_func splits this internally: gate=w1[..., :H], up=w1[..., H:]
@@ -3159,6 +3382,7 @@ class RoutedMoE(nnx.Module):
       input_ids: jax.Array | None = None,
       gate_inputs: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
+      forced_routed_experts: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes the routed MoE block.
 
@@ -3227,6 +3451,7 @@ class RoutedMoE(nnx.Module):
           w0_kernel=w0_kernel,
           w1_kernel=w1_kernel,
           fused_kernel=fused_kernel,
+          forced_routed_experts=forced_routed_experts,
       )
     elif cfg.sparse_matmul:
       if quantizations.in_serve_mode(self.quant):
@@ -3251,7 +3476,8 @@ class RoutedMoE(nnx.Module):
           w0_bias,
           w1_bias,
           wo_bias,
-          input_ids,
+          input_ids=input_ids,
+          forced_routed_experts=forced_routed_experts,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -3264,7 +3490,8 @@ class RoutedMoE(nnx.Module):
           w0_bias,
           w1_bias,
           wo_bias,
-          input_ids,
+          input_ids=input_ids,
+          forced_routed_experts=forced_routed_experts,
       )
     return output, lb_loss, bias_updates
 
@@ -3354,6 +3581,7 @@ class RoutedAndSharedMoE(nnx.Module):
       intermediate_sharding: NamedSharding | None = None,
       out_sharding: NamedSharding | None = None,
       input_ids: jax.Array | None = None,
+      forced_routed_experts: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes both the routed experts and the shared expert block.
 
@@ -3375,6 +3603,7 @@ class RoutedAndSharedMoE(nnx.Module):
         gate_inputs=gate_inputs,
         out_sharding=out_sharding,
         input_ids=input_ids,
+        forced_routed_experts=forced_routed_experts,
     )
     shared_experts = self.shared_experts(
         inputs,

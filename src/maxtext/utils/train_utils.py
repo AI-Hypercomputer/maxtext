@@ -54,7 +54,9 @@ def create_training_optimizer(config, model):
 def create_checkpoint_manager(config, mesh, init_state_fn):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
   # pass in model for muon
-  logger = checkpointing.setup_checkpoint_logger(config)
+  # `setup_checkpoint_logger` only emits a deprecation warning now (Orbax v1 logs
+  # internally) and always returns None; we still pass it through for API parity.
+  logger = checkpointing.setup_checkpoint_logger(config)  # pylint: disable=assignment-from-no-return
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager(
         config.local_checkpoint_directory,
@@ -98,6 +100,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
+        config.checkpoint_storage_target_data_file_size_bytes,
     )
 
   # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
@@ -302,10 +305,14 @@ def setup_train_loop(config, recorder, devices=None):
       ):
         raise ValueError("Packing is only supported for load balanced ring attention with context parallelism for GPU.")
 
-    # Apply reordering wrapper to data iterators if context parallelism is enabled
+    # Apply reordering wrapper to data iterators if context parallelism is enabled.
+    # `reordered_cp_size` is the single source of truth for the permutation the
+    # batch carries; consumers that assume it (the LoadBalanced* Splash masks,
+    # MTP's shift-by-one) read the same helper rather than re-deriving it.
     data_iterator_for_loader = data_iterator
+    reorder_cp_size = max_utils.reordered_cp_size(config, mesh)
     with jax.set_mesh(mesh):
-      if context_parallel_size > 1 and config.context_parallel_load_balance:
+      if reorder_cp_size > 1:
 
         # Determine load balancing reorder strategy.
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
@@ -322,7 +329,7 @@ def setup_train_loop(config, recorder, devices=None):
           reorder_strategy = config.context_parallel_reorder_strategy
 
         reorder_fn = maxtext_utils.get_reorder_callable(
-            context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
+            reorder_cp_size, config.shard_mode, reorder_strategy, config.hardware
         )
         # data_iterator itself stays unwrapped because checkpointing dispatches on
         # its concrete type; only batch consumers receive the reordered view.

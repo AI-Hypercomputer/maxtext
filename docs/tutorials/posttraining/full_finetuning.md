@@ -108,6 +108,8 @@ python3 -m maxtext.trainers.pre_train.train \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   model_name=${MODEL?} \
+  dataset_type=grain \
+  grain_file_type=tfrecord \
   dataset_path=${DATASET_GCS_BUCKET?} \
   async_checkpointing=False  \
   steps=10 per_device_batch_size=1

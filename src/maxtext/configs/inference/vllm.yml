@@ -33,7 +33,7 @@ vllm_additional_config: {}
 
 
 # -------------- Logical Axis Rules --------------
-mesh_axes: ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert']
+mesh_axes: ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert', 'dcp', 'pcp']
 logical_axis_rules: [
                       # ==========================================
                       # Vocabulary Embedding
@@ -91,6 +91,7 @@ logical_axis_rules: [
                       # General Weights
                       ['mlp', ['attn_dp', 'model']],
                       ['embed', []],
+                      ['embed_attn', []],
                       ['norm', []],
                       ['layers', []],
                       ['local_layers', []],
