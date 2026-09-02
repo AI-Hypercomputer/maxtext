@@ -99,8 +99,6 @@ def decode_with_vllm(config: Config) -> None:
               "debug_sharding": config.debug_sharding,
               "prefuse_moe_weights": config.prefuse_moe_weights,
               "scan_layers": config.scan_layers,
-              "enable_nnx": config.enable_nnx,
-              "pure_nnx_decoder": config.pure_nnx_decoder,
           },
           "sharding": {
               "sharding_strategy": {
@@ -248,8 +246,6 @@ def decode_with_tunix(
           "debug_sharding": config.debug_sharding,
           "prefuse_moe_weights": config.prefuse_moe_weights,
           "scan_layers": config.scan_layers,
-          "enable_nnx": config.enable_nnx,
-          "pure_nnx_decoder": config.pure_nnx_decoder,
       }
   }
 
