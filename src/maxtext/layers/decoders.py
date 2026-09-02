@@ -724,6 +724,7 @@ class Decoder(nn.Module):
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
+            "qwen3.5-tiny",
             "maxtext-omni-gemma3-qwen3",
         ]:
           y = mm_utils.merge_mm_embeddings(
@@ -744,6 +745,7 @@ class Decoder(nn.Module):
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
+            "qwen3.5-tiny",
         ]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
