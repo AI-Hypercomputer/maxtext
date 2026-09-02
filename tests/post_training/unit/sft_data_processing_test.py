@@ -548,7 +548,6 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
     self.assertEqual(result["messages"][1], "2+2 is 4.\n<channel|>4<turn|>\n")
 
 
-
 @pytest.mark.external_training
 class SFTPromptMaskingTest(unittest.TestCase):
 
