@@ -190,9 +190,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
 
     def loss_fn(model, *_args, **_kwargs):
-      # Mutating a non-`Param` variable is what makes `new_rest` differ from the cached
-      # `rest`; scaling the loss by it makes a stale publish show up as a wrong gradient
-      # rather than only as a wrong counter.
+      # Mutating a non-`Param` makes `new_rest` differ from the cached `rest`; scaling the
+      # loss by it turns a stale publish into a wrong gradient, not just a wrong counter.
       model.calls.value = model.calls.value + 1.0
       return (
           abstract_engine.WeightedMetric(
@@ -213,8 +212,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       t.update()
 
     self.assertIsNotNone(t._params_pure, "the pure-state cache fell back to re-splitting the graph")
-    # `nnx.update` is the publish barrier: the live module the engine hands out, checkpoints
-    # and syncs weights from must track the cache, not lag behind it.
+    # `nnx.update` is the publish barrier: the live module must track the cache.
     self.assertEqual(float(t.model.calls.value), 2.0)
     self.assertGreater(float(np.abs(np.asarray(t.model.weights.value) - before).max()), 0.0)
     self.assertEqual(t.train_step, 2)
@@ -662,8 +660,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         self.assertIsNone(metrics)
       if idx == 1:
         # Metrics for train_step=0, waited on through the update's gradient norm -- one
-        # scalar out of the same executable, not the state itself, whose buffers the next
-        # update donates away.
+        # scalar out of the same executable, not the state, whose buffers get donated away.
         self.assertIsNotNone(metrics)
         self.assertLen(computation, 1)
         self.assertEqual(jnp.shape(computation[0]), ())
