@@ -332,15 +332,18 @@ _QWEN3_NEXT_FULL_ATTN_LAYER = {
     "post_attention_layernorm": {"scale": None},
 }
 
+# A scanned Qwen3-Next block covers one `inhomogeneous_layer_cycle_interval` period: the
+# linear-attention layers are homogeneous and stacked into `local_layers`, and the single
+# trailing full-attention layer is `global_layer`. The dimension numbers themselves are
+# unchanged by that stacking -- `transform_logic` keys off the parameter path, and the scan
+# axes go in at `param_scan_axis`, which shifts neither axis 0 nor the negative axes.
 QWEN3_NEXT_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
             "decoder_norm": {"scale": None},
             "layers": {
-                "layer_0": _QWEN3_NEXT_GDN_LAYER,
-                "layer_1": _QWEN3_NEXT_GDN_LAYER,
-                "layer_2": _QWEN3_NEXT_GDN_LAYER,
-                "layer_3": _QWEN3_NEXT_FULL_ATTN_LAYER,
+                "local_layers": _QWEN3_NEXT_GDN_LAYER,
+                "global_layer": _QWEN3_NEXT_FULL_ATTN_LAYER,
             },
             "logits_dense": {"kernel": None},
         },
