@@ -265,7 +265,14 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
 
 def get_nnx_var_named_sharding_with_scan_axis(v: Any, mesh) -> Any:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
-  if isinstance(v, (jax.core.ShapedArray, jax.core.ShapeDtypeStruct, jax.Array)):
+  shape_types = tuple(
+      cls for cls in (
+          getattr(jax, "Array", None),
+          getattr(jax, "ShapeDtypeStruct", None),
+          getattr(jax.core, "ShapedArray", None),
+      ) if cls is not None
+  )
+  if shape_types and isinstance(v, shape_types):
     if hasattr(v, "sharding") and isinstance(v.sharding, jax.sharding.NamedSharding):
       return v.sharding
     return NamedSharding(mesh, P())
