@@ -1223,14 +1223,15 @@ class NNXDecoder(nnx.Module):
     """Get remat policy for jax.checkpoint."""
     policy = None
     cfg = self.config
-    if cfg.remat_policy and cfg.remat_policy != "none":
-      if cfg.remat_policy in {"minimal_with_context", "minimal_flash"}:
-        if cfg.remat_policy == "minimal_flash":
+    remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+    if remat_policy and remat_policy != "none":
+      if remat_policy in {"minimal_with_context", "minimal_flash"}:
+        if remat_policy == "minimal_flash":
           max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
         policy = self.minimal_policy(with_context=True)
-      elif cfg.remat_policy == "minimal":
+      elif remat_policy == "minimal":
         policy = self.minimal_policy()
-      elif cfg.remat_policy == "minimal_with_quantization":
+      elif remat_policy == "minimal_with_quantization":
         if cfg.scan_layers:
           warnings.warn(
               "Scan layers can introduce overhead to checkpointed values that in some configurations is slower"
@@ -1239,7 +1240,7 @@ class NNXDecoder(nnx.Module):
               "beneficial for performance."
           )
         policy = self.minimal_policy(with_context=False, with_quantization=True)
-      elif cfg.remat_policy == "minimal_with_context_and_quantization":
+      elif remat_policy == "minimal_with_context_and_quantization":
         if cfg.scan_layers:
           warnings.warn(
               "Scan layers can introduce overhead to checkpointed values that in some configurations is slower"
@@ -1248,7 +1249,7 @@ class NNXDecoder(nnx.Module):
               "beneficial for performance."
           )
         policy = self.minimal_policy(with_context=True, with_quantization=True)
-      elif cfg.remat_policy == "save_dot_with_context_except_mlp":
+      elif remat_policy == "save_dot_with_context_except_mlp":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
             "value_proj",
@@ -1258,7 +1259,7 @@ class NNXDecoder(nnx.Module):
             "context",
             "out_proj",
         )
-      elif cfg.remat_policy == "save_dot_except_mlpwi":
+      elif remat_policy == "save_dot_except_mlpwi":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
             "value_proj",
@@ -1268,7 +1269,7 @@ class NNXDecoder(nnx.Module):
             "out_proj",
             "mlpwo",
         )
-      elif cfg.remat_policy == "save_dot_except_mlp":
+      elif remat_policy == "save_dot_except_mlp":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
             "value_proj",
@@ -1277,7 +1278,7 @@ class NNXDecoder(nnx.Module):
             "qkv_proj",
             "out_proj",
         )
-      elif cfg.remat_policy == "save_qkv_proj":
+      elif remat_policy == "save_qkv_proj":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
             "value_proj",
@@ -1285,7 +1286,7 @@ class NNXDecoder(nnx.Module):
             "kv_proj",
             "qkv_proj",
         )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
+      elif remat_policy == "qkv_proj_offloaded":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
             names_which_can_be_offloaded=[
@@ -1297,7 +1298,7 @@ class NNXDecoder(nnx.Module):
             offload_src="device",
             offload_dst="pinned_host",
         )
-      elif cfg.remat_policy == "minimal_offloaded":
+      elif remat_policy == "minimal_offloaded":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
             names_which_can_be_offloaded=[
@@ -1315,17 +1316,17 @@ class NNXDecoder(nnx.Module):
             offload_src="device",
             offload_dst="pinned_host",
         )
-      elif cfg.remat_policy == "custom":
+      elif remat_policy == "custom":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=cfg.tensors_on_device,
             names_which_can_be_offloaded=cfg.tensors_to_offload,
             offload_src="device",
             offload_dst="pinned_host",
         )
-      elif cfg.remat_policy == "save_out_proj":
+      elif remat_policy == "save_out_proj":
         policy = jax.checkpoint_policies.save_only_these_names("out_proj")
       else:
-        assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
+        assert remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
     return policy
 
