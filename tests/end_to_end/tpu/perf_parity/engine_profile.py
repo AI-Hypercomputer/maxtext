@@ -102,6 +102,9 @@ def _build_config(spec: qc.RunSpec):
       per_device_batch_size=spec.per_device_batch,
       ici_fsdp_parallelism=spec.fsdp,
       ici_tensor_parallelism=spec.tp,
+      ici_expert_parallelism=spec.ep,
+      use_ring_of_experts=spec.ring_of_experts,
+      use_ragged_sort=spec.ragged_sort,
       dtype="float32",
       weight_dtype="float32",
       remat_policy="none",
@@ -201,6 +204,16 @@ def main() -> None:
   engine.with_loss_fn(peft_trainer_v2._default_loss_fn)  # pylint: disable=protected-access
   engine.with_gen_model_input_fn(qc.make_gen_model_input_fn(tokenizer.pad_token_id))
 
+  # `close()` ends with `save_checkpoint(..., force=True)`, and the engine's
+  # `CheckpointManager` arms itself on `checkpoint_dir` being non-empty rather than on
+  # `enable_checkpointing` -- and `checkpoint_dir` is recomputed by pyconfig from
+  # `base_output_directory` + `run_name`, so it cannot be cleared from the config either.
+  # On qwen3.5-35b-a3b in f32 that is a ~140 G write per run, which this host has no room
+  # for and which is not part of the step being measured. Honour the
+  # `enable_checkpointing=False` the config already asked for.
+  if not config.enable_checkpointing:
+    engine._checkpoint_manager._checkpoint_manager = None  # pylint: disable=protected-access
+
   # The engine owns its own mesh and axis-rule context (`_sharding_ctx`), so unlike the
   # PeftTrainer arms nothing is entered around the loop here. This is how the orchestrator
   # drives it.
@@ -230,14 +243,23 @@ def main() -> None:
     jax.effects_barrier()
 
   timer.report(f"maxtext {spec.model} + MaxTextTrainingEngine (scan_layers={spec.scan})", group=spec.ga)
+
   # Split the step in two. Both halves include a blocking `wait_for_next`, so this does not
   # separate host work from waiting -- but it does say which of the engine's two dispatches
   # the time sits behind. Under GA the fwd_bwd figure is per micro-batch and the update
   # figure is per optimizer step, so the two only add up after scaling by `ga`.
+  #
+  # `--steps` at or below `WARMUP_STEPS` leaves one of these slices empty, which `median`
+  # raises on. Report what there is rather than losing the run's summary to it -- the trace
+  # and `timer.report` above are already written by this point.
+  def _median_ms(samples: list[float], warmup: int) -> str:
+    warm = samples[warmup:]
+    return f"{statistics.median(warm) * 1e3:.1f}ms" if warm else "n/a"
+
   print(
       "  fwd_bwd / update : "
-      f"{statistics.median(fwd_bwd_s[qc.WARMUP_STEPS * spec.ga:]) * 1e3:.1f}ms per micro / "
-      f"{statistics.median(update_s[qc.WARMUP_STEPS:]) * 1e3:.1f}ms per step (medians)"
+      f"{_median_ms(fwd_bwd_s, qc.WARMUP_STEPS * spec.ga)} per micro / "
+      f"{_median_ms(update_s, qc.WARMUP_STEPS)} per step (medians)"
   )
   _report_nnx_graph_cost(engine)
   print(f"train steps completed: {engine.train_step}", flush=True)
