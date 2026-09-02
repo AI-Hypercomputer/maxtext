@@ -1046,7 +1046,7 @@ class Attention(nnx.Module):
           inputs, num_frames, height, width, token_mask=token_mask, valid_grid=valid_grid
       )
     else:
-      return self.rotary_embedding(inputs, inputs_positions)
+      return self.rotary_embedding(inputs, inputs_positions, **(rope_kwargs or {}))
 
   def init_kv_caches(self, inputs_kv_shape: Tuple):
     """Initializes KVCache.

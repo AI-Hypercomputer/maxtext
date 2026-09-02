@@ -1019,18 +1019,36 @@ def main(
               for k, v in hf_state_dict_numpy.items()
           }
 
+      def _resolve_shared_indexer_tensor(key: str, getter_fn):
+        """Resolves missing indexer parameters for GLM-5.2 Shared (S) layers from preceding Full (F) donor layers.
+
+        Use-Case:
+          In GLM-5.2 IndexShare models, HuggingFace/Safetensors checkpoints prune indexer weights
+          on Shared (S) layers (e.g., layers 1, 2, 3) because they share weights with the preceding
+          Full (F) donor layer (e.g., layer 0). When constructing the MaxText model state (or when
+          prune_shared_indexers=False), any missing indexer weight on a shared layer is resolved
+          by searching backwards for the closest preceding donor layer containing the physical tensor.
+        """
+        if "indexer" in key and key.startswith("model.layers."):
+          m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
+          if m:
+            layer_idx = int(m.group(1))
+            rest = m.group(2)
+            # Search backwards for the closest preceding donor layer containing the key
+            for candidate_idx in range(layer_idx - 1, -1, -1):
+              donor_key = f"model.layers.{candidate_idx}.{rest}"
+              try:
+                return getter_fn(donor_key)
+              except (ValueError, KeyError):
+                continue
+        return None
+
       def _eager_getter(key):
         if key not in hf_state_dict_numpy:
-          if getattr(config, "use_index_share", False) and "indexer" in key and key.startswith("model.layers."):
-            m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
-            if m:
-              layer_idx = int(m.group(1))
-              rest = m.group(2)
-              # Search backwards for the closest preceding donor layer containing the key
-              for candidate_idx in range(layer_idx - 1, -1, -1):
-                donor_key = f"model.layers.{candidate_idx}.{rest}"
-                if donor_key in hf_state_dict_numpy:
-                  return _eager_getter(donor_key)
+          if getattr(config, "use_index_share", False):
+            donor_tensor = _resolve_shared_indexer_tensor(key, _eager_getter)
+            if donor_tensor is not None:
+              return donor_tensor
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
         v = hf_state_dict_numpy[key]
         # target dtype is "float32"
@@ -1056,18 +1074,9 @@ def main(
         try:
           return orig_tensor_getter(key)
         except (ValueError, KeyError) as e:
-          if "indexer" in key and key.startswith("model.layers."):
-            m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
-            if m:
-              layer_idx = int(m.group(1))
-              rest = m.group(2)
-              # Search backwards for the closest preceding donor layer containing the key
-              for candidate_idx in range(layer_idx - 1, -1, -1):
-                donor_key = f"model.layers.{candidate_idx}.{rest}"
-                try:
-                  return orig_tensor_getter(donor_key)
-                except (ValueError, KeyError):
-                  continue
+          donor_tensor = _resolve_shared_indexer_tensor(key, orig_tensor_getter)
+          if donor_tensor is not None:
+            return donor_tensor
           raise e
 
       tensor_getter = _index_share_tensor_getter

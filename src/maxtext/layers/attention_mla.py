@@ -222,7 +222,7 @@ class Indexer(nnx.Module):
     # indexer_head_dim -> [rope_head_dim, indexer_head_dim - rope_head_dim]
     x_pe, x_nope = jnp.split(inputs, [self.rope_head_dim], axis=-1)
     # x_pe [B, S, H, rope_head_dim], positions [B, S]
-    x_pe = self.rotary_embedding(x_pe, position=inputs_positions)
+    x_pe = self.rotary_embedding(x_pe, position=inputs_positions, unsqueeze_dim=2)
     x = jnp.concatenate([x_pe, x_nope], axis=-1)
     return x
 
@@ -745,15 +745,19 @@ class MLA(Attention):
     if getattr(config, "use_index_share", False):
       pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
       self.is_full_tuple = tuple(role == "F" for role in pattern)
+      self.is_full = jnp.array(self.is_full_tuple, dtype=jnp.bool_)
       self.served_group_sizes_tuple = index_share_utils.get_served_group_sizes(pattern)
     else:
       self.is_full_tuple = None
+      self.is_full = None
       self.served_group_sizes_tuple = None
     is_pruned = (
         getattr(config, "use_index_share", False)
         and getattr(config, "prune_shared_indexers", True)
         and self.is_shared_layer
     )
+    self.indexer = None
+    self.IndexerKVCache_0 = None
     if self.use_indexer and not is_pruned:
       # Need two versions of rope.
       # MLA applies yarn with interleave layout.
@@ -769,9 +773,6 @@ class MLA(Attention):
           model_mode=model_mode,
       )
       self.IndexerKVCache_0 = self.init_indexer_cache(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
-    else:
-      self.indexer = None
-      self.IndexerKVCache_0 = None
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
@@ -969,7 +970,7 @@ class MLA(Attention):
     # Partial RoPE: Split into non-positional and rotary parts.
     # last dimension: qk_nope_head_dim, qk_rope_head_dim
     q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name)
-    q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
+    q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions, rope_kwargs={"unsqueeze_dim": 2})
     q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name)
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
@@ -1121,7 +1122,7 @@ class MLA(Attention):
     low_rank_main = checkpoint_name(low_rank_main, "mla_kv")
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
-    key_rope = self.apply_rotary_embedding(key_rope, inputs_positions=inputs_positions)
+    key_rope = self.apply_rotary_embedding(key_rope, inputs_positions=inputs_positions, rope_kwargs={"unsqueeze_dim": 2})
 
     key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
     cached_values = [None, None]
@@ -1352,14 +1353,23 @@ class MLA(Attention):
 
           def _run_shared(_):
             with jax.named_scope("glm_shared_layer_index_reuse"):
+              if cached_indexer_state is None:
+                batch = query.shape[0]
+                q_len = query.shape[1]
+                kv_len = key.shape[1] if key is not None else 0
+                topk = getattr(self.config, "indexer_topk", 0)
+                mask = jnp.zeros((batch, q_len, kv_len), dtype=query.dtype)
+                indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
+                score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
+                return mask, indices, score
               mask, indices, score = cached_indexer_state
               mask = checkpoint_name(mask, "shared_layer_reused_mask")
               indices = checkpoint_name(indices, "shared_layer_reused_indices")
               return mask, indices, score
 
-          if getattr(self.config, "use_index_share", False) and cached_indexer_state is not None:
-            if layer_idx is not None and self.is_full_tuple is not None:
-              is_full = jnp.array(self.is_full_tuple, dtype=jnp.bool_)[layer_idx]
+          if getattr(self.config, "use_index_share", False):
+            if layer_idx is not None and self.is_full is not None:
+              is_full = self.is_full[layer_idx]
               indexer_mask, topk_indices, indexer_score = jax.lax.cond(
                   is_full,
                   _run_full,

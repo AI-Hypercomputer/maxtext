@@ -113,7 +113,7 @@ def _jetstream_stubs():
         else:
           tokens = self.data[slot, self.tokens_idx]
       else:
-        tokens = self.data
+        tokens = self.data[slot] if self.data is not None else None
 
       if self.data is not None and self.valid_idx is not None:
         if isinstance(self.valid_idx, tuple) and len(self.valid_idx) == 2:

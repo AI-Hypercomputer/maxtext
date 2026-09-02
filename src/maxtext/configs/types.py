@@ -3863,6 +3863,12 @@ class MaxTextConfig(
         )
     if not self.use_indexer and self.use_index_share:
       raise ValueError("`use_index_share=True` requires `use_indexer=True`.")
+    if self.use_index_share and self.prune_shared_indexers and self.scan_layers:
+      raise ValueError(
+          "`prune_shared_indexers=True` is not compatible with `scan_layers=True` because "
+          "pruning indexer parameters on shared layers creates heterogeneous PyTree structures across layers. "
+          "Please set `scan_layers=False` or `prune_shared_indexers=False`."
+      )
     if not self.use_indexer and self.indexer_cutoff_threshold != RematLocation.REMAT:
       raise ValueError(
           f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
