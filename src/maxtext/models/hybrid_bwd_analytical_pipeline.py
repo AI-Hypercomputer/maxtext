@@ -22,6 +22,7 @@ matrix multiplications.
 """
 
 import functools
+import math
 from typing import Any, Optional, Tuple
 
 import jax
@@ -341,19 +342,19 @@ def make_bwd_block_specs(
     num_v_heads: int,
     kq_head_dim: int,
     v_head_dim: int,
-    kernel_size: int,
-    pad_len: int,
     padded_num_v_heads: int | None = None,
+    kernel_size: int = 4,
+    pad_len: int = 8,
 ) -> Tuple[list[pl.BlockSpec], list[pl.BlockSpec], int, int]:
-  """Constructs reverse-scan Pallas emit_pipeline in_specs and out_specs including t_inv."""
-  del batch_size
+  """Constructs reverse-scan Pallas emit_pipeline in_specs and out_specs for analytical GDN backward."""
+  del batch_size, kernel_size, pad_len
   if padded_num_v_heads is None:
     padded_num_v_heads = ((num_v_heads + 127) // 128) * 128
   rc = lambda c: num_chunks - 1 - c
   in_specs = [
       pl.BlockSpec(
-          (None, pl.BoundedSlice(chunk_size + pad_len), dim_size),
-          lambda b, c: (b, pl.ds(rc(c) * chunk_size, chunk_size + pad_len), 0),
+          (None, None, chunk_size, dim_size),
+          lambda b, c: (b, rc(c), 0, 0),
       ),
       pl.BlockSpec(
           (None, None, chunk_size, padded_num_v_heads),
@@ -383,14 +384,6 @@ def make_bwd_block_specs(
           (None, 1, padded_num_v_heads),
           lambda b, c: (b, 0, 0),
       ),
-      pl.BlockSpec(
-          (kernel_size, dim_size),
-          lambda b, c: (0, 0),
-      ),
-      pl.BlockSpec(
-          (dim_size,),
-          lambda b, c: (0,),
-      ),
   ]
   out_specs = [
       pl.BlockSpec(
@@ -406,14 +399,6 @@ def make_bwd_block_specs(
           lambda b, c: (b, rc(c), 0, 0),
       ),
       pl.BlockSpec(
-          (None, None, kernel_size, dim_size),
-          lambda b, c: (b, rc(c), 0, 0),
-      ),
-      pl.BlockSpec(
-          (None, None, 1, dim_size),
-          lambda b, c: (b, rc(c), 0, 0),
-      ),
-      pl.BlockSpec(
           (None, None, 1, padded_num_v_heads),
           lambda b, c: (b, rc(c), 0, 0),
       ),
@@ -426,7 +411,7 @@ def make_bwd_block_specs(
 
 
 def _bwd_analytical_pipeline_body(
-    padded_pre_conv_qkv_ref: Any,
+    qkv_conv_ref: Any,
     b_ref: Any,
     a_ref: Any,
     do_ref: Any,
@@ -434,17 +419,12 @@ def _bwd_analytical_pipeline_body(
     t_inv_ref: Any,
     a_log_ref: Any,
     dt_bias_ref: Any,
-    conv_weight_ref: Any,
-    conv_bias_ref: Any,
-    d_pre_conv_qkv_ref: Any,
+    dy_conv_ref: Any,
     d_b_ref: Any,
     d_a_ref: Any,
-    d_conv_weight_ref: Any,
-    d_conv_bias_ref: Any,
     d_a_log_ref: Any,
     d_dt_bias_ref: Any,
     d_state_scr: Any,
-    dz_halo_scratch: Any,
     *,
     chunk_size: int,
     dim_size: int,
@@ -453,12 +433,12 @@ def _bwd_analytical_pipeline_body(
     padded_num_v_heads: int,
     kq_head_dim: int,
     v_head_dim: int,
-    kernel_size: int,
-    pad_len: int,
     use_qk_norm_in_gdn: bool,
-    head_tile: int = 32,
+    kernel_size: int = 4,
+    pad_len: int = 8,
 ) -> None:
   """Inner kernel executed per (batch, chunk) by emit_pipeline with analytical manual backward."""
+  del kernel_size, pad_len
   c = pl.program_id(1)
   repeats = num_v_heads // num_kq_heads
   q_size = num_kq_heads * kq_head_dim
@@ -470,30 +450,11 @@ def _bwd_analytical_pipeline_body(
     d_state_scr[...] = jnp.zeros(
         (num_v_heads, kq_head_dim, v_head_dim), dtype=jnp.float32
     )
-    dz_halo_scratch[...] = jnp.zeros((pad_len, dim_size), dtype=jnp.float32)
 
   d_state = d_state_scr[...]
-  dz_halo = dz_halo_scratch[...]
+  y_c = qkv_conv_ref[...]
 
-  padded_pre_conv_qkv_val = padded_pre_conv_qkv_ref[...]
-  conv_w = conv_weight_ref[...]
-  conv_b = conv_bias_ref[...]
-
-  # 1. Compute z_c_top = conv1d(x_c) + b and y_c = silu(z_c_top) directly in VMEM
-  # Do not hold z_c alive across the GDN backward adjoint matmuls
-  z_c_top = jnp.zeros((chunk_size, dim_size), dtype=jnp.float32)
-  for k_idx in range(kernel_size):
-    shift = kernel_size - 1 - k_idx
-    start = pad_len - shift
-    x_s = padded_pre_conv_qkv_val[start : start + chunk_size].astype(
-        jnp.float32
-    )
-    z_c_top = z_c_top + x_s * conv_w[k_idx].astype(jnp.float32)
-  z_c_top = z_c_top + conv_b.astype(jnp.float32)
-  y_c = jax.nn.silu(z_c_top)
-  del z_c_top
-
-  # 2. Slice y_c into q, k, v for GDN reverse pass
+  # Slice chunk inputs for this head group
   q_orig = (
       y_c[:, :q_size]
       .reshape((chunk_size, num_kq_heads, kq_head_dim))
@@ -505,7 +466,7 @@ def _bwd_analytical_pipeline_body(
       .astype(jnp.float32)
   )
   v = (
-      y_c[:, q_size + k_size :]
+      y_c[:, q_size + k_size : q_size + k_size + v_size]
       .reshape((chunk_size, num_v_heads, v_head_dim))
       .astype(jnp.float32)
   )
@@ -513,13 +474,20 @@ def _bwd_analytical_pipeline_body(
   b_val = b_ref[...][:, :num_v_heads].astype(jnp.float32)
   a_val = a_ref[...][:, :num_v_heads].astype(jnp.float32)
   do_val = do_ref[...].astype(jnp.float32)
-  state_prev_val = chunk_states_ref[...].astype(jnp.float32)
+  state_prev = chunk_states_ref[...].astype(jnp.float32)
   t_inv_val = t_inv_ref[...].astype(jnp.float32)
   a_log_val = a_log_ref[...][0, :num_v_heads].astype(jnp.float32)
   dt_bias_val = dt_bias_ref[...][0, :num_v_heads].astype(jnp.float32)
 
-  # 3. Manual Analytical GDN Backward Pass (Bypassing jax.vjp)
   scale = 1.0 / jnp.sqrt(kq_head_dim)
+  mask_cumsum = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
+  mask_strict = jnp.tril(
+      jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1
+  )
+  mask_causal = jnp.tril(
+      jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=0
+  )
+
   if use_qk_norm_in_gdn:
     norm_q = normalizations.l2norm(q_orig, dim=-1, eps=1e-6)
     norm_k = normalizations.l2norm(k_orig, dim=-1, eps=1e-6)
@@ -538,7 +506,6 @@ def _bwd_analytical_pipeline_body(
   exp_a_log = jnp.exp(a_log_val)
   log_g = -exp_a_log * sp_val
 
-  mask_cumsum = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=log_g.dtype))
   cumsum_log_g = jnp.dot(mask_cumsum, log_g)
 
   q_h = jnp.transpose(q_rep, (1, 0, 2))
@@ -548,215 +515,132 @@ def _bwd_analytical_pipeline_body(
   cumsum_h = jnp.transpose(cumsum_log_g, (1, 0))
   do_h = jnp.transpose(do_val, (1, 0, 2))
 
-  mask_strict = jnp.tril(
-      jnp.ones((chunk_size, chunk_size), dtype=log_g.dtype), k=-1
+  diff = cumsum_h[:, :, None] - cumsum_h[:, None, :]
+  safe_diff_strict = jnp.where(mask_strict[None, :, :] == 1.0, diff, -1e4)
+  g_mat_strict = jnp.exp(safe_diff_strict) * mask_strict[None, :, :]
+
+  safe_diff_causal = jnp.where(mask_causal[None, :, :] == 1.0, diff, -1e4)
+  g_mat_causal = jnp.exp(safe_diff_causal) * mask_causal[None, :, :]
+
+  gating_forward = jnp.exp(cumsum_h)[:, :, None]
+  gating_last = jnp.exp(cumsum_h[:, -1])[:, None, None]
+  gating_backward = jnp.exp(cumsum_h[:, -1:] - cumsum_h)[:, :, None]
+
+  k_beta = k_h * beta_h[:, :, None]
+  k_h_T = jnp.swapaxes(k_h, -1, -2)
+  S_unmasked = jnp.matmul(k_beta, k_h_T)
+
+  A = t_inv_val
+
+  v_beta = v_h * beta_h[:, :, None]
+  k_beta_g = k_beta * gating_forward
+  u = jnp.matmul(A, v_beta)
+  w = jnp.matmul(A, k_beta_g)
+
+  ws = jnp.matmul(w, state_prev)
+  v_new = u - ws
+
+  q_g = q_h * gating_forward
+  attn_unmasked = jnp.matmul(q_h, k_h_T)
+  attn = attn_unmasked * g_mat_causal
+
+  k_scaled_bwd = k_h * gating_backward
+
+  dv_new = jnp.matmul(jnp.swapaxes(attn, -1, -2), do_h) + jnp.matmul(
+      k_scaled_bwd, d_state
   )
-  mask_causal = jnp.tril(
-      jnp.ones((chunk_size, chunk_size), dtype=log_g.dtype), k=0
+  d_attn = jnp.matmul(do_h, jnp.swapaxes(v_new, -1, -2))
+
+  du = dv_new
+  dw = -jnp.matmul(dv_new, jnp.swapaxes(state_prev, -1, -2))
+
+  d_state_prev = (
+      d_state * gating_last
+      + jnp.matmul(jnp.swapaxes(q_g, -1, -2), do_h)
+      - jnp.matmul(jnp.swapaxes(w, -1, -2), dv_new)
   )
 
-  effective_head_tile = (
-      head_tile if head_tile is not None and head_tile > 0 else num_v_heads
+  A_T = jnp.swapaxes(A, -1, -2)
+  d_v_beta = jnp.matmul(A_T, du)
+  d_k_beta_g = jnp.matmul(A_T, dw)
+  dA = jnp.matmul(du, jnp.swapaxes(v_beta, -1, -2)) + jnp.matmul(
+      dw, jnp.swapaxes(k_beta_g, -1, -2)
   )
 
-  d_q_h_list = []
-  d_k_h_list = []
-  d_v_h_list = []
-  d_state_prev_list = []
-  d_a_val_list = []
-  d_a_log_val_list = []
-  d_dt_bias_val_list = []
-  d_b_val_list = []
+  dS = jnp.tril(-jnp.matmul(jnp.matmul(A_T, dA), A_T), k=-1)
 
-  for h_start in range(0, num_v_heads, effective_head_tile):
-    h_end = min(h_start + effective_head_tile, num_v_heads)
-    h_slice = slice(h_start, h_end)
+  d_S_unmasked = dS * g_mat_strict
+  d_k_beta_from_S = jnp.matmul(d_S_unmasked, k_h)
+  d_k_h_from_S = jnp.matmul(jnp.swapaxes(d_S_unmasked, -1, -2), k_beta)
 
-    diff_tile = cumsum_h[h_slice, :, None] - cumsum_h[h_slice, None, :]
-    safe_diff_strict_tile = jnp.where(
-        mask_strict[None, :, :] == 1.0, diff_tile, -1e4
-    )
-    g_mat_strict_tile = (
-        jnp.exp(safe_diff_strict_tile) * mask_strict[None, :, :]
-    )
+  d_k_beta = d_k_beta_g * gating_forward + d_k_beta_from_S
+  d_beta_h = jnp.sum(d_v_beta * v_h, axis=-1) + jnp.sum(
+      d_k_beta * k_h, axis=-1
+  )
+  d_v_h = d_v_beta * beta_h[:, :, None]
 
-    safe_diff_causal_tile = jnp.where(
-        mask_causal[None, :, :] == 1.0, diff_tile, -1e4
-    )
-    g_mat_causal_tile = (
-        jnp.exp(safe_diff_causal_tile) * mask_causal[None, :, :]
-    )
+  d_attn_unmasked = d_attn * g_mat_causal
+  d_q_h_from_attn = jnp.matmul(d_attn_unmasked, k_h)
+  d_k_h_from_attn = jnp.matmul(jnp.swapaxes(d_attn_unmasked, -1, -2), q_h)
 
-    gating_forward_tile = jnp.exp(cumsum_h[h_slice])[:, :, None]
-    gating_last_tile = jnp.exp(cumsum_h[h_slice, -1])[:, None, None]
-    gating_backward_tile = jnp.exp(
-        cumsum_h[h_slice, -1:] - cumsum_h[h_slice]
-    )[:, :, None]
+  d_q_g = jnp.matmul(do_h, jnp.swapaxes(state_prev, -1, -2))
+  d_q_h_from_q_g = d_q_g * gating_forward
 
-    k_h_tile = k_h[h_slice]
-    beta_h_tile = beta_h[h_slice]
-    k_beta_tile = k_h_tile * beta_h_tile[:, :, None]
-    k_h_T_tile = jnp.swapaxes(k_h_tile, -1, -2)
-    S_unmasked_tile = jnp.matmul(k_beta_tile, k_h_T_tile)
+  d_k_scaled = jnp.matmul(v_new, jnp.swapaxes(d_state, -1, -2))
+  d_k_h_from_k_scaled = d_k_scaled * gating_backward
 
-    A_tile = t_inv_val[h_slice]
+  d_q_h = d_q_h_from_q_g + d_q_h_from_attn
+  d_k_h = (
+      d_k_h_from_attn
+      + d_k_h_from_S
+      + d_k_beta * beta_h[:, :, None]
+      + d_k_h_from_k_scaled
+  )
 
-    v_h_tile = v_h[h_slice]
-    v_beta_tile = v_h_tile * beta_h_tile[:, :, None]
-    k_beta_g_tile = k_beta_tile * gating_forward_tile
-    u_tile = jnp.matmul(A_tile, v_beta_tile)
-    w_tile = jnp.matmul(A_tile, k_beta_g_tile)
+  # Gating adjoints
+  d_gating_forward = jnp.sum(d_q_g * q_h, axis=-1) + jnp.sum(
+      d_k_beta_g * k_beta, axis=-1
+  )
+  d_cumsum_from_fwd = d_gating_forward * gating_forward[:, :, 0]
 
-    state_prev_tile = state_prev_val[h_slice]
-    ws_tile = jnp.matmul(w_tile, state_prev_tile)
-    v_new_tile = u_tile - ws_tile
+  d_gating_last = jnp.sum(d_state * state_prev, axis=(-1, -2))
+  d_cumsum_last = d_gating_last * jnp.exp(cumsum_h[:, -1])
 
-    q_h_tile = q_h[h_slice]
-    q_g_tile = q_h_tile * gating_forward_tile
-    attn_unmasked_tile = jnp.matmul(q_h_tile, k_h_T_tile)
-    attn_tile = attn_unmasked_tile * g_mat_causal_tile
+  d_gating_backward = jnp.sum(d_k_scaled * k_h, axis=-1)
+  d_diff_bwd = d_gating_backward * gating_backward[:, :, 0]
 
-    k_scaled_bwd_tile = k_h_tile * gating_backward_tile
+  d_g_strict = dS * S_unmasked
+  d_g_causal = d_attn * attn_unmasked
+  d_diff = (d_g_strict * g_mat_strict) + (d_g_causal * g_mat_causal)
+  d_cumsum_from_diff = jnp.sum(d_diff, axis=2) - jnp.sum(d_diff, axis=1)
 
-    do_h_tile = do_h[h_slice]
-    d_state_tile = d_state[h_slice]
+  d_cumsum_h = d_cumsum_from_fwd + d_cumsum_from_diff - d_diff_bwd
+  last_col_addition = (d_cumsum_last + jnp.sum(d_diff_bwd, axis=-1))[:, None]
+  d_cumsum_h = d_cumsum_h + jnp.pad(
+      last_col_addition, ((0, 0), (chunk_size - 1, 0))
+  )
 
-    dv_new_tile = jnp.matmul(
-        jnp.swapaxes(attn_tile, -1, -2), do_h_tile
-    ) + jnp.matmul(k_scaled_bwd_tile, d_state_tile)
-    d_attn_tile = jnp.matmul(do_h_tile, jnp.swapaxes(v_new_tile, -1, -2))
+  d_cumsum_log_g = jnp.transpose(d_cumsum_h, (1, 0))
+  d_log_g = jnp.dot(mask_cumsum.T, d_cumsum_log_g)
 
-    du_tile = dv_new_tile
-    dw_tile = -jnp.matmul(dv_new_tile, jnp.swapaxes(state_prev_tile, -1, -2))
+  sig_sp = jax.nn.sigmoid(sp_input)
+  d_a_val = d_log_g * (-exp_a_log * sig_sp)
+  d_a_log_val = jnp.sum(d_log_g * (-exp_a_log * sp_val), axis=0)
+  d_dt_bias_val = jnp.sum(d_a_val, axis=0)
 
-    d_state_prev_tile = (
-        d_state_tile * gating_last_tile
-        + jnp.matmul(jnp.swapaxes(q_g_tile, -1, -2), do_h_tile)
-        - jnp.matmul(jnp.swapaxes(w_tile, -1, -2), dv_new_tile)
-    )
-
-    A_T_tile = jnp.swapaxes(A_tile, -1, -2)
-    d_v_beta_tile = jnp.matmul(A_T_tile, du_tile)
-    d_k_beta_g_tile = jnp.matmul(A_T_tile, dw_tile)
-    dA_tile = jnp.matmul(
-        du_tile, jnp.swapaxes(v_beta_tile, -1, -2)
-    ) + jnp.matmul(dw_tile, jnp.swapaxes(k_beta_g_tile, -1, -2))
-
-    dS_tile = jnp.tril(
-        -jnp.matmul(jnp.matmul(A_T_tile, dA_tile), A_T_tile), k=-1
-    )
-
-    d_S_unmasked_tile = dS_tile * g_mat_strict_tile
-    d_k_beta_from_S_tile = jnp.matmul(d_S_unmasked_tile, k_h_tile)
-    d_k_h_from_S_tile = jnp.matmul(
-        jnp.swapaxes(d_S_unmasked_tile, -1, -2), k_beta_tile
-    )
-
-    d_k_beta_tile = d_k_beta_g_tile * gating_forward_tile + d_k_beta_from_S_tile
-    d_beta_h_tile = jnp.sum(d_v_beta_tile * v_h_tile, axis=-1) + jnp.sum(
-        d_k_beta_tile * k_h_tile, axis=-1
-    )
-    d_v_h_tile = d_v_beta_tile * beta_h_tile[:, :, None]
-
-    d_attn_unmasked_tile = d_attn_tile * g_mat_causal_tile
-    d_q_h_from_attn_tile = jnp.matmul(d_attn_unmasked_tile, k_h_tile)
-    d_k_h_from_attn_tile = jnp.matmul(
-        jnp.swapaxes(d_attn_unmasked_tile, -1, -2), q_h_tile
-    )
-
-    d_q_g_tile = jnp.matmul(do_h_tile, jnp.swapaxes(state_prev_tile, -1, -2))
-    d_q_h_from_q_g_tile = d_q_g_tile * gating_forward_tile
-
-    d_k_scaled_tile = jnp.matmul(v_new_tile, jnp.swapaxes(d_state_tile, -1, -2))
-    d_k_h_from_k_scaled_tile = d_k_scaled_tile * gating_backward_tile
-
-    d_q_h_tile = d_q_h_from_q_g_tile + d_q_h_from_attn_tile
-    d_k_h_tile = (
-        d_k_h_from_attn_tile
-        + d_k_h_from_S_tile
-        + d_k_beta_tile * beta_h_tile[:, :, None]
-        + d_k_h_from_k_scaled_tile
-    )
-
-    # Gating adjoints
-    d_gating_forward_tile = jnp.sum(d_q_g_tile * q_h_tile, axis=-1) + jnp.sum(
-        d_k_beta_g_tile * k_beta_tile, axis=-1
-    )
-    d_cumsum_from_fwd_tile = (
-        d_gating_forward_tile * gating_forward_tile[:, :, 0]
-    )
-
-    d_gating_last_tile = jnp.sum(d_state_tile * state_prev_tile, axis=(-1, -2))
-    d_cumsum_last_tile = d_gating_last_tile * jnp.exp(cumsum_h[h_slice, -1])
-
-    d_gating_backward_tile = jnp.sum(d_k_scaled_tile * k_h_tile, axis=-1)
-    d_diff_bwd_tile = d_gating_backward_tile * gating_backward_tile[:, :, 0]
-
-    d_g_strict_tile = dS_tile * S_unmasked_tile
-    d_g_causal_tile = d_attn_tile * attn_unmasked_tile
-    d_diff_tile = (d_g_strict_tile * g_mat_strict_tile) + (
-        d_g_causal_tile * g_mat_causal_tile
-    )
-    d_cumsum_from_diff_tile = jnp.sum(d_diff_tile, axis=2) - jnp.sum(
-        d_diff_tile, axis=1
-    )
-
-    d_cumsum_h_tile = (
-        d_cumsum_from_fwd_tile + d_cumsum_from_diff_tile - d_diff_bwd_tile
-    )
-    last_col_addition_tile = (
-        d_cumsum_last_tile + jnp.sum(d_diff_bwd_tile, axis=-1)
-    )[:, None]
-    d_cumsum_h_tile = d_cumsum_h_tile + jnp.pad(
-        last_col_addition_tile, ((0, 0), (chunk_size - 1, 0))
-    )
-
-    d_cumsum_log_g_tile = jnp.transpose(d_cumsum_h_tile, (1, 0))
-    d_log_g_tile = jnp.dot(mask_cumsum.T, d_cumsum_log_g_tile)
-
-    sp_input_tile = sp_input[:, h_slice]
-    exp_a_log_tile = exp_a_log[h_slice]
-    sp_val_tile = sp_val[:, h_slice]
-    sig_sp_tile = jax.nn.sigmoid(sp_input_tile)
-
-    d_a_val_tile = d_log_g_tile * (-exp_a_log_tile * sig_sp_tile)
-    d_a_log_val_tile = jnp.sum(
-        d_log_g_tile * (-exp_a_log_tile * sp_val_tile), axis=0
-    )
-    d_dt_bias_val_tile = jnp.sum(d_a_val_tile, axis=0)
-
-    beta_tile = beta[:, h_slice]
-    d_b_val_tile = (
-        (jnp.transpose(d_beta_h_tile, (1, 0))) * beta_tile * (1.0 - beta_tile)
-    )
-
-    d_q_h_list.append(d_q_h_tile)
-    d_k_h_list.append(d_k_h_tile)
-    d_v_h_list.append(d_v_h_tile)
-    d_state_prev_list.append(d_state_prev_tile)
-    d_a_val_list.append(d_a_val_tile)
-    d_a_log_val_list.append(d_a_log_val_tile)
-    d_dt_bias_val_list.append(d_dt_bias_val_tile)
-    d_b_val_list.append(d_b_val_tile)
-
-  d_q_h = jnp.concatenate(d_q_h_list, axis=0)
-  d_k_h = jnp.concatenate(d_k_h_list, axis=0)
-  d_v_h = jnp.concatenate(d_v_h_list, axis=0)
-  d_state_prev = jnp.concatenate(d_state_prev_list, axis=0)
-  d_a_val = jnp.concatenate(d_a_val_list, axis=1)
-  d_a_log_val = jnp.concatenate(d_a_log_val_list, axis=0)
-  d_dt_bias_val = jnp.concatenate(d_dt_bias_val_list, axis=0)
-  d_b_val = jnp.concatenate(d_b_val_list, axis=1)
+  d_b_val = (jnp.transpose(d_beta_h, (1, 0))) * beta * (1.0 - beta)
 
   d_v_val = jnp.transpose(d_v_h, (1, 0, 2))
   d_q_rep = jnp.transpose(d_q_h, (1, 0, 2))
   d_k_rep = jnp.transpose(d_k_h, (1, 0, 2))
 
   d_q_proj = jnp.sum(
-      d_q_rep.reshape(chunk_size, num_kq_heads, repeats, kq_head_dim), axis=2
+      d_q_rep.reshape(chunk_size, num_kq_heads, repeats, kq_head_dim),
+      axis=2,
   )
   d_k_proj = jnp.sum(
-      d_k_rep.reshape(chunk_size, num_kq_heads, repeats, kq_head_dim), axis=2
+      d_k_rep.reshape(chunk_size, num_kq_heads, repeats, kq_head_dim),
+      axis=2,
   )
 
   if use_qk_norm_in_gdn:
@@ -771,137 +655,66 @@ def _bwd_analytical_pipeline_body(
     r_k = jnp.sqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-12)
     k_unit = k_orig / r_k
     d_k = (
-        d_k_proj - k_unit * jnp.sum(d_k_proj * k_unit, axis=-1, keepdims=True)
+        d_k_proj
+        - k_unit * jnp.sum(d_k_proj * k_unit, axis=-1, keepdims=True)
     ) / r_k
   else:
     d_q = d_q_proj * scale
     d_k = d_k_proj
 
-  # 4. Form dy_c in VMEM (no HBM write)
-  dy_c = jnp.concatenate(
-      [
-          d_q.reshape(chunk_size, q_size),
-          d_k.reshape(chunk_size, k_size),
-          d_v_val.reshape(chunk_size, v_size),
-      ],
-      axis=-1,
-  )
+  # Flatten gradients to chunk_size x dim_size and write to refs
+  d_q_flat = d_q.reshape(chunk_size, q_size).astype(dy_conv_ref.dtype)
+  d_k_flat = d_k.reshape(chunk_size, k_size).astype(dy_conv_ref.dtype)
+  d_v_flat = d_v_val.reshape(chunk_size, v_size).astype(dy_conv_ref.dtype)
+  dy_conv_ref[...] = jnp.concatenate([d_q_flat, d_k_flat, d_v_flat], axis=-1)
 
-  # 5. In-Kernel Rematerialization of z_c: Recompute z_c right before Conv1D backward
-  # z_c = sum_{k=0}^{K-1} x_{t-k} * w_k + b locally using padded_pre_conv_qkv_val
-  z_c = jnp.zeros((chunk_size, dim_size), dtype=jnp.float32)
-  for k_idx in range(kernel_size):
-    shift = kernel_size - 1 - k_idx
-    start = pad_len - shift
-    x_s = padded_pre_conv_qkv_val[start : start + chunk_size].astype(
-        jnp.float32
-    )
-    z_c = z_c + x_s * conv_w[k_idx].astype(jnp.float32)
-  z_c = z_c + conv_b.astype(jnp.float32)
+  if padded_num_v_heads > num_v_heads:
+    d_b_ref[...] = jnp.pad(
+        d_b_val, ((0, 0), (0, padded_num_v_heads - num_v_heads))
+    ).astype(d_b_ref.dtype)
+    d_a_ref[...] = jnp.pad(
+        d_a_val, ((0, 0), (0, padded_num_v_heads - num_v_heads))
+    ).astype(d_a_ref.dtype)
+    d_a_log_ref[...] = jnp.pad(
+        d_a_log_val[None, :], ((0, 0), (0, padded_num_v_heads - num_v_heads))
+    ).astype(d_a_log_ref.dtype)
+    d_dt_bias_ref[...] = jnp.pad(
+        d_dt_bias_val[None, :], ((0, 0), (0, padded_num_v_heads - num_v_heads))
+    ).astype(d_dt_bias_ref.dtype)
+  else:
+    d_b_ref[...] = d_b_val.astype(d_b_ref.dtype)
+    d_a_ref[...] = d_a_val.astype(d_a_ref.dtype)
+    d_a_log_ref[...] = d_a_log_val[None, :].astype(d_a_log_ref.dtype)
+    d_dt_bias_ref[...] = d_dt_bias_val[None, :].astype(d_dt_bias_ref.dtype)
 
-  # Compute elementwise SiLU' derivative in VMEM: dz_c = dy_c * SiLU'(z_c)
-  sig_z = jax.nn.sigmoid(z_c)
-  silu_prime = sig_z * (1.0 + z_c * (1.0 - sig_z))
-  dz_c = dy_c * silu_prime
-  del z_c
-
-  # 6. Emit chunk partials: bias gradient db_c = sum(dz_c)
-  d_conv_bias_ref[...] = jnp.sum(dz_c, axis=0, keepdims=True).astype(
-      d_conv_bias_ref.dtype
-  )
-
-  # 7. Emit chunk partials: weight gradient dw_c[k] = sum(dz_c * x_shifted[k])
-  dw_rows = []
-  for k_idx in range(kernel_size):
-    shift = kernel_size - 1 - k_idx
-    start = pad_len - shift
-    x_shifted = padded_pre_conv_qkv_val[start : start + chunk_size].astype(
-        jnp.float32
-    )
-    dw_rows.append(jnp.sum(dz_c * x_shifted, axis=0))
-  d_cw = jnp.stack(dw_rows, axis=0)
-  d_conv_weight_ref[...] = d_cw.astype(d_conv_weight_ref.dtype)
-
-  # 8. Anti-causal transposed convolution in VMEM for dx_c
-  dz_extended = jnp.concatenate([dz_c, dz_halo], axis=0)
-
-  dx_c = jnp.zeros((chunk_size, dim_size), dtype=jnp.float32)
-  for j_idx in range(kernel_size):
-    w_j = conv_w[kernel_size - 1 - j_idx].astype(jnp.float32)
-    dx_c = dx_c + dz_extended[j_idx : j_idx + chunk_size] * w_j
-  d_pre_conv_qkv_ref[...] = dx_c.astype(d_pre_conv_qkv_ref.dtype)
-
-  # 9. Save boundary cotangents into dz_halo_scratch for next reverse iteration
-  padded_halo = jnp.pad(
-      dz_c[: kernel_size - 1],
-      ((0, pad_len - (kernel_size - 1)), (0, 0)),
-  )
-  dz_halo_scratch[...] = padded_halo.astype(jnp.float32)
-
-  # 10. Write other outputs & recurrent state carry
-  d_b_ref[...] = jnp.pad(
-      d_b_val.astype(d_b_ref.dtype),
-      ((0, 0), (0, padded_num_v_heads - num_v_heads)),
-  )
-  d_a_ref[...] = jnp.pad(
-      d_a_val.astype(d_a_ref.dtype),
-      ((0, 0), (0, padded_num_v_heads - num_v_heads)),
-  )
-  d_a_log_ref[...] = jnp.pad(
-      d_a_log_val.astype(d_a_log_ref.dtype)[None, :],
-      ((0, 0), (0, padded_num_v_heads - num_v_heads)),
-  )
-  d_dt_bias_ref[...] = jnp.pad(
-      d_dt_bias_val.astype(d_dt_bias_ref.dtype)[None, :],
-      ((0, 0), (0, padded_num_v_heads - num_v_heads)),
-  )
-  d_state_scr[...] = d_state_prev
+  d_state_scr[...] = d_state_prev.astype(d_state_scr.dtype)
 
 
-def pallas_fused_conv1d_gdn_analytical_bwd_computation(
-    pre_conv_qkv: jax.Array,
+def _pallas_analytical_gdn_bwd_single_group(
+    qkv_conv: jax.Array,
     b: jax.Array,
     a: jax.Array,
     a_log: jax.Array,
     dt_bias: jax.Array,
     do: jax.Array,
     chunk_states: jax.Array,
-    conv_weight: jax.Array,
-    conv_bias: Optional[jax.Array] = None,
-    t_inv: Optional[jax.Array] = None,
-    qkv: Optional[jax.Array] = None,
-    seq_lens: Optional[jax.Array] = None,
+    t_inv: jax.Array,
     *,
     num_v_heads: int,
+    num_kq_heads: int,
     kq_head_dim: int,
     v_head_dim: int,
-    kernel_size: int,
     chunk_size: int = 64,
     use_qk_norm_in_gdn: bool = False,
     vmem_limit_mb: Optional[int] = None,
-    head_tile: int = 32,
     interpret: bool | pltpu.InterpretParams | None = None,
-) -> Tuple[
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    Optional[jax.Array],
-    jax.Array,
-    jax.Array,
-]:
-  """Executes the Pallas reverse-chunk GDNv3 analytical backward kernel using emit_pipeline."""
-  del seq_lens, qkv
-  if interpret is None and jax.default_backend() == "cpu":
-    interpret = True
-  if interpret:
-    ensure_cpu_interpret_registered()
-
-  batch_size, seq_len, dim_size = pre_conv_qkv.shape
+) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Executes single head-group Pallas emit_pipeline kernel."""
+  batch_size, seq_len, dim_size = qkv_conv.shape
   num_chunks = seq_len // chunk_size
-
-  num_kq_heads = (dim_size - num_v_heads * v_head_dim) // (kq_head_dim * 2)
   padded_num_v_heads = ((num_v_heads + 127) // 128) * 128
+
+  qkv_conv_4d = qkv_conv.reshape(batch_size, num_chunks, chunk_size, dim_size)
 
   b_4d = b.reshape(batch_size, num_chunks, chunk_size, num_v_heads)
   if padded_num_v_heads > num_v_heads:
@@ -943,22 +756,6 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
         dt_bias_3d, ((0, 0), (0, 0), (0, padded_num_v_heads - num_v_heads))
     )
 
-  if conv_weight.ndim == 3:
-    conv_weight_2d = conv_weight.squeeze(1)
-  else:
-    conv_weight_2d = conv_weight
-
-  if conv_bias is None:
-    conv_bias_1d = jnp.zeros((dim_size,), dtype=conv_weight_2d.dtype)
-  else:
-    conv_bias_1d = conv_bias.reshape(-1)
-
-  pad_len = max(((kernel_size - 1 + 7) // 8) * 8, 8)
-  pre_conv_pad = jnp.zeros(
-      (batch_size, pad_len, dim_size), dtype=pre_conv_qkv.dtype
-  )
-  padded_pre_conv_qkv = jnp.concatenate([pre_conv_pad, pre_conv_qkv], axis=1)
-
   t_inv_5d = t_inv.astype(jnp.float32).reshape(
       batch_size, num_chunks, num_v_heads, chunk_size, chunk_size
   )
@@ -971,23 +768,15 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
       num_v_heads=num_v_heads,
       kq_head_dim=kq_head_dim,
       v_head_dim=v_head_dim,
-      kernel_size=kernel_size,
-      pad_len=pad_len,
       padded_num_v_heads=padded_num_v_heads,
   )
 
   out_shapes = (
       jax.ShapeDtypeStruct(
-          (batch_size, num_chunks, chunk_size, dim_size), pre_conv_qkv.dtype
+          (batch_size, num_chunks, chunk_size, dim_size), qkv_conv.dtype
       ),
       jax.ShapeDtypeStruct(b_4d.shape, b_4d.dtype),
       jax.ShapeDtypeStruct(a_4d.shape, a_4d.dtype),
-      jax.ShapeDtypeStruct(
-          (batch_size, num_chunks, kernel_size, dim_size), conv_weight_2d.dtype
-      ),
-      jax.ShapeDtypeStruct(
-          (batch_size, num_chunks, 1, dim_size), conv_bias_1d.dtype
-      ),
       jax.ShapeDtypeStruct(
           (batch_size, num_chunks, 1, padded_num_v_heads), a_log_3d.dtype
       ),
@@ -1005,10 +794,7 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
       padded_num_v_heads=padded_num_v_heads,
       kq_head_dim=kq_head_dim,
       v_head_dim=v_head_dim,
-      kernel_size=kernel_size,
-      pad_len=pad_len,
       use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-      head_tile=head_tile,
   )
 
   def outer(*refs):
@@ -1027,11 +813,9 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
 
   hbm = pltpu.MemorySpace.HBM
   (
-      d_pre_conv_qkv,
-      d_b,
-      d_a,
-      d_conv_weight_chunks,
-      d_conv_bias_chunks,
+      dy_conv_chunks,
+      d_b_chunks,
+      d_a_chunks,
       d_a_log_chunks,
       d_dt_bias_chunks,
   ) = pl.pallas_call(
@@ -1042,7 +826,6 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
       out_specs=[pl.BlockSpec(memory_space=hbm)] * nout,
       scratch_shapes=[
           pltpu.VMEM((num_v_heads, kq_head_dim, v_head_dim), jnp.float32),
-          pltpu.VMEM((pad_len, dim_size), jnp.float32),
       ],
       compiler_params=pltpu.CompilerParams(
           vmem_limit_bytes=vmem_limit_bytes,
@@ -1050,7 +833,7 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
       ),
       interpret=interpret,
   )(
-      padded_pre_conv_qkv,
+      qkv_conv_4d,
       b_4d,
       a_4d,
       do_4d,
@@ -1058,12 +841,8 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
       t_inv_5d,
       a_log_3d,
       dt_bias_3d,
-      conv_weight_2d,
-      conv_bias_1d,
   )
 
-  d_conv_weight_reduced = jnp.sum(d_conv_weight_chunks, axis=(0, 1))
-  d_conv_bias_reduced = jnp.sum(d_conv_bias_chunks[..., 0, :], axis=(0, 1))
   d_a_log_reduced = jnp.sum(
       d_a_log_chunks[..., 0, :num_v_heads], axis=(0, 1)
   ).astype(a_log.dtype)
@@ -1071,42 +850,387 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
       d_dt_bias_chunks[..., 0, :num_v_heads], axis=(0, 1)
   ).astype(dt_bias.dtype)
 
-  d_pre_conv_qkv_flat = d_pre_conv_qkv.reshape(
+  dy_conv_flat = dy_conv_chunks.reshape(
       batch_size, seq_len, dim_size
-  ).astype(pre_conv_qkv.dtype)
+  ).astype(qkv_conv.dtype)
   d_b_flat = (
-      d_b[..., :num_v_heads]
+      d_b_chunks[..., :num_v_heads]
       .reshape(batch_size, seq_len, num_v_heads)
       .astype(b.dtype)
   )
   d_a_flat = (
-      d_a[..., :num_v_heads]
+      d_a_chunks[..., :num_v_heads]
       .reshape(batch_size, seq_len, num_v_heads)
       .astype(a.dtype)
   )
 
-  if conv_weight.ndim == 3:
-    d_conv_weight_out = d_conv_weight_reduced[:, None, :].astype(
-        conv_weight.dtype
-    )
-  else:
-    d_conv_weight_out = d_conv_weight_reduced.astype(conv_weight.dtype)
-
-  if conv_bias is None:
-    d_conv_bias_out = None
-  else:
-    d_conv_bias_out = d_conv_bias_reduced.reshape(conv_bias.shape).astype(
-        conv_bias.dtype
-    )
-
   return (
-      d_pre_conv_qkv_flat,
+      dy_conv_flat,
       d_b_flat,
       d_a_flat,
-      d_conv_weight_out,
-      d_conv_bias_out,
       d_a_log_reduced,
       d_dt_bias_reduced,
+  )
+
+
+def pallas_analytical_gdn_bwd_computation(
+    qkv_conv: jax.Array,
+    b: jax.Array,
+    a: jax.Array,
+    a_log: jax.Array,
+    dt_bias: jax.Array,
+    do: jax.Array,
+    chunk_states: jax.Array,
+    t_inv: jax.Array,
+    *,
+    num_v_heads: int,
+    kq_head_dim: int,
+    v_head_dim: int,
+    chunk_size: int = 64,
+    use_qk_norm_in_gdn: bool = False,
+    vmem_limit_mb: Optional[int] = None,
+    head_tile: Optional[int] = None,
+    interpret: bool | pltpu.InterpretParams | None = None,
+) -> Tuple[
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+]:
+  """Executes the Pallas reverse-chunk GDNv3 analytical backward kernel using emit_pipeline."""
+  if interpret is None and jax.default_backend() == "cpu":
+    interpret = True
+  if interpret:
+    ensure_cpu_interpret_registered()
+
+  batch_size, seq_len, dim_size = qkv_conv.shape
+  num_kq_heads = (dim_size - num_v_heads * v_head_dim) // (kq_head_dim * 2)
+  repeats = num_v_heads // num_kq_heads
+
+  target_tile = 16 if head_tile is None else head_tile
+  max_possible = min(num_v_heads, target_tile)
+  tile_v_heads = None
+  for candidate in range(max_possible, 0, -1):
+    if num_v_heads % candidate == 0 and candidate % repeats == 0:
+      tile_v_heads = candidate
+      break
+  if tile_v_heads is None:
+    tile_v_heads = repeats if num_v_heads % repeats == 0 else num_v_heads
+  num_groups = num_v_heads // tile_v_heads
+
+  if num_groups <= 1:
+    return _pallas_analytical_gdn_bwd_single_group(
+        qkv_conv=qkv_conv,
+        b=b,
+        a=a,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        do=do,
+        chunk_states=chunk_states,
+        t_inv=t_inv,
+        num_v_heads=num_v_heads,
+        num_kq_heads=num_kq_heads,
+        kq_head_dim=kq_head_dim,
+        v_head_dim=v_head_dim,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        vmem_limit_mb=vmem_limit_mb,
+        interpret=interpret,
+    )
+
+  # For large head counts (e.g. 64 heads on TPU v7x Ghostfish), partition heads
+  # into independent groups of tile_v_heads (e.g. 16 heads) to fit strictly within 64 MB VMEM.
+  q_size = num_kq_heads * kq_head_dim
+  k_size = num_kq_heads * kq_head_dim
+  v_size = num_v_heads * v_head_dim
+
+  q_all = qkv_conv[:, :, :q_size].reshape(
+      batch_size, seq_len, num_kq_heads, kq_head_dim
+  )
+  k_all = qkv_conv[:, :, q_size : q_size + k_size].reshape(
+      batch_size, seq_len, num_kq_heads, kq_head_dim
+  )
+  v_all = qkv_conv[:, :, q_size + k_size :].reshape(
+      batch_size, seq_len, num_v_heads, v_head_dim
+  )
+
+  tile_kq_heads = tile_v_heads // repeats
+
+  dq_list = []
+  dk_list = []
+  dv_list = []
+  db_list = []
+  da_list = []
+  dalog_list = []
+  ddtbias_list = []
+
+  for g in range(num_groups):
+    vh_start = g * tile_v_heads
+    vh_end = vh_start + tile_v_heads
+    kq_start = g * tile_kq_heads
+    kq_end = kq_start + tile_kq_heads
+
+    q_g = q_all[:, :, kq_start:kq_end, :].reshape(
+        batch_size, seq_len, tile_kq_heads * kq_head_dim
+    )
+    k_g = k_all[:, :, kq_start:kq_end, :].reshape(
+        batch_size, seq_len, tile_kq_heads * kq_head_dim
+    )
+    v_g = v_all[:, :, vh_start:vh_end, :].reshape(
+        batch_size, seq_len, tile_v_heads * v_head_dim
+    )
+    qkv_g = jnp.concatenate([q_g, k_g, v_g], axis=-1)
+
+    b_g = b[:, :, vh_start:vh_end]
+    a_g = a[:, :, vh_start:vh_end]
+    do_g = do[:, :, vh_start:vh_end, :]
+    chunk_states_g = chunk_states[:, :, vh_start:vh_end, :, :]
+    t_inv_g = t_inv[:, :, vh_start:vh_end, :, :]
+    a_log_g = a_log[vh_start:vh_end]
+    dt_bias_g = dt_bias[vh_start:vh_end]
+
+    dy_conv_g, d_b_g, d_a_g, d_a_log_g, d_dt_bias_g = (
+        _pallas_analytical_gdn_bwd_single_group(
+            qkv_conv=qkv_g,
+            b=b_g,
+            a=a_g,
+            a_log=a_log_g,
+            dt_bias=dt_bias_g,
+            do=do_g,
+            chunk_states=chunk_states_g,
+            t_inv=t_inv_g,
+            num_v_heads=tile_v_heads,
+            num_kq_heads=tile_kq_heads,
+            kq_head_dim=kq_head_dim,
+            v_head_dim=v_head_dim,
+            chunk_size=chunk_size,
+            use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+            vmem_limit_mb=vmem_limit_mb,
+            interpret=interpret,
+        )
+    )
+
+    q_dim_g = tile_kq_heads * kq_head_dim
+    k_dim_g = tile_kq_heads * kq_head_dim
+    v_dim_g = tile_v_heads * v_head_dim
+
+    dq_g = dy_conv_g[:, :, :q_dim_g].reshape(
+        batch_size, seq_len, tile_kq_heads, kq_head_dim
+    )
+    dk_g = dy_conv_g[:, :, q_dim_g : q_dim_g + k_dim_g].reshape(
+        batch_size, seq_len, tile_kq_heads, kq_head_dim
+    )
+    dv_g = dy_conv_g[:, :, q_dim_g + k_dim_g : q_dim_g + k_dim_g + v_dim_g].reshape(
+        batch_size, seq_len, tile_v_heads, v_head_dim
+    )
+
+    dq_list.append(dq_g)
+    dk_list.append(dk_g)
+    dv_list.append(dv_g)
+    db_list.append(d_b_g)
+    da_list.append(d_a_g)
+    dalog_list.append(d_a_log_g)
+    ddtbias_list.append(d_dt_bias_g)
+
+  dq_all = jnp.concatenate(dq_list, axis=2).reshape(batch_size, seq_len, q_size)
+  dk_all = jnp.concatenate(dk_list, axis=2).reshape(batch_size, seq_len, k_size)
+  dv_all = jnp.concatenate(dv_list, axis=2).reshape(batch_size, seq_len, v_size)
+  dy_conv_all = jnp.concatenate([dq_all, dk_all, dv_all], axis=-1)
+
+  d_b_all = jnp.concatenate(db_list, axis=-1)
+  d_a_all = jnp.concatenate(da_list, axis=-1)
+  d_a_log_all = jnp.concatenate(dalog_list, axis=0)
+  d_dt_bias_all = jnp.concatenate(ddtbias_list, axis=0)
+
+  return (
+      dy_conv_all,
+      d_b_all,
+      d_a_all,
+      d_a_log_all,
+      d_dt_bias_all,
+  )
+
+
+def conv1d_silu_fwd(
+    qkv: jax.Array,
+    conv_weight: jax.Array,
+    conv_bias: Optional[jax.Array],
+    kernel_size: int,
+) -> Tuple[jax.Array, jax.Array]:
+  """Forward Conv1D + SiLU returning (conv_out, qkv_conv)."""
+  batch, seq_len, dim_size = qkv.shape
+  if conv_weight.ndim == 3:
+    conv_weight_3d = conv_weight.astype(jnp.float32)
+  else:
+    conv_weight_3d = conv_weight[:, None, :].astype(jnp.float32)
+
+  conv_input = jnp.pad(
+      qkv.astype(jnp.float32), ((0, 0), (kernel_size - 1, 0), (0, 0))
+  )
+  conv_out = jax.lax.conv_general_dilated(
+      lhs=conv_input,
+      rhs=conv_weight_3d,
+      window_strides=(1,),
+      padding="VALID",
+      dimension_numbers=("NWC", "WIO", "NWC"),
+      feature_group_count=dim_size,
+  )
+  if conv_bias is not None:
+    conv_out = conv_out + conv_bias.astype(jnp.float32)
+  conv_out = conv_out[:, -seq_len:, :]
+  qkv_conv = jax.nn.silu(conv_out)
+  return conv_out, qkv_conv.astype(qkv.dtype)
+
+
+def conv1d_silu_bwd(
+    qkv: jax.Array,
+    conv_weight: jax.Array,
+    conv_bias: Optional[jax.Array],
+    dy: jax.Array,
+    kernel_size: int,
+) -> Tuple[jax.Array, jax.Array, Optional[jax.Array]]:
+  """Dedicated Conv1D + SiLU backward pass using JAX primitives."""
+  batch, seq_len, dim_size = qkv.shape
+  if conv_weight.ndim == 3:
+    conv_weight_3d = conv_weight.astype(jnp.float32)
+  else:
+    conv_weight_3d = conv_weight[:, None, :].astype(jnp.float32)
+
+  # 1. Forward pass: z = conv1d(x) + b
+  conv_input = jnp.pad(
+      qkv.astype(jnp.float32), ((0, 0), (kernel_size - 1, 0), (0, 0))
+  )
+  conv_out = jax.lax.conv_general_dilated(
+      lhs=conv_input,
+      rhs=conv_weight_3d,
+      window_strides=(1,),
+      padding="VALID",
+      dimension_numbers=("NWC", "WIO", "NWC"),
+      feature_group_count=dim_size,
+  )
+  if conv_bias is not None:
+    conv_out = conv_out + conv_bias.astype(jnp.float32)
+  z = conv_out[:, -seq_len:, :]
+
+  # 2. Adjoint: dz = dy * SiLU'(z)
+  sig_z = jax.nn.sigmoid(z)
+  silu_prime = sig_z * (1.0 + z * (1.0 - sig_z))
+  dz = dy.astype(jnp.float32) * silu_prime
+
+  # 3. Parameter gradients:
+  # Bias gradient: db = sum(dz)
+  if conv_bias is not None:
+    db = jnp.sum(dz, axis=(0, 1)).astype(conv_bias.dtype)
+    if conv_bias.ndim != 1:
+      db = db.reshape(conv_bias.shape)
+  else:
+    db = None
+
+  # Weight gradient: dw[k] = sum_{b,t} dz[b,t] * conv_input[b, t+k]
+  dw_rows = []
+  for k in range(kernel_size):
+    x_k = conv_input[:, k : k + seq_len, :]
+    dw_rows.append(jnp.sum(dz * x_k, axis=(0, 1)))
+  dw = jnp.stack(dw_rows, axis=0)
+  if conv_weight.ndim == 3:
+    dw = dw[:, None, :].astype(conv_weight.dtype)
+  else:
+    dw = dw.astype(conv_weight.dtype)
+
+  # 4. Input gradient: dx = transposed convolution of dz with reversed w
+  dz_pad = jnp.pad(dz, ((0, 0), (0, kernel_size - 1), (0, 0)))
+  w_rev = conv_weight_3d[::-1]
+  dx = jax.lax.conv_general_dilated(
+      lhs=dz_pad,
+      rhs=w_rev,
+      window_strides=(1,),
+      padding="VALID",
+      dimension_numbers=("NWC", "WIO", "NWC"),
+      feature_group_count=dim_size,
+  )
+  dx = dx[:, :seq_len, :].astype(qkv.dtype)
+
+  return dx, dw, db
+
+
+def pallas_fused_conv1d_gdn_analytical_bwd_computation(
+    pre_conv_qkv: jax.Array,
+    b: jax.Array,
+    a: jax.Array,
+    a_log: jax.Array,
+    dt_bias: jax.Array,
+    do: jax.Array,
+    chunk_states: jax.Array,
+    conv_weight: jax.Array,
+    conv_bias: Optional[jax.Array] = None,
+    t_inv: Optional[jax.Array] = None,
+    qkv: Optional[jax.Array] = None,
+    seq_lens: Optional[jax.Array] = None,
+    *,
+    num_v_heads: int,
+    kq_head_dim: int,
+    v_head_dim: int,
+    kernel_size: int = 4,
+    chunk_size: int = 64,
+    use_qk_norm_in_gdn: bool = False,
+    vmem_limit_mb: Optional[int] = None,
+    head_tile: Optional[int] = None,
+    interpret: bool | pltpu.InterpretParams | None = None,
+) -> Tuple[
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    Optional[jax.Array],
+    jax.Array,
+    jax.Array,
+]:
+  """Fused Conv1D + GDN analytical backward combining decoupled GDN bwd and Conv1D bwd."""
+  del seq_lens, qkv, head_tile
+  _, qkv_conv = conv1d_silu_fwd(
+      qkv=pre_conv_qkv,
+      conv_weight=conv_weight,
+      conv_bias=conv_bias,
+      kernel_size=kernel_size,
+  )
+
+  dy_conv, d_b, d_a, d_a_log, d_dt_bias = (
+      pallas_analytical_gdn_bwd_computation(
+          qkv_conv=qkv_conv,
+          b=b,
+          a=a,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          do=do,
+          chunk_states=chunk_states,
+          t_inv=t_inv,
+          num_v_heads=num_v_heads,
+          kq_head_dim=kq_head_dim,
+          v_head_dim=v_head_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+          vmem_limit_mb=vmem_limit_mb,
+          interpret=interpret,
+      )
+  )
+
+  d_pre_conv_qkv, d_conv_weight, d_conv_bias = conv1d_silu_bwd(
+      qkv=pre_conv_qkv,
+      conv_weight=conv_weight,
+      conv_bias=conv_bias,
+      dy=dy_conv,
+      kernel_size=kernel_size,
+  )
+
+  return (
+      d_pre_conv_qkv,
+      d_b,
+      d_a,
+      d_conv_weight,
+      d_conv_bias,
+      d_a_log,
+      d_dt_bias,
   )
 
 
@@ -1481,6 +1605,7 @@ def _run_local_gdn_fused_fwd(
       kernel_size=conv_kernel_size,
       compute_precision=jnp.dtype(jnp.float32),
       mixed_tile_size=chunk_size,
+      is_prefill_only=True,
   )
 
   core_attn_out = core_attn_out_flat.reshape(
@@ -1651,7 +1776,7 @@ def _hybrid_fused_conv1d_gdn_analytical_bwd(
 
   # Recompute forward chunk states and t_inv if not cached in residuals
   if chunk_states is None or t_inv_fwd is None:
-    _, chunk_states_recomputed, t_inv_recomputed = (
+    qkv_conv, chunk_states_recomputed, t_inv_recomputed = (
         _compute_forward_conv_and_states(
             qkv=pre_conv_qkv,
             b=b,
@@ -1676,34 +1801,41 @@ def _hybrid_fused_conv1d_gdn_analytical_bwd(
       chunk_states = chunk_states_recomputed
     if t_inv_fwd is None:
       t_inv_fwd = t_inv_recomputed
+  else:
+    _, qkv_conv = conv1d_silu_fwd(
+        qkv=pre_conv_qkv,
+        conv_weight=conv_weight,
+        conv_bias=conv_bias,
+        kernel_size=conv_kernel_size,
+    )
   t_inv = t_inv_fwd
 
-  (
-      d_pre_conv_qkv,
-      d_b,
-      d_a,
-      d_conv_weight,
-      d_conv_bias,
-      d_a_log,
-      d_dt_bias,
-  ) = pallas_fused_conv1d_gdn_analytical_bwd_computation(
-      pre_conv_qkv=pre_conv_qkv,
-      b=b,
-      a=a,
-      a_log=a_log,
-      dt_bias=dt_bias,
-      do=d_out,
-      chunk_states=chunk_states,
-      t_inv=t_inv,
+  dy_conv, d_b, d_a, d_a_log, d_dt_bias = (
+      pallas_analytical_gdn_bwd_computation(
+          qkv_conv=qkv_conv,
+          b=b,
+          a=a,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          do=d_out,
+          chunk_states=chunk_states,
+          t_inv=t_inv,
+          num_v_heads=num_v_heads,
+          kq_head_dim=head_k_dim,
+          v_head_dim=head_v_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+      )
+  )
+
+  d_pre_conv_qkv, d_conv_weight, d_conv_bias = conv1d_silu_bwd(
+      qkv=pre_conv_qkv,
       conv_weight=conv_weight,
       conv_bias=conv_bias,
-      num_v_heads=num_v_heads,
-      kq_head_dim=head_k_dim,
-      v_head_dim=head_v_dim,
+      dy=dy_conv,
       kernel_size=conv_kernel_size,
-      chunk_size=chunk_size,
-      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
   )
+
   d_conv_state_out = None if conv_state is None else jnp.zeros_like(conv_state)
   d_recurrent_state_out = (
       None if recurrent_state is None else jnp.zeros_like(recurrent_state)
@@ -1729,7 +1861,10 @@ hybrid_fused_conv1d_gdn_analytical.defvjp(
 __all__ = [
     "chunk_forward",
     "chunk_forward_with_tinv",
+    "pallas_analytical_gdn_bwd_computation",
     "pallas_fused_conv1d_gdn_analytical_bwd_computation",
+    "conv1d_silu_fwd",
+    "conv1d_silu_bwd",
     "pure_jax_fused_conv1d_gdn",
     "hybrid_fused_conv1d_gdn_analytical",
     "ensure_cpu_interpret_registered",

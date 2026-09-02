@@ -162,7 +162,9 @@ def calculate_decode_tile_size(
   # - When value head count is large (n_v >= 64), recurrent state working
   #   memory scales up, so cap max_decode_b to 4 to prevent on-chip memory
   #   overflow.
-  if n_v >= 64 or batch_size <= 64:
+  if n_v >= 64:
+    max_decode_b = 2
+  elif batch_size <= 64:
     max_decode_b = 4
   elif batch_size <= 128:
     max_decode_b = 8

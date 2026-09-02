@@ -295,6 +295,7 @@ def outer_kernel(
         "mixed_tile_size",
         "zero_initialize_out",
         "compute_precision",
+        "is_prefill_only",
     ),
 )
 def fused_conv1d_gdn(
@@ -321,6 +322,7 @@ def fused_conv1d_gdn(
     compute_precision: jnp.dtype = jnp.float32.dtype,
     decode_tile_size: int | None = None,
     mixed_tile_size: int | None = None,
+    is_prefill_only: bool = False,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array], jax.Array, jax.Array]:
   """Perform conv1d and gdn in a single fused kernel, returning (out, states, t_inv, chunk_states)."""
   act_in_dtype = qkv.dtype
@@ -518,9 +520,22 @@ def fused_conv1d_gdn(
         weights,
     )
 
-  out_act, out_conv_state, out_recurrent_state, _ = call_kernel(
-      conv_state, recurrent_state, None, config.GDNMode.BATCHED
-  )
+  if not is_prefill_only:
+    try:
+      if int(distribution[0]) == 0:
+        is_prefill_only = True
+    except (TypeError, ValueError, jax.errors.TracerIntegerConversionError):
+      pass
+
+  if not is_prefill_only:
+    out_act, out_conv_state, out_recurrent_state, _ = call_kernel(
+        conv_state, recurrent_state, None, config.GDNMode.BATCHED
+    )
+  else:
+    out_act = None
+    out_conv_state = conv_state
+    out_recurrent_state = recurrent_state
+
   out_act, out_conv_state, out_recurrent_state, t_inv, chunk_states = (
       call_kernel(
           out_conv_state, out_recurrent_state, out_act, config.GDNMode.PER_SEQ
