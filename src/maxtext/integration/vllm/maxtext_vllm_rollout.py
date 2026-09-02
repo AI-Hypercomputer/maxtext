@@ -450,7 +450,7 @@ class MaxTextVllmSampler(VllmSampler):
       scan_axis: int = 1,
       layer_pattern_length: Optional[int] = None,
   ):
-    super().__init__(tokenizer=tokenizer, config=config, converter=converter)
+    super().__init__(tokenizer=tokenizer, config=config)
     self._converter = converter
     self.converter = converter
     self._direct_maxtext_sync = direct_maxtext_sync
