@@ -48,6 +48,7 @@ import contextlib
 from functools import wraps
 from typing import Any, Callable, Optional, Sequence
 
+import dataclasses
 import datasets
 import grain
 import jax
@@ -619,11 +620,19 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         beta=trainer_config.rl.grpo_beta,
         epsilon=trainer_config.rl.grpo_epsilon,
         loss_algo=trainer_config.rl.loss_algo,
+        loss_agg_mode=trainer_config.rl.loss_agg_mode,
         max_response_length=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
         max_concurrency=trainer_config.rl.max_concurrency,
         off_policy_steps=trainer_config.rl.off_policy_steps,
         system_prompt=trainer_config.rl.system_prompt,
         epsilon_high=trainer_config.rl.epsilon_high,
+        use_rollout_logps=trainer_config.rl.use_rollout_logps,
+        force_on_policy_ratio=trainer_config.rl.force_on_policy_ratio,
+        log_sampler_trainer_agreement=(trainer_config.rl.log_sampler_trainer_agreement),
+    )
+    max_logging.log(
+        "GRPO config resolved:\n"
+        + "\n".join(f"  {k} = {v!r}" for k, v in sorted(dataclasses.asdict(grpo_config).items()))
     )
     # Instantiate the custom MaxText chat parser
     template_config = load_data_template_from_file(trainer_config.data_template_path)
