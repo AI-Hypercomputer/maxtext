@@ -1976,6 +1976,10 @@ class ManifoldConstrainedHyperConnections(BaseModel):
           " optimal for TPU v7 memory constraints; 256 is optimal for TPU v6."
       ),
   )
+  mhc_pallas_kernel_bwd_feature_block_size: int = Field(
+      1024,
+      description=("Feature block size for backward pass of MHC Pallas kernel."),
+  )
 
   @model_validator(mode="after")
   def validate_mhc_kernel(self) -> "ManifoldConstrainedHyperConnections":
