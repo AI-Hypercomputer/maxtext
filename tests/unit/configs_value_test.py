@@ -649,6 +649,69 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.attention_type, "chunk")
     self.assertTrue(config.context_parallel_load_balance)
 
+  def test_rampup_batch_size_validation(self):
+    """Unusable rampup settings must raise rather than silently changing the schedule.
+
+    The schedule is derived behind guards that fall through to `rampup_end_step = 0`,
+    so without validation a bad combination either disables rampup with no diagnostic
+    or, when the batch-size change is not a multiple of the increment, ramps to a
+    different final batch size than the one requested.
+    """
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "enable_rampup_batch_size=True",
+        "per_device_batch_size_start=4",
+        "per_device_batch_size=16",
+        "per_device_batch_size_increment=4",
+        "global_rampup_samples=500",
+        "skip_jax_distributed_system=True",
+    ]
+    cases = [
+        (["per_device_batch_size_increment=0"], "per_device_batch_size_increment must be positive"),
+        (["per_device_batch_size_start=0"], "per_device_batch_size_start must be positive"),
+        (["global_rampup_samples=0"], "global_rampup_samples must be positive"),
+        (["per_device_batch_size=4"], "must be greater than per_device_batch_size_start"),
+        (["per_device_batch_size=2"], "must be greater than per_device_batch_size_start"),
+        (["per_device_batch_size=15"], "divisible by per_device_batch_size_increment"),
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for bad_args, expected_regex in cases:
+      with self.subTest(bad_args=bad_args):
+        argv = base_args + bad_args
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
+          with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
+            pyconfig.initialize(argv)
+
+    # A well-formed rampup config is still accepted and still produces a schedule.
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(base_args)
+    self.assertTrue(config.enable_rampup_batch_size)
+    # With 8 devices, expansion_factor_real_data=-1 (i.e. disabled) and
+    # gradient_accumulation_steps=1: global_batch_size_to_load goes 32 -> 128
+    # in 3 increments of 32, so 500 rampup samples split into ~166.67/increment,
+    # ceil'd per stage at batch sizes 32/64/96 gives 6 + 3 + 2 = 11 rampup steps.
+    self.assertEqual(config.rampup_end_step, 11)
+
+  def test_rampup_validation_skipped_when_disabled(self):
+    """The checks must not fire when rampup is off, whatever the rampup fields hold."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "enable_rampup_batch_size=False",
+        "per_device_batch_size_start=0",
+        "per_device_batch_size_increment=0",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+    self.assertEqual(config.rampup_end_step, 0)
+
   def test_block_diffusion_attention_config(self):
     config = pyconfig.initialize(
         [

@@ -1636,6 +1636,50 @@ class DatasetGeneral(BaseModel):
   global_rampup_samples: int = Field(500, description="Target number of training samples for rampup.")
   colocated_python_data_input: bool = Field(False, description="Experimental feature for Pathways.")
 
+  @model_validator(mode="after")
+  def validate_rampup_batch_size(self) -> "DatasetGeneral":
+    """Rejects rampup settings that would otherwise disable rampup silently.
+
+    `MaxTextConfig` derives the rampup schedule behind guards that fall through
+    to `rampup_end_step = 0`, so an unusable combination leaves rampup switched
+    off with no diagnostic. A non-multiple increment is worse: the floor
+    division truncates and the schedule ends at a batch size the user never
+    asked for. These are the checks the legacy config performed in
+    `pyconfig_deprecated.validate_rampup_batch_size`.
+    """
+    if not self.enable_rampup_batch_size:
+      return self
+    if self.per_device_batch_size_start <= 0:
+      raise ValueError(
+          f"per_device_batch_size_start must be positive when enable_rampup_batch_size=True, "
+          f"got {self.per_device_batch_size_start}."
+      )
+    if self.per_device_batch_size_increment <= 0:
+      raise ValueError(
+          f"per_device_batch_size_increment must be positive when enable_rampup_batch_size=True, "
+          f"got {self.per_device_batch_size_increment}."
+      )
+    if self.global_rampup_samples <= 0:
+      raise ValueError(
+          f"global_rampup_samples must be positive when enable_rampup_batch_size=True, "
+          f"got {self.global_rampup_samples}."
+      )
+    diff_batch_size = self.per_device_batch_size - self.per_device_batch_size_start
+    if diff_batch_size <= 0:
+      raise ValueError(
+          f"per_device_batch_size must be greater than per_device_batch_size_start when "
+          f"enable_rampup_batch_size=True, got per_device_batch_size={self.per_device_batch_size} "
+          f"and per_device_batch_size_start={self.per_device_batch_size_start}."
+      )
+    if diff_batch_size % self.per_device_batch_size_increment != 0:
+      raise ValueError(
+          f"Rampup batch size change must be divisible by per_device_batch_size_increment, got "
+          f"per_device_batch_size={self.per_device_batch_size}, "
+          f"per_device_batch_size_start={self.per_device_batch_size_start} and "
+          f"per_device_batch_size_increment={self.per_device_batch_size_increment}."
+      )
+    return self
+
 
 class TfdsDataset(BaseModel):
   """Configuration specific to TFDS datasets."""
