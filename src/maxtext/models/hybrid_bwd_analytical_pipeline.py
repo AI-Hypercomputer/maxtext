@@ -348,7 +348,7 @@ def make_bwd_block_specs(
   """Constructs reverse-scan Pallas emit_pipeline in_specs and out_specs including t_inv."""
   del batch_size
   if padded_num_v_heads is None:
-    padded_num_v_heads = max(num_v_heads, 256)
+    padded_num_v_heads = ((num_v_heads + 127) // 128) * 128
   rc = lambda c: num_chunks - 1 - c
   in_specs = [
       pl.BlockSpec(
@@ -456,6 +456,7 @@ def _bwd_analytical_pipeline_body(
     kernel_size: int,
     pad_len: int,
     use_qk_norm_in_gdn: bool,
+    head_tile: int = 32,
 ) -> None:
   """Inner kernel executed per (batch, chunk) by emit_pipeline with analytical manual backward."""
   c = pl.program_id(1)
@@ -478,17 +479,19 @@ def _bwd_analytical_pipeline_body(
   conv_w = conv_weight_ref[...]
   conv_b = conv_bias_ref[...]
 
-  # 1. Recompute z_c = conv1d(x_c) + b and y_c = silu(z_c) directly in VMEM
-  z_c = jnp.zeros((chunk_size, dim_size), dtype=jnp.float32)
+  # 1. Compute z_c_top = conv1d(x_c) + b and y_c = silu(z_c_top) directly in VMEM
+  # Do not hold z_c alive across the GDN backward adjoint matmuls
+  z_c_top = jnp.zeros((chunk_size, dim_size), dtype=jnp.float32)
   for k_idx in range(kernel_size):
     shift = kernel_size - 1 - k_idx
     start = pad_len - shift
     x_s = padded_pre_conv_qkv_val[start : start + chunk_size].astype(
         jnp.float32
     )
-    z_c = z_c + x_s * conv_w[k_idx].astype(jnp.float32)
-  z_c = z_c + conv_b.astype(jnp.float32)
-  y_c = jax.nn.silu(z_c)
+    z_c_top = z_c_top + x_s * conv_w[k_idx].astype(jnp.float32)
+  z_c_top = z_c_top + conv_b.astype(jnp.float32)
+  y_c = jax.nn.silu(z_c_top)
+  del z_c_top
 
   # 2. Slice y_c into q, k, v for GDN reverse pass
   q_orig = (
@@ -543,131 +546,207 @@ def _bwd_analytical_pipeline_body(
   v_h = jnp.transpose(v, (1, 0, 2))
   beta_h = jnp.transpose(beta, (1, 0))
   cumsum_h = jnp.transpose(cumsum_log_g, (1, 0))
-
-  diff = cumsum_h[:, :, None] - cumsum_h[:, None, :]
-  mask_strict = jnp.tril(
-      jnp.ones((chunk_size, chunk_size), dtype=diff.dtype), k=-1
-  )
-  safe_diff_strict = jnp.where(mask_strict[None, :, :] == 1.0, diff, -1e4)
-  g_mat_strict = jnp.exp(safe_diff_strict) * mask_strict[None, :, :]
-
-  mask_causal = jnp.tril(
-      jnp.ones((chunk_size, chunk_size), dtype=diff.dtype), k=0
-  )
-  safe_diff_causal = jnp.where(mask_causal[None, :, :] == 1.0, diff, -1e4)
-  g_mat_causal = jnp.exp(safe_diff_causal) * mask_causal[None, :, :]
-
-  gating_forward = jnp.exp(cumsum_h)[:, :, None]
-  gating_last = jnp.exp(cumsum_h[:, -1])[:, None, None]
-  gating_backward = jnp.exp(cumsum_h[:, -1:] - cumsum_h)[:, :, None]
-
-  k_beta = k_h * beta_h[:, :, None]
-  k_h_T = jnp.swapaxes(k_h, -1, -2)
-  S_unmasked = jnp.matmul(k_beta, k_h_T)
-
-  # Cached t_inv matrix
-  A = t_inv_val
-
-  v_beta = v_h * beta_h[:, :, None]
-  k_beta_g = k_beta * gating_forward
-  u = jnp.matmul(A, v_beta)
-  w = jnp.matmul(A, k_beta_g)
-
-  ws = jnp.matmul(w, state_prev_val)
-  v_new = u - ws
-
-  q_g = q_h * gating_forward
-  attn_unmasked = jnp.matmul(q_h, k_h_T)
-  attn = attn_unmasked * g_mat_causal
-
-  k_scaled_bwd = k_h * gating_backward
-
-  # Intermediate Adjoints
   do_h = jnp.transpose(do_val, (1, 0, 2))
 
-  dv_new = jnp.matmul(jnp.swapaxes(attn, -1, -2), do_h) + jnp.matmul(
-      k_scaled_bwd, d_state
+  mask_strict = jnp.tril(
+      jnp.ones((chunk_size, chunk_size), dtype=log_g.dtype), k=-1
   )
-  d_attn = jnp.matmul(do_h, jnp.swapaxes(v_new, -1, -2))
-
-  du = dv_new
-  dw = -jnp.matmul(dv_new, jnp.swapaxes(state_prev_val, -1, -2))
-
-  d_state_prev = (
-      d_state * gating_last
-      + jnp.matmul(jnp.swapaxes(q_g, -1, -2), do_h)
-      - jnp.matmul(jnp.swapaxes(w, -1, -2), dv_new)
+  mask_causal = jnp.tril(
+      jnp.ones((chunk_size, chunk_size), dtype=log_g.dtype), k=0
   )
 
-  A_T = jnp.swapaxes(A, -1, -2)
-  d_v_beta = jnp.matmul(A_T, du)
-  d_k_beta_g = jnp.matmul(A_T, dw)
-  dA = jnp.matmul(du, jnp.swapaxes(v_beta, -1, -2)) + jnp.matmul(
-      dw, jnp.swapaxes(k_beta_g, -1, -2)
+  effective_head_tile = (
+      head_tile if head_tile is not None and head_tile > 0 else num_v_heads
   )
 
-  # Closed-form derivative through triangular inverse via systolic matmuls:
-  # grad_t = tril(-(A_T @ dA @ A_T), k=-1)
-  dS = jnp.tril(-jnp.matmul(jnp.matmul(A_T, dA), A_T), k=-1)
+  d_q_h_list = []
+  d_k_h_list = []
+  d_v_h_list = []
+  d_state_prev_list = []
+  d_a_val_list = []
+  d_a_log_val_list = []
+  d_dt_bias_val_list = []
+  d_b_val_list = []
 
-  d_S_unmasked = dS * g_mat_strict
-  d_k_beta_from_S = jnp.matmul(d_S_unmasked, k_h)
-  d_k_h_from_S = jnp.matmul(jnp.swapaxes(d_S_unmasked, -1, -2), k_beta)
+  for h_start in range(0, num_v_heads, effective_head_tile):
+    h_end = min(h_start + effective_head_tile, num_v_heads)
+    h_slice = slice(h_start, h_end)
 
-  d_k_beta = d_k_beta_g * gating_forward + d_k_beta_from_S
-  d_beta_h = jnp.sum(d_v_beta * v_h, axis=-1) + jnp.sum(d_k_beta * k_h, axis=-1)
-  d_v_h = d_v_beta * beta_h[:, :, None]
+    diff_tile = cumsum_h[h_slice, :, None] - cumsum_h[h_slice, None, :]
+    safe_diff_strict_tile = jnp.where(
+        mask_strict[None, :, :] == 1.0, diff_tile, -1e4
+    )
+    g_mat_strict_tile = (
+        jnp.exp(safe_diff_strict_tile) * mask_strict[None, :, :]
+    )
 
-  d_attn_unmasked = d_attn * g_mat_causal
-  d_q_h_from_attn = jnp.matmul(d_attn_unmasked, k_h)
-  d_k_h_from_attn = jnp.matmul(jnp.swapaxes(d_attn_unmasked, -1, -2), q_h)
+    safe_diff_causal_tile = jnp.where(
+        mask_causal[None, :, :] == 1.0, diff_tile, -1e4
+    )
+    g_mat_causal_tile = (
+        jnp.exp(safe_diff_causal_tile) * mask_causal[None, :, :]
+    )
 
-  d_q_g = jnp.matmul(do_h, jnp.swapaxes(state_prev_val, -1, -2))
-  d_q_h_from_q_g = d_q_g * gating_forward
+    gating_forward_tile = jnp.exp(cumsum_h[h_slice])[:, :, None]
+    gating_last_tile = jnp.exp(cumsum_h[h_slice, -1])[:, None, None]
+    gating_backward_tile = jnp.exp(
+        cumsum_h[h_slice, -1:] - cumsum_h[h_slice]
+    )[:, :, None]
 
-  d_k_scaled = jnp.matmul(v_new, jnp.swapaxes(d_state, -1, -2))
-  d_k_h_from_k_scaled = d_k_scaled * gating_backward
+    k_h_tile = k_h[h_slice]
+    beta_h_tile = beta_h[h_slice]
+    k_beta_tile = k_h_tile * beta_h_tile[:, :, None]
+    k_h_T_tile = jnp.swapaxes(k_h_tile, -1, -2)
+    S_unmasked_tile = jnp.matmul(k_beta_tile, k_h_T_tile)
 
-  d_q_h = d_q_h_from_q_g + d_q_h_from_attn
-  d_k_h = (
-      d_k_h_from_attn
-      + d_k_h_from_S
-      + d_k_beta * beta_h[:, :, None]
-      + d_k_h_from_k_scaled
-  )
+    A_tile = t_inv_val[h_slice]
 
-  # Gating adjoints
-  d_gating_forward = jnp.sum(d_q_g * q_h, axis=-1) + jnp.sum(
-      d_k_beta_g * k_beta, axis=-1
-  )
-  d_cumsum_from_fwd = d_gating_forward * gating_forward[:, :, 0]
+    v_h_tile = v_h[h_slice]
+    v_beta_tile = v_h_tile * beta_h_tile[:, :, None]
+    k_beta_g_tile = k_beta_tile * gating_forward_tile
+    u_tile = jnp.matmul(A_tile, v_beta_tile)
+    w_tile = jnp.matmul(A_tile, k_beta_g_tile)
 
-  d_gating_last = jnp.sum(d_state * state_prev_val, axis=(-1, -2))
-  d_cumsum_last = d_gating_last * jnp.exp(cumsum_h[:, -1])
+    state_prev_tile = state_prev_val[h_slice]
+    ws_tile = jnp.matmul(w_tile, state_prev_tile)
+    v_new_tile = u_tile - ws_tile
 
-  d_gating_backward = jnp.sum(d_k_scaled * k_h, axis=-1)
-  d_diff_bwd = d_gating_backward * gating_backward[:, :, 0]
+    q_h_tile = q_h[h_slice]
+    q_g_tile = q_h_tile * gating_forward_tile
+    attn_unmasked_tile = jnp.matmul(q_h_tile, k_h_T_tile)
+    attn_tile = attn_unmasked_tile * g_mat_causal_tile
 
-  d_g_strict = dS * S_unmasked
-  d_g_causal = d_attn * attn_unmasked
-  d_diff = (d_g_strict * g_mat_strict) + (d_g_causal * g_mat_causal)
-  d_cumsum_from_diff = jnp.sum(d_diff, axis=2) - jnp.sum(d_diff, axis=1)
+    k_scaled_bwd_tile = k_h_tile * gating_backward_tile
 
-  d_cumsum_h = d_cumsum_from_fwd + d_cumsum_from_diff - d_diff_bwd
-  last_col_addition = (d_cumsum_last + jnp.sum(d_diff_bwd, axis=-1))[:, None]
-  d_cumsum_h = d_cumsum_h + jnp.pad(
-      last_col_addition, ((0, 0), (chunk_size - 1, 0))
-  )
+    do_h_tile = do_h[h_slice]
+    d_state_tile = d_state[h_slice]
 
-  d_cumsum_log_g = jnp.transpose(d_cumsum_h, (1, 0))
-  d_log_g = jnp.dot(mask_cumsum.T, d_cumsum_log_g)
+    dv_new_tile = jnp.matmul(
+        jnp.swapaxes(attn_tile, -1, -2), do_h_tile
+    ) + jnp.matmul(k_scaled_bwd_tile, d_state_tile)
+    d_attn_tile = jnp.matmul(do_h_tile, jnp.swapaxes(v_new_tile, -1, -2))
 
-  sig_sp = jax.nn.sigmoid(sp_input)
-  d_a_val = d_log_g * (-exp_a_log * sig_sp)
-  d_a_log_val = jnp.sum(d_log_g * (-exp_a_log * sp_val), axis=0)
-  d_dt_bias_val = jnp.sum(d_a_val, axis=0)
+    du_tile = dv_new_tile
+    dw_tile = -jnp.matmul(dv_new_tile, jnp.swapaxes(state_prev_tile, -1, -2))
 
-  d_b_val = (jnp.transpose(d_beta_h, (1, 0))) * beta * (1.0 - beta)
+    d_state_prev_tile = (
+        d_state_tile * gating_last_tile
+        + jnp.matmul(jnp.swapaxes(q_g_tile, -1, -2), do_h_tile)
+        - jnp.matmul(jnp.swapaxes(w_tile, -1, -2), dv_new_tile)
+    )
+
+    A_T_tile = jnp.swapaxes(A_tile, -1, -2)
+    d_v_beta_tile = jnp.matmul(A_T_tile, du_tile)
+    d_k_beta_g_tile = jnp.matmul(A_T_tile, dw_tile)
+    dA_tile = jnp.matmul(
+        du_tile, jnp.swapaxes(v_beta_tile, -1, -2)
+    ) + jnp.matmul(dw_tile, jnp.swapaxes(k_beta_g_tile, -1, -2))
+
+    dS_tile = jnp.tril(
+        -jnp.matmul(jnp.matmul(A_T_tile, dA_tile), A_T_tile), k=-1
+    )
+
+    d_S_unmasked_tile = dS_tile * g_mat_strict_tile
+    d_k_beta_from_S_tile = jnp.matmul(d_S_unmasked_tile, k_h_tile)
+    d_k_h_from_S_tile = jnp.matmul(
+        jnp.swapaxes(d_S_unmasked_tile, -1, -2), k_beta_tile
+    )
+
+    d_k_beta_tile = d_k_beta_g_tile * gating_forward_tile + d_k_beta_from_S_tile
+    d_beta_h_tile = jnp.sum(d_v_beta_tile * v_h_tile, axis=-1) + jnp.sum(
+        d_k_beta_tile * k_h_tile, axis=-1
+    )
+    d_v_h_tile = d_v_beta_tile * beta_h_tile[:, :, None]
+
+    d_attn_unmasked_tile = d_attn_tile * g_mat_causal_tile
+    d_q_h_from_attn_tile = jnp.matmul(d_attn_unmasked_tile, k_h_tile)
+    d_k_h_from_attn_tile = jnp.matmul(
+        jnp.swapaxes(d_attn_unmasked_tile, -1, -2), q_h_tile
+    )
+
+    d_q_g_tile = jnp.matmul(do_h_tile, jnp.swapaxes(state_prev_tile, -1, -2))
+    d_q_h_from_q_g_tile = d_q_g_tile * gating_forward_tile
+
+    d_k_scaled_tile = jnp.matmul(v_new_tile, jnp.swapaxes(d_state_tile, -1, -2))
+    d_k_h_from_k_scaled_tile = d_k_scaled_tile * gating_backward_tile
+
+    d_q_h_tile = d_q_h_from_q_g_tile + d_q_h_from_attn_tile
+    d_k_h_tile = (
+        d_k_h_from_attn_tile
+        + d_k_h_from_S_tile
+        + d_k_beta_tile * beta_h_tile[:, :, None]
+        + d_k_h_from_k_scaled_tile
+    )
+
+    # Gating adjoints
+    d_gating_forward_tile = jnp.sum(d_q_g_tile * q_h_tile, axis=-1) + jnp.sum(
+        d_k_beta_g_tile * k_beta_tile, axis=-1
+    )
+    d_cumsum_from_fwd_tile = (
+        d_gating_forward_tile * gating_forward_tile[:, :, 0]
+    )
+
+    d_gating_last_tile = jnp.sum(d_state_tile * state_prev_tile, axis=(-1, -2))
+    d_cumsum_last_tile = d_gating_last_tile * jnp.exp(cumsum_h[h_slice, -1])
+
+    d_gating_backward_tile = jnp.sum(d_k_scaled_tile * k_h_tile, axis=-1)
+    d_diff_bwd_tile = d_gating_backward_tile * gating_backward_tile[:, :, 0]
+
+    d_g_strict_tile = dS_tile * S_unmasked_tile
+    d_g_causal_tile = d_attn_tile * attn_unmasked_tile
+    d_diff_tile = (d_g_strict_tile * g_mat_strict_tile) + (
+        d_g_causal_tile * g_mat_causal_tile
+    )
+    d_cumsum_from_diff_tile = jnp.sum(d_diff_tile, axis=2) - jnp.sum(
+        d_diff_tile, axis=1
+    )
+
+    d_cumsum_h_tile = (
+        d_cumsum_from_fwd_tile + d_cumsum_from_diff_tile - d_diff_bwd_tile
+    )
+    last_col_addition_tile = (
+        d_cumsum_last_tile + jnp.sum(d_diff_bwd_tile, axis=-1)
+    )[:, None]
+    d_cumsum_h_tile = d_cumsum_h_tile + jnp.pad(
+        last_col_addition_tile, ((0, 0), (chunk_size - 1, 0))
+    )
+
+    d_cumsum_log_g_tile = jnp.transpose(d_cumsum_h_tile, (1, 0))
+    d_log_g_tile = jnp.dot(mask_cumsum.T, d_cumsum_log_g_tile)
+
+    sp_input_tile = sp_input[:, h_slice]
+    exp_a_log_tile = exp_a_log[h_slice]
+    sp_val_tile = sp_val[:, h_slice]
+    sig_sp_tile = jax.nn.sigmoid(sp_input_tile)
+
+    d_a_val_tile = d_log_g_tile * (-exp_a_log_tile * sig_sp_tile)
+    d_a_log_val_tile = jnp.sum(
+        d_log_g_tile * (-exp_a_log_tile * sp_val_tile), axis=0
+    )
+    d_dt_bias_val_tile = jnp.sum(d_a_val_tile, axis=0)
+
+    beta_tile = beta[:, h_slice]
+    d_b_val_tile = (
+        (jnp.transpose(d_beta_h_tile, (1, 0))) * beta_tile * (1.0 - beta_tile)
+    )
+
+    d_q_h_list.append(d_q_h_tile)
+    d_k_h_list.append(d_k_h_tile)
+    d_v_h_list.append(d_v_h_tile)
+    d_state_prev_list.append(d_state_prev_tile)
+    d_a_val_list.append(d_a_val_tile)
+    d_a_log_val_list.append(d_a_log_val_tile)
+    d_dt_bias_val_list.append(d_dt_bias_val_tile)
+    d_b_val_list.append(d_b_val_tile)
+
+  d_q_h = jnp.concatenate(d_q_h_list, axis=0)
+  d_k_h = jnp.concatenate(d_k_h_list, axis=0)
+  d_v_h = jnp.concatenate(d_v_h_list, axis=0)
+  d_state_prev = jnp.concatenate(d_state_prev_list, axis=0)
+  d_a_val = jnp.concatenate(d_a_val_list, axis=1)
+  d_a_log_val = jnp.concatenate(d_a_log_val_list, axis=0)
+  d_dt_bias_val = jnp.concatenate(d_dt_bias_val_list, axis=0)
+  d_b_val = jnp.concatenate(d_b_val_list, axis=1)
 
   d_v_val = jnp.transpose(d_v_h, (1, 0, 2))
   d_q_rep = jnp.transpose(d_q_h, (1, 0, 2))
@@ -708,10 +787,23 @@ def _bwd_analytical_pipeline_body(
       axis=-1,
   )
 
-  # 5. Compute elementwise SiLU' derivative in VMEM: dz_c = dy_c * SiLU'(z_c)
+  # 5. In-Kernel Rematerialization of z_c: Recompute z_c right before Conv1D backward
+  # z_c = sum_{k=0}^{K-1} x_{t-k} * w_k + b locally using padded_pre_conv_qkv_val
+  z_c = jnp.zeros((chunk_size, dim_size), dtype=jnp.float32)
+  for k_idx in range(kernel_size):
+    shift = kernel_size - 1 - k_idx
+    start = pad_len - shift
+    x_s = padded_pre_conv_qkv_val[start : start + chunk_size].astype(
+        jnp.float32
+    )
+    z_c = z_c + x_s * conv_w[k_idx].astype(jnp.float32)
+  z_c = z_c + conv_b.astype(jnp.float32)
+
+  # Compute elementwise SiLU' derivative in VMEM: dz_c = dy_c * SiLU'(z_c)
   sig_z = jax.nn.sigmoid(z_c)
   silu_prime = sig_z * (1.0 + z_c * (1.0 - sig_z))
   dz_c = dy_c * silu_prime
+  del z_c
 
   # 6. Emit chunk partials: bias gradient db_c = sum(dz_c)
   d_conv_bias_ref[...] = jnp.sum(dz_c, axis=0, keepdims=True).astype(
@@ -787,6 +879,7 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
     chunk_size: int = 64,
     use_qk_norm_in_gdn: bool = False,
     vmem_limit_mb: Optional[int] = None,
+    head_tile: int = 32,
     interpret: bool | pltpu.InterpretParams | None = None,
 ) -> Tuple[
     jax.Array,
@@ -808,7 +901,7 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
   num_chunks = seq_len // chunk_size
 
   num_kq_heads = (dim_size - num_v_heads * v_head_dim) // (kq_head_dim * 2)
-  padded_num_v_heads = max(num_v_heads, 256)
+  padded_num_v_heads = ((num_v_heads + 127) // 128) * 128
 
   b_4d = b.reshape(batch_size, num_chunks, chunk_size, num_v_heads)
   if padded_num_v_heads > num_v_heads:
@@ -915,6 +1008,7 @@ def pallas_fused_conv1d_gdn_analytical_bwd_computation(
       kernel_size=kernel_size,
       pad_len=pad_len,
       use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+      head_tile=head_tile,
   )
 
   def outer(*refs):
