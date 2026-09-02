@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for custom vision projector implementation in MaxText."""
+"""Tests for custom vision projector implementation in MaxText.
+
+"""
 
 import argparse
 import gc
