@@ -555,13 +555,24 @@ function tlZoomOut(){
   renderTimeline();
 }
 function tlZoomReset(){TL_ZOOM=null;renderTimeline()}
+// Every chart is laid out in a 1100-unit box. That is comfortable up to about
+// twenty merged pull requests - the width the sample data was drawn at, where a
+// run gets roughly 52 units and its bar is readable. Past that the bars get too
+// thin to see, so the BOX grows instead of the bars shrinking, and the card
+// scrolls sideways (each chart's host div is already overflow-x:auto).
+const CHART_BOX=1100, CHART_SLOT=52;
+function chartWidth(slots,lp,rp){
+  return Math.max(CHART_BOX, lp+rp+Math.max(1,slots)*CHART_SLOT);
+}
+
 function renderTimeline(){
   const host=$('#timeline');host.innerHTML='';
   const ns='http://www.w3.org/2000/svg';
-  const W=1100,LP=36,RP=10,TP=70,PLOT=228;  // H and B follow the axis-label form, set once the bar count is known
+  const LP=36,RP=10,TP=70,PLOT=228;
+  let W=CHART_BOX;   // widened below, once the number of bars is known  // H and B follow the axis-label form, set once the bar count is known
   let H=TP+PLOT+44,B=44;
   const svg=document.createElementNS(ns,'svg');
-  svg.style.cssText='display:block;width:100%;min-width:700px';
+  svg.style.cssText='display:block;width:100%';   // min-width is set once W is known
   const el=(t,a)=>{const e=document.createElementNS(ns,t);for(const[k,v]of Object.entries(a))e.setAttribute(k,v);svg.appendChild(e);return e};
   const defs=document.createElementNS(ns,'defs');
   defs.innerHTML='<filter id="pillShadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#000000" flood-opacity="0.5"/></filter>';
@@ -583,9 +594,11 @@ function renderTimeline(){
   const viewTotals=VIEW.map((c,vi)=>totals[off+vi]);
   const ymax=Math.ceil(Math.max(...viewTotals)/10)*10+5;
   const barGap=16;
+  W=chartWidth(VIEW.length,LP,RP);
   const barW=(W-LP-RP)/VIEW.length-barGap;
   B=axisBottomPad(barW+barGap);H=TP+PLOT+B;
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  svg.style.minWidth=W+'px';
   const py=v=>TP+(1-v/ymax)*(H-B-TP);
 
   const sorted=[...totals].sort((a,b)=>a-b);
@@ -1158,7 +1171,8 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
   host.appendChild(zb);
 
   const ns='http://www.w3.org/2000/svg';
-  const W=1100,LP=45,RP=70,TP=18,plotH=202;
+  const LP=45,RP=70,TP=18,plotH=202;
+  const W=chartWidth(VIEW.length-1,LP,RP);
   // A wide slot gets the two-line label; a narrow one gets the rotated single line, exactly as
   // the two bar charts do. Reserve the matching space so the plot never changes height.
   const sp=VIEW.length>1?(W-LP-RP)/(VIEW.length-1):(W-LP-RP);
@@ -1170,7 +1184,7 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
 
   const svg=document.createElementNS(ns,'svg');
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
-  svg.style.cssText='display:block;width:100%;min-width:700px;user-select:none';
+  svg.style.cssText=`display:block;width:100%;min-width:${W}px;user-select:none`;
   const el=(t,a)=>{const e=document.createElementNS(ns,t);for(const[k,v]of Object.entries(a))e.setAttribute(k,String(v));svg.appendChild(e);return e};
 
   // Grid
@@ -1755,14 +1769,15 @@ ${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]
 <div data-wklegend style="margin-top:4px"><span style="color:var(--q)">■</span> Runner wait <span style="color:var(--bld);margin-left:8px">■</span> Setup <span style="color:${col};margin-left:8px">■</span> Worker tests${nW>1?' <span style="color:var(--muted)">(tests shaded dark to light = worker 1 to '+nW+')</span>':''}</div>`;
     host.innerHTML='';
     const ns='http://www.w3.org/2000/svg';
-    const W=1100,LP=46,RP=12,TP=26,gap=14,plotH=244;
+    const LP=46,RP=12,TP=26,gap=14,plotH=244;
+    const W=chartWidth(LIST.length,LP,RP);
     const B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
     const data=LIST.map(c=>({rows:wkWorkerRows(c,ent),v:wkEntTime(c,ent),status:wkEntStatus(c,ent)}));
     const ymax=Math.max(...data.flatMap(x=>x.rows.map(r=>r.tot)),5)*1.2;
     const py=v=>TP+(1-v/ymax)*plotH;
     const svg=document.createElementNS(ns,'svg');
     svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
-    svg.style.cssText=`display:block;width:100%;min-width:760px;opacity:${dimAll?0.25:1}`;
+    svg.style.cssText=`display:block;width:100%;min-width:${W}px;opacity:${dimAll?0.25:1}`;
     const el=(a,b)=>{const e=document.createElementNS(ns,a);for(const[k,v]of Object.entries(b))e.setAttribute(k,String(v));svg.appendChild(e);return e};
     const step=ymax>25?10:ymax>12?5:2;
     for(let g=0;g<=ymax;g+=step){
@@ -1825,11 +1840,12 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
 <div data-wklegend style="margin-top:4px"><span style="color:var(--tpu)">■</span> TPU <span style="color:var(--gpu);margin-left:8px">■</span> GPU <span style="color:var(--cpu);margin-left:8px">■</span> CPU <span style="color:#8B5CF6;margin-left:8px">■</span> Build <span style="color:#64748B;margin-left:8px">■</span> Checks</div>`;
   host.innerHTML='';
   const ns='http://www.w3.org/2000/svg';
-  const W=1100,LP=46,RP=12,TP=26,gap=14,plotH=274;
+  const LP=46,RP=12,TP=26,gap=14,plotH=274;
+  const W=chartWidth(LIST.length,LP,RP);
   const B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
   const svg=document.createElementNS(ns,'svg');
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
-  svg.style.cssText='display:block;width:100%;min-width:760px';
+  svg.style.cssText=`display:block;width:100%;min-width:${W}px`;
   const el=(a,b)=>{const e=document.createElementNS(ns,a);for(const[k,v]of Object.entries(b))e.setAttribute(k,String(v));svg.appendChild(e);return e};
   const totals=LIST.map(c=>ents.reduce((a,e)=>a+wkEntTime(c,e),0));
   const ymax=Math.max(...totals)*1.08;
@@ -2305,11 +2321,13 @@ function adaptViews(v){
     if(!seen||when>new Date(seen.created_at||seen.merged_at))newestPerPr.set(key,run);
   });
 
-  // Sorted by when the run was created, NOT by when the pull request merged:
-  // that is the clock prTime() reads, and every chart walks this list assuming
-  // it runs forwards in time. merged_at only decides whether a run is here.
+  // NEWEST FIRST. This is the order the charts expect: they reverse the list to
+  // draw it, so the newest run ends up on the RIGHT of the x-axis and the
+  // oldest on the left. Sorting the other way silently mirrors every chart.
+  // The key is created_at, not merged_at, because created_at is the clock
+  // prTime() reads; merged_at only decides whether a run belongs here at all.
   const ordered=[...newestPerPr.values()].sort((a,b)=>
-    new Date(a.created_at||a.merged_at)-new Date(b.created_at||b.merged_at));
+    new Date(b.created_at||b.merged_at)-new Date(a.created_at||a.merged_at));
 
   const commits=[],times={},timeIso={},runIds={},triggers={},probeQ={};
   ordered.forEach(run=>{

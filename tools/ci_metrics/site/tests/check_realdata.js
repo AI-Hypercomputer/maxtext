@@ -87,8 +87,14 @@ function check(){
   ok(COMMITS.every(c=>/^#\d+$/.test(c.pr)),'every commit carries a real pull request number');
   ok(COMMITS.every(c=>['pass','fail','flaky'].includes(c.status)),'every status is one the charts know');
 
-  const ordered=COMMITS.every((c,i)=>i===0||w.eval('prTime')(COMMITS[i-1].hash)<=w.eval('prTime')(c.hash));
-  ok(ordered,'commits are ordered oldest first, the order the charts assume');
+  // NEWEST FIRST is the order the sample data uses and the charts rely on: they
+  // reverse the list when drawing, so the newest run lands on the right of the
+  // x-axis. An ascending list mirrors every chart without any error.
+  const pt=w.eval('prTime');
+  const newestFirst=COMMITS.every((c,i)=>i===0||pt(COMMITS[i-1].hash)>=pt(c.hash));
+  ok(newestFirst,'commits are ordered newest first, the order the charts reverse when drawing');
+  ok(pt(COMMITS[0].hash)>=pt(COMMITS[COMMITS.length-1].hash),
+     `the newest run is first (${COMMITS[0].pr} is newer than ${COMMITS[COMMITS.length-1].pr})`);
 
   ok(JOBS.length>0&&JOBS.length<=jobsTable.rows.length,
      `the job catalogue was discovered from the data (${JOBS.length} distinct job(s))`);
@@ -117,6 +123,37 @@ function check(){
   const fromData=new Set(jobsTable.rows.map(r=>r[ci.runner_label]).filter(Boolean));
   ok(Object.values(labels).every(v=>fromData.has(v)),
      'every machine label shown is one the collector actually recorded');
+
+  // --- the charts widen instead of squashing the bars -----------------------
+  // The sample data was drawn at 1100 units for about twenty runs. With more
+  // runs than that the box has to grow, or every bar becomes a hairline. The
+  // card scrolls sideways instead.
+  const BOX=w.eval('CHART_BOX'),SLOT=w.eval('CHART_SLOT');
+  const widest=sel=>{
+    const all=[...d.querySelectorAll(sel)]
+      .map(s=>({s,W:+((s.getAttribute('viewBox')||'0 0 0 0').split(' ')[2])}));
+    all.sort((a,b)=>b.W-a.W);
+    return all[0];
+  };
+  const runsShown=w.eval('getWindows()').current.length;
+  [['#timeline svg','run-time chart'],['#worker-chart svg','worker chart'],
+   ['#devlines svg','device chart']].forEach(([sel,name])=>{
+    const c=widest(sel);
+    if(!c){ok(false,name+' drew no SVG');return}
+    const expected=runsShown>21;
+    ok(expected?c.W>BOX:c.W===BOX,
+       `${name} box is ${c.W} units for ${runsShown} run(s) `+
+       `(${expected?'wider than':'the usual'} ${BOX})`);
+    ok(!expected||c.s.style.minWidth===c.W+'px',
+       `${name} sets a min-width so the card scrolls rather than shrinking the bars`);
+  });
+  // A bar should still be about as wide as it is in the sample data.
+  const tl=widest('#timeline svg');
+  if(tl){
+    const bars=[...tl.s.querySelectorAll('rect')].map(r=>+(r.getAttribute('width')||0)).filter(x=>x>0.5);
+    const max=Math.max(...bars);
+    ok(max>SLOT*0.5,`the widest bar is ${max.toFixed(0)} units, not a hairline (slot is ${SLOT})`);
+  }
 
   // --- something was actually drawn ----------------------------------------
   ok(d.querySelectorAll('#timeline svg').length>0,'the run-time chart drew an SVG');
