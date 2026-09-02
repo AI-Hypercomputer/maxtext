@@ -1521,7 +1521,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # 2. Extract clean trainable parameters
       params_state = self._get_trainable_params_state()
       piece_batch = max(1, int(os.environ.get("RAIDEN_STREAM_PIECE_BATCH", "1")))
-      if "RAIDEN_WEIGHT_SYNC_CHUNKS" in os.environ and not getattr(self, "_warned_raiden_sync_chunks", False):
+      if "RAIDEN_WEIGHT_SYNC_CHUNKS" in os.environ and not self._warned_raiden_sync_chunks:
         logging.warning(
             "RAIDEN_WEIGHT_SYNC_CHUNKS is deprecated and no longer affects Raiden staging; "
             "use RAIDEN_STREAM_PIECE_BATCH instead."
@@ -1567,10 +1567,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
       all_metadata = []
       total_variables = 0
-      piece_idx = -1
 
       for piece_idx, piece in enumerate(piece_iter):
-        if expected_num_pieces is None and piece_idx >= len(self._raiden_syncs):
+        if piece_idx >= len(self._raiden_syncs):
           self._raiden_syncs.append(
               raiden_synchronizer.RaidenSynchronizer(
                   job_name="trainer",
@@ -1580,9 +1579,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
                   parallelism=4,
               )
           )
-        elif piece_idx >= len(self._raiden_syncs):
-          del piece
-          break
 
         sync = self._raiden_syncs[piece_idx]
         sync.bind(piece)
@@ -1602,19 +1598,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         all_metadata.append(metadata)
         sync.release_host_arrays()
 
-      if expected_num_pieces is not None:
-        remaining = 0
-        for _ in piece_iter:
-          remaining += 1
-        num_pieces = (piece_idx + 1) + remaining
-        if num_pieces != expected_num_pieces:
-          raise RuntimeError(
-              f"weight-sync piece count changed from {expected_num_pieces} to {num_pieces} "
-              "between rounds; the cached conversion plan should make this impossible "
-              "unless the model/config changed mid-run."
-          )
-      else:
-        num_pieces = piece_idx + 1
+      num_pieces = len(all_metadata)
+      if expected_num_pieces is not None and num_pieces != expected_num_pieces:
+        raise RuntimeError(
+            f"weight-sync piece count changed from {expected_num_pieces} to {num_pieces} "
+            "between rounds; the cached conversion plan should make this impossible "
+            "unless the model/config changed mid-run."
+        )
 
       gc.collect()
       _malloc_trim()

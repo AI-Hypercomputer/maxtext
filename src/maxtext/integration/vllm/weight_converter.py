@@ -404,45 +404,6 @@ class WeightConverter:
         "convert_streaming is only supported in direct MaxText-to-MaxText mode (rollout_backend='maxtext' and rules=None)."
     )
 
-    # HuggingFace-shaped target: rename and restructure per the rule table.
-    result = {}
-    unfired = []
-    for rule in self.rules:
-      tensors = [flat_src.pop(src_pat) for src_pat in rule.source_patterns if src_pat in flat_src]
-      if not tensors:
-        # A rule can legitimately not fire (e.g. the `wi` rule when the
-        # trainer stores split `wi_0`/`wi_1`), but a table where *many*
-        # rules miss means the source layout has drifted.
-        unfired.append(rule.target_pattern)
-        continue
-
-      out = tensors
-      for op in rule.operations:
-        out = op(out, tp=self.tp)
-        if not isinstance(out, list) and op != rule.operations[-1]:
-          out = [out]
-
-      if isinstance(out, list) and len(out) > 1 and "{}" in rule.target_pattern:
-        for i, tensor in enumerate(out):
-          result[rule.target_pattern.format(i)] = tensor
-      elif isinstance(out, list) and len(out) == 1:
-        result[rule.target_pattern] = out[0]
-      else:
-        result[rule.target_pattern] = out
-
-      del out, tensors
-      gc.collect()
-
-    if not result:
-      raise ValueError(
-          "No conversion rule matched the trainer state; the rollout would "
-          f"keep its dummy weights. Rule targets: {unfired}"
-      )
-    if unfired:
-      logging.info("Conversion rules that did not fire: %s", unfired)
-
-    return _rekey_to_target(result, target_state)
-
 
 # ==========================================
 # 4. Registries and Builders
@@ -1263,7 +1224,7 @@ class MaxTextToMaxTextConverter:
       return traverse_util.unflatten_dict(flat_result)
 
     src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
-    src_flat, src_root = _strip_root(src_flat, "base")
+    src_flat, _ = _strip_root(src_flat, "base")
 
     # Read variable types before purifying to plain arrays loses them.
     skip_paths = _non_param_paths(target_state)
@@ -1368,7 +1329,7 @@ class MaxTextToMaxTextConverter:
       raise NotImplementedError("convert_streaming only supports target-free conversion (target_state=None).")
 
     src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
-    src_flat, src_root = _strip_root(src_flat, "base")
+    src_flat, _ = _strip_root(src_flat, "base")
 
     if self._plan is None:
       self._plan = self._build_target_free_plan(src_flat)
@@ -1383,7 +1344,7 @@ class MaxTextToMaxTextConverter:
         for k in group.source_keys:
           src_flat.pop(k, None)
         for tgt_key, out in outs:
-          piece_result[src_root + tgt_key] = out
+          piece_result[tgt_key] = out
         del outs
 
       nested = traverse_util.unflatten_dict(piece_result)
