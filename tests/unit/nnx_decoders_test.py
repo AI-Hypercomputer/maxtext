@@ -871,21 +871,26 @@ _QWEN3_NEXT_CONFIG = {
 }
 
 
+def _build_qwen3_next_block(layer_idx_offset=0, **overrides):
+  """Builds one Qwen3-Next scannable block; overrides go to the config."""
+  cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, **overrides})
+  block = qwen3.Qwen3NextScannableBlock(
+      config=cfg,
+      mesh=_make_mesh(cfg),
+      model_mode=MODEL_MODE_TRAIN,
+      layer_idx_offset=layer_idx_offset,
+      rngs=nnx.Rngs(0),
+  )
+  return cfg, block
+
+
 class TestQwen3NextScannableBlock(unittest.TestCase):
   """Tests Qwen3-Next's nested local(scan)/global(length-1 scan) decoder block."""
 
-  def _build(self, layer_idx_offset=0, **overrides):
-    """Builds one scannable block; overrides go to the config, layer_idx_offset to the block."""
-    cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, **overrides})
-    mesh = _make_mesh(cfg)
-    block = qwen3.Qwen3NextScannableBlock(
-        config=cfg,
-        mesh=mesh,
-        model_mode=MODEL_MODE_TRAIN,
-        layer_idx_offset=layer_idx_offset,
-        rngs=nnx.Rngs(0),
-    )
-    return cfg, mesh, block
+  @classmethod
+  def setUpClass(cls):
+    """Builds the block once; it costs several seconds and no test here mutates it."""
+    cls.cfg, cls.block = _build_qwen3_next_block()
 
   def _inputs(self, cfg):
     inputs = jax.random.normal(jax.random.PRNGKey(1), (1, cfg.max_target_length, cfg.emb_dim), dtype=jnp.float32)
@@ -894,16 +899,13 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     return inputs, segment_ids, positions
 
   def test_block_splits_cycle_into_local_stack_plus_one_global(self):
-    """A block covers one attention period: cycle-1 linear layers and one full-attention layer."""
-    cfg, _, block = self._build()
+    """A block covers one attention period: cycle-1 stacked linear layers and one full-attention layer."""
+    cfg, block = self.cfg, self.block
     self.assertEqual(block.num_local, cfg.inhomogeneous_layer_cycle_interval - 1)
     self.assertEqual(block.num_global, 1)
-    self.assertIsNotNone(block.local_layers)
     self.assertIsNotNone(block.global_layer)
 
-  def test_local_params_are_stacked(self):
-    """The linear-attention layers are stacked along param_scan_axis, not stored per layer."""
-    cfg, _, block = self._build()
+    # The linear-attention layers are stacked along param_scan_axis, not stored per layer.
     _, params, _ = nnx.split(block.local_layers, nnx.Param, ...)
     leaves = [v.value for _, v in params.flat_state()]
     self.assertTrue(leaves)
@@ -912,49 +914,32 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
 
   def test_nested_scan_matches_sequential_unroll(self):
     """Scanning the local layers then the global layer equals applying them one by one."""
-    cfg, _, block = self._build()
+    cfg, block = self.cfg, self.block
     inputs, segment_ids, positions = self._inputs(cfg)
 
     scanned = block(inputs, segment_ids, positions, True, MODEL_MODE_TRAIN)
 
     # Reference: pull each stacked local layer out by index and run it, then the global layer.
-    graphdef, params, rest = nnx.split(block.local_layers, nnx.Param, ...)
-    if cfg.param_scan_axis != 0:
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, cfg.param_scan_axis, 0), params)
-    y = inputs
-    for i in range(block.num_local):
-      layer = nnx.merge(
-          graphdef,
-          jax.tree.map(lambda x, i=i: x[i], params),
-          jax.tree.map(lambda x, i=i: x[i], rest),
-      )
-      y = layer(y, segment_ids, positions, True, MODEL_MODE_TRAIN)[0]
-    expected = block.global_layer(y, segment_ids, positions, True, MODEL_MODE_TRAIN)[0]
+    # Under jit, so that the unrolled sub-layers are traced once instead of dispatched op by op.
+    local_graphdef, params, rest = nnx.split(block.local_layers, nnx.Param, ...)
+    global_graphdef, global_state = nnx.split(block.global_layer)
+
+    @jax.jit
+    def unrolled(params, rest, global_state, y):
+      if cfg.param_scan_axis != 0:
+        params = jax.tree.map(lambda x: jnp.moveaxis(x, cfg.param_scan_axis, 0), params)
+      for i in range(block.num_local):
+        layer = nnx.merge(
+            local_graphdef,
+            jax.tree.map(lambda x, i=i: x[i], params),
+            jax.tree.map(lambda x, i=i: x[i], rest),
+        )
+        y = layer(y, segment_ids, positions, True, MODEL_MODE_TRAIN)[0]
+      return nnx.merge(global_graphdef, global_state)(y, segment_ids, positions, True, MODEL_MODE_TRAIN)[0]
+
+    expected = unrolled(params, rest, global_state, inputs)
 
     np.testing.assert_allclose(np.asarray(scanned), np.asarray(expected), rtol=1e-5, atol=1e-5)
-
-  def test_external_kv_cache_matches_scanned_path(self):
-    """The external-kv-cache path must match the scanned path and return one cache per sub-layer.
-
-    In TRAIN mode with dot_product attention the caches pass straight through, so
-    the two paths differ only in the loop mechanism (nested scans vs static
-    unroll of the stacked local params) -- any mismatch is a slice/re-stack bug.
-    """
-    cfg, _, block = self._build(matmul_precision="highest")
-    inputs, segment_ids, positions = self._inputs(cfg)
-    call_args = (segment_ids, positions, True, MODEL_MODE_TRAIN)
-
-    y_scanned = block(inputs, *call_args)
-
-    num_layers = block.num_local + block.num_global
-    external_kv = tuple(jnp.full((1, cfg.max_target_length), float(i)) for i in range(num_layers))
-    y_external, updated_kvs = block(inputs, *call_args, kv_cache=external_kv)
-
-    self.assertEqual(len(updated_kvs), num_layers)
-    # Order must stay local[0..n-1] then global, matching the flat per-layer cache list.
-    for i, updated in enumerate(updated_kvs):
-      np.testing.assert_array_equal(np.asarray(updated), np.asarray(external_kv[i]))
-    np.testing.assert_allclose(np.asarray(y_external), np.asarray(y_scanned), rtol=1e-5, atol=1e-5)
 
   def test_rejects_block_whose_global_layer_is_not_last(self):
     """The local scan runs before the global layer, so any other ordering must be refused.
@@ -964,15 +949,17 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     local-scan-then-global would silently reorder the model, so it is rejected.
     """
     with self.assertRaisesRegex(ValueError, "full-attention layer last"):
-      self._build(layer_idx_offset=1)
+      _build_qwen3_next_block(layer_idx_offset=1)
 
 
 class TestNNXDecoderQwen3Next(unittest.TestCase):
   """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
 
-  def _build(self, num_decoder_layers):
+  def _build(self, num_decoder_layers, **overrides):
     """Builds a scanned Qwen3-Next decoder and its shared embedding."""
-    cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True})
+    cfg = _make_config(
+        **{**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True, **overrides}
+    )
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
     shared_embedding = Embed(
@@ -1011,8 +998,14 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
     ``_apply_qwen3_next_scanned_blocks``, which must also keep
     ``skip_block_remat=True`` on this path rather than falling back to the
     generic (block-rematerialized) branch.
+
+    The external-cache path is a static unroll, so its cost is per sub-layer;
+    a cycle of 2 keeps two blocks -- the minimum that can regroup wrongly --
+    at half the layers of the stock cycle of 4.
     """
-    cfg, decoder, shared_embedding = self._build(8)
+    cfg, decoder, shared_embedding = self._build(4, inhomogeneous_layer_cycle_interval=2)
+    # Every layer is inside the scan, so there is no remainder block.
+    self.assertFalse(hasattr(decoder, "layers_remainder"))
     batch = cfg.global_batch_size_to_train_on
     seq = cfg.max_target_length
 
@@ -1048,11 +1041,6 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
         np.allclose(np.asarray(before), np.asarray(after)),
         "the remainder block's weights did not affect the output, so it was not applied",
     )
-
-  def test_decoder_has_no_remainder_block_when_layers_divide_evenly(self):
-    """With a whole number of periods every layer is inside the scan, so no remainder block."""
-    _, decoder, _ = self._build(8)
-    self.assertFalse(hasattr(decoder, "layers_remainder"))
 
 
 class TestQwen3NextDecoderParity(unittest.TestCase):
