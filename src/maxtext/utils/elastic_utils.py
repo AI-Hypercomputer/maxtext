@@ -231,4 +231,9 @@ def maybe_elastic_scale_up(config, checkpoint_manager):
     if checkpoint_manager is not None:
       checkpoint_manager.wait_until_finished()
     max_logging.log("Checkpoint save completed. Interrupting")
+    try:
+      from maxtext.input_pipeline.multihost_dataloading import cleanup_all_iterators
+      cleanup_all_iterators()
+    except Exception as e:
+      max_logging.log(f"Error in maybe_elastic_scale_up cleanup: {e}")
     raise manager.ScaleUpSignalError()

@@ -23,6 +23,9 @@ from typing import Union, Sequence
 from collections.abc import Iterator, Iterable
 import time
 import json
+import weakref
+import os
+import signal
 
 from etils import epath
 
@@ -49,6 +52,63 @@ from maxtext.utils import max_logging
 _GLOBAL_REMOTE_ITERATORS = weakref.WeakSet()
 _GLOBAL_MULTIHOST_ITERATORS = weakref.WeakSet()
 
+def _cleanup_orphaned_multiprocessing_processes(force_all: bool = False):
+  """Cleans up multiprocessing spawn and resource tracker processes.
+
+  If force_all is True, terminates all multiprocessing spawn/tracker processes
+  except the current process.
+  If force_all is False, terminates only orphaned processes (PPid == 1 or parent dead).
+  """
+  current_pid = os.getpid()
+  try:
+    if not os.path.exists("/proc"):
+      return
+    for entry in os.listdir("/proc"):
+      if not entry.isdigit():
+        continue
+      pid = int(entry)
+      if pid == current_pid or pid == 1:
+        continue
+      try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+          cmd = f.read().decode("utf-8", errors="ignore")
+        if "multiprocessing.spawn" not in cmd and "multiprocessing.resource_tracker" not in cmd:
+          continue
+
+        ppid = None
+        with open(f"/proc/{pid}/status", "r") as f:
+          for line in f:
+            if line.startswith("PPid:"):
+              ppid = int(line.split()[1])
+              break
+
+        is_orphan = (ppid == 1) or (ppid != current_pid and force_all)
+        if force_all or is_orphan:
+          max_logging.log(
+              f"CLEANUP: Terminating multiprocessing process {pid} (PPid={ppid}, force_all={force_all}, orphan={is_orphan})"
+          )
+          try:
+            os.kill(pid, signal.SIGTERM)
+          except ProcessLookupError:
+            continue
+          except Exception as e:
+            max_logging.log(f"CLEANUP: SIGTERM failed for {pid}: {e}")
+
+          time.sleep(0.05)
+          try:
+            os.kill(pid, signal.SIGKILL)
+          except ProcessLookupError:
+            pass
+          except Exception as e:
+            max_logging.log(f"CLEANUP: SIGKILL failed for {pid}: {e}")
+      except (FileNotFoundError, ProcessLookupError, PermissionError):
+        continue
+      except Exception as e:
+        max_logging.log(f"CLEANUP: Error checking PID {pid}: {e}")
+  except Exception as e:
+    max_logging.log(f"CLEANUP: Failed scanning /proc: {e}")
+
+
 def cleanup_all_iterators():
   max_logging.log(f"CLEANUP: Cleaning up {len(_GLOBAL_MULTIHOST_ITERATORS)} multihost iterators and {len(_GLOBAL_REMOTE_ITERATORS)} remote iterators")
   for it in list(_GLOBAL_MULTIHOST_ITERATORS):
@@ -63,6 +123,7 @@ def cleanup_all_iterators():
         it.close()
     except Exception as e:
       max_logging.log(f"CLEANUP Error: {e}")
+  _cleanup_orphaned_multiprocessing_processes(force_all=True)
 
 
 def _build_global_shape_and_sharding(
@@ -130,9 +191,16 @@ class MultiHostDataLoadIterator:
 
   def close(self):
     if hasattr(self, "local_iterator") and hasattr(self.local_iterator, "close") and callable(self.local_iterator.close):
-      self.local_iterator.close()
+      try:
+        self.local_iterator.close()
+      except Exception as e:
+        max_logging.log(f"MultiHostDataLoadIterator.close() ignored exception: {e}")
     if hasattr(self, "dataloader") and hasattr(self.dataloader, "close") and callable(self.dataloader.close):
-      self.dataloader.close()
+      try:
+        self.dataloader.close()
+      except Exception as e:
+        max_logging.log(f"MultiHostDataLoadIterator dataloader.close() error: {e}")
+    _cleanup_orphaned_multiprocessing_processes(force_all=False)
       
   def __del__(self):
     self.close()
@@ -211,12 +279,57 @@ class RemoteIterator:
   "iterator class for using colocated python class"
 
   def __init__(self, get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic=False):
+    # Step 1: Clean up any previous RemoteIterator stored in SINGLETON_OBJECT_STORE on the worker
+    try:
+      from jax.experimental.colocated_python.obj_backend import SINGLETON_OBJECT_STORE
+      with SINGLETON_OBJECT_STORE._lock:
+        uids_to_del = []
+        for uid, state in list(SINGLETON_OBJECT_STORE._storage.items()):
+          if state.obj is not None and state.obj is not self:
+            if hasattr(state.obj, "close") and callable(state.obj.close):
+              try:
+                state.obj.close()
+              except Exception:
+                pass
+            uids_to_del.append(uid)
+        for uid in uids_to_del:
+          SINGLETON_OBJECT_STORE._storage.pop(uid, None)
+    except Exception as e:
+      max_logging.log(f"Failed to cleanup SINGLETON_OBJECT_STORE in RemoteIterator: {e}")
+
+    # Step 2: Clean up module-level iterators
+    try:
+      cleanup_all_iterators()
+    except Exception as e:
+      max_logging.log(f"Failed to cleanup old iterators in RemoteIterator: {e}")
+
+    # Step 3: Terminate any orphaned multiprocessing child processes in this sidecar
+    try:
+      import multiprocessing
+      for child in multiprocessing.active_children():
+        try:
+          child.terminate()
+          child.join(timeout=1)
+        except Exception:
+          pass
+    except Exception:
+      pass
+    _cleanup_orphaned_multiprocessing_processes(force_all=True)
+
+    # Step 4: Collect garbage
+    try:
+      import gc
+      gc.collect()
+    except Exception:
+      pass
+
     self.get_ds_fn = get_ds_fn
     self.preprocessing_fn = preprocessing_fn
     self.global_shape = global_shape
     self.checkpoint_path = checkpoint_path
     self.elastic = elastic
     self.reset()
+    _GLOBAL_REMOTE_ITERATORS.add(self)
     max_logging.log("RemoteIterator initiated")
 
   def reset(self):
@@ -229,11 +342,28 @@ class RemoteIterator:
     else:
       raise ValueError("Type error: dataloader should be Iterable.")
 
-  def close(self):
+  def close(self, dummy_array=None):
     if hasattr(self, "iterator") and hasattr(self.iterator, "close") and callable(self.iterator.close):
-      self.iterator.close()
+      try:
+        self.iterator.close()
+      except Exception as e:
+        max_logging.log(f"Error closing iterator: {e}")
     if hasattr(self, "dataloader") and hasattr(self.dataloader, "close") and callable(self.dataloader.close):
-      self.dataloader.close()
+      try:
+        self.dataloader.close()
+      except Exception as e:
+        max_logging.log(f"Error closing dataloader: {e}")
+    try:
+      import multiprocessing
+      for child in multiprocessing.active_children():
+        try:
+          child.terminate()
+          child.join(timeout=1)
+        except Exception:
+          pass
+    except Exception:
+      pass
+    _cleanup_orphaned_multiprocessing_processes(force_all=True)
       
   def __del__(self):
     self.close()
@@ -321,7 +451,10 @@ class RemoteIteratorWrapper:
 
   def close(self):
     if hasattr(self, "local_iterator") and hasattr(self.local_iterator, "close") and callable(self.local_iterator.close):
-      self.local_iterator.close()
+      try:
+        self.local_iterator.close(self.dummy_array)
+      except Exception as e:
+        max_logging.log(f"RemoteIteratorWrapper.close() ignored exception: {e}")
     
   def __del__(self):
     self.close()
