@@ -173,7 +173,7 @@ Per-execution device costs off those traces, core 0:
 
 ## 5. Measurement notes
 
-**The EP traces are truncated, and badly enough that the mean per-execution figure is
+**The EP traces in §4 are truncated, and badly enough that the mean per-execution figure is
 wrong.** Ragged sort runs on SparseCore, and the SparseCore planes emit roughly 1.3 M trace
 events over a 6-step run (16 `TEC n` lines at ~83 k events each) against ~18 k for the same
 run at tp=2. That overflows the device buffer and drops most of the `XLA Modules` line: the
@@ -182,6 +182,17 @@ is a clipped event, not a fast step. Averaging the two gives 442.7 ms and an app
 utilization, which is an artifact. **Take the maximum per-execution duration, not the mean,
 and never totals divided by steps.** Cross-check against xprof's own `Steps` line, which on
 the same trace holds exactly one intact event of 663.0 ms.
+
+**`maybe_trace` now caps the capture, which fixes it.** The rig builds base.yml's
+`enable_tpu_profiling_options` advanced configuration -- one chip per task, one SparseCore
+tile, two SparseCore cores -- and passes it to `jax.profiler.trace`. A ragged-sort GA=2 run
+taken that way keeps **every** execution (5 of 5 `jit_first_kernel`, 5 of 5
+`jit_accum_kernel`, 5 of 5 `jit__update_kernel`, all within 1.7 ms of each other), so the
+§8 tables are read straight off the production config rather than off a ring-of-experts run
+with ragged sort switched off. It also all but removes the tracing overhead: 1338.9 ms
+traced against 1338.8 ms untraced. `--no-tpu-profiling-options` restores the raw capture,
+which is what produced the §4 traces. The cap is a *coverage* restriction -- the trace holds
+one chip's device plane, which is the one these arms read anyway.
 
 `xplane_device_summary.py` reports the mean and divides by `--steps`, so on an EP trace read
 its `costliest modules` block and the `ms/exec` column rather than the `per step` line, or
@@ -296,10 +307,25 @@ of this branch; the numbers above are from installing `07dbe293` into the venv w
 ## 8. Where the engine's own cost sits
 
 The trainer comparison above says the two are level; this section says *why*, and what is
-actually worth changing on the engine side. Device figures are per-execution maxima from
-traces taken at ep=8 with ring-of-experts but **without** ragged sort, which truncates
-(§5). Memory figures are `Compiled.memory_analysis()` on the engine's own compiled kernels,
-per device, against the 94.74 G this chip has.
+actually worth changing on the engine side. Device figures are per-execution durations from
+traces taken in the production config -- ep=8, ring-of-experts, ragged sort -- with the
+advanced TPU profiling options of §5 on, so nothing is dropped and no maximum-versus-mean
+correction is needed. Memory figures are `Compiled.memory_analysis()` on the engine's own
+compiled kernels, per device, against the 94.74 G this chip has.
+
+### Traces
+
+```
+gs://chengnuojin-xprof/engine-ga-anatomy-20260902/ga2-roe-rsort-engine/plugins/profile/2026_09_02_22_59_47/t1v-n-c9d27794-w-0.xplane.pb
+gs://chengnuojin-xprof/engine-ga-anatomy-20260902/ga2-roe-rsort-peft/plugins/profile/2026_09_02_23_05_04/t1v-n-c9d27794-w-0.xplane.pb
+gs://chengnuojin-xprof/engine-ga-anatomy-20260902/ga1-roe-engine/plugins/profile/2026_09_02_22_19_55/t1v-n-c9d27794-w-0.xplane.pb
+gs://chengnuojin-xprof/engine-ga-anatomy-20260902/ga1-roe-peft/plugins/profile/2026_09_02_22_18_23/t1v-n-c9d27794-w-0.xplane.pb
+```
+
+The first pair is `--ga 2 --ep 8 --ring-of-experts --ragged-sort --steps 5`, taken with the
+advanced TPU profiling options on and intact throughout; they are the GA=2 table below. The
+second pair is the GA=1 cross-check, ring-of-experts with ragged sort off, from before the
+profiler cap existed. `-peft` is the `PeftTrainer v2` arm.
 
 ### The kernels
 
@@ -317,16 +343,23 @@ back in place. The update kernel is free -- 0.01 G of temporaries.
 
 | | engine | `PeftTrainer` |
 | --- | --- | --- |
-| fwd/bwd without accumulate | `jit_first_kernel` 698.4 ms | — |
-| fwd/bwd with accumulate | `jit_accum_kernel` 724.4 ms | `jit__fwd_bwd_step` 716.9 ms |
-| update | `jit__update_kernel` 16.1 ms | `jit__update_step` 21.6 ms |
-| **total** | **1438.9 ms** | **1455.4 ms** |
+| fwd/bwd without accumulate | `jit_first_kernel` 649.0 ms | — |
+| fwd/bwd with accumulate | `jit_accum_kernel` 667.2 ms | `jit__fwd_bwd_step` 656.6 ms |
+| update | `jit__update_kernel` 16.0 ms | `jit__update_step` 21.6 ms |
+| **total** | **1332.2 ms** | **1334.8 ms** |
+| wall clock for the same step | 1338.9 ms | 1342.1 ms |
 
-At GA=1 the engine's two executables come to 698.4 + 16.0 = 714.4 ms against `PeftTrainer`'s
-single fused `jit__train_step` at 713.5 ms. The forward/backward itself is at parity; the
-engine's update is 5.5 ms cheaper (`PeftTrainer`'s also zeroes the accumulator), and its
-accumulate is 7.5 ms dearer. Break-even is around GA=2, which is why the engine leads at
-GA=2 and trails by 1.2% at GA=8.
+Five executions of each, spread under 1.7 ms. The forward/backward is at parity -- take
+`jit_first_kernel` as the accumulator-free baseline and `PeftTrainer`'s accumulating step is
+649.0 + 7.6 ms against the engine's 649.0 + 18.2. **The whole of the engine's deficit is
+that 10.6 ms.** Its update is 5.6 ms cheaper in exchange (`PeftTrainer`'s also zeroes the
+accumulator), which is one accumulate's worth, so the two cross over at GA=2: the engine is
+2.6 ms ahead there and, projecting 649.0 + 7 x 667.2 + 16.0 = 5335.4 against 8 x 656.6 +
+21.6 = 5274.4, 61 ms behind at GA=8. §6 measured 5343.0 against 5278.0.
+
+At GA=1, on a ring-of-experts trace without ragged sort, the engine's two executables come
+to 698.4 + 16.0 = 714.4 ms against `PeftTrainer`'s single fused `jit__train_step` at
+713.5 ms -- 0.1%, which is what says the split into two dispatches is not itself a cost.
 
 ### The accumulate costs 22.40 G, and it is the fusion that costs it
 
