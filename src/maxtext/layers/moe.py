@@ -3290,6 +3290,7 @@ class RoutedMoE(nnx.Module):
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
       from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
+      from tpu_inference import envs as tpu_inference_envs
     except ImportError as e:
       raise ImportError("fused_moe_matmul requires the tpu-inference package.") from e
 
@@ -3333,6 +3334,18 @@ class RoutedMoE(nnx.Module):
         use_ep=use_ep,
         activation=activation,
         scoring_fn=scoring_fn,
+        # Forward the same environment-backed kernel knobs that tpu-inference passes on its
+        # own serving path (tpu_inference/layers/common/moe.py). Without these, env vars such
+        # as ONEHOT_MOE_PERMUTE_THRESHOLD and VLLM_MOE_CHUNK_SIZE are silently ignored when a
+        # MaxText model is served through vLLM, so the two paths run the same kernel with
+        # different configurations. In particular, ONEHOT_MOE_PERMUTE_THRESHOLD selects the
+        # one-hot permute path instead of the SparseCore ragged_gather_reduce kernel, which
+        # is what makes expert parallelism usable on TPU generations whose SparseCore has
+        # fewer SIMD lanes than the kernel requires (e.g. v5p).
+        enable_rs_kernel=tpu_inference_envs.ENABLE_RS_KERNEL,
+        use_gmm_fused_rs_kernel=tpu_inference_envs.USE_GMM_FUSED_RS_KERNEL,
+        onehot_moe_permute_threshold=tpu_inference_envs.ONEHOT_MOE_PERMUTE_THRESHOLD,
+        moe_chunk_size=tpu_inference_envs.VLLM_MOE_CHUNK_SIZE,
     )
 
     # Reshape output 2D [T, D] -> 3D [B, S, D]
