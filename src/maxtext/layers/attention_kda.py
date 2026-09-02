@@ -28,6 +28,7 @@ projections, and delegates the chunk-parallel Delta Rule recurrence to
 
 import functools
 import math
+import warnings
 
 from flax import nnx
 import jax
@@ -531,8 +532,6 @@ class KimiDeltaAttention(nnx.Module):
     safe_gate = cfg.use_kda_safe_gate
     lower_bound = cfg.kda_lower_bound if safe_gate else None
     if not safe_gate and cfg.kda_lower_bound != 0.0:
-      import warnings
-
       warnings.warn(
           f"kda_lower_bound={cfg.kda_lower_bound} is ignored because use_kda_safe_gate=False. "
           "Set use_kda_safe_gate=True to enable lower_bound clamping.",

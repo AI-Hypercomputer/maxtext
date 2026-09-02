@@ -26,10 +26,15 @@ import jax.numpy as jnp
 
 # TODO(kda): `kimi_delta_attention` currently lives on tokamax's private
 # experimental path `tokamax._src.ops.experimental.kda` (openxla/tokamax
-# PR #1103, assumed merged). Once tokamax releases a version that exposes a
-# stable public API for KDA, switch this adapter to that entry point and bump
-# the tokamax pins under src/dependencies/requirements/. Keep the lazy import
-# and this note in sync until then.
+# PR #1103; until that change lands in a public tokamax release, no pip
+# version specifier can express this dependency, so the requirement pins are
+# left unchanged). This import is deliberately lazy: a clean MaxText
+# installation without the KDA API still works for everything else, and only
+# KDA use fails — with this ImportError as the symptom. Once tokamax releases
+# a version with a stable public KDA API: (1) switch this adapter to that
+# entry point, (2) bump the tokamax pins under src/dependencies/requirements/
+# to the first release containing it and regenerate the derived requirement
+# files. Keep the lazy import and this note in sync until then.
 
 
 def _to_tokamax(q, k, v, g, beta):
@@ -99,7 +104,11 @@ def tokamax_chunk_kda(
   Returns:
       (o, None) where o is [B, T, H, V].
   """
-  from tokamax._src.ops.experimental.kda.api import kimi_delta_attention
+  # Deliberately lazy: importing the KDA API must not fail at module import
+  # time on installs without tokamax; only an actual KDA call requires it.
+  from tokamax._src.ops.experimental.kda.api import (  # pylint: disable=import-outside-toplevel
+      kimi_delta_attention,
+  )
 
   if initial_state is not None:
     raise NotImplementedError("initial_state is not supported with tokamax backend")

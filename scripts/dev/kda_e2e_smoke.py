@@ -16,15 +16,20 @@
 
 Builds a tiny language model whose attention stack is the real maxtext
 ``KimiDeltaAttention`` layer (tokamax Pallas kernel underneath) and trains it
-on a synthetic, fully learnable next-token task (random fixed permutation:
-``t[i+1] = perm[t[i]]``). If the forward/backward/optimizer chain through the
-KDA kernel is healthy, loss drops from ``log(vocab_size)`` toward ~0.
+on a synthetic, history-dependent next-token task: a delayed-copy sequence
+``t[i] = t[i-delay]`` over random i.i.d. tokens. Because each target is
+information-theoretically independent of the *current* token, no MLP acting
+on the current token alone can solve it — loss only drops from
+``log(vocab_size)`` toward ~0 if the KDA recurrent state actually carries
+history through forward/backward. This makes the smoke test a genuine
+correctness signal for the kernel rather than just an optimizer/compilation
+check.
 
 This exists because the KDA layer is not yet wired into the maxtext decoder;
 it validates the layer end to end without decoder integration.
 
 Usage (on a TPU host):
-  python scripts/dev/kda_e2e_smoke.py [--steps 400] [--batch 32] [--seq-len 128]
+  python scripts/dev/kda_e2e_smoke.py [--steps 400] [--batch 32] [--seq-len 128] [--delay 4]
 """
 
 import argparse
@@ -119,15 +124,19 @@ class TinyKdaLM(nnx.Module):
     return logits
 
 
-def make_dataset(seed: int, num_seqs: int, seq_len: int) -> np.ndarray:
-  """Random-walk sequences over a fixed permutation: t[i+1] = perm[t[i]]."""
+def make_dataset(seed: int, num_seqs: int, seq_len: int, delay: int) -> np.ndarray:
+  """Delayed-copy sequences over random tokens: t[i] = t[i-delay].
+
+  Tokens before index ``delay`` are i.i.d. uniform; every later position
+  repeats the token ``delay`` steps back. The target t[i+1] is independent
+  of the current token t[i], so no memoryless (current-token-only) model can
+  predict it — solving the task requires ``delay`` steps of recurrent history.
+  """
   rng = np.random.default_rng(seed)
-  perm = rng.permutation(_VOCAB)
-  start = rng.integers(0, _VOCAB, size=(num_seqs,))
-  seqs = np.empty((num_seqs, seq_len + 1), dtype=np.int32)
-  seqs[:, 0] = start
-  for i in range(seq_len):
-    seqs[:, i + 1] = perm[seqs[:, i]]
+  total = seq_len + 1
+  seqs = rng.integers(0, _VOCAB, size=(num_seqs, total), dtype=np.int32)
+  for i in range(delay, total):
+    seqs[:, i] = seqs[:, i - delay]
   return seqs
 
 
@@ -139,9 +148,13 @@ def main():
   parser.add_argument("--num-layers", type=int, default=4)
   parser.add_argument("--lr", type=float, default=3e-4)
   parser.add_argument("--log-every", type=int, default=50)
+  parser.add_argument("--delay", type=int, default=4, help="delayed-copy distance; larger = harder (more history needed)")
   args = parser.parse_args()
 
-  assert args.seq_len % 64 == 0, "seq_len must be a multiple of the KDA chunk size (64)"
+  if args.seq_len % 64 != 0:
+    parser.error(f"--seq-len must be a multiple of the KDA chunk size (64), got {args.seq_len}")
+  if args.delay < 1 or args.delay >= args.seq_len:
+    parser.error(f"--delay must be in [1, seq_len-1], got {args.delay}")
   devices = jax.devices()
   print(f"devices: {devices}")
   mesh = jax.sharding.Mesh(np.array(devices), ("x",))
@@ -153,17 +166,22 @@ def main():
   n_params = sum(v.size for v in jax.tree.leaves(nnx.state(model)) if isinstance(v, (jax.Array, np.ndarray)))
   print(f"model params: {n_params / 1e6:.1f}M")
 
-  data = make_dataset(seed=42, num_seqs=4096, seq_len=args.seq_len)
+  data = make_dataset(seed=42, num_seqs=4096, seq_len=args.seq_len, delay=args.delay)
+  # Label position j predicts token j+1 = token j+1-delay; learnable only once
+  # that token is inside the context, i.e. j >= delay-1. Earlier positions are
+  # random (irreducible), so mask them out to keep the loss floor at 0.
+  loss_mask = jnp.asarray(np.arange(args.seq_len) >= args.delay - 1, dtype=jnp.float32)[None, :]
   optimizer = nnx.Optimizer(model, optax.adamw(args.lr), wrt=nnx.Param)
+
+  def _masked_ce(logits, labels):
+    ce = optax.softmax_cross_entropy_with_integer_labels(logits=logits.astype(jnp.float32), labels=labels)
+    return (ce * loss_mask).sum() / loss_mask.sum() / labels.shape[0]
 
   @nnx.jit
   def train_step(model, optimizer, tokens):
     def loss_fn(model):
       logits = model(tokens[:, :-1])
-      loss = optax.softmax_cross_entropy_with_integer_labels(
-          logits=logits.astype(jnp.float32), labels=tokens[:, 1:]
-      ).mean()
-      return loss, logits
+      return _masked_ce(logits, tokens[:, 1:]), logits
 
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
     (loss, _), grads = grad_fn(model)
@@ -173,7 +191,7 @@ def main():
   @nnx.jit
   def eval_loss(model, tokens):
     logits = model(tokens[:, :-1])
-    return optax.softmax_cross_entropy_with_integer_labels(logits=logits.astype(jnp.float32), labels=tokens[:, 1:]).mean()
+    return _masked_ce(logits, tokens[:, 1:])
 
   perm_rng = np.random.default_rng(1)
   losses = []
@@ -189,7 +207,8 @@ def main():
       print(f"step {step:5d}  train_loss {loss_val:.4f}")
 
   init_loss, final_loss = losses[0], np.mean(losses[-20:])
-  print(f"\ninitial loss: {init_loss:.4f} (theoretical ln({_VOCAB}) = {np.log(_VOCAB):.4f})")
+  print(f"\ntask: delayed copy, delay={args.delay} (history-dependent; a memoryless model cannot solve it)")
+  print(f"initial loss: {init_loss:.4f} (theoretical ln({_VOCAB}) = {np.log(_VOCAB):.4f})")
   print(f"final (avg last 20): {final_loss:.4f}")
   ok = final_loss < 0.5 * init_loss and final_loss < 1.0
   print("PASS: loss decreased as expected (KDA e2e smoke OK)" if ok else "FAIL: loss did not decrease sufficiently")

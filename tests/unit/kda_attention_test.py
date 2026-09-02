@@ -38,19 +38,25 @@ import ml_dtypes
 from flax import nnx
 
 try:
-  import tokamax
+  from tokamax._src.ops.experimental.kda import api as tokamax_kda_api
+  from tokamax._src.ops.experimental.kda.cp_utils import ContextParallelMetadata
 
   TOKAMAX_AVAILABLE = True
 except ImportError:
+  tokamax_kda_api = None
+  ContextParallelMetadata = None
   TOKAMAX_AVAILABLE = False
 
+from maxtext.configs.types import KdaAttention
+from maxtext.kernels.kda import chunk_kda
 from maxtext.layers import attention_kda
+from maxtext.layers.attention_kda import ShortConvolution, _l2_normalize
 
-# The chunk_kda kernel tests exercise tokamax Pallas TPU kernels and multi-chip
-# CP; mark the module tpu_only so CPU-only testbeds skip them (consistent with
-# kernels_test.py) while they run on TPU hosts.
-pytestmark = pytest.mark.tpu_only
-
+# Marker policy: `tpu_only` is applied per test/class — only where a test
+# invokes the tokamax Mosaic Pallas kernel or multi-device CP. Pure
+# config / pure-op / non-CP tests (init checks, the naive recurrence, the L2
+# norm helper, standalone ShortConvolution, config guards) also run in
+# regular CPU CI, keeping fast regression coverage outside TPU testbeds.
 
 # ---------------------------------------------------------------------------
 # Precision comparison utilities (adapted from gla_compare_test.py)
@@ -78,18 +84,20 @@ def bf16_ulp_diff(actual_f32, expected_f32):
 
 
 def _assert_close(actual, expected, label, atol=1e-2, rtol=1e-5, max_ulp=2, max_ulp_fail_rate=1e-3):
-  """Assert two arrays match via allclose with bf16 ULP diff fallback."""
+  """Assert two arrays match via allclose with bf16 ULP diff fallback.
+
+  Diagnostics are collected silently and surfaced only in the assertion
+  failure message, so passing tests keep normal pytest output quiet.
+  """
   actual_f32 = np.asarray(actual, dtype=np.float32)
   expected_f32 = np.asarray(expected, dtype=np.float32)
 
   diff = np.abs(actual_f32 - expected_f32)
   max_abs = float(diff.max())
   mean_abs = float(diff.mean())
-  print(f"  {label}: max_abs={max_abs:.6e}  mean_abs={mean_abs:.6e}")
 
   close_mask = diff <= atol + rtol * np.abs(expected_f32)
   if close_mask.all():
-    print(f"  {label}: all close ({atol=}, {rtol=})")
     return
 
   n_fail = int((~close_mask).sum())
@@ -101,16 +109,28 @@ def _assert_close(actual, expected, label, atol=1e-2, rtol=1e-5, max_ulp=2, max_
   n_over = int((abs_ulps > max_ulp).sum()) if n_mis > 0 else 0
   over_rate = n_over / n_fail if n_fail > 0 else 0.0
 
-  if n_mis > 0:
-    print(
-        f"  {label} ULP: {n_fail}/{n_total} fail allclose, "
-        f"{n_mis} have ULP diff, max_ulp={worst_ulp}, "
-        f"over {max_ulp} ULP: {n_over}/{n_fail} ({over_rate:.2e})"
-    )
-
   assert over_rate <= max_ulp_fail_rate, (
-      f"{label}: {n_over}/{n_fail} elements ({over_rate:.2e}) exceed "
-      f"{max_ulp} ULP (threshold {max_ulp_fail_rate:.2e})"
+      f"{label}: max_abs={max_abs:.6e} mean_abs={mean_abs:.6e}; "
+      f"{n_fail}/{n_total} elements fail allclose (atol={atol}, rtol={rtol}), "
+      f"{n_mis} have bf16 ULP diff, worst_ulp={worst_ulp}, "
+      f"{n_over}/{n_fail} elements ({over_rate:.2e}) exceed {max_ulp} ULP "
+      f"(threshold {max_ulp_fail_rate:.2e})"
+  )
+
+
+def _assert_rel_l2_close(actual, expected, label, tol=2e-2):
+  """Assert the relative L2 distance between two arrays is at most ``tol``.
+
+  Suited for gradient comparisons whose per-element absolute tails are
+  dominated by accumulation (e.g. weight gradients summed over tokens): the
+  norm ratio is scale- and tail-insensitive, while genuine wiring errors
+  (relative diff O(1)) still fail hard.
+  """
+  a = np.asarray(actual, dtype=np.float32).ravel()
+  e = np.asarray(expected, dtype=np.float32).ravel()
+  rel = float(np.linalg.norm(a - e) / max(float(np.linalg.norm(e)), 1e-8))
+  assert rel <= tol, (
+      f"{label}: relative L2 diff {rel:.3e} exceeds {tol:.3e} " f"(max_abs={float(np.abs(a - e).max()):.6e})"
   )
 
 
@@ -190,6 +210,7 @@ class TestKimiDeltaAttention:
     assert hasattr(attn, "A_log")
     assert hasattr(attn, "dt_bias")
 
+  @pytest.mark.tpu_only
   def test_forward_shape(self, mesh):
     attn = self._make_attn(mesh)
     B, T, D = 2, 64, 128
@@ -199,6 +220,7 @@ class TestKimiDeltaAttention:
     assert output.shape == (B, T, D)
     assert aux is None
 
+  @pytest.mark.tpu_only
   def test_forward_no_nan_inf(self, mesh):
     attn = self._make_attn(mesh)
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
@@ -208,6 +230,7 @@ class TestKimiDeltaAttention:
     assert not jnp.any(jnp.isinf(output))
     assert jnp.any(output != 0)
 
+  @pytest.mark.tpu_only
   def test_sequence_padding(self, mesh):
     """Non-divisible sequence lengths should be handled via padding."""
     attn = self._make_attn(mesh)
@@ -217,6 +240,7 @@ class TestKimiDeltaAttention:
       output, _ = attn(x)
     assert output.shape == (B, T, D)
 
+  @pytest.mark.tpu_only
   def test_deterministic(self, mesh):
     attn = self._make_attn(mesh)
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
@@ -225,6 +249,7 @@ class TestKimiDeltaAttention:
       o2, _ = attn(x)
     assert jnp.allclose(o1, o2, atol=1e-5)
 
+  @pytest.mark.tpu_only
   def test_packed_sequences_supported(self, mesh):
     """Test that KDA supports packed sequences with segment_ids."""
     attn = self._make_attn(mesh)
@@ -245,6 +270,7 @@ class TestKimiDeltaAttention:
     # No NaN or Inf
     assert jnp.isfinite(o).all()
 
+  @pytest.mark.tpu_only
   def test_segment_ids_padding_alignment(self, mesh):
     """When T % 64 != 0, segment_ids should be padded along with hidden_states."""
     attn = self._make_attn(mesh)
@@ -264,6 +290,7 @@ class TestKimiDeltaAttention:
     # but output should still be finite
     assert jnp.isfinite(o).all()
 
+  @pytest.mark.tpu_only
   def test_segment_ids_none_fallback(self, mesh):
     """Test that segment_ids=None falls back to legacy behavior."""
     attn = self._make_attn(mesh)
@@ -273,6 +300,7 @@ class TestKimiDeltaAttention:
       o2, _ = attn(x)  # Default None
     assert jnp.allclose(o1, o2, atol=1e-5)
 
+  @pytest.mark.tpu_only
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
   def test_row_independence(self, mesh):
     """Hard verification: row0 and row1 use different inputs; only change row1's seg,
@@ -303,6 +331,7 @@ class TestKimiDeltaAttention:
         "Row 0 changed when only row 1's segment changed; " "this indicates segment-based isolation violation"
     )
 
+  @pytest.mark.tpu_only
   def test_packed_segment_no_leak_within_row(self, mesh):
     """Within a single row, changing tokens in segment 2 must not affect segment 1's
     output (and vice versa). Complements test_row_independence (cross-row) by
@@ -344,13 +373,12 @@ class TestKimiDeltaAttention:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.tpu_only
 class TestChunkKda:
   """Direct tests for the chunk_kda kernel via tokamax backend."""
 
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
   def test_basic(self):
-    from maxtext.kernels.kda import chunk_kda
-    from maxtext.layers.attention_kda import _l2_normalize
 
     B, T, H, K, V = 1, 2048, 4, 128, 128
     key = jax.random.PRNGKey(42)
@@ -434,11 +462,10 @@ def _naive_kda_recurrent(q, k, v, g, beta, scale):
 class TestNaiveKda:
   """Compare tokamax chunk_kda kernel against naive recurrent KDA implementation."""
 
+  @pytest.mark.tpu_only
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
   def test_chunk_kda_vs_naive(self):
     """Verify chunk_kda matches the naive Delta Rule recurrence."""
-    from maxtext.kernels.kda import chunk_kda
-    from maxtext.layers.attention_kda import _l2_normalize
 
     B, T, H, K, V = 1, 64, 2, 16, 16
     key = jax.random.PRNGKey(0)
@@ -526,11 +553,10 @@ class TestNaiveKda:
         f"Large negative gate should decay state: t=0 norm={norm_0:.6f}, " f"t={T-1} norm={norm_last:.6f}"
     )
 
+  @pytest.mark.tpu_only
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
   def test_chunk_kda_vs_naive_bf16(self):
     """Verify chunk_kda matches naive in bfloat16 (training dtype)."""
-    from maxtext.kernels.kda import chunk_kda
-    from maxtext.layers.attention_kda import _l2_normalize
 
     B, T, H, K, V = 1, 64, 2, 16, 16
     key = jax.random.PRNGKey(0)
@@ -564,7 +590,6 @@ class TestNaiveKda:
 
 # ---------------------------------------------------------------------------
 
-
 # ---------------------------------------------------------------------------
 # QK L2 norm tests
 # ---------------------------------------------------------------------------
@@ -577,6 +602,7 @@ class TestQkL2Norm:
   def mesh(self):
     return jax.sharding.Mesh(jax.devices(), ("x",))
 
+  @pytest.mark.tpu_only
   def test_qk_l2norm_applied_outside_kernel(self, mesh):
     """With use_qk_norm=True, Q and K should be L2-normalized before kernel call."""
     cfg = _MockKdaConfig(use_qk_norm=True)
@@ -590,6 +616,7 @@ class TestQkL2Norm:
     assert output.shape == (B, T, D)
     assert not jnp.any(jnp.isnan(output))
 
+  @pytest.mark.tpu_only
   def test_qk_l2norm_skipped_when_disabled(self, mesh):
     """With use_qk_norm=False, forward pass should still work without L2 norm."""
     cfg = _MockKdaConfig(use_qk_norm=False)
@@ -603,6 +630,7 @@ class TestQkL2Norm:
     assert output.shape == (B, T, D)
     assert not jnp.any(jnp.isnan(output))
 
+  @pytest.mark.tpu_only
   def test_l2norm_changes_output(self, mesh):
     """Enabling vs disabling L2 norm should produce different outputs."""
     B, T, D = 1, 64, 128
@@ -628,7 +656,6 @@ class TestQkL2Norm:
     The layer applies this to Q/K before the kernel; verifying the helper's
     norm (not just output shape/NaN) is the actual correctness property.
     """
-    from maxtext.layers.attention_kda import _l2_normalize
 
     x = jax.random.normal(jax.random.PRNGKey(11), (2, 16, 4, 128))
     normed = _l2_normalize(x)
@@ -647,6 +674,7 @@ class TestQkL2Norm:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.tpu_only
 class TestKdaBackward:
   """Backward pass tests for KimiDeltaAttention (learning from GLA test patterns)."""
 
@@ -739,6 +767,92 @@ class TestKdaBackward:
 
 
 # ---------------------------------------------------------------------------
+# Full-layer kernel parity (Mosaic vs tokamax XLA reference)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.tpu_only
+class TestKdaLayerParity:
+  """Full-layer parity between the Mosaic Pallas kernel and the tokamax XLA
+  reference implementation.
+
+  Kernel-vs-recurrent-reference parity (TestNaiveKda) validates the kernel
+  in isolation, and the CP equivalence tests validate sharding. Neither
+  exercises the *composed layer* (QKV projection, ShortConvolution, gate /
+  beta transforms, output RMSNorm + gating, output projection) against an
+  independent implementation. Running the same layer with identical weights
+  on both tokamax implementations catches composition-level argument and
+  constraint bugs that kernel-only tests cannot see.
+  """
+
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
+  def test_full_layer_mosaic_vs_xla_parity(self, monkeypatch):
+    mesh = jax.sharding.Mesh(jax.devices(), ("x",))
+    cfg = _MockKdaConfig()
+    rngs = nnx.Rngs(0)
+    with mesh:
+      attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+
+    B, T, D = 2, 128, 128
+    x = jax.random.normal(jax.random.PRNGKey(13), (B, T, D))
+    # Two packed segments so varlen handling is part of the parity check.
+    seg_ids = jnp.array([[1] * 64 + [2] * 64, [1] * 128], dtype=jnp.int32)
+
+    def _loss(model, x_in):
+      with mesh:
+        o, _ = model(x_in, decoder_segment_ids=seg_ids)
+      return o.astype(jnp.float32).sum()
+
+    # Input gradients: differentiate the output sum w.r.t. the input.
+    def _loss_x(x_in):
+      return _loss(attn, x_in)
+
+    # Weight gradients via the split-params pattern (see TestKdaBackward).
+    graphdef, params, other = nnx.split(attn, nnx.Param, ...)
+
+    def _loss_params(params):
+      return _loss(nnx.merge(graphdef, params, other), x)
+
+    def _run():
+      with mesh:
+        o, _ = attn(x, decoder_segment_ids=seg_ids)
+      return (
+          jax.device_get(o),
+          jax.device_get(jax.grad(_loss_x)(x)),
+          [jax.device_get(g) for g in jax.tree.leaves(jax.grad(_loss_params)(params))],
+      )
+
+    # --- Mosaic (production path, the adapter's default) ---
+    o_mosaic, grad_x_mosaic, leaves_mosaic = _run()
+
+    # --- XLA reference implementation, same module and weights ---
+    orig = tokamax_kda_api.kimi_delta_attention
+
+    def _xla_impl(*args, **kwargs):
+      kwargs["implementation"] = "xla"
+      return orig(*args, **kwargs)
+
+    # The adapter imports kimi_delta_attention lazily inside the function,
+    # so patching the module attribute switches the implementation.
+    monkeypatch.setattr(tokamax_kda_api, "kimi_delta_attention", _xla_impl)
+    o_xla, grad_x_xla, leaves_xla = _run()
+
+    # The two tokamax implementations are not bitwise identical — tokamax's
+    # own CI validates the mosaic kernel against the XLA reference at ~5e-3
+    # RMS, and the layer's gated norm/projections propagate that rounding.
+    # Use a generous absolute tolerance; gross wiring errors deviate by O(0.1)
+    # and still fail hard.
+    _assert_close(o_mosaic, o_xla, "full_layer_mosaic_vs_xla_fwd", atol=2e-2, rtol=1e-2)
+    # Gradients: relative L2 norm comparison (accumulated weight-gradient
+    # tails make absolute tolerances unreliable here; see helper docstring).
+    _assert_rel_l2_close(grad_x_mosaic, grad_x_xla, "full_layer_mosaic_vs_xla_dx", tol=2e-2)
+
+    assert len(leaves_mosaic) == len(leaves_xla)
+    for i, (gm, gx) in enumerate(zip(leaves_mosaic, leaves_xla)):
+      _assert_rel_l2_close(gm, gx, f"full_layer_mosaic_vs_xla_param_{i}", tol=2e-2)
+
+
+# ---------------------------------------------------------------------------
 # ShortConvolution tests (standalone)
 # ---------------------------------------------------------------------------
 
@@ -748,7 +862,6 @@ class TestShortConvolution:
 
   def test_short_conv_no_cp(self):
     """ShortConvolution without CP should produce correct output and respect segment masks."""
-    from maxtext.layers.attention_kda import ShortConvolution
 
     rngs = nnx.Rngs(0)
     kernel_size, features = 4, 8
@@ -795,6 +908,7 @@ class TestShortConvolution:
     out_alt = conv(x, segment_ids=seg_alt)
     assert jnp.allclose(out_seg[0], out_alt[0], atol=0.0), "Row 0 output changed when only row 1 segments changed"
 
+  @pytest.mark.tpu_only
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   @pytest.mark.parametrize("layout", ["uniform", "rank_boundary", "spanning_ranks"])
   def test_short_conv_cp_halo(self, layout):
@@ -805,7 +919,6 @@ class TestShortConvolution:
     from the previous CP rank so the causal-conv output is identical to
     running on the full (non-sharded) sequence.
     """
-    from maxtext.layers.attention_kda import ShortConvolution
 
     devices = jax.devices()
     cp_size = 2
@@ -885,12 +998,59 @@ class TestShortConvolution:
         f"max_diff={float(jnp.abs(cp_out_full - ref_out).max()):.2e}"
     )
 
+  @pytest.mark.tpu_only
+  @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
+  def test_short_conv_cp_rejects_oversized_halo(self):
+    """halo_size > T_local under CP must fail clearly, not silently convolve
+    with wrong context.
+
+    The halo exchange only reads from the immediately preceding rank; a
+    receptive field (kernel_size - 1) larger than the per-rank sequence
+    length would span multiple ranks, which is not implemented.
+    """
+
+    devices = jax.devices()
+    cp_size = 2
+    n_devices = (len(devices) // cp_size) * cp_size
+    mesh = jax.sharding.Mesh(np.array(devices[:n_devices]).reshape(cp_size, -1), ("context", "x"))
+
+    kernel_size, features = 8, 8  # halo_size = 7 > T_local = 4 below
+    rngs = nnx.Rngs(0)
+    conv = ShortConvolution(
+        kernel_size=kernel_size,
+        features=features,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        rngs=rngs,
+    )
+
+    B, T = 1, 8  # T_local = T // cp_size = 4 < kernel_size - 1 = 7
+    x = jax.random.normal(jax.random.PRNGKey(0), (B, T, features))
+    xs = jax.lax.with_sharding_constraint(
+        x,
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "context", None)),
+    )
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=jax.sharding.PartitionSpec(None, "context", None),
+        out_specs=jax.sharding.PartitionSpec(None, "context", None),
+        check_vma=False,
+    )
+    def _conv_cp(x_local):
+      return conv(x_local)
+
+    with pytest.raises(ValueError, match="halo_size"):
+      _conv_cp(xs)
+
 
 # ---------------------------------------------------------------------------
 # CP (Context Parallelism) tests
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.tpu_only
 class TestKdaCp:
   """Tests for KDA context parallelism."""
 
@@ -906,8 +1066,6 @@ class TestKdaCp:
     """KDA with CP should produce equivalent output to non-CP KDA."""
     if len(jax.devices()) < cp_size:
       pytest.skip(f"need >={cp_size} devices for CP={cp_size}")
-    from maxtext.layers.attention_kda import _l2_normalize
-    from maxtext.kernels.kda import chunk_kda
 
     mesh_cp = self._cp_mesh(cp_size=cp_size)
 
@@ -928,7 +1086,6 @@ class TestKdaCp:
     ref_o, _ = chunk_kda(q, k, v, g, beta, scale=scale, segment_ids=seg_ids, max_num_segments=1)
 
     # --- CP run: shard along T, call chunk_kda with context_parallel_metadata ---
-    from tokamax._src.ops.experimental.kda.cp_utils import ContextParallelMetadata
 
     cp_ctx = ContextParallelMetadata(mesh=mesh_cp, axis_name="context")
 
@@ -980,9 +1137,6 @@ class TestKdaCp:
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   def test_kda_cp_backward(self):
     """CP backward: gradients match the non-CP reference (fwd+bwd through the CP kernels)."""
-    from maxtext.layers.attention_kda import _l2_normalize
-    from maxtext.kernels.kda import chunk_kda
-    from tokamax._src.ops.experimental.kda.cp_utils import ContextParallelMetadata
 
     cp_size = 2
     mesh_cp = self._cp_mesh(cp_size=cp_size)
@@ -1105,6 +1259,93 @@ class TestKdaCp:
     grad_x = jax.device_get(jax.grad(_sum_cp)(x))
     assert np.all(np.isfinite(grad_x)), "non-finite gradient through full-layer CP backward"
 
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
+  @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
+  def test_kda_cp_full_layer_packed_segments(self):
+    """Full KimiDeltaAttention under CP with multiple real packed segments.
+
+    Unlike the dummy-segment test, the layouts here stress the composition
+    of CP mechanics inside one layer:
+      - row 0: segment 2 spans the rank boundary, so recurrent state and
+        conv halo must cross ranks within one segment;
+      - row 1: a segment boundary exactly at the rank split, so the halo
+        tokens pulled across ranks belong to a different segment and must
+        be masked out by the conv segment logic, and the kernel must reset
+        recurrent state at the rank edge.
+    Forward output and input/weight gradients must match the non-CP run.
+    """
+    cp_size = 2
+    mesh_cp = self._cp_mesh(cp_size=cp_size)
+    mesh_ref = jax.sharding.Mesh(np.array(jax.devices()), ("x",))
+    B, T, D = 2, 128, 128
+    x = jax.random.normal(jax.random.PRNGKey(11), (B, T, D))
+
+    def _build(mesh):
+      # Same rng seed on both meshes -> identical weights.
+      # head_dim must be a multiple of 128 under CP (mosaic kernel constraint).
+      cfg = _MockKdaConfig(head_dim=128)
+      rngs = nnx.Rngs(0)
+      with mesh:
+        return attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+
+    attn_cp = _build(mesh_cp)
+    attn_ref = _build(mesh_ref)
+
+    # T_local = 64 per rank.
+    seg_ids = jnp.array(
+        [
+            # seg 2 [30, 90) spans the rank boundary at 64.
+            [1] * 30 + [2] * 60 + [3] * 38,
+            # segment boundary exactly at the rank split: [1]*64 | [2]*64.
+            [1] * 64 + [2] * 64,
+        ],
+        dtype=jnp.int32,
+    )
+
+    # --- Forward: CP vs non-CP ---
+    with mesh_cp:
+      o_cp, _ = attn_cp(x, decoder_segment_ids=seg_ids)
+    o_cp_full = jax.device_get(
+        jax.lax.with_sharding_constraint(o_cp, jax.sharding.NamedSharding(mesh_cp, jax.sharding.PartitionSpec()))
+    )
+    with mesh_ref:
+      o_ref, _ = attn_ref(x, decoder_segment_ids=seg_ids)
+    # Full-layer tolerance: 2x the kernel-level CP tolerance (5e-3, tokamax CI
+    # baseline) since the gated norm / output projection propagate the
+    # cross-rank chunk-boundary rounding through the rest of the layer.
+    _assert_close(o_cp_full, jax.device_get(o_ref), "kda_cp_full_layer_packed_seg_fwd", atol=1e-2, rtol=1e-3)
+    assert not np.any(np.isnan(o_cp_full)), "NaN in full-layer CP packed-segment output"
+
+    # --- Backward: input and weight gradients, CP vs non-CP ---
+    def _grads(attn, mesh):
+      graphdef, params, other = nnx.split(attn, nnx.Param, ...)
+
+      def loss_fn(params, x):
+        model = nnx.merge(graphdef, params, other)
+        with mesh:
+          o, _ = model(x, decoder_segment_ids=seg_ids)
+        return o.astype(jnp.float32).sum()
+
+      _, (grad_params, grad_x) = jax.value_and_grad(loss_fn, argnums=(0, 1))(params, x)
+      return jax.tree.leaves(grad_params), jax.device_get(grad_x)
+
+    leaves_cp, grad_x_cp = _grads(attn_cp, mesh_cp)
+    leaves_ref, grad_x_ref = _grads(attn_ref, mesh_ref)
+
+    _assert_close(grad_x_cp, grad_x_ref, "kda_cp_full_layer_packed_seg_dx", atol=2e-2, rtol=1e-2)
+
+    # Weight gradients are summed over the whole sequence, so their absolute
+    # tails are larger than per-token kernel tolerances; compare by
+    # relative L2 norm instead.
+    assert len(leaves_cp) == len(leaves_ref), "CP and non-CP param gradient trees differ"
+    for i, (gc, gr) in enumerate(zip(leaves_cp, leaves_ref)):
+      _assert_rel_l2_close(
+          jax.device_get(gc),
+          jax.device_get(gr),
+          f"kda_cp_full_layer_packed_seg_param_{i}",
+          tol=2e-2,
+      )
+
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   def test_kda_cp_rejects_load_balance(self):
     """KDA CP should raise ValueError when load_balance is enabled."""
@@ -1152,7 +1393,6 @@ class TestKdaConfigGuards:
 
   def test_safe_gate_requires_valid_lower_bound(self):
     """use_kda_safe_gate=True with kda_lower_bound outside [-5,0) must be rejected."""
-    from maxtext.configs.types import KdaAttention
 
     with pytest.raises(ValueError, match="kda_lower_bound"):
       KdaAttention(use_kda_safe_gate=True, kda_lower_bound=0.0)
@@ -1165,7 +1405,6 @@ class TestKdaConfigGuards:
 
   def test_use_kda_lora_true_rejected(self):
     """use_kda_lora=True is an unimplemented no-op and must be rejected."""
-    from maxtext.configs.types import KdaAttention
 
     with pytest.raises(ValueError, match="use_kda_lora"):
       KdaAttention(use_kda_lora=True)

@@ -44,6 +44,12 @@ def halo_exchange_for_conv(
   left zero-padding, which is the correct causal-convolution boundary for a
   single-device / no-CP run.
 
+  Constraint: the exchange only reads from the immediately preceding rank,
+  so ``halo_size`` must not exceed the local sequence length. A larger
+  receptive field (kernel_size - 1 > T_local) would need tokens from
+  multiple previous ranks, which is not implemented; a ``ValueError`` is
+  raised instead of silently reading the wrong context.
+
   Args:
     x: Tensor shaped ``[B, T, …]`` (seq_axis = 1).
     halo_size: Number of tokens to pull from the previous rank.
@@ -67,6 +73,16 @@ def halo_exchange_for_conv(
   cp_size = jax.lax.psum(1, axis_name=axis_name)
   if cp_size == 1:
     return zero_padded
+
+  t_local = x.shape[seq_axis]
+  if halo_size > t_local:
+    raise ValueError(
+        f"halo_exchange_for_conv: halo_size ({halo_size}) exceeds the local "
+        f"sequence length ({t_local}) on the '{axis_name}' axis. The causal "
+        "convolution receptive field would span multiple CP ranks, which is "
+        "not implemented. Use a smaller linear_conv_kernel_dim, a longer "
+        "sequence, or a smaller CP size."
+    )
 
   # Forward ring: each rank sends its tail to the next rank.
   tail = jax.lax.dynamic_slice_in_dim(x, x.shape[seq_axis] - halo_size, halo_size, axis=seq_axis)
