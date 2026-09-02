@@ -102,8 +102,8 @@ logical_axis_rules: [
                       # ==========================================
                       ['activation_prefill_kv_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['decode_batch', ['data', 'attn_dp', 'attn_dp_expert']],
-                      ['cache_heads', ['expert', 'model']],
-                      ['paged_kv_heads', ['expert', 'model']],
+                      ['cache_heads', ['model', 'expert']],
+                      ['paged_kv_heads', ['model', 'expert']],
                       ['cache_batch_prefill', []],
                       ['cache_batch', []],
                       ['cache_heads_none', []],
