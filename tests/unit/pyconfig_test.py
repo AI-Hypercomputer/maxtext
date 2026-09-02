@@ -49,6 +49,30 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_gdn_context_parallelism_rejects_load_balance(self):
+    """The reorder composes the GatedDeltaNet recurrence out of order.
+
+    context_parallel_load_balance defaults to true, so this has to raise rather
+    than warn: the run trains either way and the loss falls either way.
+    """
+    with self.assertRaisesRegex(ValueError, "requires context_parallel_load_balance=False"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          model_name="qwen3-next-80b-a3b",
+          ici_context_parallelism=4,
+          context_parallel_load_balance=True,
+      )
+
+  def test_gdn_context_parallelism_accepts_load_balance_off(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        model_name="qwen3-next-80b-a3b",
+        ici_context_parallelism=4,
+        context_parallel_load_balance=False,
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(config.context_parallel_load_balance)
+
   def test_managed_mldiagnostics_storage_path(self):
     # Test completely omitting the parameter (defaults to "" from base.yml)
     config_omitted = pyconfig.initialize(
