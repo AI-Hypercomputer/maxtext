@@ -1,6 +1,6 @@
 // Commit-modal job table sorting (2026-08-31 part B).
-const fs=require('fs'),path=require('path');const {JSDOM}=require('jsdom');
-const html=fs.readFileSync(path.join(__dirname,'..','index.html'),'utf-8');
+const fs=require('fs');const {JSDOM}=require('jsdom');
+const html=fs.readFileSync(require('path').join(__dirname,'..','index.html'),'utf-8');
 const dom=new JSDOM(html,{runScripts:'dangerously',pretendToBeVisual:true});
 const w=dom.window,d=w.document;
 let pass=0,fail=0;
@@ -16,6 +16,7 @@ setTimeout(()=>{
   const heads=()=>rows().filter(r=>r.querySelector(':scope > td.cat-head')).length;
   const mains=()=>rows().filter(r=>r.querySelector(':scope > td .xarr'));
   const cell=(r,i)=>txt(r.querySelectorAll(':scope > td')[i]);
+  // Columns: Job 0, Lane 1, Machine 2, Queue 3, Image 4, Env 5, Run 6, Total 7.
   // Sorting keeps the category headings, so "first" is per category, not global.
   const firstOfCat=name=>{
     const rs=rows();const i=rs.findIndex(r=>{const h=r.querySelector(':scope > td.cat-head');return h&&txt(h).startsWith(name)});
@@ -26,18 +27,27 @@ setTimeout(()=>{
   ok('default first job = Analyze Code Changes (infra group)',cell(mains()[0],0).includes('Analyze Code Changes'));
   w.jtSort(jid,'total');
   ok('sort by Total keeps all 5 category headers and 18 job rows',heads()===5&&mains().length===18);
-  ok('sorted inside the category: TPU group leads with tpu-integration 37.0m',cell(firstOfCat('TPU Tests'),0).includes('tpu-integration')&&cell(firstOfCat('TPU Tests'),6)==='37.0m');
+  ok('sorted inside the category: TPU group leads with tpu-integration 37.0m',cell(firstOfCat('TPU Tests'),0).includes('tpu-integration')&&cell(firstOfCat('TPU Tests'),7)==='37.0m');
   ok('categories stay in workflow order when sorted',rows().filter(r=>r.querySelector(':scope > td.cat-head')).map(r=>txt(r).split(' (')[0]).join()==='Infrastructure,Build,TPU Tests,GPU Tests,CPU Tests');
   ok('every job row is followed by its own step drawer',mains().every(r=>r.nextElementSibling&&/xrow-4920-\d/.test(r.nextElementSibling.innerHTML)));
   ok('Total header shows ▼',txt(d.querySelector(`th[data-jt="${jid}"][data-jtkey="total"] .jtarr`))==='▼');
   w.jtSort(jid,'total');
-  ok('second click: shortest first inside Infrastructure = Gate Parameters 0.2m',cell(firstOfCat('Infrastructure'),0).includes('Gate and Formalize Parameters')&&cell(firstOfCat('Infrastructure'),6)==='0.2m');
+  ok('second click: shortest first inside Infrastructure = Gate Parameters 0.2m',cell(firstOfCat('Infrastructure'),0).includes('Gate and Formalize Parameters')&&cell(firstOfCat('Infrastructure'),7)==='0.2m');
   w.jtSort(jid,'q');
-  ok('sort by Queue: the TPU group leads with a 14m wait',cell(firstOfCat('TPU Tests'),2)==='14m'&&cell(firstOfCat('TPU Tests'),1)==='TPU');
+  ok('sort by Queue: the TPU group leads with a 14m wait',cell(firstOfCat('TPU Tests'),3)==='14m'&&cell(firstOfCat('TPU Tests'),1)==='TPU');
   w.jtSort(jid,'r');
-  ok('sort by Run: the TPU group leads with tpu-integration at 20m',cell(firstOfCat('TPU Tests'),5)==='20m'&&cell(firstOfCat('TPU Tests'),0).includes('tpu-integration'));
+  ok('sort by Run: the TPU group leads with tpu-integration at 20m',cell(firstOfCat('TPU Tests'),6)==='20m'&&cell(firstOfCat('TPU Tests'),0).includes('tpu-integration'));
   w.jtSort(jid,'');
   ok('Job header restores grouped order',heads()===5&&cell(mains()[0],0).includes('Analyze Code Changes')&&txt(d.querySelector(`th[data-jt="${jid}"][data-jtkey="total"] .jtarr`))==='');
+  // Machine column: the real runs-on label each job asks for, plus the pool that answered.
+  const machineOf=name=>{const r=mains().find(x=>cell(x,0).includes(name));return r?cell(r,2):''};
+  ok('TPU jobs ask for the 4-chip TPU label',machineOf('tpu-unit').includes('linux-x86-ct6e-180-4tpu'));
+  ok('CPU jobs ask for linux-x86-n2-32',machineOf('cpu-unit').includes('linux-x86-n2-32'));
+  ok('GPU jobs ask for the A100 label',machineOf('gpu-unit').includes('linux-x86-a2-48-a100-4gpu'));
+  ok('the wheel build asks for the buildkit runner',machineOf('Build Wheel').includes('linux-x86-n2-16-buildkit'));
+  ok('hosted jobs say ubuntu-latest',machineOf('Pre-commit Linters').includes('ubuntu-latest'));
+  ok('every job names a machine',mains().every(r=>cell(r,2).length>4));
+  ok('the pool is stable across renders',(()=>{const a=machineOf('cpu-unit');w.jtSort(jid,'q');w.jtSort(jid,'');return machineOf('cpu-unit')===a})());
   ok('legend hint sentence present',d.querySelector('#modal').textContent.includes('Sorting keeps the category headings and orders the jobs inside each one')&&d.querySelector('#modal').textContent.includes('Click Queue, Image, Env, Run, or Total to sort the jobs by that time')&&d.querySelector('#modal').textContent.includes('Click the Job header to restore the grouped order.'));
   // per-test JUnit tables inside the drawers still work after a job sort
   w.jtSort(jid,'total');

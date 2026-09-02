@@ -63,24 +63,6 @@ setTimeout(()=>{
   w.jtSort(tid2,'delta');
   ok('4920 sort by Δ: +9.1s (moe) first, no-Δ last',n2()[0]==='test_mixture_of_experts_routing'&&n2()[3]==='test_ring_attention_multihost');
   w.closeModal();
-  // ---------- B2. Single PR page sort ----------
-  w.inspectPR('4920');
-  const pb=d.querySelector('#jt-pr-4920-body');
-  ok('PR page table registered',!!pb&&!!w.eval('JT')['jt-pr-4920']&&w.eval('JT')['jt-pr-4920'].rows.length===6);
-  const mains=()=>Array.from(pb.querySelectorAll('tr')).filter(r=>!r.id.startsWith('tx-'));
-  ok('6 test rows + 6 hidden history rows',mains().length===6&&pb.querySelectorAll('tr[id^="tx-"]').length===6);
-  ok('PR default: failed tests first',txt(mains()[0].querySelector('td')).includes('test_ring_attention_multihost'));
-  w.jtSort('jt-pr-4920','dur');
-  const m2=mains();
-  ok('PR sort by duration across jobs: convergence 44.8s first, gpu flash 3.1s fourth, failed (no duration) last',
-    txt(m2[0].querySelectorAll('td')[2])==='44.8s'&&txt(m2[3].querySelectorAll('td')[2])==='3.1s'&&txt(m2[5].querySelectorAll('td')[2])==='—');
-  ok('history row still follows its own test after sorting',Array.from(pb.querySelectorAll('tr[id^="tx-"]')).every(r=>r.previousElementSibling&&r.id.includes(txt(r.previousElementSibling.querySelector('td')).replace(/[^a-zA-Z0-9-]/g,''))));
-  ok('PR Duration header shows ▼',txt(d.querySelector('th[data-jt="jt-pr-4920"][data-jtkey="dur"] .jtarr'))==='▼');
-  ok('PR page hint sentence present',d.querySelector('#pr-detail').textContent.includes('Click Duration, Usual, or Δ to sort the table by that column'));
-  w.inspectPR('4940');
-  ok('4940 (no tests ran): note rows kept as table tail',d.querySelectorAll('#jt-pr-4940-body tr').length===2&&w.eval('JT')['jt-pr-4940'].rows.length===0);
-  w.jtSort('jt-pr-4940','dur');
-  ok('sorting an empty table keeps its note rows',d.querySelectorAll('#jt-pr-4940-body tr').length===2);
   // ---------- D. review-fix asserts (wf_38aa44ab-975) ----------
   w.tlZoomReset();w.setWKSel('all');
   const h0=d.querySelectorAll('#page-main .card.hero');
@@ -100,9 +82,6 @@ setTimeout(()=>{
   ok('modal hint describes the real default order and the blank-cell rule',mtxt.includes('Failed tests come first. Then come the tests that added the most time')&&mtxt.includes('drop to the bottom: failed tests have no duration, and new tests have no baseline yet')&&mtxt.includes('Click the Test header to restore the default order')&&!mtxt.includes('Failures come first'));
   ok('JUnit header style is 12px (sort arrow inherits it)',(d.querySelector('#modal th[data-jtkey="dur"]').getAttribute('style')||'').includes('font-size:12px'));
   w.closeModal();
-  w.inspectPR('4920');
-  const ptxt=d.querySelector('#pr-detail').textContent;
-  ok('PR page description says grouped by job + blank-cell rule',ptxt.includes('grouped by job.')&&ptxt.includes('Within each job, failed tests come first')&&ptxt.includes('new tests have no usual duration yet')&&ptxt.includes('Click the Test header to restore the default order')&&!ptxt.includes('failures and biggest slow-downs first'));
   // ---------- flip: oldest left, newest right on every commit-driven chart (2026-08-31 part I) ----------
   const byX=nodes=>[...nodes].map(n=>({n,x:+n.getAttribute('x')})).sort((a,b)=>a.x-b.x).map(o=>o.n.textContent.trim());
   const tlH=byX(d.querySelectorAll('#timeline svg a.axlink text'));
@@ -112,8 +91,6 @@ setTimeout(()=>{
   const devH=byX(d.querySelectorAll('#devlines svg a.axlink text'));
   // device + queue charts draw the 10-PR w.current window (#4940 .. #4914), not all 13 COMMITS
   ok('device lines: every PR in range, oldest leftmost, newest rightmost',devH.length===n&&devH[0]==='#'+oldest&&devH[devH.length-1]==='#'+newest);
-  const stH=byX([...d.querySelector('#starv svg').querySelectorAll('text')].filter(t=>/^#\d{4}$/.test(t.textContent)));
-  ok('queue latency: oldest leftmost, newest rightmost',stH[0]==='#'+oldest&&stH[stH.length-1]==='#'+newest);
   const devEnd=[...d.querySelectorAll('#devlines svg text')].filter(t=>/^(TPU|GPU|CPU) [\d.]+m$/.test(t.textContent));
   ok('device endpoint labels sit at the right edge',devEnd.length===3&&devEnd.every(t=>+t.getAttribute('x')>1000));
   ok('timeline guide states oldest -> newest',d.getElementById('guide-timeline').textContent.includes('oldest merged pull request on the left to the newest on the right'));

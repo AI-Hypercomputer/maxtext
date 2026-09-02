@@ -104,12 +104,6 @@ setTimeout(()=>{
   const rows2=d.querySelectorAll('#flaky [data-flane]');
   ok('HW=gpu dims TPU rows',Array.from(rows2).filter(r=>r.getAttribute('data-flane')==='TPU').every(r=>r.getAttribute('style').includes('opacity:0.28')));
   try{d.querySelector('.fchip[data-hw="all"]').click()}catch(e){}
-  // TH combined: explicit counts
-  const cPaths=Array.from(d.querySelectorAll('#thCharts path[stroke-dasharray="5,4"]'));
-  ok('11 count splines, heavier + brighter',cPaths.length===11&&cPaths.every(p=>p.getAttribute('stroke-width')==='2.2'&&p.getAttribute('opacity')==='0.95'));
-  const thc=d.querySelector('#thCharts');
-  ok('legend counts labeled "tests" (83 tests)',thc.textContent.includes('83 tests'));
-  ok('legend hint explains the numbers',thc.textContent.includes('how many tests its latest run executed'));
   // footnote = facts only; rules moved into the How to read panel (2026-08-31 part Q)
   w.initGuides();  // the observer re-attaches guides on a microtask; force it so the assert below sees the rebuilt panel
   const flFoot=host.querySelector('[data-flfoot]'),flPanel=d.getElementById('guide-flaky');

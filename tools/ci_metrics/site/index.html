@@ -150,11 +150,6 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
 </div></div></header>
 
 <main>
-<div id="pagebar" style="display:flex;gap:6px;margin-bottom:14px">
-<button class="pbtn on" data-page="main" onclick="switchPage('main')">Main</button>
-<button class="pbtn" data-page="details" onclick="switchPage('details')">Details</button>
-<button class="pbtn" data-page="pr" onclick="switchPage('pr')">Single PR</button>
-</div>
 
 <div id="page-main">
 <div class="card hero">
@@ -187,44 +182,8 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
 <div class="card"><div class="ct">Test run time by device</div><div id="devlines-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div><div id="devlines" style="overflow-x:auto"></div></div>
 <div class="card"><div class="ct">Flaky jobs and tests</div>
 <div id="flaky"></div></div>
-<!-- Test suite health -->
-<div class="card" style="overflow:visible">
-<div style="padding:0 0 12px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
-<div class="ct" style="margin:0;flex-shrink:0">Test suite health</div>
-<span style="font-size:13px;color:var(--ink2)" data-guide="th" data-guide-kind="section"><span class="g-more">This section has three parts. The table below ranks the suites whose numbers changed most, worst first; click a row to open that suite at the commit where the change began. The chart under it draws every suite’s total test time and test count per commit. Above the chart, the Suite dropdown shows one suite on its own, with its test count on the right axis, and the Every suite / Device groups toggle rolls the suites up into one line per device. The table and the chart each have their own How to read. Suite names are the test flavors of the CI workflow: tpu-unit, tpu-integration, tpu-post-training-unit, tpu-post-training-integration, gpu-unit, gpu-integration, cpu-unit, cpu-integration, cpu-post-training-unit and cpu-post-training-integration. Each one writes one test-result file per parallel worker on every run where the suite was selected, and the files of one run are added together. decoupled is the exception: it is not a job of its own but an extra pytest pass inside the cpu-unit job on worker 1, over the 4 test files marked decoupled_target, and its 50 tests are also counted inside cpu-unit. Three flavors are left out on purpose: tpu7x-unit, tpu7x-integration and tpu7x-post-training-unit run only when the workflow is not started by a pull request (scheduled, manual and release runs), so they have no pull-request data. The TPU Pathways Unit and Integration jobs write no test-result file, so they have no suite here.</span></span>
-</div>
-<div id="thSummary"></div>
-<div class="th-tabs" id="thTabs"></div>
-<div class="th-cards-stack" id="thCharts"></div>
-</div>
 </div><!-- /page-main -->
 
-<div id="page-details" style="display:none">
-<div class="grid3" id="dtiles"></div>
-<div id="budget" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px"></div>
-<div class="card"><div class="ct">CI phase breakdown</div><div id="cause-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div><div id="cause"></div></div>
-<div class="card"><div class="ct">Runner queue latency by pool</div><div id="starv-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div><div id="starv" style="overflow-x:auto"></div></div>
-<!-- Issues (dynamic: job-level + test-level rules) -->
-<div class="card">
-<div class="ct">Issues detected</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">This list shows the problems the dashboard's rules found in the current data. It updates automatically when the data changes.</div>
-<div id="issuesList"></div>
-</div>
-</div><!-- /page-details -->
-
-<div id="page-pr" style="display:none">
-<div class="card">
-<div class="ct">Merged pull requests</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px" data-guide="prlist">This list shows the merged pull requests inside the selected date range. Each one shows the run of its final commit — earlier pushes are not tracked. <span class="g-more">Click a pull request to inspect its CI run, or search by number; a stored pull request outside the range opens too, with a note above its detail. The dashboard stores the last 90 days of runs.</span></div>
-<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
-<input id="pr-search" type="text" placeholder="PR number, e.g. 4920" style="font:500 14px var(--mono);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:7px 10px;border-radius:8px;width:200px" onkeydown="if(event.key==='Enter')searchPR()">
-<button onclick="searchPR()" style="font:600 13px var(--font);background:var(--accent);color:#090D16;border:none;padding:7px 14px;border-radius:6px;cursor:pointer">Inspect</button>
-<span id="pr-search-msg" style="font-size:13px;color:var(--crit)"></span>
-</div>
-<div id="pr-list" style="overflow-x:auto"></div>
-</div>
-<div id="pr-detail"></div>
-</div><!-- /page-pr -->
 </main>
 
 <div id="tip"></div>
@@ -255,28 +214,27 @@ const JOBS=[
 {id:'cpu-post-u',name:'CPU Posttrain Tests (cpu-post-training-unit)',cat:'cpu',lane:'CPU',b:{q:0,s:2,r:5}},
 {id:'cpu-post-i',name:'CPU Posttrain Tests (cpu-post-training-integration)',cat:'cpu',lane:'CPU',b:{q:0,s:2,r:4}},
 ];
-const CATS=['build','tpu','gpu','cpu'];
 const CAT_COLORS={build:'var(--bld)',tpu:'var(--tpu)',gpu:'var(--gpu)',cpu:'var(--cpu)',infra:'var(--bld)'};
 const LANE_COLORS={TPU:'var(--tpu)',GPU:'var(--gpu)',CPU:'var(--cpu)',Hosted:'var(--muted)',Build:'var(--bld)'};
 
 // ============ COMMITS (overrides from baseline) ============
 const COMMITS=[
-{hash:'4908',pr:'#4908',title:'chore: bump jax to 0.4.31',author:'chen-w',status:'pass',attempts:1,concurrent:2,o:{}},
-{hash:'4910',pr:'#4910',title:'feat: flash attention v2 kernel',author:'sara-m',status:'pass',attempts:1,concurrent:1,o:{}},
-{hash:'4912',pr:'#4912',title:'fix: gradient checkpointing OOM',author:'alex-k',status:'pass',attempts:1,concurrent:2,o:{}},
-{hash:'4914',pr:'#4914',title:'refactor: tokenizer pipeline',author:'chen-w',status:'pass',attempts:1,concurrent:1,o:{'pkg':{r:5}}},
-{hash:'4916',pr:'#4916',title:'test: add llama3-70b sharded benchmark',author:'sara-m',status:'pass',attempts:1,concurrent:2,
+{hash:'4908',pr:'#4908',title:'chore: bump jax to 0.4.31',status:'pass',attempts:1,concurrent:2,o:{}},
+{hash:'4910',pr:'#4910',title:'feat: flash attention v2 kernel',status:'pass',attempts:1,concurrent:1,o:{}},
+{hash:'4912',pr:'#4912',title:'fix: gradient checkpointing OOM',status:'pass',attempts:1,concurrent:2,o:{}},
+{hash:'4914',pr:'#4914',title:'refactor: tokenizer pipeline',status:'pass',attempts:1,concurrent:1,o:{'pkg':{r:5}}},
+{hash:'4916',pr:'#4916',title:'test: add llama3-70b sharded benchmark',status:'pass',attempts:1,concurrent:2,
   o:{'tpu-pre-u':{r:24},'tpu-pre-i':{r:22},'cpu-pre-u':{r:16},'cpu-pre-i':{r:10}}},
-{hash:'4918',pr:'#4918',title:'ci: pin docker base image digest',author:'ops-bot',status:'pass',attempts:1,concurrent:4,
+{hash:'4918',pr:'#4918',title:'ci: pin docker base image digest',status:'pass',attempts:1,concurrent:4,
   o:{'tpu-pre-u':{q:10},'tpu-pre-i':{q:12},'tpu-post-u':{q:10},'tpu-post-i':{q:11},'tpu-pw-u1':{q:9},'tpu-pw-u2':{q:9},'tpu-pw-i':{q:10},'gpu-u':{q:3},'gpu-i':{q:3}}},
-{hash:'4920',pr:'#4920',title:'feat: mixture of experts router',author:'alex-k',status:'flaky',attempts:2,concurrent:6,
+{hash:'4920',pr:'#4920',title:'feat: mixture of experts router',status:'flaky',attempts:2,concurrent:6,
   o:{'tpu-pre-u':{q:14,st:'flaky',r:17.3},'tpu-pre-i':{q:14},'tpu-post-u':{q:12},'tpu-post-i':{q:13},'tpu-pw-u1':{q:14},'tpu-pw-u2':{q:13},'tpu-pw-i':{q:14},'gpu-u':{q:4},'gpu-i':{q:4,st:'flaky'}}},
-{hash:'4922',pr:'#4922',title:'fix: moe load balancing loss',author:'alex-k',status:'pass',attempts:1,concurrent:2,o:{}},
-{hash:'4924',pr:'#4924',title:'docs: update training guide',author:'chen-w',status:'pass',attempts:1,concurrent:1,o:{}},
-{hash:'4926',pr:'#4926',title:'perf: compile cache warmup',author:'sara-m',status:'pass',attempts:1,concurrent:2,o:{'pkg':{s:2}}},
-{hash:'4928',pr:'#4928',title:'feat: ring attention implementation',author:'alex-k',status:'pass',attempts:1,concurrent:3,o:{'tpu-pre-i':{r:22},'tpu-pw-i':{r:14}}},
-{hash:'4930',pr:'#4930',title:'test: convergence threshold tighten',author:'sara-m',status:'pass',attempts:1,concurrent:2,o:{}},
-{hash:'4940',pr:'#4940',title:'ci: runner pool rebalance',author:'ops-bot',status:'fail',attempts:1,concurrent:5,
+{hash:'4922',pr:'#4922',title:'fix: moe load balancing loss',status:'pass',attempts:1,concurrent:2,o:{}},
+{hash:'4924',pr:'#4924',title:'docs: update training guide',status:'pass',attempts:1,concurrent:1,o:{}},
+{hash:'4926',pr:'#4926',title:'perf: compile cache warmup',status:'pass',attempts:1,concurrent:2,o:{'pkg':{s:2}}},
+{hash:'4928',pr:'#4928',title:'feat: ring attention implementation',status:'pass',attempts:1,concurrent:3,o:{'tpu-pre-i':{r:22},'tpu-pw-i':{r:14}}},
+{hash:'4930',pr:'#4930',title:'test: convergence threshold tighten',status:'pass',attempts:1,concurrent:2,o:{}},
+{hash:'4940',pr:'#4940',title:'ci: runner pool rebalance',status:'fail',attempts:1,concurrent:5,
   o:{'tpu-pre-u':{q:9,s:0,r:0,st:'fail'},'tpu-pre-i':{q:9,s:0,r:0,st:'fail'},'tpu-post-u':{q:9,s:0,r:0,st:'fail'},'tpu-post-i':{q:9,s:0,r:0,st:'fail'},'tpu-pw-u1':{q:9,s:0,r:0,st:'fail'},'tpu-pw-u2':{q:9,s:0,r:0,st:'fail'},'tpu-pw-i':{q:9,s:0,r:0,st:'fail'}}},
 ];
 
@@ -361,23 +319,23 @@ const TIMES={'4908':'Aug 20 12:04','4910':'Aug 20 08:03','4912':'Aug 19 23:41','
 // crash commit); #4888 is a queue bump; everything else is baseline +/- a small jitter.
 (function extendHistory(){
   const older=[  // newest of the old first, so COMMITS stays newest-first after the appends
-    {hash:'4906',time:'Aug 14 11:20',title:'fix: pathways heartbeat retry',author:'chen-w',concurrent:2,o:{}},
-    {hash:'4904',time:'Aug 12 15:44',title:'feat: moe expert parallel bf16',author:'alex-k',concurrent:3,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
-    {hash:'4902',time:'Aug 10 09:31',title:'ci: add decoupled cpu-unit pass',author:'ops-bot',concurrent:2,o:{'cpu-pre-u':{r:9}}},
-    {hash:'4900',time:'Aug 09 17:05',title:'refactor: test discovery markers',author:'sara-m',concurrent:1,o:{'tpu-pre-u':{r:26},'gpu-u':{r:2}}},
-    {hash:'4898',time:'Aug 08 13:12',title:'feat: pathways multi-slice',author:'chen-w',concurrent:4,status:'flaky',attempts:2,o:{'tpu-pw-i':{st:'flaky',q:6}}},
-    {hash:'4896',time:'Aug 07 10:48',title:'fix: flash attention backward',author:'alex-k',concurrent:2,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
-    {hash:'4894',time:'Aug 06 16:27',title:'docs: sharding guide',author:'sara-m',concurrent:1,o:{}},
-    {hash:'4892',time:'Aug 05 12:09',title:'perf: dataloader prefetch',author:'chen-w',concurrent:2,o:{'cpu-pre-u':{r:14}}},
-    {hash:'4890',time:'Aug 04 09:55',title:'feat: expert parallel routing',author:'alex-k',concurrent:3,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
-    {hash:'4888',time:'Aug 03 14:36',title:'ci: runner image refresh',author:'ops-bot',concurrent:5,o:{'tpu-pre-u':{q:8},'tpu-pre-i':{q:9},'tpu-post-u':{q:8},'tpu-post-i':{q:8}}},
-    {hash:'4886',time:'Aug 01 11:02',title:'fix: ring attention multihost sync',author:'sara-m',concurrent:2,status:'flaky',attempts:2,o:{'tpu-pre-u':{st:'flaky'}}},
-    {hash:'4884',time:'Jul 31 17:40',title:'feat: a100 bf16 convergence test',author:'alex-k',concurrent:2,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
-    {hash:'4882',time:'Jul 29 10:15',title:'chore: deps bump',author:'chen-w',concurrent:1,o:{}},
-    {hash:'4880',time:'Jul 28 15:22',title:'fix: checkpoint restore sharded',author:'alex-k',concurrent:2,o:{}},
-    {hash:'4878',time:'Jul 26 09:47',title:'test: pathways integration coverage',author:'sara-m',concurrent:2,o:{'tpu-pw-i':{r:12}}},
-    {hash:'4876',time:'Jul 24 13:58',title:'perf: xla flags',author:'chen-w',concurrent:1,o:{}},
-    {hash:'4874',time:'Jul 23 10:31',title:'chore: initial ci pipeline tune',author:'ops-bot',concurrent:2,o:{}},
+    {hash:'4906',time:'Aug 14 11:20',title:'fix: pathways heartbeat retry',concurrent:2,o:{}},
+    {hash:'4904',time:'Aug 12 15:44',title:'feat: moe expert parallel bf16',concurrent:3,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
+    {hash:'4902',time:'Aug 10 09:31',title:'ci: add decoupled cpu-unit pass',concurrent:2,o:{'cpu-pre-u':{r:9}}},
+    {hash:'4900',time:'Aug 09 17:05',title:'refactor: test discovery markers',concurrent:1,o:{'tpu-pre-u':{r:26},'gpu-u':{r:2}}},
+    {hash:'4898',time:'Aug 08 13:12',title:'feat: pathways multi-slice',concurrent:4,status:'flaky',attempts:2,o:{'tpu-pw-i':{st:'flaky',q:6}}},
+    {hash:'4896',time:'Aug 07 10:48',title:'fix: flash attention backward',concurrent:2,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
+    {hash:'4894',time:'Aug 06 16:27',title:'docs: sharding guide',concurrent:1,o:{}},
+    {hash:'4892',time:'Aug 05 12:09',title:'perf: dataloader prefetch',concurrent:2,o:{'cpu-pre-u':{r:14}}},
+    {hash:'4890',time:'Aug 04 09:55',title:'feat: expert parallel routing',concurrent:3,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
+    {hash:'4888',time:'Aug 03 14:36',title:'ci: runner image refresh',concurrent:5,o:{'tpu-pre-u':{q:8},'tpu-pre-i':{q:9},'tpu-post-u':{q:8},'tpu-post-i':{q:8}}},
+    {hash:'4886',time:'Aug 01 11:02',title:'fix: ring attention multihost sync',concurrent:2,status:'flaky',attempts:2,o:{'tpu-pre-u':{st:'flaky'}}},
+    {hash:'4884',time:'Jul 31 17:40',title:'feat: a100 bf16 convergence test',concurrent:2,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
+    {hash:'4882',time:'Jul 29 10:15',title:'chore: deps bump',concurrent:1,o:{}},
+    {hash:'4880',time:'Jul 28 15:22',title:'fix: checkpoint restore sharded',concurrent:2,o:{}},
+    {hash:'4878',time:'Jul 26 09:47',title:'test: pathways integration coverage',concurrent:2,o:{'tpu-pw-i':{r:12}}},
+    {hash:'4876',time:'Jul 24 13:58',title:'perf: xla flags',concurrent:1,o:{}},
+    {hash:'4874',time:'Jul 23 10:31',title:'chore: initial ci pipeline tune',concurrent:2,o:{}},
   ];
   const probeBump={'4888':{tpu:11,gpu:3,cpu:1}};
   older.forEach((c,k)=>{
@@ -387,7 +345,7 @@ const TIMES={'4908':'Aug 20 12:04','4910':'Aug 20 08:03','4912':'Aug 19 23:41','
       const ov=c.o[j.id]||(c.o[j.id]={});
       if(ov.r===undefined&&ov.st!=='fail'){const wob=((seed*7+ji*13)%11)-5;ov.r=+(j.b.r*(1+wob/60)).toFixed(1)}  // +/-8% around the job's usual run time
     });
-    COMMITS.push({hash:c.hash,pr:'#'+c.hash,title:c.title,author:c.author,status:c.status||'pass',attempts:c.attempts||1,concurrent:c.concurrent,o:c.o});
+    COMMITS.push({hash:c.hash,pr:'#'+c.hash,title:c.title,status:c.status||'pass',attempts:c.attempts||1,concurrent:c.concurrent,o:c.o});
     TIMES[c.hash]=c.time;
     RUN_IDS[c.hash]=39100000000-(k+1)*2137000;  // older runs carry smaller ids than every run above
     TRIGGERS[c.hash]='pull_request';
@@ -436,80 +394,6 @@ function getWindows(){
 }
 
 // ============ TIME BUDGET (overhead summary) ============
-function renderBudget(){
-  const host=$('#budget');if(!host)return;
-  const w=getWindows();
-  const recent=w.current;
-  if(!recent.length){host.innerHTML=`<div class="dtile" style="grid-column:1/-1"><div class="dtile-name">Time budget</div><div style="font-size:13px;color:var(--ink2)">No merged pull requests fall inside this date range.</div></div>`;return}
-  // Compute average time budget across recent commits
-  let totIdle=0,totOverhead=0,totTest=0,totAll=0,totBuild=0,totImg=0;
-  recent.forEach(c=>{
-    const jobs=allJobs(c);
-    const testJobs=jobs.filter(j=>['tpu','gpu','cpu'].includes(j.cat));
-    // Idle = max queue across test jobs (wall-clock queue wait)
-    const idle=testJobs.length?Math.max(...testJobs.map(j=>j.q)):0;
-    // Build = Build Package total (sequential phase)
-    const buildJobs=jobs.filter(j=>j.cat==='infra'||j.cat==='build');
-    const buildTime=Math.max(...buildJobs.map(j=>j.total()));
-    // Docker + setup overhead per job (setup time minus test time)
-    const setupOverhead=testJobs.reduce((s,j)=>s+j.s,0)/Math.max(testJobs.length,1);
-    const imgOverhead=testJobs.reduce((s,j)=>s+j.s*(DOCKER_FRAC[j.cat]!==undefined?DOCKER_FRAC[j.cat]:0.5),0)/Math.max(testJobs.length,1);
-    const overhead=buildTime+setupOverhead;
-    // Test execution = max test job run time
-    const testTime=testJobs.length?Math.max(...testJobs.map(j=>j.r)):0;
-    const total=overhead+idle+testTime;
-    totIdle+=idle;totOverhead+=overhead;totTest+=testTime;totAll+=total;totBuild+=buildTime;totImg+=imgOverhead;
-  });
-  const n=recent.length||1;
-  const aIdle=+(totIdle/n).toFixed(1);
-  const aOver=+(totOverhead/n).toFixed(1);
-  const aBuildOv=+(totBuild/n).toFixed(1);
-  const aImgOv=+(totImg/n).toFixed(1);
-  const aEnvOv=+(aOver-aBuildOv-aImgOv).toFixed(1);
-  const aTest=+(totTest/n).toFixed(1);
-  const aAll=+(totAll/n).toFixed(1);
-  const pIdle=aAll>0?Math.round(aIdle/aAll*100):0;
-  const pOver=aAll>0?Math.round(aOver/aAll*100):0;
-  const pTest=aAll>0?Math.round(aTest/aAll*100):0;
-
-  // Baseline comparison
-  const bl=w.baseline;
-  let blTest=0,blAll=0;
-  bl.forEach(c=>{
-    const jobs=allJobs(c);
-    const testJobs=jobs.filter(j=>['tpu','gpu','cpu'].includes(j.cat));
-    const idle=testJobs.length?Math.max(...testJobs.map(j=>j.q)):0;
-    const buildJobs=jobs.filter(j=>j.cat==='infra'||j.cat==='build');
-    const buildTime=Math.max(...buildJobs.map(j=>j.total()));
-    const setupOverhead=testJobs.reduce((s,j)=>s+j.s,0)/Math.max(testJobs.length,1);
-    const testTime=testJobs.length?Math.max(...testJobs.map(j=>j.r)):0;
-    blAll+=buildTime+setupOverhead+idle+testTime;blTest+=testTime;
-  });
-  const bn=bl.length||1;
-  const blEfficiency=blAll>0?Math.round((blTest/bn)/((blAll/bn))*100):0;
-  const curEfficiency=aAll>0?Math.round(aTest/aAll*100):0;
-  const effDelta=curEfficiency-blEfficiency;
-
-  const peakIdle=Math.max(...recent.map(c=>{const tj=allJobs(c).filter(j=>['tpu','gpu','cpu'].includes(j.cat));return tj.length?Math.max(...tj.map(j=>j.q)):0}));
-  const items=[
-    {label:'Total wall-clock',val:aAll+'m avg',sub:'Average over '+recent.length+' merged pull request'+(recent.length===1?'':'s')+' '+w.inRange+'.',color:'var(--ink)',pct:null},
-    {label:'Idle',val:aIdle+'m avg',sub:pIdle+'% · queue wait (peak: '+peakIdle+'m)',color:'var(--q)',pct:pIdle},
-    {label:'Overhead',val:aOver+'m avg',sub:pOver+'% · build '+aBuildOv+'m + image pull '+aImgOv+'m + env setup '+aEnvOv+'m',color:'var(--bld)',pct:pOver},
-    {label:'Testing',val:aTest+'m avg',sub:pTest+'% · pytest execution',color:'var(--good)',pct:pTest},
-  ];
-
-  host.innerHTML=items.map((it,i)=>{
-    const bar=it.pct!==null?`<div style="display:flex;height:4px;border-radius:2px;background:var(--elevated);margin-top:6px;overflow:hidden"><div style="width:${it.pct}%;background:${it.color};border-radius:2px"></div></div>`:'<div style="display:flex;height:4px;border-radius:2px;background:var(--elevated);margin-top:6px;overflow:hidden"><div style="width:${pIdle}%;background:var(--q)"></div><div style="width:${pOver}%;background:var(--bld)"></div><div style="width:${pTest}%;background:var(--good)"></div></div>';
-    const trend=i===3?(bl.length>=3?`<div style="font-size:12px;margin-top:4px;color:var(--ink2)">Tests took ${aTest} of ${aAll} minutes per run; in the ${w.days} day${w.days===1?'':'s'} before this range they took ${(blTest/bn).toFixed(1)} of ${(blAll/bn).toFixed(1)} (${bl.length} merged pull requests).</div>`:`<div style="font-size:12px;margin-top:4px;color:var(--muted)">${bl.length?'Only '+bl.length:'No'} merged pull request${bl.length===1?'':'s'} in the ${w.days} day${w.days===1?'':'s'} before this range, so there is nothing to compare against yet.</div>`):'';
-    return`<div class="dtile">
-<div class="dtile-name">${it.label}</div>
-<div class="dtile-val" style="color:${it.color};font-size:20px">${it.val}</div>
-<div style="font-size:12px;color:var(--muted)">${it.sub}</div>
-${bar}${trend}
-</div>`;
-  }).join('');
-}
-
 // Navigate to a commit: open its modal
 function goToCommit(hash){
   const ci=COMMITS.findIndex(c=>c.hash===hash);
@@ -521,9 +405,6 @@ function goToCommit(hash){
   openModal(COMMITS[ci],ci,wcsAll,median);
 }
 // Clickable commit link HTML
-function commitLink(hash,label){
-  return`<a href="#" onclick="event.preventDefault();goToCommit('${hash}')" style="color:var(--accent);text-decoration:none;font-family:var(--mono);font-size:13px;cursor:pointer">${label||'#'+hash}</a>`;
-}
 // X-axis label for one merged pull request: the hash is a link to the pull request on GitHub
 // (new tab, marked with the same arrow as every other external link); the merge date and time
 // sit on two lines beneath it. Used by both bar charts.
@@ -605,6 +486,25 @@ function jd(commit,jobId){
 }
 function allJobs(c){return JOBS.map(j=>jd(c,j.id))}
 
+// The runs-on label each job asks for, and the runner pools that answer it. Measured from
+// runs 33468578834, 33465601432 and 33462758754 on 2026-09-01. The label is fixed per job;
+// the pool varies run to run, which is why one job can wait while its neighbour does not.
+const RUNNER_LABELS={
+  'analyze':'ubuntu-latest','quality':'ubuntu-latest','docs':'ubuntu-latest','gate':'ubuntu-latest',
+  'pkg':'linux-x86-n2-16-buildkit',
+  'tpu-pre-u':'linux-x86-ct6e-180-4tpu','tpu-pre-i':'linux-x86-ct6e-180-4tpu',
+  'tpu-post-u':'linux-x86-ct6e-180-4tpu','tpu-post-i':'linux-x86-ct6e-180-4tpu',
+  'tpu-pw-u1':'linux-x86-ct6e-180-4tpu','tpu-pw-u2':'linux-x86-ct6e-180-4tpu',
+  'tpu-pw-i':'linux-x86-ct6e-180-4tpu',
+  'gpu-u':'linux-x86-a2-48-a100-4gpu','gpu-i':'linux-x86-a2-48-a100-4gpu',
+  'cpu-pre-u':'linux-x86-n2-32','cpu-pre-i':'linux-x86-n2-32',
+  'cpu-post-u':'linux-x86-n2-32','cpu-post-i':'linux-x86-n2-32'};
+// One machine type per device, read off that device's jobs rather than hard-coded, so a
+// mock change cannot silently make this lie.
+function machineOfCat(cat){
+  const j=JOBS.find(x=>x.cat===cat);
+  return j?(RUNNER_LABELS[j.id]||''):'';
+}
 function wallClock(c,hwFilter){
   const hw=hwFilter||'all';
   const jobs=allJobs(c);
@@ -628,43 +528,17 @@ function wallClock(c,hwFilter){
     if(catMax.cpu>catMax.tpu&&catMax.cpu>catMax.gpu)bottleneck='cpu';
     return{build:buildTime,queue:maxQ,tests:testTime-maxQ,total:buildTime+testTime,bottleneck,catMax,catQueue,catSetup,catRun};
   }
-  // Filtered: show only the selected device lane
+  // Filtered: one device lane, but the run still starts with the package build, and a device
+  // that ran nothing still waited for a runner. Both are real elapsed time, so the bar stays.
   const filteredJobs=jobs.filter(j=>j.cat===hw);
-  if(!filteredJobs.length||filteredJobs.every(j=>j.r===0)){
-    return{build:buildTime,queue:0,tests:0,total:buildTime,bottleneck:hw,catMax,empty:true};
-  }
-  const maxFiltered=Math.max(...filteredJobs.map(j=>j.total()));
-  const maxQ=Math.max(...filteredJobs.map(j=>j.q));
-  return{build:buildTime,queue:maxQ,tests:maxFiltered-maxQ,total:buildTime+maxFiltered,bottleneck:hw,catMax};
+  const noTests=!filteredJobs.length||filteredJobs.every(j=>j.r===0);
+  const maxFiltered=filteredJobs.length?Math.max(...filteredJobs.map(j=>j.total())):0;
+  const maxQ=filteredJobs.length?Math.max(...filteredJobs.map(j=>j.q)):0;
+  return{build:buildTime,queue:maxQ,tests:maxFiltered-maxQ,total:buildTime+maxFiltered,
+    bottleneck:hw,catMax,catQueue,catSetup,catRun,noTests};
 }
 
 // ============ DEVICE TILES ============
-function renderTiles(){
-  const host=$('#dtiles');
-  const dw=getWindows();const tileCommits=dw.current;
-  if(!tileCommits.length){host.innerHTML=`<div class="dtile" style="grid-column:1/-1"><div class="dtile-name">Runner wait</div><div style="font-size:13px;color:var(--ink2)">No merged pull requests fall inside this date range.</div></div>`;return}
-  const pools=[
-    {name:'TPU',lane:'tpu',color:'var(--tpu)',ids:JOBS.filter(j=>j.cat==='tpu').map(j=>j.id)},
-    {name:'GPU',lane:'gpu',color:'var(--gpu)',ids:JOBS.filter(j=>j.cat==='gpu').map(j=>j.id)},
-    {name:'CPU',lane:'cpu',color:'var(--cpu)',ids:JOBS.filter(j=>j.cat==='cpu').map(j=>j.id)},
-  ];
-  host.innerHTML=pools.map(p=>{
-    const queueVals=tileCommits.flatMap(c=>p.ids.map(id=>jd(c,id).q));
-    const avg=+(queueVals.reduce((a,b)=>a+b,0)/queueVals.length).toFixed(1);
-    const peak=Math.max(...queueVals);
-    const lastC=tileCommits[0];  // newest merged PR in range (COMMITS is newest-first)
-    const lastOk=p.ids.every(id=>jd(lastC,id).status==='pass');
-    const alert=peak>10||!lastOk;
-    const dot=!lastOk?'var(--crit)':peak>10?'var(--warn)':'var(--good)';
-    const dim=HW!=='all'&&HW!==p.lane;
-    return`<div class="dtile ${alert?'alert':''}" style="opacity:${dim?0.3:1}">
-      <div class="dtile-head"><span class="dtile-name">${p.name}</span><span class="sdot" style="background:${dot}"></span></div>
-      <div class="dtile-val" style="color:${dot}">${avg}<small style="font-size:13px;color:var(--muted)"> min avg wait per job</small></div>
-      <div class="dtile-row"><span>peak: ${peak}m</span><span style="color:var(--muted)">${tileCommits.length} merged pull request${tileCommits.length===1?'':'s'} ${dw.inRange}</span></div>
-    </div>`;
-  }).join('');
-}
-
 // ============ TIMELINE ============
 // Brush-zoom state: null = all commits; {a,b} = inclusive index range into COMMITS
 let TL_ZOOM=null;
@@ -676,7 +550,6 @@ function tlZoomOut(){
   renderTimeline();
 }
 function tlZoomReset(){TL_ZOOM=null;renderTimeline()}
-function tlZoomTo(a,b){const n=getWindows().current.length;TL_ZOOM={a:Math.max(0,a),b:Math.min(n-1,b)};renderTimeline()}
 function renderTimeline(){
   const host=$('#timeline');host.innerHTML='';
   const ns='http://www.w3.org/2000/svg';
@@ -745,7 +618,7 @@ function renderTimeline(){
     const isReg=trailingMed!==null&&wc.total>trailingMed*1.15&&(wc.total-trailingMed)>3;
     const isFail=c.status==='fail';
     const isFlaky=c.status==='flaky';
-    const isEmpty=wc.empty;
+    const isEmpty=false;  // the bar always draws; a device with no tests still shows build and wait
 
     // Device columns per commit — each stacks its own full timeline from zero:
     // build (shared start) → queue → image pull → env setup → test run
@@ -759,7 +632,7 @@ function renderTimeline(){
         const ds=wc.catSetup?wc.catSetup[cat]||0:0;
         const dr=wc.catRun?wc.catRun[cat]||0:0;
         const dTotal=dq+ds+dr;
-        if(dTotal<=0)return;
+        if(dTotal<=0&&wc.build<=0.5)return;  // nothing at all to draw for this lane
         let cy=0;
         // Build package segment at the base of every lane (the run starts with it)
         if(wc.build>0.5){
@@ -953,7 +826,7 @@ function showTip(c,ci,wcs,med,e){
   const tpuCount=tpuJobs.length,gpuCount=gpuJobs.length,cpuCount=cpuJobs.length;
 
   tip.innerHTML=`<div class="th">${c.pr} ${c.title}</div>
-<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${c.author} · ${c.attempts>1?c.attempts+' attempts · ':''}${c.concurrent} pipeline runs overlapped it</div>
+<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${c.attempts>1?c.attempts+' attempts · ':''}${c.concurrent} pipeline runs overlapped it</div>
 <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
 <span style="font-size:13px;color:var(--ink2)">Wall-clock time</span>
 <span class="tv" style="font-size:16px;font-weight:700">${Math.round(wc.total)}m</span>
@@ -967,9 +840,9 @@ function showTip(c,ci,wcs,med,e){
 <div class="trow"><span style="color:var(--q)">■ Queue wait</span><span class="tv">${wc.queue}m</span></div>
 <div style="border-top:1px solid var(--grid);margin:4px 0;padding-top:4px"></div>
 <div style="font-size:12px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Test execution (parallel)</div>
-<div class="trow"><span style="color:var(--tpu)">■ TPU <span style="color:var(--muted)">(${tpuCount} jobs)</span></span><span class="tv">${Math.round(wc.catMax.tpu)}m</span></div>
-<div class="trow"><span style="color:var(--gpu)">■ GPU <span style="color:var(--muted)">(${gpuCount} jobs)</span></span><span class="tv">${Math.round(wc.catMax.gpu)}m</span></div>
-<div class="trow"><span style="color:var(--cpu)">■ CPU <span style="color:var(--muted)">(${cpuCount} jobs)</span></span><span class="tv">${Math.round(wc.catMax.cpu)}m</span></div>
+<div class="trow"><span style="color:var(--tpu)">■ TPU <span style="color:var(--muted)">(${tpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${machineOfCat('tpu')}</span></span><span class="tv">${Math.round(wc.catMax.tpu)}m</span></div>
+<div class="trow"><span style="color:var(--gpu)">■ GPU <span style="color:var(--muted)">(${gpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${machineOfCat('gpu')}</span></span><span class="tv">${Math.round(wc.catMax.gpu)}m</span></div>
+<div class="trow"><span style="color:var(--cpu)">■ CPU <span style="color:var(--muted)">(${cpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${machineOfCat('cpu')}</span></span><span class="tv">${Math.round(wc.catMax.cpu)}m</span></div>
 <div style="font-size:12px;color:var(--muted);margin-top:4px">Bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span> — sets the run time</div>
 <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid var(--grid)">
 <div style="display:flex;gap:8px">
@@ -1012,7 +885,7 @@ function openModal(c,ci,wcs,med){
   catOrder.forEach(cat=>{
     const catJobs=jobs.filter(j=>j.cat===cat);
     if(!catJobs.length)return;
-    const catHeadHtml=`<tr><td colspan="9" class="cat-head">${catNames[cat]} (${catJobs.length} jobs)</td></tr>`;
+    const catHeadHtml=`<tr><td colspan="10" class="cat-head">${catNames[cat]} (${catJobs.length} jobs)</td></tr>`;
     jobHeads[cat]=catHeadHtml;
     tableRows+=catHeadHtml;
     catJobs.forEach(j=>{
@@ -1096,6 +969,7 @@ function openModal(c,ci,wcs,med){
       const jobHtml=`<tr style="opacity:${dim?0.25:1};cursor:pointer" onclick="const x=document.getElementById('${rid}');x.style.display=x.style.display==='none'?'block':'none';this.querySelector('.xarr').textContent=x.style.display==='none'?'▸':'▾'">
 <td style="font-size:13px;max-width:300px;min-width:220px;white-space:normal;line-height:1.25;padding-right:6px" title="${j.name}"><span class="xarr" style="color:var(--muted);margin-right:4px">▸</span><strong>${j.name}</strong></td>
 <td><span style="color:${lc};font-weight:600;font-size:13px">${j.lane}</span></td>
+<td class="mono" style="font-size:12px;color:var(--ink2);white-space:nowrap">${RUNNER_LABELS[j.id]||'&mdash;'}</td>
 <td class="mono" style="font-size:13px">${j.q}m</td>
 <td class="mono" style="font-size:13px">${sImg}m</td>
 <td class="mono" style="font-size:13px">${sEnv}m</td>
@@ -1103,7 +977,7 @@ function openModal(c,ci,wcs,med){
 <td class="mono" style="font-size:13px;font-weight:700">${t.toFixed(1)}m</td>
 <td style="min-width:100px"><div class="wf-track"><div class="wf-seg" style="width:${qP}%;background:var(--q)"></div><div class="wf-seg" style="width:${iP}%;background:var(--bld);opacity:0.55"></div><div class="wf-seg" style="width:${eP}%;background:var(--bld);opacity:0.28"></div><div class="wf-seg" style="width:${rP}%;background:${lc}"></div></div></td>
 <td><span class="chip ${sChp}">${j.status.toUpperCase()}</span></td>
-</tr><tr style="opacity:${dim?0.25:1}"><td colspan="9" style="padding:0">${stepHtml}</td></tr>`;
+</tr><tr style="opacity:${dim?0.25:1}"><td colspan="10" style="padding:0">${stepHtml}</td></tr>`;
       tableRows+=jobHtml;
       jobUnits.push({cat:cat,vals:{q:j.q,img:sImg,env:sEnv,r:j.r,total:t},html:jobHtml});
       jobIdx++;
@@ -1116,14 +990,14 @@ function openModal(c,ci,wcs,med){
   $('#modal').innerHTML=`<div class="modal-head"><div>
 <h2>${c.pr} ${c.title}</h2>
 <div class="sub">
-${c.author} · ${stChip} · <span class="mono">${Math.round(wc.total)}m total</span> · ${delta>0?'+':''}${delta}m vs median · ${c.concurrent} pipeline runs overlapped it · bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span>
+${stChip} · <span class="mono">${Math.round(wc.total)}m total</span> · ${delta>0?'+':''}${delta}m vs median · ${c.concurrent} pipeline runs overlapped it · bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span>
 <br><span style="color:var(--muted)">${trigger==='pull_request'?'Run of a merged pull request':'Scheduled run'} · ${time} (${ago}) · run #${runId}</span>
 </div>
 <div style="display:flex;gap:8px;margin-top:6px">
 <a href="${runUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">View run ↗</a>
 <a href="${prUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">PR ${c.pr} ↗</a>
 <a href="${commitUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">Commit ↗</a>
-<a href="#" onclick="event.preventDefault();inspectPR('${c.hash}')" style="font-size:13px;color:#090D16;background:var(--accent);text-decoration:none;font-weight:700;padding:3px 8px;border-radius:5px">Inspect this PR</a>
+
 </div>
 </div><button class="modal-close" onclick="closeModal()">✕</button></div>
 <div class="modal-body">
@@ -1138,7 +1012,7 @@ ${c.author} · ${stChip} · <span class="mono">${Math.round(wc.total)}m total</s
 <span style="flex-basis:100%;font-size:12px;color:var(--muted)">Jobs that take only seconds are not listed: the ten Setup Parameters jobs, All Required Tests Passed, All Notebooks Passed, Notify failed build and Track Test Performance. Click a job row to expand its steps. Sorting keeps the category headings and orders the jobs inside each one. Click Queue, Image, Env, Run, or Total to sort the jobs by that time, longest first; click again for shortest first. Click the Job header to restore the grouped order.</span>
 </div>
 <table>
-<thead><tr>${jtTh(jid,'','Job','','Restore the grouped order')}<th>Lane</th>${jtTh(jid,'q','Queue','','Sort by queue wait')}${jtTh(jid,'img','Image','','Sort by image pull time')}${jtTh(jid,'env','Env','','Sort by environment setup time')}${jtTh(jid,'r','Run','','Sort by run time')}${jtTh(jid,'total','Total','','Sort by total time')}<th>Waterfall</th><th>Status</th></tr></thead>
+<thead><tr>${jtTh(jid,'','Job','','Restore the grouped order')}<th>Lane</th><th>Machine</th>${jtTh(jid,'q','Queue','','Sort by queue wait')}${jtTh(jid,'img','Image','','Sort by image pull time')}${jtTh(jid,'env','Env','','Sort by environment setup time')}${jtTh(jid,'r','Run','','Sort by run time')}${jtTh(jid,'total','Total','','Sort by total time')}<th>Waterfall</th><th>Status</th></tr></thead>
 <tbody id="${jid}-body">${tableRows}</tbody></table></div>`;
 
   $('#overlay').classList.add('on');
@@ -1148,125 +1022,6 @@ function closeModal(){$('#overlay').classList.remove('on');document.body.style.o
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 
 // ============ CAUSE ATTRIBUTION ============
-function renderCause(){
-  const host=$('#cause');if(!host)return;
-  const w=getWindows();
-  const recent=w.current,baseline=w.baseline;
-  const hasBase=baseline.length>=3;
-  const cm=$('#cause-meta');
-  if(!recent.length){if(cm)cm.innerHTML=`<div style="font-size:13px;color:var(--ink2);margin-bottom:4px">This chart shows which phase of a run — and which device's tests — grew or shrank lately.</div>`;host.innerHTML=`<div style="font-size:13px;color:var(--ink2);padding:8px 0">No merged pull requests fall inside this date range.</div>`;return}
-  if(cm)cm.innerHTML=`<div style="font-size:13px;color:var(--ink2);margin-bottom:4px">This chart shows which phase of a run — and which device's tests — grew or shrank lately.</div><span class="mono">Average minutes per run over the ${recent.length} merged pull requests ${w.inRange}${hasBase?`, compared with the ${baseline.length} merged in the ${w.days} day${w.days===1?'':'s'} before`:''} · sorted by largest change</span>${hasBase?'':`<div style="font-size:12px;color:var(--muted);margin-top:3px">${baseline.length?'Only '+baseline.length:'No'} merged pull request${baseline.length===1?'':'s'} in the ${w.days} day${w.days===1?'':'s'} before this range, so nothing is compared yet; the bars show this range on its own.</div>`}`;
-  // Per-device queue job IDs
-  const QUEUE_POOLS={tpu:JOBS.filter(j=>j.cat==='tpu').map(j=>j.id),gpu:JOBS.filter(j=>j.cat==='gpu').map(j=>j.id),cpu:JOBS.filter(j=>j.cat==='cpu').map(j=>j.id)};
-  const cats=[
-    {key:'tpu',name:'TPU tests (longest job)',color:'var(--tpu)'},
-    {key:'gpu',name:'GPU tests (longest job)',color:'var(--gpu)'},
-    {key:'cpu',name:'CPU tests (longest job)',color:'var(--cpu)'},
-    {key:'q-tpu',name:'TPU queue wait',color:'var(--tpu)',isQueue:true,pool:'tpu'},
-    {key:'q-gpu',name:'GPU queue wait',color:'var(--gpu)',isQueue:true,pool:'gpu'},
-    {key:'q-cpu',name:'CPU queue wait',color:'var(--cpu)',isQueue:true,pool:'cpu'},
-    {key:'img',name:'Image pull (slowest lane)',color:'var(--bld)'},
-    {key:'env',name:'Env setup (slowest lane)',color:'var(--bld)'},
-    {key:'docker',name:'Build job setup',color:'var(--bld)'},
-  ];
-  // Image-pull / env-setup minutes on the lane that sets the finish time
-  const setupSplit=(c,part)=>{
-    const wc=wallClock(c);const bn=wc.bottleneck;
-    const s=wc.catSetup?wc.catSetup[bn]||0:0;
-    const f=DOCKER_FRAC[bn]!==undefined?DOCKER_FRAC[bn]:0.5;
-    return part==='img'?s*f:s*(1-f);
-  };
-  const data=cats.map(cat=>{
-    const rVals=recent.map(c=>{
-      if(cat.isQueue){return Math.max(...QUEUE_POOLS[cat.pool].map(id=>jd(c,id).q))}
-      if(cat.key==='img'||cat.key==='env'){return setupSplit(c,cat.key)}
-      if(cat.key==='docker'){return jd(c,'pkg').s}
-      const wc=wallClock(c);return wc.catMax[cat.key]||0;
-    });
-    const bVals=baseline.map(c=>{
-      if(cat.isQueue){return Math.max(...QUEUE_POOLS[cat.pool].map(id=>jd(c,id).q))}
-      if(cat.key==='img'||cat.key==='env'){return setupSplit(c,cat.key)}
-      if(cat.key==='docker'){return jd(c,'pkg').s}
-      const wc=wallClock(c);return wc.catMax[cat.key]||0;
-    });
-    const rAvg=rVals.reduce((a,b)=>a+b,0)/rVals.length;
-    const bAvg=bVals.length?bVals.reduce((a,b)=>a+b,0)/bVals.length:rAvg;
-    const delta=+(rAvg-bAvg).toFixed(1);
-    const pct=bAvg>0?Math.round(delta/bAvg*100):0;
-    return{...cat,avg:+rAvg.toFixed(1),delta,pct};
-  }).sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta));
-
-  // Data-derived reason notes per category
-  // Find the commit with the worst value for a category
-  function worstCommitFor(key,cat){
-    let worst=null,worstVal=0;
-    recent.forEach(c=>{
-      let v=0;
-      if(cat&&cat.isQueue){v=Math.max(...QUEUE_POOLS[cat.pool].map(id=>jd(c,id).q))}
-      else if(key==='queue'){const wc=wallClock(c);v=wc.queue}
-      else if(key==='img'||key==='env'){v=setupSplit(c,key)}
-      else if(key==='docker'){v=jd(c,'pkg').s}
-      else{const wc=wallClock(c);v=wc.catMax[key]||0}
-      if(v>worstVal){worstVal=v;worst=c}
-    });
-    return worst;
-  }
-
-  function causeReason(cat,delta,pct){
-    if(Math.abs(delta)<1)return'';
-    const wc=worstCommitFor(cat.key,cat);
-    const wcLink=wc?commitLink(wc.hash):'';
-    if(cat.key==='queue'||cat.isQueue){
-      const maxConc=Math.max(...recent.map(c=>c.concurrent));
-      if(delta>3&&maxConc>=4)return'Up to '+maxConc+' pipeline runs overlapped in this window — worst: '+wcLink;
-      if(delta>2)return'Runner pool contention — worst: '+wcLink;
-      if(delta<-2)return'Queue times improving';
-      return'';
-    }
-    if(cat.key==='tpu'){
-      const recentUnit=recent.map(c=>jd(c,'tpu-pre-u').r);
-      const baseUnit=baseline.map(c=>jd(c,'tpu-pre-u').r);
-      const rAvgU=recentUnit.reduce((a,b)=>a+b,0)/recentUnit.length;
-      const bAvgU=baseUnit.length?baseUnit.reduce((a,b)=>a+b,0)/baseUnit.length:rAvgU;
-      if(rAvgU-bAvgU>3)return'tpu-unit regression (+'+Math.round(rAvgU-bAvgU)+'m) — started at '+wcLink;
-      if(delta>2)return'TPU test execution growing — worst: '+wcLink;
-      return'';
-    }
-    if(cat.key==='gpu'){
-      const hasFlaky=recent.some(c=>jd(c,'gpu-i').status==='flaky');
-      const flakyC=recent.find(c=>jd(c,'gpu-i').status==='flaky');
-      if(hasFlaky&&flakyC)return'gpu-integration flaky retries — '+commitLink(flakyC.hash);
-      if(delta>2)return'GPU test execution growing — worst: '+wcLink;
-      return'';
-    }
-    if(cat.key==='cpu'){
-      if(delta>2)return'CPU test suite expanding — worst: '+wcLink;
-      return'';
-    }
-    if(cat.key==='img'){
-      if(delta>1)return'Image pull took longer — worst: '+wcLink;
-      if(delta<-1)return'Image pulls getting faster';
-      return'';
-    }
-    if(cat.key==='env'){
-      if(delta>1)return'Dependency install growing — worst: '+wcLink;
-      return'';
-    }
-    return'';
-  }
-
-  const mx=Math.max(...data.map(d=>d.avg));
-  host.innerHTML='<div class="cause-row" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;padding:2px 8px"><div>CI phase</div><div>Avg per run</div><div style="text-align:right">Δ per run</div><div style="text-align:right">now · before</div></div>'+data.map(d=>{
-    const p=(d.avg/mx*100).toFixed(0);
-    const cls=d.pct>25?'delta-bad':d.pct>5?'delta-warn':d.delta<=0?'delta-good':'delta-flat';
-    const reason=causeReason(d,d.delta,d.pct);
-    return`<div class="cause-row"><div style="font-weight:600;display:flex;align-items:center;gap:8px;font-size:14px"><span style="color:${d.color}">■</span><div>${d.name}${reason?'<div style="font-size:12px;font-weight:400;color:var(--muted);margin-top:1px">'+reason+'</div>':''}</div></div>
-<div style="background:var(--elevated);height:12px;border-radius:4px;overflow:hidden"><div style="height:100%;width:${p}%;background:${d.color};border-radius:4px"></div></div>
-${hasBase?`<div class="mono" style="font-size:14px;text-align:right">${d.delta>0?'+':''}${d.delta}m</div>
-<div class="delta-chip ${cls}">now ${d.avg.toFixed(1)}m · before ${(d.avg-d.delta).toFixed(1)}m</div>`:`<div class="mono" style="font-size:14px;text-align:right">${d.avg}m</div><div style="font-size:12px;color:var(--muted);text-align:right">no earlier runs to compare</div>`}</div>`;
-  }).join('');
-}
-
 // ============ TEST RUN TIME BY DEVICE ============
 let DEV_PHASE='run';
 let DEV_ZOOM=null;
@@ -1279,7 +1034,6 @@ const DEV_PHASES=[
 function setDevPhase(k){DEV_PHASE=k;renderDevLines()}
 function devZoomOut(){if(!DEV_ZOOM)return;const n=getWindows().current.length;DEV_ZOOM={a:Math.max(0,DEV_ZOOM.a-2),b:Math.min(n-1,DEV_ZOOM.b+2)};if(DEV_ZOOM.a===0&&DEV_ZOOM.b===n-1)DEV_ZOOM=null;renderDevLines()}
 function devZoomReset(){DEV_ZOOM=null;renderDevLines()}
-function devZoomTo(a,b){const n=getWindows().current.length;DEV_ZOOM={a:Math.max(0,Math.min(a,n-1)),b:Math.max(0,Math.min(b,n-1))};renderDevLines()}
 function devJobVal(j){
   if(DEV_PHASE==='run')return j.r;
   if(DEV_PHASE==='queue')return j.q;
@@ -1302,67 +1056,6 @@ function sumBlock(o){
 // combined-chart legend and the suite-health summary. rank: 0 = tests vanished ... 7 = steady.
 // Test suite health draws only the commits inside the header date range. THV is set by renderDashboard.
 let THV=null;
-function thView(c){
-  const ar=c.anomalyRange;
-  const a=ar&&ar[0]>=THV.i0&&ar[0]<=THV.i1?[ar[0]-THV.i0,Math.min(ar[1],THV.i1)-THV.i0]:null;  // crash before the range -> no ring; the summary says so instead
-  return{...c,data:c.data.slice(THV.i0,THV.i1+1),anomalyRange:a,pills:(c.pills||[]).filter(p=>p.idx>=THV.i0&&p.idx<=THV.i1),full:c};
-}
-function thSuiteRead(c){
-  const full=c.full||c;
-  const f0=c.data.find(d=>d.count!==null)||null;
-  const lv=[...c.data].reverse().find(d=>d.count!==null)||{count:0,dur:0,perTest:0,commitIdx:0};
-  const rep=c.data.filter(d=>d.dur!==null&&d.count>0);
-  const b8=rep.slice(0,Math.min(8,rep.length));
-  const ptB=b8.length?b8.reduce((a,d)=>a+d.perTest,0)/b8.length:0;
-  const ptN=rep.length?rep[rep.length-1].perTest:0;
-  const mean=rep.length?rep.reduce((a,d)=>a+d.perTest,0)/rep.length:0;
-  const cv=mean>0?Math.sqrt(rep.reduce((a,d)=>a+(d.perTest-mean)*(d.perTest-mean),0)/rep.length)/mean:0;
-  const cR=f0&&f0.count?lv.count/f0.count:1;
-  let pw='steady',pc='var(--muted)',rank=7,at=lv.commitIdx;
-  // from=8 skips the first-week baseline, so a noisy suite is dated at its first crossing AFTER the baseline
-  const firstAt=(pred,from=0)=>{const d=rep.slice(from).find(pred);return d?d.commitIdx:at};
-  const firstEver=full.data.find(d=>d.count!==null&&d.count>0)||null;
-  const preDrop=THV&&full!==c&&firstEver&&f0&&firstEver.commitIdx<THV.i0&&f0.count<=0.8*firstEver.count?firstEver.count:null;  // suite was already smaller before this range began
-  if(rep.length<8){const startedInRange=firstEver&&THV&&firstEver.commitIdx>THV.i0;pw=startedInRange?'new suite':'too few runs to compare';rank=4;at=rep.length?rep[0].commitIdx:at}
-  else if(cR<=0.5){pw='tests vanished';pc='var(--crit)';rank=0;at=firstAt(d=>d.count/f0.count<=0.5)}
-  else if(cR<=0.8){pw='tests trimmed';rank=1;at=firstAt(d=>d.count/f0.count<=0.8)}
-  else if(ptB>0&&ptN/ptB>=1.10){pw='tests got slower';pc='var(--warn)';rank=2;at=firstAt(d=>d.perTest/ptB>=1.10,8)}
-  else if(ptB>0&&ptN/ptB<=0.90){pw='tests got faster';pc='var(--accent)';rank=6;at=firstAt(d=>d.perTest/ptB<=0.90,8)}
-  else if(cv>=0.18){pw='unstable run times';pc='var(--warn)';rank=3;at=rep.reduce((b,d)=>Math.abs(d.perTest-mean)>Math.abs(b.perTest-mean)?d:b,rep[0]).commitIdx}
-  else if(cR>=1.2){pw='coverage growing';pc='var(--accent)';rank=5;at=firstAt(d=>d.count/f0.count>=1.2)}
-  return{pw,pc,rank,at,f0,lv,ptN,ptB,cv,cR,rep,first:rep[0]||null,last:rep[rep.length-1]||null,preDrop};
-}
-function renderTHSummary(cats){
-  const host=document.getElementById('thSummary');if(!host)return;
-  const fmtC=v=>v>=1000?(v/1000).toFixed(1).replace(/\.0$/,'')+'k':String(v);
-  const fmtS=v=>v>=10?v.toFixed(0)+'s':v>=1?v.toFixed(1)+'s':v.toFixed(2)+'s';
-  const reads=cats.map(c=>({c,r:thSuiteRead(c)})).filter(x=>x.r.first&&x.r.f0)
-    .sort((a,b)=>a.r.rank-b.r.rank||Math.abs(1-b.r.cR)-Math.abs(1-a.r.cR)||a.c.name.localeCompare(b.c.name));
-  const CAP=5,shown=reads.slice(0,CAP);
-  const nn=reads.filter(x=>x.c.nested).length;
-  const nS=`${reads.length-nn} suites in this view${nn?' (plus the decoupled pass inside cpu-unit)':''}`;
-  const floorN=reads.filter(x=>x.r.pw==='too few runs to compare').length;
-  const van=reads.filter(x=>x.r.rank===0).length,trim=reads.filter(x=>x.r.rank===1).length,slow=reads.filter(x=>x.r.rank===2).length,unst=reads.filter(x=>x.r.rank===3).length;
-  const toneOf=r=>r.pc==='var(--crit)'?'crit':r.pc==='var(--warn)'?'warn':r.pc==='var(--accent)'?'accent':'none';
-  const rows=shown.map(({c,r})=>{
-    const cm=TH_COMMITS[r.at];
-    return{tone:toneOf(r),onclick:`openTHDetail('${c.id}',${r.at})`,attrs:`data-thsum="${c.id}"`,cells:[
-      `<span style="display:inline-flex;align-items:center;gap:6px;color:var(--ink);font-weight:600"><span style="width:10px;height:10px;border-radius:3px;background:${c.color};display:inline-block;flex-shrink:0"></span>${c.name}${c.tag?` <span style="color:var(--muted);font-weight:400">(${c.tag})</span>`:''}</span>`,
-      `<span class="mono" style="color:var(--ink2)">${fmtC(r.f0.count)} &rarr; ${fmtC(r.lv.count)} tests &middot; ${fmtS(r.first.perTest)} &rarr; ${fmtS(r.last.perTest)} per test</span>`,
-      `<span style="color:${r.pc};font-weight:600">${r.pw}</span> <span class="mono" style="font-size:12px;color:var(--muted)">${(r.rank<=1?'since ':r.rank===3?'widest swing at ':r.rank===4?'first run ':r.rank===7?'latest ':'first seen at ')+cm.pr+' ('+cm.date+')'}</span>${r.preDrop?` <span class="mono" style="font-size:12px;color:var(--muted)">&middot; already down from ${fmtC(r.preDrop)} tests before this range</span>`:''}`]};
-  });
-  const parts=[];if(van)parts.push(`${van} lost most of their tests`);if(trim)parts.push(`${trim} ${trim===1?'was':'were'} trimmed`);if(slow)parts.push(`${slow} got slower per test`);if(unst)parts.push(`${unst} ${unst===1?'has':'have'} unstable run times`);
-  const lead=cats.length===1
-    ?'Only the suite you picked is listed.'
-    :(floorN===reads.length&&reads.length?`The range holds too few runs (fewer than 8 per suite) to compare the ${nS}; each row shows the suite's first and latest in-range run.`:parts.length?`Of the ${nS}, ${parts.join(', ')}.`:`None of the ${nS} lost tests or got slower.`);
-  const more=cats.length===1
-    ?'The numbers compare this suite\'s first and latest reported run in this view. Click the row to open its details at the commit where the change begins.'
-    :'Suites are ranked by what their numbers show: suites that lost tests first, then slower and unstable ones, steady suites last. The numbers compare each suite\'s first and latest reported run in this view. Click a suite to open its details at the commit where the change begins.';
-  host.innerHTML=sumBlock({key:'th',title:'Suites with the biggest change',lead,more,guide:'th-sum',guideKind:'table',rows,
-    cols:'minmax(170px,1fr) minmax(260px,1.4fr) minmax(200px,1fr)',head:['Suite','Tests and time per test, first &rarr; latest','What the numbers show'],
-    empty:'No suite has reported in this view yet.',
-    foot:reads.length>CAP?`${reads.length-CAP} more suite${reads.length-CAP===1?'':'s'} ${floorN===reads.length?'with too few runs to compare':'read steady or better'}; every suite is listed in the legend below.`:''});
-}
 function renderDevLines(){
   const host=$('#devlines');if(!host)return;
   const meta=$('#devlines-meta');
@@ -1542,7 +1235,7 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
 ${rows.map((r,ri)=>{
   const expand=HW==='all'||HW===r.key;
   return `<div style="display:flex;justify-content:space-between;gap:14px;padding:3px 0;border-top:1px solid var(--grid)">
-<span style="font-size:13px"><span style="color:${r.color};font-weight:700">${r.label}</span> <span style="font-size:11px;color:var(--muted)">${r.parts.length} jobs</span>${ri===0&&r.v>0?' <span style="font-size:11px;color:var(--warn)">sets the pace</span>':''}${r.failedOut?' <span style="font-size:11px;color:var(--crit)">no tests ran</span>':''}${r.anom?' <span style="font-size:11px;color:var(--warn)">above recent level</span>':''}</span>
+<span style="font-size:13px"><span style="color:${r.color};font-weight:700">${r.label}</span> <span style="font-size:12px;color:var(--muted)" class="mono">${machineOfCat(r.key)}</span> <span style="font-size:11px;color:var(--muted)">${r.parts.length} jobs</span>${ri===0&&r.v>0?' <span style="font-size:11px;color:var(--warn)">sets the pace</span>':''}${r.failedOut?' <span style="font-size:11px;color:var(--crit)">no tests ran</span>':''}${r.anom?' <span style="font-size:11px;color:var(--warn)">above recent level</span>':''}</span>
 <span class="mono" style="font-weight:700;font-size:14px;color:${r.failedOut?'var(--crit)':'var(--ink)'}">${fmt(r.v)}m</span></div>`
     +(expand?r.parts.map(p=>`<div style="display:flex;justify-content:space-between;gap:14px;padding:1px 0 1px 12px">
 <span style="font-size:12px;color:${p.status==='fail'?'var(--crit)':'var(--muted)'}">${p.name}${p.status==='fail'?' — failed':''}</span>
@@ -1599,666 +1292,29 @@ ${rows.map((r,ri)=>{
 }
 
 // ============ RUNNER QUEUE LATENCY ============
-function renderStarv(){
-  const host=$('#starv');if(!host)return;
-  const sm=$('#starv-meta');
-  const THRESHOLD=10;
-  const w=getWindows();
-  const wCommits=w.current;
-  if(!wCommits.length){if(sm)sm.innerHTML=`<div style="font-size:13px;color:var(--ink2);margin-bottom:4px">This chart shows how long jobs sat waiting for a free runner in each pool, and whether a slow day was the infrastructure's fault.</div>`;host.innerHTML=`<div style="font-size:13px;color:var(--ink2);padding:8px 0">No merged pull requests fall inside this date range.</div>`;return}
-  if(sm)sm.innerHTML=`<div style="font-size:13px;color:var(--ink2);margin-bottom:4px">This chart shows how long jobs sat waiting for a free runner in each pool, and whether a slow day was the infrastructure's fault. The label on the worst point also says how many runs of this pipeline overlapped that one.</div><span class="mono">${rangeCovers(w,wCommits)}. The solid line is the longest wait in each pull request's run. <span style="color:#94A3B8">The dashed gray line is the scheduled probe — the same code run on a timer. If the probe rises too, the slowdown is the infrastructure, not the code change.</span> Click any point for details.</span>`;
-  const pools=[
-    {label:'linux-x86-ct6e-180-4tpu',type:'TPU',ids:['tpu-pre-u','tpu-pre-i','tpu-post-u','tpu-post-i','tpu-pw-u1','tpu-pw-u2','tpu-pw-i']},
-    {label:'linux-x86-a2-48-a100-4gpu',type:'GPU',ids:['gpu-u','gpu-i']},
-    {label:'linux-x86-n2-32',type:'CPU',ids:['cpu-pre-u','cpu-pre-i','cpu-post-u','cpu-post-i']},
-  ];
-
-  // Shared Y scale so the three pools are directly comparable
-  const allPoolVals=pools.flatMap(p=>wCommits.map(c=>Math.max(...p.ids.map(id=>jd(c,id).q))));
-  const sharedMaxY=Math.max(...allPoolVals,THRESHOLD+2)*1.15;
-
-  // Full-width line chart per pool
-  const ns='http://www.w3.org/2000/svg';
-  host.innerHTML='';
-
-  pools.forEach(p=>{
-    const perCommit=wCommits.map(c=>Math.max(...p.ids.map(id=>jd(c,id).q)));
-    // A job that failed with 0 minutes of run time died waiting in the queue
-    const deaths=wCommits.map(c=>p.ids.some(id=>{const j=jd(c,id);return j.status==='fail'&&j.r===0}));
-    const avg=+(perCommit.reduce((a,b)=>a+b,0)/perCommit.length).toFixed(1);
-    const peak=Math.max(...perCommit);
-    const overCount=perCommit.filter(v=>v>THRESHOLD).length;
-    const anyDeath=deaths.some(Boolean);
-    const crit=peak>THRESHOLD||anyDeath;
-    const col=LANE_COLORS[p.type];
-    const dim=HW!=='all'&&HW!==p.type.toLowerCase();
-
-    const W=1100,H=172,LP=45,RP=64,TP=22,B=58;
-    const plotH=H-TP-B;
-    const maxY=sharedMaxY;
-    const py=v=>TP+(1-v/maxY)*plotH;
-    const xOf=i=>wCommits.length>1?LP+(wCommits.length-1-i)*((W-LP-RP)/(wCommits.length-1)):(LP+(W-LP-RP)/2);  // oldest left, newest right
-
-    const svg=document.createElementNS(ns,'svg');
-    svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
-    svg.style.cssText=`display:block;width:100%;opacity:${dim?0.25:1}`;
-    const el=(t,a)=>{const e=document.createElementNS(ns,t);for(const[k,v]of Object.entries(a))e.setAttribute(k,String(v));svg.appendChild(e);return e};
-
-    // Grid
-    const gStep=maxY>60?20:maxY>30?10:5;const gVals=[];for(let v=0;v<=maxY;v+=gStep)gVals.push(v);
-    gVals.forEach(v=>{
-      el('line',{x1:LP,y1:py(v),x2:W-RP,y2:py(v),stroke:'#1E293B','stroke-width':1,'stroke-dasharray':'3,3'});
-      el('text',{x:LP-4,y:py(v)+3,'text-anchor':'end','font-size':'11',fill:'#64748B','font-family':'var(--mono)'}).textContent=v+'m';
-    });
-
-    // Threshold line
-    el('line',{x1:LP,y1:py(THRESHOLD),x2:W-RP,y2:py(THRESHOLD),stroke:'#EF4444','stroke-width':1,'stroke-dasharray':'6,3',opacity:0.5});
-    el('text',{x:W-RP-2,y:py(THRESHOLD)-4,'text-anchor':'end','font-size':'10',fill:'#EF4444',opacity:0.7,'font-family':'var(--mono)'}).textContent=THRESHOLD+'m threshold';
-
-    // Label
-    el('text',{x:LP,y:12,'font-size':'13',fill:LANE_COLORS[p.type],'font-weight':'700','font-family':'var(--font)'}).textContent=p.type;
-    el('text',{x:LP+30,y:12,'font-size':'12',fill:'#64748B','font-family':'var(--mono)'}).textContent=p.label+' · longest wait per run: avg '+avg+'m · peak '+peak+'m';
-
-    // Area fill
-    let areaD=`M${xOf(0)},${py(0)}`;
-    perCommit.forEach((v,i)=>{areaD+=` L${xOf(i)},${py(v)}`});
-    areaD+=` L${xOf(perCommit.length-1)},${py(0)} Z`;
-    el('path',{d:areaD,fill:LANE_COLORS[p.type],opacity:0.06});
-
-    // Bezier line
-    const pts=perCommit.map((v,i)=>({x:xOf(i),y:py(v),v,i}));
-    let lineD=`M ${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
-    for(let j=1;j<pts.length;j++){
-      const p0=j>0?pts[j-1]:pts[j],p1=pts[j];
-      const cp=(p1.x-p0.x)*0.3;
-      lineD+=` C ${(p0.x+cp).toFixed(1)},${p0.y.toFixed(1)} ${(p1.x-cp).toFixed(1)},${p1.y.toFixed(1)} ${p1.x.toFixed(1)},${p1.y.toFixed(1)}`;
-    }
-    el('path',{d:lineD,fill:'none',stroke:col,'stroke-width':2,'stroke-linecap':'round','stroke-linejoin':'round'});
-
-    // Scheduled probe series (infra control group at constant code)
-    const probeVals=wCommits.map(c=>(PROBE_Q[c.hash]||{})[p.type.toLowerCase()]??null);
-    if(probeVals.some(v=>v!==null)){
-      const pPts=probeVals.map((v,i)=>v===null?null:{x:xOf(i),y:py(v),v,i}).filter(Boolean);
-      const pD=pPts.map((pt,k)=>(k?'L':'M')+pt.x.toFixed(1)+','+pt.y.toFixed(1)).join(' ');
-      el('path',{d:pD,fill:'none',stroke:'#94A3B8','stroke-width':1.5,'stroke-dasharray':'5,4',opacity:0.85});
-      pPts.forEach(pt=>{
-        const dot=el('circle',{cx:pt.x,cy:pt.y,r:2.2,fill:'var(--surface)',stroke:'#94A3B8','stroke-width':1.3,opacity:0.9});
-        const tt=document.createElementNS(ns,'title');
-        tt.textContent='Scheduled probe near #'+wCommits[pt.i].hash+': longest wait '+pt.v+'m ('+p.type+' pool, same code on a timer)';
-        dot.appendChild(tt);
-      });
-    }
-
-    // Dots + hit areas
-    pts.forEach(pt=>{
-      const isOver=pt.v>THRESHOLD;
-      const isDeath=deaths[pt.i];
-      const r=isOver||isDeath?4:2.5;
-      const fill=isOver||isDeath?'#EF4444':LANE_COLORS[p.type];
-      el('circle',{cx:pt.x,cy:pt.y,r,fill,stroke:'var(--surface)','stroke-width':1.5});
-
-      // Death marker: the run died while jobs waited in this queue
-      if(isDeath){
-        el('circle',{cx:pt.x,cy:pt.y,r:7,fill:'none',stroke:'#EF4444','stroke-width':1.5,opacity:0.7});
-        el('text',{x:pt.x,y:Math.max(10,pt.y-12),'text-anchor':'middle','font-size':'13','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
-      }
-
-      // Clickable hit area
-      const colW=wCommits.length>1?(W-LP-RP)/(wCommits.length-1):(W-LP-RP);
-      const hit=el('rect',{x:pt.x-colW/2,y:TP,width:colW,height:plotH,fill:'transparent',cursor:'pointer'});
-      const c=wCommits[pt.i];
-      hit.addEventListener('mouseenter',e=>{
-        const jobQueues=p.ids.map(id=>{const j=jd(c,id);return{name:j.name,q:j.q,r:j.r,status:j.status}}).sort((a,b)=>b.q-a.q);
-        const tipEl=$('#tip');
-        tipEl.innerHTML=`<div style="font-weight:700;font-size:15px;margin-bottom:6px">${p.type} queue · #${c.hash}</div>
-<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${c.pr} · ${c.concurrent} pipeline runs overlapped it</div>
-<div style="font-size:13px;font-weight:600;margin-bottom:4px">Max wait: <span class="mono" style="color:${isOver||isDeath?'var(--crit)':'var(--ink)'}">${pt.v}m</span>${isOver?' <span style="color:var(--crit);font-size:12px">(over '+THRESHOLD+'m threshold)</span>':''}</div>
-${isDeath?'<div style="font-size:13px;color:var(--crit);font-weight:600;margin-bottom:4px">✕ No runner became free for the TPU jobs — the run was cancelled with 0 tests executed.</div>':''}
-<div style="border-top:1px solid var(--grid);padding-top:6px;margin-top:4px">
-<div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">Per-job queue time</div>
-${jobQueues.map(j=>`<div style="display:flex;justify-content:space-between;gap:12px;padding:2px 0;font-size:13px;border-bottom:1px solid var(--grid)"><span style="color:var(--ink2)">${j.name}${j.status==='fail'&&j.r===0?' <span style="color:var(--crit);font-size:11px">died in queue</span>':''}</span><span class="mono" style="font-weight:600;color:${j.q>THRESHOLD||(j.status==='fail'&&j.r===0)?'var(--crit)':'var(--ink)'}">${j.q}m</span></div>`).join('')}
-</div>
-<div style="font-size:12px;color:var(--accent);text-align:center;margin-top:6px;padding-top:4px;border-top:1px solid var(--grid)">click the point to see full commit details →</div>`;
-        tipEl.style.display='block';
-        const bx=e.clientX+16,by=e.clientY-20;
-        tipEl.style.left=(bx+320>window.innerWidth?e.clientX-330:bx)+'px';
-        tipEl.style.top=Math.max(8,by)+'px';
-      });
-      hit.addEventListener('mouseleave',()=>{$('#tip').style.display='none'});
-      hit.addEventListener('click',()=>{$('#tip').style.display='none';goToCommit(c.hash)});
-    });
-
-    // Latest value label at the line's end
-    const lastPt=pts[0];  // newest run = right edge
-    const lastDeath=deaths[lastPt.i];
-    const lastCol=lastPt.v>THRESHOLD||lastDeath?'#EF4444':'#94A3B8';
-    el('text',{x:lastPt.x+8,y:lastPt.y+3,'font-size':'11','font-weight':'700',fill:lastCol,'font-family':'var(--mono)'}).textContent=lastPt.v+'m';
-
-    // Worst spike annotation: name the cause on the chart itself
-    if(peak>THRESHOLD){
-      const worstI=perCommit.indexOf(peak);
-      if(!deaths[worstI]){
-        const wx=xOf(worstI),wy=py(peak);
-        el('text',{x:Math.min(Math.max(wx,LP+40),W-RP-40),y:Math.max(10,wy-9),'text-anchor':'middle','font-size':'10','font-weight':'700',fill:'#EF4444','font-family':'var(--mono)'}).textContent=peak+'m · '+wCommits[worstI].concurrent+' runs overlapped';
-      }
-    }
-
-    // X-axis labels — every merged pull request, rotated so none is skipped
-    wCommits.forEach((c,i)=>{
-      el('text',{x:xOf(i)+3,y:H-B+14,'text-anchor':'end','font-size':'12',fill:'#64748B','font-family':'var(--mono)',transform:`rotate(-55 ${xOf(i)+3} ${H-B+14})`}).textContent='#'+c.hash;
-    });
-
-    // Status summary
-    const wrapper=document.createElement('div');
-    wrapper.style.cssText=`padding:8px 0;border-bottom:1px solid var(--grid);opacity:${dim?0.25:1}`;
-    wrapper.appendChild(svg);
-
-    if(overCount>0||anyDeath){
-      const statusDiv=document.createElement('div');
-      statusDiv.style.cssText='font-size:12px;color:var(--muted);padding:4px 0 0 '+LP+'px';
-      const parts=[];
-      if(overCount>0){
-        const affectedLinks=perCommit.map((v,i)=>v>THRESHOLD?commitLink(wCommits[i].hash):null).filter(Boolean).join(' ');
-        parts.push(`<span style="color:var(--crit)">${overCount} merged pull request${overCount>1?'s':''} over ${THRESHOLD}m:</span> ${affectedLinks}`);
-      }
-      if(anyDeath){
-        const deathLinks=deaths.map((d,i)=>d?commitLink(wCommits[i].hash):null).filter(Boolean).join(' ');
-        parts.push(`<span style="color:var(--crit)">✕ run died waiting in queue:</span> ${deathLinks}`);
-      }
-      statusDiv.innerHTML=parts.join(' · ');
-      wrapper.appendChild(statusDiv);
-    }
-
-    host.appendChild(wrapper);
-  });
-}
-
 // ============ JOB REGRESSIONS ============
 
 // ============ DIAGNOSTICS (combined issue table) ============
 
 // ============ SINGLE PR INSPECT ============
 // Machine type per job category (from the runs-on labels the GitHub API reports)
-const MACHINES={tpu:'linux-x86-ct6e-180-4tpu',gpu:'linux-x86-a2-48-a100-4gpu',cpu:'linux-x86-n2-32',build:'linux-x86-n2-16-buildkit',infra:'ubuntu-latest'};  // runs-on labels from run_tests_coordinator.yml / ci_pipeline.yml
 // Per-PR device-lane overrides (test counts from JUnit; durations derive from job overrides)
-const PR_LANE={
-  '4914':{tpu:{count:45}},
-  '4916':{tpu:{count:421,added:8}},
-  '4920':{tpu:{failed:1},gpu:{failed:1}},
-  '4940':{tpu:{count:0}},
-};
 // Per-attempt detail (from /actions/runs/{id}/attempts/{n}/jobs)
-const ATTEMPT_INFO={
-  '4920':[
-    {n:1,trigger:'Started automatically when the pull request was updated',time:'Aug 19 08:05',dur:43,jobs:18,result:'fail',
-     rows:[
-      {job:'GPU Tests (gpu-integration)',lane:'GPU',res:'failure',run:18,step:'Run pytest — test_gpu_convergence_a100_bf16 failed (CUDA OOM at step 42)'},
-      {job:'TPU Pretrain Tests (tpu-unit)',lane:'TPU',res:'failure',run:30,step:'Run pytest — test_ring_attention_multihost timed out after 300 seconds'},
-     ]},
-    {n:2,trigger:'Failed jobs re-run manually by alex-k',time:'Aug 19 09:02',dur:24,jobs:2,result:'pass',
-     rows:[
-      {job:'GPU Tests (gpu-integration)',lane:'GPU',res:'success',run:17,rescued:true,q:2,s:3},
-      {job:'TPU Pretrain Tests (tpu-unit)',lane:'TPU',res:'success',run:29,rescued:true,q:6,s:3},
-     ]},
-  ],
-  '4940':[
-    {n:1,trigger:'Started automatically when the pull request was updated',time:'Aug 17 16:03',dur:24,jobs:18,result:'fail',
-     rows:JOBS.filter(j=>j.cat==='tpu').map(j=>({job:j.name,lane:'TPU',res:'failure',run:0,step:'No runner became free; the job was cancelled before any step ran'}))},
-  ],
-};
-function attemptsFor(c){
-  if(ATTEMPT_INFO[c.hash])return ATTEMPT_INFO[c.hash];
-  const wc=wallClock(c,'all');
-  return[{n:1,trigger:TRIGGERS[c.hash]==='schedule'?'Started by the 4-hourly schedule':'Started automatically when the pull request was updated',time:TIMES[c.hash]||'',dur:Math.round(wc.total),jobs:JOBS.length,result:c.status==='fail'?'fail':'pass',rows:[]}];
-}
 // Failed jobs across attempts, one entry per job (same shape as the pr_check script output)
-function errorRows(c){
-  const atts=attemptsFor(c);
-  const byJob={};
-  atts.forEach(a=>{
-    a.rows.filter(r=>r.res==='failure').forEach(r=>{
-      if(!byJob[r.job])byJob[r.job]={job:r.job,lane:r.lane,texts:[],att:{}};
-      const j=byJob[r.job];
-      j.att[a.n]='hit';
-      if(r.step&&!j.texts.includes(r.step))j.texts.push(r.step);
-    });
-  });
-  atts.forEach(a=>{
-    a.rows.filter(r=>r.res==='success').forEach(r=>{
-      if(byJob[r.job]&&!byJob[r.job].att[a.n])byJob[r.job].att[a.n]='clean';
-    });
-  });
-  return Object.values(byJob).map(j=>{
-    const cells=atts.map(a=>({n:a.n,state:j.att[a.n]||(a.n===1?'clean':'skip')}));
-    const total=cells.filter(cl=>cl.state==='hit').length;
-    return{...j,text:j.texts.join('<br>'),cells,total};
-  }).sort((a,b)=>b.total-a.total||a.job.localeCompare(b.job));
-}
 // Deep link to a job's log page (mock id scheme shared with the commit modal)
-function jobLogUrl(runUrl,runId,jobName){
-  const i=JOBS.findIndex(x=>x.name===jobName);
-  return `${runUrl}/jobs/${runId*100+(i<0?0:i)}`;
-}
 // JUnit results per re-run attempt (attempt 1 lives in TESTS)
-const TESTS_BY_ATTEMPT={
-  '4920':{2:{
-    'tpu-pre-u':{tests:[
-      {name:'test_ring_attention_multihost',dur:6.9,base:6.7,st:'pass'},
-      {name:'test_mixture_of_experts_routing',dur:14.8,base:6.1,st:'pass'},
-      {name:'test_llama3_70b_sharded_convergence',dur:44.5,base:45.2,st:'pass'},
-      {name:'test_checkpoint_save_restore',dur:9.0,base:3.1,st:'pass'},
-    ]},
-    'gpu-i':{tests:[
-      {name:'test_gpu_convergence_a100_bf16',dur:8.4,base:8.2,st:'pass'},
-      {name:'test_gpu_flash_attention',dur:3.0,base:3.0,st:'pass'},
-    ]},
-  }},
-};
-function junitForAttempt(hash,att){return att===1?(TESTS[hash]||null):((TESTS_BY_ATTEMPT[hash]||{})[att]||null)}
 // Total attempts a job's tests ran in this PR (whole jobs re-run, so all its tests re-execute)
-function testTotalAttempts(hash,jobId){
-  let n=(TESTS[hash]&&TESTS[hash][jobId])?1:0;
-  Object.keys(TESTS_BY_ATTEMPT[hash]||{}).forEach(a=>{if(TESTS_BY_ATTEMPT[hash][a][jobId])n++});
-  return Math.max(n,1);
-}
 // One test's result in every attempt it ran
-function testHistory(hash,jobId,name){
-  const out=[];
-  const a1=TESTS[hash]&&TESTS[hash][jobId];
-  if(a1&&a1.tests){const t=a1.tests.find(x=>x.name===name);if(t)out.push({n:1,st:t.st,dur:t.dur,base:t.base,error:t.error||null})}
-  Object.keys(TESTS_BY_ATTEMPT[hash]||{}).sort().forEach(a=>{
-    const j2=TESTS_BY_ATTEMPT[hash][a][jobId];
-    if(j2&&j2.tests){const t=j2.tests.find(x=>x.name===name);if(t)out.push({n:+a,st:t.st,dur:t.dur,base:t.base,error:t.error||null})}
-  });
-  return out;
-}
-let PR_ATT='1';
-function setPRAtt(n){PR_ATT=String(n);renderPRPage()}
-let PR_SEL=null;
-let PR_PICKED=false;  // true once the user explicitly opens a PR; auto-selection then stops following the range
 
 // Per-lane test count + duration for one PR, against the 28-day main baseline
-function laneStats(c){
-  const res={};
-  ['tpu','gpu','cpu'].forEach(cat=>{
-    const jobs=allJobs(c).filter(j=>j.cat===cat);
-    const dur=jobs.reduce((a,j)=>a+j.r,0);
-    const baseDur=JOBS.filter(j=>j.cat===cat).reduce((a,j)=>a+j.b.r,0);
-    const baseCount=JOBS.filter(j=>j.cat===cat).reduce((a,j)=>a+((TEST_COUNTS[j.id]||{}).total||0),0);
-    const ov=(PR_LANE[c.hash]||{})[cat]||{};
-    res[cat]={count:ov.count!==undefined?ov.count:baseCount,dur:ov.dur!==undefined?ov.dur:dur,baseCount,baseDur,failed:ov.failed||0,added:ov.added||0};
-  });
-  return res;
-}
 // Composite anomaly per lane — same rule family as Test suite health, one point vs baseline
-function laneVerdict(s){
-  if(s.count===0)return{key:'none',label:'NO TESTS RAN',color:'var(--crit)',crit:true};
-  const cr=s.count/s.baseCount,pt=s.dur*60/s.count,bpt=s.baseDur*60/s.baseCount,pr=pt/bpt;
-  if(s.failed>0)return{key:'fail',label:s.failed+' TEST FAILED',color:'var(--crit)',crit:true};
-  if(cr<0.5&&pr>2)return{key:'crash',label:'TESTS DISAPPEARED',color:'var(--crit)',crit:true};
-  if(cr<0.85&&pr<1.15)return{key:'trim',label:'TESTS REMOVED',color:'var(--warn)',crit:false};
-  if(s.added>0||cr>1.15)return{key:'new',label:'+'+(s.added||s.count-s.baseCount)+' NEW TESTS',color:'var(--accent)',crit:false};
-  if(pr>1.3)return{key:'slow',label:'SLOWER PER TEST',color:'var(--warn)',crit:false};
-  return{key:'ok',label:'OK',color:'var(--muted)',crit:false};
-}
 // Phase split following the slowest device lane (it sets the finish time)
-function phaseSegs(c){
-  const wcx=wallClock(c,'all');
-  const bn=wcx.bottleneck;
-  const lane=allJobs(c).filter(j=>j.cat===bn);
-  const pace=lane.reduce((a,j)=>j.total()>a.total()?j:a,lane[0]);
-  const frac=DOCKER_FRAC[bn]!==undefined?DOCKER_FRAC[bn]:0.5;
-  return{build:wcx.build,queue:pace.q,img:+(pace.s*frac).toFixed(1),env:+(pace.s*(1-frac)).toFixed(1),run:pace.r,total:wcx.build+pace.total(),lane:bn,paceName:pace.name};
-}
 function prTime(h){const p=(TIMES[h]||'Aug 17 00:00').split(' ');return new Date(p[0]+' '+p[1]+' 2026 '+(p[2]||'00:00'))}
 function prDay(h){return (TIMES[h]||'').split(' ').slice(0,2).join(' ')}  // 'Aug 17'
 function rangeCovers(w,list){return list.length?`${w.label} covers ${list.length} merged pull request${list.length===1?'':'s'}, #${list[list.length-1].hash} (${prDay(list[list.length-1].hash)}) to #${list[0].hash} (${prDay(list[0].hash)})`:`${w.label} holds no merged pull requests`}
-function selectPR(hash){PR_SEL=hash;PR_PICKED=true;PR_ATT='1';renderPRPage();const d=$('#pr-detail');if(d&&d.firstChild&&d.scrollIntoView)d.scrollIntoView({behavior:'smooth',block:'start'})}
-function inspectPR(hash){closeModal();switchPage('pr');PR_SEL=hash;PR_PICKED=true;renderPRPage()}
-function searchPR(){
-  const v=($('#pr-search').value||'').replace('#','').trim();
-  if(!v)return;
-  const c=COMMITS.find(x=>x.hash===v||x.pr==='#'+v);
-  if(c){$('#pr-search-msg').textContent='';selectPR(c.hash)}
-  else{$('#pr-search-msg').textContent='PR #'+v+' is not among the stored merged pull requests (#'+COMMITS[COMMITS.length-1].hash+' to #'+COMMITS[0].hash+').'}
-}
 
-function renderPRPage(){
-  const listHost=$('#pr-list'),detailHost=$('#pr-detail');
-  if(!listHost||!detailHost)return;
-  const win=getWindows(),inRange=win.current;
-  const sorted=[...inRange].sort((a,b)=>prTime(b.hash)-prTime(a.hash));
-  if(!PR_PICKED||!PR_SEL||!COMMITS.some(x=>x.hash===PR_SEL))PR_SEL=sorted.length?sorted[0].hash:(PR_PICKED?PR_SEL:null);  // auto-selection follows the range; an explicit pick sticks
-  const wcsAll=COMMITS.map(x=>wallClock(x,'all'));
-  const medList=inRange.length?inRange:COMMITS;
-  const medTotals=medList.map(x=>wallClock(x,'all').total).sort((a,b)=>a-b);
-  const med=medTotals[Math.floor(medTotals.length/2)];
-  const medNote=` (${medList.length} runs ${inRange.length?win.inRange:'stored'})`;
-
-  listHost.innerHTML=`<table style="width:100%;border-collapse:collapse;font-size:14px;min-width:640px">
-<thead><tr>
-<th style="text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--grid)">PR</th>
-<th style="text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--grid)">Title</th>
-<th style="text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--grid)">Merged</th>
-<th style="text-align:right;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--grid)">Attempts</th>
-<th style="text-align:right;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--grid)">Wall-clock</th>
-<th style="text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--grid)">Result</th>
-</tr></thead><tbody>${sorted.map(c=>{
-    const ci=COMMITS.indexOf(c);
-    const wc=wcsAll[ci];
-    const on=c.hash===PR_SEL;
-    const chip=c.status==='fail'?'<span class="chip fail">FAILED</span>':c.status==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
-    const anomalies=Object.values(laneStats(c)).map(laneVerdict).filter(x=>x.key!=='ok');
-    const flag=anomalies.some(a=>a.crit)?' <span style="color:var(--crit);font-weight:700" title="Test anomaly on at least one device">⚑</span>':'';
-    return`<tr onclick="selectPR('${c.hash}')" style="cursor:pointer;${on?'background:rgba(6,182,212,0.08)':''}" onmouseover="if('${c.hash}'!==PR_SEL)this.style.background='rgba(255,255,255,0.03)'" onmouseout="this.style.background='${on?'rgba(6,182,212,0.08)':''}'">
-<td class="mono" style="padding:6px 8px;border-bottom:1px solid var(--grid);color:var(--accent);font-weight:700">${c.pr}</td>
-<td style="padding:6px 8px;border-bottom:1px solid var(--grid);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.title}${flag}</td>
-<td class="mono" style="padding:6px 8px;border-bottom:1px solid var(--grid);color:var(--muted);font-size:13px">${TIMES[c.hash]||''}</td>
-<td class="mono" style="padding:6px 8px;border-bottom:1px solid var(--grid);text-align:right;${c.attempts>1?'color:var(--warn);font-weight:700':''}">${c.attempts}</td>
-<td class="mono" style="padding:6px 8px;border-bottom:1px solid var(--grid);text-align:right">${Math.round(wc.total)}m</td>
-<td style="padding:6px 8px;border-bottom:1px solid var(--grid)">${chip}</td></tr>`}).join('')}</tbody></table>`;
-
-  if(!sorted.length)listHost.innerHTML=`<div style="font-size:13px;color:var(--ink2);padding:8px 0">No merged pull requests fall inside this date range.</div>`;
-  const c=COMMITS.find(x=>x.hash===PR_SEL);
-  const outside=c&&!inRange.some(x=>x.hash===c.hash);
-  detailHost.innerHTML=c?(outside?`<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${c.pr} was merged on ${prDay(c.hash)}, outside the selected date range; the list above shows only that range.</div>`:'')+prDetailHTML(c,med,medNote):'';
-}
-
-function prDetailHTML(c,med,medNote){
-  const jobs=allJobs(c);
-  const wc=wallClock(c,'all');
-  const delta=Math.round(wc.total-med);
-  const compute=jobs.reduce((a,j)=>a+j.s+j.r,0);
-  const baseCompute=JOBS.reduce((a,j)=>a+j.b.s+j.b.r,0);
-  const dComp=Math.round(compute-baseCompute);
-  const runVals=jobs.map(j=>j.s+j.r);
-  const waitVals=jobs.map(j=>j.q);
-  const avgRun=(runVals.reduce((a,b)=>a+b,0)/runVals.length).toFixed(1);
-  const maxRun=Math.max(...runVals).toFixed(1);
-  const avgWait=(waitVals.reduce((a,b)=>a+b,0)/waitVals.length).toFixed(1);
-  const maxWait=Math.max(...waitVals).toFixed(1);
-  const runId=RUN_IDS[c.hash]||0;
-  const runUrl=`https://github.com/${REPO}/actions/runs/${runId}`;
-  const prUrl=`https://github.com/${REPO}/pull/${c.pr.replace('#','')}`;
-  const stChip=c.status==='fail'?'<span class="chip fail">FAILED</span>':c.status==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
-  const stats=[
-    {l:'Checks',v:jobs.length,s:'jobs in attempt 1'},
-    {l:'Wall-clock',v:Math.round(wc.total)+'m',s:(delta>0?'+':'')+delta+'m vs the median run'+(medNote||''),warn:delta>3},
-    (()=>{const extra=attemptsFor(c).filter(a=>a.n>1).reduce((x,a)=>x+a.rows.reduce((y,r)=>y+(r.run||0)+(r.s||0)+(r.q?0:0),0),0);
-      return {l:'Machine minutes',v:Math.round(compute)+'m',s:((dComp>0?'+':'')+dComp+'m vs typical')+(extra>0?' · re-runs spent '+Math.round(extra)+'m more':''),warn:dComp>10||extra>0};})(),
-    {l:'Job run time',v:avgRun+'m avg',s:'longest '+maxRun+'m'},
-    {l:'Runner wait',v:avgWait+'m avg',s:'longest '+maxWait+'m',warn:+maxWait>10},
-    {l:'Attempts',v:c.attempts,s:c.attempts>1?'re-run was needed':(c.status==='fail'?'failed, never re-run':'passed first attempt'),warn:c.attempts>1||c.status==='fail'},
-  ];
-
-  // --- Device lane tiles ---
-  const ls=laneStats(c);
-  const laneTiles=['tpu','gpu','cpu'].map(cat=>{
-    const s=ls[cat],v=laneVerdict(s);
-    const dim=HW!=='all'&&HW!==cat;
-    const perT=s.count>0?(s.dur*60/s.count).toFixed(1):null;
-    const basePerT=(s.baseDur*60/s.baseCount).toFixed(1);
-    const cd=s.count-s.baseCount;
-    const dd=+(s.dur-s.baseDur).toFixed(1);
-    const countLine=s.count===0
-      ?'No tests were collected on this run.'
-      :`${s.count.toLocaleString()} tests ran — the main branch usually runs ${s.baseCount.toLocaleString()} (${cd>=0?'+':''}${cd}).`;
-    const durLine=s.count===0
-      ?`Usually ${Math.round(s.baseDur)}m of test time on this device.`
-      :`${Math.round(s.dur)}m of test time — usually ${Math.round(s.baseDur)}m (${dd>=0?'+':''}${dd}m).`;
-    const perLine=perT!==null?`${perT}s per test — usually ${basePerT}s.`:'';
-    const border=v.crit?'border-color:rgba(239,68,68,0.5);background:rgba(239,68,68,0.05)':v.key!=='ok'?'border-color:rgba(245,158,11,0.35)':'';
-    return`<div class="dtile" style="opacity:${dim?0.3:1};${border}">
-<div class="dtile-head"><span class="dtile-name" style="color:${LANE_COLORS[cat.toUpperCase()]}">${cat.toUpperCase()}</span>
-<span class="chip" style="background:${v.key==='ok'?'var(--elevated)':'transparent'};border:1px solid ${v.color};color:${v.color}">${v.label}</span></div>
-<div class="dtile-val" style="font-size:18px;color:${v.crit?'var(--crit)':'var(--ink)'}">${s.count===0?'0 tests':s.count.toLocaleString()+' · '+Math.round(s.dur)+'m'}</div>
-<div style="font-size:13px;color:var(--ink2);margin-top:4px;line-height:1.45">${countLine}<br>${durLine}${perLine?'<br>'+perLine:''}</div>
-</div>`}).join('');
-
-  // --- Entity-first: jobs and tests lead; attempts and failing commits are columns on their rows ---
-  const atts=attemptsFor(c);
-  const thS='text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--grid)';
-  const attSummary=`<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">${atts.map(a=>
-    `<div style="font-size:13px;color:var(--ink2)"><span style="font-weight:700;color:var(--ink)">Attempt ${a.n}</span> — ${a.time} · ${a.trigger}. ${a.jobs} jobs, ${a.dur}m, ${a.result==='fail'?'<span style="color:var(--crit);font-weight:600">failed</span>':'<span style="color:var(--good);font-weight:600">passed</span>'}. <a href="${runUrl}/attempts/${a.n}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">Attempt logs ↗</a>${a.n>1?' The jobs that failed in the previous attempt were re-run, together with the jobs that depend on them.':''}</div>`).join('')}</div>`;
-
-  // One job's outcome in one attempt: hit (failed), clean (re-run passed), ok (ran and passed), skip (not re-run)
-  const jobAttCell=(j,attempt)=>{
-    const a=atts.find(x=>x.n===attempt);
-    if(!a)return{state:'skip'};
-    const row=a.rows.find(r=>r.job===j.name);
-    if(row)return{state:row.res==='failure'?'hit':'clean'};
-    return attempt===1?{state:j.status==='fail'?'hit':'ok'}:{state:'skip'};
-  };
-  const attCellHTML=cell=>{
-    if(cell.state==='hit')return'<span style="color:var(--crit);font-weight:700">✕ failed</span>';
-    if(cell.state==='clean')return'<span style="color:var(--good)">✓ passed on re-run</span>';
-    if(cell.state==='ok')return'<span style="color:var(--good)">✓ passed</span>';
-    return'<span style="color:var(--muted)">— not re-run</span>';
-  };
-  const failedRecentlyJob=jobId=>getWindows().current.filter(x=>x.hash!==c.hash&&x.o[jobId]&&(x.o[jobId].st==='fail'||x.o[jobId].st==='flaky')).map(x=>x.hash).reverse();
-  const failedRecentlyTest=name=>getWindows().current.filter(x=>x.hash!==c.hash&&TESTS[x.hash]&&Object.values(TESTS[x.hash]).some(td=>td.tests&&td.tests.some(tt=>tt.name===name&&tt.st==='fail'))).map(x=>x.hash).reverse();
-  const recentChips=hs=>hs.length
-    ?hs.map(h=>`<span class="mono" onclick="event.stopPropagation();selectPR('${h}')" style="color:var(--accent);cursor:pointer;font-weight:600">#${h}</span>`).join(' ')
-    :'<span style="color:var(--muted)">—</span>';
-  const attTh=atts.map(a=>`<th style="${thS}">Attempt ${a.n}</th>`).join('');
-
-  // --- Per-test results (attempt 1 JUnit; attempt columns show every attempt the test ran) ---
-  const junit=junitForAttempt(c.hash,1);
-  let testRows='';
-  const units=[];let noteRows='';
-  if(junit){
-    Object.entries(junit).forEach(([jobId,td])=>{
-      const jobDef=JOBS.find(x=>x.id===jobId);if(!jobDef)return;
-      const steps=STEPS[jobDef.id]||STEPS[jobDef.cat]||[];
-      const pytestStep=steps.findIndex(s=>s.isTest)+1;
-      const jUrl=jobLogUrl(runUrl,runId,jobDef.name)+(pytestStep>0?`#step:${pytestStep}:1`:'');
-      const dim=HW!=='all'&&jobDef.lane.toLowerCase()!==HW;
-      if(td.note){
-        noteRows+=`<tr style="opacity:${dim?0.25:1}"><td style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:13px;color:var(--ink2)" colspan="${7+atts.length}"><span style="color:${LANE_COLORS[jobDef.lane]};font-weight:700;font-size:12px">${jobDef.lane}</span> ${jobDef.name} — ${td.note}</td><td style="padding:5px 8px;border-bottom:1px solid var(--grid)"><a href="${jobLogUrl(runUrl,runId,jobDef.name)}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none">Log ↗</a></td></tr>`;
-        return;
-      }
-      const sortedT=[...(td.tests||[])].sort((x,y)=>{
-        if(x.st==='fail'&&y.st!=='fail')return -1;if(y.st==='fail'&&x.st!=='fail')return 1;
-        const dx=x.base&&x.dur?x.dur-x.base:(x.dur||0);const dy=y.base&&y.dur?y.dur-y.base:(y.dur||0);return dy-dx;
-      });
-      sortedT.forEach(tst=>units.push({tst,jobId,jobDef,jUrl,pytestStep,dim}));
-    });
-  }
-  // One test = its main row plus (when it ran in more than one attempt) its hidden history row,
-  // so sorting moves both together.
-  const unitHTML=u=>{
-        const {tst,jobId,jobDef,jUrl,pytestStep,dim}=u;let out='';
-        const dlt=tst.base!==null&&tst.dur!==null?+(tst.dur-tst.base).toFixed(1):null;
-        const dCol=tst.st==='fail'?'var(--crit)':dlt>2?'var(--crit)':dlt>0?'var(--warn)':'var(--good)';
-        const hist=testHistory(c.hash,jobId,tst.name);
-        const expandable=hist.length>1;
-        const xid=('tx-'+c.hash+'-'+jobId+'-'+tst.name).replace(/[^a-zA-Z0-9-]/g,'');
-        const cause=tst.st==='fail'?(tst.error||'unknown failure')+(tst.rescued?' — passed when attempt 2 re-ran it':''):dlt>2?'runs '+dlt+'s slower than usual':'—';
-        const tCells=atts.map(a=>{
-          let inner;
-          if(a.n===1)inner=tst.st==='fail'?'<span style="color:var(--crit);font-weight:700">✕ failed</span>':'<span style="color:var(--good)">✓ passed</span>';
-          else{
-            const j2=(TESTS_BY_ATTEMPT[c.hash]||{})[a.n];
-            const t2=j2&&j2[jobId]&&(j2[jobId].tests||[]).find(x=>x.name===tst.name);
-            inner=!t2?'<span style="color:var(--muted)">— not re-run</span>':(t2.st==='fail'?'<span style="color:var(--crit);font-weight:700">✕ failed</span>':'<span style="color:var(--good)">✓ passed on re-run</span>');
-          }
-          return`<td style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:13px;white-space:nowrap">${inner}</td>`;
-        }).join('');
-        const rowClick=expandable?`onclick="const x=document.getElementById('${xid}');const on=x.style.display==='none';x.style.display=on?'table-row':'none';this.querySelector('.txarr').textContent=on?'▾':'▸'" style="cursor:pointer;opacity:${dim?0.25:1};${tst.st==='fail'?'background:var(--tint-crit)':''}"`:`style="opacity:${dim?0.25:1};${tst.st==='fail'?'background:var(--tint-crit)':''}"`;
-        out+=`<tr ${rowClick}>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:12px">${expandable?'<span class="txarr" style="color:var(--muted);margin-right:4px">▸</span>':''}${tst.name}</td>
-<td style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:12px"><span style="color:${LANE_COLORS[jobDef.lane]};font-weight:700">${jobDef.lane}</span></td>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);text-align:right">${tst.dur!==null?tst.dur+'s':'—'}</td>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);text-align:right;color:var(--muted)">${tst.base!==null?tst.base+'s':'—'}</td>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);text-align:right;color:${dCol};font-weight:600">${dlt!==null?(dlt>0?'+':'')+dlt+'s':''}</td>
-${tCells}
-<td style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:13px">${recentChips(failedRecentlyTest(tst.name))}</td>
-<td style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:13px;color:${tst.st==='fail'?'var(--crit)':'var(--ink2)'};max-width:220px">${cause}</td>
-<td style="padding:5px 8px;border-bottom:1px solid var(--grid);white-space:nowrap">${tst.isNew?'<span class="chip new">★ NEW</span> ':''}<a href="${jUrl}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:13px;color:var(--accent);text-decoration:none">Log ↗</a></td>
-</tr>`;
-        if(expandable){
-          const subRows=hist.map(hv=>{
-            const hUrl=`${jobLogUrl(runUrl,runId,jobDef.name)}${hv.n>1?'?attempt='+hv.n:''}${pytestStep>0?'#step:'+pytestStep+':1':''}`;
-            const hChip=hv.st==='fail'?'<span class="chip fail">✕ FAILED</span>':'<span class="chip pass">✓ PASS</span>';
-            const hDelta=hv.dur!==null&&hv.base!==null?` <span class="mono" style="color:var(--muted)">(usually ${hv.base}s${hv.dur-hv.base>0?', +':', '}${+(hv.dur-hv.base).toFixed(1)}s)</span>`:'';
-            return`<div style="display:flex;align-items:center;gap:12px;padding:5px 0;border-bottom:1px solid var(--grid)">
-<span style="font-weight:700;font-size:13px;min-width:70px">Attempt ${hv.n}</span>${hChip}
-<span class="mono" style="font-size:13px">${hv.dur!==null?hv.dur+'s':'—'}</span>${hDelta}
-${hv.error?'<span style="font-size:13px;color:var(--crit)">'+hv.error+'</span>':''}
-<a href="${hUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;margin-left:auto">Log ↗</a>
-</div>`}).join('');
-          out+=`<tr id="${xid}" style="display:none"><td colspan="${8+atts.length}" style="padding:4px 8px 8px 28px;background:rgba(0,0,0,0.25);border-bottom:1px solid var(--grid)">
-<div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:2px">This test in every attempt</div>${subRows}</td></tr>`;
-        }
-        return out;
-  };
-  const ptid='jt-pr-'+c.hash;
-  JT[ptid]={rows:units,pick:u=>u.tst,row:unitHTML,key:null,dir:'desc',tail:noteRows};
-  testRows=units.map(unitHTML).join('')+noteRows;
-  const testCard=testRows
-    ?`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:14px;min-width:${900+atts.length*90}px">
-<thead><tr>
-${jtTh(ptid,'','Test',thS,'Restore the default order')}
-<th style="${thS}">Job</th>
-${jtTh(ptid,'dur','Duration',thS+';text-align:right','Sort by duration')}
-${jtTh(ptid,'base','Usual',thS+';text-align:right','Sort by usual duration')}
-${jtTh(ptid,'delta','Δ',thS+';text-align:right','Sort by change against usual')}
-${attTh}
-<th style="${thS}">Failed recently</th>
-<th style="${thS}">Root cause</th>
-<th style="${thS}">Log</th>
-</tr></thead><tbody id="${ptid}-body">${testRows}</tbody></table></div>`
-    :`<div style="font-size:14px;color:var(--muted)">No per-test JUnit detail is stored for this run. Test-level rows appear when the run uploads JUnit artifacts and the collector picks them up within 24 hours.</div>`;
-  const testsCard=`<div class="card">
-<div class="ct">Test results</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px" data-guide="pr-tests">This table shows how each test behaved in this run: failures, slow-downs, and re-runs. Individual tests from this run's JUnit files, grouped by job. <span class="g-more">Within each job, failed tests come first, then the tests that added the most time; a new test with no usual duration yet is ranked by its full duration. The attempt columns show each test's result in every attempt it ran. Click a test with more than one attempt to see each attempt's duration, error, and log. Failed recently lists other recent commits where the same test failed — click one to open it. Click Duration, Usual, or Δ to sort the table by that column; click again to flip the order. Rows with a blank cell in the sorted column drop to the bottom: failed tests have no duration, and new tests have no usual duration yet. Click the Test header to restore the default order.</span></div>
-${testCard}
-</div>`;
-
-  // --- Jobs table (every job once; attempts and failing commits on the row) ---
-  const sortedJobs=[...jobs].sort((a,b)=>(b.s+b.r)-(a.s+a.r));
-  const jobRows=sortedJobs.map(j=>{
-    const dim=HW!=='all'&&j.lane.toLowerCase()!==HW;
-    const jb=JOBS.find(x=>x.id===j.id).b;
-    const dRun=+((j.s+j.r)-(jb.s+jb.r)).toFixed(1);
-    const jFrac=DOCKER_FRAC[j.cat]!==undefined?DOCKER_FRAC[j.cat]:0.5;
-    const jImg=+(j.s*jFrac).toFixed(1);
-    const jEnv=+(j.s-jImg).toFixed(1);
-    const cells=atts.map(a=>jobAttCell(j,a.n));
-    const anyFail=cells.some(cl=>cl.state==='hit');
-    const cellsHTML=cells.map(cl=>`<td style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:13px;white-space:nowrap">${attCellHTML(cl)}</td>`).join('');
-    const logs=cells.map((cl,i)=>({cl,n:atts[i].n})).filter(x=>x.cl.state!=='skip').map(x=>
-      `<a href="${jobLogUrl(runUrl,runId,j.name)}${x.n>1?'?attempt='+x.n:''}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;white-space:nowrap">Attempt ${x.n} ↗</a>`).join(' · ');
-    return`<tr style="opacity:${dim?0.25:1};${anyFail?'background:var(--tint-crit)':''}">
-<td style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:13px">${j.name}</td>
-<td style="padding:5px 8px;border-bottom:1px solid var(--grid)"><span style="color:${LANE_COLORS[j.lane]};font-weight:700;font-size:12px">${j.lane}</span></td>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:12px;color:var(--muted)">${MACHINES[j.cat]}</td>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);text-align:right;color:${j.q>5?'var(--warn)':'var(--ink2)'};font-weight:${j.q>5?'700':'400'}">${j.q}m</td>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);text-align:right;color:var(--ink2)">${jImg}m</td>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);text-align:right;color:var(--ink2)">${jEnv}m</td>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);text-align:right">${j.r.toFixed(1)}m</td>
-<td class="mono" style="padding:5px 8px;border-bottom:1px solid var(--grid);text-align:right;color:${dRun>2?'var(--crit)':dRun>0.5?'var(--warn)':dRun<-0.5?'var(--good)':'var(--muted)'}">${dRun>=0?'+':''}${dRun}m</td>
-${cellsHTML}
-<td style="padding:5px 8px;border-bottom:1px solid var(--grid);font-size:13px">${recentChips(failedRecentlyJob(j.id))}</td>
-<td style="padding:5px 8px;border-bottom:1px solid var(--grid)">${logs}</td>
-</tr>`}).join('');
-  const jobsCard=`<div class="card">
-<div class="ct">Job durations and waits</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px" data-guide="pr-jobs">This table shows where this run's time went, job by job, and how each job compares with its usual self. Every job in this run, longest first. Timing columns come from attempt 1. <span class="g-more">Wait is time spent holding no runner. Image and Env split the job's setup time. The Δ column compares this run's working time with the same job's usual time on main. The attempt columns show the job's result in every attempt. Failed recently lists other recent commits where the same job failed — click one to open it. Jobs that take only seconds (the ten Setup Parameters jobs, All Required Tests Passed, All Notebooks Passed, Notify failed build, Track Test Performance) are not listed.</span></div>
-${attSummary}
-<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:14px;min-width:${960+atts.length*90}px">
-<thead><tr>
-<th style="${thS}">Job</th>
-<th style="${thS}">Lane</th>
-<th style="${thS}">Machine</th>
-<th style="${thS};text-align:right">Wait</th>
-<th style="${thS};text-align:right">Image</th>
-<th style="${thS};text-align:right">Env</th>
-<th style="${thS};text-align:right">Test run</th>
-<th style="${thS};text-align:right">Δ vs usual</th>
-${attTh}
-<th style="${thS}">Failed recently</th>
-<th style="${thS}">Logs</th>
-</tr></thead><tbody>${jobRows}</tbody></table></div>
-</div>`;
-
-  // --- Errors across attempts (summary of what went wrong, before the per-attempt detail) ---
-  const errs=errorRows(c);
-  const errCard=errs.length===0?'':(()=>{
-    const th=x=>`<th style="text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--grid)">${x}</th>`;
-    const tdS='padding:6px 8px;border-bottom:1px solid var(--grid)';
-    // Failed jobs per attempt, drawn above the table
-    const cW=520,cH=150,cL=46,cR=170,cT=18,cB=30;
-    const failsA=atts.map(a=>a.rows.filter(r=>r.res==='failure').length);
-    const maxF=Math.max(...failsA,1);
-    const fx=i=>atts.length>1?cL+i*((cW-cL-cR)/(atts.length-1)):cL+(cW-cL-cR)/2;
-    const fy=v=>cT+(1-v/(maxF*1.15))*(cH-cT-cB);
-    const ptsA=atts.map((a,i)=>({n:a.n,f:failsA[i],x:fx(i),y:fy(failsA[i])}));
-    const lineD=ptsA.map((p,i)=>(i?'L':'M')+p.x.toFixed(1)+','+p.y.toFixed(1)).join(' ');
-    const errChart=`<svg viewBox="0 0 ${cW} ${cH}" style="display:block;max-width:${cW}px;width:100%;margin:2px 0 8px">
-<line x1="${cL}" y1="${fy(0)}" x2="${cW-cR+24}" y2="${fy(0)}" stroke="#1E293B" stroke-width="1"/>
-<text x="${cL-6}" y="${fy(0)+3}" text-anchor="end" font-size="11" fill="#64748B" font-family="var(--mono)">0</text>
-${atts.length>1?`<path d="${lineD}" fill="none" stroke="#64748B" stroke-width="1.5" stroke-dasharray="4,3"/>`:''}
-${ptsA.map(p=>`<circle cx="${p.x}" cy="${p.y}" r="5" fill="${p.f>0?'var(--crit)':'var(--good)'}" stroke="var(--surface)" stroke-width="1.5"/>
-<text x="${p.x+10}" y="${p.y+3.5}" font-size="13" font-weight="700" fill="${p.f>0?'var(--crit)':'var(--good)'}" font-family="var(--font)">${p.f>0?p.f+' failed '+(p.f===1?'job':'jobs'):'0 — all jobs passed'}</text>
-<text x="${p.x}" y="${cH-8}" text-anchor="middle" font-size="12" fill="#94A3B8" font-family="var(--font)">Attempt ${p.n}</text>`).join('')}
-</svg>`;
-    const rows=errs.map(s=>{
-      const dim=HW!=='all'&&s.lane.toLowerCase()!==HW;
-      const cells=s.cells.map(cl=>{
-        if(cl.state==='hit')return`<td style="${tdS};white-space:nowrap"><span style="color:var(--crit);font-weight:700">✕ failed</span></td>`;
-        if(cl.state==='clean')return`<td style="${tdS};white-space:nowrap"><span style="color:var(--good)">✓ passed${cl.n>1?' on re-run':''}</span></td>`;
-        return`<td style="${tdS};white-space:nowrap"><span style="color:var(--muted)">— not re-run</span></td>`;
-      }).join('');
-      const logs=s.cells.filter(cl=>cl.state!=='skip').map(cl=>{
-        const u=jobLogUrl(runUrl,runId,s.job)+(cl.n>1?'?attempt='+cl.n:'');
-        return`<a href="${u}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;white-space:nowrap">Attempt ${cl.n} ↗</a>`;
-      }).join(' · ');
-      return`<tr style="opacity:${dim?0.25:1}">
-<td style="${tdS};font-size:14px"><span style="color:${LANE_COLORS[s.lane]||'var(--ink2)'};font-weight:700;font-size:12px">${s.lane}</span> ${s.job}</td>
-<td style="${tdS};font-size:13px;color:var(--ink2);max-width:320px">${s.text}</td>
-${cells}
-<td style="${tdS};text-align:right"><span class="mono" style="font-weight:700">${s.total}</span></td>
-<td style="${tdS}">${logs}</td>
-</tr>`;
-    }).join('');
-    return`<div class="card">
-<div class="ct">Errors across attempts</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px" data-guide="pr-errors">This card shows every failure in this run and whether a re-run cleared it. <span class="g-more">Each row is one job that failed at least once in this run, with its result in every attempt: ✕ failed, ✓ passed, and a dash means the job was not re-run because it had already passed. Times failed counts the attempts in which the job failed.</span></div>
-${errChart}
-<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:14px;min-width:720px">
-<thead><tr>${th('Job')}${th('What went wrong')}${atts.map(a=>th('Attempt '+a.n)).join('')}${th('Times failed')}${th('Logs')}</tr></thead>
-<tbody>${rows}</tbody></table></div>
-</div>`;
-  })();
-
-  return`<div class="card hero">
-<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px">
-<div><div style="font-size:16px;font-weight:700"><span class="mono" style="color:var(--accent)">${c.pr}</span> ${c.title}</div>
-<div style="font-size:14px;color:var(--ink2);margin-top:3px">${c.author} · merged ${TIMES[c.hash]||''} · ${stChip}</div></div>
-<div style="display:flex;gap:8px">
-<a href="${runUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:4px 10px;border-radius:6px">View run ↗</a>
-<a href="${prUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:4px 10px;border-radius:6px">PR on GitHub ↗</a>
-<a href="#" onclick="event.preventDefault();goToCommit('${c.hash}')" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:4px 10px;border-radius:6px">Full job waterfall</a>
-</div></div>
-<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px" id="pr-stats">${stats.map(st=>`<div style="background:rgba(15,23,42,0.6);border:1px solid ${st.warn?'rgba(245,158,11,0.4)':'var(--border)'};border-radius:8px;padding:10px 12px">
-<div style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">${st.l}</div>
-<div class="mono" style="font-size:16px;font-weight:700;color:${st.warn?'var(--warn)':'var(--ink)'}">${st.v}</div>
-<div style="font-size:12px;color:var(--muted)">${st.s}</div></div>`).join('')}</div>
-</div>
-
-${errCard}
-${jobsCard}
-
-${testsCard}`;
-}
 
 // ============ PAGE SWITCH ============
-function switchPage(p){
-  ['main','details','pr'].forEach(k=>{const el=$('#page-'+k);if(el)el.style.display=k===p?'':'none'});
-  $$('#pagebar .pbtn').forEach(b=>b.classList.toggle('on',b.dataset.page===p));
-  window.scrollTo({top:0});
-}
 
 // ============ HW FILTER ============
 $$('.fchip').forEach(btn=>{btn.addEventListener('click',()=>{HW=btn.dataset.hw;$$('.fchip').forEach(b=>b.classList.toggle('on',b===btn));renderAll()})});
@@ -2357,643 +1413,8 @@ const TH_CATEGORIES=[
    pills:[{idx:14,text:'50 tests · 20s',sub:'Suite Introduced',type:'accent',dy:-52,dx:0},{idx:29,text:'50 tests · 20s',type:'latest',dy:-36,dx:-40}]}
 ];
 
-function fmtDuration(s){if(s>=3600)return(s/3600).toFixed(1)+'h';if(s>=60){let m=Math.floor(s/60),r=Math.round(s-m*60);if(r===60){m+=1;r=0}return m+'m '+r+'s'}return Math.round(s)+'s'}
 
-function createSplinePath(points){if(points.length<2)return'';if(points.length===2)return'M '+points[0].x.toFixed(1)+','+points[0].y.toFixed(1)+' L '+points[1].x.toFixed(1)+','+points[1].y.toFixed(1);
-  let d='M '+points[0].x.toFixed(1)+','+points[0].y.toFixed(1);
-  for(let i=0;i<points.length-1;i++){const p0=i>0?points[i-1]:points[i];const p1=points[i];const p2=points[i+1];const p3=i+2<points.length?points[i+2]:p2;
-    const cp1x=p1.x+(p2.x-p0.x)/6;const cp1y=p1.y+(p2.y-p0.y)/6;const cp2x=p2.x-(p3.x-p1.x)/6;const cp2y=p2.y-(p3.y-p1.y)/6;
-    d+=' C '+cp1x.toFixed(1)+','+cp1y.toFixed(1)+' '+cp2x.toFixed(1)+','+cp2y.toFixed(1)+' '+p2.x.toFixed(1)+','+p2.y.toFixed(1)}
-  return d}
 
-function renderChartSVG(cat) {
-    const W = 1000;
-    const H = 371;  // room for rotated "#hash Mon DD" labels; plot height unchanged (215)
-    const pad = { top: 60, right: 65, bottom: 96, left: 55 };
-    const plotW = W - pad.left - pad.right;
-    const plotH = H - pad.top - pad.bottom;
-    const baseY = pad.top + plotH;
-
-    // Filter valid data points
-    const validData = cat.data.filter(d => d.dur !== null);
-    if (!validData.length) return '';
-
-    const firstValidIdx = cat.data.findIndex(d => d.dur !== null);
-    const numCommits = THV.commits.length;
-    const xStep = plotW / (numCommits - 1);
-
-    const coords = validData.map(d => {
-      const x = pad.left + (d.commitIdx - THV.i0) * xStep;
-      const y = pad.top + plotH - (d.dur / cat.maxY) * plotH;
-      return { ...d, x, y };
-    });
-
-    // Spline curve paths
-    const splineD = createSplinePath(coords);
-    const firstPt = coords[0];
-    const lastPt = coords[coords.length - 1];
-    const areaD = `${splineD} L ${lastPt.x.toFixed(1)},${baseY} L ${firstPt.x.toFixed(1)},${baseY} Z`;
-
-    // Unique IDs for SVG elements
-    const uid = cat.id;
-    const isAnomaly = cat.status === 'CRASH';
-
-    // Linear gradient for line stroke
-    let strokeGradientStops = '';
-    let areaGradientStops = '';
-
-    if (cat.anomalyRange) {
-      const startPct = ((pad.left + cat.anomalyRange[0] * xStep - 20) / W * 100).toFixed(1);
-      const crashPct = ((pad.left + cat.anomalyRange[0] * xStep) / W * 100).toFixed(1);
-      strokeGradientStops = `
-        <stop offset="0%" stop-color="${cat.color}" />
-        <stop offset="${startPct}%" stop-color="${cat.color}" />
-        <stop offset="${crashPct}%" stop-color="#EF4444" />
-        <stop offset="100%" stop-color="#EF4444" />
-      `;
-      areaGradientStops = `
-        <stop offset="0%" stop-color="${cat.color}" stop-opacity="0.2" />
-        <stop offset="${startPct}%" stop-color="${cat.color}" stop-opacity="0.2" />
-        <stop offset="${crashPct}%" stop-color="#EF4444" stop-opacity="0.32" />
-        <stop offset="100%" stop-color="#EF4444" stop-opacity="0.32" />
-      `;
-    } else {
-      strokeGradientStops = `<stop offset="0%" stop-color="${cat.color}" /><stop offset="100%" stop-color="${cat.color}" />`;
-      areaGradientStops = `<stop offset="0%" stop-color="${cat.color}" stop-opacity="0.22" /><stop offset="100%" stop-color="${cat.color}" stop-opacity="0.22" />`;
-    }
-
-    // Right axis: test count scale — nice step so labels are round numbers
-    const numYSteps = cat.maxY / cat.yInterval;
-    const maxCount = Math.max(...validData.map(d => d.count || 0), 1);
-    const NICE = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000];
-    const countStep = NICE.find(n => n * numYSteps >= maxCount) || NICE[NICE.length - 1];
-    const countMax = countStep * numYSteps;
-    const fmtCount = v => v >= 1000 ? ((v / 1000) % 1 === 0 ? (v / 1000) : (v / 1000).toFixed(1)) + 'k' : String(v);
-
-    // Gridlines & Y-Axis Labels — each side's labels colored to its series (duration left, tests right)
-    let gridMarkup = '';
-    for (let s = 0; s <= numYSteps; s++) {
-      const val = s * cat.yInterval;
-      const yPos = pad.top + plotH - (val / cat.maxY) * plotH;
-      const tick = cat.yInterval < 60 ? val + 's' : Math.round(val / 60) + 'm';  // sub-minute suites (decoupled) read in seconds
-      gridMarkup += `
-        <line x1="${pad.left}" y1="${yPos}" x2="${W - pad.right}" y2="${yPos}" stroke="#1E293B" stroke-width="1" stroke-dasharray="4,4" />
-        <text x="${pad.left - 12}" y="${yPos + 4}" fill="${cat.color}" opacity="0.85" font-size="13" class="mono" text-anchor="end">${tick}</text>
-        <text x="${W - pad.right + 12}" y="${yPos + 4}" fill="#94A3B8" font-size="13" class="mono" text-anchor="start">${fmtCount(countStep * s)}</text>
-      `;
-    }
-
-    // Test count line — always the dashed gray line, on every chart
-    const countCoords = validData.map(d => ({
-      x: pad.left + (d.commitIdx - THV.i0) * xStep,
-      y: pad.top + plotH - ((d.count || 0) / countMax) * plotH
-    }));
-    let countLineMarkup = '';
-    if (countCoords.length > 1) {
-      const countD = createSplinePath(countCoords);
-      const lastC = countCoords[countCoords.length - 1];
-      const lastCount = validData[validData.length - 1].count || 0;
-      countLineMarkup = `
-        <path d="${countD}" fill="none" stroke="#94A3B8" stroke-width="2" stroke-dasharray="6,4" stroke-linecap="round" stroke-linejoin="round" opacity="0.9" />
-        <circle cx="${lastC.x.toFixed(1)}" cy="${lastC.y.toFixed(1)}" r="3" fill="#94A3B8" stroke="#0F172A" stroke-width="1.5" />
-        <text x="${(lastC.x - 9).toFixed(1)}" y="${(lastC.y - 8).toFixed(1)}" text-anchor="end" fill="#94A3B8" font-size="12" font-weight="600" class="mono">${fmtCount(lastCount)} tests</text>
-      `;
-    }
-
-    // X-Axis Labels (Every 5 commits + critical points)
-    let xLabelsMarkup = '';
-    THV.commits.forEach((c, i) => {
-      const xPos = pad.left + i * xStep;
-      const isCrashCommit = cat.anomalyRange && i === cat.anomalyRange[0];
-      const labelColor = isCrashCommit ? '#EF4444' : '#64748B';
-      xLabelsMarkup += `
-        <line x1="${xPos}" y1="${baseY}" x2="${xPos}" y2="${baseY + 5}" stroke="#334155" stroke-width="1" />
-        <text x="${xPos + 3}" y="${baseY + 16}" fill="${labelColor}" font-size="12" font-weight="${isCrashCommit ? 'bold' : 'normal'}" class="mono" text-anchor="end" transform="rotate(-55 ${xPos + 3} ${baseY + 16})">#${c.hash} ${c.date}</text>
-      `;
-    });
-
-    // Anomaly Vertical Zone Highlight
-    let anomalyZoneMarkup = '';
-    if (cat.anomalyRange) {
-      const zX1 = pad.left + cat.anomalyRange[0] * xStep - 15;
-      const zW = (pad.left + cat.anomalyRange[1] * xStep + 15) - zX1;
-      anomalyZoneMarkup = `
-        <rect x="${zX1}" y="${pad.top}" width="${zW}" height="${plotH}" fill="#EF4444" fill-opacity="0.04" rx="6" />
-        <line x1="${zX1}" y1="${pad.top}" x2="${zX1}" y2="${baseY}" stroke="#EF4444" stroke-opacity="0.3" stroke-dasharray="3,3" />
-        <line x1="${zX1 + zW}" y1="${pad.top}" x2="${zX1 + zW}" y2="${baseY}" stroke="#EF4444" stroke-opacity="0.3" stroke-dasharray="3,3" />
-      `;
-    }
-
-    // Inline Pills Badges Markup — count pills removed (count is the dashed line now); only the anomaly flag remains
-    let pillsMarkup = '';
-    cat.pills.filter(p => p.type === 'anomaly').forEach(p => {
-      const pt = coords.find(c => c.commitIdx === p.idx);
-      if (!pt) return;
-
-      const px = pt.x + (p.dx || 0);
-      const py = pt.y + (p.dy || -36);
-
-      if (p.type === 'anomaly') {
-        // Red Anomaly Pill with Warning Beacon & Pulse
-        pillsMarkup += `
-          <g transform="translate(${px - 85}, ${py})" class="pulse-anim" filter="url(#pill-shadow-${uid})">
-            <!-- Leader Line -->
-            <path d="M 85,42 L ${pt.x - (px - 85)},${pt.y - py}" stroke="#EF4444" stroke-width="1.4" stroke-dasharray="2,2" />
-            <!-- Pill Background -->
-            <rect x="0" y="0" width="170" height="42" rx="21" fill="#1A0B0E" stroke="#EF4444" stroke-width="1.8" />
-            <!-- Warning Icon -->
-            <path d="M 19,14 L 27,28 L 11,28 Z" fill="#EF4444" />
-            <circle cx="19" cy="25" r="1" fill="#1A0B0E" />
-            <line x1="19" y1="18" x2="19" y2="22.5" stroke="#1A0B0E" stroke-width="1.4" stroke-linecap="round" />
-            <!-- Text Content -->
-            <text x="35" y="20" fill="#FCA5A5" font-size="14" font-weight="700" class="mono">${p.text}</text>
-            <text x="35" y="33" fill="#F87171" font-size="9.5" class="mono">${p.sub}</text>
-            <!-- Badge Flag -->
-            <rect x="28" y="-10" width="114" height="15" rx="4" fill="#EF4444" />
-            <text x="85" y="1" fill="#FFFFFF" font-size="8.5" font-weight="800" text-anchor="middle" letter-spacing="0.05em">ANOMALY DETECTED</text>
-          </g>
-        `;
-      } else if (p.type === 'accent' || p.type === 'warn') {
-        // Styled Accent/Warn Pill (e.g. Trimmed / Noise Valley / Introduced)
-        const borderColor = p.type === 'warn' ? '#F59E0B' : '#06B6D4';
-        const textColor = p.type === 'warn' ? '#FCD34D' : '#67E8F9';
-        pillsMarkup += `
-          <g transform="translate(${px - 75}, ${py})" filter="url(#pill-shadow-${uid})">
-            <path d="M 75,34 L ${pt.x - (px - 75)},${pt.y - py}" stroke="${borderColor}" stroke-width="1.2" stroke-dasharray="2,2" />
-            <rect x="0" y="0" width="150" height="34" rx="17" fill="#0F172A" stroke="${borderColor}" stroke-width="1.4" />
-            <circle cx="14" cy="17" r="4" fill="${borderColor}" />
-            <text x="26" y="16" fill="#F8FAFC" font-size="13" font-weight="600" class="mono">${p.text}</text>
-            <text x="26" y="27" fill="${textColor}" font-size="11" class="mono">${p.sub || ''}</text>
-          </g>
-        `;
-      } else {
-        // Standard Dark Elevated Pill
-        const dotColor = p.type === 'latest' ? '#10B981' : cat.color;
-        pillsMarkup += `
-          <g transform="translate(${px - 65}, ${py})" filter="url(#pill-shadow-${uid})">
-            <path d="M 65,26 L ${pt.x - (px - 65)},${pt.y - py}" stroke="#334155" stroke-width="1.2" stroke-dasharray="2,2" />
-            <rect x="0" y="0" width="130" height="26" rx="13" fill="#1E293B" stroke="#334155" stroke-width="1.2" />
-            <circle cx="12" cy="13" r="3.5" fill="${dotColor}" />
-            <text x="22" y="17" fill="#F8FAFC" font-size="13" font-weight="600" class="mono">${p.text}</text>
-          </g>
-        `;
-      }
-    });
-
-    // Data Points Markup
-    let dotsMarkup = '';
-    coords.forEach(pt => {
-      const isPtAnomaly = cat.anomalyRange && pt.commitIdx - THV.i0 >= cat.anomalyRange[0];
-      const r = isPtAnomaly ? (pt.commitIdx - THV.i0 === cat.anomalyRange[0] ? 5.5 : 4.5) : 3.5;
-      const fill = isPtAnomaly ? '#EF4444' : cat.color;
-      const filter = isPtAnomaly ? `filter="url(#glow-red-${uid})"` : '';
-      dotsMarkup += `<circle cx="${pt.x}" cy="${pt.y}" r="${r}" fill="${fill}" stroke="#0F172A" stroke-width="2" ${filter} />`;
-    });
-
-    // Invisible Interactive Hover Columns
-    let hoverColsMarkup = '';
-    THV.commits.forEach((c, i) => {
-      const pt = coords.find(pt => pt.commitIdx === THV.i0 + i);
-      if (!pt) return;
-      const colX = pt.x - xStep / 2;
-      hoverColsMarkup += `
-        <rect 
-          x="${colX}" y="${pad.top}" width="${xStep}" height="${plotH}" 
-          fill="transparent" 
-          class="interactive-hover-col"
-          onmouseenter="showTooltip(event, '${cat.id}', ${THV.i0 + i})"
-          onmousemove="moveTooltip(event, '${cat.id}')"
-          onmouseleave="hideTooltip('${cat.id}')"
-          onclick="openTHDetail('${cat.id}', ${THV.i0 + i})"
-        />
-      `;
-    });
-
-    return `
-      <svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" style="overflow:visible;" id="svg-${cat.id}">
-        <defs>
-          <filter id="pill-shadow-${uid}" x="-20%" y="-20%" width="140%" height="150%">
-            <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.5"/>
-          </filter>
-          <filter id="glow-red-${uid}" x="-30%" y="-30%" width="160%" height="160%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <linearGradient id="line-grad-${uid}" x1="0%" y1="0%" x2="100%" y2="0%">
-            ${strokeGradientStops}
-          </linearGradient>
-          <linearGradient id="area-grad-${uid}" x1="0%" y1="0%" x2="100%" y2="0%">
-            ${areaGradientStops}
-          </linearGradient>
-          <linearGradient id="fade-mask-grad-${uid}" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stop-color="#FFFFFF" stop-opacity="1" />
-            <stop offset="75%" stop-color="#FFFFFF" stop-opacity="0.3" />
-            <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
-          </linearGradient>
-          <mask id="fade-mask-${uid}">
-            <rect x="0" y="${pad.top}" width="${W}" height="${plotH}" fill="url(#fade-mask-grad-${uid})" />
-          </mask>
-        </defs>
-
-        <!-- Anomaly Zone Background -->
-        ${anomalyZoneMarkup}
-
-        <!-- Grid Lines & Axes -->
-        ${gridMarkup}
-
-        <!-- Area Fill Under Curve -->
-        <path d="${areaD}" fill="url(#area-grad-${uid})" mask="url(#fade-mask-${uid})" />
-
-        <!-- Test count line (dashed gray, right axis) -->
-        ${countLineMarkup}
-
-        <!-- Spline Line Stroke -->
-        <path d="${splineD}" fill="none" stroke="url(#line-grad-${uid})" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
-
-        <!-- Data Point Circles -->
-        ${dotsMarkup}
-
-        <!-- 4 Inline Pill Badges -->
-        ${pillsMarkup}
-
-        <!-- X-Axis Labels -->
-        ${xLabelsMarkup}
-
-        <!-- Active Hover Crosshair Line & Dot (Hidden by default) -->
-        <g id="hover-overlay-${uid}" opacity="0" pointer-events="none">
-          <line id="hover-line-${uid}" x1="0" y1="${pad.top}" x2="0" y2="${baseY}" stroke="#3987E5" stroke-width="1.2" stroke-dasharray="3,3" />
-          <circle id="hover-ring-${uid}" cx="0" cy="0" r="7" fill="none" stroke="#3987E5" stroke-width="2" />
-          <circle id="hover-dot-${uid}" cx="0" cy="0" r="4" fill="#3987E5" />
-        </g>
-
-        <!-- Invisible Hit Boxes for Hover -->
-        ${hoverColsMarkup}
-      </svg>
-
-      <!-- Floating HTML Tooltip Card -->
-      <div id="tooltip-${uid}" style="
-        position: absolute; 
-        opacity: 0; 
-        pointer-events: none; 
-        transition: opacity 0.15s ease, transform 0.15s ease;
-        background: #090D16;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 12px 16px;
-        box-shadow: 0 10px 25px -5px rgba(0,0,0,0.8);
-        z-index: 50;
-        min-width: 210px;
-        top: 0;
-        left: 0;
-      "></div>
-    `;
-  }
-
-  // Render Category Cards based on active tab
-  let TH_SEL = 'all';
-  let TH_GROUP = false;
-
-  function renderDashboard() {
-    const stack = document.getElementById('thCharts');
-    stack.innerHTML = '';
-    const R = flakyCalc();
-    if (!R.n) { THV = {i0:0,i1:-1,commits:[],iset:new Set(),n:0,R}; const sh = document.getElementById('thSummary'); if (sh) sh.innerHTML = ''; stack.innerHTML = `<div style="font-size:13px;color:var(--ink2);padding:8px 0">No merged pull requests fall inside this date range.</div>`; return; }
-    THV = {i0:R.idxs[0], i1:R.idxs[R.idxs.length-1], commits:TH_COMMITS.slice(R.idxs[0], R.idxs[R.idxs.length-1]+1), iset:R.iset, n:R.n, R};
-
-    const filtered = TH_SEL !== 'all' ? TH_CATEGORIES.filter(c => c.id === TH_SEL) : TH_CATEGORIES.filter(c => HW === 'all' || c.device.toLowerCase() === HW);
-    const filteredV = filtered.map(thView);
-    renderTHSummary(filteredV);
-    if (R.n < 2) { stack.innerHTML = `<div style="font-size:13px;color:var(--ink2);padding:8px 0">Only one merged pull request falls inside this date range; the suite lines need at least two.</div>`; return; }
-
-    if (TH_SEL === 'all') { renderTHCombined(stack, filteredV); renderTHIndex(stack, filteredV); if(TH_PIN)thIso(null); return; }
-
-    filteredV.forEach(cat => {
-      const card = document.createElement('div');
-      card.className = 'chart-card';
-
-      card.innerHTML = `
-        <div class="chart-card-header">
-          <div>
-            <div class="card-title-row">
-              <span class="device-indicator-dot" style="background:${cat.color}"></span>
-              <span class="card-title">${cat.name}${cat.tag?` <span style="color:var(--muted);font-weight:400">(${cat.tag})</span>`:``}</span>
-            </div>
-            <div class="card-subtitle" data-guide="th-suite">This chart shows whether this suite got slower, and whether its test count changed. <span class="g-more">The solid line is total duration, on the left axis. The dashed gray line is how many tests ran, on the right axis. When the gray line falls but the solid line does not, fewer tests are taking as much time.</span></div>
-            <div data-thjob style="font-size:12px;color:var(--muted);margin-top:4px">GitHub job: ${thJobPattern(cat)}</div>
-            ${cat.note?`<div data-thnote style="font-size:13px;color:var(--ink2);margin-top:4px;max-width:680px">${cat.note}</div>`:``}
-          </div>
-          <div style="font-size:13px; color:var(--ink2); display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
-            <span style="display:flex;align-items:center;gap:5px"><span style="width:16px;border-top:3px solid ${cat.color};display:inline-block;border-radius:2px"></span>duration (left axis)</span>
-            <span style="display:flex;align-items:center;gap:5px"><span style="width:16px;border-top:2px dashed #94A3B8;display:inline-block"></span>tests (right axis)</span>
-          </div>
-        </div>
-        <div class="chart-scroll-wrap">
-          <div class="chart-svg-container" id="container-${cat.id}">
-            ${renderChartSVG(cat)}
-          </div>
-        </div>
-      `;
-      stack.appendChild(card);
-    });
-    renderTHIndex(stack, filteredV);
-  }
-
-  // Tab switching
-  function setTHSel(v) {
-    TH_SEL = v;
-    renderTHTabs();
-    renderDashboard();
-  }
-  function setTHGroup(v) {
-    TH_GROUP = v;
-    renderTHTabs();
-    renderDashboard();
-  }
-
-  // Interactive Hover Tooltip Management
-  function showTooltip(evt, catId, commitIdx) {
-    const cat = TH_CATEGORIES.find(c => c.id === catId);
-    if (!cat) return;
-    const pt = cat.data.find(d => d.commitIdx === commitIdx);
-    if (!pt || pt.dur === null) return;
-
-    const container = document.getElementById(`container-${catId}`);
-    const svg = document.getElementById(`svg-${catId}`);
-    const overlay = document.getElementById(`hover-overlay-${catId}`);
-    const hoverLine = document.getElementById(`hover-line-${catId}`);
-    const hoverRing = document.getElementById(`hover-ring-${catId}`);
-    const hoverDot = document.getElementById(`hover-dot-${catId}`);
-    const tooltip = document.getElementById(`tooltip-${catId}`);
-
-    // Must match renderChartSVG geometry: W=1000, H=320, pad {top:60,right:65,bottom:45,left:55}
-    const padLeft = 55;
-    const plotW = 1000 - 55 - 65;
-    const xStep = plotW / (THV.commits.length - 1);
-    const plotH = 320 - 60 - 45;
-    const xPos = padLeft + (commitIdx - THV.i0) * xStep;
-    const yPos = 60 + plotH - (pt.dur / cat.maxY) * plotH;
-
-    const isAnomaly = cat.anomalyRange && cat.anomalyRange[0] >= (THV ? THV.i0 : 0) && cat.anomalyRange[0] <= (THV ? THV.i1 : 1e9) && commitIdx >= cat.anomalyRange[0];  // only when the collapse happened inside the range
-    const themeColor = isAnomaly ? '#EF4444' : cat.color;
-
-    // Update SVG hover elements
-    hoverLine.setAttribute('x1', xPos);
-    hoverLine.setAttribute('x2', xPos);
-    hoverLine.setAttribute('stroke', themeColor);
-
-    hoverRing.setAttribute('cx', xPos);
-    hoverRing.setAttribute('cy', yPos);
-    hoverRing.setAttribute('stroke', themeColor);
-
-    hoverDot.setAttribute('cx', xPos);
-    hoverDot.setAttribute('cy', yPos);
-    hoverDot.setAttribute('fill', themeColor);
-
-    overlay.setAttribute('opacity', '1');
-
-    // Build Tooltip HTML
-    const commit = TH_COMMITS[commitIdx];
-    const baseline = (THV ? cat.data.find(d => THV.iset.has(d.commitIdx) && d.count !== null) : cat.data[0]) || cat.data[0];  // first reported run in the range
-    const countDelta = baseline.count ? Math.round(((pt.count - baseline.count) / baseline.count) * 100) : 0;
-    const countDeltaStr = countDelta < -15 ? `<span style="color:#EF4444; font-weight:700;">(first in range: ${baseline.count.toLocaleString()})</span>` : '';
-
-    let statusHeader = '';
-    if (isAnomaly) {
-      statusHeader = `
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; border-bottom:1px solid rgba(239,68,68,0.3); padding-bottom:6px;">
-          <span class="badge-pill badge-crit" style="font-size:9.5px; padding:1px 6px;">TEST COUNT COLLAPSED</span>
-          <span class="mono" style="font-size:13px; color:#FCA5A5;">${commit.hash.slice(0,7)} · ${commit.pr}</span>
-        </div>
-      `;
-      tooltip.style.borderColor = '#EF4444';
-      tooltip.style.background = '#15080A';
-    } else {
-      statusHeader = `
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; border-bottom:1px solid var(--border); padding-bottom:6px;">
-          <span class="mono" style="font-size:13px; color:var(--ink2);">${commit.hash.slice(0,7)} · ${commit.pr}</span>
-          <span style="font-size:13px; color:var(--muted);">${commit.date}, 2026</span>
-        </div>
-      `;
-      tooltip.style.borderColor = 'var(--elevated)';
-      tooltip.style.background = '#090D16';
-    }
-
-    tooltip.innerHTML = `
-      ${statusHeader}
-      <div style="display:flex; flex-direction:column; gap:4px; font-size:14px;">
-        <div style="display:flex; justify-content:space-between; gap:16px;">
-          <span style="color:var(--ink2)">Test Count:</span>
-          <strong class="mono" style="color:${isAnomaly ? '#EF4444' : 'var(--ink)'}">${pt.count} tests ${countDeltaStr}</strong>
-        </div>
-        <div style="display:flex; justify-content:space-between; gap:16px;">
-          <span style="color:var(--ink2)">Total Duration:</span>
-          <strong class="mono" style="color:var(--ink)">${fmtDuration(pt.dur)} <span style="font-size:10.5px; color:var(--muted)">(${pt.dur}s)</span></strong>
-        </div>
-        <div style="margin:4px 0; height:1px; background:var(--elevated);"></div>
-        <div style="display:flex; justify-content:space-between; gap:16px; align-items:baseline;">
-          <span style="color:var(--ink2)">Per-Test Avg:</span>
-          <strong class="mono" style="color:${isAnomaly ? '#EF4444' : '#34D399'}; font-size:12.5px;">
-            ${pt.perTest < 1 ? pt.perTest.toFixed(2) : pt.perTest.toFixed(1)}s / test
-          </strong>
-        </div>
-        <div style="font-size:12px; color:var(--accent); text-align:center; margin-top:6px; padding-top:5px; border-top:1px solid var(--elevated);">click the point to see full details →</div>
-      </div>
-    `;
-
-    // Position tooltip nicely relative to container
-    const svgRect = svg.getBoundingClientRect();
-    const containerRect = container.getBoundingClientRect();
-    const svgScale = svgRect.width / 1000;
-
-    let tipX = xPos * svgScale + 14;
-    let tipY = yPos * svgScale - 40;
-
-    if (tipX + 220 > containerRect.width) {
-      tipX = xPos * svgScale - 230;
-    }
-    if (tipY < 10) tipY = 10;
-
-    tooltip.style.transform = `translate(${tipX}px, ${tipY}px)`;
-    tooltip.style.opacity = '1';
-  }
-
-  function moveTooltip(evt, catId) {
-    // Dynamic tracking handled smoothly
-  }
-
-  function hideTooltip(catId) {
-    const overlay = document.getElementById(`hover-overlay-${catId}`);
-    const tooltip = document.getElementById(`tooltip-${catId}`);
-    if (overlay) overlay.setAttribute('opacity', '0');
-    if (tooltip) tooltip.style.opacity = '0';
-  }
-
-  // ============ TEST HEALTH POINT DETAIL MODAL ============
-  function thJobPattern(cat){
-  if(cat.nested){const p=TH_CATEGORIES.find(x=>x.name===cat.nested||x.id===cat.nested);const pn=p?p.name:cat.nested,pg=p?p.group:'CPU Pretrain Tests';
-    return `step "Run Targeted Decoupled Tests" inside ${pg} (${pn}) / Execute Tests (1) / ${pn}`;}
-  const w=cat.workers||1;return `${cat.group} (${cat.name}) / Execute Tests (${w>1?'1..'+w:'1'}) / ${cat.name}`;
-}
-function openTHDetail(catId, commitIdx) {
-    const cat = TH_CATEGORIES.find(c => c.id === catId);
-    if (!cat) return;
-    const pt = cat.data.find(d => d.commitIdx === commitIdx);
-    if (!pt || pt.dur === null) return;
-    hideTooltip(catId);
-
-    const commit = TH_COMMITS[commitIdx];
-    const valid = cat.data.filter(d => d.dur !== null);
-    const vIdx = valid.findIndex(d => d.commitIdx === commitIdx);
-    const prev = vIdx > 0 ? valid[vIdx - 1] : null;
-
-    // Baseline = this suite's first up-to-8 reported runs INSIDE the range and BEFORE this commit;
-    // if the range holds fewer than 3 such runs, the first stored runs before this commit.
-    const inR = THV ? valid.filter(d => THV.iset.has(d.commitIdx) && d.commitIdx < commitIdx) : [];
-    const before = valid.filter(d => d.commitIdx < commitIdx);
-    const hasBase = before.length > 0;  // never compare a run against itself or its own future
-    const base = inR.length >= 3 ? inR.slice(0, 8) : hasBase ? before.slice(0, 8) : [pt];
-    const baseLabel = inR.length >= 3 ? `the first ${base.length} runs in this range` : hasBase ? `the first ${base.length} stored runs (before this range)` : 'no earlier stored run';
-    const baseCount = Math.round(base.reduce((s, d) => s + d.count, 0) / base.length);
-    const baseDur = Math.round(base.reduce((s, d) => s + d.dur, 0) / base.length);
-    const basePT = base.reduce((s, d) => s + d.perTest, 0) / base.length;
-
-    const isAnom = cat.anomalyRange && commitIdx >= cat.anomalyRange[0] && commitIdx <= cat.anomalyRange[1];
-    const countDelta = baseCount ? Math.round((pt.count - baseCount) / baseCount * 100) : 0;
-    const durDelta = baseDur ? Math.round((pt.dur - baseDur) / baseDur * 100) : 0;
-    const ptRatio = basePT > 0 ? pt.perTest / basePT : 1;
-
-    const commitUrl = `https://github.com/${REPO}/commit/${commit.hash}`;
-    const prUrl = `https://github.com/${REPO}/pull/${commit.pr.replace('#','')}`;
-
-    // Plain-language explanation of what this point means
-    let meaning = '';
-    if (cat.status === 'CRASH' && isAnom) {
-      const preDrop = cat.anomalyRange ? valid.filter(d => d.commitIdx < cat.anomalyRange[0]) : [];
-      const preDropPT = preDrop.length ? preDrop.reduce((s, d) => s + d.perTest, 0) / preDrop.length : null;
-      const expected = Math.round(pt.count * (preDropPT !== null ? preDropPT : basePT));
-      meaning = `${preDropPT !== null ? `At the speed this suite ran before the drop (${preDropPT.toFixed(2)}s per test)` : `At this range's average speed (${basePT.toFixed(2)}s per test)`}, ${pt.count} tests would finish in about ${fmtDuration(expected)}. This run took ${fmtDuration(pt.dur)} — each test averaged ${pt.perTest.toFixed(1)}s.`;
-    } else if (cat.status === 'CRASH') {
-      meaning = 'This commit ran before the incident. Test count and speed match the baseline.';
-    } else if (cat.status === 'NOISY') {
-      meaning = 'Test count matches the baseline, but total time swings between runs of identical code. The variation points at the runner machine, not the tests.';
-    } else if (cat.status === 'TRIMMED') {
-      meaning = pt.count < baseCount * 0.95 ? 'Fewer tests than the baseline, with per-test speed unchanged — consistent with an intentional cleanup.' : 'Test count and speed match the baseline for this range.';
-    } else if (cat.status === 'NEW') {
-      const firstIdx = cat.data.findIndex(d => d.dur !== null);
-      meaning = `This suite first reported results on ${TH_COMMITS[firstIdx].date}. Runs so far form its baseline.`;
-    } else {
-      meaning = 'Test count and speed are within the normal range for this suite.';
-    }
-
-    // Pattern read: fixed-threshold rules on count/duration/workers vs the
-    // previous commit. Names which known T/D/W situation the numbers match —
-    // facts only, never advice. Split parts always sum to the total change.
-    const wNow = (typeof THI_WORKERS !== 'undefined' && THI_WORKERS[cat.id]) || 1;
-    const wPrev = wNow; // per-suite worker counts did not change inside this window
-    let patternBox = '';
-    {
-      const min1 = s => (s < -0.5 ? '\u2212' : '+') + (Math.abs(s) / 60).toFixed(1) + 'm';
-      let label = '', tone = 'var(--ink2)', parts = '';
-      if (!prev) {
-        label = 'First reported run for this suite \u2014 there is no previous commit to compare against.';
-        tone = 'var(--muted)';
-      } else {
-        const dD = pt.dur - prev.dur;
-        const pctT = prev.count > 0 ? (pt.count - prev.count) / prev.count : 0;
-        const countScale = prev.count > 0 ? pt.count / prev.count : 1;
-        const expDur = prev.dur * countScale * (wPrev / wNow);
-        const testsPart = prev.dur * countScale - prev.dur;
-        const workersPart = expDur - (prev.dur + testsPart);
-        const speedPart = pt.dur - expDur;
-        const spdSig = Math.abs(speedPart) >= Math.max(0.10 * expDur, 60);
-        if (pctT <= -0.20) {
-          label = `Test count fell ${prev.count.toLocaleString()} \u2192 ${pt.count.toLocaleString()} (${(prev.count - pt.count).toLocaleString()} fewer tests). Total time went ${fmtDuration(prev.dur)} \u2192 ${fmtDuration(pt.dur)}. At the old speed, the remaining tests would take about ${fmtDuration(expDur)}` + (spdSig ? ` \u2014 the actual run is ${fmtDuration(Math.abs(speedPart))} ${speedPart > 0 ? 'more' : 'less'}, so the tests that ran averaged ${speedPart > 0 ? 'slower' : 'faster'} per test than before.` : `, and the actual run matches that.`);
-          tone = isAnom ? 'var(--crit)' : 'var(--warn)';
-        } else if (pctT >= 0.20 && !spdSig) {
-          label = `Tests added: ${prev.count.toLocaleString()} \u2192 ${pt.count.toLocaleString()} (${(pt.count - prev.count).toLocaleString()} more tests). Total time went ${fmtDuration(prev.dur)} \u2192 ${fmtDuration(pt.dur)} \u2014 that matches the larger test count at unchanged speed per test.`;
-        } else if (pctT >= 0.05 && spdSig) {
-          label = `Tests added and existing tests got ${speedPart > 0 ? 'slower' : 'faster'}: total time went ${fmtDuration(prev.dur)} \u2192 ${fmtDuration(pt.dur)}. The added tests explain ${min1(testsPart)} of that change` + (speedPart > 0 ? `; slower running adds ${fmtDuration(speedPart)} on top.` : `; faster running takes ${fmtDuration(Math.abs(speedPart))} back off.`);
-          tone = speedPart > 0 ? 'var(--warn)' : 'var(--accent)';
-        } else if (spdSig) {
-          label = `Existing tests got ${speedPart > 0 ? 'slower' : 'faster'}: total time went ${fmtDuration(prev.dur)} \u2192 ${fmtDuration(pt.dur)}. With the test count at ${prev.count.toLocaleString()} \u2192 ${pt.count.toLocaleString()}, the expected time was about ${fmtDuration(expDur)} \u2014 the actual run is ${fmtDuration(Math.abs(speedPart))} ${speedPart > 0 ? 'more' : 'less'}, so the tests that ran averaged ${speedPart > 0 ? 'slower' : 'faster'} per test than before.`;
-          tone = speedPart > 0 ? 'var(--warn)' : 'var(--accent)';
-        } else {
-          label = `No significant change: total time went ${fmtDuration(prev.dur)} \u2192 ${fmtDuration(pt.dur)}, in line with the previous commit.`;
-          tone = 'var(--muted)';
-        }
-        parts = `<div style="margin-top:6px;font-size:13px;color:var(--ink2)">Change split vs the previous commit: <span class="mono">tests added/removed ${min1(testsPart)}</span> \u00b7 <span class="mono">workers ${min1(workersPart)}</span> \u00b7 <span class="mono">${speedPart >= 0 ? 'slower' : 'faster'} running ${min1(speedPart)}</span> = <span class="mono">${min1(dD)} total</span> <span style="color:var(--muted)">(+ adds minutes to the run, \u2212 removes them)</span></div>`;
-      }
-      patternBox = `<div data-thpattern style="padding:10px 14px;border:1px solid var(--border);border-radius:8px;margin-bottom:16px">
-<div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">Pattern read \u2014 this commit vs the previous one</div>
-<div style="font-size:14px;line-height:1.6;font-weight:600;color:${tone}">${label}</div>
-${parts}
-<div style="margin-top:6px;font-size:12px;color:var(--muted)">Workers: ${cat.nested ? 'none of its own (it runs inside ' + cat.nested + ' worker 1)' : wNow + (wPrev === wNow ? ' (unchanged)' : '')}. Every value comes from this suite's own runs through fixed thresholds; no judgment is applied.</div>
-</div>`;
-    }
-    const dCol = v => v > 25 ? 'var(--crit)' : v > 10 ? 'var(--warn)' : v < -10 ? 'var(--accent)' : 'var(--muted)';
-    const rowFor = (label, d, highlight) => d ? `<tr style="${highlight ? 'background:rgba(6,182,212,0.06)' : ''}">
-      <td style="font-size:13px;color:var(--ink2)">${label}</td>
-      <td class="mono">${d.count.toLocaleString()}</td>
-      <td class="mono">${fmtDuration(d.dur)}</td>
-      <td class="mono">${d.perTest < 1 ? d.perTest.toFixed(2) : d.perTest.toFixed(1)}s</td>
-    </tr>` : '';
-
-    // Nearby commits (3 before, 3 after) for context around the point
-    const nearby = valid.slice(Math.max(0, vIdx - 3), vIdx + 4);
-    const nearbyRows = nearby.map(d => {
-      const c = TH_COMMITS[d.commitIdx];
-      const rowAnom = cat.anomalyRange && d.commitIdx >= cat.anomalyRange[0] && d.commitIdx <= cat.anomalyRange[1];
-      const isSel = d.commitIdx === commitIdx;
-      return `<tr onclick="openTHDetail('${cat.id}', ${d.commitIdx})" style="cursor:pointer;${isSel ? 'background:rgba(248,250,252,0.06)' : ''}${rowAnom && !isSel ? 'background:rgba(239,68,68,0.05)' : ''}">
-        <td style="font-size:13px">${isSel ? '<span style="color:var(--accent)">▶</span> ' : ''}<span class="mono">${c.hash.slice(0,7)}</span></td>
-        <td class="mono" style="font-size:13px;color:var(--ink2)">${c.pr}</td>
-        <td style="font-size:13px;color:var(--muted)">${c.date}</td>
-        <td class="mono" style="color:${rowAnom ? 'var(--crit)' : 'var(--ink)'}">${d.count.toLocaleString()}</td>
-        <td class="mono">${fmtDuration(d.dur)}</td>
-        <td class="mono" style="color:${rowAnom ? 'var(--crit)' : 'var(--ink2)'}">${d.perTest < 1 ? d.perTest.toFixed(2) : d.perTest.toFixed(1)}s</td>
-      </tr>`;
-    }).join('');
-
-    $('#modal').innerHTML = `<div class="modal-head"><div>
-<h2><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${cat.color};margin-right:6px"></span>${cat.name}</h2>
-<div class="sub"><span class="mono">${commit.hash.slice(0,7)}</span> · ${commit.pr} · ${commit.date}, 2026</div>
-<div class="sub" data-thjob style="margin-top:6px;color:var(--muted)">GitHub job: ${thJobPattern(cat)}</div>
-${cat.note?`<div class="sub" data-thnote style="margin-top:6px;max-width:680px;color:var(--ink2)">${cat.note}</div>`:``}
-<div style="display:flex;gap:8px;margin-top:8px">
-${window.__thiBack!=null?`<button onclick="thiPatPop(window.__thiBack)" style="font:600 13px var(--font);color:var(--ink);background:var(--elevated);border:1px solid var(--border);padding:3px 10px;border-radius:5px;cursor:pointer">← Back to pattern event</button>`:''}
-<a href="${commitUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">Commit ↗</a>
-<a href="${prUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">PR ${commit.pr} ↗</a>
-</div>
-</div><button class="modal-close" onclick="closeModal()">✕</button></div>
-<div class="modal-body">
-<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">
-<div class="dtile"><div class="dtile-name">Tests executed</div><div class="dtile-val" style="color:${isAnom ? 'var(--crit)' : 'var(--ink)'}">${pt.count.toLocaleString()}</div><div style="font-size:12px;color:${dCol(Math.abs(countDelta))}">${hasBase?`${baseLabel}: ${Math.round(baseCount).toLocaleString()} tests`:'first stored run of this suite — nothing earlier to compare against'}</div></div>
-<div class="dtile"><div class="dtile-name">Total duration</div><div class="dtile-val">${fmtDuration(pt.dur)}</div><div style="font-size:12px;color:${dCol(Math.abs(durDelta))}">${hasBase?`${fmtDuration(Math.abs(pt.dur - baseDur))} ${pt.dur >= baseDur ? 'more' : 'less'} than the average of ${baseLabel} (${fmtDuration(baseDur)})`:'no earlier stored run to compare against'}</div></div>
-<div class="dtile"><div class="dtile-name">Time per test</div><div class="dtile-val" style="color:${ptRatio > 2 ? 'var(--crit)' : ptRatio > 1.3 ? 'var(--warn)' : 'var(--good)'}">${pt.perTest < 1 ? pt.perTest.toFixed(2) : pt.perTest.toFixed(1)}s</div><div style="font-size:12px;color:var(--muted)">${!hasBase ? 'no earlier stored run to compare against' : ptRatio >= 1.05 ? 'each test takes ' + ptRatio.toFixed(1) + '× as long as the ' + basePT.toFixed(2) + 's of ' + baseLabel : 'matches the time per test of ' + basePT.toFixed(2) + 's in ' + baseLabel}</div></div>
-</div>
-<div style="padding:10px 14px;background:${isAnom ? 'var(--tint-crit)' : 'var(--elevated)'};border-radius:8px;font-size:14px;line-height:1.6;color:${isAnom ? '#FCA5A5' : 'var(--ink2)'};margin-bottom:16px">${meaning}</div>
-
-${patternBox}<div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:6px">This run compared with its history</div>
-<table style="margin-bottom:16px">
-<thead><tr><th></th><th>Tests</th><th>Total</th><th>Per test</th></tr></thead>
-<tbody>
-${hasBase?rowFor("Average of " + baseLabel, {count: baseCount, dur: baseDur, perTest: basePT}, false):''}
-${rowFor('Previous commit (' + (prev ? TH_COMMITS[prev.commitIdx].hash.slice(0,7) : '') + ')', prev, false)}
-${rowFor('This commit (' + commit.hash.slice(0,7) + ')', pt, true)}
-</tbody></table>
-
-<div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:6px">Nearby commits — click a row to inspect it (rows outside the selected range appear for context)</div>
-<table>
-<thead><tr><th>Commit</th><th>PR</th><th>Date</th><th>Tests</th><th>Total</th><th>Per test</th></tr></thead>
-<tbody>${nearbyRows}</tbody></table>
-</div>`;
-
-    $('#overlay').classList.add('on');
-    document.body.style.overflow = 'hidden';
-  }
 
   // ================= ISSUE DETECTION ENGINE =================
   function detectIssues() {
@@ -3150,482 +1571,13 @@ ${rowFor('This commit (' + commit.hash.slice(0,7) + ')', pt, true)}
 // Render test health tabs
 // One chart holding every suite: a duration line per suite, statuses in the chip row,
 // counts in the hover card (and on each suite's own panel via the dropdown).
-let TH_PIN=null;
-function thIso(id){
-  const eff=id||TH_PIN;
-  document.querySelectorAll('#thCharts [data-th]').forEach(n=>{
-    const base=n.getAttribute('data-op')||'1';
-    n.setAttribute('opacity',eff==null||n.getAttribute('data-th')===eff?base:'0.13');
-  });
-  document.querySelectorAll('#thCharts [data-throw]').forEach(r=>{
-    r.style.background=(eff&&r.getAttribute('data-throw')===eff)?'var(--elevated)':'transparent';
-  });
-  document.querySelectorAll('#thCharts [data-thlab]').forEach(n=>{
-    n.setAttribute('opacity',eff&&n.getAttribute('data-thlab')===eff?'1':'0');
-  });
-}
-function thPin(id){TH_PIN=TH_PIN===id?null:id;renderTestHealth();}
-function thcOpenFor(cat,idx){
-  if(cat.memberIds){
-    let m=null;
-    cat.memberIds.forEach(id=>{const mc=TH_CATEGORIES.find(c=>c.id===id);const md=mc&&mc.data[THV.i0+idx];if(md&&md.dur!==null&&(!m||md.dur>m.md.dur))m={mc,md}});
-    if(m)openTHDetail(m.mc.id,THV.i0+idx);
-    return;
-  }
-  openTHDetail(cat.id,THV.i0+idx);
-}
-function thcClick(evt,idx){
-  const st=window.__thc;if(!st)return;
-  $('#tip').style.display='none';
-  if(TH_PIN){const pc=st.cats.find(c=>c.id===TH_PIN);if(pc){thcOpenFor(pc,idx);return}}
-  const svg=document.querySelector('#thCharts svg');
-  const rect=svg?svg.getBoundingClientRect():null;
-  let best=null;
-  st.cats.forEach(cat=>{
-    const d=cat.data[idx];if(!d||d.dur===null)return;
-    const yD=st.padTop+st.plotH*(1-d.dur/st.maxY);
-    const yC=st.padTop+st.plotH*(1-d.count/st.cMax);
-    let dist=0;
-    if(rect&&rect.height>0){
-      const yPx=(evt.clientY-rect.top)/rect.height*st.H;
-      dist=Math.min(Math.abs(yD-yPx),Math.abs(yC-yPx));
-    }else{
-      dist=-d.dur;
-    }
-    if(!best||dist<best.dist)best={cat,dist};
-  });
-  if(best)thcOpenFor(best.cat,idx);
-}
-function thcHide(){$('#tip').style.display='none';$('#tip').style.maxWidth='';const cl=document.getElementById('thc-cross');if(cl)cl.setAttribute('opacity',0)}
-function thcTip(evt,idx){
-  const st=window.__thc;if(!st)return;
-  const c=THV.commits[idx];
-  const cl=document.getElementById('thc-cross');
-  if(cl){cl.setAttribute('x1',st.px[idx]);cl.setAttribute('x2',st.px[idx]);cl.setAttribute('opacity',1)}
-  let rows=st.cats.map(cat=>({cat,d:cat.data[idx]})).filter(r=>r.d&&r.d.dur!==null).sort((a,b)=>b.d.dur-a.d.dur);
-  // a zoomed (pinned) suite gets a card about itself only
-  if(TH_PIN)rows=rows.filter(r=>r.cat.id===TH_PIN);
-  const tEl=$('#tip');
-  const fmtC=v=>v>=1000?(v/1000).toFixed(1)+'k':String(v);
-  const cell=s=>`<span class="mono" style="font-size:12px;text-align:right;white-space:nowrap">${s}</span>`;
-  let body='';
-  ['TPU','GPU','CPU'].forEach(dv=>{
-    const rs=rows.filter(r=>(r.cat.device||'').toUpperCase()===dv);
-    if(!rs.length)return;
-    if(!TH_PIN)body+=`<div style="grid-column:1/-1;font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--muted);padding:5px 0 1px;border-bottom:1px solid var(--grid)">${dv}</div>`;
-    rs.forEach(r=>{
-      const pin=TH_PIN===r.cat.id;
-      body+=`<span style="font-size:12px;color:${pin?'var(--ink)':'var(--ink2)'};${pin?'font-weight:700;':''}white-space:nowrap"><span style="color:${st.colorOf[r.cat.id]}">■</span> ${r.cat.name}${r.cat.tag?` <span style="color:var(--muted)">(${r.cat.tag})</span>`:''}</span>`
-        +cell(fmtDuration(r.d.dur))+cell(fmtC(r.d.count))+cell((+r.d.perTest).toFixed(1)+'s');
-    });
-  });
-  tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">${c.pr||'#'+c.hash} · ${c.date}</div>
-<div style="font-size:13px;color:var(--muted);margin-bottom:4px">${TH_PIN?'Only the suite you zoomed to is shown':'Every suite on this commit, grouped by device'}</div>
-<div style="display:grid;grid-template-columns:1fr auto auto auto;column-gap:12px;row-gap:2px;align-items:baseline">
-<span></span>${['Duration','Tests','Per test'].map(h=>`<span style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);text-align:right">${h}</span>`).join('')}
-${body}
-</div>
-<div style="font-size:12px;color:var(--accent);text-align:center;margin-top:6px">${TH_PIN?`click to open this suite's full details →`:'click to open full details of the line nearest your cursor →'}</div>`;
-  tEl.style.maxWidth='430px';
-  tEl.style.display='block';
-  const ow=tEl.offsetWidth||340;let lx=evt.clientX+14;if(lx+ow+8>window.innerWidth)lx=evt.clientX-ow-14;
-  tEl.style.left=lx+'px';tEl.style.top=Math.max(8,Math.min(evt.clientY-16,window.innerHeight-(tEl.offsetHeight||220)-8))+'px';
-}
-function renderTHCombined(stack,cats){
-  if(TH_GROUP){
-    const byD={};cats.forEach(c=>{(byD[c.device]=byD[c.device]||[]).push(c)});
-    const DEVN={TPU:'TPU suites combined',GPU:'GPU suites combined',CPU:'CPU suites combined'};
-    cats=Object.entries(byD).map(([dv,list])=>({
-      id:'grp-'+dv,device:dv,name:DEVN[dv]||dv,status:'GROUP',statusLabel:'',memberIds:list.map(c=>c.id),
-      data:THV.commits.map((_,i)=>{
-        const ms=list.map(c=>({c,d:c.data[i]})).filter(x=>x.d&&x.d.dur!==null);
-        if(!ms.length)return{count:null,dur:null,perTest:null,commitIdx:THV.i0+i};
-        // a nested suite (decoupled) is an extra pass inside another suite's job: its time is real extra time, its tests are already in that suite's count
-        const dur=ms.reduce((a,x)=>a+x.d.dur,0),count=ms.reduce((a,x)=>a+((x.c.nested||(x.c.full&&x.c.full.nested))?0:x.d.count),0);
-        return{count,dur,perTest:count?+(dur/count).toFixed(2):null,commitIdx:THV.i0+i};  // global TH index, like every real suite
-      }),
-      anomalyRange:(()=>{const s=list.filter(c=>c.anomalyRange).map(c=>c.anomalyRange[0]);return s.length?[Math.min(...s),THV.commits.length-1]:null})(),
-    }));
-  }
-  if(TH_PIN&&!cats.some(c=>c.id===TH_PIN))TH_PIN=null;
-  const W=1060,H=390,pad={top:24,right:230,bottom:92,left:62};  // bottom/left hold the rotated "#hash Mon DD" labels; right holds the longest flavor name (tpu-post-training-integration); plot width 768 and plotH 274 unchanged
-  const plotW=W-pad.left-pad.right,plotH=H-pad.top-pad.bottom;
-  const scaleCats=TH_PIN?cats.filter(c=>c.id===TH_PIN):cats;
-  // Zoomed to one suite, the two series get different headroom (1.25 vs 1.7) so a flat
-  // duration line and a flat count line land in separate bands instead of on top of each other.
-  const maxY=Math.max(...scaleCats.flatMap(c=>c.data.filter(d=>d.dur!==null).map(d=>d.dur)))*(TH_PIN?1.25:1.12);
-  // Dual axis at the user's request: left = duration, right = tests-run count; the scales are independent.
-  const cMax=Math.max(...scaleCats.flatMap(c=>c.data.filter(d=>d.count!==null).map(d=>d.count)))*(TH_PIN?1.7:1.08);
-  const cpy=v=>pad.top+plotH-(v/cMax)*plotH;
-  const xStep=plotW/(THV.commits.length-1);
-  const px=i=>pad.left+i*xStep,py=v=>pad.top+plotH-(v/maxY)*plotH;
-  const DEVHEX={TPU:'#3987E5',GPU:'#F97316',CPU:'#22C55E'};
-  const byDev={};cats.forEach(c=>{(byDev[c.device]=byDev[c.device]||[]).push(c)});
-  const colorOf={};Object.entries(byDev).forEach(([dv,list])=>list.forEach((c,i)=>{colorOf[c.id]=thLineShade(DEVHEX[dv]||'#64748B',i,list.length)}));
-  window.__thc={cats,colorOf,px:THV.commits.map((_,i)=>px(i)),padTop:pad.top,plotH,maxY,cMax,H};
-  const latest=c=>{const v=[...c.data].reverse().find(d=>d.count!==null);return v||{count:0,dur:0}};
-  const fmtC=v=>v>=1000?(v/1000).toFixed(1).replace(/\.0$/,'')+'k':String(v);
-
-  let g='';
-  const yInt=maxY>1800?600:maxY>600?300:60;
-  for(let v=0;v<=maxY;v+=yInt){
-    g+=`<line x1="${pad.left}" y1="${py(v)}" x2="${W-pad.right}" y2="${py(v)}" stroke="#1E293B" stroke-width="1" stroke-dasharray="3,3"/>`;
-    g+=`<text x="${pad.left-6}" y="${py(v)+3}" text-anchor="end" font-size="11" fill="#64748B" font-family="var(--mono)">${Math.round(v/60)}m</text>`;
-  }
-  const cInt=cMax>1200?500:cMax>300?100:50;
-  for(let v=0;v<=cMax;v+=cInt){
-    g+=`<text x="${W-pad.right-5}" y="${cpy(v)-3}" text-anchor="end" font-size="10" fill="#475569" font-family="var(--mono)">${v>=1000?(v/1000).toFixed(1).replace('.0','')+'k':v}${v===0?' tests':''}</text>`;
-  }
-  g+=`<line id="thc-cross" x1="0" y1="${pad.top}" x2="0" y2="${pad.top+plotH}" stroke="rgba(248,250,252,0.2)" stroke-width="1" stroke-dasharray="3,3" opacity="0"/>`;
-  // count lines first (dashed, right axis), duration lines on top
-  cats.forEach(cat=>{
-    const cpts=cat.data.filter(d=>d.count!==null).map(d=>({x:px(d.commitIdx-THV.i0),y:cpy(d.count),v:d.count}));
-    if(cpts.length>=2)g+=`<path data-th="${cat.id}" data-op="0.95" d="${createSplinePath(cpts)}" fill="none" stroke="${colorOf[cat.id]}" stroke-width="2.2" stroke-dasharray="5,4" opacity="0.95"/>`;
-    // explicit test-count numbers — visible while this suite is highlighted or pinned
-    const fC=v=>v>=1000?(v/1000).toFixed(1)+'k':String(v);
-    cpts.forEach((p,k)=>{
-      if(k===0||k===cpts.length-1||fC(p.v)!==fC(cpts[k-1].v)){
-        const lx=Math.min(Math.max(p.x,pad.left+16),W-pad.right-16);
-        const ly=Math.min(Math.max(p.y+16,pad.top+9),pad.top+plotH-4);
-        g+=`<text data-thlab="${cat.id}" x="${lx}" y="${ly}" text-anchor="middle" font-size="12" font-weight="700" fill="${colorOf[cat.id]}" font-family="var(--mono)" opacity="0" pointer-events="none">${fC(p.v)}</text>`;}
-    });
-  });
-  // lines
-  cats.forEach(cat=>{
-    const pts=cat.data.filter(d=>d.dur!==null).map(d=>({x:px(d.commitIdx-THV.i0),y:py(d.dur),v:d.dur}));
-    if(pts.length<2)return;
-    g+=`<path data-th="${cat.id}" data-op="1" d="${createSplinePath(pts)}" fill="none" stroke="${colorOf[cat.id]}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1"/>`;
-    // explicit duration numbers — visible while this suite is highlighted or pinned
-    pts.forEach((p,k)=>{
-      const lx=Math.min(Math.max(p.x,pad.left+16),W-pad.right-16);
-      const ly=Math.min(Math.max(p.y+(k%2?16:-9),pad.top+9),pad.top+plotH-4);
-      g+=`<text data-thlab="${cat.id}" x="${lx}" y="${ly}" text-anchor="middle" font-size="12" font-weight="700" fill="${colorOf[cat.id]}" font-family="var(--mono)" opacity="0" pointer-events="none">${Math.round(p.v/60)}m</text>`;
-    });
-    if(cat.anomalyRange){
-      const i0=cat.anomalyRange[0];const d0=cat.data[i0];
-      if(d0&&d0.dur!==null)g+=`<circle data-th="${cat.id}" data-op="1" cx="${px(i0)}" cy="${py(d0.dur)}" r="6" fill="none" stroke="#EF4444" stroke-width="1.6" opacity="1"/>`;
-    }
-    const st=cat.data.findIndex(d=>d.dur!==null);
-    if(st>0){const dS=cat.data[st];g+=`<circle data-th="${cat.id}" data-op="1" cx="${px(st)}" cy="${py(dS.dur)}" r="3.5" fill="${colorOf[cat.id]}" stroke="var(--surface)" stroke-width="1.5" opacity="1"/>`;}
-  });
-  // endpoint labels, staggered
-  const eps=cats.map(c=>{const lv=latest(c);return{id:c.id,label:c.name,color:colorOf[c.id],y:py(lv.dur)}}).sort((a,b)=>a.y-b.y);
-  for(let i=1;i<eps.length;i++)if(eps[i].y<eps[i-1].y+13)eps[i].y=eps[i-1].y+13;
-  // a cluster pushed past the plot bottom is walked back up so every label stays inside the plot
-  const epMax=pad.top+plotH-2;if(eps.length&&eps[eps.length-1].y>epMax){eps[eps.length-1].y=epMax;for(let i=eps.length-2;i>=0;i--)if(eps[i].y>eps[i+1].y-13)eps[i].y=eps[i+1].y-13}
-  eps.forEach(p=>{g+=`<text data-th="${p.id}" data-op="1" x="${W-pad.right+8}" y="${p.y+3}" font-size="11" font-weight="700" fill="${p.color}" font-family="var(--mono)" opacity="1">${p.label}</text>`});
-  // x labels: sparse dates + hash
-  THV.commits.forEach((c,i)=>{
-    g+=`<text data-thax="1" x="${px(i)+3}" y="${H-78}" text-anchor="end" font-size="12" fill="#64748B" font-family="var(--mono)" transform="rotate(-55 ${px(i)+3} ${H-78})">#${c.hash} ${c.date}</text>`;
-  });
-  // hit columns
-  THV.commits.forEach((c,i)=>{
-    g+=`<rect x="${px(i)-xStep/2}" y="${pad.top}" width="${xStep}" height="${plotH}" fill="transparent" cursor="pointer" onmousemove="thcTip(event,${i})" onmouseleave="thcHide()" onclick="thcClick(event,${i})"/>`;
-  });
-
-  const card=document.createElement('div');
-  card.className='chart-card';
-  card.innerHTML=`
-    <div class="chart-card-header">
-      <div>
-        <div class="card-title-row"><span class="card-title">All test suites — duration per commit</span></div>
-        <div class="card-subtitle" data-guide="th-combined">This chart shows every suite's speed and size in one place, so a suite that got slower or lost tests stands out. <span class="g-more">Each suite draws two lines in its device's colour: the solid line is its total test time, on the left axis; the dashed line is how many tests ran, on the right axis. If the dashed line falls off a cliff while the solid line stays up, fewer tests are taking just as much time; the red ring marks the commit where that collapse happened. Hover anywhere on the chart to list every suite's numbers at that commit. Click a commit to open the details of the line closest to your pointer, or of the suite you have highlighted. In the legend above the chart, hover a suite to follow its two lines; click it to keep it highlighted and zoom the chart to that suite alone; click it again to zoom back out. The Every suite / Device groups toggle above the card rolls the suites up into one line per device, and the Suite dropdown shows one suite on its own.</span></div>
-      </div>
-    </div>
-    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:2px 0 4px;align-items:center;font-size:12px;color:var(--ink2)">
-      <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:16px;border-top:3px solid #94A3B8;display:inline-block;border-radius:2px"></span>duration (left axis)</span>
-      <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:16px;border-top:2px dashed #94A3B8;display:inline-block"></span>tests (right axis)</span>
-      <span style="color:var(--muted)">Each suite row shows how many tests its latest run executed, how that count has changed since the start of this date range, its current time per test, and the pattern those numbers match. Hover a row to follow its two lines; click to keep it highlighted and zoom the chart to it; click again to zoom back out.</span>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:2px 24px;margin-bottom:8px">
-      ${['TPU','GPU','CPU'].filter(dv=>cats.some(c=>c.device===dv)).map(dv=>`<div>
-        <div style="font-size:11px;letter-spacing:0.07em;color:var(--muted);text-transform:uppercase;margin:2px 0">${dv}</div>
-        ${cats.filter(c=>c.device===dv).map(c=>{
-          const f=c.data.find(d=>d.count!==null),lv=latest(c);
-          const dd=f?lv.count-f.count:0;
-          const dtxt=dd===0?'· 0':(dd>0?'▲ ':'▼ ')+fmtC(Math.abs(dd));
-          const dcol=dd<0&&f&&Math.abs(dd)/f.count>0.2?'var(--crit)':dd>0?'var(--accent)':'var(--muted)';
-          // pattern word: fixed thresholds on this suite's own history (facts, not verdicts) — shared with the summary
-          const R=thSuiteRead(c);const pw=R.pw,pc=R.pc,ptN=R.ptN;
-          return `<div data-throw="${c.id}" onmouseenter="thIso('${c.id}')" onmouseleave="thIso(null)" onclick="thPin('${c.id}')" style="display:flex;flex-wrap:wrap;align-items:center;gap:2px 6px;padding:2px 6px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--ink2)">
-            <span style="width:10px;height:10px;border-radius:3px;background:${colorOf[c.id]};display:inline-block;flex-shrink:0"></span>
-            <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.name}${c.tag?` <span style="color:var(--muted);font-weight:400">(${c.tag})</span>`:''}</span>
-            <span class="mono" style="color:var(--ink);white-space:nowrap">${fmtC(lv.count)} tests</span>
-            <span class="mono" style="color:${dcol};min-width:46px;text-align:right" title="Change in test count since the start of this date range">${dtxt}</span>
-            <span data-thpw style="flex-basis:100%;padding-left:16px;font-size:12px;color:var(--muted)"><span class="mono">${ptN<1?ptN.toFixed(2):ptN.toFixed(1)}s/test</span> · <span style="color:${pc}">${pw}</span></span>
-          </div>`;
-        }).join('')}
-      </div>`).join('')}
-    </div>
-    <div data-thflavors style="font-size:12px;color:var(--muted);margin:0 0 10px;max-width:980px">Suite names are the test flavors of the CI workflow. decoupled runs inside the cpu-unit job on worker 1 and its 50 tests are also counted in cpu-unit; in Device groups it adds its time to the CPU line but not its tests. Not shown: tpu7x-unit, tpu7x-integration and tpu7x-post-training-unit run only when the workflow is not started by a pull request (scheduled, manual and release runs), so they have no pull-request data; the TPU Pathways Unit and Integration jobs write no test-result file.</div>
-    <div class="chart-scroll-wrap"><div class="chart-svg-container">
-      <svg viewBox="0 0 ${W} ${H}" style="display:block;width:100%;min-width:760px">${g}</svg>
-    </div></div>`;
-  stack.appendChild(card);
-}
 
 // One indexed line chart: test count, test duration, and worker count divided by their
 // level at the start of the history, so three different units share a single axis.
 // 2026-08-31: the totals card is parked (kept in source, hidden on the page) until the first production push. Flip to false to show it.
-const THI_HIDDEN=true;
-const THI={dur:{key:'dur',label:'Test duration',color:'#F97316',dash:''},
-           cnt:{key:'cnt',label:'Test count',color:'#06B6D4',dash:'6,4'},
-           wrk:{key:'wrk',label:'Workers',color:'#94A3B8',dash:'2,4'}};
 // Parallel "Execute Tests (N)" jobs per suite, from the suite list: cpu-unit 4, cpu-post-training-unit 4, tpu-unit 2, others 1. The collector counts them per run; never hard-code.
-const THI_WORKERS=Object.fromEntries(TH_CATEGORIES.map(c=>[c.id,c.workers||1]));  // parallel workers per suite, from the suite list
-function thiTip(evt,idx){
-  const st=window.__thi;if(!st)return;
-  const cl=document.getElementById('thi-cross');
-  if(cl){cl.setAttribute('x1',st.px[idx]);cl.setAttribute('x2',st.px[idx]);cl.setAttribute('opacity',1)}
-  const c=THV.commits[idx],d=st.data[idx],b=st.base,c0=THV.commits[st.baseIdx];
-  const tEl=$('#tip');
-  const line=(m,raw,chg,tone)=>`<div style="display:grid;grid-template-columns:auto 1fr;gap:0 16px;padding:3px 0;border-top:1px solid var(--grid);align-items:baseline">
-<span style="font-size:13px;white-space:nowrap"><span style="color:${m.color}">■</span> ${m.label}</span>
-<span class="mono" style="font-size:13px;text-align:right;white-space:nowrap">${raw}</span>
-<span></span><span class="mono" style="font-size:12px;text-align:right;color:${tone}">${chg}</span></div>`;
-  const dDur=d.dur-b.dur,dCnt=d.cnt-b.cnt,dWrk=d.wrk-b.wrk;
-  const durChg=Math.abs(dDur)<30?'same as the start':fmtDuration(Math.abs(dDur))+(dDur>0?' more than the start':' less than the start');
-  const cntChg=dCnt===0?'same as the start':Math.abs(dCnt).toLocaleString()+(dCnt>0?' more than the start':' fewer than the start');
-  const wrkChg=dWrk===0?'same as the start':Math.abs(dWrk)+(dWrk>0?' more than the start':' fewer than the start');
-  const durTone=b.dur&&dDur>=Math.max(0.10*b.dur,60)?'var(--warn)':b.dur&&dDur<=-Math.max(0.10*b.dur,60)?'var(--accent)':'var(--muted)';
-  const cntTone=b.cnt&&dCnt<=-0.20*b.cnt?'var(--crit)':'var(--muted)';
-  tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">${c.pr||'#'+c.hash} · ${c.date}</div>
-<div style="font-size:13px;color:var(--muted);margin-bottom:6px">Values at this commit, and how each compares with the first commit in this date range (${c0.pr||'#'+c0.hash}, ${c0.date}).</div>
-${line(THI.cnt,d.cnt.toLocaleString()+' tests',cntChg,cntTone)}
-${line(THI.dur,fmtDuration(d.dur),durChg,durTone)}
-${line(THI.wrk,d.wrk+' parallel workers',wrkChg,'var(--muted)')}`;
-  tEl.style.maxWidth='430px';tEl.style.display='block';
-  const ow=tEl.offsetWidth||300;let lx=evt.clientX+14;if(lx+ow+8>window.innerWidth)lx=evt.clientX-ow-14;
-  tEl.style.left=lx+'px';tEl.style.top=Math.max(8,evt.clientY-16)+'px';
-}
-function thiHide(){$('#tip').style.display='none';$('#tip').style.maxWidth='';const cl=document.getElementById('thi-cross');if(cl)cl.setAttribute('opacity',0)}
-function thiPatHl(k,on){
-  document.querySelectorAll(`[data-thipatmk="${k}"]`).forEach(n=>n.setAttribute('opacity',on?'1':'0.85'));
-  document.querySelectorAll(`[data-thipatn="${k}"]`).forEach(n=>{n.style.background=on?'var(--elevated)':'';});
-}
-function thiPatDetail(k,id,idx){window.__thiBack=k;openTHDetail(id,THV.i0+idx);}
-function thiPatPop(k){
-  window.__thiBack=null;
-  const st=window.__thi;if(!st||!st.ev||!st.ev[k])return;
-  const e=st.ev[k];
-  const c1=THV.commits[e.i],c0=THV.commits[e.i0];
-  const rows=st.cats.map(cat=>{
-    const d0=cat.data[e.i0]&&cat.data[e.i0].dur!==null?cat.data[e.i0]:null;
-    const d1=cat.data[e.i]&&cat.data[e.i].dur!==null?cat.data[e.i]:null;
-    if(!d0&&!d1)return null;
-    const t0=d0?d0.count:0,t1=d1?d1.count:0,s0=d0?d0.dur:0,s1=d1?d1.dur:0;
-    const tag=!d0?'joined':!d1?'did not report':'';
-    const prior=cat.data.map((dd,ii)=>dd&&dd.dur!==null?ii:-1).filter(ii=>ii>=0&&ii<=e.i);
-    const openIdx=d1?e.i:(prior.length?prior[prior.length-1]:e.i);
-    return{cat,t0,t1,s0,s1,dd:s1-s0,tag,openIdx};
-  }).filter(Boolean).sort((a,b)=>Math.abs(b.dd)-Math.abs(a.dd));
-  const tot=rows.reduce((a,r)=>({t0:a.t0+r.t0,t1:a.t1+r.t1,s0:a.s0+r.s0,s1:a.s1+r.s1}),{t0:0,t1:0,s0:0,s1:0});
-  const sgn=s=>(s<0?'\u2212':'+')+fmtDuration(Math.abs(s));
-  const body=rows.map(r=>`<tr onclick="thiPatDetail(${k},'${r.cat.id}',${r.openIdx})" style="cursor:pointer">
-<td style="font-size:13px"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${r.cat.color};margin-right:6px"></span>${r.cat.name}${r.tag?` <span style="font-size:12px;color:var(--muted)">(${r.tag})</span>`:''}</td>
-<td class="mono" style="font-size:13px">${r.t0.toLocaleString()} \u2192 ${r.t1.toLocaleString()}</td>
-<td class="mono" style="font-size:13px">${fmtDuration(r.s0)} \u2192 ${fmtDuration(r.s1)}</td>
-<td class="mono" style="font-size:13px;color:${Math.abs(r.dd)<30?'var(--muted)':'var(--ink)'}">${sgn(r.dd)}</td></tr>`).join('');
-  $('#modal').innerHTML=`<div class="modal-head"><div>
-<h2>Pattern event \u2014 ${c0.pr} \u2192 ${c1.pr}</h2>
-<div class="sub">${c0.date} \u2192 ${c1.date}, 2026</div>
-</div><button class="modal-close" onclick="closeModal()">\u2715</button></div>
-<div class="modal-body">
-<div style="padding:10px 14px;background:var(--elevated);border-radius:8px;font-size:14px;line-height:1.6;color:${e.tone};margin-bottom:14px">${e.label}</div>
-<div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:6px">How each suite contributed \u2014 click a suite for its full detail</div>
-<table><thead><tr><th>Suite</th><th>Tests</th><th>Total time</th><th>Time change</th></tr></thead>
-<tbody>${body}
-<tr style="font-weight:700;border-top:1px solid var(--border)"><td style="font-size:13px">All suites together</td><td class="mono" style="font-size:13px">${tot.t0.toLocaleString()} \u2192 ${tot.t1.toLocaleString()}</td><td class="mono" style="font-size:13px">${fmtDuration(tot.s0)} \u2192 ${fmtDuration(tot.s1)}</td><td class="mono" style="font-size:13px">${sgn(tot.s1-tot.s0)}</td></tr>
-</tbody></table>
-<div style="margin-top:8px;font-size:12px;color:var(--muted)">These per-suite rows add up to the totals in the pattern row you clicked. The tags mean: joined \u2014 the suite's first reported commit in this pair; did not report \u2014 the suite has no run at the second commit.</div>
-</div>`;
-  $('#overlay').classList.add('on');document.body.style.overflow='hidden';
-}
-function renderTHIndex(stack,cats){
-  const data=THV.commits.map((_,i)=>{
-    const rows=cats.map(c=>({c,d:c.data[i]})).filter(r=>r.d&&r.d.dur!==null);
-    return{dur:rows.reduce((a,r)=>a+r.d.dur,0),cnt:rows.reduce((a,r)=>a+(r.c.nested?0:r.d.count),0),wrk:rows.reduce((a,r)=>a+(r.c.nested?0:(THI_WORKERS[r.c.id]||1)),0)};
-  });
-  const base=data.find(d=>d.wrk>0&&d.cnt>0&&d.dur>0);
-  if(!base)return;
-  const baseIdx=data.indexOf(base);
-  const W=1000,H=290,pad={top:20,right:150,bottom:72,left:58};
-  const plotW=W-pad.left-pad.right,plotH=H-pad.top-pad.bottom;
-  // Two raw axes, both from zero: total test time (seconds under the hood) on the left, tests run on the right.
-  const durMax=Math.max(...data.map(d=>d.dur),1)*1.12,cntMax=Math.max(...data.map(d=>d.cnt),1)*1.08;
-  const xStep=plotW/(THV.commits.length-1);
-  const px=i=>pad.left+i*xStep,pyD=v=>pad.top+plotH-(v/durMax)*plotH,pyC=v=>pad.top+plotH-(v/cntMax)*plotH;
-  window.__thi={data,base,baseIdx,px:THV.commits.map((_,i)=>px(i))};
-  // Pattern reads: fixed-threshold comparison of each commit vs the one before,
-  // on the summed series this chart draws. Facts only, never advice. A worker
-  // change in this data means the reporting suite set changed (per-suite worker
-  // counts are constant inside this window).
-  window.__thi.cats=cats;
-  const events=[];
-  const rep=i=>cats.filter(cc=>cc.data[i]&&cc.data[i].dur!==null);
-  for(let i=1;i<data.length;i++){
-    const p=data[i-1],c=data[i];
-    if(!p.dur||!c.dur)continue;
-    const pctT=p.cnt>0?(c.cnt-p.cnt)/p.cnt:0;
-    const exp=p.dur*(p.cnt>0?c.cnt/p.cnt:1)*(c.wrk>0?p.wrk/c.wrk:1);
-    const speed=c.dur-exp;
-    const sig=Math.abs(speed)>=Math.max(0.10*exp,60);
-    let label='',tone='var(--ink2)',kind='',openId='';
-    if(c.wrk!==p.wrk){
-      // Decompose the suite-set change instead of blanket-attributing totals.
-      kind='worker';
-      const idsP=rep(i-1).map(x=>x.id),idsC=rep(i).map(x=>x.id);
-      const joined=rep(i).filter(x=>!idsP.includes(x.id));
-      const missed=rep(i-1).filter(x=>!idsC.includes(x.id));
-      const jT=joined.reduce((a2,x)=>a2+x.data[i].count,0),jD=joined.reduce((a2,x)=>a2+x.data[i].dur,0);
-      const mT=missed.reduce((a2,x)=>a2+x.data[i-1].count,0),mD=missed.reduce((a2,x)=>a2+x.data[i-1].dur,0);
-      const cont=rep(i).filter(x=>idsP.includes(x.id));
-      const cTp=cont.reduce((a2,x)=>a2+x.data[i-1].count,0),cTn=cont.reduce((a2,x)=>a2+x.data[i].count,0);
-      const cDp=cont.reduce((a2,x)=>a2+x.data[i-1].dur,0),cDn=cont.reduce((a2,x)=>a2+x.data[i].dur,0);
-      const cExp=cTp>0?cDp*cTn/cTp:cDp;
-      const cSpd=cDn-cExp,cSig=Math.abs(cSpd)>=Math.max(0.10*cExp,60);
-      const parts=[];
-      if(joined.length)parts.push(`${joined.map(x=>x.name).join(' and ')} reported for the first time, adding ${jT.toLocaleString()} tests and ${fmtDuration(jD)}`);
-      if(missed.length)parts.push(`${missed.map(x=>x.name).join(' and ')} did not report, removing ${mT.toLocaleString()} tests and ${fmtDuration(mD)}`);
-      label=`Workers went ${p.wrk} \u2192 ${c.wrk}: ${parts.join('; ')}. The suites that ran both times went ${cTp.toLocaleString()} \u2192 ${cTn.toLocaleString()} tests and ${fmtDuration(cDp)} \u2192 ${fmtDuration(cDn)}`+(cSig?` \u2014 ${fmtDuration(Math.abs(cSpd))} ${cSpd>0?'more':'less'} than their test-count change explains.`:`, in line with their test-count change.`);
-      tone=cSig&&cSpd>0?'var(--warn)':'var(--muted)';
-      openId=(joined[0]||missed[0]||{}).id||'';
-    } else if(pctT<=-0.20){
-      kind='fall';
-      label=`Test count fell ${p.cnt.toLocaleString()} \u2192 ${c.cnt.toLocaleString()} (${(p.cnt-c.cnt).toLocaleString()} fewer tests). Total test time went ${fmtDuration(p.dur)} \u2192 ${fmtDuration(c.dur)}. At the old speed, the remaining tests would take about ${fmtDuration(exp)}`+(sig?` \u2014 the actual time is ${fmtDuration(Math.abs(speed))} ${speed>0?'more':'less'}, so the tests that ran averaged ${speed>0?'slower':'faster'} per test than before.`:`, and the actual time matches that.`);
-      tone='var(--crit)';
-    } else if(pctT>=0.20){
-      kind='add';
-      const addPart=p.dur*(p.cnt>0?c.cnt/p.cnt:1)-p.dur;
-      label=`Tests added: ${p.cnt.toLocaleString()} \u2192 ${c.cnt.toLocaleString()} (${(c.cnt-p.cnt).toLocaleString()} more tests). Total test time went ${fmtDuration(p.dur)} \u2192 ${fmtDuration(c.dur)}; the larger test set explains ${fmtDuration(Math.abs(addPart))} of that`+(sig?(speed>0?`, and slower running adds another ${fmtDuration(speed)} on top.`:`, while faster running takes ${fmtDuration(-speed)} back off.`):` \u2014 speed per test is unchanged.`);
-      tone=sig&&speed>0?'var(--warn)':'var(--ink2)';
-    } else if(sig){
-      kind='speed';
-      label=`Total test time went ${fmtDuration(p.dur)} \u2192 ${fmtDuration(c.dur)}. With the test count at ${p.cnt.toLocaleString()} \u2192 ${c.cnt.toLocaleString()}, the expected time was about ${fmtDuration(exp)} \u2014 the actual time is ${fmtDuration(Math.abs(speed))} ${speed>0?'more':'less'}: the tests that ran averaged ${speed>0?'slower':'faster'} per test than before.`;
-      tone=speed>0?'var(--warn)':'var(--accent)';
-    }
-    if(label)events.push({i,i0:i-1,label,tone,kind,sign:speed>0?1:-1,pctT,openId});
-  }
-  // Collapse runs of alternating speed-only events with a near-flat count into
-  // one factual swing row (runner noise, not six separate verdicts).
-  const collapsed=[];
-  for(let k=0;k<events.length;k++){
-    const e=events[k];
-    if(e.kind!=='speed'){collapsed.push(e);continue}
-    let j=k;
-    while(j+1<events.length&&events[j+1].kind==='speed'&&Math.abs(events[j].pctT)<0.05&&Math.abs(events[j+1].pctT)<0.05&&events[j+1].sign!==events[j].sign)j++;
-    const run=events.slice(k,j+1);
-    if(run.length>=3){
-      const lo=Math.min(...run.map(e2=>Math.min(data[e2.i].dur,data[e2.i-1].dur)));
-      const hi=Math.max(...run.map(e2=>Math.max(data[e2.i].dur,data[e2.i-1].dur)));
-      const cAvg=Math.round(run.reduce((a2,e2)=>a2+data[e2.i].cnt,0)/run.length);
-      collapsed.push({i:run[run.length-1].i,i0:run[0].i0,kind:'swing',sign:0,pctT:0,tone:'var(--ink2)',openId:'',label:`Total test time swung between ${fmtDuration(lo)} and ${fmtDuration(hi)} across ${run.length} commit pairs (${THV.commits[run[0].i].pr} to ${THV.commits[run[run.length-1].i].pr}) while the test count stayed near ${cAvg.toLocaleString()} \u2014 repeated back-and-forth swings, not a lasting change.`});
-      k=j;
-    } else { collapsed.push(...run); k=j; }
-  }
-  const evChron=collapsed.slice(-6);
-  evChron.forEach((e2,ix)=>{e2.n=ix+1});
-  const evShown=evChron.slice().reverse();
-  window.__thi.ev=evShown;
-  const patRows=evShown.map((e,k)=>`<div onclick="thiPatPop(${k})" onmouseenter="thiPatHl(${e.n},1)" onmouseleave="thiPatHl(${e.n},0)" style="cursor:pointer;font-size:13px;line-height:1.55;padding:3px 0;color:${e.tone};display:flex;gap:8px"><span data-thipatn="${e.n}" style="flex:none;display:inline-flex;width:19px;height:19px;border-radius:50%;border:1.5px solid ${e.tone};color:${e.tone};font:700 12px var(--mono);align-items:center;justify-content:center;transform:translateY(2px)">${e.n}</span><span><span class="mono" style="color:var(--ink)">#${THV.commits[e.i].hash}</span> <span style="color:var(--muted)">${THV.commits[e.i].date}</span> \u2014 ${e.label}</span></div>`).join('');
-  const patBlock=`<div data-thipat style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
-<div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">Pattern reads in this date range</div>
-${(()=>{const lastD=[...data].reverse().find(d2=>d2.dur>0&&d2.cnt>0);if(!lastD||!base.cnt)return'';const li=data.indexOf(lastD);const ptN=lastD.dur/lastD.cnt,ptB=base.dur/base.cnt;const ps=v=>v<1?v.toFixed(2):v.toFixed(1);const dif=(a,b2,unit)=>{const x=b2-a;if(x===0)return'no change';return Math.abs(x).toLocaleString()+' '+(x>0?'more':'fewer')+(unit?' '+unit:'')};const dDur=lastD.dur-base.dur;const durDif=Math.abs(dDur)<30?'about the same':fmtDuration(Math.abs(dDur))+(dDur>0?' more':' less');const ptTone=ptB>0&&ptN/ptB>=1.10?'var(--warn)':ptB>0&&ptN/ptB<=0.90?'var(--accent)':'var(--ink2)';return`<div style="font-size:13px;line-height:1.55;color:var(--ink2);padding:1px 0 7px">Since the start of this date range (${THV.commits[baseIdx].pr}, ${THV.commits[baseIdx].date}) to ${THV.commits[li].pr}: total test time went ${fmtDuration(base.dur)} \u2192 ${fmtDuration(lastD.dur)} (${durDif}), test count ${base.cnt.toLocaleString()} \u2192 ${lastD.cnt.toLocaleString()} (${dif(base.cnt,lastD.cnt,'tests')}), workers ${base.wrk} \u2192 ${lastD.wrk} (${dif(base.wrk,lastD.wrk,'')}). <span style="color:${ptTone}">Time per test is now ${ps(ptN)}s against ${ps(ptB)}s at the start.</span></div>`})()}
-${evShown.length?patRows:'<div style="font-size:13px;color:var(--muted)">No pattern events: count, duration and workers moved together within the normal range across this window.</div>'}
-${collapsed.length>6?`<div style="font-size:12px;color:var(--muted)">This list shows the 6 most recent events; ${collapsed.length-6} earlier events in this date range are not shown.</div>`:''}
-<div style="font-size:12px;color:var(--muted);margin-top:4px">Each row compares one commit with the one before it using fixed thresholds; no judgment is applied. Rows run newest first. The numbered circle on each row matches the numbered marker on the chart above, showing exactly where that commit sits. Click a row to see how each suite contributed to it; from there you can open any suite's full detail.</div>
-</div>`;
 
-  let g='';
-  // Axes. Tick labels take their line's colour so the pairing needs no legend lookup. The count
-  // ticks sit just inside the right edge, as on the suite chart above, to leave the gutter for labels.
-  const tickStep=(max,steps,n)=>steps.find(s=>max/s<=n)||steps[steps.length-1];
-  const dStep=tickStep(durMax,[300,600,900,1800,3600,7200,10800,21600],7);
-  const cStep=tickStep(cntMax,[50,100,250,500,1000,2000,2500,5000,10000],6);
-  const fmtTick=s=>s===0?'0':s<3600?Math.round(s/60)+'m':(s/3600).toFixed(1).replace(/\.0$/,'')+'h';
-  for(let v=0;v<=durMax;v+=dStep){
-    g+=`<line x1="${pad.left}" y1="${pyD(v)}" x2="${W-pad.right}" y2="${pyD(v)}" stroke="${v===0?'#334155':'#1E293B'}" stroke-width="${v===0?1.5:1}" stroke-dasharray="${v===0?'':'3,3'}"/>`;
-    g+=`<text data-thiax="dur" x="${pad.left-6}" y="${pyD(v)+3}" text-anchor="end" font-size="12" fill="${THI.dur.color}" fill-opacity="0.9" font-family="var(--mono)">${fmtTick(v)}</text>`;
-  }
-  for(let v=cStep;v<=cntMax;v+=cStep){
-    g+=`<line x1="${W-pad.right}" y1="${pyC(v)}" x2="${W-pad.right+4}" y2="${pyC(v)}" stroke="${THI.cnt.color}" stroke-width="1" opacity="0.7"/>`;
-    g+=`<text data-thiax="cnt" x="${W-pad.right-4}" y="${pyC(v)-3}" text-anchor="end" font-size="12" fill="${THI.cnt.color}" fill-opacity="0.9" font-family="var(--mono)">${v.toLocaleString()}${v+cStep>cntMax?' tests':''}</text>`;
-  }
-  g+=`<text x="${pad.left}" y="${pad.top-8}" font-size="12" font-weight="700" fill="${THI.dur.color}" font-family="var(--mono)">Test time (left axis)</text>`;
-  g+=`<text x="${W-pad.right}" y="${pad.top-8}" text-anchor="end" font-size="12" font-weight="700" fill="${THI.cnt.color}" font-family="var(--mono)">Tests run (right axis)</text>`;
-  g+=`<line id="thi-cross" x1="0" y1="${pad.top}" x2="0" y2="${pad.top+plotH}" stroke="rgba(248,250,252,0.2)" stroke-width="1" stroke-dasharray="3,3" opacity="0"/>`;
-  const series=[{m:THI.cnt,k:'cnt',py:pyC,w:2},{m:THI.dur,k:'dur',py:pyD,w:2.2}];
-  series.forEach(s=>{
-    const pts=data.map((d,i)=>({x:px(i),y:s.py(d[s.k])}));
-    g+=`<path data-thiline="${s.k}" d="${createSplinePath(pts)}" fill="none" stroke="${s.m.color}" stroke-width="${s.w}" ${s.m.dash?`stroke-dasharray="${s.m.dash}"`:''} stroke-linecap="round"/>`;
-  });
-  // Direct value labels: the start (inside the left edge), the end (right gutter), and the new
-  // test count at every commit where a pattern row says the count fell or grew.
-  const last=data.length-1;
-  const fmtV={dur:d=>fmtDuration(d.dur),cnt:d=>d.cnt.toLocaleString()+' tests'};
-  const stag=arr=>{arr.sort((a,b)=>a.y-b.y);for(let i=1;i<arr.length;i++)if(arr[i].y<arr[i-1].y+14)arr[i].y=arr[i-1].y+14;return arr};
-  stag(series.map(s=>({label:fmtV[s.k](data[last])+(s.k==='dur'?' test time':''),color:s.m.color,y:s.py(data[last][s.k])+4}))).forEach(p=>{g+=`<text data-thilab="end" x="${W-pad.right+8}" y="${p.y}" font-size="12" font-weight="700" fill="${p.color}" font-family="var(--mono)">${p.label}</text>`});
-  stag(series.map(s=>{const y0=s.py(data[baseIdx][s.k]);return{label:fmtV[s.k](data[baseIdx]),color:s.m.color,y:y0-pad.top>26?y0-8:y0+16}})).forEach(p=>{g+=`<text data-thilab="start" x="${px(baseIdx)+6}" y="${p.y}" font-size="12" font-weight="700" fill="${p.color}" font-family="var(--mono)">${p.label}</text>`});
-  collapsed.filter(e=>(e.kind==='fall'||e.kind==='add')&&e.i>baseIdx+1&&e.i<last-1).forEach(e=>{
-    const y=pyC(data[e.i].cnt);
-    g+=`<text data-thilab="change" x="${px(e.i)+6}" y="${e.kind==='fall'?y+15:y-8}" font-size="12" font-weight="700" fill="${THI.cnt.color}" font-family="var(--mono)">${data[e.i].cnt.toLocaleString()}</text>`;
-  });
-  evShown.forEach((e,k)=>{
-    const x=px(e.i);
-    g+=`<g data-thipatmk="${e.n}" opacity="0.85"><line x1="${x}" y1="${pad.top+16}" x2="${x}" y2="${pad.top+plotH}" stroke="${e.tone}" stroke-width="1" stroke-dasharray="2,3"/><circle cx="${x}" cy="${pad.top+8}" r="8" fill="var(--elevated)" stroke="${e.tone}" stroke-width="1.5"/><text x="${x}" y="${pad.top+11.5}" text-anchor="middle" font-size="11" font-weight="700" fill="${e.tone}" font-family="var(--mono)">${e.n}</text></g>`;
-  });
-  // Worker count is a step, not a trend: a labelled band under the plot, with a dashed guide up
-  // through the plot at each commit where the count changed.
-  const bandY=pad.top+plotH+24;
-  g+=`<text x="${pad.left-6}" y="${bandY+4}" text-anchor="end" font-size="12" fill="${THI.wrk.color}" font-family="var(--mono)">Workers</text>`;
-  let r0=0;
-  for(let i=1;i<=data.length;i++){
-    if(i<data.length&&data[i].wrk===data[r0].wrk)continue;
-    const x0=px(r0),x1=px(i-1);
-    g+=`<g data-thiwrk="${data[r0].wrk}"><line x1="${x0}" y1="${bandY}" x2="${x1}" y2="${bandY}" stroke="${THI.wrk.color}" stroke-width="2.5" stroke-linecap="round"/><text x="${x0+(r0?8:0)}" y="${bandY-6}" font-size="12" font-weight="700" fill="${THI.wrk.color}" font-family="var(--mono)">${data[r0].wrk}${x1-x0>=110?' workers':''}</text></g>`;
-    if(i<data.length)g+=`<line data-thiwrkchg="${data[i].wrk}" x1="${px(i)}" y1="${pad.top+16}" x2="${px(i)}" y2="${bandY+6}" stroke="${THI.wrk.color}" stroke-width="1" stroke-dasharray="4,3" opacity="0.8"/>`;
-    r0=i;
-  }
-  THV.commits.forEach((c,i)=>{
-    g+=`<text x="${px(i)+3}" y="${H-30}" text-anchor="end" font-size="12" fill="#64748B" font-family="var(--mono)" transform="rotate(-55 ${px(i)+3} ${H-30})">#${c.hash}</text>`;
-  });
-  THV.commits.forEach((c,i)=>{
-    g+=`<rect x="${px(i)-xStep/2}" y="${pad.top}" width="${xStep}" height="${plotH}" fill="transparent" onmousemove="thiTip(event,${i})" onmouseleave="thiHide()"/>`;
-  });
-  const card=document.createElement('div');
-  card.className='chart-card';
-  card.innerHTML=`
-    <div class="chart-card-header">
-      <div>
-        <div class="card-title-row"><span class="card-title">Test count, test duration, and worker count</span></div>
-        <div class="card-subtitle" data-guide="thi">This chart shows whether test count, test duration, and worker count move together. Each line adds together every suite shown by the current Hardware filter \u2014 these are totals across suites, not one suite's numbers. <span class="g-more">Total test time is drawn against the left axis in minutes and hours; the number of tests run is drawn against the right axis; both axes start at zero. The worker count is a step, not a trend, so it sits in the band under the chart and is written out only where it changes. Reading it is simple: if the tests line collapses while the time line stays where it was and the worker count does not change, the same workers spent about the same time running far fewer tests.</span></div>
-      </div>
-    </div>
-    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:2px 0 8px;font-size:12px;color:var(--ink2)">
-      ${[[THI.dur,'left axis, minutes and hours'],[THI.cnt,'right axis, tests run']].map(([m,ax])=>`<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:16px;border-top:${m.dash?'2px dashed':'3px solid'} ${m.color};display:inline-block;border-radius:2px"></span>${m.label} <span style="color:var(--muted)">(${ax})</span></span>`).join('')}<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:16px;border-top:3px solid ${THI.wrk.color};display:inline-block;border-radius:2px"></span>${THI.wrk.label} <span style="color:var(--muted)">(band under the chart, written out where the count changes)</span></span>
-    </div>
-    <div class="chart-scroll-wrap"><div class="chart-svg-container">
-      <svg viewBox="0 0 ${W} ${H}" style="display:block;width:100%;min-width:760px">${g}</svg>
-    </div></div>${patBlock}`;
-  if(THI_HIDDEN){card.hidden=true;card.style.display='none';card.setAttribute('data-parked','thi')}
-  stack.appendChild(card);
-}
 
-function renderTHTabs(){
-  const tabs=$('#thTabs');if(!tabs)return;
-  tabs.style.display='flex';tabs.style.flexWrap='wrap';tabs.style.alignItems='center';tabs.style.gap='8px';
-  const fmtC=c=>c>=1000?((c/1000).toFixed(1).replace(/\.0$/,''))+'k':String(c);
-  const latestOf=cat=>{const v=[...cat.data].reverse().find(d=>d.count!==null&&(!THV||THV.iset.has(d.commitIdx)));return v?v.count:0};  // latest run inside the range
-  const byDev={};TH_CATEGORIES.forEach(c=>{(byDev[c.device]=byDev[c.device]||[]).push(c)});
-  const sel=`<select onchange="setTHSel(this.value)" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:5px 8px;border-radius:6px;max-width:340px;cursor:pointer">
-<option value="all" ${TH_SEL==='all'?'selected':''}>All test suites</option>
-${['TPU','GPU','CPU'].map(dv=>`<optgroup label="${dv}">${(byDev[dv]||[]).map(c=>`<option value="${c.id}" ${TH_SEL===c.id?'selected':''}>${c.name}${c.tag?' ('+c.tag+')':''}${latestOf(c)?` — ${fmtC(latestOf(c))} tests`:''}</option>`).join('')}</optgroup>`).join('')}
-</select>`;
-  tabs.innerHTML=`<span style="font-size:13px;color:var(--muted)">Suite:</span>`+sel
-    +(TH_SEL==='all'?`<button class="fchip ${TH_GROUP?'':'on'}" style="border-radius:8px" onclick="setTHGroup(false)">Every suite</button><button class="fchip ${TH_GROUP?'on':''}" style="border-radius:8px" onclick="setTHGroup(true)">Device groups</button>`:`<button class="fchip" style="border-radius:8px" onclick="setTHSel('all')">All suites</button>`);
-}
-
-function renderTestHealth(){renderTHTabs();renderDashboard();detectIssues()}
 
 // ============ WORKER SUITES (matrix workers grouped into one suite entity) ============
 const WK_GROUPS={
@@ -3663,7 +1615,9 @@ function wkWorkerRows(c,ent){
   return ws.map((wk,k)=>{
     const q=ent.split?+(jd(c,ent.jobs[0]).q/n).toFixed(2):jd(c,ent.jobs[k]).q;
     const s=ent.split?+(jd(c,ent.jobs[0]).s/n).toFixed(2):jd(c,ent.jobs[k]).s;
-    return{name:wk.name,q,s,r:wk.r,status:wk.status,tot:+(q+s+wk.r).toFixed(2)};
+    const jid=ent.split?ent.jobs[0]:ent.jobs[k];
+    return{name:wk.name,q,s,r:wk.r,status:wk.status,tot:+(q+s+wk.r).toFixed(2),
+      machine:RUNNER_LABELS[jid]||''};
   });
 }
 // Path with rounded top corners only (columns get a soft cap, joints stay square)
@@ -3675,11 +1629,6 @@ const WK_LANE_HEX={tpu:'#3987E5',gpu:'#F97316',cpu:'#22C55E',build:'#8B5CF6',inf
 // Line ramp for the suite chart: suite 0 of a device draws in the device colour itself, later suites in
 // progressively lighter tints (never darker). wkShade's dark->light ramp is for stacked bars, where a 62% shade
 // reads fine as a filled slice but a 1.3px line in it disappears against the dark background.
-function thLineShade(hex,i,n){
-  const f=n<=1||i<=0?0:0.55*i/(n-1);
-  const cc=v=>{const c=parseInt(hex.slice(v,v+2),16);return Math.round(c+(255-c)*f)};
-  return '#'+[1,3,5].map(v=>cc(v).toString(16).padStart(2,'0')).join('');
-}
 function wkShade(hex,i,n){
   const f=n<=1?1:0.62+(i/(n-1))*0.75;
   const cc=v=>Math.max(0,Math.min(255,Math.round(parseInt(hex.slice(v,v+2),16)*f)));
@@ -3727,7 +1676,7 @@ ${rows.map(r=>{
 </div>`}).join('')}
 <div style="display:flex;gap:10px;margin-top:12px">
 <button onclick="closeWkPop();goToCommit('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open full commit details</button>
-<button onclick="closeWkPop();inspectPR('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open this pull request</button>
+
 </div>`;
   $('#wkpop').style.display='flex';
 }
@@ -3759,7 +1708,7 @@ ${rows.map((r,k)=>`<div style="display:grid;grid-template-columns:16px 1fr 190px
 <div style="display:flex;gap:10px;margin-top:12px">
 <button onclick="openWkPop('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Every suite in this run</button>
 <button onclick="closeWkPop();goToCommit('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open full commit details</button>
-<button onclick="closeWkPop();inspectPR('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open this pull request</button>
+
 </div>`;
   $('#wkpop').style.display='flex';
 }
@@ -3838,7 +1787,8 @@ ${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]
           r.addEventListener('mousemove',ev=>{
             if(n>1)svg.querySelectorAll('[data-wk]').forEach(nd=>nd.setAttribute('opacity',+nd.getAttribute('data-wk')===k?'1':'0.3'));
             tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">#${c.hash} ${c.title}</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:6px">${ent.name}${n>1?' · '+wk.name:''}</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:2px">${ent.name}${n>1?' · '+wk.name:''}</div>
+${wk.machine?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${wk.machine}</div>`:'<div style="margin-bottom:6px"></div>'}
 ${parts.map((s2,k2)=>`<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;${k2===si?'font-weight:700':''}"><span style="color:${k2===si?'var(--ink)':'var(--ink2)'}">${s2.label}</span><span class="mono">${(+s2.v).toFixed(1)}m</span></div>`).join('')}
 <div style="display:flex;justify-content:space-between;gap:14px;font-size:14px;font-weight:700;border-top:1px solid var(--grid);margin-top:4px;padding-top:4px"><span>This worker</span><span class="mono" style="color:${wk.status==='fail'?'var(--crit)':'var(--ink)'}">${wk.tot.toFixed(1)}m</span></div>
 ${n>1?`<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;color:var(--ink2)"><span>All ${n} workers together</span><span class="mono">${dpt.v.toFixed(1)}m</span></div>`:''}
@@ -3900,6 +1850,7 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
         svg.querySelectorAll('[data-gid]').forEach(nd=>nd.setAttribute('opacity',nd.getAttribute('data-gid')===e.gid?nd.getAttribute('data-op'):'0.22'));
         tipEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">${e.name}</div>
 <div style="font-size:13px;color:var(--ink2)">#${c.hash} · <span class="mono">${v.toFixed(1)}m</span> · ${share}% of this run's worker time</div>
+${(()=>{const m=RUNNER_LABELS[(e.jobs||[])[0]];return m?`<div class="mono" style="font-size:12px;color:var(--muted);margin-top:2px">${m}</div>`:''})()}
 ${ws.length>1?`<div style="font-size:12px;color:var(--muted);margin-top:3px">${ws.length} parallel workers · tests ${ws.map(x=>x.r+'m').join(' · ')}</div>`:''}
 <div style="font-size:12px;color:var(--accent);margin-top:4px">this suite is lit up across every bar · click for every suite's time →</div>`;
         tipEl.style.display='block';
@@ -3956,7 +1907,8 @@ function flakyCellTip(evt,id,idx){
   const e=j.events.find(x=>thIdxOf(x.pr)===idx);
   const f=(j.fails||[]).some(p=>thIdxOf(p)===idx);
   const tEl=$('#tip');
-  const head=`<div style="font-weight:700;font-size:13px;margin-bottom:2px">${c.pr} &middot; ${c.date}</div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">${j.name}</div>`;
+  const head=`<div style="font-weight:700;font-size:13px;margin-bottom:2px">${c.pr} &middot; ${c.date}</div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">${j.name}</div>`
+    +(RUNNER_LABELS[j.id]?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:4px">${RUNNER_LABELS[j.id]}</div>`:'');
   // Only this run of this job: which tests failed on the first attempt (from the JUnit report of attempt 1).
   const CAP=6;
   const testLine=(name,cause)=>`<div style="font-size:12px;padding:1px 0;line-height:1.45"><span class="mono" style="color:var(--ink)">${name}</span> <span style="color:var(--muted)">&mdash; ${cause}</span></div>`;
@@ -4071,7 +2023,7 @@ function renderFlaky(){
       :`<span style="color:${col==='#64748B'?'var(--ink)':col};font-weight:700">${Math.round(rate*100)}%</span> &middot; ${evIn.length} of ${n} first attempts &middot; <span style="color:var(--muted)">${wasted}m wasted</span>`;
     return `<div class="issue-row" data-flane="${j.lane}" onclick="openFlakyPop('${j.id}')" style="grid-template-columns:minmax(220px,290px) 1fr 340px;cursor:pointer;opacity:${dim?0.28:1}">
       <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${j.name}</div>
-      <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane</div></div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane${RUNNER_LABELS[j.id]?` &middot; <span class="mono" style="font-size:12px">${RUNNER_LABELS[j.id]}</span>`:''}</div></div>
       <div style="display:flex;gap:2px;min-width:220px;align-items:center">${cells}</div>
       <div class="mono" style="font-size:13px;text-align:right;white-space:nowrap;color:var(--ink)">${rateTxt}</div>
     </div>`;
@@ -4117,10 +2069,7 @@ function openFlakyTestPop(testName,jobId){
   const share=FLAKY_TESTS.filter(x=>x.job===jobId&&x.test!==testName&&x.prs.some(p=>inPrs.includes(p)));
   const rowsH=inPrs.map(p=>{
     const e=j.events.find(x=>x.pr===p)||{};
-    const real=COMMITS.some(c=>'#'+c.hash===p);
-    const chip=real
-      ?`<button onclick="closeWkPop();inspectPR('${p.slice(1)}')" style="font:600 13px var(--mono);background:var(--elevated);border:1px solid var(--border);border-radius:6px;padding:2px 8px;color:var(--accent);cursor:pointer">${p}</button>`
-      :`<span class="mono" style="font-size:13px;color:var(--ink2)">${p}</span>`;
+    const chip=`<span class="mono" style="font-size:13px;color:var(--ink2)">${p}</span>`;
     return `<div style="display:grid;grid-template-columns:80px 64px 1fr auto;gap:12px;align-items:center;padding:8px 4px;border-top:1px solid var(--grid)">
       <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${e.date||''}</span>
       <span class="mono" style="font-size:13px;color:var(--ink2)">${ft.cause}</span>
@@ -4212,6 +2161,9 @@ initGuides();
 // Range change = new window everywhere: drop both brush zooms (they index the drawn list), then redraw.
 function setRange(){TL_ZOOM=null;DEV_ZOOM=null;renderAll()}
 function renderHdot(){const hd=$('#hdot');if(!hd)return;const c0=getWindows().current[0];hd.style.background=c0?(c0.status==='fail'?'var(--crit)':c0.status==='flaky'?'var(--warn)':'var(--good)'):'var(--muted)';hd.title=c0?`The newest merged pull request in this range (${c0.pr}) ${c0.status==='fail'?'failed':c0.status==='flaky'?'passed only after a re-run':'passed'}.`:'No merged pull request falls inside this date range.'}
-function renderAll(){renderHdot();renderTiles();renderBudget();renderWorker();renderTimeline();renderDevLines();renderFlaky();renderCause();renderStarv();renderTestHealth();renderPRPage()}
+// Zoom seams: the charts zoom by dragging, and these let a test drive the same state.
+function tlZoomTo(a,b){const n=getWindows().current.length;TL_ZOOM={a:Math.max(0,a),b:Math.min(n-1,b)};renderTimeline()}
+function devZoomTo(a,b){const n=getWindows().current.length;DEV_ZOOM={a:Math.max(0,Math.min(a,n-1)),b:Math.max(0,Math.min(b,n-1))};renderDevLines()}
+function renderAll(){renderHdot();renderWorker();renderTimeline();renderDevLines();renderFlaky()}
 renderAll();
 </script>
