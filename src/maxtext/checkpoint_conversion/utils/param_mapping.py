@@ -1402,100 +1402,81 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
   }
 
   if scan_layers:
-    # 2. Scan over block cycles
-    for block_idx in range(layer_cycle_interval):
-      hf_indices = list(range(block_idx, num_main_layers, layer_cycle_interval))
-      prefix = f"params-decoder-layers-layer_{block_idx}"
+    # 2. Scanned blocks. One block covers a single period of the hybrid attention
+    # pattern: `layer_cycle_interval - 1` linear-attention (GatedDeltaNet) layers
+    # run as an inner scan, then one full-attention layer. The resulting params are:
+    #   layers-local_layers-*  -> nested [block][local]  (doubly scanned)
+    #   layers-global_layer-*  -> flat [block]           (block scan only; the
+    #     length-1 _scan_global_layer scan is a runtime memory boundary, not a
+    #     param stack)
+    # Routed-expert weights carry an additional leading expert axis, so they are
+    # nested one level deeper: [expert][block][local] and [expert][block].
+    # Qwen3NextScannableBlock requires the full-attention layer to be last in the
+    # period, so the local positions are 0..cycle-2 and the global position is
+    # cycle-1.
+    num_blocks = num_main_layers // layer_cycle_interval
+    local_positions = list(range(layer_cycle_interval - 1))
+    global_position = layer_cycle_interval - 1
 
-      # Layer norms
-      mapping[f"{prefix}-input_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
-          f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
-      ]  # pyrefly: ignore[bad-assignment]
-      mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
-          f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
+    def hf_layer(block_idx, position, suffix):
+      return f"model.layers.{block_idx * layer_cycle_interval + position}.{suffix}"
+
+    # (maxtext subkey, hf suffix) pairs shared by both the local and global layers.
+    shared_specs = [
+        ("input_layernorm-scale", "input_layernorm.weight"),
+        ("post_attention_layernorm-scale", "post_attention_layernorm.weight"),
+        ("mlp-routed_experts-gate-kernel", "mlp.gate.weight"),
+        ("mlp-shared_expert-wi_0-kernel", "mlp.shared_expert.gate_proj.weight"),
+        ("mlp-shared_expert-wi_1-kernel", "mlp.shared_expert.up_proj.weight"),
+        ("mlp-shared_expert-wo-kernel", "mlp.shared_expert.down_proj.weight"),
+        ("mlp-shared_expert_gate-kernel", "mlp.shared_expert_gate.weight"),
+    ]
+    # Linear (GatedDeltaNet) attention: only ever on the local layers.
+    local_specs = shared_specs + [
+        ("attention-in_proj_qkvz-kernel", "linear_attn.in_proj_qkvz.weight"),
+        ("attention-in_proj_ba-kernel", "linear_attn.in_proj_ba.weight"),
+        ("attention-conv1d-kernel", "linear_attn.conv1d.weight"),
+        ("attention-A_log", "linear_attn.A_log"),
+        ("attention-dt_bias", "linear_attn.dt_bias"),
+        ("attention-norm-rms_norm-scale", "linear_attn.norm.weight"),
+        ("attention-out_proj-kernel", "linear_attn.out_proj.weight"),
+    ]
+    # Full attention: only ever on the global layer.
+    global_specs = shared_specs + [
+        ("attention-attention-query-kernel", "self_attn.q_proj.weight"),
+        ("attention-attention-key-kernel", "self_attn.k_proj.weight"),
+        ("attention-attention-value-kernel", "self_attn.v_proj.weight"),
+        ("attention-attention-out-kernel", "self_attn.o_proj.weight"),
+        ("attention-attention-query_norm-scale", "self_attn.q_norm.weight"),
+        ("attention-attention-key_norm-scale", "self_attn.k_norm.weight"),
+    ]
+    expert_specs = [
+        ("mlp-routed_experts-wi_0", "gate_proj.weight"),
+        ("mlp-routed_experts-wi_1", "up_proj.weight"),
+        ("mlp-routed_experts-wo", "down_proj.weight"),
+    ]
+
+    local_prefix = "params-decoder-layers-local_layers"
+    for subkey, suffix in local_specs:
+      mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          [hf_layer(b, p, suffix) for p in local_positions] for b in range(num_blocks)
+      ]
+    for subkey, suffix in expert_specs:
+      mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          [[hf_layer(b, p, f"mlp.experts.{e}.{suffix}") for p in local_positions] for b in range(num_blocks)]
+          for e in range(num_experts)
       ]
 
-      # Handle Interleaved Attention (Linear vs Full)
-      is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
-
-      if is_full_attention_layer:
-        mapping.update(  # pyrefly: ignore[no-matching-overload]
-            {
-                f"{prefix}-attention-attention-query-kernel": [
-                    f"model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-key-kernel": [
-                    f"model.layers.{i}.self_attn.k_proj.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-value-kernel": [
-                    f"model.layers.{i}.self_attn.v_proj.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-out-kernel": [
-                    f"model.layers.{i}.self_attn.o_proj.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-query_norm-scale": [
-                    f"model.layers.{i}.self_attn.q_norm.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-key_norm-scale": [
-                    f"model.layers.{i}.self_attn.k_norm.weight" for i in hf_indices
-                ],
-            }
-        )
-      else:
-        # Linear/Hybrid Attention Block
-        mapping.update(  # pyrefly: ignore[no-matching-overload]
-            {
-                f"{prefix}-attention-in_proj_qkvz-kernel": [
-                    f"model.layers.{i}.linear_attn.in_proj_qkvz.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-in_proj_ba-kernel": [
-                    f"model.layers.{i}.linear_attn.in_proj_ba.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-conv1d-kernel": [f"model.layers.{i}.linear_attn.conv1d.weight" for i in hf_indices],
-                f"{prefix}-attention-A_log": [f"model.layers.{i}.linear_attn.A_log" for i in hf_indices],
-                f"{prefix}-attention-dt_bias": [f"model.layers.{i}.linear_attn.dt_bias" for i in hf_indices],
-                f"{prefix}-attention-norm-rms_norm-scale": [
-                    f"model.layers.{i}.linear_attn.norm.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-out_proj-kernel": [
-                    f"model.layers.{i}.linear_attn.out_proj.weight" for i in hf_indices
-                ],
-            }
-        )
-
-      # 3. Handle MLP: Gates and Shared Experts
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-mlp-routed_experts-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in hf_indices],
-              f"{prefix}-mlp-shared_expert-wi_0-kernel": [
-                  f"model.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wi_1-kernel": [
-                  f"model.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wo-kernel": [
-                  f"model.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert_gate-kernel": [
-                  f"model.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices
-              ],
-          }
-      )
-
-      # 4. Handle MoE Routed Experts
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-mlp-routed_experts-wi_0": [
-                  [f"model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for i in hf_indices] for e in range(num_experts)
-              ],
-              f"{prefix}-mlp-routed_experts-wi_1": [
-                  [f"model.layers.{i}.mlp.experts.{e}.up_proj.weight" for i in hf_indices] for e in range(num_experts)
-              ],
-              f"{prefix}-mlp-routed_experts-wo": [
-                  [f"model.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in hf_indices] for e in range(num_experts)
-              ],
-          }
-      )
+    global_prefix = "params-decoder-layers-global_layer"
+    for subkey, suffix in global_specs:
+      mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          hf_layer(b, global_position, suffix) for b in range(num_blocks)
+      ]
+    for subkey, suffix in expert_specs:
+      mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          [hf_layer(b, global_position, f"mlp.experts.{e}.{suffix}") for b in range(num_blocks)]
+          for e in range(num_experts)
+      ]
   else:
     # Unscanned layer mapping
     for i in range(num_main_layers):
@@ -1589,17 +1570,21 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
 
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
   num_main_layers = config["num_hidden_layers"]
-  loop_indices = range(layer_cycle_interval) if scan_layers else range(num_main_layers)
+  # Scanned blocks expose two prefixes -- the stacked local (linear-attention) layers
+  # and the single global (full-attention) layer -- rather than one prefix per position
+  # in the cycle. Unscanned models keep one prefix per decoder layer.
+  if scan_layers:
+    layer_prefixes = [
+        ("params-decoder-layers-local_layers", False),
+        ("params-decoder-layers-global_layer", True),
+    ]
+  else:
+    layer_prefixes = [
+        (f"params-decoder-layers_{i}", (i % layer_cycle_interval + 1) % layer_cycle_interval == 0)
+        for i in range(num_main_layers)
+    ]
 
-  for i in loop_indices:
-    if scan_layers:
-      prefix = f"params-decoder-layers-layer_{i}"
-      block_idx = i
-    else:
-      prefix = f"params-decoder-layers_{i}"
-      block_idx = i % layer_cycle_interval
-    is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
-
+  for prefix, is_full_attention_layer in layer_prefixes:
     if is_full_attention_layer:
       for key in ["query", "key", "value", "out"]:
         hooks[f"{prefix}-attention-attention-{key}-kernel"] = reshape_kernel  # pyrefly: ignore[bad-assignment]

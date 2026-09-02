@@ -1073,6 +1073,18 @@ class Decoder(nn.Module):
               kv_caches=kv_caches,
               attention_metadata=attention_metadata,
           )
+        elif cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+          y = self._apply_qwen3_next_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              previous_chunk,
+              slot,
+              kv_caches=kv_caches,
+              attention_metadata=attention_metadata,
+          )
         elif cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
           y = self._apply_deepseek4_scanned_blocks(
               y,
@@ -1421,6 +1433,128 @@ class Decoder(nn.Module):
       if kv_caches is not None and updated_remainder_kv is not None:
         start_idx = scan_length * attention_pattern_length
         for offset, updated_item in enumerate(updated_remainder_kv):
+          kv_caches[start_idx + offset] = updated_item
+
+    return y
+
+  def _apply_qwen3_next_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      slot,
+      kv_caches=None,
+      attention_metadata=None,
+  ):
+    """Applies Qwen3-Next scanned decoder blocks, handling main scan and remainders."""
+
+    cfg = self.config
+    mesh = self.mesh
+
+    # Define the repeating pattern length and calculate how many full blocks to scan
+    block_pattern_len = cfg.inhomogeneous_layer_cycle_interval
+    num_full_blocks = cfg.num_decoder_layers // block_pattern_len
+    remainder_layers = cfg.num_decoder_layers % block_pattern_len
+
+    if num_full_blocks > 0:
+      ScannableBlockToLinen = qwen3.Qwen3NextScannableBlockToLinen
+      policy = self.get_remat_policy()
+
+      kv_cache_scanned = maxtext_utils.prepare_kv_caches_for_scan(
+          kv_caches, num_full_blocks, block_pattern_len, stack=True
+      )
+
+      # Positional order must match Qwen3NextScannableBlock.__call__.
+      broadcast_args_spec = [
+          (decoder_segment_ids, nn.broadcast),
+          (decoder_positions, nn.broadcast),
+          (deterministic, nn.broadcast),
+          (model_mode, nn.broadcast),
+          (previous_chunk, nn.broadcast),
+          (slot, nn.broadcast),
+          (kv_cache_scanned, 0 if kv_caches is not None else nn.broadcast),
+          (attention_metadata, nn.broadcast),
+      ]
+      broadcast_args = tuple(arg for arg, _ in broadcast_args_spec)
+      in_axes_tuple = tuple(axis for _, axis in broadcast_args_spec)
+
+      # For a fully scanned block, apply it inside an nn.scan over the calculated number of full blocks
+      y, returned_kv_cache = nn.scan(
+          ScannableBlockToLinen,
+          variable_axes={
+              "params": cfg.param_scan_axis,
+              "cache": 0,
+              "intermediates": 0,
+              "aqt": 0,
+              "_overwrite_with_gradient": 0,
+          },
+          split_rngs={"params": True, "dropout": cfg.enable_dropout},
+          in_axes=in_axes_tuple,
+          length=num_full_blocks,
+          unroll=1,
+          metadata_params={
+              nn.PARTITION_NAME: "layers",
+              "abstract_init": False,
+          },
+      )(
+          config=cfg,
+          mesh=mesh,
+          quant=self.quant,
+          model_mode=model_mode,
+          num_of_layers=block_pattern_len,
+          remat_policy_fn=policy,
+          apply_internal_remat=True,
+          # Keep the Linen parameter path identical to the pure-NNX decoder's
+          # `self.layers`, so a single checkpoint mapping serves both.
+          name="layers",
+      )(
+          y, *broadcast_args
+      )
+
+      maxtext_utils.update_kv_caches_after_scan(
+          kv_caches, returned_kv_cache, num_full_blocks, block_pattern_len, stacked=True
+      )
+
+    # Layers past the last whole block go into a short block of their own. It is a
+    # Qwen3NextScannableBlock like the scanned ones, named `layers_remainder`, so the
+    # parameter paths still match the pure-NNX decoder's and one mapping serves both.
+    if remainder_layers > 0:
+      start_idx = cfg.num_decoder_layers - remainder_layers
+      remainder_kv = tuple(kv_caches[start_idx:]) if kv_caches is not None else None
+      y_and_kv = qwen3.Qwen3NextScannableBlockToLinen(
+          config=cfg,
+          mesh=mesh,
+          quant=self.quant,
+          model_mode=model_mode,
+          num_of_layers=remainder_layers,
+          layer_idx_offset=start_idx,
+          remat_policy_fn=self.get_remat_policy(),
+          apply_internal_remat=True,
+          name="layers_remainder",
+      )(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk,
+          slot,
+          remainder_kv,
+          attention_metadata,
+      )
+
+      if isinstance(y_and_kv, tuple):
+        y = y_and_kv[0]
+        new_kv = y_and_kv[1]
+      else:
+        y = y_and_kv
+        new_kv = None
+
+      if kv_caches is not None and new_kv is not None:
+        for offset, updated_item in enumerate(new_kv):
           kv_caches[start_idx + offset] = updated_item
 
     return y

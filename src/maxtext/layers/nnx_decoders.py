@@ -480,6 +480,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
+    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -590,6 +591,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
+    elif self.is_qwen3_next:
+      self._init_scanned_qwen3_next(rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -759,6 +762,48 @@ class NNXDecoder(nnx.Module):
         **rem_layer_kwargs,
         rngs=rngs,
     )
+
+  def _init_scanned_qwen3_next(self, rngs, mesh):
+    """Initializes scanned Qwen3-Next blocks with per-layer (rather than per-block) remat.
+
+    Mirrors _init_scanned_gemma4: each block covers one period of the hybrid
+    attention pattern and rematerializes its own sub-layers, so the outer apply
+    skips block-level remat. Layers past the last whole period go into a short
+    remainder block, named the same as the Linen `Decoder`'s so both decoders
+    keep producing the same parameter tree.
+    """
+    config = self.config
+    block_length = config.inhomogeneous_layer_cycle_interval
+    scan_length = config.num_decoder_layers // block_length
+    num_remaining_layers = config.num_decoder_layers % block_length
+    policy = self.get_remat_policy()
+    if scan_length > 0:
+      self.layers = self._create_scanned_layers(
+          qwen3.Qwen3NextScannableBlock,
+          length=scan_length,
+          metadata_axis_name="layers",
+          rngs=rngs,
+          num_of_layers=block_length,
+          remat_policy_fn=policy,
+          apply_internal_remat=True,
+      )
+    if num_remaining_layers > 0:
+      # The remainder starts on a period boundary, so it holds only the leading
+      # linear-attention layers of a period -- the full-attention layer is last.
+      self.layers_remainder = qwen3.Qwen3NextScannableBlock(
+          config=config,
+          mesh=mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          num_of_layers=num_remaining_layers,
+          layer_idx_offset=scan_length * block_length,
+          remat_policy_fn=policy,
+          # _apply_remainder_block already wraps the call in jax.checkpoint, and
+          # the remainder is shorter than one period and runs once, so there is
+          # nothing to gain from a second, finer remat boundary inside it.
+          apply_internal_remat=False,
+          rngs=rngs,
+      )
 
   def _init_scanned_generic(self, decoder_block_classes, rngs):
     """Initializes scanned generic decoder layers."""
@@ -1962,6 +2007,13 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
+        elif self.is_qwen3_next:
+          y = self._apply_qwen3_next_scanned_blocks(
+              y,
+              layer_args,
+              layer_kwargs,
+              kv_caches=kv_caches,
+          )
         else:
           cycle_interval = cfg.inhomogeneous_layer_cycle_interval
           scan_length = int(cfg.num_decoder_layers / cycle_interval)
@@ -2327,6 +2379,53 @@ class NNXDecoder(nnx.Module):
 
     return y
 
+  def _apply_qwen3_next_scanned_blocks(self, y, layer_args, layer_kwargs, kv_caches=None):
+    """Applies the Qwen3-Next scanned blocks.
+
+    Qwen3NextScannableBlock rematerializes its own sub-layers (a scan over the
+    linear-attention layers plus a trip-count-one scan over the full-attention
+    layer), so block-level remat is skipped here to avoid rematerializing twice.
+    This holds for the external-KV-cache path too, hence the regrouping below
+    rather than falling back to the generic (block-rematerialized) branch.
+
+    External (vLLM) caches arrive as a flat list with one entry per decoder
+    layer, but the scan runs over blocks, so they are grouped into per-block
+    tuples before the scan and written back to the flat list afterwards, as in
+    _apply_gemma4_scanned_blocks.
+
+    Layers past the last whole block are applied afterwards, in a short
+    remainder block, so a layer count that is not a multiple of the cycle keeps
+    all its layers.
+    """
+    cfg = self.config
+    block_length = cfg.inhomogeneous_layer_cycle_interval
+    scan_length = cfg.num_decoder_layers // block_length
+    if scan_length > 0:
+      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
+      y, self.layers, _ = self._apply_layers_sequentially(
+          self.layers,
+          y,
+          *layer_args,
+          length=scan_length,
+          kv_caches_stacked=grouped_kv_caches,
+          skip_block_remat=True,
+          **layer_kwargs,
+      )
+      maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, block_length, stacked=False)
+
+    num_remaining_layers = cfg.num_decoder_layers % block_length
+    if num_remaining_layers > 0:
+      y = self._apply_remainder_block(
+          self.layers_remainder,
+          y,
+          layer_args,
+          layer_kwargs,
+          kv_caches=kv_caches,
+          start_idx=scan_length * block_length,
+          num_remaining_layers=num_remaining_layers,
+      )
+    return y
+
   def _apply_gemma4_scanned_blocks(
       self,
       y,
@@ -2369,52 +2468,87 @@ class NNXDecoder(nnx.Module):
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
     if num_remaining_layers > 0:
-      policy = self.get_remat_policy()
-      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+      y = self._apply_remainder_block(
+          self.layers_remainder,
+          y,
+          layer_args,
+          layer_kwargs,
+          kv_caches=kv_caches,
+          start_idx=scan_length * attention_pattern_length,
+          num_remaining_layers=num_remaining_layers,
+      )
 
-      remainder_kv = None
-      if kv_caches is not None:
-        start_idx = scan_length * attention_pattern_length
-        remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+    return y
 
-      if cfg.use_qwix_quantization or cfg.lora.lora_weight_qtype:
+  def _apply_remainder_block(
+      self,
+      block,
+      y,
+      layer_args,
+      layer_kwargs,
+      kv_caches,
+      start_idx,
+      num_remaining_layers,
+  ):
+    """Applies the trailing scannable block holding the layers left over by the main scan.
+
+    The outer scan runs over whole blocks, so `num_decoder_layers %
+    block_length` layers are left over. They live in a single short block,
+    applied here behind one block-level remat boundary. The main scan skips
+    block-level remat, because there its blocks rematerialize their own
+    sub-layers; this one runs once, so a coarse boundary costs nothing.
+
+    Args:
+      block: The remainder block module; updated in place with its new state.
+      y: Input activations.
+      layer_args: Positional arguments forwarded to the block.
+      layer_kwargs: Keyword arguments forwarded to the block.
+      kv_caches: Flat per-layer external cache list, mutated in place, or None.
+      start_idx: Index of the first remainder layer in `kv_caches`.
+      num_remaining_layers: How many layers the remainder block covers.
+
+    Returns:
+      The output activations.
+    """
+    cfg = self.config
+    remainder_kv = None
+    if kv_caches is not None:
+      remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+
+    def split_output(out_res):
+      if isinstance(out_res, tuple):
+        return out_res[0], (out_res[1] if len(out_res) > 1 else None)
+      return out_res, None
+
+    if cfg.use_qwix_quantization or cfg.lora.lora_weight_qtype:
+      call_kwargs = dict(layer_kwargs)
+      if remainder_kv is not None:
+        call_kwargs["kv_cache"] = remainder_kv
+      y, updated_remainder_kv = split_output(block(y, *layer_args, **call_kwargs))
+    else:
+
+      def pure_block_fn(graphdef, state_in, y_in, kv_in):
+        merged_layer = nnx.merge(graphdef, state_in)
         call_kwargs = dict(layer_kwargs)
-        if remainder_kv is not None:
-          call_kwargs["kv_cache"] = remainder_kv
-        out_res = self.layers_remainder(y, *layer_args, **call_kwargs)
-        if isinstance(out_res, tuple):
-          y = out_res[0]
-          updated_remainder_kv = out_res[1] if len(out_res) > 1 else None
-        else:
-          y = out_res
-          updated_remainder_kv = None
-      else:
+        if kv_in is not None:
+          call_kwargs["kv_cache"] = kv_in
+        out_y, out_kv = split_output(merged_layer(y_in, *layer_args, **call_kwargs))
+        nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
+        return out_y, out_kv, nnx.state(merged_layer)
 
-        def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
-          merged_layer = nnx.merge(graphdef, state_in)
-          call_kwargs = dict(layer_kwargs)
-          if kv_in is not None:
-            call_kwargs["kv_cache"] = kv_in
-          out_res = merged_layer(y_in, *layer_args, **call_kwargs)
-          if isinstance(out_res, tuple):
-            out_y = out_res[0]
-            out_kv = out_res[1] if len(out_res) > 1 else None
-          else:
-            out_y = out_res
-            out_kv = None
-          nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
-          return out_y, out_kv, nnx.state(merged_layer)
+      checkpointed_block_fn = jax.checkpoint(
+          pure_block_fn,
+          policy=self.get_remat_policy(),
+          prevent_cse=maxtext_utils.should_prevent_cse_in_remat(cfg),
+      )
 
-        checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
+      graphdef, state = nnx.split(block)
+      y, updated_remainder_kv, new_state = checkpointed_block_fn(graphdef, state, y, remainder_kv)
+      nnx.update(block, new_state)
 
-        graphdef, state = nnx.split(self.layers_remainder)
-        y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
-        nnx.update(self.layers_remainder, new_state)
-
-      if kv_caches is not None and updated_remainder_kv is not None:
-        start_idx = scan_length * attention_pattern_length
-        for offset, updated_item in enumerate(updated_remainder_kv):
-          kv_caches[start_idx + offset] = updated_item
+    if kv_caches is not None and updated_remainder_kv is not None:
+      for offset, updated_item in enumerate(updated_remainder_kv):
+        kv_caches[start_idx + offset] = updated_item
 
     return y
 
