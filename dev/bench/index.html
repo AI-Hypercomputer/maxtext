@@ -9,22 +9,77 @@
         -webkit-font-smoothing: antialiased;
         background-color: #fff;
         font-size: 16px;
+        height: 100%;
       }
       body {
         color: #4a4a4a;
         margin: 8px;
         font-size: 1em;
         font-weight: 400;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
       }
       header {
         margin-bottom: 8px;
         display: flex;
-        flex-direction: column;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+      }
+      .header-item {
+        display: flex;
+        align-items: center;
+      }
+      .view-toggle {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px;
+        border: 1px solid #dfe3e8;
+        border-radius: 999px;
+        background: #f5f7fa;
+      }
+      .toggle-button {
+        color: #4a4a4a;
+        background: transparent;
+        border: none;
+        border-radius: 999px;
+        padding: 8px 12px;
+        font-size: 0.875rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .toggle-button.active {
+        color: #fff;
+        background-color: #3298dc;
+      }
+      .page-view {
+        display: none;
+      }
+      .page-view.active {
+        display: block;
+      }
+      #ci-page.page-view.active {
+        display: flex;
+        flex: 1 1 auto;
+        min-height: 0;
       }
       main {
         width: 100%;
         display: flex;
         flex-direction: column;
+      }
+      #ci-metrics-frame {
+        width: 100%;
+        /* --ci-chrome is measured from the real header at runtime; 88px is only
+           the value used before the first measurement lands. */
+        height: calc(100vh - var(--ci-chrome, 88px));
+        min-height: 0;
+        border: 0;
+        background: #ffffff;
+        display: block;
       }
       a {
         color: #3273dc;
@@ -96,13 +151,24 @@
         <strong class="header-label">Repository:</strong>
         <a id="repository-link" rel="noopener"></a>
       </div>
+      <div class="view-toggle" aria-label="View toggle">
+        <button class="toggle-button active" data-view="benchmarks" type="button">Benchmarks</button>
+        <button class="toggle-button" data-view="ci" type="button">CI Pulse</button>
+      </div>
     </header>
-    <main id="main"></main>
-    <footer>
-      <button id="dl-button">Download data as JSON</button>
-      <div class="spacer"></div>
-      <div class="small">Powered by <a rel="noopener" href="https://github.com/marketplace/actions/continuous-benchmark">github-action-benchmark</a></div>
-    </footer>
+
+    <div id="benchmarks-page" class="page-view active">
+      <main id="main"></main>
+      <footer>
+        <button id="dl-button">Download data as JSON</button>
+        <div class="spacer"></div>
+        <div class="small">Powered by <a rel="noopener" href="https://github.com/marketplace/actions/continuous-benchmark">github-action-benchmark</a></div>
+      </footer>
+    </div>
+
+    <div id="ci-page" class="page-view">
+      <iframe id="ci-metrics-frame" title="CI Metrics dashboard" data-src="ci-pulse/index.html"></iframe>
+    </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>
     <script src="data.js"></script>
@@ -167,6 +233,63 @@
             dataSet: collectBenchesPerTestCase(data.entries[name]),
           }));
         }
+
+        // The CI Pulse pane is an iframe. A display:none iframe still downloads its
+        // src, so the tag ships without one and it is filled in the first time the
+        // tab is opened. Readers who only ever look at the benchmark charts never
+        // pay for the dashboard.
+        function loadCiFrame() {
+          const frame = document.getElementById('ci-metrics-frame');
+          if (frame && !frame.getAttribute('src')) {
+            frame.setAttribute('src', frame.dataset.src);
+          }
+        }
+
+        // The iframe is sized against the space the header does not use. The header
+        // wraps on a narrow window, so the height is measured rather than assumed.
+        function measureChrome() {
+          const header = document.getElementById('header');
+          if (!header) return;
+          // 8px body margin above, 8px header margin below, 8px body margin under.
+          const chrome = header.getBoundingClientRect().height + 24;
+          document.documentElement.style.setProperty('--ci-chrome', chrome + 'px');
+        }
+
+        function setActiveView(viewName) {
+          const views = document.querySelectorAll('.page-view');
+          const buttons = document.querySelectorAll('.toggle-button');
+
+          views.forEach(view => {
+            view.classList.toggle('active', view.id === `${viewName}-page`);
+          });
+
+          buttons.forEach(button => {
+            button.classList.toggle('active', button.dataset.view === viewName);
+          });
+
+          if (viewName === 'ci') {
+            measureChrome();
+            loadCiFrame();
+          }
+        }
+
+        document.querySelectorAll('.toggle-button').forEach(button => {
+          button.addEventListener('click', () => {
+            setActiveView(button.dataset.view);
+            // So the tab survives a reload and can be sent to someone else.
+            // replaceState, not pushState: Back should leave the page, not walk
+            // through every tab the reader clicked.
+            history.replaceState(null, '', button.dataset.view === 'ci' ? '#ci' : '#benchmarks');
+          });
+        });
+
+        if (typeof ResizeObserver === 'function') {
+          const header = document.getElementById('header');
+          if (header) new ResizeObserver(measureChrome).observe(header);
+        } else {
+          window.addEventListener('resize', measureChrome);
+        }
+        measureChrome();
 
         function renderAllChars(dataSets) {
 
@@ -274,6 +397,9 @@
           }
         }
 
+        // Open on whichever tab the URL asks for, so the CI Pulse tab survives a
+        // reload and can be linked to.
+        setActiveView(location.hash === '#ci' ? 'ci' : 'benchmarks');
         renderAllChars(init()); // Start
       })();
     </script>

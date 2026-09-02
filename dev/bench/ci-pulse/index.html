@@ -1,0 +1,2453 @@
+<title>MaxText CI Pulse</title>
+<style>
+:root{color-scheme:light;--bg:#F8FAFC;--surface:#FFFFFF;--elevated:#F1F5F9;--ink:#0F172A;--ink2:#334155;--muted:#475569;--grid:#E2E8F0;--border:rgba(15,23,42,0.12);--accent:#0EA5E9;--q:#64748B;--bld:#8B5CF6;--tpu:#3B82F6;--gpu:#F97316;--cpu:#22C55E;--crit:#DC2626;--warn:#D97706;--good:#16A34A;--tint-crit:rgba(239,68,68,0.08);--tint-warn:rgba(245,158,11,0.10);--tint-good:rgba(34,197,94,0.10);--font:system-ui,-apple-system,'Segoe UI',sans-serif;--mono:ui-monospace,'SF Mono',Menlo,monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:13px/1.5 var(--font)}
+header{background:rgba(255,255,255,0.94);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.hwrap{max-width:1200px;margin:0 auto;padding:0 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;padding:12px 0}
+.brand b{font-size:16px;letter-spacing:-0.02em}
+.tag{font:600 12px var(--mono);background:var(--elevated);color:var(--ink2);padding:2px 8px;border-radius:4px;border:1px solid var(--border)}
+.sdot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.filters{display:flex;gap:8px;align-items:center;margin-left:auto}
+.fchip{appearance:none;border:1px solid var(--border);background:#FFFFFF;color:var(--ink2);font:600 14px/1 var(--font);padding:6px 12px;border-radius:15px;cursor:pointer;box-shadow:0 1px 0 rgba(15,23,42,0.04)}
+.fchip:hover{color:var(--ink);border-color:rgba(14,165,233,0.35)}
+.fchip.on{border-color:var(--accent);color:#ffffff;background:linear-gradient(180deg,#38BDF8 0%,#0EA5E9 100%);font-weight:700;box-shadow:0 2px 8px rgba(14,165,233,0.2)}
+.fchip.on::before{content:"✓ ";color:#ffffff}
+select{font:500 14px/1 var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 10px;border-radius:8px;cursor:pointer}
+main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
+.card{background:rgba(255,255,255,0.96);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);overflow:hidden;box-shadow:0 1px 0 rgba(15,23,42,0.03)}
+.card.hero{background:linear-gradient(180deg,#F0F9FF 0%,rgba(255,255,255,0.98) 100%);border-color:rgba(14,165,233,0.18)}
+.card.gradient-hero{background:linear-gradient(180deg,#EAF6FF 0%,#F8FBFF 55%,#FFFFFF 100%);border-color:rgba(14,165,233,0.18)}
+.ct{font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:12px}
+.leg{display:flex;gap:14px;font-size:13px;color:var(--ink2);margin-bottom:10px;flex-wrap:wrap}
+.leg span{display:flex;align-items:center;gap:5px}
+.leg i{width:10px;height:10px;border-radius:2px;display:inline-block}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
+@media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}#budget{grid-template-columns:repeat(2,1fr)!important}}
+@media(max-width:500px){#budget{grid-template-columns:1fr!important}}
+.dtile{background:#FFFFFF;border:1px solid var(--border);border-radius:10px;padding:14px;box-shadow:0 1px 0 rgba(15,23,42,0.03)}
+.dtile.alert{border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.03)}
+.dtile-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.dtile-name{font:600 13px var(--font);text-transform:uppercase;letter-spacing:.06em;color:var(--ink2)}
+.dtile-val{font:700 22px var(--mono);font-variant-numeric:tabular-nums}
+.dtile-row{font-size:13px;color:var(--muted);display:flex;gap:12px;margin-top:4px}
+#tip{position:fixed;z-index:100;pointer-events:none;background:rgba(255,255,255,0.98);border:1px solid rgba(15,23,42,0.12);border-radius:10px;padding:12px 14px;font-size:14px;max-width:360px;backdrop-filter:blur(16px);display:none;box-shadow:0 8px 24px rgba(15,23,42,0.12)}
+#wkpop{background:rgba(15,23,42,0.08)}
+#wkpop-body{background:#FFFFFF;color:var(--ink)}
+#tip .th{font-weight:700;font-size:15px;margin-bottom:6px}
+#tip .trow{display:flex;justify-content:space-between;gap:16px;padding:2px 0;border-bottom:1px solid var(--grid)}
+#tip .trow:last-child{border:0}
+#tip .tv{font:600 14px var(--mono);font-variant-numeric:tabular-nums}
+.overlay{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);display:none;align-items:flex-start;justify-content:center;padding:40px 20px;overflow-y:auto}
+.overlay.on{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:14px;max-width:1000px;width:100%;max-height:85vh;overflow-y:auto}
+.modal-head{padding:20px 24px 12px;border-bottom:1px solid var(--grid);display:flex;justify-content:space-between;align-items:flex-start}
+.modal-head h2{font-size:16px;font-weight:700}
+.modal-head .sub{font-size:14px;color:var(--ink2);margin-top:2px}
+.modal-close{appearance:none;border:0;background:var(--elevated);color:var(--ink2);width:28px;height:28px;border-radius:8px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center}
+.modal-close:hover{color:var(--ink)}
+.modal-body{padding:16px 24px 24px}
+.modal table{width:100%;border-collapse:collapse;font-size:14px}
+.modal th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--grid);white-space:nowrap}
+.modal td{padding:6px 8px;border-bottom:1px solid var(--grid)}
+.modal tr:last-child td{border-bottom:0}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.chip{display:inline-flex;align-items:center;font-size:12px;font-weight:700;padding:2px 7px;border-radius:10px}
+.chip.pass{background:var(--tint-good);color:var(--good);border:1px solid rgba(34,197,94,0.3)}
+.chip.fail{background:var(--tint-crit);color:var(--crit);border:1px solid rgba(239,68,68,0.3)}
+.chip.flaky{background:var(--tint-warn);color:var(--warn);border:1px solid rgba(245,158,11,0.3)}
+.chip.skip{background:var(--elevated);color:var(--muted);border:1px solid var(--border)}
+.chip.new{background:rgba(6,182,212,0.15);color:var(--accent);border:1px solid rgba(6,182,212,0.3)}
+.wf-track{background:var(--elevated);height:14px;border-radius:3px;position:relative;overflow:hidden;display:flex}
+.wf-seg{height:100%}
+#timeline svg text{font-family:var(--mono);font-size:12px;fill:var(--muted)}
+.jbar{background:var(--elevated);height:12px;border-radius:3px;overflow:hidden;display:flex}
+.jbar>div{height:100%}
+.cause-row{display:grid;grid-template-columns:180px 1fr 70px 172px;align-items:center;gap:12px;padding:6px 8px;border-radius:6px;font-size:14px}
+.cause-row:hover{background:rgba(255,255,255,0.02)}
+.delta-chip{font:700 12px var(--mono);padding:3px 8px;border-radius:4px;text-align:center;white-space:nowrap}
+.delta-bad{background:rgba(244,63,94,0.15);color:#F43F5E;border:1px solid rgba(244,63,94,0.3)}
+.delta-warn{background:rgba(245,158,11,0.15);color:#F59E0B;border:1px solid rgba(245,158,11,0.3)}
+.delta-good{background:rgba(16,185,129,0.15);color:#10B981;border:1px solid rgba(16,185,129,0.3)}
+.delta-flat{background:var(--elevated);color:var(--ink2)}
+.cat-head{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:8px 8px 4px;margin-top:8px;border-top:1px solid var(--grid)}
+.cat-head:first-child{border-top:0;margin-top:0}
+.pbtn{appearance:none;border:1px solid var(--border);background:var(--elevated);color:var(--ink2);font:600 14px var(--font);padding:8px 20px;border-radius:8px;cursor:pointer;transition:all .15s}
+.pbtn:hover{color:var(--ink)}
+.pbtn.on{background:var(--accent);color:#090D16;border-color:var(--accent);font-weight:700}
+
+/* Test health chart cards (classes emitted by renderDashboard) */
+.chart-card{padding:2px 0 0;overflow:hidden}
+.chart-card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;flex-wrap:wrap}
+.card-title-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.device-indicator-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;display:inline-block}
+.card-title{font-size:15px;font-weight:600;letter-spacing:-0.01em}
+.card-subtitle{font-size:13px;color:var(--ink2);margin-top:3px;padding-left:18px}
+.gbtn{appearance:none;display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);background:transparent;color:var(--accent);font:600 12px/1 var(--font);text-transform:none;letter-spacing:0;padding:4px 9px;border-radius:12px;cursor:pointer;margin-left:10px;white-space:nowrap;vertical-align:middle}
+.gbtn:hover{border-color:var(--accent)}
+.gbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.card-title-row>.gbtn{margin-left:2px}
+.card-guide{flex-basis:100%;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:8px 12px;margin:6px 0 10px;background:#F8FAFC;font-size:13px;line-height:1.55;color:var(--ink2)}
+.card-guide[hidden]{display:none}
+.card-guide-h{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:3px}
+.sum-lead:empty{display:none}
+.sum .card-guide{margin:2px 0 8px}
+#thTabs{margin-bottom:16px}
+.chart-scroll-wrap{overflow-x:auto}
+.chart-svg-container{width:100%;min-width:720px;position:relative;user-select:none}
+.badge-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:12px;font-size:13px;font-weight:600;font-family:var(--mono)}
+.badge-crit{background:rgba(239,68,68,0.15);color:#FCA5A5;border:1px solid rgba(239,68,68,0.3)}
+.badge-warn{background:rgba(245,158,11,0.15);color:#FCD34D;border:1px solid rgba(245,158,11,0.3)}
+.badge-good{background:rgba(34,197,94,0.15);color:#86EFAC;border:1px solid rgba(34,197,94,0.3)}
+.badge-accent{background:rgba(6,182,212,0.15);color:#67E8F9;border:1px solid rgba(6,182,212,0.3)}
+.th-tabs{display:flex;gap:4px;margin-bottom:0}
+.th-tab{background:var(--bg);border:1px solid var(--border);border-bottom:none;color:var(--ink2);padding:8px 16px;border-radius:8px 8px 0 0;font:600 14px var(--font);cursor:pointer;display:flex;align-items:center;gap:6px;transition:all .15s}
+.th-tab:hover{color:var(--ink)}
+.th-tab.active{background:var(--surface);color:var(--ink);border-bottom:1px solid var(--surface);padding-bottom:9px;margin-bottom:-1px}
+.th-counter{padding:1px 5px;border-radius:10px;background:var(--elevated);font-size:12px;color:var(--ink2);font-family:var(--mono)}
+.th-tab.active .th-counter{background:rgba(248,250,252,0.12);color:var(--ink)}
+.th-cards-stack{display:flex;flex-direction:column;gap:16px}
+.interactive-hover-col{cursor:pointer}
+.axlink{cursor:pointer}.axlink:hover text{text-decoration:underline}
+.jth{cursor:pointer;user-select:none;white-space:nowrap}.jth:hover{color:var(--ink)}.jtarr{margin-left:2px}
+.sum{border:1px solid var(--border);border-radius:10px;padding:10px 14px 8px;margin:2px 0 14px;background:#FFFFFF;box-shadow:0 1px 0 rgba(15,23,42,0.02)}
+.sum-h{font-size:14px;font-weight:700;color:var(--ink);margin-bottom:2px}
+.sum-lead{font-size:13px;color:var(--ink2);margin-bottom:6px;line-height:1.5}
+.sum-head{display:grid;gap:6px 14px;padding:2px 8px 4px;font-size:12px;color:var(--muted)}
+.sum-row{display:grid;align-items:center;gap:6px 14px;padding:7px 8px;border-top:1px solid var(--grid);cursor:pointer;border-radius:6px;font-size:13px}
+.sum-row:hover{background:rgba(248,250,252,0.04)}
+.sum-rank{width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font:700 12px var(--mono);border:1.5px solid var(--muted);color:var(--ink2)}
+.sum-empty{font-size:13px;color:var(--muted);padding:6px 8px}
+.sum-foot{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}
+@keyframes anomalyPulse{0%,100%{filter:drop-shadow(0 0 3px rgba(239,68,68,0.35))}50%{filter:drop-shadow(0 0 11px rgba(239,68,68,0.85))}}.pulse-anim{animation:anomalyPulse 2.5s infinite ease-in-out}
+.issue-row{display:grid;grid-template-columns:auto 160px 1fr auto;align-items:center;gap:16px;padding:12px 16px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:15px;transition:border-color .15s;margin-bottom:8px}
+.issue-row:hover{border-color:rgba(248,250,252,0.2)}
+.issue-row.crit{border-left:3px solid var(--crit);background:linear-gradient(90deg,rgba(239,68,68,0.05) 0%,var(--bg) 40%)}
+.issue-row.warn{border-left:3px solid var(--warn);background:linear-gradient(90deg,rgba(245,158,11,0.04) 0%,var(--bg) 40%)}
+.issue-row.info{border-left:3px solid var(--accent)}
+.issue-desc{color:var(--ink2);line-height:1.4}
+.issue-desc strong{color:var(--ink);font-weight:600}
+.th-tooltip{position:absolute;opacity:0;pointer-events:none;transition:opacity .15s ease;background:#090D16;border:1px solid #334155;border-radius:10px;padding:12px 16px;box-shadow:0 10px 25px -5px rgba(0,0,0,0.8);z-index:50;min-width:210px}
+
+</style>
+
+<header>
+<div class="hwrap">
+<div class="brand"><span class="sdot" id="hdot" style="background:var(--good)"></span><b>MaxText CI Pulse</b><span class="tag">AI-Hypercomputer/maxtext</span></div>
+<div class="filters">
+<select id="date-range" onchange="if(this.value==='custom'){$('#date-custom').style.display='flex';this.style.display='none'}else{setRange()}"><option value="7">Last 7 days</option><option value="14" selected>Last 14 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="custom">Custom range…</option></select>
+<div id="date-custom" style="display:none;align-items:center;gap:6px">
+<input type="date" id="d-from" style="font:500 14px/1 var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:5px 8px;border-radius:6px;color-scheme:light">
+<span style="color:var(--muted);font-size:13px">to</span>
+<input type="date" id="d-to" style="font:500 14px/1 var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:5px 8px;border-radius:6px;color-scheme:light">
+<button onclick="$('#date-range').value='custom';setRange()" style="font:600 13px var(--font);background:var(--accent);color:#090D16;border:none;padding:5px 12px;border-radius:6px;cursor:pointer">Apply</button>
+<button onclick="$('#date-custom').style.display='none';$('#date-range').style.display='';$('#date-range').value='14';setRange()" style="font:500 13px var(--font);background:none;border:1px solid var(--border);color:var(--muted);padding:5px 8px;border-radius:6px;cursor:pointer">✕</button>
+</div>
+<span style="width:1px;height:20px;background:var(--grid)"></span>
+<button class="fchip on" data-hw="all">All</button>
+<button class="fchip" data-hw="tpu">TPU</button>
+<button class="fchip" data-hw="gpu">GPU</button>
+<button class="fchip" data-hw="cpu">CPU</button>
+</div></div></header>
+
+<main>
+<!-- How old the numbers are. Filled from meta.json when real data loads; empty on the sample data. -->
+<div id="freshness" style="font-size:12px;color:var(--muted);margin:0 0 10px"></div>
+
+<div id="page-main">
+<div class="card hero">
+<div class="ct">Main branch · run time per merged pull request</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="timeline">This chart shows how long CI took on every merged pull request on main, and which phase of the run — build, queue wait, setup, or a device's tests — took the time. <span class="g-more">Overlapping runs, in the hover card, counts how many other runs of this pipeline were in flight at the same moment as this one, whatever started them. More runs at once means more jobs competing for the same runners. Bars run from the oldest merged pull request on the left to the newest on the right. The pull request number under each bar opens that pull request on GitHub in a new tab; its merge date is under it. The chart below breaks the same runs down by worker suite. A mark above a bar repeats its state: ▲ means the run was slower than recent runs, ✕ means it failed, ↻ means a job passed only when re-run. Hover a mark for its numbers; zoom in and it grows into a two-line label.</span></div>
+<div class="leg">
+<span><i style="background:var(--bld)"></i>Build package</span>
+<span><i style="background:var(--q)"></i>Queue wait</span>
+<span><i style="background:var(--bld);opacity:0.55"></i>Image pull</span>
+<span><i style="background:var(--bld);opacity:0.28"></i>Env setup</span>
+<span><i style="background:var(--tpu)"></i>TPU run</span>
+<span><i style="background:var(--gpu)"></i>GPU run</span>
+<span><i style="background:var(--cpu)"></i>CPU run</span>
+<span style="color:var(--muted)">╌╌</span><span>wall-clock total</span>
+<span style="display:inline-flex;align-items:center;gap:5px;white-space:nowrap" data-lg="slow"><svg viewBox="0 0 32 32" width="18" height="18" aria-hidden="true" style="flex:none"><circle cx="16" cy="16" r="14" fill="#FFFFFF" stroke="#F59E0B" stroke-width="2"/><path d="M 9 21.5 L 23 21.5 L 16 9.5 Z" fill="#F59E0B"/></svg><i style="width:10px;height:10px;border:2px dashed #F59E0B;border-radius:2px;display:inline-block;background:transparent;margin:0"></i>slower than recent runs</span>
+<span style="display:inline-flex;align-items:center;gap:5px;white-space:nowrap" data-lg="fail"><svg viewBox="0 0 32 32" width="18" height="18" aria-hidden="true" style="flex:none"><circle cx="16" cy="16" r="14" fill="#FFFFFF" stroke="#EF4444" stroke-width="2"/><line x1="10.5" y1="10.5" x2="21.5" y2="21.5" stroke="#EF4444" stroke-width="3.2" stroke-linecap="round"/><line x1="10.5" y1="21.5" x2="21.5" y2="10.5" stroke="#EF4444" stroke-width="3.2" stroke-linecap="round"/></svg><i style="width:10px;height:10px;border:2px solid #EF4444;border-radius:2px;display:inline-block;background:transparent;margin:0"></i>failed</span>
+<span style="display:inline-flex;align-items:center;gap:5px;white-space:nowrap" data-lg="flaky"><svg viewBox="0 0 32 32" width="18" height="18" aria-hidden="true" style="flex:none"><circle cx="16" cy="16" r="14" fill="#FFFFFF" stroke="#F59E0B" stroke-width="2"/><path d="M 22 16 A 6 6 0 1 1 17.5 10.2" fill="none" stroke="#F59E0B" stroke-width="2.6" stroke-linecap="round"/><path d="M 14.8 7.4 L 21.8 8.6 L 16.8 13.6 Z" fill="#F59E0B"/></svg>flaky — passed on retry</span>
+</div>
+<div id="tl-zoombar" style="display:flex;gap:10px;align-items:center;font-size:13px;margin-bottom:8px;min-height:24px"></div>
+<div id="timeline" style="overflow-x:auto"></div>
+</div>
+
+<div class="card hero gradient-hero">
+<div class="ct">Worker time per merged pull request</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="worker">This chart shows where each merged pull request's CI time went, worker suite by worker suite: every worker's runner wait, setup and tests, stacked. <span class="g-more">A worker suite is one test flavor of the CI workflow, for example cpu-unit, together with all of its parallel Execute Tests jobs. Bars run from the oldest merged pull request on the left to the newest on the right. Every bar is one merged pull request. Every slice is one worker suite, in its device's color. Hover a slice to follow that suite across all pull requests. Click a bar to list every suite's time in that run. Pick one suite to see one bar per worker instead. The pull request number under each bar opens that pull request on GitHub in a new tab; its merge date is under it. The chart above splits the same runs by phase.</span></div>
+<div id="wk-chips" style="display:flex;gap:8px;align-items:center;margin-bottom:8px"></div>
+<div id="wk-meta" style="font-size:12px;color:var(--muted);margin-bottom:6px"></div>
+<div id="worker-chart" style="overflow-x:auto"></div>
+</div>
+<div class="card gradient-hero"><div class="ct">Test run time by device</div><div id="devlines-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div><div id="devlines" style="overflow-x:auto"></div></div>
+<div class="card gradient-hero"><div class="ct">Flaky jobs and tests</div>
+<div id="flaky"></div></div>
+</div><!-- /page-main -->
+
+</main>
+
+<div id="tip"></div>
+<div id="wkpop" style="position:fixed;inset:0;z-index:90;display:none;background:rgba(0,0,0,0.55);align-items:center;justify-content:center" onclick="if(event.target===this)closeWkPop()">
+<div id="wkpop-body" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;max-width:660px;width:92%;max-height:80vh;overflow:auto;padding:18px 20px;box-shadow:0 16px 48px rgba(0,0,0,0.6)"></div>
+</div>
+<div class="overlay" id="overlay" onclick="if(event.target===this)closeModal()"><div class="modal" id="modal"></div></div>
+
+<script>
+// ============ JOB DEFINITIONS (baseline times in minutes) ============
+let JOBS=[
+{id:'analyze',name:'Analyze Code Changes for Test Orchestration',cat:'infra',lane:'Hosted',b:{q:0,s:0.3,r:0.2}},
+{id:'quality',name:'Code Quality Check / Pre-commit Linters',cat:'infra',lane:'Hosted',b:{q:0,s:0.5,r:1.5}},
+{id:'docs',name:'Documentation Build Check / Build Sphinx Docs',cat:'infra',lane:'Hosted',b:{q:0,s:0.3,r:0.7}},
+{id:'pkg',name:'Build MaxText Package / Build Wheel',cat:'build',lane:'Build',b:{q:1,s:1,r:4}},
+{id:'gate',name:'Gate and Formalize Parameters',cat:'infra',lane:'Hosted',b:{q:0,s:0.1,r:0.1}},
+{id:'tpu-pre-u',name:'TPU Pretrain Tests (tpu-unit)',cat:'tpu',lane:'TPU',b:{q:3,s:3,r:17}},
+{id:'tpu-pre-i',name:'TPU Pretrain Tests (tpu-integration)',cat:'tpu',lane:'TPU',b:{q:3,s:3,r:20}},
+{id:'tpu-post-u',name:'TPU Posttrain Tests (tpu-post-training-unit)',cat:'tpu',lane:'TPU',b:{q:3,s:3,r:12}},
+{id:'tpu-post-i',name:'TPU Posttrain Tests (tpu-post-training-integration)',cat:'tpu',lane:'TPU',b:{q:3,s:3,r:15}},
+{id:'tpu-pw-u1',name:'TPU Pathways Unit Tests (worker 1)',cat:'tpu',lane:'TPU',b:{q:3,s:3,r:8}},
+{id:'tpu-pw-u2',name:'TPU Pathways Unit Tests (worker 2)',cat:'tpu',lane:'TPU',b:{q:3,s:3,r:8}},
+{id:'tpu-pw-i',name:'TPU Pathways Integration Tests',cat:'tpu',lane:'TPU',b:{q:3,s:3,r:10}},
+{id:'gpu-u',name:'GPU Tests (gpu-unit)',cat:'gpu',lane:'GPU',b:{q:1,s:3,r:10}},
+{id:'gpu-i',name:'GPU Tests (gpu-integration)',cat:'gpu',lane:'GPU',b:{q:1,s:3,r:14}},
+{id:'cpu-pre-u',name:'CPU Pretrain Tests (cpu-unit)',cat:'cpu',lane:'CPU',b:{q:0,s:2,r:8}},
+{id:'cpu-pre-i',name:'CPU Pretrain Tests (cpu-integration)',cat:'cpu',lane:'CPU',b:{q:0,s:2,r:6}},
+{id:'cpu-post-u',name:'CPU Posttrain Tests (cpu-post-training-unit)',cat:'cpu',lane:'CPU',b:{q:0,s:2,r:5}},
+{id:'cpu-post-i',name:'CPU Posttrain Tests (cpu-post-training-integration)',cat:'cpu',lane:'CPU',b:{q:0,s:2,r:4}},
+];
+const CAT_COLORS={build:'var(--bld)',tpu:'var(--tpu)',gpu:'var(--gpu)',cpu:'var(--cpu)',infra:'var(--bld)'};
+const LANE_COLORS={TPU:'var(--tpu)',GPU:'var(--gpu)',CPU:'var(--cpu)',Hosted:'var(--muted)',Build:'var(--bld)'};
+
+// ============ COMMITS (overrides from baseline) ============
+let COMMITS=[
+{hash:'4908',pr:'#4908',title:'chore: bump jax to 0.4.31',status:'pass',attempts:1,concurrent:2,o:{}},
+{hash:'4910',pr:'#4910',title:'feat: flash attention v2 kernel',status:'pass',attempts:1,concurrent:1,o:{}},
+{hash:'4912',pr:'#4912',title:'fix: gradient checkpointing OOM',status:'pass',attempts:1,concurrent:2,o:{}},
+{hash:'4914',pr:'#4914',title:'refactor: tokenizer pipeline',status:'pass',attempts:1,concurrent:1,o:{'pkg':{r:5}}},
+{hash:'4916',pr:'#4916',title:'test: add llama3-70b sharded benchmark',status:'pass',attempts:1,concurrent:2,
+  o:{'tpu-pre-u':{r:24},'tpu-pre-i':{r:22},'cpu-pre-u':{r:16},'cpu-pre-i':{r:10}}},
+{hash:'4918',pr:'#4918',title:'ci: pin docker base image digest',status:'pass',attempts:1,concurrent:4,
+  o:{'tpu-pre-u':{q:10},'tpu-pre-i':{q:12},'tpu-post-u':{q:10},'tpu-post-i':{q:11},'tpu-pw-u1':{q:9},'tpu-pw-u2':{q:9},'tpu-pw-i':{q:10},'gpu-u':{q:3},'gpu-i':{q:3}}},
+{hash:'4920',pr:'#4920',title:'feat: mixture of experts router',status:'flaky',attempts:2,concurrent:6,
+  o:{'tpu-pre-u':{q:14,st:'flaky',r:17.3},'tpu-pre-i':{q:14},'tpu-post-u':{q:12},'tpu-post-i':{q:13},'tpu-pw-u1':{q:14},'tpu-pw-u2':{q:13},'tpu-pw-i':{q:14},'gpu-u':{q:4},'gpu-i':{q:4,st:'flaky'}}},
+{hash:'4922',pr:'#4922',title:'fix: moe load balancing loss',status:'pass',attempts:1,concurrent:2,o:{}},
+{hash:'4924',pr:'#4924',title:'docs: update training guide',status:'pass',attempts:1,concurrent:1,o:{}},
+{hash:'4926',pr:'#4926',title:'perf: compile cache warmup',status:'pass',attempts:1,concurrent:2,o:{'pkg':{s:2}}},
+{hash:'4928',pr:'#4928',title:'feat: ring attention implementation',status:'pass',attempts:1,concurrent:3,o:{'tpu-pre-i':{r:22},'tpu-pw-i':{r:14}}},
+{hash:'4930',pr:'#4930',title:'test: convergence threshold tighten',status:'pass',attempts:1,concurrent:2,o:{}},
+{hash:'4940',pr:'#4940',title:'ci: runner pool rebalance',status:'fail',attempts:1,concurrent:5,
+  o:{'tpu-pre-u':{q:9,s:0,r:0,st:'fail'},'tpu-pre-i':{q:9,s:0,r:0,st:'fail'},'tpu-post-u':{q:9,s:0,r:0,st:'fail'},'tpu-post-i':{q:9,s:0,r:0,st:'fail'},'tpu-pw-u1':{q:9,s:0,r:0,st:'fail'},'tpu-pw-u2':{q:9,s:0,r:0,st:'fail'},'tpu-pw-i':{q:9,s:0,r:0,st:'fail'}}},
+];
+
+// ============ STEP TEMPLATES (per-job step breakdown) ============
+let STEPS={
+  // Step names as GitHub Actions shows them (run_tests_against_package.yml); pct = share of the job's minutes in the mock.
+  infra:[{name:'Run analysis',pct:1}],
+  build:[{name:'Checkout MaxText',pct:0.05},{name:'Initialize containers',pct:0.25,img:'python:3.12-slim-bookworm'},{name:'Build Wheel',pct:0.65},{name:'Upload artifact',pct:0.05}],
+  tpu:[{name:'Checkout MaxText',pct:0.02},{name:'Initialize containers',pct:0.12,img:'maxtext-unit-test-tpu:py312'},{name:'Download and install the maxtext wheel',pct:0.04},{name:'Copy test assets files',pct:0.02},{name:'Run Tests',pct:0.76,isTest:true},{name:'Upload Test Results XML',pct:0.02},{name:'Stop containers',pct:0.02}],
+  gpu:[{name:'Checkout MaxText',pct:0.02},{name:'Initialize containers',pct:0.15,img:'maxtext-unit-test-cuda12:py312'},{name:'Download and install the maxtext wheel',pct:0.05},{name:'Copy test assets files',pct:0.03},{name:'Run Tests',pct:0.70,isTest:true},{name:'Upload Test Results XML',pct:0.03},{name:'Stop containers',pct:0.02}],
+  cpu:[{name:'Checkout MaxText',pct:0.03},{name:'Initialize containers',pct:0.15,img:'maxtext-unit-test-tpu:py312'},{name:'Download and install the maxtext wheel',pct:0.05},{name:'Run Tests',pct:0.73,isTest:true},{name:'Upload Test Results XML',pct:0.02},{name:'Stop containers',pct:0.02}],
+  // cpu-unit worker 1 also runs the decoupled pass ("Run Targeted Decoupled Tests", marker decoupled_target)
+  'cpu-pre-u':[{name:'Checkout MaxText',pct:0.03},{name:'Initialize containers',pct:0.15,img:'maxtext-unit-test-tpu:py312'},{name:'Download and install the maxtext wheel',pct:0.05},{name:'Run Tests',pct:0.66,isTest:true},{name:'Run Targeted Decoupled Tests',pct:0.07,isTest:true},{name:'Upload Test Results XML',pct:0.02},{name:'Stop containers',pct:0.02}],
+};
+// Share of each job's setup minutes spent pulling the docker image (derived from step templates)
+const DOCKER_FRAC={};
+Object.entries(STEPS).forEach(([cat,steps])=>{
+  const nonTest=steps.filter(s=>!s.isTest);
+  const total=nonTest.reduce((a,s)=>a+s.pct,0)||1;
+  const img=nonTest.find(s=>s.img);
+  DOCKER_FRAC[cat]=img?img.pct/total:0;
+});
+
+// Mock test counts per job category
+let TEST_COUNTS={
+  'tpu-pre-u':{total:150,pass:149,fail:0,skip:1},'tpu-pre-i':{total:85,pass:85,fail:0,skip:0},
+  'tpu-post-u':{total:42,pass:42,fail:0,skip:0},'tpu-post-i':{total:38,pass:38,fail:0,skip:0},
+  // no entries for tpu-pw-u1 / tpu-pw-u2 / tpu-pw-i: run_pathways_tests.yml runs pytest without --junitxml and uploads no test-result file
+  'gpu-u':{total:62,pass:62,fail:0,skip:0},'gpu-i':{total:85,pass:84,fail:0,skip:1},
+  'cpu-pre-u':{total:142,pass:142,fail:0,skip:0},'cpu-pre-i':{total:68,pass:68,fail:0,skip:0},
+  'cpu-post-u':{total:35,pass:35,fail:0,skip:0},'cpu-post-i':{total:30,pass:30,fail:0,skip:0},
+};
+
+// Test-level detail per commit+job (from JUnit XML artifacts)
+let TESTS={
+  '4916':{
+    'tpu-pre-u':{tests:[
+      {name:'test_llama3_70b_sharded_convergence',dur:45.2,base:null,st:'pass',isNew:true},
+      {name:'test_llama3_70b_sharded_checkpoint',dur:38.1,base:null,st:'pass',isNew:true},
+      {name:'test_llama3_70b_sharded_eval',dur:22.4,base:null,st:'pass',isNew:true},
+      {name:'test_llama3_70b_sharded_data_loading',dur:18.0,base:null,st:'pass',isNew:true},
+      {name:'test_llama3_70b_sharded_loss_fn',dur:12.8,base:null,st:'pass',isNew:true},
+      {name:'test_llama3_70b_sharded_tokenizer',dur:8.2,base:null,st:'pass',isNew:true},
+      {name:'test_llama3_70b_sharded_config',dur:4.5,base:null,st:'pass',isNew:true},
+      {name:'test_llama3_70b_sharded_init',dur:2.1,base:null,st:'pass',isNew:true},
+      {name:'test_checkpoint_save_restore',dur:8.3,base:3.1,st:'pass'},
+      {name:'test_attention_flash_v2',dur:2.2,base:2.0,st:'pass'},
+      {name:'test_convergence_gemma_7b',dur:12.1,base:11.8,st:'pass'},
+    ]},
+    'cpu-pre-u':{tests:[
+      {name:'test_data_pipeline_tfds',dur:4.2,base:2.1,st:'pass'},
+      {name:'test_tokenizer_pipeline',dur:1.5,base:1.4,st:'pass'},
+    ]},
+  },
+  '4920':{
+    'tpu-pre-u':{tests:[
+      {name:'test_ring_attention_multihost',dur:null,base:6.7,st:'fail',error:'timeout after 300s',attempts:2,rescued:true},
+      {name:'test_mixture_of_experts_routing',dur:15.2,base:6.1,st:'pass'},
+      {name:'test_llama3_70b_sharded_convergence',dur:44.8,base:45.2,st:'pass'},
+      {name:'test_checkpoint_save_restore',dur:9.1,base:3.1,st:'pass'},
+    ]},
+    'gpu-i':{tests:[
+      {name:'test_gpu_convergence_a100_bf16',dur:null,base:8.2,st:'fail',error:'CUDA OOM at step 42',attempts:2,rescued:true},
+      {name:'test_gpu_flash_attention',dur:3.1,base:3.0,st:'pass'},
+    ]},
+  },
+  '4940':{
+    'tpu-pre-u':{tests:[],note:'Cancelled while waiting for a runner — no tests executed'},
+    'tpu-pre-i':{tests:[],note:'Cancelled while waiting for a runner — no tests executed'},
+  },
+};
+// Longest queue wait seen by the 4-hourly scheduled probe runs nearest each merge (same code on a timer)
+let PROBE_Q={'4908':{tpu:3,gpu:1,cpu:0},'4910':{tpu:2,gpu:1,cpu:0},'4912':{tpu:3,gpu:1,cpu:0},'4914':{tpu:3,gpu:1,cpu:1},'4916':{tpu:2,gpu:1,cpu:0},'4918':{tpu:12,gpu:3,cpu:1},'4920':{tpu:15,gpu:4,cpu:1},'4922':{tpu:4,gpu:1,cpu:0},'4924':{tpu:3,gpu:1,cpu:0},'4926':{tpu:2,gpu:1,cpu:0},'4928':{tpu:3,gpu:1,cpu:1},'4930':{tpu:3,gpu:1,cpu:0},'4940':{tpu:18,gpu:2,cpu:1}};
+const REPO='AI-Hypercomputer/maxtext';
+// Mock run IDs per commit
+let RUN_IDS={'4908':39125644000,'4910':39123507000,'4912':39121370000,'4914':39119233000,'4916':39117096000,'4918':39114959000,'4920':39112822000,'4922':39110685000,'4924':39108548000,'4926':39106411000,'4928':39104274000,'4930':39102137000,'4940':39100000000};
+let TRIGGERS={'4908':'pull_request','4910':'pull_request','4912':'pull_request','4914':'pull_request','4916':'pull_request','4918':'pull_request','4920':'pull_request','4922':'pull_request','4924':'pull_request','4926':'pull_request','4928':'pull_request','4930':'pull_request','4940':'pull_request'};
+let TIMES={'4908':'Aug 20 12:04','4910':'Aug 20 08:03','4912':'Aug 19 23:41','4914':'Aug 19 20:04','4916':'Aug 19 16:02','4918':'Aug 19 12:30','4920':'Aug 19 08:05','4922':'Aug 18 20:12','4924':'Aug 18 16:08','4926':'Aug 18 12:04','4928':'Aug 18 08:01','4930':'Aug 17 20:05','4940':'Aug 17 16:03'};
+// ---- Older merged PRs (2026-08-31): job-level detail for the 17 TH_COMMITS predecessors, so the
+// date range has 30 days of history on every chart. Values are deterministic. Stories: rescue PRs
+// carry the flaky job status their RESCUES event describes; #4900 runs slower (the suite-health
+// crash commit); #4888 is a queue bump; everything else is baseline +/- a small jitter.
+(function extendHistory(){
+  const older=[  // newest of the old first, so COMMITS stays newest-first after the appends
+    {hash:'4906',time:'Aug 14 11:20',title:'fix: pathways heartbeat retry',concurrent:2,o:{}},
+    {hash:'4904',time:'Aug 12 15:44',title:'feat: moe expert parallel bf16',concurrent:3,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
+    {hash:'4902',time:'Aug 10 09:31',title:'ci: add decoupled cpu-unit pass',concurrent:2,o:{'cpu-pre-u':{r:9}}},
+    {hash:'4900',time:'Aug 09 17:05',title:'refactor: test discovery markers',concurrent:1,o:{'tpu-pre-u':{r:26},'gpu-u':{r:2}}},
+    {hash:'4898',time:'Aug 08 13:12',title:'feat: pathways multi-slice',concurrent:4,status:'flaky',attempts:2,o:{'tpu-pw-i':{st:'flaky',q:6}}},
+    {hash:'4896',time:'Aug 07 10:48',title:'fix: flash attention backward',concurrent:2,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
+    {hash:'4894',time:'Aug 06 16:27',title:'docs: sharding guide',concurrent:1,o:{}},
+    {hash:'4892',time:'Aug 05 12:09',title:'perf: dataloader prefetch',concurrent:2,o:{'cpu-pre-u':{r:14}}},
+    {hash:'4890',time:'Aug 04 09:55',title:'feat: expert parallel routing',concurrent:3,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
+    {hash:'4888',time:'Aug 03 14:36',title:'ci: runner image refresh',concurrent:5,o:{'tpu-pre-u':{q:8},'tpu-pre-i':{q:9},'tpu-post-u':{q:8},'tpu-post-i':{q:8}}},
+    {hash:'4886',time:'Aug 01 11:02',title:'fix: ring attention multihost sync',concurrent:2,status:'flaky',attempts:2,o:{'tpu-pre-u':{st:'flaky'}}},
+    {hash:'4884',time:'Jul 31 17:40',title:'feat: a100 bf16 convergence test',concurrent:2,status:'flaky',attempts:2,o:{'gpu-i':{st:'flaky'}}},
+    {hash:'4882',time:'Jul 29 10:15',title:'chore: deps bump',concurrent:1,o:{}},
+    {hash:'4880',time:'Jul 28 15:22',title:'fix: checkpoint restore sharded',concurrent:2,o:{}},
+    {hash:'4878',time:'Jul 26 09:47',title:'test: pathways integration coverage',concurrent:2,o:{'tpu-pw-i':{r:12}}},
+    {hash:'4876',time:'Jul 24 13:58',title:'perf: xla flags',concurrent:1,o:{}},
+    {hash:'4874',time:'Jul 23 10:31',title:'chore: initial ci pipeline tune',concurrent:2,o:{}},
+  ];
+  const probeBump={'4888':{tpu:11,gpu:3,cpu:1}};
+  older.forEach((c,k)=>{
+    const seed=parseInt(c.hash,10);
+    JOBS.forEach((j,ji)=>{
+      if(j.cat!=='tpu'&&j.cat!=='gpu'&&j.cat!=='cpu')return;
+      const ov=c.o[j.id]||(c.o[j.id]={});
+      if(ov.r===undefined&&ov.st!=='fail'){const wob=((seed*7+ji*13)%11)-5;ov.r=+(j.b.r*(1+wob/60)).toFixed(1)}  // +/-8% around the job's usual run time
+    });
+    COMMITS.push({hash:c.hash,pr:'#'+c.hash,title:c.title,status:c.status||'pass',attempts:c.attempts||1,concurrent:c.concurrent,o:c.o});
+    TIMES[c.hash]=c.time;
+    RUN_IDS[c.hash]=39100000000-(k+1)*2137000;  // older runs carry smaller ids than every run above
+    TRIGGERS[c.hash]='pull_request';
+    PROBE_Q[c.hash]=probeBump[c.hash]||{tpu:2+((seed>>1)%3),gpu:1,cpu:(seed%4===0)?1:0};
+  });
+})();
+function timeAgo(t){const p=(t||'').split(' ');if(p.length<2)return t||'';const d=new Date(p[0]+' '+p[1]+' 2026 '+(p[2]||'00:00'));const h=Math.round((new Date('2026-08-20T12:00:00').getTime()-d.getTime())/3600000);if(h<1)return 'just now';if(h<48)return h+'h ago';return Math.round(h/24)+'d ago'}
+
+// ============ HELPERS ============
+const $=s=>document.querySelector(s);
+const $$=s=>document.querySelectorAll(s);
+let HW='all';
+
+// Date filter: splits COMMITS into current window + baseline (prior period of same length)
+// ---- One date range for the whole page (2026-08-31). Mock today is 2026-08-20.
+let TODAY=new Date(2026,7,20);   // replaced by meta.json generated_at when real data loads
+// merge time of a detailed commit (prTime parses 'Aug 20 12:04'); null when the mock has no time for it
+function commitDate(c){return TIMES[c.hash]?prTime(c.hash):null}
+function getRange(){
+  const sel=$('#date-range');
+  let from=null,to=null,days=14,label='The last 14 days',custom=false;
+  if(sel&&sel.value==='custom'){
+    custom=true;
+    const f=$('#d-from'),g=$('#d-to');
+    from=f&&f.value?new Date(f.value+'T00:00:00'):null;
+    to=g&&g.value?new Date(g.value+'T23:59:59'):null;
+    label='The selected date range';
+    days=from&&to?Math.max(1,Math.round((to-from)/86400000)):14;
+  }else{
+    days=sel?parseInt(sel.value,10)||14:14;
+    from=new Date(TODAY.getTime()-days*86400000);
+    label='The last '+days+' days';
+  }
+  const inRange=custom?'in the selected date range':'in the last '+days+' days';
+  const has=d=>!!d&&(!from||d>=from)&&(!to||d<=to);
+  return{from,to,days,label,inRange,custom,has,spanMs:days*86400000};
+}
+// current = merged PRs inside the range (newest-first, like COMMITS); baseline = the same number of
+// days immediately before the range. Both may be empty for custom ranges; callers must say so.
+function getWindows(){
+  const r=getRange();
+  const current=COMMITS.filter(c=>r.has(commitDate(c)));
+  const bFrom=r.from?new Date(r.from.getTime()-r.spanMs):null;
+  const baseline=r.from?COMMITS.filter(c=>{const d=commitDate(c);return !!d&&d>=bFrom&&d<r.from}):[];
+  return{current,baseline,days:r.days,label:r.label,inRange:r.inRange,custom:r.custom,range:r};
+}
+
+// ============ TIME BUDGET (overhead summary) ============
+// Navigate to a commit: open its modal
+function goToCommit(hash){
+  const ci=COMMITS.findIndex(c=>c.hash===hash);
+  if(ci===-1)return;
+  const wcsAll=COMMITS.map(c=>wallClock(c,'all'));
+  // Same baseline as the timeline: the median of the runs in the selected range (all stored runs if empty)
+  const src=getWindows().current;const pool=(src.length?src:COMMITS).map(c=>wallClock(c,'all').total).sort((a,b)=>a-b);
+  const median=pool[Math.floor(pool.length/2)];
+  openModal(COMMITS[ci],ci,wcsAll,median);
+}
+// Clickable commit link HTML
+// X-axis label for one merged pull request: the hash is a link to the pull request on GitHub
+// (new tab, marked with the same arrow as every other external link); the merge date and time
+// sit on two lines beneath it. Used by both bar charts.
+function prAxisLabel(svg,ns,cx,y,hash){
+  const mk=(t,a)=>{const e=document.createElementNS(ns,t);for(const[k,v]of Object.entries(a))e.setAttribute(k,String(v));return e};
+  const a=mk('a',{href:`https://github.com/${REPO}/pull/${hash}`,target:'_blank',rel:'noopener','class':'axlink'});
+  const tt=document.createElementNS(ns,'title');tt.textContent='Open pull request #'+hash+' on GitHub';
+  const h=mk('text',{x:cx,y,'text-anchor':'middle','font-size':'12','font-weight':'700','font-family':'var(--mono)'});
+  h.style.fill='var(--accent)';h.textContent='#'+hash;
+  a.appendChild(tt);a.appendChild(h);svg.appendChild(a);
+  const tm=(TIMES[hash]||'').split(' ');
+  const d=mk('text',{x:cx,y:y+14,'text-anchor':'middle','font-size':'12',fill:'#64748B','font-family':'var(--mono)'});
+  d.textContent=tm.length>1?tm[0]+' '+tm[1]:'';
+  svg.appendChild(d);
+}
+// Bar charts: two stacked lines when the slot is wide enough for "#4908", one rotated line when not.
+// Both forms keep the GitHub link. plotBottom = y of the plot's bottom edge; slot = px per commit.
+function prAxisLabelAuto(svg,ns,cx,plotBottom,hash,slot){
+  if(slot>=50){prAxisLabel(svg,ns,cx,plotBottom+22,hash);return}
+  const a=document.createElementNS(ns,'a');a.setAttribute('href',`https://github.com/${REPO}/pull/${hash}`);a.setAttribute('target','_blank');a.setAttribute('rel','noopener');a.setAttribute('class','axlink');
+  const tt=document.createElementNS(ns,'title');tt.textContent='Open pull request #'+hash+' on GitHub';a.appendChild(tt);
+  const y=plotBottom+16,t=document.createElementNS(ns,'text');
+  for(const[k,v]of Object.entries({x:cx+3,y,'text-anchor':'end','font-size':'12','font-family':'var(--mono)',transform:`rotate(-55 ${cx+3} ${y})`}))t.setAttribute(k,String(v));
+  t.style.fill='var(--accent)';
+  t.textContent='#'+hash+(TIMES[hash]?' '+prDay(hash):'');
+  a.appendChild(t);svg.appendChild(a);
+}
+function axisBottomPad(slot){return slot>=50?44:90}  // two lines vs a rotated "#4908 Aug 20"
+
+// ============ SORTABLE PER-TEST TABLES ============
+// Every sortable table (the per-test tables and the commit modal job table) registers its rows here by id, so a
+// header click re-orders the rows in place. Default order = the order the table was built in
+// (failed tests first, then the tests that added the most time; a new test with no baseline is
+// ranked by its full duration). Rows with a blank cell in the sorted column sink to the bottom.
+const JT={};
+function jtVal(t,key){if(key==='dur')return t.dur;if(key==='base')return t.base;if(key==='delta')return(t.dur!==null&&t.base!==null)?+(t.dur-t.base).toFixed(1):null;return(t[key]===undefined||t[key]===null)?null:t[key]}
+function jtOrder(s){
+  if(!s.key)return s.rows.slice();
+  return s.rows.slice().sort((a,b)=>{
+    const va=jtVal(s.pick(a),s.key),vb=jtVal(s.pick(b),s.key);
+    if(va===null&&vb===null)return 0;if(va===null)return 1;if(vb===null)return -1;
+    return s.dir==='asc'?va-vb:vb-va;
+  });
+}
+// A grouped table (the commit modal's jobs) keeps its category headers when sorted and
+// orders the rows inside each category. An ungrouped table sorts as one flat list.
+function jtRender(s){
+  const ordered=jtOrder(s);
+  if(!s.group)return ordered.map(s.row).join('')+(s.tail||'');
+  let out='';
+  (s.groupOrder||[]).forEach(g=>{
+    const rows=ordered.filter(u=>s.group(u)===g);
+    if(!rows.length)return;
+    out+=(s.groupHead&&s.groupHead[g])||'';
+    out+=rows.map(s.row).join('');
+  });
+  return out+(s.tail||'');
+}
+function jtTh(id,key,label,style,title){
+  return`<th data-jt="${id}" data-jtkey="${key}" style="${style}"><span class="jth" onclick="jtSort('${id}','${key}')" title="${title}">${label}<span class="jtarr"></span></span></th>`;
+}
+function jtSort(id,key){
+  const s=JT[id];if(!s)return;
+  if(!key){s.key=null;s.dir='desc'}
+  else if(s.key===key)s.dir=s.dir==='desc'?'asc':'desc';
+  else{s.key=key;s.dir='desc'}
+  const tb=document.getElementById(id+'-body');
+  if(tb)tb.innerHTML=(!s.key&&s.defaultHTML)?s.defaultHTML:jtRender(s);
+  document.querySelectorAll(`[data-jt="${id}"]`).forEach(th=>{
+    const k=th.getAttribute('data-jtkey');const ar=th.querySelector('.jtarr');
+    if(ar)ar.textContent=(k===s.key)?(s.dir==='desc'?' ▼':' ▲'):'';
+  });
+}
+
+function jd(commit,jobId){
+  const j=JOBS.find(x=>x.id===jobId);
+  const ov=commit.o[jobId]||{};
+  return{id:jobId,name:j.name,cat:j.cat,lane:j.lane,q:ov.q??j.b.q,s:ov.s??j.b.s,r:ov.r??j.b.r,status:ov.st||'pass',total:function(){return this.q+this.s+this.r}};
+}
+function allJobs(c){return JOBS.map(j=>jd(c,j.id))}
+
+// The runs-on label each job asks for, and the runner pools that answer it. Measured from
+// runs 33468578834, 33465601432 and 33462758754 on 2026-09-01. The label is fixed per job;
+// the pool varies run to run, which is why one job can wait while its neighbour does not.
+let RUNNER_LABELS={
+  'analyze':'ubuntu-latest','quality':'ubuntu-latest','docs':'ubuntu-latest','gate':'ubuntu-latest',
+  'pkg':'linux-x86-n2-16-buildkit',
+  'tpu-pre-u':'linux-x86-ct6e-180-4tpu','tpu-pre-i':'linux-x86-ct6e-180-4tpu',
+  'tpu-post-u':'linux-x86-ct6e-180-4tpu','tpu-post-i':'linux-x86-ct6e-180-4tpu',
+  'tpu-pw-u1':'linux-x86-ct6e-180-4tpu','tpu-pw-u2':'linux-x86-ct6e-180-4tpu',
+  'tpu-pw-i':'linux-x86-ct6e-180-4tpu',
+  'gpu-u':'linux-x86-a2-48-a100-4gpu','gpu-i':'linux-x86-a2-48-a100-4gpu',
+  'cpu-pre-u':'linux-x86-n2-32','cpu-pre-i':'linux-x86-n2-32',
+  'cpu-post-u':'linux-x86-n2-32','cpu-post-i':'linux-x86-n2-32'};
+// One machine type per device, read off that device's jobs rather than hard-coded, so a
+// mock change cannot silently make this lie.
+function machineOfCat(cat){
+  const j=JOBS.find(x=>x.cat===cat);
+  return j?(RUNNER_LABELS[j.id]||''):'';
+}
+function wallClock(c,hwFilter){
+  const hw=hwFilter||'all';
+  const jobs=allJobs(c);
+  const buildJobs=jobs.filter(j=>j.cat==='infra'||j.cat==='build');
+  const buildTime=Math.max(...buildJobs.map(j=>j.total()));
+  const catMax={},catQueue={},catSetup={},catRun={};
+  ['tpu','gpu','cpu'].forEach(cat=>{
+    const cj=jobs.filter(j=>j.cat===cat);
+    catMax[cat]=cj.length?Math.max(...cj.map(j=>j.total())):0;
+    catQueue[cat]=cj.length?Math.max(...cj.map(j=>j.q)):0;
+    catSetup[cat]=cj.length?Math.max(...cj.map(j=>j.s)):0;
+    catRun[cat]=cj.length?Math.max(...cj.map(j=>j.r)):0;
+  });
+
+  if(hw==='all'){
+    const testTime=Math.max(catMax.tpu,catMax.gpu,catMax.cpu);
+    const testJobs=jobs.filter(j=>['tpu','gpu','cpu'].includes(j.cat));
+    const maxQ=testJobs.length?Math.max(...testJobs.map(j=>j.q)):0;
+    let bottleneck='tpu';
+    if(catMax.gpu>catMax.tpu&&catMax.gpu>catMax.cpu)bottleneck='gpu';
+    if(catMax.cpu>catMax.tpu&&catMax.cpu>catMax.gpu)bottleneck='cpu';
+    return{build:buildTime,queue:maxQ,tests:testTime-maxQ,total:buildTime+testTime,bottleneck,catMax,catQueue,catSetup,catRun};
+  }
+  // Filtered: one device lane, but the run still starts with the package build, and a device
+  // that ran nothing still waited for a runner. Both are real elapsed time, so the bar stays.
+  const filteredJobs=jobs.filter(j=>j.cat===hw);
+  const noTests=!filteredJobs.length||filteredJobs.every(j=>j.r===0);
+  const maxFiltered=filteredJobs.length?Math.max(...filteredJobs.map(j=>j.total())):0;
+  const maxQ=filteredJobs.length?Math.max(...filteredJobs.map(j=>j.q)):0;
+  return{build:buildTime,queue:maxQ,tests:maxFiltered-maxQ,total:buildTime+maxFiltered,
+    bottleneck:hw,catMax,catQueue,catSetup,catRun,noTests};
+}
+
+// ============ DEVICE TILES ============
+// ============ TIMELINE ============
+// Brush-zoom state: null = all commits; {a,b} = inclusive index range into COMMITS
+let TL_ZOOM=null;
+function tlZoomOut(){
+  if(!TL_ZOOM)return;
+  const n=getWindows().current.length;
+  TL_ZOOM={a:Math.max(0,TL_ZOOM.a-2),b:Math.min(n-1,TL_ZOOM.b+2)};
+  if(TL_ZOOM.a===0&&TL_ZOOM.b===n-1)TL_ZOOM=null;
+  renderTimeline();
+}
+function tlZoomReset(){TL_ZOOM=null;renderTimeline()}
+function renderTimeline(){
+  const host=$('#timeline');host.innerHTML='';
+  const ns='http://www.w3.org/2000/svg';
+  const W=1100,LP=36,RP=10,TP=70,PLOT=228;  // H and B follow the axis-label form, set once the bar count is known
+  let H=TP+PLOT+44,B=44;
+  const svg=document.createElementNS(ns,'svg');
+  svg.style.cssText='display:block;width:100%;min-width:700px';
+  const el=(t,a)=>{const e=document.createElementNS(ns,t);for(const[k,v]of Object.entries(a))e.setAttribute(k,v);svg.appendChild(e);return e};
+  const defs=document.createElementNS(ns,'defs');
+  defs.innerHTML='<filter id="pillShadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#000000" flood-opacity="0.5"/></filter>';
+  svg.appendChild(defs);
+
+  // The chart draws the merged PRs inside the selected date range (newest-first, like COMMITS).
+  const win=getWindows(),LIST=win.current;
+  if(TL_ZOOM&&(TL_ZOOM.b>LIST.length-1||TL_ZOOM.a>=TL_ZOOM.b))TL_ZOOM=null;
+  if(!LIST.length){host.innerHTML=`<div style="font-size:13px;color:var(--ink2);padding:8px 0">No merged pull requests fall inside this date range.</div>`;const zb0=$('#tl-zoombar');if(zb0)zb0.innerHTML='';return}
+  const wcs=LIST.map(c=>wallClock(c,HW));
+  const wcsAll=LIST.map(c=>wallClock(c,'all'));
+  const totals=wcs.map(w=>w.total);
+  // Regression flags compare each run with the runs merged BEFORE it in the FULL stored history, so
+  // narrowing the range never changes a flag. COMMITS is newest-first: older runs sit after the index.
+  const allTotals=COMMITS.map(c=>wallClock(c,HW).total);
+  // Zoom window: render only the selected slice of LIST
+  const off=TL_ZOOM?TL_ZOOM.a:0;
+  const VIEW=TL_ZOOM?LIST.slice(TL_ZOOM.a,TL_ZOOM.b+1):LIST;
+  const viewTotals=VIEW.map((c,vi)=>totals[off+vi]);
+  const ymax=Math.ceil(Math.max(...viewTotals)/10)*10+5;
+  const barGap=16;
+  const barW=(W-LP-RP)/VIEW.length-barGap;
+  B=axisBottomPad(barW+barGap);H=TP+PLOT+B;
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  const py=v=>TP+(1-v/ymax)*(H-B-TP);
+
+  const sorted=[...totals].sort((a,b)=>a-b);
+  const median=sorted[Math.floor(sorted.length/2)];
+
+  // Filter label
+  if(HW!=='all'){
+    el('text',{x:W-RP-2,y:TP-6,'text-anchor':'end',fill:CAT_COLORS[HW],'font-size':'12','font-weight':'700','font-family':'system-ui'}).textContent='Showing: '+HW.toUpperCase()+' only';
+  }
+
+  // Grid
+  for(let v=0;v<=ymax;v+=10){
+    el('line',{x1:LP,y1:py(v),x2:W-RP,y2:py(v),stroke:'var(--grid)','stroke-dasharray':'2,2'});
+    if(v%20===0)el('text',{x:LP-6,y:py(v)+4,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=v+'m';
+  }
+  // Median (drawn only when it fits the zoomed scale)
+  if(median<=ymax&&totals.length>=5){  // a median of fewer than 5 runs says little
+    // Neutral ink on purpose: cyan is the link colour on this chart (the hash under every bar).
+    el('line',{x1:LP,y1:py(median),x2:W-RP,y2:py(median),'stroke-width':1,'stroke-dasharray':'6,4',opacity:0.7}).style.stroke='var(--ink2)';
+    el('text',{x:W-RP-2,y:py(median)-5,'text-anchor':'end','font-size':'12'}).textContent='median '+Math.round(median)+'m · '+totals.length+' runs';
+  }
+
+  const pillRows=[];  // rightmost x already used per annotation row (collision avoidance)
+  // Drawn oldest -> newest, left -> right. COMMITS is stored newest-first, so view index vi sits in
+  // display slot VIEW.length-1-vi; iterating in display order keeps the pill collision tracker valid.
+  const slotX=vi=>LP+(VIEW.length-1-vi)*(barW+barGap)+barGap/2;
+  VIEW.map((c,vi)=>vi).reverse().forEach(vi=>{
+    const c=VIEW[vi];
+    const ci=off+vi;
+    const wc=wcs[ci];
+    const x=slotX(vi);
+    // Trailing median: the runs merged BEFORE this one in the full store (not including self).
+    const priorTotals=allTotals.slice(COMMITS.indexOf(c)+1);
+    const trailingMed=priorTotals.length>=3?[...priorTotals].sort((a,b)=>a-b)[Math.floor(priorTotals.length/2)]:null;
+    const isReg=trailingMed!==null&&wc.total>trailingMed*1.15&&(wc.total-trailingMed)>3;
+    const isFail=c.status==='fail';
+    const isFlaky=c.status==='flaky';
+    const isEmpty=false;  // the bar always draws; a device with no tests still shows build and wait
+
+    // Device columns per commit — each stacks its own full timeline from zero:
+    // build (shared start) → queue → image pull → env setup → test run
+    if(!isEmpty){
+      const devs=HW==='all'?['tpu','gpu','cpu']:[HW];
+      const gap=1.5;
+      const subW=(barW-(devs.length-1)*gap)/devs.length;
+      devs.forEach((cat,di)=>{
+        const dx=x+di*(subW+gap);
+        const dq=wc.catQueue?wc.catQueue[cat]||0:0;
+        const ds=wc.catSetup?wc.catSetup[cat]||0:0;
+        const dr=wc.catRun?wc.catRun[cat]||0:0;
+        const dTotal=dq+ds+dr;
+        if(dTotal<=0&&wc.build<=0.5)return;  // nothing at all to draw for this lane
+        let cy=0;
+        // Build package segment at the base of every lane (the run starts with it)
+        if(wc.build>0.5){
+          const h=wc.build/ymax*(H-B-TP);
+          el('rect',{x:dx,y:py(cy+wc.build),width:subW,height:h,fill:'var(--bld)',opacity:0.85});
+          cy+=wc.build;
+        }
+        // Queue segment (gray)
+        if(dq>0.5){
+          const h=dq/ymax*(H-B-TP);
+          el('rect',{x:dx,y:py(cy+dq),width:subW,height:h,fill:'var(--q)',opacity:0.7});
+          cy+=dq;
+        }
+        // Setup split: image pull first, then environment setup (two shades of the build purple)
+        const dImg=ds*(DOCKER_FRAC[cat]||0.5);
+        const dEnv=ds-dImg;
+        if(dImg>0.3){
+          const h=dImg/ymax*(H-B-TP);
+          el('rect',{x:dx,y:py(cy+dImg),width:subW,height:h,fill:'var(--bld)',opacity:0.55});
+          cy+=dImg;
+        }
+        if(dEnv>0.3){
+          const h=dEnv/ymax*(H-B-TP);
+          el('rect',{x:dx,y:py(cy+dEnv),width:subW,height:h,fill:'var(--bld)',opacity:0.28});
+          cy+=dEnv;
+        }
+        // Test run segment (device color)
+        if(dr>0.5){
+          const h=dr/ymax*(H-B-TP);
+          el('rect',{x:dx,y:py(cy+dr),width:subW,height:h,fill:CAT_COLORS[cat],opacity:0.85,rx:3});
+        }
+      });
+    }
+
+    // Status flags — two-line annotation pills (dark card, colored border, drop shadow, dashed leader line)
+    if(!isEmpty){
+      const flags=[];
+      const failedJobs=allJobs(c).filter(j=>j.status==='fail');
+      const flakyJobs=allJobs(c).filter(j=>j.status==='flaky');
+      if(isFail){
+        const deaths=failedJobs.filter(j=>j.r===0).length;
+        flags.push({main:'FAILED',sub:deaths>0&&deaths===failedJobs.length?deaths+' jobs never got a runner':failedJobs.length+' jobs failed',col:'#EF4444',bg:'#FFFFFF'});
+      }else if(isReg){
+        flags.push({main:'+'+Math.round(wc.total-trailingMed)+'m slower',sub:Math.round(wc.total)+'m — usually '+Math.round(trailingMed)+'m',col:'#F59E0B',bg:'#FFFFFF'});
+      }
+      if(isFlaky)flags.push({main:'FLAKY ↻',sub:flakyJobs.length+(flakyJobs.length===1?' job':' jobs')+' passed on retry',col:'#F59E0B',bg:'#FFFFFF'});
+      const cx=x+barW/2, barTop=py(wc.total);
+      if(VIEW.length<=6){
+        // Zoomed in: room for the full two-line annotation pills
+        let rowStart=0;
+        flags.forEach(f=>{
+          const wPix=Math.max(f.main.length*7.2,f.sub.length*5.6)+24;
+          let row=rowStart, px=cx, placed=false;
+          while(!placed){
+            const right=pillRows[row];
+            if(right===undefined||right<px-wPix/2-10){placed=true;break}
+            const shifted=right+10+wPix/2;
+            if(shifted-cx<=60){px=shifted;placed=true;break}
+            row++;px=cx;
+          }
+          px=Math.min(Math.max(px,LP+wPix/2),W-RP-wPix/2);
+          pillRows[row]=px+wPix/2;
+          rowStart=row+1;
+          const pb=barTop-14-row*44;
+          const pt=pb-34;
+          el('line',{x1:cx,y1:barTop-3,x2:px,y2:pb+1,stroke:f.col,'stroke-width':1.2,'stroke-dasharray':'2,2',opacity:0.8});
+          el('rect',{x:px-wPix/2,y:pt,width:wPix,height:34,rx:9,fill:f.bg,stroke:f.col,'stroke-width':1.5,filter:'url(#pillShadow)'});
+          el('text',{x:px,y:pt+14.5,'text-anchor':'middle',fill:f.col,'font-size':'11.5','font-weight':'700','font-family':'system-ui'}).textContent=f.main;
+          el('text',{x:px,y:pt+27,'text-anchor':'middle',fill:'#94A3B8','font-size':'9.5','font-family':'system-ui'}).textContent=f.sub;
+        });
+      }else{
+        // Full view: compact symbol badges — they expand into labeled pills when the user zooms in
+        flags.forEach((f,fi)=>{
+          const by=barTop-23-fi*34;
+          const badge=el('circle',{cx,cy:by,r:14,fill:f.bg,stroke:f.col,'stroke-width':2,filter:'url(#pillShadow)',cursor:'pointer'});
+        badge.addEventListener('mousemove',ev=>{
+          tip.innerHTML=`<div style="font-weight:700;font-size:14px;color:${f.col};margin-bottom:2px">${f.main}</div>
+<div style="font-size:13px;color:var(--ink2)">${f.sub}</div>
+<div style="font-size:12px;color:var(--muted);margin-top:4px">#${c.hash} — zoom in and this mark expands into its full label.</div>`;
+          tip.style.display='block';
+          const lx=ev.clientX+14+280>window.innerWidth?ev.clientX-294:ev.clientX+14;
+          tip.style.left=lx+'px';tip.style.top=Math.max(8,ev.clientY-16)+'px';
+        });
+        badge.addEventListener('mouseleave',()=>{tip.style.display='none'});
+          const kind=f.main.indexOf('FAILED')===0?'fail':f.main.indexOf('FLAKY')===0?'flaky':'slow';
+          if(kind==='slow'){
+            el('path',{d:`M ${cx-7} ${by+5.5} L ${cx+7} ${by+5.5} L ${cx} ${by-6.5} Z`,fill:f.col,'pointer-events':'none'});
+          }else if(kind==='fail'){
+            el('line',{x1:cx-5.5,y1:by-5.5,x2:cx+5.5,y2:by+5.5,stroke:f.col,'stroke-width':3.2,'stroke-linecap':'round','pointer-events':'none'});
+            el('line',{x1:cx-5.5,y1:by+5.5,x2:cx+5.5,y2:by-5.5,stroke:f.col,'stroke-width':3.2,'stroke-linecap':'round','pointer-events':'none'});
+          }else{
+            el('path',{d:`M ${cx+6} ${by} A 6 6 0 1 1 ${cx+1.5} ${by-5.8}`,fill:'none',stroke:f.col,'stroke-width':2.6,'stroke-linecap':'round','pointer-events':'none'});
+            el('path',{d:`M ${cx-1.2} ${by-8.6} L ${cx+5.8} ${by-7.4} L ${cx+0.8} ${by-2.4} Z`,fill:f.col,'pointer-events':'none'});
+          }
+        });
+      }
+      if(isReg||isFail){
+        el('rect',{x:x-2.5,y:py(wc.total)-2.5,width:barW+5,height:(wc.total/ymax*(H-B-TP))+5,fill:'none',stroke:isFail?'#EF4444':'#F59E0B','stroke-width':2,rx:4,'stroke-dasharray':isFail?'':'5,3'});
+      }
+    }
+
+    // X label
+    prAxisLabelAuto(svg,ns,x+barW/2,H-B,c.hash,barW+barGap);
+
+    // Hit area — tooltip uses unfiltered data for full context
+    const hit=el('rect',{x,y:TP,width:barW,height:H-B-TP,fill:'transparent',cursor:'pointer'});
+    hit.addEventListener('mouseenter',e=>showTip(c,ci,wcsAll,median,e));
+    hit.addEventListener('mousemove',e=>moveTip(e));
+    hit.addEventListener('mouseleave',()=>{$('#tip').style.display='none'});
+    hit.addEventListener('click',()=>{if(window.__tlDragged)return;openModal(c,ci,wcsAll,median)});
+  });
+
+  // Wall-clock overlay line (white dashed, shows total wait time trend)
+  const pts=VIEW.map((c,vi)=>{
+    const x=slotX(vi)+barW/2;
+    const y=py(wcs[off+vi].total);
+    return x.toFixed(1)+','+y.toFixed(1);
+  });
+  el('polyline',{points:pts.join(' '),fill:'none',stroke:'#475569','stroke-width':1.8,'stroke-dasharray':'4,3','stroke-linecap':'round','stroke-linejoin':'round'});
+  VIEW.forEach((c,vi)=>{
+    const cx=slotX(vi)+barW/2;
+    const cy=py(wcs[off+vi].total);
+    el('circle',{cx,cy,r:2.5,fill:'#F8FAFC',stroke:'var(--surface)','stroke-width':1.5});
+  });
+
+  // Brush zoom: drag horizontally to select a commit range; double-click resets
+  svg.style.cursor='crosshair';
+  let dragX0=null,dragging=false,selRect=null;
+  const fx=e=>{const r=svg.getBoundingClientRect();return (e.clientX-r.left)/r.width*W};
+  const idxAt=px=>VIEW.length-1-Math.max(0,Math.min(VIEW.length-1,Math.floor((px-LP)/(barW+barGap))));  // display slot -> data index
+  svg.addEventListener('mousedown',e=>{dragX0=fx(e);dragging=false});
+  svg.addEventListener('mousemove',e=>{
+    if(dragX0===null)return;
+    const cur=fx(e);
+    if(!dragging&&Math.abs(cur-dragX0)>8){
+      dragging=true;window.__tlDragged=true;
+      selRect=el('rect',{x:Math.min(dragX0,cur),y:TP,width:Math.abs(cur-dragX0),height:H-B-TP,fill:'rgba(6,182,212,0.12)',stroke:'#06B6D4','stroke-width':1,'stroke-dasharray':'4,3',rx:3,'pointer-events':'none'});
+      $('#tip').style.display='none';
+    }
+    if(dragging&&selRect){
+      selRect.setAttribute('x',Math.min(dragX0,cur));
+      selRect.setAttribute('width',Math.abs(cur-dragX0));
+    }
+  });
+  svg.addEventListener('mouseup',e=>{
+    if(dragging){
+      const cur=fx(e);
+      const ia=idxAt(Math.min(dragX0,cur)),ib=idxAt(Math.max(dragX0,cur));
+      const i0=Math.min(ia,ib),i1=Math.max(ia,ib);
+      if(i1>i0){TL_ZOOM={a:off+i0,b:off+i1};renderTimeline()}
+      else if(selRect)selRect.remove();
+      setTimeout(()=>{window.__tlDragged=false},0);
+    }
+    dragX0=null;dragging=false;selRect=null;
+  });
+  svg.addEventListener('mouseleave',()=>{if(selRect)selRect.remove();dragX0=null;dragging=false;selRect=null;window.__tlDragged=false});
+  svg.addEventListener('dblclick',()=>{TL_ZOOM=null;renderTimeline()});
+
+  // Zoom control bar above the chart
+  const zb=$('#tl-zoombar');
+  if(zb){
+    const btn='font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:4px 12px;border-radius:6px;cursor:pointer';
+    zb.innerHTML=TL_ZOOM
+      ?`<span style="color:var(--accent);font-weight:600">Zoomed in: ${VIEW.length} of ${LIST.length} merged pull requests (#${VIEW[VIEW.length-1].hash} to #${VIEW[0].hash})</span>
+<button style="${btn}" onclick="tlZoomOut()">− Zoom out</button>
+<button style="${btn}" onclick="tlZoomReset()">Show all merged pull requests</button>`
+      :`<span style="color:var(--muted)">${rangeCovers(win,LIST)}. Every bar is one merged pull request, oldest on the left and newest on the right. Drag across the chart to zoom into a range; double-click the chart to reset. The ▲ ✕ ↻ marks expand into full labels when you zoom in.</span>`;
+  }
+
+  host.appendChild(svg);
+}
+
+// ============ TOOLTIP ============
+const tip=$('#tip');
+function showTip(c,ci,wcs,med,e){
+  const wc=wcs[ci];
+  const delta=Math.round(wc.total-med);
+  const dColor=delta>5?'var(--crit)':delta>0?'var(--warn)':'var(--good)';
+  const stChip=c.status==='fail'?'<span class="chip fail">FAILED</span>':c.status==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
+  const jobs=allJobs(c);
+  const tpuJobs=jobs.filter(j=>j.cat==='tpu'),gpuJobs=jobs.filter(j=>j.cat==='gpu'),cpuJobs=jobs.filter(j=>j.cat==='cpu');
+  const tpuOk=tpuJobs.every(j=>j.status==='pass'),gpuOk=gpuJobs.every(j=>j.status==='pass'),cpuOk=cpuJobs.every(j=>j.status==='pass');
+
+  // Compute percentages for mini bar
+  const bP=Math.round(wc.build/wc.total*100);
+  const qP=Math.round(wc.queue/wc.total*100);
+  const tpuP=Math.round(wc.catMax.tpu/wc.total*100);
+  const gpuP=Math.round(wc.catMax.gpu/wc.total*100);
+  const cpuP=Math.round(wc.catMax.cpu/wc.total*100);
+  // Jobs per category
+  const tpuCount=tpuJobs.length,gpuCount=gpuJobs.length,cpuCount=cpuJobs.length;
+
+  tip.innerHTML=`<div class="th">${c.pr} ${c.title}</div>
+<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${c.attempts>1?c.attempts+' attempts · ':''}${c.concurrent} pipeline runs overlapped it</div>
+<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+<span style="font-size:13px;color:var(--ink2)">Wall-clock time</span>
+<span class="tv" style="font-size:16px;font-weight:700">${Math.round(wc.total)}m</span>
+</div>
+<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:10px;background:var(--elevated)">
+<div style="width:${bP}%;background:var(--bld)"></div>
+<div style="width:${qP}%;background:var(--q)"></div>
+<div style="width:${Math.round(wc.tests/wc.total*100)}%;background:${CAT_COLORS[wc.bottleneck]}"></div>
+</div>
+<div class="trow"><span style="color:var(--bld)">■ Build & infra</span><span class="tv">${Math.round(wc.build)}m</span></div>
+<div class="trow"><span style="color:var(--q)">■ Queue wait</span><span class="tv">${wc.queue}m</span></div>
+<div style="border-top:1px solid var(--grid);margin:4px 0;padding-top:4px"></div>
+<div style="font-size:12px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Test execution (parallel)</div>
+<div class="trow"><span style="color:var(--tpu)">■ TPU <span style="color:var(--muted)">(${tpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${machineOfCat('tpu')}</span></span><span class="tv">${Math.round(wc.catMax.tpu)}m</span></div>
+<div class="trow"><span style="color:var(--gpu)">■ GPU <span style="color:var(--muted)">(${gpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${machineOfCat('gpu')}</span></span><span class="tv">${Math.round(wc.catMax.gpu)}m</span></div>
+<div class="trow"><span style="color:var(--cpu)">■ CPU <span style="color:var(--muted)">(${cpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${machineOfCat('cpu')}</span></span><span class="tv">${Math.round(wc.catMax.cpu)}m</span></div>
+<div style="font-size:12px;color:var(--muted);margin-top:4px">Bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span> — sets the run time</div>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid var(--grid)">
+<div style="display:flex;gap:8px">
+<span style="font-size:13px;display:flex;align-items:center;gap:4px"><span class="sdot" style="background:${tpuOk?'var(--good)':'var(--crit)'}"></span>TPU ${tpuOk?'✓':'✕'}</span>
+<span style="font-size:13px;display:flex;align-items:center;gap:4px"><span class="sdot" style="background:${gpuOk?'var(--good)':'var(--crit)'}"></span>GPU ${gpuOk?'✓':'✕'}</span>
+<span style="font-size:13px;display:flex;align-items:center;gap:4px"><span class="sdot" style="background:${cpuOk?'var(--good)':'var(--crit)'}"></span>CPU ${cpuOk?'✓':'✕'}</span>
+</div>
+<div style="font-size:12px;color:var(--muted);margin-top:2px">${(()=>{let t=0;jobs.filter(j=>['tpu','gpu','cpu'].includes(j.cat)).forEach(j=>{const tc=TEST_COUNTS[j.id];if(tc)t+=tc.total});return t>0?t+' tests across all jobs':'';})()}</div>
+${stChip}
+</div>
+<div style="font-size:13px;font-weight:600;color:${dColor};text-align:right;margin-top:4px">${delta>0?'+':''}${delta}m vs median</div>
+<div style="font-size:12px;color:var(--muted);text-align:center;margin-top:6px;padding-top:6px;border-top:1px solid var(--grid)">click the bar to see all ${jobs.length} jobs →</div>`;
+  tip.style.display='block';moveTip(e);
+}
+function moveTip(e){const x=e.clientX+16,y=e.clientY-20,r=tip.getBoundingClientRect();tip.style.left=(x+(r.width||350)>window.innerWidth?e.clientX-(r.width||350)-16:x)+'px';tip.style.top=Math.max(8,Math.min(y,window.innerHeight-(r.height||300)-8))+'px'}
+
+// ============ MODAL (17 jobs + expandable step drill-down) ============
+function openModal(c,ci,wcs,med){
+  tip.style.display='none';
+  const wc=wcs[ci];
+  const jobs=allJobs(c);
+  const delta=Math.round(wc.total-med);
+  const stChip=c.status==='fail'?'<span class="chip fail">FAILED</span>':c.status==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
+  const maxJobT=Math.max(...jobs.map(j=>j.total()));
+  const runId=RUN_IDS[c.hash]||0;
+  const runUrl=`https://github.com/${REPO}/actions/runs/${runId}`;
+  const prUrl=`https://github.com/${REPO}/pull/${c.pr.replace('#','')}`;
+  const commitUrl=`https://github.com/${REPO}/commit/${c.hash}`;
+  const trigger=TRIGGERS[c.hash]||'unknown';
+  const time=TIMES[c.hash]||'';
+  const ago=timeAgo(time);
+
+  const catOrder=['infra','build','tpu','gpu','cpu'];
+  const catNames={infra:'Infrastructure',build:'Build',tpu:'TPU Tests',gpu:'GPU Tests',cpu:'CPU Tests'};
+
+  let tableRows='';
+  const jobUnits=[];
+  const jobHeads={};
+  let jobIdx=0;
+  catOrder.forEach(cat=>{
+    const catJobs=jobs.filter(j=>j.cat===cat);
+    if(!catJobs.length)return;
+    const catHeadHtml=`<tr><td colspan="10" class="cat-head">${catNames[cat]} (${catJobs.length} jobs)</td></tr>`;
+    jobHeads[cat]=catHeadHtml;
+    tableRows+=catHeadHtml;
+    catJobs.forEach(j=>{
+      const t=j.total();
+      const sFrac=DOCKER_FRAC[j.cat]!==undefined?DOCKER_FRAC[j.cat]:0.5;
+      const sImg=+(j.s*sFrac).toFixed(1);
+      const sEnv=+(j.s-sImg).toFixed(1);
+      const qP=(j.q/maxJobT*100).toFixed(0);
+      const iP=(sImg/maxJobT*100).toFixed(1);
+      const eP=(sEnv/maxJobT*100).toFixed(1);
+      const rP=(j.r/maxJobT*100).toFixed(0);
+      const sChp=j.status==='fail'?'fail':j.status==='flaky'?'flaky':j.status==='skip'?'skip':'pass';
+      const lc=LANE_COLORS[j.lane]||'var(--muted)';
+      const dim=HW!=='all'&&j.lane.toLowerCase()!==HW;
+      const jUrl=`${runUrl}/jobs/${runId*100+jobIdx}`;
+      const rid='xrow-'+c.hash+'-'+jobIdx;
+      const steps=STEPS[j.id]||STEPS[j.cat]||STEPS.infra;
+      const tc=TEST_COUNTS[j.id];
+
+      // Step breakdown HTML
+      let stepHtml='<div id="'+rid+'" style="display:none;padding:8px 0 8px 24px;background:rgba(0,0,0,0.2);border-bottom:1px solid var(--grid)">';
+      // Step Gantt
+      stepHtml+=`<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:8px;background:var(--elevated)">`;
+      steps.forEach((st,si)=>{
+        const stepTime=st.isTest?j.r*st.pct/(steps.filter(x=>x.isTest).reduce((a,x)=>a+x.pct,0)||1):j.s*st.pct/(steps.filter(x=>!x.isTest).reduce((a,x)=>a+x.pct,0)||1);  // several test steps (cpu-unit worker 1: Run Tests + decoupled pass) share the job's test minutes by pct
+        const stepPct=(st.pct*100).toFixed(0);
+        const col=st.isTest?lc:si===1?'var(--bld)':'var(--q)';
+        stepHtml+=`<div style="width:${stepPct}%;background:${col}"></div>`;
+      });
+      stepHtml+=`</div>`;
+      // Step table
+      stepHtml+=`<table style="width:100%;font-size:13px;border-collapse:collapse">`;
+      let stepNum=1;
+      steps.forEach(st=>{
+        const dur=st.isTest?j.r*st.pct/(steps.filter(x=>x.isTest).reduce((a,x)=>a+x.pct,0)||1):(t>0?(j.s*st.pct/(steps.filter(x=>!x.isTest).reduce((a,x)=>a+x.pct,0)||1)):0);
+        const stepUrl=`${jUrl}#step:${stepNum}:1`;
+        stepHtml+=`<tr>
+<td style="padding:3px 8px;border-bottom:1px solid var(--grid);color:var(--ink2)">${st.name}${st.img?'<br><span class="mono" style="font-size:11px;color:var(--muted)">'+st.img+'</span>':''}</td>
+<td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);width:60px;text-align:right">${dur>0?dur.toFixed(1)+'m':'—'}</td>
+<td style="padding:3px 8px;border-bottom:1px solid var(--grid);width:30px"><a href="${stepUrl}" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none">log↗</a></td>
+</tr>`;
+        stepNum++;
+      });
+      stepHtml+=`</table>`;
+      // Test summary (if test job)
+      if(!tc&&j.r>0&&/Pathways/.test(j.name)){stepHtml+=`<div style="font-size:12px;color:var(--muted);margin-top:6px">No test-result file: the Pathways jobs run pytest without JUnit output, so no test counts exist for them.</div>`;}
+      if(tc&&j.r>0){
+        stepHtml+=`<div style="margin-top:6px;padding:6px 8px;background:var(--elevated);border-radius:6px;font-size:13px">
+<span style="color:var(--good)">${tc.pass} ✓</span> <span style="color:${tc.fail?'var(--crit)':'var(--muted)'}">${tc.fail} ✕</span> <span style="color:var(--muted)">${tc.skip} skip</span> · ${tc.total} tests total</div>`;
+      }
+      if(j.r===0&&j.status==='fail'){
+        stepHtml+=`<div style="margin-top:6px;padding:6px 8px;background:var(--tint-crit);border-radius:6px;font-size:13px;color:var(--crit)">Job timed out in queue — no tests executed</div>`;
+      }
+      // Test-level detail from JUnit data
+      const testData=TESTS[c.hash]&&TESTS[c.hash][j.id];
+      if(testData&&testData.note){
+        stepHtml+=`<div style="margin-top:6px;padding:6px 8px;background:var(--tint-crit);border-radius:6px;font-size:13px;color:var(--crit)">${testData.note}</div>`;
+      }else if(testData&&testData.tests&&testData.tests.length){
+        const sorted=[...testData.tests].sort((a,b)=>{
+          if(a.st==='fail'&&b.st!=='fail')return -1;if(b.st==='fail'&&a.st!=='fail')return 1;
+          const da=a.base&&a.dur?(a.dur-a.base):(a.dur||999);const db=b.base&&b.dur?(b.dur-b.base):(b.dur||999);return db-da;
+        });
+        const tid='jt-'+rid;
+        const thS0='padding:3px 8px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);border-bottom:1px solid var(--grid)';
+        const jtRow=t=>{
+          const delta=t.base&&t.dur?+(t.dur-t.base).toFixed(1):null;
+          const deltaStr=delta!==null?(delta>0?'+'+delta+'s':delta+'s'):'';
+          const deltaCol=t.st==='fail'?'var(--crit)':delta>2?'var(--crit)':delta>0?'var(--warn)':'var(--good)';
+          const rowBg=t.st==='fail'?'background:var(--tint-crit)':t.isNew?'background:rgba(6,182,212,0.05)':'';
+          const stLabel=t.st==='fail'?`<span class="chip fail">✕ ${t.error||'FAIL'}</span>`:t.isNew?'<span class="chip new">★ NEW</span>':'<span style="color:var(--good)">✓</span>';
+          return`<tr style="${rowBg}"><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);font-size:12px">${t.name}</td><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right">${t.dur!==null?t.dur+'s':'—'}</td><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;color:var(--muted)">${t.base!==null?t.base+'s':'—'}</td><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;color:${deltaCol};font-weight:600">${deltaStr}</td><td style="padding:4px 8px;border-bottom:1px solid var(--grid)">${stLabel}</td></tr>`;
+        };
+        JT[tid]={rows:sorted,pick:t=>t,row:jtRow,key:null,dir:'desc'};
+        stepHtml+=`<div style="margin-top:8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Test results (JUnit)</div>`;
+        stepHtml+=`<div style="font-size:12px;color:var(--muted);margin-top:2px">Failed tests come first. Then come the tests that added the most time: a test with a baseline is ranked by its Δ, and a new test, which has no baseline yet, is ranked by its full duration. Click Duration, Baseline, or Δ to sort by that column; click again to flip the order. Rows with a blank cell in the sorted column drop to the bottom: failed tests have no duration, and new tests have no baseline yet. Click the Test header to restore the default order.</div>`;
+        stepHtml+=`<table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:4px">
+<thead><tr>${jtTh(tid,'','Test',thS0+';text-align:left','Restore the default order')}${jtTh(tid,'dur','Duration',thS0+';text-align:right','Sort by duration')}${jtTh(tid,'base','Baseline',thS0+';text-align:right','Sort by baseline duration')}${jtTh(tid,'delta','Δ',thS0+';text-align:right','Sort by change against the baseline')}<th style="${thS0}">Status</th></tr></thead><tbody id="${tid}-body">${sorted.map(jtRow).join('')}</tbody></table>`;
+      }
+      stepHtml+=`</div>`;
+
+      const jobHtml=`<tr style="opacity:${dim?0.25:1};cursor:pointer" onclick="const x=document.getElementById('${rid}');x.style.display=x.style.display==='none'?'block':'none';this.querySelector('.xarr').textContent=x.style.display==='none'?'▸':'▾'">
+<td style="font-size:13px;max-width:300px;min-width:220px;white-space:normal;line-height:1.25;padding-right:6px" title="${j.name}"><span class="xarr" style="color:var(--muted);margin-right:4px">▸</span><strong>${j.name}</strong></td>
+<td><span style="color:${lc};font-weight:600;font-size:13px">${j.lane}</span></td>
+<td class="mono" style="font-size:12px;color:var(--ink2);white-space:nowrap">${RUNNER_LABELS[j.id]||'&mdash;'}</td>
+<td class="mono" style="font-size:13px">${j.q}m</td>
+<td class="mono" style="font-size:13px">${sImg}m</td>
+<td class="mono" style="font-size:13px">${sEnv}m</td>
+<td class="mono" style="font-size:13px">${j.r}m</td>
+<td class="mono" style="font-size:13px;font-weight:700">${t.toFixed(1)}m</td>
+<td style="min-width:100px"><div class="wf-track"><div class="wf-seg" style="width:${qP}%;background:var(--q)"></div><div class="wf-seg" style="width:${iP}%;background:var(--bld);opacity:0.55"></div><div class="wf-seg" style="width:${eP}%;background:var(--bld);opacity:0.28"></div><div class="wf-seg" style="width:${rP}%;background:${lc}"></div></div></td>
+<td><span class="chip ${sChp}">${j.status.toUpperCase()}</span></td>
+</tr><tr style="opacity:${dim?0.25:1}"><td colspan="10" style="padding:0">${stepHtml}</td></tr>`;
+      tableRows+=jobHtml;
+      jobUnits.push({cat:cat,vals:{q:j.q,img:sImg,env:sEnv,r:j.r,total:t},html:jobHtml});
+      jobIdx++;
+    });
+  });
+
+  const jid='jt-jobs-'+c.hash;
+  JT[jid]={rows:jobUnits,pick:u=>u.vals,row:u=>u.html,key:null,dir:'desc',defaultHTML:tableRows,
+    group:u=>u.cat,groupOrder:catOrder,groupHead:jobHeads};
+  $('#modal').innerHTML=`<div class="modal-head"><div>
+<h2>${c.pr} ${c.title}</h2>
+<div class="sub">
+${stChip} · <span class="mono">${Math.round(wc.total)}m total</span> · ${delta>0?'+':''}${delta}m vs median · ${c.concurrent} pipeline runs overlapped it · bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span>
+<br><span style="color:var(--muted)">${trigger==='pull_request'?'Run of a merged pull request':'Scheduled run'} · ${time} (${ago}) · run #${runId}</span>
+</div>
+<div style="display:flex;gap:8px;margin-top:6px">
+<a href="${runUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">View run ↗</a>
+<a href="${prUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">PR ${c.pr} ↗</a>
+<a href="${commitUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">Commit ↗</a>
+
+</div>
+</div><button class="modal-close" onclick="closeModal()">✕</button></div>
+<div class="modal-body">
+<div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;padding:10px 14px;background:var(--elevated);border-radius:8px;flex-wrap:wrap">
+<span style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Waterfall legend</span>
+<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--q);display:inline-block"></span><span style="color:var(--ink2)">Queue wait</span></span>
+<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--bld);opacity:0.55;display:inline-block"></span><span style="color:var(--ink2)">Image pull</span></span>
+<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--bld);opacity:0.28;display:inline-block"></span><span style="color:var(--ink2)">Env setup</span></span>
+<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--tpu);display:inline-block"></span><span style="color:var(--ink2)">TPU</span></span>
+<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--gpu);display:inline-block"></span><span style="color:var(--ink2)">GPU</span></span>
+<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--cpu);display:inline-block"></span><span style="color:var(--ink2)">CPU</span></span>
+<span style="flex-basis:100%;font-size:12px;color:var(--muted)">Jobs that take only seconds are not listed: the ten Setup Parameters jobs, All Required Tests Passed, All Notebooks Passed, Notify failed build and Track Test Performance. Click a job row to expand its steps. Sorting keeps the category headings and orders the jobs inside each one. Click Queue, Image, Env, Run, or Total to sort the jobs by that time, longest first; click again for shortest first. Click the Job header to restore the grouped order.</span>
+</div>
+<table>
+<thead><tr>${jtTh(jid,'','Job','','Restore the grouped order')}<th>Lane</th><th>Machine</th>${jtTh(jid,'q','Queue','','Sort by queue wait')}${jtTh(jid,'img','Image','','Sort by image pull time')}${jtTh(jid,'env','Env','','Sort by environment setup time')}${jtTh(jid,'r','Run','','Sort by run time')}${jtTh(jid,'total','Total','','Sort by total time')}<th>Waterfall</th><th>Status</th></tr></thead>
+<tbody id="${jid}-body">${tableRows}</tbody></table></div>`;
+
+  $('#overlay').classList.add('on');
+  document.body.style.overflow='hidden';
+}
+function closeModal(){$('#overlay').classList.remove('on');document.body.style.overflow='';window.__thiBack=null}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
+
+// ============ CAUSE ATTRIBUTION ============
+// ============ TEST RUN TIME BY DEVICE ============
+let DEV_PHASE='run';
+let DEV_ZOOM=null;
+let DEV_PHASES=[
+  {key:'run',chip:'Test run',plain:'running their tests',metric:'minutes running pytest, summed across every test job of the device'},
+  {key:'queue',chip:'Queue wait',plain:'waiting for a free runner',metric:'minutes waiting for a runner, summed across every test job of the device'},
+  {key:'img',chip:'Image pull',plain:'pulling the Docker image',metric:'minutes pulling the docker image, summed across every test job of the device'},
+  {key:'env',chip:'Env setup',plain:'setting up the environment after the image pull',metric:'minutes of environment setup after the image pull, summed across every test job of the device'},
+];
+function setDevPhase(k){DEV_PHASE=k;renderDevLines()}
+function devZoomOut(){if(!DEV_ZOOM)return;const n=getWindows().current.length;DEV_ZOOM={a:Math.max(0,DEV_ZOOM.a-2),b:Math.min(n-1,DEV_ZOOM.b+2)};if(DEV_ZOOM.a===0&&DEV_ZOOM.b===n-1)DEV_ZOOM=null;renderDevLines()}
+function devZoomReset(){DEV_ZOOM=null;renderDevLines()}
+function devJobVal(j){
+  if(DEV_PHASE==='run')return j.r;
+  if(DEV_PHASE==='queue')return j.q;
+  const frac=DOCKER_FRAC[j.cat]||0;
+  return DEV_PHASE==='img'?j.s*frac:j.s*(1-frac);
+}
+// ============ SUMMARY BLOCKS (the problems first, the chart second) ============
+// One ranked list per card: worst first, at most 5 rows, facts only. rows = [{tone, cells, onclick, attrs, dim}].
+let FL_ALL=false;
+function flakyShowAll(v){FL_ALL=v;renderFlaky()}
+function sumTone(t){return t==='crit'?'var(--crit)':t==='warn'?'var(--warn)':t==='accent'?'var(--accent)':'var(--muted)'}
+function sumBlock(o){
+  const grid=`grid-template-columns:26px ${o.cols}`;
+  const head=o.head?`<div class="sum-head" style="${grid}"><span></span>${o.head.map(c=>`<span>${c}</span>`).join('')}</div>`:'';
+  const rows=o.rows.map((r,i)=>`<div class="sum-row" data-sumrow="${o.key}" ${r.attrs||''} style="${grid};opacity:${r.dim?0.28:1}" onclick="${r.onclick||''}">
+    <span class="sum-rank" style="border-color:${sumTone(r.tone)};color:${r.tone&&r.tone!=='none'?sumTone(r.tone):'var(--ink2)'}">${i+1}</span>${r.cells.map(c=>`<div>${c}</div>`).join('')}</div>`).join('');
+  return `<div class="sum" data-sum="${o.key}"><div class="sum-h${(o.guide&&(o.lead||o.more))?' gtitle':''}">${o.title}</div><div class="sum-lead"${(o.guide&&(o.lead||o.more))?` data-guide="${o.guide}" data-guide-kind="${o.guideKind||'table'}"`:''}>${(o.guide&&o.more)?`${o.lead||''} <span class="g-more">${o.more}</span>`:(o.guide&&o.lead)?`<span class="g-more">${o.lead}</span>`:o.lead}</div>${rows?head+rows:`<div class="sum-empty">${o.empty||''}</div>`}${o.foot?`<div class="sum-foot">${o.foot}</div>`:''}</div>`;
+}
+// Pattern read for one suite from its own history (fixed thresholds, facts not verdicts). Shared by the
+// combined-chart legend and the suite-health summary. rank: 0 = tests vanished ... 7 = steady.
+// Test suite health draws only the commits inside the header date range. THV is set by renderDashboard.
+let THV=null;
+function renderDevLines(){
+  const host=$('#devlines');if(!host)return;
+  const meta=$('#devlines-meta');
+  const w=getWindows();
+  const wCommits=w.current;
+  if(DEV_ZOOM&&(DEV_ZOOM.b>wCommits.length-1||DEV_ZOOM.a>=DEV_ZOOM.b))DEV_ZOOM=null;
+  const phase=DEV_PHASES.find(p=>p.key===DEV_PHASE)||DEV_PHASES[0];
+  const fmt=v=>v>=10?String(Math.round(v)):String(Math.round(v*10)/10);
+  if(meta)meta.innerHTML=`<div style="font-size:13px;color:var(--ink2);margin-bottom:4px" data-guide="devlines">This chart shows how many minutes the TPU, GPU and CPU test jobs spent ${phase.plain} on each merged pull request. One line per device, one point per pull request. <span class="g-more">Each point adds up every test job of that device in that run, so a device with more jobs shows more minutes. The chips below switch the phase: running tests, waiting for a runner, pulling the image, or setting up the environment. Click a point to open that run. The pull request number under each point opens it on GitHub; its merge date is under it. Drag across the chart to zoom into a range and double-click to reset.</span></div>
+${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></div>
+<div style="margin-top:4px"><span style="color:var(--tpu)">■</span> TPU <span style="color:var(--gpu);margin-left:8px">■</span> GPU <span style="color:var(--cpu);margin-left:8px">■</span> CPU</div>`:''}`;
+  host.innerHTML='';
+  if(!wCommits.length){host.innerHTML=`<div style="font-size:13px;color:var(--ink2);padding:8px 0">No merged pull requests fall inside this date range.</div>`;return}
+  const sumHost=document.createElement('div');host.appendChild(sumHost);
+
+  // Phase filter chips (build package is a single shared job, so it lives in the commit chart, not here)
+  const chips=document.createElement('div');
+  chips.style.cssText='display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px';
+  chips.innerHTML=`<span style="font-size:13px;color:var(--muted)">Time shown:</span>`
+    +DEV_PHASES.map(p=>`<button class="fchip ${p.key===DEV_PHASE?'on':''}" style="border-radius:8px" onclick="setDevPhase('${p.key}')">${p.chip}</button>`).join('')
+    +`<span style="font-size:12px;color:var(--muted)">Build package time is not listed here because it runs once per merged pull request, not per device; the charts above show it.</span>`;
+  host.appendChild(chips);
+
+  const DEVS=[
+    {key:'tpu',label:'TPU',color:'#3987E5'},
+    {key:'gpu',label:'GPU',color:'#F97316'},
+    {key:'cpu',label:'CPU',color:'#22C55E'},
+  ];
+
+  // Per commit, per device: SUM of the chosen phase across all of that device's test jobs
+  const series={};
+  DEVS.forEach(d=>{
+    series[d.key]=wCommits.map(c=>{
+      const jobs=allJobs(c).filter(j=>j.cat===d.key);
+      const parts=jobs.map(j=>({name:j.name,v:devJobVal(j),status:j.status})).sort((a,b)=>b.v-a.v);
+      const v=parts.reduce((a,p)=>a+p.v,0);
+      const failedOut=jobs.length>0&&jobs.every(j=>j.status==='fail'&&j.r===0);
+      return{v,parts,failedOut};
+    });
+  });
+
+  // "Usual" for a run = median of the runs merged BEFORE it in the FULL stored history (not only the
+  // ones inside the range), so narrowing the range never changes a flag. COMMITS is newest-first.
+  const allSer={};DEVS.forEach(d=>{allSer[d.key]=COMMITS.map(c=>allJobs(c).filter(j=>j.cat===d.key).reduce((a,j)=>a+devJobVal(j),0))});
+  const storeIdx=wCommits.map(c=>COMMITS.indexOf(c));
+  const anomInfo={};
+  DEVS.forEach(d=>{
+    anomInfo[d.key]=series[d.key].map((p,i)=>{
+      const prior=allSer[d.key].slice(storeIdx[i]+1).filter(v=>v>0);
+      if(prior.length<3)return{flag:false,med:null};
+      const med=[...prior].sort((a,b)=>a-b)[Math.floor(prior.length/2)];
+      return{flag:p.v>med*1.15&&p.v-med>2,med};
+    });
+  });
+  const anomFlags={};DEVS.forEach(d=>{anomFlags[d.key]=anomInfo[d.key].map(a=>a.flag)});
+
+  // Summary first: the device with the biggest change in this phase, worst first
+  {
+    const m=v=>fmt(v)+'m';
+    const rows=DEVS.map(d=>{
+      const s=series[d.key],a=anomInfo[d.key];
+      let worst=null;
+      s.forEach((p,i)=>{if(a[i].med===null||p.failedOut)return;const dlt=p.v-a[i].med;if(!worst||dlt>worst.dlt)worst={i,dlt,med:a[i].med,v:p.v,flag:a[i].flag}});
+      const fo=s.map((p,i)=>p.failedOut?i:-1).filter(i=>i>=0);
+      const latest=s[0],lm=a[0].med;
+      const score=(fo.length?1000:0)+(worst?(worst.flag?100:0)+Math.max(0,worst.dlt):0);
+      const tone=fo.length?'crit':worst&&worst.flag?'warn':'none';
+      const bits=[];
+      if(fo.length)bits.push(`<span style="color:var(--crit)">${fo.map(i=>'#'+wCommits[i].hash).join(', ')}: no tests ran &mdash; every ${d.label} test job failed before its tests started</span>`);
+      if(worst&&worst.dlt>0)bits.push(`${worst.flag?'<span style="color:var(--warn);font-weight:600">flagged:</span> ':''}biggest rise +${fmt(worst.dlt)}m at #${wCommits[worst.i].hash} (${m(worst.v)} against a usual ${m(worst.med)})${worst.flag?'':', inside the usual range'}`);
+      else if(!fo.length)bits.push('no run rose above its usual level');
+      if(!latest.failedOut)bits.push(`latest run ${m(latest.v)}`+(worst&&worst.flag?(lm!==null&&latest.v>lm*1.15&&latest.v-lm>2?', still above usual':', back to usual'):''));
+      const target=fo.length?wCommits[fo[0]].hash:worst&&worst.dlt>0?wCommits[worst.i].hash:wCommits[0].hash;
+      return{d,score,tone,txt:bits.join(' &middot; '),target};
+    }).sort((x,y)=>y.score-x.score||x.d.label.localeCompare(y.d.label));
+    sumHost.innerHTML=sumBlock({key:'dev',guide:'dev-sum',guideKind:'table',title:'Largest changes by device',
+      lead:`One row per device: TPU, GPU and CPU. Each row names the merged pull request where that device's ${phase.chip.toLowerCase()} time went furthest above its usual level, and says whether the latest run is back at that level. A run where no tests ran at all is listed first. "Usual" is the typical ${phase.chip.toLowerCase()} time of the merged pull requests before each one, whether or not they fall inside this range. A rise is flagged when it is both over 15% and more than 2 minutes above usual. Click a row to open that run.`,
+      cols:'56px 1fr 72px',
+      rows:rows.map(r=>({tone:r.tone,dim:HW!=='all'&&HW!==r.d.key,attrs:`data-devsum="${r.d.key}"`,onclick:`goToCommit('${r.target}')`,
+        cells:[`<span style="color:${r.d.color};font-weight:700">${r.d.label}</span>`,`<span style="color:var(--ink2)">${r.txt}</span>`,`<span class="mono" style="color:var(--accent)">#${r.target}</span>`]}))});
+  }
+
+  const off=DEV_ZOOM?DEV_ZOOM.a:0;
+  const VIEW=DEV_ZOOM?wCommits.slice(DEV_ZOOM.a,DEV_ZOOM.b+1):wCommits;
+
+  // Zoom control bar
+  const zb=document.createElement('div');
+  zb.style.cssText='display:flex;gap:10px;align-items:center;font-size:13px;margin-bottom:6px;min-height:20px';
+  const zbtn='font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:4px 12px;border-radius:6px;cursor:pointer';
+  zb.innerHTML=DEV_ZOOM
+    ?`<span style="color:var(--accent);font-weight:600">Zoomed in: ${VIEW.length} of ${wCommits.length} merged pull requests (#${VIEW[VIEW.length-1].hash} to #${VIEW[0].hash})</span>
+<button style="${zbtn}" onclick="devZoomOut()">− Zoom out</button>
+<button style="${zbtn}" onclick="devZoomReset()">Show all merged pull requests</button>`
+    :`<span style="color:var(--muted)">Every point is one merged pull request. Drag across the chart to zoom into a range; double-click the chart to reset.</span>`;
+  host.appendChild(zb);
+
+  const ns='http://www.w3.org/2000/svg';
+  const W=1100,LP=45,RP=70,TP=18,plotH=202;
+  // A wide slot gets the two-line label; a narrow one gets the rotated single line, exactly as
+  // the two bar charts do. Reserve the matching space so the plot never changes height.
+  const sp=VIEW.length>1?(W-LP-RP)/(VIEW.length-1):(W-LP-RP);
+  const B=axisBottomPad(sp),H=TP+plotH+B;
+  const allV=DEVS.flatMap(d=>series[d.key].slice(off,off+VIEW.length).map(p=>p.v));
+  const yMax=Math.max(...allV,5)*1.18;
+  const py=v=>TP+(1-v/yMax)*plotH;
+  const xOf=i=>VIEW.length>1?LP+(VIEW.length-1-i)*sp:(LP+(W-LP-RP)/2);  // oldest left, newest right
+
+  const svg=document.createElementNS(ns,'svg');
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  svg.style.cssText='display:block;width:100%;min-width:700px;user-select:none';
+  const el=(t,a)=>{const e=document.createElementNS(ns,t);for(const[k,v]of Object.entries(a))e.setAttribute(k,String(v));svg.appendChild(e);return e};
+
+  // Grid
+  const step=yMax>80?25:yMax>25?10:5;
+  for(let v=0;v<=yMax;v+=step){
+    el('line',{x1:LP,y1:py(v),x2:W-RP,y2:py(v),stroke:'var(--grid)','stroke-width':1,'stroke-dasharray':'3,3'});
+    el('text',{x:LP-6,y:py(v)+3,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=v+'m';
+  }
+
+  // Crosshair (shared)
+  const crossV=el('line',{x1:0,y1:TP,x2:0,y2:TP+plotH,stroke:'rgba(248,250,252,0.2)','stroke-width':1,'stroke-dasharray':'3,3',opacity:0});
+
+  // Lines per device
+  DEVS.forEach(d=>{
+    const pts=VIEW.map((c,vi)=>{const ai=off+vi;const p=series[d.key][ai];return{x:xOf(vi),y:py(p.v),...p,anom:anomFlags[d.key][ai]}});
+    const dimmed=HW!=='all'&&HW!==d.key;
+    const op=dimmed?0.15:1;
+
+    // Bezier
+    let lineD=`M ${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+    for(let j=1;j<pts.length;j++){
+      const p0=pts[j-1],p1=pts[j];const cp=(p1.x-p0.x)*0.3;
+      lineD+=` C ${(p0.x+cp).toFixed(1)},${p0.y.toFixed(1)} ${(p1.x-cp).toFixed(1)},${p1.y.toFixed(1)} ${p1.x.toFixed(1)},${p1.y.toFixed(1)}`;
+    }
+    el('path',{d:lineD,fill:'none',stroke:d.color,'stroke-width':2,'stroke-linecap':'round','stroke-linejoin':'round',opacity:op});
+
+    // Dots + anomaly rings + failure marks
+    pts.forEach(pt=>{
+      el('circle',{cx:pt.x,cy:pt.y,r:pt.anom?3.5:2.5,fill:pt.failedOut?'#EF4444':d.color,stroke:'var(--surface)','stroke-width':1.5,opacity:op});
+      if(pt.anom)el('circle',{cx:pt.x,cy:pt.y,r:6.5,fill:'none',stroke:'#F59E0B','stroke-width':1.5,opacity:op});
+      if(pt.failedOut){
+        el('text',{x:pt.x,y:Math.max(10,pt.y-10),'text-anchor':'middle','font-size':'13','font-weight':'700',fill:'#EF4444','font-family':'var(--font)',opacity:op}).textContent='✕';
+      }
+    });
+
+  });
+
+  // Endpoint labels, nudged apart when they overlap
+  const eps=DEVS.map(d=>{const p=series[d.key][off];const dimmed=HW!=='all'&&HW!==d.key;return{label:d.label,color:d.color,v:p.v,y:py(p.v),op:dimmed?0.15:1}}).sort((a,b)=>a.y-b.y);
+  for(let i=1;i<eps.length;i++)if(eps[i].y<eps[i-1].y+13)eps[i].y=eps[i-1].y+13;
+  const lastX=xOf(0);
+  eps.forEach(p=>{el('text',{x:lastX+8,y:p.y+3,'font-size':'12','font-weight':'700',fill:p.color,'font-family':'var(--mono)',opacity:p.op}).textContent=p.label+' '+fmt(p.v)+'m'});
+
+  // X labels — every merged pull request: linked hash, merge date and time (same helper as the bar charts)
+  VIEW.forEach((c,vi)=>{prAxisLabelAuto(svg,ns,xOf(vi),H-B,c.hash,sp)});
+
+  // Tooltip follows the mouse and stays inside the viewport
+  const placeTip=(e,tipEl)=>{
+    const ow=tipEl.offsetWidth||320,oh=tipEl.offsetHeight||200;
+    let lx=e.clientX+16;if(lx+ow+8>window.innerWidth)lx=e.clientX-ow-16;
+    let ty=e.clientY-20;ty=Math.max(8,Math.min(ty,window.innerHeight-oh-8));
+    tipEl.style.left=Math.max(8,lx)+'px';tipEl.style.top=ty+'px';
+  };
+
+  // Hit columns: crosshair + combined tooltip + click
+  VIEW.forEach((c,vi)=>{
+    const ai=off+vi;
+    const x=xOf(vi);
+    const colW=VIEW.length>1?sp:(W-LP-RP);
+    const hit=el('rect',{x:x-colW/2,y:TP,width:colW,height:plotH,fill:'transparent',cursor:'pointer'});
+    const fill=e=>{
+      crossV.setAttribute('x1',x);crossV.setAttribute('x2',x);crossV.setAttribute('opacity',1);
+      const rows=DEVS.map(d=>({...d,...series[d.key][ai],anom:anomFlags[d.key][ai]})).sort((a,b)=>b.v-a.v);
+      const tipEl=$('#tip');
+      tipEl.innerHTML=`<div style="font-weight:700;font-size:15px;margin-bottom:2px">#${c.hash} ${c.title}</div>
+<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${c.pr} · ${phase.chip} minutes per device, every test job listed</div>
+${rows.map((r,ri)=>{
+  const expand=HW==='all'||HW===r.key;
+  return `<div style="display:flex;justify-content:space-between;gap:14px;padding:3px 0;border-top:1px solid var(--grid)">
+<span style="font-size:13px"><span style="color:${r.color};font-weight:700">${r.label}</span> <span style="font-size:12px;color:var(--muted)" class="mono">${machineOfCat(r.key)}</span> <span style="font-size:11px;color:var(--muted)">${r.parts.length} jobs</span>${ri===0&&r.v>0?' <span style="font-size:11px;color:var(--warn)">sets the pace</span>':''}${r.failedOut?' <span style="font-size:11px;color:var(--crit)">no tests ran</span>':''}${r.anom?' <span style="font-size:11px;color:var(--warn)">above recent level</span>':''}</span>
+<span class="mono" style="font-weight:700;font-size:14px;color:${r.failedOut?'var(--crit)':'var(--ink)'}">${fmt(r.v)}m</span></div>`
+    +(expand?r.parts.map(p=>`<div style="display:flex;justify-content:space-between;gap:14px;padding:1px 0 1px 12px">
+<span style="font-size:12px;color:${p.status==='fail'?'var(--crit)':'var(--muted)'}">${p.name}${p.status==='fail'?' — failed':''}</span>
+<span class="mono" style="font-size:12px;color:${p.status==='fail'?'var(--crit)':'var(--ink2)'}">${fmt(p.v)}m</span></div>`).join(''):'');
+}).join('')}
+<div style="font-size:12px;color:var(--accent);text-align:center;margin-top:6px">click the point to see full commit details →</div>`;
+      tipEl.style.display='block';
+      placeTip(e,tipEl);
+    };
+    hit.addEventListener('mouseenter',e=>{if(window.__devDragging)return;fill(e)});
+    hit.addEventListener('mousemove',e=>{
+      if(window.__devDragging){$('#tip').style.display='none';return}
+      const tipEl=$('#tip');
+      if(tipEl.style.display!=='block')fill(e);else placeTip(e,tipEl);
+    });
+    hit.addEventListener('mouseleave',()=>{$('#tip').style.display='none';crossV.setAttribute('opacity',0)});
+    hit.addEventListener('click',()=>{if(window.__devDragged)return;$('#tip').style.display='none';goToCommit(c.hash)});
+  });
+
+  // Brush zoom: drag horizontally to select a commit range; double-click resets
+  svg.style.cursor='crosshair';
+  let dragX0=null,dragging=false,selRect=null;
+  const fx=e=>{const r=svg.getBoundingClientRect();return (e.clientX-r.left)/r.width*W};
+  const idxAt=px=>{if(VIEW.length<2)return 0;return VIEW.length-1-Math.max(0,Math.min(VIEW.length-1,Math.round((px-LP)/sp)))};  // display slot -> data index
+  svg.addEventListener('mousedown',e=>{dragX0=fx(e);dragging=false});
+  svg.addEventListener('mousemove',e=>{
+    if(dragX0===null)return;
+    const cur=fx(e);
+    if(!dragging&&Math.abs(cur-dragX0)>8){
+      dragging=true;window.__devDragged=true;window.__devDragging=true;
+      selRect=el('rect',{x:Math.min(dragX0,cur),y:TP,width:Math.abs(cur-dragX0),height:plotH,fill:'rgba(6,182,212,0.12)',stroke:'#06B6D4','stroke-width':1,'stroke-dasharray':'4,3',rx:3,'pointer-events':'none'});
+      $('#tip').style.display='none';crossV.setAttribute('opacity',0);
+    }
+    if(dragging&&selRect){
+      selRect.setAttribute('x',Math.min(dragX0,cur));
+      selRect.setAttribute('width',Math.abs(cur-dragX0));
+    }
+  });
+  svg.addEventListener('mouseup',e=>{
+    if(dragging){
+      const cur=fx(e);
+      const ia=idxAt(Math.min(dragX0,cur)),ib=idxAt(Math.max(dragX0,cur));
+      const i0=Math.min(ia,ib),i1=Math.max(ia,ib);
+      if(i1>i0){DEV_ZOOM={a:off+i0,b:off+i1};renderDevLines()}
+      else if(selRect)selRect.remove();
+      setTimeout(()=>{window.__devDragged=false;window.__devDragging=false},0);
+    }
+    dragX0=null;dragging=false;selRect=null;
+  });
+  svg.addEventListener('mouseleave',()=>{if(selRect)selRect.remove();dragX0=null;dragging=false;selRect=null;window.__devDragged=false;window.__devDragging=false});
+  svg.addEventListener('dblclick',()=>{DEV_ZOOM=null;renderDevLines()});
+
+  host.appendChild(svg);
+}
+
+// ============ RUNNER QUEUE LATENCY ============
+// ============ JOB REGRESSIONS ============
+
+// ============ DIAGNOSTICS (combined issue table) ============
+
+// ============ SINGLE PR INSPECT ============
+// Machine type per job category (from the runs-on labels the GitHub API reports)
+// Per-PR device-lane overrides (test counts from JUnit; durations derive from job overrides)
+// Per-attempt detail (from /actions/runs/{id}/attempts/{n}/jobs)
+// Failed jobs across attempts, one entry per job (same shape as the pr_check script output)
+// Deep link to a job's log page (mock id scheme shared with the commit modal)
+// JUnit results per re-run attempt (attempt 1 lives in TESTS)
+// Total attempts a job's tests ran in this PR (whole jobs re-run, so all its tests re-execute)
+// One test's result in every attempt it ran
+
+// Per-lane test count + duration for one PR, against the 28-day main baseline
+// Composite anomaly per lane — same rule family as Test suite health, one point vs baseline
+// Phase split following the slowest device lane (it sets the finish time)
+let TIME_ISO={};  // hash -> full timestamp, filled from the runs view; empty on the mock path
+function prTime(h){
+  if(TIME_ISO[h])return new Date(TIME_ISO[h]);
+  const p=(TIMES[h]||'Aug 17 00:00').split(' ');
+  return new Date(p[0]+' '+p[1]+' 2026 '+(p[2]||'00:00'));  // the sample data is all one year
+}
+function prDay(h){return (TIMES[h]||'').split(' ').slice(0,2).join(' ')}  // 'Aug 17'
+function rangeCovers(w,list){return list.length?`${w.label} covers ${list.length} merged pull request${list.length===1?'':'s'}, #${list[list.length-1].hash} (${prDay(list[list.length-1].hash)}) to #${list[0].hash} (${prDay(list[0].hash)})`:`${w.label} holds no merged pull requests`}
+
+
+// ============ PAGE SWITCH ============
+
+// ============ HW FILTER ============
+$$('.fchip').forEach(btn=>{btn.addEventListener('click',()=>{HW=btn.dataset.hw;$$('.fchip').forEach(b=>b.classList.toggle('on',b===btn));renderAll()})});
+
+// ============ TEST SUITE HEALTH (integrated from bench analysis) ============
+let TH_COMMITS = [
+  {hash:'4874',pr:'#4874',date:'Jul 23'},
+  {hash:'4876',pr:'#4876',date:'Jul 24'},
+  {hash:'4878',pr:'#4878',date:'Jul 26'},
+  {hash:'4880',pr:'#4880',date:'Jul 28'},
+  {hash:'4882',pr:'#4882',date:'Jul 29'},
+  {hash:'4884',pr:'#4884',date:'Jul 31'},
+  {hash:'4886',pr:'#4886',date:'Aug 01'},
+  {hash:'4888',pr:'#4888',date:'Aug 03'},
+  {hash:'4890',pr:'#4890',date:'Aug 04'},
+  {hash:'4892',pr:'#4892',date:'Aug 05'},
+  {hash:'4894',pr:'#4894',date:'Aug 06'},
+  {hash:'4896',pr:'#4896',date:'Aug 07'},
+  {hash:'4898',pr:'#4898',date:'Aug 08'},
+  {hash:'4900',pr:'#4900',date:'Aug 09'},
+  {hash:'4902',pr:'#4902',date:'Aug 10'},
+  {hash:'4904',pr:'#4904',date:'Aug 12'},
+  {hash:'4906',pr:'#4906',date:'Aug 14'},
+  {hash:'4940',pr:'#4940',date:'Aug 17'},
+  {hash:'4930',pr:'#4930',date:'Aug 17'},
+  {hash:'4928',pr:'#4928',date:'Aug 18'},
+  {hash:'4926',pr:'#4926',date:'Aug 18'},
+  {hash:'4924',pr:'#4924',date:'Aug 18'},
+  {hash:'4922',pr:'#4922',date:'Aug 18'},
+  {hash:'4920',pr:'#4920',date:'Aug 19'},
+  {hash:'4918',pr:'#4918',date:'Aug 19'},
+  {hash:'4916',pr:'#4916',date:'Aug 19'},
+  {hash:'4914',pr:'#4914',date:'Aug 19'},
+  {hash:'4912',pr:'#4912',date:'Aug 19'},
+  {hash:'4910',pr:'#4910',date:'Aug 20'},
+  {hash:'4908',pr:'#4908',date:'Aug 20'}
+];
+
+let TH_CATEGORIES=[
+  // Suite = one JUnit flavor of the "MaxText Package Tests" workflow (run_tests_coordinator.yml matrix). name = the flavor id as it appears in GitHub Actions.
+  // group = the Actions job group that runs it; workers = parallel "Execute Tests (N)" jobs per run (coordinator constants: cpu-unit 4, cpu-post-training-unit 4, tpu-unit 2, others 1).
+  {id:'tpu-pretrain-unit',device:'TPU',name:'tpu-unit',group:'TPU Pretrain Tests',workers:2,status:'CRASH',statusLabel:'TESTS DISAPPEARED',color:'#3987E5',maxY:3000,yInterval:600,
+   data:Array.from({length:30},(_,i)=>{
+     // Baseline: ~2,400 tests at 0.64s each (~25m total)
+     if(i<12){const c=2400+((i%5)-2)*8;const d=1530+Math.round(Math.sin(i)*25);return{count:c,dur:d,perTest:+(d/c).toFixed(2),commitIdx:i}}
+     if(i===12)return{count:2400,dur:1560,perTest:0.65,commitIdx:i};
+     // Crash region: deterministic oscillation 79<->159 tests (mirrors real bench data)
+     if(i<=17){const occ=[79,159,79,159,167];const osc=[2402,1871,2402,1876,1931];const c=occ[i-13];const d=osc[i-13];return{count:c,dur:d,perTest:+(d/c).toFixed(1),commitIdx:i}}
+     // Tail: ~81 tests stuck at ~29s each (~39m total)
+     const c=81+(i%3);const d=2340+Math.round(Math.cos(i)*20);return{count:c,dur:d,perTest:+(d/c).toFixed(1),commitIdx:i};
+   }),anomalyRange:[13,29],
+   pills:[{idx:0,text:'2.4k tests · 25m',type:'start',dy:-36,dx:0},{idx:12,text:'2.4k tests · 26m',type:'pre-crash',dy:-36,dx:-20},{idx:13,text:'79 tests · 40m',sub:'30.4s each — was 0.6s',type:'anomaly',dy:-74,dx:0,flag:'ANOMALY DETECTED'},{idx:29,text:'81 tests · 39m',type:'latest',dy:-36,dx:-40}]},
+
+  {id:'tpu-pretrain-int',device:'TPU',name:'tpu-integration',group:'TPU Pretrain Tests',workers:1,status:'HEALTHY',statusLabel:'HEALTHY',color:'#3987E5',maxY:2400,yInterval:600,
+   data:Array.from({length:30},(_,i)=>{const c=Math.round(82-(i/29)*11);const d=Math.round(c*21.8+Math.sin(i)*25);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:null,
+   pills:[{idx:0,text:'82 tests · 30m',type:'start',dy:-36,dx:0},{idx:29,text:'71 tests · 26m',type:'latest',dy:-36,dx:-40}]},
+
+  {id:'tpu-posttrain-unit',device:'TPU',name:'tpu-post-training-unit',group:'TPU Posttrain Tests',workers:1,status:'TRIMMED',statusLabel:'TESTS REMOVED (NORMAL)',color:'#3987E5',maxY:900,yInterval:180,
+   data:Array.from({length:30},(_,i)=>{const c=i<15?100:66;const d=Math.round(c*6.0+Math.sin(i)*10);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:null,
+   pills:[{idx:0,text:'100 tests · 10m',type:'start',dy:-36,dx:0},{idx:15,text:'66 tests · 6.6m',sub:'6.0s each (clean drop)',type:'accent',dy:-52,dx:0},{idx:29,text:'66 tests · 6.5m',type:'latest',dy:-36,dx:-40}]},
+
+  {id:'tpu-posttrain-int',device:'TPU',name:'tpu-post-training-integration',group:'TPU Posttrain Tests',workers:1,status:'HEALTHY',statusLabel:'HEALTHY',color:'#3987E5',maxY:600,yInterval:120,
+   data:Array.from({length:30},(_,i)=>{const c=9;const d=Math.round(c*21.0+Math.sin(i)*10);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:null,
+   pills:[{idx:0,text:'9 tests · 3.2m',type:'start',dy:-36,dx:0},{idx:29,text:'9 tests · 3.2m',type:'latest',dy:-36,dx:-40}]},
+
+  {id:'gpu-unit',device:'GPU',name:'gpu-unit',group:'GPU Tests',workers:1,status:'CRASH',statusLabel:'TESTS DISAPPEARED',color:'#F97316',maxY:3000,yInterval:600,
+   data:Array.from({length:30},(_,i)=>{if(i<=11){const c=2260+(i%5);return{count:c,dur:1350+Math.floor(Math.sin(i)*25),perTest:(1350+Math.floor(Math.sin(i)*25))/c,commitIdx:i}}if(i===12)return{count:2260,dur:1980,perTest:1980/2260,commitIdx:i};const c=11+(i%3);const d=2100+Math.floor(Math.sin(i)*35);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:[13,29],
+   pills:[{idx:0,text:'2.3k tests · 23m',type:'start',dy:-36,dx:0},{idx:12,text:'2.3k tests · 33m',type:'pre-crash',dy:-36,dx:-20},{idx:13,text:'11 tests · 35m',sub:'190.9s each — was 0.6s',type:'anomaly',dy:-74,dx:0,flag:'ANOMALY DETECTED'},{idx:29,text:'13 tests · 35m',type:'latest',dy:-36,dx:-40}]},
+
+  {id:'gpu-int',device:'GPU',name:'gpu-integration',group:'GPU Tests',workers:1,status:'TRIMMED',statusLabel:'TESTS REMOVED (NORMAL)',color:'#F97316',maxY:2400,yInterval:600,
+   data:Array.from({length:30},(_,i)=>{const c=i<15?45:26;const d=Math.round(c*40.0+Math.sin(i)*25);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:null,
+   pills:[{idx:0,text:'45 tests · 30m',type:'start',dy:-36,dx:0},{idx:15,text:'26 tests · 17m',sub:'40.0s each (proportional)',type:'accent',dy:-52,dx:0},{idx:29,text:'26 tests · 17m',type:'latest',dy:-36,dx:-40}]},
+
+  {id:'cpu-pretrain',device:'CPU',name:'cpu-unit',group:'CPU Pretrain Tests',workers:4,status:'NOISY',statusLabel:'UNSTABLE RUNNER',color:'#22C55E',maxY:1500,yInterval:300,
+   data:Array.from({length:30},(_,i)=>{const c=265;const n=Math.sin(i*1.8)*220+Math.cos(i*3.1)*120;const d=Math.round(1050+n);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:null,
+   pills:[{idx:0,text:'265 tests · 18m',type:'start',dy:-36,dx:0},{idx:19,text:'265 tests · 21m',sub:'Runner contention peak',type:'warn',dy:-54,dx:0},{idx:29,text:'265 tests · 16m',type:'latest',dy:-36,dx:-40}]},
+
+  {id:'cpu-pretrain-int',device:'CPU',name:'cpu-integration',group:'CPU Pretrain Tests',workers:1,status:'HEALTHY',statusLabel:'HEALTHY',color:'#22C55E',maxY:900,yInterval:180,
+   data:Array.from({length:30},(_,i)=>{const c=50;const d=Math.round(c*9.0+Math.cos(i)*12);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:null,
+   pills:[{idx:0,text:'50 tests · 7.5m',type:'start',dy:-36,dx:0},{idx:29,text:'50 tests · 7.5m',type:'latest',dy:-36,dx:-40}]},
+
+  {id:'cpu-posttrain',device:'CPU',name:'cpu-post-training-unit',group:'CPU Posttrain Tests',workers:4,status:'HEALTHY',statusLabel:'HEALTHY',color:'#22C55E',maxY:900,yInterval:180,
+   data:Array.from({length:30},(_,i)=>{const c=176;const d=Math.round(530+Math.sin(i)*15);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:null,
+   pills:[{idx:0,text:'176 tests · 8.8m',type:'start',dy:-36,dx:0},{idx:29,text:'176 tests · 8.9m',type:'latest',dy:-36,dx:-40}]},
+
+  {id:'cpu-posttrain-int',device:'CPU',name:'cpu-post-training-integration',group:'CPU Posttrain Tests',workers:1,status:'HEALTHY',statusLabel:'HEALTHY',color:'#22C55E',maxY:300,yInterval:60,
+   data:Array.from({length:30},(_,i)=>{const c=3;const d=Math.round(c*40.0+Math.sin(i)*6);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:null,
+   pills:[{idx:0,text:'3 tests · 2.0m',type:'start',dy:-36,dx:0},{idx:29,text:'3 tests · 2.0m',type:'latest',dy:-36,dx:-40}]},
+
+  // Special case: not a job. run_tests_against_package.yml runs an extra "Run Targeted Decoupled Tests" pytest pass inside cpu-unit worker 1
+  // (marker decoupled_target, file test-results-decoupled-targeted.xml, 4 files / 50 tests). nested = its tests are already inside cpu-unit's count.
+  {id:'decoupled',device:'CPU',name:'decoupled',group:'CPU Pretrain Tests (inside cpu-unit, worker 1)',workers:1,nested:'cpu-unit',tag:'inside cpu-unit',
+   note:'decoupled is not a job of its own. It is an extra pytest pass that runs inside the cpu-unit job on worker 1, over the 4 test files marked decoupled_target, and it writes its own test-result file. Its 50 tests are also counted inside cpu-unit, so adding the two suites together counts them twice.',
+   status:'NEW',statusLabel:'NEW SUITE (Aug 10)',color:'#22C55E',maxY:60,yInterval:15,
+   data:Array.from({length:30},(_,i)=>{if(i<14)return{count:null,dur:null,perTest:null,commitIdx:i};const c=50;const d=Math.round(20+Math.cos(i)*3);return{count:c,dur:d,perTest:d/c,commitIdx:i}}),anomalyRange:null,
+   pills:[{idx:14,text:'50 tests · 20s',sub:'Suite Introduced',type:'accent',dy:-52,dx:0},{idx:29,text:'50 tests · 20s',type:'latest',dy:-36,dx:-40}]}
+];
+
+
+
+
+  // ================= ISSUE DETECTION ENGINE =================
+  function detectIssues() {
+    const issues = [];
+    let evaluated = 0;
+    const CATEGORIES = TH_CATEGORIES, COMMITS = TH_COMMITS;
+
+    CATEGORIES.forEach(cat => {
+      const data = cat.data.filter(d => THV && THV.iset.has(d.commitIdx) && d.count !== null && d.count > 0);
+      if (data.length < 3) return;
+      evaluated++;
+
+      // Split into early (first 40%) and recent (last 5)
+      const splitAt = Math.min(8, Math.floor(data.length * 0.4));
+      const early = data.slice(0, splitAt);
+      const recent = data.slice(-5);
+
+      const earlyCount = early.reduce((s, d) => s + d.count, 0) / early.length;
+      const recentCount = recent.reduce((s, d) => s + d.count, 0) / recent.length;
+      const earlyPT = early.reduce((s, d) => s + d.perTest, 0) / early.length;
+      const recentPT = recent.reduce((s, d) => s + d.perTest, 0) / recent.length;
+      const earlyDur = early.reduce((s, d) => s + d.dur, 0) / early.length;
+      const recentDur = recent.reduce((s, d) => s + d.dur, 0) / recent.length;
+
+      const countChange = (recentCount - earlyCount) / Math.max(earlyCount, 1);
+      const ptChange = earlyPT > 0 ? (recentPT - earlyPT) / earlyPT : 0;
+      const ptMultiplier = earlyPT > 0 ? Math.round(recentPT / earlyPT) : 1;
+
+      // Find the commit where the biggest count drop happened
+      let crashCommitIdx = -1, biggestDrop = 0;
+      for (let i = 1; i < data.length; i++) {
+        const drop = data[i-1].count - data[i].count;
+        if (drop > biggestDrop) { biggestDrop = drop; crashCommitIdx = data[i].commitIdx; }
+      }
+      const crashCommit = crashCommitIdx >= 0 ? COMMITS[crashCommitIdx] : null;
+
+      // Duration variance (for noise detection)
+      const durs = data.map(d => d.dur);
+      const durMed = [...durs].sort((a, b) => a - b)[Math.floor(durs.length / 2)] || 1;
+      const maxVariance = Math.max(...durs.map(v => Math.abs(v - durMed) / durMed));
+
+      // ---- RULE 1: CRASH (count dropped >50% AND per-test >2× baseline) ----
+      if (countChange < -0.5 && ptChange > 1.0) {
+        issues.push({
+          sev: 'crit', rowClass: 'crit',
+          badge: 'TESTS DISAPPEARED', badgeClass: 'badge-crit',
+          name: cat.name + (cat.tag ? ' (' + cat.tag + ')' : ''), color: cat.color,
+          desc: `<strong>${Math.round(earlyCount).toLocaleString()} tests dropped to ${Math.round(recentCount).toLocaleString()}</strong> (${Math.round(earlyCount - recentCount).toLocaleString()} fewer)${crashCommit ? ' at commit <span class="mono" style="color:var(--ink)">' + crashCommit.hash.slice(0,7) + '</span> (<span class="mono" style="color:var(--ink)">' + crashCommit.pr + '</span>)' : ''}. Total duration went from ${Math.round(earlyDur/60)}m to ${Math.round(recentDur/60)}m. Each remaining test takes <strong>${recentPT.toFixed(1)} seconds</strong> — they used to take ${earlyPT.toFixed(1)} seconds.`,
+          metric: `${ptMultiplier}× SLOWER`,
+          metricColor: '#FCA5A5',
+          order: 0
+        });
+      }
+      // ---- RULE 2: DROP (count dropped >50%, per-test NOT spiked) ----
+      else if (countChange < -0.5) {
+        issues.push({
+          sev: 'crit', rowClass: 'crit',
+          badge: 'TESTS DROPPED', badgeClass: 'badge-crit',
+          name: cat.name + (cat.tag ? ' (' + cat.tag + ')' : ''), color: cat.color,
+          desc: `Test count dropped from <strong>${Math.round(earlyCount).toLocaleString()} to ${Math.round(recentCount).toLocaleString()}</strong> (${Math.round(earlyCount - recentCount).toLocaleString()} fewer)${crashCommit ? ' at commit <span class="mono" style="color:var(--ink)">' + crashCommit.hash.slice(0,7) + '</span> (<span class="mono" style="color:var(--ink)">' + crashCommit.pr + '</span>)' : ''}. Duration dropped proportionally — remaining tests run at normal speed.`,
+          metric: `${Math.round(countChange * 100)}%`,
+          metricColor: '#FCA5A5',
+          order: 1
+        });
+      }
+      // ---- RULE 3: SLOWER (count stable, per-test increased >30%) ----
+      else if (Math.abs(countChange) < 0.15 && ptChange > 0.3) {
+        issues.push({
+          sev: 'warn', rowClass: 'warn',
+          badge: 'GETTING SLOWER', badgeClass: 'badge-warn',
+          name: cat.name + (cat.tag ? ' (' + cat.tag + ')' : ''), color: cat.color,
+          desc: `Test count is stable at <strong>~${Math.round(recentCount).toLocaleString()} tests</strong>, but each test now takes <strong>${recentPT.toFixed(1)} seconds</strong> — up from ${earlyPT.toFixed(1)} seconds (+${Math.round(ptChange * 100)}%).`,
+          metric: `+${Math.round(ptChange * 100)}% /test`,
+          metricColor: '#FCD34D',
+          order: 2
+        });
+      }
+      // ---- RULE 4: NOISY (count stable, duration variance >25%) ----
+      else if (Math.abs(countChange) < 0.1 && maxVariance > 0.25) {
+        const minDur = Math.min(...durs);
+        const maxDur = Math.max(...durs);
+        issues.push({
+          sev: 'warn', rowClass: 'warn',
+          badge: 'UNSTABLE RUNNER', badgeClass: 'badge-warn',
+          name: cat.name + (cat.tag ? ' (' + cat.tag + ')' : ''), color: cat.color,
+          desc: `Test count is stable at <strong>${Math.round(recentCount).toLocaleString()} tests</strong>, but total duration swings between <strong>${Math.round(minDur/60)}m and ${Math.round(maxDur/60)}m</strong> (±${Math.round(maxVariance * 100)}%) across identical runs. This is likely the runner machine, not the code.`,
+          metric: `±${Math.round(maxVariance * 100)}% JITTER`,
+          metricColor: '#FCD34D',
+          order: 3
+        });
+      }
+      // ---- RULE 5: TRIMMED (count dropped 15-50%, per-test stable) ----
+      else if (countChange < -0.15 && Math.abs(ptChange) < 0.15) {
+        issues.push({
+          sev: 'info', rowClass: 'info',
+          badge: 'TESTS REMOVED', badgeClass: 'badge-accent',
+          name: cat.name + (cat.tag ? ' (' + cat.tag + ')' : ''), color: cat.color,
+          desc: `Test count reduced from <strong>${Math.round(earlyCount).toLocaleString()} to ${Math.round(recentCount).toLocaleString()}</strong>. Each remaining test still runs at the same speed (${recentPT.toFixed(1)} seconds each). This looks like an intentional cleanup.`,
+          metric: 'CLEAN',
+          metricColor: 'var(--accent)',
+          order: 4
+        });
+      }
+      // ---- RULE 6: NEW (data starts late — category appeared recently) ----
+      else if (cat.data.findIndex(d => d.count !== null && d.count > 0) > (THV ? THV.i0 : 0) + 10) {
+        const firstIdx = cat.data.findIndex(d => d.count !== null && d.count > 0);
+        const firstCommit = COMMITS[firstIdx];
+        issues.push({
+          sev: 'info', rowClass: 'info',
+          badge: 'NEW SUITE', badgeClass: 'badge-accent',
+          name: cat.name + (cat.tag ? ' (' + cat.tag + ')' : ''), color: cat.color,
+          desc: `New test suite added${firstCommit ? ' at commit <span class="mono" style="color:var(--ink)">' + firstCommit.hash.slice(0,7) + '</span> (<span class="mono" style="color:var(--ink)">' + firstCommit.pr + '</span>) on ' + firstCommit.date : ''} with <strong>${Math.round(recentCount)} tests</strong> running in about ${Math.round(recentDur/60)} minutes. Running normally so far.`,
+          metric: `${Math.round(recentCount)} TESTS`,
+          metricColor: 'var(--accent)',
+          order: 5
+        });
+      }
+      // HEALTHY categories produce no issue
+    });
+
+    // Sort by severity
+    // Scheduled probe sentinel: main went red between merges (probes re-run the same code on a timer). Its day is Aug 17 (TH idx 17).
+    if (THV && THV.iset.has(17)) issues.push({
+      sev: 'crit', rowClass: 'crit',
+      badge: 'PROBE RED', badgeClass: 'badge-crit',
+      name: 'TPU runner pool', color: 'var(--tpu)',
+      desc: `Main was red on the <strong>Aug 17 16:00 scheduled probe run</strong> — 7 TPU jobs never got a runner, and the 20:00 probe passed. Probe runs re-run the same code on a timer, so this points at infrastructure, not a merge.`,
+      metric: 'INFRA',
+      metricColor: '#FCA5A5',
+      order: 0.5
+    });
+
+    issues.sort((a, b) => a.order - b.order);
+
+    // Render
+    const list = document.getElementById('issuesList');
+    if (!issues.length) {
+      list.innerHTML = `<div style="padding:16px; color:var(--ink2); font-size:14px;">${THV&&THV.n===0?'No merged pull requests fall inside this date range.':THV&&evaluated===0?`The range holds only ${THV.n} merged pull request${THV.n===1?'':'s'}; the suite rules need at least 3 reported runs, so none was evaluated.`:`No suite tripped a rule ${THV ? THV.R.inRange : 'in this date range'}.`}</div>`;
+      return;
+    }
+
+    list.innerHTML = issues.map(iss => `
+      <div class="issue-row ${iss.rowClass}">
+        <span class="badge-pill ${iss.badgeClass}">${iss.badge}</span>
+        <strong style="color:${iss.color}; font-family:var(--mono);">${iss.name}</strong>
+        <div class="issue-desc">${iss.desc}</div>
+        <span class="mono" style="font-size:14px; color:${iss.metricColor}; font-weight:600;">${iss.metric}</span>
+      </div>
+    `).join('');
+  }
+
+  
+
+// Render test health tabs
+// One chart holding every suite: a duration line per suite, statuses in the chip row,
+// counts in the hover card (and on each suite's own panel via the dropdown).
+
+// One indexed line chart: test count, test duration, and worker count divided by their
+// level at the start of the history, so three different units share a single axis.
+// 2026-08-31: the totals card is parked (kept in source, hidden on the page) until the first production push. Flip to false to show it.
+// Parallel "Execute Tests (N)" jobs per suite, from the suite list: cpu-unit 4, cpu-post-training-unit 4, tpu-unit 2, others 1. The collector counts them per run; never hard-code.
+
+
+
+// ============ WORKER SUITES (matrix workers grouped into one suite entity) ============
+let WK_GROUPS={
+  'tpu-pw-u':{name:'TPU Pathways Unit Tests (2 workers)',cat:'tpu',lane:'TPU',jobs:['tpu-pw-u1','tpu-pw-u2']},
+  'tpu-pre-u':{name:'TPU Pretrain Tests (tpu-unit, 2 workers)',cat:'tpu',lane:'TPU',jobs:['tpu-pre-u'],split:[0.55,0.45]},
+  'cpu-pre-u':{name:'CPU Pretrain Tests (cpu-unit, 4 workers)',cat:'cpu',lane:'CPU',jobs:['cpu-pre-u'],split:[0.30,0.27,0.24,0.19]},
+  'cpu-post-u':{name:'CPU Posttrain Tests (cpu-post-training-unit, 4 workers)',cat:'cpu',lane:'CPU',jobs:['cpu-post-u'],split:[0.29,0.26,0.24,0.21]},
+};
+function wkEntities(){
+  const memberOf={};Object.entries(WK_GROUPS).forEach(([gid,g])=>g.jobs.forEach(j=>{memberOf[j]=gid}));
+  const ents=[];
+  ['tpu','gpu','cpu','build','infra'].forEach(cat=>{
+    JOBS.filter(j=>j.cat===cat).forEach(j=>{
+      const gid=memberOf[j.id];
+      if(gid){if(!ents.some(e=>e.gid===gid))ents.push({gid,...WK_GROUPS[gid],isGroup:true})}
+      else ents.push({gid:j.id,name:j.name,cat:j.cat,lane:j.lane,jobs:[j.id],isGroup:false});
+    });
+  });
+  return ents;
+}
+// Per-worker rows of one suite on one commit (synthetic splits sum to the job's own test time)
+function wkWorkers(c,ent){
+  if(ent.split){
+    const d=jd(c,ent.jobs[0]);
+    return ent.split.map((f,i)=>({name:'Execute Tests ('+(i+1)+')',q:d.q,s:d.s,r:+(d.r*f).toFixed(1),status:d.status}));
+  }
+  return ent.jobs.map((id,i)=>{const d=jd(c,id);return{name:'Execute Tests ('+(i+1)+')',q:d.q,s:d.s,r:d.r,status:d.status}});
+}
+function wkEntTime(c,ent){return ent.jobs.reduce((a,id)=>{const d=jd(c,id);return a+d.q+d.s+d.r},0)}
+function wkEntStatus(c,ent){const ss=ent.jobs.map(id=>jd(c,id).status);return ss.includes('fail')?'fail':ss.includes('flaky')?'flaky':'pass'}
+// Per-worker phase rows of one suite on one commit (shared by the chart and the popup)
+function wkWorkerRows(c,ent){
+  const ws=wkWorkers(c,ent);
+  const n=ws.length;
+  return ws.map((wk,k)=>{
+    const q=ent.split?+(jd(c,ent.jobs[0]).q/n).toFixed(2):jd(c,ent.jobs[k]).q;
+    const s=ent.split?+(jd(c,ent.jobs[0]).s/n).toFixed(2):jd(c,ent.jobs[k]).s;
+    const jid=ent.split?ent.jobs[0]:ent.jobs[k];
+    return{name:wk.name,q,s,r:wk.r,status:wk.status,tot:+(q+s+wk.r).toFixed(2),
+      machine:RUNNER_LABELS[jid]||''};
+  });
+}
+// Path with rounded top corners only (columns get a soft cap, joints stay square)
+function roundTopD(x,y,w,h,r){
+  const rr=Math.max(0,Math.min(r,w/2,h));
+  return `M ${x},${y+h} L ${x},${y+rr} Q ${x},${y} ${x+rr},${y} L ${x+w-rr},${y} Q ${x+w},${y} ${x+w},${y+rr} L ${x+w},${y+h} Z`;
+}
+const WK_LANE_HEX={tpu:'#3987E5',gpu:'#F97316',cpu:'#22C55E',build:'#8B5CF6',infra:'#64748B'};
+// Line ramp for the suite chart: suite 0 of a device draws in the device colour itself, later suites in
+// progressively lighter tints (never darker). wkShade's dark->light ramp is for stacked bars, where a 62% shade
+// reads fine as a filled slice but a 1.3px line in it disappears against the dark background.
+function wkShade(hex,i,n){
+  const f=n<=1?1:0.62+(i/(n-1))*0.75;
+  const cc=v=>Math.max(0,Math.min(255,Math.round(parseInt(hex.slice(v,v+2),16)*f)));
+  return '#'+[1,3,5].map(v=>cc(v).toString(16).padStart(2,'0')).join('');
+}
+function wkColors(ents){
+  const byCat={};ents.forEach(e=>{(byCat[e.cat]=byCat[e.cat]||[]).push(e.gid)});
+  const map={};Object.entries(byCat).forEach(([cat,ids])=>ids.forEach((id,i)=>{map[id]=wkShade(WK_LANE_HEX[cat]||'#64748B',i,ids.length)}));
+  return map;
+}
+
+// ============ WORKER TIME POPUP (clicked bar shows every suite's time) ============
+function closeWkPop(){$('#wkpop').style.display='none'}
+function openWkPop(hash){
+  const c=COMMITS.find(x=>x.hash===hash);if(!c)return;
+  $('#tip').style.display='none';
+  const ents=wkEntities();
+  const colorOf=wkColors(ents);
+  const rows=ents.map(e=>{
+    const ws=wkWorkers(c,e);
+    const q=ws[0].q,s=ws[0].s;
+    const r=+(ws.reduce((a,x)=>a+x.r,0)).toFixed(1);
+    return{...e,q,s,r,v:wkEntTime(c,e),status:wkEntStatus(c,e),workers:ws};
+  }).sort((a,b)=>b.v-a.v);
+  const tot=rows.reduce((a,r)=>a+r.v,0)||1;
+  const mx=Math.max(...rows.map(r=>r.v),1);
+  const stChip=c.status==='fail'?'<span class="chip fail">FAILED</span>':c.status==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
+  $('#wkpop-body').innerHTML=`
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
+<div style="font-weight:700;font-size:15px">#${c.hash} ${c.title}</div>${stChip}
+<button onclick="closeWkPop()" style="margin-left:auto;font:600 15px var(--font);background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
+</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">Every worker suite in this run, longest first. The time is the suite's full clock time: runner wait, plus setup, plus test run. It is the same value as the chart slice. A suite with several parallel workers lists each worker's test minutes. Total: <span class="mono" style="font-weight:700;color:var(--ink)">${Math.round(tot)}m</span>.</div>
+${rows.map(r=>{
+  const dim=HW!=='all'&&r.lane.toLowerCase()!==HW;
+  const share=(r.v/tot*100).toFixed(1);
+  const w=(r.v/mx*100).toFixed(1);
+  const wsLine=r.workers.length>1?`<br><span style="font-size:12px;color:var(--muted)">${r.workers.length} workers · tests ${r.workers.map(x=>x.r+'m').join(' · ')}</span>`:`<br><span style="font-size:12px;color:var(--muted)">${r.q}m wait · ${r.s}m setup · ${r.r}m tests</span>`;
+  return`<div style="display:grid;grid-template-columns:16px 1fr 170px 52px 46px;gap:10px;align-items:center;padding:4px 0;border-bottom:1px solid var(--grid);opacity:${dim?0.3:1}">
+<span style="width:12px;height:12px;border-radius:3px;background:${colorOf[r.gid]};display:inline-block"></span>
+<span style="font-size:14px;${r.status==='fail'?'color:var(--crit)':''}">${r.name}${r.status==='fail'?' — failed':r.status==='flaky'?' — passed on retry':''}${wsLine}</span>
+<span style="height:8px;background:var(--elevated);border-radius:4px;overflow:hidden"><span style="display:block;height:100%;width:${w}%;background:${colorOf[r.gid]}"></span></span>
+<span class="mono" style="font-size:14px;font-weight:700;text-align:right">${r.v.toFixed(1)}m</span>
+<span class="mono" style="font-size:12px;color:var(--muted);text-align:right">${share}%</span>
+</div>`}).join('')}
+<div style="display:flex;gap:10px;margin-top:12px">
+<button onclick="closeWkPop();goToCommit('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open full commit details</button>
+
+</div>`;
+  $('#wkpop').style.display='flex';
+}
+
+// Suite-scoped popup: one clicked bar in single-suite view shows only that suite's workers
+function openWkSuitePop(hash,gid){
+  const c=COMMITS.find(x=>x.hash===hash);if(!c)return;
+  const ent=wkEntities().find(e=>e.gid===gid);if(!ent){openWkPop(hash);return}
+  $('#tip').style.display='none';
+  const col=WK_LANE_HEX[ent.cat]||'#64748B';
+  const rows=wkWorkerRows(c,ent);
+  const n=rows.length;
+  const suiteTot=wkEntTime(c,ent);
+  const mx=Math.max(...rows.map(r=>r.tot),0.1);
+  const st=wkEntStatus(c,ent);
+  const stChip=st==='fail'?'<span class="chip fail">FAILED</span>':st==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
+  $('#wkpop-body').innerHTML=`
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
+<div style="font-weight:700;font-size:15px">#${c.hash} ${c.title}</div>${stChip}
+<button onclick="closeWkPop()" style="margin-left:auto;font:600 15px var(--font);background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
+</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">${ent.name} on this run — one row per worker, with its runner wait, setup, and test minutes.${ent.split?' The worker split is estimated from the suite total.':''} Together the ${n>1?n+' workers':'worker'} spent <span class="mono" style="font-weight:700;color:var(--ink)">${suiteTot.toFixed(1)}m</span>.</div>
+${rows.map((r,k)=>`<div style="display:grid;grid-template-columns:16px 1fr 190px 56px;gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid var(--grid)">
+<span style="width:12px;height:12px;border-radius:3px;background:${wkShade(col,k,n)};display:inline-block"></span>
+<span style="font-size:14px;${r.status==='fail'?'color:var(--crit)':''}">${r.name}${r.status==='fail'?' — failed':r.status==='flaky'?' — passed on retry':''}<br><span style="font-size:12px;color:var(--muted)">${r.q.toFixed(1)}m wait · ${r.s.toFixed(1)}m setup · ${r.r.toFixed(1)}m tests</span></span>
+<span style="height:8px;background:var(--elevated);border-radius:4px;overflow:hidden;display:flex">${r.q>0?`<span style="width:${(r.q/mx*100).toFixed(1)}%;background:var(--q)"></span>`:''}${r.s>0?`<span style="width:${(r.s/mx*100).toFixed(1)}%;background:var(--bld)"></span>`:''}${r.r>0?`<span style="width:${(r.r/mx*100).toFixed(1)}%;background:${wkShade(col,k,n)}"></span>`:''}</span>
+<span class="mono" style="font-size:14px;font-weight:700;text-align:right">${r.tot.toFixed(1)}m</span>
+</div>`).join('')}
+<div style="display:flex;gap:10px;margin-top:12px">
+<button onclick="openWkPop('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Every suite in this run</button>
+<button onclick="closeWkPop();goToCommit('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open full commit details</button>
+
+</div>`;
+  $('#wkpop').style.display='flex';
+}
+
+// ============ WORKER TIME (Chart 1) ============
+let WK_SEL='all';
+function setWKSel(v){WK_SEL=v;renderWorker()}
+function renderWorker(){
+  const host=$('#worker-chart');if(!host)return;
+  const meta=$('#wk-meta');
+  const win=getWindows(),LIST=win.current;
+  if(!LIST.length){if(meta)meta.innerHTML=`<div><span class="mono">No merged pull requests fall inside this date range.</span></div>`;const h0=$('#worker-chart');if(h0)h0.innerHTML='';return}
+  const ents=wkEntities();
+  const colorOf=wkColors(ents);
+  const chips=$('#wk-chips');
+  if(chips){
+    const catLabel={tpu:'TPU',gpu:'GPU',cpu:'CPU',build:'Build',infra:'Checks'};
+    const byCat={};ents.forEach(e=>{(byCat[e.cat]=byCat[e.cat]||[]).push(e)});
+    const sel=`<select onchange="setWKSel(this.value)" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:5px 8px;border-radius:6px;max-width:300px;cursor:pointer">
+<option value="all" ${WK_SEL==='all'?'selected':''}>All worker suites</option>
+${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]}">${(byCat[cat]||[]).map(e=>`<option value="${e.gid}" ${WK_SEL===e.gid?'selected':''}>${e.name}${e.jobs.length>1||e.split?' — '+(e.split?e.split.length:e.jobs.length)+' workers':''}</option>`).join('')}</optgroup>`).join('')}
+</select>`;
+    chips.innerHTML=`<span style="font-size:13px;color:var(--muted)">Worker suite:</span>${sel}`+(WK_SEL==='all'?'':`<button class="fchip" style="border-radius:8px" onclick="setWKSel('all')">Back to all suites</button>`);
+  }
+
+  // Single-suite mode: same stacked columns as the all-suites view — runner wait, setup, then one slice per worker's tests
+  if(WK_SEL!=='all'){
+    const ent=ents.find(e=>e.gid===WK_SEL);
+    if(!ent){WK_SEL='all';renderWorker();return}
+    const col=WK_LANE_HEX[ent.cat]||'#64748B';
+    const dimAll=HW!=='all'&&ent.lane.toLowerCase()!==HW;
+    const nW=ent.split?ent.split.length:ent.jobs.length;
+    if(meta)meta.innerHTML=`<div><span class="mono">${ent.name} across the ${LIST.length} merged pull requests ${win.inRange}. One bar per worker under each pull request, stacking that worker's runner wait, setup, and tests. The label above a group is all its workers added together${ent.split?' (split estimated from the suite total)':''}. Click a bar for that run's worker details.</span></div>
+<div data-wklegend style="margin-top:4px"><span style="color:var(--q)">■</span> Runner wait <span style="color:var(--bld);margin-left:8px">■</span> Setup <span style="color:${col};margin-left:8px">■</span> Worker tests${nW>1?' <span style="color:var(--muted)">(tests shaded dark to light = worker 1 to '+nW+')</span>':''}</div>`;
+    host.innerHTML='';
+    const ns='http://www.w3.org/2000/svg';
+    const W=1100,LP=46,RP=12,TP=26,gap=14,plotH=244;
+    const B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
+    const data=LIST.map(c=>({rows:wkWorkerRows(c,ent),v:wkEntTime(c,ent),status:wkEntStatus(c,ent)}));
+    const ymax=Math.max(...data.flatMap(x=>x.rows.map(r=>r.tot)),5)*1.2;
+    const py=v=>TP+(1-v/ymax)*plotH;
+    const svg=document.createElementNS(ns,'svg');
+    svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+    svg.style.cssText=`display:block;width:100%;min-width:760px;opacity:${dimAll?0.25:1}`;
+    const el=(a,b)=>{const e=document.createElementNS(ns,a);for(const[k,v]of Object.entries(b))e.setAttribute(k,String(v));svg.appendChild(e);return e};
+    const step=ymax>25?10:ymax>12?5:2;
+    for(let g=0;g<=ymax;g+=step){
+      el('line',{x1:LP,y1:py(g),x2:W-RP,y2:py(g),stroke:'var(--grid)','stroke-width':1,'stroke-dasharray':'3,3'});
+      el('text',{x:LP-6,y:py(g)+3,'text-anchor':'end','font-size':'11',fill:'#64748B','font-family':'var(--mono)'}).textContent=g+'m';
+    }
+    const slotW=(W-LP-RP-gap*LIST.length)/LIST.length;
+    const inner=2;
+    const tEl=$('#tip');
+    const place=e=>{const ow=tEl.offsetWidth||300;let lx=e.clientX+14;if(lx+ow+8>window.innerWidth)lx=e.clientX-ow-14;tEl.style.left=lx+'px';tEl.style.top=Math.max(8,e.clientY-14)+'px'};
+    LIST.forEach((c,i)=>{
+      const x0=LP+gap/2+(LIST.length-1-i)*(slotW+gap);  // oldest left, newest right
+      const dpt=data[i];
+      const n=dpt.rows.length;
+      const bw=(slotW-inner*(n-1))/n;
+      dpt.rows.forEach((wk,k)=>{
+        const bx=x0+k*(bw+inner);
+        const parts=[
+          {label:'Runner wait',v:wk.q,fill:'var(--q)'},
+          {label:'Setup (image + env)',v:wk.s,fill:'var(--bld)'},
+          {label:'Tests',v:wk.r,fill:wkShade(col,k,n)}
+        ];
+        const vis=parts.filter(p=>p.v>0);
+        let acc=0;
+        parts.forEach((sl,si)=>{
+          if(sl.v<=0)return;
+          const isTop=sl===vis[vis.length-1];
+          const y1=py(acc+sl.v),h=py(acc)-py(acc+sl.v);
+          const geo=isTop?{d:roundTopD(bx,y1,Math.max(bw,1.5),Math.max(h,0.5),2.5)}:{x:bx,y:y1,width:Math.max(bw,1.5),height:Math.max(h,0.5)};
+          const r=el(isTop?'path':'rect',{...geo,fill:sl.fill,stroke:'var(--surface)','stroke-width':1,cursor:'pointer'});
+          r.setAttribute('data-wk',k);
+          r.addEventListener('mousemove',ev=>{
+            if(n>1)svg.querySelectorAll('[data-wk]').forEach(nd=>nd.setAttribute('opacity',+nd.getAttribute('data-wk')===k?'1':'0.3'));
+            tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">#${c.hash} ${c.title}</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:2px">${ent.name}${n>1?' · '+wk.name:''}</div>
+${wk.machine?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${wk.machine}</div>`:'<div style="margin-bottom:6px"></div>'}
+${parts.map((s2,k2)=>`<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;${k2===si?'font-weight:700':''}"><span style="color:${k2===si?'var(--ink)':'var(--ink2)'}">${s2.label}</span><span class="mono">${(+s2.v).toFixed(1)}m</span></div>`).join('')}
+<div style="display:flex;justify-content:space-between;gap:14px;font-size:14px;font-weight:700;border-top:1px solid var(--grid);margin-top:4px;padding-top:4px"><span>This worker</span><span class="mono" style="color:${wk.status==='fail'?'var(--crit)':'var(--ink)'}">${wk.tot.toFixed(1)}m</span></div>
+${n>1?`<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;color:var(--ink2)"><span>All ${n} workers together</span><span class="mono">${dpt.v.toFixed(1)}m</span></div>`:''}
+${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4px">This worker failed on this run.</div>':dpt.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4px">Another worker in this suite failed on this run.</div>':''}
+<div style="font-size:12px;color:var(--accent);text-align:center;margin-top:6px">click the bar to see this suite's worker details →</div>`;
+            tEl.style.display='block';place(ev);
+          });
+          r.addEventListener('mouseleave',()=>{tEl.style.display='none';svg.querySelectorAll('[data-wk]').forEach(nd=>nd.setAttribute('opacity','1'))});
+          r.addEventListener('click',()=>{tEl.style.display='none';openWkSuitePop(c.hash,ent.gid)});
+          acc+=sl.v;
+        });
+      });
+      prAxisLabelAuto(svg,ns,x0+slotW/2,H-B,c.hash,slotW+gap);
+      const tops=dpt.rows.filter(r=>r.tot>0).map(r=>py(r.tot));
+      const topY=tops.length?Math.min(...tops):py(0);
+      el('text',{x:x0+slotW/2,y:topY-5,'text-anchor':'middle','font-size':'11',fill:'#94A3B8','font-family':'var(--mono)'}).textContent=dpt.v.toFixed(1)+'m';
+      if(dpt.status==='fail')el('text',{x:x0+slotW/2,y:topY-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
+    });
+    host.appendChild(svg);
+    return;
+  }
+
+  if(meta)meta.innerHTML=`<div><span class="mono">${rangeCovers(win,LIST)}. One slice per worker suite, stacked with build and checks at the bottom, then CPU, GPU, and TPU on top.</span></div>
+<div data-wklegend style="margin-top:4px"><span style="color:var(--tpu)">■</span> TPU <span style="color:var(--gpu);margin-left:8px">■</span> GPU <span style="color:var(--cpu);margin-left:8px">■</span> CPU <span style="color:#8B5CF6;margin-left:8px">■</span> Build <span style="color:#64748B;margin-left:8px">■</span> Checks</div>`;
+  host.innerHTML='';
+  const ns='http://www.w3.org/2000/svg';
+  const W=1100,LP=46,RP=12,TP=26,gap=14,plotH=274;
+  const B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
+  const svg=document.createElementNS(ns,'svg');
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  svg.style.cssText='display:block;width:100%;min-width:760px';
+  const el=(a,b)=>{const e=document.createElementNS(ns,a);for(const[k,v]of Object.entries(b))e.setAttribute(k,String(v));svg.appendChild(e);return e};
+  const totals=LIST.map(c=>ents.reduce((a,e)=>a+wkEntTime(c,e),0));
+  const ymax=Math.max(...totals)*1.08;
+  const y=v=>TP+(1-v/ymax)*plotH;
+  const barW=(W-LP-RP-gap*LIST.length)/LIST.length;
+  for(let g=0;g<=ymax;g+=50){
+    el('line',{x1:LP,y1:y(g),x2:W-RP,y2:y(g),stroke:'var(--grid)','stroke-width':1,'stroke-dasharray':'3,3'});
+    el('text',{x:LP-6,y:y(g)+3,'text-anchor':'end','font-size':'11',fill:'#64748B','font-family':'var(--mono)'}).textContent=g+'m';
+  }
+  const tipEl=$('#tip');
+  LIST.forEach((c,i)=>{
+    const x=LP+gap/2+(LIST.length-1-i)*(barW+gap);  // oldest left, newest right
+    const tot=totals[i]||1;
+    let acc=0;
+    const items=ents.map(e=>({e,v:wkEntTime(c,e)})).filter(it=>it.v>0).reverse();
+    items.forEach((it,vi)=>{
+      const e=it.e,v=it.v;
+      const isTop=vi===items.length-1;
+      const y1=y(acc+v),h=y(acc)-y(acc+v);
+      const dim=HW!=='all'&&e.lane.toLowerCase()!==HW;
+      const baseOp=dim?0.15:1;
+      const geo=isTop?{d:roundTopD(x,y1,barW,Math.max(h,0.5),3)}:{x,y:y1,width:barW,height:Math.max(h,0.5)};
+      const r=el(isTop?'path':'rect',{...geo,fill:colorOf[e.gid],stroke:'var(--surface)','stroke-width':1,opacity:baseOp,cursor:'pointer'});
+      r.setAttribute('data-gid',e.gid);r.setAttribute('data-op',baseOp);
+      const share=(v/tot*100).toFixed(1);
+      const ws=wkWorkers(c,e);
+      r.addEventListener('mousemove',ev=>{
+        svg.querySelectorAll('[data-gid]').forEach(nd=>nd.setAttribute('opacity',nd.getAttribute('data-gid')===e.gid?nd.getAttribute('data-op'):'0.22'));
+        tipEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">${e.name}</div>
+<div style="font-size:13px;color:var(--ink2)">#${c.hash} · <span class="mono">${v.toFixed(1)}m</span> · ${share}% of this run's worker time</div>
+${(()=>{const m=RUNNER_LABELS[(e.jobs||[])[0]];return m?`<div class="mono" style="font-size:12px;color:var(--muted);margin-top:2px">${m}</div>`:''})()}
+${ws.length>1?`<div style="font-size:12px;color:var(--muted);margin-top:3px">${ws.length} parallel workers · tests ${ws.map(x=>x.r+'m').join(' · ')}</div>`:''}
+<div style="font-size:12px;color:var(--accent);margin-top:4px">this suite is lit up across every bar · click for every suite's time →</div>`;
+        tipEl.style.display='block';
+        const lx=ev.clientX+14+300>window.innerWidth?ev.clientX-314:ev.clientX+14;
+        tipEl.style.left=lx+'px';tipEl.style.top=Math.max(8,ev.clientY-14)+'px';
+      });
+      r.addEventListener('mouseleave',()=>{tipEl.style.display='none';svg.querySelectorAll('[data-gid]').forEach(nd=>nd.setAttribute('opacity',nd.getAttribute('data-op')))});
+      r.addEventListener('click',()=>{openWkPop(c.hash)});
+      acc+=v;
+    });
+    prAxisLabelAuto(svg,ns,x+barW/2,H-B,c.hash,barW+gap);
+    el('text',{x:x+barW/2,y:y(tot)-5,'text-anchor':'middle','font-size':'11',fill:'#94A3B8','font-family':'var(--mono)'}).textContent=Math.round(tot)+'m';
+    if(c.status==='fail')el('text',{x:x+barW/2,y:y(tot)-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
+  });
+  host.appendChild(svg);
+}
+// ============ JOBS RESCUED BY RE-RUNS (aggregate flakiness) ============
+// Window = the merged pull requests inside the header date range (shared with every other card).
+// A rescue = the job failed on attempt 1 and passed on a manual re-run of the same commit.
+// Only #4920 sits inside the stored 13 runs; older events live in the pre-window commits.
+let RESCUES=[
+ {id:'gpu-i',name:'GPU Tests (gpu-integration)',lane:'GPU',events:[
+   {pr:'#4884',date:'Jul 31',wasted:9.5,cause:'CUDA OOM at step 42'},
+   {pr:'#4890',date:'Aug 04',wasted:11.0,cause:'CUDA OOM at step 42'},
+   {pr:'#4896',date:'Aug 07',wasted:8.5,cause:'CUDA OOM at step 42'},
+   {pr:'#4904',date:'Aug 12',wasted:12.0,cause:'CUDA OOM at step 42'},
+   {pr:'#4920',date:'Aug 19',wasted:11.0,cause:'CUDA OOM at step 42'},
+ ]},
+ {id:'tpu-pre-u',name:'TPU Pretrain Tests (tpu-unit)',lane:'TPU',fails:['#4940'],events:[
+   {pr:'#4886',date:'Aug 01',wasted:19.0,cause:'test_ring_attention_multihost timed out after 300s'},
+   {pr:'#4920',date:'Aug 19',wasted:21.5,cause:'test_ring_attention_multihost timed out after 300s'},
+ ]},
+ {id:'tpu-pw-i',name:'TPU Pathways Integration Tests',lane:'TPU',fails:['#4940'],events:[
+   {pr:'#4898',date:'Aug 08',wasted:13.0,cause:'the job failed at step "Start Pathways Daemons"'},
+ ]},
+];
+// The specific test behind each rescue, from JUnit artifacts. The Pathways rescue was a
+// the Pathways jobs write no test-result file, so it has no row here.
+let FLAKY_TESTS=[
+ {test:'test_gpu_convergence_a100_bf16',job:'gpu-i',prs:['#4884','#4890','#4896','#4904','#4920'],cause:'CUDA OOM at step 42'},
+ {test:'test_ring_attention_multihost',job:'tpu-pre-u',prs:['#4886','#4920'],cause:'timed out after 300s'},
+ // Synthetic: the same GPU OOM runs also took down neighbouring tests (an OOM poisons the device for the
+ // tests that follow), so several tests share one rescue run. Only pre-window synthetic PRs are used.
+ {test:'test_gpu_moe_expert_parallel_bf16',job:'gpu-i',prs:['#4890','#4896','#4904'],cause:'CUDA OOM at step 42'},
+ {test:'test_gpu_checkpoint_restore_sharded',job:'gpu-i',prs:['#4884','#4904'],cause:'NCCL timeout after 1800s (rank 1)'},
+ {test:'test_gpu_flash_attention_backward',job:'gpu-i',prs:['#4896'],cause:'CUDA error: device-side assert triggered'},
+];
+function wilsonCI(k,n){const z=1.96,p=k/n,d=1+z*z/n,c=p+z*z/(2*n),m=z*Math.sqrt((p*(1-p)+z*z/(4*n))/n);return[Math.max(0,(c-m)/d),Math.min(1,(c+m)/d)]}
+function flakyColor(rate){return rate>=0.2?'var(--crit)':rate>=0.1?'var(--warn)':'#64748B'}
+const thIdxOf=pr=>TH_COMMITS.findIndex(c=>'#'+c.hash===pr);
+function flakyCellTip(evt,id,idx){
+  const j=RESCUES.find(r=>r.id===id);if(!j)return;
+  const c=TH_COMMITS[idx];
+  const e=j.events.find(x=>thIdxOf(x.pr)===idx);
+  const f=(j.fails||[]).some(p=>thIdxOf(p)===idx);
+  const tEl=$('#tip');
+  const head=`<div style="font-weight:700;font-size:13px;margin-bottom:2px">${c.pr} &middot; ${c.date}</div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">${j.name}</div>`
+    +(RUNNER_LABELS[j.id]?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:4px">${RUNNER_LABELS[j.id]}</div>`:'');
+  // Only this run of this job: which tests failed on the first attempt (from the JUnit report of attempt 1).
+  const CAP=6;
+  const testLine=(name,cause)=>`<div style="font-size:12px;padding:1px 0;line-height:1.45"><span class="mono" style="color:var(--ink)">${name}</span> <span style="color:var(--muted)">&mdash; ${cause}</span></div>`;
+  const listOf=(tests)=>{
+    const shown=tests.slice(0,CAP),more=tests.length-shown.length;
+    return shown.map(x=>testLine(x.name,x.cause)).join('')+(more>0?`<div style="font-size:12px;color:var(--muted);margin-top:2px">and ${more} more failed in the same run.</div>`:'');
+  };
+  let body;
+  if(e){
+    const cal=flakyCalc();
+    const tests=FLAKY_TESTS.filter(x=>x.job===id&&x.prs.includes(c.pr))
+      .map(x=>({name:x.test,cause:x.cause,n:x.prs.filter(p=>cal.iset.has(thIdxOf(p))).length}))
+      .sort((a,b)=>b.n-a.n||a.name.localeCompare(b.name));
+    body=`<div style="font-size:13px;color:var(--warn)">Failed first, passed on re-run${tests.length?'':' &mdash; '+e.cause} &middot; ${e.wasted}m wasted</div>`
+      +(tests.length
+        ?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">${tests.length===1?'1 test':tests.length+' tests'} failed on the first attempt and passed on the re-run:</div>${listOf(tests)}`
+        :`<div style="font-size:12px;color:var(--ink2);margin-top:6px">No single test failed in this run: ${e.cause}.</div>`);
+  }else if(f){
+    const cm=COMMITS.find(x=>x.hash===c.hash);const jj=cm?jd(cm,id):null;
+    const rec=cm&&TESTS[cm.hash]&&TESTS[cm.hash][id]&&TESTS[cm.hash][id].tests?TESTS[cm.hash][id].tests.filter(x=>x.st==='fail').map(x=>({name:x.name,cause:x.error||'failed'})):[];
+    body=`<div style="font-size:13px;color:var(--crit)">Failed and was never re-run &mdash; counted as a failure, not a rescue.</div>`
+      +(jj&&jj.r===0
+        ?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">No test ran: the job waited ${Math.round(jj.q)} minutes for a runner and was cancelled before pytest started.</div>`
+        :rec.length?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">${rec.length===1?'1 test':rec.length+' tests'} failed on the only attempt:</div>${listOf(rec)}`
+        :`<div style="font-size:12px;color:var(--ink2);margin-top:6px">No test list is recorded for this run.</div>`);
+  }else{
+    body=`<div style="font-size:13px;color:var(--ink2)">Passed on the first attempt.</div>`;
+  }
+  tEl.innerHTML=head+body;
+  tEl.style.maxWidth='430px';
+  tEl.style.display='block';
+  const ow=tEl.offsetWidth||280;let lx=evt.clientX+14;if(lx+ow+8>window.innerWidth)lx=evt.clientX-ow-14;
+  tEl.style.left=lx+'px';tEl.style.top=Math.max(8,evt.clientY-14)+'px';
+}
+function flakyTipHide(){const tEl=$('#tip');tEl.style.display='none';tEl.style.maxWidth=''}
+function thDateOf(s){const p=s.split(' ');const mm={Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11}[p[0]];return new Date(2026,mm,parseInt(p[1],10))}
+// Window for the re-run card, driven by the header date selector (mock "today" = Aug 20).
+function flakyCalc(){
+  const sel=$('#date-range');
+  const R=getRange();const from=R.from,to=R.to,label=R.label;
+  const idxs=[];TH_COMMITS.forEach((c,i)=>{const d=thDateOf(c.date);if((!from||d>=from)&&(!to||d<=to))idxs.push(i)});
+  const iset=new Set(idxs);
+  const rows=RESCUES.map(j=>{
+    const evIn=j.events.filter(e=>iset.has(thIdxOf(e.pr)));
+    const failIn=(j.fails||[]).filter(p=>iset.has(thIdxOf(p)));
+    return{j,evIn,failIn,rate:idxs.length?evIn.length/idxs.length:0};
+  });
+  const inRange=R.inRange;
+  return{idxs,iset,n:idxs.length,rows,label,inRange,days:R.days,custom:R.custom};
+}
+function renderFlaky(){
+  const host=$('#flaky');if(!host)return;
+  const cal=flakyCalc();
+  const n=cal.n;
+  if(!n){host.innerHTML='<div style="font-size:14px;color:var(--muted)">No merged pull requests fall inside this date range.</div>';return}
+  const totE=cal.rows.reduce((a,r)=>a+r.evIn.length,0);
+  const totW=Math.round(cal.rows.reduce((a,r)=>a+r.evIn.reduce((x,e)=>x+e.wasted,0),0));
+  const listed=cal.rows.filter(r=>r.evIn.length>0).sort((a,b)=>b.rate-a.rate);
+  const others=JOBS.length-listed.length;
+  const gated=n<10;
+  const first=TH_COMMITS[cal.idxs[0]],last=TH_COMMITS[cal.idxs[cal.idxs.length-1]];
+  let h=`<div style="font-size:14px;color:var(--ink);margin-bottom:10px">${cal.label} covers <b>${n} merged pull requests</b>; re-runs rescued <b>${totE} failed first attempt${totE===1?'':'s'}</b>, burning <b>${totW} extra machine minutes</b>.</div>`;
+  // Summary first: the flakiest tests in this window, most re-runs first (the job strips follow as the detail)
+  const tRows=FLAKY_TESTS.map(ft=>{
+    const j=RESCUES.find(r=>r.id===ft.job);
+    const inPrs=ft.prs.filter(p=>cal.iset.has(thIdxOf(p)));
+    const wasted=Math.round(inPrs.reduce((a,p)=>{const e=j.events.find(x=>x.pr===p);return a+(e?e.wasted:0)},0));
+    return{ft,j,inPrs,wasted};
+  }).filter(r=>r.inPrs.length>0).sort((a,b)=>b.inPrs.length-a.inPrs.length||b.wasted-a.wasted||a.ft.test.localeCompare(b.ft.test));
+  const CAP=5,shownT=FL_ALL?tRows:tRows.slice(0,CAP);
+  const tLead=tRows.length
+    ?`These are the tests that failed on a first attempt and then passed when their job was re-run, counted ${cal.inRange}. The "Failed first try" column counts runs, not tests: The job reached a first attempt on each of the ${cal.n} merged pull requests ${cal.inRange} (a pull request whose changed files skip the job would not count), so every test had up to ${cal.n} chances to run (a run that died before its tests started counts too). "${tRows[0].inPrs.length} of ${cal.n} runs" means that in ${tRows[0].inPrs.length} of those ${cal.n} runs the test failed on the first attempt and then passed when the job was re-run; in the other ${cal.n-tRows[0].inPrs.length} runs it passed first time. The ${cal.n} is the same for every row here; it can differ between jobs when a job was skipped on some pull requests. Tests with the most such runs come first${tRows.length>CAP&&!FL_ALL?`; only the top ${CAP} are shown`:''}. Minutes wasted is the re-run time of the test's own job; tests that failed in the same job and run show the same minutes, so the column cannot be added up. Click a test to open every re-run of the job it belongs to.`
+    :'';
+  const pwN=(listed.find(x=>x.j.id==='tpu-pw-i')||{evIn:[]}).evIn.length;  // rescues on a job that publishes no test results (Pathways) in this range
+  const tFoot=(pwN?`${pwN===1?'One':pwN} of the ${totE} rescued runs (TPU Pathways) ${pwN===1?'has':'have'} no test here: the Pathways jobs publish no test results, so no test can be named. `:'')
+    +`Test results are only collected from the day the dashboard went live &mdash; GitHub deletes them after about a day, so older runs cannot be added.`
+    +(tRows.length>CAP?` <a href="#" data-flmore="1" onclick="event.preventDefault();flakyShowAll(${FL_ALL?'false':'true'})" style="color:var(--accent);text-decoration:none">${FL_ALL?'Show only the top '+CAP:'Show all '+tRows.length+' tests'}</a>`:'');
+  h+=sumBlock({key:'flaky',guide:'flaky-sum',guideKind:'table',title:'Flakiest tests',lead:tLead,foot:tFoot,empty:'No test needed a re-run to pass '+cal.inRange+'.',
+    cols:'minmax(240px,1.3fr) minmax(170px,1fr) 124px 124px',head:['Test','Job it runs in','<span style="display:block;text-align:right">Failed first try</span>','<span style="display:block;text-align:right">Minutes wasted</span>'],
+    rows:shownT.map(r=>{
+      const rate=cal.n?r.inPrs.length/cal.n:0,col=flakyColor(rate);
+      const hlIdx=r.inPrs.map(p=>thIdxOf(p)).filter(x=>x>=0).join(',');
+      return{tone:rate>=0.2?'crit':rate>=0.1?'warn':'none',dim:HW!=='all'&&r.j.lane.toLowerCase()!==HW,
+        attrs:`data-ftlane="${r.j.lane}" onmouseenter="flakyTestHl('${r.j.id}','${hlIdx}',true)" onmouseleave="flakyTestHl('${r.j.id}','${hlIdx}',false)"`,
+        onclick:`openFlakyTestPop('${r.ft.test.replace(/'/g,"\\'")}','${r.j.id}')`,cells:[
+        `<div class="mono" style="font-weight:600;color:var(--ink);overflow-wrap:anywhere">${r.ft.test}</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${r.ft.cause} &middot; last in ${r.inPrs[r.inPrs.length-1]}</div>`,
+        `<span style="color:var(--ink2)"><span style="color:${LANE_COLORS[r.j.lane]}">&#9679;</span> ${r.j.name}</span>`,
+        `<span class="mono" style="display:block;text-align:right;font-weight:700;color:${col==='#64748B'?'var(--ink)':col}">${r.inPrs.length} of ${cal.n} runs</span>`,
+        `<span class="mono" style="display:block;text-align:right;color:var(--muted)">${r.wasted}m</span>`]};
+    })});
+  let legendH=`<div style="display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:8px">
+    <span>Each cell is one merged pull request, oldest on the left &mdash; ${first.pr} (${first.date}) &rarr; ${last.pr} (${last.date}).</span>
+    <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:var(--warn);display:inline-block"></span>failed first, passed on re-run</span>
+    <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;border:2px solid var(--crit);display:inline-block"></span>failed, never re-run</span>
+    <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:var(--elevated);display:inline-block"></span>passed first try</span>
+  </div>`;
+  const failsInRange=[...new Set(RESCUES.flatMap(r=>(r.fails||[]).filter(p=>cal.iset.has(thIdxOf(p)))))];
+  h+=`<div class="gtitle" style="font-size:14px;font-weight:700;color:var(--ink);margin:4px 0 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">Re-runs per job</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="flaky">This chart shows which jobs are flaky: they fail on a first attempt and pass when re-run, and what those re-runs cost. <span class="g-more">Each row is one job. Each cell is one merged pull request. An amber cell means the job failed on the first attempt and passed when someone re-ran it. Hover a cell to see which tests failed in that run. Click a row for every rescue with its pull request and cost. The label under each column is the pull request number and its merge date. Runs that failed and were never re-run — the outlined cells — are failures rather than rescues, so they do not count toward the rate. A rate is only shown once a job has at least 10 first attempts in the selected range. An amber rate means at least 1 in 10 first attempts failed before passing on a re-run; a red rate means at least 1 in 5.</span></div>`+(listed.length?legendH:`<div style="font-size:14px;color:var(--ink2);padding:10px 4px">No job needed a re-run to pass ${cal.inRange}.${failsInRange.length?` ${failsInRange.join(', ')} failed and was never re-run — a failure, not a rescue, so it has no row.`:''}</div>`);
+  h+=listed.map(({j,evIn,failIn,rate})=>{
+    const dim=HW!=='all'&&j.lane.toLowerCase()!==HW;
+    const col=flakyColor(rate);
+    const wasted=Math.round(evIn.reduce((a,e)=>a+e.wasted,0));
+    const resIdx={};evIn.forEach(e=>{resIdx[thIdxOf(e.pr)]=e});
+    const failIdx={};failIn.forEach(p=>{failIdx[thIdxOf(p)]=p});
+    const cells=cal.idxs.map(i=>{
+      const st=resIdx[i]?'background:var(--warn)':failIdx[i]?'background:transparent;border:2px solid var(--crit)':'background:#D9E2F0;border:1px solid #B8C6D9';
+      return `<div data-cell="1" data-fljob="${j.id}" data-flidx="${i}" style="flex:1;height:16px;border-radius:3px;min-width:6px;transition:opacity .1s;${st}" onmousemove="flakyCellTip(event,'${j.id}',${i})" onmouseleave="flakyTipHide()"></div>`;
+    }).join('');
+    const rateTxt=gated
+      ?`${evIn.length} of ${n} &middot; <span style="color:var(--muted)">too few to rate (needs 10)</span>`
+      :`<span style="color:${col==='#64748B'?'var(--ink)':col};font-weight:700">${Math.round(rate*100)}%</span> &middot; ${evIn.length} of ${n} first attempts &middot; <span style="color:var(--muted)">${wasted}m wasted</span>`;
+    return `<div class="issue-row" data-flane="${j.lane}" onclick="openFlakyPop('${j.id}')" style="grid-template-columns:minmax(220px,290px) 1fr 340px;cursor:pointer;opacity:${dim?0.28:1}">
+      <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${j.name}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane${RUNNER_LABELS[j.id]?` &middot; <span class="mono" style="font-size:12px">${RUNNER_LABELS[j.id]}</span>`:''}</div></div>
+      <div style="display:flex;gap:2px;min-width:220px;align-items:center">${cells}</div>
+      <div class="mono" style="font-size:13px;text-align:right;white-space:nowrap;color:var(--ink)">${rateTxt}</div>
+    </div>`;
+  }).join('');
+  if(listed.length){
+    h+=`<div data-flaxis="1" style="display:grid;grid-template-columns:minmax(220px,290px) 1fr 340px;gap:16px;align-items:start;padding:0 17px">
+      <div style="font-size:12px;color:var(--muted);text-align:right;padding-top:2px">merged pull request &rarr;</div>
+      <div style="display:flex;gap:2px">${cal.idxs.map(i=>`<div style="flex:1;min-width:6px;position:relative;height:88px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div><span style="position:absolute;top:7px;right:50%;transform:rotate(-55deg);transform-origin:top right;display:inline-block;font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap">${TH_COMMITS[i].pr} ${TH_COMMITS[i].date}</span></div>`).join('')}</div>
+      <div style="font-size:12px;color:var(--muted);padding-top:2px">oldest &rarr; newest</div>
+    </div>`;
+  }
+  // Facts only under the strips; the rules (never-re-run cells, the 10-attempt gate, amber/red thresholds) live in the section's How to read panel.
+  const footFacts=[];
+  if(listed.length)footFacts.push(`The other ${others} of ${JOBS.length} jobs needed no re-run ${cal.inRange}.`);
+  if(gated)footFacts.push(`No rate is shown: this range has only ${n} merged pull requests, and a rate needs at least 10.`);
+  if(footFacts.length)h+=`<div data-flfoot style="font-size:13px;color:var(--muted);margin-top:10px;line-height:1.55">${footFacts.join(' ')}</div>`;
+  host.innerHTML=h;
+}
+// Hovering a row of the Flakiest tests table lights up, in the Re-runs per job strips below,
+// exactly the pull requests where THAT test failed on the first attempt. Its job's other
+// rescues stay dim: they were a different test.
+function flakyTestHl(jobId,idxCsv,on){
+  const want=new Set((idxCsv||'').split(',').filter(x=>x!=='').map(Number));
+  document.querySelectorAll('#flaky [data-cell]').forEach(cell=>{
+    if(!on){cell.style.opacity='';cell.style.outline='';return}
+    const mine=cell.getAttribute('data-fljob')===jobId&&want.has(+cell.getAttribute('data-flidx'));
+    cell.style.opacity=mine?'1':'0.22';
+    cell.style.outline=mine?'2px solid var(--ink)':'';
+  });
+  document.querySelectorAll('#flaky [data-flaxis] span').forEach(s=>{s.style.opacity=on?'0.35':''});
+}
+
+// The Flakiest tests rows used to open the popup for the job the test runs in, which answered
+// a question the reader had not asked. This one is about the test.
+function openFlakyTestPop(testName,jobId){
+  const ft=FLAKY_TESTS.find(x=>x.test===testName&&x.job===jobId);
+  const j=RESCUES.find(r=>r.id===jobId);
+  if(!ft||!j)return;
+  $('#tip').style.display='none';
+  const cal=flakyCalc();
+  const inPrs=ft.prs.filter(p=>cal.iset.has(thIdxOf(p)));
+  const wasted=Math.round(inPrs.reduce((a,p)=>{const e=j.events.find(x=>x.pr===p);return a+(e?e.wasted:0)},0));
+  const share=FLAKY_TESTS.filter(x=>x.job===jobId&&x.test!==testName&&x.prs.some(p=>inPrs.includes(p)));
+  const rowsH=inPrs.map(p=>{
+    const e=j.events.find(x=>x.pr===p)||{};
+    const chip=`<span class="mono" style="font-size:13px;color:var(--ink2)">${p}</span>`;
+    return `<div style="display:grid;grid-template-columns:80px 64px 1fr auto;gap:12px;align-items:center;padding:8px 4px;border-top:1px solid var(--grid)">
+      <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${e.date||''}</span>
+      <span class="mono" style="font-size:13px;color:var(--ink2)">${ft.cause}</span>
+      <span class="mono" style="font-size:13px;color:var(--warn)">${e.wasted||0}m wasted</span></div>`;
+  }).join('');
+  $('#wkpop-body').innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
+      <div class="mono" style="font-size:16px;font-weight:700;color:var(--ink);overflow-wrap:anywhere">${ft.test}</div>
+      <button onclick="closeWkPop()" style="background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer">&#10005;</button></div>
+    <div style="font-size:13px;color:var(--ink2);margin-bottom:12px;line-height:1.5">
+      It failed on the first attempt and passed on a re-run in ${inPrs.length} of the ${cal.n} merged pull requests ${cal.inRange}, costing ${wasted} minutes of re-run time.
+      It runs in <span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.name}.
+      Every failure so far reported the same line: <span class="mono" style="color:var(--ink)">${ft.cause}</span>.</div>
+    ${inPrs.length?rowsH:'<div style="font-size:13px;color:var(--muted)">This test needed no re-run inside this date range.</div>'}
+    ${share.length?`<div style="font-size:13px;color:var(--ink2);margin-top:10px;line-height:1.5">${share.length===1?'One other test':share.length+' other tests'} failed in the same runs: ${share.map(x=>`<span class="mono">${x.test}</span>`).join(', ')}. They share those runs&rsquo; re-run minutes, so the minutes column cannot be added up.</div>`:''}
+    <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--grid)">
+      <button onclick="openFlakyPop('${jobId}')" style="font:600 13px var(--font);background:var(--elevated);border:1px solid var(--border);border-radius:8px;padding:6px 12px;color:var(--accent);cursor:pointer">Every re-run of ${j.name} &rarr;</button></div>
+`;
+  $('#wkpop').style.display='flex';
+}
+
+function openFlakyPop(id){
+  const j=RESCUES.find(r=>r.id===id);if(!j)return;
+  $('#tip').style.display='none';
+  const cal=flakyCalc();
+  const evIn=j.events.filter(e=>cal.iset.has(thIdxOf(e.pr)));
+  const failIn=(j.fails||[]).filter(p=>cal.iset.has(thIdxOf(p)));
+  const wasted=Math.round(evIn.reduce((a,e)=>a+e.wasted,0));
+  const rateBit=cal.n>=10
+    ?(()=>{const ci=wilsonCI(evIn.length,cal.n);return `(${Math.round(evIn.length/cal.n*100)}%, 95% interval ${Math.round(ci[0]*100)}&ndash;${Math.round(ci[1]*100)}%)`})()
+    :'(too few first attempts in this range to rate)';
+  const rowsH=evIn.map(e=>{
+    const real=COMMITS.some(c=>'#'+c.hash===e.pr);
+    const chip=real?`<button onclick="closeWkPop();inspectPR('${e.pr.slice(1)}')" style="font:600 13px var(--mono);background:var(--elevated);border:1px solid var(--border);color:var(--accent);padding:3px 9px;border-radius:6px;cursor:pointer">${e.pr}</button>`
+      :`<span class="mono" style="font-size:13px;color:var(--ink2)">${e.pr}</span>`;
+    return `<div style="display:grid;grid-template-columns:80px 64px 1fr auto;gap:12px;align-items:center;padding:8px 4px;border-top:1px solid var(--grid)">
+      <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${e.date}</span>
+      <span style="font-size:13px;color:var(--ink2)">${e.cause}</span>
+      <span class="mono" style="font-size:13px;color:var(--warn)">${e.wasted}m wasted</span></div>`;
+  }).join('');
+  $('#wkpop-body').innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
+      <div style="font-size:17px;font-weight:700;color:var(--ink)">${j.name}</div>
+      <button onclick="closeWkPop()" style="background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer">&#10005;</button></div>
+    <div style="font-size:13px;color:var(--ink2);margin-bottom:12px;line-height:1.5"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane &middot; ${cal.label.toLowerCase()} &middot; failed first and passed on a re-run in ${evIn.length} of ${cal.n} merged pull requests ${rateBit} &middot; ${wasted} machine minutes wasted in total</div>
+    ${evIn.length?rowsH:'<div style="font-size:13px;color:var(--muted)">No re-runs inside this date range.</div>'}
+    ${failIn.length?`<div style="font-size:13px;color:var(--crit);margin-top:10px">This job also failed in ${failIn.join(', ')} and was never re-run &mdash; that run counts as a failure, not a rescue.</div>`:''}
+`;
+  $('#wkpop').style.display='flex';
+}
+
+// Card guides (2026-08-31 part G). A description tagged data-guide keeps its visible lead; the
+// text inside its .g-more span moves into a "How to read" panel opened by a button beside the card
+// title. Open state lives in GUIDE_OPEN so the full re-render behind every filter click keeps it.
+const GUIDE_OPEN=new Set();
+const GUIDE_ICON='<svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="7.2" y="7" width="1.6" height="5" fill="currentColor"/><circle cx="8" cy="4.6" r="1" fill="currentColor"/></svg>';
+function guideBtnLabel(open){return GUIDE_ICON+'<span>'+(open?'Hide guide':'How to read')+'</span>'}
+function guideTitleEl(c){const SEL='.card-title-row,.ct,.card-title,.gtitle,h2,h3';let p=c.previousElementSibling;while(p&&!p.matches(SEL))p=p.previousElementSibling;if(!p&&c.parentElement){p=c.parentElement.previousElementSibling;while(p&&!p.matches(SEL))p=p.previousElementSibling}return p}
+function initGuides(){
+  document.querySelectorAll('[data-guide]:not([data-gdone])').forEach(c=>{
+    c.setAttribute('data-gdone','1');
+    const key=c.getAttribute('data-guide'),more=c.querySelector('.g-more');
+    if(!more)return;
+    const open=GUIDE_OPEN.has(key);
+    const kind=c.getAttribute('data-guide-kind')||(c.textContent.match(/^\s*This (chart|section|table|list|card)/)||[])[1]||'chart';
+    const panel=document.createElement('div');
+    panel.className='card-guide';panel.id='guide-'+key;panel.hidden=!open;
+    const h=document.createElement('div');h.className='card-guide-h';h.textContent='How to read this '+kind;
+    const body=document.createElement('div');body.className='card-guide-b';
+    while(more.firstChild)body.appendChild(more.firstChild);
+    more.remove();panel.appendChild(h);panel.appendChild(body);
+    c.after(panel);
+    document.querySelectorAll(`[data-gbtn="${key}"]`).forEach(b=>b.remove());  // a static title keeps its old button when only the description re-renders
+    const btn=document.createElement('button');
+    btn.type='button';btn.className='gbtn';btn.setAttribute('data-gbtn',key);btn.setAttribute('aria-controls',panel.id);btn.setAttribute('aria-expanded',String(open));
+    btn.innerHTML=guideBtnLabel(open);btn.onclick=()=>toggleGuide(key);
+    const t=guideTitleEl(c);
+    if(t)t.appendChild(btn);else c.appendChild(btn);
+  });
+}
+function toggleGuide(key){
+  const open=!GUIDE_OPEN.has(key);
+  if(open)GUIDE_OPEN.add(key);else GUIDE_OPEN.delete(key);
+  document.querySelectorAll('#guide-'+key).forEach(p=>{p.hidden=!open});
+  document.querySelectorAll(`[data-gbtn="${key}"]`).forEach(b=>{b.innerHTML=guideBtnLabel(open);b.setAttribute('aria-expanded',String(open))});
+}
+new MutationObserver(()=>initGuides()).observe(document.documentElement,{childList:true,subtree:true});
+initGuides();
+// Range change = new window everywhere: drop both brush zooms (they index the drawn list), then redraw.
+function setRange(){TL_ZOOM=null;DEV_ZOOM=null;renderAll()}
+function renderHdot(){const hd=$('#hdot');if(!hd)return;const c0=getWindows().current[0];hd.style.background=c0?(c0.status==='fail'?'var(--crit)':c0.status==='flaky'?'var(--warn)':'var(--good)'):'var(--muted)';hd.title=c0?`The newest merged pull request in this range (${c0.pr}) ${c0.status==='fail'?'failed':c0.status==='flaky'?'passed only after a re-run':'passed'}.`:'No merged pull request falls inside this date range.'}
+// Zoom seams: the charts zoom by dragging, and these let a test drive the same state.
+function tlZoomTo(a,b){const n=getWindows().current.length;TL_ZOOM={a:Math.max(0,a),b:Math.min(n-1,b)};renderTimeline()}
+function devZoomTo(a,b){const n=getWindows().current.length;DEV_ZOOM={a:Math.max(0,Math.min(a,n-1)),b:Math.max(0,Math.min(b,n-1))};renderDevLines()}
+function renderAll(){renderHdot();renderWorker();renderTimeline();renderDevLines();renderFlaky()}
+
+// ==========================================================================
+// REAL DATA
+// --------------------------------------------------------------------------
+// Everything above this line works on one in-memory model: JOBS is the job
+// catalogue, COMMITS is one entry per merged pull request, and COMMITS[].o
+// holds that pull request's queue / setup / run minutes for each job. The
+// sample data above fills that model directly.
+//
+// The collector publishes something else: columnar JSON in views/, one file
+// per chart group per month. The code below reads those files and builds the
+// same model, so not one chart function had to change.
+//
+// The published page ONLY reads files. There is deliberately no fall back to
+// the sample data: a dashboard that silently shows invented numbers when a
+// fetch fails is worse than one that says it could not load.
+// ==========================================================================
+
+const VIEWS_BASE='views/';                 // relative to this file, so the site can move
+const VIEW_GROUPS=['runs','suites','flaky','queue','workflows'];
+
+// A view table is {columns:[...], rows:[[...]]}: the names are written once and
+// each row is a plain array. Turn it back into objects.
+function rowsOf(table){
+  if(!table||!Array.isArray(table.columns)||!Array.isArray(table.rows))return[];
+  const cols=table.columns;
+  return table.rows.map(r=>{const o={};for(let i=0;i<cols.length;i++)o[cols[i]]=r[i];return o});
+}
+
+// meta.json is the index: it says which month files exist for each group, so
+// the page never guesses a filename and never asks for one that is not there.
+async function loadViews(base){
+  const meta=await getJSON(base+'meta.json');
+  const out={meta:meta};
+  await Promise.all(VIEW_GROUPS.map(async group=>{
+    const months=(meta.groups&&meta.groups[group]&&meta.groups[group].months)||[];
+    const files=await Promise.all(months.map(m=>getJSON(`${base}${group}-${m}.json`)));
+    const tables={};
+    files.forEach(file=>{
+      Object.entries((file&&file.tables)||{}).forEach(([name,table])=>{
+        (tables[name]=tables[name]||[]).push(...rowsOf(table));
+      });
+    });
+    out[group]=tables;
+  }));
+  return out;
+}
+
+async function getJSON(url){
+  const res=await fetch(url,{cache:'no-cache'});
+  if(!res.ok)throw new Error(`${url} returned ${res.status}`);
+  return res.json();
+}
+
+// --------------------------------------------------------------------------
+// Turning view rows into the page's model
+// --------------------------------------------------------------------------
+
+const LANE_CAT={TPU:'tpu',GPU:'gpu',CPU:'cpu',Build:'build',Hosted:'infra'};
+const MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function mins(seconds){return seconds==null?0:Math.round((seconds/60)*100)/100}
+function stamp(iso){
+  const d=new Date(iso);
+  if(isNaN(d))return'';
+  return `${MONTHS[d.getMonth()]} ${String(d.getDate()).padStart(2,'0')} `+
+         `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+function median(list){
+  const s=list.filter(n=>typeof n==='number'&&!isNaN(n)).sort((a,b)=>a-b);
+  return s.length?s[Math.floor(s.length/2)]:0;
+}
+
+// One job identity, stable across runs. The GitHub job name carries the run's
+// own numbering, so it cannot be the key; flavor plus worker can.
+function jobSlug(row){
+  if(row.lane==='Build')return'pkg';
+  if(row.flavor)return row.worker==null?row.flavor:`${row.flavor}#${row.worker}`;
+  return String(row.name||'job').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+}
+
+// "CPU Pretrain Tests (cpu-unit) / Execute Tests (2) / cpu-unit" is the job's
+// real name. The charts have no room for it, so keep the part before the first
+// slash and say which worker it was.
+function jobTitle(row){
+  const head=String(row.name||'').split(' / ')[0].trim()||row.flavor||'Job';
+  return row.worker==null?head:`${head} (worker ${row.worker})`;
+}
+
+function adaptViews(v){
+  const runs=(v.runs&&v.runs.runs)||[];
+  const jobRows=(v.runs&&v.runs.jobs)||[];
+  const suites=(v.suites&&v.suites.suites)||[];
+  const queue=(v.queue&&v.queue.queue)||[];
+  const rescues=(v.flaky&&v.flaky.rescues)||[];
+  const rescueTests=(v.flaky&&v.flaky.rescue_tests)||[];
+
+  // ---- the job catalogue, discovered from the data rather than hard-coded ----
+  const seen=new Map();
+  jobRows.forEach(r=>{
+    const id=jobSlug(r);
+    if(!seen.has(id))seen.set(id,{id,name:jobTitle(r),cat:LANE_CAT[r.lane]||'infra',
+                                  lane:r.lane||'Hosted',label:r.runner_label||'',q:[],s:[],r:[]});
+    const j=seen.get(id);
+    j.q.push(mins(r.queued_seconds));j.s.push(mins(r.setup_seconds));j.r.push(mins(r.run_seconds));
+  });
+  const jobs=[...seen.values()].map(j=>({id:j.id,name:j.name,cat:j.cat,lane:j.lane,
+    b:{q:median(j.q),s:median(j.s),r:median(j.r)}}));
+  const labels={};seen.forEach((j,id)=>{if(j.label)labels[id]=j.label});
+
+  // ---- one entry per merged pull request, oldest first ----
+  const byRun=new Map();
+  jobRows.forEach(r=>{
+    if(!byRun.has(r.run_id))byRun.set(r.run_id,[]);
+    byRun.get(r.run_id).push(r);
+  });
+
+  const ordered=runs.slice().sort((a,b)=>
+    new Date(a.merged_at||a.created_at)-new Date(b.merged_at||b.created_at));
+
+  const commits=[],times={},timeIso={},runIds={},triggers={},probeQ={};
+  ordered.forEach(run=>{
+    const hash=String(run.pr);
+    const o={};
+    (byRun.get(run.run_id)||[]).forEach(r=>{
+      o[jobSlug(r)]={q:mins(r.queued_seconds),s:mins(r.setup_seconds),r:mins(r.run_seconds),
+                     st:r.conclusion==='success'?'pass':'fail'};
+    });
+    const rescued=rescues.some(x=>x.run_id===run.run_id&&x.rescued);
+    commits.push({hash,pr:'#'+run.pr,title:run.title||'',
+      status:run.conclusion==='success'?(rescued?'flaky':'pass'):'fail',
+      attempts:run.attempts||1,concurrent:run.overlapping_runs||0,o});
+    const when=run.created_at||run.merged_at;
+    times[hash]=stamp(when);timeIso[hash]=when;
+    runIds[hash]=run.run_id;triggers[hash]=run.event||'';
+    // The queue view reports one wait per device lane per run.
+    const q={tpu:0,gpu:0,cpu:0};
+    queue.filter(x=>x.run_id===run.run_id).forEach(x=>{
+      const k=String(x.lane||'').toLowerCase();
+      if(k in q)q[k]=Math.round(mins(x.median_wait_seconds));
+    });
+    probeQ[hash]=q;
+  });
+
+  // ---- test counts per job, from the suites view ----
+  const counts={};
+  suites.forEach(s=>{
+    if(!s.flavor)return;
+    const workers=Math.max(1,s.workers_ran||s.workers_named||1);
+    for(let w=1;w<=workers;w++){
+      const id=workers===1&&!jobRows.some(r=>r.flavor===s.flavor&&r.worker!=null)
+        ? s.flavor : `${s.flavor}#${w}`;
+      const c=counts[id]=counts[id]||{total:0,pass:0,fail:0,skip:0,n:0};
+      c.total+=(s.collected||0)/workers;
+      c.fail+=((s.failed||0)+(s.errored||0))/workers;
+      c.skip+=(s.skipped||0)/workers;
+      c.n++;
+    }
+  });
+  Object.values(counts).forEach(c=>{
+    const n=Math.max(1,c.n);
+    c.total=Math.round(c.total/n);c.fail=Math.round(c.fail/n);c.skip=Math.round(c.skip/n);
+    c.pass=Math.max(0,c.total-c.fail-c.skip);delete c.n;
+  });
+
+  // ---- worker groups: any flavor that ran on more than one worker ----
+  const perFlavor={};
+  jobs.forEach(j=>{
+    const flavor=j.id.split('#')[0];
+    (perFlavor[flavor]=perFlavor[flavor]||[]).push(j);
+  });
+  const wkGroups={};
+  Object.entries(perFlavor).forEach(([flavor,list])=>{
+    if(list.length<2)return;
+    wkGroups[flavor]={name:`${list[0].name.replace(/ \(worker \d+\)$/,'')} (${list.length} workers)`,
+      cat:list[0].cat,lane:list[0].lane,jobs:list.map(j=>j.id)};
+  });
+
+  // ---- suite health: one point per suite per merged pull request ----
+  const prIndex={};commits.forEach((c,i)=>{prIndex[c.hash]=i});
+  const byFlavor={};
+  suites.forEach(s=>{
+    if(!s.flavor||!(String(s.pr) in prIndex))return;
+    (byFlavor[s.flavor]=byFlavor[s.flavor]||[]).push(s);
+  });
+  const thCategories=Object.entries(byFlavor).map(([flavor,list])=>{
+    const first=list[0];
+    const data=list.map(s=>({count:s.executed==null?null:s.executed,
+      dur:s.duration_seconds==null?null:s.duration_seconds,
+      perTest:(s.executed&&s.duration_seconds)?+(s.duration_seconds/s.executed).toFixed(2):null,
+      commitIdx:prIndex[String(s.pr)]}))
+      .sort((a,b)=>a.commitIdx-b.commitIdx);
+    const top=Math.max(1,...data.map(d=>d.count||0));
+    const lane=(jobs.find(j=>j.id.split('#')[0]===flavor)||{}).lane||'CPU';
+    return{id:flavor,device:lane,name:flavor,group:jobTitle({name:first.flavor,flavor}),
+      workers:first.workers_named||1,status:'HEALTHY',statusLabel:'',
+      color:lane==='TPU'?'#3987E5':lane==='GPU'?'#F59E0B':'#16A34A',
+      maxY:Math.ceil(top*1.2),yInterval:Math.max(1,Math.ceil(top*1.2/5)),
+      data,anomalyRange:null,pills:[]};
+  });
+  const thCommits=commits.map(c=>({hash:c.hash,pr:c.pr,date:(times[c.hash]||'').split(' ').slice(0,2).join(' ')}));
+
+  // ---- rescued jobs and the tests that failed inside them ----
+  const rescueByJob={};
+  rescues.forEach(r=>{
+    const id=r.flavor?(r.worker==null?r.flavor:`${r.flavor}#${r.worker}`):jobSlug(r);
+    const g=rescueByJob[id]=rescueByJob[id]||{id,name:r.job_name||id,lane:r.lane||'',events:[]};
+    g.events.push({pr:'#'+r.pr,date:(times[String(r.pr)]||'').split(' ').slice(0,2).join(' '),
+      wasted:mins(r.wasted_seconds),cause:r.final_conclusion||r.failed_conclusion||''});
+  });
+
+  const flakyByTest={};
+  rescueTests.forEach(x=>{
+    const key=x.classname?`${x.classname}.${x.name}`:x.name;
+    const id=x.flavor?(x.worker==null?x.flavor:`${x.flavor}#${x.worker}`):'';
+    const f=flakyByTest[key]=flakyByTest[key]||{test:x.name,job:id,prs:[],
+      cause:(x.failure_message||'').split('\n')[0].slice(0,120)};
+    if(!f.prs.includes('#'+x.pr))f.prs.push('#'+x.pr);
+  });
+
+  return{jobs,labels,commits,times,timeIso,runIds,triggers,probeQ,counts,
+    wkGroups,thCategories,thCommits,
+    rescues:Object.values(rescueByJob),flaky:Object.values(flakyByTest)};
+}
+
+// Assigning the model is the only place the globals are written.
+function applyModel(m,generatedAt){
+  JOBS=m.jobs;RUNNER_LABELS=m.labels;
+  COMMITS=m.commits;TIMES=m.times;TIME_ISO=m.timeIso;
+  RUN_IDS=m.runIds;TRIGGERS=m.triggers;PROBE_Q=m.probeQ;
+  TEST_COUNTS=m.counts;WK_GROUPS=m.wkGroups;
+  TH_CATEGORIES=m.thCategories;TH_COMMITS=m.thCommits;
+  RESCUES=m.rescues;FLAKY_TESTS=m.flaky;
+  TESTS={};                                   // per-test detail is not in the month views
+  if(generatedAt){const d=new Date(generatedAt);if(!isNaN(d))TODAY=d}
+}
+
+function showDataError(err){
+  const main=document.getElementById('page-main')||document.querySelector('main');
+  if(!main)return;
+  main.innerHTML=
+    '<div class="card"><div class="ct">The dashboard could not load its data</div>'+
+    '<div style="font-size:13px;color:var(--ink2);margin-top:8px">'+
+    'It reads JSON files from <code>views/</code> next to this page. '+
+    String(err&&err.message||err).replace(/[<>&]/g,'')+
+    '</div><div style="font-size:13px;color:var(--muted);margin-top:10px">'+
+    'Refresh those files with <code>tools/ci_metrics/deploy/refresh-data.sh</code>, and open this page '+
+    'through a web server rather than from a file:// path - fetch does not work on file URLs.'+
+    '</div></div>';
+}
+
+function showFreshness(meta){
+  const el=document.getElementById('freshness');
+  if(!el||!meta)return;
+  const bits=[];
+  if(meta.generated_at)bits.push('Data collected '+stamp(meta.generated_at));
+  if(meta.uncollected_runs)bits.push(meta.uncollected_runs+' run(s) not read yet');
+  el.textContent=bits.join(' · ');
+}
+
+async function boot(){
+  try{
+    const views=await loadViews(VIEWS_BASE);
+    applyModel(adaptViews(views),views.meta&&views.meta.generated_at);
+    showFreshness(views.meta);
+    renderAll();
+  }catch(err){
+    showDataError(err);
+  }
+}
+
+// The checks in tools/ci_metrics/site/tests have no web server, so they ask for
+// the sample data that is already in this file. Nothing sets this flag on the
+// published page.
+if(window.__CI_PULSE_MOCK__){renderAll()}else{boot()}
+</script>

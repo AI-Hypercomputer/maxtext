@@ -1,0 +1,236 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# =============================================================================
+# TEMPLATE - THIS FILE DOES NOT RUN FROM HERE.
+# =============================================================================
+#
+# This is the workflow that would run the CI metrics collector on a schedule. It lives in
+# tools/ci_metrics/deploy/ as a template and is deliberately NOT in .github/workflows/: that
+# directory belongs to the pipeline this project measures, and nothing here may add a job to
+# it.
+#
+# Installing it is a decision someone else makes:
+#
+#   1. Open a pull request that adds this file to `.github/workflows/ci_metrics_collector.yml`
+#      in the repository that is to run it, and get it reviewed like any other workflow.
+#   2. It must be merged into that repository's DEFAULT branch. GitHub only runs `schedule`
+#      and `workflow_dispatch` workflows from the default branch: a copy sitting on a feature
+#      branch never fires, and a `workflow_dispatch` button for it never appears.
+#   3. Fill in the four values under `env:` below. They are the only things to change.
+#   4. Create the store branch before the first run - it is checked out, so it has to exist:
+#      `git switch --orphan ci-metrics-store && git commit --allow-empty -m 'store' &&
+#      git push -u origin ci-metrics-store`.
+#
+# What it needs to be allowed to do:
+#
+#   * Read the pipeline repository's Actions data: runs, jobs and artifacts. When the
+#     workflow runs INSIDE that repository, the built-in GITHUB_TOKEN with `actions: read` is
+#     enough. When it runs anywhere else, GITHUB_TOKEN cannot download another repository's
+#     artifacts, so a token with `actions:read` on the pipeline repository has to be supplied
+#     as the secret CI_METRICS_TOKEN.
+#   * Write the store branch. That is `contents: write`, and it is the only write this
+#     project ever performs.
+#
+# What it must never do: read, write or check out the pipeline's `gh-pages` branch or its
+# `dev/bench` folder. The store branch below is this project's own.
+#
+# Why 20 minutes past the hour: the pipeline repository already has a job that pushes on the
+# whole-four-hour clock. Two writers landing at the same minute would spend their time
+# rebasing over each other, so this one is offset. `concurrency` with `cancel-in-progress:
+# false` covers the other race: a slow tick queues the next one instead of running twice.
+#
+# Checking it after an edit: the repository's actionlint pre-commit hook only matches
+# `.github/workflows/**` and `action.yml`, so nothing here re-checks this file on its own.
+# Run it by hand, from a scratch directory, with shellcheck on PATH:
+#
+#   mkdir -p /tmp/wf/.github/workflows
+#   cp tools/ci_metrics/deploy/collector.yml /tmp/wf/.github/workflows/collector.yml
+#   (cd /tmp/wf && actionlint -ignore 'label ".*" is unknown' .github/workflows/collector.yml)
+#
+# The `-ignore` is needed because the runner labels are the target repository's, not this
+# one's. Last run clean at the pinned hook version.
+# =============================================================================
+
+name: CI metrics collector
+
+on:
+  schedule:
+    # Every four hours, twenty minutes past, offset from the other writer on this repository.
+    - cron: '20 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'Collect runs created on or after this day (YYYY-MM-DD). Empty = from the stored watermark.'
+        required: false
+        default: ''
+      until:
+        description: 'Collect runs created on or before this day (YYYY-MM-DD). Empty = up to now.'
+        required: false
+        default: ''
+      backfill_days:
+        description: 'How far back the first tick of an empty store reaches.'
+        required: false
+        default: '30'
+      max_runs:
+        description: 'Stop after this many runs. Empty = no cap.'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Fetch and compute everything, write nothing.'
+        type: boolean
+        required: false
+        default: false
+
+# One writer of this store, and a slow tick queues rather than racing itself.
+concurrency:
+  group: ci-metrics-collector
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  collect:
+    name: Collect one tick
+    # Always a GitHub-hosted runner. This job must never take a self-hosted machine: those
+    # belong to the pipeline being measured, and a collector that competes for them would
+    # change the very queue times it reports.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      # The repository whose pipeline is measured. Read-only, every request a GET.
+      TARGET_REPO: AI-Hypercomputer/maxtext
+      # The branch holding this collector's code (tools/ci_metrics/collector).
+      COLLECTOR_REF: main
+      # The branch the store is committed to, and the directory inside it. This branch is
+      # this project's own: it is never gh-pages and never a branch of the pipeline's work.
+      STORE_BRANCH: ci-metrics-store
+      STORE_DIR: ci-metrics
+
+    steps:
+      - name: Check out the collector
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COLLECTOR_REF }}
+          path: collector-src
+          persist-credentials: false
+
+      - name: Check out the store branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.STORE_BRANCH }}
+          path: store
+          # The whole history: a tick appends to it and pushes, so a shallow clone cannot
+          # rebase onto a tip it does not have. The store branch is squashed yearly, which is
+          # what keeps this affordable.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requests
+        run: python -m pip install --disable-pip-version-check --no-cache-dir 'requests>=2.31,<3'
+
+      - name: Run the tick
+        id: tick
+        shell: bash
+        env:
+          # A token for the pipeline repository when one is configured, the built-in token
+          # otherwise. Artifact downloads need `actions:read` on the repository being read.
+          GITHUB_TOKEN: ${{ secrets.CI_METRICS_TOKEN || secrets.GITHUB_TOKEN }}
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+          BACKFILL_DAYS: ${{ inputs.backfill_days }}
+          MAX_RUNS: ${{ inputs.max_runs }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          args=(--out "${GITHUB_WORKSPACE}/store/${STORE_DIR}" --repo "${TARGET_REPO}")
+          [ -n "${SINCE}" ] && args+=(--since "${SINCE}")
+          [ -n "${UNTIL}" ] && args+=(--until "${UNTIL}")
+          [ -n "${BACKFILL_DAYS}" ] && args+=(--backfill-days "${BACKFILL_DAYS}")
+          [ -n "${MAX_RUNS}" ] && args+=(--max-runs "${MAX_RUNS}")
+          [ "${DRY_RUN}" = "true" ] && args+=(--dry-run)
+
+          cd "${GITHUB_WORKSPACE}/collector-src/tools/ci_metrics"
+          python -m collector.tick "${args[@]}" 2>&1 | tee "${RUNNER_TEMP}/tick.log"
+          status=${PIPESTATUS[0]}
+
+          # 0 means the tick finished, whether or not it found anything new. 1 means it lost
+          # data and should be looked at - but whatever it did collect is still committed
+          # below, so the failure costs freshness and not rows. The job is failed at the end.
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+          echo "summary=$(tail -n 1 "${RUNNER_TEMP}/tick.log")" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Commit and push the store
+        if: ${{ inputs.dry_run != true }}
+        shell: bash
+        working-directory: store
+        env:
+          # Read through the environment rather than interpolated into the script: a step
+          # output must never become shell source, whatever produced it.
+          TICK_SUMMARY: ${{ steps.tick.outputs.summary }}
+        run: |
+          set -euo pipefail
+          # An unchanged store commits nothing. A tick that found no new run is a normal
+          # outcome, not something to record as an empty commit six times a day.
+          if [ -z "$(git status --porcelain -- "${STORE_DIR}")" ]; then
+            echo "The store is unchanged; nothing to commit."
+            exit 0
+          fi
+
+          git config user.name 'ci-metrics-collector'
+          git config user.email 'ci-metrics-collector@users.noreply.github.com'
+          git add -- "${STORE_DIR}"
+
+          # One commit per tick: it is the transaction boundary, so every file a tick
+          # produced lands together or not at all. [skip ci] keeps the push from starting the
+          # pipeline's own workflows.
+          # The subject carries the marker, the body carries the counts.
+          git commit -m "ci-metrics: $(date -u +%Y-%m-%dT%H:%M:%SZ) [skip ci]" -m "${TICK_SUMMARY}"
+
+          # The collector is the only writer of this branch, so a rejection means a human
+          # edited it. Rebase and try again, three times, then give up loudly.
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:${STORE_BRANCH}"; then
+              echo "Pushed on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push rejected on attempt ${attempt}; rebasing onto the branch tip."
+            git pull --rebase origin "${STORE_BRANCH}"
+          done
+          echo "The store could not be pushed after three attempts." >&2
+          exit 1
+
+      - name: Report what the tick did
+        shell: bash
+        env:
+          TICK_SUMMARY: ${{ steps.tick.outputs.summary }}
+          TICK_STATUS: ${{ steps.tick.outputs.status }}
+        run: |
+          echo "${TICK_SUMMARY} (exit ${TICK_STATUS})" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Fail the job when the tick lost data
+        if: ${{ steps.tick.outputs.status != '0' }}
+        shell: bash
+        run: |
+          echo "The tick exited ${{ steps.tick.outputs.status }}: it lost data or could not write." >&2
+          echo "Repeating a tick is always safe - re-run this workflow once the cause is fixed." >&2
+          exit 1
