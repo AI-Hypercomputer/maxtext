@@ -246,6 +246,24 @@ class DeferredAllReduceGateTest(absltest.TestCase):
         maxtext_engine._deferred_all_reduce_shardings(cfg, mesh, self._params_shardings(mesh)),  # pylint: disable=protected-access
     )
 
+  def test_declines_when_tensor_parallelism_shards_the_features(self):
+    """The batch is on `data` alone here, and the backward pass is still rejected.
+
+    `fsdp` breaks the tag through the batch dimension; `tensor` breaks it through the
+    feature dimension of the same activation, which a batch-axis check cannot see:
+    "unreduced axes should be equal to the contracting specs. Got unreduced
+    axes=frozenset({'data'}) and contracting spec=('data', None, 'tensor')". Measured on
+    4x v6e with qwen3-0.6b at dp2 x tp2, where it crashed `fwd_bwd` on the first
+    micro-batch.
+    """
+    cfg = _config(ici_data_parallelism=2, ici_tensor_parallelism=2)
+    mesh = maxtext_utils.get_mesh_from_config(cfg)
+
+    self.assertEqual(
+        (None, None),
+        maxtext_engine._deferred_all_reduce_shardings(cfg, mesh, self._params_shardings(mesh)),  # pylint: disable=protected-access
+    )
+
   def test_a_parameter_already_sharded_over_data_is_left_alone(self):
     """`reduced` and a shard over the same axis are contradictory, and JAX says so."""
     cfg = _config()
@@ -384,6 +402,37 @@ class DeferredAllReduceTest(absltest.TestCase):
 
     for i, (got, want) in enumerate(zip(resumed, expected)):
       np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-6, atol=1e-6, err_msg=f"leaf {i}")
+
+  def test_a_tensor_parallel_mesh_still_trains(self):
+    """The gate declining has to leave a working engine behind, not a broken one.
+
+    This does not reproduce the crash. The toy model here shards plenty over `tensor` and
+    traces clean on CPU anyway; what raised `ShardingTypeError` was qwen3-0.6b at dp2 x tp2
+    on 4x v6e, whose attention kernels contract over a tensor-sharded dimension the
+    `dot_product` path does not. So the assertion that pins the fix is the gate one above,
+    and this pins the other half: with the tag off, a tensor-parallel mesh completes a step
+    and moves the weights.
+    """
+    cfg = _config(ici_data_parallelism=2, ici_tensor_parallelism=2)
+    mesh = maxtext_utils.get_mesh_from_config(cfg)
+    with jax.set_mesh(mesh):
+      engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+      engine.compile(_batch(cfg, 0))
+      before = jax.tree.leaves(nnx.to_pure_dict(nnx.state(engine.model, nnx.Param)))
+      before = [np.asarray(leaf) for leaf in before]
+      engine.fwd_bwd(_batch(cfg, 0))
+      engine.fwd_bwd(_batch(cfg, 1))
+      engine.update()
+      after = jax.tree.leaves(nnx.to_pure_dict(nnx.state(engine.model, nnx.Param)))
+
+      self.assertIsNone(
+          engine._plain_grad_shardings,  # pylint: disable=protected-access
+          "the deferral engaged on a tensor-parallel mesh, which JAX rejects",
+      )
+    self.assertTrue(
+        any(not np.array_equal(np.asarray(got), want) for got, want in zip(after, before)),
+        "the step ran but no parameter moved, so nothing was trained",
+    )
 
 
 if __name__ == "__main__":
