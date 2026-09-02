@@ -25,10 +25,13 @@ import os
 # Must precede the first JAX import: the cross-mesh tests below need more than
 # one CPU device, and the backend reads this only at initialization.
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=8")
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import types as pytypes  # pylint: disable=wrong-import-position
 import unittest  # pylint: disable=wrong-import-position
 
+import logging
+from typing import Any
 import jax  # pylint: disable=wrong-import-position
 import jax.numpy as jnp  # pylint: disable=wrong-import-position
 import numpy as np  # pylint: disable=wrong-import-position
@@ -439,6 +442,74 @@ class CrossMeshPlacementTest(unittest.TestCase):
       )
 
 
+def _profile_conversion_worker(is_streaming: bool, result_queue: Any):
+  import gc
+  import resource
+  import types as pytypes
+  import jax.numpy as jnp
+  from maxtext.integration.vllm.weight_converter import MaxTextToMaxTextConverter
+
+  num_layers = 16
+  cycle = 2
+  scaled_emb = 128
+  scaled_experts = 8
+  scaled_mlp = 256
+  blocks = num_layers // cycle
+
+  cfg = pytypes.SimpleNamespace(
+      inhomogeneous_layer_cycle_interval=cycle,
+      num_decoder_layers=num_layers,
+      param_scan_axis=1,
+      padded_base_moe_mlp_dim=scaled_mlp,
+      prefuse_moe_weights=True,
+      weight_dtype=jnp.float32,
+  )
+
+  def _arr(*shape):
+    return jnp.ones(shape, dtype=jnp.float32)
+
+  layers = {}
+  for slot in range(cycle):
+    layers[f"layer_{slot}"] = {
+        "input_layernorm": {"scale": _arr(scaled_emb, blocks)},
+        "post_self_attention_layernorm": {"scale": _arr(scaled_emb, blocks)},
+        "self_attention": {
+            "query": {"kernel": _arr(scaled_emb, blocks, 4, 32)},
+            "key": {"kernel": _arr(scaled_emb, blocks, 2, 32)},
+            "value": {"kernel": _arr(scaled_emb, blocks, 2, 32)},
+            "out": {"kernel": _arr(4, blocks, 32, scaled_emb)},
+        },
+        "moe_block": {
+            "gate": {"kernel": _arr(scaled_emb, blocks, scaled_experts)},
+            "wi_0": _arr(scaled_experts, blocks, scaled_emb, scaled_mlp),
+            "wi_1": _arr(scaled_experts, blocks, scaled_emb, scaled_mlp),
+            "wo": _arr(scaled_experts, blocks, scaled_mlp, scaled_emb),
+        },
+    }
+  scaled_source = {
+      "base": {
+          "token_embedder": {"embedding": _arr(256, scaled_emb)},
+          "decoder": {"decoder_norm": {"scale": _arr(scaled_emb)}, "layers": layers},
+      }
+  }
+
+  converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=True)
+  gc.collect()
+  before_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+  if is_streaming:
+    for piece in converter.convert_streaming(scaled_source, target_state=None, groups_per_piece=1):
+      del piece
+      gc.collect()
+  else:
+    out = converter.convert(scaled_source, target_state=None)
+    del out
+    gc.collect()
+
+  after_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+  result_queue.put(after_rss - before_rss)
+
+
 class TargetFreeConversionTest(unittest.TestCase):
   """Comprehensive test suite for target-free key synthesis and execution."""
 
@@ -466,13 +537,14 @@ class TargetFreeConversionTest(unittest.TestCase):
     }
     converter = WeightConverter(config=cfg, rollout_backend="maxtext")
     out = converter.convert(source, target_state=None)
-    self.assertIn("token_embedder", out)
-    self.assertIn("decoder", out)
+    out_root = out["base"] if "base" in out else out
+    self.assertIn("token_embedder", out_root)
+    self.assertIn("decoder", out_root)
     for i in range(4):
       layer_key = f"layers_{i}"
-      self.assertIn(layer_key, out["decoder"])
-      scale = getattr(out["decoder"][layer_key]["input_layernorm"]["scale"], "value", out["decoder"][layer_key]["input_layernorm"]["scale"])
-      query = getattr(out["decoder"][layer_key]["self_attention"]["query"]["kernel"], "value", out["decoder"][layer_key]["self_attention"]["query"]["kernel"])
+      self.assertIn(layer_key, out_root["decoder"])
+      scale = getattr(out_root["decoder"][layer_key]["input_layernorm"]["scale"], "value", out_root["decoder"][layer_key]["input_layernorm"]["scale"])
+      query = getattr(out_root["decoder"][layer_key]["self_attention"]["query"]["kernel"], "value", out_root["decoder"][layer_key]["self_attention"]["query"]["kernel"])
       self.assertEqual(scale.shape, (EMB,))
       self.assertEqual(query.shape, (EMB, 2, 4))
 
@@ -481,10 +553,11 @@ class TargetFreeConversionTest(unittest.TestCase):
     source = _source_tree(True)
     converter = WeightConverter(config=cfg, rollout_backend="maxtext")
     out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
     src_layers = source["base"]["decoder"]["layers"]
     for layer in range(NUM_LAYERS):
       slot, block = layer % CYCLE, layer // CYCLE
-      got = getattr(out["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"], "value", out["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"])
+      got = getattr(out_root["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"], "value", out_root["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"])
       want = jnp.take(src_layers[f"layer_{slot}"]["input_layernorm"]["scale"], block, axis=SCAN_AXIS)
       np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
 
@@ -502,8 +575,9 @@ class TargetFreeConversionTest(unittest.TestCase):
     source = _source_tree(True)
     converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=True)
     out = converter.convert(source, target_state=None)
-    wi = getattr(out["decoder"]["layers_0"]["moe_block"]["wi"], "value", out["decoder"]["layers_0"]["moe_block"]["wi"])
-    wo = getattr(out["decoder"]["layers_0"]["moe_block"]["wo"], "value", out["decoder"]["layers_0"]["moe_block"]["wo"])
+    out_root = out["base"] if "base" in out else out
+    wi = getattr(out_root["decoder"]["layers_0"]["moe_block"]["wi"], "value", out_root["decoder"]["layers_0"]["moe_block"]["wi"])
+    wo = getattr(out_root["decoder"]["layers_0"]["moe_block"]["wo"], "value", out_root["decoder"]["layers_0"]["moe_block"]["wo"])
     self.assertEqual(wi.shape, (EXPERTS, EMB, padded_dim * 2))
     self.assertEqual(wo.shape, (EXPERTS, padded_dim, EMB))
 
@@ -517,67 +591,34 @@ class TargetFreeConversionTest(unittest.TestCase):
     abstract_source = jax.tree_util.tree_map(to_struct, _source_tree(True))
     converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=True)
     out = converter.convert(abstract_source, target_state=None)
+    out_root = out["base"] if "base" in out else out
     for leaf in jax.tree_util.tree_leaves(out):
       val = getattr(leaf, "value", leaf)
       self.assertIsInstance(val, jax.ShapeDtypeStruct)
-    wi = getattr(out["decoder"]["layers_0"]["moe_block"]["wi"], "value", out["decoder"]["layers_0"]["moe_block"]["wi"])
+    wi = getattr(out_root["decoder"]["layers_0"]["moe_block"]["wi"], "value", out_root["decoder"]["layers_0"]["moe_block"]["wi"])
     self.assertEqual(wi.shape, (EXPERTS, EMB, 32))
 
   def test_case_5_host_memory_profiling(self):
-    import resource
+    import multiprocessing
+    ctx = multiprocessing.get_context("spawn")
+    q_non_stream = ctx.Queue()
+    p_non_stream = ctx.Process(target=_profile_conversion_worker, args=(False, q_non_stream))
+    p_non_stream.start()
+    delta_non_stream = q_non_stream.get(timeout=60)
+    p_non_stream.join()
 
-    # Test with realistic scaled dimensions
-    scaled_emb = 128
-    scaled_experts = 8
-    scaled_mlp = 256
-    cfg = _config(
-        inhomogeneous_layer_cycle_interval=CYCLE,
-        num_decoder_layers=NUM_LAYERS,
-        padded_base_moe_mlp_dim=scaled_mlp,
-        prefuse_moe_weights=True,
-    )
-    # Build scaled source tree
-    blocks = NUM_LAYERS // CYCLE
-    layers = {}
-    for slot in range(CYCLE):
-      layers[f"layer_{slot}"] = {
-          "input_layernorm": {"scale": _arr(scaled_emb, blocks)},
-          "post_self_attention_layernorm": {"scale": _arr(scaled_emb, blocks)},
-          "self_attention": {
-              "query": {"kernel": _arr(scaled_emb, blocks, 4, 32)},
-              "key": {"kernel": _arr(scaled_emb, blocks, 2, 32)},
-              "value": {"kernel": _arr(scaled_emb, blocks, 2, 32)},
-              "out": {"kernel": _arr(blocks, 4, 32, scaled_emb)},
-          },
-          "moe_block": {
-              "gate": {"kernel": _arr(scaled_emb, blocks, scaled_experts)},
-              "wi_0": _arr(scaled_experts, blocks, scaled_emb, scaled_mlp),
-              "wi_1": _arr(scaled_experts, blocks, scaled_emb, scaled_mlp),
-              "wo": _arr(scaled_experts, blocks, scaled_mlp, scaled_emb),
-          },
-      }
-    scaled_source = {
-        "base": {
-            "token_embedder": {"embedding": _arr(256, scaled_emb)},
-            "decoder": {"decoder_norm": {"scale": _arr(scaled_emb)}, "layers": layers},
-        }
-    }
+    q_stream = ctx.Queue()
+    p_stream = ctx.Process(target=_profile_conversion_worker, args=(True, q_stream))
+    p_stream.start()
+    delta_stream = q_stream.get(timeout=60)
+    p_stream.join()
 
-    converter = WeightConverter(config=cfg, rollout_backend="maxtext")
-    before_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    out = converter.convert(scaled_source, target_state=None)
-    after_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     logging.info(
-        "test_case_5_host_memory_profiling: before_rss=%d KB, after_rss=%d KB, delta=%d KB",
-        before_rss,
-        after_rss,
-        after_rss - before_rss,
+        "test_case_5_host_memory_profiling: delta_non_stream=%d KB, delta_stream=%d KB",
+        delta_non_stream,
+        delta_stream,
     )
-    self.assertIsNotNone(out)
-    self.assertIn("decoder", out)
-    self.assertIn(f"layers_{NUM_LAYERS - 1}", out["decoder"])
-    wi = getattr(out["decoder"]["layers_0"]["moe_block"]["wi"], "value", out["decoder"]["layers_0"]["moe_block"]["wi"])
-    self.assertEqual(wi.shape, (scaled_experts, scaled_emb, scaled_mlp * 2))
+    self.assertLessEqual(delta_stream, delta_non_stream)
 
   def test_case_6_parity_vs_raiden_unscan_on_homogeneous(self):
     from maxtext.integration.tunix.weight_mapping import raiden_unscan
@@ -618,6 +659,85 @@ class TargetFreeConversionTest(unittest.TestCase):
       self.assertEqual(v_base.shape, v_conv.shape, f"Shape mismatch at {k}")
       self.assertEqual(v_base.dtype, v_conv.dtype, f"Dtype mismatch at {k}")
       np.testing.assert_array_equal(np.asarray(v_base), np.asarray(v_conv), err_msg=f"Value mismatch at {k}")
+
+  def test_case_7_streaming_piece_count_and_parity(self):
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    source = _source_tree(True)
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext")
+    pieces = list(converter.convert_streaming(source, target_state=None, groups_per_piece=1))
+    self.assertEqual(len(pieces), len(converter._direct._groups))
+
+    # Parity check against fresh non-streaming converter
+    fresh_converter = WeightConverter(config=cfg, rollout_backend="maxtext")
+    expected_out = fresh_converter.convert(source, target_state=None)
+
+    merged_flat = {}
+    for piece in pieces:
+      piece_flat = traverse_util.flatten_dict(piece)
+      for k, v in piece_flat.items():
+        self.assertNotIn(k, merged_flat, f"Duplicate key across pieces: {k}")
+        merged_flat[k] = v
+
+    expected_flat = traverse_util.flatten_dict(expected_out)
+    self.assertEqual(set(merged_flat.keys()), set(expected_flat.keys()))
+    for k in expected_flat:
+      v_exp = getattr(expected_flat[k], "value", expected_flat[k])
+      v_got = getattr(merged_flat[k], "value", merged_flat[k])
+      self.assertEqual(v_exp.shape, v_got.shape, f"Shape mismatch at {k}")
+      self.assertEqual(v_exp.dtype, v_got.dtype, f"Dtype mismatch at {k}")
+      np.testing.assert_array_equal(np.asarray(v_exp), np.asarray(v_got), err_msg=f"Value mismatch at {k}")
+
+  def test_case_8_streaming_piece_batching(self):
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    source = _source_tree(True)
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext")
+    pieces = list(converter.convert_streaming(source, target_state=None, groups_per_piece=2))
+    num_groups = len(converter._direct._groups)
+    expected_piece_count = (num_groups + 1) // 2
+    self.assertEqual(len(pieces), expected_piece_count)
+
+    fresh_converter = WeightConverter(config=cfg, rollout_backend="maxtext")
+    expected_out = fresh_converter.convert(source, target_state=None)
+    expected_flat = traverse_util.flatten_dict(expected_out)
+
+    merged_flat = {}
+    for piece in pieces:
+      piece_flat = traverse_util.flatten_dict(piece)
+      for k, v in piece_flat.items():
+        self.assertNotIn(k, merged_flat, f"Duplicate key across pieces: {k}")
+        merged_flat[k] = v
+
+    self.assertEqual(set(merged_flat.keys()), set(expected_flat.keys()))
+    for k in expected_flat:
+      v_exp = getattr(expected_flat[k], "value", expected_flat[k])
+      v_got = getattr(merged_flat[k], "value", merged_flat[k])
+      np.testing.assert_array_equal(np.asarray(v_exp), np.asarray(v_got))
+
+  def test_case_9_weight_converter_convert_streaming_dispatch(self):
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    source = _source_tree(True)
+    # Direct MaxText mode delegates correctly
+    direct_wc = WeightConverter(config=cfg, rollout_backend="maxtext")
+    pieces = list(direct_wc.convert_streaming(source, target_state=None))
+    self.assertGreater(len(pieces), 0)
+
+    # Torchax rules mode raises NotImplementedError
+    rule = Rule(source_patterns=["some_pattern"], target_pattern="some_target")
+    torchax_wc = WeightConverter(rules=[rule], rollout_backend="torchax")
+    with self.assertRaises(NotImplementedError):
+      list(torchax_wc.convert_streaming(source))
 
 
 if __name__ == "__main__":

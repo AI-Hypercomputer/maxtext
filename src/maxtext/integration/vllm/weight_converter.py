@@ -23,7 +23,7 @@ import re
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import List, Union, Any, Dict, Optional, Mapping, Tuple
+from typing import List, Union, Any, Dict, Optional, Mapping, Tuple, Iterator
 from flax import traverse_util, nnx
 from maxtext.integration.vllm.convert_utils import (
     _align_per_axis,
@@ -350,6 +350,59 @@ class WeightConverter:
 
     flat_src = traverse_util.flatten_dict(_to_pure_dict(src_pytree), sep=".")
     gc.collect()
+
+    # HuggingFace-shaped target: rename and restructure per the rule table.
+    result = {}
+    unfired = []
+    for rule in self.rules:
+      tensors = [flat_src.pop(src_pat) for src_pat in rule.source_patterns if src_pat in flat_src]
+      if not tensors:
+        # A rule can legitimately not fire (e.g. the `wi` rule when the
+        # trainer stores split `wi_0`/`wi_1`), but a table where *many*
+        # rules miss means the source layout has drifted.
+        unfired.append(rule.target_pattern)
+        continue
+
+      out = tensors
+      for op in rule.operations:
+        out = op(out, tp=self.tp)
+        if not isinstance(out, list) and op != rule.operations[-1]:
+          out = [out]
+
+      if isinstance(out, list) and len(out) > 1 and "{}" in rule.target_pattern:
+        for i, tensor in enumerate(out):
+          result[rule.target_pattern.format(i)] = tensor
+      elif isinstance(out, list) and len(out) == 1:
+        result[rule.target_pattern] = out[0]
+      else:
+        result[rule.target_pattern] = out
+
+      del out, tensors
+      gc.collect()
+
+    if not result:
+      raise ValueError(
+          "No conversion rule matched the trainer state; the rollout would "
+          f"keep its dummy weights. Rule targets: {unfired}"
+      )
+    if unfired:
+      logging.info("Conversion rules that did not fire: %s", unfired)
+
+    return _rekey_to_target(result, target_state)
+
+  def convert_streaming(
+      self,
+      src_pytree: Any,
+      target_state: Any = None,
+      *,
+      groups_per_piece: int = 1,
+  ) -> Iterator[Dict[str, Any]]:
+    """Yields converted weight pieces incrementally in direct MaxText-to-MaxText mode."""
+    if self.rollout_backend == "maxtext" and self.rules is None:
+      return self._direct.convert_streaming(src_pytree, target_state=target_state, groups_per_piece=groups_per_piece)
+    raise NotImplementedError(
+        "convert_streaming is only supported in direct MaxText-to-MaxText mode (rollout_backend='maxtext' and rules=None)."
+    )
 
     # HuggingFace-shaped target: rename and restructure per the rule table.
     result = {}
@@ -1200,39 +1253,17 @@ class MaxTextToMaxTextConverter:
     """Returns a nested dict of rollout weights, keyed by target paths.
 
     Pure: neither `src_pytree` nor `target_state` is mutated. Leaves are wrapped in nnx.Param.
-    Note on memory lifecycle: `src_flat.pop()` frees internal flattened dict references
-    as `result` is constructed to prevent dictionary growth overhead, but the caller's
-    `src_pytree` retains full-tree references until `convert()` returns and the caller
-    rebinds or drops its handle.
     """
-    src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
-    src_flat, _ = _strip_root(src_flat, "base")
-
     if target_state is None:
-      if self._plan is None:
-        self._plan = self._build_target_free_plan(src_flat)
-        self._groups = _group_plan(self._plan)
-
-      result: Dict[Tuple[Any, ...], Any] = {}
-      for group in self._groups:
-        outs = self._execute_group_target_free(group, src_flat)
-        # Drop processed source entries from src_flat to reduce dict overhead
-        for k in group.source_keys:
-          src_flat.pop(k, None)
-        for tgt_key, out in outs:
-          result[tgt_key] = out
-        del outs
-
-      del src_flat
-      gc.collect()
-      nested = traverse_util.unflatten_dict(result)
-      del result
+      flat_result = {}
+      for piece in self.convert_streaming(src_pytree, target_state=None):
+        flat_result.update(traverse_util.flatten_dict(piece))
       gc.collect()
       _malloc_trim()
-      return jax.tree_util.tree_map(
-          lambda x: nnx.Param(x) if not isinstance(x, (nnx.Param, nnx.Variable)) else x,
-          nested,
-      )
+      return traverse_util.unflatten_dict(flat_result)
+
+    src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
+    src_flat, src_root = _strip_root(src_flat, "base")
 
     # Read variable types before purifying to plain arrays loses them.
     skip_paths = _non_param_paths(target_state)
@@ -1319,6 +1350,52 @@ class MaxTextToMaxTextConverter:
         lambda x: nnx.Param(x) if not isinstance(x, (nnx.Param, nnx.Variable)) else x,
         nested,
     )
+
+  def convert_streaming(
+      self,
+      src_pytree: Any,
+      target_state: Any = None,
+      *,
+      groups_per_piece: int = 1,
+  ) -> Iterator[Dict[str, Any]]:
+    """Yields converted rollout weight pieces incrementally for target-free conversion.
+
+    Pure: `src_pytree` is not mutated. Each yielded piece is a nested dict of `nnx.Param`s
+    corresponding to `groups_per_piece` plan groups. Memory is freed piece-by-piece as
+    source keys are consumed.
+    """
+    if target_state is not None:
+      raise NotImplementedError("convert_streaming only supports target-free conversion (target_state=None).")
+
+    src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
+    src_flat, src_root = _strip_root(src_flat, "base")
+
+    if self._plan is None:
+      self._plan = self._build_target_free_plan(src_flat)
+      self._groups = _group_plan(self._plan)
+
+    groups_per_piece = max(1, groups_per_piece)
+    for i in range(0, len(self._groups), groups_per_piece):
+      piece_groups = self._groups[i : i + groups_per_piece]
+      piece_result: Dict[Tuple[Any, ...], Any] = {}
+      for group in piece_groups:
+        outs = self._execute_group_target_free(group, src_flat)
+        for k in group.source_keys:
+          src_flat.pop(k, None)
+        for tgt_key, out in outs:
+          piece_result[src_root + tgt_key] = out
+        del outs
+
+      nested = traverse_util.unflatten_dict(piece_result)
+      del piece_result
+      yield jax.tree_util.tree_map(
+          lambda x: nnx.Param(x) if not isinstance(x, (nnx.Param, nnx.Variable)) else x,
+          nested,
+      )
+
+    del src_flat
+    gc.collect()
+    _malloc_trim()
 
 
 def _rekey_to_target(flat_dotted: Dict[str, Any], target_state: Any) -> Dict[str, Any]:

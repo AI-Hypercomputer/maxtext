@@ -36,11 +36,120 @@ function's pattern-block matching would silently no-op on Qwen3 trees (its
 simpler, single-axis case directly instead of adapting that function.
 """
 
-from typing import Any
+import gc
+from typing import Any, Iterator, Tuple, List, Dict
 
 import jax
 from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
+
+
+def _unscan_one_key(
+    key: Tuple[Any, ...],
+    value: Any,
+    num_layers: int,
+    layer_container: str = "layers",
+    scan_axis: int = 1,
+) -> Tuple[List[Tuple[Tuple[Any, ...], Any]], bool]:
+  """Unscans a single flattened pytree entry.
+
+  Returns:
+    (list_of_entries, is_scanned), where list_of_entries is a list of (new_key, value_slice) pairs.
+  """
+  if layer_container not in key:
+    return [(key, value)], False
+
+  idx = key.index(layer_container)
+  prefix = key[:idx]
+  suffix = key[idx + 1 :]
+  arr = getattr(value, "value", value)
+
+  if not hasattr(arr, "shape") or arr.ndim <= scan_axis:
+    return [(key, value)], False
+
+  if arr.shape[scan_axis] != num_layers:
+    raise ValueError(
+        f"unscan_layers: {'.'.join(str(k) for k in key)!r} has shape {arr.shape}, expected axis {scan_axis} to be"
+        f" num_layers={num_layers}."
+    )
+
+  entries = []
+  for i in range(num_layers):
+    sliced = jax.lax.index_in_dim(arr, i, axis=scan_axis, keepdims=False)
+    new_key = prefix + (f"{layer_container}_{i}",) + suffix
+    entries.append((new_key, sliced))
+  return entries, True
+
+
+def unscan_layers_streaming(
+    state: Any,
+    num_layers: int,
+    layer_container: str = "layers",
+    scan_axis: int = 1,
+    *,
+    keys_per_piece: int = 1,
+) -> Iterator[Any]:
+  """Yields unscanned layer pieces incrementally for Raiden weight sync.
+
+  Args:
+    state: An `nnx.State` (or any pytree exposing `to_pure_dict`/`to_dict`, or a plain nested dict) of MaxText params,
+      scanned along `scan_axis` under a `layer_container` key (MaxText's default scan layout).
+    num_layers: Number of layers the scanned axis must have.
+    layer_container: The pytree key holding the scanned per-layer params.
+    scan_axis: The axis along which layers are scanned (default 1).
+    keys_per_piece: Number of original flattened keys to batch per yielded piece (default 1).
+
+  Yields:
+    Nested dicts with `nnx.Param`-wrapped leaves, each containing `keys_per_piece` keys' worth of
+    unscanned slices.
+  """
+  if hasattr(state, "to_pure_dict"):
+    pure = state.to_pure_dict()
+  elif hasattr(state, "to_dict"):
+    pure = state.to_dict()
+  elif isinstance(state, dict):
+    pure = state
+  else:
+    yield state
+    return
+
+  flat = flatten_dict(pure)
+
+  has_scanned = any(
+      layer_container in key
+      and hasattr(getattr(flat[key], "value", flat[key]), "shape")
+      and getattr(getattr(flat[key], "value", flat[key]), "ndim", 0) > scan_axis
+      for key in flat
+  )
+  if not has_scanned:
+    raise ValueError(
+        f"unscan_layers: found no scanned '{layer_container}' entries to unscan "
+        "-- state may already be unscanned, or layer_container is wrong."
+    )
+
+  keys_per_piece = max(1, keys_per_piece)
+  flat_keys = list(flat.keys())
+  for i in range(0, len(flat_keys), keys_per_piece):
+    chunk_keys = flat_keys[i : i + keys_per_piece]
+    piece_flat = {}
+    for key in chunk_keys:
+      value = flat.pop(key)
+      outputs, _ = _unscan_one_key(
+          key, value, num_layers=num_layers, layer_container=layer_container, scan_axis=scan_axis
+      )
+      for new_key, sliced in outputs:
+        piece_flat[new_key] = sliced
+      del value, outputs
+
+    nested = unflatten_dict(piece_flat)
+    del piece_flat
+    yield jax.tree_util.tree_map(
+        lambda x: nnx.Param(x) if not isinstance(x, (nnx.Param, nnx.Variable)) else x,
+        nested,
+    )
+
+  del flat
+  gc.collect()
 
 
 def unscan_layers(
@@ -66,64 +175,15 @@ def unscan_layers(
     see the same leaf shape whether or not this transform ran. Non-scanned entries (e.g. embeddings, final norm) pass
     through unchanged, also rewrapped.
   """
-  if hasattr(state, "to_pure_dict"):
-    pure = state.to_pure_dict()
-  elif hasattr(state, "to_dict"):
-    pure = state.to_dict()
-  elif isinstance(state, dict):
-    pure = state
-  else:
+  if not hasattr(state, "to_pure_dict") and not hasattr(state, "to_dict") and not isinstance(state, dict):
     return state
 
-  flat = flatten_dict(pure)
   new_flat = {}
-  unscanned_count = 0
-
-  # Drain `flat` as we go (pop, not iterate-then-keep) rather than holding
-  # every original scanned array alive for the whole function: at 30B-A3B
-  # scale (padded MoE weights are tens of GB each), keeping both the
-  # original scanned tree and the ~num_layers-times-larger unscanned tree
-  # alive simultaneously roughly doubles peak host memory during Raiden's
-  # D2H staging -- confirmed as the direct cause of an OOMKill there.
-  for key in list(flat.keys()):
-    value = flat.pop(key)
-    if layer_container not in key:
-      new_flat[key] = value
-      continue
-
-    idx = key.index(layer_container)
-    prefix = key[:idx]
-    suffix = key[idx + 1 :]
-    arr = getattr(value, "value", value)
-
-    if arr is None or not hasattr(arr, "shape") or getattr(arr, "ndim", 0) <= scan_axis:
-      # Not a per-layer leaf (shouldn't happen for real params under
-      # `layers`, but don't silently drop anything unexpected). Keep the
-      # original (possibly already-wrapped) value, matching pre-existing
-      # behavior -- unlike the actually-scanned case below, there's no
-      # multi-copy blowup here worth restructuring around.
-      new_flat[key] = value
-      continue
-    del value
-
-    if arr.shape[scan_axis] != num_layers:
-      raise ValueError(
-          f"unscan_layers: {'.'.join(key)!r} has shape {arr.shape}, expected axis {scan_axis} to be"
-          f" num_layers={num_layers}."
-      )
-
-    for i in range(num_layers):
-      sliced = jax.lax.index_in_dim(arr, i, axis=scan_axis, keepdims=False)
-      new_key = prefix + (f"{layer_container}_{i}",) + suffix
-      new_flat[new_key] = sliced
-    del arr
-    unscanned_count += 1
-
-  if unscanned_count == 0:
-    raise ValueError(
-        f"unscan_layers: found no scanned '{layer_container}' entries to unscan "
-        "-- state may already be unscanned, or layer_container is wrong."
-    )
-
+  for piece in unscan_layers_streaming(
+      state, num_layers=num_layers, layer_container=layer_container, scan_axis=scan_axis
+  ):
+    new_flat.update(flatten_dict(piece))
+  gc.collect()
   nested = unflatten_dict(new_flat)
-  return jax.tree_util.tree_map(nnx.Param, nested)
+  del new_flat
+  return nested

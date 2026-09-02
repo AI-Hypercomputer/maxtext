@@ -186,6 +186,53 @@ class UnscanLayersTest(absltest.TestCase):
     after = sum(int(np.size(np.asarray(_unwrap(x)))) for x in jax.tree_util.tree_leaves(unscanned))
     self.assertEqual(after, before)
 
+  def test_streaming_piece_count_and_parity(self):
+    state = self._scanned_state()
+    pieces = list(raiden_unscan.unscan_layers_streaming(state, num_layers=_NUM_LAYERS, keys_per_piece=1))
+    # 3 original flattened keys: embed, layers.kernel, layers.scale
+    self.assertEqual(len(pieces), 3)
+
+    expected = raiden_unscan.unscan_layers(state, num_layers=_NUM_LAYERS)
+    merged_flat = {}
+    for piece in pieces:
+      piece_flat = raiden_unscan.flatten_dict(piece)
+      for k, v in piece_flat.items():
+        self.assertNotIn(k, merged_flat)
+        merged_flat[k] = v
+
+    expected_flat = raiden_unscan.flatten_dict(expected)
+    self.assertEqual(set(merged_flat.keys()), set(expected_flat.keys()))
+    for k in expected_flat:
+      v_exp = _unwrap(expected_flat[k])
+      v_got = _unwrap(merged_flat[k])
+      np.testing.assert_array_equal(np.asarray(v_got), np.asarray(v_exp))
+
+  def test_streaming_keys_per_piece_batching(self):
+    state = self._scanned_state()
+    pieces = list(raiden_unscan.unscan_layers_streaming(state, num_layers=_NUM_LAYERS, keys_per_piece=2))
+    # 3 keys with batch size 2 -> ceil(3/2) = 2 pieces
+    self.assertEqual(len(pieces), 2)
+
+    expected = raiden_unscan.unscan_layers(state, num_layers=_NUM_LAYERS)
+    expected_flat = raiden_unscan.flatten_dict(expected)
+    merged_flat = {}
+    for piece in pieces:
+      merged_flat.update(raiden_unscan.flatten_dict(piece))
+
+    self.assertEqual(set(merged_flat.keys()), set(expected_flat.keys()))
+    for k in expected_flat:
+      np.testing.assert_array_equal(np.asarray(_unwrap(merged_flat[k])), np.asarray(_unwrap(expected_flat[k])))
+
+  def test_streaming_leaves_are_nnx_param(self):
+    state = self._scanned_state()
+    for piece in raiden_unscan.unscan_layers_streaming(state, num_layers=_NUM_LAYERS):
+      for leaf in jax.tree_util.tree_leaves(piece, is_leaf=lambda x: isinstance(x, nnx.Param)):
+        self.assertIsInstance(leaf, nnx.Param)
+
+  def test_streaming_already_unscanned_state_raises(self):
+    with self.assertRaisesRegex(ValueError, "found no scanned 'layers' entries"):
+      list(raiden_unscan.unscan_layers_streaming(nnx.state(UnscannedModel(), nnx.Param), num_layers=_NUM_LAYERS))
+
 
 if __name__ == "__main__":
   absltest.main()
