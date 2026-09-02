@@ -1144,6 +1144,10 @@ class Qwen3Next(BaseModel):
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
+  use_gdn_kernel: bool = Field(
+      False,
+      description="Whether to use the fused analytical Pallas GDN kernel.",
+  )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
 
 
