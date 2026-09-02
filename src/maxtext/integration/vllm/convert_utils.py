@@ -160,9 +160,22 @@ class ShapeMismatchError(ValueError):
   """Raised when source and target shapes are incompatible."""
 
 
-def _apply_dtype_cast(val: jax.Array | np.ndarray, tgt_dtype: jnp.dtype, src_key: str) -> jax.Array | np.ndarray:
+def _apply_dtype_cast(val: Any, tgt_dtype: Any, src_key: str) -> Any:
   """Casts val to target dtype if needed, logging a warning on type mismatch."""
-  if val.dtype != tgt_dtype:
+  if isinstance(tgt_dtype, str):
+    if tgt_dtype in ("bfloat16", "bf16"):
+      tgt_dtype = jnp.bfloat16
+    elif tgt_dtype in ("float32", "fp32"):
+      tgt_dtype = jnp.float32
+    else:
+      tgt_dtype = jnp.dtype(tgt_dtype)
+  if isinstance(val, jax.ShapeDtypeStruct):
+    if tgt_dtype is not None and val.dtype != tgt_dtype:
+      return jax.ShapeDtypeStruct(val.shape, tgt_dtype)
+    return val
+  if not hasattr(val, "dtype"):
+    return val
+  if tgt_dtype is not None and val.dtype != tgt_dtype:
     logging.log_first_n(
         logging.WARNING,
         "Type mismatch on %s: %s -> %s",
@@ -171,7 +184,8 @@ def _apply_dtype_cast(val: jax.Array | np.ndarray, tgt_dtype: jnp.dtype, src_key
         val.dtype,
         tgt_dtype,
     )
-    return val.astype(tgt_dtype)
+    if hasattr(val, "astype"):
+      return val.astype(tgt_dtype)
   return val
 
 
@@ -409,6 +423,8 @@ def _align_per_axis(
   path here is bulk alignment of scanned MoE weights, where eager
   dispatch was costing tens of seconds per tensor.
   """
+  if isinstance(arr, jax.ShapeDtypeStruct):
+    return jax.ShapeDtypeStruct(tgt_shape, arr.dtype)
   if not hasattr(arr, "shape"):
     return arr
   if arr.shape == tgt_shape:
@@ -604,6 +620,11 @@ def _bulk_align_and_unstack(
     A tuple of `num_layers` per-layer arrays at the per-layer target shape.
   """
   per_layer_shape = per_layer_tgt_val.shape
+  if isinstance(arr, jax.ShapeDtypeStruct) or isinstance(per_layer_tgt_val, jax.ShapeDtypeStruct):
+    num_layers = arr.shape[scan_axis]
+    tgt_dtype = getattr(per_layer_tgt_val, "dtype", getattr(arr, "dtype", jnp.float32))
+    return tuple(jax.ShapeDtypeStruct(per_layer_shape, tgt_dtype) for _ in range(num_layers))
+
   scanned_tgt_shape = per_layer_shape[:scan_axis] + (arr.shape[scan_axis],) + per_layer_shape[scan_axis:]
   scanned_tgt_sharding = _scanned_sharding_from_per_layer(getattr(per_layer_tgt_val, "sharding", None), scan_axis)
 

@@ -439,5 +439,141 @@ class CrossMeshPlacementTest(unittest.TestCase):
       )
 
 
+class TargetFreeConversionTest(unittest.TestCase):
+  """Comprehensive test suite for target-free key synthesis and execution."""
+
+  def test_case_0_raiden_unscan_fails_on_hybrid_cycle(self):
+    from maxtext.integration.tunix.weight_mapping import raiden_unscan
+
+    source = _source_tree(True)
+    with self.assertRaises(ValueError) as ctx:
+      raiden_unscan.unscan_layers(source, num_layers=NUM_LAYERS, scan_axis=SCAN_AXIS)
+    self.assertIn("expected axis 1 to be num_layers=8", str(ctx.exception))
+
+  def test_case_1_homogeneous_target_free_unroll(self):
+    cfg = _config(inhomogeneous_layer_cycle_interval=1, num_decoder_layers=4)
+    source = {
+        "base": {
+            "token_embedder": {"embedding": _arr(16, EMB)},
+            "decoder": {
+                "decoder_norm": {"scale": _arr(EMB)},
+                "layers": {
+                    "input_layernorm": {"scale": _arr(EMB, 4)},
+                    "self_attention": {"query": {"kernel": _arr(EMB, 4, 2, 4)}},
+                },
+            },
+        }
+    }
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext")
+    out = converter.convert(source, target_state=None)
+    self.assertIn("token_embedder", out)
+    self.assertIn("decoder", out)
+    for i in range(4):
+      layer_key = f"layers_{i}"
+      self.assertIn(layer_key, out["decoder"])
+      scale = getattr(out["decoder"][layer_key]["input_layernorm"]["scale"], "value", out["decoder"][layer_key]["input_layernorm"]["scale"])
+      query = getattr(out["decoder"][layer_key]["self_attention"]["query"]["kernel"], "value", out["decoder"][layer_key]["self_attention"]["query"]["kernel"])
+      self.assertEqual(scale.shape, (EMB,))
+      self.assertEqual(query.shape, (EMB, 2, 4))
+
+  def test_case_2_hybrid_cycle_target_free_unroll(self):
+    cfg = _config()
+    source = _source_tree(True)
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext")
+    out = converter.convert(source, target_state=None)
+    src_layers = source["base"]["decoder"]["layers"]
+    for layer in range(NUM_LAYERS):
+      slot, block = layer % CYCLE, layer // CYCLE
+      got = getattr(out["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"], "value", out["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"])
+      want = jnp.take(src_layers[f"layer_{slot}"]["input_layernorm"]["scale"], block, axis=SCAN_AXIS)
+      np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+  def test_case_3_prefused_moe_target_free(self):
+    from maxtext.integration.vllm.moe_padding import compute_padded_moe_mlp_dim
+
+    # Verify helper across topologies
+    self.assertEqual(compute_padded_moe_mlp_dim(512, 2, 128), 512)
+    self.assertEqual(compute_padded_moe_mlp_dim(512, 4, 128), 1024)
+    self.assertEqual(compute_padded_moe_mlp_dim(512, 8, 128), 2048)
+
+    # Verify target-free prefused MoE with padded dim
+    padded_dim = 16
+    cfg = _config(padded_base_moe_mlp_dim=padded_dim, prefuse_moe_weights=True)
+    source = _source_tree(True)
+    converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=True)
+    out = converter.convert(source, target_state=None)
+    wi = getattr(out["decoder"]["layers_0"]["moe_block"]["wi"], "value", out["decoder"]["layers_0"]["moe_block"]["wi"])
+    wo = getattr(out["decoder"]["layers_0"]["moe_block"]["wo"], "value", out["decoder"]["layers_0"]["moe_block"]["wo"])
+    self.assertEqual(wi.shape, (EXPERTS, EMB, padded_dim * 2))
+    self.assertEqual(wo.shape, (EXPERTS, padded_dim, EMB))
+
+  def test_case_4_abstract_evaluation(self):
+    cfg = _config(padded_base_moe_mlp_dim=16, prefuse_moe_weights=True)
+
+    def to_struct(x):
+      arr = getattr(x, "value", x)
+      return jax.ShapeDtypeStruct(arr.shape, arr.dtype)
+
+    abstract_source = jax.tree_util.tree_map(to_struct, _source_tree(True))
+    converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=True)
+    out = converter.convert(abstract_source, target_state=None)
+    for leaf in jax.tree_util.tree_leaves(out):
+      val = getattr(leaf, "value", leaf)
+      self.assertIsInstance(val, jax.ShapeDtypeStruct)
+    wi = getattr(out["decoder"]["layers_0"]["moe_block"]["wi"], "value", out["decoder"]["layers_0"]["moe_block"]["wi"])
+    self.assertEqual(wi.shape, (EXPERTS, EMB, 32))
+
+  def test_case_5_host_memory_profiling(self):
+    import resource
+
+    cfg = _config()
+    source = _source_tree(True)
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext")
+    before_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    out = converter.convert(source, target_state=None)
+    after_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    self.assertIsNotNone(out)
+
+  def test_case_6_parity_vs_raiden_unscan_on_homogeneous(self):
+    from maxtext.integration.tunix.weight_mapping import raiden_unscan
+
+    cfg = pytypes.SimpleNamespace(
+        num_decoder_layers=4,
+        inhomogeneous_layer_cycle_interval=1,
+        param_scan_axis=1,
+        weight_dtype=jnp.bfloat16,
+        prefuse_moe_weights=False,
+    )
+    raw_source = {
+        "token_embedder": {"embedding": _arr(16, EMB)},
+        "decoder": {
+            "decoder_norm": {"scale": _arr(EMB)},
+            "layers": {
+                "input_layernorm": {"scale": _arr(EMB, 4)},
+                "self_attention": {"query": {"kernel": _arr(EMB, 4, 2, 4)}},
+            },
+        },
+    }
+    bf16_source = jax.tree_util.tree_map(
+        lambda x: x.astype(jnp.bfloat16) if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) else x,
+        raw_source,
+    )
+    baseline_out = raiden_unscan.unscan_layers(bf16_source, num_layers=4, scan_axis=1)
+
+    converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=False, target_dtype=jnp.bfloat16)
+    converter_out = converter.convert(raw_source, target_state=None)
+
+    base_flat = traverse_util.flatten_dict(baseline_out)
+    conv_flat = traverse_util.flatten_dict(converter_out)
+
+    self.assertEqual(set(base_flat.keys()), set(conv_flat.keys()))
+    for k in base_flat:
+      v_base = getattr(base_flat[k], "value", base_flat[k])
+      v_conv = getattr(conv_flat[k], "value", conv_flat[k])
+      self.assertEqual(v_base.shape, v_conv.shape, f"Shape mismatch at {k}")
+      self.assertEqual(v_base.dtype, v_conv.dtype, f"Dtype mismatch at {k}")
+      np.testing.assert_array_equal(np.asarray(v_base), np.asarray(v_conv), err_msg=f"Value mismatch at {k}")
+
+
 if __name__ == "__main__":
   unittest.main()

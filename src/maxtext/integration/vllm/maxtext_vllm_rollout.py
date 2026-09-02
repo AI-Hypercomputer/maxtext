@@ -464,14 +464,11 @@ class MaxTextVllmSampler(VllmSampler):
       self,
       tokenizer: Any,
       config: VllmConfig,
-      converter: Any = None,
       direct_maxtext_sync: bool = False,
       scan_axis: int = 1,
       layer_pattern_length: Optional[int] = None,
   ):
     super().__init__(tokenizer=tokenizer, config=config)
-    self._converter = converter
-    self.converter = converter
     self._direct_maxtext_sync = direct_maxtext_sync
     self._scan_axis = scan_axis
     self._layer_pattern_length = layer_pattern_length
@@ -495,11 +492,6 @@ class MaxTextVllmSampler(VllmSampler):
         raise
     if self._converter is None:
       if self._direct_maxtext_sync:
-        updated_weights = unroll_qwen_scanned_weights(
-            updated_weights,
-            scan_axis=self._scan_axis,
-            pattern_length=self._layer_pattern_length,
-        )
         updated_weights = unroll_gemma_scanned_weights(updated_weights)
     try:
       return super().update_params(updated_weights, filter_types)
@@ -742,7 +734,6 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             additional_config=rollout_additional_config,
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
         ),
-        converter=converter,
         direct_maxtext_sync=direct_maxtext_sync,
         scan_axis=getattr(maxtext_config, "param_scan_axis", 1),
         layer_pattern_length=getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", None),

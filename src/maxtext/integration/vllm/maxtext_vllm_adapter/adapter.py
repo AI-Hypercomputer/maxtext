@@ -48,19 +48,7 @@ from vllm.config import VllmConfig
 _HYBRID_LAYER_IMBALANCE_THRESHOLD = 1.5
 
 
-def next_power_of_two(x: int) -> int:
-  """Finds the smallest power of 2 >= x using bit manipulation.
-
-  Args:
-    x: The input number (should be an integer).
-
-  Returns:
-    The smallest integer power of 2 that is >= x.
-  """
-  assert x > 0
-  if x == 1:
-    return 1
-  return 1 << (x - 1).bit_length()
+from maxtext.integration.vllm.moe_padding import compute_padded_moe_mlp_dim, next_power_of_two
 
 
 def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters:
@@ -166,11 +154,8 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   # The GMM_v2 kernel requires the MLP dimension per expert to be at least 2x the number of TPU lanes
   # to ensure efficient execution. See the validate_inputs() method in the following file for more details:
   # https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/megablox/gmm_v2.py
-  if hidden_size is not None and (hidden_size // moe_mlp_tp_size) % (2 * num_lanes) != 0:
-    padded_hidden_size = next_power_of_two(hidden_size)
-    while (padded_hidden_size // moe_mlp_tp_size) < (2 * num_lanes):
-      padded_hidden_size = next_power_of_two(padded_hidden_size + 1)
-
+  padded_hidden_size = compute_padded_moe_mlp_dim(hidden_size, moe_mlp_tp_size, num_lanes)
+  if padded_hidden_size is not None and padded_hidden_size != hidden_size:
     # This inflates every expert weight, so it is a real memory/FLOP cost rather than a
     # cosmetic reshape: at moe_mlp_tp_size=4 a 512-wide MoE is padded to 1024 (2x the MoE
     # weights), and at moe_mlp_tp_size=8 to 2048 (4x). Log it at WARNING so it is visible
