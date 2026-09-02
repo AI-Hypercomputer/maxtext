@@ -26,12 +26,19 @@ of the trainer, not of the workload.
 | Engine host step path at GA=8, after the §9 fix    | qwen3-0.6b **2.19x**/step at identical TPU-busy; 1.45x on loop wall clock      |
 | Engine at GA=8, whole PR vs. `59f49ac90^`          | qwen3-0.6b **5.87x** — §9's host fix plus the fused accumulation kernel        |
 | Engine vs. `PeftTrainer` at GA=8, identical model  | **2.08x**/step — 589.6 vs. 1225.9 ms, at 96% vs. 50% device utilization        |
+| Behaviour change to know about                     | The micro-batch must divide `data x fsdp`, or gradients go NaN — see below     |
 
 **On step time alone the two trainers are equivalent at production sequence lengths.**
 MaxText's lead is a short-sequence effect that amortizes away completely: 1.85x at 16
 tokens, 1.21x at 2048, **1.03x at 8192** (§4). Do not quote the small-shape numbers as a
 general result. The HBM difference, by contrast, is flat in sequence length and does not
 amortize.
+
+**The one behaviour change**, as opposed to a timing change, is that
+`micro_batch_size_to_train_on` must now be a multiple of `data x fsdp`. Making MaxText's
+logical constraints real is what buys the device-side speedup, and it is also what turns an
+unshardable batch into NaN gradients under a finite loss:
+[the batch has to be shardable](#the-batch-has-to-be-shardable-now).
 
 ## Environment
 
@@ -123,12 +130,25 @@ step loop. Reproducing those three rows means re-adding the marks; the last row 
 
 ## 1. End-to-end GRPO test
 
-`tests/post_training/integration/maxtext_engine_grpo_loss_test.py` — **1 passed in 50.32 s**
+`tests/post_training/integration/maxtext_engine_grpo_loss_test.py` — **1 passed in 51.67 s**
 against the real GCS checkpoint.
 
 Note that this test never calls `engine.compile()`, so it exercises the engine's *eager*
 path. That path is roughly 7x slower per update (237 ms vs. 34 ms); see
 [Calling `compile()` is load-bearing](#calling-compile-is-load-bearing).
+
+Two things about the test are load-bearing and were not before this PR:
+
+- **The batch is derived from the mesh**, `mesh.shape["data"] * mesh.shape["fsdp"]`, not
+  hard-coded. See
+  [the batch has to be shardable](#the-batch-has-to-be-shardable-now) — a hard-coded 2 on
+  this 4-device host produced NaN gradients under a finite loss.
+- **`matmul_precision=highest`.** The KL assertion compares log-probs from two different code
+  paths — Tunix's `compute_per_token_logps` for the reference against the engine's sharded
+  forward for the policy. At the default bf16 those disagree by ~2e-2 on values near -12.6,
+  and `low_var_kl` squares the difference into a KL of ~1.2e-4: noise, but an order of
+  magnitude above the 5e-5 the assertion is trying to police. fp32 matmuls put it back under
+  the tolerance, and at this model size cost nothing measurable.
 
 ## 2. Numerical parity at GA=1
 
@@ -576,6 +596,27 @@ under `nn_partitioning.axis_rules` folds accumulation into the compiled program,
 launches — 2334 per step, close to 310 parameter leaves x 8 micro-batches of eager `jit_add`
 — collapse into one `jit_accum_kernel` per micro step, and the fwd/bwd module itself falls
 285.8 → 71.1 ms per micro-batch.
+
+#### The batch has to be shardable now
+
+That speedup has a precondition worth stating separately, because it changes behaviour rather
+than just timing. Tracing under `nn_partitioning.axis_rules` is what makes MaxText's logical
+constraints on the activations *real*; before, they were inert and the activations simply
+stayed unsharded. So a micro-batch that the data x fsdp devices cannot split is no longer
+merely slow — XLA pads the batch out, and the padded lanes are all-zero sequences, which mask
+themselves out of attention entirely. Their contribution comes back as NaN on the pad token's
+embedding row. The loss stays finite; only the gradients are poisoned, which is a bad way to
+find out.
+
+The condition is exactly `micro_batch_size_to_train_on % (data x fsdp) == 0`. MaxText's splash
+kernel already asserts on it — "Batch dimension should be shardable among the devices in data
+and fsdp axis", `src/maxtext/layers/attention_op.py` — but `dot_product` does not, so under
+`attention=dot_product` it surfaces as a NaN instead of an error. This is how it first showed
+up: §1's test hard-coded a batch of 2 and ran on a 4-device host.
+
+Callers that were relying on an undersized micro-batch working are the group affected. In
+practice a batch smaller than the device count was already leaving devices idle, so the fix
+is the one they wanted anyway.
 
 It also moves the trainer comparison. §4 found the two trainers equivalent on step time at
 production sequence lengths, which held at GA=1; at GA=8 they separate, because
