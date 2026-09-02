@@ -196,8 +196,64 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         else call_kwargs["args"].__dict__
     )
     self.assertIn("model_params", args_dict)
-    self.assertIn("accumulated_metrics", args_dict)
+    self.assertNotIn("accumulated_metrics", args_dict)
     self.assertNotIn("accumulated_grads", args_dict)
+
+  def test_save_checkpoint_omits_items_with_no_leaves(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+
+    # When no metrics have been recorded, accumulated_metrics is empty list and not saved
+    t.save_checkpoint(metadata=None)
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    self.assertNotIn("accumulated_metrics", args_dict)
+
+    # When accumulated_metrics is None in CheckpointState, it is not saved
+    mock_orbax_mgr.reset_mock()
+    ckpt_state_none = maxtext_engine.checkpointing.CheckpointState(
+        model=t.model,
+        accumulated_metrics=None,
+    )
+    t._checkpoint_manager.save_checkpoint(
+        step=1,
+        checkpoint_state=ckpt_state_none,
+        force=True,
+    )
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    self.assertNotIn("accumulated_metrics", args_dict)
+
+    # When accumulated_metrics is empty list in CheckpointState, it is not saved
+    mock_orbax_mgr.reset_mock()
+    ckpt_state_empty = maxtext_engine.checkpointing.CheckpointState(
+        model=t.model,
+        accumulated_metrics=[],
+    )
+    t._checkpoint_manager.save_checkpoint(
+        step=2,
+        checkpoint_state=ckpt_state_empty,
+        force=True,
+    )
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    self.assertNotIn("accumulated_metrics", args_dict)
 
   def test_save_checkpoint_skips_if_already_saved(self):
     mock_config = self.setup_config(enable_checkpointing=True)
@@ -339,7 +395,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         else call_kwargs["args"].__dict__
     )
     self.assertIn("model_params", args_dict)
-    self.assertIn("accumulated_metrics", args_dict)
+    self.assertNotIn("accumulated_metrics", args_dict)
     self.assertIn("accumulated_grads", args_dict)
 
   def test_close_writes_final_checkpoint(self):
