@@ -1070,6 +1070,7 @@ decode_sampling_temperature: 1.
 eval_start_step: 0 # start eval when train step is >= eval_start_step
 eval_interval: -1  # the specific number of train step between eval_step
 eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
+loss_is_preaveraged: false # Whether eval hooks receive a loss already averaged across eval batches
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 abort_on_nan_loss: true # Check for NaN and abort if found in training loss
 abort_on_inf_loss: true # Check for Inf and abort if found in training loss
