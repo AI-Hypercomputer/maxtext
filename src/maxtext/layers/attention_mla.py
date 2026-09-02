@@ -756,8 +756,6 @@ class MLA(Attention):
         and getattr(config, "prune_shared_indexers", True)
         and self.is_shared_layer
     )
-    self.indexer = None
-    self.IndexerKVCache_0 = None
     if self.use_indexer and not is_pruned:
       # Need two versions of rope.
       # MLA applies yarn with interleave layout.
@@ -773,6 +771,9 @@ class MLA(Attention):
           model_mode=model_mode,
       )
       self.IndexerKVCache_0 = self.init_indexer_cache(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
+    else:
+      self.indexer = None
+      self.IndexerKVCache_0 = None
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
