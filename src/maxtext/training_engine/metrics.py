@@ -40,20 +40,9 @@ _METRICS_TO_LOG = [
     "tflops",
 ]
 
-# How many completed step buffers stay resident before the oldest are evicted.
-#
-# Every buffer holds live device arrays -- one leaf per scalar metric, plus one per aux
-# metric when the engine runs with `has_aux`, which for MoE/MTP configs is tens of leaves --
-# so nothing in the list is free. Nothing on the engine's own step path removes an entry
-# either: `get_step_metrics` hands out the newest by reference, and only
-# `get_metrics_history(clear_cache=True)` and `cleanup()` clear. A driver that reads the
-# engine's own TensorBoard output rather than calling `get_metrics()` therefore never
-# clears, and both HBM and -- because `save_checkpoint` serializes the whole retained
-# history -- checkpoint size and save latency grow linearly in steps.
-#
-# Tunix v2 keeps exactly one prior step (`_prev_buffered_train_metrics` in
-# `peft_trainer_v2.py`). This keeps a window instead so batched readers of
-# `get_metrics_history` still work, while making the footprint constant in step count.
+# Completed step buffers to keep resident. Each holds live device arrays and nothing on the
+# engine's step path removes one, so unbounded history grows HBM, and checkpoint size with
+# it. A window rather than Tunix's single prior step, so batched readers still work.
 _DEFAULT_MAX_BUFFERED_STEPS = 128
 
 
@@ -74,8 +63,7 @@ class MetricsRecorder:
 
     Args:
       max_buffered_steps: How many completed step buffers to retain; older ones are evicted
-        as new steps start. Pass 0 or a negative value to retain everything, which is only
-        safe when the driver drains the history itself.
+        as new steps start. Zero or less retains everything.
     """
     self._metrics_buffer: list[abstract_engine.MetricsBuffer] = []
     self._max_buffered_steps = max_buffered_steps
@@ -107,8 +95,7 @@ class MetricsRecorder:
   def _evict_old_buffers(self) -> None:
     """Drops the oldest step buffers once the retention window is full.
 
-    Only ever runs when a *new* step starts, so the buffer the current step is writing into
-    and the one `get_step_metrics` is about to hand the throttler are never the ones dropped.
+    Only runs when a *new* step starts, so the current step's buffer is never a candidate.
     """
     if self._max_buffered_steps <= 0 or len(self._metrics_buffer) <= self._max_buffered_steps:
       return
@@ -116,8 +103,6 @@ class MetricsRecorder:
     oldest_dropped_id = self._metrics_buffer[0].id
     del self._metrics_buffer[:num_dropped]
     self._dropped_buffer_count += num_dropped
-    # Dropping metrics silently is the pattern that produced the fabricated 0.0 in the parity
-    # harness, so say so -- but once per window, not once per step.
     logging.log_every_n(
         logging.WARNING,
         "Metrics history is full at %d step(s); evicting buffers from step %s onwards "
@@ -172,7 +157,7 @@ class MetricsRecorder:
 
     The engine's own `get_metrics` returns only the most recent buffer, per the trainer
     contract. This is the accessor that keeps the history reachable -- the last
-    `max_buffered_steps` of it; see `_DEFAULT_MAX_BUFFERED_STEPS` for why it is a window.
+    `max_buffered_steps` of it.
 
     Args:
       clear_cache: Whether to reset cached metrics after retrieval.

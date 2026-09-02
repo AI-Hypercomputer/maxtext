@@ -90,12 +90,9 @@ def _config(**overrides) -> pyconfig.HyperParameters:
       "learning_rate=1e-4",
       "micro_batch_size_to_train_on=2",
       "max_target_length=64",
-      # The KL assertion below compares log-probs produced by two different code paths:
-      # tunix's compute_per_token_logps for the reference, and the engine's own sharded
-      # forward pass for the policy. At the default bf16 matmul precision those disagree
-      # by ~2e-2 on log-probs near -12.6, and low_var_kl squares the difference into a
-      # KL of ~1e-4 -- noise, but large enough to swamp a real regression. fp32 matmuls
-      # bring it back under 1e-5; the model is tiny enough that the cost is invisible.
+      # The KL assertion compares log-probs from two code paths -- tunix's
+      # compute_per_token_logps and the engine's sharded forward -- which at bf16 disagree by
+      # ~2e-2 near -12.6, and low_var_kl squares that into a KL of ~1e-4. fp32 fixes it.
       "matmul_precision=highest",
   ]
   argv.extend(f"{k}={v}" for k, v in overrides.items())
@@ -178,15 +175,10 @@ class MaxTextEngineGrpoLossTest(absltest.TestCase):
   def test_grpo_loss_drives_a_training_step(self):
     cfg = _config()
     mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
-    # The batch has to divide the data x fsdp device count, and only the mesh knows that
-    # number, so it cannot be hard-coded in `_config`. The engine traces its kernels under
-    # `nn_partitioning.axis_rules`, which is what makes MaxText's logical constraints on the
-    # activations real; a batch those devices cannot split is then padded out by XLA, and the
-    # padded lanes are all-zero sequences that mask themselves out of attention entirely.
-    # Their contribution comes back as NaN on the pad token's embedding row -- a finite loss
-    # and unusable gradients. The splash kernel asserts on exactly this ratio
-    # (`attention_op.py`, "Batch dimension should be shardable"); dot_product does not, so
-    # here it surfaced as a NaN instead of an error.
+    # The batch must divide data x fsdp, which only the mesh knows. A batch those devices
+    # cannot split is padded by XLA into all-zero sequences that mask themselves out of
+    # attention, returning NaN on the pad token's embedding row under a finite loss. Splash
+    # asserts on this ratio ("Batch dimension should be shardable"); dot_product does not.
     batch = int(mesh.shape["data"] * mesh.shape["fsdp"])
     if cfg.micro_batch_size_to_train_on != batch:
       cfg = _config(micro_batch_size_to_train_on=batch)

@@ -34,15 +34,13 @@ class InflightThrottler:
     """
     self._inflight_queue = queue.Queue[Any](maxsize=config.max_inflight_computations)
     self._metrics_logger = metrics_module.MetricsLogger(config=config)
-    # Popped by `wait_for_next` but not yet written; see `_flush_pending_metrics`.
     self._pending_metrics: abstract_engine.MetricsBuffer | None = None
 
   def add_computation(self, computation: Any, metrics: abstract_engine.MetricsBuffer | None) -> None:
     """Adds an active on-device computation to the queue."""
     self._inflight_queue.put((jax.tree.leaves(computation), metrics))
-    # The caller has just dispatched, so the device has work queued behind this point and the
-    # blocking read inside `write_metrics` overlaps it instead of running against an idle
-    # device. This is the whole reason the write is deferred rather than done in place.
+    # Flushed here, not in `wait_for_next`: the caller has just dispatched, so the blocking
+    # read inside `write_metrics` overlaps that work instead of an idle device.
     self._flush_pending_metrics()
 
   def _flush_pending_metrics(self) -> None:
@@ -55,20 +53,14 @@ class InflightThrottler:
   def wait_for_next(self) -> None:
     """If the limit is reached, wait for the next computation to finish.
 
-    Blocks, but does not log. `write_metrics` reduces each `WeightedMetric` on device and then
-    pulls the result to host with `np.asarray`, and those reduction ops are dispatched behind
-    whatever is already in the device's queue -- so doing it here, before the caller dispatches
-    the step it just made room for, stalls the host on the full backlog with nothing new
-    running. Deferring to the following `add_computation` costs one dispatch of staleness in
-    the log and hands the same work a busy device to hide behind. Metrics carry their own step
-    id (`MetricsBuffer.id`), so nothing downstream can tell the difference.
+    Blocks, but does not log: the metrics write is stashed for the next `add_computation`.
+    Buffers carry their own step id, so the extra dispatch of staleness is invisible.
     """
     if self._inflight_queue.full():
       computation, metrics = self._inflight_queue.get()
       jax.block_until_ready(computation)
       if metrics is not None:
-        # Never hold two: the engine only attaches metrics to one of its two computations per
-        # step, but a caller that attached them to both would otherwise silently lose a buffer.
+        # Never hold two, or a caller attaching metrics to every computation loses a buffer.
         self._flush_pending_metrics()
         self._pending_metrics = metrics
 
@@ -81,8 +73,7 @@ class InflightThrottler:
       if metrics is not None:
         self._flush_pending_metrics()
         self._pending_metrics = metrics
-    # Draining is the one place that must not leave a write outstanding: callers use it to
-    # reach a quiescent state before checkpointing or shutting down.
+    # A drain must not leave a write outstanding.
     self._flush_pending_metrics()
 
   def cleanup(self) -> None:
