@@ -625,7 +625,9 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         _deterministic,
         _model_mode,
         multimodal_input=None,
+        decoder_input_embeddings=None,
     ):
+      del decoder_input_embeddings
       captured["multimodal_input"] = multimodal_input
       batch = self.cfg.global_batch_size_to_train_on
       seq_len = self.cfg.max_target_length
@@ -654,6 +656,26 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
     self.assertTrue(jnp.array_equal(forwarded.audio_embeddings, sentinel_aud_emb))
     self.assertTrue(jnp.array_equal(forwarded.audio_masks, sentinel_aud_mask))
     self.assertTrue(jnp.array_equal(forwarded.bidirectional_mask, sentinel_bidir))
+
+  def test_precomputed_embeddings_bypass_initial_multimodal_merge(self):
+    """Complete input embeddings must not be merged with vision embeddings again."""
+    ids, _, positions = self._make_token_inputs()
+    embeddings = jnp.ones(
+        (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length, self.cfg.emb_dim),
+        dtype=self.cfg.dtype,
+    )
+
+    result = self.decoder._apply_embedding(  # pylint: disable=protected-access
+        lambda *_args, **_kwargs: self.fail("token embedding should be bypassed"),
+        ids,
+        positions,
+        True,
+        MODEL_MODE_TRAIN,
+        multimodal_input=object(),
+        decoder_input_embeddings=embeddings,
+    )
+
+    self.assertTrue(jnp.array_equal(result, embeddings))
 
   def test_different_random_seeds_produce_different_logits(self):
     """Two randomly-initialised decoders should not produce identical logits."""
