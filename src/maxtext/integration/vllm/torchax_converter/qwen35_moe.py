@@ -25,6 +25,17 @@ from maxtext.integration.vllm.torchax_converter.base import BaseMaxTextToVLLMCon
 class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
   """Converts MaxText Qwen3.5 (Scanned Block) layout to vLLM execution layout."""
 
+  def __init__(self, config, mesh, vllm_attn_dp: int = 1, vllm_use_ep: bool = False):
+    super().__init__(config, mesh)
+    self.vllm_attn_dp = max(1, int(vllm_attn_dp or 1))
+    self.vllm_use_ep = bool(vllm_use_ep)
+    assert (
+        self.vllm_tp % self.vllm_attn_dp == 0
+    ), f"rollout_tensor_parallelism={self.vllm_tp} must be divisible by attn_dp_size={self.vllm_attn_dp}"
+    # Attention (and GDN / shared-expert column) projections are sharded over
+    # the per-attention-group tensor axis.
+    self.attn_shards = self.vllm_tp // self.vllm_attn_dp
+
   def convert(self, model_state: dict, **kwargs):
     """Converts model_state parameters to vLLM format."""
     logging.info("\n%sStarting Qwen 3.5 Conversion (Hybrid MoE)...%s", GREEN, RESET)
@@ -67,6 +78,16 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
         params["base"]["decoder"]["logits_dense"]["kernel"], (1, 0)
     )
 
+  def _replicate_kv_heads(self, kv):
+    """[D, n_kv, dh] -> [D, n_kv * replicas, dh] with each head repeated
+    consecutively, as vLLM's QKVParallelLinear lays KV heads out when
+    tp > num_kv_heads (rank r reads head r // replicas)."""
+    n_kv = kv.shape[1]
+    if self.attn_shards <= n_kv:
+      return kv
+    assert self.attn_shards % n_kv == 0, f"attention shards={self.attn_shards} must be a multiple of num_kv_heads={n_kv}"
+    return jnp.repeat(kv, self.attn_shards // n_kv, axis=1)
+
   def _convert_attn(self, params):
     """Converts attention weights."""
     decoder = params["base"]["decoder"]
@@ -102,13 +123,17 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
           self.vllm_state[f"{prefix}.input_layernorm.weight"] = pre_ln[rep]
           self.vllm_state[f"{prefix}.post_attention_layernorm.weight"] = post_ln[rep]
 
-          q, k, v = q_layers[rep], k_layers[rep], v_layers[rep]
+          # q carries the attention output gate ([q | gate] per head); k/v are
+          # replicated up to one head per shard when tp > num_kv_heads.
+          q = q_layers[rep]
+          k = self._replicate_kv_heads(k_layers[rep])
+          v = self._replicate_kv_heads(v_layers[rep])
 
           q_T = jnp.transpose(q, (1, 2, 0))
           k_T = jnp.transpose(k, (1, 2, 0))
           v_T = jnp.transpose(v, (1, 2, 0))
 
-          tp_size = self.vllm_tp
+          tp_size = self.attn_shards
           q_tp_shards = jnp.split(q_T.reshape(-1, q.shape[0]), tp_size, axis=0)
           k_tp_shards = jnp.split(k_T.reshape(-1, k.shape[0]), tp_size, axis=0)
           v_tp_shards = jnp.split(v_T.reshape(-1, v.shape[0]), tp_size, axis=0)
@@ -163,7 +188,7 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
           v = t_r[:, 2 * D_k : 2 * D_k + V_per_K * D_v, :].reshape(H_v * D_v, -1)
           z = t_r[:, 2 * D_k + V_per_K * D_v :, :].reshape(H_v * D_v, -1)
 
-          tp_size = self.vllm_tp
+          tp_size = self.attn_shards
           q_shards = jnp.split(q, tp_size, axis=0)
           k_shards = jnp.split(k, tp_size, axis=0)
           v_shards = jnp.split(v, tp_size, axis=0)
@@ -233,7 +258,9 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
       wi_1 = jnp.transpose(routed["wi_1"], (1, 0, 2, 3))
 
       num_reps, num_experts, d_model, d_inner = wi_0.shape
-      tp_size = self.vllm_tp
+      # GMM_EP (expert parallelism) shards experts and keeps [gate | up] whole;
+      # GMM_TP interleaves per-TP gate/up chunks.
+      tp_size = 1 if self.vllm_use_ep else self.vllm_tp
 
       # vLLM's TPU Grouped GEMM kernel requires 128-alignment per expert chunk
       chunk_size = d_inner // tp_size
@@ -264,7 +291,9 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
         shared = mlp_block["shared_expert"]
         sh_gate_layers = jnp.unstack(jnp.transpose(shared["wi_0"]["kernel"], (1, 2, 0)), axis=0)
         sh_up_layers = jnp.unstack(jnp.transpose(shared["wi_1"]["kernel"], (1, 2, 0)), axis=0)
-        sh_down_layers = jnp.unstack(jnp.transpose(shared["wo"]["kernel"], (1, 2, 0)), axis=0)
+        # wo.kernel is [F, layer, D]; per-layer [F, D] is already the runner's
+        # [in, out] layout for down_proj.
+        sh_down_layers = jnp.unstack(shared["wo"]["kernel"], axis=1)
 
         if "shared_expert_gate" in mlp_block:
           sh_gate_router_layers = jnp.unstack(jnp.transpose(mlp_block["shared_expert_gate"]["kernel"], (1, 2, 0)), axis=0)
@@ -274,30 +303,29 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
         p = f"vllm_model.language_model.model.layers.{i}"
 
         self.vllm_state[f"{p}.mlp.gate.weight"] = router_weights[rep]
-        # vLLM nests the routed-expert weights one level deeper than the
-        # router (`mlp.experts.routed_experts.*`, not `mlp.experts.*`) --
-        # missing that segment means these never match spec_flat during
-        # sync, so the routed experts (the bulk of a MoE model's params)
-        # silently stay at their random dummy-init value.
+        # Current vLLM nests the expert tensors under a `routed_experts`
+        # submodule; older versions keep them on the FusedMoE layer directly.
+        # Emit both names (same array, no copy) and let the structural sync
+        # pick whichever the target has.
         self.vllm_state[f"{p}.mlp.experts.routed_experts.w13_weight"] = w13_layers[rep]
         self.vllm_state[f"{p}.mlp.experts.routed_experts.w2_weight"] = down_layers[rep]
+        self.vllm_state[f"{p}.mlp.experts.w13_weight"] = w13_layers[rep]
+        self.vllm_state[f"{p}.mlp.experts.w2_weight"] = down_layers[rep]
 
         if has_shared:
           sh_g, sh_u = sh_gate_layers[rep], sh_up_layers[rep]
-          sh_per_tp = sh_g.shape[0] // self.vllm_tp
+          sh_per_tp = sh_g.shape[0] // self.attn_shards
 
           shared_gate_up = jnp.concatenate(
               [
-                  sh_g.reshape(self.vllm_tp, sh_per_tp, sh_g.shape[1]),
-                  sh_u.reshape(self.vllm_tp, sh_per_tp, sh_u.shape[1]),
+                  sh_g.reshape(self.attn_shards, sh_per_tp, sh_g.shape[1]),
+                  sh_u.reshape(self.attn_shards, sh_per_tp, sh_u.shape[1]),
               ],
               axis=1,
           ).reshape(-1, sh_g.shape[1])
 
-          # Same (in_features, out_features) convention as the GDN in_proj/out_proj
-          # weights above -- neither of these was transposed into it yet.
           self.vllm_state[f"{p}.mlp.shared_expert.gate_up_proj.weight"] = jnp.transpose(shared_gate_up, (1, 0))
-          self.vllm_state[f"{p}.mlp.shared_expert.down_proj.weight"] = jnp.transpose(sh_down_layers[rep], (1, 0))
+          self.vllm_state[f"{p}.mlp.shared_expert.down_proj.weight"] = sh_down_layers[rep]
 
           if "shared_expert_gate" in mlp_block:
             self.vllm_state[f"{p}.mlp.shared_expert_gate.weight"] = sh_gate_router_layers[rep]
