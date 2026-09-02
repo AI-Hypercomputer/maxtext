@@ -828,27 +828,13 @@ class TrainCompile(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {
-          "testcase_name": "linen_scanned_dot_product",
+          "testcase_name": "scanned_dot_product",
           "scan_layers": "true",
-          "enable_nnx": "False",
           "attention": "dot_product",
       },
       {
-          "testcase_name": "linen_scanned_flash",
+          "testcase_name": "scanned_flash",
           "scan_layers": "true",
-          "enable_nnx": "False",
-          "attention": "flash",
-      },
-      {
-          "testcase_name": "nnx_scanned_dot_product",
-          "scan_layers": "true",
-          "enable_nnx": "True",
-          "attention": "dot_product",
-      },
-      {
-          "testcase_name": "nnx_scanned_flash",
-          "scan_layers": "true",
-          "enable_nnx": "True",
           "attention": "flash",
       },
   )
@@ -856,11 +842,10 @@ class TrainCompile(parameterized.TestCase):
   def test_deepseek4(
       self,
       scan_layers,
-      enable_nnx,
       attention="dot_product",
   ):
-    # test deepseek4 compile across Linen and NNX
-    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}_{enable_nnx}_{attention}.pickle"
+    # test deepseek4 compile.
+    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}_{attention}.pickle"
     train_compile_main(
         (
             "",
@@ -885,9 +870,6 @@ class TrainCompile(parameterized.TestCase):
             "sa_block_kv_dq=128",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
-            f"enable_nnx={enable_nnx}",
-            f"pure_nnx={enable_nnx}",
-            f"pure_nnx_decoder={enable_nnx}",
             "routed_bias=False",
             "override_model_config=True",
         )
@@ -1198,13 +1180,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_vocab_tiling_bf16_nnx(self):
-    """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp).
-
-    Sets `pure_nnx`/`enable_nnx`/`pure_nnx_decoder` explicitly so the NNX AOT
-    path is covered regardless of the default values. Once those defaults flip
-    to True, `test_vocab_tiling_bf16` above will already exercise this same
-    path via defaults.
-    """
+    """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp)."""
     compiled_trainstep_file = "/tmp/test_vocab_tiling_bf16_nnx.pickle"
     train_compile_main(
         (
@@ -1218,9 +1194,6 @@ class TrainCompile(parameterized.TestCase):
             "max_target_length=1024",
             "num_vocab_tiling=4",
             "weight_dtype=bfloat16",
-            "pure_nnx=true",
-            "enable_nnx=true",
-            "pure_nnx_decoder=true",
         )
     )
 
@@ -1246,9 +1219,6 @@ class TrainCompile(parameterized.TestCase):
             "attention=dot_product",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
-            "enable_nnx=True",
-            "pure_nnx=True",
-            "pure_nnx_decoder=True",
             "override_model_config=True",
         )
     )
