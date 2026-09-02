@@ -21,12 +21,14 @@ the MaxRL AbstractTrainer interface without running an outer loop.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import contextlib
 import dataclasses
 import os
 from typing import Any
 
 from absl import logging
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 from flax.traverse_util import flatten_dict
 from flax.traverse_util import unflatten_dict
 import jax
@@ -52,6 +54,17 @@ import numpy as np
 # Mirrors Tunix's `PeftTrainer.get_metrics`, which returns `MetricsBuffer(id=-1)` in the
 # same situation. Real buffers are identified by their train step, so this cannot collide.
 EMPTY_METRICS_BUFFER_ID = -1
+
+# Where `nnx.split(TrainStateNNX(...))` puts the model's own state; verified, not assumed,
+# by `_check_pure_state_reusable`.
+_MODEL_STATE_KEY = "model"
+
+_PURE_STATE_FALLBACK_WARNING = (
+    "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
+    "update will re-walk the NNX module graph. That is correct but slow -- the two "
+    "`nnx.split` calls cost ~92 ms per step on an unrolled 28-layer qwen3-0.6b, against "
+    "~2 ms for the pure-state equivalent. Logged once per engine instance."
+)
 
 
 def _is_jax_dynamic(value: Any) -> bool:
@@ -358,7 +371,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     else:
       self._model = model_or_model_mesh_pair
     self._state: Any = None
+    # Pure-pytree mirror of the model and train state, carried across steps so the step path
+    # never re-walks the module graph. `None` means "not cached".
+    self._params_pure: Any = None
+    self._rest_pure: Any = None
+    self._state_pure: Any = None
+    self._pure_state_warned: bool = False
     self._accumulated_grads: Any = None
+    # Summed loss denominators behind `_accumulated_grads`, which are unreduced: this is the
+    # divisor `update()` applies once.
+    self._accumulated_denominator: Any = None
     self._micro_step_count = 0
     # Set when this run resumed from an intra-step checkpoint, cleared once the step it
     # resumed into completes and its finished state has been checkpointed.
@@ -391,8 +413,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._model = new_model
     self._compiled = False
     self._compiled_fwd_bwd = None
+    self._compiled_fwd_bwd_accum = None
     self._compiled_update = None
     self._model_graphdef = None
+    self._invalidate_pure_state()
 
   @property
   def optimizer(self) -> Any:
@@ -405,8 +429,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._optimizer = new_optimizer
     self._compiled = False
     self._compiled_fwd_bwd = None
+    self._compiled_fwd_bwd_accum = None
     self._compiled_update = None
     self._state_graphdef = None
+    self._invalidate_pure_state()
 
   @property
   def train_step(self) -> int:
@@ -431,8 +457,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._state = new_state
     self._compiled = False
     self._compiled_fwd_bwd = None
+    self._compiled_fwd_bwd_accum = None
     self._compiled_update = None
     self._state_graphdef = None
+    self._invalidate_pure_state()
 
   @property
   def micro_step_count(self) -> int:
@@ -484,8 +512,156 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled = False
     return self
 
-  def _fwd_bwd_kernel(self, params, rest, batch):
-    """Executes a single forward and backward pass to compute gradients."""
+  @contextlib.contextmanager
+  def _sharding_ctx(self):
+    """Activates the mesh and logical axis rules the MaxText layers are written against.
+
+    The rules live in a context variable, so a kernel traced outside this context sees an
+    empty rule set, every `maybe_shard_with_logical` becomes a no-op and XLA guesses the
+    partitioning -- badly: 1012 ms against 581 ms for the same fwd/bwd on llama3.1-8b/fsdp=8.
+    `train.py` wraps its own `jax.jit` the same way. Entered around the *call*, since jit is
+    lazy and the rules must be live when tracing happens. Note a batch that data x fsdp
+    cannot divide gives NaN gradients once the constraints are real.
+    """
+    if self._mesh is None:
+      yield
+      return
+    with jax.set_mesh(self._mesh), nn_partitioning.axis_rules(self._config.logical_axis_rules):
+      yield
+
+  def _invalidate_pure_state(self) -> None:
+    """Forgets the cached pure state, so the next step re-reads it from the NNX objects.
+
+    For the three ways the live NNX variables get replaced behind the engine's back: the
+    `model`/`optimizer`/`state` setters, and a checkpoint restore.
+    """
+    self._params_pure = None
+    self._rest_pure = None
+    self._state_pure = None
+
+  def _disable_pure_state(self, reason: str) -> None:
+    """Falls back to re-splitting the module graph on every step, saying so once."""
+    self._invalidate_pure_state()
+    if not self._pure_state_warned:
+      self._pure_state_warned = True
+      logging.warning(_PURE_STATE_FALLBACK_WARNING, reason)
+
+  @staticmethod
+  def _with_model_state(state_pure: Any, model_pure: Any) -> Any:
+    """Returns `state_pure` with its model subtree replaced by `model_pure`.
+
+    Through `raw_mapping` rather than `{**state_pure}`: `nnx.State` wraps children in a
+    `State` on `__getitem__`, and rebuilding from those views gives an equal-valued but
+    deeper pytree that `jax.jit` rejects as an `in_shardings` prefix mismatch.
+    """
+    return nnx.State({**state_pure.raw_mapping, _MODEL_STATE_KEY: model_pure.raw_mapping})
+
+  def _check_pure_state_reusable(self, state_pure: Any, params_pure: Any, rest_pure: Any) -> str | None:
+    """Returns why the pure state cannot be carried across steps, or None if it can.
+
+    The step path rebuilds the kernel's `state_pure` by dropping the model's state back into
+    `state_pure["model"]`, which only reproduces `nnx.split` if NNX put it there exactly
+    once. `TrainStateNNX` does, but `engine.state` is a public setter that accepts anything,
+    so this runs the real reconstruction and compares treedefs -- once per compile, against
+    a `jax.jit` in_shardings mismatch that is hard to read back to its cause.
+
+    Returns:
+      `None` when the fast path is safe, else a short phrase naming what did not line up.
+    """
+    if not isinstance(state_pure, nnx.State) or _MODEL_STATE_KEY not in state_pure:
+      return f"the train state's pure form has no {_MODEL_STATE_KEY!r} entry"
+    if not hasattr(state_pure, "raw_mapping"):
+      return "this version of flax.nnx.State does not expose raw_mapping"
+    rebuilt = self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
+    if jax.tree.structure(rebuilt) != jax.tree.structure(state_pure):
+      return f"state[{_MODEL_STATE_KEY!r}] is not the model's own state"
+    return None
+
+  def _refresh_pure_state(self) -> None:
+    """Re-reads the model and train state as pure `nnx.State`, and caches both.
+
+    Once per compile rather than once per step, which is the point: the two `nnx.split`
+    calls the step path used to make walked 1756 graph nodes for 92 ms of a 283 ms step on
+    an unrolled qwen3-0.6b, against 0.84 ms for `nnx.split_state` over the flat state.
+    Publication is unchanged -- `fwd_bwd` and `update` still `nnx.update` the live objects
+    where they always did, so `self.model` and `self.state` are never stale.
+    """
+    if self._state is None:
+      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
+    self._state_graphdef, state_pure = nnx.split(self._state)
+    self._model_graphdef, params_pure, rest_pure = nnx.split(model, nnx.Param, ...)
+
+    reason = self._check_pure_state_reusable(state_pure, params_pure, rest_pure)
+    if reason is not None:
+      self._disable_pure_state(reason)
+      return
+    self._params_pure, self._rest_pure, self._state_pure = params_pure, rest_pure, state_pure
+
+  def _read_model_pure(self, model: Any) -> tuple[Any, Any]:
+    """Returns the model's `(params, rest)` pure state, from the cache when it is live."""
+    if self._params_pure is not None:
+      return self._params_pure, self._rest_pure
+    self._model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+    return params, rest
+
+  def _read_state_pure(self) -> Any:
+    """Returns the train state's pure form, from the cache when it is live."""
+    if self._state_pure is not None:
+      return self._state_pure
+    self._state_graphdef, state_pure = nnx.split(self._state)
+    return state_pure
+
+  def _publish_model_rest(self, new_rest: Any) -> None:
+    """Folds a fwd/bwd's updated non-parameter state into the cached train state.
+
+    Required, not an optimization: without it `update()` would see the *previous*
+    micro-batch's RNG counters and batch statistics. The structure is checked because
+    anything the forward pass `sow`s (`record_max_logits`, `distill_beta`, MTP) widens
+    `new_rest`, which would disagree with the shardings the kernel was compiled against.
+    """
+    if self._params_pure is None:
+      return
+    if jax.tree.structure(new_rest) != jax.tree.structure(self._rest_pure):
+      self._disable_pure_state("fwd_bwd returned a wider non-parameter state than the model was split into")
+      return
+    self._rest_pure = new_rest
+    self._state_pure = self._with_model_state(self._state_pure, nnx.merge_state(self._params_pure, new_rest))
+
+  def _publish_state(self, new_state_pure: Any) -> None:
+    """Adopts the update kernel's output as the cached state, re-deriving `(params, rest)`.
+
+    The re-derivation reads `.type` off leaves that survive `jax.jit` in the treedef; the
+    treedef comparison costs ~1 ms and turns a future NNX flattening change into a fallback
+    plus a warning rather than a pytree error inside a traced kernel. Correctness does not
+    hinge on it: `update()` has already written the state into the live NNX objects.
+    """
+    if self._params_pure is None:
+      return
+    if not isinstance(new_state_pure, nnx.State) or _MODEL_STATE_KEY not in new_state_pure:
+      self._disable_pure_state("the update kernel returned a state with no model entry")
+      return
+    params_pure, rest_pure = nnx.split_state(new_state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
+    if jax.tree.structure(params_pure) != jax.tree.structure(self._params_pure):
+      self._disable_pure_state("the update kernel's output does not partition into the same parameters")
+      return
+    self._params_pure, self._rest_pure, self._state_pure = params_pure, rest_pure, new_state_pure
+
+  def _fwd_bwd_kernel(self, params, rest, batch, acc_grads=None, acc_denom=None):
+    """Executes a single forward and backward pass and folds the result into the accumulator.
+
+    Args:
+      params: Pure `nnx.Param` state to differentiate against.
+      rest: The model's remaining (non-parameter) pure state.
+      batch: Loss-function inputs for this micro-batch.
+      acc_grads: Gradients accumulated over earlier micro-batches of this update, or None on
+        the first, which is what lets it skip allocating a parameter-sized buffer.
+      acc_denom: Denominator accumulated alongside `acc_grads`, or None with it.
+
+    Returns:
+      `(primary_loss, aux_metrics, new_rest, acc_grads, acc_denom)`, where the last two are
+      this micro-batch folded into the running totals.
+    """
     loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
 
     def diff_wrapper(p, r, b):
@@ -546,13 +722,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
 
     grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
-    # Every non-raising branch of `diff_wrapper` builds a LossOutput, so `loss_out` is
-    # always one and the gradient scaling below is unconditional. The value returned by
-    # `value_and_grad` is the unreduced sum that was differentiated, which
-    # `loss_out.primary_loss` already carries, so it is discarded here.
+    # Every non-raising branch of `diff_wrapper` builds a LossOutput, so `loss_out` is always
+    # one. The value returned by `value_and_grad` is the unreduced sum that was
+    # differentiated, which `loss_out.primary_loss` already carries, so it is discarded here.
     (_, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
-    scale = loss_out.primary_loss.compute_scale()
-    micro_grads = jax.tree.map(lambda g: g * scale, micro_grads)
 
     micro_grads = jax.tree.map(
         lambda x: (
@@ -563,24 +736,40 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         micro_grads,
     )
 
-    return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads
+    # Accumulated UNREDUCED, with no `1/denominator` applied: `_update_kernel` divides once
+    # by the total, so the optimizer sees `sum(grads)/sum(denom)` rather than a mean of
+    # per-micro-batch means, which overweights short micro-batches. Same as
+    # `gradient_accumulation.py` in the pre-train path.
+    denominator = loss_out.primary_loss.denominator.astype(jnp.float32)
+    if acc_grads is None:
+      return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads, denominator
+    acc_grads = jax.tree.map(jnp.add, acc_grads, micro_grads)
+    return loss_out.primary_loss, loss_out.aux_metrics, new_rest, acc_grads, acc_denom + denominator
 
-  def _update_kernel(self, state_pure, accumulated_grads, micro_step_count, mean_loss):
-    """Applies accumulated gradients to update the NNX model state."""
+  def _update_kernel(self, state_pure, accumulated_grads, accumulated_denominator, mean_loss):
+    """Applies accumulated gradients to update the NNX model state.
+
+    Returns:
+      `(new_state_pure, grad_norm, is_skipped)`. `grad_norm` doubles as the throttler's
+      handle on this update; see the `add_computation` call in `update()`.
+    """
     grad_norm = None
     is_skipped_val = None
     if state_pure is not None:
-      if micro_step_count <= 1:
-        grads = accumulated_grads
-      else:
-        grads = jax.tree.map(
-            lambda g: g / micro_step_count,
-            accumulated_grads,
-        )
-      grad_norm = max_utils.l2norm_pytree(grads)
+      # This one division is the whole normalization. A zero total means every micro-batch
+      # was empty; yield zeros rather than a NaN, as `gradient_accumulation.py` does.
+      has_weights = accumulated_denominator > 0
+      safe_denominator = jnp.where(has_weights, accumulated_denominator, 1.0)
+      grads = jax.tree.map(
+          lambda g: jnp.where(has_weights, g / safe_denominator.astype(g.dtype), jnp.zeros_like(g)),
+          accumulated_grads,
+      )
+      # Before clipping, where Tunix's `optax.global_norm` also sits -- `train.py` would call
+      # this `raw_grad_norm`. In float32 whatever `grad_dtype` is: a sum of squares over bf16
+      # overflows on production-size models.
+      grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), grads))
       if self._config.gradient_clipping_threshold > 0:
         grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
-
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if hasattr(local_state, "apply_gradients"):
         if self._config.skip_step_on_spikes:
@@ -710,43 +899,69 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     `static_batch` is closed over rather than passed, so non-array loss arguments (Tunix's
     `algo_config`, `pad_id`, `eos_id`) never reach the jit boundary.
     """
-    if self._state is None:
-      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+    # The only place the graphs are walked: a recompile is when they may legitimately have
+    # changed shape, and everything after is maintained as plain pytrees.
+    self._refresh_pure_state()
+    state_pure = self._read_state_pure()
+    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
 
-    self._state_graphdef, state_pure = nnx.split(self._state)
-    self._model_graphdef, params_pure, rest_pure = nnx.split(self._model, nnx.Param, ...)
-
-    def kernel(params, rest, dynamic):
+    def first_kernel(params, rest, dynamic):
       batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
       return self._fwd_bwd_kernel(params, rest, batch)
 
+    def accum_kernel(params, rest, dynamic, acc_grads, acc_denom):
+      batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
+      return self._fwd_bwd_kernel(params, rest, batch, acc_grads, acc_denom)
+
     if self._mesh is not None:
+      replicated = jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec())
       state_mesh_shardings = jax.tree.map(self._mesh_sharding, state_pure)
       params_shardings = jax.tree.map(self._mesh_sharding, params_pure)
       rest_shardings = jax.tree.map(self._mesh_sharding, rest_pure)
-      fwd_bwd_in_shardings = (params_shardings, rest_shardings, self._batch_data_shardings(dynamic_batch))
-      fwd_bwd_out_shardings = (None, None, rest_shardings, params_shardings)
-      update_in_shardings = (state_mesh_shardings, params_shardings, None)
+      batch_shardings = self._batch_data_shardings(dynamic_batch)
+      first_in_shardings = (params_shardings, rest_shardings, batch_shardings)
+      accum_in_shardings = first_in_shardings + (params_shardings, replicated)
+      fwd_bwd_out_shardings = (None, None, rest_shardings, params_shardings, replicated)
+      update_in_shardings = (state_mesh_shardings, params_shardings, replicated, None)
       update_out_shardings = (state_mesh_shardings, None, None)
     else:
-      fwd_bwd_in_shardings = None
+      first_in_shardings = None
+      accum_in_shardings = None
       fwd_bwd_out_shardings = None
       update_in_shardings = None
       update_out_shardings = None
 
-    # 1. JIT Compile Micro FWD/BWD Pass
+    # 1. JIT Compile Micro FWD/BWD Pass.
+    #
+    # Two kernels: the first micro-batch has no accumulator to add to and allocates none,
+    # later ones fold in and donate it, so the sum is written back in place instead of
+    # materializing the micro gradients plus a fresh sum. `jax.jit` is lazy, so the second
+    # costs nothing when every update takes one micro-batch. `params` is deliberately NOT
+    # donated: JAX matches donations by shard-shape, not position, so it would alias the
+    # weights into the gradient output.
     self._compiled_fwd_bwd = jax.jit(
-        kernel,
-        in_shardings=fwd_bwd_in_shardings,
+        first_kernel,
+        in_shardings=first_in_shardings,
         out_shardings=fwd_bwd_out_shardings,
     )
+    self._compiled_fwd_bwd_accum = jax.jit(
+        accum_kernel,
+        in_shardings=accum_in_shardings,
+        out_shardings=fwd_bwd_out_shardings,
+        donate_argnums=(3, 4),
+    )
 
-    # 2. JIT Compile Optimizer Update Pass
+    # 2. JIT Compile Optimizer Update Pass.
+    #
+    # `state_pure` is donated, as `get_functional_train_with_signature` does for the
+    # standalone trainer: the engine rebinds the state from the output, so it is dead on
+    # return. The gradients are not -- every parameter-shaped output is already claimed by
+    # the incoming state, so JAX would only warn.
     self._compiled_update = jax.jit(
         self._update_kernel,
         in_shardings=update_in_shardings,
         out_shardings=update_out_shardings,
-        static_argnums=(2,),
+        donate_argnums=(0,),
     )
     self._compiled_signature = _batch_signature(dynamic_batch, static_batch)
     self._compiled = True
@@ -800,8 +1015,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, "model", self._model)
-    self._model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
 
     if self._compile_requested:
       dynamic_batch, static_batch = _split_static_and_dynamic(batch)
@@ -812,10 +1026,25 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       signature = _batch_signature(dynamic_batch, static_batch)
       if not self._compiled or self._needs_recompile(signature):
         self._compile_for_batch(dynamic_batch, static_batch)
-      loss, aux, new_rest, micro_grads = self._compiled_fwd_bwd(params, rest, dynamic_batch)
+      # After any recompile, not before: reading first would hand the new kernel a pure
+      # state split against the old graph.
+      params, rest = self._read_model_pure(model)
+      with self._sharding_ctx():
+        if self._accumulated_grads is None:
+          loss, aux, new_rest, acc_grads, acc_denom = self._compiled_fwd_bwd(params, rest, dynamic_batch)
+        else:
+          # Both accumulators are donated here, so they are rebound from the outputs below.
+          loss, aux, new_rest, acc_grads, acc_denom = self._compiled_fwd_bwd_accum(
+              params, rest, dynamic_batch, self._accumulated_grads, self._accumulated_denominator
+          )
     else:
-      loss, aux, new_rest, micro_grads = self._fwd_bwd_kernel(params, rest, batch)
+      params, rest = self._read_model_pure(model)
+      with self._sharding_ctx():
+        loss, aux, new_rest, acc_grads, acc_denom = self._fwd_bwd_kernel(
+            params, rest, batch, self._accumulated_grads, self._accumulated_denominator
+        )
     nnx.update(model, new_rest)
+    self._publish_model_rest(new_rest)
 
     # Don't add metrics to the throttler queue because metrics are logged after
     # the update step.
@@ -831,10 +1060,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           self.record_metrics(key, value)
 
     self._cached_losses.append(loss)
-    if self._accumulated_grads is None:
-      self._accumulated_grads = micro_grads
-    else:
-      self._accumulated_grads = jax.tree.map(jnp.add, self._accumulated_grads, micro_grads)
+    self._accumulated_grads = acc_grads
+    self._accumulated_denominator = acc_denom
     self._micro_step_count += 1
 
   def update(self, **kwargs: Any) -> int:
@@ -859,40 +1086,52 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Wait for previous computations to finish before dispatching the update step to TPU.
     self._throttler.wait_for_next()
 
-    # TODO(mazumdera): The logic below should be pre-compiled.
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    self._state_graphdef, state_pure = nnx.split(self._state)
+    state_pure = self._read_state_pure()
 
-    if self._cached_losses:
+    # `_update_kernel` reads `mean_loss` only under `skip_step_on_spikes`, which is traced
+    # off `self._config`, so otherwise this was seven eager launches per step
+    # (`WeightedMetric.compute()`) feeding an argument the executable does not contain.
+    if not self._config.skip_step_on_spikes:
+      mean_loss = None
+    elif self._cached_losses:
       loss_values = [l.compute() if isinstance(l, abstract_engine.WeightedMetric) else l for l in self._cached_losses]
       mean_loss = jnp.mean(jnp.stack(loss_values)) if len(loss_values) > 1 else loss_values[0]
     else:
       mean_loss = jnp.array(0.0)
-    if self._compiled and hasattr(self, "_compiled_update"):
-      new_state_pure, grad_norm, is_skipped = self._compiled_update(
-          state_pure, self._accumulated_grads, self._micro_step_count, mean_loss
-      )
-    else:
-      new_state_pure, grad_norm, is_skipped = self._update_kernel(
-          state_pure, self._accumulated_grads, self._micro_step_count, mean_loss
-      )
+    # `state_pure` is donated, so between this call and the `nnx.update` below `self._state`
+    # is torn -- reading one of its arrays raises "Array has been deleted". Keep them adjacent.
+    with self._sharding_ctx():
+      if self._compiled and hasattr(self, "_compiled_update"):
+        new_state_pure, grad_norm, is_skipped = self._compiled_update(
+            state_pure, self._accumulated_grads, self._accumulated_denominator, mean_loss
+        )
+      else:
+        new_state_pure, grad_norm, is_skipped = self._update_kernel(
+            state_pure, self._accumulated_grads, self._accumulated_denominator, mean_loss
+        )
     nnx.update(self._state, new_state_pure)
+    self._publish_state(new_state_pure)
 
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
     if is_skipped is not None:
       self.record_metrics("step_skipped", is_skipped)
 
-    # Add the state to the throttler queue so jax.block_until_ready() waits
-    # for the optimizer update to complete before logging the metrics.
+    # Queue something the update produced, so `jax.block_until_ready` waits for it before the
+    # metrics are logged. The gradient norm rather than the state: the throttler holds queued
+    # entries until it pops them, which pinned three parameter trees, and once the state is
+    # donated a late pop raises "Array has been deleted". The norm comes out of the same
+    # executable, so its readiness still means the update landed. Tunix v2 does the same.
     self._throttler.add_computation(
-        self._state if self._state is not None else self._model,
+        grad_norm if grad_norm is not None else (self._state if self._state is not None else self._model),
         self._metrics_recorder.get_step_metrics(self.train_step),
     )
 
     self._cached_losses.clear()
     self._accumulated_grads = None
+    self._accumulated_denominator = None
     self._micro_step_count = 0
     self._train_step += 1
 
@@ -961,6 +1200,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if metadata:
       # Metadata from Orchestrator
       custom_metadata["additional_metadata"] = metadata
+    # The gradients are stored unreduced, so their divisor has to survive the round-trip too.
+    if self._micro_step_count > 0 and self._accumulated_denominator is not None:
+      custom_metadata["accumulated_denominator"] = float(self._accumulated_denominator)
 
     ckpt_saved = self._checkpoint_manager.save_checkpoint(
         step=step,
@@ -1005,6 +1247,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return None
 
     logging.info("Checkpoint restored from step %d.", restored_step)
+    # Orbax has just written new arrays into the live NNX variables, so the cache is wrong
+    # rather than merely old.
+    self._invalidate_pure_state()
 
     if restored_checkpoint_state.accumulated_metrics:
       buffers = []
@@ -1034,8 +1279,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Checkpoint with no metadata says nothing about how far into its step it
     # got, and must not inherit the count from whatever this engine was doing before.
     self._micro_step_count = 0
+    restored_denominator = None
     if restored_metadata:
       self._micro_step_count = restored_metadata.get("micro_step_count", 0)
+      restored_denominator = restored_metadata.get("accumulated_denominator", None)
       restored_additional_metadata = restored_metadata.get("additional_metadata", None)
 
     if self._micro_step_count > 0:
@@ -1058,13 +1305,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # above, which the branch above has already discarded.
     if self._micro_step_count > 0 and restored_checkpoint_state.accumulated_grads:
       self._accumulated_grads = restored_checkpoint_state.accumulated_grads
+      self._accumulated_denominator = jnp.float32(restored_denominator if restored_denominator else 0.0)
 
+      rebuilt_losses = None
       if self._metrics_recorder._metrics_buffer:  # pylint: disable=protected-access
         active_buf = self._metrics_recorder.get_step_metrics(restored_step)
         if active_buf and "loss" in active_buf.weighted_metrics:
           wm = active_buf.weighted_metrics["loss"]
           if wm.unreduced_sum.ndim > 0:
-            self._cached_losses = [
+            rebuilt_losses = [
                 abstract_engine.WeightedMetric(
                     unreduced_sum=wm.unreduced_sum[i],
                     denominator=wm.denominator[i],
@@ -1074,7 +1323,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
                 for i in range(wm.unreduced_sum.shape[0])
             ]
           else:
-            self._cached_losses = [wm]
+            rebuilt_losses = [wm]
+          self._cached_losses = rebuilt_losses
+
+      # Checkpoints predating the denominator carry no value for it, but the losses rebuilt
+      # above carry the very denominators that went into the saved gradients. Only those:
+      # any `_cached_losses` from before the restore belong to a different run.
+      if not restored_denominator and rebuilt_losses:
+        denominator = jnp.float32(0.0)
+        for cached_loss in rebuilt_losses:
+          denominator = denominator + jnp.sum(cached_loss.denominator).astype(jnp.float32)
+        self._accumulated_denominator = denominator
 
     return restored_additional_metadata
 
