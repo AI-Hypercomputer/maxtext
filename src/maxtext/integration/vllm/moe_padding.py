@@ -35,7 +35,7 @@ def next_power_of_two(x: int) -> int:
 def compute_padded_moe_mlp_dim(
     hidden_size: Optional[int],
     moe_mlp_tp_size: int,
-    num_lanes: int,
+    num_lanes: int = 128,
 ) -> Optional[int]:
   """Computes padded MoE intermediate size for GMM_v2 kernel requirements.
 

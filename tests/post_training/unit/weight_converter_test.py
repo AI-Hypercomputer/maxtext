@@ -526,13 +526,58 @@ class TargetFreeConversionTest(unittest.TestCase):
   def test_case_5_host_memory_profiling(self):
     import resource
 
-    cfg = _config()
-    source = _source_tree(True)
+    # Test with realistic scaled dimensions
+    scaled_emb = 128
+    scaled_experts = 8
+    scaled_mlp = 256
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        padded_base_moe_mlp_dim=scaled_mlp,
+        prefuse_moe_weights=True,
+    )
+    # Build scaled source tree
+    blocks = NUM_LAYERS // CYCLE
+    layers = {}
+    for slot in range(CYCLE):
+      layers[f"layer_{slot}"] = {
+          "input_layernorm": {"scale": _arr(scaled_emb, blocks)},
+          "post_self_attention_layernorm": {"scale": _arr(scaled_emb, blocks)},
+          "self_attention": {
+              "query": {"kernel": _arr(scaled_emb, blocks, 4, 32)},
+              "key": {"kernel": _arr(scaled_emb, blocks, 2, 32)},
+              "value": {"kernel": _arr(scaled_emb, blocks, 2, 32)},
+              "out": {"kernel": _arr(blocks, 4, 32, scaled_emb)},
+          },
+          "moe_block": {
+              "gate": {"kernel": _arr(scaled_emb, blocks, scaled_experts)},
+              "wi_0": _arr(scaled_experts, blocks, scaled_emb, scaled_mlp),
+              "wi_1": _arr(scaled_experts, blocks, scaled_emb, scaled_mlp),
+              "wo": _arr(scaled_experts, blocks, scaled_mlp, scaled_emb),
+          },
+      }
+    scaled_source = {
+        "base": {
+            "token_embedder": {"embedding": _arr(256, scaled_emb)},
+            "decoder": {"decoder_norm": {"scale": _arr(scaled_emb)}, "layers": layers},
+        }
+    }
+
     converter = WeightConverter(config=cfg, rollout_backend="maxtext")
     before_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    out = converter.convert(source, target_state=None)
+    out = converter.convert(scaled_source, target_state=None)
     after_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    logging.info(
+        "test_case_5_host_memory_profiling: before_rss=%d KB, after_rss=%d KB, delta=%d KB",
+        before_rss,
+        after_rss,
+        after_rss - before_rss,
+    )
     self.assertIsNotNone(out)
+    self.assertIn("decoder", out)
+    self.assertIn(f"layers_{NUM_LAYERS - 1}", out["decoder"])
+    wi = getattr(out["decoder"]["layers_0"]["moe_block"]["wi"], "value", out["decoder"]["layers_0"]["moe_block"]["wi"])
+    self.assertEqual(wi.shape, (scaled_experts, scaled_emb, scaled_mlp * 2))
 
   def test_case_6_parity_vs_raiden_unscan_on_homogeneous(self):
     from maxtext.integration.tunix.weight_mapping import raiden_unscan

@@ -1200,6 +1200,10 @@ class MaxTextToMaxTextConverter:
     """Returns a nested dict of rollout weights, keyed by target paths.
 
     Pure: neither `src_pytree` nor `target_state` is mutated. Leaves are wrapped in nnx.Param.
+    Note on memory lifecycle: `src_flat.pop()` frees internal flattened dict references
+    as `result` is constructed to prevent dictionary growth overhead, but the caller's
+    `src_pytree` retains full-tree references until `convert()` returns and the caller
+    rebinds or drops its handle.
     """
     src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
     src_flat, _ = _strip_root(src_flat, "base")
@@ -1212,6 +1216,7 @@ class MaxTextToMaxTextConverter:
       result: Dict[Tuple[Any, ...], Any] = {}
       for group in self._groups:
         outs = self._execute_group_target_free(group, src_flat)
+        # Drop processed source entries from src_flat to reduce dict overhead
         for k in group.source_keys:
           src_flat.pop(k, None)
         for tgt_key, out in outs:

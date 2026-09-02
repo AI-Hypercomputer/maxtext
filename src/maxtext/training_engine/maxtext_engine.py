@@ -416,16 +416,28 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         checkpoint_dir=self._config.checkpoint_dir,
         config=self._config,
     )
+    self._metrics_recorder = metrics_module.MetricsRecorder()
     self._throttler = inflight_throttler.InflightThrottler(config=self._config)
     self._raiden_syncs: Any = None
     self._last_staged_step: Optional[int] = None
     self._staged_metadata: Any = None
+    vllm_cfg = getattr(self._config, "vllm", {})
+    if isinstance(vllm_cfg, dict):
+      vllm_use_wc = vllm_cfg.get("use_weight_converter", False)
+      vllm_backend = vllm_cfg.get("rollout_backend", "maxtext")
+    else:
+      vllm_use_wc = getattr(vllm_cfg, "use_weight_converter", False)
+      vllm_backend = getattr(vllm_cfg, "rollout_backend", "maxtext")
+
     self._use_weight_converter = bool(
         getattr(self._config, "use_weight_converter", False)
+        or vllm_use_wc
         or os.environ.get("USE_WEIGHT_CONVERTER", "0").lower() in ("1", "true", "yes")
     )
     self._rollout_backend = (
-        getattr(self._config, "rollout_backend", "maxtext") or os.environ.get("ROLLOUT_BACKEND", "maxtext")
+        getattr(self._config, "rollout_backend", None)
+        or vllm_backend
+        or os.environ.get("ROLLOUT_BACKEND", "maxtext")
     )
     if self._use_weight_converter:
       from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
@@ -1626,6 +1638,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def release_weight_sync(self, **kwargs: Any) -> Any:
     """Releases staged weight buffers after transfer completion."""
+    self._last_staged_step = None
+    self._staged_metadata = None
     if self._raiden_syncs:
       for sync in self._raiden_syncs:
         logging.vlog(1, "Trainer Raiden metrics: %s", sync.metrics())
