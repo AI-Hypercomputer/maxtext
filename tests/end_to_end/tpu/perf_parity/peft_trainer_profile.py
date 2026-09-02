@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Comparison arm: the same tunix trainer driving MaxText's qwen3-0.6b.
+"""Comparison arm: the tunix `PeftTrainer v2` driving a MaxText model.
 
-Only the model changes from `qwen3_tunix_profile.py`; everything else comes out of
-`qwen3_common.py`. The swap is a straight drop-in because
+Only the model changes from `qwen3_0p6b_tunix_profile.py`; everything else comes out of
+`perf_parity_common.py`. The swap is a straight drop-in because
 `peft_trainer_v2._default_loss_fn` calls `model(input_tokens, positions, None,
 attention_mask)` positionally, which is exactly `TunixMaxTextAdapter.__call__`'s
 signature -- and also exactly `tunix.models.qwen3.Qwen3.__call__`'s.
@@ -47,10 +47,16 @@ Deliberately not equalised, because it is part of what is being compared: MaxTex
 `attention: autoselected` picks its own TPU kernel, while tunix's qwen3 leaves
 `use_flash_attention` at its default of False. The chosen kernel is logged.
 
-Run from this directory -- the arms import `qwen3_common` as a sibling, and a working
+Not named after a model: `--model` selects one, and this arm is the PeftTrainer side of
+the 35b trainer comparison as well as the 0.6b one. Note that on qwen3.5-35b-a3b it runs
+only at `--ga 1`; every `--ga > 1` OOMs on a GA-depth-independent 161.94 G fp32 copy of
+the parameter tree that `GradientAccumulator` allocates off the single-microstep fast
+path. See `RESULTS-qwen35-35b-20260902.md` §2.
+
+Run from this directory -- the arms import `perf_parity_common` as a sibling, and a working
 directory that contains a `tunix/` checkout will shadow the installed package:
 
-  cd tests/end_to_end/tpu/perf_parity && python qwen3_maxtext_profile.py [--scan]
+  cd tests/end_to_end/tpu/perf_parity && python peft_trainer_profile.py [--scan]
 """
 
 import argparse
@@ -63,13 +69,13 @@ from maxtext.configs import pyconfig
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 import optax
-import qwen3_common as qc
+import perf_parity_common as qc
 from transformers import AutoTokenizer
 from tunix.experimental.train import peft_trainer_v2
 
 
 def _build_config(spec: qc.RunSpec, scan_layers: bool):
-  """Builds the MaxText config for a qwen3-0.6b matched to the tunix run.
+  """Builds the MaxText config for `--model`, matched to the tunix run.
 
   `per_device_batch_size` describes the *micro*-batch. MaxText's own
   `gradient_accumulation_steps` is left at 1 deliberately: it would have base.yml split
@@ -79,7 +85,7 @@ def _build_config(spec: qc.RunSpec, scan_layers: bool):
   return pyconfig.initialize(
       [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
       model_name=spec.model,
-      run_name="perf_parity_qwen3_0p6b",
+      run_name=f"perf_parity_{qc.slug(spec.model)}",
       base_output_directory=os.path.join(os.getcwd(), "maxtext_out"),
       max_target_length=spec.seq,
       per_device_batch_size=spec.per_device_batch,
@@ -104,6 +110,9 @@ def _build_config(spec: qc.RunSpec, scan_layers: bool):
 def main() -> None:
   spec = qc.RunSpec(qc.add_common_args(argparse.ArgumentParser()).parse_args())
   scan_layers = spec.scan
+  # The arm is tagged `-maxtext` (the MaxText *model*, under Tunix's trainer) rather than
+  # after this file. Renaming it would orphan the trace paths recorded in
+  # RESULTS-qwen35-35b-20260902.md and in §9 of the parity doc.
   profile_dir = qc.profile_dir(spec.tag(f"{spec.model}-maxtext" + ("-scan" if scan_layers else "")))
   print(spec.describe(), flush=True)
 

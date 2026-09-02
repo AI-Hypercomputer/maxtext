@@ -14,14 +14,20 @@
 
 """Baseline arm: tunix `peft_trainer_v2.PeftTrainer` driving tunix's own qwen3-0.6b.
 
-Pair this with `qwen3_maxtext_profile.py`, which holds the trainer, optimizer, dataset,
+Pair this with `peft_trainer_profile.py`, which holds the trainer, optimizer, dataset,
 input fn, mesh shape and step count fixed and swaps only the model. See
-`qwen3_common.py` for what is shared and why the shape changed from the gemma4 pair.
+`perf_parity_common.py` for what is shared and why the shape changed from the gemma4 pair.
 
-Run from this directory -- the arms import `qwen3_common` as a sibling, and a working
+This is the only arm named after a model, because it is the only one locked to one:
+`ModelConfig.qwen3_0p6b()` is hardcoded below and `--model`/`--scan` are rejected. tunix
+implements this one architecture as a `ModuleList`, so there is no 35b arm on this side --
+which is why the qwen3.5-35b-a3b comparison is engine vs `PeftTrainer` over the same
+MaxText model, and runs `peft_trainer_profile.py` instead of this file.
+
+Run from this directory -- the arms import `perf_parity_common` as a sibling, and a working
 directory that contains a `tunix/` checkout will shadow the installed package:
 
-  cd tests/end_to_end/tpu/perf_parity && python qwen3_tunix_profile.py
+  cd tests/end_to_end/tpu/perf_parity && python qwen3_0p6b_tunix_profile.py
 """
 
 import argparse
@@ -30,7 +36,7 @@ import time
 from flax import nnx
 import jax
 import optax
-import qwen3_common as qc
+import perf_parity_common as qc
 from transformers import AutoTokenizer
 from tunix.experimental.train import peft_trainer_v2
 from tunix.models.qwen3 import model as qwen3_model

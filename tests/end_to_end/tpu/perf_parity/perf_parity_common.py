@@ -12,7 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared rig for the qwen3-0.6b model comparison under tunix `peft_trainer_v2`.
+"""Shared rig for the trainer/model parity arms. Model-agnostic; `--model` picks the model.
+
+Nothing here is specific to one model, which is why the file is not named after one. Three
+of the four arms take `--model` and have been run at both sizes on this rig:
+
+  * `qwen3-0.6b` (the default) -- the shape all four arms can run, and the only one the
+    tunix arm can, since tunix implements that architecture and not the others. Runs
+    unscanned at `--tp 8` on 8 devices.
+  * `qwen3.5-35b-a3b` -- MaxText-side arms only, and only as `--tp 2 --scan`: the model has
+    2 KV heads, so `--tp 8` is rejected by the sharding checks, and unscanned it OOMs. See
+    `RESULTS-qwen35-35b-20260902.md`.
+
+`qwen3_0p6b_tunix_profile.py` is the one arm named after a model, because it is the one arm
+locked to one.
 
 The gemma4-e2b pair before this had to truncate the model to 12 layers and guess at a
 matching KV-sharing split, because the two repos parameterise that architecture
@@ -75,8 +88,17 @@ MODEL_NAME = "qwen3-0.6b"
 PROFILE_ROOT = os.environ.get("PERF_PARITY_PROFILE_ROOT", "perf_parity_traces")
 
 
+def slug(model: str) -> str:
+  """`qwen3.5-35b-a3b` -> `qwen3_5_35b_a3b`, for use in a MaxText `run_name`.
+
+  `run_name` becomes a path component under `base_output_directory`, so the two models
+  need to produce different ones -- otherwise a 35b run overwrites the 0.6b run's output.
+  """
+  return model.replace(".", "_").replace("-", "_")
+
+
 def profile_dir(arm: str) -> str:
-  """Trace destination for one arm, e.g. `qwen3-0.6b-tunix`."""
+  """Trace destination for one arm, e.g. `qwen3-0.6b-tunix` or `qwen3.5-35b-a3b-engine-scan`."""
   return os.path.join(PROFILE_ROOT, arm)
 
 
