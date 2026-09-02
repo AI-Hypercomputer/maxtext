@@ -812,7 +812,7 @@ class KdaAttention(BaseModel):
     Rejects invalid combinations at config time instead of failing deep in
     tokamax kernel binding (tokamax enforces the same range on `lower_bound`).
     """
-    if self.use_kda_safe_gate and not (-5.0 <= self.kda_lower_bound < 0.0):
+    if self.use_kda_safe_gate and (self.kda_lower_bound < -5.0 or self.kda_lower_bound >= 0.0):
       raise ValueError(
           "use_kda_safe_gate=True requires kda_lower_bound in [-5, 0) "
           f"(the tokamax sigmoid gate path constraint), got "

@@ -49,8 +49,10 @@ except ImportError:
 
 from maxtext.configs.types import KdaAttention
 from maxtext.kernels.kda import chunk_kda
+from maxtext.kernels.kda.tokamax import tokamax_chunk_kda
 from maxtext.layers import attention_kda
 from maxtext.layers.attention_kda import ShortConvolution, _l2_normalize
+from maxtext.utils.cp_utils import halo_exchange_for_conv
 
 # Marker policy: `tpu_only` is applied per test/class — only where a test
 # invokes the tokamax Mosaic Pallas kernel or multi-device CP. Pure
@@ -201,6 +203,26 @@ class TestKimiDeltaAttention:
   def test_init_no_conv(self, mesh):
     attn = self._make_attn(mesh, linear_conv_kernel_dim=0)
     assert attn.q_conv is None
+
+  @pytest.mark.tpu_only
+  def test_forward_no_conv(self, mesh):
+    """Forward with linear_conv_kernel_dim=0 (the conv path is skipped entirely)."""
+    attn = self._make_attn(mesh, linear_conv_kernel_dim=0)
+    x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
+    with mesh:
+      output, _ = attn(x)
+    assert output.shape == (1, 64, 128)
+    assert jnp.isfinite(output).all()
+
+  @pytest.mark.tpu_only
+  def test_lower_bound_warns_without_safe_gate(self, mesh):
+    """use_kda_safe_gate=False with a non-zero kda_lower_bound must warn."""
+    attn = self._make_attn(mesh, use_kda_safe_gate=False, kda_lower_bound=-1.0)
+    x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
+    with pytest.warns(UserWarning, match="use_kda_safe_gate=False"):
+      with mesh:
+        output, _ = attn(x)
+    assert jnp.isfinite(output).all()
 
   def test_init_has_gate_and_norm(self, mesh):
     """Output gate projection and out_norm should always be present."""
@@ -908,6 +930,43 @@ class TestShortConvolution:
     out_alt = conv(x, segment_ids=seg_alt)
     assert jnp.allclose(out_seg[0], out_alt[0], atol=0.0), "Row 0 output changed when only row 1 segments changed"
 
+  def test_short_conv_rejects_wrong_features(self):
+    """Input with the wrong feature count must fail loudly, not silently."""
+    rngs = nnx.Rngs(0)
+    conv = ShortConvolution(kernel_size=4, features=8, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=rngs)
+    with pytest.raises(ValueError, match="Input features"):
+      conv(jnp.zeros((1, 16, 7)))
+
+  def test_short_conv_kernel_size_one(self):
+    """kernel_size=1 -> halo_size=0: the exchange returns the input untouched."""
+    rngs = nnx.Rngs(0)
+    conv = ShortConvolution(kernel_size=1, features=8, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=rngs)
+    B, T = 2, 16
+    x = jax.random.normal(jax.random.PRNGKey(0), (B, T, 8))
+    out = conv(x)
+    assert out.shape == (B, T, 8)
+    assert jnp.isfinite(out).all()
+
+  def test_halo_exchange_single_rank_shard_map(self):
+    """Inside a shard_map whose CP axis has size 1 the exchange degrades to zero-pad."""
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("context",))
+    x = jax.random.normal(jax.random.PRNGKey(0), (1, 8, 4))
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=jax.sharding.PartitionSpec(None, "context", None),
+        out_specs=jax.sharding.PartitionSpec(None, "context", None),
+        check_vma=False,
+    )
+    def _exchange(x_local):
+      return halo_exchange_for_conv(x_local, halo_size=2, axis_name="context", seq_axis=1)
+
+    out = _exchange(x)
+    assert out.shape == (1, 10, 4)
+    assert jnp.allclose(out[:, :2, :], 0.0, atol=0.0), "halo rows must be zeros on the only rank"
+    assert jnp.allclose(out[:, 2:, :], x, atol=0.0)
+
   @pytest.mark.tpu_only
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   @pytest.mark.parametrize("layout", ["uniform", "rank_boundary", "spanning_ranks"])
@@ -1347,6 +1406,25 @@ class TestKdaCp:
       )
 
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
+  def test_kda_cp_requires_tokamax_metadata(self, monkeypatch):
+    """If ContextParallelMetadata failed to import, CP must refuse to run.
+
+    CP without cross-rank metadata would silently split the recurrent
+    state across ranks, so the layer raises instead of degrading.
+    """
+    mesh = self._cp_mesh(cp_size=2)
+    cfg = _MockKdaConfig(head_dim=128)
+    rngs = nnx.Rngs(0)
+    with mesh:
+      attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+
+    monkeypatch.setattr(attention_kda, "TokamaxContextParallelMetadata", None)
+    x = jax.random.normal(jax.random.PRNGKey(0), (2, 128, 128))
+    with pytest.raises(ImportError, match="ContextParallelMetadata"):
+      with mesh:
+        attn(x)
+
+  @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   def test_kda_cp_rejects_load_balance(self):
     """KDA CP should raise ValueError when load_balance is enabled."""
     mesh = self._cp_mesh(cp_size=2)
@@ -1424,3 +1502,49 @@ class TestKdaConfigGuards:
     seg = jnp.ones((1, 64), dtype=jnp.int32)
     with pytest.raises(ValueError, match="max_segments_per_seq"):
       attn(x, decoder_segment_ids=seg)
+
+
+# ---------------------------------------------------------------------------
+# Kernel input-guard tests (raise before any kernel call; run in CPU CI)
+# ---------------------------------------------------------------------------
+
+
+class TestKdaKernelGuards:
+  """``initial_state`` / ``output_final_state`` are rejected before dispatch.
+
+  These guards fire before any tokamax kernel is touched, so they are safe
+  to run on CPU (no tpu_only marker).
+  """
+
+  @staticmethod
+  def _dummy_inputs():
+    """Small random q/k/v/g/beta tensors shaped for the kernel interface."""
+    B, T, H, K, V = 1, 64, 2, 16, 16
+    key = jax.random.PRNGKey(0)
+    keys = jax.random.split(key, 5)
+    q = jax.random.normal(keys[0], (B, T, H, K))
+    k = jax.random.normal(keys[1], (B, T, H, K))
+    v = jax.random.normal(keys[2], (B, T, H, V))
+    g = jax.random.normal(keys[3], (B, T, H, K))
+    beta = jax.random.normal(keys[4], (B, T, H))
+    return q, k, v, g, beta
+
+  def test_chunk_kda_rejects_initial_state(self):
+    q, k, v, g, beta = self._dummy_inputs()
+    with pytest.raises(NotImplementedError, match="initial_state"):
+      chunk_kda(q, k, v, g, beta, scale=0.25, initial_state=jnp.zeros((2, 16, 16)))
+
+  def test_chunk_kda_rejects_output_final_state(self):
+    q, k, v, g, beta = self._dummy_inputs()
+    with pytest.raises(NotImplementedError, match="output_final_state"):
+      chunk_kda(q, k, v, g, beta, scale=0.25, output_final_state=True)
+
+  def test_tokamax_adapter_rejects_initial_state(self):
+    q, k, v, g, beta = self._dummy_inputs()
+    with pytest.raises(NotImplementedError, match="initial_state"):
+      tokamax_chunk_kda(q, k, v, g, beta, scale=0.25, initial_state=jnp.zeros((2, 16, 16)))
+
+  def test_tokamax_adapter_rejects_output_final_state(self):
+    q, k, v, g, beta = self._dummy_inputs()
+    with pytest.raises(NotImplementedError, match="output_final_state"):
+      tokamax_chunk_kda(q, k, v, g, beta, scale=0.25, output_final_state=True)

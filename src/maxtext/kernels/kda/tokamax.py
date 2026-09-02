@@ -104,16 +104,18 @@ def tokamax_chunk_kda(
   Returns:
       (o, None) where o is [B, T, H, V].
   """
+  # Input validation before the lazy import so the guards fire even on
+  # installs without tokamax.
+  if initial_state is not None:
+    raise NotImplementedError("initial_state is not supported with tokamax backend")
+  if output_final_state:
+    raise NotImplementedError("output_final_state is not supported with tokamax backend")
+
   # Deliberately lazy: importing the KDA API must not fail at module import
   # time on installs without tokamax; only an actual KDA call requires it.
   from tokamax._src.ops.experimental.kda.api import (  # pylint: disable=import-outside-toplevel
       kimi_delta_attention,
   )
-
-  if initial_state is not None:
-    raise NotImplementedError("initial_state is not supported with tokamax backend")
-  if output_final_state:
-    raise NotImplementedError("output_final_state is not supported with tokamax backend")
 
   q_h, k_h, v_h, g_h, beta_h = _to_tokamax(q, k, v, g, beta)
 
