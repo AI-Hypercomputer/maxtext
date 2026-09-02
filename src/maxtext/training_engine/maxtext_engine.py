@@ -27,6 +27,7 @@ from typing import Any
 
 from absl import logging
 from flax import nnx
+from flax import struct
 from flax.traverse_util import flatten_dict
 from flax.traverse_util import unflatten_dict
 import jax
@@ -145,7 +146,11 @@ _UNCOMPARABLE_STRUCTURE_HINT = (
 )
 
 
-@dataclasses.dataclass(kw_only=True)
+# Frozen to match tunix's `TrainerPayload`, which is a
+# `flax.struct.dataclass(frozen=True)`. Python refuses to derive a non-frozen
+# dataclass from a frozen one, and `struct.dataclass` also keeps the subclass
+# registered as a pytree so it can still cross a `jit` boundary.
+@struct.dataclass(frozen=True, kw_only=True)
 class RouterReplayTrainerPayload(abstract_engine.TrainerPayload):
   """A TrainerPayload extension carrying forced router-replay expert decisions.
 
