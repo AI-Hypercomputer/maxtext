@@ -298,6 +298,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       TypeError: If training_config is not a pyconfig.HyperParameters instance.
       ValueError: If training_config.model_name is not specified or empty, or if `wrap_with_tunix_adapter`
         is requested without `tokenizer_pad_id` or without a `mesh`.
+      NotImplementedError: If `training_config.lora.enable_lora` is True. This engine has no LoRA
+        path and would otherwise full-finetune the base model while the config claims LoRA.
     """
     if not isinstance(training_config, pyconfig.HyperParameters):
       raise TypeError(
@@ -311,6 +313,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
       if mesh is None:
         raise ValueError("wrap_with_tunix_adapter=True requires a mesh; the adapter is built under it.")
+
+    # This engine has no LoRA path
+    if getattr(getattr(training_config, "lora", None), "enable_lora", False):
+      raise NotImplementedError(
+          "MaxTextTrainingEngine does not support LoRA, but lora.enable_lora=True was set. "
+          "This engine trains all parameters, set lora.enable_lora=False to train with this engine."
+      )
     self._config = training_config
     self._mesh = mesh
     self._init_rng = jax.random.PRNGKey(training_config.init_weights_seed)
@@ -357,8 +366,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
     # `create_training_optimizer` returns a raw optax GradientTransformation. `TrainStateNNX.apply_gradients`
     # calls `optimizer.update(model, grads)`, which is the nnx.Optimizer signature, and
-    # `checkpointing.CheckpointState` expects an nnx.Optimizer too, so wrap it here. This engine is only
-    # driven via tunix's GRPO+Raiden integration, which never enables LoRA, so `wrt` is always `nnx.Param`.
+    # `checkpointing.CheckpointState` expects an nnx.Optimizer too, so wrap it here. `wrt=nnx.Param`
+    # covers every parameter, which is correct only because LoRA is rejected above.
     self._learning_rate_schedule, tx = train_utils.create_training_optimizer(self._config, self._model)
     self._optimizer = nnx.Optimizer(self._model, tx, wrt=nnx.Param)
     self._train_step: int = 0
@@ -568,12 +577,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             lambda g: g / micro_step_count,
             accumulated_grads,
         )
+      grad_norm = max_utils.l2norm_pytree(grads)
       if self._config.gradient_clipping_threshold > 0:
         grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
+
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if hasattr(local_state, "apply_gradients"):
         if self._config.skip_step_on_spikes:
-          grad_norm = max_utils.l2norm_pytree(grads)
           local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
           opt_obj = getattr(local_state, "optimizer", self._optimizer)
           if opt_obj is not None:

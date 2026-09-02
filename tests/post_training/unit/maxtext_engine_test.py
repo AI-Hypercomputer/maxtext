@@ -27,6 +27,7 @@ import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
+from maxtext.training_engine import metrics as metrics_module
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
@@ -1104,6 +1105,53 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("metric_b", metrics.scalar_metrics)
     self.assertAlmostEqual(float(metrics.weighted_metrics["loss"].compute().item()), 6.0, places=4)
     self.assertAlmostEqual(float(metrics.weighted_metrics["metric_a"].compute().item()), 4.0, places=4)
+
+  def _weighted_loss_fn(self, model, *_args, **_kwargs):
+    """Loss whose gradient wrt the dummy model's weights is exactly [2.0, 2.0].
+
+    `unreduced_sum` is 8 * sum(w) = 24.0 over a denominator of 4.0, so the reported loss
+    is 6.0 and each gradient element is 8.0 * compute_scale() = 2.0.
+    """
+    return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0))
+
+  def test_enable_lora_is_rejected_instead_of_silently_full_finetuning(self):
+    """This engine has no LoRA path, so the flag must fail loudly."""
+    self.assertFalse(self.mock_config.lora.enable_lora, "the default config must not enable LoRA")
+    maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    self.mock_from_pretrained.assert_called_once()
+    self.mock_from_pretrained.reset_mock()
+
+    lora_config = self.setup_config(lora={"enable_lora": True, "lora_rank": 8, "lora_alpha": 16.0})
+    with self.assertRaisesRegex(NotImplementedError, "does not support LoRA"):
+      maxtext_engine.MaxTextTrainingEngine(lora_config)
+    self.mock_from_pretrained.assert_not_called()
+
+  def test_gradient_norm_is_recorded_every_step(self):
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16")
+    self.assertFalse(cfg.skip_step_on_spikes, "this test covers the default, spike-detection-off path")
+
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.fwd_bwd(DummyPayload())
+    t.update()
+
+    buffer = t.get_metrics(clear_cache=True)
+    self.assertIn("gradient_norm", buffer.scalar_metrics)
+    grad_norm = buffer.scalar_metrics["gradient_norm"]
+    np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(8.0)], rtol=1e-3)
+    self.assertNotIn("step_skipped", buffer.scalar_metrics)
+
+  def test_perplexity_is_emitted_alongside_the_loss(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.fwd_bwd(DummyPayload())
+    t.update()
+
+    processed = metrics_module.MetricsLogger(self.mock_config).process_metrics(t.get_metrics(clear_cache=True))
+
+    self.assertAlmostEqual(processed["loss"], 6.0, places=4)
+    self.assertIn("perplexity", processed)
+    self.assertAlmostEqual(processed["perplexity"], float(np.exp(6.0)), places=3)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ import numpy as np
 _METRICS_TO_LOG = [
     "learning_rate",
     "loss",
+    "perplexity",
     "total_weights",
     "gradient_norm",
     "step_skipped",
@@ -271,6 +272,9 @@ class MetricsLogger:
       if isinstance(host_val, (np.ndarray, jax.Array)):
         host_val = host_val.item() if host_val.size == 1 else float(np.mean(host_val))
       processed[name] = host_val
+
+    if "loss" in processed:
+      processed["perplexity"] = float(np.exp(np.asarray(processed["loss"], dtype=np.float64)))
     return processed
 
   def cleanup(self) -> None:
