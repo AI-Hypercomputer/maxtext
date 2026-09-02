@@ -21,9 +21,10 @@ from typing import Any, List
 from absl import logging
 from flax import nnx
 import jax
+from maxtext.common import checkpoint_context
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
-import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 
 
 @dataclasses.dataclass
@@ -53,27 +54,34 @@ class CheckpointManager:
       checkpoint_dir: The root directory for saving checkpoints.
       config: The training configuration.
     """
-    self._checkpoint_manager: ocp.CheckpointManager | None = None
+    self._checkpointer: ocp.training.Checkpointer | None = None
+    # The v0 manager took async-ness as an option; the v1 Checkpointer chooses per call,
+    # so remember it and dispatch in save_checkpoint.
+    self._use_async = bool(config.async_checkpointing)
     if checkpoint_dir:
-      self._checkpoint_manager = ocp.CheckpointManager(
-          directory=checkpoint_dir,
-          options=ocp.CheckpointManagerOptions(
-              save_interval_steps=config.checkpoint_period,
-              max_to_keep=config.max_num_checkpoints_to_keep,
-              enable_async_checkpointing=config.async_checkpointing,
+      preservation_policy = None
+      if config.max_num_checkpoints_to_keep is not None:
+        preservation_policy = checkpoint_context.build_preservation_policy(max_to_keep=config.max_num_checkpoints_to_keep)
+      self._checkpointer = ocp.training.Checkpointer(
+          checkpoint_dir,
+          context=checkpoint_context.build_context(),
+          save_decision_policy=checkpoint_context.build_save_decision_policy(
+              save_interval_steps=config.checkpoint_period
           ),
+          preservation_policy=preservation_policy,
       )
 
   def get_latest_step(self) -> int | None:
     """Returns the latest checkpoint step."""
-    if self._checkpoint_manager:
-      return self._checkpoint_manager.latest_step()
+    if self._checkpointer:
+      latest = self._checkpointer.latest
+      return latest.step if latest is not None else None
     return None
 
   def wait_until_finished(self) -> None:
     """Waits for any ongoing async checkpoint saves to finish."""
-    if self._checkpoint_manager:
-      self._checkpoint_manager.wait_until_finished()
+    if self._checkpointer:
+      self._checkpointer.wait()
 
   def get_saved_micro_step_count(self, step: int) -> int:
     """Returns how far into `step` the checkpoint already on disk got.
@@ -85,10 +93,10 @@ class CheckpointManager:
       0 if that checkpoint covers a complete step, otherwise the number of micro-batches
       accumulated into it.
     """
-    if self._checkpoint_manager is None:
+    if self._checkpointer is None:
       return 0
     try:
-      metadata = self._checkpoint_manager.metadata(step)
+      metadata = self._checkpointer.checkpointables_metadata(step)
     except Exception as e:  # pylint: disable=broad-except
       logging.warning("Could not read metadata for step %d, treating it as complete: %s", step, e)
       return 0
@@ -126,9 +134,17 @@ class CheckpointManager:
     Args:
       step: The step to delete.
     """
+    if self._checkpointer is None:
+      return
     logging.info("Deleting intra-step checkpoint at step %d so a more complete one can replace it.", step)
-    self._checkpoint_manager.wait_until_finished()
-    self._checkpoint_manager.delete(step)
+    self._checkpointer.wait()
+    # The v1 Checkpointer exposes no public delete yet; use the
+    # underlying v0 manager's delete (the same call Orbax makes internally).
+    self._checkpointer._manager.delete(step)  # pylint: disable=protected-access
+    # The v1 `checkpoints`/`latest` properties cache their step listing and are
+    # unaware of deletes made below them; refresh so the replacement save isn't
+    # misjudged.
+    self._checkpointer.reload()
 
   def save_checkpoint(
       self,
@@ -148,7 +164,7 @@ class CheckpointManager:
     Returns:
       Whether the checkpoint was saved.
     """
-    if self._checkpoint_manager is None:
+    if self._checkpointer is None:
       logging.info("Checkpointing is disabled, skipping save.")
       return False
 
@@ -174,49 +190,31 @@ class CheckpointManager:
 
     params = nnx.state(checkpoint_state.model)
     jax.block_until_ready(params)
-    model_cp_args = ocp.args.PyTreeSave(
-        item=params,
-        save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params),
-    )
-    save_args = {"model_params": model_cp_args}
+    checkpointables = {"model_params": params}
 
     if checkpoint_state.optimizer:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
       jax.block_until_ready(optimizer_state)
-      optimizer_cp_args = ocp.args.PyTreeSave(
-          item=optimizer_state,
-          save_args=jax.tree.map(lambda _: ocp.SaveArgs(), optimizer_state),
-      )
-      save_args["optimizer_state"] = optimizer_cp_args
+      checkpointables["optimizer_state"] = optimizer_state
 
     if checkpoint_state.accumulated_metrics is not None:
       jax.block_until_ready(checkpoint_state.accumulated_metrics)
-      metrics_cp_args = ocp.args.PyTreeSave(
-          item=checkpoint_state.accumulated_metrics,
-          save_args=jax.tree.map(
-              lambda _: ocp.SaveArgs(),
-              checkpoint_state.accumulated_metrics,
-          ),
-      )
-      save_args["accumulated_metrics"] = metrics_cp_args
+      checkpointables["accumulated_metrics"] = checkpoint_state.accumulated_metrics
 
     if checkpoint_state.accumulated_grads:
       jax.block_until_ready(checkpoint_state.accumulated_grads)
-      grads_cp_args = ocp.args.PyTreeSave(
-          item=checkpoint_state.accumulated_grads,
-          save_args=jax.tree.map(
-              lambda _: ocp.SaveArgs(),
-              checkpoint_state.accumulated_grads,
-          ),
-      )
-      save_args["accumulated_grads"] = grads_cp_args
+      checkpointables["accumulated_grads"] = checkpoint_state.accumulated_grads
 
-    return self._checkpoint_manager.save(
-        step=step,
-        args=ocp.args.Composite(**save_args),
-        custom_metadata=custom_metadata,
-        **kwargs,
-    )
+    try:
+      if self._use_async:
+        response = self._checkpointer.save_checkpointables_async(
+            step, checkpointables, custom_metadata=custom_metadata, **kwargs
+        )
+        return response is not None
+      return self._checkpointer.save_checkpointables(step, checkpointables, custom_metadata=custom_metadata, **kwargs)
+    except FileExistsError as e:  # ocp.training StepAlreadyExistsError subclasses FileExistsError
+      logging.info("Checkpoint for step %d already exists, skipping save. (%s)", step, e)
+      return False
 
   def restore_checkpoint(
       self,
@@ -232,7 +230,7 @@ class CheckpointManager:
     Returns:
       A tuple of (step, checkpoint_state, custom metadata).
     """
-    if self._checkpoint_manager is None:
+    if self._checkpointer is None:
       logging.info("Checkpointing is disabled, skipping restore.")
       return None, checkpoint_state, None
 
@@ -242,43 +240,26 @@ class CheckpointManager:
         logging.info("No checkpoint found, skipping restore.")
         return None, checkpoint_state, None
 
-    metadata = self._checkpoint_manager.metadata(step)
-    restore_args: dict[str, Any] = {}
+    metadata = self._checkpointer.checkpointables_metadata(step)
+    saved_checkpointables = metadata.metadata if isinstance(metadata.metadata, Mapping) else {}
 
-    abstract_params = nnx.state(checkpoint_state.model)
-    restore_args["model_params"] = ocp.args.PyTreeRestore(
-        item=abstract_params,
-        restore_args=ocp.checkpoint_utils.construct_restore_args(target=abstract_params),
-    )
+    abstract_checkpointables: dict[str, Any] = {"model_params": nnx.state(checkpoint_state.model)}
 
-    if checkpoint_state.optimizer is not None and "optimizer_state" in metadata.item_metadata:
-      optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
-      restore_args["optimizer_state"] = ocp.args.PyTreeRestore(
-          item=optimizer_state,
-          restore_args=ocp.checkpoint_utils.construct_restore_args(
-              target=nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
-          ),
-      )
+    if checkpoint_state.optimizer is not None and "optimizer_state" in saved_checkpointables:
+      abstract_checkpointables["optimizer_state"] = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
 
-    if "accumulated_metrics" in metadata.item_metadata:
-      restore_args["accumulated_metrics"] = ocp.args.PyTreeRestore()
+    if "accumulated_metrics" in saved_checkpointables:
+      abstract_checkpointables["accumulated_metrics"] = saved_checkpointables["accumulated_metrics"]
 
-    if "accumulated_grads" in metadata.item_metadata:
-      accumulated_grads_target = nnx.state(checkpoint_state.model, nnx.Param)
-      restore_args["accumulated_grads"] = ocp.args.PyTreeRestore(
-          item=accumulated_grads_target,
-          restore_args=ocp.checkpoint_utils.construct_restore_args(target=accumulated_grads_target),
-      )
+    if "accumulated_grads" in saved_checkpointables:
+      abstract_checkpointables["accumulated_grads"] = nnx.state(checkpoint_state.model, nnx.Param)
 
     custom_metadata = None
     if metadata and hasattr(metadata, "custom_metadata"):
       custom_metadata = metadata.custom_metadata
 
     try:
-      restored_items = self._checkpoint_manager.restore(
-          step=step,
-          args=ocp.args.Composite(**restore_args),
-      )
+      restored_items = self._checkpointer.load_checkpointables(step, abstract_checkpointables)
     except Exception as e:  # pylint: disable=broad-except
       logging.exception("Failed to restore checkpoint: %s", e)
       return None, None, None
@@ -296,5 +277,5 @@ class CheckpointManager:
 
   def close(self) -> None:
     """Closes the checkpoint manager."""
-    if self._checkpoint_manager:
-      self._checkpoint_manager.close()
+    if self._checkpointer:
+      self._checkpointer.close()
