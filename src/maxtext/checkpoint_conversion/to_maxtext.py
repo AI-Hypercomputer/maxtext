@@ -85,7 +85,30 @@ except ImportError:
   torch = None
 
 
-absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
+def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any]) -> Any:
+  """Resolves missing indexer parameters for GLM-5.2 Shared (S) layers from preceding Full (F) donor layers.
+
+  Use-Case:
+    In GLM-5.2 IndexShare models, HuggingFace/Safetensors checkpoints prune indexer weights
+    on Shared (S) layers (e.g., layers 1, 2, 3) because they share weights with the preceding
+    Full (F) donor layer (e.g., layer 0). When constructing the MaxText model state (or when
+    prune_shared_indexers=False), any missing indexer weight on a shared layer is resolved
+    by searching backwards for the closest preceding donor layer containing the physical tensor.
+  """
+  str_key = str(key)
+  if "indexer" in str_key and str_key.startswith("model.layers."):
+    m = re.match(r"model\.layers\.(\d+)\.(.+)", str_key)
+    if m:
+      layer_idx = int(m.group(1))
+      rest = m.group(2)
+      # Search backwards for the closest preceding donor layer containing the key
+      for candidate_idx in range(layer_idx - 1, -1, -1):
+        donor_key = f"model.layers.{candidate_idx}.{rest}"
+        try:
+          return getter_fn(donor_key)
+        except Exception:  # pylint: disable=broad-exception-caught
+          continue
+  return None
 
 
 class LazyHFLoader:
@@ -467,23 +490,11 @@ def _build_single_axis_stacked_tensor(
       try:
         hf_tensor_numpy = tensor_getter_fn(hf_key_single)
       except (ValueError, KeyError) as e:
-        if "indexer" in str(hf_key_single) and str(hf_key_single).startswith("model.layers."):
-          m = re.match(r"model\.layers\.(\d+)\.(.+)", str(hf_key_single))
-          if m:
-            layer_idx = int(m.group(1))
-            rest = m.group(2)
-            # Search backwards for the closest preceding donor layer containing the key
-            for candidate_idx in range(layer_idx - 1, -1, -1):
-              donor_key = f"model.layers.{candidate_idx}.{rest}"
-              try:
-                hf_tensor_numpy = tensor_getter_fn(donor_key)
-                break
-              except Exception:  # pylint: disable=broad-exception-caught
-                continue
-            else:
-              hf_tensor_numpy = np.zeros(mt_slice_shape, dtype=np.float32)
-          else:
-            raise e
+        resolved = _resolve_shared_indexer_tensor(hf_key_single, tensor_getter_fn)
+        if resolved is not None:
+          hf_tensor_numpy = resolved
+        elif "indexer" in str(hf_key_single) and str(hf_key_single).startswith("model.layers."):
+          hf_tensor_numpy = np.zeros(mt_slice_shape, dtype=np.float32)
         else:
           raise e
     processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
@@ -1018,30 +1029,6 @@ def main(
               (old_prefix + k[len(new_prefix) :] if k.startswith(new_prefix) and not k.startswith(old_prefix) else k): v
               for k, v in hf_state_dict_numpy.items()
           }
-
-      def _resolve_shared_indexer_tensor(key: str, getter_fn):
-        """Resolves missing indexer parameters for GLM-5.2 Shared (S) layers from preceding Full (F) donor layers.
-
-        Use-Case:
-          In GLM-5.2 IndexShare models, HuggingFace/Safetensors checkpoints prune indexer weights
-          on Shared (S) layers (e.g., layers 1, 2, 3) because they share weights with the preceding
-          Full (F) donor layer (e.g., layer 0). When constructing the MaxText model state (or when
-          prune_shared_indexers=False), any missing indexer weight on a shared layer is resolved
-          by searching backwards for the closest preceding donor layer containing the physical tensor.
-        """
-        if "indexer" in key and key.startswith("model.layers."):
-          m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
-          if m:
-            layer_idx = int(m.group(1))
-            rest = m.group(2)
-            # Search backwards for the closest preceding donor layer containing the key
-            for candidate_idx in range(layer_idx - 1, -1, -1):
-              donor_key = f"model.layers.{candidate_idx}.{rest}"
-              try:
-                return getter_fn(donor_key)
-              except (ValueError, KeyError):
-                continue
-        return None
 
       def _eager_getter(key):
         if key not in hf_state_dict_numpy:
