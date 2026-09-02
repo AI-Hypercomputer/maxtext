@@ -1592,7 +1592,7 @@ class Tokenizer(BaseModel):
 class DatasetGeneral(BaseModel):
   """General configuration for dataset and data loading."""
 
-  dataset_type: DatasetType = Field(DatasetType.TFDS, description="The type of the data loading pipeline.")
+  dataset_type: DatasetType = Field(DatasetType.SYNTHETIC, description="The type of the data loading pipeline.")
   per_device_batch_size: int | float = Field(12, description="The batch size per device.")
   eval_per_device_batch_size: int | float = Field(
       0.0,
