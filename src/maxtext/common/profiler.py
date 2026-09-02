@@ -79,8 +79,6 @@ class Profiler:
   def is_active(self, step=None):
     if self.mode == "":
       return False
-    if getattr(self, "_active", False):
-      return True
     if step is not None:
       initial_active = self.start_initial_profile_step <= step <= self.finished_initial_profile_step
       if initial_active:
@@ -89,7 +87,8 @@ class Profiler:
         duration = self.finished_initial_profile_step - self.start_initial_profile_step
         offset = (step - self.start_initial_profile_step) % self.profile_period
         return 0 <= offset <= duration
-    return False
+      return False
+    return getattr(self, "_active", False)
 
   def maybe_activate_profiler(self, step, state):
     """Conditionally activates the profiler based on the current step.

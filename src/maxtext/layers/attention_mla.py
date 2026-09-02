@@ -745,11 +745,9 @@ class MLA(Attention):
     if getattr(config, "use_index_share", False):
       pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
       self.is_full_tuple = tuple(role == "F" for role in pattern)
-      self.is_full = jnp.array(self.is_full_tuple, dtype=jnp.bool_)
       self.served_group_sizes_tuple = index_share_utils.get_served_group_sizes(pattern)
     else:
       self.is_full_tuple = None
-      self.is_full = None
       self.served_group_sizes_tuple = None
     is_pruned = (
         getattr(config, "use_index_share", False)
@@ -1333,10 +1331,19 @@ class MLA(Attention):
         if attention_mask is not None:
           attention_mask = attention_mask.squeeze(axis=(1, 2))
 
-        if self.indexer is not None:
+        if self.indexer is not None or getattr(self.config, "use_index_share", False):
 
           def _run_full(_):
-            with jax.named_scope("glm_full_layer_indexer"):
+            with jax.named_scope("glm_full_layer_index_computation"):
+              if self.indexer is None:
+                batch = query.shape[0]
+                q_len = query.shape[1]
+                kv_len = key.shape[1] if key is not None else 0
+                topk = getattr(self.config, "indexer_topk", 0)
+                mask = jnp.zeros((batch, q_len, kv_len), dtype=query.dtype)
+                indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
+                score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
+                return mask, indices, score
               mask, indices, score = self.indexer(
                   inputs_q=inputs_q,
                   low_rank_q=low_rank_q,
@@ -1369,16 +1376,16 @@ class MLA(Attention):
               return mask, indices, score
 
           if getattr(self.config, "use_index_share", False):
-            if layer_idx is not None and self.is_full is not None:
-              is_full = self.is_full[layer_idx]
+            if self.is_shared_layer:
+              indexer_mask, topk_indices, indexer_score = _run_shared(None)
+            elif layer_idx is not None and self.is_full_tuple is not None:
+              is_full = jnp.array(self.is_full_tuple, dtype=jnp.bool_)[layer_idx]
               indexer_mask, topk_indices, indexer_score = jax.lax.cond(
                   is_full,
                   _run_full,
                   _run_shared,
                   operand=None,
               )
-            elif self.is_shared_layer:
-              indexer_mask, topk_indices, indexer_score = _run_shared(None)
             else:
               indexer_mask, topk_indices, indexer_score = _run_full(None)
           else:

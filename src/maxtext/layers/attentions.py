@@ -16,6 +16,7 @@
 
 import dataclasses
 import functools
+import inspect
 import os
 from typing import Any, Iterable, Optional, Tuple, Union, cast
 
@@ -1046,7 +1047,15 @@ class Attention(nnx.Module):
           inputs, num_frames, height, width, token_mask=token_mask, valid_grid=valid_grid
       )
     else:
-      return self.rotary_embedding(inputs, inputs_positions, **(rope_kwargs or {}))
+      if rope_kwargs:
+        sig = inspect.signature(self.rotary_embedding.__call__)
+        valid_kwargs = {
+            k: v
+            for k, v in rope_kwargs.items()
+            if k in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        }
+        return self.rotary_embedding(inputs, inputs_positions, **valid_kwargs)
+      return self.rotary_embedding(inputs, inputs_positions)
 
   def init_kv_caches(self, inputs_kv_shape: Tuple):
     """Initializes KVCache.

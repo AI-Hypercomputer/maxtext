@@ -2044,7 +2044,7 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
       self,
       inputs: jnp.ndarray,
       position: jnp.ndarray,
-      unsqueeze_dim: int | None = 1,
+      unsqueeze_dim: int | None = 2,
       reverse: bool = False,
   ) -> jnp.ndarray:
     """Applies interleaved Rotary Position Embedding to the inputs.
