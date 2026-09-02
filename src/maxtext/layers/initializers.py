@@ -23,7 +23,7 @@ from flax import linen as nn
 from flax import nnx
 from aqt.jax.v2 import aqt_tensor
 
-from maxtext.common.common_types import Array, DType, Shape, PRNGKey
+from maxtext.common.common_types import Array, DType, Shape, PRNGKey, is_fp8_dtype
 
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = int | tuple[int, ...]
@@ -32,7 +32,7 @@ NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxi
 
 def _default_embed_init(key, shape, dtype=jnp.float32):
   target_dtype = dtype
-  sample_dtype = jnp.float32 if jnp.dtype(dtype).itemsize < 2 else dtype
+  sample_dtype = jnp.float32 if is_fp8_dtype(dtype) else dtype
   fn = nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
   return fn(key, shape, sample_dtype).astype(target_dtype)
 
@@ -64,7 +64,7 @@ def nd_dense_init(scale, mode, distribution):
   def init_fn(key, shape, dtype, in_axis, out_axis):
     """Initializes an array using variance scaling with specified axes."""
     target_dtype = dtype
-    sample_dtype = jnp.float32 if jnp.dtype(dtype).itemsize < 2 else dtype
+    sample_dtype = jnp.float32 if is_fp8_dtype(dtype) else dtype
     fn = jax.nn.initializers.variance_scaling(scale, mode, distribution, in_axis, out_axis)
     return fn(key, shape, sample_dtype).astype(target_dtype)
 

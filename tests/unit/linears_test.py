@@ -362,24 +362,6 @@ class DenseGeneralTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       linears.dequantize_weight(w, scale_invalid, compute_dtype=jnp.bfloat16)
 
-  def test_deepseek_v4_grouped_linear_fp8(self):
-    layer = linears.DeepSeekV4GroupedLinear(
-        in_features_per_group=16,
-        out_features=128,
-        n_groups=4,
-        weight_dtype=jnp.float8_e4m3fn,
-        dtype=jnp.bfloat16,
-        kernel_axes=("embed", "mlp"),
-        rngs=self.rngs,
-    )
-    self.assertIsNotNone(layer.kernel_scale)
-    self.assertEqual(layer.scale_axes, ())
-    inputs = jnp.ones((2, 4, 16), dtype=jnp.bfloat16)
-    out = layer(inputs)
-    self.assertEqual(out.shape, (2, 4, 32))
-    self.assertEqual(out.dtype, jnp.bfloat16)
-
-
 class MlpBlockTest(unittest.TestCase):
   """Tests for MlpBlock."""
 

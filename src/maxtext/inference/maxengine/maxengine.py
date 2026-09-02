@@ -1505,9 +1505,6 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
-      if hasattr(partial_cache, "dtype") and hasattr(full_cache, "dtype") and partial_cache.dtype != full_cache.dtype:
-        partial_cache = partial_cache.astype(full_cache.dtype)
-
       if path_key in _DEEPSEEK_V4_CACHE_KEYS:
         # Copy these states by explicitly overwriting the target slots matching current request id
         for slot in slots:
@@ -1628,9 +1625,6 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
-
-      if hasattr(partial_cache, "dtype") and hasattr(full_cache, "dtype") and partial_cache.dtype != full_cache.dtype:
-        partial_cache = partial_cache.astype(full_cache.dtype)
 
       if path_key in _DEEPSEEK_V4_CACHE_KEYS:
         # Copy these states by explicitly overwriting the target slot matching current request id

@@ -40,29 +40,26 @@ def is_fp8_dtype(dtype: Any) -> bool:
   )
 
 
-def get_weight_dtype(config: Config, module_name: str) -> DType:
-  """Resolves parameter storage dtype for a submodule, honoring unquantized_modules.
+UNQUANTIZED_MODULE_LEAF_NAMES = frozenset({
+    "token_embedder",
+    "logits_dense",
+    "gate",
+    "shared_expert_gate",
+    "conv1d",
+    "in_proj_ba",
+})
 
-  If weight_dtype is not an FP8 type, returns config.weight_dtype (preserving base model behavior).
-  If weight_dtype is FP8, checks if module_name matches any pattern in config.unquantized_modules.
-  If matched, returns config.dtype (e.g. bfloat16); otherwise returns config.weight_dtype.
-  """
+
+def get_weight_dtype(config: Config, module_name: str) -> DType:
+  """Resolves parameter storage dtype for a submodule, honoring unquantized_modules."""
   if not is_fp8_dtype(config.weight_dtype):
     return config.weight_dtype
-  if module_name in ("token_embedder", "logits_dense"):
+  leaf_name = module_name.rsplit(".", 1)[-1]
+  if leaf_name in UNQUANTIZED_MODULE_LEAF_NAMES or module_name in UNQUANTIZED_MODULE_LEAF_NAMES:
     return config.dtype
-  unquantized = getattr(config, "unquantized_modules", None) or []
-  leaf_name = module_name.split(".")[-1]
-  for pattern in unquantized:
-    if (
-        pattern == module_name
-        or pattern == leaf_name
-        or module_name.endswith(f".{pattern}")
-        or module_name.endswith(f"_{pattern}")
-        or fnmatch.fnmatch(module_name, pattern)
-        or fnmatch.fnmatch(leaf_name, pattern)
-    ):
-      return config.dtype
+  unquantized = getattr(config, "unquantized_modules", None) or ()
+  if any(fnmatch.fnmatch(module_name, p) or fnmatch.fnmatch(leaf_name, p) for p in unquantized):
+    return config.dtype
   return config.weight_dtype
 
 

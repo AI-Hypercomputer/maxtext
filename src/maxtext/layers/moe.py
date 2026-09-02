@@ -673,13 +673,13 @@ class RoutedMoE(nnx.Module):
       if self.config.prefuse_moe_weights:
         wi_scale_shape = (
             num_experts,
-            int(np.ceil(self.moe_expert_input_dim / 128)),
-            int(np.ceil(moe_intermediate_dim * 2 / 128)),
+            self.moe_expert_input_dim // 128,
+            (moe_intermediate_dim * 2) // 128,
         )
         wo_scale_shape = (
             self.num_experts,
-            int(np.ceil(moe_intermediate_dim / 128)),
-            int(np.ceil(self.moe_expert_input_dim / 128)),
+            moe_intermediate_dim // 128,
+            self.moe_expert_input_dim // 128,
         )
         self.wi_scale = nnx.Param(
             jnp.ones(wi_scale_shape, dtype=scale_dtype),
@@ -694,13 +694,13 @@ class RoutedMoE(nnx.Module):
       else:
         wi_scale_shape = (
             num_experts,
-            int(np.ceil(self.moe_expert_input_dim / 128)),
-            int(np.ceil(moe_intermediate_dim / 128)),
+            self.moe_expert_input_dim // 128,
+            moe_intermediate_dim // 128,
         )
         wo_scale_shape = (
             self.num_experts,
-            int(np.ceil(moe_intermediate_dim / 128)),
-            int(np.ceil(self.moe_expert_input_dim / 128)),
+            moe_intermediate_dim // 128,
+            self.moe_expert_input_dim // 128,
         )
         self.wi_0_scale = nnx.Param(
             jnp.ones(wi_scale_shape, dtype=scale_dtype),
@@ -3276,36 +3276,26 @@ class RoutedMoE(nnx.Module):
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
-    if hasattr(self, "wo_scale") and self.wo_scale is not None:
-      wo_kernel = linears.dequantize_weight(self.wo[...], self.wo_scale[...], self.dtype)
-    else:
-      wo_kernel = linears.dequantize_weight(self.wo[...], None, self.dtype)
+    wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
+    wo_kernel = linears.dequantize_weight(self.wo[...], wo_scale, self.dtype)
 
     fused_kernel = None
     w0_kernel = None
     w1_kernel = None
     if cfg.prefuse_moe_weights and cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
-      if hasattr(self, "wi_scale") and self.wi_scale is not None:
-        fused_kernel = linears.dequantize_weight(self.wi[...], self.wi_scale[...], self.dtype)
-      else:
-        fused_kernel = linears.dequantize_weight(self.wi[...], None, self.dtype)
+      wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
+      fused_kernel = linears.dequantize_weight(self.wi[...], wi_scale, self.dtype)
     elif cfg.prefuse_moe_weights:
-      if hasattr(self, "wi_scale") and self.wi_scale is not None:
-        wi = linears.dequantize_weight(self.wi[...], self.wi_scale[...], self.dtype)
-      else:
-        wi = linears.dequantize_weight(self.wi[...], None, self.dtype)
+      wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
+      wi = linears.dequantize_weight(self.wi[...], wi_scale, self.dtype)
       n = wi.shape[-1] // 2
       w0_kernel = wi[..., :n]
       w1_kernel = wi[..., n:]
     else:
-      if hasattr(self, "wi_0_scale") and self.wi_0_scale is not None:
-        w0_kernel = linears.dequantize_weight(self.wi_0[...], self.wi_0_scale[...], self.dtype)
-      else:
-        w0_kernel = linears.dequantize_weight(self.wi_0[...], None, self.dtype)
-      if hasattr(self, "wi_1_scale") and self.wi_1_scale is not None:
-        w1_kernel = linears.dequantize_weight(self.wi_1[...], self.wi_1_scale[...], self.dtype)
-      else:
-        w1_kernel = linears.dequantize_weight(self.wi_1[...], None, self.dtype)
+      wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
+      wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
+      w0_kernel = linears.dequantize_weight(self.wi_0[...], wi_0_scale, self.dtype)
+      w1_kernel = linears.dequantize_weight(self.wi_1[...], wi_1_scale, self.dtype)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because
