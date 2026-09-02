@@ -1139,6 +1139,28 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_qwen3_5_gdn_kernel(self):
+    """AOT test for qwen3-5 with analytical GDN kernel and GMM v2"""
+    compiled_trainstep_file = "/tmp/test_qwen3_5_gdn_kernel"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.5-397b-a17b",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "use_tokamax_gmm=True",
+            "use_gmm_v2=True",
+            "use_tokamax_splash=True",
+            "use_gdn_kernel=True",
+        )
+    )
+
   def test_serialization_and_deserialization_formats(self):
     """Tests that our custom binary save/load functions work securely and legacy fallback triggers warning."""
 

@@ -45,6 +45,7 @@ class PyconfigTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`."):
       pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
           use_gmm_v2_heuristic_tiling=True,
           use_gmm_v2=False,
       )

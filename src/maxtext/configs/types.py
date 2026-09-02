@@ -282,6 +282,7 @@ ModelName = Literal[
     "qwen3-custom-30b-a3b",
     "qwen3.5-35b-a3b",
     "qwen3.5-397b-a17b",
+    "qwen3.5-tiny",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -1143,6 +1144,10 @@ class Qwen3Next(BaseModel):
   use_qk_norm_in_gdn: bool = Field(
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
+  )
+  use_gdn_kernel: bool = Field(
+      False,
+      description="Whether to use the fused analytical Pallas GDN kernel.",
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
 
@@ -4275,6 +4280,7 @@ class MaxTextConfig(
           "qwen3-vl-30b-a3b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
+          "qwen3.5-tiny",
           "maxtext-omni-gemma3-qwen3",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
