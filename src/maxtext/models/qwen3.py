@@ -62,9 +62,23 @@ from maxtext.inference import kvcache
 
 
 def naive_jax_chunk_gated_delta_rule(
-    query, key, value, g, beta, chunk_size=64, initial_state=None, use_qk_norm_in_gdn=False
+    query,
+    key,
+    value,
+    g,
+    beta,
+    chunk_size=64,
+    initial_state=None,
+    use_qk_norm_in_gdn=False,
+    precision=jax.lax.Precision.HIGHEST,
 ):
-  """Naive implementation of the Gated Delta Rule in jax."""
+  """Naive implementation of the Gated Delta Rule in jax.
+
+  This is the numerical reference used by the unit tests, so `precision` defaults
+  to `jax.lax.Precision.HIGHEST` and should be left at that default when the
+  function is used as the fp32 baseline. It is exposed only so tests can drive
+  the kernel at other precisions.
+  """
   initial_dtype = query.dtype
   if use_qk_norm_in_gdn:
     query = l2norm(query, dim=-1, eps=1e-6)
@@ -109,7 +123,7 @@ def naive_jax_chunk_gated_delta_rule(
   g_diff_exp = jnp.exp(g_diff_tril).astype(jnp.float32)
   decay_mask = g_diff_exp
 
-  prec = jax.lax.Precision.HIGHEST
+  prec = precision
   attn = -jnp.matmul(k_beta_c, jnp.swapaxes(key_c, -1, -2), precision=prec) * decay_mask
   attn = jnp.where(mask, 0.0, attn)
 
@@ -152,7 +166,7 @@ def naive_jax_chunk_gated_delta_rule(
   def scan_body(prev_state, x):
     q_i, k_i, v_i, k_cumdecay_i, g_i, decay_mask_i = x
     last_recurrent_state = prev_state
-    prec = jax.lax.Precision.HIGHEST
+    prec = precision
 
     attn_i = jnp.matmul(q_i, jnp.swapaxes(k_i, -1, -2), precision=prec) * decay_mask_i
     attn_i = jnp.where(mask_inter, 0.0, attn_i)
@@ -196,8 +210,17 @@ def jax_chunk_gated_delta_rule(
     initial_state: None | Array = None,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
+    matmul_precision: str = "highest",
 ) -> tuple[Array, None | Array]:
-  """Optimized JAX implementation of Gated Delta Rule."""
+  """Optimized JAX implementation of Gated Delta Rule.
+
+  Args:
+    matmul_precision: Precision for the delta-rule matmuls, as accepted by
+      `jax.lax.Precision`. Most of these matmuls run on operands this function
+      deliberately upcasts to float32, so "highest" (the default, and the value
+      this path used before it was configurable) is what makes that upcast
+      meaningful on TPU. Lowering it truncates those operands back to bf16.
+  """
   # =========================================================================
   # STAGE 1: PREPARATION & PADDING
   # =========================================================================
@@ -259,7 +282,7 @@ def jax_chunk_gated_delta_rule(
   k_beta = k_c * beta_c[..., None]
 
   # S Matrix Calculation
-  S = jnp.matmul(k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
+  S = jnp.matmul(k_beta, k_c.swapaxes(-1, -2), precision=matmul_precision)
   S = S.astype(jnp.float32)
 
   # Apply mask BEFORE exp to prevent 'inf' gradients
@@ -278,11 +301,11 @@ def jax_chunk_gated_delta_rule(
 
   # 5. WY Factors
   v_beta = v_c * beta_c[..., None]
-  u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+  u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=matmul_precision)
   u_chunks = u_chunks.astype(compute_dtype)
 
   k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
-  w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
+  w_chunks = jnp.matmul(A, k_beta_g, precision=matmul_precision)
   w_chunks = w_chunks.astype(compute_dtype)
 
   # =========================================================================
@@ -306,7 +329,7 @@ def jax_chunk_gated_delta_rule(
 
   def scan_body(h, args):
     w, u, q, k, g = args
-    prec = jax.lax.Precision.HIGHEST
+    prec = matmul_precision
 
     # --- Output Computation ---
     # 1. Inter-chunk: q(dtype) * exp(g)(f32) -> f32
@@ -375,8 +398,15 @@ def jax_ar_gated_delta_rule(
     initial_state: Array,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
+    matmul_precision: str = "highest",
 ) -> tuple[Array, Array]:
-  """Highly optimized step for Autoregressive Decoding (seq_len == 1)."""
+  """Highly optimized step for Autoregressive Decoding (seq_len == 1).
+
+  Args:
+    matmul_precision: Precision for the delta-rule matmuls, as accepted by
+      `jax.lax.Precision`. Defaults to "highest", preserving the precision this
+      path used before the value was configurable.
+  """
   # Shapes: q, k (B, 1, H, K_dim) | v (B, 1, H, V_dim) | g, beta (B, 1, H)
   initial_dtype = query.dtype
 
@@ -410,20 +440,20 @@ def jax_ar_gated_delta_rule(
 
   # v_prime = state @ (k_beta * exp(g))
   k_cumdecay = (k_beta.astype(jnp.float32) * g_exp)[..., None, :]  # (B, H, 1, K)
-  v_prime = jnp.matmul(k_cumdecay, state, precision=jax.lax.Precision.HIGHEST).squeeze(-2)
+  v_prime = jnp.matmul(k_cumdecay, state, precision=matmul_precision).squeeze(-2)
 
   v_new = v_beta.astype(jnp.float32) - v_prime
 
   # Core Output
   q_g = (q.astype(jnp.float32) * g_exp)[..., None, :]  # (B, H, 1, K)
-  attn_inter = jnp.matmul(q_g, state, precision=jax.lax.Precision.HIGHEST).squeeze(-2)
+  attn_inter = jnp.matmul(q_g, state, precision=matmul_precision).squeeze(-2)
 
   attn_intra = jnp.sum(q.astype(jnp.float32) * k.astype(jnp.float32), axis=-1, keepdims=True)
   core_attn_out = attn_inter + attn_intra * v_new
 
   # State Update: new_state = state * exp(g) + k^T @ v_new
   new_state = state * g_exp[..., None] + jnp.matmul(
-      k.astype(jnp.float32)[..., None], v_new[..., None, :], precision=jax.lax.Precision.HIGHEST
+      k.astype(jnp.float32)[..., None], v_new[..., None, :], precision=matmul_precision
   )
 
   # Restore sequence dimension
@@ -875,6 +905,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           initial_state=recurrent_state,  # pyrefly: ignore[bad-argument-type]
           use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
           compute_dtype=cfg.dtype,
+          matmul_precision=cfg.gdn_matmul_precision,
       )
     elif self.mesh is not None:
       logical_rules = get_logical_axis_rules()
@@ -937,6 +968,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             initial_state=init_h,
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=cfg.dtype,
+            matmul_precision=cfg.gdn_matmul_precision,
         )
 
       core_attn_out, next_recurrent_state = shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg)
@@ -951,6 +983,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           initial_state=recurrent_state,
           use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
           compute_dtype=cfg.dtype,
+          matmul_precision=cfg.gdn_matmul_precision,
       )
 
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:

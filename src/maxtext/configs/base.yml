@@ -1342,6 +1342,13 @@ gdn_num_key_heads: 16
 gdn_num_value_heads: 32
 # Chunk size for the parallel scan algorithm in the Gated Delta Net.
 gdn_chunk_size: 64
+# Precision for the matmuls inside the Gated Delta Rule kernels. Choose one of default, high, and highest.
+# These matmuls are deliberately computed on float32 operands, and "highest" is what makes that upcast
+# meaningful on TPU: it emulates float32 with 6 bf16 MXU passes, where "default" would truncate the
+# operands back to bf16. Lowering it is therefore a numerics change, not just a speed knob, and the
+# delta rule's (I + S)^-1 is sensitive to it. Kept separate from matmul_precision, which stays free to
+# describe the ordinary projections, and defaulted to highest to preserve the kernel's original behavior.
+gdn_matmul_precision: "highest"
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
