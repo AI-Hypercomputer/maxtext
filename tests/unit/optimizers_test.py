@@ -24,8 +24,10 @@ import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
+from maxtext.optimizers.muon import ShardedMuonDimensionNumbers as smdn
 from maxtext.utils import maxtext_utils, muon_utils
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
 import optax
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 import pytest
@@ -969,11 +971,12 @@ class TestMuonLogic(unittest.TestCase):
     self.assertEqual(result.self_attention.out, mdn((0, -2), (-1,)))
 
   def test_muon_newton_schulz_config(self):
-    """Verifies that muon optimizer configures Newton-Schulz parameters correctly based on model."""
+    """Verifies that muon optimizer configures Newton-Schulz parameters correctly based on model and muon_type."""
     model = MagicMock()
+    mesh = MagicMock()
     learning_rate_schedule = MagicMock()
 
-    # Case 1: DeepSeek4 Model (Auto-configures 10-step schedule)
+    # Case 1: DeepSeek4 Model (Auto-configures 10-step schedule with sharded Muon)
     argv_ds4 = [
         "",
         get_test_config_path(),
@@ -985,31 +988,148 @@ class TestMuonLogic(unittest.TestCase):
     config_ds4 = pyconfig.initialize(argv_ds4)
 
     with (
-        patch.object(optimizers, "get_muon_weight_dimension_numbers") as mock_get_mdn,
-        patch.object(optimizers, "muon") as mock_muon,
+        patch.object(optimizers, "get_sharded_muon_weight_dimension_numbers") as mock_get_smdn,
+        patch.object(optimizers, "sharded_muon") as mock_sharded_muon,
     ):
-      mock_get_mdn.return_value = {}
-      optimizers.get_optimizer(config_ds4, learning_rate_schedule, model=model)
-      mock_muon.assert_called_once()
-      _, kwargs = mock_muon.call_args
+      mock_get_smdn.return_value = {"params": {"w": smdn((0,), (-1,))}}
+      optimizers.get_optimizer(config_ds4, learning_rate_schedule, model=model, mesh=mesh)
+      mock_get_smdn.assert_called_once_with(model, config_ds4, mesh=mesh)
+      mock_sharded_muon.assert_called_once()
+      _, kwargs = mock_sharded_muon.call_args
       self.assertEqual(kwargs["ns_steps"], 10)
       self.assertEqual(len(kwargs["ns_coeffs"]), 10)
       self.assertEqual(kwargs["ns_coeffs"][-1], (2.0, -1.5, 0.5))
+      self.assertEqual(kwargs["muon_weight_dimension_numbers"], mock_get_smdn.return_value)
+      self.assertTrue(kwargs["use_all_to_all"])
 
-    # Case 2: Standard Model (Llama2) (Defaults to 5-step schedule)
-    argv_llama = ["", get_test_config_path(), "run_name=test", "opt_type=muon", "model_name=llama2-7b"]
-    config_llama = pyconfig.initialize(argv_llama)
+    # Case 2: Sharded Muon with use_all_to_all=False
+    argv_no_a2a = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "opt_type=muon",
+        "model_name=llama2-7b",
+        "muon_use_all_to_all=False",
+    ]
+    config_no_a2a = pyconfig.initialize(argv_no_a2a)
+
+    with (
+        patch.object(optimizers, "get_sharded_muon_weight_dimension_numbers") as mock_get_smdn,
+        patch.object(optimizers, "sharded_muon") as mock_sharded_muon,
+    ):
+      mock_get_smdn.return_value = {}
+      optimizers.get_optimizer(config_no_a2a, learning_rate_schedule, model=model)
+      mock_get_smdn.assert_called_once_with(model, config_no_a2a, mesh=None)
+      mock_sharded_muon.assert_called_once()
+      _, kwargs = mock_sharded_muon.call_args
+      self.assertEqual(kwargs["ns_steps"], 5)
+      self.assertEqual(kwargs["ns_coeffs"], (3.4445, -4.7750, 2.0315))
+      self.assertEqual(kwargs["muon_weight_dimension_numbers"], mock_get_smdn.return_value)
+      self.assertFalse(kwargs["use_all_to_all"])
+
+    # Case 3: Explicit MaxText Muon (muon_type=maxtext_muon)
+    argv_maxtext = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "opt_type=muon",
+        "muon_type=maxtext_muon",
+        "model_name=llama2-7b",
+    ]
+    config_maxtext = pyconfig.initialize(argv_maxtext)
+
+    with (
+        patch.object(optimizers, "get_sharded_muon_weight_dimension_numbers") as mock_get_smdn,
+        patch.object(optimizers, "sharded_muon") as mock_sharded_muon,
+    ):
+      mock_get_smdn.return_value = {}
+      optimizers.get_optimizer(config_maxtext, learning_rate_schedule, model=model, mesh=mesh)
+      mock_get_smdn.assert_called_once_with(model, config_maxtext, mesh=mesh)
+      mock_sharded_muon.assert_called_once()
+      _, kwargs = mock_sharded_muon.call_args
+      self.assertEqual(kwargs["muon_weight_dimension_numbers"], mock_get_smdn.return_value)
+
+    # Case 4: Optax Muon (muon_type=optax_muon)
+    argv_optax = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "opt_type=muon",
+        "muon_type=optax_muon",
+        "model_name=llama2-7b",
+    ]
+    config_optax = pyconfig.initialize(argv_optax)
 
     with (
         patch.object(optimizers, "get_muon_weight_dimension_numbers") as mock_get_mdn,
-        patch.object(optimizers, "muon") as mock_muon,
+        patch.object(optimizers, "optax_muon") as mock_optax_muon,
     ):
       mock_get_mdn.return_value = {}
-      optimizers.get_optimizer(config_llama, learning_rate_schedule, model=model)
-      mock_muon.assert_called_once()
-      _, kwargs = mock_muon.call_args
+      optimizers.get_optimizer(config_optax, learning_rate_schedule, model=model)
+      mock_get_mdn.assert_called_once_with(model, config_optax)
+      mock_optax_muon.assert_called_once()
+      _, kwargs = mock_optax_muon.call_args
       self.assertEqual(kwargs["ns_steps"], 5)
       self.assertEqual(kwargs["ns_coeffs"], (3.4445, -4.7750, 2.0315))
+      self.assertEqual(kwargs["muon_weight_dimension_numbers"], mock_get_mdn.return_value)
+      self.assertNotIn("use_all_to_all", kwargs)
+
+    # Case 5: Invalid muon_type raises ValueError
+    argv_invalid = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "opt_type=muon",
+        "muon_type=invalid_type",
+        "model_name=llama2-7b",
+    ]
+    config_invalid = pyconfig.initialize(argv_invalid)
+    with self.assertRaises(ValueError):
+      optimizers.get_optimizer(config_invalid, learning_rate_schedule, model=model)
+
+  def test_sharded_muon_wires_named_sharding_and_mesh(self):
+    """Verifies that get_optimizer forwards mesh and propagates ShardedMuonDimensionNumbers with NamedSharding."""
+    devices = np.array(jax.devices()[:1]).reshape((1, 1))
+    mesh = jax.sharding.Mesh(devices, ("data", "model"))
+    sharded_dim_nums = {
+        "params": {
+            "mlp": {
+                "kernel": smdn(
+                    reduction_axis=(0,),
+                    output_axis=(-1,),
+                    sharding=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data", "model")),
+                )
+            }
+        }
+    }
+    model = MagicMock()
+    learning_rate_schedule = MagicMock()
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "opt_type=muon",
+        "muon_type=maxtext_muon",
+        "model_name=llama2-7b",
+    ]
+    config = pyconfig.initialize(argv)
+
+    with (
+        patch.object(
+            optimizers, "get_sharded_muon_weight_dimension_numbers", return_value=sharded_dim_nums
+        ) as mock_get_smdn,
+        patch.object(optimizers, "sharded_muon") as mock_sharded_muon,
+    ):
+      optimizers.get_optimizer(config, learning_rate_schedule, model=model, mesh=mesh)
+      mock_get_smdn.assert_called_once_with(model, config, mesh=mesh)
+      mock_sharded_muon.assert_called_once()
+      _, kwargs = mock_sharded_muon.call_args
+      passed_dim_nums = kwargs["muon_weight_dimension_numbers"]
+      self.assertEqual(passed_dim_nums, sharded_dim_nums)
+      kernel_spec = passed_dim_nums["params"]["mlp"]["kernel"]
+      self.assertIsInstance(kernel_spec.sharding, jax.sharding.NamedSharding)
+      self.assertEqual(kernel_spec.sharding.mesh, mesh)
+      self.assertEqual(kernel_spec.sharding.spec, jax.sharding.PartitionSpec("data", "model"))
 
 
 if __name__ == "__main__":
