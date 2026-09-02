@@ -209,6 +209,14 @@ def mesh_axes_for_dim(axis_names):
   return tuple(axis for axis in axis_names if axis is not None)
 
 
+def batch_mesh_axes(mesh, rules=None):
+  """Returns the mesh axes of size > 1 that the activation batch dimension is sharded over."""
+  spec = logical_to_mesh_axes(("activation_batch",), mesh, rules=rules)
+  if spec is None:
+    return frozenset()
+  return frozenset(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
+
+
 def mesh_axes_size(mesh, axes, *, label):
   """Returns the product of mesh sizes for a set of axes."""
   size = 1
