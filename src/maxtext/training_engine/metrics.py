@@ -40,6 +40,22 @@ _METRICS_TO_LOG = [
     "tflops",
 ]
 
+# How many completed step buffers stay resident before the oldest are evicted.
+#
+# Every buffer holds live device arrays -- one leaf per scalar metric, plus one per aux
+# metric when the engine runs with `has_aux`, which for MoE/MTP configs is tens of leaves --
+# so nothing in the list is free. Nothing on the engine's own step path removes an entry
+# either: `get_step_metrics` hands out the newest by reference, and only
+# `get_metrics_history(clear_cache=True)` and `cleanup()` clear. A driver that reads the
+# engine's own TensorBoard output rather than calling `get_metrics()` therefore never
+# clears, and both HBM and -- because `save_checkpoint` serializes the whole retained
+# history -- checkpoint size and save latency grow linearly in steps.
+#
+# Tunix v2 keeps exactly one prior step (`_prev_buffered_train_metrics` in
+# `peft_trainer_v2.py`). This keeps a window instead so batched readers of
+# `get_metrics_history` still work, while making the footprint constant in step count.
+_DEFAULT_MAX_BUFFERED_STEPS = 128
+
 
 class MetricsRecorder:
   """Synchronous frontend for buffering and aggregating step metrics on-device.
@@ -53,8 +69,17 @@ class MetricsRecorder:
   for processing.
   """
 
-  def __init__(self):
+  def __init__(self, max_buffered_steps: int = _DEFAULT_MAX_BUFFERED_STEPS):
+    """Initializes the recorder.
+
+    Args:
+      max_buffered_steps: How many completed step buffers to retain; older ones are evicted
+        as new steps start. Pass 0 or a negative value to retain everything, which is only
+        safe when the driver drains the history itself.
+    """
     self._metrics_buffer: list[abstract_engine.MetricsBuffer] = []
+    self._max_buffered_steps = max_buffered_steps
+    self._dropped_buffer_count = 0
 
   def buffer_metrics(
       self,
@@ -74,9 +99,35 @@ class MetricsRecorder:
     if not self._metrics_buffer or self._metrics_buffer[-1].id != train_step:
       new_buffer = abstract_engine.MetricsBuffer(id=train_step, mode="train")
       self._metrics_buffer.append(new_buffer)
+      self._evict_old_buffers()
 
     # Record the new metric in the buffer for the current step.
     self._record_metric(name, metric, aggregation_fn=aggregation_fn)
+
+  def _evict_old_buffers(self) -> None:
+    """Drops the oldest step buffers once the retention window is full.
+
+    Only ever runs when a *new* step starts, so the buffer the current step is writing into
+    and the one `get_step_metrics` is about to hand the throttler are never the ones dropped.
+    """
+    if self._max_buffered_steps <= 0 or len(self._metrics_buffer) <= self._max_buffered_steps:
+      return
+    num_dropped = len(self._metrics_buffer) - self._max_buffered_steps
+    oldest_dropped_id = self._metrics_buffer[0].id
+    del self._metrics_buffer[:num_dropped]
+    self._dropped_buffer_count += num_dropped
+    # Dropping metrics silently is the pattern that produced the fabricated 0.0 in the parity
+    # harness, so say so -- but once per window, not once per step.
+    logging.log_every_n(
+        logging.WARNING,
+        "Metrics history is full at %d step(s); evicting buffers from step %s onwards "
+        "(%d dropped so far). Drain it with MetricsRecorder.get_metrics_history() or the "
+        "engine's get_metrics() if you need every step.",
+        self._max_buffered_steps,
+        self._max_buffered_steps,
+        oldest_dropped_id,
+        self._dropped_buffer_count,
+    )
 
   def _record_metric(
       self,
@@ -120,13 +171,14 @@ class MetricsRecorder:
     """Returns every cached step buffer and optionally clears the metrics cache.
 
     The engine's own `get_metrics` returns only the most recent buffer, per the trainer
-    contract. This is the accessor that keeps the full history reachable.
+    contract. This is the accessor that keeps the history reachable -- the last
+    `max_buffered_steps` of it; see `_DEFAULT_MAX_BUFFERED_STEPS` for why it is a window.
 
     Args:
       clear_cache: Whether to reset cached metrics after retrieval.
 
     Returns:
-      One on-device MetricsBuffer per recorded train step, oldest first.
+      One on-device MetricsBuffer per retained train step, oldest first.
     """
     metrics_to_return = self._metrics_buffer
     if clear_cache:
