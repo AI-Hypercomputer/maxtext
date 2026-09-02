@@ -1021,6 +1021,7 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
 
   def _make_mock_config(self):
     cfg = MagicMock()
+    cfg.retry_when_tokens_dropped = False
     return cfg
 
   def test_returns_five_tuple(self):
@@ -1051,6 +1052,15 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
         step, "data_sharding", "state_shardings", "model", self._make_mock_config()
     )
     self.assertEqual(donate_argnums, 0)
+
+  def test_donate_argnums_is_empty_with_retry_when_tokens_dropped(self):
+    step = self._make_mock_step()
+    cfg = self._make_mock_config()
+    cfg.retry_when_tokens_dropped = True
+    _, _, _, _, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+        step, "data_sharding", "state_shardings", "model", cfg
+    )
+    self.assertEqual(donate_argnums, ())
 
   def test_functional_train_is_partial(self):
     """functional_train should partially apply model and config."""
