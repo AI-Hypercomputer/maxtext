@@ -259,7 +259,9 @@ class DeepSeekV4GroupedLinearTest(unittest.TestCase):
 
     # PyTorch's forward does: w = self.weight.view(self.n_groups, -1, hidden_dim).transpose(1, 2)
     # This reshapes the weight matrix into group-specific chunks.
-    mt_weight_np = pt_weight.reshape(self.n_groups, out_features_per_group, self.in_features_per_group).transpose(0, 2, 1)
+    mt_weight_np = pt_weight.reshape(self.n_groups, out_features_per_group, self.in_features_per_group).transpose(
+        0, 2, 1
+    )
 
     # --------------------------------------------------------------------------
     # 3. Initialize MaxText Implementation
@@ -459,7 +461,11 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
         layer_types=["sliding_attention"],
         num_hidden_layers=1,
         rope_parameters={
-            "main": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": self.partial_rotary_factor},
+            "main": {
+                "rope_type": "default",
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": self.partial_rotary_factor,
+            },
             "compress": {
                 "rope_type": "default",
                 "rope_theta": 160000.0,
@@ -724,13 +730,17 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
         # [batch, n_windows, compress_rate, head_dim] -> [batch, n_windows, head_dim]
         pt_compressed = pt_comp.kv_norm((pt_chunk_kv * pt_gate_weights).sum(dim=2))
         mt_compressed = mt_comp.kv_norm(jnp.sum(mt_chunk_kv * mt_gate_weights, axis=2))
-        print(f"compressed before rope error: {np.max(np.abs(pt_compressed.detach().numpy() - np.array(mt_compressed)))}")
+        print(
+            f"compressed before rope error: {np.max(np.abs(pt_compressed.detach().numpy() - np.array(mt_compressed)))}"
+        )
 
         # Calculate RoPE embeddings for compressed tokens
         # -> [1, n_windows]
         pt_positions = torch.arange(n_windows) * pt_comp.compress_rate
         pt_positions = pt_positions.unsqueeze(0).expand(batch, -1)
-        pt_cos, pt_sin = pt_comp.rotary_emb(pt_compressed, position_ids=pt_positions, layer_type=pt_comp.rope_layer_type)
+        pt_cos, pt_sin = pt_comp.rotary_emb(
+            pt_compressed, position_ids=pt_positions, layer_type=pt_comp.rope_layer_type
+        )
 
         # -> [batch, n_windows]
         mt_positions = jnp.arange(n_windows) * mt_comp.compress_rate
@@ -1369,7 +1379,7 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
     )
 
     config_arguments = {
-        "model_name": "deepseek4-tiny",
+        "model_name": "deepseek4-284b",
         "override_model_config": True,
         "per_device_batch_size": 1,
         "matmul_precision": "highest",
@@ -1610,7 +1620,7 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
     self.rngs = nnx.Rngs(0)
 
     # Build MaxText config dictionary
-    argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-tiny"]
+    argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-284b"]
     config_arguments = {
         "override_model_config": True,
         "attention": "dot_product",
@@ -1666,7 +1676,9 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
         mesh=self.mesh,
         rngs=self.rngs,
     )
-    self.assertTrue(hasattr(mt_decoder, "hc_head"), "NNXDecoder completely missed hc_head setup! Bug in nnx_decoders.py!")
+    self.assertTrue(
+        hasattr(mt_decoder, "hc_head"), "NNXDecoder completely missed hc_head setup! Bug in nnx_decoders.py!"
+    )
     self.assertIsInstance(mt_decoder.hc_head, DeepSeek4HyperHead, "NNXDecoder instantiated the wrong HyperHead class!")
 
     # Verify hc_head.__call__ is invoked during NNXDecoder forward pass

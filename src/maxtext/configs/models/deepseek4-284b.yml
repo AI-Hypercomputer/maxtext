@@ -22,6 +22,7 @@ base_mlp_dim: 2048
 base_moe_mlp_dim: 2048
 vocab_size: 129280
 head_dim: 512
+qk_nope_head_dim: 512
 qk_rope_head_dim: 64
 
 # --- Standard Defaults ---
@@ -59,6 +60,7 @@ routed_scaling_factor: 1.5
 
 
 # --- Attention configuration ---
+attention: "dot_product"
 attention_type: 'compressed'
 q_lora_rank: 1024
 o_groups: 8
