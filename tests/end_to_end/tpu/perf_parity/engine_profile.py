@@ -12,16 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Third arm: MaxText's qwen3-0.6b driven by `MaxTextTrainingEngine`, not by PeftTrainer.
+"""Third arm: a MaxText model driven by `MaxTextTrainingEngine`, not by PeftTrainer.
 
-`qwen3_maxtext_profile.py` held the trainer fixed and varied the model. This varies the
+`peft_trainer_profile.py` held the trainer fixed and varied the model. This varies the
 trainer and holds the model fixed, so the three runs together separate the two costs:
 
-  tunix model + PeftTrainer  ->  qwen3_tunix_profile.py
-  MaxText model + PeftTrainer ->  qwen3_maxtext_profile.py   (isolates the model)
+  tunix model + PeftTrainer   ->  qwen3_0p6b_tunix_profile.py
+  MaxText model + PeftTrainer ->  peft_trainer_profile.py    (isolates the model)
   MaxText model + engine      ->  this file                  (isolates the trainer)
 
-The model config here is byte-identical to `qwen3_maxtext_profile.py`'s, and the loss is
+Not named after a model: `--model` selects one, and this arm has been run at both
+`qwen3-0.6b --tp 8` and `qwen3.5-35b-a3b --tp 2 --scan`. See `perf_parity_common.py`.
+
+The model config here is byte-identical to `peft_trainer_profile.py`'s, and the loss is
 literally tunix's own `peft_trainer_v2._default_loss_fn` -- the engine accepts it
 unchanged because it returns a `tunix.sft.utils.LossOutput`, which is the same class
 object `abstract_engine` re-exports. So the arithmetic is the same on both sides and the
@@ -60,10 +63,10 @@ it implements one architecture -- so past qwen3-0.6b the comparison is engine ag
 anyway. A model with few KV heads constrains `--tp`: qwen3.5-35b-a3b has 2, so `--tp 8` is
 rejected by the sharding checks and `--tp 2 --scan` is the shape that runs on 8 devices.
 
-Run from this directory -- the arms import `qwen3_common` as a sibling, and a working
+Run from this directory -- the arms import `perf_parity_common` as a sibling, and a working
 directory that contains a `tunix/` checkout will shadow the installed package:
 
-  cd tests/end_to_end/tpu/perf_parity && python qwen3_engine_profile.py
+  cd tests/end_to_end/tpu/perf_parity && python engine_profile.py
 """
 
 import argparse
@@ -77,13 +80,13 @@ from maxtext.configs import pyconfig
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import maxtext_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-import qwen3_common as qc
+import perf_parity_common as qc
 from transformers import AutoTokenizer
 from tunix.experimental.train import peft_trainer_v2
 
 
 def _build_config(spec: qc.RunSpec):
-  """The qwen3_maxtext_profile.py config, plus the optimizer overrides listed above.
+  """The peft_trainer_profile.py config, plus the optimizer overrides listed above.
 
   `gradient_accumulation_steps` stays at 1 no matter what `--ga` says. The engine reads
   no accumulation setting at all -- `_micro_step_count` counts `fwd_bwd` calls since the
@@ -93,7 +96,7 @@ def _build_config(spec: qc.RunSpec):
   return pyconfig.initialize(
       [None, os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
       model_name=spec.model,
-      run_name="perf_parity_qwen3_0p6b_engine",
+      run_name=f"perf_parity_{qc.slug(spec.model)}_engine",
       base_output_directory=os.path.join(os.getcwd(), "maxtext_out"),
       max_target_length=spec.seq,
       per_device_batch_size=spec.per_device_batch,

@@ -88,26 +88,48 @@ claim, because the trainers converge as the shape grows (§4).
 one arm per process over a synthetic dataset and takes the mesh and model as flags:
 
 ```bash
-cd tests/end_to_end/tpu/perf_parity   # the arms import qwen3_common as a sibling
+cd tests/end_to_end/tpu/perf_parity   # the arms import perf_parity_common as a sibling
 
 # The two §9 shapes. --no-trace for wall clock; drop it to write an xplane trace.
-python qwen3_engine_profile.py --model qwen3-0.6b       --tp 8          --seq 1024 --no-trace
-python qwen3_engine_profile.py --model qwen3.5-35b-a3b  --tp 2 --scan   --seq 1024 --no-trace
+python engine_profile.py --model qwen3-0.6b       --tp 8          --seq 1024 --no-trace
+python engine_profile.py --model qwen3.5-35b-a3b  --tp 2 --scan   --seq 1024 --no-trace
 
 # The same shape under Tunix's trainer, for the trainer-vs-trainer comparison. The tunix
 # arm refuses --model/--scan: it implements one architecture and has no scanned variant.
-python qwen3_maxtext_profile.py --tp 8 --seq 1024 --no-trace   # MaxText model, Tunix trainer
-python qwen3_tunix_profile.py   --tp 8 --seq 1024 --no-trace   # Tunix model, Tunix trainer
+python peft_trainer_profile.py     --tp 8 --seq 1024 --no-trace  # MaxText model, Tunix trainer
+python qwen3_0p6b_tunix_profile.py --tp 8 --seq 1024 --no-trace  # Tunix model, Tunix trainer
 
 # The GA=8 rows in §9, on a 4-device host. --ga is the only change; fsdp fills the devices.
 # `time` around each of these is where §9's GA=8 process wall clock comes from; the loop
 # figure next to it is the arm's own `train() total`.
-python qwen3_engine_profile.py  --ga 8 --no-trace
-python qwen3_maxtext_profile.py --ga 8 --no-trace
-python qwen3_tunix_profile.py   --ga 8 --no-trace
+python engine_profile.py           --ga 8 --no-trace
+python peft_trainer_profile.py     --ga 8 --no-trace
+python qwen3_0p6b_tunix_profile.py --ga 8 --no-trace
 
 # The matching traces. --steps 6 keeps the xplane under ~1 GiB at this shape.
-PERF_PARITY_PROFILE_ROOT=gs://your-bucket/run python qwen3_engine_profile.py --ga 8 --steps 6
+PERF_PARITY_PROFILE_ROOT=gs://your-bucket/run python engine_profile.py --ga 8 --steps 6
+```
+
+Only `qwen3_0p6b_tunix_profile.py` is tied to a model; the other three take `--model`. Two
+wrappers run a whole model's sweep end to end and print the steady-state lines and trace
+paths at the finish:
+
+```bash
+./run_qwen3_0p6b.sh          # all three arms, tp=8 unscanned, GA=1 and GA=8
+./run_qwen3_5_35b_a3b.sh     # the two MaxText-side arms, fsdp=4 x tp=2 scanned
+```
+
+qwen3.5-35b-a3b is not a drop-in `--model` swap: 2 KV heads make `--tp 8` illegal, the
+unscanned decoder OOMs, and `PeftTrainer` cannot accumulate at all on it. Those constraints
+and the resulting numbers are in
+[`tests/end_to_end/tpu/perf_parity/RESULTS-qwen35-35b-20260902.md`](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/perf_parity/RESULTS-qwen35-35b-20260902.md).
+
+For the device side of any of these, `xplane_device_summary.py` reads TPU-busy and module
+launches straight off the `.xplane.pb` wire format (no xprof import, which does not resolve
+in this venv), and `xplane_host_summary.py` does the same for host events:
+
+```bash
+python xplane_device_summary.py --steps 3 <run>/plugins/profile/<ts>/<host>.xplane.pb
 ```
 
 The "before" rows come from the same commands with only
@@ -118,12 +140,12 @@ per step makes the norm most visible:
 
 ```bash
 git checkout <norm-commit>^ -- src/maxtext/training_engine/maxtext_engine.py
-python qwen3_engine_profile.py --ga 1 --no-trace   # repeat; the delta is ~0.6 ms/step
+python engine_profile.py --ga 1 --no-trace   # repeat; the delta is ~0.6 ms/step
 git checkout HEAD -- src/maxtext/training_engine/maxtext_engine.py
 ```
 
 The arms report the steady-state window and nothing else, so §9's wall-clock table was timed
-from outside — `time python qwen3_engine_profile.py …` for the end-to-end row, and the loop
+from outside — `time python engine_profile.py …` for the end-to-end row, and the loop
 and phase splits from temporary `time.perf_counter()` marks around `engine.compile()` and the
 step loop. Reproducing those three rows means re-adding the marks; the last row needs only
 `time`.
@@ -558,10 +580,10 @@ micro step and `report(group=8)` sums each run of eight gaps back into an optimi
 
 And the wall clock the same runs took, which is what a caller actually waits for:
 
-| GA=8 wall clock                              | before | after      | speedup   |
-| -------------------------------------------- | ------ | ---------- | --------- |
-| 23-step loop (`train()` total, compile in)   | 39.2 s | **27.1 s** | **1.45x** |
-| `time python qwen3_engine_profile.py --ga 8` | 64.9 s | **52.6 s** | 1.23x     |
+| GA=8 wall clock                            | before | after      | speedup   |
+| ------------------------------------------ | ------ | ---------- | --------- |
+| 23-step loop (`train()` total, compile in) | 39.2 s | **27.1 s** | **1.45x** |
+| `time python engine_profile.py --ga 8`     | 64.9 s | **52.6 s** | 1.23x     |
 
 The loop figure tracks the mean, not the median — 23 x (1138.2 - 616.6) = 12.0 s predicted
 against 12.1 s observed. The process figure is the same 12.1 s against a fixed ~25 s of
@@ -666,12 +688,12 @@ never depended on skipping work Tunix was doing.
 The per-step figures above are medians; total run time follows the **mean**, so it credits
 the fix with the tail as well. Same two shapes, same `--no-trace` runs, timed from outside:
 
-| wall clock                         | qwen3-0.6b `tp=8` | qwen3.5-35b-a3b `tp=2 --scan` |
-| ---------------------------------- | ----------------- | ----------------------------- |
-| 23-step loop — before              | 8.9 s             | 56.3 s                        |
-| **23-step loop — after**           | **6.3 s**         | **55.7 s**                    |
-| in-process total — before → after  | 18.0 → **15.4 s** | 62.6 → **62.0 s**             |
-| `python qwen3_engine_profile.py …` | 27.7 → **25.3 s** | 72.2 → **71.7 s**             |
+| wall clock                        | qwen3-0.6b `tp=8` | qwen3.5-35b-a3b `tp=2 --scan` |
+| --------------------------------- | ----------------- | ----------------------------- |
+| 23-step loop — before             | 8.9 s             | 56.3 s                        |
+| **23-step loop — after**          | **6.3 s**         | **55.7 s**                    |
+| in-process total — before → after | 18.0 → **15.4 s** | 62.6 → **62.0 s**             |
+| `python engine_profile.py …`      | 27.7 → **25.3 s** | 72.2 → **71.7 s**             |
 
 The loop times are the means times 23, to within measurement noise: qwen3-0.6b 211.4 → 89.8
 ms predicts 2.80 s saved against 2.6 s observed, qwen3.5-35b-a3b 2340.0 → 2314.0 ms predicts
