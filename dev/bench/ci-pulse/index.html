@@ -2292,8 +2292,24 @@ function adaptViews(v){
     byRun.get(r.run_id).push(r);
   });
 
-  const ordered=runs.slice().sort((a,b)=>
-    new Date(a.merged_at||a.created_at)-new Date(b.merged_at||b.created_at));
+  // One bar per merged pull request, which means one RUN per pull request. A
+  // pull request that was pushed to again has several runs, and only the last
+  // one is the state it merged in; the earlier ones were superseded. Keeping
+  // them all would draw two bars under one number and, worse, silently
+  // overwrite that number's timestamp, run id and queue figures.
+  const newestPerPr=new Map();
+  runs.forEach(run=>{
+    const key=String(run.pr);
+    const seen=newestPerPr.get(key);
+    const when=new Date(run.created_at||run.merged_at);
+    if(!seen||when>new Date(seen.created_at||seen.merged_at))newestPerPr.set(key,run);
+  });
+
+  // Sorted by when the run was created, NOT by when the pull request merged:
+  // that is the clock prTime() reads, and every chart walks this list assuming
+  // it runs forwards in time. merged_at only decides whether a run is here.
+  const ordered=[...newestPerPr.values()].sort((a,b)=>
+    new Date(a.created_at||a.merged_at)-new Date(b.created_at||b.merged_at));
 
   const commits=[],times={},timeIso={},runIds={},triggers={},probeQ={};
   ordered.forEach(run=>{

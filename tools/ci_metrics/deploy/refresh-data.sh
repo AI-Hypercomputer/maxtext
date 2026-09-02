@@ -355,6 +355,5 @@ else
   say '  cd dev/bench && python3 -m http.server 8000'
   say '  open http://localhost:8000/#ci'
   say ''
-  say 'Note: the dashboard still reads its baked-in constants, so these files are'
-  say 'not on screen yet. That is step 2 of the work order in GOING-LIVE.md.'
+  say 'A file:// path will not work: the page reads these files with fetch.'
 fi

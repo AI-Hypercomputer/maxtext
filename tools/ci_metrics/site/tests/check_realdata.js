@@ -60,13 +60,30 @@ function check(){
      'TODAY comes from meta.json generated_at, not the sample date');
 
   // --- the model was built from the view rows -------------------------------
-  const runsFile=Object.keys(files).find(k=>/views\/runs-/.test(k));
-  const runsTable=runsFile?JSON.parse(files[runsFile]).tables.runs:{rows:[]};
-  const jobsTable=runsFile?JSON.parse(files[runsFile]).tables.jobs:{rows:[]};
+  // There is one runs file per month, so every month has to be counted.
+  const runsFiles=Object.keys(files).filter(k=>/views\/runs-/.test(k)).sort();
+  const runsTable={columns:[],rows:[]},jobsTable={columns:[],rows:[]};
+  runsFiles.forEach(k=>{
+    const f=JSON.parse(files[k]);
+    ['runs','jobs'].forEach(name=>{
+      const into=name==='runs'?runsTable:jobsTable;
+      const from=f.tables[name];
+      if(!from)return;
+      if(!into.columns.length)into.columns=from.columns;
+      into.rows.push(...from.rows);
+    });
+  });
   const COMMITS=w.eval('COMMITS'),JOBS=w.eval('JOBS');
 
-  ok(COMMITS.length===runsTable.rows.length,
-     `one commit per row in the runs view (${COMMITS.length} of ${runsTable.rows.length})`);
+  // A pull request that was pushed to again has more than one run in the view.
+  // Only its last run is the state it merged in, so the chart gets one bar.
+  const rc={};runsTable.columns.forEach((c,i)=>{rc[c]=i});
+  const distinctPrs=new Set(runsTable.rows.map(r=>String(r[rc.pr])));
+  ok(COMMITS.length===distinctPrs.size,
+     `one commit per pull request (${COMMITS.length} of ${distinctPrs.size} distinct, from `+
+     `${runsTable.rows.length} run row(s) in ${runsFiles.length} file(s))`);
+  ok(new Set(COMMITS.map(c=>c.hash)).size===COMMITS.length,
+     'no pull request appears twice, so no bar can overwrite another one is numbers');
   ok(COMMITS.every(c=>/^#\d+$/.test(c.pr)),'every commit carries a real pull request number');
   ok(COMMITS.every(c=>['pass','fail','flaky'].includes(c.status)),'every status is one the charts know');
 
