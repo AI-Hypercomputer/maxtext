@@ -66,6 +66,7 @@ from typing import Any, List
 
 import jax
 import numpy as np
+import optax
 from tunix.rl import common
 from tunix.sft import hooks
 from tunix.sft import peft_trainer
@@ -73,6 +74,15 @@ from tunix.sft import peft_trainer
 LEARNING_RATE = 1e-5
 BATCH_SIZE = 8
 SEQ_LEN = 1024
+# base.yml's adamw settings, restated so `--opt adamw` means the same thing on both sides.
+# optax's own defaults differ on two of these (`b2=0.999`, `weight_decay=1e-4`), so leaving
+# either side to its default would compare two different optimizers. `sgd` stays the rig
+# default: it is what the tunix arms were written against and what every figure recorded
+# before `--opt` existed was taken with.
+ADAM_B1 = 0.9
+ADAM_B2 = 0.95
+ADAM_EPS = 1e-8
+ADAM_WEIGHT_DECAY = 0.1
 # Steps dropped from the steady-state figure: compilation lands in the first, and the
 # next two cover the throttler filling its two-deep inflight queue.
 WARMUP_STEPS = 3
@@ -150,6 +160,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
   """Adds the flags every arm honours. Defaults reproduce the original 4-device run."""
   parser.add_argument("--ga", type=int, default=ACCUM_STEPS, help="micro-batches per optimizer step")
   parser.add_argument("--devices", type=int, default=None, help="use only the first N local devices")
+  parser.add_argument("--dp", type=int, default=1, help="pure data-parallel mesh axis; Zero-1 shards over this one")
   parser.add_argument("--fsdp", type=int, default=None, help="fsdp mesh axis (default: fills the devices)")
   parser.add_argument("--tp", type=int, default=1, help="tensor-parallel mesh axis")
   parser.add_argument("--ep", type=int, default=1, help="expert-parallel mesh axis; MoE models only")
@@ -177,6 +188,17 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
   )
   parser.add_argument("--model", default=MODEL_NAME, help="MaxText model_name; the tunix arm only has qwen3-0.6b")
   parser.add_argument("--scan", action="store_true", help="use MaxText's scanned decoder")
+  parser.add_argument("--opt", default="sgd", choices=("sgd", "adamw"), help="optimizer, matched across arms")
+  parser.add_argument(
+      "--explicit",
+      action="store_true",
+      help="shard_mode=explicit, so the mesh axes are Explicit rather than Auto; MaxText arms only",
+  )
+  parser.add_argument(
+      "--zero1",
+      action="store_true",
+      help="shard_optimizer_over_data: shard the optimizer moments over --dp. Implies --explicit; engine arm only",
+  )
   return parser
 
 
@@ -193,13 +215,14 @@ class RunSpec:
     if args.devices is not None and not 0 < args.devices <= len(all_devices):
       raise ValueError(f"--devices={args.devices} but only {len(all_devices)} are visible")
     self.devices = all_devices[: args.devices] if args.devices else all_devices
+    self.dp = args.dp
     self.tp = args.tp
     self.ep = args.ep
-    self.fsdp = args.fsdp if args.fsdp else len(self.devices) // (self.tp * self.ep)
-    if self.fsdp * self.tp * self.ep != len(self.devices):
+    self.fsdp = args.fsdp if args.fsdp else len(self.devices) // (self.dp * self.tp * self.ep)
+    if self.dp * self.fsdp * self.tp * self.ep != len(self.devices):
       raise ValueError(
-          f"mesh fsdp={self.fsdp} x tp={self.tp} x ep={self.ep} = {self.fsdp * self.tp * self.ep} "
-          f"does not cover {len(self.devices)} devices"
+          f"mesh dp={self.dp} x fsdp={self.fsdp} x tp={self.tp} x ep={self.ep} = "
+          f"{self.dp * self.fsdp * self.tp * self.ep} does not cover {len(self.devices)} devices"
       )
     self.ring_of_experts = args.ring_of_experts
     self.ragged_sort = args.ragged_sort
@@ -217,6 +240,24 @@ class RunSpec:
     self.tpu_profiling_options = args.tpu_profiling_options
     self.model = args.model
     self.scan = args.scan
+    self.opt = args.opt
+    # Zero-1 needs `Explicit` mesh axes, so asking for one without the other is always a
+    # mistake rather than a shape: `_zero1_active` would decline and the run would silently
+    # be the baseline it was meant to be compared against. Imply it instead of rejecting it.
+    self.zero1 = args.zero1
+    self.explicit = args.explicit or args.zero1
+    # `types.py` raises this itself, but only after the model has been built. Zero-1 shards
+    # the moments over "data" on top of the parameters' own layout, and FSDP has already
+    # sharded those over "fsdp", so the add inside the update is a type error under explicit
+    # sharding and an extra collective under auto.
+    if self.zero1 and self.fsdp != 1:
+      raise ValueError(f"--zero1 cannot be combined with FSDP (fsdp={self.fsdp}); pass --dp {len(self.devices)}")
+    if self.zero1 and self.dp <= 1:
+      raise ValueError("--zero1 has nothing to shard over without a data axis; pass --dp > 1")
+    # SGD carries no parameter-shaped state, so Zero-1 would have nothing to move and the
+    # arm would measure the all-gather without the saving that pays for it.
+    if self.zero1 and self.opt == "sgd":
+      raise ValueError("--zero1 with --opt sgd is vacuous: sgd has no optimizer moments to shard. Pass --opt adamw")
 
   @property
   def micro_steps(self) -> int:
@@ -240,6 +281,8 @@ class RunSpec:
       parts.append(f"ga{self.ga}")
     if len(self.devices) != len(jax.devices()):
       parts.append(f"d{len(self.devices)}")
+    if self.dp != 1:
+      parts.append(f"dp{self.dp}" if self.fsdp == 1 else f"dp{self.dp}fsdp{self.fsdp}")
     if self.tp != 1:
       parts.append(f"fsdp{self.fsdp}tp{self.tp}")
     if self.ep != 1:
@@ -252,18 +295,92 @@ class RunSpec:
       parts.append(f"b{self.batch}")
     if self.seq != SEQ_LEN:
       parts.append(f"s{self.seq}")
+    if self.opt != "sgd":
+      parts.append(self.opt)
+    # Only one of these is ever tagged: `--zero1` implies `--explicit`, and the pair
+    # `explicit` alone is the control arm that isolates the mesh mode from the feature.
+    if self.zero1:
+      parts.append("zero1")
+    elif self.explicit:
+      parts.append("explicit")
     return "-".join([arm] + parts)
 
   def describe(self) -> str:
     moe = [name for name, on in (("ring_of_experts", self.ring_of_experts), ("ragged_sort", self.ragged_sort)) if on]
     return (
         f"devices={len(self.devices)} ({self.devices[0].device_kind})  "
-        f"mesh fsdp={self.fsdp} tp={self.tp} ep={self.ep}  "
+        f"mesh dp={self.dp} fsdp={self.fsdp} tp={self.tp} ep={self.ep}  "
         + (f"moe={'+'.join(moe)}  " if moe else "")
+        + f"opt={self.opt}  shard_mode={'explicit' if self.explicit else 'auto'}  zero1={self.zero1}  "
         + f"ga={self.ga}  "
         f"micro-batch={self.batch}x{self.seq}  global-batch={self.global_batch}  "
         f"steps={self.steps} ({self.micro_steps} micro)"
     )
+
+
+def report_peak_hbm(spec: RunSpec) -> None:
+  """Peak HBM per device over the whole process, straight off the TPU allocator.
+
+  `peak_bytes_in_use` is a high-water mark since process start, so this has to be read after
+  the loop and it covers compilation as well as steady state. That is the number that decides
+  whether a shape fits, which is what Zero-1 is bought with -- and unlike
+  `Compiled.memory_analysis()` it is one call that means the same thing on both trainers,
+  rather than a per-kernel figure only the engine arm can enumerate.
+
+  Reported for every device in the mesh, not just the first: Zero-1 shards the moments over
+  `data`, and a layout that is lopsided across replicas would show up here and nowhere else.
+  """
+  peaks, limits = [], []
+  for device in spec.devices:
+    stats = device.memory_stats() or {}
+    peaks.append(stats.get("peak_bytes_in_use", 0) / 1e9)
+    limits.append(stats.get("bytes_limit", 0) / 1e9)
+  if not any(peaks):
+    return
+  spread = f"  (min {min(peaks):.2f} max {max(peaks):.2f})" if max(peaks) - min(peaks) > 0.01 else ""
+  print(f"  peak HBM / device: {max(peaks):.2f} G of {max(limits):.2f} G{spread}")
+
+
+def optimizer_overrides(spec: RunSpec) -> dict:
+  """MaxText config keys that make `create_training_optimizer` build `optax_optimizer(spec)`.
+
+  Paired with `optax_optimizer` below so the two sides cannot drift: the engine takes its
+  optimizer from the config and the PeftTrainer arms take an `optax` object, and matching
+  those by eye is how `adam_b2` ends up at 0.95 on one side and 0.999 on the other.
+
+  `gradient_clipping_threshold=0.0` and the flattened schedule are not optimizer choices so
+  much as removals: base.yml clips at 1.0 and runs warmup+cosine, neither of which the
+  `optax` side does, and the clip is a full-tree l2 norm on every step.
+  """
+  overrides = {
+      "opt_type": spec.opt,
+      "learning_rate": LEARNING_RATE,
+      "gradient_clipping_threshold": 0.0,
+      "warmup_steps_fraction": 0.0,
+      "learning_rate_final_fraction": 1.0,
+  }
+  if spec.opt == "adamw":
+    overrides |= {
+        "adam_b1": ADAM_B1,
+        "adam_b2": ADAM_B2,
+        "adam_eps": ADAM_EPS,
+        "adam_weight_decay": ADAM_WEIGHT_DECAY,
+    }
+  return overrides
+
+
+def optax_optimizer(spec: RunSpec):
+  """The optimizer the PeftTrainer arms pass in, matched to `optimizer_overrides`.
+
+  `inject_hyperparams` is what lets tunix read the learning rate back out of the optimizer
+  state; it is not a performance choice and both `--opt` values keep it.
+  """
+  schedule = optax.constant_schedule(LEARNING_RATE)
+  if spec.opt == "adamw":
+    return optax.inject_hyperparams(optax.adamw)(
+        learning_rate=schedule, b1=ADAM_B1, b2=ADAM_B2, eps=ADAM_EPS, weight_decay=ADAM_WEIGHT_DECAY
+    )
+  return optax.inject_hyperparams(optax.sgd)(learning_rate=schedule)
 
 
 def make_gen_model_input_fn(pad_id: int):

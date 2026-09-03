@@ -73,7 +73,6 @@ import jax
 from maxtext.configs import pyconfig
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-import optax
 import perf_parity_common as qc
 from transformers import AutoTokenizer
 from tunix.experimental.train import peft_trainer_v2
@@ -94,9 +93,15 @@ def _build_config(spec: qc.RunSpec, scan_layers: bool):
       base_output_directory=os.path.join(os.getcwd(), "maxtext_out"),
       max_target_length=spec.seq,
       per_device_batch_size=spec.per_device_batch,
+      ici_data_parallelism=spec.dp,
       ici_fsdp_parallelism=spec.fsdp,
       ici_tensor_parallelism=spec.tp,
       ici_expert_parallelism=spec.ep,
+      # `--explicit` is honoured here so the mesh mode can be held equal to the engine arm's
+      # when that is what is being compared. `--zero1` is not: it is a property of the
+      # engine's `update()`, and PeftTrainer has no equivalent -- which is the reason the
+      # Zero-1 comparison pairs an engine arm against a plain data-parallel or FSDP one.
+      shard_mode="explicit" if spec.explicit else "auto",
       # Both default off and both require an expert axis; `RunSpec` rejects them at --ep 1.
       use_ring_of_experts=spec.ring_of_experts,
       use_ragged_sort=spec.ragged_sort,
@@ -143,7 +148,7 @@ def main() -> None:
   print(f"model built in {time.perf_counter() - build_start:.1f}s", flush=True)
   print(f"mesh: {mesh}", flush=True)
 
-  optimizer = optax.inject_hyperparams(optax.sgd)(learning_rate=optax.constant_schedule(qc.LEARNING_RATE))
+  optimizer = qc.optax_optimizer(spec)
   trainer_config = peft_trainer_v2.TrainingConfig(
       eval_every_n_steps=20000,
       max_steps=spec.steps,
@@ -162,6 +167,7 @@ def main() -> None:
       jax.effects_barrier()
 
   timer.report(f"maxtext {spec.model} (scan_layers={scan_layers})", group=spec.ga)
+  qc.report_peak_hbm(spec)
   if spec.trace:
     print(f"trace written to {profile_dir}", flush=True)
 
