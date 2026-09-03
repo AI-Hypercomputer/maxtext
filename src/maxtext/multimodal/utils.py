@@ -14,6 +14,7 @@
 
 """General utility functions for multimodal processing."""
 
+import io
 import os
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -62,7 +63,13 @@ class PreprocessorOutput:
 
 def convert_to_RGB(image):
   """Convert image to RGB format."""
-  if image.mode != "RGB":
+  if isinstance(image, dict) and "bytes" in image and image["bytes"] is not None:
+    image = Image.open(io.BytesIO(image["bytes"]))
+  elif isinstance(image, bytes):
+    image = Image.open(io.BytesIO(image))
+  elif isinstance(image, str):
+    image = Image.open(image)
+  if hasattr(image, "mode") and image.mode != "RGB":
     image = image.convert("RGB")
   return image
 

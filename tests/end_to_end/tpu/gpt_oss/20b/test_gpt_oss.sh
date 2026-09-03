@@ -51,6 +51,8 @@ DATASET_PATH=gs://maxtext-dataset
 # Note that scanned checkpoint helps with efficient training
 python3 -m maxtext.trainers.pre_train.train \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/train \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH} \
     tokenizer_type="huggingface" \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \

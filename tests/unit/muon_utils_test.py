@@ -16,8 +16,8 @@
 
 # pylint: disable=protected-access
 
-import io
 import contextlib
+import io
 import unittest
 from unittest import mock
 
@@ -81,11 +81,6 @@ class TestTransformLogic(unittest.TestCase):
     self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "wi")), mdn((-2,), (-1,)))
     self.assertEqual(muon_utils.transform_logic(("decoder", "routed_experts", "wi")), mdn((-2,), (-1,)))
 
-  def test_qwen3_next_moe_routed_experts(self):
-    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_0")), mdn((-2,), (-1,)))
-    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_1")), mdn((-2,), (-1,)))
-    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wo")), mdn((-2,), (-1,)))
-
   def test_qwen3_moe_block(self):
     self.assertEqual(muon_utils.transform_logic(("decoder", "moe_block", "wi_0")), mdn((-2,), (-1,)))
     self.assertEqual(muon_utils.transform_logic(("decoder", "moe_block", "wo")), mdn((-2,), (-1,)))
@@ -94,37 +89,89 @@ class TestTransformLogic(unittest.TestCase):
     self.assertEqual(muon_utils.transform_logic(("decoder", "GptOssMlp", "wi_0")), mdn((-2,), (-1,)))
     self.assertEqual(muon_utils.transform_logic(("decoder", "GptOssMlp", "wo")), mdn((-2,), (-1,)))
 
-  def test_moe_gate_falls_through_to_standard(self):
-    # 'gate' is inside MoeBlock_0 but not one of (wi, wi_0, wi_1, wo) → standard.
-    self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel")), mdn((0,), (-1,)))
-    self.assertEqual(muon_utils.transform_logic(("decoder", "routed_experts", "gate", "kernel")), mdn((0,), (-1,)))
+  def test_moe_gate_uses_standard_axes(self):
+    # 'gate' is a 2D router matrix [in_features, (num_layers), num_experts] -> standard (0,), (-1,).
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel")),
+        mdn((0,), (-1,)),
+    )
+
+  def test_gate_up_proj_uses_last_two_axes(self):
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate_up_proj")),
+        mdn((-2,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "mlp", "gate_proj")),
+        mdn((0,), (-1,)),
+    )
+
+  def test_1d_tensor_is_excluded(self):
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "mlp", "custom_param"), shape=(512,)))
+
+  def test_2d_attention_projections_use_2d_axes(self):
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "query"), shape=(512, 512)),
+        mdn((0,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "out"), shape=(512, 512)),
+        mdn((0,), (-1,)),
+    )
 
   # --- 2.2 Self-attention ---
   def test_self_attention_out_projection(self):
-    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "out")), mdn((0, -2), (-1,)))
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "out")),
+        mdn((0, -2), (-1,)),
+    )
 
   def test_self_attention_query_projection(self):
-    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "query")), mdn((0,), (-2, -1)))
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "query")),
+        mdn((0,), (-2, -1)),
+    )
 
   def test_self_attention_key_projection(self):
-    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "key")), mdn((0,), (-2, -1)))
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "key")),
+        mdn((0,), (-2, -1)),
+    )
 
   def test_self_attention_value_projection(self):
-    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "value")), mdn((0,), (-2, -1)))
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "value")),
+        mdn((0,), (-2, -1)),
+    )
 
   def test_self_attention_wq_b_and_wkv_b(self):
-    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "wq_b")), mdn((0,), (-2, -1)))
-    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "wkv_b")), mdn((0,), (-2, -1)))
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "wq_b")),
+        mdn((0,), (-2, -1)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "wkv_b")),
+        mdn((0,), (-2, -1)),
+    )
 
-  def test_self_attention_mla_wq_a_is_excluded_from_special(self):
+  def test_self_attention_mla_wq_a_is_standard(self):
     # wq_a / wkv_a are MLA down-projections; they fall through the self_attention branch
-    # without matching anything, so the function returns the default standard mdn((0,), (-1,)).
-    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "wq_a")), mdn((0,), (-1,)))
-    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "wkv_a")), mdn((0,), (-1,)))
+    # to standard mdn((0,), (-1,)).
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "wq_a")),
+        mdn((0,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "wkv_a")),
+        mdn((0,), (-1,)),
+    )
 
   # --- 3. Standard ---
   def test_standard_weight(self):
-    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "kernel")), mdn((0,), (-1,)))
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "mlp", "kernel")),
+        mdn((0,), (-1,)),
+    )
 
   # --- 4. DeepSeek V4 Specific ---
   def test_deepseek_v4_exclusions(self):
@@ -132,6 +179,7 @@ class TestTransformLogic(unittest.TestCase):
     self.assertIsNone(muon_utils.transform_logic(("decoder", "hc_head", "hc_scale")))
     self.assertIsNone(muon_utils.transform_logic(("decoder", "hc_head", "hc_base")))
     self.assertIsNone(muon_utils.transform_logic(("decoder", "layers", "layers_0", "mhc_attention", "res_beta")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "layers", "layers_0", "mhc_attention", "res_alpha_scale")))
     self.assertIsNone(muon_utils.transform_logic(("decoder", "layers", "layers_0", "self_attention", "sinks")))
     self.assertIsNone(
         muon_utils.transform_logic(("decoder", "layers", "layers_0", "mlp", "MoeBlock_0", "gate", "tid2eid"))
@@ -140,9 +188,24 @@ class TestTransformLogic(unittest.TestCase):
         muon_utils.transform_logic(("decoder", "layers", "layers_0", "self_attention", "rotary_embedding", "inv_freq"))
     )
 
+  def test_deepseek_v4_mhc_alpha_projections(self):
+    # Alpha projection matrices in MHC are 2D dense linear projections
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "layers", "layers_0", "mhc_attention", "pre_alpha")),
+        mdn((0,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "layers", "layers_0", "mhc_attention", "post_alpha")),
+        mdn((0,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "layers", "layers_0", "mhc_attention", "res_alpha")),
+        mdn((0,), (-1,)),
+    )
+
   def test_deepseek_v4_self_attention_grouped_projection(self):
-    # o_a_proj projects with reduction on in_features_per_group (-2)
-    # and output on out_features_per_group (-1)
+    # o_a_proj is a grouped linear layer [o_groups, (layers), in_features_per_group, out_features_per_group]
+    # with reduction on in_features_per_group (-2) and output on out_features_per_group (-1)
     self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "o_a_proj")), mdn((-2,), (-1,)))
 
   def test_deepseek_v4_position_bias_is_standard_weight(self):
@@ -156,6 +219,41 @@ class TestTransformLogic(unittest.TestCase):
         muon_utils.transform_logic(("decoder", "self_attention", "hca_compressor", "position_bias")),
         mdn((0,), (-1,)),
     )
+
+  # --- 5. Qwen3-Next Specific ---
+  def test_qwen3_next_moe_routed_experts(self):
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_0")),
+        mdn((-2,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_1")),
+        mdn((-2,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wo")),
+        mdn((-2,), (-1,)),
+    )
+
+  def test_qwen3_next_gdn_projections(self):
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "gdn", "in_proj_qkvz")),
+        mdn((0,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "gdn", "in_proj_ba")),
+        mdn((0,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "gdn", "out_proj")),
+        mdn((0,), (-1,)),
+    )
+
+  def test_qwen3_next_exclusions(self):
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "gdn", "A_log")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "gdn", "dt_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "gdn", "conv1d")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "mlp", "shared_expert_gate")))
 
 
 class TestGetTransformTree(unittest.TestCase):
@@ -176,16 +274,22 @@ class TestGetTransformTree(unittest.TestCase):
     self.assertEqual(muon_utils.get_transform_tree(0), mdn((0,), (-1,)))
 
 
+class _AttentionSubModule(nnx.Module):
+
+  def __init__(self):
+    self.out = nnx.Param(jnp.ones((2, 4, 8)))
+
+
 class _MoeLikeNNXModel(nnx.Module):
   """Small NNX model whose param paths exercise the NNX branch of get_muon_weight_dimension_numbers."""
 
   def __init__(self, rngs):
     # Names are chosen so transform_logic matches each of the three meaningful branches:
     # - w_standard: default mdn
-    # - self_attention_out: attention-out mdn
+    # - self_attention.out: attention-out mdn
     # - scale: excluded (None)
     self.w_standard = nnx.Param(jnp.ones((4, 8)))
-    self.self_attention_out = nnx.Param(jnp.ones((4, 8)))
+    self.self_attention = _AttentionSubModule()
     self.scale = nnx.Param(jnp.ones((8,)))
 
 
@@ -201,7 +305,8 @@ class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
 
     # Result is an nnx.State whose top-level keys mirror the model attributes.
     self.assertIn("w_standard", result)
-    self.assertIn("self_attention_out", result)
+    self.assertIn("self_attention", result)
+    self.assertIn("out", result["self_attention"])
     self.assertIn("scale", result)
 
     # NNX Variables are walked by jax.tree_util.tree_map_with_path, so the returned
@@ -210,6 +315,7 @@ class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
     self.assertIsNone(result["scale"])
     # 'w_standard' does not trigger any special rule → standard mdn.
     self.assertEqual(result["w_standard"], mdn((0,), (-1,)))
+    self.assertEqual(result["self_attention"]["out"], mdn((0, -2), (-1,)))
 
   def test_nnx_verbose_path_executes_print_debug(self):
     """verbose=True should also execute _print_structure_debug without raising."""
@@ -225,7 +331,6 @@ class TestGetMuonWeightDimensionNumbersLinen(unittest.TestCase):
 
   def test_linen_branch_uses_get_abstract_param(self):
     """Linen models dispatch to maxtext_utils.get_abstract_param + get_transform_tree."""
-    # Build a Linen nn.Module so isinstance(model, nnx.Module) is False.
 
     class LinenStub(nn.Module):
 
@@ -235,8 +340,6 @@ class TestGetMuonWeightDimensionNumbersLinen(unittest.TestCase):
 
     model = LinenStub()
 
-    # Mock the heavy get_abstract_param call with a pre-shaped dict that exercises
-    # both a standard weight path and an excluded path.
     fake_abstract_param = {
         "params": {
             "self_attention": {"out": object()},
@@ -261,7 +364,10 @@ class TestPrintStructureDebug(unittest.TestCase):
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-      muon_utils._print_structure_debug(tree, muon_weight_dimension_numbers={"params": {"kernel": mdn((0,), (-1,))}})
+      muon_utils._print_structure_debug(
+          tree,
+          muon_weight_dimension_numbers={"params": {"kernel": mdn((0,), (-1,))}},
+      )
     out = buf.getvalue()
     self.assertIn("(4, 8)", out)
     self.assertIn("embed", out)
@@ -275,6 +381,89 @@ class TestPrintStructureDebug(unittest.TestCase):
       muon_utils._print_structure_debug(tree, muon_weight_dimension_numbers={"kernel": mdn((0,), (-1,))})
     out = buf.getvalue()
     self.assertIn("(16, 32)", out)
+
+
+class TestLayerScanInvariance(unittest.TestCase):
+  """Verifies Muon dimension mapping is invariant to layer scanning."""
+
+  def test_transform_tree_identical_with_and_without_layer_scan(self):
+    """Parameter paths return identical dimension specs with/without scan."""
+    unscanned_tree = {
+        "decoder": {
+            "self_attention": {
+                "query": jax.ShapeDtypeStruct((512, 8, 64), jnp.float32),
+                "out": jax.ShapeDtypeStruct((8, 64, 512), jnp.float32),
+            },
+            "mlp": {
+                "wi_0": jax.ShapeDtypeStruct((512, 2048), jnp.float32),
+                "wo": jax.ShapeDtypeStruct((2048, 512), jnp.float32),
+            },
+            "norm": {
+                "scale": jax.ShapeDtypeStruct((512,), jnp.float32),
+            },
+        }
+    }
+    # Place layer dimension (num_layers=12) on axis 1 (param_scan_axis=1) for
+    # all layers to simulate layer scanning.
+    scanned_tree = {
+        "decoder": {
+            "self_attention": {
+                "query": jax.ShapeDtypeStruct((512, 12, 8, 64), jnp.float32),
+                "out": jax.ShapeDtypeStruct((8, 12, 64, 512), jnp.float32),
+            },
+            "mlp": {
+                "wi_0": jax.ShapeDtypeStruct((512, 12, 2048), jnp.float32),
+                "wo": jax.ShapeDtypeStruct((2048, 12, 512), jnp.float32),
+            },
+            "norm": {
+                "scale": jax.ShapeDtypeStruct((512, 12), jnp.float32),
+            },
+        }
+    }
+
+    unscanned_mdn = muon_utils.get_transform_tree(unscanned_tree)
+    scanned_mdn = muon_utils.get_transform_tree(scanned_tree)
+
+    self.assertEqual(unscanned_mdn, scanned_mdn)
+
+  def test_relative_dimensions_resolve_consistent_matrix_features(self):
+    """Dimension numbers index same feature axes regardless of scan axis."""
+    # Standard MLP: 2D unscanned vs 3D scanned (param_scan_axis = 1, num_layers = 12)
+    mlp_unscanned_shape = (512, 2048)
+    mlp_scanned_shape = (512, 12, 2048)
+    mlp_mdn = muon_utils.transform_logic(("decoder", "mlp", "kernel"))
+
+    # Reduction axis (0) and Output axis (-1) point to identical feature sizes
+    self.assertEqual(mlp_unscanned_shape[mlp_mdn.reduction_axis[0]], 512)
+    self.assertEqual(mlp_scanned_shape[mlp_mdn.reduction_axis[0]], 512)
+    self.assertEqual(mlp_unscanned_shape[mlp_mdn.output_axis[0]], 2048)
+    self.assertEqual(mlp_scanned_shape[mlp_mdn.output_axis[0]], 2048)
+
+    # Attention QKV: 3D unscanned vs 4D scanned (param_scan_axis = 1, num_layers = 12)
+    qkv_unscanned_shape = (512, 8, 64)
+    qkv_scanned_shape = (512, 12, 8, 64)
+    qkv_mdn = muon_utils.transform_logic(("decoder", "self_attention", "query"))
+
+    self.assertEqual(qkv_unscanned_shape[qkv_mdn.reduction_axis[0]], 512)
+    self.assertEqual(qkv_scanned_shape[qkv_mdn.reduction_axis[0]], 512)
+    self.assertEqual(tuple(qkv_unscanned_shape[ax] for ax in qkv_mdn.output_axis), (8, 64))
+    self.assertEqual(tuple(qkv_scanned_shape[ax] for ax in qkv_mdn.output_axis), (8, 64))
+
+    # Attention Out: 3D unscanned vs 4D scanned (param_scan_axis = 1, num_layers = 12)
+    out_unscanned_shape = (8, 64, 512)
+    out_scanned_shape = (8, 12, 64, 512)
+    out_mdn = muon_utils.transform_logic(("decoder", "self_attention", "out"))
+
+    self.assertEqual(
+        tuple(out_unscanned_shape[ax] for ax in out_mdn.reduction_axis),
+        (8, 64),
+    )
+    self.assertEqual(
+        tuple(out_scanned_shape[ax] for ax in out_mdn.reduction_axis),
+        (8, 64),
+    )
+    self.assertEqual(out_unscanned_shape[out_mdn.output_axis[0]], 512)
+    self.assertEqual(out_scanned_shape[out_mdn.output_axis[0]], 512)
 
 
 if __name__ == "__main__":

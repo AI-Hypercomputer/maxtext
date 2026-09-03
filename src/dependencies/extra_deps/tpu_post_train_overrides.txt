@@ -10,3 +10,6 @@ libtpu==0.0.44
 optax==0.2.6
 qwix==0.1.8
 xprof<=2.23.0
+tensorflow==2.20.0
+tensorflow-text==2.20.1
+markdown>=3.4.1
