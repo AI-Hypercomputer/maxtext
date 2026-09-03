@@ -251,38 +251,29 @@ def extract_token_ids(tokens):
     raise ValueError(f"Can't extract token_ids from type {type(tokens)}")
 
 
-def _get_completion_in_chat_template(tokenizer_model, round_msgs):
-  """Calculates the completion part of a conversation turn formatted with a chat template.
+def _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs):
+  """Splits a conversational round (system + user + assistant) into prompt and completion formatted strings.
 
   Uses the longest-common-prefix between the full conversation tokens and the
-  generation-prompt tokens to locate where the completion starts.
-
-  For most models (Llama, Qwen, …) the generation prompt is an exact prefix of the
-  full conversation, so common_len == len(prompt_ids).
-
-  For Gemma4, add_generation_prompt=True emits thinking-channel tokens
-  (<|channel>thought\\n<channel|>) that diverge from the plain conversation
-  at the model-turn boundary. The common prefix ends just before that
-  divergence, and the completion correctly captures the thinking content
-  and response tokens.
+  generation-prompt tokens to locate where the prompt ends and completion begins.
 
   Args:
     tokenizer_model: The tokenizer instance.
     round_msgs: Messages for the current conversational turn including the assistant response.
 
   Returns:
-    A string representing the completion formatted by the chat template.
+    A tuple of (prompt_str, completion_str).
   """
-  prompt_completion_tokens = tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True)
-  # include generation_prompt as part of the prompt tokens
-  prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
+  full_tokens = extract_token_ids(
+      tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True)
+  )
+  prompt_tokens = extract_token_ids(
+      tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
+  )
 
-  prompt_completion_ids = extract_token_ids(prompt_completion_tokens)
-  prompt_ids = extract_token_ids(prompt_tokens)
-
-  # Walk forward until the two sequences diverge
+  # Find the longest common prefix where prompt ends and completion begins
   common_len = 0
-  for full_id, prompt_id in zip(prompt_completion_ids, prompt_ids):
+  for full_id, prompt_id in zip(full_tokens, prompt_tokens):
     if full_id == prompt_id:
       common_len += 1
     else:
@@ -291,13 +282,20 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   if common_len == 0:
     raise ValueError(
         "Chat template generation prompt mismatch: no common prefix tokens found.\n"
-        f"Full conversation tokens: {prompt_completion_ids} ('{tokenizer_model.decode(prompt_completion_ids)}')\n"
-        f"Generation prompt tokens: {prompt_ids} ('{tokenizer_model.decode(prompt_ids)}')\n"
+        f"Full conversation tokens: {full_tokens} ('{tokenizer_model.decode(full_tokens)}')\n"
+        f"Generation prompt tokens: {prompt_tokens} ('{tokenizer_model.decode(prompt_tokens)}')\n"
         "Cannot determine completion boundary."
     )
 
-  completion_tokens = prompt_completion_ids[common_len:]
-  return tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
+  prompt_str = tokenizer_model.decode(full_tokens[:common_len], skip_special_tokens=False)
+  completion_str = tokenizer_model.decode(full_tokens[common_len:], skip_special_tokens=False)
+  return prompt_str, completion_str
+
+
+def _get_completion_in_chat_template(tokenizer_model, round_msgs):
+  """Calculates the completion part of a conversation turn formatted with a chat template."""
+  _, completion_str = _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs)
+  return completion_str
 
 
 def apply_chat_template(example, tokenizer_model, data_column_name):
@@ -332,15 +330,11 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
         round_msgs.append(message)
       elif message["role"] == "user":
         round_msgs.append(message)
-        prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            round_msgs, add_generation_prompt=True, tokenize=False
-        )
-        messages.append(prompt_in_chat_template)
-        is_prompt.append(True)
       elif message["role"] == "assistant":
         round_msgs.append(message)
-        messages.append(_get_completion_in_chat_template(tokenizer_model, round_msgs))
-        is_prompt.append(False)
+        prompt_str, completion_str = _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs)
+        messages.extend([prompt_str, completion_str])
+        is_prompt.extend([True, False])
         # Round ended, clearing the buffer.
         round_msgs.clear()
   except ValueError as e:
