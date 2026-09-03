@@ -14,6 +14,7 @@
 
 # pytype: skip-file
 """Pydantic-based configuration management for MaxText."""
+
 import ast
 import logging
 import os
@@ -94,7 +95,10 @@ def _resolve_or_infer_config(argv: list[str] | None = None, **kwargs) -> tuple[s
   module = _module_from_path(argv[0]) if len(argv) > 0 else None
   if module not in _CONFIG_FILE_MAPPING:
     config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
-    logger.warning("No config file provided and no default config found for module '%s', using base.yml", module)
+    logger.warning(
+        "No config file provided and no default config found for module '%s', using base.yml",
+        module,
+    )
   else:
     config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
     logger.warning("No config file provided, using default config mapping: %s", config_path)
@@ -187,18 +191,38 @@ def _apply_rules(base_rules, new_rules, config):
 
 def _load_config(config_name: str) -> omegaconf.DictConfig:
   """Loads a YAML file and its base_configs recursively using OmegaConf."""
+  if not config_name:
+    return omegaconf.OmegaConf.create({})
+
+  base_name = os.path.basename(config_name)
+  if base_name == "base.yml":
+    logger.info("Note: base_config: 'base.yml' is deprecated and ignored; defaults are provided by types.MaxTextConfig.")
+    return omegaconf.OmegaConf.create({})
+
+  if not os.path.exists(config_name):
+    raise FileNotFoundError(f"Config file not found: {config_name}")
+
   cfg = omegaconf.OmegaConf.load(config_name)
   if _BASE_CONFIG_ATTR in cfg:
     base_path = cfg[_BASE_CONFIG_ATTR]
-    if not os.path.isabs(base_path):
-      # Search relative to current config, then in the default configs folder
-      loaded_parent_config_filename = os.path.join(os.path.dirname(config_name), base_path)
-      if not os.path.isfile(loaded_parent_config_filename):
-        loaded_parent_config_filename = os.path.join(MAXTEXT_CONFIGS_DIR, base_path)
+    del cfg[_BASE_CONFIG_ATTR]
+    base_parent_name = os.path.basename(base_path)
+    if base_parent_name == "base.yml":
+      logger.info(
+          "Note: base_config: 'base.yml' in %s is deprecated and ignored; defaults are provided by types.MaxTextConfig.",
+          config_name,
+      )
+      base_cfg = omegaconf.OmegaConf.create({})
     else:
-      loaded_parent_config_filename = base_path
+      if not os.path.isabs(base_path):
+        # Search relative to current config, then in the default configs folder
+        loaded_parent_config_filename = os.path.join(os.path.dirname(config_name), base_path)
+        if not os.path.isfile(loaded_parent_config_filename):
+          loaded_parent_config_filename = os.path.join(MAXTEXT_CONFIGS_DIR, base_path)
+      else:
+        loaded_parent_config_filename = base_path
 
-    base_cfg = _load_config(loaded_parent_config_filename)
+      base_cfg = _load_config(loaded_parent_config_filename)
     cfg = omegaconf.OmegaConf.merge(base_cfg, cfg)
   return cfg
 
@@ -251,6 +275,19 @@ def _check_for_invalid_keys(key: str, valid_fields: set[str]) -> bool:
   return False
 
 
+def _get_nested_field_info(key: str, fields: dict[str, Any]) -> tuple[Any, bool]:
+  """Recursively finds a field's FieldInfo in Pydantic model fields."""
+  if key in fields:
+    return fields[key], True
+  for field_info in fields.values():
+    annotation = getattr(field_info, "annotation", None)
+    if hasattr(annotation, "model_fields"):
+      f_info, found = _get_nested_field_info(key, annotation.model_fields)
+      if found:
+        return f_info, True
+  return None, False
+
+
 def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = types.MaxTextConfig) -> dict[str, Any]:
   """Prepares the raw dictionary for Pydantic model instantiation."""
   pydantic_kwargs = {}
@@ -264,7 +301,10 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
     if not check_flag:
       # Bypass the error for multimodal keys if use_multimodal is False
       if not use_multimodal and key in types.Multimodal.model_fields:
-        logger.warning("Ignoring multimodal field %s because use_multimodal is False.", repr(key))
+        logger.warning(
+            "Ignoring multimodal field %s because use_multimodal is False.",
+            repr(key),
+        )
         continue
 
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
@@ -283,7 +323,12 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
         new_value = [new_value]
 
     # Coerce string/tuple inputs for list[str] configuration fields into Python lists.
-    if key in ("train_data_columns", "eval_data_columns", "trainable_parameters_mask", "adamw_mask"):
+    if key in (
+        "train_data_columns",
+        "eval_data_columns",
+        "trainable_parameters_mask",
+        "adamw_mask",
+    ):
       new_value = _coerce_to_list(new_value)
 
     # An empty value provided in the configuration is treated as None
@@ -308,18 +353,36 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
     if key in ("dump_hlo_local_module_name", "dump_hlo_module_name") and new_value is None:
       new_value = ""
 
-    if key == "tokenizer_path" and new_value is None:
-      try:
-        new_value = HF_IDS[raw_keys["model_name"]]
-      except KeyError:
-        new_value = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2")
-        max_logging.warning(
-            "tokenizer_path not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
-          Using the default src/maxtext/assets/tokenizers/tokenizer.llama2 instead. \
-          Please pass tokenizer_path in your command if this is not intended."
-        )
+    if key in valid_fields:
+      pydantic_kwargs[key] = new_value
+    else:
+      # Route nested field to its parent model (e.g. lora_rank -> lora.lora_rank)
+      routed = False
+      for field_name, field_info in valid_fields.items():
+        annotation = getattr(field_info, "annotation", None)
+        if hasattr(annotation, "model_fields") and key in annotation.model_fields:
+          if field_name not in pydantic_kwargs or not isinstance(pydantic_kwargs[field_name], dict):
+            pydantic_kwargs[field_name] = dict(pydantic_kwargs.get(field_name, {}))
+          pydantic_kwargs[field_name][key] = new_value
+          routed = True
+          break
+      if not routed:
+        pydantic_kwargs[key] = new_value
 
-    pydantic_kwargs[key] = new_value
+  if "tokenizer_path" not in pydantic_kwargs or pydantic_kwargs["tokenizer_path"] is None:
+    model_name = raw_keys.get("model_name")
+    if model_name and model_name in HF_IDS:
+      pydantic_kwargs["tokenizer_path"] = HF_IDS[model_name]
+    else:
+      pydantic_kwargs["tokenizer_path"] = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2")
+      max_logging.warning(
+          "tokenizer_path not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. "
+          "Using the default src/maxtext/assets/tokenizers/tokenizer.llama2 instead. "
+          "Please pass tokenizer_path in your command if this is not intended."
+      )
+
+  if "decoder_block" not in pydantic_kwargs or pydantic_kwargs["decoder_block"] is None:
+    pydantic_kwargs["decoder_block"] = types.DecoderBlockType.LLAMA2
 
   return pydantic_kwargs
 
@@ -400,7 +463,11 @@ def _handle_config_exception(e: Exception):
     raise e
 
 
-def initialize(argv: list[str] | None = None, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> HyperParameters:
+def initialize(
+    argv: list[str] | None = None,
+    config_class: type[Any] = types.MaxTextConfig,
+    **kwargs,
+) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
   try:
     pydantic_config = _initialize_pydantic(argv, config_class=config_class, **kwargs)
@@ -413,7 +480,11 @@ def initialize(argv: list[str] | None = None, config_class: type[Any] = types.Ma
     raise e
 
 
-def initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> Any:
+def initialize_pydantic(
+    argv: list[str] | None = None,
+    config_class: type[Any] = types.MaxTextConfig,
+    **kwargs,
+) -> Any:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and overrides.
 
   Returns the pydantic config class.
@@ -427,13 +498,19 @@ def initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] =
     raise e
 
 
-def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> Any:
+def _initialize_pydantic(
+    argv: list[str] | None = None,
+    config_class: type[Any] = types.MaxTextConfig,
+    **kwargs,
+) -> Any:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
   Returns pydantic config class whereas `initialize` returns the og `HyperParameters`
   """
   # 1. Load base and inherited configs from file(s)
   config_path, cli_args = _resolve_or_infer_config(argv, **kwargs)
-  base_yml_config = _load_config(config_path)
+  recipe_cfg = _load_config(config_path) if config_path else omegaconf.OmegaConf.create({})
+  if _BASE_CONFIG_ATTR in recipe_cfg:
+    del recipe_cfg[_BASE_CONFIG_ATTR]
 
   # 2. Get overrides from CLI and kwargs
   cli_cfg = omegaconf.OmegaConf.from_cli(cli_args)
@@ -443,32 +520,36 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
         "your token visible in 'ps' and shell history. Please set the 'HF_TOKEN' environment variable instead."
     )
   kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
-  overrides_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
+  user_overrides_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
+  overrides_cfg = omegaconf.OmegaConf.merge(recipe_cfg, user_overrides_cfg)
 
-  temp_cfg1 = omegaconf.OmegaConf.merge(base_yml_config, overrides_cfg)
   # 3.1. infer more configs if possible
-  temp_cfg1 = _resolve_or_infer_addl_config(**temp_cfg1)
-  # update overrides_cfg with temp_cfg1
-  overrides_cfg = omegaconf.OmegaConf.merge(overrides_cfg, temp_cfg1)
-  temp_cfg = omegaconf.OmegaConf.merge(base_yml_config, overrides_cfg)
+  inferred_addl = _resolve_or_infer_addl_config(**overrides_cfg)
+  overrides_cfg = omegaconf.OmegaConf.merge(overrides_cfg, inferred_addl)
 
   # 3.2. Handle model-specific config
-
-  model_name = temp_cfg.get("model_name", "default")
+  model_name = overrides_cfg.get("model_name", "default")
   # The architecture for -Instruct v/s base models are the same, so for identifying the
   # architecture we replace "-Instruct" from the model_name and get the base model name
   model_name = model_name.replace("-Instruct", "") if "-Instruct" in model_name else model_name
   model_cfg = {}
   if model_name != "default":
-    # First try relative to base config path
-    model_config_path = os.path.join(os.path.dirname(config_path), "models", f"{model_name}.yml")
-    # Try looking for "models" under "src/maxtext/configs/"
-    if not os.path.isfile(model_config_path):
-      model_config_path = os.path.join(
-          os.path.dirname(os.path.dirname(config_path)),
-          "models",
-          f"{model_name}.yml",
-      )
+    model_config_path = None
+    if config_path:
+      candidate = os.path.join(os.path.dirname(config_path), "models", f"{model_name}.yml")
+      if os.path.isfile(candidate):
+        model_config_path = candidate
+      else:
+        candidate = os.path.join(
+            os.path.dirname(os.path.dirname(config_path)),
+            "models",
+            f"{model_name}.yml",
+        )
+        if os.path.isfile(candidate):
+          model_config_path = candidate
+
+    if not model_config_path or not os.path.isfile(model_config_path):
+      model_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "models", f"{model_name}.yml")
 
     if not os.path.isfile(model_config_path):
       # Fallback to the default location within package
@@ -477,25 +558,30 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
 
     if os.path.exists(model_config_path):
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)
+      if _BASE_CONFIG_ATTR in model_loaded_cfg:
+        del model_loaded_cfg[_BASE_CONFIG_ATTR]
       # if override_model_config=True, only apply model configs for keys not present in overrides.
-      if temp_cfg.get("override_model_config"):
-        model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in overrides_cfg}
+      if overrides_cfg.get("override_model_config"):
+        model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in user_overrides_cfg}
       else:
         model_cfg = model_loaded_cfg
         # Validate that no keys are overridden by both model config and CLI/kwargs
-        validate_no_keys_overridden_twice(model_loaded_cfg, overrides_cfg)
+        validate_no_keys_overridden_twice(model_loaded_cfg, user_overrides_cfg)
     else:
       logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
 
-      # Finally merge (base, model, then overrides)
   model_cfg_oc = omegaconf.OmegaConf.create(model_cfg)
 
   # 4. Manually merge logical_axis_rules to avoid OmegaConf's list replacement behavior.
-  base_rules_oc = base_yml_config.get("logical_axis_rules", [])
+  base_rules_oc = recipe_cfg.get("logical_axis_rules", [])
   model_rules_oc = model_cfg_oc.get("logical_axis_rules", [])
   overrides_rules_oc = overrides_cfg.get("logical_axis_rules", [])
 
-  base_rules = omegaconf.OmegaConf.to_container(base_rules_oc, resolve=True) if base_rules_oc else []
+  if base_rules_oc:
+    base_rules = omegaconf.OmegaConf.to_container(base_rules_oc, resolve=True)
+  else:
+    base_rules = copy.deepcopy(types.DEFAULT_LOGICAL_AXIS_RULES)
+
   model_rules = omegaconf.OmegaConf.to_container(model_rules_oc, resolve=True) if model_rules_oc else []
   overrides_rules = omegaconf.OmegaConf.to_container(overrides_rules_oc, resolve=True) if overrides_rules_oc else []
 
@@ -503,54 +589,74 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
   merged_rules = _apply_rules(merged_rules, overrides_rules, overrides_cfg)
 
   # Remove the rules from the original configs before the main merge
-  if "logical_axis_rules" in base_yml_config:
-    del base_yml_config["logical_axis_rules"]
+  if "logical_axis_rules" in recipe_cfg:
+    del recipe_cfg["logical_axis_rules"]
   if "logical_axis_rules" in model_cfg_oc:
     del model_cfg_oc["logical_axis_rules"]
   if "logical_axis_rules" in overrides_cfg:
     del overrides_cfg["logical_axis_rules"]
 
-  # 5. Final merge for all other keys
-  final_config = omegaconf.OmegaConf.merge(base_yml_config, model_cfg_oc, overrides_cfg)
+  # 5. Final merge for all other keys (sparse merge)
+  final_config = omegaconf.OmegaConf.merge(recipe_cfg, model_cfg_oc, overrides_cfg)
   final_config["logical_axis_rules"] = merged_rules
 
   raw_keys_dict = omegaconf.OmegaConf.to_container(final_config, resolve=True)
 
-  # 6. Handle environment variable overrides
-  cli_keys = frozenset(omegaconf.OmegaConf.to_container(cli_cfg, resolve=True).keys())
+  # 6. Handle environment variable overrides (M_*)
+  cli_keys = frozenset(omegaconf.OmegaConf.to_container(user_overrides_cfg, resolve=True).keys())
   kwargs_keys = frozenset(kwargs.keys())
   env_keys = set()
-  for k in tuple(raw_keys_dict.keys()):
-    env_key = yaml_key_to_env_key(k)
-    if env_key in os.environ:
+  for env_var, env_val in os.environ.items():
+    if env_var.startswith(_MAX_PREFIX):
+      k = env_var[len(_MAX_PREFIX) :].lower()
+      if not _check_for_invalid_keys(k, config_class.model_fields):
+        continue
+
       # Validate that no keys are overridden by both CLI/kwargs and environment variable
       if k in cli_keys or k in kwargs_keys:
         raise ValueError(
-            f"Key '{k}' is overridden by both CLI/kwargs and environment variable '{env_key}'. This is not allowed."
+            f"Key '{k}' is overridden by both CLI/kwargs and environment variable '{env_var}'. This is not allowed."
         )
       # Validate that no keys are overridden by both model config and environment variable
-      if not temp_cfg.get("override_model_config") and k in model_cfg.keys():
+      if not overrides_cfg.get("override_model_config") and k in model_cfg.keys():
         raise ValueError(
-            f"Key '{k}' is overridden by both model config and environment variable '{env_key}'."
+            f"Key '{k}' is overridden by both model config and environment variable '{env_var}'."
             "This is not allowed, unless setting `override_model_config=True`."
         )
 
       env_keys.add(k)
-      new_proposal = os.environ.get(env_key)
+      field_info, found = _get_nested_field_info(k, config_class.model_fields)
+      if not found:
+        continue
+
       original_value = raw_keys_dict.get(k)
+      if original_value.__class__.__name__ == "PydanticUndefinedType":
+        original_value = None
+
+      if original_value is None and field_info:
+        original_value = field_info.default
+        if original_value.__class__.__name__ == "PydanticUndefinedType":
+          original_value = None
+
       parser = None
       if isinstance(original_value, bool):
         parser = _yaml_types_to_parser[bool]
-      elif isinstance(original_value, (str, int, float)):
+      elif isinstance(original_value, (int, float, str)):
         parser = type(original_value)
+      elif field_info:
+        annotation = getattr(field_info, "annotation", None)
+        if annotation in (int, float, str, bool):
+          parser = _yaml_types_to_parser[bool] if annotation is bool else annotation
+        else:
+          parser = str
 
       if parser is None:
-        raise TypeError(f"Type {type(original_value)} for key '{k}' not supported for ENV override.")
+        raise TypeError(f"Type for key '{k}' not supported for ENV override.")
 
       try:
-        raw_keys_dict[k] = parser(new_proposal)
+        raw_keys_dict[k] = parser(env_val)
       except (ValueError, KeyError) as e:
-        raise ValueError(f"Couldn't parse value from ENV '{new_proposal}' for key '{k}'") from e
+        raise ValueError(f"Couldn't parse value from ENV '{env_val}' for key '{k}'") from e
 
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict, config_class=config_class)
 
