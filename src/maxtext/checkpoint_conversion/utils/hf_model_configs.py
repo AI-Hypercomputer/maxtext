@@ -1883,6 +1883,56 @@ qwen3_vl_30b_a3b_dict = {
 }
 qwen3_vl_30b_a3b_config = PTConfig(**qwen3_vl_30b_a3b_dict)
 
+cosmos3_nano_reasoner_dict = {
+    "architectures": ["Cosmos3OmniForConditionalGeneration"],
+    "model_type": "cosmos3_omni",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 151643,
+        "dtype": "bfloat16",
+        "eos_token_id": 151645,
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 4096,
+        "initializer_range": 0.02,
+        "intermediate_size": 12288,
+        "max_position_embeddings": 262144,
+        "model_type": "qwen3_vl_text",
+        "num_attention_heads": 32,
+        "num_hidden_layers": 36,
+        "num_key_value_heads": 8,
+        "pad_token_id": None,
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+            "mrope_interleaved": True,
+            "mrope_section": [24, 20, 20],
+            "rope_theta": 5000000,
+            "rope_type": "default",
+        },
+        "tie_word_embeddings": True,
+        "use_cache": True,
+        "vocab_size": 151936,
+    },
+    "vision_config": {
+        "deepstack_visual_indexes": [8, 16, 24],
+        "depth": 27,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 1152,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 4304,
+        "model_type": "qwen3_vl_vision",
+        "num_heads": 16,
+        "num_position_embeddings": 2304,
+        "out_hidden_size": 4096,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+    },
+}
+cosmos3_nano_reasoner_config = PTConfig(**cosmos3_nano_reasoner_dict)
+
 
 glm5_1_744b_dict = {
     "architectures": ["GlmMoeDsaForCausalLM"],
@@ -1932,6 +1982,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-vl-2b": qwen3_vl_2b_config,
     "qwen3-vl-4b": qwen3_vl_4b_config,
     "qwen3-vl-30b-a3b": qwen3_vl_30b_a3b_config,
+    "cosmos3-nano-reasoner": cosmos3_nano_reasoner_config,
     "llama3.1-8b": llama31_8b_config,
     "llama3.1-8b-Instruct": llama31_8b_config,
     "llama3.1-70b": llama31_70b_config,

@@ -33,6 +33,52 @@ def apply_hook_fns(weight, target_shape, hook_fns):
   return weight
 
 
+def nesting_depth(hf_source_keys: Any) -> int:
+  """Counts how many axes a (possibly nested) list of HF keys stacks over.
+
+  Only ``list`` nesting counts: a ``tuple`` of HF keys is the composite-key
+  convention (several HF tensors combined into one MaxText leaf by a hook), not
+  a stacking axis.
+  """
+  depth = 0
+  while isinstance(hf_source_keys, list):
+    depth += 1
+    hf_source_keys = hf_source_keys[0]
+  return depth
+
+
+def stacked_axes(mt_key: str, config, depth: int) -> tuple:
+  """Returns where each of the ``depth`` stacked axes lands in the MaxText tensor.
+
+  The outer-to-inner ordering of the returned axes matches the outer-to-inner
+  nesting of the HF key list. Three layouts occur:
+
+  * MoE expert stacking -- ``(experts, layers, ...)``: every stacked axis is
+    leading, so the axes are ``0, 1, ...``.
+  * A nested block scan (``...-local_layers-...``, used by gemma4 and
+    qwen3-next): the block's local layers are an inner scan nested inside the
+    outer block scan, so ``(blocks, local)`` sit at
+    ``(param_scan_axis, param_scan_axis + 1)`` rather than at the leading axes.
+  * A nested block scan whose weights are *also* expert-stacked (qwen3-next's
+    routed experts): the expert axis still leads, giving
+    ``(0, param_scan_axis, param_scan_axis + 1)``.
+  """
+  if isinstance(mt_key, str) and "-local_layers" in mt_key:
+    param_scan_axis = config.param_scan_axis
+    nested_axes = (param_scan_axis, param_scan_axis + 1)
+    return nested_axes if depth == 2 else (0,) + nested_axes
+  return tuple(range(depth))
+
+
+def slice_shape(target_shape: tuple, axes: tuple) -> tuple:
+  """Returns ``target_shape`` with the stacked ``axes`` removed.
+
+  Hook functions operate on a single un-stacked slice, so they need this shape
+  rather than the shape of the fully assembled tensor.
+  """
+  return tuple(dim for i, dim in enumerate(target_shape) if i not in set(axes))
+
+
 def _binary_chunked_stack(tensors: List[np.ndarray], axis: int) -> np.ndarray:
   """Stacks JAX arrays along axis by binary division to limit memory usage from JAX compiler."""
   if not tensors:
@@ -49,13 +95,20 @@ def _binary_chunked_stack(tensors: List[np.ndarray], axis: int) -> np.ndarray:
 
 
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]],
+    hf_source_keys: List[Any],
     tensor_getter_fn: Callable[[str], np.ndarray],
     hook_fns: Any,
     target_leaf: Any,
     config,
+    mt_key: str = "",
 ) -> np.ndarray:
-  """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers) directly in place on device."""
+  """Builds a MaxText tensor by stacking HF weights along several axes, in place on device.
+
+  ``hf_source_keys`` is nested one level per stacked axis, outermost first (see
+  ``nesting_depth``), and ``stacked_axes`` decides where those axes land in the
+  target: leading for MoE expert stacking, or at ``param_scan_axis`` and beyond
+  for a nested block scan.
+  """
   if hasattr(target_leaf, "sharding"):
     target_shape = target_leaf.shape
     target_sharding = target_leaf.sharding
@@ -65,39 +118,37 @@ def _build_multi_axis_stacked_tensor(
     target_sharding = None
     target_dtype = target_leaf.dtype if hasattr(target_leaf, "dtype") else np.float32
 
-  mt_slice_shape = target_shape[2:]
+  depth = nesting_depth(hf_source_keys)
+  axes = stacked_axes(mt_key, config, depth)
+  mt_slice_shape = slice_shape(target_shape, axes)
 
-  # Pre-derive the compatible sharding specs to avoid rank mismatches
-  if target_sharding is not None and hasattr(target_sharding, "spec"):
-    # Target shape is (experts, layers, ...) -> slice is from index 2 onwards
-    spec_list = list(target_sharding.spec)[2:]
-    slice_sharding = jax.sharding.NamedSharding(target_sharding.mesh, jax.sharding.PartitionSpec(*spec_list))
-    # Stacking layer shards
-    layer_spec_list = list(target_sharding.spec)[1:]
-    layer_sharding = jax.sharding.NamedSharding(target_sharding.mesh, jax.sharding.PartitionSpec(*layer_spec_list))
-  else:
-    slice_sharding = target_sharding
-    layer_sharding = target_sharding
+  # Pre-derive the compatible sharding specs to avoid rank mismatches. The tensor
+  # is assembled with its stacked axes leading and only moved into place at the
+  # end, so level ``l`` carries the specs of the axes not yet stacked, followed by
+  # the specs of the slice itself.
+  target_spec = list(target_sharding.spec) if target_sharding is not None and hasattr(target_sharding, "spec") else None
 
-  all_expert_tensors = []
-  # Outer loop iterates through experts
-  for layer_keys_for_expert in hf_source_keys:
-    layer_tensors_for_expert = []
-    # Inner loop iterates through layers for the current expert
-    for hf_key_single in layer_keys_for_expert:
-      hf_tensor_numpy = tensor_getter_fn(hf_key_single)
-      processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
+  def sharding_at(level):
+    if target_spec is None:
+      return target_sharding
+    stacked_spec = [target_spec[axis] for axis in axes[level:]]
+    slice_spec = [spec for i, spec in enumerate(target_spec) if i not in set(axes)]
+    return jax.sharding.NamedSharding(target_sharding.mesh, jax.sharding.PartitionSpec(*stacked_spec, *slice_spec))
 
-      if target_sharding is not None:
-        processed_hf_tensor = jax.device_put(processed_hf_tensor, slice_sharding)
-      layer_tensors_for_expert.append(processed_hf_tensor)
+  def gather(keys, level):
+    if level == depth:
+      # A tuple of keys is a composite HF source that the hook fuses into one leaf.
+      raw = tuple(tensor_getter_fn(k) for k in keys) if isinstance(keys, tuple) else tensor_getter_fn(keys)
+      tensor = apply_hook_fns(raw, mt_slice_shape, hook_fns)
+    else:
+      tensor = _binary_chunked_stack([gather(sub, level + 1) for sub in keys], axis=0)
+    if target_sharding is not None and level > 0:
+      tensor = jax.device_put(tensor, sharding_at(level))
+    return tensor
 
-    expert_tensor = _binary_chunked_stack(layer_tensors_for_expert, axis=0)
-    if target_sharding is not None:
-      expert_tensor = jax.device_put(expert_tensor, layer_sharding)
-    all_expert_tensors.append(expert_tensor)
-
-  stacked_array = _binary_chunked_stack(all_expert_tensors, axis=0).astype(target_dtype)
+  stacked_array = gather(hf_source_keys, 0).astype(target_dtype)
+  if axes != tuple(range(depth)):
+    stacked_array = np.moveaxis(stacked_array, tuple(range(depth)), axes)
   if target_sharding is not None:
     stacked_array = jax.device_put(stacked_array, target_sharding)
   return stacked_array
@@ -155,7 +206,7 @@ def _build_single_axis_stacked_tensor(
   return stacked_array
 
 
-def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_leaf, config):
+def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_leaf, config, mt_key=""):
   """Determine the loading function for HF keys."""
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
@@ -194,4 +245,5 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
         hook_fn,
         mt_target_leaf,
         config,
+        mt_key,
     )

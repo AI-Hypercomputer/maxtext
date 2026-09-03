@@ -131,12 +131,12 @@ class TestReorderedDataIterator(unittest.TestCase):
       view = train_utils._ReorderedDataIterator(lambda batch: batch * 10, iterator)
       self.assertEqual(next(view), 0)
       self.assertEqual(next(view), 10)
-      ocp.save_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable_v1(iterator)})
+      ocp.save_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable(iterator)})
       self.assertTrue((path / "iter" / "process_0-of-1.json").exists())
 
       restored = iter(grain.MapDataset.range(10).to_iter_dataset())
       restored_view = train_utils._ReorderedDataIterator(lambda batch: batch * 10, restored)
-      ocp.load_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable_v1(restored)})
+      ocp.load_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable(restored)})
       self.assertEqual(next(restored_view), 20)
 
   def test_eval_view_consume_reset_consume(self):

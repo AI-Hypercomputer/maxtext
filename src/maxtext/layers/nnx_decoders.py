@@ -19,6 +19,7 @@
 
 import functools
 import inspect
+import re
 from typing import Any
 import warnings
 
@@ -37,7 +38,8 @@ from maxtext.common.common_types import (
     MultimodalInput,
     ShardMode,
 )
-from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
+from maxtext.configs.types import check_forced_routing_support
+from maxtext.layers import initializers, linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -228,6 +230,47 @@ class NNXDecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output, kv_cache
+
+
+def reshape_forced_routed_experts_for_scan(
+    forced_routed_experts: jax.Array,
+    num_layers: int,
+    scan_length: int,
+    layers_per_cycle: int,
+) -> jax.Array:
+  """Reshapes a batch's forced_routed_experts into jax.lax.scan's xs layout.
+
+  The outer scan runs `scan_length` iterations, each covering a cycle of
+  `layers_per_cycle` decoder layers. Every supported architecture is
+  homogeneous-MoE, so the layer axis is simply the decoder layer index.
+
+  Args:
+    forced_routed_experts: `[batch, seq, num_layers, top_k]` (per-layer) or
+      `[batch, seq, top_k]` (broadcast to every layer).
+    num_layers: Total decoder layers (`scan_length * layers_per_cycle`).
+    scan_length: Number of outer scan iterations.
+    layers_per_cycle: Decoder layers per cycle.
+
+  Returns:
+    Array shaped `[scan_length, layers_per_cycle, batch, seq, top_k]`.
+
+  Raises:
+    ValueError: If forced_routed_experts is not 3D or 4D.
+  """
+  fre = forced_routed_experts
+  if fre.ndim not in (3, 4):
+    raise ValueError(
+        "forced_routed_experts must be [batch, seq, top_k] (3D, broadcast to"
+        " every layer) or [batch, seq, num_layers, top_k] (4D, per-layer); got"
+        f" ndim={fre.ndim} with shape {fre.shape}."
+    )
+  if fre.ndim == 4:
+    # [batch, seq, num_layers, top_k] -> [num_layers, batch, seq, top_k]
+    fre = jnp.moveaxis(fre, 2, 0)
+  else:
+    # [batch, seq, top_k]: same forced routing for every layer.
+    fre = jnp.broadcast_to(fre[None], (num_layers,) + fre.shape)
+  return jnp.reshape(fre, (scan_length, layers_per_cycle) + fre.shape[1:])
 
 
 def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
@@ -439,6 +482,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
+    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -549,6 +593,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
+    elif self.is_qwen3_next:
+      self._init_scanned_qwen3_next(rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -718,6 +764,48 @@ class NNXDecoder(nnx.Module):
         **rem_layer_kwargs,
         rngs=rngs,
     )
+
+  def _init_scanned_qwen3_next(self, rngs, mesh):
+    """Initializes scanned Qwen3-Next blocks with per-layer (rather than per-block) remat.
+
+    Mirrors _init_scanned_gemma4: each block covers one period of the hybrid
+    attention pattern and rematerializes its own sub-layers, so the outer apply
+    skips block-level remat. Layers past the last whole period go into a short
+    remainder block, named the same as the Linen `Decoder`'s so both decoders
+    keep producing the same parameter tree.
+    """
+    config = self.config
+    block_length = config.inhomogeneous_layer_cycle_interval
+    scan_length = config.num_decoder_layers // block_length
+    num_remaining_layers = config.num_decoder_layers % block_length
+    policy = self.get_remat_policy()
+    if scan_length > 0:
+      self.layers = self._create_scanned_layers(
+          qwen3.Qwen3NextScannableBlock,
+          length=scan_length,
+          metadata_axis_name="layers",
+          rngs=rngs,
+          num_of_layers=block_length,
+          remat_policy_fn=policy,
+          apply_internal_remat=True,
+      )
+    if num_remaining_layers > 0:
+      # The remainder starts on a period boundary, so it holds only the leading
+      # linear-attention layers of a period -- the full-attention layer is last.
+      self.layers_remainder = qwen3.Qwen3NextScannableBlock(
+          config=config,
+          mesh=mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          num_of_layers=num_remaining_layers,
+          layer_idx_offset=scan_length * block_length,
+          remat_policy_fn=policy,
+          # _apply_remainder_block already wraps the call in jax.checkpoint, and
+          # the remainder is shorter than one period and runs once, so there is
+          # nothing to gain from a second, finer remat boundary inside it.
+          apply_internal_remat=False,
+          rngs=rngs,
+      )
 
   def _init_scanned_generic(self, decoder_block_classes, rngs):
     """Initializes scanned generic decoder layers."""
@@ -929,6 +1017,7 @@ class NNXDecoder(nnx.Module):
       skip_block_remat: bool = False,
       unroll: int = 1,
       metadata_axis_name: str = "layers",
+      forced_routed_experts_scanned=None,
       **kwargs,
   ):
     """Runs the layer stack using nnx.scan.
@@ -943,19 +1032,25 @@ class NNXDecoder(nnx.Module):
       x_in: The carry (hidden state) fed into the first layer.
       *args: Positional args broadcast to every layer call.
       length: Number of scan iterations (= number of layers).
-      kv_caches_stacked: Optional pytree whose leaves have shape [num_layers, ...].
-        When provided, the i-th slice is passed as `kv_cache=` to layer i and the
-        updated caches are returned as a third element of the tuple.
-      skip_block_remat: When True, do not wrap the scanned body in jax.checkpoint.
-        Used when the scanned module already applies its own (finer-grained,
-        e.g. per-layer) remat internally, to avoid double rematerialization.
+      kv_caches_stacked: Optional pytree whose leaves have shape [num_layers,
+        ...]. When provided, the i-th slice is passed as `kv_cache=` to layer i
+        and the updated caches are returned as a third element of the tuple.
+      skip_block_remat: When True, do not wrap the scanned body in
+        jax.checkpoint. Used when the scanned module already applies its own
+        (finer-grained, e.g. per-layer) remat internally, to avoid double
+        rematerialization.
       unroll: Number of scan iterations to unroll into straight-line code
         (forwarded to jax.lax.scan). unroll >= length fully unrolls the loop.
-      metadata_axis_name: The name of the scan axis used during layer initialization.
-        This must perfectly match the string passed to `_create_scanned_layers`
-        (e.g., "layers", "scanned_blocks") to prevent strict JAX `pjit` PyTree
-        metadata mismatch errors when using custom `nnx.Variable` types (like `MoEBiasVar`).
-      **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
+      metadata_axis_name: The name of the scan axis used during layer
+        initialization. This must perfectly match the string passed to
+        `_create_scanned_layers` (e.g., "layers", "scanned_blocks") to prevent
+        strict JAX `pjit` PyTree metadata mismatch errors when using custom
+        `nnx.Variable` types (like `MoEBiasVar`).
+      forced_routed_experts_scanned: Optional `[length, ...]` array, one slice
+        per scan iteration, threaded through jax.lax.scan's xs alongside
+        params/state and passed to each layer as `forced_routed_experts=`.
+      **kwargs: Keyword args forwarded to the layer (filtered by the layer
+        signature).
 
     Returns:
       (final_carry, updated_layers) when kv_caches_stacked is None.
@@ -997,6 +1092,7 @@ class NNXDecoder(nnx.Module):
     updated_graphdef = [graphdef]
 
     use_kv = kv_caches_stacked is not None
+    use_forced_routing = forced_routed_experts_scanned is not None
     is_index_share = getattr(self.config, "use_index_share", False)
     cached_indexer_state = kwargs.get("cached_indexer_state", None)
     start_layer_idx = kwargs.get("start_layer_idx", 0)
@@ -1020,9 +1116,14 @@ class NNXDecoder(nnx.Module):
       # Unpack the sliced variables for THIS layer
       if use_kv:
         current_params, current_state, kv_cache_layer = scanned_vars
+        forced_routed_experts_layer = None
+      elif use_forced_routing:
+        current_params, current_state, forced_routed_experts_layer = scanned_vars
+        kv_cache_layer = None
       else:
         current_params, current_state = scanned_vars
         kv_cache_layer = None
+        forced_routed_experts_layer = None
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(
@@ -1032,10 +1133,12 @@ class NNXDecoder(nnx.Module):
 
       layer = nnx.merge(graphdef, current_params, current_state)
 
-      # Build call kwargs, injecting per-layer kv_cache when available
+      # Build call kwargs, injecting per-layer kv_cache / forced routing when available
       call_kwargs = dict(valid_kwargs)
       if kv_cache_layer is not None:
         call_kwargs["kv_cache"] = kv_cache_layer
+      if use_forced_routing:
+        call_kwargs["forced_routed_experts"] = forced_routed_experts_layer
 
       if is_index_share:
         y_in, current_cached_indexer, lyr_idx = carry
@@ -1121,7 +1224,11 @@ class NNXDecoder(nnx.Module):
       params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
       state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
 
-      scan_res_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, init_scan_carry, (params, state), unroll=unroll)
+      if use_forced_routing:
+        scan_xs = (params, state, forced_routed_experts_scanned)
+      else:
+        scan_xs = (params, state)
+      scan_res_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, init_scan_carry, scan_xs, unroll=unroll)
       returned_kv_stacked = None
 
       if is_index_share:
@@ -1133,8 +1240,6 @@ class NNXDecoder(nnx.Module):
       # Move the scan axis to each variable's param_scan_axis and restore its name
       # in the sharding metadata. jax.lax.scan emits it at position 0.
       scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, metadata_axis_name)
-
-      returned_kv_stacked = None
 
     if dynamic_graph_init:
       # If graph changed, we need to merge with the new graphdef.
@@ -1384,14 +1489,24 @@ class NNXDecoder(nnx.Module):
       deterministic,
       model_mode,
       multimodal_input=None,
+      decoder_input_embeddings=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
+
     cfg = self.config
 
-    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    # vLLM passes token IDs for text-only requests, but passes complete, premerged
+    # text and multimodal embeddings for multimodal requests. The latter enter
+    # through `decoder_input_embeddings` to avoid embedding and merging them again.
+    y = (
+        decoder_input_embeddings
+        if decoder_input_embeddings is not None
+        else shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    )
 
-    # Merge the image embeddings with the text embeddings for multimodal models
-    if multimodal_input is not None:
+    # Precomputed embeddings are complete (including any multimodal replacements),
+    # so only merge modality embeddings when token embeddings were created here.
+    if decoder_input_embeddings is None and multimodal_input is not None:
       image_embeddings = multimodal_input.image_embeddings
       bidirectional_mask = multimodal_input.bidirectional_mask
       image_masks = multimodal_input.image_masks
@@ -1418,6 +1533,8 @@ class NNXDecoder(nnx.Module):
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
+            "maxtext-omni-gemma3-qwen3",
+            "cosmos3-nano-reasoner",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1436,6 +1553,7 @@ class NNXDecoder(nnx.Module):
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
+            "cosmos3-nano-reasoner",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1526,13 +1644,23 @@ class NNXDecoder(nnx.Module):
     Bridges NNX to Linen by creating a dictionary that mimics the exact variable
     structure expected by `deepseek_batchsplit.fetch_weights`.
     """
-    state_dict = nnx.state(moe_stack, nnx.Param)
+    state_dict = nnx.state(moe_stack, (nnx.Param, moe.MoEBiasVar))
+    moe_block = state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0"))
+
+    # When param_scan_axis != 0, nnx.Param variables are stacked at param_scan_axis,
+    # but MoEBiasVar (being non-Param) was stacked at axis 0.
+    # Align MoEBiasVar's layer dimension with param_scan_axis for batchsplit.
+    if self.config.routed_bias and self.config.param_scan_axis != 0 and moe_block is not None:
+      bias_var = moe_block["MoeBlock_0"]["gate"]["bias"]
+      bias_val = getattr(bias_var, "value", bias_var)
+      if hasattr(bias_val, "ndim") and bias_val.ndim >= 2:
+        moe_block["MoeBlock_0"]["gate"]["bias"] = jnp.swapaxes(bias_val, 0, self.config.param_scan_axis)
 
     return {
         "pre_self_attention_layer_norm": state_dict["pre_self_attention_layer_norm"],
         "post_self_attention_layer_norm": state_dict["post_self_attention_layer_norm"],
         "self_attention": state_dict["self_attention"],
-        "DeepSeekMoeBlock_0": state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0")),
+        "DeepSeekMoeBlock_0": moe_block,
     }
 
   def _find_next_boundary(self, current_idx, end_idx, engram_indices):
@@ -1647,9 +1775,38 @@ class NNXDecoder(nnx.Module):
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
       multimodal_input: None | MultimodalInput = None,
+      forced_routed_experts: jnp.ndarray | None = None,
+      decoder_input_embeddings=None,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
+
+    if forced_routed_experts is not None:
+      check_forced_routing_support(cfg.decoder_block)
+      if getattr(cfg, "mtp_num_layers", 0) > 0:
+        # The MTP side-car reuses the decoder layer blueprint but is invoked
+        # separately, so it would re-route freely while the main stack replays.
+        raise NotImplementedError(
+            "Forced routing (router replay) is not supported with multi-token"
+            f" prediction; got mtp_num_layers={cfg.mtp_num_layers}."
+        )
+      if getattr(cfg, "using_pipeline_parallelism", False):
+        # The pipeline path forwards layer_kwargs to every layer unchanged, so
+        # forced_routed_experts would be broadcast instead of sliced per layer.
+        raise NotImplementedError(
+            "Forced routing (router replay) is not supported with pipeline"
+            " parallelism; the pipeline path cannot slice forced_routed_experts"
+            " per layer."
+        )
+      if cfg.scan_layers and cfg.decoder_block == DecoderBlockType.GEMMA4:
+        # _apply_gemma4_scanned_blocks is a triple-nested scan that doesn't
+        # thread forced_routed_experts; the kwarg filter would silently strip it.
+        raise NotImplementedError(
+            "Forced routing with scan_layers=True is not yet implemented for"
+            " GEMMA4 (its scanned path is structurally different from the other"
+            " supported architectures); set scan_layers=False to use forced"
+            " routing with Gemma4."
+        )
 
     policy = self.get_remat_policy()
 
@@ -1661,6 +1818,7 @@ class NNXDecoder(nnx.Module):
         deterministic,
         model_mode,
         multimodal_input=multimodal_input,
+        decoder_input_embeddings=decoder_input_embeddings,
     )
 
     mhc_reduce = None
@@ -1693,6 +1851,9 @@ class NNXDecoder(nnx.Module):
 
     if cfg.engram_layers and decoder_input_tokens is not None:
       layer_kwargs["decoder_input_tokens"] = decoder_input_tokens
+
+    if forced_routed_experts is not None:
+      layer_kwargs["forced_routed_experts"] = forced_routed_experts
 
     if getattr(cfg, "using_pipeline_parallelism", False):
       logical_partition_spec = (
@@ -1937,8 +2098,43 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
+        elif self.is_qwen3_next:
+          y = self._apply_qwen3_next_scanned_blocks(
+              y,
+              layer_args,
+              layer_kwargs,
+              kv_caches=kv_caches,
+          )
         else:
-          scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
+          cycle_interval = cfg.inhomogeneous_layer_cycle_interval
+          scan_length = int(cfg.num_decoder_layers / cycle_interval)
+          forced_routed_experts_scanned = None
+          if forced_routed_experts is not None:
+            if kv_caches is not None:
+              # The kv-cache branch below cannot take scan xs, so the routing
+              # would be broadcast whole to every layer instead of sliced.
+              raise NotImplementedError(
+                  "Forced routing is not supported together with"
+                  " externally-managed (vLLM) kv_caches in scanned layers."
+              )
+            # Only the per-layer slices may reach the layers from here on.
+            layer_kwargs.pop("forced_routed_experts", None)
+            forced_routed_experts_scanned = reshape_forced_routed_experts_for_scan(
+                forced_routed_experts,
+                num_layers=cfg.num_decoder_layers,
+                scan_length=scan_length,
+                layers_per_cycle=cycle_interval,
+            )
+            if cfg.decoder_block == DecoderBlockType.MIXTRAL:
+              # Mixtral has no ScannableBlock: one scan iteration is one layer,
+              # so drop the (size-1) per-cycle axis the layer would slice.
+              if cycle_interval != 1:
+                raise NotImplementedError(
+                    "Forced routing with scanned MIXTRAL requires"
+                    " inhomogeneous_layer_cycle_interval == 1; got"
+                    f" {cycle_interval}."
+                )
+              forced_routed_experts_scanned = jnp.squeeze(forced_routed_experts_scanned, axis=1)
           if kv_caches is not None:
             # Pass the kv_caches list directly to avoid copying in jnp.stack,
             # which breaks vLLM PagedAttention in-place memory updates.
@@ -1958,20 +2154,21 @@ class NNXDecoder(nnx.Module):
                 y,
                 *layer_args,
                 length=scan_length,
+                forced_routed_experts_scanned=forced_routed_experts_scanned,
                 **layer_kwargs,
             )
       else:
         prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
         dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
 
-        def pure_layer_fn(graphdef_in, state_in, y_in, kv_in):
+        def pure_layer_fn(graphdef_in, state_in, y_in, kv_in, valid_kwargs):
           if cfg.parameter_memory_host_offload:
             state_in = jax.tree.map(
                 lambda x: jax.device_put(x, max_utils.device_space()),
                 state_in,
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
-          out = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
+          out = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
           if getattr(cfg, "use_index_share", False):
             out_y, out_kv, out_indexer_cache = out
           else:
@@ -2039,10 +2236,36 @@ class NNXDecoder(nnx.Module):
           if getattr(cfg, "use_index_share", False):
             layer_kwargs["cached_indexer_state"] = cached_indexer_state
 
+          current_kwargs = dict(layer_kwargs)
+
+          routed_experts = current_kwargs.pop("forced_routed_experts", None)
+          if routed_experts is not None:
+            # Every supported decoder_block is homogeneous-MoE, so the layer
+            # axis is just `lyr`.
+            if routed_experts.ndim not in (3, 4):
+              raise ValueError(
+                  "forced_routed_experts must be [batch, seq, top_k] (3D,"
+                  " broadcast to every layer) or [batch, seq, num_layers,"
+                  f" top_k] (4D, per-layer); got ndim={routed_experts.ndim}"
+                  f" with shape {routed_experts.shape}."
+              )
+            if routed_experts.ndim == 4 and routed_experts.shape[2] != cfg.num_decoder_layers:
+              # jnp clamps an out-of-range static index, so a short layer axis
+              # would silently replay the last slice on every later layer.
+              raise ValueError(
+                  "forced_routed_experts layer axis must equal"
+                  f" num_decoder_layers ({cfg.num_decoder_layers}); got"
+                  f" {routed_experts.shape[2]} from shape"
+                  f" {routed_experts.shape}."
+              )
+            current_kwargs["forced_routed_experts"] = (
+                routed_experts[:, :, lyr, :] if routed_experts.ndim == 4 else routed_experts
+            )
+
           if cfg.remat_policy != "none":
-            res = checkpointed_fn(graphdef, state, y, kv_cache)
+            res = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
           else:
-            res = pure_layer_fn(graphdef, state, y, kv_cache)
+            res = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
 
           if getattr(cfg, "use_index_share", False):
             y, kv_cache, cached_indexer_state, new_state, new_graphdef = res
@@ -2117,6 +2340,34 @@ class NNXDecoder(nnx.Module):
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
+    expert_indices = None
+    try:
+
+      def _path_sort_key(path):
+        key = []
+        for part in path:
+          nums = re.findall(r"\d+", str(part))
+          key.append(int(nums[0]) if nums else str(part))
+        return tuple(key)
+
+      intermediates = nnx.state(self, nnx.Intermediate)
+      flat_items = [
+          (path, val.value if hasattr(val, "value") else val)
+          for path, val in intermediates.flat_state()
+          if path and str(path[-1]) == "selected_experts"
+      ]
+      flat_items.sort(key=lambda item: _path_sort_key(item[0]))
+      expert_indices_list = [v for _, v in flat_items]
+      if expert_indices_list:
+        # Scanned blocks already carry a leading layer axis (3D); sequential
+        # layers are 2D and need that axis added before concatenating.
+        expert_indices_list = [v if v.ndim == 3 else jnp.expand_dims(v, axis=0) for v in expert_indices_list]
+        expert_indices = jnp.concatenate(expert_indices_list, axis=0)
+    except Exception:  # pylint: disable=broad-exception-caught
+      expert_indices = None
+
+    if expert_indices is not None:
+      return logits, hidden_state, kv_caches, expert_indices
     return logits, hidden_state, kv_caches
 
   def _apply_deepseek4_scanned_blocks(
@@ -2235,6 +2486,53 @@ class NNXDecoder(nnx.Module):
 
     return y
 
+  def _apply_qwen3_next_scanned_blocks(self, y, layer_args, layer_kwargs, kv_caches=None):
+    """Applies the Qwen3-Next scanned blocks.
+
+    Qwen3NextScannableBlock rematerializes its own sub-layers (a scan over the
+    linear-attention layers plus a trip-count-one scan over the full-attention
+    layer), so block-level remat is skipped here to avoid rematerializing twice.
+    This holds for the external-KV-cache path too, hence the regrouping below
+    rather than falling back to the generic (block-rematerialized) branch.
+
+    External (vLLM) caches arrive as a flat list with one entry per decoder
+    layer, but the scan runs over blocks, so they are grouped into per-block
+    tuples before the scan and written back to the flat list afterwards, as in
+    _apply_gemma4_scanned_blocks.
+
+    Layers past the last whole block are applied afterwards, in a short
+    remainder block, so a layer count that is not a multiple of the cycle keeps
+    all its layers.
+    """
+    cfg = self.config
+    block_length = cfg.inhomogeneous_layer_cycle_interval
+    scan_length = cfg.num_decoder_layers // block_length
+    if scan_length > 0:
+      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
+      y, self.layers, _ = self._apply_layers_sequentially(
+          self.layers,
+          y,
+          *layer_args,
+          length=scan_length,
+          kv_caches_stacked=grouped_kv_caches,
+          skip_block_remat=True,
+          **layer_kwargs,
+      )
+      maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, block_length, stacked=False)
+
+    num_remaining_layers = cfg.num_decoder_layers % block_length
+    if num_remaining_layers > 0:
+      y = self._apply_remainder_block(
+          self.layers_remainder,
+          y,
+          layer_args,
+          layer_kwargs,
+          kv_caches=kv_caches,
+          start_idx=scan_length * block_length,
+          num_remaining_layers=num_remaining_layers,
+      )
+    return y
+
   def _apply_gemma4_scanned_blocks(
       self,
       y,
@@ -2277,52 +2575,87 @@ class NNXDecoder(nnx.Module):
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
     if num_remaining_layers > 0:
-      policy = self.get_remat_policy()
-      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+      y = self._apply_remainder_block(
+          self.layers_remainder,
+          y,
+          layer_args,
+          layer_kwargs,
+          kv_caches=kv_caches,
+          start_idx=scan_length * attention_pattern_length,
+          num_remaining_layers=num_remaining_layers,
+      )
 
-      remainder_kv = None
-      if kv_caches is not None:
-        start_idx = scan_length * attention_pattern_length
-        remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+    return y
 
-      if cfg.use_qwix_quantization or cfg.lora.lora_weight_qtype:
+  def _apply_remainder_block(
+      self,
+      block,
+      y,
+      layer_args,
+      layer_kwargs,
+      kv_caches,
+      start_idx,
+      num_remaining_layers,
+  ):
+    """Applies the trailing scannable block holding the layers left over by the main scan.
+
+    The outer scan runs over whole blocks, so `num_decoder_layers %
+    block_length` layers are left over. They live in a single short block,
+    applied here behind one block-level remat boundary. The main scan skips
+    block-level remat, because there its blocks rematerialize their own
+    sub-layers; this one runs once, so a coarse boundary costs nothing.
+
+    Args:
+      block: The remainder block module; updated in place with its new state.
+      y: Input activations.
+      layer_args: Positional arguments forwarded to the block.
+      layer_kwargs: Keyword arguments forwarded to the block.
+      kv_caches: Flat per-layer external cache list, mutated in place, or None.
+      start_idx: Index of the first remainder layer in `kv_caches`.
+      num_remaining_layers: How many layers the remainder block covers.
+
+    Returns:
+      The output activations.
+    """
+    cfg = self.config
+    remainder_kv = None
+    if kv_caches is not None:
+      remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+
+    def split_output(out_res):
+      if isinstance(out_res, tuple):
+        return out_res[0], (out_res[1] if len(out_res) > 1 else None)
+      return out_res, None
+
+    if cfg.use_qwix_quantization or cfg.lora.lora_weight_qtype:
+      call_kwargs = dict(layer_kwargs)
+      if remainder_kv is not None:
+        call_kwargs["kv_cache"] = remainder_kv
+      y, updated_remainder_kv = split_output(block(y, *layer_args, **call_kwargs))
+    else:
+
+      def pure_block_fn(graphdef, state_in, y_in, kv_in):
+        merged_layer = nnx.merge(graphdef, state_in)
         call_kwargs = dict(layer_kwargs)
-        if remainder_kv is not None:
-          call_kwargs["kv_cache"] = remainder_kv
-        out_res = self.layers_remainder(y, *layer_args, **call_kwargs)
-        if isinstance(out_res, tuple):
-          y = out_res[0]
-          updated_remainder_kv = out_res[1] if len(out_res) > 1 else None
-        else:
-          y = out_res
-          updated_remainder_kv = None
-      else:
+        if kv_in is not None:
+          call_kwargs["kv_cache"] = kv_in
+        out_y, out_kv = split_output(merged_layer(y_in, *layer_args, **call_kwargs))
+        nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
+        return out_y, out_kv, nnx.state(merged_layer)
 
-        def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
-          merged_layer = nnx.merge(graphdef, state_in)
-          call_kwargs = dict(layer_kwargs)
-          if kv_in is not None:
-            call_kwargs["kv_cache"] = kv_in
-          out_res = merged_layer(y_in, *layer_args, **call_kwargs)
-          if isinstance(out_res, tuple):
-            out_y = out_res[0]
-            out_kv = out_res[1] if len(out_res) > 1 else None
-          else:
-            out_y = out_res
-            out_kv = None
-          nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
-          return out_y, out_kv, nnx.state(merged_layer)
+      checkpointed_block_fn = jax.checkpoint(
+          pure_block_fn,
+          policy=self.get_remat_policy(),
+          prevent_cse=maxtext_utils.should_prevent_cse_in_remat(cfg),
+      )
 
-        checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
+      graphdef, state = nnx.split(block)
+      y, updated_remainder_kv, new_state = checkpointed_block_fn(graphdef, state, y, remainder_kv)
+      nnx.update(block, new_state)
 
-        graphdef, state = nnx.split(self.layers_remainder)
-        y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
-        nnx.update(self.layers_remainder, new_state)
-
-      if kv_caches is not None and updated_remainder_kv is not None:
-        start_idx = scan_length * attention_pattern_length
-        for offset, updated_item in enumerate(updated_remainder_kv):
-          kv_caches[start_idx + offset] = updated_item
+    if kv_caches is not None and updated_remainder_kv is not None:
+      for offset, updated_item in enumerate(updated_remainder_kv):
+        kv_caches[start_idx + offset] = updated_item
 
     return y
 

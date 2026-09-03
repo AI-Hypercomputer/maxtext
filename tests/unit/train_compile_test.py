@@ -1190,7 +1190,8 @@ class TrainCompile(parameterized.TestCase):
             "base_emb_dim=256",
             "base_mlp_dim=256",
             "base_num_decoder_layers=2",
-            "ici_data_parallelism=4",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
             "shard_optimizer_over_data=true",
             "shard_mode=explicit",
         )

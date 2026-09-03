@@ -90,6 +90,10 @@ def _config(**overrides) -> pyconfig.HyperParameters:
       "learning_rate=1e-4",
       "micro_batch_size_to_train_on=2",
       "max_target_length=64",
+      # The KL assertion compares log-probs from two code paths -- tunix's
+      # compute_per_token_logps and the engine's sharded forward -- which at bf16 disagree by
+      # ~2e-2 near -12.6, and low_var_kl squares that into a KL of ~1e-4. fp32 fixes it.
+      "matmul_precision=highest",
   ]
   argv.extend(f"{k}={v}" for k, v in overrides.items())
   return pyconfig.initialize(argv)
@@ -171,6 +175,13 @@ class MaxTextEngineGrpoLossTest(absltest.TestCase):
   def test_grpo_loss_drives_a_training_step(self):
     cfg = _config()
     mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    # The batch must divide data x fsdp, which only the mesh knows. A batch those devices
+    # cannot split is padded by XLA into all-zero sequences that mask themselves out of
+    # attention, returning NaN on the pad token's embedding row under a finite loss. Splash
+    # asserts on this ratio ("Batch dimension should be shardable"); dot_product does not.
+    batch = int(mesh.shape["data"] * mesh.shape["fsdp"])
+    if cfg.micro_batch_size_to_train_on != batch:
+      cfg = _config(micro_batch_size_to_train_on=batch)
     algo_config = _GrpoConfig()
 
     engine = maxtext_engine.MaxTextTrainingEngine(
@@ -197,7 +208,7 @@ class MaxTextEngineGrpoLossTest(absltest.TestCase):
     )
     self.assertIs(returned, engine)
 
-    payload = _train_example(engine.model, algo_config)
+    payload = _train_example(engine.model, algo_config, batch=batch)
     before = _param_leaves(engine.model)
 
     engine.fwd_bwd(payload)

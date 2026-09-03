@@ -47,6 +47,9 @@ from maxtext.integration.vllm.weight_converter import (
     MODEL_TO_CONVERSION_RULES,
 )
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
+from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
+from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
+
 
 # Sentinel distinguishing "this model has no entry" from "this model has an
 # entry whose value is None", which means direct-sync-only.
@@ -59,12 +62,8 @@ def _rule_table_for(model_name: str):
   Returns `None` for models supported only on the direct path, and
   `_NO_RULE_TABLE` for models this converter does not handle at all.
   """
-  if model_name.startswith("qwen3.5-"):
-    return MODEL_TO_CONVERSION_RULES["qwen35_moe"]
   if model_name == "qwen3-0.6b":
     return MODEL_TO_CONVERSION_RULES["qwen3"]
-  if model_name.startswith("qwen3-"):
-    return MODEL_TO_CONVERSION_RULES["qwen3_moe"]
   return _NO_RULE_TABLE
 
 
@@ -79,9 +78,7 @@ def _create_model_converter(
   """Instantiate the converter for a MaxText model name."""
   tp = config.rollout_tensor_parallelism
   if not use_hf_mapping and not use_weight_converter:
-    # Default MaxText-to-MaxText sync uses legacy transfer_state_directly unless explicitly opted in
-    if model_name.startswith("gemma4"):
-      return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+    # Default MaxText-to-MaxText sync uses direct transfer_state_directly with unroll
     return None
 
   rule_table = _rule_table_for(model_name)
@@ -101,6 +98,10 @@ def _create_model_converter(
 
   if model_name.startswith("gemma4"):
     return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+  if model_name.startswith("qwen3.5"):
+    return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
+  if model_name.startswith("qwen3-30"):
+    return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
 
   # For all other models, return None to fallback to transfer_state_with_mappings()
 
@@ -451,6 +452,7 @@ class MaxTextVllmSampler(VllmSampler):
   ):
     super().__init__(tokenizer=tokenizer, config=config)
     self._converter = converter
+    self.converter = converter
     self._direct_maxtext_sync = direct_maxtext_sync
     self._scan_axis = scan_axis
     self._layer_pattern_length = layer_pattern_length

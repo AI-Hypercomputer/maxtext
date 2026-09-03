@@ -1402,100 +1402,81 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
   }
 
   if scan_layers:
-    # 2. Scan over block cycles
-    for block_idx in range(layer_cycle_interval):
-      hf_indices = list(range(block_idx, num_main_layers, layer_cycle_interval))
-      prefix = f"params-decoder-layers-layer_{block_idx}"
+    # 2. Scanned blocks. One block covers a single period of the hybrid attention
+    # pattern: `layer_cycle_interval - 1` linear-attention (GatedDeltaNet) layers
+    # run as an inner scan, then one full-attention layer. The resulting params are:
+    #   layers-local_layers-*  -> nested [block][local]  (doubly scanned)
+    #   layers-global_layer-*  -> flat [block]           (block scan only; the
+    #     length-1 _scan_global_layer scan is a runtime memory boundary, not a
+    #     param stack)
+    # Routed-expert weights carry an additional leading expert axis, so they are
+    # nested one level deeper: [expert][block][local] and [expert][block].
+    # Qwen3NextScannableBlock requires the full-attention layer to be last in the
+    # period, so the local positions are 0..cycle-2 and the global position is
+    # cycle-1.
+    num_blocks = num_main_layers // layer_cycle_interval
+    local_positions = list(range(layer_cycle_interval - 1))
+    global_position = layer_cycle_interval - 1
 
-      # Layer norms
-      mapping[f"{prefix}-input_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
-          f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
-      ]  # pyrefly: ignore[bad-assignment]
-      mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
-          f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
+    def hf_layer(block_idx, position, suffix):
+      return f"model.layers.{block_idx * layer_cycle_interval + position}.{suffix}"
+
+    # (maxtext subkey, hf suffix) pairs shared by both the local and global layers.
+    shared_specs = [
+        ("input_layernorm-scale", "input_layernorm.weight"),
+        ("post_attention_layernorm-scale", "post_attention_layernorm.weight"),
+        ("mlp-routed_experts-gate-kernel", "mlp.gate.weight"),
+        ("mlp-shared_expert-wi_0-kernel", "mlp.shared_expert.gate_proj.weight"),
+        ("mlp-shared_expert-wi_1-kernel", "mlp.shared_expert.up_proj.weight"),
+        ("mlp-shared_expert-wo-kernel", "mlp.shared_expert.down_proj.weight"),
+        ("mlp-shared_expert_gate-kernel", "mlp.shared_expert_gate.weight"),
+    ]
+    # Linear (GatedDeltaNet) attention: only ever on the local layers.
+    local_specs = shared_specs + [
+        ("attention-in_proj_qkvz-kernel", "linear_attn.in_proj_qkvz.weight"),
+        ("attention-in_proj_ba-kernel", "linear_attn.in_proj_ba.weight"),
+        ("attention-conv1d-kernel", "linear_attn.conv1d.weight"),
+        ("attention-A_log", "linear_attn.A_log"),
+        ("attention-dt_bias", "linear_attn.dt_bias"),
+        ("attention-norm-rms_norm-scale", "linear_attn.norm.weight"),
+        ("attention-out_proj-kernel", "linear_attn.out_proj.weight"),
+    ]
+    # Full attention: only ever on the global layer.
+    global_specs = shared_specs + [
+        ("attention-attention-query-kernel", "self_attn.q_proj.weight"),
+        ("attention-attention-key-kernel", "self_attn.k_proj.weight"),
+        ("attention-attention-value-kernel", "self_attn.v_proj.weight"),
+        ("attention-attention-out-kernel", "self_attn.o_proj.weight"),
+        ("attention-attention-query_norm-scale", "self_attn.q_norm.weight"),
+        ("attention-attention-key_norm-scale", "self_attn.k_norm.weight"),
+    ]
+    expert_specs = [
+        ("mlp-routed_experts-wi_0", "gate_proj.weight"),
+        ("mlp-routed_experts-wi_1", "up_proj.weight"),
+        ("mlp-routed_experts-wo", "down_proj.weight"),
+    ]
+
+    local_prefix = "params-decoder-layers-local_layers"
+    for subkey, suffix in local_specs:
+      mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          [hf_layer(b, p, suffix) for p in local_positions] for b in range(num_blocks)
+      ]
+    for subkey, suffix in expert_specs:
+      mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          [[hf_layer(b, p, f"mlp.experts.{e}.{suffix}") for p in local_positions] for b in range(num_blocks)]
+          for e in range(num_experts)
       ]
 
-      # Handle Interleaved Attention (Linear vs Full)
-      is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
-
-      if is_full_attention_layer:
-        mapping.update(  # pyrefly: ignore[no-matching-overload]
-            {
-                f"{prefix}-attention-attention-query-kernel": [
-                    f"model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-key-kernel": [
-                    f"model.layers.{i}.self_attn.k_proj.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-value-kernel": [
-                    f"model.layers.{i}.self_attn.v_proj.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-out-kernel": [
-                    f"model.layers.{i}.self_attn.o_proj.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-query_norm-scale": [
-                    f"model.layers.{i}.self_attn.q_norm.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-attention-key_norm-scale": [
-                    f"model.layers.{i}.self_attn.k_norm.weight" for i in hf_indices
-                ],
-            }
-        )
-      else:
-        # Linear/Hybrid Attention Block
-        mapping.update(  # pyrefly: ignore[no-matching-overload]
-            {
-                f"{prefix}-attention-in_proj_qkvz-kernel": [
-                    f"model.layers.{i}.linear_attn.in_proj_qkvz.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-in_proj_ba-kernel": [
-                    f"model.layers.{i}.linear_attn.in_proj_ba.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-conv1d-kernel": [f"model.layers.{i}.linear_attn.conv1d.weight" for i in hf_indices],
-                f"{prefix}-attention-A_log": [f"model.layers.{i}.linear_attn.A_log" for i in hf_indices],
-                f"{prefix}-attention-dt_bias": [f"model.layers.{i}.linear_attn.dt_bias" for i in hf_indices],
-                f"{prefix}-attention-norm-rms_norm-scale": [
-                    f"model.layers.{i}.linear_attn.norm.weight" for i in hf_indices
-                ],
-                f"{prefix}-attention-out_proj-kernel": [
-                    f"model.layers.{i}.linear_attn.out_proj.weight" for i in hf_indices
-                ],
-            }
-        )
-
-      # 3. Handle MLP: Gates and Shared Experts
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-mlp-routed_experts-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in hf_indices],
-              f"{prefix}-mlp-shared_expert-wi_0-kernel": [
-                  f"model.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wi_1-kernel": [
-                  f"model.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wo-kernel": [
-                  f"model.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert_gate-kernel": [
-                  f"model.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices
-              ],
-          }
-      )
-
-      # 4. Handle MoE Routed Experts
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-mlp-routed_experts-wi_0": [
-                  [f"model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for i in hf_indices] for e in range(num_experts)
-              ],
-              f"{prefix}-mlp-routed_experts-wi_1": [
-                  [f"model.layers.{i}.mlp.experts.{e}.up_proj.weight" for i in hf_indices] for e in range(num_experts)
-              ],
-              f"{prefix}-mlp-routed_experts-wo": [
-                  [f"model.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in hf_indices] for e in range(num_experts)
-              ],
-          }
-      )
+    global_prefix = "params-decoder-layers-global_layer"
+    for subkey, suffix in global_specs:
+      mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          hf_layer(b, global_position, suffix) for b in range(num_blocks)
+      ]
+    for subkey, suffix in expert_specs:
+      mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          [hf_layer(b, global_position, f"mlp.experts.{e}.{suffix}") for b in range(num_blocks)]
+          for e in range(num_experts)
+      ]
   else:
     # Unscanned layer mapping
     for i in range(num_main_layers):
@@ -1589,17 +1570,21 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
 
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
   num_main_layers = config["num_hidden_layers"]
-  loop_indices = range(layer_cycle_interval) if scan_layers else range(num_main_layers)
+  # Scanned blocks expose two prefixes -- the stacked local (linear-attention) layers
+  # and the single global (full-attention) layer -- rather than one prefix per position
+  # in the cycle. Unscanned models keep one prefix per decoder layer.
+  if scan_layers:
+    layer_prefixes = [
+        ("params-decoder-layers-local_layers", False),
+        ("params-decoder-layers-global_layer", True),
+    ]
+  else:
+    layer_prefixes = [
+        (f"params-decoder-layers_{i}", (i % layer_cycle_interval + 1) % layer_cycle_interval == 0)
+        for i in range(num_main_layers)
+    ]
 
-  for i in loop_indices:
-    if scan_layers:
-      prefix = f"params-decoder-layers-layer_{i}"
-      block_idx = i
-    else:
-      prefix = f"params-decoder-layers_{i}"
-      block_idx = i % layer_cycle_interval
-    is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
-
+  for prefix, is_full_attention_layer in layer_prefixes:
     if is_full_attention_layer:
       for key in ["query", "key", "value", "out"]:
         hooks[f"{prefix}-attention-attention-{key}-kernel"] = reshape_kernel  # pyrefly: ignore[bad-assignment]
@@ -4008,67 +3993,115 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       mapping[composite_key] = f"model.language_model.layers.{i}.mlp.experts.gate_up_proj"
       mapping[key_wo] = f"model.language_model.layers.{i}.mlp.experts.down_proj"
 
-  vision_config = config["vision_config"]
-  n_vision_layers = vision_config["depth"]
+  if maxtext_config.use_multimodal:
+    vision_config = config["vision_config"]
+    n_vision_layers = vision_config["depth"]
 
-  mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-kernel"] = "model.visual.patch_embed.proj.weight"
-  mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-bias"] = "model.visual.patch_embed.proj.bias"
+    mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-kernel"] = (
+        "model.visual.patch_embed.proj.weight"
+    )
+    mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-bias"] = "model.visual.patch_embed.proj.bias"
 
-  mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-pos_embed_interpolate-pos_embed"] = (
-      "model.visual.pos_embed.weight"
-  )
+    mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-pos_embed_interpolate-pos_embed"] = (
+        "model.visual.pos_embed.weight"
+    )
 
-  for i in range(n_vision_layers):
-    prefix = f"params-vision_encoder-Qwen3VLVisionEncoder_0-blocks_{i}"
-    hf_prefix = f"model.visual.blocks.{i}"
+    for i in range(n_vision_layers):
+      prefix = f"params-vision_encoder-Qwen3VLVisionEncoder_0-blocks_{i}"
+      hf_prefix = f"model.visual.blocks.{i}"
 
-    mapping[f"{prefix}-ln1-scale"] = f"{hf_prefix}.norm1.weight"
-    mapping[f"{prefix}-ln1-bias"] = f"{hf_prefix}.norm1.bias"
-    mapping[f"{prefix}-ln2-scale"] = f"{hf_prefix}.norm2.weight"
-    mapping[f"{prefix}-ln2-bias"] = f"{hf_prefix}.norm2.bias"
+      mapping[f"{prefix}-ln1-scale"] = f"{hf_prefix}.norm1.weight"
+      mapping[f"{prefix}-ln1-bias"] = f"{hf_prefix}.norm1.bias"
+      mapping[f"{prefix}-ln2-scale"] = f"{hf_prefix}.norm2.weight"
+      mapping[f"{prefix}-ln2-bias"] = f"{hf_prefix}.norm2.bias"
 
-    mapping[
-        (
-            f"{prefix}-attn-attn-query-kernel",
-            f"{prefix}-attn-attn-key-kernel",
-            f"{prefix}-attn-attn-value-kernel",
-        )
-    ] = f"{hf_prefix}.attn.qkv.weight"
-    mapping[
-        (
-            f"{prefix}-attn-attn-query-bias",
-            f"{prefix}-attn-attn-key-bias",
-            f"{prefix}-attn-attn-value-bias",
-        )
-    ] = f"{hf_prefix}.attn.qkv.bias"
-    mapping[f"{prefix}-attn-attn-out-kernel"] = f"{hf_prefix}.attn.proj.weight"
-    mapping[f"{prefix}-attn-attn-out-bias"] = f"{hf_prefix}.attn.proj.bias"
+      mapping[
+          (
+              f"{prefix}-attn-attn-query-kernel",
+              f"{prefix}-attn-attn-key-kernel",
+              f"{prefix}-attn-attn-value-kernel",
+          )
+      ] = f"{hf_prefix}.attn.qkv.weight"
+      mapping[
+          (
+              f"{prefix}-attn-attn-query-bias",
+              f"{prefix}-attn-attn-key-bias",
+              f"{prefix}-attn-attn-value-bias",
+          )
+      ] = f"{hf_prefix}.attn.qkv.bias"
+      mapping[f"{prefix}-attn-attn-out-kernel"] = f"{hf_prefix}.attn.proj.weight"
+      mapping[f"{prefix}-attn-attn-out-bias"] = f"{hf_prefix}.attn.proj.bias"
 
-    mapping[f"{prefix}-mlp-kernel"] = f"{hf_prefix}.mlp.linear_fc1.weight"
-    mapping[f"{prefix}-mlp-bias"] = f"{hf_prefix}.mlp.linear_fc1.bias"
-    mapping[f"{prefix}-mlp_out-kernel"] = f"{hf_prefix}.mlp.linear_fc2.weight"
-    mapping[f"{prefix}-mlp_out-bias"] = f"{hf_prefix}.mlp.linear_fc2.bias"
+      mapping[f"{prefix}-mlp-kernel"] = f"{hf_prefix}.mlp.linear_fc1.weight"
+      mapping[f"{prefix}-mlp-bias"] = f"{hf_prefix}.mlp.linear_fc1.bias"
+      mapping[f"{prefix}-mlp_out-kernel"] = f"{hf_prefix}.mlp.linear_fc2.weight"
+      mapping[f"{prefix}-mlp_out-bias"] = f"{hf_prefix}.mlp.linear_fc2.bias"
 
-  deepstack_indexes = vision_config.get("deepstack_visual_indexes", [5, 11, 17])
-  for merger_idx, _ in enumerate(deepstack_indexes):
-    prefix = f"params-vision_encoder-Qwen3VLVisionEncoder_0-merger_{merger_idx}"
-    hf_prefix = f"model.visual.deepstack_merger_list.{merger_idx}"
+    deepstack_indexes = vision_config.get("deepstack_visual_indexes", [5, 11, 17])
+    for merger_idx, _ in enumerate(deepstack_indexes):
+      prefix = f"params-vision_encoder-Qwen3VLVisionEncoder_0-merger_{merger_idx}"
+      hf_prefix = f"model.visual.deepstack_merger_list.{merger_idx}"
 
-    mapping[f"{prefix}-ln_q-scale"] = f"{hf_prefix}.norm.weight"
-    mapping[f"{prefix}-ln_q-bias"] = f"{hf_prefix}.norm.bias"
-    mapping[f"{prefix}-mlp_0-kernel"] = f"{hf_prefix}.linear_fc1.weight"
-    mapping[f"{prefix}-mlp_0-bias"] = f"{hf_prefix}.linear_fc1.bias"
-    mapping[f"{prefix}-mlp_2-kernel"] = f"{hf_prefix}.linear_fc2.weight"
-    mapping[f"{prefix}-mlp_2-bias"] = f"{hf_prefix}.linear_fc2.bias"
+      mapping[f"{prefix}-ln_q-scale"] = f"{hf_prefix}.norm.weight"
+      mapping[f"{prefix}-ln_q-bias"] = f"{hf_prefix}.norm.bias"
+      mapping[f"{prefix}-mlp_0-kernel"] = f"{hf_prefix}.linear_fc1.weight"
+      mapping[f"{prefix}-mlp_0-bias"] = f"{hf_prefix}.linear_fc1.bias"
+      mapping[f"{prefix}-mlp_2-kernel"] = f"{hf_prefix}.linear_fc2.weight"
+      mapping[f"{prefix}-mlp_2-bias"] = f"{hf_prefix}.linear_fc2.bias"
 
-  mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-ln_q-scale"] = "model.visual.merger.norm.weight"
-  mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-ln_q-bias"] = "model.visual.merger.norm.bias"
-  mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_0-kernel"] = "model.visual.merger.linear_fc1.weight"
-  mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_0-bias"] = "model.visual.merger.linear_fc1.bias"
-  mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_2-kernel"] = "model.visual.merger.linear_fc2.weight"
-  mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_2-bias"] = "model.visual.merger.linear_fc2.bias"
+    mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-ln_q-scale"] = "model.visual.merger.norm.weight"
+    mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-ln_q-bias"] = "model.visual.merger.norm.bias"
+    mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_0-kernel"] = (
+        "model.visual.merger.linear_fc1.weight"
+    )
+    mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_0-bias"] = "model.visual.merger.linear_fc1.bias"
+    mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_2-kernel"] = (
+        "model.visual.merger.linear_fc2.weight"
+    )
+    mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_2-bias"] = "model.visual.merger.linear_fc2.bias"
 
   return mapping
+
+
+def COSMOS3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping from MaxText to HuggingFace Cosmos3-Nano Reasoner weight paths."""
+  # 1. Reuse QWEN3_VL mapping
+  qwen3_vl_mapping = QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
+
+  mapping = {}
+
+  def translate_hf_key(val):
+    if isinstance(val, list):
+      return [translate_hf_key(v) for v in val]
+    elif isinstance(val, str):
+      # Strip prefixes used by Qwen3-VL in HF
+      if val.startswith("model.language_model."):
+        val = val[len("model.language_model.") :]
+      elif val.startswith("model.visual."):
+        val = val[len("model.visual.") :]
+      elif val.startswith("model."):
+        val = val[len("model.") :]
+
+      # Apply Cosmos3 specific attention naming
+      val = val.replace("self_attn.q_proj", "self_attn.to_q")
+      val = val.replace("self_attn.k_proj", "self_attn.to_k")
+      val = val.replace("self_attn.v_proj", "self_attn.to_v")
+      val = val.replace("self_attn.o_proj", "self_attn.to_out")
+      val = val.replace("self_attn.q_norm", "self_attn.norm_q")
+      val = val.replace("self_attn.k_norm", "self_attn.norm_k")
+      return val
+    return val
+
+  for key, value in qwen3_vl_mapping.items():
+    mapping[key] = translate_hf_key(value)
+
+  return mapping
+
+
+def COSMOS3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Cosmos3-Nano Reasoner."""
+  # Hooks operate on MaxText Parameter paths, which are identical to Qwen3-VL
+  return QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers, saving_to_hf)
 
 
 def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
@@ -4106,99 +4139,100 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       mapping[composite_key] = process_wi_0_wi_1_fused
       mapping[f"params-decoder-layers_{i}-moe_block-wo"] = None
 
-  vision_config = config["vision_config"]
-  n_vision_layers = vision_config["depth"]
-  hidden_size = vision_config["hidden_size"]
+  if maxtext_config.use_multimodal:
+    vision_config = config["vision_config"]
+    n_vision_layers = vision_config["depth"]
+    hidden_size = vision_config["hidden_size"]
 
-  def reshape_kernel_vision(input_tensor, target_shape):
-    """Reshape kernel for vision layers."""
-    if saving_to_hf:
-      flipped_target_shape = np.flip(np.array(target_shape))
-      return input_tensor.reshape(flipped_target_shape).T
-    else:
-      return input_tensor.T.reshape(target_shape)
+    def reshape_kernel_vision(input_tensor, target_shape):
+      """Reshape kernel for vision layers."""
+      if saving_to_hf:
+        flipped_target_shape = np.flip(np.array(target_shape))
+        return input_tensor.reshape(flipped_target_shape).T
+      else:
+        return input_tensor.T.reshape(target_shape)
 
-  def reshape_conv3d_patch_embed(input_tensor, target_shape):
-    """Reshape 3D conv patch embedding weight."""
-    if saving_to_hf:
-      return input_tensor.transpose(4, 3, 0, 1, 2)
-    else:
-      return input_tensor.transpose(2, 3, 4, 1, 0)
+    def reshape_conv3d_patch_embed(input_tensor, target_shape):
+      """Reshape 3D conv patch embedding weight."""
+      if saving_to_hf:
+        return input_tensor.transpose(4, 3, 0, 1, 2)
+      else:
+        return input_tensor.transpose(2, 3, 4, 1, 0)
 
-  def process_qkv_vision(input_tensor, target_shape=None):
-    """Handles composite_mt_key: maxtext (query, key, value) <-> hf (qkv)."""
-    if saving_to_hf:
-      q, k, v = input_tensor
-      q_hf = q.reshape(hidden_size, hidden_size).T
-      k_hf = k.reshape(hidden_size, hidden_size).T
-      v_hf = v.reshape(hidden_size, hidden_size).T
-      return np.concatenate([q_hf, k_hf, v_hf], axis=0)
-    else:
-      q_hf = input_tensor[:hidden_size, :]
-      k_hf = input_tensor[hidden_size : 2 * hidden_size, :]
-      v_hf = input_tensor[2 * hidden_size :, :]
-      q_mt = q_hf.T.reshape(target_shape[0])  # pyrefly: ignore[unsupported-operation]
-      k_mt = k_hf.T.reshape(target_shape[1])  # pyrefly: ignore[unsupported-operation]
-      v_mt = v_hf.T.reshape(target_shape[2])  # pyrefly: ignore[unsupported-operation]
-      return np.stack([q_mt, k_mt, v_mt], axis=-1)
+    def process_qkv_vision(input_tensor, target_shape=None):
+      """Handles composite_mt_key: maxtext (query, key, value) <-> hf (qkv)."""
+      if saving_to_hf:
+        q, k, v = input_tensor
+        q_hf = q.reshape(hidden_size, hidden_size).T
+        k_hf = k.reshape(hidden_size, hidden_size).T
+        v_hf = v.reshape(hidden_size, hidden_size).T
+        return np.concatenate([q_hf, k_hf, v_hf], axis=0)
+      else:
+        q_hf = input_tensor[:hidden_size, :]
+        k_hf = input_tensor[hidden_size : 2 * hidden_size, :]
+        v_hf = input_tensor[2 * hidden_size :, :]
+        q_mt = q_hf.T.reshape(target_shape[0])  # pyrefly: ignore[unsupported-operation]
+        k_mt = k_hf.T.reshape(target_shape[1])  # pyrefly: ignore[unsupported-operation]
+        v_mt = v_hf.T.reshape(target_shape[2])  # pyrefly: ignore[unsupported-operation]
+        return np.stack([q_mt, k_mt, v_mt], axis=-1)
 
-  def process_qkv_bias_vision(input_tensor, target_shape=None):
-    """Handles composite_mt_key: maxtext (query_bias, key_bias, value_bias) <-> hf (qkv_bias)."""
-    if saving_to_hf:
-      qb, kb, vb = input_tensor
-      qb_hf = qb.reshape(hidden_size)
-      kb_hf = kb.reshape(hidden_size)
-      vb_hf = vb.reshape(hidden_size)
-      return np.concatenate([qb_hf, kb_hf, vb_hf], axis=0)
-    else:
-      qb_hf = input_tensor[:hidden_size]
-      kb_hf = input_tensor[hidden_size : 2 * hidden_size]
-      vb_hf = input_tensor[2 * hidden_size :]
-      qb_mt = qb_hf.reshape(target_shape[0])  # pyrefly: ignore[unsupported-operation]
-      kb_mt = kb_hf.reshape(target_shape[1])  # pyrefly: ignore[unsupported-operation]
-      vb_mt = vb_hf.reshape(target_shape[2])  # pyrefly: ignore[unsupported-operation]
-      return np.stack([qb_mt, kb_mt, vb_mt], axis=-1)
+    def process_qkv_bias_vision(input_tensor, target_shape=None):
+      """Handles composite_mt_key: maxtext (query_bias, key_bias, value_bias) <-> hf (qkv_bias)."""
+      if saving_to_hf:
+        qb, kb, vb = input_tensor
+        qb_hf = qb.reshape(hidden_size)
+        kb_hf = kb.reshape(hidden_size)
+        vb_hf = vb.reshape(hidden_size)
+        return np.concatenate([qb_hf, kb_hf, vb_hf], axis=0)
+      else:
+        qb_hf = input_tensor[:hidden_size]
+        kb_hf = input_tensor[hidden_size : 2 * hidden_size]
+        vb_hf = input_tensor[2 * hidden_size :]
+        qb_mt = qb_hf.reshape(target_shape[0])  # pyrefly: ignore[unsupported-operation]
+        kb_mt = kb_hf.reshape(target_shape[1])  # pyrefly: ignore[unsupported-operation]
+        vb_mt = vb_hf.reshape(target_shape[2])  # pyrefly: ignore[unsupported-operation]
+        return np.stack([qb_mt, kb_mt, vb_mt], axis=-1)
 
-  def reshape_vision_attn_out(input_tensor, target_shape):
-    """Reshape vision attention output projection."""
-    if saving_to_hf:
-      return input_tensor.reshape(hidden_size, hidden_size).T
-    else:
-      return input_tensor.T.reshape(target_shape)
+    def reshape_vision_attn_out(input_tensor, target_shape):
+      """Reshape vision attention output projection."""
+      if saving_to_hf:
+        return input_tensor.reshape(hidden_size, hidden_size).T
+      else:
+        return input_tensor.T.reshape(target_shape)
 
-  mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-kernel"] = reshape_conv3d_patch_embed
+    mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-kernel"] = reshape_conv3d_patch_embed
 
-  for i in range(n_vision_layers):
-    prefix = f"params-vision_encoder-Qwen3VLVisionEncoder_0-blocks_{i}"
+    for i in range(n_vision_layers):
+      prefix = f"params-vision_encoder-Qwen3VLVisionEncoder_0-blocks_{i}"
 
-    mapping[
-        (
-            f"{prefix}-attn-attn-query-kernel",
-            f"{prefix}-attn-attn-key-kernel",
-            f"{prefix}-attn-attn-value-kernel",
-        )
-    ] = process_qkv_vision
-    mapping[
-        (
-            f"{prefix}-attn-attn-query-bias",
-            f"{prefix}-attn-attn-key-bias",
-            f"{prefix}-attn-attn-value-bias",
-        )
-    ] = process_qkv_bias_vision
+      mapping[
+          (
+              f"{prefix}-attn-attn-query-kernel",
+              f"{prefix}-attn-attn-key-kernel",
+              f"{prefix}-attn-attn-value-kernel",
+          )
+      ] = process_qkv_vision
+      mapping[
+          (
+              f"{prefix}-attn-attn-query-bias",
+              f"{prefix}-attn-attn-key-bias",
+              f"{prefix}-attn-attn-value-bias",
+          )
+      ] = process_qkv_bias_vision
 
-    mapping[f"{prefix}-attn-attn-out-kernel"] = reshape_vision_attn_out
+      mapping[f"{prefix}-attn-attn-out-kernel"] = reshape_vision_attn_out
 
-    mapping[f"{prefix}-mlp-kernel"] = reshape_kernel_vision
-    mapping[f"{prefix}-mlp_out-kernel"] = reshape_kernel_vision
+      mapping[f"{prefix}-mlp-kernel"] = reshape_kernel_vision
+      mapping[f"{prefix}-mlp_out-kernel"] = reshape_kernel_vision
 
-  deepstack_indexes = vision_config.get("deepstack_visual_indexes", [5, 11, 17])
-  for merger_idx, _ in enumerate(deepstack_indexes):
-    prefix = f"params-vision_encoder-Qwen3VLVisionEncoder_0-merger_{merger_idx}"
-    mapping[f"{prefix}-mlp_0-kernel"] = reshape_kernel_vision
-    mapping[f"{prefix}-mlp_2-kernel"] = reshape_kernel_vision
+    deepstack_indexes = vision_config.get("deepstack_visual_indexes", [5, 11, 17])
+    for merger_idx, _ in enumerate(deepstack_indexes):
+      prefix = f"params-vision_encoder-Qwen3VLVisionEncoder_0-merger_{merger_idx}"
+      mapping[f"{prefix}-mlp_0-kernel"] = reshape_kernel_vision
+      mapping[f"{prefix}-mlp_2-kernel"] = reshape_kernel_vision
 
-  mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_0-kernel"] = reshape_kernel_vision
-  mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_2-kernel"] = reshape_kernel_vision
+    mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_0-kernel"] = reshape_kernel_vision
+    mapping["params-vision_encoder-Qwen3VLVisionProjector_0-merger-mlp_2-kernel"] = reshape_kernel_vision
 
   return mapping
 
@@ -4558,6 +4592,7 @@ PARAM_MAPPING = {
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "cosmos3-nano-reasoner": COSMOS3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4614,6 +4649,7 @@ HOOK_FNS = {
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "cosmos3-nano-reasoner": COSMOS3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,

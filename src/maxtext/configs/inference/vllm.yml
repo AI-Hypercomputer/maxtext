@@ -33,7 +33,7 @@ vllm_additional_config: {}
 
 
 # -------------- Logical Axis Rules --------------
-mesh_axes: ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert']
+mesh_axes: ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert', 'dcp', 'pcp']
 logical_axis_rules: [
                       # ==========================================
                       # Vocabulary Embedding
@@ -91,6 +91,7 @@ logical_axis_rules: [
                       # General Weights
                       ['mlp', ['attn_dp', 'model']],
                       ['embed', []],
+                      ['embed_attn', []],
                       ['norm', []],
                       ['layers', []],
                       ['local_layers', []],
@@ -101,8 +102,8 @@ logical_axis_rules: [
                       # ==========================================
                       ['activation_prefill_kv_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['decode_batch', ['data', 'attn_dp', 'attn_dp_expert']],
-                      ['cache_heads', ['expert', 'model']],
-                      ['paged_kv_heads', ['expert', 'model']],
+                      ['cache_heads', ['model', 'expert']],
+                      ['paged_kv_heads', ['model', 'expert']],
                       ['cache_batch_prefill', []],
                       ['cache_batch', []],
                       ['cache_heads_none', []],

@@ -68,7 +68,7 @@ from maxtext.configs.types import DType
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns
+from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
 from maxtext.layers import quantizations
@@ -381,66 +381,59 @@ def get_maxtext_model_info(config):
 
 
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]],
+    hf_source_keys: List[Any],
     tensor_getter_fn: Callable[[str], np.ndarray],
     hook_fns: Any,
     target_shape: tuple,
     config,
     mt_key: str = "",
 ) -> np.ndarray:
-  """Builds a MaxText tensor by stacking HF weights along two axes.
+  """Builds a MaxText tensor by stacking HF weights along several axes.
 
-  Two cases share this helper:
+  Three layouts share this helper, distinguished by how deeply ``hf_source_keys``
+  is nested and by whether ``mt_key`` names a nested block scan:
     * MoE expert stacking: outer=experts, inner=layers, placed at the LEADING two
       axes -> shape (num_experts, num_layers, ...).
-    * Gemma4 nested block scan (``scanned_blocks-local_layers``): the block's local
-      layers are an inner scan nested inside the outer block scan, so the two
-      stacked axes live at ``(param_scan_axis, param_scan_axis + 1)`` rather than
-      the leading axes, e.g. (emb, blocks, local, ...).
+    * Nested block scan (``...-local_layers-...``, gemma4 and qwen3-next): the
+      block's local layers are an inner scan nested inside the outer block scan,
+      so the two stacked axes live at ``(param_scan_axis, param_scan_axis + 1)``
+      rather than the leading axes, e.g. (emb, blocks, local, ...).
+    * Both at once (qwen3-next's routed experts, which are expert-stacked inside
+      a nested block scan): three axes at ``(0, param_scan_axis,
+      param_scan_axis + 1)``, e.g. (experts, blocks, local, ...).
 
   Args:
-      hf_source_keys: A nested (2D) list of Hugging Face parameter names.
-                      The outer list is the outer stack axis, the inner list the
-                      inner stack axis.
+      hf_source_keys: A nested list of Hugging Face parameter names, one level of
+        nesting per stacked axis, outermost axis first. A ``tuple`` of names is a
+        composite HF source that the hook fuses into a single leaf, not an axis.
       tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
       hook_fns: The hook function(s) to apply to each individual weight.
       target_shape: The final shape of the target MaxText tensor.
       config: The MaxText pyconfig object.
-      mt_key: The MaxText parameter key, used to detect the gemma4 nested-scan case.
+      mt_key: The MaxText parameter key, used to detect the nested-scan case.
 
   Returns:
       The final, assembled NumPy array for the MaxText parameter.
   """
-  # Gemma4's local layers are an inner scan nested inside the block scan, so the
-  # two stacked axes go at (param_scan_axis, param_scan_axis + 1); everything else
-  # (MoE experts/layers) stacks at the leading axes.
-  if isinstance(mt_key, str) and "scanned_blocks-local_layers" in mt_key:
-    outer_axis, inner_axis = config.param_scan_axis, config.param_scan_axis + 1
-  else:
-    outer_axis, inner_axis = 0, 1
-
+  depth = nesting_depth(hf_source_keys)
+  axes = stacked_axes(mt_key, config, depth)
   # The hook function needs the shape of an individual slice: target_shape with
-  # the two stacked axes removed.
-  stacked_axes = {outer_axis, inner_axis}
-  mt_slice_shape = tuple(d for i, d in enumerate(target_shape) if i not in stacked_axes)
+  # the stacked axes removed.
+  mt_slice_shape = slice_shape(target_shape, axes)
 
-  all_outer_tensors = []
-  # Outer loop iterates the outer stack axis (experts, or blocks for gemma4 local)
-  for inner_keys in hf_source_keys:
-    inner_tensors = []
-    # Inner loop iterates the inner stack axis (layers, or local layers for gemma4)
-    for hf_key_single in inner_keys:
-      if isinstance(hf_key_single, (list, tuple)):
-        hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
+  def gather(keys, level):
+    if level == depth:
+      if isinstance(keys, (list, tuple)):
+        raw = tuple(tensor_getter_fn(k) for k in keys)
       else:
-        hf_tensor_numpy = tensor_getter_fn(hf_key_single)
-      inner_tensors.append(apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns))
-    all_outer_tensors.append(np.stack(inner_tensors, axis=0))
-  stacked = np.stack(all_outer_tensors, axis=0)  # (outer, inner, *slice)
+        raw = tensor_getter_fn(keys)
+      return apply_hook_fns(raw, mt_slice_shape, hook_fns)
+    # Stack with the axes leading, outermost first; they are moved into place below.
+    return np.stack([gather(sub, level + 1) for sub in keys], axis=0)
 
-  # Move the (outer, inner) axes from leading positions to their targets.
-  if (outer_axis, inner_axis) != (0, 1):
-    stacked = np.moveaxis(stacked, (0, 1), (outer_axis, inner_axis))
+  stacked = gather(hf_source_keys, 0)
+  if axes != tuple(range(depth)):
+    stacked = np.moveaxis(stacked, tuple(range(depth)), axes)
   return stacked
 
 

@@ -31,6 +31,26 @@ from maxtext.utils import max_utils
 from maxtext.utils.sharding import truncate_out_sharding
 
 
+def _align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+  """Reshards a 1-D norm scale to match the sharding of the axis it normalizes.
+
+  The scale is stored with the `kernel_axes` layout, which is picked for the
+  usual case of normalizing over the embedding axis (`norm` -> `tensor`). A
+  per-head QK norm instead normalizes over `head_dim`, which is unsharded while
+  the neighbouring `heads` axis is the one on `tensor`. Multiplying those
+  directly under `ShardMode.EXPLICIT` would place `tensor` on two axes of the
+  result, which JAX rejects, so align the scale with the activation instead.
+
+  This is a no-op whenever the two already agree, which includes every
+  auto-sharding-equivalent layout for the ordinary layer norms.
+  """
+  activation_spec = jax.typeof(y).sharding.spec
+  scale_spec = jax.typeof(scale).sharding.spec
+  if scale_spec[-1] == activation_spec[-1]:
+    return scale
+  return jax.sharding.reshard(scale, jax.sharding.PartitionSpec(activation_spec[-1]))
+
+
 class RMSNorm(nnx.Module):
   """RMS normalization."""
 
@@ -93,6 +113,8 @@ class RMSNorm(nnx.Module):
 
     scale = jnp.asarray(scale, self.dtype)
     effective_scale = scale + self.scale_offset
+    if self.shard_mode == ShardMode.EXPLICIT:
+      effective_scale = _align_scale_with_normalized_axis(effective_scale, y)
     return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
 
 

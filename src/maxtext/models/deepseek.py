@@ -468,7 +468,9 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         )(inputs)
         dpos = deepseek_batchsplit_fp8.split(decoder_positions, self.config.batch_split_factor)
         dseg = deepseek_batchsplit_fp8.split(decoder_segment_ids, self.config.batch_split_factor)
-        weights = deepseek_batchsplit_fp8.fetch_weights(nnx.to_pure_dict(nnx.state(self, nnx.Param)), self.config.dtype)
+        weights = deepseek_batchsplit_fp8.fetch_weights(
+            nnx.to_pure_dict(nnx.state(self, (nnx.Param, moe.MoEBiasVar))), self.config.dtype
+        )
         outputs = deepseek_batchsplit_fp8.batch_split_schedule(
             inputs,
             weights,
@@ -537,7 +539,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         return x
 
       weights = deepseek_batchsplit.fetch_weights(
-          nnx.to_pure_dict(nnx.state(self, nnx.Param), extract_fn), self.config.dtype
+          nnx.to_pure_dict(nnx.state(self, (nnx.Param, moe.MoEBiasVar)), extract_fn), self.config.dtype
       )
       weights = deepseek_batchsplit.gather_weights(weights, self.mesh)
       outputs, _ = deepseek_batchsplit.batch_split_schedule(

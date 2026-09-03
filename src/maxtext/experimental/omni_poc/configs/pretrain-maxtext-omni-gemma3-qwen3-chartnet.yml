@@ -1,0 +1,88 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Step 1: Pretrain / Align the custom MLP vision projector on ChartNet (human_verified subset)
+# using dense chart analytical summaries (Chart-to-Text).
+#
+# Example command to run pretraining on TPU VM:
+# python3 -m maxtext.experimental.omni_poc.train_sft_omni \
+#   src/maxtext/experimental/omni_poc/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml
+
+# Inherit model architecture (Gemma 3 4B Vision Tower + Qwen 3 4B Decoder + Custom MLP Connector)
+base_config: "../maxtext-omni-gemma3-qwen3.yml"
+
+use_sft: true
+use_tunix_gradient_accumulation: false
+use_multimodal: true
+sft_train_on_completion_only: true
+packing: false
+freeze_vision_encoder_params: true
+
+# Pretrain ONLY the custom MLP projector to align Gemma 3 vision features with Qwen 3 text space
+trainable_parameters_mask: ["custom_linear"]
+
+# Learning rate and schedule for projector alignment
+learning_rate: 2.e-4
+lr_schedule_type: 'cosine'
+warmup_steps_fraction: 0.05
+learning_rate_final_fraction: 0.1
+adamw_mask: ['.*norm.*', '.*bias.*']
+gradient_clipping_threshold: 1.0
+
+# -------------- HF pipeline (ibm-granite/ChartNet - human_verified) --------------
+# Dataset features in human_verified subset: ['id', 'image', 'code', 'csv', 'summary']
+# Prompt: 'prompt' (injected via default_prompt)
+# Completion: 'summary' (dense natural-language description of chart trends, axes, and data)
+dataset_type: hf
+tokenizer_type: "huggingface"
+tokenizer_path: "Qwen/Qwen3-4B"
+hf_path: 'ibm-granite/ChartNet'
+hf_name: 'human_verified'
+train_split: 'train'
+hf_eval_split: 'test'
+
+# Image column
+train_image_column: 'image'
+eval_image_column: 'image'
+
+# Text columns: ['prompt', 'summary']
+train_data_columns: ['prompt', 'summary']
+eval_data_columns: ['prompt', 'summary']
+default_prompt: "Summarize the key information and data trends in this chart in detail."
+
+# Initial stitched checkpoint path (or override via CLI to point to COCO step 14000)
+load_parameters_path: "gs://YOUR_BUCKET/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items"
+base_output_directory: "gs://YOUR_BUCKET/omni-gemma3-qwen3/multimodal/pretrain_chartnet"
+run_name: "omni_pretrain_chartnet_embedder_only"
+
+# Training schedule (~3 full epochs across ~92.6k human-verified samples at global batch size 16)
+# 92,643 * 3 / 16 = 17,370 steps
+per_device_batch_size: 4
+steps: 17370
+num_epoch: 3
+checkpoint_period: 1000
+log_period: 1
+save_checkpoint_on_completion: true
+async_checkpointing: true
+
+# Evaluation (evaluates against 2,000 human_verified test split charts)
+eval_interval: 1000
+eval_steps: 50
+
+# Sequence length & attention settings
+max_prefill_predict_length: 1024
+max_target_length: 2048
+max_num_images_per_example: 1
+scan_layers: true
+attention: "dot_product"

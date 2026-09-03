@@ -48,7 +48,7 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.85 \
+    hbm_utilization_vllm=0.8 \
     prompt='Suggest some famous landmarks in London.' \
     max_target_length=256 \
     max_num_batched_tokens=256 \
@@ -97,7 +97,7 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.85 \
+    hbm_utilization_vllm=0.8 \
     prompt='Suggest some famous landmarks in London.' \
     max_target_length=256 \
     max_num_batched_tokens=256 \

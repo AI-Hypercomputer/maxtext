@@ -64,7 +64,9 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     model_name=gpt-oss-20b \
     tokenizer_type=huggingface \
     tokenizer_path=openai/gpt-oss-20b \
-    dataset_type=synthetic \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
+    dataset_path=${DATASET_PATH?} \
     enable_checkpointing=false \
     attention=flash \
     sparse_matmul=True \
@@ -90,6 +92,8 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     model_name=gpt-oss-20b \
     tokenizer_type=huggingface \
     tokenizer_path=openai/gpt-oss-20b \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH?} \
     enable_checkpointing=true \
     async_checkpointing=false \
