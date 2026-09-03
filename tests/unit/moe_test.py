@@ -2432,5 +2432,74 @@ class FusedMlpMoETest(unittest.TestCase):
     )
 
 
+class SparseCoreCollectiveOffloadTest(unittest.TestCase):
+  """Tests for SparseCore collective offloading flags and custom VJP."""
+
+  def test_sparse_core_flags(self):
+    # Umbrella flag propagates to both FSDP and EP flags on Gen7
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="sc_test",
+        enable_checkpointing=False,
+        compile_topology="tpu7x-2",
+        compile_topology_num_slices=1,
+        moe_pin_sparse_core_all_gathers=True,
+    )
+    self.assertTrue(cfg.moe_pin_sparse_core_all_gathers)
+    self.assertTrue(cfg.moe_pin_sparse_core_fsdp_all_gather)
+    self.assertTrue(cfg.moe_pin_sparse_core_ep_all_gather)
+
+    # Separate flags can be toggled independently
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="sc_test",
+        enable_checkpointing=False,
+        compile_topology="tpu7x-2",
+        compile_topology_num_slices=1,
+        moe_pin_sparse_core_fsdp_all_gather=True,
+        moe_pin_sparse_core_ep_all_gather=False,
+    )
+    self.assertTrue(cfg.moe_pin_sparse_core_fsdp_all_gather)
+    self.assertFalse(cfg.moe_pin_sparse_core_ep_all_gather)
+
+    # Automatically disabled on non-Gen7 TPU (e.g. v5e)
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="sc_test",
+        enable_checkpointing=False,
+        compile_topology="v5e-256",
+        compile_topology_num_slices=1,
+        moe_pin_sparse_core_all_gathers=True,
+    )
+    self.assertFalse(cfg.moe_pin_sparse_core_all_gathers)
+    self.assertFalse(cfg.moe_pin_sparse_core_fsdp_all_gather)
+    self.assertFalse(cfg.moe_pin_sparse_core_ep_all_gather)
+
+  def test_fsdp_all_gather_with_rs_custom_vjp(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="sc_test",
+        enable_checkpointing=False,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+
+    def loss_fn(w):
+      gathered = moe._fsdp_all_gather_with_rs(  # pylint: disable=protected-access
+          w,
+          P(None),
+          P(None),
+          mesh,
+          cfg.shard_mode,
+          pin_to_sparse_core=False,
+          sc_id=0,
+      )
+      return jnp.sum(gathered**2)
+
+    w = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+    val, grad = jax.value_and_grad(loss_fn)(w)
+    self.assertAlmostEqual(float(val), 30.0, places=5)
+    self.assertTrue(jnp.allclose(grad, 2.0 * w))
+
+
 if __name__ == "__main__":
   unittest.main()

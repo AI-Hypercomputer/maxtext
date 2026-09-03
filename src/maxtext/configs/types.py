@@ -25,6 +25,7 @@ import logging
 import math
 from math import prod
 import os
+import re
 from tempfile import gettempdir
 import yaml
 from typing import Any, Literal, NewType, Optional
@@ -975,6 +976,26 @@ class MoEGeneral(BaseModel):
   )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
+  moe_pin_sparse_core_all_gathers: bool = Field(
+      False,
+      description="Umbrella flag to pin both FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",
+  )
+  moe_pin_sparse_core_fsdp_all_gather: bool = Field(
+      False,
+      description="Pin MoE FSDP weight all-gathers to dedicated SparseCore using compute_on and custom VJP.",
+  )
+  moe_pin_sparse_core_ep_all_gather: bool = Field(
+      False,
+      description="Pin MoE EP comm (all-gathers) to dedicated SparseCore using compute_on.",
+  )
+  moe_fsdp_all_gather_sparse_core_id: int = Field(
+      0,
+      description="SparseCore ID to pin MoE FSDP all-gathers to.",
+  )
+  moe_ep_all_gather_sparse_core_id: int = Field(
+      1,
+      description="SparseCore ID to pin MoE EP all-gathers to.",
+  )
   moe_fsdp_use_two_stage_all_gather: bool = Field(
       False,
       description="Use two separate All-Gather calls for MoE weights sharded on both FSDP and FSDP-transpose.",
@@ -3137,6 +3158,37 @@ def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
+def is_non_gen7_tpu(compile_topology: str | None = None) -> bool:
+  """Returns True if the compile topology or runtime hardware is TPU but NOT Gen7."""
+  if compile_topology:
+    compile_topo = compile_topology.lower()
+    try:
+      spec = accelerator_to_spec_map.get_system_characteristics(compile_topology)
+      if spec and spec.platform == "tpu":
+        return not ("tpu7" in compile_topo or "v7" in compile_topo)
+    except (ValueError, KeyError, AttributeError):
+      if "v" in compile_topo or "tpu" in compile_topo:
+        return not ("tpu7" in compile_topo or "v7" in compile_topo)
+    return False
+
+  try:
+    devices = jax.devices()
+  except (RuntimeError, IndexError, ValueError):
+    return False
+
+  tpu_devices = [d for d in devices if d.platform == "tpu"]
+  if not tpu_devices:
+    return False
+
+  device_kind = tpu_devices[0].device_kind
+  if any(gen7_id in device_kind for gen7_id in ("TPU7", "TPU v7", "TPU7x")):
+    return False
+  match = re.match(r"TPU[^\d]*(\d+)", device_kind)
+  if match and int(match.group(1)) == 7:
+    return False
+  return True
+
+
 def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
   """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
 
@@ -3750,6 +3802,26 @@ class MaxTextConfig(
       self.num_target_devices = get_num_target_devices()
     except (RuntimeError, IndexError):
       logger.warning("JAX device system not available for config validation. Assuming 1 device.")
+
+    # Handle umbrella flag moe_pin_sparse_core_all_gathers
+    if self.moe_pin_sparse_core_all_gathers:
+      self.moe_pin_sparse_core_fsdp_all_gather = True
+      self.moe_pin_sparse_core_ep_all_gather = True
+
+    # Disable SparseCore offloading if backend is TPU but not Gen7
+    has_sc_offload = (
+        self.moe_pin_sparse_core_all_gathers
+        or self.moe_pin_sparse_core_fsdp_all_gather
+        or self.moe_pin_sparse_core_ep_all_gather
+    )
+    if has_sc_offload and is_non_gen7_tpu(self.compile_topology):
+      logger.warning(
+          "SparseCore collective offloading (moe_pin_sparse_core_*) is only supported on TPU Gen7. "
+          "Disabling SparseCore collective offloading on non-Gen7 TPU."
+      )
+      self.moe_pin_sparse_core_all_gathers = False
+      self.moe_pin_sparse_core_fsdp_all_gather = False
+      self.moe_pin_sparse_core_ep_all_gather = False
 
     # Automatically determine number of slices if not specified.
     raw_keys_for_num_slices = {
