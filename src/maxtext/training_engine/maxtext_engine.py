@@ -401,6 +401,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._raiden_sync: Any = None
 
   @property
+  def mesh(self) -> jax.sharding.Mesh | None:
+    """Returns the SPMD Device mesh the model is sharded on"""
+    return self._mesh
+    
+  @property
   def model(self) -> Any:
     """Returns the NNX model instance."""
     return self._model
