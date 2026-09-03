@@ -678,7 +678,7 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
 
       mt_q_latent = mt_attn.wq_a(x_mt)
       mt_q_residual = mt_attn.q_norm(mt_q_latent)
-      mt_top_k_indices = mt_attn.csa_compressor.indexer(x_mt, mt_q_residual, pos_mt)
+      mt_top_k_indices, _ = mt_attn.csa_compressor.indexer(x_mt, mt_q_residual, pos_mt)
       print(f"MaxText top_k_indices:\n{mt_top_k_indices[0]}")
 
       num_mismatches = np.sum(pt_top_k_indices.detach().numpy() != np.array(mt_top_k_indices))
@@ -1378,6 +1378,7 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
         "dtype": "float32",
         "weight_dtype": "float32",
         "skip_jax_distributed_system": True,
+        "attention": "dot_product",
         "use_tokamax_splash": True,
     }
     argv = [sys.argv[0], "src/maxtext/configs/base.yml"]

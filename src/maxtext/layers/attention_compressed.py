@@ -37,6 +37,7 @@ from maxtext.common.common_types import (
 )
 
 from maxtext.layers import nnx_wrappers
+from maxtext.layers.attention_mla import indexer_losses
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
@@ -45,6 +46,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference.kvcache import KVQuant
 from maxtext.inference import kvcache
+from maxtext.utils.globals import EPS
 
 
 class CSAPoolingConfig(enum.IntEnum):
@@ -783,7 +785,8 @@ class DeepseekV4Indexer(nnx.Module):
       attention_mask: Optional[Array] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       cache: Optional[Any] = None,
-  ) -> Array:
+      return_scores: bool = False,
+  ) -> Tuple[Array, Optional[Array]]:
     """Forward pass for the DeepSeek-V4 Indexer.
 
     Args:
@@ -793,11 +796,16 @@ class DeepseekV4Indexer(nnx.Module):
       attention_mask: Optional attention mask.
       model_mode: Execution mode (train, prefill, or autoregressive).
       cache: Optional Indexer KV cache instance for inference.
+      return_scores: Whether to return (final_indices, index_scores).
 
     Returns:
-      Top-K selected indices for each query position.
+      A tuple (top_k_indices, indexer_scores) where indexer_scores is None when return_scores=False.
     """
     batch_size, seq_len, _ = hidden_states.shape
+    # Stop gradient on indexer inputs so indexer loss does not backprop into main model projections
+    hidden_states = jax.lax.stop_gradient(hidden_states)
+    q_latent = jax.lax.stop_gradient(q_latent)
+
     future_mask = None
     kv = self.kv_proj(hidden_states)
     gate = self.gate_proj(hidden_states)
@@ -871,7 +879,8 @@ class DeepseekV4Indexer(nnx.Module):
         )
 
     if compressed_len == 0:
-      return jnp.zeros((batch_size, seq_len, min(self.index_topk, compressed_len)), dtype=jnp.int32)
+      empty_indices = jnp.zeros((batch_size, seq_len, min(self.index_topk, compressed_len)), dtype=jnp.int32)
+      return empty_indices, (jnp.zeros((batch_size, seq_len, 0), dtype=jnp.float32) if return_scores else None)
 
     # --- TOP-K ROUTING MATH (Executes in both Prefill and AR) ---
     compressed_kv = jnp.expand_dims(compressed, axis=1)
@@ -904,14 +913,14 @@ class DeepseekV4Indexer(nnx.Module):
     if attention_mask is not None:
       att_m = attention_mask[:, :, :compressed_len]
       index_scores += att_m
-      combined_invalid = combined_invalid | (att_m < -100.0)
+      combined_invalid = combined_invalid | (att_m < (DEFAULT_MASK_VALUE / 2))
 
     top_k_indices = jax.lax.top_k(index_scores, k)[1]
     invalid = jnp.take_along_axis(combined_invalid, top_k_indices, axis=-1)
 
     final_indices = jnp.where(invalid, jnp.full_like(top_k_indices, -1), top_k_indices)
 
-    return final_indices
+    return final_indices, (index_scores if return_scores else None)
 
 
 class DeepseekV4CSACompressor(BaseDeepseekCompressor):
@@ -979,7 +988,8 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       model_mode: str = MODEL_MODE_TRAIN,
       cache: Optional[Any] = None,
       indexer_cache: Optional[Any] = None,
-  ) -> Tuple[Array, Array]:
+      return_indexer_scores: bool = False,
+  ) -> Tuple[Array, Array, Optional[Array]]:
     """Forward pass for the CSA compressor.
 
     Args:
@@ -990,15 +1000,25 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       model_mode: Execution mode (train, prefill, or autoregressive).
       cache: Optional CSA compressor KV cache instance for inference.
       indexer_cache: Optional Indexer KV cache instance for inference.
+      return_indexer_scores: Whether to return indexer scores along with compressed KV and mask.
 
     Returns:
       compressed_kv: The pooled KV tensors.
       compressed_mask: The sparse attention mask computed by the indexer.
+      index_scores (optional): The raw indexer scores if return_indexer_scores is True.
     """
     batch_size, seq_len, _ = hidden_states.shape
 
     # 1. ALWAYS Run Indexer (It fetches its own history inside AR)
-    top_k_indices = self.indexer(hidden_states, q_latent, position_ids, attention_mask, model_mode, indexer_cache)
+    top_k_indices, indexer_scores = self.indexer(
+        hidden_states,
+        q_latent,
+        position_ids,
+        attention_mask,
+        model_mode,
+        indexer_cache,
+        return_scores=return_indexer_scores,
+    )
 
     kv = self.kv_proj(hidden_states)
     gate = self.gate_proj(hidden_states)
@@ -1072,7 +1092,8 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
         )
 
     if compressed_len == 0:
-      return compressed_kv, jnp.zeros((batch_size, 1, seq_len, 0), dtype=self.dtype)
+      empty_mask = jnp.zeros((batch_size, 1, seq_len, 0), dtype=self.dtype)
+      return compressed_kv, empty_mask, (indexer_scores if return_indexer_scores else None)
 
     # 3. Apply Dynamic Masking Logic
     k = top_k_indices.shape[-1]
@@ -1093,7 +1114,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
           dtype=self.dtype,
       )
 
-    return compressed_kv, compressed_mask
+    return compressed_kv, compressed_mask, (indexer_scores if return_indexer_scores else None)
 
 
 class CompressedAttention(Attention):
@@ -1555,15 +1576,58 @@ class CompressedAttention(Attention):
           inputs_kv, q_normed, inputs_positions, model_mode, self.compressor_cache
       )
     elif self.compress_ratio == 4:
-      compressed_kv, compressed_mask = self.csa_compressor(
-          inputs_kv,
-          q_normed,
-          inputs_positions,
-          compressed_segment_mask,
-          model_mode,
-          self.compressor_cache,
-          self.indexer_cache,
-      )
+      use_indexer = self.config.use_indexer
+      scaling_factor = self.config.indexer_loss_scaling_factor
+      should_compute_loss = use_indexer and scaling_factor > 0.0 and model_mode == MODEL_MODE_TRAIN
+
+      if use_indexer:
+        compressed_kv, sparse_compressed_mask, indexer_scores = self.csa_compressor(
+            inputs_kv,
+            q_normed,
+            inputs_positions,
+            compressed_segment_mask,
+            model_mode,
+            self.compressor_cache,
+            self.indexer_cache,
+            return_indexer_scores=True,
+        )
+        is_sparse_training = self.config.indexer_sparse_training
+        is_dense_warmup = (model_mode == MODEL_MODE_TRAIN) and (scaling_factor > 0.0) and (not is_sparse_training)
+        use_sparse_mask = not is_dense_warmup
+        compressed_mask = self.get_compressed_mask(
+            inputs_positions,
+            compressed_kv.shape[1],
+            sparse_compressed_mask=sparse_compressed_mask if use_sparse_mask else None,
+        )
+
+        if (
+            should_compute_loss
+            and indexer_scores is not None
+            and compressed_kv is not None
+            and compressed_kv.shape[1] > 0
+        ):
+          indexer_loss = self.calculate_csa_indexer_loss(
+              indexer_score=indexer_scores,
+              query=q,
+              compressed_kv=compressed_kv,
+              compressed_mask=sparse_compressed_mask,
+              segment_mask=compressed_segment_mask,
+              position_ids=inputs_positions,
+              sparse_loss=is_sparse_training,
+              scaling_factor=scaling_factor,
+          )
+          self.indexer_loss = indexer_losses(indexer_loss)
+      else:
+        compressed_kv, compressed_mask, _ = self.csa_compressor(
+            inputs_kv,
+            q_normed,
+            inputs_positions,
+            compressed_segment_mask,
+            model_mode,
+            self.compressor_cache,
+            self.indexer_cache,
+            return_indexer_scores=False,
+        )
 
     # Apply segment masking to the compressed blocks
     if compressed_segment_mask is not None and compressed_mask is not None:
@@ -1661,6 +1725,167 @@ class CompressedAttention(Attention):
 
     # Return the Tuple expected by the transformer block
     return final_out, current_kv_cache
+
+  def get_compressed_mask(
+      self,
+      inputs_positions: Array,
+      compressed_len: int,
+      sparse_compressed_mask: Optional[Array] = None,
+  ) -> Array:
+    """Builds compressed attention mask. Returns sparse_compressed_mask if provided, else dense causal mask."""
+    if sparse_compressed_mask is not None:
+      return sparse_compressed_mask
+    usable_len = compressed_len * self.compress_ratio
+    block_positions = inputs_positions[:, : usable_len : self.compress_ratio]
+    is_future = (block_positions[:, None, :] + self.compress_ratio) > (inputs_positions[:, :, None] + 1)
+    dense_causal_mask = jnp.where(is_future, DEFAULT_MASK_VALUE, 0.0).astype(self.dtype)
+    return dense_causal_mask[:, None, :, :]
+
+  def calculate_csa_indexer_loss(
+      self,
+      indexer_score: Array,
+      query: Array,
+      compressed_kv: Array,
+      compressed_mask: Array,
+      segment_mask: Optional[Array] = None,
+      position_ids: Optional[Array] = None,
+      sparse_loss: bool = False,
+      scaling_factor: float = 1.0,
+  ) -> Array:
+    """Calculates the indexer KL divergence loss for Compressed Attention (DeepSeek-V4).
+
+    This loss trains the indexer to predict which compressed blocks are important by matching
+    the distribution of true attention scores from the main model over compressed KV blocks.
+
+    The target distribution is derived through the following steps:
+    1. Compute raw attention scores via Q @ K_comp^T (Q is already pre-scaled by 1/sqrt(head_dim)).
+    2. Apply causal block masking and segment masking over compressed blocks.
+    3. Softmax across compressed blocks dimension for each head.
+    4. Aggregate probabilities by summing across all attention heads.
+    5. Apply L1-normalization across the compressed block sequence dimension.
+
+    target_distribution = L1_Normalize(Sum_h(Softmax_w(Q @ K_comp^T + teacher_mask)))
+
+    Reference:
+    DeepSeek-V4 (https://arxiv.org/abs/2606.19348):
+      - Section 2.3.1 describes the Lightning Indexer and CSA forward architecture.
+      - Section 4.2.2 ("Training Setups") describes the 3-stage sparse attention pre-training pipeline:
+        Stage 1 (Dense Pre-training, first 1T tokens):
+          use_indexer=False, indexer_loss_scaling_factor=0.0
+        Stage 2 (Lightning Indexer Warm-up):
+          use_indexer=True, indexer_sparse_training=False, indexer_loss_scaling_factor=1.0,
+          trainable_parameters_mask=['.*indexer.*']
+        Stage 3 (Sparse Pre-training):
+          use_indexer=True, indexer_sparse_training=True, indexer_loss_scaling_factor=1.0
+    DeepSeek-V3.2 Section 2.1, Eqs. 3–4 (https://arxiv.org/abs/2512.02556) - DeepSeek Sparse Attention (DSA)
+      KL divergence distillation loss, adapted here from uncompressed tokens to CSA compressed KV blocks.
+
+    Args:
+      indexer_score: Scores predicted by indexer [batch, q_len, compressed_len].
+      query: Query tensor from main model [batch, q_len, heads, dim].
+      compressed_kv: Compressed KV tensor from main model [batch, compressed_len, 1, dim].
+      compressed_mask: Indexer compressed mask [batch, 1, q_len, compressed_len] or [batch, q_len, compressed_len].
+      segment_mask: Segment mask [batch, q_len, compressed_len] or [batch, 1, q_len, compressed_len] or None.
+      position_ids: Token position IDs [batch, q_len] or None.
+      sparse_loss: Whether to use sparse loss.
+      scaling_factor: The scaling factor for the loss.
+
+    Returns:
+      The computed scalar KL divergence loss.
+    """
+    if compressed_kv is None or indexer_score is None:
+      return jnp.array(0.0, dtype=jnp.float32)
+
+    batch, q_len, _, _ = query.shape
+    compressed_len = compressed_kv.shape[1]
+    if compressed_len == 0:
+      return jnp.array(0.0, dtype=jnp.float32)
+
+    # Detach main model components from the computational graph.
+    query = jax.lax.stop_gradient(query)
+    compressed_kv = jax.lax.stop_gradient(compressed_kv)
+
+    # Construct complete teacher mask: causal block mask + segment packing mask
+    # 1. Causal block mask: query at position t can only attend to block w if (w+1)*r <= t+1
+    if position_ids is not None:
+      usable_len = compressed_len * self.compress_ratio
+      block_positions = position_ids[:, : usable_len : self.compress_ratio]
+      future_mask = (block_positions[:, None, :] + self.compress_ratio) > (position_ids[:, :, None] + 1)
+    else:
+      q_pos = jnp.arange(q_len)[:, None]
+      block_end_pos = (jnp.arange(compressed_len)[None, :] + 1) * self.compress_ratio
+      future_mask = block_end_pos > (q_pos + 1)
+      future_mask = jnp.broadcast_to(future_mask[None, :, :], (batch, q_len, compressed_len))
+
+    # Ensure indexer_mask is 2D/3D [batch, q_len, compressed_len]
+    if compressed_mask.ndim == 4:
+      indexer_mask = compressed_mask[:, 0, :, :]
+    else:
+      indexer_mask = compressed_mask
+
+    # Combine causal, segment, and sparse masks via boolean disjunction to prevent float32 additive overflow
+    is_invalid_block = future_mask
+    if segment_mask is not None:
+      if segment_mask.ndim == 4:
+        c_seg = segment_mask[:, 0, :, :compressed_len]
+      elif segment_mask.ndim == 3:
+        c_seg = segment_mask[:, :, :compressed_len]
+      else:
+        c_seg = segment_mask
+      is_invalid_block = is_invalid_block | (c_seg < (DEFAULT_MASK_VALUE / 2))
+
+    if sparse_loss:
+      is_invalid_block = is_invalid_block | (indexer_mask < (DEFAULT_MASK_VALUE / 2))
+
+    teacher_mask = jnp.where(is_invalid_block, DEFAULT_MASK_VALUE, 0.0)
+    c_mask = teacher_mask[:, None, :, :]  # [batch, 1, q_len, compressed_len]
+
+    # Valid tokens mask checks causal, segment, and sparse boundaries after all masks are combined
+    valid_tokens_mask = jnp.any(~is_invalid_block, axis=-1)  # [batch, q_len]
+
+    # In CSA, compressed KV is pooled into a single representation per block (num_kv_heads = 1),
+    # which is broadcast across all query heads.
+    k_vec = compressed_kv[:, :, 0, :] if compressed_kv.ndim == 4 else compressed_kv
+
+    # Student scores: index_scores already contains causal future_mask and segment masking.
+    # In sparse training mode, mask non-selected blocks with DEFAULT_MASK_VALUE.
+    if sparse_loss:
+      student_scores = jnp.where(indexer_mask < (DEFAULT_MASK_VALUE / 2), DEFAULT_MASK_VALUE, indexer_score)
+    else:
+      student_scores = indexer_score
+
+    safe_student_scores = jnp.where(valid_tokens_mask[:, :, None], student_scores, 0.0)
+    log_indexer_probs = jax.nn.log_softmax(safe_student_scores.astype(jnp.float32), axis=-1)
+    log_indexer_probs = jnp.where(valid_tokens_mask[:, :, None], log_indexer_probs, 0.0)
+
+    # Query is already scaled by softmax_scale in compressed_query_projection; do not scale again
+    attention_scores = jnp.einsum("bthd, bwd -> bhtw", query, k_vec, precision=self.config.matmul_precision)
+    attention_scores = attention_scores + c_mask
+
+    # Apply NaN shielding for pre-block tokens
+    safe_scores = jnp.where(valid_tokens_mask[:, None, :, None], attention_scores, 0.0)
+    raw_probs = jax.nn.softmax(safe_scores.astype(jnp.float32), axis=-1)
+    raw_probs = jnp.where(valid_tokens_mask[:, None, :, None], raw_probs, 0.0)
+    target_probs = jnp.sum(raw_probs, axis=1)
+    target_probs = jax.lax.optimization_barrier(target_probs)
+
+    # L1 normalize aggregated target distribution across compressed blocks
+    target_probs = jnp.where(valid_tokens_mask[:, :, None], target_probs, 0.0)
+    target_probs = target_probs / (jnp.sum(target_probs, axis=-1, keepdims=True) + EPS)
+
+    # KL Divergence: KL(attention || indexer)
+    log_target_probs = jnp.log(target_probs + EPS)
+    kl_element = jnp.where(target_probs > 0.0, target_probs * (log_target_probs - log_indexer_probs), 0.0)
+    kl_per_token = jnp.sum(
+        jnp.where(valid_tokens_mask[:, :, None], kl_element, 0.0),
+        axis=-1,
+    )
+
+    # Average loss across valid tokens only (ignoring pre-block tokens t < compress_rate)
+    num_valid_tokens = jnp.maximum(jnp.sum(valid_tokens_mask.astype(jnp.float32)), 1.0)
+    indexer_loss = (jnp.sum(kl_per_token) / num_valid_tokens) * scaling_factor
+
+    return indexer_loss
 
 
 def compressed_attention(
