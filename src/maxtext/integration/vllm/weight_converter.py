@@ -1329,7 +1329,9 @@ class MaxTextToMaxTextConverter:
       raise NotImplementedError("convert_streaming only supports target-free conversion (target_state=None).")
 
     src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
-    src_flat, _ = _strip_root(src_flat, "base")
+    src_flat, src_root = _strip_root(src_flat, "base")
+    if not src_root:
+      src_root = ("base",)
 
     if self._plan is None:
       self._plan = self._build_target_free_plan(src_flat)
@@ -1344,7 +1346,7 @@ class MaxTextToMaxTextConverter:
         for k in group.source_keys:
           src_flat.pop(k, None)
         for tgt_key, out in outs:
-          piece_result[tgt_key] = out
+          piece_result[src_root + tgt_key] = out
         del outs
 
       nested = traverse_util.unflatten_dict(piece_result)

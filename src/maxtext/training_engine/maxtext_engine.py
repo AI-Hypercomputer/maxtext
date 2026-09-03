@@ -1536,7 +1536,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
               rollout_backend=self._rollout_backend,
               debug=getattr(self._config, "weight_sync_debug", False),
           )
-        piece_iter = self._weight_converter.convert_streaming(params_state, groups_per_piece=piece_batch)
+        converted_state = self._weight_converter.convert(params_state)
       else:
         # UNCHANGED, deliberately out of scope: this fp32->bf16 cast is an
         # on-device (HBM, not host RAM) full materialization -- a different
@@ -1547,73 +1547,54 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             params_state,
         )
         if self._config.scan_layers:
-          piece_iter = raiden_unscan.unscan_layers_streaming(
+          converted_state = raiden_unscan.unscan_layers(
               params_state,
               num_layers=self._config.num_decoder_layers,
               scan_axis=self._config.param_scan_axis,
-              keys_per_piece=piece_batch,
           )
         else:
-          piece_iter = iter([params_state])
+          converted_state = params_state
 
       del params_state
       gc.collect()
 
       if self._raiden_syncs is None:
-        self._raiden_syncs = []
+        is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
+        self._raiden_syncs = [
+            raiden_synchronizer.RaidenSynchronizer(
+                job_name="trainer",
+                worker_index=jax.process_index(),
+                auto_h2d=False,
+                host_stage=is_pathways,
+                parallelism=4,
+            )
+        ]
 
-      expected_num_pieces = len(self._raiden_syncs) if self._raiden_syncs else None
-      is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
+      sync = self._raiden_syncs[0]
+      sync.bind(converted_state)
+      del converted_state
+      gc.collect()
+      _malloc_trim()
+
+      # 4. Initiate Device-to-Host transfer to stage for network transfer.
+      if sync.active:
+        sync.d2h()
+
       verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
-      all_metadata = []
-      total_variables = 0
+      if verify_weights:
+        logging.info("Source weights checksums: %s", sync.checksums())
 
-      for piece_idx, piece in enumerate(piece_iter):
-        if piece_idx >= len(self._raiden_syncs):
-          self._raiden_syncs.append(
-              raiden_synchronizer.RaidenSynchronizer(
-                  job_name="trainer",
-                  worker_index=self._raiden_worker_index(piece_idx),
-                  auto_h2d=False,
-                  host_stage=is_pathways,
-                  parallelism=4,
-              )
-          )
-
-        sync = self._raiden_syncs[piece_idx]
-        sync.bind(piece)
-        del piece
-        gc.collect()
-
-        # 4. Initiate Device-to-Host transfer to stage this piece for network
-        # transfer before moving on to the next piece.
-        if sync.active:
-          sync.d2h()
-
-        if verify_weights:
-          logging.info("Source weights checksums (piece %d): %s", piece_idx, sync.checksums())
-
-        metadata = sync.work_unit_metadata()
-        total_variables += len(metadata.variables)
-        all_metadata.append(metadata)
-        sync.release_host_arrays()
-
-      num_pieces = len(all_metadata)
-      if expected_num_pieces is not None and num_pieces != expected_num_pieces:
-        raise RuntimeError(
-            f"weight-sync piece count changed from {expected_num_pieces} to {num_pieces} "
-            "between rounds; the cached conversion plan should make this impossible "
-            "unless the model/config changed mid-run."
-        )
+      metadata = sync.work_unit_metadata()
+      total_variables = len(metadata.variables)
+      all_metadata = [metadata]
 
       gc.collect()
       _malloc_trim()
 
       logging.info(
-          "Trainer prepared weight sync for step %d: registered %d variables across %d piece(s) on mesh %s",
+          "Trainer prepared weight sync for step %d: registered %d variables across 1 piece(s) on mesh %s",
           self.train_step,
           total_variables,
-          num_pieces,
           all_metadata[0].mesh_axes if all_metadata else None,
       )
       self._last_staged_step = self.train_step

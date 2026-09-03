@@ -65,7 +65,7 @@ class PrepareWeightSyncTest(unittest.TestCase):
     return meta
 
   @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
-  def test_streaming_grows_syncs_and_accumulates_metadata(self, mock_sync_cls):
+  def test_sync_binds_converted_state_and_accumulates_metadata(self, mock_sync_cls):
     created_syncs = []
 
     def make_sync(*args, **kwargs):
@@ -79,28 +79,20 @@ class PrepareWeightSyncTest(unittest.TestCase):
 
     mock_sync_cls.side_effect = make_sync
 
-    pieces = [{"piece_0": 0}, {"piece_1": 1}, {"piece_2": 2}]
-    self.engine._weight_converter.convert_streaming.return_value = iter(pieces)
+    converted = {"param_0": 0, "param_1": 1}
+    self.engine._weight_converter.convert.return_value = converted
 
     metadata = self.engine.prepare_weight_sync()
 
-    self.assertEqual(len(metadata), 3)
-    self.assertEqual(len(self.engine._raiden_syncs), 3)
-    self.assertEqual(len(created_syncs), 3)
+    self.assertEqual(len(metadata), 1)
+    self.assertEqual(len(self.engine._raiden_syncs), 1)
+    self.assertEqual(len(created_syncs), 1)
 
-    # Worker indices must be unique and properly strided
-    expected_indices = [
-        jax.process_index() * _RAIDEN_WORKER_INDEX_STRIDE + i + 1 for i in range(3)
-    ]
-    actual_indices = [s.worker_index for s in created_syncs]
-    self.assertEqual(actual_indices, expected_indices)
-
-    # Check that bind, d2h, metadata, release were called on each sync
-    for s, p in zip(created_syncs, pieces):
-      s.bind.assert_called_once_with(p)
-      s.d2h.assert_called_once()
-      s.work_unit_metadata.assert_called_once()
-      s.release_host_arrays.assert_called_once()
+    s = created_syncs[0]
+    self.assertEqual(s.worker_index, jax.process_index())
+    s.bind.assert_called_once_with(converted)
+    s.d2h.assert_called_once()
+    s.work_unit_metadata.assert_called_once()
 
   @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
   def test_rebind_reuses_sync_instances(self, mock_sync_cls):
@@ -117,35 +109,19 @@ class PrepareWeightSyncTest(unittest.TestCase):
     mock_sync_cls.side_effect = make_sync
 
     # Round 1
-    self.engine._weight_converter.convert_streaming.return_value = iter([{"p0": 0}, {"p1": 1}])
+    self.engine._weight_converter.convert.return_value = {"p0": 0}
     self.engine.prepare_weight_sync()
-    self.assertEqual(len(mock_syncs), 2)
+    self.assertEqual(len(mock_syncs), 1)
     first_round_syncs = list(self.engine._raiden_syncs)
 
     # Round 2 at step 1
     self.engine._train_step = 1
-    self.engine._weight_converter.convert_streaming.return_value = iter([{"p0": 0}, {"p1": 1}])
+    self.engine._weight_converter.convert.return_value = {"p0": 0}
     self.engine.prepare_weight_sync()
 
     # No new instances created
-    self.assertEqual(len(mock_syncs), 2)
+    self.assertEqual(len(mock_syncs), 1)
     self.assertEqual(self.engine._raiden_syncs, first_round_syncs)
-
-  @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
-  def test_piece_count_mismatch_between_rounds_raises(self, mock_sync_cls):
-    mock_sync_cls.side_effect = lambda *a, **kw: mock.MagicMock(
-        active=True, work_unit_metadata=mock.MagicMock(return_value=self._make_dummy_metadata())
-    )
-
-    # Round 1 has 2 pieces
-    self.engine._weight_converter.convert_streaming.return_value = iter([{"p0": 0}, {"p1": 1}])
-    self.engine.prepare_weight_sync()
-
-    # Round 2 has 3 pieces
-    self.engine._train_step = 1
-    self.engine._weight_converter.convert_streaming.return_value = iter([{"p0": 0}, {"p1": 1}, {"p2": 2}])
-    with self.assertRaisesRegex(RuntimeError, "weight-sync piece count changed from 2 to 3"):
-      self.engine.prepare_weight_sync()
 
   @mock.patch.dict(os.environ, {"RAIDEN_WEIGHT_SYNC_CHUNKS": "4"})
   @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
