@@ -126,7 +126,7 @@ def attention_as_linen(
     sliding_window_size: int | None = None,
     use_ragged_attention: bool = False,
     ragged_block_size: int = 256,
-    use_qk_norm: bool = False,
+    use_qk_norm: bool | None = None,
     query_pre_attn_scalar: float | None = None,
     use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
     share_kv_projections: bool = False,  # If true, Key and Value use the same projection
@@ -283,7 +283,7 @@ class Attention(nnx.Module):
       sliding_window_size: int | None = None,
       use_ragged_attention: bool = False,
       ragged_block_size: int = 256,
-      use_qk_norm: bool = False,
+      use_qk_norm: bool | None = None,
       query_pre_attn_scalar: float | None = None,
       use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
       share_kv_projections: bool = False,  # If true, Key and Value use the same projection
@@ -394,7 +394,7 @@ class Attention(nnx.Module):
     self.sliding_window_size = sliding_window_size
     self.use_ragged_attention = use_ragged_attention
     self.ragged_block_size = ragged_block_size
-    self.use_qk_norm = use_qk_norm
+    self.use_qk_norm = getattr(self.config, "use_qk_norm", False) if use_qk_norm is None else use_qk_norm
     self.query_pre_attn_scalar = query_pre_attn_scalar
     self.use_bias_in_projections = use_bias_in_projections
     self.share_kv_projections = share_kv_projections
@@ -665,9 +665,7 @@ class Attention(nnx.Module):
     #       linear transformations, which is equivalent under Adafactor.
     # We disable depth_scaling when using qk_norm or a query_pre_attn_scalar
     # to avoid applying scaling twice.
-    if getattr(self.config, "use_qk_norm", False) or (
-        self.query_pre_attn_scalar is not None and self.query_pre_attn_scalar != 1.0
-    ):
+    if self.use_qk_norm or (self.query_pre_attn_scalar is not None and self.query_pre_attn_scalar != 1.0):
       depth_scaling = 1.0
     else:
       depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
