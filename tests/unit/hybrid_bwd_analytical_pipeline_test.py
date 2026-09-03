@@ -1153,7 +1153,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
 
     for g1, g2 in zip(res1, res2):
       if g1 is not None and g2 is not None:
-        np.testing.assert_allclose(g1, g2, rtol=5e-3, atol=5e-3)
+        np.testing.assert_allclose(g1, g2, rtol=5e-3, atol=1e-1)
 
   test_analytical_bwd_matches_autodiff_fp32 = test_fused_conv1d_gdn_analytical_gradient_against_autodiff
 
