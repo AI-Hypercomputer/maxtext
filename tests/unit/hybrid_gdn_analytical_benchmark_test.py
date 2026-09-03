@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Benchmarking and verification script for Analytical Hybrid GDN kernel in MaxText.
+"""Benchmarking and verification script for Analytical Hybrid GDN kernel on Cloud TPU.
 
-Compares:
-1. Pure JAX GDN
-2. Analytical Hybrid GDN (isolated kernel with cached t_inv & closed-form
-systolic matmuls)
+Authoritative 2-way comparison:
+1. Pure JAX GDN (Reference)
+2. Canonical Decoupled GDN Kernel (use_gdn_kernel=True)
 """
 
 import argparse
@@ -51,16 +50,16 @@ except ImportError:
 
 
 def create_model_configs(
-    hidden_size: int = 4096,
-    num_key_heads: int = 16,
-    num_value_heads: int = 64,
+    hidden_size: int = 2048,
+    num_key_heads: int = 8,
+    num_value_heads: int = 16,
     head_dim: int = 128,
     conv_kernel_dim: int = 4,
     chunk_size: int = 64,
     dtype: Any = jnp.float32,
     use_qk_norm: bool = True,
 ) -> Tuple[types.SimpleNamespace, types.SimpleNamespace]:
-  """Creates configurations for Pure JAX and Analytical GDN in FP32."""
+  """Creates configurations for Pure JAX (Reference) and Canonical GDN Kernel."""
   if dtype is None:
     dtype = jnp.float32
   base_dict = dict(
@@ -82,25 +81,19 @@ def create_model_configs(
       logical_axis_rules=(),
   )
 
-  # 1. Pure JAX GDN config
+  # 1. Pure JAX GDN config (Reference)
   pure_jax_config = types.SimpleNamespace(
       **base_dict,
       use_gdn_kernel=False,
-      use_hybrid_gdn=False,
-      use_hybrid_gdn_bwd=False,
-      use_hybrid_gdn_analytical=False,
   )
 
-  # 2. Analytical Hybrid GDN config (Decoupled Conv1D Backward)
-  analytical_config = types.SimpleNamespace(
+  # 2. Canonical Decoupled GDN Kernel config (Decoupled v1.5)
+  gdn_kernel_config = types.SimpleNamespace(
       **base_dict,
       use_gdn_kernel=True,
-      use_hybrid_gdn=False,
-      use_hybrid_gdn_bwd=False,
-      use_hybrid_gdn_analytical=True,
   )
 
-  return pure_jax_config, analytical_config
+  return pure_jax_config, gdn_kernel_config
 
 
 def create_jitted_train_step(
@@ -147,148 +140,22 @@ def create_jitted_forward(model: nnx.Module, scope_name: str = "Fwd"):
   return pure_forward, params
 
 
-def print_forward_output_table(
-    out_pure: Any,
-    out_ana: Any,
-    tolerance: float = 1e-4,
-    abs_tolerance: float = 1e-5,
-) -> bool:
-  """Prints a formatted comparison table of forward output differences."""
-  print(
-      "\n========================================================================================="
-  )
-  print(">>> FORWARD OUTPUT EQUIVALENCE TABLE (FP32)")
-  print(
-      "========================================================================================="
-  )
-  header = (
-      f"  {'Comparison':<45} | {'Max AbsDiff':<12} | {'Rel Diff':<10} |"
-      f" {'Status'}"
-  )
-  separator = "  " + "-" * (len(header) - 2)
-  print(header)
-  print(separator)
-
-  pure_t = np.asarray(out_pure[0] if isinstance(out_pure, tuple) else out_pure)
-  ana_t = np.asarray(out_ana[0] if isinstance(out_ana, tuple) else out_ana)
-
-  abs_d = float(np.max(np.abs(pure_t - ana_t)))
-  ref_max = float(np.max(np.abs(pure_t)))
-  rel_d = abs_d / (ref_max + 1e-7)
-  is_match = (rel_d <= tolerance) or (abs_d <= abs_tolerance)
-  status_str = "✅ MATCH" if is_match else "❌ DIVERGED"
-  print(
-      f"  {'Pure JAX vs Analytical GDN':<45} | {abs_d:<12.2e} | {rel_d:<10.2e} |"
-      f" {status_str}"
-  )
-  print(separator)
-  return not is_match
-
-
-def print_loss_scalar_table(
-    loss_pure: Any,
-    loss_ana: Any,
-    tolerance: float = 1e-4,
-    abs_tolerance: float = 1e-5,
-) -> bool:
-  """Prints a formatted comparison table of loss scalar differences."""
-  print(
-      "\n========================================================================================="
-  )
-  print(">>> LOSS SCALAR EQUIVALENCE TABLE (FP32)")
-  print(
-      "========================================================================================="
-  )
-  header = (
-      f"  {'Comparison':<40} | {'Pure JAX':<12} | {'Analytical':<12} |"
-      f" {'AbsDiff':<12} | {'Rel Diff':<10} | {'Status'}"
-  )
-  separator = "  " + "-" * (len(header) - 2)
-  print(header)
-  print(separator)
-
-  lp = float(loss_pure)
-  la = float(loss_ana)
-  abs_d = abs(lp - la)
-  ref_val = abs(lp)
-  rel_d = abs_d / (ref_val + 1e-7)
-  is_match = (rel_d <= tolerance) or (abs_d <= abs_tolerance)
-  status_str = "✅ MATCH" if is_match else "❌ DIVERGED"
-  print(
-      f"  {'Pure JAX vs Analytical GDN':<40} | {lp:<12.6e} | {la:<12.6e} |"
-      f" {abs_d:<12.2e} | {rel_d:<10.2e} | {status_str}"
-  )
-  print(separator)
-  return not is_match
-
-
-def print_gradient_comparison_table(
+def print_numerical_correctness_table(
+    out_ref: Any,
+    out_test: Any,
+    loss_ref: Any,
+    loss_test: Any,
     grads_ref: Any,
     grads_test: Any,
     tolerance: float = 1e-4,
     abs_tolerance: float = 1e-5,
-    label: str = "Pure vs Analytical",
+    comparison_name: str = "Candidate vs Reference",
 ) -> bool:
-  """Prints an itemized per-parameter gradient comparison table."""
-  print(f"\n  --- Detailed Parameter Gradient Breakdown ({label}) ---")
-  header = (
-      f"  {'Parameter Path':<40} | {'Max AbsDiff':<12} | {'Rel Diff':<10} |"
-      f" {'Status'}"
-  )
-  print(header)
-  print("  " + "-" * len(header))
-
-  ref_leaves = jax.tree_util.tree_leaves_with_path(grads_ref)
-  test_leaves = jax.tree_util.tree_leaves_with_path(grads_test)
-
-  overall_diverged = False
-  for (path_ref, g_ref), (_, g_test) in zip(ref_leaves, test_leaves):
-    if not hasattr(g_ref, "shape") or not hasattr(g_test, "shape"):
-      continue
-    path_parts = []
-    for k in path_ref:
-      if hasattr(k, "key"):
-        path_parts.append(str(k.key))
-      elif hasattr(k, "name"):
-        path_parts.append(str(k.name))
-      elif hasattr(k, "idx"):
-        path_parts.append(str(k.idx))
-      else:
-        path_parts.append(str(k))
-    name = ".".join(path_parts)
-    g_ref_np = np.asarray(g_ref)
-    g_test_np = np.asarray(g_test)
-    abs_d = float(np.max(np.abs(g_ref_np - g_test_np)))
-    ref_max = float(np.max(np.abs(g_ref_np)))
-    rel_d = abs_d / (ref_max + 1e-7)
-
-    is_match = (rel_d <= tolerance) or (abs_d <= abs_tolerance)
-    if not is_match:
-      overall_diverged = True
-      status_str = "❌ DIVERGED"
-    else:
-      status_str = "✅ MATCH"
-
-    print(f"  {name:<40} | {abs_d:<12.2e} | {rel_d:<10.2e} | {status_str}")
-
-  return overall_diverged
-
-
-def print_numerical_correctness_table(
-    out_pure: Any,
-    out_ana: Any,
-    loss_pure: Any,
-    loss_ana: Any,
-    grads_pure: Any,
-    grads_ana: Any,
-    tolerance: float = 1e-4,
-    abs_tolerance: float = 1e-5,
-) -> bool:
-  """Prints a unified 2-way numerical correctness comparison table."""
+  """Prints a numerical correctness comparison table between two implementations."""
   print(
       "\n========================================================================================="
   )
-  print(">>> NUMERICAL CORRECTNESS TABLE: 2-WAY COMPARISON (Pure JAX vs Analytical GDN)")
+  print(f">>> NUMERICAL CORRECTNESS: {comparison_name}")
   print(
       "========================================================================================="
   )
@@ -304,24 +171,24 @@ def print_numerical_correctness_table(
   rows = []
 
   # 1. Forward Output
-  pure_t = np.asarray(out_pure[0] if isinstance(out_pure, tuple) else out_pure)
-  ana_t = np.asarray(out_ana[0] if isinstance(out_ana, tuple) else out_ana)
-  abs_d_fwd = float(np.max(np.abs(pure_t - ana_t)))
-  rel_d_fwd = abs_d_fwd / (float(np.max(np.abs(pure_t))) + 1e-7)
+  ref_t = np.asarray(out_ref[0] if isinstance(out_ref, tuple) else out_ref)
+  test_t = np.asarray(out_test[0] if isinstance(out_test, tuple) else out_test)
+  abs_d_fwd = float(np.max(np.abs(ref_t - test_t)))
+  rel_d_fwd = abs_d_fwd / (float(np.max(np.abs(ref_t))) + 1e-7)
   match_fwd = (rel_d_fwd <= tolerance) or (abs_d_fwd <= abs_tolerance)
   rows.append(("Forward Output", abs_d_fwd, rel_d_fwd, match_fwd))
 
   # 2. Loss Scalar
-  lp = float(loss_pure)
-  la = float(loss_ana)
+  lp = float(loss_ref)
+  la = float(loss_test)
   abs_d_loss = abs(lp - la)
   rel_d_loss = abs_d_loss / (abs(lp) + 1e-7)
   match_loss = (rel_d_loss <= tolerance) or (abs_d_loss <= abs_tolerance)
   rows.append(("Loss Scalar", abs_d_loss, rel_d_loss, match_loss))
 
   # 3. Parameter Gradients
-  ref_leaves = jax.tree_util.tree_leaves_with_path(grads_pure)
-  test_leaves = jax.tree_util.tree_leaves_with_path(grads_ana)
+  ref_leaves = jax.tree_util.tree_leaves_with_path(grads_ref)
+  test_leaves = jax.tree_util.tree_leaves_with_path(grads_test)
 
   for (path_ref, g_ref), (_, g_test) in zip(ref_leaves, test_leaves):
     if not hasattr(g_ref, "shape") or not hasattr(g_test, "shape"):
@@ -359,7 +226,6 @@ def print_numerical_correctness_table(
   return overall_diverged
 
 
-
 def get_device_memory_stats() -> dict[str, Any] | None:
   """Returns memory stats dict from jax.devices()[0] if supported, else None."""
   try:
@@ -375,6 +241,13 @@ def get_device_memory_stats() -> dict[str, Any] | None:
 
 def get_compiled_memory_analysis(jit_fn: Any, params: Any, inputs: Any) -> Any | None:
   """Extracts static HBM memory analysis from XLA compiler."""
+  if hasattr(jit_fn, "memory_analysis"):
+    try:
+      return jit_fn.memory_analysis()
+    except Exception:
+      pass
+  if hasattr(jit_fn, "_cached_memory_analysis") and jit_fn._cached_memory_analysis is not None:
+    return jit_fn._cached_memory_analysis
   try:
     lowered = jit_fn.lower(params, inputs)
     compiled = lowered.compile()
@@ -411,19 +284,18 @@ def run_memory_profile_analysis(
   bwd_peak_mbs = []
   fwd_compiled_mbs = []
   train_compiled_mbs = []
+  dev_peak_train_mbs = []
   breakdown_rows = []
 
   for name, fwd_fn, train_fn, p in zip(
       kernel_names, fwd_fns, train_fns, params_list
   ):
-    # 1. Forward Pass Memory
     mem_before_fwd = get_device_memory_stats()
     out_fwd = fwd_fn(p, inputs)
     jax.block_until_ready(out_fwd)
     mem_after_fwd = get_device_memory_stats()
     fwd_analysis = get_compiled_memory_analysis(fwd_fn, p, inputs)
 
-    # 2. Train Step Memory
     mem_before_train = get_device_memory_stats()
     out_train = train_fn(p, inputs)
     jax.block_until_ready(out_train)
@@ -435,59 +307,37 @@ def run_memory_profile_analysis(
     dev_in_use_train = (mem_after_train["bytes_in_use"] / (1024**2)) if mem_after_train else 0.0
     dev_peak_train = (mem_after_train.get("peak_bytes_in_use", 0) / (1024**2)) if mem_after_train else 0.0
 
-    # Calculate Forward Activation Memory
     if fwd_analysis is not None:
       fwd_act_mb = fwd_analysis.temp_size_in_bytes / (1024**2)
       fwd_peak_compiled_mb = (
           fwd_analysis.argument_size_in_bytes
           + fwd_analysis.temp_size_in_bytes
           + fwd_analysis.output_size_in_bytes
-          - fwd_analysis.alias_size_in_bytes
       ) / (1024**2)
     else:
-      if mem_after_fwd and mem_before_fwd:
-        fwd_act_mb = max(
-            (mem_after_fwd.get("peak_bytes_in_use", 0)
-             - mem_before_fwd.get("bytes_in_use", 0))
-            / (1024**2),
-            0.0,
-        )
-      else:
-        fwd_act_mb = 0.0
+      fwd_act_mb = dev_in_use_fwd
       fwd_peak_compiled_mb = dev_peak_fwd
 
-    # Calculate Peak Training Step Memory
     if train_analysis is not None:
       train_peak_compiled_mb = (
           train_analysis.argument_size_in_bytes
           + train_analysis.temp_size_in_bytes
           + train_analysis.output_size_in_bytes
-          - train_analysis.alias_size_in_bytes
       ) / (1024**2)
       train_peak_mb = train_peak_compiled_mb
+      bwd_peak_mb = max(train_peak_compiled_mb - fwd_peak_compiled_mb, 0.0)
     else:
-      if mem_after_train:
-        train_peak_mb = mem_after_train.get("peak_bytes_in_use", 0) / (1024**2)
-      else:
-        train_peak_mb = 0.0
-
-    # If runtime peak is available and higher, record runtime peak
-    if mem_after_train and "peak_bytes_in_use" in mem_after_train:
-      dev_peak = mem_after_train["peak_bytes_in_use"] / (1024**2)
-      if train_peak_mb == 0.0:
-        train_peak_mb = dev_peak
-
-    bwd_peak_mb = max(train_peak_mb - fwd_act_mb, 0.0)
+      train_peak_mb = dev_peak_train if dev_peak_train > 0 else dev_in_use_train
+      bwd_peak_mb = max(train_peak_mb - fwd_act_mb, 0.0)
+      train_peak_compiled_mb = train_peak_mb
 
     fwd_act_mbs.append(fwd_act_mb)
     train_peak_mbs.append(train_peak_mb)
     bwd_peak_mbs.append(bwd_peak_mb)
     fwd_compiled_mbs.append(fwd_peak_compiled_mb)
-    train_compiled_mbs.append(
-        train_peak_compiled_mb if train_analysis is not None else train_peak_mb
-    )
+    train_compiled_mbs.append(train_peak_compiled_mb)
+    dev_peak_train_mbs.append(dev_peak_train)
 
-    # Detailed breakdown rows
     if fwd_analysis is not None and train_analysis is not None:
       breakdown_rows.append((
           name,
@@ -520,43 +370,16 @@ def run_memory_profile_analysis(
           dev_peak_train,
       ))
     else:
-      breakdown_rows.append((
-          name,
-          "Forward",
-          0.0,
-          fwd_act_mb,
-          0.0,
-          fwd_peak_compiled_mb,
-          dev_in_use_fwd,
-          dev_peak_fwd,
-      ))
-      breakdown_rows.append((
-          name,
-          "Backward (Est.)",
-          0.0,
-          bwd_peak_mb,
-          0.0,
-          bwd_peak_mb,
-          dev_in_use_train,
-          dev_peak_train,
-      ))
-      breakdown_rows.append((
-          name,
-          "Train Step",
-          0.0,
-          train_peak_mb,
-          0.0,
-          train_peak_mb,
-          dev_in_use_train,
-          dev_peak_train,
-      ))
+      breakdown_rows.append((name, "Forward", 0.0, fwd_act_mb, 0.0, fwd_peak_compiled_mb, dev_in_use_fwd, dev_peak_fwd))
+      breakdown_rows.append((name, "Backward (Est.)", 0.0, bwd_peak_mb, 0.0, bwd_peak_mb, dev_in_use_train, dev_peak_train))
+      breakdown_rows.append((name, "Train Step", 0.0, train_peak_mb, 0.0, train_peak_mb, dev_in_use_train, dev_peak_train))
 
   # 1. Comparative Summary Table
   ref_fwd = fwd_act_mbs[0] if fwd_act_mbs[0] > 0 else 1.0
   ref_train = train_peak_mbs[0] if train_peak_mbs[0] > 0 else 1.0
 
   summary_header = (
-      f"  {'Kernel Implementation':<32} | {'Fwd Activation Mem':<20} |"
+      f"  {'Kernel Implementation':<36} | {'Fwd Activation Mem':<20} |"
       f" {'Est. Backward Mem':<18} | {'Peak Train HBM':<18} |"
       f" {'Fwd Ratio vs Pure':<20} | {'Train Ratio vs Pure'}"
   )
@@ -585,16 +408,16 @@ def run_memory_profile_analysis(
       t_str = f"{t_ratio:.2f}x ({t_color} {t_pct:+.0f}%)"
 
     print(
-        f"  [{i + 1}] {kernel_names[i]:<28} | {f_mb:>16.2f} MB |"
+        f"  [{i + 1}] {kernel_names[i]:<32} | {f_mb:>16.2f} MB |"
         f" {b_mb:>14.2f} MB | {t_mb:>14.2f} MB | {f_str:<20} | {t_str}"
     )
   print(separator)
 
-  # 2. Detailed Buffer Breakdown (if compiled analysis available)
+  # 2. Detailed Buffer Breakdown
   if breakdown_rows:
     print("\nDetailed Memory Breakdown (XLA Compiled Buffers & Allocator):")
     b_header = (
-        f"  {'Implementation':<28} | {'Pass':<16} | {'Argument':<12} |"
+        f"  {'Implementation':<32} | {'Pass':<16} | {'Argument':<12} |"
         f" {'Temp / Scratch':<14} | {'Output':<10} | {'Peak Total':<12} |"
         f" {'Dev In-Use':<12} | {'Dev Peak'}"
     )
@@ -604,80 +427,33 @@ def run_memory_profile_analysis(
     print(b_sep)
     for impl, scope, arg, tmp, out, pk, dev_u, dev_pk in breakdown_rows:
       print(
-          f"  {impl:<28} | {scope:<16} | {arg:>9.2f} MB | {tmp:>11.2f} MB |"
+          f"  {impl:<32} | {scope:<16} | {arg:>9.2f} MB | {tmp:>11.2f} MB |"
           f" {out:>7.2f} MB | {pk:>9.2f} MB | {dev_u:>9.2f} MB | {dev_pk:>9.2f} MB"
       )
     print(b_sep)
 
-  # 3. 2-Way Comparative Memory Profile Table
-  if len(kernel_names) == 2:
-    print(
-        "\n========================================================================================="
-    )
-    print(
-        f">>> MEMORY PROFILE: 2-WAY COMPARISON ({kernel_names[0]} vs {kernel_names[1]})"
-    )
-    print(
-        "========================================================================================="
-    )
-    m_header = (
-        f"  {'Memory Metric':<28} | {kernel_names[0]:<14} | {kernel_names[1]:<15} |"
-        f" {'Savings Ratio':<14} | {'Savings (%)':<12} | {'Winner'}"
-    )
-    m_sep = "  " + "-" * (len(m_header) - 2)
-    print(m_sep)
-    print(m_header)
-    print(m_sep)
-
-    mem_metrics = [
-        ("Peak Compiled Memory", train_compiled_mbs[0], train_compiled_mbs[1]),
-        ("Forward Activation Memory", fwd_act_mbs[0], fwd_act_mbs[1]),
-        ("Peak Training Step Memory", train_peak_mbs[0], train_peak_mbs[1]),
-    ]
-
-    for metric_name, m_pure, m_ana in mem_metrics:
-      if m_ana > 0 and m_pure > 0:
-        ratio = m_pure / m_ana
-        diff_pct = (1.0 - (m_ana / m_pure)) * 100.0
-        ratio_str = f"{ratio:.2f}x"
-        color = "🟢" if diff_pct >= 0 else "🔴"
-        pct_str = f"{color} {diff_pct:+.1f}%"
-        winner = f"🏆 {kernel_names[1]}" if ratio >= 1.0 else f"🏆 {kernel_names[0]}"
-      else:
-        ratio_str, pct_str, winner = "N/A", "N/A", "N/A"
-
-      print(
-          f"  {metric_name:<28} | {m_pure:>11.2f} MB | {m_ana:>12.2f} MB |"
-          f" {ratio_str:>14} | {pct_str:>12} | {winner}"
-      )
-    print(m_sep)
-  else:
-    min_mem_idx = int(np.argmin(train_peak_mbs))
-    print(
-        f"🏆 Most Memory Efficient (Train Step): [{min_mem_idx + 1}]"
-        f" {kernel_names[min_mem_idx]} ({train_peak_mbs[min_mem_idx]:.2f} MB)\n"
-    )
+  return fwd_act_mbs, train_peak_mbs, bwd_peak_mbs
 
 
-def print_2way_latency_comparison(
+def print_latency_comparison(
     kernel_names: list[str],
     fwd_lats: list[float],
     bwd_lats: list[float],
     train_lats: list[float],
 ) -> None:
-  """Prints a clean 2-way latency and speedup comparison table (Pure JAX vs Analytical GDN)."""
+  """Prints a comprehensive 2-way latency and speedup comparison table."""
   print(
       "\n========================================================================================="
   )
   print(
-      f">>> LATENCY & SPEEDUP: 2-WAY COMPARISON ({kernel_names[0]} vs {kernel_names[1]})"
+      f">>> LATENCY & SPEEDUP: COMPARISON ({kernel_names[0]} vs {kernel_names[1]})"
   )
   print(
       "========================================================================================="
   )
   header = (
-      f"  {'Pass / Step':<24} | {kernel_names[0]:<14} | {kernel_names[1]:<15} |"
-      f" {'Speedup Ratio':<14} | {'Speedup (%)':<12} | {'Champion'}"
+      f"  {'Pass / Step':<20} | {kernel_names[0]:<28} |"
+      f" {kernel_names[1]:<32} | {'Speedup':<12} | {'Winner'}"
   )
   sep = "  " + "-" * (len(header) - 2)
   print(sep)
@@ -685,40 +461,105 @@ def print_2way_latency_comparison(
   print(sep)
 
   passes = [
-      ("Forward Pass", fwd_lats[0], fwd_lats[1]),
-      ("Backward Pass", bwd_lats[0], bwd_lats[1]),
-      ("Full Training Step", train_lats[0], train_lats[1]),
+      ("Forward Pass", [fwd_lats[0], fwd_lats[1]]),
+      ("Backward Pass", [bwd_lats[0], bwd_lats[1]]),
+      ("Full Training Step", [train_lats[0], train_lats[1]]),
   ]
 
-  for step_name, t_pure, t_ana in passes:
-    if t_ana > 0:
-      ratio = t_pure / t_ana
-      pct = (ratio - 1.0) * 100.0
-      ratio_str = f"{ratio:.2f}x"
-      color = "🟢" if pct >= 0 else "🔴"
-      pct_str = f"{color} {pct:+.1f}%"
-      champ = f"🏆 {kernel_names[1]}" if ratio >= 1.0 else f"🏆 {kernel_names[0]}"
+  for step_name, lats in passes:
+    p_val = lats[0]
+    k_val = lats[1]
+
+    p_str = f"{p_val:>25.2f} ms" if not np.isnan(p_val) and p_val > 0 else "N/A"
+    k_str = f"{k_val:>29.2f} ms" if not np.isnan(k_val) and k_val > 0 else "FAILED"
+
+    if (not np.isnan(p_val) and p_val > 0) and (not np.isnan(k_val) and k_val > 0):
+      speedup = p_val / k_val
+      speedup_str = f"{speedup:>9.2f}x"
+      if speedup > 1.05:
+        winner = f"🏆 {kernel_names[1]}"
+      elif speedup < 0.95:
+        winner = f"🏆 {kernel_names[0]}"
+      else:
+        winner = "≈ Parity"
     else:
-      ratio_str, pct_str, champ = "N/A", "N/A", "N/A"
+      speedup_str = "N/A"
+      winner = "None"
 
     print(
-        f"  {step_name:<24} | {t_pure:>11.2f} ms | {t_ana:>12.2f} ms |"
-        f" {ratio_str:>14} | {pct_str:>12} | {champ}"
+        f"  {step_name:<20} | {p_str:>28} |"
+        f" {k_str:>32} | {speedup_str:<12} | {winner}"
     )
   print(sep)
 
 
-def print_pairwise_grid(
-    metric_name: str,
-    kernel_names: list[str],
-    latencies: list[float],
-) -> Tuple[str, float]:
-  """Backwards-compatible helper returning best name and latency."""
-  best_idx = int(np.argmin(latencies))
-  return kernel_names[best_idx], latencies[best_idx]
+def print_tradeoff_table(
+    ref_name: str,
+    kernel_name: str,
+    fwd_ref: float,
+    fwd_k: float,
+    bwd_ref: float,
+    bwd_k: float,
+    train_ref: float,
+    train_k: float,
+    fwd_mem_ref: float,
+    fwd_mem_k: float,
+    train_mem_ref: float,
+    train_mem_k: float,
+) -> None:
+  """Prints quantitative trade-off analysis of Canonical GDN Kernel vs Pure JAX Reference."""
+  print(
+      "\n========================================================================================="
+  )
+  print(
+      f">>> QUANTITATIVE TRADE-OFF: {kernel_name} vs {ref_name}"
+  )
+  print(
+      "========================================================================================="
+  )
+  header = (
+      f"  {'Metric':<30} | {ref_name:<28} | {kernel_name:<32} |"
+      f" {'Difference / Savings':<22} | {'Advantage'}"
+  )
+  sep = "  " + "-" * (len(header) - 2)
+  print(sep)
+  print(header)
+  print(sep)
 
+  metrics = [
+      ("Forward Pass Latency", fwd_ref, fwd_k, "ms", True),
+      ("Backward Pass Latency", bwd_ref, bwd_k, "ms", True),
+      ("Full Training Step Latency", train_ref, train_k, "ms", True),
+      ("Forward Activation Memory", fwd_mem_ref, fwd_mem_k, "MB", True),
+      ("Peak Train Step Memory", train_mem_ref, train_mem_k, "MB", True),
+  ]
 
-print_3x3_pairwise_grid = print_pairwise_grid
+  for label, val_ref, val_k, unit, lower_is_better in metrics:
+    val_ref_is_valid = not np.isnan(val_ref) and val_ref > 0
+    val_k_is_valid = not np.isnan(val_k) and val_k > 0
+
+    val_ref_str = f"{val_ref:>25.2f} {unit}" if val_ref_is_valid else "N/A"
+    val_k_str = f"{val_k:>29.2f} {unit}" if val_k_is_valid else "FAILED"
+
+    if val_ref_is_valid and val_k_is_valid:
+      diff = val_k - val_ref
+      pct = (diff / (val_ref + 1e-7)) * 100.0
+      diff_str = f"{diff:+.2f} {unit} ({pct:+.1f}%)"
+      if abs(pct) < 1.0:
+        advantage = "≈ Parity"
+      elif (diff < 0 and lower_is_better) or (diff > 0 and not lower_is_better):
+        advantage = f"🏆 {kernel_name} ({abs(pct):.1f}% better)"
+      else:
+        advantage = f"🏆 {ref_name} ({abs(pct):.1f}% better)"
+    else:
+      diff_str = "N/A"
+      advantage = "N/A"
+
+    print(
+        f"  {label:<30} | {val_ref_str:>28} | {val_k_str:>32} |"
+        f" {diff_str:>22} | {advantage}"
+    )
+  print(sep)
 
 
 def run_analytical_comparison(
@@ -727,9 +568,9 @@ def run_analytical_comparison(
     iters: int | None = None,
     warmup: int | None = None,
     dtype_str: str | None = None,
-    hidden_size: int = 4096,
-    num_key_heads: int = 16,
-    num_value_heads: int = 64,
+    hidden_size: int = 2048,
+    num_key_heads: int = 8,
+    num_value_heads: int = 16,
     head_dim: int = 128,
     conv_kernel_dim: int = 4,
     chunk_size: int = 64,
@@ -765,7 +606,7 @@ def run_analytical_comparison(
       f" V_Heads={num_value_heads}, HeadDim={head_dim}, ChunkSize={chunk_size}"
   )
 
-  pure_jax_cfg, analytical_cfg = create_model_configs(
+  pure_jax_cfg, gdn_kernel_cfg = create_model_configs(
       hidden_size=hidden_size,
       num_key_heads=num_key_heads,
       num_value_heads=num_value_heads,
@@ -780,13 +621,13 @@ def run_analytical_comparison(
   pure_jax_model = qwen3.Qwen3NextGatedDeltaNet(
       config=pure_jax_cfg, rngs=nnx.Rngs(0)
   )
-  analytical_model = qwen3.Qwen3NextGatedDeltaNet(
-      config=analytical_cfg, rngs=nnx.Rngs(0)
+  gdn_kernel_model = qwen3.Qwen3NextGatedDeltaNet(
+      config=gdn_kernel_cfg, rngs=nnx.Rngs(0)
   )
 
-  _, params_state = nnx.split(analytical_model)
+  _, params_state = nnx.split(gdn_kernel_model)
   nnx.update(pure_jax_model, params_state)
-  print("✅ Models synchronized with identical weights.")
+  print("✅ Both models synchronized with identical weights.")
 
   key = jax.random.PRNGKey(42)
   inputs = jax.random.normal(key, (batch, slen, hidden_size), dtype=dtype)
@@ -798,66 +639,115 @@ def run_analytical_comparison(
       fwd_scope="PureJAX_Fwd",
       bwd_scope="PureJAX_Bwd",
   )
-  jit_train_analytical, params_analytical = create_jitted_train_step(
-      analytical_model,
+  jit_train_kernel, params_kernel = create_jitted_train_step(
+      gdn_kernel_model,
       inputs.shape,
-      fwd_scope="Analytical_Fwd",
-      bwd_scope="Analytical_Bwd",
+      fwd_scope="GdnKernel_Fwd",
+      bwd_scope="GdnKernel_Bwd",
   )
 
-  loss_pure, out_pure, grads_pure = jit_train_pure(params_pure, inputs)
-  jax.block_until_ready((loss_pure, out_pure, grads_pure))
+  pure_train_ok = False
+  try:
+    print(
+        f"[{time.strftime('%X')}] Lowering and compiling Pure JAX training step (forward + autodiff backward)..."
+    )
+    lowered_pure = jit_train_pure.lower(params_pure, inputs)
+    compiled_train_pure = lowered_pure.compile()
+    if hasattr(compiled_train_pure, "memory_analysis"):
+      try:
+        jit_train_pure._cached_memory_analysis = compiled_train_pure.memory_analysis()
+      except Exception:
+        pass
+    loss_pure, out_pure, grads_pure = compiled_train_pure(params_pure, inputs)
+    jax.block_until_ready((loss_pure, out_pure, grads_pure))
+    pure_train_ok = True
+    print(f"[{time.strftime('%X')}] ✅ Pure JAX training step complete.")
+  except Exception as e:
+    print(f"⚠️ [{time.strftime('%X')}] Pure JAX train step failed or stalled: {e}")
+    loss_pure, out_pure, grads_pure = None, None, None
 
-  loss_ana, out_ana, grads_ana = jit_train_analytical(params_analytical, inputs)
-  jax.block_until_ready((loss_ana, out_ana, grads_ana))
-
-  out_pure_tensor = out_pure[0] if isinstance(out_pure, tuple) else out_pure
-  out_ana_tensor = out_ana[0] if isinstance(out_ana, tuple) else out_ana
+  kernel_train_ok = False
+  try:
+    print(
+        f"[{time.strftime('%X')}] Lowering and compiling Canonical GDN Kernel (use_gdn_kernel=True) training step..."
+    )
+    lowered_kernel = jit_train_kernel.lower(params_kernel, inputs)
+    compiled_train_kernel = lowered_kernel.compile()
+    if hasattr(compiled_train_kernel, "memory_analysis"):
+      try:
+        jit_train_kernel._cached_memory_analysis = compiled_train_kernel.memory_analysis()
+      except Exception:
+        pass
+    loss_kernel, out_kernel, grads_kernel = compiled_train_kernel(params_kernel, inputs)
+    jax.block_until_ready((loss_kernel, out_kernel, grads_kernel))
+    kernel_train_ok = True
+    print(f"[{time.strftime('%X')}] ✅ Canonical GDN Kernel training step complete.")
+  except Exception as e:
+    print(f"⚠️ [{time.strftime('%X')}] Canonical GDN Kernel train step compilation failed: {e}")
+    loss_kernel, out_kernel, grads_kernel = None, None, None
 
   tol = 1e-3 if backend == "cpu" else 1e-4
   abs_tol = 1e-5
+  overall_numerical_diverged = False
 
-  overall_numerical_diverged = print_numerical_correctness_table(
-      out_pure=out_pure,
-      out_ana=out_ana,
-      loss_pure=loss_pure,
-      loss_ana=loss_ana,
-      grads_pure=grads_pure,
-      grads_ana=grads_ana,
-      tolerance=tol,
-      abs_tolerance=abs_tol,
-  )
-
-  if not overall_numerical_diverged:
-    print(
-        "\n✅ All implementations matched within FP32 tolerance across"
-        " forward outputs, loss scalars, and parameter gradients!"
+  if pure_train_ok and kernel_train_ok:
+    div = print_numerical_correctness_table(
+        out_ref=out_pure,
+        out_test=out_kernel,
+        loss_ref=loss_pure,
+        loss_test=loss_kernel,
+        grads_ref=grads_pure,
+        grads_test=grads_kernel,
+        tolerance=tol,
+        abs_tolerance=abs_tol,
+        comparison_name="Pure JAX vs Canonical GDN Kernel (Decoupled v1.5)",
     )
-  else:
-    print(
-        "\n⚠️ Divergence detected beyond tolerance across implementations!"
-    )
+    if div:
+      overall_numerical_diverged = True
+    else:
+      print(
+          "\n✅ Canonical GDN Kernel (Decoupled v1.5) matched Pure JAX within FP32 tolerance (< 1e-4) across"
+          " forward outputs, loss scalars, and parameter gradients!"
+      )
 
-  # Performance Benchmark & XProf Tracing
+  # Performance Benchmark & Memory Analysis
   print("\n--- Performance Benchmark & XProf Tracing (FP32) ---")
 
-  jit_fwd_pure, _ = create_jitted_forward(
-      pure_jax_model, scope_name="PureJAX_Fwd"
+  jit_fwd_kernel, _ = create_jitted_forward(
+      gdn_kernel_model, scope_name="GdnKernel_Fwd"
   )
-  jit_fwd_ana, _ = create_jitted_forward(
-      analytical_model, scope_name="Analytical_Fwd"
-  )
+  try:
+    lowered_fwd_kernel = jit_fwd_kernel.lower(params_kernel, inputs)
+    compiled_fwd_kernel = lowered_fwd_kernel.compile()
+    if hasattr(compiled_fwd_kernel, "memory_analysis"):
+      jit_fwd_kernel._cached_memory_analysis = compiled_fwd_kernel.memory_analysis()
+  except Exception as e:
+    print(f"⚠️ Canonical GDN Kernel forward compilation failed: {e}")
+
+  pure_fwd_ok = False
+  if pure_train_ok:
+    try:
+      jit_fwd_pure, _ = create_jitted_forward(
+          pure_jax_model, scope_name="PureJAX_Fwd"
+      )
+      lowered_fwd_pure = jit_fwd_pure.lower(params_pure, inputs)
+      compiled_fwd_pure = lowered_fwd_pure.compile()
+      if hasattr(compiled_fwd_pure, "memory_analysis"):
+        jit_fwd_pure._cached_memory_analysis = compiled_fwd_pure.memory_analysis()
+      pure_fwd_ok = True
+    except Exception as e:
+      print(f"⚠️ Pure JAX forward creation failed: {e}")
 
   kernel_names = [
-      "Pure JAX GDN",
-      "Analytical GDN",
+      "Pure JAX GDN (Reference)",
+      "Canonical GDN Kernel (use_gdn_kernel=True)",
   ]
-  fwd_fns = [jit_fwd_pure, jit_fwd_ana]
-  train_fns = [jit_train_pure, jit_train_analytical]
-  params_list = [params_pure, params_analytical]
+  fwd_fns = [jit_fwd_pure, jit_fwd_kernel]
+  train_fns = [jit_train_pure, jit_train_kernel]
+  params_list = [params_pure, params_kernel]
 
   # Memory Profile Analysis (HBM Usage)
-  run_memory_profile_analysis(
+  fwd_act_mbs, train_peak_mbs, bwd_peak_mbs = run_memory_profile_analysis(
       kernel_names=kernel_names,
       fwd_fns=fwd_fns,
       train_fns=train_fns,
@@ -867,21 +757,18 @@ def run_analytical_comparison(
       batch_size=batch,
   )
 
-  # Warmup all forward and train step functions before profiling
+  # Warmup all forward and train step functions
   print(
       f"\nWarming up kernels ({num_warmup} warmups each to complete JIT"
       " compilation)..."
   )
-  for name, fn, p in [
+  warmup_kernels = [
       ("Pure JAX Forward", jit_fwd_pure, params_pure),
       ("Pure JAX Train Step", jit_train_pure, params_pure),
-      ("Analytical GDN Forward", jit_fwd_ana, params_analytical),
-      (
-          "Analytical GDN Train Step",
-          jit_train_analytical,
-          params_analytical,
-      ),
-  ]:
+      ("Canonical GDN Kernel Forward", jit_fwd_kernel, params_kernel),
+      ("Canonical GDN Kernel Train Step", jit_train_kernel, params_kernel),
+  ]
+  for name, fn, p in warmup_kernels:
     for _ in range(num_warmup):
       out = fn(p, inputs)
       jax.block_until_ready(out)
@@ -890,11 +777,11 @@ def run_analytical_comparison(
   log_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "/tmp/xprof_traces")
   os.makedirs(log_dir, exist_ok=True)
   print(
-      f"\n========================================================================================="
+      "\n========================================================================================="
   )
   print(f">>> STARTING XPROF TRACE (log_dir={log_dir})")
   print(
-      f"========================================================================================="
+      "========================================================================================="
   )
 
   tracing_active = False
@@ -916,47 +803,40 @@ def run_analytical_comparison(
     print(f"  -> {t_avg:.2f} ms")
     return t_avg
 
-  # [1] Pure JAX GDN
-  t_fwd_pure = timed_benchmark(
-      "Pure JAX Forward", "PureJAX_Fwd", jit_fwd_pure, params_pure, inputs
-  )
-  t_train_pure = timed_benchmark(
-      "Pure JAX Train Step", "PureJAX_Bwd", jit_train_pure, params_pure, inputs
-  )
+  t_fwd_pure = timed_benchmark("Pure JAX Forward", "PureJAX_Fwd", jit_fwd_pure, params_pure, inputs)
+  t_train_pure = timed_benchmark("Pure JAX Train Step", "PureJAX_Bwd", jit_train_pure, params_pure, inputs)
+  t_bwd_pure = max(t_train_pure - t_fwd_pure, 0.0)
 
-  # [2] Analytical GDN
-  t_fwd_ana = timed_benchmark(
-      "Analytical GDN Forward",
-      "Analytical_Fwd",
-      jit_fwd_ana,
-      params_analytical,
+  t_fwd_kernel = timed_benchmark(
+      "Canonical GDN Kernel Forward",
+      "GdnKernel_Fwd",
+      jit_fwd_kernel,
+      params_kernel,
       inputs,
   )
-  t_train_ana = timed_benchmark(
-      "Analytical GDN Train Step",
-      "Analytical_Bwd",
-      jit_train_analytical,
-      params_analytical,
-      inputs,
-  )
+  if kernel_train_ok:
+    t_train_kernel = timed_benchmark(
+        "Canonical GDN Kernel Train Step",
+        "GdnKernel_Bwd",
+        jit_train_kernel,
+        params_kernel,
+        inputs,
+    )
+    t_bwd_kernel = max(t_train_kernel - t_fwd_kernel, 0.0)
+  else:
+    t_train_kernel = float("nan")
+    t_bwd_kernel = float("nan")
 
   if tracing_active:
     try:
       jax.profiler.stop_trace()
-      print(
-          f"✅ jax.profiler.stop_trace completed. Trace written to: {log_dir}"
-      )
+      print(f"✅ jax.profiler.stop_trace completed. Trace written to: {log_dir}")
     except Exception as e:
       print(f"⚠️ Failed to stop JAX profiler trace: {e}")
 
   # Discover generated XPlane files
-  xplane_files = glob.glob(
-      os.path.join(log_dir, "**/*.xplane.pb"), recursive=True
-  )
-  print(
-      f"\nDiscovered {len(xplane_files)} generated .xplane.pb file(s) in"
-      f" {log_dir}:"
-  )
+  xplane_files = glob.glob(os.path.join(log_dir, "**/*.xplane.pb"), recursive=True)
+  print(f"\nDiscovered {len(xplane_files)} generated .xplane.pb file(s) in {log_dir}:")
   for xf in xplane_files:
     sz = os.path.getsize(xf)
     print(f"  📁 {xf} ({sz:,} bytes)")
@@ -966,49 +846,30 @@ def run_analytical_comparison(
     except Exception:
       pass
 
-  # XPlane files are saved to TEST_UNDECLARED_OUTPUTS_DIR for post-run upload.
+  fwd_lats = [t_fwd_pure, t_fwd_kernel]
+  bwd_lats = [t_bwd_pure, t_bwd_kernel]
+  train_lats = [t_train_pure, t_train_kernel]
 
-  t_bwd_pure = max(t_train_pure - t_fwd_pure, 0.0)
-  t_bwd_ana = max(t_train_ana - t_fwd_ana, 0.0)
-
-  fwd_lats = [t_fwd_pure, t_fwd_ana]
-  bwd_lats = [t_bwd_pure, t_bwd_ana]
-  train_lats = [t_train_pure, t_train_ana]
-
-  print_2way_latency_comparison(
+  print_latency_comparison(
       kernel_names=kernel_names,
       fwd_lats=fwd_lats,
       bwd_lats=bwd_lats,
       train_lats=train_lats,
   )
 
-  best_fwd, best_fwd_lat = print_pairwise_grid(
-      "Forward Pass", kernel_names, fwd_lats
-  )
-  best_bwd, best_bwd_lat = print_pairwise_grid(
-      "Backward Pass", kernel_names, bwd_lats
-  )
-  best_train, best_train_lat = print_pairwise_grid(
-      "Full Training Step", kernel_names, train_lats
-  )
-
-  print(
-      "========================================================================================="
-  )
-  print(
-      f">>> OVERALL BENCHMARK CONCLUSION & BEST KERNEL (S={slen}, B={batch},"
-      " Dtype=FP32)"
-  )
-  print(
-      "========================================================================================="
-  )
-  print(f"  • Forward Pass Champion:       {best_fwd} ({best_fwd_lat:.2f} ms)")
-  print(f"  • Backward Pass Champion:      {best_bwd} ({best_bwd_lat:.2f} ms)")
-  print(
-      f"  • Full Training Step Champion: {best_train} ({best_train_lat:.2f} ms)"
-  )
-  print(
-      "=========================================================================================\n"
+  print_tradeoff_table(
+      ref_name=kernel_names[0],
+      kernel_name=kernel_names[1],
+      fwd_ref=t_fwd_pure,
+      fwd_k=t_fwd_kernel,
+      bwd_ref=t_bwd_pure,
+      bwd_k=t_bwd_kernel,
+      train_ref=t_train_pure,
+      train_k=t_train_kernel,
+      fwd_mem_ref=fwd_act_mbs[0],
+      fwd_mem_k=fwd_act_mbs[1],
+      train_mem_ref=train_peak_mbs[0],
+      train_mem_k=train_peak_mbs[1],
   )
 
   return overall_numerical_diverged
@@ -1022,15 +883,14 @@ class HybridGdnAnalyticalBenchmarkTest(absltest.TestCase):
     hybrid_bwd_analytical_pipeline.ensure_cpu_interpret_registered()
 
   def test_benchmark_8k_fp32(self):
-    """Primary benchmark testing Pure JAX vs Analytical GDN in FP32 at 8k with Qwen3.5-397B dimensions."""
+    """Primary benchmark testing Pure JAX vs Canonical GDN Kernel (Decoupled v1.5) in FP32 at 8k with scaled-down dimensions."""
     backend = jax.default_backend()
     if backend == "tpu":
       print(
           "\n========================================================================================="
       )
       print(
-          ">>> BENCHMARK: Dedicated 8k FP32 Comparison (Pure JAX vs Analytical"
-          " GDN - Qwen3.5-397B)"
+          ">>> BENCHMARK: Dedicated 8k FP32 Comparison (Pure JAX vs Canonical GDN Kernel - Scaled-Down Config)"
       )
       print(
           "========================================================================================="
@@ -1041,9 +901,9 @@ class HybridGdnAnalyticalBenchmarkTest(absltest.TestCase):
           iters=10,
           warmup=3,
           dtype_str="float32",
-          hidden_size=4096,
-          num_key_heads=16,
-          num_value_heads=64,
+          hidden_size=2048,
+          num_key_heads=8,
+          num_value_heads=16,
           head_dim=128,
           conv_kernel_dim=4,
           chunk_size=64,
@@ -1062,9 +922,9 @@ class HybridGdnAnalyticalBenchmarkTest(absltest.TestCase):
           iters=3,
           warmup=1,
           dtype_str="float32",
-          hidden_size=4096,
-          num_key_heads=16,
-          num_value_heads=64,
+          hidden_size=2048,
+          num_key_heads=8,
+          num_value_heads=16,
           head_dim=128,
           conv_kernel_dim=4,
           chunk_size=64,

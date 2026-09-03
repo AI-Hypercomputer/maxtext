@@ -15,22 +15,10 @@
 """Unit tests for hybrid_bwd_analytical_pipeline with manual analytical backward pass."""
 
 import functools
-try:
-  from absl.testing import absltest
-except ImportError:
-  import unittest as absltest
+from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-try:
-  import jax.experimental.xla_metadata
-  if not hasattr(jax.experimental.xla_metadata, "must_fuse_call"):
-    jax.experimental.xla_metadata.must_fuse_call = (
-        lambda *args, **kwargs: (lambda fn: fn)
-    )
-except Exception:
-  pass
 
 try:
   from maxtext.models import hybrid_bwd_analytical_pipeline
@@ -199,7 +187,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
     )
 
   def test_fused_conv1d_gdn_analytical_gradient_against_autodiff(self):
-    """Compares hybrid_fused_conv1d_gdn_analytical custom VJP against JAX autodiff on pure JAX."""
+    """Compares hybrid_fused_conv1d_gdn custom VJP against JAX autodiff on pure JAX."""
     batch_size = 1
     chunk_size = 64
     num_chunks = 2
@@ -262,7 +250,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
     # 2. Kernel Gradients via Analytical custom VJP
     def loss_analytical(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
       out, _ = (
-          hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn_analytical(
+          hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn(
               qkv=qkv_in,
               b=b_in,
               a=a_in,
@@ -357,7 +345,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
 
     def loss_fn(qkv_in, b_in, a_in, cw_in, al_in, dt_in):
       out, _ = (
-          hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn_analytical(
+          hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn(
               qkv=qkv_in,
               b=b_in,
               a=a_in,
@@ -423,7 +411,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
 
     def loss_fn(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
       out, _ = (
-          hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn_analytical(
+          hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn(
               qkv=qkv_in,
               b=b_in,
               a=a_in,
@@ -599,7 +587,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
     np.testing.assert_allclose(t_inv_cached, t_inv_ref, rtol=1e-6, atol=1e-6)
 
   def test_fused_conv1d_gdn_analytical_bwd_with_cached_tinv_in_residuals(self):
-    """Verifies _hybrid_fused_conv1d_gdn_analytical_bwd gives identical grads with cached t_inv."""
+    """Verifies _hybrid_fused_conv1d_gdn_bwd gives identical grads with cached t_inv."""
     batch_size = 1
     chunk_size = 32
     num_chunks = 2
@@ -693,7 +681,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
     cotangents = (do, (None, None))
 
     grads_none = (
-        hybrid_bwd_analytical_pipeline._hybrid_fused_conv1d_gdn_analytical_bwd(
+        hybrid_bwd_analytical_pipeline._hybrid_fused_conv1d_gdn_bwd(
             num_k_heads=num_k_heads,
             num_v_heads=num_v_heads,
             head_k_dim=head_k_dim,
@@ -708,7 +696,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
     )
 
     grads_cached = (
-        hybrid_bwd_analytical_pipeline._hybrid_fused_conv1d_gdn_analytical_bwd(
+        hybrid_bwd_analytical_pipeline._hybrid_fused_conv1d_gdn_bwd(
             num_k_heads=num_k_heads,
             num_v_heads=num_v_heads,
             head_k_dim=head_k_dim,
@@ -723,7 +711,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
     )
 
     grads_cached_all = (
-        hybrid_bwd_analytical_pipeline._hybrid_fused_conv1d_gdn_analytical_bwd(
+        hybrid_bwd_analytical_pipeline._hybrid_fused_conv1d_gdn_bwd(
             num_k_heads=num_k_heads,
             num_v_heads=num_v_heads,
             head_k_dim=head_k_dim,
@@ -903,7 +891,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
 
     def loss_analytical(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
       out, _ = (
-          hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn_analytical(
+          hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn(
               qkv=qkv_in,
               b=b_in,
               a=a_in,
@@ -936,6 +924,241 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
       self.assertIsNotNone(act_g)
       np.testing.assert_allclose(exp_g, act_g, rtol=1e-3, atol=1e-3)
 
+  def test_analytical_bwd_multi_group_head_parallel(self):
+    """Verifies multi-group head-parallel grid dispatch matches reference."""
+    batch_size = 1
+    chunk_size = 32
+    num_chunks = 2
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 4
+    num_v_heads = 8
+    head_k_dim = 64
+    head_v_dim = 64
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    key = jax.random.PRNGKey(1234)
+    k1, k2, k3, k4, k5, k6, k7, k8 = jax.random.split(key, 8)
+
+    qkv = jax.random.normal(k1, (batch_size, seq_len, dim_size), dtype=jnp.float32)
+    b = jax.random.normal(k2, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
+    a = jax.random.normal(k3, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
+    a_log = jax.random.normal(k4, (num_v_heads,), dtype=jnp.float32)
+    dt_bias = jax.random.normal(k5, (num_v_heads,), dtype=jnp.float32)
+    do = jax.random.normal(k6, (batch_size, seq_len, num_v_heads, head_v_dim), dtype=jnp.float32)
+    chunk_states = jax.random.normal(
+        k7, (batch_size, num_chunks, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32
+    )
+    t_inv = jax.random.normal(
+        k8, (batch_size, num_chunks, num_v_heads, chunk_size, chunk_size), dtype=jnp.float32
+    )
+
+    # 1. Dispatch with head_tile = 4 -> 2 head groups
+    dy1, db1, da1, dal1, ddt1 = (
+        hybrid_bwd_analytical_pipeline.pallas_gdn_bwd_computation(
+            qkv_conv=qkv,
+            b=b,
+            a=a,
+            a_log=a_log,
+            dt_bias=dt_bias,
+            do=do,
+            chunk_states=chunk_states,
+            t_inv=t_inv,
+            num_v_heads=num_v_heads,
+            kq_head_dim=head_k_dim,
+            v_head_dim=head_v_dim,
+            chunk_size=chunk_size,
+            head_tile=4,
+        )
+    )
+
+    # 2. Dispatch with head_tile = 8 -> 1 head group
+    dy2, db2, da2, dal2, ddt2 = (
+        hybrid_bwd_analytical_pipeline.pallas_gdn_bwd_computation(
+            qkv_conv=qkv,
+            b=b,
+            a=a,
+            a_log=a_log,
+            dt_bias=dt_bias,
+            do=do,
+            chunk_states=chunk_states,
+            t_inv=t_inv,
+            num_v_heads=num_v_heads,
+            kq_head_dim=head_k_dim,
+            v_head_dim=head_v_dim,
+            chunk_size=chunk_size,
+            head_tile=8,
+        )
+    )
+
+    np.testing.assert_allclose(dy1, dy2, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(db1, db2, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(da1, da2, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(dal1, dal2, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(ddt1, ddt2, rtol=1e-3, atol=1e-3)
+
+  def test_analytical_bwd_variable_length_segment_ids_reset(self):
+    """Verifies segment_ids document boundaries reset carried state gradient to prevent leakage."""
+    batch_size = 1
+    chunk_size = 32
+    num_chunks = 2
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 1
+    num_v_heads = 2
+    head_k_dim = 64
+    head_v_dim = 64
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    key = jax.random.PRNGKey(5678)
+    k1, k2, k3, k4, k5, k6, k7, k8 = jax.random.split(key, 8)
+
+    qkv = jax.random.normal(k1, (batch_size, seq_len, dim_size), dtype=jnp.float32)
+    b = jax.random.normal(k2, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
+    a = jax.random.normal(k3, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
+    a_log = jax.random.normal(k4, (num_v_heads,), dtype=jnp.float32)
+    dt_bias = jax.random.normal(k5, (num_v_heads,), dtype=jnp.float32)
+    chunk_states = jax.random.normal(
+        k6, (batch_size, num_chunks, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32
+    )
+    t_inv = jax.random.normal(
+        k7, (batch_size, num_chunks, num_v_heads, chunk_size, chunk_size), dtype=jnp.float32
+    )
+
+    # Only chunk 1 has non-zero incoming gradients; chunk 0 do is all zeros
+    do_chunk1 = jax.random.normal(
+        k8, (batch_size, chunk_size, num_v_heads, head_v_dim), dtype=jnp.float32
+    )
+    do_chunk0 = jnp.zeros((batch_size, chunk_size, num_v_heads, head_v_dim), dtype=jnp.float32)
+    do = jnp.concatenate([do_chunk0, do_chunk1], axis=1)
+
+    # 1. No document reset: gradient flows backwards from chunk 1 into chunk 0
+    dy_no_reset, _, _, _, _ = (
+        hybrid_bwd_analytical_pipeline.pallas_gdn_bwd_computation(
+            qkv_conv=qkv,
+            b=b,
+            a=a,
+            a_log=a_log,
+            dt_bias=dt_bias,
+            do=do,
+            chunk_states=chunk_states,
+            t_inv=t_inv,
+            num_v_heads=num_v_heads,
+            kq_head_dim=head_k_dim,
+            v_head_dim=head_v_dim,
+            chunk_size=chunk_size,
+            segment_ids=None,
+        )
+    )
+    # Chunk 0 gradient is non-zero due to recurrent state carrying gradients from chunk 1
+    self.assertGreater(float(jnp.max(jnp.abs(dy_no_reset[:, :chunk_size, :]))), 1e-4)
+
+    # 2. With segment_ids boundary between chunk 0 (doc 0) and chunk 1 (doc 1)
+    seg_doc0 = jnp.zeros((batch_size, chunk_size), dtype=jnp.int32)
+    seg_doc1 = jnp.ones((batch_size, chunk_size), dtype=jnp.int32)
+    segment_ids = jnp.concatenate([seg_doc0, seg_doc1], axis=1)
+
+    dy_reset, _, _, _, _ = (
+        hybrid_bwd_analytical_pipeline.pallas_gdn_bwd_computation(
+            qkv_conv=qkv,
+            b=b,
+            a=a,
+            a_log=a_log,
+            dt_bias=dt_bias,
+            do=do,
+            chunk_states=chunk_states,
+            t_inv=t_inv,
+            num_v_heads=num_v_heads,
+            kq_head_dim=head_k_dim,
+            v_head_dim=head_v_dim,
+            chunk_size=chunk_size,
+            segment_ids=segment_ids,
+        )
+    )
+    # Chunk 0 gradient is strictly zero because boundary reset eliminated cross-document leakage!
+    np.testing.assert_allclose(
+        dy_reset[:, :chunk_size, :],
+        jnp.zeros_like(dy_reset[:, :chunk_size, :]),
+        atol=1e-6,
+    )
+
+  def test_fused_conv1d_gdn_analytical_bwd_with_head_tile(self):
+    """Verifies pallas_fused_conv1d_gdn_bwd_computation forwards head_tile correctly."""
+    batch_size = 1
+    chunk_size = 32
+    num_chunks = 2
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 4
+    num_v_heads = 8
+    head_k_dim = 64
+    head_v_dim = 64
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    key = jax.random.PRNGKey(999)
+    k1, k2, k3, k4, k5, k6, k7, k8, k9, k10 = jax.random.split(key, 10)
+
+    pre_conv_qkv = jax.random.normal(k1, (batch_size, seq_len, dim_size), dtype=jnp.float32)
+    b = jax.random.normal(k2, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
+    a = jax.random.normal(k3, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
+    a_log = jax.random.normal(k4, (num_v_heads,), dtype=jnp.float32)
+    dt_bias = jax.random.normal(k5, (num_v_heads,), dtype=jnp.float32)
+    do = jax.random.normal(k6, (batch_size, seq_len, num_v_heads, head_v_dim), dtype=jnp.float32)
+    chunk_states = jax.random.normal(
+        k7, (batch_size, num_chunks, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32
+    )
+    conv_weight = jax.random.normal(k8, (conv_kernel_size, 1, dim_size), dtype=jnp.float32)
+    conv_bias = jax.random.normal(k9, (dim_size,), dtype=jnp.float32)
+    t_inv = jax.random.normal(
+        k10, (batch_size, num_chunks, num_v_heads, chunk_size, chunk_size), dtype=jnp.float32
+    )
+
+    res1 = (
+        hybrid_bwd_analytical_pipeline.pallas_fused_conv1d_gdn_bwd_computation(
+            pre_conv_qkv=pre_conv_qkv,
+            b=b,
+            a=a,
+            a_log=a_log,
+            dt_bias=dt_bias,
+            do=do,
+            chunk_states=chunk_states,
+            conv_weight=conv_weight,
+            conv_bias=conv_bias,
+            t_inv=t_inv,
+            num_v_heads=num_v_heads,
+            kq_head_dim=head_k_dim,
+            v_head_dim=head_v_dim,
+            chunk_size=chunk_size,
+            head_tile=4,
+        )
+    )
+
+    res2 = (
+        hybrid_bwd_analytical_pipeline.pallas_fused_conv1d_gdn_bwd_computation(
+            pre_conv_qkv=pre_conv_qkv,
+            b=b,
+            a=a,
+            a_log=a_log,
+            dt_bias=dt_bias,
+            do=do,
+            chunk_states=chunk_states,
+            conv_weight=conv_weight,
+            conv_bias=conv_bias,
+            t_inv=t_inv,
+            num_v_heads=num_v_heads,
+            kq_head_dim=head_k_dim,
+            v_head_dim=head_v_dim,
+            chunk_size=chunk_size,
+            head_tile=8,
+        )
+    )
+
+    for g1, g2 in zip(res1, res2):
+      if g1 is not None and g2 is not None:
+        np.testing.assert_allclose(g1, g2, rtol=5e-3, atol=5e-3)
+
+  test_analytical_bwd_matches_autodiff_fp32 = test_fused_conv1d_gdn_analytical_gradient_against_autodiff
+
 
 if __name__ == "__main__":
   absltest.main()
+
+

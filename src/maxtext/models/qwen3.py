@@ -811,8 +811,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         else:
           recurrent_state = recurrent_state[:batch]
 
-    if getattr(cfg, "use_gdn_kernel", False):
-      from maxtext.models.hybrid_bwd_analytical_pipeline import hybrid_fused_conv1d_gdn_analytical as hybrid_fused_conv1d_gdn
+    if (
+        getattr(cfg, "use_gdn_kernel", False)
+        or getattr(cfg, "use_hybrid_gdn", False)
+        or getattr(cfg, "use_hybrid_gdn_analytical", False)
+    ):
+      try:
+        from maxtext.models.hybrid_bwd_analytical_pipeline import hybrid_fused_conv1d_gdn
+      except ImportError:
+        from maxtext.src.maxtext.models.hybrid_bwd_analytical_pipeline import hybrid_fused_conv1d_gdn
 
       conv_state_arg = (
           conv_state
