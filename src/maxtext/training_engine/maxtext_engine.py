@@ -168,9 +168,16 @@ def _tag_sharding(named_sharding: jax.sharding.NamedSharding, field: str) -> jax
   """Marks a sharding `reduced` or `unreduced` over the data axis.
 
   A tensor already sharded over that axis is returned untouched: it holds no cross-replica
-  partial to defer, and JAX rejects a spec that both shards and reduces over one axis.
+  partial to defer, and JAX rejects a spec that both shards and reduces over one axis
+  (`ValueError: partitions cannot overlap with reduced axes passed to PartitionSpec`).
+
+  The axes come from `get_mesh_axes_used_by_tensor_spec`, which flattens: one dimension can be
+  sharded over several axes at once, and a per-dimension check would read that nested
+  `('data', 'fsdp')` as a single unrecognised entry and tag a parameter that is in fact already
+  sharded over `data`. Applied to `.partitions` rather than to the spec, because iterating a
+  spec that already carries a tag raises.
   """
-  if _DATA_AXIS in sharding.mesh_axes_for_dim(named_sharding.spec.partitions):
+  if _DATA_AXIS in sharding.get_mesh_axes_used_by_tensor_spec(named_sharding.spec.partitions):
     return named_sharding
   return named_sharding.update(spec=named_sharding.spec.update(**{field: {_DATA_AXIS}}))
 
