@@ -95,6 +95,50 @@ class TestTransformLogic(unittest.TestCase):
         muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel")),
         mdn((0,), (-1,)),
     )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel"), include_routers=True),
+        mdn((0,), (-1,)),
+    )
+
+  def test_moe_gate_excluded_when_include_routers_false(self):
+    # When include_routers=False, MoE router/gate weights return None and optimize with AdamW.
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel"), include_routers=False))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "moe_block", "gate", "kernel"), include_routers=False))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "GptOssMlp", "gate", "kernel"), include_routers=False))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "routed_experts", "gate", "kernel"), include_routers=False))
+    self.assertIsNone(
+        muon_utils.transform_logic(("decoder", "DeepSeekMoeBlock_0", "gate", "kernel"), include_routers=False)
+    )
+    self.assertIsNone(
+        muon_utils.transform_logic(("decoder", "Llama4MoEBlock_0", "gate", "kernel"), include_routers=False)
+    )
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "routed_moe", "gate", "kernel"), include_routers=False))
+
+  def test_moe_expert_weights_unaffected_by_include_routers_false(self):
+    # Expert weights (wi, wo, gate_up_proj) must remain mdn((-2,), (-1,)) even if include_routers=False.
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "MoeBlock_0", "wi_0"), include_routers=False),
+        mdn((-2,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "MoeBlock_0", "wi_1"), include_routers=False),
+        mdn((-2,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "MoeBlock_0", "wo"), include_routers=False),
+        mdn((-2,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate_up_proj"), include_routers=False),
+        mdn((-2,), (-1,)),
+    )
+
+  def test_dense_mlp_gate_proj_unaffected_by_include_routers_false(self):
+    # Dense MLP gate projections (e.g. SwiGLU) are not MoE routers and must remain standard mdn.
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "mlp", "gate_proj"), include_routers=False),
+        mdn((0,), (-1,)),
+    )
 
   def test_gate_up_proj_uses_last_two_axes(self):
     self.assertEqual(
@@ -273,6 +317,26 @@ class TestGetTransformTree(unittest.TestCase):
     # If the tree itself is a leaf, path=() and transform_logic returns the standard mdn.
     self.assertEqual(muon_utils.get_transform_tree(0), mdn((0,), (-1,)))
 
+  def test_get_transform_tree_with_include_routers_toggle(self):
+    tree = {
+        "decoder": {
+            "MoeBlock_0": {
+                "gate": {"kernel": 0},
+                "wi_0": 0,
+            },
+            "mlp": {"gate_proj": 0},
+        }
+    }
+    result_true = muon_utils.get_transform_tree(tree, include_routers=True)
+    self.assertEqual(result_true["decoder"]["MoeBlock_0"]["gate"]["kernel"], mdn((0,), (-1,)))
+    self.assertEqual(result_true["decoder"]["MoeBlock_0"]["wi_0"], mdn((-2,), (-1,)))
+    self.assertEqual(result_true["decoder"]["mlp"]["gate_proj"], mdn((0,), (-1,)))
+
+    result_false = muon_utils.get_transform_tree(tree, include_routers=False)
+    self.assertIsNone(result_false["decoder"]["MoeBlock_0"]["gate"]["kernel"])
+    self.assertEqual(result_false["decoder"]["MoeBlock_0"]["wi_0"], mdn((-2,), (-1,)))
+    self.assertEqual(result_false["decoder"]["mlp"]["gate_proj"], mdn((0,), (-1,)))
+
 
 class _AttentionSubModule(nnx.Module):
 
@@ -280,17 +344,27 @@ class _AttentionSubModule(nnx.Module):
     self.out = nnx.Param(jnp.ones((2, 4, 8)))
 
 
+class _MoeSubModule(nnx.Module):
+
+  def __init__(self):
+    self.gate = nnx.Module()
+    self.gate.kernel = nnx.Param(jnp.ones((4, 8)))
+    self.wi_0 = nnx.Param(jnp.ones((8, 4, 8)))
+
+
 class _MoeLikeNNXModel(nnx.Module):
   """Small NNX model whose param paths exercise the NNX branch of get_muon_weight_dimension_numbers."""
 
   def __init__(self, rngs):
-    # Names are chosen so transform_logic matches each of the three meaningful branches:
+    # Names are chosen so transform_logic matches each of the meaningful branches:
     # - w_standard: default mdn
     # - self_attention.out: attention-out mdn
     # - scale: excluded (None)
+    # - MoeBlock_0: router gate + routed expert weights
     self.w_standard = nnx.Param(jnp.ones((4, 8)))
     self.self_attention = _AttentionSubModule()
     self.scale = nnx.Param(jnp.ones((8,)))
+    self.MoeBlock_0 = _MoeSubModule()
 
 
 class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
@@ -316,6 +390,19 @@ class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
     # 'w_standard' does not trigger any special rule → standard mdn.
     self.assertEqual(result["w_standard"], mdn((0,), (-1,)))
     self.assertEqual(result["self_attention"]["out"], mdn((0, -2), (-1,)))
+    self.assertEqual(result["MoeBlock_0"]["gate"]["kernel"], mdn((0,), (-1,)))
+    self.assertEqual(result["MoeBlock_0"]["wi_0"], mdn((-2,), (-1,)))
+
+  def test_nnx_model_respects_muon_include_routers_config(self):
+    cfg_true = mock.MagicMock(muon_include_routers=True)
+    result_true = muon_utils.get_muon_weight_dimension_numbers(self.model, config=cfg_true)
+    self.assertEqual(result_true["MoeBlock_0"]["gate"]["kernel"], mdn((0,), (-1,)))
+    self.assertEqual(result_true["MoeBlock_0"]["wi_0"], mdn((-2,), (-1,)))
+
+    cfg_false = mock.MagicMock(muon_include_routers=False)
+    result_false = muon_utils.get_muon_weight_dimension_numbers(self.model, config=cfg_false)
+    self.assertIsNone(result_false["MoeBlock_0"]["gate"]["kernel"])
+    self.assertEqual(result_false["MoeBlock_0"]["wi_0"], mdn((-2,), (-1,)))
 
   def test_nnx_verbose_path_executes_print_debug(self):
     """verbose=True should also execute _print_structure_debug without raising."""
@@ -352,6 +439,35 @@ class TestGetMuonWeightDimensionNumbersLinen(unittest.TestCase):
 
     self.assertEqual(result["params"]["self_attention"]["out"], mdn((0, -2), (-1,)))
     self.assertIsNone(result["params"]["norm"]["scale"])
+
+  def test_linen_branch_respects_muon_include_routers_config(self):
+    class LinenStub(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        return x
+
+    model = LinenStub()
+
+    fake_abstract_param = {
+        "params": {
+            "MoeBlock_0": {
+                "gate": {"kernel": object()},
+                "wi_0": object(),
+            },
+        },
+    }
+
+    with mock.patch.object(muon_utils.maxtext_utils, "get_abstract_param", return_value=fake_abstract_param):
+      result_true = muon_utils.get_muon_weight_dimension_numbers(model, config=mock.MagicMock(muon_include_routers=True))
+      self.assertEqual(result_true["params"]["MoeBlock_0"]["gate"]["kernel"], mdn((0,), (-1,)))
+      self.assertEqual(result_true["params"]["MoeBlock_0"]["wi_0"], mdn((-2,), (-1,)))
+
+      result_false = muon_utils.get_muon_weight_dimension_numbers(
+          model, config=mock.MagicMock(muon_include_routers=False)
+      )
+      self.assertIsNone(result_false["params"]["MoeBlock_0"]["gate"]["kernel"])
+      self.assertEqual(result_false["params"]["MoeBlock_0"]["wi_0"], mdn((-2,), (-1,)))
 
 
 class TestPrintStructureDebug(unittest.TestCase):
