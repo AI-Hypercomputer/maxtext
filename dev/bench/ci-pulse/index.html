@@ -182,7 +182,7 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
 <div class="card gradient-hero"><div class="ct">Test run time by device</div><div id="devlines-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div><div id="devlines" style="overflow-x:auto"></div></div>
 <div class="card hero gradient-hero">
 <div class="ct">Worker time per merged pull request</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="worker">This chart shows where each merged pull request's CI time went, one bar per device lane. <span class="g-more">Two switches decide what the bars mean. "Measure" picks the question: wall clock is how long the run took, and because the jobs run side by side that is the slowest one, not the sum; machine minutes is how much runner hardware the run used, and those do add up. The bars follow the same rule, so the number above a group is always what the eye reads off the axis: things that run side by side are drawn side by side under wall clock and stacked under machine minutes. "Time shown" picks which minutes count: the tests on their own, or the wait for a free runner and the setup as well. Bars run from the oldest merged pull request on the left to the newest on the right. A red cross above a bar marks a failure: in the all-lanes view the run itself failed, and in a single suite's view one of that suite's workers failed on that run. Hover a lane to follow it across all pull requests. Click a bar to list every suite's time in that run. Pick one suite from the dropdown to see one bar per worker instead. The pull request number under each bar opens that pull request on GitHub in a new tab; its merge date is under it.</span></div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="worker">This chart shows where each merged pull request's CI time went, one bar per device lane. <span class="g-more">Each bar shows the total time: jobs run side by side, so the bar height is the slowest one, not the sum. "Time shown" picks which minutes count: the tests on their own, or the wait for a free runner and the setup as well. Bars run from the oldest merged pull request on the left to the newest on the right. A red cross above a bar marks a failure: in the all-lanes view the run itself failed, and in a single suite's view one of that suite's workers failed on that run. Hover a lane to follow it across all pull requests. Click a bar to list every suite's time in that run. Pick one suite from the dropdown to see one bar per worker instead. The pull request number under each bar opens that pull request on GitHub in a new tab; its merge date is under it.</span></div>
 <div id="wk-chips" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"></div>
 <div id="wk-meta" style="font-size:12px;color:var(--muted);margin-bottom:6px"></div>
 <div id="worker-chart" style="overflow-x:auto"></div>
@@ -1087,9 +1087,9 @@ ${split?`<td class="mono" style="font-size:13px">${sImg}m</td><td class="mono" s
   });
 
   const jid='jt-jobs-'+c.hash;
-  // Opens sorted by total time, shortest first, inside each category heading. key:null is still
+  // Opens sorted by total time, longest first, inside each category heading. key:null is still
   // reachable through the Job header, which restores the order the catalogue built the rows in.
-  JT[jid]={rows:jobUnits,pick:u=>u.vals,row:u=>u.html,key:'total',dir:'asc',defaultHTML:tableRows,
+  JT[jid]={rows:jobUnits,pick:u=>u.vals,row:u=>u.html,key:'total',dir:'desc',defaultHTML:tableRows,
     group:u=>u.cat,groupOrder:catOrder,groupHead:jobHeads};
   const jobBody=jtRender(JT[jid]);
   $('#modal').innerHTML=`<div class="modal-head"><div>
@@ -1185,7 +1185,7 @@ function renderDevLines(){
   const fmt=v=>v>=10?String(Math.round(v)):String(Math.round(v*10)/10);
   if(meta)meta.innerHTML=`<div style="font-size:13px;color:var(--ink2);margin-bottom:4px" data-guide="devlines">This chart shows how many minutes the TPU, GPU and CPU test jobs spent ${phase.plain} on each merged pull request. One line per device, one point per pull request. <span class="g-more">Each point adds up every test job of that device in that run, so a device with more jobs shows more minutes. The chips below switch the phase: ${phases.map(p=>p.chip).join(', ')}. Hover a chip for what it counts. Click a point to open that run. The pull request number under each point opens it on GitHub; its merge date is under it. Drag across the chart to zoom into a range and double-click to reset.</span></div>
 ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></div>
-<div style="margin-top:4px"><span style="color:var(--tpu)">■</span> TPU <span style="color:var(--gpu);margin-left:8px">■</span> GPU <span style="color:var(--cpu);margin-left:8px">■</span> CPU</div>`:''}`;
+<div style="margin-top:4px"><span style="color:var(--tpu)">■</span> TPU <span style="color:var(--gpu);margin-left:8px">■</span> GPU <span style="color:var(--cpu);margin-left:8px">■</span> CPU <span style="color:#EF4444;margin-left:12px;font-weight:700">✕</span> Failed before tests started <span style="color:#F59E0B;margin-left:12px">○</span> Slower than usual</div>`:''}`;
   host.innerHTML='';
   if(!wCommits.length){host.innerHTML=`<div style="font-size:13px;color:var(--ink2);padding:8px 0">No merged pull requests fall inside this date range.</div>`;return}
   const sumHost=document.createElement('div');host.appendChild(sumHost);
@@ -1855,7 +1855,7 @@ let WK_SEL='all';
 // The bars follow the same rule the numbers do: things that run side by side are drawn side
 // by side under wall clock and stacked under machine minutes, so the figure above a group is
 // always the figure the eye reads off the axis.
-let WK_MEASURE='wall';   // 'wall' | 'machine'
+let WK_MEASURE='wall';   // only 'wall' is offered now
 // Which minutes count. 'tests' is the time the tests themselves were running; 'all' adds the
 // wait for a free runner and the setup (image pull plus environment) that come before them.
 let WK_PHASE='tests';    // 'tests' | 'all'
@@ -1863,8 +1863,7 @@ function setWKSel(v){WK_SEL=v;renderWorker()}
 function setWKMeasure(v){WK_MEASURE=v;renderWorker()}
 function setWKPhase(v){WK_PHASE=v;renderWorker()}
 const WK_MEASURES=[
-  {key:'wall',chip:'Wall clock',note:'How long the run took. Jobs run side by side, so this is the slowest one, not the sum.'},
-  {key:'machine',chip:'Machine minutes',note:'How much runner hardware the run used. Every job holds its own machine, so these add up.'}];
+  {key:'wall',chip:'Total time',note:'How long the run took. Jobs run side by side, so this is the slowest one, not the sum.'}];
 const WK_PHASES=[
   {key:'tests',chip:'Tests only',note:'Only the minutes the tests were running.'},
   {key:'all',chip:'All time',note:'The wait for a free runner and the setup as well as the tests.'}];
@@ -1898,7 +1897,7 @@ function wkRowsShown(c,ent){
   return wkWorkerRows(c,ent).map(r=>{const q=WK_PHASE==='all'?r.q:0,s=WK_PHASE==='all'?r.s:0;
     return{name:r.name,q,s,r:r.r,status:r.status,machine:r.machine,tot:+(q+s+r.r).toFixed(2)}});
 }
-function wkMeasureWord(){return WK_MEASURE==='wall'?'wall-clock minutes':'machine minutes'}
+function wkMeasureWord(){return 'total minutes'}
 function wkPhaseWord(){return WK_PHASE==='all'?'runner wait, setup and tests':'test minutes'}
 function renderWorker(){
   const host=$('#worker-chart');if(!host)return;
@@ -1917,7 +1916,7 @@ ${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]
       +items.map(i=>`<button class="fchip ${i.key===cur?'on':''}" style="border-radius:8px" title="${i.note}" onclick="${fn}('${i.key}')">${i.chip}</button>`).join('');
     chips.innerHTML=`<span style="font-size:13px;color:var(--muted)">Worker suite:</span>${sel}`
       +(WK_SEL==='all'?'':`<button class="fchip" style="border-radius:8px" onclick="setWKSel('all')">Back to all suites</button>`)
-      +row('Measure:',WK_MEASURES,WK_MEASURE,'setWKMeasure')
+      +(WK_MEASURES.length>1?row('Measure:',WK_MEASURES,WK_MEASURE,'setWKMeasure'):'')
       +row('Time shown:',WK_PHASES,WK_PHASE,'setWKPhase');
   }
   if(!LIST.length){if(meta)meta.innerHTML=`<div><span class="mono">No merged pull requests fall inside this date range.</span></div>`;host.innerHTML='';return}
@@ -1941,10 +1940,7 @@ ${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]
     const data=LIST.map(c=>{const rows=wkRowsShown(c,ent);
       return{rows,v:wkRoll(rows.map(r=>r.tot)),status:wkEntStatus(c,ent)}});
     const nW=Math.max(1,...data.map(d=>d.rows.length));
-    if(meta)meta.innerHTML=`<div><span class="mono">${ent.name} across the ${LIST.length} merged pull requests ${win.inRange}, counting ${wkPhaseWord()}. ${WK_MEASURE==='wall'
-        ?`The workers run at the same time, so they are drawn side by side and the number above a group is the slowest of them - the wall-clock time this suite added to the run.`
-        :`Machine minutes add up, so the workers are stacked and the number above a bar is all ${nW} of them together.`}${ent.split?' The split between workers is estimated from the suite total.':''} Click a bar for that run's worker details.</span></div>
-<div data-wklegend style="margin-top:4px">${WK_PHASE==='all'&&WK_MEASURE==='wall'?`<span style="color:var(--q)">■</span> Runner wait <span style="color:var(--bld);margin-left:8px">■</span> Setup <span style="color:${col};margin-left:8px">■</span> Worker tests`:`<span style="color:${col}">■</span> Worker ${WK_PHASE==='all'&&WK_MEASURE==='machine'?'time':'tests'}`}${nW>1?' <span style="color:var(--muted)">(shaded dark to light = worker 1 to '+nW+')</span>':''} <span style="color:#EF4444;margin-left:12px;font-weight:700">✕</span> a worker in this suite failed on that run</div>`;
+    if(meta)meta.innerHTML=`<div data-wklegend style="margin-top:4px">${WK_PHASE==='all'?`<span style="color:var(--q)">■</span> Runner wait <span style="color:var(--bld);margin-left:8px">■</span> Setup <span style="color:${col};margin-left:8px">■</span> Worker tests`:`<span style="color:${col}">■</span> Worker tests`}${nW>1?' <span style="color:var(--muted)">(shaded dark to light = worker 1 to '+nW+')</span>':''} <span style="color:#EF4444;margin-left:12px;font-weight:700">✕</span> a worker in this suite failed on that run</div>`;
     const slotPx=WK_MEASURE==='wall'?Math.max(CHART_SLOT,16*nW):CHART_SLOT;
     const W=Math.max(CHART_BOX,LP+RP+LIST.length*slotPx);
     const plotH=244,B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
@@ -2011,10 +2007,7 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
   const parts=LIST.map(c=>{const o={};WK_LANES.forEach(L=>{const p=wkLanePart(c,L.key);if(p)o[L.key]=p});return o});
   const lanes=WK_LANES.filter(L=>parts.some(p=>p[L.key]&&p[L.key].tot>0));
   const groupVal=parts.map(p=>wkRoll(lanes.map(L=>(p[L.key]||{tot:0}).tot)));
-  if(meta)meta.innerHTML=`<div><span class="mono">${rangeCovers(win,LIST)}, counting ${wkPhaseWord()}. ${WK_MEASURE==='wall'
-      ?'The device lanes run at the same time, so they are drawn side by side and the number above a group is the slowest lane - the wall-clock time that lane added to the run.'
-      :'Machine minutes add up, so the lanes are stacked and the number above a bar is every job in the run added together.'} Pick a suite above to open one bar per worker instead.</span></div>
-<div data-wklegend style="margin-top:4px">${WK_PHASE==='all'&&WK_MEASURE==='wall'?`<span style="color:var(--q)">■</span> Runner wait <span style="color:var(--bld);margin-left:8px">■</span> Setup <span style="margin-left:8px"></span>`:''}${lanes.map((L,i)=>`<span style="color:${WK_LANE_HEX[L.key]};${i?'margin-left:8px':''}">■</span> ${L.label}`).join(' ')} <span style="color:#EF4444;margin-left:12px;font-weight:700">✕</span> this run failed</div>`;
+  if(meta)meta.innerHTML=`<div data-wklegend style="margin-top:4px">${WK_PHASE==='all'?`<span style="color:var(--q)">■</span> Runner wait <span style="color:var(--bld);margin-left:8px">■</span> Setup <span style="margin-left:8px"></span>`:''}${lanes.map((L,i)=>`<span style="color:${WK_LANE_HEX[L.key]};${i?'margin-left:8px':''}">■</span> ${L.label}`).join(' ')} <span style="color:#EF4444;margin-left:12px;font-weight:700">✕</span> this run failed</div>`;
   const slotPx=WK_MEASURE==='wall'?Math.max(CHART_SLOT,18*lanes.length):CHART_SLOT;
   const W=Math.max(CHART_BOX,LP+RP+LIST.length*slotPx);
   const plotH=274,B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
@@ -2218,7 +2211,7 @@ function renderFlaky(){
     const rescued=new Set(r.evIn.map(e=>e.pr));
     return a+r.failIn.filter(p=>!rescued.has(p)).length;
   },0);
-  let h=`<div style="font-size:14px;color:var(--ink);margin-bottom:10px">${cal.label} covers <b>${n} merged pull requests</b>; re-runs rescued <b>${totE} failed first attempt${totE===1?'':'s'}</b>, burning <b>${totW} extra machine minutes</b>.${totF?` The jobs listed below also failed <b>${totF}</b> time${totF===1?'':'s'} without being re-run &mdash; the outlined cells. ${totF===1?'That is a failure':'Those are failures'}, not ${totF===1?'a rescue':'rescues'}, so ${totF===1?'it does':'they do'} not count toward the numbers above.`:''}</div>`;
+  let h=`<div style="font-size:14px;color:var(--ink);margin-bottom:10px">${cal.label}: <b>${n} merged pull requests</b> checked. <b>${totE}</b> test${totE===1?'':'s'} failed on first try but passed when re-run, using <b>${totW} extra minutes</b> of runner time.</div>`;
   // Summary first: the flakiest tests in this window, most re-runs first (the job strips follow as the detail)
   const tRows=FLAKY_TESTS.map(ft=>{
     const j=RESCUES.find(r=>r.id===ft.job);
@@ -2236,7 +2229,7 @@ function renderFlaky(){
     +(!tRows.length&&totE?`This table names the test behind each re-run. It needs the job to be a test worker and its test-result file to still exist. Gate jobs have no tests; Pathways jobs write no result file. `:'')
     +`Test results are only collected from the day the dashboard went live &mdash; GitHub deletes them after about a day, so older runs cannot be added.`
     +(tRows.length>CAP?` <a href="#" data-flmore="1" onclick="event.preventDefault();flakyShowAll(${FL_ALL?'false':'true'})" style="color:var(--accent);text-decoration:none">${FL_ALL?'Show only the top '+CAP:'Show all '+tRows.length+' tests'}</a>`:'');
-  h+=sumBlock({key:'flaky',guide:'flaky-sum',guideKind:'table',title:'Flakiest tests',lead:tLead||emptyWhy,foot:tFoot,empty:totE
+  h+=sumBlock({key:'flaky',guide:'flaky-sum',guideKind:'table',title:'Tests that failed and were re-run',lead:tLead||emptyWhy,foot:tFoot,empty:totE
       ?`${totE} re-run${totE===1?'':'s'} and ${totF} failure${totF===1?'':'s'} happened ${cal.inRange}, but none named a specific test.`
       :`No job needed a re-run to pass ${cal.inRange}.`,
     cols:'minmax(240px,1.3fr) minmax(170px,1fr) 124px 124px',head:['Test','Job it runs in','<span style="display:block;text-align:right">Failed first try</span>','<span style="display:block;text-align:right">Minutes wasted</span>'],
@@ -2356,38 +2349,36 @@ function openFlakyPop(id){
   const wasted=Math.round(evIn.reduce((a,e)=>a+(e.wasted||0),0));
   const prIn=[...new Set(evIn.map(e=>e.pr))];   // pull requests that needed a re-run, not re-runs
   const ci=cal.n>=10?wilsonCI(prIn.length,cal.n):null;
-  const unknown=evIn.filter(e=>e.wasted==null).length;
-  // The facts stay on the page; what the numbers mean moves behind the same How to read button
-  // every card uses, so the popup opens on three short sentences instead of a paragraph.
   const rateLead=ci
     ? `That happened in ${prIn.length} of the ${cal.n} pull requests merged in this range, which is <b>${Math.round(prIn.length/cal.n*100)}%</b>.`
     : `That happened in ${prIn.length} of the ${cal.n} pull requests merged in this range.`;
   const wastedLead=evIn.length?` The re-runs used <b>${wasted} minute${wasted===1?'':'s'}</b> of runner time.`:'';
-  const rateMore=ci
-    ? `That share is measured from ${cal.n} runs, so the true rate is likely to sit somewhere between ${Math.round(ci[0]*100)}% and ${Math.round(ci[1]*100)}%. A wide band means there are still too few runs to lean on the number.`
-    : `Fewer than 10 first attempts fall in this range, so no percentage is shown: a single re-run would swing it too far to mean anything.`;
-  const wastedMore=evIn.length
-    ? ` Those minutes are the time the failed attempts had already held a runner before they were thrown away and started over. It is machine time that produced nothing, because the work had to be done again.${unknown?` ${unknown} of them never got a runner at all, so ${unknown===1?'it adds':'they add'} nothing to the total.`:''}`
-    : '';
   const rowsH=evIn.map(e=>{
     const real=COMMITS.some(c=>'#'+c.hash===e.pr);
     const chip=real?`<button onclick="closeWkPop();inspectPR('${e.pr.slice(1)}')" style="font:600 13px var(--mono);background:var(--elevated);border:1px solid var(--border);color:var(--accent);padding:3px 9px;border-radius:6px;cursor:pointer">${e.pr}</button>`
       :`<span class="mono" style="font-size:13px;color:var(--ink2)">${e.pr}</span>`;
-    return `<div style="display:grid;grid-template-columns:80px 64px 1fr auto;gap:12px;align-items:center;padding:8px 4px;border-top:1px solid var(--grid)">
-      <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${dayNum(e.date)}</span>
-      <span style="font-size:13px;color:var(--ink2)">${e.cause}</span>
-      <span class="mono" style="font-size:13px;color:var(--warn)" title="${WASTED_TIP}">${e.wasted==null?'time unknown':e.wasted+'m wasted'}</span></div>`;
+    const tests=FLAKY_TESTS.filter(x=>x.job===id&&x.prs.includes(e.pr))
+      .map(x=>({name:x.test,cause:x.cause}));
+    const testList=tests.length
+      ? tests.map(t=>`<div class="mono" style="font-size:12px;line-height:1.5"><span style="color:var(--crit)">&#9679;</span> ${t.name}${t.cause?` <span style="color:var(--muted)">&mdash; ${t.cause}</span>`:''}</div>`).join('')
+      : `<div style="font-size:12px;color:var(--muted)">No test details available</div>`;
+    return `<div style="padding:10px 4px;border-top:1px solid var(--grid)">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+        <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${dayNum(e.date)}</span>
+        <span class="mono" style="font-size:13px;color:var(--warn);margin-left:auto" title="${WASTED_TIP}">${e.wasted==null?'time unknown':e.wasted+'m wasted'}</span>
+      </div>
+      <div style="margin-left:4px">${testList}</div>
+    </div>`;
   }).join('');
   $('#wkpop-body').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
       <div style="font-size:17px;font-weight:700;color:var(--ink)">${j.name}</div>
       <button onclick="closeWkPop()" style="background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer">&#10005;</button></div>
     <div style="font-size:13px;color:var(--muted);margin-bottom:6px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane &middot; ${cal.label.toLowerCase()}</div>
-    <div data-guide="flakypop" data-guide-kind="number" style="font-size:13px;color:var(--ink2);margin-bottom:10px;line-height:1.55">This job failed on its first try and then passed when the same commit was run again. ${rateLead}${wastedLead}<span class="g-more">${rateMore}${wastedMore} Every run listed below is one of those re-runs, with the minutes its own failed attempt threw away.</span></div>
+    <div style="font-size:13px;color:var(--ink2);margin-bottom:10px;line-height:1.55">This job needed a re-run to pass. ${rateLead}${wastedLead}</div>
     ${evIn.length?rowsH:'<div style="font-size:13px;color:var(--muted)">No re-runs inside this date range.</div>'}
-    ${failIn.length?`<div style="font-size:13px;color:var(--crit);margin-top:10px;line-height:1.55"><b>${failIn.length}</b> other run${failIn.length===1?'':'s'} of this job failed and ${failIn.length===1?'was':'were'} never re-run (the outlined cells): ${failIn.join(', ')}. ${failIn.length===1?'That is a failure':'Those are failures'}, not ${failIn.length===1?'a rescue':'rescues'}, so ${failIn.length===1?'it is':'they are'} not counted in the rate above.</div>`:''}
+    ${failIn.length?`<div style="font-size:13px;color:var(--crit);margin-top:10px;line-height:1.55"><b>${failIn.length}</b> other run${failIn.length===1?'':'s'} also failed but ${failIn.length===1?'was':'were'} not re-run: ${failIn.join(', ')}.</div>`:''}
 `;
-  initGuides();   // build the How to read panel now, rather than waiting on the observer's microtask
   $('#wkpop').style.display='flex';
 }
 
@@ -2633,6 +2624,12 @@ function adaptViews(v){
     wkGroups[flavor]={name:`${list[0].name.replace(/ \(worker \d+\)$/,'')} (${list.length} workers)`,
       cat:list[0].cat,lane:list[0].lane,jobs:list.map(j=>j.id)};
   });
+  // Group Jupyter Notebook test jobs into one suite
+  const nbJobs=jobs.filter(j=>/^Jupyter Notebook Tests/i.test(j.name));
+  if(nbJobs.length>1){
+    wkGroups['jupyter-nb']={name:`Jupyter Notebook Tests (${nbJobs.length} notebooks)`,
+      cat:nbJobs[0].cat,lane:nbJobs[0].lane,jobs:nbJobs.map(j=>j.id)};
+  }
 
   // ---- suite health: one point per suite per merged pull request ----
   // Oldest first, the direction every chart on this page draws in. commits is newest-first
