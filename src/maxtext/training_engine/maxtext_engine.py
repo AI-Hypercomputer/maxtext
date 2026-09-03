@@ -58,6 +58,9 @@ EMPTY_METRICS_BUFFER_ID = -1
 # by `_check_pure_state_reusable`.
 _MODEL_STATE_KEY = "model"
 
+# Where the same split puts the `nnx.Optimizer`, including the optax state Zero-1 shards.
+_OPTIMIZER_STATE_KEY = "optimizer"
+
 _PURE_STATE_FALLBACK_WARNING = (
     "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
     "update will re-walk the NNX module graph. That is correct but slow -- the two "
@@ -155,6 +158,147 @@ _UNCOMPARABLE_STRUCTURE_HINT = (
     "dtypes, which compare cleanly. Recompilation stays correct, but the cost is now paid "
     "every step, so this is worth reporting rather than living with."
 )
+
+# The mesh axis a data-parallel gradient all-reduce runs over. Only this one is ever tagged
+# `reduced`/`unreduced`; see `_deferred_all_reduce_shardings`.
+_DATA_AXIS = "data"
+
+
+def _tag_sharding(named_sharding: jax.sharding.NamedSharding, field: str) -> jax.sharding.NamedSharding:
+  """Marks a sharding `reduced` or `unreduced` over the data axis.
+
+  A tensor already sharded over that axis is returned untouched: it holds no cross-replica
+  partial to defer, and JAX rejects a spec that both shards and reduces over one axis
+  (`ValueError: partitions cannot overlap with reduced axes passed to PartitionSpec`).
+
+  The axes come from `get_mesh_axes_used_by_tensor_spec`, which flattens: one dimension can be
+  sharded over several axes at once, and a per-dimension check would read that nested
+  `('data', 'fsdp')` as a single unrecognised entry and tag a parameter that is in fact already
+  sharded over `data`. Applied to `.partitions` rather than to the spec, because iterating a
+  spec that already carries a tag raises.
+  """
+  if _DATA_AXIS in sharding.get_mesh_axes_used_by_tensor_spec(named_sharding.spec.partitions):
+    return named_sharding
+  return named_sharding.update(spec=named_sharding.spec.update(**{field: {_DATA_AXIS}}))
+
+
+def _deferred_all_reduce_shardings(config: Any, mesh: Any, params_shardings: Any) -> tuple[Any, Any]:
+  """Returns `(reduced params, unreduced gradients)` sharding trees, or `(None, None)`.
+
+  Tagging the parameters that are differentiated `reduced` over the data axis makes their
+  cotangents come out `unreduced`: each replica then holds a partial sum that accumulates
+  locally across micro-batches, and the cross-replica all-reduce runs once per optimizer
+  step instead of once per micro-batch. This is the same trick
+  `gradient_accumulation.py` plays for the pre-train path, applied across the engine's
+  separate `jax.jit` dispatches rather than inside one `jax.lax.scan`.
+
+  `(None, None)` -- the untagged status quo -- whenever the tag would be unsound:
+
+  - not explicit sharding, where reduced/unreduced specs do not exist;
+  - a mesh with any non-Explicit axis, which those specs are also rejected on. A caller can
+    hand the engine an all-Auto mesh regardless of `config.shard_mode`;
+  - any mesh axis other than "data" has size > 1. JAX requires the unreduced set to be
+    exactly the axes the gradient contracts over, and "data" is the only one the tag ever
+    names, so a second axis over any contracted dimension makes the backward pass illegal.
+    `fsdp` gets there through the batch ("unreduced axes should be equal to the contracting
+    specs. Got unreduced axes=frozenset({'data'}) and contracting spec=(('data', 'fsdp'),
+    None)") and `tensor` through the feature dimension ("... and contracting spec=('data',
+    None, 'tensor')"). Widening the tag is not the fix in either case: a parameter sharded
+    over `fsdp` or `tensor` cannot also be unreduced over it. So the rule is the blunt one
+    -- pure data parallelism or no deferral -- rather than a list of the axes known to
+    break, which is how `tensor` was missed. Read the mesh that resolved rather than
+    `config.ici_*_parallelism`, which may still be -1 (auto-fill).
+  - the batch dimension is not sharded over "data" after all, leaving no cross-replica
+    partial to defer and nothing for the tag to describe.
+  """
+  if getattr(config, "shard_mode", None) != common_types.ShardMode.EXPLICIT:
+    return None, None
+  if mesh is None or mesh.shape.get(_DATA_AXIS, 1) <= 1:
+    return None, None
+  if any(axis_type != jax.sharding.AxisType.Explicit for axis_type in mesh.axis_types):
+    return None, None
+  if any(size > 1 for axis, size in mesh.shape.items() if axis != _DATA_AXIS):
+    return None, None
+  try:
+    batch_axes = sharding.batch_mesh_axes(mesh, rules=config.logical_axis_rules)
+  except (KeyError, ValueError, IndexError):
+    # No usable "activation_batch" rule for this mesh: leave the gradients untagged.
+    return None, None
+  if batch_axes != frozenset({_DATA_AXIS}):
+    return None, None
+  return (
+      jax.tree.map(lambda s: _tag_sharding(s, "reduced"), params_shardings),
+      jax.tree.map(lambda s: _tag_sharding(s, "unreduced"), params_shardings),
+  )
+
+
+_ZERO1_DECLINED_WARNING = (
+    "`shard_optimizer_over_data` (Zero-1) is set, but this engine cannot honour it (%s), so the "
+    "optimizer state stays replicated over the data axis. Logged once per engine instance."
+)
+
+
+def _zero1_active(config: Any, mesh: Any) -> str | None:
+  """Returns why Zero-1 cannot run here, or None when it can.
+
+  Zero-1 shards the optimizer's parameter-shaped state over the data axis, so each replica
+  keeps and updates 1/N of the moments. The engine implements it by resharding the
+  gradients and the parameters onto that same layout inside `_update_kernel` and gathering
+  the new parameters back on the way out, which needs the reshards to be real ops on a
+  mesh whose axes are `Explicit` -- under `auto` the layout is GSPMD's to choose and these
+  would be hints it may ignore, giving a silently replicated optimizer again.
+
+  The flag being off is a reason like any other, so a single call answers "should this run"
+  rather than leaving the caller to test the flag as well.
+  """
+  if not getattr(config, "shard_optimizer_over_data", False):
+    return "it is not enabled"
+  if getattr(config, "shard_mode", None) != common_types.ShardMode.EXPLICIT:
+    return "it needs shard_mode=explicit"
+  if mesh is None:
+    return "the engine has no mesh"
+  if mesh.shape.get(_DATA_AXIS, 1) <= 1:
+    return f"the mesh has no {_DATA_AXIS!r} axis to shard the optimizer over"
+  if any(axis_type != jax.sharding.AxisType.Explicit for axis_type in mesh.axis_types):
+    return "the mesh has non-Explicit axes"
+  return None
+
+
+def _zero1_sharding(mesh: Any, aval: Any, base: jax.sharding.NamedSharding | None) -> jax.sharding.NamedSharding | None:
+  """Returns `base` with the data axis added, or None to leave the value where it is.
+
+  Thin wrapper over the pre-train path's `add_data_to_sharding` so the parameters, the
+  gradients and the optimizer moments are placed by one function of `(shape, base
+  sharding)`. That is what makes them agree without matching up two pytrees: a moment
+  mirrors its parameter's shape and starts from its layout, so it lands on the same spec.
+  A value with no dimension the data axis divides -- a scalar `count`, an odd-sized bias --
+  comes back unchanged and stays replicated, on all three trees alike.
+  """
+  if base is None or not hasattr(aval, "shape"):
+    return None
+  try:
+    target = sharding.add_data_to_sharding(mesh, (), aval, base)
+  except AssertionError:
+    # add_data_to_sharding rejects a shape it cannot shard; leave the value replicated.
+    return None
+  return None if target == base else target
+
+
+def _conform_accumulator(value: Any, target: jax.sharding.NamedSharding) -> Any:
+  """Moves one accumulated-gradient leaf onto `target`, preserving the value it represents.
+
+  Only ever needed when the accumulator outlives the shardings it was produced under: a
+  checkpoint restore hands back the summed gradient, and a recompile may turn the deferred
+  all-reduce on or off. Both directions are exact -- resharding away from `unreduced` runs
+  the all-reduce, and `device_put` onto it keeps the value on one data replica and zeroes
+  the others, so the pending all-reduce reproduces it.
+  """
+  current = getattr(value, "sharding", None)
+  if current == target:
+    return value
+  if getattr(current, "spec", None) is not None and current.spec.unreduced:
+    return jax.sharding.reshard(value, target)
+  return jax.device_put(value, target)
 
 
 @struct.dataclass(frozen=True, kw_only=True)
@@ -379,6 +523,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Summed loss denominators behind `_accumulated_grads`, which are unreduced: this is the
     # divisor `update()` applies once.
     self._accumulated_denominator: Any = None
+    # Set together by `_compile_for_batch` when the data-parallel all-reduce can be deferred
+    # to the optimizer step; all three `None` selects the untagged path. The parameters as
+    # `_fwd_bwd_kernel` differentiates them, the gradients as they cross every kernel
+    # boundary, and the gradients once reduced. See `_deferred_all_reduce_shardings`.
+    self._reduced_params_shardings: Any = None
+    self._unreduced_grad_shardings: Any = None
+    self._plain_grad_shardings: Any = None
+    # Set together by `_compile_for_batch` when Zero-1 is on: the parameters as
+    # `_update_kernel` shards them to meet the optimizer state, and as it hands them back.
+    # `None` keeps the whole update on the replicated layout. See `_zero1_active`.
+    self._zero1_params_shardings: Any = None
+    self._gathered_params_shardings: Any = None
+    self._zero1_warned = False
     self._micro_step_count = 0
     # Set when this run resumed from an intra-step checkpoint, cleared once the step it
     # resumed into completes and its finished state has been checkpointed.
@@ -645,6 +802,82 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return
     self._params_pure, self._rest_pure, self._state_pure = params_pure, rest_pure, new_state_pure
 
+  def _note_zero1_declined(self, reason: str) -> None:
+    """Says once that Zero-1 was asked for and not done, which used to happen in silence.
+
+    Nothing here is wrong when Zero-1 declines -- the run is correct, just without the
+    saving -- so this is a warning rather than an error, and once rather than per compile.
+    """
+    if getattr(self._config, "shard_optimizer_over_data", False) and not self._zero1_warned:
+      self._zero1_warned = True
+      logging.warning(_ZERO1_DECLINED_WARNING, reason)
+
+  def _zero1_shardings_for(self, params_pure: Any, params_shardings: Any) -> Any:
+    """Returns the Zero-1 sharding tree for the parameters, or None to keep them replicated."""
+    declined = _zero1_active(self._config, self._mesh)
+    if declined is not None:
+      self._note_zero1_declined(declined)
+      return None
+
+    def target(leaf, base):
+      sharded = _zero1_sharding(self._mesh, leaf, base)
+      return base if sharded is None else sharded
+
+    return jax.tree.map(target, params_pure, params_shardings)
+
+  def _shard_optimizer_state_over_data(self) -> None:
+    """Moves the optimizer's parameter-shaped state onto the Zero-1 layout, in place.
+
+    `nnx.Optimizer` allocates the moments eagerly, as `zeros_like` of each parameter, so
+    they arrive replicated over the data axis however `shard_optimizer_over_data` is set --
+    which is why the flag has so far been a silent no-op here. Resharding them once, before
+    `_compile_for_batch` reads the state's layout back off the arrays, is all it takes for
+    the rest of the engine to follow: the update kernel's in/out shardings are derived from
+    exactly these arrays.
+
+    Every leaf is placed by `_zero1_sharding`, moments and bookkeeping alike, rather than
+    by walking for the ones named `mu`/`nu`. A scalar `count` has no dimension to shard and
+    comes back untouched, and a partitioned optimizer (Muon's `muon`/`adam` branches) needs
+    no special case. Idempotent: a leaf already carrying the data axis is left alone, so a
+    recompile or a restored checkpoint re-runs this for free.
+    """
+    if _zero1_active(self._config, self._mesh) is not None:
+      return
+    state_pure = self._read_state_pure()
+    if _OPTIMIZER_STATE_KEY not in state_pure:
+      return
+
+    moved = False
+
+    def place(leaf):
+      nonlocal moved
+      target = _zero1_sharding(self._mesh, leaf, self._mesh_sharding(leaf))
+      if target is None:
+        return leaf
+      moved = True
+      return jax.device_put(leaf, target)
+
+    optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
+    if not moved:
+      return
+    with self._sharding_ctx():
+      nnx.update(self._state, nnx.State({_OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping}))
+    self._invalidate_pure_state()
+    self._refresh_pure_state()
+
+  def _reshard_model_params(self, state_pure: Any, params_shardings: Any) -> Any:
+    """Returns `state_pure` with its `nnx.Param` leaves moved onto `params_shardings`.
+
+    Used twice inside `_update_kernel`, in opposite directions: down to the Zero-1 layout
+    the optimizer state lives on, then back up to the replicated one the forward pass and
+    the kernel's `out_shardings` expect. Only parameters move -- the optimizer state is
+    already where it belongs, and the rngs and batch statistics alongside it have no
+    Zero-1 layout to speak of.
+    """
+    params_pure, rest_pure = nnx.split_state(state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
+    params_pure = jax.tree.map(jax.sharding.reshard, params_pure, params_shardings)
+    return self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
+
   def _fwd_bwd_kernel(self, params, rest, batch, acc_grads=None, acc_denom=None):
     """Executes a single forward and backward pass and folds the result into the accumulator.
 
@@ -719,6 +952,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             "or a 2-element tuple/list: (loss, aux_metrics)."
         )
 
+    if self._reduced_params_shardings is not None:
+      # Tag the differentiated parameters `reduced` over the data axis, so their cotangents
+      # come out `unreduced` and the accumulation below stays replica-local -- the
+      # cross-replica all-reduce then runs once, in `_update_kernel`. Deliberately outside
+      # `diff_wrapper`: autodiff transposes a reshard, so the same call one line further in
+      # would put an all-reduce back into every micro-batch.
+      params = jax.tree.map(jax.sharding.reshard, params, self._reduced_params_shardings)
+
     grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
     # Every non-raising branch of `diff_wrapper` builds a LossOutput, so `loss_out` is always
     # one. The value returned by `value_and_grad` is the unreduced sum that was
@@ -754,6 +995,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     grad_norm = None
     is_skipped_val = None
     if state_pure is not None:
+      # Where the gradients have to land before the optimizer can use them. Under Zero-1
+      # that is the sharded layout the moments live on; otherwise the plain parameter one.
+      grad_target = self._zero1_params_shardings
+      if grad_target is None:
+        grad_target = self._plain_grad_shardings
+      if grad_target is not None:
+        # Resharding away from `unreduced` -- a per-replica partial sum over this step's
+        # micro-batches -- is what emits the single cross-replica reduction that replaces
+        # the one every micro-batch used to pay. First, so that everything below (the
+        # division, the norm, clipping, the optimizer) sees ordinary gradients and needs
+        # no tag handling of its own. When the deferral is off but Zero-1 is on, the same
+        # line is just the local slice onto the optimizer's layout.
+        accumulated_grads = jax.tree.map(jax.sharding.reshard, accumulated_grads, grad_target)
+      if self._zero1_params_shardings is not None:
+        # Meet the gradients and the moments on the sharded layout. Free -- slicing a
+        # replicated array is local -- and it is what makes the optimizer's arithmetic,
+        # and the memory traffic under it, run on 1/N of every parameter.
+        state_pure = self._reshard_model_params(state_pure, self._zero1_params_shardings)
       # This one division is the whole normalization. A zero total means every micro-batch
       # was empty; yield zeros rather than a NaN, as `gradient_accumulation.py` does.
       has_weights = accumulated_denominator > 0
@@ -781,6 +1040,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         else:
           local_state.apply_gradients(grads)
       _, new_state_pure = nnx.split(local_state)
+      if self._zero1_params_shardings is not None:
+        # The one all-gather Zero-1 costs: each replica updated its own slice of every
+        # parameter, and the forward pass needs all of them. The moments stay behind,
+        # sharded, which is the whole point.
+        new_state_pure = self._reshard_model_params(new_state_pure, self._gathered_params_shardings)
       return new_state_pure, grad_norm, is_skipped_val
     return state_pure, grad_norm, is_skipped_val
 
@@ -900,6 +1164,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # The only place the graphs are walked: a recompile is when they may legitimately have
     # changed shape, and everything after is maintained as plain pytrees.
     self._refresh_pure_state()
+    # Before the shardings below are read off the state: this is what puts the optimizer
+    # moments on the Zero-1 layout, and `state_mesh_shardings` has to see them there.
+    self._shard_optimizer_state_over_data()
     state_pure = self._read_state_pure()
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
 
@@ -917,17 +1184,50 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       params_shardings = jax.tree.map(self._mesh_sharding, params_pure)
       rest_shardings = jax.tree.map(self._mesh_sharding, rest_pure)
       batch_shardings = self._batch_data_shardings(dynamic_batch)
+      # When the data-parallel all-reduce can be deferred, the gradients live on their own
+      # shardings -- `params_shardings` plus an `unreduced` tag -- everywhere they cross a
+      # jit boundary: out of both fwd/bwd kernels, back into the accumulating one, and into
+      # the update. `params_shardings` stays untagged, so the weights themselves are
+      # unaffected; `_fwd_bwd_kernel` applies the matching `reduced` tag inside.
+      self._reduced_params_shardings, self._unreduced_grad_shardings = _deferred_all_reduce_shardings(
+          self._config, self._mesh, params_shardings
+      )
+      # Zero-1 lives entirely inside `_update_kernel`, so it changes no kernel signature:
+      # the parameters cross every jit boundary replicated exactly as before, and only the
+      # optimizer state -- already moved above -- is stored sharded.
+      self._zero1_params_shardings = self._zero1_shardings_for(params_pure, params_shardings)
+      self._gathered_params_shardings = params_shardings if self._zero1_params_shardings is not None else None
+      grad_shardings = self._unreduced_grad_shardings
+      if grad_shardings is None:
+        grad_shardings = params_shardings
+        self._plain_grad_shardings = None
+      else:
+        self._plain_grad_shardings = params_shardings
       first_in_shardings = (params_shardings, rest_shardings, batch_shardings)
-      accum_in_shardings = first_in_shardings + (params_shardings, replicated)
-      fwd_bwd_out_shardings = (None, None, rest_shardings, params_shardings, replicated)
-      update_in_shardings = (state_mesh_shardings, params_shardings, replicated, None)
+      accum_in_shardings = first_in_shardings + (grad_shardings, replicated)
+      fwd_bwd_out_shardings = (None, None, rest_shardings, grad_shardings, replicated)
+      update_in_shardings = (state_mesh_shardings, grad_shardings, replicated, None)
       update_out_shardings = (state_mesh_shardings, None, None)
+      # A live accumulator predates this compile -- a checkpoint restore hands one back, and
+      # a recompile can flip the deferral on or off -- so it may not be on the shardings the
+      # kernels were just built for. `jax.jit` matches `in_shardings` exactly and would
+      # reject it.
+      if self._accumulated_grads is not None:
+        with self._sharding_ctx():
+          self._accumulated_grads = jax.tree.map(_conform_accumulator, self._accumulated_grads, grad_shardings)
     else:
       first_in_shardings = None
       accum_in_shardings = None
       fwd_bwd_out_shardings = None
       update_in_shardings = None
       update_out_shardings = None
+      self._reduced_params_shardings = None
+      self._unreduced_grad_shardings = None
+      self._plain_grad_shardings = None
+      # `_zero1_shardings_for` is not reached on this branch, so the request is declined here.
+      self._note_zero1_declined(_zero1_active(self._config, self._mesh))
+      self._zero1_params_shardings = None
+      self._gathered_params_shardings = None
 
     # 1. JIT Compile Micro FWD/BWD Pass.
     #
@@ -1166,6 +1466,21 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           "Logged once per engine instance."
       )
 
+  def _reduced_accumulated_grads(self) -> Any:
+    """Returns the accumulated gradients in the form Orbax can serialize.
+
+    While the data-parallel all-reduce is deferred they are held `unreduced` -- a
+    per-replica partial sum -- which Orbax cannot write (`device_indices_map` is undefined
+    for one) and which would not be a meaningful thing to write anyway. Resharding runs the
+    all-reduce the pending `update()` would have run, so the checkpoint holds exactly the
+    total that step will apply. `_compile_for_batch` puts a restored total back on the
+    accumulator's shardings.
+    """
+    if self._accumulated_grads is None or self._plain_grad_shardings is None:
+      return self._accumulated_grads
+    with self._sharding_ctx():
+      return jax.tree.map(jax.sharding.reshard, self._accumulated_grads, self._plain_grad_shardings)
+
   def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
     """Forces asynchronous Orbax checkpoint serialization.
 
@@ -1210,7 +1525,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             # The full history, not `get_metrics()`: CheckpointState.accumulated_metrics is
             # a list, and restore_checkpoint iterates it back into the recorder's buffer.
             accumulated_metrics=self._metrics_recorder.get_metrics_history(clear_cache=False),
-            accumulated_grads=self._accumulated_grads,
+            accumulated_grads=self._reduced_accumulated_grads(),
             # Recorded by the CheckpointManager into custom_metadata, so that a later save
             # at this same step can tell it supersedes this one.
             micro_step_count=self._micro_step_count,
@@ -1234,6 +1549,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
         optimizer=self.optimizer,
+        # Not `_reduced_accumulated_grads()`: unlike the save path, nothing here reads the
+        # value. `CheckpointManager.restore_checkpoint` builds its restore target from the
+        # model's params and overwrites this field, so reducing would run the deferred
+        # all-reduce over the whole gradient tree, and allocate a second copy of it, for a
+        # value that is thrown away. In the one corner where it does survive the call --
+        # metadata says `micro_step_count > 0` but the checkpoint holds no accumulator --
+        # unreduced is the form the already-compiled kernels want, and `_conform_accumulator`
+        # below is then a no-op instead of a reshard back.
         accumulated_grads=self._accumulated_grads,
     )
 
@@ -1303,6 +1626,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # above, which the branch above has already discarded.
     if self._micro_step_count > 0 and restored_checkpoint_state.accumulated_grads:
       self._accumulated_grads = restored_checkpoint_state.accumulated_grads
+      if self._unreduced_grad_shardings is not None:
+        # What was saved is the reduced total; what the already-compiled kernels take is an
+        # unreduced partial. Without this the resumed step dies on an `in_shardings`
+        # mismatch, since restoring does not recompile -- the batch shape has not changed.
+        with self._sharding_ctx():
+          self._accumulated_grads = jax.tree.map(
+              _conform_accumulator, self._accumulated_grads, self._unreduced_grad_shardings
+          )
       self._accumulated_denominator = jnp.float32(restored_denominator if restored_denominator else 0.0)
 
       rebuilt_losses = None
