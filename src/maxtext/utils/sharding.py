@@ -18,7 +18,6 @@
 from collections.abc import Iterable
 import inspect  # for debugging only
 from pathlib import Path
-from typing import Any
 
 from flax import linen as nn, nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
@@ -263,49 +262,29 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 
-def get_nnx_var_named_sharding_with_scan_axis(v: Any, mesh) -> Any:
+def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Variable:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
-  if isinstance(v, (jax.Array, jax.ShapeDtypeStruct, jax.core.ShapedArray)):
-    if hasattr(v, "sharding") and isinstance(v.sharding, jax.sharding.NamedSharding):
-      return v.sharding
-    return NamedSharding(mesh, P())
-  if not hasattr(v, "get_value"):
-    if hasattr(v, "value"):
-      val = v.value
-    else:
-      return NamedSharding(mesh, P())
-  else:
-    val = v.get_value()
+  val = v.get_value()
   if not hasattr(val, "shape"):
     # `val` is either truly leafless (e.g. optax MaskedNode) or a composite
     # pytree of tensors (e.g. Qwix QArray or AQT QTensor).
     if jax.tree_util.tree_leaves(val):
       first_leaf = jax.tree_util.tree_leaves(val)[0]
       if hasattr(first_leaf, "shape"):
-        leaf_var = get_nnx_var_named_sharding_with_scan_axis(
-            v.replace(value=first_leaf) if hasattr(v, "replace") else first_leaf, mesh
-        )
-        leaf_sharding = leaf_var.get_value() if hasattr(leaf_var, "get_value") else leaf_var
+        leaf_var = get_nnx_var_named_sharding_with_scan_axis(v.replace(value=first_leaf), mesh)
+        leaf_sharding = leaf_var.get_value()
         if not isinstance(leaf_sharding, NamedSharding):
           leaf_sharding = NamedSharding(mesh, P())
-        return (
-            v.replace(jax.tree.map(lambda _: leaf_sharding, val))
-            if hasattr(v, "replace")
-            else jax.tree.map(lambda _: leaf_sharding, val)
-        )
+        return v.replace(jax.tree.map(lambda _: leaf_sharding, val))
       replicated = NamedSharding(mesh, P())
-      return (
-          v.replace(jax.tree.map(lambda _: replicated, val))
-          if hasattr(v, "replace")
-          else jax.tree.map(lambda _: replicated, val)
-      )
+      return v.replace(jax.tree.map(lambda _: replicated, val))
     return v
-  metadata = v.get_metadata() if hasattr(v, "get_metadata") else getattr(v, "metadata", {})
+  metadata = v.get_metadata()
   out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
   if not out_sharding:
     pspec = P()
   elif isinstance(out_sharding, jax.sharding.NamedSharding):
-    return v.replace(out_sharding) if hasattr(v, "replace") else out_sharding
+    return v.replace(out_sharding)
   elif isinstance(out_sharding, jax.sharding.PartitionSpec):
     pspec = out_sharding
   else:
@@ -343,10 +322,8 @@ def get_nnx_var_named_sharding_with_scan_axis(v: Any, mesh) -> Any:
       if 0 < orig_len < len(pspec):
         pspec = P(*pspec[:orig_len])
 
-  named_sharding = NamedSharding(mesh, pspec)
-  if hasattr(v, "replace"):
-    return v.replace(named_sharding)
-  return named_sharding
+  # pyrefly: ignore[bad-argument-type]
+  return v.replace(NamedSharding(mesh, pspec))
 
 
 def nnx_construct_named_sharding(abs_var_state: nnx.State, mesh) -> nnx.State:
