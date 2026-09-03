@@ -50,6 +50,7 @@ from maxtext.configs.types import TeCommGemmOverlapPolicy
 from maxtext.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
 from maxtext.utils.globals import EPS
 from maxtext.utils import elastic_utils
+
 # Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
@@ -390,18 +391,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
             mtp_moe_bias_updates = []
           mtp_moe_bias_updates.append(val)
 
-  te_moe_capacity_overflow = jnp.asarray(False)
-  te_moe_max_total_recv_tokens = jnp.asarray(0, dtype=jnp.int32)
-  te_moe_recv_capacity_per_rank = jnp.asarray(0, dtype=jnp.int32)
-  if config.te_moe_block:
+  te_moe_block = getattr(config, "te_moe_block", False)
+  if te_moe_block:
     overflow_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_capacity_overflow")
     total_recv_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_total_recv_tokens")
     capacity_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_recv_capacity_per_rank")
     if not overflow_values or not total_recv_values or not capacity_values:
       raise ValueError("te_moe_block=True did not produce TE MoE receive-capacity intermediates.")
-    te_moe_capacity_overflow = jnp.any(jnp.concatenate(overflow_values))
-    te_moe_max_total_recv_tokens = jnp.max(jnp.concatenate(total_recv_values))
-    te_moe_recv_capacity_per_rank = jnp.min(jnp.concatenate(capacity_values))
 
   # Add the model's primary output to the intermediates dict so it can be used
   # by the acceptance rate calculation in eval_step.
@@ -418,11 +414,16 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "moe_bias_updates": moe_bias_updates,
       "mtp_moe_bias_updates": mtp_moe_bias_updates,
       "mtp_loss": mtp_loss,
-      "te_moe_capacity_overflow": te_moe_capacity_overflow,
-      "te_moe_max_total_recv_tokens": te_moe_max_total_recv_tokens,
-      "te_moe_recv_capacity_per_rank": te_moe_recv_capacity_per_rank,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
+  if te_moe_block:
+    aux.update(
+        {
+            "te_moe_capacity_overflow": jnp.any(jnp.concatenate(overflow_values)),
+            "te_moe_max_total_recv_tokens": jnp.max(jnp.concatenate(total_recv_values)),
+            "te_moe_recv_capacity_per_rank": jnp.min(jnp.concatenate(capacity_values)),
+        }
+    )
   return loss, aux
 
 
@@ -568,9 +569,6 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   moe_bias_updates = aux.get("moe_bias_updates")
   mtp_moe_bias_updates = aux.get("mtp_moe_bias_updates")
   mtp_loss = aux.get("mtp_loss", 0.0)
-  te_moe_capacity_overflow = aux.get("te_moe_capacity_overflow", jnp.asarray(False))
-  te_moe_max_total_recv_tokens = aux.get("te_moe_max_total_recv_tokens", jnp.asarray(0, dtype=jnp.int32))
-  te_moe_recv_capacity_per_rank = aux.get("te_moe_recv_capacity_per_rank", jnp.asarray(0, dtype=jnp.int32))
   new_opt_state = None
   bias_metrics = {}
 
@@ -719,10 +717,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/indexer_loss": indexer_loss,
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
-      "learning/te_moe_capacity_overflow": te_moe_capacity_overflow.astype(jnp.int32),
-      "learning/te_moe_max_total_recv_tokens": te_moe_max_total_recv_tokens,
-      "learning/te_moe_recv_capacity_per_rank": te_moe_recv_capacity_per_rank,
   }
+  if getattr(config, "te_moe_block", False):
+    scalar_metrics.update(
+        {
+            "learning/te_moe_capacity_overflow": aux["te_moe_capacity_overflow"].astype(jnp.int32),
+            "learning/te_moe_max_total_recv_tokens": aux["te_moe_max_total_recv_tokens"],
+            "learning/te_moe_recv_capacity_per_rank": aux["te_moe_recv_capacity_per_rank"],
+        }
+    )
   scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
     if isinstance(model, nn.Module):
@@ -1072,7 +1075,7 @@ def train_loop(config, recorder, state=None):
       metrics = training_loop_iteration(jax_device_state, python_vars, immutable_data)
       python_vars["step"] += 1
 
-      if config.te_moe_block:
+      if getattr(config, "te_moe_block", False):
         te_moe_overflow_window.append(
             (
                 int(step),
