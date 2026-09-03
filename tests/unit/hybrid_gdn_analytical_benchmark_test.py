@@ -50,9 +50,9 @@ except ImportError:
 
 
 def create_model_configs(
-    hidden_size: int = 2048,
-    num_key_heads: int = 8,
-    num_value_heads: int = 16,
+    hidden_size: int = 4096,
+    num_key_heads: int = 16,
+    num_value_heads: int = 64,
     head_dim: int = 128,
     conv_kernel_dim: int = 4,
     chunk_size: int = 64,
@@ -940,7 +940,9 @@ class HybridGdnBenchmarkTest(absltest.TestCase):
 
 # Backwards compatibility alias for external imports
 if __name__ != "__main__":
-  HybridGdnAnalyticalBenchmarkTest = HybridGdnBenchmarkTest
+  class HybridGdnAnalyticalBenchmarkTest(HybridGdnBenchmarkTest):
+    """Backwards compatibility alias for external imports."""
+    __test__ = False
 
 
 if __name__ == "__main__":

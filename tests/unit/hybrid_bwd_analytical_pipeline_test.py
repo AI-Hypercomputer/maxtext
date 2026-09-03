@@ -1162,7 +1162,9 @@ class HybridBwdGdnKernelPipelineTest(absltest.TestCase):
 
 # Backwards compatibility alias for external imports
 if __name__ != "__main__":
-  HybridBwdAnalyticalPipelineTest = HybridBwdGdnKernelPipelineTest
+  class HybridBwdAnalyticalPipelineTest(HybridBwdGdnKernelPipelineTest):
+    """Backwards compatibility alias for external imports."""
+    __test__ = False
 
 
 if __name__ == "__main__":
