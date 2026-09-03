@@ -1531,19 +1531,20 @@ class NNXDecoder(nnx.Module):
 
     return y
 
-  def apply_output_head(self, shared_embedding, y, deterministic, model_mode):
+  def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
-    if cfg.shard_mode == ShardMode.EXPLICIT:
-      norm_out_sharding = create_sharding(
-          self.mesh,
-          ("activation_batch", "activation_length", "activation_embed"),
-      )
-    else:
-      norm_out_sharding = None
+    if normalize_y:
+      if cfg.shard_mode == ShardMode.EXPLICIT:
+        norm_out_sharding = create_sharding(
+            self.mesh,
+            ("activation_batch", "activation_length", "activation_embed"),
+        )
+      else:
+        norm_out_sharding = None
 
-    y = self.decoder_norm(y, out_sharding=norm_out_sharding)
+      y = self.decoder_norm(y, out_sharding=norm_out_sharding)
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
     if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE}:

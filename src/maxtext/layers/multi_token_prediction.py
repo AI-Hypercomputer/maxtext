@@ -208,6 +208,15 @@ class MultiTokenPredictionLayer(nnx.Module):
         rngs=rngs,
     )
 
+    self.final_norm = RMSNorm(
+        num_features=cfg.emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=("norm",),
+        rngs=rngs,
+    )
+
   @property
   def embedding_norm(self):
     return getattr(self, f"mtp_{self.layer_number}_embedding_norm")
@@ -239,6 +248,14 @@ class MultiTokenPredictionLayer(nnx.Module):
   @transformer_layer.setter
   def transformer_layer(self, module):
     setattr(self, f"mtp_{self.layer_number}_transformer_layer", module)
+
+  @property
+  def final_norm(self):
+    return getattr(self, f"mtp_{self.layer_number}_final_norm")
+
+  @final_norm.setter
+  def final_norm(self, module):
+    setattr(self, f"mtp_{self.layer_number}_final_norm", module)
 
   def __call__(
       self,
@@ -462,7 +479,19 @@ class MultiTokenPredictionBlock(nnx.Module):
           model_mode=self.decoder.model_mode,
       )
 
-      mtp_logits = self.decoder.apply_output_head(shared_embedding, mtp_hidden_state, deterministic, model_mode)
+      # Apply separate normalization to the MTP hidden state before projecting to logits.
+      normed_mtp_hidden_state = mtp_layer.final_norm(mtp_hidden_state)
+      normed_mtp_hidden_state = sharding.maybe_shard_with_logical(
+          normed_mtp_hidden_state,
+          ("activation_batch", "activation_length", "activation_embed"),
+          self.mesh,
+          cfg.shard_mode,
+          sharding.get_logical_axis_rules(),
+      )
+
+      mtp_logits = self.decoder.apply_output_head(
+          shared_embedding, normed_mtp_hidden_state, deterministic, model_mode, normalize_y=False
+      )
 
       logits_logical_axes = (
           "activation_embed_and_logits_batch",

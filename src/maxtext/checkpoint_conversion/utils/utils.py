@@ -1281,6 +1281,7 @@ def save_weights_to_checkpoint(
       save_interval_steps,
       use_ocdbt=use_ocdbt,
       use_zarr3=use_zarr3,
+      enable_continuous_checkpointing=True,
   )
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
