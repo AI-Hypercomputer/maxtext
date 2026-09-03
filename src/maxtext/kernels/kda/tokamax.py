@@ -24,17 +24,19 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-# TODO(kda): `kimi_delta_attention` currently lives on tokamax's private
-# experimental path `tokamax._src.ops.experimental.kda` (openxla/tokamax
-# PR #1103; until that change lands in a public tokamax release, no pip
-# version specifier can express this dependency, so the requirement pins are
-# left unchanged). This import is deliberately lazy: a clean MaxText
-# installation without the KDA API still works for everything else, and only
-# KDA use fails — with this ImportError as the symptom. Once tokamax releases
-# a version with a stable public KDA API: (1) switch this adapter to that
-# entry point, (2) bump the tokamax pins under src/dependencies/requirements/
-# to the first release containing it and regenerate the derived requirement
-# files. Keep the lazy import and this note in sync until then.
+# TODO(kda): `kimi_delta_attention` lives on tokamax's experimental path
+# `tokamax._src.ops.experimental.kda`. The KDA change has landed on
+# openxla/tokamax main (the original PR #1103 was left open, but the API is
+# on main, signature-compatible with this adapter). No public tokamax release
+# contains it yet, so no pip version specifier can express this dependency
+# and the requirement pins are left unchanged. This import is deliberately
+# lazy: a clean MaxText installation without the KDA API still works for
+# everything else, and only KDA use fails — with this ImportError as the
+# symptom. Once tokamax cuts a release containing the KDA API: (1) switch
+# this adapter to the stable public entry point if one is added, (2) bump the
+# tokamax pins under src/dependencies/requirements/ to the first release
+# containing it and regenerate the derived requirement files. Keep the lazy
+# import and this note in sync until then.
 
 
 def _to_tokamax(q, k, v, g, beta):

@@ -25,11 +25,18 @@ history through forward/backward. This makes the smoke test a genuine
 correctness signal for the kernel rather than just an optimizer/compilation
 check.
 
+``delay`` must also exceed the short convolution's receptive field: the
+``linear_conv_kernel_dim``-tap causal conv already feeds positions
+``[j - kernel_dim + 1, j]`` into Q/K/V at position ``j``, so any target
+within that window could be copied by the conv alone without using the KDA
+state. The default ``delay=8`` sits outside the 4-tap window; the script
+enforces ``delay > linear_conv_kernel_dim``.
+
 This exists because the KDA layer is not yet wired into the maxtext decoder;
 it validates the layer end to end without decoder integration.
 
 Usage (on a TPU host):
-  python scripts/dev/kda_e2e_smoke.py [--steps 400] [--batch 32] [--seq-len 128] [--delay 4]
+  python scripts/dev/kda_e2e_smoke.py [--steps 600] [--batch 32] [--seq-len 128] [--delay 8]
 """
 
 import argparse
@@ -142,24 +149,33 @@ def make_dataset(seed: int, num_seqs: int, seq_len: int, delay: int) -> np.ndarr
 
 def main():
   parser = argparse.ArgumentParser()
-  parser.add_argument("--steps", type=int, default=400)
+  parser.add_argument("--steps", type=int, default=600)
   parser.add_argument("--batch", type=int, default=32)
   parser.add_argument("--seq-len", type=int, default=128)
   parser.add_argument("--num-layers", type=int, default=4)
   parser.add_argument("--lr", type=float, default=3e-4)
   parser.add_argument("--log-every", type=int, default=50)
-  parser.add_argument("--delay", type=int, default=4, help="delayed-copy distance; larger = harder (more history needed)")
+  parser.add_argument("--delay", type=int, default=8, help="delayed-copy distance; larger = harder (more history needed)")
   args = parser.parse_args()
 
   if args.seq_len % 64 != 0:
     parser.error(f"--seq-len must be a multiple of the KDA chunk size (64), got {args.seq_len}")
   if args.delay < 1 or args.delay >= args.seq_len:
     parser.error(f"--delay must be in [1, seq_len-1], got {args.delay}")
+
+  cfg = make_config()
+  # The causal conv already exposes kernel_dim-1 past tokens to Q/K/V; the
+  # task only proves recurrent-state carry when the target lies outside that
+  # receptive field.
+  if args.delay <= cfg.linear_conv_kernel_dim:
+    parser.error(
+        f"--delay must exceed the short-conv receptive field "
+        f"(linear_conv_kernel_dim={cfg.linear_conv_kernel_dim}), got {args.delay}; "
+        "otherwise the target can be copied by the convolution without KDA state"
+    )
   devices = jax.devices()
   print(f"devices: {devices}")
   mesh = jax.sharding.Mesh(np.array(devices), ("x",))
-
-  cfg = make_config()
   rngs = nnx.Rngs(0)
   with mesh:
     model = TinyKdaLM(cfg, mesh, args.num_layers, rngs=rngs)
