@@ -305,6 +305,124 @@ class BlockCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable
     )
 
 
+class HCAStaticMask(splash_attention_mask.Mask):
+  """Static compile-time mask for DeepSeek-V4 Heavily Compressed Attention (HCA).
+
+  Defines coarse-block coordinates and deduplicated partial block patterns for
+  Splash Attention with pre-packed bitmasks loaded into VMEM/SMEM. Evaluates
+  analytical boolean slices on host CPU during compilation, eliminating runtime VPU
+  arithmetic overhead without materializing dense boolean mask arrays in HBM.
+
+  Attributes:
+    shape: (seq_len, aligned_kv_len) tuple.
+    local_kv_len: Unpadded local sequence length.
+    compressed_kv_len: Number of active compressed tokens.
+    pad_kv_total: Prepend tile padding tokens between local and compressed KV.
+    compress_ratio: Compression ratio for HCA (e.g. 128). Must be positive.
+    local_window: Local sliding-window size (e.g. 128).
+  """
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      local_kv_len: Optional[int] = None,
+      compressed_kv_len: Optional[int] = None,
+      pad_kv_total: int = 0,
+      compress_ratio: int = 128,
+      local_window: Optional[int] = 128,
+      shard_count: int = 1,
+  ):
+    # shard_count is retained for Splash Attention Mask API compatibility;
+    # HCA static coordinates do not shard local window math across sequence axes.
+    del shard_count
+    if compress_ratio <= 0:
+      raise ValueError(f"compress_ratio must be positive, got {compress_ratio}")
+    self._shape = shape
+    self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
+    if self._shape[0] > self.local_kv_len and pad_kv_total <= 0:
+      raise ValueError(
+          f"pad_kv_total must be > 0 when query sequence is padded (shape[0]={self._shape[0]} > local_kv_len={self.local_kv_len})."
+      )
+    self.compressed_kv_len = (
+        compressed_kv_len if compressed_kv_len is not None else max(1, self.local_kv_len // compress_ratio)
+    )
+    self.pad_kv_total = pad_kv_total
+    self.compress_ratio = compress_ratio
+    self.local_window = local_window
+
+  @property
+  def shape(self) -> tuple[int, int]:
+    return self._shape
+
+  def __getitem__(self, idx: tuple[slice, slice]) -> np.ndarray:
+    if len(idx) != 2:
+      raise NotImplementedError(f"Unsupported slice: {idx}")
+    q_slice, kv_slice = idx
+    if not isinstance(q_slice, slice) or not isinstance(kv_slice, slice):
+      raise NotImplementedError(f"Unsupported slice: {idx}")
+
+    q_slice = splash_attention_mask._fill_slice(q_slice, self.shape[0])
+    kv_slice = splash_attention_mask._fill_slice(kv_slice, self.shape[1])
+
+    rows = np.arange(q_slice.start, q_slice.stop, dtype=np.int32)[:, None]
+    cols = np.arange(kv_slice.start, kv_slice.stop, dtype=np.int32)[None, :]
+
+    if rows.size == 0 or cols.size == 0:
+      return np.empty((rows.shape[0], cols.shape[1]), dtype=np.bool_)
+
+    diff = rows - cols
+    if self.local_window is None:
+      local_m = (diff >= 0) & (cols < self.local_kv_len)
+    elif self.local_window > 0:
+      local_m = (diff >= 0) & (diff < self.local_window) & (cols < self.local_kv_len)
+    else:
+      local_m = np.zeros((rows.shape[0], cols.shape[1]), dtype=np.bool_)
+
+    c_idx = cols - self.local_kv_len - self.pad_kv_total
+    c_thresh = (rows + 1) // self.compress_ratio
+    comp_m = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < self.compressed_kv_len)
+
+    # Map each padded query row 1-to-1 to a distinct padding KV column (softmax denominator = 1.0, logsumexp = 0.0).
+    # This eliminates 0 * inf = NaN in backward dkv without cross-talk or gradient bleed into real tokens.
+    if self.pad_kv_total > 0:
+      pad_cols = self.local_kv_len + ((rows - self.local_kv_len) % self.pad_kv_total)
+      pad_m = (rows >= self.local_kv_len) & (cols == pad_cols)
+    else:
+      pad_m = np.zeros((rows.shape[0], cols.shape[1]), dtype=np.bool_)
+
+    return local_m | comp_m | pad_m
+
+  def __eq__(self, other: object):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+    return (
+        self.shape == other.shape
+        and self.local_kv_len == other.local_kv_len
+        and self.compressed_kv_len == other.compressed_kv_len
+        and self.pad_kv_total == other.pad_kv_total
+        and self.compress_ratio == other.compress_ratio
+        and self.local_window == other.local_window
+    )
+
+  def __hash__(self):
+    return hash(
+        (
+            type(self),
+            self.shape,
+            self.local_kv_len,
+            self.compressed_kv_len,
+            self.pad_kv_total,
+            self.compress_ratio,
+            self.local_window,
+        )
+    )
+
+  def __bool__(self) -> bool:
+    raise NotImplementedError(
+        "Conversion to bool is unsupported. Could be caused by using logical" " instead of bitwise operations on masks."
+    )
+
+
 def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
   """Generates an explicit boolean mask for chunked causal attention.
 
@@ -1392,6 +1510,8 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
   ) -> None:
     """Validates runtime constraints for the TPU Tokamax ring path."""
+    if self.attention_type == AttentionType.COMPRESSED:
+      raise ValueError("TPU Tokamax ring attention does not support AttentionType.COMPRESSED (DeepSeek-V4 HCA/CSA).")
     if getattr(self.config, "use_indexer", False) and indexer_mask is None:
       raise ValueError(
           "`indexer_mask` cannot be None when `use_indexer` is True. "
@@ -1420,6 +1540,11 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
   ) -> None:
     """Validates runtime constraints for the TPU Ulysses path."""
+    if self.attention_type == AttentionType.COMPRESSED:
+      raise ValueError(
+          "TPU Ulysses attention does not support AttentionType.COMPRESSED (DeepSeek-V4 HCA/CSA) "
+          "due to MQA (num_kv_heads=1), asymmetric Q/KV sequence lengths, and dynamic/ragged masking."
+      )
     ulysses_attention.validate_ulysses_runtime(
         model_mode=model_mode,
         previous_chunk=previous_chunk,
@@ -1442,6 +1567,8 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
   ) -> None:
     """Validates runtime constraints for the TPU USP path."""
+    if self.attention_type == AttentionType.COMPRESSED:
+      raise ValueError("TPU USP attention does not support AttentionType.COMPRESSED (DeepSeek-V4 HCA/CSA).")
     usp_attention.validate_usp_runtime(
         model_mode=model_mode,
         previous_chunk=previous_chunk,
@@ -1469,6 +1596,8 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
+      pad_kv_total: int = 0,
+      compress_ratio: int = 0,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1477,6 +1606,13 @@ class AttentionOp(nnx.Module):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
+    cp_size = (
+        self.mesh.shape.get(self.config.context_sharding, 1)
+        if self.mesh is not None and hasattr(self.mesh, "shape")
+        else 1
+    )
+    if self.attention_type == AttentionType.COMPRESSED and cp_size > 1:
+      raise ValueError(f"Context parallelism (cp_size={cp_size}) is not supported with AttentionType.COMPRESSED.")
     if (
         target_hardware == "tpu"
         and tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
@@ -1564,6 +1700,8 @@ class AttentionOp(nnx.Module):
             use_ragged_attention=use_ragged_attention,
             record_max_logits=record_max_logits,
             decoder_segment_ids_kv=decoder_segment_ids_kv,
+            pad_kv_total=pad_kv_total,
+            compress_ratio=compress_ratio,
         )
         if max_logits is not None:
           self.max_logits = nnx.Intermediate(max_logits)
@@ -1745,6 +1883,8 @@ class AttentionOp(nnx.Module):
       use_ragged_attention: bool = False,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Array | None = None,
+      pad_kv_total: int = 0,
+      compress_ratio: int = 0,
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
@@ -1788,6 +1928,28 @@ class AttentionOp(nnx.Module):
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
     key = jnp.transpose(key, axes=(0, 2, 1, 3))
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
+
+    orig_q_len = query.shape[2]
+    orig_kv_len = key.shape[2]
+    pad_q = 0
+    pad_kv = 0
+    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+
+    # Pad sequences to block-sized boundaries upfront for AttentionType.COMPRESSED
+    if self.attention_type == AttentionType.COMPRESSED:
+      if query.shape[2] % self.block_q != 0:
+        pad_q = (self.block_q - (query.shape[2] % self.block_q)) % self.block_q
+        query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
+        if decoder_segment_ids is not None:
+          decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)), constant_values=-1)
+
+      if key.shape[2] % self.block_kv != 0:
+        pad_kv = (self.block_kv - (key.shape[2] % self.block_kv)) % self.block_kv
+        key = jnp.pad(key, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
+        value = jnp.pad(value, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
+        if decoder_segment_ids_kv_in is not None:
+          decoder_segment_ids_kv_in = jnp.pad(decoder_segment_ids_kv_in, ((0, 0), (0, pad_kv)), constant_values=-1)
+
     segment_axis_names_q = None
     segment_axis_names_kv = None
     sink_axis_names = self._logical_to_mesh_axes((HEAD,))
@@ -1882,7 +2044,14 @@ class AttentionOp(nnx.Module):
             )
             if config.cost_estimate_flops_bwd >= 0
             else None,
-            dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
+            # Tokamax Splash backward kernel requires dq_reduction_steps in (3, None).
+            # Setting dq_reduction_steps=3 for AttentionType.COMPRESSED enables in-kernel
+            # circular ring buffer gradient accumulation, cutting unreduced dQ HBM write traffic by ~42x.
+            dq_reduction_steps=(
+                config.dq_reduction_steps
+                if config.dq_reduction_steps is not None and config.dq_reduction_steps > 0
+                else (3 if self.attention_type == AttentionType.COMPRESSED else None)
+            ),
             use_experimental_scheduler=self.use_splash_scheduler,
         )
       else:
@@ -1944,24 +2113,44 @@ class AttentionOp(nnx.Module):
       splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
     else:
       sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
-      block_q = sa_config.block_q
-      block_kv = sa_config.block_kv
+      mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
 
-      # Splash requires sequences to be padded to strict block-sized boundaries.
-      # If naturally divisible (condition false), it falls back to exact sequence lengths.
-      if self.attention_type == AttentionType.COMPRESSED and (
-          (query.shape[2] % block_q != 0) or (key.shape[2] % block_kv != 0)
-      ):
-        padded_q_len = ((query.shape[2] + block_q - 1) // block_q) * block_q
-        padded_kv_len = ((key.shape[2] + block_kv - 1) // block_kv) * block_kv
-        mask_shape = (padded_q_len, padded_kv_len)
-      else:
-        mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
+      splash_q_seq_shards = cp_size
 
       mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
       use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
+      elif self.attention_type == AttentionType.COMPRESSED:
+        if not self.config.use_tokamax_splash:
+          raise ValueError("AttentionType.COMPRESSED flash attention requires use_tokamax_splash=True.")
+        if compress_ratio is None or compress_ratio <= 0:
+          raise ValueError("compress_ratio must be provided for AttentionType.COMPRESSED flash attention.")
+        if compress_ratio > 4:
+          if cp_size > 1:
+            raise NotImplementedError(
+                "Context parallelism is currently not implemented for DeepSeek-V4 HCA Flash Attention."
+            )
+          local_kv_len = orig_q_len
+          compressed_kv_len = max(0, orig_kv_len - orig_q_len - pad_kv_total)
+          mask = HCAStaticMask(
+              shape=mask_shape,
+              local_kv_len=local_kv_len,
+              compressed_kv_len=compressed_kv_len,
+              pad_kv_total=pad_kv_total,
+              compress_ratio=compress_ratio,
+              local_window=self.sliding_window_size,
+              shard_count=splash_q_seq_shards,
+          )
+        elif compress_ratio == 4:
+          if indexer_mask is None:
+            raise ValueError("indexer_mask must be provided for CSA (compress_ratio == 4) dynamic splash attention.")
+          mask = None
+        else:
+          raise ValueError(
+              f"Unsupported compress_ratio={compress_ratio} for AttentionType.COMPRESSED. "
+              "Expected 4 for CSA (requires indexer_mask) or >4 for HCA (requires HCAStaticMask)."
+          )
       elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
         mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
         mask_kwargs = {"cp_size": cp_size} if use_load_balanced_cp else {}
@@ -1976,6 +2165,7 @@ class AttentionOp(nnx.Module):
       if use_load_balanced_cp and self.attention_type not in (
           AttentionType.FULL,
           AttentionType.BLOCK_DIFFUSION,
+          AttentionType.COMPRESSED,
       ):
         mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
 
@@ -2027,15 +2217,22 @@ class AttentionOp(nnx.Module):
           ],
       )
       def wrap_tokamax_splash_kernel(single_head_mask):
-        splash_kernel = tokamax_splash_kernel.make_splash_mha(
-            mask=single_head_mask,
-            config=sa_config,
-            q_seq_shards=cp_size,  # axis for sequence sharding,
-        )
+        if self.attention_type == AttentionType.COMPRESSED and self.num_kv_heads == 1:
+          splash_kernel = tokamax_splash_kernel.make_splash_mqa(
+              mask=single_head_mask,
+              config=sa_config,
+              q_seq_shards=splash_q_seq_shards,
+          )
+        else:
+          splash_kernel = tokamax_splash_kernel.make_splash_mha(
+              mask=single_head_mask,
+              config=sa_config,
+              q_seq_shards=splash_q_seq_shards,
+          )
         return splash_kernel
 
       segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
-      if indexer_mask is None:
+      if indexer_mask is None and mask is not None:
         splash_kernel = wrap_tokamax_splash_kernel(single_head_mask)
         splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
       else:
@@ -2287,17 +2484,27 @@ class AttentionOp(nnx.Module):
 
           # Construct the splash kernel call with dynamic mask
           def dynamic_mask_splash_kernel(q, k, v, segment, sinks, indexer_mask):
-            splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mha(
-                mask=indexer_mask,
-                config=sa_config,
-            )
+            if self.attention_type == AttentionType.COMPRESSED and self.num_kv_heads == 1:
+              splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mqa(
+                  mask=indexer_mask,
+                  config=sa_config,
+              )
+              k_in = k[0]
+              v_in = v[0]
+            else:
+              splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mha(
+                  mask=indexer_mask,
+                  config=sa_config,
+              )
+              k_in = k
+              v_in = v
             kernel = partial(splash_kernel, max_logit_value=max_logit_value)
 
             if record_max_logits:
-              out, stats = kernel(q, k, v, segment, sinks=sinks, save_residuals=True)
+              out, stats = kernel(q, k_in, v_in, segment, sinks=sinks, save_residuals=True)
               return out, stats["max_logits"]
             else:
-              return kernel(q, k, v, segment, sinks=sinks), None
+              return kernel(q, k_in, v_in, segment, sinks=sinks), None
 
           # Iterate over batch dimension for (query, key, value, segment, sinks, mask)
           attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
@@ -2310,12 +2517,15 @@ class AttentionOp(nnx.Module):
             return attention_output, None
         else:
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
+          is_mqa_compressed = self.attention_type == AttentionType.COMPRESSED and self.num_kv_heads == 1
 
           if record_max_logits:
 
             def kernel_fn(q, k, v, d, s):
               # Pass save_residuals=True to force stats generation
-              out, stats = kernel(q, k, v, d, sinks=s, save_residuals=True)
+              k_in = k[0] if is_mqa_compressed else k
+              v_in = v[0] if is_mqa_compressed else v
+              out, stats = kernel(q, k_in, v_in, d, sinks=s, save_residuals=True)
               return out, stats["max_logits"]
 
             attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(
@@ -2323,7 +2533,13 @@ class AttentionOp(nnx.Module):
             )
             return attention_output, max_logits
           else:
-            attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
+
+            def call_kernel_fn(q, k, v, d, s):
+              k_in = k[0] if is_mqa_compressed else k
+              v_in = v[0] if is_mqa_compressed else v
+              return kernel(q, k_in, v_in, d, sinks=s)
+
+            attention_output = jax.vmap(call_kernel_fn, in_axes=(0, 0, 0, 0, None))(
                 query, key, value, decoder_segment_ids_tuple, sinks
             )
             return attention_output, None
@@ -2358,7 +2574,6 @@ class AttentionOp(nnx.Module):
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
     value = self._maybe_shard_with_pspec(value, axis_names_kv)
     decoder_segment_ids_q = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
-    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
     decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids_kv_in, segment_axis_names_kv)
     sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
     indexer_mask = self._maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
@@ -2379,6 +2594,11 @@ class AttentionOp(nnx.Module):
 
     x, max_logits = ret
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
+    # Slice outputs back to unpadded sequence length for compressed attention
+    if self.attention_type == AttentionType.COMPRESSED and pad_q > 0:
+      x = x[:, :orig_q_len, :, :]
+      if record_max_logits:
+        max_logits = max_logits[:, :, :orig_q_len]
 
     if record_max_logits:
       # Max over sequence length (dim 2 of max_logits)
@@ -2971,6 +3191,8 @@ class AttentionOp(nnx.Module):
       slot: Optional[int] = None,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
+      pad_kv_total: int = 0,
+      compress_ratio: int = 0,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -3018,6 +3240,8 @@ class AttentionOp(nnx.Module):
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
+        pad_kv_total=pad_kv_total,
+        compress_ratio=compress_ratio,
     )
 
     if ar_kv_cache is None:

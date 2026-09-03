@@ -524,6 +524,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
+      attention_kernel: str = "dot_product",
   ):
     """Initializes the HCA Compressor.
 
@@ -537,6 +538,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       quant: Optional quantization scheme.
       model_mode: The operational mode (e.g., "train", "prefill").
       rngs: An optional Rngs instance for stochastic initializations or dropout.
+      attention_kernel: Attention kernel name ("flash", "dot_product").
     """
     super().__init__(
         config,
@@ -548,6 +550,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
         model_mode,
         rngs,
     )
+    self.attention_kernel = attention_kernel
 
   def __call__(
       self,
@@ -648,10 +651,14 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
           cache=cache,
       )
 
-    # Skip causal mask generation during decoding (seq_len == 1) or if no blocks were pooled
+    # During decoding (seq_len == 1) or if no blocks were pooled, return a zero mask
     if seq_len == 1 or compressed_len == 0:
       compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
       return compressed_kv, compressed_mask
+
+    # Skip dense causal mask generation when using static flash attention (HCAStaticMask)
+    if self.attention_kernel == "flash":
+      return compressed_kv, None
 
     # Construct a causal mask preventing early queries from attending to future compressed blocks
     usable_len = compressed_len * self.compress_rate
@@ -1161,6 +1168,13 @@ class CompressedAttention(Attention):
     if self.compress_ratio == 0:
       attention_type = AttentionType.LOCAL_SLIDING
 
+    cp_size = mesh.shape.get(config.context_sharding, 1) if mesh is not None and hasattr(mesh, "shape") else 1
+    if cp_size > 1 and self.compress_ratio > 0:
+      raise ValueError(
+          f"Context parallelism (cp_size={cp_size}, strategy={getattr(config, 'context_parallel_strategy', 'unknown')}) "
+          f"is not supported for CompressedAttention with compress_ratio={self.compress_ratio}."
+      )
+
     super().__init__(
         config=config,
         num_query_heads=num_query_heads,
@@ -1297,6 +1311,7 @@ class CompressedAttention(Attention):
           quant=self.quant,
           model_mode=self.model_mode,
           rngs=self.rngs,
+          attention_kernel=self.attention_kernel,
       )
     elif self.compress_ratio == 4:
       self.csa_compressor = DeepseekV4CSACompressor(
@@ -1586,6 +1601,12 @@ class CompressedAttention(Attention):
       block_size = self.config.sa_block_kv
       pad_kv_total = (block_size - (total_kv_len % block_size)) % block_size
 
+      # Guarantee padding KV columns exist whenever query padding is required
+      block_q = self.config.sa_block_q
+      pad_q = (block_q - (inputs_q.shape[1] % block_q)) % block_q
+      if pad_q > 0 and pad_kv_total == 0:
+        pad_kv_total = block_size
+
       if pad_kv_total > 0:
         if compressed_kv is not None:
           # Prepend padding to the compressed blocks so they remain at the end of the sequence
@@ -1608,9 +1629,9 @@ class CompressedAttention(Attention):
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
       q = q * self.query_pre_attn_scalar
 
-    # Build indexer mask explicitly for tokamax splash kernel
+    # Build indexer mask explicitly for tokamax splash kernel (CSA dynamic path)
     indexer_mask = None
-    if self.attention_kernel == "flash" and compressed_mask is not None:
+    if self.attention_kernel == "flash" and compressed_mask is not None and self.compress_ratio == 4:
       indexer_mask = self.attention_op.generate_attention_mask(
           q,
           unpadded_kv,
@@ -1640,6 +1661,8 @@ class CompressedAttention(Attention):
         cached_values=current_kv_cache,
         indexer_mask=indexer_mask,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
+        pad_kv_total=pad_kv_total,
+        compress_ratio=self.compress_ratio,
     )
 
     # Reverse RoPE on Values
