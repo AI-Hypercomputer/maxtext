@@ -1574,5 +1574,42 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
       maxtext_utils_nnx.nnx_add_and_sync_scan_axis = original_add_scan_axis
 
 
+class TestApplyLayersSequentiallyDynamicGraphInit(unittest.TestCase):
+  """Params created inside the scan body must not drag the base stack out with them."""
+
+  class _AdapterLayer(nnx.Module):
+    """A layer that materializes a new param while tracing, as Qwix LoRA does."""
+
+    def __init__(self):
+      self.p = nnx.Param(jax.numpy.zeros((2,)))
+
+    def __call__(self, x, **kwargs):
+      self.adapter = nnx.LoRAParam(jax.numpy.ones((2,)))
+      return x + self.p.value + self.adapter.value, None
+
+  def _run(self, param_scan_axis):
+    cfg = _make_config(param_scan_axis=param_scan_axis)
+    decoder = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0))
+    layers = nnx.vmap(self._AdapterLayer, in_axes=(), out_axes=param_scan_axis, axis_size=2)()
+    # Qwix sets this on every module for the duration of its init pass.
+    decoder.disable_quant_stats_update = True
+    base_before = layers.p.value
+    # pylint: disable=protected-access
+    _, out_layers, _ = decoder._apply_layers_sequentially(layers=layers, x_in=jax.numpy.zeros((2,)), length=2)
+    return base_before, out_layers
+
+  def test_created_param_escapes_the_scan(self):
+    for axis in (0, 1):
+      with self.subTest(param_scan_axis=axis):
+        _, out_layers = self._run(axis)
+        self.assertTrue(hasattr(out_layers, "adapter"))
+
+  def test_base_params_are_not_restacked(self):
+    for axis in (0, 1):
+      with self.subTest(param_scan_axis=axis):
+        base_before, out_layers = self._run(axis)
+        self.assertIs(out_layers.p.value, base_before)
+
+
 if __name__ == "__main__":
   unittest.main()
