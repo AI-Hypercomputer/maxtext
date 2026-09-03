@@ -76,18 +76,20 @@ def _restore_subtrees_from_path(
   has_params = "params" in tree and not has_params_params
   has_base = "base" in tree
 
+  subtrees_restore_args = ocp.checkpoint_utils.construct_restore_args(subtrees_abstract)
+
   if has_params_params:
     item = {"params": {"params": subtrees_abstract}}
-    restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(subtrees_abstract)}}
+    restore_args = {"params": {"params": subtrees_restore_args}}
   elif has_params:
     item = {"params": subtrees_abstract}
-    restore_args = {"params": ocp.checkpoint_utils.construct_restore_args(subtrees_abstract)}
+    restore_args = {"params": subtrees_restore_args}
   elif has_base:
     item = {"base": subtrees_abstract}
-    restore_args = {"base": ocp.checkpoint_utils.construct_restore_args(subtrees_abstract)}
+    restore_args = {"base": subtrees_restore_args}
   else:
     item = subtrees_abstract
-    restore_args = ocp.checkpoint_utils.construct_restore_args(subtrees_abstract)
+    restore_args = subtrees_restore_args
 
   restored = ckptr.restore(
       epath.Path(ckpt_path),
@@ -114,16 +116,11 @@ def _assemble(k: str, v: Any, stitched_subtrees: Dict[str, Any]) -> Any:
   if k in stitched_subtrees:  # e.g., k is vision_encoder, decoder, or token_embedder
     restored_val = stitched_subtrees[k]
     if isinstance(restored_val, dict) and isinstance(v, dict):
-      # Merge sub-modules inside this namespace
-      merged_module = {}
-      for sub_module_name, fresh_weights in v.items():
-        if sub_module_name in restored_val:
-          # If the sub-module (e.g. Gemma3VisionEncoderLayer_0) exists in the checkpoint, load it
-          merged_module[sub_module_name] = restored_val[sub_module_name]
-        else:
-          # If the sub-module is missing from the checkpoint (e.g. the new projector), keep its fresh random weights
-          merged_module[sub_module_name] = fresh_weights
-      return merged_module
+      # Merge sub-modules in a single pass
+      return {
+          sub_module_name: restored_val.get(sub_module_name, fresh_weights)
+          for sub_module_name, fresh_weights in v.items()
+      }
     # k is pointing to a single tensor
     return restored_val
 
@@ -222,9 +219,13 @@ def stitch_and_save_checkpoints(
   final_params = {"params": stitched_inner}
 
   # 5. Save unified parameter tree to output_checkpoint_path
-  max_logging.log(f"Saving stitched checkpoint to: {output_checkpoint_path}")
+  # Normalize "/<step>/items" to "/<step>" so Orbax v1 writes the correct checkpoint root
+  output_checkpoint_dir = epath.Path(output_checkpoint_path)
+  if output_checkpoint_dir.name == "items":
+    output_checkpoint_dir = output_checkpoint_dir.parent
+  max_logging.log(f"Saving stitched checkpoint to: {output_checkpoint_dir}")
   checkpointing.save_params_to_path(
-      output_checkpoint_path,
+      str(output_checkpoint_dir),
       final_params,
       use_ocdbt=config.checkpoint_storage_use_ocdbt,
       use_zarr3=config.checkpoint_storage_use_zarr3,
@@ -257,17 +258,17 @@ def main(argv):
       "vision_model_name",
       "llm_model_name",
       "base_config",
-      "model_name",
   }
   omni_kwargs = {}
   cleaned_argv = []
   for arg in argv:
     cleaned_arg = arg.lstrip("-")
-    if "=" in cleaned_arg and cleaned_arg.split("=", 1)[0] in omni_keys:
+    if "=" in cleaned_arg:
       k, v = cleaned_arg.split("=", 1)
-      omni_kwargs[k] = v
-    else:
-      cleaned_argv.append(arg)
+      if k in omni_keys:
+        omni_kwargs[k] = v
+        continue
+    cleaned_argv.append(arg)
 
   # To populate all system-wide defaults, MaxText requires base.yml as argv[1].
   # To apply our custom overrides on top of these defaults, we convert the custom config
@@ -297,7 +298,6 @@ def main(argv):
 
   # Initialize MaxText config using standard train.initialize
   config, _ = initialize(cleaned_argv)
-  object.__setattr__(config, "model_name", "maxtext-omni-gemma3-qwen3")
   # Extract paths from command-line arguments or FLAGS
   vision_path = FLAGS.vision_load_path or omni_kwargs.get("vision_load_path")
   llm_path = FLAGS.llm_load_path or omni_kwargs.get("llm_load_path")

@@ -50,6 +50,7 @@ import numpy as np
 import omegaconf
 from orbax import checkpoint as ocp
 
+from maxtext.common import checkpointing
 from maxtext.configs import pyconfig
 from maxtext.experimental.omni_poc.utils import stitch_checkpoint
 from maxtext.layers import encoders
@@ -77,17 +78,17 @@ def _unwrap_params(restored_dict):
 
 
 def _get_vision_layer_count(vision_state):
-  """Counts unique encoder block names within the vision encoder state."""
+  """Counts unique encoder block names within the vision encoder state using iterative DFS."""
   blocks = set()
-
-  def recurse(d):
-    if isinstance(d, dict):
-      for k, v in d.items():
+  stack = [vision_state]
+  while stack:
+    curr = stack.pop()
+    if isinstance(curr, dict):
+      for k, v in curr.items():
         if k.startswith("encoderblock_"):
           blocks.add(k)
-        recurse(v)
-
-  recurse(vision_state)
+        if isinstance(v, dict):
+          stack.append(v)
   return len(blocks)
 
 
@@ -99,16 +100,16 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    base_dir = os.environ.get("OMNI_TEST_BASE_DIR")
+    base_dir = os.environ.get("BASE_OUTPUT_DIRECTORY")
     if not base_dir or not epath.Path(base_dir).exists():
       self.skipTest(
-          "OMNI_TEST_BASE_DIR environment variable is not set or points to an invalid path. "
-          "Set OMNI_TEST_BASE_DIR to run Omni checkpoint stitching tests."
+          "BASE_OUTPUT_DIRECTORY environment variable is not set or points to an invalid path. "
+          "Set BASE_OUTPUT_DIRECTORY to run Omni checkpoint stitching tests."
       )
 
-    self.vision_ckpt_dir = f"{base_dir}/gemma3-4b_converted/0/items"
-    self.llm_ckpt_dir = f"{base_dir}/qwen3-4b_converted/0/items"
-    self.output_ckpt_dir = f"{base_dir}/omni_stitched_gemma3-4b_qwen3-4b/0/items"
+    self.vision_ckpt_dir = f"{base_dir}/converted/gemma3-4b/0/items"
+    self.llm_ckpt_dir = f"{base_dir}/converted/qwen3-4b/0/items"
+    self.output_ckpt_dir = f"{base_dir}/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items"
 
     # Run tests on CPU mesh to avoid running out of TPU device memory
     cpu_device = jax.devices("cpu")[0]
@@ -136,7 +137,6 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
         "vision_model_name",
         "llm_model_name",
         "base_config",
-        "model_name",
     }
     yaml_overrides = {k: v for k, v in custom_cfg.items() if k not in omni_keys}
 
@@ -152,7 +152,6 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
         **yaml_overrides,
     )
     # Use object.__setattr__ to bypass the read-only check on _HyperParameters
-    object.__setattr__(config, "model_name", custom_cfg.get("model_name", "maxtext-omni-gemma3-qwen3"))
     object.__setattr__(config, "vision_model_name", "gemma3-4b")
     object.__setattr__(config, "llm_model_name", "qwen3-4b")
     object.__setattr__(config, "ici_context_autoregressive_parallelism", 1)
@@ -205,7 +204,14 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
       concrete_template = jax.tree.map(to_concrete_zeros, target_params_abstract)
 
       # Load weights from the STITCHED checkpoint path
-      stitched_inner = stitch_checkpoint._restore_subtrees_from_path(self.output_ckpt_dir, concrete_template, ckptr)
+      loaded = checkpointing.load_params_from_path(
+          self.output_ckpt_dir,
+          {"params": concrete_template},
+          config.checkpoint_storage_concurrent_gb,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+      )
+      stitched_inner = loaded.get("params", loaded)
 
       # Load weights from the ORIGINAL Vision checkpoint
       vision_abstract = {
