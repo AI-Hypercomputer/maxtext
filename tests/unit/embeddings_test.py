@@ -84,6 +84,43 @@ class EmbedTest(unittest.TestCase):
 
     self.assertEqual(outputs.shape, (batch_size, seq_len, num_embeddings))
 
+  def test_attend_on_embedding_matches_transposed_dot(self):
+    """`attend_on_embedding` contracts over the table's feature axis directly.
+
+    Expressing the transpose as dimension numbers instead of materializing
+    `table.T` is what lets the input lookup and the tied output head share one
+    bf16 cast under `shard_mode: explicit`. It reassociates the accumulation, so
+    the logits agree to float rounding rather than bit for bit.
+    """
+    table = jax.random.normal(jax.random.PRNGKey(0), (32, 8))
+    for query_shape in ((8,), (3, 8), (2, 3, 8)):
+      with self.subTest(query_shape=query_shape):
+        query = jax.random.normal(jax.random.PRNGKey(1), query_shape)
+        expected = jnp.dot(query, jnp.asarray(table, jnp.bfloat16).T, preferred_element_type=jnp.float32)
+        got = embeddings.attend_on_embedding(query, table, jnp.float32, self.cfg)
+        self.assertEqual(got.shape, expected.shape)
+        np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+  def test_attend_on_embedding_weight_gradient_in_table_order(self):
+    """The tied head's table gradient comes out in the table's own axis order.
+
+    With `table.T` the gradient is built transposed and handed back through a
+    second transpose, which under explicit sharding survives to codegen. The
+    gradient itself must be unchanged.
+    """
+    table = jax.random.normal(jax.random.PRNGKey(0), (32, 8))
+    query = jax.random.normal(jax.random.PRNGKey(1), (2, 3, 8))
+
+    def loss(t, attend):
+      return jnp.sum(jnp.sin(attend(query, t)))
+
+    got = jax.grad(loss)(table, lambda q, t: embeddings.attend_on_embedding(q, t, jnp.float32, self.cfg))
+    expected = jax.grad(loss)(
+        table, lambda q, t: jnp.dot(q, jnp.asarray(t, jnp.bfloat16).T, preferred_element_type=jnp.float32)
+    )
+    self.assertEqual(got.shape, table.shape)
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
 
 class RotaryEmbeddingTest(unittest.TestCase):
   """Tests for RotaryEmbedding."""
