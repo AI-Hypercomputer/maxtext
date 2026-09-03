@@ -77,6 +77,7 @@ class Profiler:
       self.profiling_options.advanced_configuration = advanced_config
 
   def is_active(self, step=None):
+    """Returns True if the profiler is active, either at the given step or currently."""
     if self.mode == "":
       return False
     if step is not None:
