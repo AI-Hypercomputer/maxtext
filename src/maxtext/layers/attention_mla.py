@@ -382,7 +382,15 @@ class Indexer(nnx.Module):
 
     # NOTE: If the total available sequence length <= topk, indexer always selects all tokens.
     if k.shape[1] <= self.indexer_topk:
-      return attention_mask, cached_s, attention_mask
+      full_mask = jnp.zeros((bsz, seqlen, k.shape[1]), dtype=jnp.float32)
+      if cached_s is not None:
+        internal_padding_mask = jnp.where(cached_s > 0, 0.0, DEFAULT_MASK_VALUE)
+        full_mask += internal_padding_mask[:, None, :]
+      if attention_mask is not None:
+        if attention_mask.shape[-1] == k.shape[1] or attention_mask.shape[-1] == 1:
+          full_mask += attention_mask
+      dummy_indices = jnp.zeros((bsz, seqlen, self.indexer_topk), dtype=jnp.int32)
+      return full_mask, dummy_indices, full_mask
 
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q)
@@ -1352,12 +1360,22 @@ class MLA(Attention):
 
       if self.indexer is not None or getattr(self.config, "use_index_share", False):
 
+        target_kv_len = (
+            k_cached.shape[1]
+            if k_cached is not None
+            else (
+                cached_indexer_state[0].shape[-1]
+                if cached_indexer_state is not None
+                else (query.shape[1] if query.shape[1] > 1 else getattr(self.config, "max_target_length", query.shape[1]))
+            )
+        )
+
         def _run_full(_):
           with jax.named_scope("glm_full_layer_index_computation"):
             if self.indexer is None:
               batch = query.shape[0]
               q_len = query.shape[1]
-              kv_len = key.shape[1] if key is not None else 0
+              kv_len = target_kv_len
               topk = getattr(self.config, "indexer_topk", 0)
               mask = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
               indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
@@ -1392,7 +1410,7 @@ class MLA(Attention):
             if cached_indexer_state is None:
               batch = query.shape[0]
               q_len = query.shape[1]
-              kv_len = key.shape[1] if key is not None else 0
+              kv_len = target_kv_len
               topk = getattr(self.config, "indexer_topk", 0)
               mask = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
               indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
