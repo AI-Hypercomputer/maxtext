@@ -332,6 +332,28 @@ class YarnRotaryEmbeddingTest(unittest.TestCase):
     default_outputs = default_layer(inputs, position=position)
     np.testing.assert_allclose(outputs, default_outputs, atol=1e-5)
 
+  def test_freqs_cis_at_matches_indexing_the_table(self):
+    """`freqs_cis_at` is what `__call__` uses; the full table is what it stands in for.
+
+    Row `p` of `freqs_cis` is `exp(1j * p * corrected_freqs)`, so the two agree
+    bit for bit — `arange(max_position_embeddings)[p]` is exactly `float(p)` for
+    every representable position.
+    """
+    layer = embeddings.YarnRotaryEmbedding(
+        embedding_dims=64,
+        mesh=self.mesh,
+        max_position_embeddings=163840,
+        original_max_position_embeddings=4096,
+        rngs=self.rngs,
+    )
+    table = layer.freqs_cis
+    self.assertEqual(table.shape, (163840, 32))
+    # Sample the bottom, the middle and the very top of the table.
+    for lo in (0, 4096, 163840 - 128):
+      with self.subTest(lo=lo):
+        position = jnp.arange(lo, lo + 128, dtype=jnp.int32)[jnp.newaxis, :]
+        np.testing.assert_array_equal(layer.freqs_cis_at(position), table.at[position].get())
+
   def test_pairwise_explicit_shard_mode_call(self):
     layer = embeddings.YarnRotaryEmbedding(
         embedding_dims=4,
