@@ -1318,6 +1318,15 @@ class NNXDecoder(nnx.Module):
     dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
     updated_graphdef = [graphdef]
 
+    # Parameters fed in as scan inputs come back out unchanged, so they must not be
+    # re-emitted as scan outputs (see layer_fn). Anything else the body produces --
+    # including parameters materialized while tracing, such as Qwix LoRA adapters,
+    # which are ``nnx.Param`` subclasses -- still has to leave the scan.
+    carried_param_paths = {path for path, _ in nnx.to_flat_state(params)}
+    # Carried-in paths still present after the body ran. The body can also remove
+    # one: Qwix QLoRA swaps a float kernel for a quantized node.
+    kept_param_paths = [carried_param_paths]
+
     use_kv = kv_caches_stacked is not None
     use_forced_routing = forced_routed_experts_scanned is not None
 
@@ -1371,7 +1380,15 @@ class NNXDecoder(nnx.Module):
       if dynamic_graph_init:
         new_graphdef, updated_params, updated_state = nnx.split(layer, nnx.Param, ...)
         updated_graphdef[0] = new_graphdef
-        returned_params = updated_params
+        # Drop the parameters that were carried in: jax.lax.scan stacks every
+        # output, so returning them would materialize a second copy of the
+        # stacked layer weights. Parameters created inside the body are still
+        # returned.
+        flat_updated_params = list(nnx.to_flat_state(updated_params))
+        kept_param_paths[0] = {path for path, _ in flat_updated_params if path in carried_param_paths}
+        returned_params = nnx.from_flat_state(
+            [(path, value) for path, value in flat_updated_params if path not in carried_param_paths]
+        )
         new_current_state = nnx.State.merge(returned_params, updated_state)
       else:
         # Avoid returning and stacking read-only parameters inside the scan body.
@@ -1437,9 +1454,19 @@ class NNXDecoder(nnx.Module):
 
     if dynamic_graph_init:
       # If graph changed, we need to merge with the new graphdef.
-      # Note: scanned_state here is the full state (Params + rest).
+      # Note: scanned_state holds only the params created inside the body plus
+      # the rest; the carried-in params are read back off `layers`, which keeps
+      # their array identity so a second adapter shares one base. Params the body
+      # removed are left out, since the new graphdef has no slot for them.
       new_params, new_rest = scanned_state.split(nnx.Param, ...)
-      out_layers = nnx.merge(updated_graphdef[0], new_params, new_rest)
+      base_params = nnx.from_flat_state(
+          [
+              (path, value)
+              for path, value in nnx.to_flat_state(nnx.state(layers, nnx.Param))
+              if path in kept_param_paths[0]
+          ]
+      )
+      out_layers = nnx.merge(updated_graphdef[0], base_params, new_params, new_rest)
     else:
       clean_state = nnx.filter_state(scanned_state, nnx.Not(nnx.RngState))
       nnx.update(layers, clean_state)
