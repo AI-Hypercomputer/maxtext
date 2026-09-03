@@ -193,7 +193,6 @@ def compare_checkpoints(
     if missing_in_stitched:
       print(f"Error: Parameters in SFT but missing in stitched checkpoint: {missing_in_stitched}")
     return False
-  # Go through all parameter tensors and compare weights before vs after SFT
   for path, sft_arr in sft_leaves.items():
     stitched_arr = stitched_leaves[path]
 
@@ -204,7 +203,11 @@ def compare_checkpoints(
     else:
       cat = "LLM Backbone"
 
-    # Compute maximum absolute difference between checkpoints
+    # Align array sharding in JAX so both arrays share the same TPU sharding
+    if hasattr(sft_arr, "sharding") and hasattr(stitched_arr, "sharding") and sft_arr.sharding != stitched_arr.sharding:
+      stitched_arr = jax.device_put(stitched_arr, sft_arr.sharding)
+
+    # Compute maximum absolute difference between checkpoints using JAX
     diff = jnp.max(jnp.abs(sft_arr.astype(jnp.float32) - stitched_arr.astype(jnp.float32)))
     max_abs_diff = float(diff)
     is_identical = max_abs_diff == 0.0
