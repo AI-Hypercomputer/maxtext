@@ -301,6 +301,53 @@ def _conform_accumulator(value: Any, target: jax.sharding.NamedSharding) -> Any:
   return jax.device_put(value, target)
 
 
+def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutput:
+  """Normalizes whatever a loss function returned a `LossOutput`.
+
+  Shared by the training and evaluation kernels.
+
+  Args:
+    out: The loss function's return value.
+    has_aux: Whether the caller considers a 2-tuple's second element to be auxiliary
+      output worth recording.
+
+  Returns:
+    The equivalent `LossOutput`.
+
+  Raises:
+    TypeError: If `out` matches none of the accepted shapes.
+  """
+  if isinstance(out, abstract_engine.LossOutput):
+    return out
+  if isinstance(out, abstract_engine.WeightedMetric):
+    return abstract_engine.LossOutput(primary_loss=out, aux_metrics={})
+  if isinstance(out, (tuple, list)) and len(out) == 2:
+    loss_val, aux = out
+    if isinstance(loss_val, abstract_engine.WeightedMetric):
+      primary_loss = loss_val
+    elif isinstance(aux, dict) and "xent_sum" in aux and "total_weights" in aux:
+      primary_loss = abstract_engine.WeightedMetric(
+          unreduced_sum=aux["xent_sum"],
+          denominator=aux["total_weights"],
+      )
+    else:
+      raise TypeError(
+          f"Cannot construct WeightedMetric from 2-tuple loss return with elements "
+          f"of type ({type(loss_val).__name__}, {type(aux).__name__}). Expected first element to be a "
+          "WeightedMetric, or second element to be a dict containing 'xent_sum' and 'total_weights'."
+      )
+
+    return abstract_engine.LossOutput(
+        primary_loss=primary_loss,
+        aux_metrics=aux if (has_aux and isinstance(aux, dict)) else {},
+    )
+  raise TypeError(
+      f"Unsupported return type from loss function: {type(out)}. "
+      "Expected abstract_engine.LossOutput, abstract_engine.WeightedMetric, "
+      "or a 2-element tuple/list: (loss, aux_metrics)."
+  )
+
+
 @struct.dataclass(frozen=True, kw_only=True)
 class RouterReplayTrainerPayload(abstract_engine.TrainerPayload):
   """A TrainerPayload extension carrying forced router-replay expert decisions.
@@ -485,15 +532,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # keeps recording its aux metrics. `with_loss_fn` overrides this per its own default.
     self._has_aux: bool = True
     self._gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = None
-    # Tracked per instance rather than via logging.log_first_n, which is process-wide and
-    # would make the warning depend on whether some earlier engine already triggered it.
-    self._eval_step_warned: bool = False
     self._compiled = False
     # Set by `compile()`, including when it defers for want of a dummy payload. `_compiled`
     # alone cannot express "wanted, not yet built", and conflating them would either make
     # every eager caller compile or make a deferred compile never happen.
     self._compile_requested = False
     self._compiled_signature: Any = None
+    self._compiled_eval: Any = None
+    self._compiled_eval_signature: Any = None
     self._signature_compare_warned: bool = False
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
@@ -554,7 +600,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         config=self._config,
     )
     self._metrics_recorder = metrics_module.MetricsRecorder()
-    self._throttler = inflight_throttler.InflightThrottler(config=self._config)
+    self._eval_metrics_recorder = metrics_module.MetricsRecorder(mode=metrics_module.Mode.EVAL)
+    self._metrics_logger = metrics_module.MetricsLogger(config=self._config)
+    self._throttler = inflight_throttler.InflightThrottler(config=self._config, metrics_logger=self._metrics_logger)
     self._raiden_sync: Any = None
 
   @property
@@ -570,6 +618,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_fwd_bwd = None
     self._compiled_fwd_bwd_accum = None
     self._compiled_update = None
+    self._compiled_eval = None
+    self._compiled_eval_signature = None
     self._model_graphdef = None
     self._invalidate_pure_state()
 
@@ -588,6 +638,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_update = None
     self._state_graphdef = None
     self._invalidate_pure_state()
+    self._compiled_eval = None
+    self._compiled_eval_signature = None
 
   @property
   def train_step(self) -> int:
@@ -616,6 +668,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_update = None
     self._state_graphdef = None
     self._invalidate_pure_state()
+    self._compiled_eval = None
+    self._compiled_eval_signature = None
 
   @property
   def micro_step_count(self) -> int:
@@ -644,6 +698,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._loss_fn = customized_fn
     self._has_aux = has_aux
     self._compiled = False
+    self._compiled_eval = None
+    self._compiled_eval_signature = None
     return self
 
   def with_gen_model_input_fn(self, gen_model_input_fn: Callable[[Any], dict[str, Any]]) -> "MaxTextTrainingEngine":
@@ -665,6 +721,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # The adapter decides which batch entries are traced and which are baked into the
     # executable, so a compiled kernel built against the previous one is stale.
     self._compiled = False
+    self._compiled_eval = None
+    self._compiled_eval_signature = None
     return self
 
   @contextlib.contextmanager
@@ -913,44 +971,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         out = loss_callable(mdl, self._config, b, None, None, is_train=True)
       _, _, new_r = nnx.split(mdl, nnx.Param, ...)
 
-      if isinstance(out, abstract_engine.LossOutput):
-        return out.primary_loss.unreduced_sum, (out, new_r)
-      elif isinstance(out, abstract_engine.WeightedMetric):
-        loss_out = abstract_engine.LossOutput(
-            primary_loss=out,
-            aux_metrics={},
-        )
-        return out.unreduced_sum, (loss_out, new_r)
-      elif isinstance(out, (tuple, list)) and len(out) == 2:
-        loss_val, aux = out
-        if isinstance(loss_val, abstract_engine.WeightedMetric):
-          primary_loss = loss_val
-        elif isinstance(aux, dict) and "xent_sum" in aux and "total_weights" in aux:
-          primary_loss = abstract_engine.WeightedMetric(
-              unreduced_sum=aux["xent_sum"],
-              denominator=aux["total_weights"],
-          )
-        else:
-          raise TypeError(
-              f"Cannot construct WeightedMetric from 2-tuple loss return with elements "
-              f"of type ({type(loss_val).__name__}, {type(aux).__name__}). Expected first element to be a "
-              "WeightedMetric, or second element to be a dict containing 'xent_sum' and 'total_weights'."
-          )
-
-        # `has_aux=False` means the caller does not consider the second element to be
-        # auxiliary output, so it is not recorded -- even though it may have been read
-        # above to build `primary_loss`.
-        loss_out = abstract_engine.LossOutput(
-            primary_loss=primary_loss,
-            aux_metrics=aux if (self._has_aux and isinstance(aux, dict)) else {},
-        )
-        return primary_loss.unreduced_sum, (loss_out, new_r)
-      else:
-        raise TypeError(
-            f"Unsupported return type from loss function: {type(out)}. "
-            "Expected abstract_engine.LossOutput, abstract_engine.WeightedMetric, "
-            "or a 2-element tuple/list: (loss, aux_metrics)."
-        )
+      loss_out = _normalize_loss_output(out, self._has_aux)
+      return loss_out.primary_loss.unreduced_sum, (loss_out, new_r)
 
     if self._reduced_params_shardings is not None:
       # Tag the differentiated parameters `reduced` over the data axis, so their cotangents
@@ -1048,6 +1070,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return new_state_pure, grad_norm, is_skipped_val
     return state_pure, grad_norm, is_skipped_val
 
+  def _eval_kernel(self, params, rest, batch):
+    """Executes a single forward pass, returning the loss and its aux metrics.
+
+    Returns:
+      `(primary_loss, aux_metrics)` -- a `WeightedMetric` and a dict.
+    """
+    loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
+    mdl = nnx.merge(self._model_graphdef, params, rest, copy=True)
+    if self._gen_model_input_fn is not None:
+      if not isinstance(batch, dict):
+        raise TypeError(
+            "gen_model_input_fn must return a dict of loss-fn keyword arguments, got " f"{type(batch).__name__}."
+        )
+      out = loss_callable(mdl, **batch)
+    else:
+      out = loss_callable(mdl, self._config, batch, None, None, is_train=False)
+
+    loss_out = _normalize_loss_output(out, self._has_aux)
+    return loss_out.primary_loss, loss_out.aux_metrics
+
   def _warn_uncomparable(self, what: str, hint: str, exc: Exception) -> None:
     """Warns once per instance that a signature half could not be compared.
 
@@ -1060,7 +1102,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._signature_compare_warned = True
     logging.warning(_UNCOMPARABLE_SIGNATURE_WARNING, what, exc, hint)
 
-  def _needs_recompile(self, signature: Any) -> bool:
+  def _needs_recompile(self, signature: Any, previous: Any) -> bool:
     """Returns whether the compiled kernel is stale for `signature`.
 
     An unanswerable comparison counts as stale. That is the right direction for
@@ -1073,7 +1115,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Comparing the signature as a whole would route a badly-behaved treedef or shape entry
     into a message blaming the caller's static loss arguments.
     """
-    previous = self._compiled_signature
     if previous is None:
       return True
 
@@ -1264,6 +1305,30 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_signature = _batch_signature(dynamic_batch, static_batch)
     self._compiled = True
 
+  def _compile_eval_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
+    """JIT-compiles the forward-only eval kernel for one batch structure."""
+    self._model_graphdef, params_pure, rest_pure = nnx.split(self._model, nnx.Param, ...)
+
+    def kernel(params, rest, dynamic):
+      batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
+      return self._eval_kernel(params, rest, batch)
+
+    if self._mesh is not None:
+      params_shardings = jax.tree.map(self._mesh_sharding, params_pure)
+      rest_shardings = jax.tree.map(self._mesh_sharding, rest_pure)
+      eval_in_shardings = (params_shardings, rest_shardings, self._batch_data_shardings(dynamic_batch))
+      eval_out_shardings = (None, None)
+    else:
+      eval_in_shardings = None
+      eval_out_shardings = None
+
+    self._compiled_eval = jax.jit(
+        kernel,
+        in_shardings=eval_in_shardings,
+        out_shardings=eval_out_shardings,
+    )
+    self._compiled_eval_signature = _batch_signature(dynamic_batch, static_batch)
+
   def compile(self, dummy_data: abstract_engine.TrainerPayload) -> None:
     """Triggers SPMD JIT compilation of fwd_bwd and update steps.
 
@@ -1322,7 +1387,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # changing needs a fresh kernel -- reusing it would raise an in_shardings mismatch
       # for the first, and silently use stale values for the second.
       signature = _batch_signature(dynamic_batch, static_batch)
-      if not self._compiled or self._needs_recompile(signature):
+      if not self._compiled or self._needs_recompile(signature, self._compiled_signature):
         self._compile_for_batch(dynamic_batch, static_batch)
       # After any recompile, not before: reading first would hand the new kernel a pure
       # state split against the old graph.
@@ -1442,29 +1507,70 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     return self.train_step
 
+  @contextlib.contextmanager
+  def eval_context(self):
+    """Brackets a sequence of `eval_step` calls and writes their metrics on exit.
+
+    Usage:
+
+        with trainer.eval_context():
+            for micro_batch in eval_ds:
+                trainer.eval_step(micro_batch)
+    """
+    logging.info("Running evaluation on train step %d.", self.train_step)
+    # Drain the training queue so that the eval metrics are logged after all training metrics for this step.
+    self._throttler.wait_for_all()
+    try:
+      yield
+    finally:
+      for buffer in self._eval_metrics_recorder.get_metrics_history(clear_cache=True):
+        logging.info("Writing buffered eval metrics for train step %d.", buffer.id)
+        self._metrics_logger.write_metrics(buffer, mode=metrics_module.Mode.EVAL)
+      self._eval_metrics_recorder.cleanup()
+
   def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
-    """Warns once that evaluation is not implemented, then does nothing.
+    """Prepares inputs, runs the evaluation, and logs eval metrics.
 
-    A silent no-op lets `TrainerWorker.run_eval` report success having evaluated nothing,
-    so any eval metrics for the run are meaningless rather than absent. Warning makes that
-    audible; warning only once keeps a loop that evaluates every step from flooding the
-    log. Implementing this properly means a forward-only pass plus deciding how eval
-    metrics bucket via `MetricsBuffer.mode`, which is tracked separately.
-
-    Mutates no trainer state -- in particular not `_accumulated_grads` or
-    `_micro_step_count` -- as `AbstractTrainer.eval_step` requires.
+    Callers should bracket a sequence of eval_step calls with eval_context() so that the metrics
+    mode is set to EVAL and buffered metrics are written on exit.
 
     Args:
-      payload: Packed micro-batch evaluation input. Currently unused.
-      **kwargs: Additional keyword arguments for evaluation. Currently unused.
+      payload: Packed micro-batch evaluation input.
+      **kwargs: Additional keyword arguments for evaluation.
     """
-    if not self._eval_step_warned:
-      self._eval_step_warned = True
-      logging.warning(
-          "MaxTextTrainingEngine.eval_step is not implemented: it evaluates nothing and "
-          "records no metrics, so any eval result reported for this run is meaningless. "
-          "Logged once per engine instance."
-      )
+    batch = self._prepare_batch(payload)
+
+    model = getattr(self._state, "model", self._model) if self._state is not None else self._model
+    if not isinstance(model, nnx.Module):
+      raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
+
+    self._model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+    # Wait for previous computations to finish before dispatching the next one to TPU.
+    self._throttler.wait_for_next()
+
+    if self._compile_requested:
+      dynamic_batch, static_batch = _split_static_and_dynamic(batch)
+      signature = _batch_signature(dynamic_batch, static_batch)
+      if self._compiled_eval is None or self._needs_recompile(signature, self._compiled_eval_signature):
+        self._compile_eval_for_batch(dynamic_batch, static_batch)
+      loss, aux = self._compiled_eval(params, rest, dynamic_batch)
+    else:
+      loss, aux = self._eval_kernel(params, rest, batch)
+
+    # No metrics attached: eval metrics are buffered by `_eval_metrics_recorder` and written
+    # in EVAL mode when `eval_context` exits.
+    self._throttler.add_computation(computation=loss, metrics=None)
+
+    if isinstance(loss, abstract_engine.WeightedMetric):
+      self.record_metrics("loss", loss, mode=metrics_module.Mode.EVAL)
+    else:
+      logging.warning("Eval loss is not a WeightedMetric, so it will not be logged. Got %s.", type(loss).__name__)
+
+    if isinstance(aux, dict):
+      for key, value in aux.items():
+        if value is not None:
+          self.record_metrics(key, value, mode=metrics_module.Mode.EVAL)
 
   def _reduced_accumulated_grads(self) -> Any:
     """Returns the accumulated gradients in the form Orbax can serialize.
@@ -1671,6 +1777,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       name: str,
       metric: abstract_engine.WeightedMetric | jax.Array | float | int | dict[str, Any],
       aggregation_fn: Callable[[jax.Array], Any] | None = None,
+      mode: metrics_module.Mode = metrics_module.Mode.TRAIN,
   ) -> None:
     """Records a metric into the buffer, appending to JAX arrays.
 
@@ -1688,14 +1795,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
               f"{name}/{sub_k}" if name else sub_k,
               sub_v,
               aggregation_fn=aggregation_fn,
+              mode=mode,
           )
     else:
-      self._metrics_recorder.buffer_metrics(
-          train_step=self.train_step,
-          name=name,
-          metric=metric,
-          aggregation_fn=aggregation_fn,
-      )
+      if mode == metrics_module.Mode.TRAIN:
+        self._metrics_recorder.buffer_metrics(
+            train_step=self.train_step,
+            name=name,
+            metric=metric,
+            aggregation_fn=aggregation_fn,
+        )
+      else:
+        self._eval_metrics_recorder.buffer_metrics(
+            train_step=self.train_step,
+            name=name,
+            metric=metric,
+            aggregation_fn=aggregation_fn,
+        )
 
   def get_metrics(self, clear_cache: bool = True) -> abstract_engine.MetricsBuffer:
     """Returns the most recent step's metrics as an on-device MetricsBuffer.
@@ -1867,3 +1983,4 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     # Cleanup metrics recorder resources after saving the checkpoint, ensuring all buffered metrics are saved properly
     self._metrics_recorder.cleanup()
+    self._metrics_logger.cleanup()
