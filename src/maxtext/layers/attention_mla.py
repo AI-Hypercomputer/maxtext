@@ -1314,88 +1314,90 @@ class MLA(Attention):
     indexer_mask = None
     new_indexer_state = None
     if self.use_indexer:
-      seq_len = key.shape[1] if key is not None else 0
-      if seq_len <= self.config.indexer_topk:
-        indexer_mask, topk_indices, indexer_score = None, None, None
-        new_indexer_state = cached_indexer_state
-      else:
-        # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
-        attention_mask = self.attention_op.generate_attention_mask(
-            query,
-            key,
-            decoder_segment_ids,
-            model_mode,
-            previous_chunk,
-            bidirectional_mask,
-            segment_positions=inputs_positions,
-        )
-        if attention_mask is not None:
-          attention_mask = attention_mask.squeeze(axis=(1, 2))
+      # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
+      attention_mask = self.attention_op.generate_attention_mask(
+          query,
+          key,
+          decoder_segment_ids,
+          model_mode,
+          previous_chunk,
+          bidirectional_mask,
+          segment_positions=inputs_positions,
+      )
+      if attention_mask is not None:
+        attention_mask = attention_mask.squeeze(axis=(1, 2))
 
-        if self.indexer is not None or getattr(self.config, "use_index_share", False):
+      if self.indexer is not None or getattr(self.config, "use_index_share", False):
 
-          def _run_full(_):
-            with jax.named_scope("glm_full_layer_index_computation"):
-              if self.indexer is None:
-                batch = query.shape[0]
-                q_len = query.shape[1]
-                kv_len = key.shape[1] if key is not None else 0
-                topk = getattr(self.config, "indexer_topk", 0)
-                mask = jnp.zeros((batch, q_len, kv_len), dtype=query.dtype)
-                indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
-                score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
-                return mask, indices, score
-              mask, indices, score = self.indexer(
-                  inputs_q=inputs_q,
-                  low_rank_q=low_rank_q,
-                  inputs_kv=inputs_kv,
-                  inputs_positions=inputs_positions,
-                  attention_mask=attention_mask,
-                  decoder_segment_ids=decoder_segment_ids,
-                  previous_chunk=previous_chunk,
-                  kv_cache=self.IndexerKVCache_0,
-                  model_mode=model_mode,
-              )
-              mask = checkpoint_name(mask, "full_layer_indexer_mask")
-              indices = checkpoint_name(indices, "full_layer_topk_indices")
+        def _run_full(_):
+          with jax.named_scope("glm_full_layer_index_computation"):
+            if self.indexer is None:
+              batch = query.shape[0]
+              q_len = query.shape[1]
+              kv_len = key.shape[1] if key is not None else 0
+              topk = getattr(self.config, "indexer_topk", 0)
+              mask = jnp.zeros((batch, q_len, kv_len), dtype=query.dtype)
+              indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
+              score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
               return mask, indices, score
+            mask, indices, score = self.indexer(
+                inputs_q=inputs_q,
+                low_rank_q=low_rank_q,
+                inputs_kv=inputs_kv,
+                inputs_positions=inputs_positions,
+                attention_mask=attention_mask,
+                decoder_segment_ids=decoder_segment_ids,
+                previous_chunk=previous_chunk,
+                kv_cache=self.IndexerKVCache_0,
+                model_mode=model_mode,
+            )
+            topk = getattr(self.config, "indexer_topk", 0)
+            if getattr(self.config, "use_index_share", False):
+              if indices is None or indices.shape != (query.shape[0], query.shape[1], topk):
+                indices = jnp.zeros((query.shape[0], query.shape[1], topk), dtype=jnp.int32)
+            mask = checkpoint_name(mask, "full_layer_indexer_mask")
+            indices = checkpoint_name(indices, "full_layer_topk_indices")
+            return mask, indices, score
 
-          def _run_shared(_):
-            with jax.named_scope("glm_shared_layer_index_reuse"):
-              if cached_indexer_state is None:
-                batch = query.shape[0]
-                q_len = query.shape[1]
-                kv_len = key.shape[1] if key is not None else 0
-                topk = getattr(self.config, "indexer_topk", 0)
-                mask = jnp.zeros((batch, q_len, kv_len), dtype=query.dtype)
-                indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
-                score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
-                return mask, indices, score
-              mask, indices, score = cached_indexer_state
-              mask = checkpoint_name(mask, "shared_layer_reused_mask")
-              indices = checkpoint_name(indices, "shared_layer_reused_indices")
+        def _run_shared(_):
+          with jax.named_scope("glm_shared_layer_index_reuse"):
+            if cached_indexer_state is None:
+              batch = query.shape[0]
+              q_len = query.shape[1]
+              kv_len = key.shape[1] if key is not None else 0
+              topk = getattr(self.config, "indexer_topk", 0)
+              mask = jnp.zeros((batch, q_len, kv_len), dtype=query.dtype)
+              indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
+              score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
               return mask, indices, score
+            mask, indices, score = cached_indexer_state
+            topk = getattr(self.config, "indexer_topk", 0)
+            if indices is None or indices.shape != (query.shape[0], query.shape[1], topk):
+              indices = jnp.zeros((query.shape[0], query.shape[1], topk), dtype=jnp.int32)
+            mask = checkpoint_name(mask, "shared_layer_reused_mask")
+            indices = checkpoint_name(indices, "shared_layer_reused_indices")
+            return mask, indices, score
 
-          if getattr(self.config, "use_index_share", False):
-            if self.is_shared_layer:
-              indexer_mask, topk_indices, indexer_score = _run_shared(None)
-            elif layer_idx is not None and self.is_full_tuple is not None:
-              is_full = jnp.array(self.is_full_tuple, dtype=jnp.bool_)[layer_idx]
-              indexer_mask, topk_indices, indexer_score = jax.lax.cond(
-                  is_full,
-                  _run_full,
-                  _run_shared,
-                  operand=None,
-              )
-            else:
-              indexer_mask, topk_indices, indexer_score = _run_full(None)
+        if getattr(self.config, "use_index_share", False):
+          if self.is_shared_layer:
+            indexer_mask, topk_indices, indexer_score = _run_shared(None)
+          elif layer_idx is not None and self.is_full_tuple is not None:
+            is_full = jnp.array(self.is_full_tuple, dtype=jnp.bool_)[layer_idx]
+            indexer_mask, topk_indices, indexer_score = jax.lax.cond(
+                is_full,
+                _run_full,
+                _run_shared,
+                operand=None,
+            )
           else:
             indexer_mask, topk_indices, indexer_score = _run_full(None)
-
-          new_indexer_state = (indexer_mask, topk_indices, indexer_score)
         else:
-          indexer_mask, topk_indices, indexer_score = None, None, None
-          new_indexer_state = cached_indexer_state
+          indexer_mask, topk_indices, indexer_score = _run_full(None)
+
+        new_indexer_state = (indexer_mask, topk_indices, indexer_score)
+      else:
+        indexer_mask, topk_indices, indexer_score = None, None, None
+        new_indexer_state = cached_indexer_state
 
       if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0 and indexer_score is not None:
         loss_scale = self.config.indexer_loss_scaling_factor
