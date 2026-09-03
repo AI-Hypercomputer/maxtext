@@ -804,6 +804,41 @@ class RescueTest(OfflineTestCase):
     self.assertIsNone(gate.flavor)
     self.assertIsNone(gate.worker)
 
+  def test_a_cancelled_attempt_between_the_failure_and_the_pass_still_counts(self) -> None:
+    """Run 32999133815 reads failure, cancelled, success and is a rescue.
+
+    Pairing only adjacent observations lost it: (failure, cancelled) and (cancelled, success)
+    are neither of them a failure-then-pass, so the job that failed and passed on a re-run
+    produced no rescue at all. GitHub's own attempt listing for
+    "TPU Pretrain Tests (tpu-unit) / Execute Tests (1) / tpu-unit" on that run is the shape
+    below.
+    """
+    name = "TPU Pretrain Tests (tpu-unit) / Execute Tests (1) / tpu-unit"
+    attempts = {
+        1: [{"id": 1, "name": name, "conclusion": "failure"}],
+        2: [{"id": 2, "name": name, "conclusion": "cancelled"}],
+        3: [{"id": 3, "name": name, "conclusion": "success"}],
+    }
+    rescues = derive.find_rescues(attempts)
+    self.assertEqual(len(rescues), 1)
+    self.assertEqual(rescues[0].job_name, name)
+    self.assertEqual(rescues[0].failed_attempt, 1)
+    self.assertEqual(rescues[0].passed_attempt, 3)
+    self.assertEqual(rescues[0].failed_job_id, 1)
+    self.assertEqual(rescues[0].passed_job_id, 3)
+
+  def test_a_failure_pairs_with_the_nearest_later_pass_only(self) -> None:
+    """failure, cancelled, failure, success is one rescue, keyed to the second failure."""
+    name = "Job"
+    attempts = {
+        1: [{"id": 1, "name": name, "conclusion": "failure"}],
+        2: [{"id": 2, "name": name, "conclusion": "cancelled"}],
+        3: [{"id": 3, "name": name, "conclusion": "failure"}],
+        4: [{"id": 4, "name": name, "conclusion": "success"}],
+    }
+    rescues = derive.find_rescues(attempts)
+    self.assertEqual([(r.failed_attempt, r.passed_attempt) for r in rescues], [(3, 4)])
+
   def test_cancelled_then_success_is_not_a_rescue(self) -> None:
     """Run 32785979907 yields zero rescues over three attempts, because cancelled is not failure."""
     attempts = self.attempts(

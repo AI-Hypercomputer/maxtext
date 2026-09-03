@@ -35,7 +35,7 @@ setTimeout(()=>{
   const apply=[...d.querySelectorAll('#date-custom button')].find(b=>T(b)==='Apply');apply.click();
   const cc=counts();
   ok(`custom Aug 19-20: 7 PRs everywhere (${JSON.stringify(cc)})`,Object.values(cc).every(x=>x===7)&&w.getWindows().label==='The selected date range');
-  ok('custom: captions say the selected date range with real endpoints',T(d.getElementById('tl-zoombar')).includes('The selected date range covers 7 merged pull requests, #4920 (Aug 19) to #4908 (Aug 20)')&&T(d.getElementById('flaky')).includes('in the selected date range'));
+  ok('custom: captions say the selected date range with real endpoints',T(d.getElementById('tl-zoombar')).includes('The selected date range covers 7 merged pull requests, #4920 (08/19) to #4908 (08/20)')&&T(d.getElementById('flaky')).includes('in the selected date range'));
   const cancel=[...d.querySelectorAll('#date-custom button')].find(b=>T(b)==='✕');cancel.click();
   ok('cancel (✕) resets to 14 days AND re-renders',sel.value==='14'&&counts().win===20&&T(d.getElementById('tl-zoombar')).includes('The last 14 days covers 20'));
   // empty range

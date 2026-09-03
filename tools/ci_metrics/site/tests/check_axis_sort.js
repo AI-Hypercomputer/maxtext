@@ -19,21 +19,40 @@ setTimeout(()=>{
   ok('link -> GitHub PR, new tab',wl[0].getAttribute('href')==='https://github.com/AI-Hypercomputer/maxtext/pull/4908'&&wl[0].getAttribute('target')==='_blank');
   ok('link has hover title',txt(wl[0].querySelector('title'))==='Open pull request #4908 on GitHub');
   ok('hash text under bar is the bare pull request number',txt(wl[0].querySelector('text'))==='#4908'&&!wl[0].querySelector('text tspan'));
-  ok('date line follows the hash, no time line',txt(wl[0].nextSibling)==='Aug 20'&&!/^\d\d:\d\d$/.test(txt(wl[0].nextSibling.nextSibling)));
-  ok('last slot = oldest in range (#4894 Aug 06)',txt(wl[n-1].querySelector('text'))==='#'+oldest&&oldest==='4894'&&txt(wl[n-1].nextSibling)==='Aug 06');
+  ok('date line follows the hash, no time line',txt(wl[0].nextSibling)==='08/20'&&!/^\d\d:\d\d$/.test(txt(wl[0].nextSibling.nextSibling)));
+  ok('last slot = oldest in range (#4894 08/06)',txt(wl[n-1].querySelector('text'))==='#'+oldest&&oldest==='4894'&&txt(wl[n-1].nextSibling)==='08/06');
   ok('hash uses accent ink (inline style beats #timeline css)',wl[0].querySelector('text').style.fill==='var(--accent)'&&tl[0].querySelector('text').style.fill==='var(--accent)');
-  ok('worker viewBox = 26+274+44 with two-line labels',wsvg.getAttribute('viewBox')==='0 0 1100 344');
+  ok('worker viewBox = 26+274+44 with two-line labels',/^0 0 \d+ 344$/.test(wsvg.getAttribute('viewBox'))&&parseInt(wsvg.getAttribute('viewBox').split(' ')[2],10)>=1100);
   ok('timeline viewBox = 70+228+44 with two-line labels',tsvg.getAttribute('viewBox')==='0 0 1100 342');
+  // The bar used to stack max(queue) + max(setup) + max(run) taken from three different jobs,
+  // which is taller than any job that ran. The outline box and the status marks hang off
+  // wc.total, so both ended up inside the bar they belong to.
+  ok('every device column is its lane\'s slowest job, so the bar reaches wc.total exactly',(()=>{
+    return w.eval('COMMITS').every(c=>{const wc=w.wallClock(c,'all');
+      const tops=['tpu','gpu','cpu'].map(k=>wc.build+wc.catLead[k].total);
+      return Math.abs(Math.max(...tops)-wc.total)<0.05})})());
+  ok('no bar segment escapes above its own outline box',(()=>{
+    const segs=[...tsvg.querySelectorAll('rect')].filter(r=>{const f=r.getAttribute('fill');return f&&f!=='none'&&f!=='transparent'});
+    const boxes=[...tsvg.querySelectorAll('rect')].filter(r=>['#EF4444','#F59E0B'].includes(r.getAttribute('stroke')));
+    return boxes.length>0&&boxes.every(b=>{const bx=+b.getAttribute('x'),bw=+b.getAttribute('width'),by=+b.getAttribute('y');
+      return segs.filter(s=>+s.getAttribute('x')>=bx&&+s.getAttribute('x')+ +s.getAttribute('width')<=bx+bw)
+                 .every(s=>+s.getAttribute('y')>=by-0.01)})})());
+  ok('no status mark sits inside the bar it belongs to',(()=>{
+    const segs=[...tsvg.querySelectorAll('rect')].filter(r=>{const f=r.getAttribute('fill');return f&&f!=='none'&&f!=='transparent'});
+    const badges=[...tsvg.querySelectorAll('circle')].filter(c=>+c.getAttribute('r')===14);
+    return badges.length>0&&badges.every(b=>{const cx=+b.getAttribute('cx'),bottom=+b.getAttribute('cy')+14;
+      const under=segs.filter(s=>{const sx=+s.getAttribute('x'),sw=+s.getAttribute('width');return cx>=sx-1&&cx<=sx+sw+1});
+      return !under.length||bottom<=Math.min(...under.map(s=>+s.getAttribute('y')))+0.01})})());
   // single-suite worker view uses the same labels
   w.setWKSel('cpu-pre-u');
   const ssvg=d.querySelector('#worker-chart svg');
-  ok('single-suite view: one link per PR in range, viewBox 314',ssvg.querySelectorAll('a.axlink').length===n&&ssvg.getAttribute('viewBox')==='0 0 1100 314');
+  ok('single-suite view: one link per PR in range, viewBox 314',ssvg.querySelectorAll('a.axlink').length===n&&/^0 0 \d+ 314$/.test(ssvg.getAttribute('viewBox')));
   w.setWKSel('all');
   // ---------- C. card order + copy ----------
-  const heroes=d.querySelectorAll('#page-main .card.hero');
-  ok('timeline card is first, worker card second',txt(heroes[0].querySelector('.ct')).startsWith('Main branch · run time per merged pull request')&&txt(heroes[1].querySelector('.ct')).startsWith('Worker time per merged pull request'));
-  ok('worker copy says "chart above"',heroes[1].textContent.includes('The chart above splits the same runs by phase.')&&!d.body.textContent.includes('The chart below splits'));
-  ok('timeline copy points down to the worker chart',heroes[0].textContent.includes('The chart below breaks the same runs down by worker suite.'));
+  const heroes=d.querySelectorAll('#page-main .card');
+  ok('card order: timeline, device lines, worker chart',txt(heroes[0].querySelector('.ct')).startsWith('Main branch · run time per merged pull request')&&txt(heroes[1].querySelector('.ct')).startsWith('Test run time by device')&&txt(heroes[2].querySelector('.ct')).startsWith('Worker time per merged pull request'));
+  ok('no stale cross-references',!d.body.textContent.includes('The chart below splits')&&!d.body.textContent.includes('The chart above splits the same runs by phase'));
+  ok('timeline copy points down to the next chart',heroes[0].textContent.includes('The chart below breaks the same runs down by worker suite.'));
   // ---------- B1. commit modal sort ----------
   w.goToCommit('4916');
   const bodies=Array.from(d.querySelectorAll('#modal tbody[id^="jt-xrow-4916-"]'));
@@ -102,7 +121,7 @@ setTimeout(()=>{
   ok('worker meta = sentence line + legend line',wkMeta.children.length===2&&wkMeta.children[0].tagName==='DIV'&&wkMeta.children[1].hasAttribute('data-wklegend')&&wkMeta.children[1].textContent.includes('TPU')&&wkMeta.children[1].textContent.includes('Checks')&&!wkMeta.children[0].textContent.includes('Checks'));
   w.setWKSel('tpu-pre-u');
   const wkMeta2=d.querySelector('#wk-meta');
-  ok('single-suite meta keeps the same two-line shape',wkMeta2.children.length===2&&wkMeta2.children[1].hasAttribute('data-wklegend')&&wkMeta2.children[1].textContent.includes('Runner wait'));
+  ok('single-suite meta keeps the same two-line shape',wkMeta2.children.length===2&&wkMeta2.children[1].hasAttribute('data-wklegend')&&wkMeta2.children[1].textContent.includes('Worker tests'));
   w.setWKSel('all');
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail?1:0);

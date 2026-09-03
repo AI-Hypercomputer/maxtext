@@ -910,7 +910,7 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def find_rescues(attempts_jobs: Mapping[Any, Sequence[Job]]) -> list[Rescue]:
-  """Finds the jobs that failed on one attempt and passed on the next attempt they appeared in.
+  """Finds the jobs that failed on one attempt and passed on a later one.
 
   A rescue is a failure-then-success pair for the SAME job name inside one run. Job ids
   cannot be used for the match: GitHub issues new ids in every attempt, even for the jobs it
@@ -944,9 +944,7 @@ def find_rescues(attempts_jobs: Mapping[Any, Sequence[Job]]) -> list[Rescue]:
   """
   rescues: list[Rescue] = []
   for name, observations in _job_history(attempts_jobs).items():
-    for (earlier, failed), (later, passed) in zip(observations, observations[1:]):
-      if failed.get("conclusion") != FAILURE_CONCLUSION or passed.get("conclusion") != SUCCESS_CONCLUSION:
-        continue
+    for (earlier, failed), (later, passed) in _rescue_pairs(observations):
       parsed = parse_execute_tests_name(name)
       rescues.append(
           Rescue(
@@ -964,6 +962,39 @@ def find_rescues(attempts_jobs: Mapping[Any, Sequence[Job]]) -> list[Rescue]:
       )
   rescues.sort(key=lambda rescue: (rescue.failed_attempt, rescue.job_name))
   return rescues
+
+
+def _rescue_pairs(
+    observations: Sequence[tuple[int, Job]],
+) -> list[tuple[tuple[int, Job], tuple[int, Job]]]:
+  """Pairs each failure with the next attempt that ran the job to a verdict and passed.
+
+  Attempts in between that neither passed nor failed are stepped over. A cancelled attempt is
+  the one that happens in practice, and pairing only ADJACENT observations lost the rescue
+  whenever one sat in the middle: run 32999133815 reads failure, cancelled, success for
+  "TPU Pretrain Tests (tpu-unit) / Execute Tests (1)", which is a job that failed and passed
+  when it was run again, and it produced no rescue at all.
+
+  A job that was cancelled and later succeeded is still not a rescue. The walk only starts
+  pairing at a failure, so run 32785979907's cancelled, success, success yields nothing, as
+  it did before.
+
+  Args:
+    observations: One job name's (attempt, job) pairs, ascending by attempt.
+
+  Returns:
+    (failed, passed) observation pairs, in attempt order. Empty when nothing was rescued.
+  """
+  pairs: list[tuple[tuple[int, Job], tuple[int, Job]]] = []
+  pending: tuple[int, Job] | None = None
+  for observation in observations:
+    conclusion = observation[1].get("conclusion")
+    if conclusion == FAILURE_CONCLUSION:
+      pending = observation
+    elif conclusion == SUCCESS_CONCLUSION and pending is not None:
+      pairs.append((pending, observation))
+      pending = None
+  return pairs
 
 
 def _row_field(row: Any, field_name: str) -> Any:

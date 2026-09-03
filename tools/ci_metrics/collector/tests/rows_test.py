@@ -900,6 +900,28 @@ class RescueRowsTest(OfflineTestCase):
         self.assertEqual(span_seconds(row.failed_started_at, row.failed_completed_at), seconds)
     self.assertEqual(sum(RESCUES_33037584699.values()), 2634)
 
+  def test_a_cancelled_attempt_between_the_failure_and_the_pass_still_counts(self) -> None:
+    """failure, cancelled, success is one rescue row, keyed to the failure.
+
+    Run 32999133815 has exactly that shape for its tpu-unit worker 1. Pairing only adjacent
+    observations produced no row at all, so a job that failed and passed on a re-run went
+    missing from the flaky card. `derive.find_rescues` pairs the same way.
+    """
+    run = load_json(f"rerun-{RERUN_ID}-run.json")
+    name = "TPU Pretrain Tests (tpu-unit) / Execute Tests (1) / tpu-unit"
+    attempts = {
+        1: [{"id": 1, "name": name, "conclusion": "failure"}],
+        2: [{"id": 2, "name": name, "conclusion": "cancelled"}],
+        3: [{"id": 3, "name": name, "conclusion": "success"}],
+    }
+    built = rows.rescue_rows(run, attempts)
+
+    self.assertEqual(len(built), 1)
+    self.assertEqual(built[0].job_name, name)
+    self.assertEqual(built[0].failed_attempt, 1)
+    self.assertEqual(built[0].rescued, True)
+    self.assertEqual(rows.failed_never_rescued_rows(run, attempts), [])
+
   def test_cancelled_then_success_is_not_a_rescue(self) -> None:
     """Run 32785979907 yields zero rescues over three attempts.
 

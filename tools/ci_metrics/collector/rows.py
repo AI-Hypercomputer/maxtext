@@ -1123,10 +1123,43 @@ def rescue_rows(
   """
   rows: list[RescueRow] = []
   for name, observations in sorted(_job_history(attempts_jobs).items()):
-    for earlier, later in zip(observations, observations[1:]):
-      if earlier[1].get("conclusion") == CONCLUSION_FAILURE and later[1].get("conclusion") == CONCLUSION_SUCCESS:
-        rows.append(_rescue_row(run, name, observations, earlier, later, collected_at))
+    for earlier, later in _rescue_pairs(observations):
+      rows.append(_rescue_row(run, name, observations, earlier, later, collected_at))
   return rows
+
+
+def _rescue_pairs(
+    observations: list[tuple[int, dict[str, Any]]],
+) -> list[tuple[tuple[int, dict[str, Any]], tuple[int, dict[str, Any]]]]:
+  """Pairs each failure with the next attempt that ran the job to a verdict and passed.
+
+  Attempts in between that neither passed nor failed are stepped over. A cancelled attempt is
+  the one that happens in practice, and pairing only ADJACENT observations lost the rescue
+  whenever one sat in the middle: run 32999133815 reads failure, cancelled, success for
+  "TPU Pretrain Tests (tpu-unit) / Execute Tests (1)", which is a job that failed and passed
+  when it was run again, and it produced no rescue row at all.
+
+  A job that was cancelled and later succeeded is still not a rescue: the walk only starts
+  pairing at a failure.
+
+  `derive.find_rescues` pairs the same way, so the two modules cannot disagree about a run.
+
+  Args:
+    observations: One job name's (attempt, job) pairs, ascending by attempt.
+
+  Returns:
+    (failed, passed) observation pairs, in attempt order. Empty when nothing was rescued.
+  """
+  pairs: list[tuple[tuple[int, dict[str, Any]], tuple[int, dict[str, Any]]]] = []
+  pending: tuple[int, dict[str, Any]] | None = None
+  for observation in observations:
+    conclusion = observation[1].get("conclusion")
+    if conclusion == CONCLUSION_FAILURE:
+      pending = observation
+    elif conclusion == CONCLUSION_SUCCESS and pending is not None:
+      pairs.append((pending, observation))
+      pending = None
+  return pairs
 
 
 def failed_never_rescued_rows(

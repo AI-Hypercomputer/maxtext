@@ -30,7 +30,7 @@ setTimeout(()=>{
      !txt(lead('timeline')).includes('newest merged pull request is on the left')&&
      txt(panel('timeline')).includes('oldest merged pull request on the left'));
   ok('merge-date note lives in the timeline panel',txt(panel('timeline')).includes('pull request number under each bar'));
-  ok('hover and click hints moved into the worker panel',txt(panel('worker')).includes('Hover a slice'));
+  ok('hover and click hints moved into the worker panel',txt(panel('worker')).includes('Hover a lane'));
   ok('flaky guide sits on the Re-runs per job sub-heading, not the card title',
      btn('flaky').parentElement.classList.contains('gtitle'));
 

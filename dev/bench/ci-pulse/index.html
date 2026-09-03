@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>MaxText CI Pulse</title>
 <style>
 :root{color-scheme:light;--bg:#F8FAFC;--surface:#FFFFFF;--elevated:#F1F5F9;--ink:#0F172A;--ink2:#334155;--muted:#475569;--grid:#E2E8F0;--border:rgba(15,23,42,0.12);--accent:#0EA5E9;--q:#64748B;--bld:#8B5CF6;--tpu:#3B82F6;--gpu:#F97316;--cpu:#22C55E;--crit:#DC2626;--warn:#D97706;--good:#16A34A;--tint-crit:rgba(239,68,68,0.08);--tint-warn:rgba(245,158,11,0.10);--tint-good:rgba(34,197,94,0.10);--font:system-ui,-apple-system,'Segoe UI',sans-serif;--mono:ui-monospace,'SF Mono',Menlo,monospace}
@@ -159,12 +160,13 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
 <div id="page-main">
 <div class="card hero">
 <div class="ct">Main branch · run time per merged pull request</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="timeline">This chart shows how long CI took on every merged pull request on main, and which phase of the run — build, queue wait, setup, or a device's tests — took the time. <span class="g-more">Overlapping runs, in the hover card, counts how many other runs of this pipeline were in flight at the same moment as this one, whatever started them. More runs at once means more jobs competing for the same runners. Bars run from the oldest merged pull request on the left to the newest on the right. The pull request number under each bar opens that pull request on GitHub in a new tab; its merge date is under it. The chart below breaks the same runs down by worker suite. A mark above a bar repeats its state: ▲ means the run was slower than recent runs, ✕ means it failed, ↻ means a job passed only when re-run. Hover a mark for its numbers; zoom in and it grows into a two-line label.</span></div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="timeline">This chart shows how long CI took on every merged pull request on main, and which phase of the run — build, queue wait, setup, or a device's tests — took the time. <span class="g-more">Overlapping runs, in the hover card, counts how many other runs of this pipeline were in flight at the same moment as this one, whatever started them. More runs at once means more jobs competing for the same runners. Bars run from the oldest merged pull request on the left to the newest on the right. The pull request number under each bar opens that pull request on GitHub in a new tab; its merge date is under it. The chart below breaks the same runs down by worker suite. Each device column is that device's slowest job, drawn phase by phase, because the jobs of a device run at the same time and the slowest one is what the run waits for. A mark above a bar repeats its state: ▲ means the run was slower than recent runs, ✕ means it failed, ↻ means a job passed only when re-run. Hover a mark for its numbers; zoom in and it grows into a two-line label.</span></div>
 <div class="leg">
 <span><i style="background:var(--bld)"></i>Build package</span>
 <span><i style="background:var(--q)"></i>Queue wait</span>
-<span><i style="background:var(--bld);opacity:0.55"></i>Image pull</span>
-<span><i style="background:var(--bld);opacity:0.28"></i>Env setup</span>
+<span data-lg="img"><i style="background:var(--bld);opacity:0.55"></i>Image pull</span>
+<span data-lg="env"><i style="background:var(--bld);opacity:0.28"></i>Env setup</span>
+<span data-lg="setup" style="display:none"><i style="background:var(--bld);opacity:0.55"></i>Setup</span>
 <span><i style="background:var(--tpu)"></i>TPU run</span>
 <span><i style="background:var(--gpu)"></i>GPU run</span>
 <span><i style="background:var(--cpu)"></i>CPU run</span>
@@ -177,14 +179,14 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
 <div id="timeline" style="overflow-x:auto"></div>
 </div>
 
+<div class="card gradient-hero"><div class="ct">Test run time by device</div><div id="devlines-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div><div id="devlines" style="overflow-x:auto"></div></div>
 <div class="card hero gradient-hero">
 <div class="ct">Worker time per merged pull request</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="worker">This chart shows where each merged pull request's CI time went, worker suite by worker suite: every worker's runner wait, setup and tests, stacked. <span class="g-more">A worker suite is one test flavor of the CI workflow, for example cpu-unit, together with all of its parallel Execute Tests jobs. Bars run from the oldest merged pull request on the left to the newest on the right. Every bar is one merged pull request. Every slice is one worker suite, in its device's color. Hover a slice to follow that suite across all pull requests. Click a bar to list every suite's time in that run. Pick one suite to see one bar per worker instead. The pull request number under each bar opens that pull request on GitHub in a new tab; its merge date is under it. The chart above splits the same runs by phase.</span></div>
-<div id="wk-chips" style="display:flex;gap:8px;align-items:center;margin-bottom:8px"></div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="worker">This chart shows where each merged pull request's CI time went, one bar per device lane. <span class="g-more">Two switches decide what the bars mean. "Measure" picks the question: wall clock is how long the run took, and because the jobs run side by side that is the slowest one, not the sum; machine minutes is how much runner hardware the run used, and those do add up. The bars follow the same rule, so the number above a group is always what the eye reads off the axis: things that run side by side are drawn side by side under wall clock and stacked under machine minutes. "Time shown" picks which minutes count: the tests on their own, or the wait for a free runner and the setup as well. Bars run from the oldest merged pull request on the left to the newest on the right. A red cross above a bar marks a failure: in the all-lanes view the run itself failed, and in a single suite's view one of that suite's workers failed on that run. Hover a lane to follow it across all pull requests. Click a bar to list every suite's time in that run. Pick one suite from the dropdown to see one bar per worker instead. The pull request number under each bar opens that pull request on GitHub in a new tab; its merge date is under it.</span></div>
+<div id="wk-chips" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"></div>
 <div id="wk-meta" style="font-size:12px;color:var(--muted);margin-bottom:6px"></div>
 <div id="worker-chart" style="overflow-x:auto"></div>
 </div>
-<div class="card gradient-hero"><div class="ct">Test run time by device</div><div id="devlines-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div><div id="devlines" style="overflow-x:auto"></div></div>
 <div class="card gradient-hero"><div class="ct">Flaky jobs and tests</div>
 <div id="flaky"></div></div>
 </div><!-- /page-main -->
@@ -262,6 +264,13 @@ Object.entries(STEPS).forEach(([cat,steps])=>{
   const img=nonTest.find(s=>s.img);
   DOCKER_FRAC[cat]=img?img.pct/total:0;
 });
+
+// The collector publishes three numbers per job - queued, setup and run seconds - and nothing
+// finer. So the live page has no step names, no step timings, and no way to tell an image pull
+// from the environment setup that follows it. The sample data above carries a step template so
+// the checks can exercise the drawer; applyModel empties STEPS, and every drawing that depends
+// on a step template asks this first.
+function stepsKnown(){return Object.keys(STEPS).length>0}
 
 // Mock test counts per job category
 let TEST_COUNTS={
@@ -400,6 +409,15 @@ function getWindows(){
 
 // ============ TIME BUDGET (overhead summary) ============
 // Navigate to a commit: open its modal
+// Navigate to a merged pull request by its number. The flaky popup's PR buttons call this.
+function inspectPR(pr){
+  const ci=COMMITS.findIndex(c=>c.hash===String(pr));
+  if(ci===-1){window.open('https://github.com/'+REPO+'/pull/'+pr,'_blank','noopener');return}
+  const wcsAll=COMMITS.map(c=>wallClock(c,'all'));
+  const src=getWindows().current;const pool=(src.length?src:COMMITS).map(c=>wallClock(c,'all').total).sort((a,b)=>a-b);
+  const median=pool[Math.floor(pool.length/2)];
+  openModal(COMMITS[ci],ci,wcsAll,median);
+}
 function goToCommit(hash){
   const ci=COMMITS.findIndex(c=>c.hash===hash);
   if(ci===-1)return;
@@ -422,7 +440,7 @@ function prAxisLabel(svg,ns,cx,y,hash){
   a.appendChild(tt);a.appendChild(h);svg.appendChild(a);
   const tm=(TIMES[hash]||'').split(' ');
   const d=mk('text',{x:cx,y:y+14,'text-anchor':'middle','font-size':'12',fill:'#64748B','font-family':'var(--mono)'});
-  d.textContent=tm.length>1?tm[0]+' '+tm[1]:'';
+  d.textContent=tm.length>1?prDay(hash):'';
   svg.appendChild(d);
 }
 // Bar charts: two stacked lines when the slot is wide enough for "#4908", one rotated line when not.
@@ -437,7 +455,7 @@ function prAxisLabelAuto(svg,ns,cx,plotBottom,hash,slot){
   t.textContent='#'+hash+(TIMES[hash]?' '+prDay(hash):'');
   a.appendChild(t);svg.appendChild(a);
 }
-function axisBottomPad(slot){return slot>=50?44:90}  // two lines vs a rotated "#4908 Aug 20"
+function axisBottomPad(slot){return slot>=50?44:90}  // two lines vs a rotated "#4908 08/20"
 
 // ============ SORTABLE PER-TEST TABLES ============
 // Every sortable table (the per-test tables and the commit modal job table) registers its rows here by id, so a
@@ -515,13 +533,19 @@ function wallClock(c,hwFilter){
   const jobs=allJobs(c);
   const buildJobs=jobs.filter(j=>j.cat==='infra'||j.cat==='build');
   const buildTime=Math.max(...buildJobs.map(j=>j.total()));
-  const catMax={},catQueue={},catSetup={},catRun={};
+  const catMax={},catQueue={},catSetup={},catRun={},catLead={};
   ['tpu','gpu','cpu'].forEach(cat=>{
     const cj=jobs.filter(j=>j.cat===cat);
     catMax[cat]=cj.length?Math.max(...cj.map(j=>j.total())):0;
     catQueue[cat]=cj.length?Math.max(...cj.map(j=>j.q)):0;
     catSetup[cat]=cj.length?Math.max(...cj.map(j=>j.s)):0;
     catRun[cat]=cj.length?Math.max(...cj.map(j=>j.r)):0;
+    // The one job that sets this lane's elapsed time, with its own phases. The bar draws this,
+    // so the bar's height is catMax - a run that really happened - and not a sum of maxima
+    // taken from three different jobs, which is what used to be drawn.
+    let lead=null;
+    cj.forEach(j=>{const t=j.total();if(!lead||t>lead.total)lead={q:j.q,s:j.s,r:j.r,total:t,id:j.id,name:j.name}});
+    catLead[cat]=lead||{q:0,s:0,r:0,total:0,id:'',name:''};
   });
 
   if(hw==='all'){
@@ -531,7 +555,7 @@ function wallClock(c,hwFilter){
     let bottleneck='tpu';
     if(catMax.gpu>catMax.tpu&&catMax.gpu>catMax.cpu)bottleneck='gpu';
     if(catMax.cpu>catMax.tpu&&catMax.cpu>catMax.gpu)bottleneck='cpu';
-    return{build:buildTime,queue:maxQ,tests:testTime-maxQ,total:buildTime+testTime,bottleneck,catMax,catQueue,catSetup,catRun};
+    return{build:buildTime,queue:maxQ,tests:testTime-maxQ,total:buildTime+testTime,bottleneck,catMax,catQueue,catSetup,catRun,catLead};
   }
   // Filtered: one device lane, but the run still starts with the package build, and a device
   // that ran nothing still waited for a runner. Both are real elapsed time, so the bar stays.
@@ -540,7 +564,7 @@ function wallClock(c,hwFilter){
   const maxFiltered=filteredJobs.length?Math.max(...filteredJobs.map(j=>j.total())):0;
   const maxQ=filteredJobs.length?Math.max(...filteredJobs.map(j=>j.q)):0;
   return{build:buildTime,queue:maxQ,tests:maxFiltered-maxQ,total:buildTime+maxFiltered,
-    bottleneck:hw,catMax,catQueue,catSetup,catRun,noTests};
+    bottleneck:hw,catMax,catQueue,catSetup,catRun,catLead,noTests};
 }
 
 // ============ DEVICE TILES ============
@@ -563,6 +587,37 @@ function tlZoomReset(){TL_ZOOM=null;renderTimeline()}
 const CHART_BOX=1100, CHART_SLOT=52;
 function chartWidth(slots,lp,rp){
   return Math.max(CHART_BOX, lp+rp+Math.max(1,slots)*CHART_SLOT);
+}
+
+// Pick a round gap between axis labels so an axis gets about `target` of them
+// whatever its range. Every axis used to have a fixed gap, which suited the
+// sample data - runs of roughly half an hour. A real week reaches seventeen
+// hours, and a fixed 50m gap then draws twenty labels stacked on each other.
+// Steps stay on the 1 / 2 / 2.5 / 5 x 10^n ladder so the numbers read round.
+// Axis labels stay in minutes, the unit the rest of the page uses. A step that
+// is not a whole number keeps one decimal so the labels do not all read the same.
+function fmtTick(v){
+  return (Number.isInteger(v)?v:Math.round(v*10)/10)+'m';
+}
+
+// Round an axis top up to the next label, rather than padding it by a flat
+// percentage. A flat 20% on top of a three-hour outlier is thirty-six minutes
+// of empty chart; rounding to the next label costs at most one step and keeps
+// the top gridline meaningful.
+function niceTop(max,target){
+  const step=niceStep(max,target);
+  return Math.max(step,Math.ceil(max/step)*step);
+}
+
+function niceStep(max,target){
+  // Never below one minute. The gridline loops step by this value, so a step
+  // that rounds towards zero - which an empty or near-empty chart would ask
+  // for - would spin forever instead of drawing nothing.
+  if(!(max>0))return 1;
+  const want=max/Math.max(1,target||5);
+  const mag=Math.pow(10,Math.floor(Math.log10(want)));
+  for(const m of [1,2,2.5,5]){if(m*mag>=want)return Math.max(1,m*mag)}
+  return Math.max(1,10*mag);
 }
 
 function renderTimeline(){
@@ -592,7 +647,7 @@ function renderTimeline(){
   const off=TL_ZOOM?TL_ZOOM.a:0;
   const VIEW=TL_ZOOM?LIST.slice(TL_ZOOM.a,TL_ZOOM.b+1):LIST;
   const viewTotals=VIEW.map((c,vi)=>totals[off+vi]);
-  const ymax=Math.ceil(Math.max(...viewTotals)/10)*10+5;
+  const ymax=niceTop(Math.max(...viewTotals),5);
   const barGap=16;
   W=chartWidth(VIEW.length,LP,RP);
   const barW=(W-LP-RP)/VIEW.length-barGap;
@@ -610,9 +665,10 @@ function renderTimeline(){
   }
 
   // Grid
-  for(let v=0;v<=ymax;v+=10){
+  const yStep=niceStep(ymax,5);
+  for(let v=0;v<=ymax;v+=yStep){
     el('line',{x1:LP,y1:py(v),x2:W-RP,y2:py(v),stroke:'var(--grid)','stroke-dasharray':'2,2'});
-    if(v%20===0)el('text',{x:LP-6,y:py(v)+4,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=v+'m';
+    if(v%20===0)el('text',{x:LP-6,y:py(v)+4,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=fmtTick(v);
   }
   // Median (drawn only when it fits the zoomed scale)
   if(median<=ymax&&totals.length>=5){  // a median of fewer than 5 runs says little
@@ -621,6 +677,9 @@ function renderTimeline(){
     el('text',{x:W-RP-2,y:py(median)-5,'text-anchor':'end','font-size':'12'}).textContent='median '+Math.round(median)+'m · '+totals.length+' runs';
   }
 
+  // The image / environment split only exists while a step template does.
+  $$('[data-lg="img"],[data-lg="env"]').forEach(e=>{e.style.display=stepsKnown()?'':'none'});
+  $$('[data-lg="setup"]').forEach(e=>{e.style.display=stepsKnown()?'none':''});
   const pillRows=[];  // rightmost x already used per annotation row (collision avoidance)
   // Drawn oldest -> newest, left -> right. COMMITS is stored newest-first, so view index vi sits in
   // display slot VIEW.length-1-vi; iterating in display order keeps the pill collision tracker valid.
@@ -637,6 +696,7 @@ function renderTimeline(){
     const isFail=c.status==='fail';
     const isFlaky=c.status==='flaky';
     const isEmpty=false;  // the bar always draws; a device with no tests still shows build and wait
+    let barTopVal=0;      // minutes at the top of the tallest lane actually painted for this run
 
     // Device columns per commit — each stacks its own full timeline from zero:
     // build (shared start) → queue → image pull → env setup → test run
@@ -646,9 +706,8 @@ function renderTimeline(){
       const subW=(barW-(devs.length-1)*gap)/devs.length;
       devs.forEach((cat,di)=>{
         const dx=x+di*(subW+gap);
-        const dq=wc.catQueue?wc.catQueue[cat]||0:0;
-        const ds=wc.catSetup?wc.catSetup[cat]||0:0;
-        const dr=wc.catRun?wc.catRun[cat]||0:0;
+        const lead=(wc.catLead&&wc.catLead[cat])||{q:0,s:0,r:0,total:0};
+        const dq=lead.q,ds=lead.s,dr=lead.r;
         const dTotal=dq+ds+dr;
         if(dTotal<=0&&wc.build<=0.5)return;  // nothing at all to draw for this lane
         let cy=0;
@@ -665,7 +724,9 @@ function renderTimeline(){
           cy+=dq;
         }
         // Setup split: image pull first, then environment setup (two shades of the build purple)
-        const dImg=ds*(DOCKER_FRAC[cat]||0.5);
+        // One setup block unless a step template says how it divides. dEnv falls to zero and
+        // its rect is skipped, so the lane keeps exactly the same height either way.
+        const dImg=stepsKnown()?ds*(DOCKER_FRAC[cat]||0.5):ds;
         const dEnv=ds-dImg;
         if(dImg>0.3){
           const h=dImg/ymax*(H-B-TP);
@@ -681,7 +742,12 @@ function renderTimeline(){
         if(dr>0.5){
           const h=dr/ymax*(H-B-TP);
           el('rect',{x:dx,y:py(cy+dr),width:subW,height:h,fill:CAT_COLORS[cat],opacity:0.85,rx:3});
+          cy+=dr;
         }
+        // The thresholds above drop slivers, so the tallest lane is measured from what was
+        // actually painted. The outline box and the status marks hang off this, which is why
+        // they can no longer sit inside the bar they belong to.
+        if(cy>barTopVal)barTopVal=cy;
       });
     }
 
@@ -697,7 +763,10 @@ function renderTimeline(){
         flags.push({main:'+'+Math.round(wc.total-trailingMed)+'m slower',sub:Math.round(wc.total)+'m — usually '+Math.round(trailingMed)+'m',col:'#F59E0B',bg:'#FFFFFF'});
       }
       if(isFlaky)flags.push({main:'FLAKY ↻',sub:flakyJobs.length+(flakyJobs.length===1?' job':' jobs')+' passed on retry',col:'#F59E0B',bg:'#FFFFFF'});
-      const cx=x+barW/2, barTop=py(wc.total);
+      // wc.total is what the bar is meant to reach; barTopVal is what it did reach. They agree
+      // now, and the max keeps the box around the bar even if a future segment overshoots.
+      const boxVal=Math.max(barTopVal,wc.total);
+      const cx=x+barW/2, barTop=py(boxVal);
       if(VIEW.length<=6){
         // Zoomed in: room for the full two-line annotation pills
         let rowStart=0;
@@ -748,7 +817,8 @@ function renderTimeline(){
         });
       }
       if(isReg||isFail){
-        el('rect',{x:x-2.5,y:py(wc.total)-2.5,width:barW+5,height:(wc.total/ymax*(H-B-TP))+5,fill:'none',stroke:isFail?'#EF4444':'#F59E0B','stroke-width':2,rx:4,'stroke-dasharray':isFail?'':'5,3'});
+        const boxV=Math.max(barTopVal,wc.total);
+        el('rect',{x:x-2.5,y:py(boxV)-2.5,width:barW+5,height:(boxV/ymax*(H-B-TP))+5,fill:'none',stroke:isFail?'#EF4444':'#F59E0B','stroke-width':2,rx:4,'stroke-dasharray':isFail?'':'5,3'});
       }
     }
 
@@ -896,6 +966,7 @@ function openModal(c,ci,wcs,med){
   const catOrder=['infra','build','tpu','gpu','cpu'];
   const catNames={infra:'Infrastructure',build:'Build',tpu:'TPU Tests',gpu:'GPU Tests',cpu:'CPU Tests'};
 
+  const split=stepsKnown();   // Image and Env are only real while a step template exists
   let tableRows='';
   const jobUnits=[];
   const jobHeads={};
@@ -903,51 +974,65 @@ function openModal(c,ci,wcs,med){
   catOrder.forEach(cat=>{
     const catJobs=jobs.filter(j=>j.cat===cat);
     if(!catJobs.length)return;
-    const catHeadHtml=`<tr><td colspan="10" class="cat-head">${catNames[cat]} (${catJobs.length} jobs)</td></tr>`;
+    const catHeadHtml=`<tr><td colspan="${split?10:9}" class="cat-head">${catNames[cat]} (${catJobs.length} jobs)</td></tr>`;
     jobHeads[cat]=catHeadHtml;
     tableRows+=catHeadHtml;
     catJobs.forEach(j=>{
       const t=j.total();
-      const sFrac=DOCKER_FRAC[j.cat]!==undefined?DOCKER_FRAC[j.cat]:0.5;
-      const sImg=+(j.s*sFrac).toFixed(1);
-      const sEnv=+(j.s-sImg).toFixed(1);
-      const qP=(j.q/maxJobT*100).toFixed(0);
-      const iP=(sImg/maxJobT*100).toFixed(1);
-      const eP=(sEnv/maxJobT*100).toFixed(1);
-      const rP=(j.r/maxJobT*100).toFixed(0);
       const sChp=j.status==='fail'?'fail':j.status==='flaky'?'flaky':j.status==='skip'?'skip':'pass';
       const lc=LANE_COLORS[j.lane]||'var(--muted)';
+      const sFrac=split?(DOCKER_FRAC[j.cat]!==undefined?DOCKER_FRAC[j.cat]:0.5):0;
+      const sImg=split?+(j.s*sFrac).toFixed(1):0;
+      const sEnv=split?+(j.s-sImg).toFixed(1):j.s;
+      // Full precision. Rounding each share to a whole percent moved a bar by up to 1.2 points,
+      // which was enough to draw a longer job with a shorter bar than a shorter one. flex-basis
+      // rather than width so the flex row can never rescale one job's bar and not another's.
+      const pc=v=>maxJobT>0?(v/maxJobT*100).toFixed(4):'0';
+      const wfSegs=(split
+        ?[{v:j.q,bg:'var(--q)'},{v:sImg,bg:'var(--bld)',op:0.55},{v:sEnv,bg:'var(--bld)',op:0.28},{v:j.r,bg:lc}]
+        :[{v:j.q,bg:'var(--q)'},{v:j.s,bg:'var(--bld)',op:0.55},{v:j.r,bg:lc}])
+        .map(g=>`<div class="wf-seg" style="flex:0 0 ${pc(g.v)}%;background:${g.bg}${g.op?';opacity:'+g.op:''}"></div>`).join('');
       const dim=HW!=='all'&&j.lane.toLowerCase()!==HW;
       const jUrl=`${runUrl}/jobs/${runId*100+jobIdx}`;
       const rid='xrow-'+c.hash+'-'+jobIdx;
-      const steps=STEPS[j.id]||STEPS[j.cat]||STEPS.infra;
+      const steps=split?(STEPS[j.id]||STEPS[j.cat]||STEPS.infra):null;
       const tc=TEST_COUNTS[j.id];
 
       // Step breakdown HTML
       let stepHtml='<div id="'+rid+'" style="display:none;padding:8px 0 8px 24px;background:rgba(0,0,0,0.2);border-bottom:1px solid var(--grid)">';
-      // Step Gantt
-      stepHtml+=`<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:8px;background:var(--elevated)">`;
-      steps.forEach((st,si)=>{
-        const stepTime=st.isTest?j.r*st.pct/(steps.filter(x=>x.isTest).reduce((a,x)=>a+x.pct,0)||1):j.s*st.pct/(steps.filter(x=>!x.isTest).reduce((a,x)=>a+x.pct,0)||1);  // several test steps (cpu-unit worker 1: Run Tests + decoupled pass) share the job's test minutes by pct
-        const stepPct=(st.pct*100).toFixed(0);
-        const col=st.isTest?lc:si===1?'var(--bld)':'var(--q)';
-        stepHtml+=`<div style="width:${stepPct}%;background:${col}"></div>`;
-      });
-      stepHtml+=`</div>`;
-      // Step table
-      stepHtml+=`<table style="width:100%;font-size:13px;border-collapse:collapse">`;
-      let stepNum=1;
-      steps.forEach(st=>{
-        const dur=st.isTest?j.r*st.pct/(steps.filter(x=>x.isTest).reduce((a,x)=>a+x.pct,0)||1):(t>0?(j.s*st.pct/(steps.filter(x=>!x.isTest).reduce((a,x)=>a+x.pct,0)||1)):0);
-        const stepUrl=`${jUrl}#step:${stepNum}:1`;
-        stepHtml+=`<tr>
+      if(steps){
+        // Every width comes from the duration printed beside it. The two used to be computed
+        // separately - the bar from the template share, the number from the job's own minutes -
+        // so a step that took no time at all still got a coloured block, up to 24 points of one.
+        const tSum=steps.filter(x=>x.isTest).reduce((a,x)=>a+x.pct,0)||1;
+        const nSum=steps.filter(x=>!x.isTest).reduce((a,x)=>a+x.pct,0)||1;
+        const durs=steps.map(st=>st.isTest?j.r*st.pct/tSum:(t>0?j.s*st.pct/nSum:0));
+        const dSum=durs.reduce((a,b)=>a+b,0)||1;
+        stepHtml+=`<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:8px;background:var(--elevated)">`
+          +steps.map((st,si)=>`<div style="flex:0 0 ${(durs[si]/dSum*100).toFixed(4)}%;background:${st.isTest?lc:si===1?'var(--bld)':'var(--q)'}"></div>`).join('')
+          +`</div>`;
+        stepHtml+=`<table style="width:100%;font-size:13px;border-collapse:collapse">`
+          +steps.map((st,si)=>`<tr>
 <td style="padding:3px 8px;border-bottom:1px solid var(--grid);color:var(--ink2)">${st.name}${st.img?'<br><span class="mono" style="font-size:11px;color:var(--muted)">'+st.img+'</span>':''}</td>
-<td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);width:60px;text-align:right">${dur>0?dur.toFixed(1)+'m':'—'}</td>
-<td style="padding:3px 8px;border-bottom:1px solid var(--grid);width:30px"><a href="${stepUrl}" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none">log↗</a></td>
-</tr>`;
-        stepNum++;
-      });
-      stepHtml+=`</table>`;
+<td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);width:60px;text-align:right">${durs[si]>0?durs[si].toFixed(1)+'m':'—'}</td>
+<td style="padding:3px 8px;border-bottom:1px solid var(--grid);width:30px"><a href="${jUrl}#step:${si+1}:1" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none">log↗</a></td>
+</tr>`).join('')+`</table>`;
+      }else{
+        // No step template: show the three times the collector actually records, and say so.
+        const phases=[{name:'Waiting for a runner',dur:j.q,col:'var(--q)'},
+                      {name:'Setup: image pull and environment',dur:j.s,col:'var(--bld)'},
+                      {name:'Tests',dur:j.r,col:lc}];
+        const pSum=phases.reduce((a,x)=>a+x.dur,0)||1;
+        stepHtml+=`<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:8px;background:var(--elevated)">`
+          +phases.map(ph=>`<div style="flex:0 0 ${(ph.dur/pSum*100).toFixed(4)}%;background:${ph.col}"></div>`).join('')
+          +`</div>`;
+        stepHtml+=`<table style="width:100%;font-size:13px;border-collapse:collapse">`
+          +phases.map(ph=>`<tr>
+<td style="padding:3px 8px;border-bottom:1px solid var(--grid);color:var(--ink2)">${ph.name}</td>
+<td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);width:60px;text-align:right">${ph.dur>0?ph.dur+'m':'—'}</td>
+</tr>`).join('')+`</table>`;
+        stepHtml+=`<div style="font-size:12px;color:var(--muted);margin-top:6px">These are the three times recorded for a job. The per-step timings GitHub shows in its own log are not published in the data this page reads, so the steps inside setup and inside the test run cannot be listed here. <a href="${runUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">Open the run on GitHub ↗</a></div>`;
+      }
       // Test summary (if test job)
       if(!tc&&j.r>0&&/Pathways/.test(j.name)){stepHtml+=`<div style="font-size:12px;color:var(--muted);margin-top:6px">No test-result file: the Pathways jobs run pytest without JUnit output, so no test counts exist for them.</div>`;}
       if(tc&&j.r>0){
@@ -989,22 +1074,24 @@ function openModal(c,ci,wcs,med){
 <td><span style="color:${lc};font-weight:600;font-size:13px">${j.lane}</span></td>
 <td class="mono" style="font-size:12px;color:var(--ink2);white-space:nowrap">${RUNNER_LABELS[j.id]||'&mdash;'}</td>
 <td class="mono" style="font-size:13px">${j.q}m</td>
-<td class="mono" style="font-size:13px">${sImg}m</td>
-<td class="mono" style="font-size:13px">${sEnv}m</td>
+${split?`<td class="mono" style="font-size:13px">${sImg}m</td><td class="mono" style="font-size:13px">${sEnv}m</td>`:`<td class="mono" style="font-size:13px">${j.s}m</td>`}
 <td class="mono" style="font-size:13px">${j.r}m</td>
 <td class="mono" style="font-size:13px;font-weight:700">${t.toFixed(1)}m</td>
-<td style="min-width:100px"><div class="wf-track"><div class="wf-seg" style="width:${qP}%;background:var(--q)"></div><div class="wf-seg" style="width:${iP}%;background:var(--bld);opacity:0.55"></div><div class="wf-seg" style="width:${eP}%;background:var(--bld);opacity:0.28"></div><div class="wf-seg" style="width:${rP}%;background:${lc}"></div></div></td>
+<td style="min-width:100px"><div class="wf-track">${wfSegs}</div></td>
 <td><span class="chip ${sChp}">${j.status.toUpperCase()}</span></td>
-</tr><tr style="opacity:${dim?0.25:1}"><td colspan="10" style="padding:0">${stepHtml}</td></tr>`;
+</tr><tr style="opacity:${dim?0.25:1}"><td colspan="${split?10:9}" style="padding:0">${stepHtml}</td></tr>`;
       tableRows+=jobHtml;
-      jobUnits.push({cat:cat,vals:{q:j.q,img:sImg,env:sEnv,r:j.r,total:t},html:jobHtml});
+      jobUnits.push({cat:cat,vals:{q:j.q,img:sImg,env:sEnv,setup:j.s,r:j.r,total:t},html:jobHtml});
       jobIdx++;
     });
   });
 
   const jid='jt-jobs-'+c.hash;
-  JT[jid]={rows:jobUnits,pick:u=>u.vals,row:u=>u.html,key:null,dir:'desc',defaultHTML:tableRows,
+  // Opens sorted by total time, shortest first, inside each category heading. key:null is still
+  // reachable through the Job header, which restores the order the catalogue built the rows in.
+  JT[jid]={rows:jobUnits,pick:u=>u.vals,row:u=>u.html,key:'total',dir:'asc',defaultHTML:tableRows,
     group:u=>u.cat,groupOrder:catOrder,groupHead:jobHeads};
+  const jobBody=jtRender(JT[jid]);
   $('#modal').innerHTML=`<div class="modal-head"><div>
 <h2>${c.pr} ${c.title}</h2>
 <div class="sub">
@@ -1022,16 +1109,20 @@ ${stChip} · <span class="mono">${Math.round(wc.total)}m total</span> · ${delta
 <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;padding:10px 14px;background:var(--elevated);border-radius:8px;flex-wrap:wrap">
 <span style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Waterfall legend</span>
 <span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--q);display:inline-block"></span><span style="color:var(--ink2)">Queue wait</span></span>
-<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--bld);opacity:0.55;display:inline-block"></span><span style="color:var(--ink2)">Image pull</span></span>
-<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--bld);opacity:0.28;display:inline-block"></span><span style="color:var(--ink2)">Env setup</span></span>
+${split?`<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--bld);opacity:0.55;display:inline-block"></span><span style="color:var(--ink2)">Image pull</span></span>
+<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--bld);opacity:0.28;display:inline-block"></span><span style="color:var(--ink2)">Env setup</span></span>`:`<span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--bld);opacity:0.55;display:inline-block"></span><span style="color:var(--ink2)">Setup (image pull and environment)</span></span>`}
 <span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--tpu);display:inline-block"></span><span style="color:var(--ink2)">TPU</span></span>
 <span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--gpu);display:inline-block"></span><span style="color:var(--ink2)">GPU</span></span>
 <span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--cpu);display:inline-block"></span><span style="color:var(--ink2)">CPU</span></span>
-<span style="flex-basis:100%;font-size:12px;color:var(--muted)">Jobs that take only seconds are not listed: the ten Setup Parameters jobs, All Required Tests Passed, All Notebooks Passed, Notify failed build and Track Test Performance. Click a job row to expand its steps. Sorting keeps the category headings and orders the jobs inside each one. Click Queue, Image, Env, Run, or Total to sort the jobs by that time, longest first; click again for shortest first. Click the Job header to restore the grouped order.</span>
+<span style="flex-basis:100%;font-size:12px;color:var(--muted)">Jobs that take only seconds are not listed: the ten Setup Parameters jobs, All Required Tests Passed, All Notebooks Passed, Notify failed build and Track Test Performance. Click a job row to expand it. ${split?'':'GitHub does not publish per-step timings in the data this page reads, so a job opens on the three times that are recorded: the wait for a runner, the setup, and the test run. '}Sorting keeps the category headings and orders the jobs inside each one. The table opens sorted by Total, shortest first. Click Queue, ${split?'Image, Env':'Setup'}, Run, or Total to sort by that time; click the same header again to flip the order. Click the Job header to restore the original job order.</span>
 </div>
 <table>
-<thead><tr>${jtTh(jid,'','Job','','Restore the grouped order')}<th>Lane</th><th>Machine</th>${jtTh(jid,'q','Queue','','Sort by queue wait')}${jtTh(jid,'img','Image','','Sort by image pull time')}${jtTh(jid,'env','Env','','Sort by environment setup time')}${jtTh(jid,'r','Run','','Sort by run time')}${jtTh(jid,'total','Total','','Sort by total time')}<th>Waterfall</th><th>Status</th></tr></thead>
-<tbody id="${jid}-body">${tableRows}</tbody></table></div>`;
+<thead><tr>${jtTh(jid,'','Job','','Restore the original job order')}<th>Lane</th><th>Machine</th>${jtTh(jid,'q','Queue','','Sort by queue wait')}${split?jtTh(jid,'img','Image','','Sort by image pull time')+jtTh(jid,'env','Env','','Sort by environment setup time'):jtTh(jid,'setup','Setup','','Sort by setup time')}${jtTh(jid,'r','Run','','Sort by run time')}${jtTh(jid,'total','Total','','Sort by total time')}<th>Waterfall</th><th>Status</th></tr></thead>
+<tbody id="${jid}-body">${jobBody}</tbody></table></div>`;
+
+  // Mark the column the table opened on, the same arrow a click would leave.
+  const jArr=$('#modal').querySelector(`[data-jt="${jid}"][data-jtkey="total"] .jtarr`);
+  if(jArr)jArr.textContent=' \u25B2';
 
   $('#overlay').classList.add('on');
   document.body.style.overflow='hidden';
@@ -1046,15 +1137,23 @@ let DEV_ZOOM=null;
 let DEV_PHASES=[
   {key:'run',chip:'Test run',plain:'running their tests',metric:'minutes running pytest, summed across every test job of the device'},
   {key:'queue',chip:'Queue wait',plain:'waiting for a free runner',metric:'minutes waiting for a runner, summed across every test job of the device'},
+  {key:'setup',chip:'Setup',plain:'getting set up',metric:'minutes pulling the image and setting up the environment, summed across every test job of the device'},
   {key:'img',chip:'Image pull',plain:'pulling the Docker image',metric:'minutes pulling the docker image, summed across every test job of the device'},
   {key:'env',chip:'Env setup',plain:'setting up the environment after the image pull',metric:'minutes of environment setup after the image pull, summed across every test job of the device'},
+  {key:'all',chip:'All time',plain:'waiting, getting set up and running their tests',metric:'every minute a test job of the device was alive - runner wait, setup and test run - added up across those jobs. Machine time, not how long the device took.'},
 ];
+// Image pull and Env setup only exist while a step template says how setup divides. Without one
+// the chart offers Setup as the single number the collector really records; with one, the two
+// halves replace it rather than sitting beside it.
+function devPhases(){return DEV_PHASES.filter(p=>stepsKnown()?p.key!=='setup':(p.key!=='img'&&p.key!=='env'))}
 function setDevPhase(k){DEV_PHASE=k;renderDevLines()}
 function devZoomOut(){if(!DEV_ZOOM)return;const n=getWindows().current.length;DEV_ZOOM={a:Math.max(0,DEV_ZOOM.a-2),b:Math.min(n-1,DEV_ZOOM.b+2)};if(DEV_ZOOM.a===0&&DEV_ZOOM.b===n-1)DEV_ZOOM=null;renderDevLines()}
 function devZoomReset(){DEV_ZOOM=null;renderDevLines()}
 function devJobVal(j){
+  if(DEV_PHASE==='all')return j.q+j.s+j.r;
   if(DEV_PHASE==='run')return j.r;
   if(DEV_PHASE==='queue')return j.q;
+  if(DEV_PHASE==='setup'||!stepsKnown())return j.s;
   const frac=DOCKER_FRAC[j.cat]||0;
   return DEV_PHASE==='img'?j.s*frac:j.s*(1-frac);
 }
@@ -1080,9 +1179,11 @@ function renderDevLines(){
   const w=getWindows();
   const wCommits=w.current;
   if(DEV_ZOOM&&(DEV_ZOOM.b>wCommits.length-1||DEV_ZOOM.a>=DEV_ZOOM.b))DEV_ZOOM=null;
-  const phase=DEV_PHASES.find(p=>p.key===DEV_PHASE)||DEV_PHASES[0];
+  const phases=devPhases();
+  if(!phases.some(p=>p.key===DEV_PHASE))DEV_PHASE=phases[0].key;   // a chip that is gone cannot stay selected
+  const phase=phases.find(p=>p.key===DEV_PHASE)||phases[0];
   const fmt=v=>v>=10?String(Math.round(v)):String(Math.round(v*10)/10);
-  if(meta)meta.innerHTML=`<div style="font-size:13px;color:var(--ink2);margin-bottom:4px" data-guide="devlines">This chart shows how many minutes the TPU, GPU and CPU test jobs spent ${phase.plain} on each merged pull request. One line per device, one point per pull request. <span class="g-more">Each point adds up every test job of that device in that run, so a device with more jobs shows more minutes. The chips below switch the phase: running tests, waiting for a runner, pulling the image, or setting up the environment. Click a point to open that run. The pull request number under each point opens it on GitHub; its merge date is under it. Drag across the chart to zoom into a range and double-click to reset.</span></div>
+  if(meta)meta.innerHTML=`<div style="font-size:13px;color:var(--ink2);margin-bottom:4px" data-guide="devlines">This chart shows how many minutes the TPU, GPU and CPU test jobs spent ${phase.plain} on each merged pull request. One line per device, one point per pull request. <span class="g-more">Each point adds up every test job of that device in that run, so a device with more jobs shows more minutes. The chips below switch the phase: ${phases.map(p=>p.chip).join(', ')}. Hover a chip for what it counts. Click a point to open that run. The pull request number under each point opens it on GitHub; its merge date is under it. Drag across the chart to zoom into a range and double-click to reset.</span></div>
 ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></div>
 <div style="margin-top:4px"><span style="color:var(--tpu)">■</span> TPU <span style="color:var(--gpu);margin-left:8px">■</span> GPU <span style="color:var(--cpu);margin-left:8px">■</span> CPU</div>`:''}`;
   host.innerHTML='';
@@ -1093,7 +1194,7 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
   const chips=document.createElement('div');
   chips.style.cssText='display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px';
   chips.innerHTML=`<span style="font-size:13px;color:var(--muted)">Time shown:</span>`
-    +DEV_PHASES.map(p=>`<button class="fchip ${p.key===DEV_PHASE?'on':''}" style="border-radius:8px" onclick="setDevPhase('${p.key}')">${p.chip}</button>`).join('')
+    +phases.map(p=>`<button class="fchip ${p.key===DEV_PHASE?'on':''}" style="border-radius:8px" title="${p.metric}" onclick="setDevPhase('${p.key}')">${p.chip}</button>`).join('')
     +`<span style="font-size:12px;color:var(--muted)">Build package time is not listed here because it runs once per merged pull request, not per device; the charts above show it.</span>`;
   host.appendChild(chips);
 
@@ -1178,7 +1279,7 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
   const sp=VIEW.length>1?(W-LP-RP)/(VIEW.length-1):(W-LP-RP);
   const B=axisBottomPad(sp),H=TP+plotH+B;
   const allV=DEVS.flatMap(d=>series[d.key].slice(off,off+VIEW.length).map(p=>p.v));
-  const yMax=Math.max(...allV,5)*1.18;
+  const yMax=niceTop(Math.max(...allV,5),5);
   const py=v=>TP+(1-v/yMax)*plotH;
   const xOf=i=>VIEW.length>1?LP+(VIEW.length-1-i)*sp:(LP+(W-LP-RP)/2);  // oldest left, newest right
 
@@ -1188,10 +1289,10 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
   const el=(t,a)=>{const e=document.createElementNS(ns,t);for(const[k,v]of Object.entries(a))e.setAttribute(k,String(v));svg.appendChild(e);return e};
 
   // Grid
-  const step=yMax>80?25:yMax>25?10:5;
+  const step=niceStep(yMax,5);
   for(let v=0;v<=yMax;v+=step){
     el('line',{x1:LP,y1:py(v),x2:W-RP,y2:py(v),stroke:'var(--grid)','stroke-width':1,'stroke-dasharray':'3,3'});
-    el('text',{x:LP-6,y:py(v)+3,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=v+'m';
+    el('text',{x:LP-6,y:py(v)+3,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=fmtTick(v);
   }
 
   // Crosshair (shared)
@@ -1334,7 +1435,11 @@ function prTime(h){
   const p=(TIMES[h]||'Aug 17 00:00').split(' ');
   return new Date(p[0]+' '+p[1]+' 2026 '+(p[2]||'00:00'));  // the sample data is all one year
 }
-function prDay(h){return (TIMES[h]||'').split(' ').slice(0,2).join(' ')}  // 'Aug 17'
+// Display form of a merge date: 'Aug 17' becomes '08/17'. TIMES keeps the month name
+// because thDateOf() parses it back into a Date; only what the charts print changes.
+const MONTH_NUM={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
+function dayNum(s){const p=String(s||'').split(' ');const m=MONTH_NUM[p[0]];return m?m+'/'+String(p[1]||'').padStart(2,'0'):String(s||'')}
+function prDay(h){return dayNum((TIMES[h]||'').split(' ').slice(0,2).join(' '))}  // '08/17'
 function rangeCovers(w,list){return list.length?`${w.label} covers ${list.length} merged pull request${list.length===1?'':'s'}, #${list[list.length-1].hash} (${prDay(list[list.length-1].hash)}) to #${list[0].hash} (${prDay(list[0].hash)})`:`${w.label} holds no merged pull requests`}
 
 
@@ -1658,13 +1763,15 @@ function wkShade(hex,i,n){
   const cc=v=>Math.max(0,Math.min(255,Math.round(parseInt(hex.slice(v,v+2),16)*f)));
   return '#'+[1,3,5].map(v=>cc(v).toString(16).padStart(2,'0')).join('');
 }
+
+// ============ WORKER TIME POPUP (clicked bar shows every suite's time) ============
+// One shade per suite inside its device colour. The chart groups by lane now, so this popup -
+// the drill-down that still lists suite by suite - is the only place that needs the ramp.
 function wkColors(ents){
   const byCat={};ents.forEach(e=>{(byCat[e.cat]=byCat[e.cat]||[]).push(e.gid)});
   const map={};Object.entries(byCat).forEach(([cat,ids])=>ids.forEach((id,i)=>{map[id]=wkShade(WK_LANE_HEX[cat]||'#64748B',i,ids.length)}));
   return map;
 }
-
-// ============ WORKER TIME POPUP (clicked bar shows every suite's time) ============
 function closeWkPop(){$('#wkpop').style.display='none'}
 function openWkPop(hash){
   const c=COMMITS.find(x=>x.hash===hash);if(!c)return;
@@ -1685,7 +1792,7 @@ function openWkPop(hash){
 <div style="font-weight:700;font-size:15px">#${c.hash} ${c.title}</div>${stChip}
 <button onclick="closeWkPop()" style="margin-left:auto;font:600 15px var(--font);background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
 </div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">Every worker suite in this run, longest first. The time is the suite's full clock time: runner wait, plus setup, plus test run. It is the same value as the chart slice. A suite with several parallel workers lists each worker's test minutes. Total: <span class="mono" style="font-weight:700;color:var(--ink)">${Math.round(tot)}m</span>.</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">Every worker suite in this run, longest first. The time is the suite's machine minutes: runner wait, plus setup, plus test run, added up over all of its workers. That is the whole run whatever the chart's two switches are set to, so it can be larger than the bar you clicked. A suite with several parallel workers lists each worker's test minutes. Total: <span class="mono" style="font-weight:700;color:var(--ink)">${Math.round(tot)}m</span>.</div>
 ${rows.map(r=>{
   const dim=HW!=='all'&&r.lane.toLowerCase()!==HW;
   const share=(r.v/tot*100).toFixed(1);
@@ -1715,6 +1822,7 @@ function openWkSuitePop(hash,gid){
   const n=rows.length;
   const suiteTot=wkEntTime(c,ent);
   const mx=Math.max(...rows.map(r=>r.tot),0.1);
+  const suiteWall=Math.max(...rows.map(r=>r.tot),0);  // the workers run at the same time
   const st=wkEntStatus(c,ent);
   const stChip=st==='fail'?'<span class="chip fail">FAILED</span>':st==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
   $('#wkpop-body').innerHTML=`
@@ -1722,7 +1830,7 @@ function openWkSuitePop(hash,gid){
 <div style="font-weight:700;font-size:15px">#${c.hash} ${c.title}</div>${stChip}
 <button onclick="closeWkPop()" style="margin-left:auto;font:600 15px var(--font);background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
 </div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">${ent.name} on this run — one row per worker, with its runner wait, setup, and test minutes.${ent.split?' The worker split is estimated from the suite total.':''} Together the ${n>1?n+' workers':'worker'} spent <span class="mono" style="font-weight:700;color:var(--ink)">${suiteTot.toFixed(1)}m</span>.</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">${ent.name} on this run — one row per worker, with its runner wait, setup, and test minutes.${ent.split?' The worker split is estimated from the suite total.':''} Together the ${n>1?n+' workers':'worker'} used <span class="mono" style="font-weight:700;color:var(--ink)">${suiteTot.toFixed(1)}m</span> of machine time${n>1?`, and because they run at the same time the suite added <span class="mono" style="font-weight:700;color:var(--ink)">${suiteWall.toFixed(1)}m</span> to the run`:''}.</div>
 ${rows.map((r,k)=>`<div style="display:grid;grid-template-columns:16px 1fr 190px 56px;gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid var(--grid)">
 <span style="width:12px;height:12px;border-radius:3px;background:${wkShade(col,k,n)};display:inline-block"></span>
 <span style="font-size:14px;${r.status==='fail'?'color:var(--crit)':''}">${r.name}${r.status==='fail'?' — failed':r.status==='flaky'?' — passed on retry':''}<br><span style="font-size:12px;color:var(--muted)">${r.q.toFixed(1)}m wait · ${r.s.toFixed(1)}m setup · ${r.r.toFixed(1)}m tests</span></span>
@@ -1739,14 +1847,64 @@ ${rows.map((r,k)=>`<div style="display:grid;grid-template-columns:16px 1fr 190px
 
 // ============ WORKER TIME (Chart 1) ============
 let WK_SEL='all';
+// Two different questions live in this chart, and they have different answers.
+//   Wall clock      = how long the merged pull request actually waited. The jobs run side by
+//                     side, so the answer is the slowest one. Adding them up would be wrong.
+//   Machine minutes = how much runner hardware the run burned. That one does add up, because
+//                     every job holds a machine of its own for as long as it runs.
+// The bars follow the same rule the numbers do: things that run side by side are drawn side
+// by side under wall clock and stacked under machine minutes, so the figure above a group is
+// always the figure the eye reads off the axis.
+let WK_MEASURE='wall';   // 'wall' | 'machine'
+// Which minutes count. 'tests' is the time the tests themselves were running; 'all' adds the
+// wait for a free runner and the setup (image pull plus environment) that come before them.
+let WK_PHASE='tests';    // 'tests' | 'all'
 function setWKSel(v){WK_SEL=v;renderWorker()}
+function setWKMeasure(v){WK_MEASURE=v;renderWorker()}
+function setWKPhase(v){WK_PHASE=v;renderWorker()}
+const WK_MEASURES=[
+  {key:'wall',chip:'Wall clock',note:'How long the run took. Jobs run side by side, so this is the slowest one, not the sum.'},
+  {key:'machine',chip:'Machine minutes',note:'How much runner hardware the run used. Every job holds its own machine, so these add up.'}];
+const WK_PHASES=[
+  {key:'tests',chip:'Tests only',note:'Only the minutes the tests were running.'},
+  {key:'all',chip:'All time',note:'The wait for a free runner and the setup as well as the tests.'}];
+// One job's minutes under the phase switch, kept split so a bar can show where they went.
+function wkPhases(c,id){const d=jd(c,id);return WK_PHASE==='all'?{q:d.q,s:d.s,r:d.r}:{q:0,s:0,r:d.r}}
+function wkJobVal(c,id){const p=wkPhases(c,id);return p.q+p.s+p.r}
+// Roll up jobs that run at the same time: slowest under wall clock, sum under machine minutes.
+function wkRoll(vals){return WK_MEASURE==='wall'?(vals.length?Math.max(...vals):0):vals.reduce((a,b)=>a+b,0)}
+function wkEntVal(c,ent){return wkRoll(ent.jobs.map(id=>wkJobVal(c,id)))}
+// The device lanes the all-suites view groups by. One bar per lane replaces one slice per
+// suite: the suites are still there, one dropdown click away, but five bars can be read.
+const WK_LANES=[{key:'tpu',label:'TPU'},{key:'gpu',label:'GPU'},{key:'cpu',label:'CPU'},
+                {key:'build',label:'Build'},{key:'infra',label:'Checks'}];
+// One lane on one run. Under machine minutes every job in the lane is added up; under wall
+// clock the lane is as long as its slowest job, and that job's own phases are what is drawn.
+function wkLanePart(c,key){
+  const ids=JOBS.filter(j=>j.cat===key).map(j=>j.id);
+  if(!ids.length)return null;
+  if(WK_MEASURE==='machine'){
+    let q=0,s=0,r=0;ids.forEach(id=>{const p=wkPhases(c,id);q+=p.q;s+=p.s;r+=p.r});
+    return{key,q,s,r,tot:+(q+s+r).toFixed(2),n:ids.length,lead:''};
+  }
+  let best=null;
+  ids.forEach(id=>{const p=wkPhases(c,id);const t=p.q+p.s+p.r;
+    if(!best||t>best.tot)best={key,q:p.q,s:p.s,r:p.r,tot:+t.toFixed(2),n:ids.length,lead:id}});
+  return best;
+}
+// Per-worker rows with the phase switch applied. The popups keep the unfiltered rows, because
+// a drill-down that hid the runner wait would be hiding the thing you opened it to find.
+function wkRowsShown(c,ent){
+  return wkWorkerRows(c,ent).map(r=>{const q=WK_PHASE==='all'?r.q:0,s=WK_PHASE==='all'?r.s:0;
+    return{name:r.name,q,s,r:r.r,status:r.status,machine:r.machine,tot:+(q+s+r.r).toFixed(2)}});
+}
+function wkMeasureWord(){return WK_MEASURE==='wall'?'wall-clock minutes':'machine minutes'}
+function wkPhaseWord(){return WK_PHASE==='all'?'runner wait, setup and tests':'test minutes'}
 function renderWorker(){
   const host=$('#worker-chart');if(!host)return;
   const meta=$('#wk-meta');
   const win=getWindows(),LIST=win.current;
-  if(!LIST.length){if(meta)meta.innerHTML=`<div><span class="mono">No merged pull requests fall inside this date range.</span></div>`;const h0=$('#worker-chart');if(h0)h0.innerHTML='';return}
   const ents=wkEntities();
-  const colorOf=wkColors(ents);
   const chips=$('#wk-chips');
   if(chips){
     const catLabel={tpu:'TPU',gpu:'GPU',cpu:'CPU',build:'Build',infra:'Checks'};
@@ -1755,55 +1913,70 @@ function renderWorker(){
 <option value="all" ${WK_SEL==='all'?'selected':''}>All worker suites</option>
 ${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]}">${(byCat[cat]||[]).map(e=>`<option value="${e.gid}" ${WK_SEL===e.gid?'selected':''}>${e.name}${e.jobs.length>1||e.split?' — '+(e.split?e.split.length:e.jobs.length)+' workers':''}</option>`).join('')}</optgroup>`).join('')}
 </select>`;
-    chips.innerHTML=`<span style="font-size:13px;color:var(--muted)">Worker suite:</span>${sel}`+(WK_SEL==='all'?'':`<button class="fchip" style="border-radius:8px" onclick="setWKSel('all')">Back to all suites</button>`);
+    const row=(label,items,cur,fn)=>`<span style="font-size:13px;color:var(--muted)">${label}</span>`
+      +items.map(i=>`<button class="fchip ${i.key===cur?'on':''}" style="border-radius:8px" title="${i.note}" onclick="${fn}('${i.key}')">${i.chip}</button>`).join('');
+    chips.innerHTML=`<span style="font-size:13px;color:var(--muted)">Worker suite:</span>${sel}`
+      +(WK_SEL==='all'?'':`<button class="fchip" style="border-radius:8px" onclick="setWKSel('all')">Back to all suites</button>`)
+      +row('Measure:',WK_MEASURES,WK_MEASURE,'setWKMeasure')
+      +row('Time shown:',WK_PHASES,WK_PHASE,'setWKPhase');
   }
+  if(!LIST.length){if(meta)meta.innerHTML=`<div><span class="mono">No merged pull requests fall inside this date range.</span></div>`;host.innerHTML='';return}
 
-  // Single-suite mode: same stacked columns as the all-suites view — runner wait, setup, then one slice per worker's tests
+  const ns='http://www.w3.org/2000/svg';
+  const LP=46,RP=12,TP=26,gap=14;
+  const tEl=$('#tip');
+  const place=e=>{const ow=tEl.offsetWidth||300;let lx=e.clientX+14;if(lx+ow+8>window.innerWidth)lx=e.clientX-ow-14;
+    tEl.style.left=lx+'px';tEl.style.top=Math.max(8,e.clientY-14)+'px'};
+  const phaseRows=p=>WK_PHASE==='all'
+    ?[{label:'Runner wait',v:p.q},{label:'Setup (image + env)',v:p.s},{label:'Tests',v:p.r}]
+    :[{label:'Tests',v:p.r}];
+  const breakdown=(p,hi)=>phaseRows(p).map(x=>`<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;${x.label===hi?'font-weight:700':''}"><span style="color:var(--ink2)">${x.label}</span><span class="mono">${(+x.v).toFixed(1)}m</span></div>`).join('');
+
+  // ---------- single suite: one column per worker ----------
   if(WK_SEL!=='all'){
     const ent=ents.find(e=>e.gid===WK_SEL);
     if(!ent){WK_SEL='all';renderWorker();return}
     const col=WK_LANE_HEX[ent.cat]||'#64748B';
     const dimAll=HW!=='all'&&ent.lane.toLowerCase()!==HW;
-    const nW=ent.split?ent.split.length:ent.jobs.length;
-    if(meta)meta.innerHTML=`<div><span class="mono">${ent.name} across the ${LIST.length} merged pull requests ${win.inRange}. One bar per worker under each pull request, stacking that worker's runner wait, setup, and tests. The label above a group is all its workers added together${ent.split?' (split estimated from the suite total)':''}. Click a bar for that run's worker details.</span></div>
-<div data-wklegend style="margin-top:4px"><span style="color:var(--q)">■</span> Runner wait <span style="color:var(--bld);margin-left:8px">■</span> Setup <span style="color:${col};margin-left:8px">■</span> Worker tests${nW>1?' <span style="color:var(--muted)">(tests shaded dark to light = worker 1 to '+nW+')</span>':''}</div>`;
-    host.innerHTML='';
-    const ns='http://www.w3.org/2000/svg';
-    const LP=46,RP=12,TP=26,gap=14,plotH=244;
-    const W=chartWidth(LIST.length,LP,RP);
-    const B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
-    const data=LIST.map(c=>({rows:wkWorkerRows(c,ent),v:wkEntTime(c,ent),status:wkEntStatus(c,ent)}));
-    const ymax=Math.max(...data.flatMap(x=>x.rows.map(r=>r.tot)),5)*1.2;
+    const data=LIST.map(c=>{const rows=wkRowsShown(c,ent);
+      return{rows,v:wkRoll(rows.map(r=>r.tot)),status:wkEntStatus(c,ent)}});
+    const nW=Math.max(1,...data.map(d=>d.rows.length));
+    if(meta)meta.innerHTML=`<div><span class="mono">${ent.name} across the ${LIST.length} merged pull requests ${win.inRange}, counting ${wkPhaseWord()}. ${WK_MEASURE==='wall'
+        ?`The workers run at the same time, so they are drawn side by side and the number above a group is the slowest of them - the wall-clock time this suite added to the run.`
+        :`Machine minutes add up, so the workers are stacked and the number above a bar is all ${nW} of them together.`}${ent.split?' The split between workers is estimated from the suite total.':''} Click a bar for that run's worker details.</span></div>
+<div data-wklegend style="margin-top:4px">${WK_PHASE==='all'&&WK_MEASURE==='wall'?`<span style="color:var(--q)">■</span> Runner wait <span style="color:var(--bld);margin-left:8px">■</span> Setup <span style="color:${col};margin-left:8px">■</span> Worker tests`:`<span style="color:${col}">■</span> Worker ${WK_PHASE==='all'&&WK_MEASURE==='machine'?'time':'tests'}`}${nW>1?' <span style="color:var(--muted)">(shaded dark to light = worker 1 to '+nW+')</span>':''} <span style="color:#EF4444;margin-left:12px;font-weight:700">✕</span> a worker in this suite failed on that run</div>`;
+    const slotPx=WK_MEASURE==='wall'?Math.max(CHART_SLOT,16*nW):CHART_SLOT;
+    const W=Math.max(CHART_BOX,LP+RP+LIST.length*slotPx);
+    const plotH=244,B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
+    const ymax=niceTop(Math.max(...data.map(d=>d.v),5),4);
     const py=v=>TP+(1-v/ymax)*plotH;
+    host.innerHTML='';
     const svg=document.createElementNS(ns,'svg');
     svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
     svg.style.cssText=`display:block;width:100%;min-width:${W}px;opacity:${dimAll?0.25:1}`;
     const el=(a,b)=>{const e=document.createElementNS(ns,a);for(const[k,v]of Object.entries(b))e.setAttribute(k,String(v));svg.appendChild(e);return e};
-    const step=ymax>25?10:ymax>12?5:2;
+    const step=niceStep(ymax,4);
     for(let g=0;g<=ymax;g+=step){
       el('line',{x1:LP,y1:py(g),x2:W-RP,y2:py(g),stroke:'var(--grid)','stroke-width':1,'stroke-dasharray':'3,3'});
-      el('text',{x:LP-6,y:py(g)+3,'text-anchor':'end','font-size':'11',fill:'#64748B','font-family':'var(--mono)'}).textContent=g+'m';
+      el('text',{x:LP-6,y:py(g)+3,'text-anchor':'end','font-size':'11',fill:'#64748B','font-family':'var(--mono)'}).textContent=fmtTick(g);
     }
     const slotW=(W-LP-RP-gap*LIST.length)/LIST.length;
-    const inner=2;
-    const tEl=$('#tip');
-    const place=e=>{const ow=tEl.offsetWidth||300;let lx=e.clientX+14;if(lx+ow+8>window.innerWidth)lx=e.clientX-ow-14;tEl.style.left=lx+'px';tEl.style.top=Math.max(8,e.clientY-14)+'px'};
     LIST.forEach((c,i)=>{
       const x0=LP+gap/2+(LIST.length-1-i)*(slotW+gap);  // oldest left, newest right
-      const dpt=data[i];
-      const n=dpt.rows.length;
-      const bw=(slotW-inner*(n-1))/n;
-      dpt.rows.forEach((wk,k)=>{
-        const bx=x0+k*(bw+inner);
-        const parts=[
-          {label:'Runner wait',v:wk.q,fill:'var(--q)'},
-          {label:'Setup (image + env)',v:wk.s,fill:'var(--bld)'},
-          {label:'Tests',v:wk.r,fill:wkShade(col,k,n)}
-        ];
-        const vis=parts.filter(p=>p.v>0);
+      const dpt=data[i],n=dpt.rows.length;
+      // Wall clock: one column per worker, each stacking that worker's own phases.
+      // Machine minutes: one column, the workers stacked on top of each other.
+      const cols=WK_MEASURE==='wall'
+        ? dpt.rows.map((wk,k)=>({segs:phaseRows(wk).map(x=>({v:x.v,fill:x.label==='Tests'?wkShade(col,k,n):x.label==='Runner wait'?'var(--q)':'var(--bld)',label:x.label})),wk,k}))
+        : [{segs:dpt.rows.map((wk,k)=>({v:wk.tot,fill:wkShade(col,k,n),label:wk.name,wk,k})),wk:null,k:0}];
+      const bw=(slotW-2*(cols.length-1))/cols.length;
+      cols.forEach((cl,ci)=>{
+        const bx=x0+ci*(bw+2);
+        const vis=cl.segs.filter(s=>s.v>0);
         let acc=0;
-        parts.forEach((sl,si)=>{
+        cl.segs.forEach(sl=>{
           if(sl.v<=0)return;
+          const wk=sl.wk||cl.wk,k=sl.wk?sl.k:cl.k;
           const isTop=sl===vis[vis.length-1];
           const y1=py(acc+sl.v),h=py(acc)-py(acc+sl.v);
           const geo=isTop?{d:roundTopD(bx,y1,Math.max(bw,1.5),Math.max(h,0.5),2.5)}:{x:bx,y:y1,width:Math.max(bw,1.5),height:Math.max(h,0.5)};
@@ -1813,10 +1986,10 @@ ${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]
             if(n>1)svg.querySelectorAll('[data-wk]').forEach(nd=>nd.setAttribute('opacity',+nd.getAttribute('data-wk')===k?'1':'0.3'));
             tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">#${c.hash} ${c.title}</div>
 <div style="font-size:13px;color:var(--ink2);margin-bottom:2px">${ent.name}${n>1?' · '+wk.name:''}</div>
-${wk.machine?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${wk.machine}</div>`:'<div style="margin-bottom:6px"></div>'}
-${parts.map((s2,k2)=>`<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;${k2===si?'font-weight:700':''}"><span style="color:${k2===si?'var(--ink)':'var(--ink2)'}">${s2.label}</span><span class="mono">${(+s2.v).toFixed(1)}m</span></div>`).join('')}
+${wk&&wk.machine?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${wk.machine}</div>`:'<div style="margin-bottom:6px"></div>'}
+${breakdown(wk,sl.label)}
 <div style="display:flex;justify-content:space-between;gap:14px;font-size:14px;font-weight:700;border-top:1px solid var(--grid);margin-top:4px;padding-top:4px"><span>This worker</span><span class="mono" style="color:${wk.status==='fail'?'var(--crit)':'var(--ink)'}">${wk.tot.toFixed(1)}m</span></div>
-${n>1?`<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;color:var(--ink2)"><span>All ${n} workers together</span><span class="mono">${dpt.v.toFixed(1)}m</span></div>`:''}
+${n>1?`<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;color:var(--ink2)"><span>${WK_MEASURE==='wall'?'Slowest of the '+n+' workers':'All '+n+' workers added up'}</span><span class="mono">${dpt.v.toFixed(1)}m</span></div>`:''}
 ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4px">This worker failed on this run.</div>':dpt.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4px">Another worker in this suite failed on this run.</div>':''}
 <div style="font-size:12px;color:var(--accent);text-align:center;margin-top:6px">click the bar to see this suite's worker details →</div>`;
             tEl.style.display='block';place(ev);
@@ -1827,69 +2000,80 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
         });
       });
       prAxisLabelAuto(svg,ns,x0+slotW/2,H-B,c.hash,slotW+gap);
-      const tops=dpt.rows.filter(r=>r.tot>0).map(r=>py(r.tot));
-      const topY=tops.length?Math.min(...tops):py(0);
-      el('text',{x:x0+slotW/2,y:topY-5,'text-anchor':'middle','font-size':'11',fill:'#94A3B8','font-family':'var(--mono)'}).textContent=dpt.v.toFixed(1)+'m';
-      if(dpt.status==='fail')el('text',{x:x0+slotW/2,y:topY-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
+      el('text',{x:x0+slotW/2,y:py(dpt.v)-5,'text-anchor':'middle','font-size':'11',fill:'#94A3B8','font-family':'var(--mono)'}).textContent=dpt.v.toFixed(1)+'m';
+      if(dpt.status==='fail')el('text',{x:x0+slotW/2,y:py(dpt.v)-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
     });
     host.appendChild(svg);
     return;
   }
 
-  if(meta)meta.innerHTML=`<div><span class="mono">${rangeCovers(win,LIST)}. One slice per worker suite, stacked with build and checks at the bottom, then CPU, GPU, and TPU on top.</span></div>
-<div data-wklegend style="margin-top:4px"><span style="color:var(--tpu)">■</span> TPU <span style="color:var(--gpu);margin-left:8px">■</span> GPU <span style="color:var(--cpu);margin-left:8px">■</span> CPU <span style="color:#8B5CF6;margin-left:8px">■</span> Build <span style="color:#64748B;margin-left:8px">■</span> Checks</div>`;
+  // ---------- all suites: one group per merged pull request, one bar per device lane ----------
+  const parts=LIST.map(c=>{const o={};WK_LANES.forEach(L=>{const p=wkLanePart(c,L.key);if(p)o[L.key]=p});return o});
+  const lanes=WK_LANES.filter(L=>parts.some(p=>p[L.key]&&p[L.key].tot>0));
+  const groupVal=parts.map(p=>wkRoll(lanes.map(L=>(p[L.key]||{tot:0}).tot)));
+  if(meta)meta.innerHTML=`<div><span class="mono">${rangeCovers(win,LIST)}, counting ${wkPhaseWord()}. ${WK_MEASURE==='wall'
+      ?'The device lanes run at the same time, so they are drawn side by side and the number above a group is the slowest lane - the wall-clock time that lane added to the run.'
+      :'Machine minutes add up, so the lanes are stacked and the number above a bar is every job in the run added together.'} Pick a suite above to open one bar per worker instead.</span></div>
+<div data-wklegend style="margin-top:4px">${WK_PHASE==='all'&&WK_MEASURE==='wall'?`<span style="color:var(--q)">■</span> Runner wait <span style="color:var(--bld);margin-left:8px">■</span> Setup <span style="margin-left:8px"></span>`:''}${lanes.map((L,i)=>`<span style="color:${WK_LANE_HEX[L.key]};${i?'margin-left:8px':''}">■</span> ${L.label}`).join(' ')} <span style="color:#EF4444;margin-left:12px;font-weight:700">✕</span> this run failed</div>`;
+  const slotPx=WK_MEASURE==='wall'?Math.max(CHART_SLOT,18*lanes.length):CHART_SLOT;
+  const W=Math.max(CHART_BOX,LP+RP+LIST.length*slotPx);
+  const plotH=274,B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
+  const ymax=niceTop(Math.max(...groupVal,5),5);
+  const y=v=>TP+(1-v/ymax)*plotH;
   host.innerHTML='';
-  const ns='http://www.w3.org/2000/svg';
-  const LP=46,RP=12,TP=26,gap=14,plotH=274;
-  const W=chartWidth(LIST.length,LP,RP);
-  const B=axisBottomPad((W-LP-RP)/LIST.length),H=TP+plotH+B;
   const svg=document.createElementNS(ns,'svg');
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
   svg.style.cssText=`display:block;width:100%;min-width:${W}px`;
   const el=(a,b)=>{const e=document.createElementNS(ns,a);for(const[k,v]of Object.entries(b))e.setAttribute(k,String(v));svg.appendChild(e);return e};
-  const totals=LIST.map(c=>ents.reduce((a,e)=>a+wkEntTime(c,e),0));
-  const ymax=Math.max(...totals)*1.08;
-  const y=v=>TP+(1-v/ymax)*plotH;
-  const barW=(W-LP-RP-gap*LIST.length)/LIST.length;
-  for(let g=0;g<=ymax;g+=50){
+  const wStep=niceStep(ymax,5);
+  for(let g=0;g<=ymax;g+=wStep){
     el('line',{x1:LP,y1:y(g),x2:W-RP,y2:y(g),stroke:'var(--grid)','stroke-width':1,'stroke-dasharray':'3,3'});
-    el('text',{x:LP-6,y:y(g)+3,'text-anchor':'end','font-size':'11',fill:'#64748B','font-family':'var(--mono)'}).textContent=g+'m';
+    el('text',{x:LP-6,y:y(g)+3,'text-anchor':'end','font-size':'11',fill:'#64748B','font-family':'var(--mono)'}).textContent=fmtTick(g);
   }
-  const tipEl=$('#tip');
+  const slotW=(W-LP-RP-gap*LIST.length)/LIST.length;
   LIST.forEach((c,i)=>{
-    const x=LP+gap/2+(LIST.length-1-i)*(barW+gap);  // oldest left, newest right
-    const tot=totals[i]||1;
-    let acc=0;
-    const items=ents.map(e=>({e,v:wkEntTime(c,e)})).filter(it=>it.v>0).reverse();
-    items.forEach((it,vi)=>{
-      const e=it.e,v=it.v;
-      const isTop=vi===items.length-1;
-      const y1=y(acc+v),h=y(acc)-y(acc+v);
-      const dim=HW!=='all'&&e.lane.toLowerCase()!==HW;
-      const baseOp=dim?0.15:1;
-      const geo=isTop?{d:roundTopD(x,y1,barW,Math.max(h,0.5),3)}:{x,y:y1,width:barW,height:Math.max(h,0.5)};
-      const r=el(isTop?'path':'rect',{...geo,fill:colorOf[e.gid],stroke:'var(--surface)','stroke-width':1,opacity:baseOp,cursor:'pointer'});
-      r.setAttribute('data-gid',e.gid);r.setAttribute('data-op',baseOp);
-      const share=(v/tot*100).toFixed(1);
-      const ws=wkWorkers(c,e);
-      r.addEventListener('mousemove',ev=>{
-        svg.querySelectorAll('[data-gid]').forEach(nd=>nd.setAttribute('opacity',nd.getAttribute('data-gid')===e.gid?nd.getAttribute('data-op'):'0.22'));
-        tipEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">${e.name}</div>
-<div style="font-size:13px;color:var(--ink2)">#${c.hash} · <span class="mono">${v.toFixed(1)}m</span> · ${share}% of this run's worker time</div>
-${(()=>{const m=RUNNER_LABELS[(e.jobs||[])[0]];return m?`<div class="mono" style="font-size:12px;color:var(--muted);margin-top:2px">${m}</div>`:''})()}
-${ws.length>1?`<div style="font-size:12px;color:var(--muted);margin-top:3px">${ws.length} parallel workers · tests ${ws.map(x=>x.r+'m').join(' · ')}</div>`:''}
-<div style="font-size:12px;color:var(--accent);margin-top:4px">this suite is lit up across every bar · click for every suite's time →</div>`;
-        tipEl.style.display='block';
-        const lx=ev.clientX+14+300>window.innerWidth?ev.clientX-314:ev.clientX+14;
-        tipEl.style.left=lx+'px';tipEl.style.top=Math.max(8,ev.clientY-14)+'px';
+    const x0=LP+gap/2+(LIST.length-1-i)*(slotW+gap);  // oldest left, newest right
+    const pmap=parts[i];
+    // Wall clock: one column per lane, each stacking the phases of that lane's slowest job.
+    // Machine minutes: one column, the lanes stacked on top of each other.
+    const cols=WK_MEASURE==='wall'
+      ? lanes.map(L=>{const p=pmap[L.key];
+          return{lane:L,part:p,segs:p?phaseRows(p).map(x=>({v:x.v,label:x.label,fill:x.label==='Tests'?WK_LANE_HEX[L.key]:x.label==='Runner wait'?'var(--q)':'var(--bld)',lane:L,part:p})):[]}})
+      : [{lane:null,part:null,segs:lanes.filter(L=>pmap[L.key]&&pmap[L.key].tot>0).map(L=>({v:pmap[L.key].tot,label:L.label,fill:WK_LANE_HEX[L.key],lane:L,part:pmap[L.key]}))}];
+    const bw=(slotW-2*(cols.length-1))/cols.length;
+    cols.forEach((cl,ci)=>{
+      const bx=x0+ci*(bw+2);
+      const vis=cl.segs.filter(s=>s.v>0);
+      let acc=0;
+      cl.segs.forEach(sl=>{
+        if(sl.v<=0)return;
+        const L=sl.lane,p=sl.part;
+        const isTop=sl===vis[vis.length-1];
+        const y1=y(acc+sl.v),h=y(acc)-y(acc+sl.v);
+        const dim=HW!=='all'&&L.key!==HW;
+        const baseOp=dim?0.15:1;
+        const geo=isTop?{d:roundTopD(bx,y1,Math.max(bw,1.5),Math.max(h,0.5),3)}:{x:bx,y:y1,width:Math.max(bw,1.5),height:Math.max(h,0.5)};
+        const r=el(isTop?'path':'rect',{...geo,fill:sl.fill,stroke:'var(--surface)','stroke-width':1,opacity:baseOp,cursor:'pointer'});
+        r.setAttribute('data-gid',L.key);r.setAttribute('data-op',baseOp);
+        r.addEventListener('mousemove',ev=>{
+          svg.querySelectorAll('[data-gid]').forEach(nd=>nd.setAttribute('opacity',nd.getAttribute('data-gid')===L.key?nd.getAttribute('data-op'):'0.22'));
+          tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">${L.label} lane</div>
+<div style="font-size:13px;color:var(--ink2)">#${c.hash} · ${p.n} job${p.n===1?'':'s'} · ${WK_MEASURE==='wall'?'the slowest one is drawn':'all of them added up'}</div>
+${WK_MEASURE==='wall'&&p.lead?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${(JOBS.find(j=>j.id===p.lead)||{}).name||p.lead}${RUNNER_LABELS[p.lead]?' · '+RUNNER_LABELS[p.lead]:''}</div>`:'<div style="margin-bottom:6px"></div>'}
+${breakdown(p,sl.label)}
+<div style="display:flex;justify-content:space-between;gap:14px;font-size:14px;font-weight:700;border-top:1px solid var(--grid);margin-top:4px;padding-top:4px"><span>This lane</span><span class="mono">${p.tot.toFixed(1)}m</span></div>
+<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;color:var(--ink2)"><span>${WK_MEASURE==='wall'?'Slowest lane in this run':'Every lane added up'}</span><span class="mono">${groupVal[i].toFixed(1)}m</span></div>
+<div style="font-size:12px;color:var(--accent);margin-top:4px">this lane is lit up across every bar · click for every suite's time →</div>`;
+          tEl.style.display='block';place(ev);
+        });
+        r.addEventListener('mouseleave',()=>{tEl.style.display='none';svg.querySelectorAll('[data-gid]').forEach(nd=>nd.setAttribute('opacity',nd.getAttribute('data-op')))});
+        r.addEventListener('click',()=>{openWkPop(c.hash)});
+        acc+=sl.v;
       });
-      r.addEventListener('mouseleave',()=>{tipEl.style.display='none';svg.querySelectorAll('[data-gid]').forEach(nd=>nd.setAttribute('opacity',nd.getAttribute('data-op')))});
-      r.addEventListener('click',()=>{openWkPop(c.hash)});
-      acc+=v;
     });
-    prAxisLabelAuto(svg,ns,x+barW/2,H-B,c.hash,barW+gap);
-    el('text',{x:x+barW/2,y:y(tot)-5,'text-anchor':'middle','font-size':'11',fill:'#94A3B8','font-family':'var(--mono)'}).textContent=Math.round(tot)+'m';
-    if(c.status==='fail')el('text',{x:x+barW/2,y:y(tot)-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
+    prAxisLabelAuto(svg,ns,x0+slotW/2,H-B,c.hash,slotW+gap);
+    el('text',{x:x0+slotW/2,y:y(groupVal[i])-5,'text-anchor':'middle','font-size':'11',fill:'#94A3B8','font-family':'var(--mono)'}).textContent=fmtTick(+groupVal[i].toFixed(1));
+    if(c.status==='fail')el('text',{x:x0+slotW/2,y:y(groupVal[i])-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
   });
   host.appendChild(svg);
 }
@@ -1924,7 +2108,20 @@ let FLAKY_TESTS=[
  {test:'test_gpu_checkpoint_restore_sharded',job:'gpu-i',prs:['#4884','#4904'],cause:'NCCL timeout after 1800s (rank 1)'},
  {test:'test_gpu_flash_attention_backward',job:'gpu-i',prs:['#4896'],cause:'CUDA error: device-side assert triggered'},
 ];
-function wilsonCI(k,n){const z=1.96,p=k/n,d=1+z*z/n,c=p+z*z/(2*n),m=z*Math.sqrt((p*(1-p)+z*z/(4*n))/n);return[Math.max(0,(c-m)/d),Math.min(1,(c+m)/d)]}
+// Wilson score interval for k successes out of n tries. Returns null when the pair cannot
+// describe a proportion - no tries at all, or a k above n - instead of taking the square root of
+// a negative number and handing the caller NaN to print. Callers fall back to their "too few to
+// rate" wording, which is the honest answer when the inputs do not describe a share.
+function wilsonCI(k,n){
+  if(!(n>0)||!(k>=0)||k>n)return null;
+  const z=1.96,p=k/n,d=1+z*z/n,c=p+z*z/(2*n),m=z*Math.sqrt((p*(1-p)+z*z/(4*n))/n);
+  return[Math.max(0,(c-m)/d),Math.min(1,(c+m)/d)];
+}
+// The "passed first try" cell. Named once so the legend square and the strip cannot drift apart.
+const FL_PASS_BG='#C7D4E6',FL_PASS_BORDER='#9FB2CB';
+// One definition of "wasted", used wherever the number appears. derive.py: wasted_seconds is the
+// run time of the job that failed, and is null when that job never held a runner.
+const WASTED_TIP='The run time of the attempt that failed - the machine minutes the re-run threw away. It reads "time unknown" when the failed job never held a runner, because there is nothing to measure.';
 function flakyColor(rate){return rate>=0.2?'var(--crit)':rate>=0.1?'var(--warn)':'#64748B'}
 const thIdxOf=pr=>TH_COMMITS.findIndex(c=>'#'+c.hash===pr);
 function flakyCellTip(evt,id,idx){
@@ -1933,7 +2130,7 @@ function flakyCellTip(evt,id,idx){
   const e=j.events.find(x=>thIdxOf(x.pr)===idx);
   const f=(j.fails||[]).some(p=>thIdxOf(p)===idx);
   const tEl=$('#tip');
-  const head=`<div style="font-weight:700;font-size:13px;margin-bottom:2px">${c.pr} &middot; ${c.date}</div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">${j.name}</div>`
+  const head=`<div style="font-weight:700;font-size:13px;margin-bottom:2px">${c.pr} &middot; ${dayNum(c.date)}</div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">${j.name}</div>`
     +(RUNNER_LABELS[j.id]?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:4px">${RUNNER_LABELS[j.id]}</div>`:'');
   // Only this run of this job: which tests failed on the first attempt (from the JUnit report of attempt 1).
   const CAP=6;
@@ -1948,12 +2145,13 @@ function flakyCellTip(evt,id,idx){
     const tests=FLAKY_TESTS.filter(x=>x.job===id&&x.prs.includes(c.pr))
       .map(x=>({name:x.test,cause:x.cause,n:x.prs.filter(p=>cal.iset.has(thIdxOf(p))).length}))
       .sort((a,b)=>b.n-a.n||a.name.localeCompare(b.name));
-    body=`<div style="font-size:13px;color:var(--warn)">Failed first, passed on re-run${tests.length?'':' &mdash; '+e.cause} &middot; ${e.wasted}m wasted</div>`
+    body=`<div style="font-size:13px;color:var(--warn)">Failed first, passed on re-run${tests.length?'':' &mdash; '+e.cause} &middot; ${e.wasted==null?'time unknown':e.wasted+'m wasted'}</div>`
       +(tests.length
         ?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">${tests.length===1?'1 test':tests.length+' tests'} failed on the first attempt and passed on the re-run:</div>${listOf(tests)}`
         :`<div style="font-size:12px;color:var(--ink2);margin-top:6px">No single test failed in this run: ${e.cause}.</div>`);
   }else if(f){
-    const cm=COMMITS.find(x=>x.hash===c.hash);const jj=cm?jd(cm,id):null;
+    const cm=COMMITS.find(x=>x.hash===c.hash);
+    const jj=(cm&&JOBS.find(x=>x.id===id))?jd(cm,id):null;
     const rec=cm&&TESTS[cm.hash]&&TESTS[cm.hash][id]&&TESTS[cm.hash][id].tests?TESTS[cm.hash][id].tests.filter(x=>x.st==='fail').map(x=>({name:x.name,cause:x.error||'failed'})):[];
     body=`<div style="font-size:13px;color:var(--crit)">Failed and was never re-run &mdash; counted as a failure, not a rescue.</div>`
       +(jj&&jj.r===0
@@ -1979,8 +2177,12 @@ function flakyCalc(){
   const iset=new Set(idxs);
   const rows=RESCUES.map(j=>{
     const evIn=j.events.filter(e=>iset.has(thIdxOf(e.pr)));
+    // One pull request that needed a re-run counts once, however many times the job was re-run
+    // inside it. Dividing a count of re-runs by a count of pull requests mixes two units, and
+    // produced rates above 100% - which then fed a square root of a negative number.
+    const prIn=[...new Set(evIn.map(e=>e.pr))];
     const failIn=(j.fails||[]).filter(p=>iset.has(thIdxOf(p)));
-    return{j,evIn,failIn,rate:idxs.length?evIn.length/idxs.length:0};
+    return{j,evIn,prIn,failIn,rate:idxs.length?prIn.length/idxs.length:0};
   });
   const inRange=R.inRange;
   return{idxs,iset,n:idxs.length,rows,label,inRange,days:R.days,custom:R.custom};
@@ -1991,28 +2193,52 @@ function renderFlaky(){
   const n=cal.n;
   if(!n){host.innerHTML='<div style="font-size:14px;color:var(--muted)">No merged pull requests fall inside this date range.</div>';return}
   const totE=cal.rows.reduce((a,r)=>a+r.evIn.length,0);
-  const totW=Math.round(cal.rows.reduce((a,r)=>a+r.evIn.reduce((x,e)=>x+e.wasted,0),0));
+  const totW=Math.round(cal.rows.reduce((a,r)=>a+r.evIn.reduce((x,e)=>x+(e.wasted||0),0),0));
   const listed=cal.rows.filter(r=>r.evIn.length>0).sort((a,b)=>b.rate-a.rate);
   const others=JOBS.length-listed.length;
   const gated=n<10;
   const first=TH_COMMITS[cal.idxs[0]],last=TH_COMMITS[cal.idxs[cal.idxs.length-1]];
-  let h=`<div style="font-size:14px;color:var(--ink);margin-bottom:10px">${cal.label} covers <b>${n} merged pull requests</b>; re-runs rescued <b>${totE} failed first attempt${totE===1?'':'s'}</b>, burning <b>${totW} extra machine minutes</b>.</div>`;
+  // One cell per merged pull request. Squeezing forty of them into the column
+  // leaves each a few pixels wide, so the cells keep a readable size and the
+  // whole block scrolls sideways instead - rows and the axis together, so a
+  // cell always stays above its own date.
+  // A label rotated by 55 degrees needs its columns about 17px apart before the lines stop
+  // running into each other (line height / sin 55). 12px was not enough, so the dates ran
+  // together; 20px and a steeper angle give each one its own band. The block scrolls, so the
+  // extra width costs nothing but a wider scroller.
+  const CELL_MIN=20,CELL_GAP=2;
+  const stripPx=cal.idxs.length*CELL_MIN+Math.max(0,cal.idxs.length-1)*CELL_GAP;
+  const ROW_PAD=34;   // .issue-row: 16px padding each side plus its 1px border, all inside the box
+  const rowMin=290+16+stripPx+16+340+ROW_PAD;
+  // Count the outlined cells the strip actually draws, so the headline quotes a number the reader
+  // can find on the page. Two things thin the raw list: jobs with no re-run at all are not listed
+  // here, and a pull request where the same job was both rescued and failed draws the amber cell,
+  // which the cell loop picks first.
+  const totF=listed.reduce((a,r)=>{
+    const rescued=new Set(r.evIn.map(e=>e.pr));
+    return a+r.failIn.filter(p=>!rescued.has(p)).length;
+  },0);
+  let h=`<div style="font-size:14px;color:var(--ink);margin-bottom:10px">${cal.label} covers <b>${n} merged pull requests</b>; re-runs rescued <b>${totE} failed first attempt${totE===1?'':'s'}</b>, burning <b>${totW} extra machine minutes</b>.${totF?` The jobs listed below also failed <b>${totF}</b> time${totF===1?'':'s'} without being re-run &mdash; the outlined cells. ${totF===1?'That is a failure':'Those are failures'}, not ${totF===1?'a rescue':'rescues'}, so ${totF===1?'it does':'they do'} not count toward the numbers above.`:''}</div>`;
   // Summary first: the flakiest tests in this window, most re-runs first (the job strips follow as the detail)
   const tRows=FLAKY_TESTS.map(ft=>{
     const j=RESCUES.find(r=>r.id===ft.job);
     const inPrs=ft.prs.filter(p=>cal.iset.has(thIdxOf(p)));
-    const wasted=Math.round(inPrs.reduce((a,p)=>{const e=j.events.find(x=>x.pr===p);return a+(e?e.wasted:0)},0));
+    const wasted=Math.round(inPrs.reduce((a,p)=>{const e=j&&j.events.find(x=>x.pr===p);return a+((e&&e.wasted)||0)},0));
     return{ft,j,inPrs,wasted};
-  }).filter(r=>r.inPrs.length>0).sort((a,b)=>b.inPrs.length-a.inPrs.length||b.wasted-a.wasted||a.ft.test.localeCompare(b.ft.test));
+  }).filter(r=>r.j&&r.inPrs.length>0).sort((a,b)=>b.inPrs.length-a.inPrs.length||b.wasted-a.wasted||a.ft.test.localeCompare(b.ft.test));
   const CAP=5,shownT=FL_ALL?tRows:tRows.slice(0,CAP);
+  const emptyWhy=(!tRows.length&&totE)?` <span class="g-more">This table only tracks tests from re-runs, not from plain failures — a failure that was never re-run cannot prove a test is flaky, only that it broke. Of the ${totE} re-run${totE===1?'':'s'}, most were on gate jobs like "All Required Tests Passed" which have no tests of their own. The rest had their test-result files expire before collection — GitHub deletes them after about a day.</span>`:'';
   const tLead=tRows.length
     ?`These are the tests that failed on a first attempt and then passed when their job was re-run, counted ${cal.inRange}. The "Failed first try" column counts runs, not tests: The job reached a first attempt on each of the ${cal.n} merged pull requests ${cal.inRange} (a pull request whose changed files skip the job would not count), so every test had up to ${cal.n} chances to run (a run that died before its tests started counts too). "${tRows[0].inPrs.length} of ${cal.n} runs" means that in ${tRows[0].inPrs.length} of those ${cal.n} runs the test failed on the first attempt and then passed when the job was re-run; in the other ${cal.n-tRows[0].inPrs.length} runs it passed first time. The ${cal.n} is the same for every row here; it can differ between jobs when a job was skipped on some pull requests. Tests with the most such runs come first${tRows.length>CAP&&!FL_ALL?`; only the top ${CAP} are shown`:''}. Minutes wasted is the re-run time of the test's own job; tests that failed in the same job and run show the same minutes, so the column cannot be added up. Click a test to open every re-run of the job it belongs to.`
     :'';
   const pwN=(listed.find(x=>x.j.id==='tpu-pw-i')||{evIn:[]}).evIn.length;  // rescues on a job that publishes no test results (Pathways) in this range
   const tFoot=(pwN?`${pwN===1?'One':pwN} of the ${totE} rescued runs (TPU Pathways) ${pwN===1?'has':'have'} no test here: the Pathways jobs publish no test results, so no test can be named. `:'')
+    +(!tRows.length&&totE?`This table names the test behind each re-run. It needs the job to be a test worker and its test-result file to still exist. Gate jobs have no tests; Pathways jobs write no result file. `:'')
     +`Test results are only collected from the day the dashboard went live &mdash; GitHub deletes them after about a day, so older runs cannot be added.`
     +(tRows.length>CAP?` <a href="#" data-flmore="1" onclick="event.preventDefault();flakyShowAll(${FL_ALL?'false':'true'})" style="color:var(--accent);text-decoration:none">${FL_ALL?'Show only the top '+CAP:'Show all '+tRows.length+' tests'}</a>`:'');
-  h+=sumBlock({key:'flaky',guide:'flaky-sum',guideKind:'table',title:'Flakiest tests',lead:tLead,foot:tFoot,empty:'No test needed a re-run to pass '+cal.inRange+'.',
+  h+=sumBlock({key:'flaky',guide:'flaky-sum',guideKind:'table',title:'Flakiest tests',lead:tLead||emptyWhy,foot:tFoot,empty:totE
+      ?`${totE} re-run${totE===1?'':'s'} and ${totF} failure${totF===1?'':'s'} happened ${cal.inRange}, but none named a specific test.`
+      :`No job needed a re-run to pass ${cal.inRange}.`,
     cols:'minmax(240px,1.3fr) minmax(170px,1fr) 124px 124px',head:['Test','Job it runs in','<span style="display:block;text-align:right">Failed first try</span>','<span style="display:block;text-align:right">Minutes wasted</span>'],
     rows:shownT.map(r=>{
       const rate=cal.n?r.inPrs.length/cal.n:0,col=flakyColor(rate);
@@ -2023,31 +2249,34 @@ function renderFlaky(){
         `<div class="mono" style="font-weight:600;color:var(--ink);overflow-wrap:anywhere">${r.ft.test}</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${r.ft.cause} &middot; last in ${r.inPrs[r.inPrs.length-1]}</div>`,
         `<span style="color:var(--ink2)"><span style="color:${LANE_COLORS[r.j.lane]}">&#9679;</span> ${r.j.name}</span>`,
         `<span class="mono" style="display:block;text-align:right;font-weight:700;color:${col==='#64748B'?'var(--ink)':col}">${r.inPrs.length} of ${cal.n} runs</span>`,
-        `<span class="mono" style="display:block;text-align:right;color:var(--muted)">${r.wasted}m</span>`]};
+        `<span class="mono" style="display:block;text-align:right;color:var(--muted)" title="${WASTED_TIP}">${r.wasted}m</span>`]};
     })});
   let legendH=`<div style="display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:8px">
-    <span>Each cell is one merged pull request, oldest on the left &mdash; ${first.pr} (${first.date}) &rarr; ${last.pr} (${last.date}).</span>
+    <span>Each cell is one merged pull request, oldest on the left &mdash; ${first.pr} (${dayNum(first.date)}) &rarr; ${last.pr} (${dayNum(last.date)}).</span>
     <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:var(--warn);display:inline-block"></span>failed first, passed on re-run</span>
     <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;border:2px solid var(--crit);display:inline-block"></span>failed, never re-run</span>
-    <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:var(--elevated);display:inline-block"></span>passed first try</span>
+    <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER};display:inline-block"></span>passed first try</span>
   </div>`;
   const failsInRange=[...new Set(RESCUES.flatMap(r=>(r.fails||[]).filter(p=>cal.iset.has(thIdxOf(p)))))];
   h+=`<div class="gtitle" style="font-size:14px;font-weight:700;color:var(--ink);margin:4px 0 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">Re-runs per job</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="flaky">This chart shows which jobs are flaky: they fail on a first attempt and pass when re-run, and what those re-runs cost. <span class="g-more">Each row is one job. Each cell is one merged pull request. An amber cell means the job failed on the first attempt and passed when someone re-ran it. Hover a cell to see which tests failed in that run. Click a row for every rescue with its pull request and cost. The label under each column is the pull request number and its merge date. Runs that failed and were never re-run — the outlined cells — are failures rather than rescues, so they do not count toward the rate. A rate is only shown once a job has at least 10 first attempts in the selected range. An amber rate means at least 1 in 10 first attempts failed before passing on a re-run; a red rate means at least 1 in 5.</span></div>`+(listed.length?legendH:`<div style="font-size:14px;color:var(--ink2);padding:10px 4px">No job needed a re-run to pass ${cal.inRange}.${failsInRange.length?` ${failsInRange.join(', ')} failed and was never re-run — a failure, not a rescue, so it has no row.`:''}</div>`);
-  h+=listed.map(({j,evIn,failIn,rate})=>{
+<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="flaky">This chart shows which jobs are flaky: they fail on a first attempt and pass when re-run, and what those re-runs cost. <span class="g-more">Each row is one job. Each cell is one merged pull request. An amber cell means the job failed on the first attempt and passed when someone re-ran it. Hover a cell to see which tests failed in that run. Click a row for every rescue with its pull request and cost. The label under each column is the pull request number and its merge date. Runs that failed and were never re-run — the outlined cells — are failures rather than rescues, so they do not count toward the rate. <b>What the rate is:</b> the share of the merged pull requests in this date range where this job failed on its first attempt and passed on a re-run. It counts pull requests, not re-runs, so a job re-run twice inside one pull request counts once. An amber rate means at least 1 in 10 first attempts failed before passing on a re-run; a red rate means at least 1 in 5. <b>Why a rate is sometimes hidden:</b> below 10 first attempts in the range a single re-run swings the percentage so far that the number would mislead more than it tells, so the count is shown on its own instead. <b>What the 95% interval is:</b> the band the true rate is likely to fall in, given how few runs it was measured from. A job at 20% over 10 runs and a job at 20% over 200 runs read the same until you look at the interval; a wide band means there is not yet enough evidence to act on. <b>What minutes wasted is:</b> the run time of the attempt that failed - the machine minutes the re-run threw away. It reads "time unknown" when the failed job never held a runner, because there is nothing to measure in that case.</span></div>`+(listed.length?legendH:`<div style="font-size:14px;color:var(--ink2);padding:10px 4px">No job needed a re-run to pass ${cal.inRange}.${failsInRange.length?` ${failsInRange.join(', ')} failed and was never re-run — a failure, not a rescue, so it has no row.`:''}</div>`);
+  // The job rows and the axis under them scroll as one block, so a cell always
+  // stays above its own date. The card itself is overflow:hidden.
+  h+='<div data-flscroll="1" style="overflow-x:auto">';
+  h+=listed.map(({j,evIn,prIn,failIn,rate})=>{
     const dim=HW!=='all'&&j.lane.toLowerCase()!==HW;
     const col=flakyColor(rate);
-    const wasted=Math.round(evIn.reduce((a,e)=>a+e.wasted,0));
+    const wasted=Math.round(evIn.reduce((a,e)=>a+(e.wasted||0),0));
     const resIdx={};evIn.forEach(e=>{resIdx[thIdxOf(e.pr)]=e});
     const failIdx={};failIn.forEach(p=>{failIdx[thIdxOf(p)]=p});
     const cells=cal.idxs.map(i=>{
-      const st=resIdx[i]?'background:var(--warn)':failIdx[i]?'background:transparent;border:2px solid var(--crit)':'background:#D9E2F0;border:1px solid #B8C6D9';
-      return `<div data-cell="1" data-fljob="${j.id}" data-flidx="${i}" style="flex:1;height:16px;border-radius:3px;min-width:6px;transition:opacity .1s;${st}" onmousemove="flakyCellTip(event,'${j.id}',${i})" onmouseleave="flakyTipHide()"></div>`;
+      const st=resIdx[i]?'background:var(--warn)':failIdx[i]?'background:transparent;border:2px solid var(--crit)':`background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER}`;
+      return `<div data-cell="1" data-fljob="${j.id}" data-flidx="${i}" style="flex:1;height:16px;border-radius:3px;min-width:${CELL_MIN}px;transition:opacity .1s;${st}" onmousemove="flakyCellTip(event,'${j.id}',${i})" onmouseleave="flakyTipHide()"></div>`;
     }).join('');
     const rateTxt=gated
-      ?`${evIn.length} of ${n} &middot; <span style="color:var(--muted)">too few to rate (needs 10)</span>`
-      :`<span style="color:${col==='#64748B'?'var(--ink)':col};font-weight:700">${Math.round(rate*100)}%</span> &middot; ${evIn.length} of ${n} first attempts &middot; <span style="color:var(--muted)">${wasted}m wasted</span>`;
-    return `<div class="issue-row" data-flane="${j.lane}" onclick="openFlakyPop('${j.id}')" style="grid-template-columns:minmax(220px,290px) 1fr 340px;cursor:pointer;opacity:${dim?0.28:1}">
+      ?`${prIn.length} of ${n} runs &middot; <span style="color:var(--muted)">too few to rate (needs 10)</span>`
+      :`<span style="color:${col==='#64748B'?'var(--ink)':col};font-weight:700">${Math.round(rate*100)}%</span> &middot; ${prIn.length} of ${n} runs &middot; <span style="color:var(--muted)" title="${WASTED_TIP}">${wasted}m wasted</span>`;
+    return `<div class="issue-row" data-flane="${j.lane}" onclick="openFlakyPop('${j.id}')" style="grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;cursor:pointer;opacity:${dim?0.28:1}">
       <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${j.name}</div>
       <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane${RUNNER_LABELS[j.id]?` &middot; <span class="mono" style="font-size:12px">${RUNNER_LABELS[j.id]}</span>`:''}</div></div>
       <div style="display:flex;gap:2px;min-width:220px;align-items:center">${cells}</div>
@@ -2055,12 +2284,13 @@ function renderFlaky(){
     </div>`;
   }).join('');
   if(listed.length){
-    h+=`<div data-flaxis="1" style="display:grid;grid-template-columns:minmax(220px,290px) 1fr 340px;gap:16px;align-items:start;padding:0 17px">
+    h+=`<div data-flaxis="1" style="display:grid;grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;gap:16px;align-items:start;padding:0 17px">
       <div style="font-size:12px;color:var(--muted);text-align:right;padding-top:2px">merged pull request &rarr;</div>
-      <div style="display:flex;gap:2px">${cal.idxs.map(i=>`<div style="flex:1;min-width:6px;position:relative;height:88px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div><span style="position:absolute;top:7px;right:50%;transform:rotate(-55deg);transform-origin:top right;display:inline-block;font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap">${TH_COMMITS[i].pr} ${TH_COMMITS[i].date}</span></div>`).join('')}</div>
+      <div style="display:flex;gap:2px">${cal.idxs.map(i=>`<div style="flex:1;min-width:${CELL_MIN}px;position:relative;height:88px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div><span style="position:absolute;top:7px;right:50%;transform:rotate(-60deg);transform-origin:top right;display:inline-block;font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap">${TH_COMMITS[i].pr} ${dayNum(TH_COMMITS[i].date)}</span></div>`).join('')}</div>
       <div style="font-size:12px;color:var(--muted);padding-top:2px">oldest &rarr; newest</div>
     </div>`;
   }
+  h+='</div>';   // end of the scroller opened before the rows
   // Facts only under the strips; the rules (never-re-run cells, the 10-attempt gate, amber/red thresholds) live in the section's How to read panel.
   const footFacts=[];
   if(listed.length)footFacts.push(`The other ${others} of ${JOBS.length} jobs needed no re-run ${cal.inRange}.`);
@@ -2091,7 +2321,7 @@ function openFlakyTestPop(testName,jobId){
   $('#tip').style.display='none';
   const cal=flakyCalc();
   const inPrs=ft.prs.filter(p=>cal.iset.has(thIdxOf(p)));
-  const wasted=Math.round(inPrs.reduce((a,p)=>{const e=j.events.find(x=>x.pr===p);return a+(e?e.wasted:0)},0));
+  const wasted=Math.round(inPrs.reduce((a,p)=>{const e=j.events.find(x=>x.pr===p);return a+((e&&e.wasted)||0)},0));
   const share=FLAKY_TESTS.filter(x=>x.job===jobId&&x.test!==testName&&x.prs.some(p=>inPrs.includes(p)));
   const rowsH=inPrs.map(p=>{
     const e=j.events.find(x=>x.pr===p)||{};
@@ -2123,27 +2353,41 @@ function openFlakyPop(id){
   const cal=flakyCalc();
   const evIn=j.events.filter(e=>cal.iset.has(thIdxOf(e.pr)));
   const failIn=(j.fails||[]).filter(p=>cal.iset.has(thIdxOf(p)));
-  const wasted=Math.round(evIn.reduce((a,e)=>a+e.wasted,0));
-  const rateBit=cal.n>=10
-    ?(()=>{const ci=wilsonCI(evIn.length,cal.n);return `(${Math.round(evIn.length/cal.n*100)}%, 95% interval ${Math.round(ci[0]*100)}&ndash;${Math.round(ci[1]*100)}%)`})()
-    :'(too few first attempts in this range to rate)';
+  const wasted=Math.round(evIn.reduce((a,e)=>a+(e.wasted||0),0));
+  const prIn=[...new Set(evIn.map(e=>e.pr))];   // pull requests that needed a re-run, not re-runs
+  const ci=cal.n>=10?wilsonCI(prIn.length,cal.n):null;
+  const unknown=evIn.filter(e=>e.wasted==null).length;
+  // The facts stay on the page; what the numbers mean moves behind the same How to read button
+  // every card uses, so the popup opens on three short sentences instead of a paragraph.
+  const rateLead=ci
+    ? `That happened in ${prIn.length} of the ${cal.n} pull requests merged in this range, which is <b>${Math.round(prIn.length/cal.n*100)}%</b>.`
+    : `That happened in ${prIn.length} of the ${cal.n} pull requests merged in this range.`;
+  const wastedLead=evIn.length?` The re-runs used <b>${wasted} minute${wasted===1?'':'s'}</b> of runner time.`:'';
+  const rateMore=ci
+    ? `That share is measured from ${cal.n} runs, so the true rate is likely to sit somewhere between ${Math.round(ci[0]*100)}% and ${Math.round(ci[1]*100)}%. A wide band means there are still too few runs to lean on the number.`
+    : `Fewer than 10 first attempts fall in this range, so no percentage is shown: a single re-run would swing it too far to mean anything.`;
+  const wastedMore=evIn.length
+    ? ` Those minutes are the time the failed attempts had already held a runner before they were thrown away and started over. It is machine time that produced nothing, because the work had to be done again.${unknown?` ${unknown} of them never got a runner at all, so ${unknown===1?'it adds':'they add'} nothing to the total.`:''}`
+    : '';
   const rowsH=evIn.map(e=>{
     const real=COMMITS.some(c=>'#'+c.hash===e.pr);
     const chip=real?`<button onclick="closeWkPop();inspectPR('${e.pr.slice(1)}')" style="font:600 13px var(--mono);background:var(--elevated);border:1px solid var(--border);color:var(--accent);padding:3px 9px;border-radius:6px;cursor:pointer">${e.pr}</button>`
       :`<span class="mono" style="font-size:13px;color:var(--ink2)">${e.pr}</span>`;
     return `<div style="display:grid;grid-template-columns:80px 64px 1fr auto;gap:12px;align-items:center;padding:8px 4px;border-top:1px solid var(--grid)">
-      <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${e.date}</span>
+      <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${dayNum(e.date)}</span>
       <span style="font-size:13px;color:var(--ink2)">${e.cause}</span>
-      <span class="mono" style="font-size:13px;color:var(--warn)">${e.wasted}m wasted</span></div>`;
+      <span class="mono" style="font-size:13px;color:var(--warn)" title="${WASTED_TIP}">${e.wasted==null?'time unknown':e.wasted+'m wasted'}</span></div>`;
   }).join('');
   $('#wkpop-body').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
       <div style="font-size:17px;font-weight:700;color:var(--ink)">${j.name}</div>
       <button onclick="closeWkPop()" style="background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer">&#10005;</button></div>
-    <div style="font-size:13px;color:var(--ink2);margin-bottom:12px;line-height:1.5"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane &middot; ${cal.label.toLowerCase()} &middot; failed first and passed on a re-run in ${evIn.length} of ${cal.n} merged pull requests ${rateBit} &middot; ${wasted} machine minutes wasted in total</div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:6px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane &middot; ${cal.label.toLowerCase()}</div>
+    <div data-guide="flakypop" data-guide-kind="number" style="font-size:13px;color:var(--ink2);margin-bottom:10px;line-height:1.55">This job failed on its first try and then passed when the same commit was run again. ${rateLead}${wastedLead}<span class="g-more">${rateMore}${wastedMore} Every run listed below is one of those re-runs, with the minutes its own failed attempt threw away.</span></div>
     ${evIn.length?rowsH:'<div style="font-size:13px;color:var(--muted)">No re-runs inside this date range.</div>'}
-    ${failIn.length?`<div style="font-size:13px;color:var(--crit);margin-top:10px">This job also failed in ${failIn.join(', ')} and was never re-run &mdash; that run counts as a failure, not a rescue.</div>`:''}
+    ${failIn.length?`<div style="font-size:13px;color:var(--crit);margin-top:10px;line-height:1.55"><b>${failIn.length}</b> other run${failIn.length===1?'':'s'} of this job failed and ${failIn.length===1?'was':'were'} never re-run (the outlined cells): ${failIn.join(', ')}. ${failIn.length===1?'That is a failure':'Those are failures'}, not ${failIn.length===1?'a rescue':'rescues'}, so ${failIn.length===1?'it is':'they are'} not counted in the rate above.</div>`:''}
 `;
+  initGuides();   // build the How to read panel now, rather than waiting on the observer's microtask
   $('#wkpop').style.display='flex';
 }
 
@@ -2269,7 +2513,10 @@ function median(list){
 function jobSlug(row){
   if(row.lane==='Build')return'pkg';
   if(row.flavor)return row.worker==null?row.flavor:`${row.flavor}#${row.worker}`;
-  return String(row.name||'job').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+  // The jobs view calls it name, the rescues view calls it job_name. Reading only one of them
+  // made every flavourless rescue row slug to the literal string "job", so hundreds of unrelated
+  // jobs merged into one row that took its title from whichever arrived first.
+  return String(row.name||row.job_name||'job').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
 }
 
 // "CPU Pretrain Tests (cpu-unit) / Execute Tests (2) / cpu-unit" is the job's
@@ -2388,7 +2635,11 @@ function adaptViews(v){
   });
 
   // ---- suite health: one point per suite per merged pull request ----
-  const prIndex={};commits.forEach((c,i)=>{prIndex[c.hash]=i});
+  // Oldest first, the direction every chart on this page draws in. commits is newest-first
+  // because the bar charts reverse it themselves; the flaky strip and the suite-health series
+  // index into TH_COMMITS directly, so their order has to be the drawing order.
+  const thOrder=[...commits].reverse();
+  const prIndex={};thOrder.forEach((c,i)=>{prIndex[c.hash]=i});
   const byFlavor={};
   suites.forEach(s=>{
     if(!s.flavor||!(String(s.pr) in prIndex))return;
@@ -2409,21 +2660,45 @@ function adaptViews(v){
       maxY:Math.ceil(top*1.2),yInterval:Math.max(1,Math.ceil(top*1.2/5)),
       data,anomalyRange:null,pills:[]};
   });
-  const thCommits=commits.map(c=>({hash:c.hash,pr:c.pr,date:(times[c.hash]||'').split(' ').slice(0,2).join(' ')}));
+  const thCommits=thOrder.map(c=>({hash:c.hash,pr:c.pr,date:(times[c.hash]||'').split(' ').slice(0,2).join(' ')}));
 
   // ---- rescued jobs and the tests that failed inside them ----
+  // The view carries both outcomes under one shape and tells them apart with `rescued`: true is
+  // a job that failed and passed on a re-run, false is one that failed and was never re-run. The
+  // second is a failure, not a rescue, and belongs in `fails`, which the strip already draws as
+  // an outlined cell. Pushing both into `events` counted every failure as a re-run.
   const rescueByJob={};
   rescues.forEach(r=>{
     const id=r.flavor?(r.worker==null?r.flavor:`${r.flavor}#${r.worker}`):jobSlug(r);
-    const g=rescueByJob[id]=rescueByJob[id]||{id,name:r.job_name||id,lane:r.lane||'',events:[]};
+    const g=rescueByJob[id]=rescueByJob[id]||{id,name:r.job_name||id,lane:r.lane||'',events:[],fails:[]};
+    if(!r.rescued){
+      if(!g.fails.includes('#'+r.pr))g.fails.push('#'+r.pr);
+      return;
+    }
     g.events.push({pr:'#'+r.pr,date:(times[String(r.pr)]||'').split(' ').slice(0,2).join(' '),
-      wasted:mins(r.wasted_seconds),cause:r.final_conclusion||r.failed_conclusion||''});
+      // null means the failed job never held a runner, so there is nothing to measure. Passing
+      // it through mins() would turn "unknown" into a confident 0m.
+      wasted:r.wasted_seconds==null?null:mins(r.wasted_seconds),
+      cause:r.failed_conclusion||r.final_conclusion||''});
   });
 
+  // Two things this list has to get right, both invisible while the view is empty.
+  //   1. Only tests from an attempt that was actually rescued belong under "Flakiest tests". The
+  //      view emits a row for every failed test of every stored event, rescued or not, and carries
+  //      no flag of its own, so the answer comes from the rescue row it shares a run, a job name
+  //      and a failed attempt with.
+  //   2. The job id has to be the same id the rescue groups use, or the card cannot find the job
+  //      the test belongs to and drops the row. A flavourless row falls back to the job name, the
+  //      same way jobSlug now resolves it.
+  const rescuedKeys=new Set(rescues.filter(r=>r.rescued)
+    .map(r=>`${r.run_id}|${r.job_name}|${r.failed_attempt}`));
   const flakyByTest={};
   rescueTests.forEach(x=>{
+    if(!rescuedKeys.has(`${x.run_id}|${x.job_name}|${x.failed_attempt}`))return;
     const key=x.classname?`${x.classname}.${x.name}`:x.name;
-    const id=x.flavor?(x.worker==null?x.flavor:`${x.flavor}#${x.worker}`):'';
+    // jobSlug prefers `name`, and in this table `name` is the TEST's name, not the job's. Hand it
+    // the job name on its own so a flavourless row slugs to the id its rescue group uses.
+    const id=x.flavor?(x.worker==null?x.flavor:`${x.flavor}#${x.worker}`):jobSlug({job_name:x.job_name});
     const f=flakyByTest[key]=flakyByTest[key]||{test:x.name,job:id,prs:[],
       cause:(x.failure_message||'').split('\n')[0].slice(0,120)};
     if(!f.prs.includes('#'+x.pr))f.prs.push('#'+x.pr);
@@ -2443,6 +2718,7 @@ function applyModel(m,generatedAt){
   TH_CATEGORIES=m.thCategories;TH_COMMITS=m.thCommits;
   RESCUES=m.rescues;FLAKY_TESTS=m.flaky;
   TESTS={};                                   // per-test detail is not in the month views
+  STEPS={};                                   // nor are per-step names and timings
   if(generatedAt){const d=new Date(generatedAt);if(!isNaN(d))TODAY=d}
 }
 

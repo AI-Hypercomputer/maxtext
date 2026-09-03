@@ -23,8 +23,13 @@ setTimeout(()=>{
     if(i<0)return null;
     return rs.slice(i+1).find(r=>r.querySelector(':scope > td .xarr'))||null;
   };
+  const catNames=['Infrastructure','Build','TPU Tests','GPU Tests','CPU Tests'];
+  const totalsOfCat=name=>{const rs=rows();const i=rs.findIndex(r=>{const h=r.querySelector(':scope > td.cat-head');return h&&txt(h).startsWith(name)});
+    if(i<0)return[];const out=[];for(const r of rs.slice(i+1)){if(r.querySelector(':scope > td.cat-head'))break;if(r.querySelector(':scope > td .xarr'))out.push(parseFloat(cell(r,7)))}return out};
   ok('default = grouped: 5 category headers + 18 job rows + 18 step drawers',heads()===5&&mains().length===18&&rows().length===41);
-  ok('default first job = Analyze Code Changes (infra group)',cell(mains()[0],0).includes('Analyze Code Changes'));
+  ok('default sort = Total ascending: first Infrastructure job is Gate and Formalize Parameters 0.2m',cell(mains()[0],0).includes('Gate and Formalize Parameters')&&cell(mains()[0],7)==='0.2m');
+  ok('default sort marks the Total header with the ascending arrow',txt(d.querySelector(`th[data-jt="${jid}"][data-jtkey="total"] .jtarr`))==='\u25B2');
+  ok('default sort is ascending inside every category',(()=>catNames.every(cn=>{const v=totalsOfCat(cn);return v.every((x,i)=>i===0||v[i-1]<=x)}))());
   w.jtSort(jid,'total');
   ok('sort by Total keeps all 5 category headers and 18 job rows',heads()===5&&mains().length===18);
   ok('sorted inside the category: TPU group leads with tpu-integration 37.0m',cell(firstOfCat('TPU Tests'),0).includes('tpu-integration')&&cell(firstOfCat('TPU Tests'),7)==='37.0m');
@@ -48,7 +53,7 @@ setTimeout(()=>{
   ok('hosted jobs say ubuntu-latest',machineOf('Pre-commit Linters').includes('ubuntu-latest'));
   ok('every job names a machine',mains().every(r=>cell(r,2).length>4));
   ok('the pool is stable across renders',(()=>{const a=machineOf('cpu-unit');w.jtSort(jid,'q');w.jtSort(jid,'');return machineOf('cpu-unit')===a})());
-  ok('legend hint sentence present',d.querySelector('#modal').textContent.includes('Sorting keeps the category headings and orders the jobs inside each one')&&d.querySelector('#modal').textContent.includes('Click Queue, Image, Env, Run, or Total to sort the jobs by that time')&&d.querySelector('#modal').textContent.includes('Click the Job header to restore the grouped order.'));
+  ok('legend hint sentence present',d.querySelector('#modal').textContent.includes('Sorting keeps the category headings and orders the jobs inside each one')&&d.querySelector('#modal').textContent.includes('The table opens sorted by Total, shortest first.')&&d.querySelector('#modal').textContent.includes('Click Queue, Image, Env, Run, or Total to sort by that time; click the same header again to flip the order.')&&d.querySelector('#modal').textContent.includes('Click the Job header to restore the original job order.'));
   // per-test JUnit tables inside the drawers still work after a job sort
   w.jtSort(jid,'total');
   const tt=d.getElementById('jt-xrow-4920-5-body');

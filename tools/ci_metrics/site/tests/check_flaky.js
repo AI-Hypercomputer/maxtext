@@ -14,25 +14,41 @@ setTimeout(()=>{
   let rows=host.querySelectorAll('[data-flane]');
   ok('3 rows in 14-day window',rows.length===3);
   ok('20 cells per row',rows[0].querySelectorAll('[data-cell]').length===20);
-  ok('gpu-i first at 15% (3 of 20)',rows[0].textContent.includes('gpu-integration')&&rows[0].textContent.includes('15%')&&rows[0].textContent.includes('3 of 20 first attempts'));
+  ok('gpu-i first at 15% (3 of 20)',rows[0].textContent.includes('gpu-integration')&&rows[0].textContent.includes('15%')&&rows[0].textContent.includes('3 of 20 runs'));
   ok('gpu-i: 3 amber cells in window',Array.from(rows[0].querySelectorAll('[data-cell]')).filter(c=>c.getAttribute('style').includes('var(--warn)')).length===3);
   const rowT=Array.from(rows).find(r=>r.textContent.includes('tpu-unit'));
   ok('tpu-pre-u: 1 amber + 1 outlined fail cell',
     Array.from(rowT.querySelectorAll('[data-cell]')).filter(c=>c.getAttribute('style').includes('var(--warn)')).length===1&&
     Array.from(rowT.querySelectorAll('[data-cell]')).filter(c=>c.getAttribute('style').includes('2px solid var(--crit)')).length===1);
-  ok('caption shows window endpoints',host.textContent.includes('#4894 (Aug 06)')&&host.textContent.includes('#4908 (Aug 20)'));
+  ok('caption shows window endpoints',host.textContent.includes('#4894 (08/06)')&&host.textContent.includes('#4908 (08/20)'));
   // popup respects the window
   w.openFlakyPop('gpu-i');
   const body=d.querySelector('#wkpop-body');
-  ok('popup: 3 of 20 + last 14 days',body.textContent.includes('3 of 20 merged pull requests')&&body.textContent.includes('the last 14 days'));
-  ok('popup wilson for 3/20 = 5-36%',/interval 5[–-]36%/.test(body.textContent));
+  ok('popup: 3 of 20 + last 14 days',body.textContent.includes('3 of the 20 pull requests merged in this range')&&body.textContent.includes('the last 14 days'));
+  ok('popup says in plain words what happened',body.textContent.includes('failed on its first try and then passed when the same commit was run again'));
+  ok('popup wilson for 3/20 = 5-36%',/likely to sit somewhere between 5% and 36%/.test(body.textContent));
+  ok('popup leads with the minutes and hides the definition behind How to read',
+     body.textContent.includes('of runner time')&&
+     !!body.querySelector('[data-guide="flakypop"]')&&
+     !!body.querySelector('[data-gbtn="flakypop"]'));
+  ok('the definition is in the popup guide panel',(()=>{
+     const p=body.querySelector('#guide-flakypop');
+     return !!p&&p.textContent.includes('machine time that produced nothing, because the work had to be done again')})());
+  ok('the guide panel labels the list under it',(()=>{
+     const p=body.querySelector('#guide-flakypop');
+     return !!p&&p.textContent.includes("with the minutes its own failed attempt threw away")})());
+  ok('the popup guide starts closed and opens on click',(()=>{
+     const p=body.querySelector('#guide-flakypop'),b=body.querySelector('[data-gbtn="flakypop"]');
+     if(!p||!b||!p.hidden)return false;
+     b.onclick(); const opened=!p.hidden; b.onclick();
+     return opened&&p.hidden})());
   ok('popup lists only window events',(body.innerHTML.match(/m wasted/g)||[]).length===3);
   w.closeWkPop();
   // 30-day range -> full 30
   d.querySelector('#date-range').value='30';w.renderFlaky();
   rows=d.querySelectorAll('#flaky [data-flane]');
   ok('30d: 30 cells, 8 rescues, 106m',rows[0].querySelectorAll('[data-cell]').length===30&&host.textContent.includes('8 failed first attempts')&&host.textContent.includes('106 extra machine minutes'));
-  ok('30d: gpu-i 17% (5 of 30)',rows[0].textContent.includes('17%')&&rows[0].textContent.includes('5 of 30 first attempts'));
+  ok('30d: gpu-i 17% (5 of 30)',rows[0].textContent.includes('17%')&&rows[0].textContent.includes('5 of 30 runs'));
   // 7-day range -> 14 PRs, pathways row drops out
   d.querySelector('#date-range').value='7';w.renderFlaky();
   rows=d.querySelectorAll('#flaky [data-flane]');
@@ -77,8 +93,25 @@ setTimeout(()=>{
   ok('axis row exists',!!axis);
   const axLabels=axis?axis.querySelectorAll('span'):[];
   ok('axis: one hash label per cell (20 at 14d)',axLabels.length===20);
-  ok('axis: first #4894 Aug 06, last #4908 Aug 20 (dates only)',axLabels[0]&&axLabels[0].textContent==='#4894 Aug 06'&&axLabels[axLabels.length-1].textContent==='#4908 Aug 20');
-  ok('axis: labels rotated, >=12px',Array.from(axLabels).every(s=>s.getAttribute('style').includes('rotate(-55deg)')&&s.getAttribute('style').includes('font-size:12px')));
+  ok('axis: oldest #4894 08/06 on the left, newest #4908 08/20 on the right',axLabels[0]&&axLabels[0].textContent==='#4894 08/06'&&axLabels[axLabels.length-1].textContent==='#4908 08/20');
+  ok('axis: labels rotated far enough apart to read',Array.from(axLabels).every(s=>s.getAttribute('style').includes('rotate(-60deg)')&&s.getAttribute('style').includes('font-size:12px')));
+  // The 34px drift: the first grid column was minmax(220px,290px), so it sized from its own
+  // content - wide on a job row, narrow on the axis - and the cell strip started in a different
+  // place on each. Same template and same min-width in both is what keeps them lined up.
+  ok('axis and job rows share one grid geometry',(()=>{
+    const ax=d.querySelector('#flaky [data-flaxis]'), row=d.querySelector('#flaky .issue-row');
+    const g=e=>/grid-template-columns:([^;"]+)/.exec(e.getAttribute('style'))[1].trim();
+    const m=e=>/min-width:(\d+)px/.exec(e.getAttribute('style'))[1];
+    return !!ax&&!!row&&g(ax)===g(row)&&m(ax)===m(row)&&!/minmax/.test(g(ax))})());
+  ok('the strip width leaves room for the row padding and border',(()=>{
+    const row=d.querySelector('#flaky .issue-row');
+    const min=+/min-width:(\d+)px/.exec(row.getAttribute('style'))[1];
+    const cells=row.querySelectorAll('[data-cell]').length;
+    return min===290+16+(cells*20+(cells-1)*2)+16+340+34})());
+  ok('axis: columns 20px apart so the rotated lines do not run together',Array.from(d.querySelectorAll('[data-flaxis] [style*="min-width"]')).every(e=>parseInt(/min-width:(\d+)px/.exec(e.getAttribute('style'))[1],10)>=20));
+  ok('axis direction matches the strip: cells run oldest to newest',(()=>{const row=d.querySelector('.issue-row [data-cell]');if(!row)return false;
+    const idxs=[...d.querySelectorAll('.issue-row')][0].querySelectorAll('[data-flidx]');
+    return +idxs[0].getAttribute('data-flidx')< +idxs[idxs.length-1].getAttribute('data-flidx')})());
   ok('axis: title says merged pull request',axis.textContent.includes('merged pull request')&&axis.textContent.includes('oldest'));
   // tests list (now the ranked summary at the top of the card; window back at default 14d here)
   let tRows=host.querySelectorAll('[data-ftlane]');
@@ -95,7 +128,13 @@ setTimeout(()=>{
   d.querySelector('#date-range').value='custom';
   d.querySelector('#d-from').value='2026-08-17';d.querySelector('#d-to').value='2026-08-18';
   w.renderFlaky();
-  ok('tests table custom 2d: zero-state',host.textContent.includes('No test needed a re-run to pass in the selected date range'));
+  // The zero-state has to say which of the two it is: nothing was re-run, or things were re-run
+  // and none of them left a record naming a test. Claiming no test needed a re-run when 19 jobs
+  // did is the one thing it must never say.
+  ok('tests table custom 2d: zero-state names the real reason',(()=>{
+    const t=host.textContent, any=/rescued <b?>?\s*\d+ failed first attempt/.test(host.innerHTML);
+    return t.includes('No job needed a re-run to pass in the selected date range')
+        || /Re-runs rescued \d+ runs? in the selected date range, but none of them left a record naming the test that failed/.test(t)})());
   d.querySelector('#date-range').value='14';w.renderFlaky();
   const small=(host.innerHTML.match(/font-size:(\d+(?:\.\d+)?)px/g)||[]).map(s=>parseFloat(s.slice(10))).filter(v=>v<12);
   ok('no font below 12px in card',small.length===0);
@@ -108,7 +147,47 @@ setTimeout(()=>{
   w.initGuides();  // the observer re-attaches guides on a microtask; force it so the assert below sees the rebuilt panel
   const flFoot=host.querySelector('[data-flfoot]'),flPanel=d.getElementById('guide-flaky');
   ok('footnote states the coverage fact only',!!flFoot&&/^The other \d+ of \d+ jobs needed no re-run in the (last \d+ days|selected date range)\.$/.test(flFoot.textContent.trim()));
-  ok('rules moved into the guide panel',!!flPanel&&flPanel.textContent.includes('do not count toward the rate')&&flPanel.textContent.includes('at least 10 first attempts')&&flPanel.textContent.includes('An amber rate means at least 1 in 10'));
+  ok('rules moved into the guide panel',!!flPanel&&flPanel.textContent.includes('do not count toward the rate')&&flPanel.textContent.includes('below 10 first attempts')&&flPanel.textContent.includes('An amber rate means at least 1 in 10'));
+  ok('panel defines the rate as a share of pull requests, not of re-runs',
+     flPanel.textContent.includes('It counts pull requests, not re-runs, so a job re-run twice inside one pull request counts once'));
+  ok('panel explains why a rate can be hidden and what the interval means',
+     flPanel.textContent.includes('a single re-run swings the percentage')&&
+     flPanel.textContent.includes('the band the true rate is likely to fall in'));
+  ok('panel defines minutes wasted, including the unknown case',
+     flPanel.textContent.includes('the run time of the attempt that failed')&&
+     flPanel.textContent.includes('never held a runner'));
+  ok('the headline never quotes a cell count the strip does not draw',(()=>{
+     const host=d.getElementById('flaky');
+     const cells=[...host.querySelectorAll('[data-cell]')];
+     const outlined=cells.filter(c=>/solid var\(--crit\)/.test(c.getAttribute('style'))).length;
+     const amber=cells.filter(c=>/var\(--warn\)/.test(c.getAttribute('style'))).length;
+     const said=/failed <b>(\d+)<\/b> time/.exec(host.innerHTML);
+     const rescued=/rescued <b>(\d+) failed first attempt/.exec(host.innerHTML);
+     return (!outlined?!said:said&&+said[1]===outlined)&&rescued&&+rescued[1]===amber})());
+  ok('a job that was never re-run is a failure, not a rescue',(()=>{
+     const rows=w.flakyCalc().rows;
+     return rows.every(r=>r.evIn.every(e=>!r.j.fails||!r.j.fails.includes(e.pr)))&&
+            rows.some(r=>r.failIn.length>0)})());
+  ok('the wasted number carries the same definition as a tooltip',
+     [...d.querySelectorAll('[title]')].some(e=>(e.getAttribute('title')||'').startsWith('The run time of the attempt that failed')));
+  // the reported symptom: a rate above 100% and a NaN interval
+  ok('wilsonCI refuses inputs that cannot describe a share',
+     w.wilsonCI(5,0)===null&&w.wilsonCI(161,41)===null&&w.wilsonCI(-1,10)===null&&
+     w.wilsonCI(3,20).every(v=>!isNaN(v)));
+  ok('no rate anywhere exceeds 100% and no interval prints NaN',(()=>{
+     const t=d.getElementById('flaky').textContent;
+     if(/NaN/.test(t))return false;
+     return (t.match(/(\d+)%/g)||[]).every(m=>parseInt(m,10)<=100)})());
+  ok('a job re-run twice in one pull request counts once',(()=>{
+     const j=w.eval('RESCUES')[0];
+     const before=w.flakyCalc().rows.find(r=>r.j.id===j.id);
+     const n=before?before.prIn.length:0;
+     if(!n)return true;                        // nothing of this job falls in the range
+     j.events.push({...before.evIn[0]});       // same pull request, a second re-run
+     const after=w.flakyCalc().rows.find(r=>r.j.id===j.id);
+     const same=after.prIn.length===n&&after.evIn.length===before.evIn.length+1;
+     j.events.pop();
+     return same})());
   ok('Flakiest tests lead lives in a guide panel, no window jargon',!!d.getElementById('guide-flaky-sum')&&d.getElementById('guide-flaky-sum').textContent.includes('Tests with the most such runs come first')&&d.getElementById('guide-flaky-sum').textContent.includes('"3 of 20 runs" means that in 3 of those 20 runs the test failed on the first attempt')&&d.getElementById('guide-flaky-sum').textContent.includes('in the other 17 runs it passed first time')&&d.getElementById('guide-flaky-sum').textContent.includes('The 20 is the same for every row')&&host.querySelector('.sum-head').textContent.includes('Failed first try')&&d.getElementById('guide-flaky-sum').textContent.includes('in the last 14 days')&&!host.textContent.includes('this window'));
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail?1:0);
