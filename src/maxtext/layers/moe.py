@@ -235,6 +235,51 @@ def valid_expert_mask(indices, num_experts):
   return (indices >= 0) & (indices < num_experts)
 
 
+def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
+  """Sums the two largest scores along the last axis, accumulating in float32.
+
+  This is mathematically equivalent to:
+    `jnp.sum(jax.lax.top_k(scores_grouped, k=2)[0].astype(jnp.float32), axis=-1)`
+  but avoids invoking `jax.lax.top_k`.
+
+  Motivation:
+    On TPU, `jax.lax.top_k` requires a sort. When the sorted dimension is small
+    (e.g., DeepSeek-V3 has 256 experts divided into 8 groups, or 32 experts per
+    group), it falls outside XLA:TPU's `SortPrefixFusion` requirements (which
+    expects a power-of-two dimension >= 256). Consequently, XLA falls back to
+    `BitonicSortEmitter`, which pads 32 elements into 128-wide vector registers
+    and executes multiple compare-and-exchange stages, adding noticeable
+    overhead per MoE layer.
+    Using two sequential `jnp.max` reductions (with the first maximum masked out)
+    replaces the sort with lightweight, fusible elementwise reductions.
+
+  Args:
+    scores_grouped: Array of shape `(..., n_routing_groups, experts_per_group)`.
+
+  Returns:
+    float32 array of shape `(..., n_routing_groups)` containing the sum of the
+    two largest scores in each routing group.
+  """
+  if scores_grouped.shape[-1] < 2:
+    raise ValueError("Each routing group needs at least 2 experts, got" f" {scores_grouped.shape[-1]}.")
+
+  # 1. Find the first maximum along the group axis.
+  max_1 = jnp.max(scores_grouped, axis=-1)
+
+  # 2. Mask out the element at the first maximum to find the second maximum.
+  # Note: `jnp.argmax` selects the lowest index in case of ties. Masking only
+  # that single index ensures that groups with tied top scores (e.g., [5.0, 5.0])
+  # correctly retain the second 5.0 as max_2, yielding 2 * max (identical to
+  # `top_k`). Comparing against `broadcasted_iota` keeps the mask fusible without
+  # materializing intermediate arrays.
+  argmax_1 = jnp.argmax(scores_grouped, axis=-1)[..., None]
+  lane = jax.lax.broadcasted_iota(argmax_1.dtype, scores_grouped.shape, scores_grouped.ndim - 1)
+  max_2 = jnp.max(jnp.where(lane == argmax_1, -jnp.inf, scores_grouped), axis=-1)
+
+  # 3. Cast both values to float32 before summation.
+  return max_1.astype(jnp.float32) + max_2.astype(jnp.float32)
+
+
 def calculate_load_balance_updates(top_k_indices, num_experts, rate):
   """
   Computes a bias adjustment update based on expert load.
@@ -860,8 +905,7 @@ class RoutedMoE(nnx.Module):
         gate_logits,
         gate_logits.shape[:-1] + (self.config.n_routing_groups, -1),
     )
-    top2_in_group_vals, _ = jax.lax.top_k(scores_grouped, k=2)
-    group_scores = jnp.sum(jnp.astype(top2_in_group_vals, jnp.float32), axis=-1)
+    group_scores = _top_2_in_group_sum(scores_grouped)
     _, group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)
 
     # Mask selected groups so that only those experts are considered.
