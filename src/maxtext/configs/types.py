@@ -607,11 +607,11 @@ class LogitsAndLoss(BaseModel):
   lm_head_weight_grad_in_kernel_order: bool | None = Field(
       None,
       description=(
-          "Compute the untied LM head's weight gradient directly in the kernel's stored axis order via a "
-          "custom_vjp, so autodiff emits no transpose after the gradient dot. Recovers the weight-gradient "
-          "reduce-scatter that shard_mode=explicit otherwise loses, leaving the stored kernel and its "
-          "initialization untouched. No effect under shard_mode=auto. None means on for an untied model "
-          "under shard_mode=explicit and off everywhere else."
+          "Trace the untied LM head's dot inside a jax.sharding.auto_axes region so that XLA folds the "
+          "transpose back into the gradient dot and the weight gradient comes out in the kernel's stored "
+          "axis order. Recovers the weight-gradient reduce-scatter that shard_mode=explicit otherwise loses, "
+          "leaving the stored kernel, its initialization and the arithmetic untouched. No effect under "
+          "shard_mode=auto. None means on for an untied model under shard_mode=explicit and off everywhere else."
       ),
   )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
@@ -1268,19 +1268,18 @@ class LayoutAndSharding(BaseModel):
       False,
       description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
   )
-  dense_weight_grad_in_kernel_order: bool = Field(
-      False,
+  dense_weight_grad_in_kernel_order: bool | None = Field(
+      None,
       description=(
-          "Compute the per-layer attention and MLP projection weight gradients directly in each kernel's stored "
-          "axis order via a custom_vjp, so autodiff emits no transpose after the gradient dot. This is the "
-          "in-loop counterpart of lm_head_weight_grad_in_kernel_order, but unlike that flag it is a trade rather "
-          "than a fix, so it defaults off. Under shard_mode=explicit the Sharding custom-calls decouple the "
-          "gradient's layout from the stored parameter's, leaving XLA free to pick it; this flag declines that "
-          "freedom and reproduces shard_mode=auto's layout op for op. Measured, that is worth roughly -0.3% on "
-          "gemma3 and -0.2% on deepseek, whose scanned gradient stacks are 3 and 1 deep, and costs 0.06%-0.60% on "
-          "the models whose stacks are 16 deep (docs/guides/optimization/shard_mode_performance.md section 4.8). "
-          "Measure before turning it on for anything else. Stored kernels and their initialization are untouched. "
-          "No effect under shard_mode=auto or on quantized layers."
+          "Trace the per-layer attention and MLP projection dots inside a jax.sharding.auto_axes region so that "
+          "XLA folds the transpose back into the gradient dot and each weight gradient comes out in its kernel's "
+          "stored axis order. This is the in-loop counterpart of lm_head_weight_grad_in_kernel_order and, like it, "
+          "None means on wherever it can act: shard_mode=explicit, where the Sharding custom-call on every dot "
+          "output blocks that fold. Without it explicit is 0.33%-1.48% slower than auto at every measured layer "
+          "count that is not a multiple of 8; with it explicit lands within 0.2% of auto everywhere "
+          "(docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels, their initialization "
+          "and the arithmetic are untouched, so gradients are bit-identical to the default rule. No effect under "
+          "shard_mode=auto, where XLA folds the transpose itself, or on quantized layers."
       ),
   )
   internal_compile: bool = Field(
@@ -3311,6 +3310,20 @@ class MaxTextConfig(
       raise ValueError(
           "lm_head_weight_grad_in_kernel_order only applies to the untied LM head, but logits_via_embedding is True."
       )
+    return self
+
+  @model_validator(mode="after")
+  def resolve_dense_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Resolve the in-loop counterpart of the LM-head flag.
+
+    Same barrier, same shape of fix, same default rule: on wherever it can act.
+    The two are independent and additive -- on llama2 at 18 layers, explicit
+    costs +1.098% against auto with neither flag, +0.621% with this one alone,
+    +0.429% with the LM-head flag alone and +0.005% with both
+    (docs/guides/optimization/shard_mode_performance.md section 4.8).
+    """
+    if self.dense_weight_grad_in_kernel_order is None:
+      self.dense_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT
     return self
 
   @model_validator(mode="after")
