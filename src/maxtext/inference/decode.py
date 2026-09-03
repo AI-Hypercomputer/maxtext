@@ -24,11 +24,12 @@ from absl import app
 
 from maxtext.configs import pyconfig
 from maxtext.common import profiler
-from maxtext.common.gcloud_stub import jetstream
+from maxtext.common.gcloud_stub import jetstream, is_decoupled
 from maxtext.inference.maxengine import maxengine
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_utils
+from maxtext.utils import max_logging
 
 _config_lib, engine_api, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
 # Placeholder: internal
@@ -119,6 +120,13 @@ def main(argv: Sequence[str]) -> None:
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
+  token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+  engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+  if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+    raise RuntimeError(
+        "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; decode requires the JetStream tokenizer. "
+        "Unset DECOUPLE_GCLOUD or install JetStream to run decode."
+    )
 
   try:
     # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
@@ -218,6 +226,21 @@ def main(argv: Sequence[str]) -> None:
   # Get results
   for i in range(_NUM_STREAMS):
     results = [t.get_result_at_slot(i).tokens.item() for t in sampled_tokens_list]
+    max_logging.debug(f"raw token ids for stream {i}: {results}")
+
+    eos_token_id = None
+    if hasattr(tokenizer_model, "tokenizer") and hasattr(tokenizer_model.tokenizer, "eos_token_id"):
+      eos_token_id = tokenizer_model.tokenizer.eos_token_id
+
+    max_logging.debug(f"using eos_token_id: {eos_token_id}")
+
+    if eos_token_id is not None and eos_token_id in results:
+      max_logging.info(
+          f"EOS token {eos_token_id} found at index {results.index(eos_token_id)};"
+          f" output sequence truncated to length {results.index(eos_token_id) + 1}"
+      )
+      results = results[: results.index(eos_token_id) + 1]  # Include the EOS token in the output
+
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
 

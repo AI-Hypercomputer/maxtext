@@ -271,7 +271,6 @@ def get_data(golden_data_point, config):
   model_prefix = config.model_name.split("-")[0]
 
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
-  model_prefix = config.model_name.split("-")[0]
   if config.use_multimodal:
     assert "pixel_values" in golden_data_point, "no image found in golden data while use_multimodal=True"
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)

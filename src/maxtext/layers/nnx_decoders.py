@@ -966,13 +966,13 @@ class NNXDecoder(nnx.Module):
         return (
             x_in,
             layers,
-            kv_caches_stacked if kv_caches_stacked is not None else None,
+            kv_caches_stacked,
             kwargs.get("cached_indexer_state", None),
         )
       return (
           x_in,
           layers,
-          kv_caches_stacked if kv_caches_stacked is not None else None,
+          kv_caches_stacked,
       )
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
@@ -1002,7 +1002,6 @@ class NNXDecoder(nnx.Module):
     start_layer_idx = kwargs.get("start_layer_idx", 0)
 
     if is_index_share:
-      cached_indexer_state = kwargs.get("cached_indexer_state", None)
       if cached_indexer_state is None:
         batch, seq_len = x_in.shape[0], x_in.shape[1]
         topk = getattr(self.config, "indexer_topk", 2048)
@@ -1981,14 +1980,13 @@ class NNXDecoder(nnx.Module):
           state_out = nnx.state(merged_layer)
 
           if dynamic_graph_init:
-            new_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
-            if getattr(cfg, "use_index_share", False):
-              return out_y, out_kv, out_indexer_cache, state_out, new_graphdef
-            return out_y, out_kv, state_out, new_graphdef
+            out_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
           else:
-            if getattr(cfg, "use_index_share", False):
-              return out_y, out_kv, out_indexer_cache, state_out, graphdef_in
-            return out_y, out_kv, state_out, graphdef_in
+            out_graphdef = graphdef_in
+
+          if getattr(cfg, "use_index_share", False):
+            return out_y, out_kv, out_indexer_cache, state_out, out_graphdef
+          return out_y, out_kv, state_out, out_graphdef
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 

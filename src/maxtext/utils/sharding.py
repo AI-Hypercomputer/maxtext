@@ -265,14 +265,7 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
 
 def get_nnx_var_named_sharding_with_scan_axis(v: Any, mesh) -> Any:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
-  shape_types = tuple(
-      cls for cls in (
-          getattr(jax, "Array", None),
-          getattr(jax, "ShapeDtypeStruct", None),
-          getattr(jax.core, "ShapedArray", None),
-      ) if cls is not None
-  )
-  if shape_types and isinstance(v, shape_types):
+  if isinstance(v, (jax.Array, jax.ShapeDtypeStruct, jax.core.ShapedArray)):
     if hasattr(v, "sharding") and isinstance(v.sharding, jax.sharding.NamedSharding):
       return v.sharding
     return NamedSharding(mesh, P())
@@ -289,15 +282,25 @@ def get_nnx_var_named_sharding_with_scan_axis(v: Any, mesh) -> Any:
     if jax.tree_util.tree_leaves(val):
       first_leaf = jax.tree_util.tree_leaves(val)[0]
       if hasattr(first_leaf, "shape"):
-        leaf_var = get_nnx_var_named_sharding_with_scan_axis(v.replace(value=first_leaf) if hasattr(v, "replace") else first_leaf, mesh)
+        leaf_var = get_nnx_var_named_sharding_with_scan_axis(
+            v.replace(value=first_leaf) if hasattr(v, "replace") else first_leaf, mesh
+        )
         leaf_sharding = leaf_var.get_value() if hasattr(leaf_var, "get_value") else leaf_var
         if not isinstance(leaf_sharding, NamedSharding):
           leaf_sharding = NamedSharding(mesh, P())
-        return v.replace(jax.tree.map(lambda _: leaf_sharding, val)) if hasattr(v, "replace") else jax.tree.map(lambda _: leaf_sharding, val)
+        return (
+            v.replace(jax.tree.map(lambda _: leaf_sharding, val))
+            if hasattr(v, "replace")
+            else jax.tree.map(lambda _: leaf_sharding, val)
+        )
       replicated = NamedSharding(mesh, P())
-      return v.replace(jax.tree.map(lambda _: replicated, val)) if hasattr(v, "replace") else jax.tree.map(lambda _: replicated, val)
+      return (
+          v.replace(jax.tree.map(lambda _: replicated, val))
+          if hasattr(v, "replace")
+          else jax.tree.map(lambda _: replicated, val)
+      )
     return v
-  metadata = v.get_metadata() if hasattr(v, "get_metadata") else (getattr(v, "metadata", {}) if hasattr(v, "metadata") else {})
+  metadata = v.get_metadata() if hasattr(v, "get_metadata") else getattr(v, "metadata", {})
   out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
   if not out_sharding:
     pspec = P()

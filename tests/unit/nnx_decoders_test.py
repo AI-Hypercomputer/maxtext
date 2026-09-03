@@ -1293,6 +1293,7 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
     maxtext_utils_nnx.nnx_add_and_sync_scan_axis = mock_add_scan_axis
 
     try:
+      # Use a custom metadata_axis_name
       custom_axis_name = "custom_scanned_blocks"
       # pylint: disable=protected-access
       _, _, _ = decoder._apply_layers_sequentially(
@@ -1301,9 +1302,11 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
           length=2,
           metadata_axis_name=custom_axis_name,
       )
+
+      # Verify that the custom axis name was indeed passed down
       found_custom_name = False
       for call_args in mock_add_scan_axis.call_args_list:
-        if len(call_args[0]) > 1 and call_args[0][1] == custom_axis_name:
+        if call_args[0][1] == custom_axis_name:
           found_custom_name = True
           break
 

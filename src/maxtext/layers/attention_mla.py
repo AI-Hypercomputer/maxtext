@@ -1285,7 +1285,8 @@ class MLA(Attention):
       cached_indexer_state: Optional tuple (indexer_mask, topk_indices, indexer_score) from donor F-layer.
 
     Returns:
-      A tensor of shape [batch, length, embed_dim] containing the MLA-attended outputs.
+      A tensor of shape [batch, length, embed_dim] containing the
+      MLA-attended outputs.
     """
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = self._maybe_shard_with_logical(inputs_q, self.prefill_input_axis_names)

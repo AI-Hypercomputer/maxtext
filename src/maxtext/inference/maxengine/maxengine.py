@@ -1892,45 +1892,49 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     When DECOUPLE_GCLOUD is FALSE we provide a clear error instead of failing
     cryptically on attribute access.
     """
+    token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+    engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+      raise RuntimeError(
+          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; get_tokenizer is unsupported. "
+          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
+      )
     try:
-      tok_type = self.config.tokenizer_type
-      if hasattr(tok_type, "name"):
-        tok_name = tok_type.name.lower()
-      elif hasattr(tok_type, "value"):
-        tok_name = str(tok_type.value).lower()
-      else:
-        tok_name = str(tok_type).lower().rsplit(".", maxsplit=1)[-1]
-      tokenizer_val = getattr(TokenizerType, tok_name, None)
-      if tokenizer_val is None and hasattr(TokenizerType, "DESCRIPTOR"):
-        val_desc = getattr(TokenizerType.DESCRIPTOR, "values_by_name", {})
-        if tok_name in val_desc:
-          tokenizer_val = val_desc[tok_name].number
+      # pyrefly: ignore[missing-attribute]
+      tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[
+          self.config.tokenizer_type
+      ].number  # pyrefly: ignore[missing-attribute]
       return TokenizerParameters(
-          path=self.config.tokenizer_path,
-          tokenizer_type=tokenizer_val if tokenizer_val is not None else tok_name,
-          access_token=self.config.hf_access_token,
-          use_chat_template=self.config.use_chat_template,
-          extra_ids=0,
+          path=self.config.tokenizer_path,  # pyrefly: ignore[unexpected-keyword]
+          tokenizer_type=tokenizer_type_val,  # pyrefly: ignore[unexpected-keyword]
+          access_token=self.config.hf_access_token,  # pyrefly: ignore[unexpected-keyword]
+          use_chat_template=self.config.use_chat_template,  # pyrefly: ignore[unexpected-keyword]
+          extra_ids=0,  # pyrefly: ignore[unexpected-keyword]
       )
     except KeyError as _:
       raise KeyError(f"Unsupported tokenizer type: {self.config.tokenizer_type}") from None
 
   def build_tokenizer(self, metadata: Any):  # return type depends on JetStream
     """Return a tokenizer"""
-    tok_type = getattr(metadata, "tokenizer_type", None)
-    if tok_type in (getattr(TokenizerType, "tiktoken", None), "tiktoken"):
+    token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+    engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+      raise RuntimeError(
+          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; build_tokenizer is unsupported. "
+          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
+      )
+    if metadata.tokenizer_type == TokenizerType.tiktoken:  # pyrefly: ignore[missing-attribute]
       return token_utils.TikToken(metadata)
-    elif tok_type in (getattr(TokenizerType, "sentencepiece", None), "sentencepiece"):
+    elif metadata.tokenizer_type == TokenizerType.sentencepiece:  # pyrefly: ignore[missing-attribute]
       return token_utils.SentencePieceTokenizer(metadata)
-    elif tok_type in (getattr(TokenizerType, "huggingface", None), "huggingface"):
+    elif metadata.tokenizer_type == TokenizerType.huggingface:  # pyrefly: ignore[missing-attribute]
       tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
-      tok = getattr(tokenizer_model, "tokenizer", tokenizer_model)
-      if hasattr(tok, "pad_token_id") and tok.pad_token_id is None:
-        if getattr(tok, "unk_token_id", None) is not None:
-          tok.pad_token_id = tok.unk_token_id
-        elif getattr(tok, "eos_token_id", None) is not None:
-          print(f"Warning: setting pad_token_id to eos_token_id:{tok.eos_token_id}")
-          tok.pad_token_id = tok.eos_token_id
+      if tokenizer_model.tokenizer.pad_token_id is None:
+        if tokenizer_model.tokenizer.unk_token_id is not None:
+          tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id
+        else:
+          print(f"Warning: setting pad_token_id to eos_token_id:{tokenizer_model.tokenizer.eos_token_id}")
+          tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.eos_token_id
       return tokenizer_model
     else:
       raise ValueError(f"Unsupported tokenizer type: {metadata.tokenizer_type}")

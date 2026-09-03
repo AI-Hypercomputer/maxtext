@@ -137,6 +137,7 @@ def main_kernel(
     # VMEM to HBM transfer.
     # Use dynamic loop to minimize register spills.
     @pl.loop(0, col_size, step=num_lanes)
+    @jax.named_scope("dma_write_loop")
     def dma_write_loop(col_vmem_start):
       col_hbm_start = col_tile_start + col_vmem_start
 

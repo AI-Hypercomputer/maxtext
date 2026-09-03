@@ -3,7 +3,7 @@
 # This file is documentation for how to get started with GLM-5.2 (Cross-Layer IndexShare).
 
 # This file runs Step 1 on CPU.
-# 1. Convert the HuggingFace checkpoint (bf16) to MaxText-compatible checkpoint (bf16): 
+# 1. Convert the HuggingFace checkpoint (bf16) to MaxText-compatible checkpoint (bf16):
 #    Scanned format is better for training; unscanned format is better for decoding.
 # 2. Run logit check, pre-training, fine-tuning, and decoding.
 

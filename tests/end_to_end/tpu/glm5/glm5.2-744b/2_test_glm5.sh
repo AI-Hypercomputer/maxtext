@@ -77,4 +77,3 @@ python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
   index_share_pattern="FSSS" \
   prune_shared_indexers=true \
   prompt="The capital of France is"
-

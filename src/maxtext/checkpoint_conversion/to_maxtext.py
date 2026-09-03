@@ -85,6 +85,9 @@ except ImportError:
   torch = None
 
 
+absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
+
+
 def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any]) -> Any:
   """Resolves missing indexer parameters for GLM-5.2 Shared (S) layers from preceding Full (F) donor layers.
 
@@ -143,25 +146,20 @@ class LazyHFLoader:
     self.current_shard_content = {}
     # Cache for resolved local shard paths
     self._local_shard_paths = {}
-    # Cache for open safetensors file readers
-    self._open_files = {}
     # Use a lock to serialize heavy RAM operations, but NOT downloads
     self._ram_lock = threading.Lock()
     self._initialize_index()
 
   def __getstate__(self):
-    """Allows pickling/copying by excluding the non-pickleable lock and files."""
+    """Allows pickling/copying by excluding the non-pickleable lock."""
     state = self.__dict__.copy()
     del state["_ram_lock"]
-    if "_open_files" in state:
-      del state["_open_files"]
     return state
 
   def __setstate__(self, state):
-    """Restores state after pickling/copying and recreates a new lock and file cache."""
+    """Restores state after pickling/copying and recreates a new lock."""
     self.__dict__.update(state)
     self._ram_lock = threading.Lock()
-    self._open_files = {}
 
   def _initialize_index(self):
     """Fetches and parses the Hugging Face model index file to build a shard map."""

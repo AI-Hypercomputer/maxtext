@@ -4,7 +4,7 @@ array-record
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
-drjax>=0.1.4
+drjax>=0.2.1
 flax
 gcsfs
 google-api-python-client
@@ -33,13 +33,13 @@ pylint
 pytest
 pytype
 qwix>=0.1.6
-sentencepiece>=0.2.0
+sentencepiece
 tensorboard-plugin-profile
 tensorboardx
 tensorflow-datasets
 tensorflow-text
 tensorflow
-tiktoken>=0.5.0
+tiktoken
 tokamax>=0.0.4
 transformers
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip

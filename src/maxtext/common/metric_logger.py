@@ -199,47 +199,33 @@ class MetricLogger:
           ]
       )
 
-    if not is_metric_hidden_step:
-      def _to_float(v, default=0.0):
-        try:
-          return float(v)
-        except Exception:
-          return default
+    lm_loss = scalars.get("learning/lm_loss", 0.0)
+    perplexity = scalars.get("learning/perplexity", 0.0)
+    log_parts.extend(
+        [
+            f"total_weights: {scalars['learning/total_weights']}",
+            f"loss: {loss:.3f}",
+            f"lm_loss: {lm_loss:.3f}",
+            f"perplexity: {perplexity:.3f}",
+        ]
+    )
+    if "learning/dpo_loss" in scalars:
+      log_parts.append(f"dpo_loss: {scalars['learning/dpo_loss']:.3f}")
+    if "learning/reward_accuracy" in scalars:
+      log_parts.append(f"reward_accuracy: {scalars['learning/reward_accuracy']:.3f}")
 
-      loss_val = _to_float(loss)
-      lm_loss = _to_float(scalars.get("learning/lm_loss", 0.0))
-      perplexity = _to_float(scalars.get("learning/perplexity", 0.0))
-      tot_w = scalars.get("learning/total_weights", 0)
-      try:
-        tot_w_val = int(tot_w)
-      except Exception:
-        tot_w_val = tot_w
+    if self.config.num_experts > 1:
+      moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
+      log_parts.append(f"moe_lb_loss: {moe_lb_loss:.6f}")
 
-      log_parts.extend(
-          [
-              f"total_weights: {tot_w_val}",
-              f"loss: {loss_val:.3f}",
-              f"lm_loss: {lm_loss:.3f}",
-              f"perplexity: {perplexity:.3f}",
-          ]
-      )
-      if "learning/dpo_loss" in scalars:
-        log_parts.append(f"dpo_loss: {_to_float(scalars['learning/dpo_loss']):.3f}")
-      if "learning/reward_accuracy" in scalars:
-        log_parts.append(f"reward_accuracy: {_to_float(scalars['learning/reward_accuracy']):.3f}")
+    if getattr(self.config, "mtp_num_layers", 0) > 0:
+      mtp_loss = scalars.get("learning/mtp_loss", 0.0)
+      log_parts.append(f"main_model_loss: {loss - mtp_loss:.3f}")
+      log_parts.append(f"mtp_loss: {mtp_loss:.3f}")
 
-      if self.config.num_experts > 1:
-        moe_lb_loss = _to_float(scalars.get("learning/moe_lb_loss", 0.0))
-        log_parts.append(f"moe_lb_loss: {moe_lb_loss:.6f}")
-
-      if getattr(self.config, "mtp_num_layers", 0) > 0:
-        mtp_loss = _to_float(scalars.get("learning/mtp_loss", 0.0))
-        log_parts.append(f"main_model_loss: {loss_val - mtp_loss:.3f}")
-        log_parts.append(f"mtp_loss: {mtp_loss:.3f}")
-
-      if getattr(self.config, "use_indexer", False):
-        indexer_l = _to_float(scalars.get("learning/indexer_loss", 0.0))
-        log_parts.append(f"indexer_loss: {indexer_l}")
+    if getattr(self.config, "use_indexer", False):
+      indexer_l = scalars.get("learning/indexer_loss", 0.0)
+      log_parts.append(f"indexer_loss: {float(indexer_l)}")
 
     max_logging.log(", ".join(log_parts))
 
@@ -298,10 +284,8 @@ class MetricLogger:
     profiler_steps = self.config.profiler_steps
     # Steps immediately before/at start, and at/immediately after end of profiling
     boundary_steps = {
-        skip_steps - 1,
         skip_steps,
         skip_steps + 1,
-        skip_steps + profiler_steps - 1,
         skip_steps + profiler_steps,
         skip_steps + profiler_steps + 1,
     }
@@ -360,8 +344,6 @@ class MetricLogger:
 
   def write_metrics_to_managed_mldiagnostics(self, metrics, step):
     """Write metrics to managed profiler."""
-    if self.config.hide_profiler_step_metric and self._is_profiler_boundary_step(step):
-      return
     if (step + 1) % self.config.log_period == 0 or step == self.config.steps - 1:
       for metric_name in metrics.get("scalar", []):
         value = metrics["scalar"][metric_name]
