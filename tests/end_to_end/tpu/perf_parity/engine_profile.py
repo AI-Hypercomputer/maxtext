@@ -30,18 +30,20 @@ unchanged because it returns a `tunix.sft.utils.LossOutput`, which is the same c
 object `abstract_engine` re-exports. So the arithmetic is the same on both sides and the
 difference is the trainer.
 
-Optimizer parity took four config overrides. The engine builds its optimizer from the
-MaxText config via `train_utils.create_training_optimizer`, and base.yml's defaults are
-nothing like `optax.sgd(constant_schedule(1e-5))`:
+Optimizer parity takes several config overrides, because the engine builds its optimizer
+from the MaxText config via `train_utils.create_training_optimizer` and base.yml's defaults
+are nothing like the `optax` object the PeftTrainer arms are handed. They live in
+`perf_parity_common.optimizer_overrides`, paired with the `optax_optimizer` that has to
+match them; `--opt` picks between `sgd` (the default, and what every figure taken before
+that flag existed used) and `adamw` (what `--zero1` needs, since sgd has no moments to
+shard).
 
-  * `opt_type="sgd"`      -- base.yml defaults to adamw, which carries two extra
-                             parameter-sized moment buffers through every update.
-  * `gradient_clipping_threshold=0.0` -- base.yml clips at 1.0, an extra full-tree l2 norm
-                             per step. tunix's bare `optax.sgd` does not clip.
-  * `learning_rate=1e-5`, `warmup_steps_fraction=0.0`,
-    `learning_rate_final_fraction=1.0` -- flattens MaxText's warmup+cosine into the
-                             constant schedule the tunix arms use. Schedule shape does not
-                             affect step cost, but it does affect what the weights do.
+`--explicit` and `--zero1` are the other two config-level knobs. The first sets
+`shard_mode=explicit`, which is what makes the mesh axes `Explicit`; the second sets
+`shard_optimizer_over_data`, which shards the optimizer's parameter-shaped state over the
+`data` axis and needs the first. Both are declined rather than enforced by the engine, so
+`--zero1` on a build without engine-side support runs the baseline and logs one line
+saying so -- check for `Zero-1` in the log before trusting a Zero-1 figure.
 
 Two structural differences remain, and they are the point of the comparison rather than
 something to equalise away:
@@ -100,11 +102,16 @@ def _build_config(spec: qc.RunSpec):
       base_output_directory=os.path.join(os.getcwd(), "maxtext_out"),
       max_target_length=spec.seq,
       per_device_batch_size=spec.per_device_batch,
+      ici_data_parallelism=spec.dp,
       ici_fsdp_parallelism=spec.fsdp,
       ici_tensor_parallelism=spec.tp,
       ici_expert_parallelism=spec.ep,
       use_ring_of_experts=spec.ring_of_experts,
       use_ragged_sort=spec.ragged_sort,
+      # Zero-1 and the mesh mode it needs. `_zero1_active` checks both plus the mesh's own
+      # axis types, so `shard_mode` alone is not enough -- see the mesh built in `main`.
+      shard_mode="explicit" if spec.explicit else "auto",
+      shard_optimizer_over_data=spec.zero1,
       dtype="float32",
       weight_dtype="float32",
       remat_policy="none",
@@ -115,15 +122,12 @@ def _build_config(spec: qc.RunSpec):
       skip_jax_distributed_system=True,
       use_multimodal=False,
       init_weights_seed=0,
-      # Optimizer parity with `optax.inject_hyperparams(optax.sgd)(constant_schedule(1e-5))`.
-      opt_type="sgd",
-      learning_rate=qc.LEARNING_RATE,
-      gradient_clipping_threshold=0.0,
-      warmup_steps_fraction=0.0,
-      learning_rate_final_fraction=1.0,
       learning_rate_schedule_steps=spec.steps,
       steps=spec.steps,
       gradient_accumulation_steps=1,
+      # Optimizer parity with the PeftTrainer arms' `optax` object; both come out of the
+      # same pair of helpers in `perf_parity_common`.
+      **qc.optimizer_overrides(spec),
   )
 
 
@@ -187,7 +191,13 @@ def main() -> None:
 
   # Built here rather than left to the engine: `wrap_with_tunix_adapter=True` requires a
   # mesh up front, since the adapter is constructed under it.
-  mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(config, devices=spec.devices), config.mesh_axes)
+  #
+  # `get_mesh_from_config` rather than a bare `jax.sharding.Mesh` over `create_device_mesh`:
+  # the bare constructor leaves every axis `Auto` whatever `shard_mode` says, and
+  # `_zero1_active` checks the mesh's axis types, not just the config. Under `--zero1` that
+  # difference is the whole run -- the engine would decline (with one log line) and quietly
+  # measure the replicated-optimizer baseline instead.
+  mesh = maxtext_utils.get_mesh_from_config(config, devices=spec.devices)
 
   build_start = time.perf_counter()
   engine = maxtext_engine.MaxTextTrainingEngine(
@@ -198,6 +208,18 @@ def main() -> None:
   )
   print(f"engine built in {time.perf_counter() - build_start:.1f}s", flush=True)
   print(f"mesh: {mesh}", flush=True)
+
+  # Say out loud whether the feature under test is on. A declined Zero-1 run is
+  # indistinguishable from the baseline in every other line of output, and the engine's own
+  # notice is a single `logging.warning` that is easy to miss in a log this size. The
+  # `getattr` is because engine-side Zero-1 is newer than this rig: on a build without it
+  # the flag is simply not read, which is itself the thing worth printing.
+  gate = getattr(maxtext_engine, "_zero1_active", None)
+  if gate is None:
+    print("zero1: UNSUPPORTED (this maxtext build has no engine-side Zero-1)", flush=True)
+  else:
+    declined = gate(config, mesh)
+    print(f"zero1: {'ACTIVE' if declined is None else f'DECLINED ({declined})'}", flush=True)
 
   # `_default_loss_fn` returns a LossOutput, so its aux travels inside the structured
   # return rather than alongside it, and `has_aux` is not consulted for this shape.
@@ -261,6 +283,7 @@ def main() -> None:
       f"{_median_ms(fwd_bwd_s, qc.WARMUP_STEPS * spec.ga)} per micro / "
       f"{_median_ms(update_s, qc.WARMUP_STEPS)} per step (medians)"
   )
+  qc.report_peak_hbm(spec)
   _report_nnx_graph_cost(engine)
   print(f"train steps completed: {engine.train_step}", flush=True)
   if spec.trace:

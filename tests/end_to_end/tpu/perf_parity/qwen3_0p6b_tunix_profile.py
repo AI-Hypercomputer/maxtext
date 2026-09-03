@@ -35,7 +35,6 @@ import time
 
 from flax import nnx
 import jax
-import optax
 import perf_parity_common as qc
 from transformers import AutoTokenizer
 from tunix.experimental.train import peft_trainer_v2
@@ -100,7 +99,7 @@ def main() -> None:
   print(f"model built in {time.perf_counter() - build_start:.1f}s", flush=True)
 
   with mesh:
-    optimizer = optax.inject_hyperparams(optax.sgd)(learning_rate=optax.constant_schedule(qc.LEARNING_RATE))
+    optimizer = qc.optax_optimizer(spec)
     # `max_steps` counts optimizer steps, not micro steps: the loop breaks on
     # `_train_steps >= max_steps`, and `_train_steps` only advances on an update.
     trainer_config = peft_trainer_v2.TrainingConfig(
@@ -118,6 +117,7 @@ def main() -> None:
       jax.effects_barrier()
 
   timer.report("tunix qwen3-0.6b", group=spec.ga)
+  qc.report_peak_hbm(spec)
   if spec.trace:
     print(f"trace written to {profile_dir}", flush=True)
 
