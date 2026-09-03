@@ -501,6 +501,7 @@ def _gmm_bwd(
       interpret,
       lhs_vma_axes,
       use_gmm_v2_heuristic_tiling,
+      quantization_rule,
   )
 
   # 4. DRHS Gradient Execution
@@ -630,6 +631,7 @@ def _compute_dlhs(
     interpret: bool,
     lhs_vma_axes: tuple,
     use_gmm_v2_heuristic_tiling: bool,
+    quantization_rule: qwix.QtRule | None = None,
 ) -> jnp.ndarray:
   """Routes execution of DLHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -642,6 +644,24 @@ def _compute_dlhs(
         use_manual_quantization,
     )
   elif use_tokamax_backend and use_gmm_v2:
+    # The gmm_v2 kernel lacks native transpose_rhs support, so its DLHS
+    # (_dlhs_run_tokamax_v2) materializes a full transpose of the weight
+    # (rhs.swapaxes(1, 2)) every backward step -- a pure HBM copy of the (large)
+    # expert weight. For the unquantized path the V1 tokamax.ragged_dot_general
+    # DLHS computes the identical result with no transpose (via
+    # DLHS_RAGGED_DOT_DIM_NUMS) and is measurably faster on TPU (bit-identical
+    # output). Quantized paths keep the V2 kernel because their scale handling
+    # (see _bwd_prepare_inputs / _dlhs_scale_grad_by_rhs_scale) is gmm_v2
+    # specific.
+    if quantization_rule is None:
+      return _dlhs_run_tokamax_v1(
+          dlhs_dout,
+          rhs,
+          group_sizes,
+          lhs_dtype,
+          transpose_rhs,
+          use_manual_quantization,
+      )
     return _dlhs_run_tokamax_v2(
         dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, use_gmm_v2_heuristic_tiling, transpose_rhs
     )
