@@ -143,13 +143,13 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 | ---------------------------------- | ---------------------------------------------------------------- | :-------: |
 | `layers/attention_kda.py`          | **New**: `KimiDeltaAttention`, `ShortConvolution`, CP support    |   ~672    |
 | `kernels/kda/__init__.py`          | **New**: `chunk_kda()` entry point                               |    ~99    |
-| `kernels/kda/tokamax.py`           | **New**: tokamax backend adapter (lazy import)                   |   ~139    |
+| `kernels/kda/tokamax.py`           | **New**: tokamax backend adapter (lazy import)                   |   ~143    |
 | `utils/cp_utils.py`                | **New**: `halo_exchange_for_conv` (+ oversized-halo guard)       |    ~95    |
 | `configs/types.py`                 | **Modified**: `KdaAttention` config class + validators           |   +~90    |
-| `tests/unit/kda_attention_test.py` | **New**: layer + conv halo + CP fwd/bwd + packed-seg CP + parity |   ~1426   |
-| `scripts/dev/kda_e2e_smoke.py`     | **New**: e2e smoke, history-dependent delayed-copy task          |   ~219    |
-| `docs/design/kda_cp_support.md`    | **New**: design doc                                              |     —     |
-| **Total**                          |                                                                  | **~2840** |
+| `tests/unit/kda_attention_test.py` | **New**: layer + conv halo + CP fwd/bwd + packed-seg CP + parity |   ~1550   |
+| `scripts/dev/kda_e2e_smoke.py`     | **New**: e2e smoke, history-dependent delayed-copy task          |   ~235    |
+| `docs/reference/kda_cp_support.md` | **New**: design doc                                              |     —     |
+| `**Total**`                        |                                                                  | **~2985** |
 
 ## Key Constraints
 

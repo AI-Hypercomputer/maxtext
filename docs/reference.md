@@ -49,6 +49,13 @@ High-level overview of MaxText design, JAX/XLA choices, and how components inter
 
 Key concepts including checkpointing strategies, quantization, tiling, and Mixture of Experts (MoE) configuration.
 ```
+
+```{grid-item-card} 🔁 KDA Context Parallelism
+:link: reference/kda_cp_support
+:link-type: doc
+
+Design of Kimi Delta Attention (KDA) CP support: halo exchange, per-rank recurrent state, segment handling, and constraints.
+```
 ````
 
 ## 📚 API Reference
@@ -64,5 +71,6 @@ reference/performance_metrics
 reference/models
 reference/architecture
 reference/core_concepts
+reference/kda_cp_support
 reference/api.rst
 ```
