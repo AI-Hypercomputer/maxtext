@@ -22,7 +22,17 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 from maxtext.layers.normalizations import l2norm
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+try:
+  from tokamax._src.ops.experimental.causal_conv1d_gated_delta_rule import (
+      wrapper as tokamax_gdn_wrapper,
+  )
+except (ImportError, ModuleNotFoundError):
+  try:
+    from tokamax._src.ops.causal_conv1d_gated_delta_rule import (
+        wrapper as tokamax_gdn_wrapper,
+    )
+  except (ImportError, ModuleNotFoundError):
+    tokamax_gdn_wrapper = None
 
 
 def _pallas_gdn_bwd_kernel(
