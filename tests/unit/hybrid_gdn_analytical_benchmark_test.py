@@ -101,8 +101,14 @@ def create_jitted_train_step(
     input_shape: Tuple[int, ...],
     fwd_scope: str = "Fwd",
     bwd_scope: str = "Bwd",
+    remat: bool | str = False,
 ):
   """Creates a pure functional, JIT-compiled training step with position-aware loss."""
+  is_remat = (
+      remat.lower() in ("full", "true", "yes", "1")
+      if isinstance(remat, str)
+      else bool(remat)
+  )
   graphdef, params = nnx.split(model)
 
   proj_key = jax.random.PRNGKey(99)
@@ -114,7 +120,10 @@ def create_jitted_train_step(
 
     def loss_fn(m_inner):
       with jax.named_scope(fwd_scope):
-        out = m_inner(x)
+        if is_remat:
+          out = jax.checkpoint(lambda m, inp: m(inp))(m_inner, x)
+        else:
+          out = m_inner(x)
         y = out[0] if isinstance(out, tuple) else out
         loss = jnp.mean(y * projection.astype(y.dtype))
         return loss, out
@@ -150,6 +159,7 @@ def print_numerical_correctness_table(
     tolerance: float = 1e-4,
     abs_tolerance: float = 1e-5,
     comparison_name: str = "Candidate vs Reference",
+    diff_records: dict[str, Any] | None = None,
 ) -> bool:
   """Prints a numerical correctness comparison table between two implementations."""
   print(
@@ -218,6 +228,14 @@ def print_numerical_correctness_table(
       status = "❌ DIVERGED"
     else:
       status = "✅ MATCH"
+    if diff_records is not None:
+      diff_records[name] = {
+          "abs_diff": abs_d,
+          "rel_diff": rel_d,
+          "match": is_m,
+          "tolerance": tolerance,
+          "abs_tolerance": abs_tolerance,
+      }
     print(
         f"  {name:<40} | {abs_d:<12.2e} | {rel_d:<13.2e} |"
         f" {tolerance:<10.2e} | {status}"
@@ -266,14 +284,19 @@ def run_memory_profile_analysis(
     inputs: Any,
     seq_len: int,
     batch_size: int,
+    policy_label: str = "",
 ):
   """Measures and displays comparative HBM memory usage across implementations."""
+  title_suffix = (
+      f" ({policy_label}S={seq_len}, B={batch_size}, Dtype=FP32)"
+      if policy_label
+      else f" (S={seq_len}, B={batch_size}, Dtype=FP32)"
+  )
   print(
       "\n========================================================================================="
   )
   print(
-      f">>> HBM MEMORY PROFILING & COMPARATIVE ANALYSIS (S={seq_len},"
-      f" B={batch_size}, Dtype=FP32)"
+      f">>> HBM MEMORY PROFILING & COMPARATIVE ANALYSIS{title_suffix}"
   )
   print(
       "========================================================================================="
@@ -440,13 +463,14 @@ def print_latency_comparison(
     fwd_lats: list[float],
     bwd_lats: list[float],
     train_lats: list[float],
+    policy_label: str = "",
 ) -> None:
   """Prints a comprehensive 2-way latency and speedup comparison table."""
   print(
       "\n========================================================================================="
   )
   print(
-      f">>> LATENCY & SPEEDUP: COMPARISON ({kernel_names[0]} vs {kernel_names[1]})"
+      f">>> LATENCY & SPEEDUP: COMPARISON {policy_label}({kernel_names[0]} vs {kernel_names[1]})"
   )
   print(
       "========================================================================================="
@@ -506,13 +530,14 @@ def print_tradeoff_table(
     fwd_mem_k: float,
     train_mem_ref: float,
     train_mem_k: float,
+    policy_label: str = "",
 ) -> None:
   """Prints quantitative trade-off analysis of Canonical GDN Kernel vs Pure JAX Reference."""
   print(
       "\n========================================================================================="
   )
   print(
-      f">>> QUANTITATIVE TRADE-OFF: {kernel_name} vs {ref_name}"
+      f">>> QUANTITATIVE TRADE-OFF {policy_label}: {kernel_name} vs {ref_name}"
   )
   print(
       "========================================================================================="
@@ -562,6 +587,131 @@ def print_tradeoff_table(
   print(sep)
 
 
+def print_cross_policy_summary(results: dict[str, dict[str, Any]]) -> None:
+  """Prints an executive summary table comparing results across remat policies."""
+  print(
+      "\n========================================================================================================================="
+  )
+  print(
+      ">>> EXECUTIVE SUMMARY: CROSS-POLICY COMPARISON (remat=none vs remat=full)"
+  )
+  print(
+      "========================================================================================================================="
+  )
+  # 1. Numerical Correctness
+  has_diffs = any("diff_records" in res and res["diff_records"] for res in results.values())
+  if has_diffs:
+    num_header = (
+        f"  {'Tensor / Parameter':<40} | {'Rel Diff (none)':<16} |"
+        f" {'Rel Diff (full)':<16} | {'Tolerance':<10} | {'Status'}"
+    )
+    num_sep = "  " + "-" * (len(num_header) - 2)
+    print("\n1. Numerical Correctness (Relative Gradient Difference vs Pure JAX):")
+    print(num_sep)
+    print(num_header)
+    print(num_sep)
+
+    all_names = []
+    for policy in ("none", "full"):
+      if policy in results and "diff_records" in results[policy]:
+        for k in results[policy]["diff_records"]:
+          if k not in all_names:
+            all_names.append(k)
+
+    for name in all_names:
+      none_rec = results.get("none", {}).get("diff_records", {}).get(name)
+      full_rec = results.get("full", {}).get("diff_records", {}).get(name)
+      none_str = f"{none_rec['rel_diff']:<16.2e}" if none_rec else f"{'N/A':<16}"
+      full_str = f"{full_rec['rel_diff']:<16.2e}" if full_rec else f"{'N/A':<16}"
+      tol_val = (full_rec or none_rec or {}).get("tolerance", 1e-4)
+      match_none = none_rec.get("match", True) if none_rec else True
+      match_full = full_rec.get("match", True) if full_rec else True
+      status = "✅ MATCH" if (match_none and match_full) else "❌ DIVERGED"
+      print(
+          f"  {name:<40} | {none_str} | {full_str} |"
+          f" {tol_val:<10.2e} | {status}"
+      )
+    print(num_sep)
+
+  # 2. Latency & Speedup
+  header = (
+      f"  {'Configuration / Implementation':<42} | {'Remat':<6} |"
+      f" {'Fwd (ms)':<10} | {'Bwd (ms)':<10} | {'Train (ms)':<12} |"
+      f" {'Speedup vs Pure':<16} | {'Winner'}"
+  )
+  sep = "  " + "-" * (len(header) - 2)
+  print("\n2. Latency & Speedup Summary:")
+  print(sep)
+  print(header)
+  print(sep)
+
+  for policy in ("none", "full"):
+    if policy not in results:
+      continue
+    res = results[policy]
+    fwd_p = res["t_fwd_pure"]
+    bwd_p = res["t_bwd_pure"]
+    trn_p = res["t_train_pure"]
+    fwd_k = res["t_fwd_kernel"]
+    bwd_k = res["t_bwd_kernel"]
+    trn_k = res["t_train_kernel"]
+    p_str = f"{trn_p:>10.2f} ms" if not np.isnan(trn_p) and trn_p > 0 else "FAILED"
+    k_str = f"{trn_k:>10.2f} ms" if not np.isnan(trn_k) and trn_k > 0 else "FAILED"
+    speedup = trn_p / trn_k if (not np.isnan(trn_p) and trn_p > 0 and not np.isnan(trn_k) and trn_k > 0) else 0.0
+    speedup_str = f"{speedup:.2f}x" if speedup > 0 else "N/A"
+    winner = "🏆 Canonical GDN" if speedup > 1.05 else ("🏆 Pure JAX" if speedup < 0.95 and speedup > 0 else "≈ Parity")
+
+    print(
+        f"  {'Pure JAX GDN (Reference)':<42} | {policy:<6} |"
+        f" {fwd_p:>8.2f} ms | {bwd_p:>8.2f} ms | {p_str} |"
+        f" {'1.00x (ref)':<16} | ref"
+    )
+    print(
+        f"  {'Canonical GDN Kernel (use_gdn_kernel=True)':<42} | {policy:<6} |"
+        f" {fwd_k:>8.2f} ms | {bwd_k:>8.2f} ms | {k_str} |"
+        f" {speedup_str:<16} | {winner}"
+    )
+    print(sep)
+
+  # 3. HBM Memory Footprint Summary
+  mem_header = (
+      f"  {'Configuration / Implementation':<42} | {'Remat':<6} |"
+      f" {'Fwd Act (MB)':<12} | {'Est Bwd (MB)':<12} | {'Peak Train (MB)':<15} |"
+      f" {'Mem Ratio vs Pure':<18} | {'Savings vs Pure'}"
+  )
+  mem_sep = "  " + "-" * (len(mem_header) - 2)
+  print("\n3. HBM Memory Footprint Summary:")
+  print(mem_sep)
+  print(mem_header)
+  print(mem_sep)
+
+  for policy in ("none", "full"):
+    if policy not in results:
+      continue
+    res = results[policy]
+    fwd_p_mem = res["fwd_act_mbs"][0]
+    bwd_p_mem = res["bwd_peak_mbs"][0]
+    trn_p_mem = res["train_peak_mbs"][0]
+    fwd_k_mem = res["fwd_act_mbs"][1]
+    bwd_k_mem = res["bwd_peak_mbs"][1]
+    trn_k_mem = res["train_peak_mbs"][1]
+    mem_ratio = trn_k_mem / trn_p_mem if trn_p_mem > 0 else 1.0
+    mem_savings_pct = (1.0 - mem_ratio) * 100.0
+    mem_savings_str = f"🟢 -{mem_savings_pct:.1f}%" if mem_savings_pct >= 0 else f"🔴 +{abs(mem_savings_pct):.1f}%"
+
+    print(
+        f"  {'Pure JAX GDN (Reference)':<42} | {policy:<6} |"
+        f" {fwd_p_mem:>10.2f} MB | {bwd_p_mem:>10.2f} MB | {trn_p_mem:>13.2f} MB |"
+        f" {'1.00x (ref)':<18} | ref"
+    )
+    print(
+        f"  {'Canonical GDN Kernel (use_gdn_kernel=True)':<42} | {policy:<6} |"
+        f" {fwd_k_mem:>10.2f} MB | {bwd_k_mem:>10.2f} MB | {trn_k_mem:>13.2f} MB |"
+        f" {f'{mem_ratio:.2f}x':<18} | {mem_savings_str}"
+    )
+    print(mem_sep)
+
+
 def run_gdn_comparison(
     batch_size: int | None = None,
     seq_len: int | None = None,
@@ -574,6 +724,7 @@ def run_gdn_comparison(
     head_dim: int = 128,
     conv_kernel_dim: int = 4,
     chunk_size: int = 64,
+    remat_policy: str = "both",
 ):
   backend = jax.default_backend()
   print(f"\nDevice: {jax.devices()[0]} ({backend})")
@@ -603,7 +754,8 @@ def run_gdn_comparison(
   print(f"Config: Batch={batch}, SeqLen={slen}, Dtype={dtype}")
   print(
       f"Model: H={hidden_size}, K_Heads={num_key_heads},"
-      f" V_Heads={num_value_heads}, HeadDim={head_dim}, ChunkSize={chunk_size}"
+      f" V_Heads={num_value_heads}, HeadDim={head_dim}, ChunkSize={chunk_size},"
+      f" RematPolicy={remat_policy}"
   )
 
   pure_jax_cfg, gdn_kernel_cfg = create_model_configs(
@@ -632,147 +784,52 @@ def run_gdn_comparison(
   key = jax.random.PRNGKey(42)
   inputs = jax.random.normal(key, (batch, slen, hidden_size), dtype=dtype)
 
-  print("\n--- Checking Numerical Equivalence in FP32 ---")
-  jit_train_pure, params_pure = create_jitted_train_step(
-      pure_jax_model,
-      inputs.shape,
-      fwd_scope="PureJAX_Fwd",
-      bwd_scope="PureJAX_Bwd",
+  # 1. Compile & Analyze Forward Pass (shared across remat policies)
+  print("\n--- Compiling Forward Passes (FP32) ---")
+  jit_fwd_pure, params_pure = create_jitted_forward(
+      pure_jax_model, scope_name="PureJAX_Fwd"
   )
-  jit_train_kernel, params_kernel = create_jitted_train_step(
-      gdn_kernel_model,
-      inputs.shape,
-      fwd_scope="GdnKernel_Fwd",
-      bwd_scope="GdnKernel_Bwd",
-  )
-
-  pure_train_ok = False
-  try:
-    print(
-        f"[{time.strftime('%X')}] Lowering and compiling Pure JAX training step (forward + autodiff backward)..."
-    )
-    lowered_pure = jit_train_pure.lower(params_pure, inputs)
-    compiled_train_pure = lowered_pure.compile()
-    if hasattr(compiled_train_pure, "memory_analysis"):
-      try:
-        jit_train_pure._cached_memory_analysis = compiled_train_pure.memory_analysis()
-      except Exception:
-        pass
-    loss_pure, out_pure, grads_pure = compiled_train_pure(params_pure, inputs)
-    jax.block_until_ready((loss_pure, out_pure, grads_pure))
-    pure_train_ok = True
-    print(f"[{time.strftime('%X')}] ✅ Pure JAX training step complete.")
-  except Exception as e:
-    print(f"⚠️ [{time.strftime('%X')}] Pure JAX train step failed or stalled: {e}")
-    loss_pure, out_pure, grads_pure = None, None, None
-
-  kernel_train_ok = False
-  try:
-    print(
-        f"[{time.strftime('%X')}] Lowering and compiling Canonical GDN Kernel (use_gdn_kernel=True) training step..."
-    )
-    lowered_kernel = jit_train_kernel.lower(params_kernel, inputs)
-    compiled_train_kernel = lowered_kernel.compile()
-    if hasattr(compiled_train_kernel, "memory_analysis"):
-      try:
-        jit_train_kernel._cached_memory_analysis = compiled_train_kernel.memory_analysis()
-      except Exception:
-        pass
-    loss_kernel, out_kernel, grads_kernel = compiled_train_kernel(params_kernel, inputs)
-    jax.block_until_ready((loss_kernel, out_kernel, grads_kernel))
-    kernel_train_ok = True
-    print(f"[{time.strftime('%X')}] ✅ Canonical GDN Kernel training step complete.")
-  except Exception as e:
-    print(f"⚠️ [{time.strftime('%X')}] Canonical GDN Kernel train step compilation failed: {e}")
-    loss_kernel, out_kernel, grads_kernel = None, None, None
-
-  tol = 1e-3 if backend == "cpu" else 1e-4
-  abs_tol = 1e-5
-  overall_numerical_diverged = False
-
-  if pure_train_ok and kernel_train_ok:
-    div = print_numerical_correctness_table(
-        out_ref=out_pure,
-        out_test=out_kernel,
-        loss_ref=loss_pure,
-        loss_test=loss_kernel,
-        grads_ref=grads_pure,
-        grads_test=grads_kernel,
-        tolerance=tol,
-        abs_tolerance=abs_tol,
-        comparison_name="Pure JAX vs Canonical GDN Kernel (Decoupled v1.5)",
-    )
-    if div:
-      overall_numerical_diverged = True
-    else:
-      print(
-          "\n✅ Canonical GDN Kernel (Decoupled v1.5) matched Pure JAX within FP32 tolerance (< 1e-4) across"
-          " forward outputs, loss scalars, and parameter gradients!"
-      )
-
-  # Performance Benchmark & Memory Analysis
-  print("\n--- Performance Benchmark & XProf Tracing (FP32) ---")
-
-  jit_fwd_kernel, _ = create_jitted_forward(
+  jit_fwd_kernel, params_kernel = create_jitted_forward(
       gdn_kernel_model, scope_name="GdnKernel_Fwd"
   )
+
+  pure_fwd_ok = False
+  try:
+    lowered_fwd_pure = jit_fwd_pure.lower(params_pure, inputs)
+    compiled_fwd_pure = lowered_fwd_pure.compile()
+    if hasattr(compiled_fwd_pure, "memory_analysis"):
+      jit_fwd_pure._cached_memory_analysis = compiled_fwd_pure.memory_analysis()
+    pure_fwd_ok = True
+  except Exception as e:
+    print(f"⚠️ Pure JAX forward compilation failed: {e}")
+
+  kernel_fwd_ok = False
   try:
     lowered_fwd_kernel = jit_fwd_kernel.lower(params_kernel, inputs)
     compiled_fwd_kernel = lowered_fwd_kernel.compile()
     if hasattr(compiled_fwd_kernel, "memory_analysis"):
       jit_fwd_kernel._cached_memory_analysis = compiled_fwd_kernel.memory_analysis()
+    kernel_fwd_ok = True
   except Exception as e:
     print(f"⚠️ Canonical GDN Kernel forward compilation failed: {e}")
 
-  pure_fwd_ok = False
-  if pure_train_ok:
-    try:
-      jit_fwd_pure, _ = create_jitted_forward(
-          pure_jax_model, scope_name="PureJAX_Fwd"
-      )
-      lowered_fwd_pure = jit_fwd_pure.lower(params_pure, inputs)
-      compiled_fwd_pure = lowered_fwd_pure.compile()
-      if hasattr(compiled_fwd_pure, "memory_analysis"):
-        jit_fwd_pure._cached_memory_analysis = compiled_fwd_pure.memory_analysis()
-      pure_fwd_ok = True
-    except Exception as e:
-      print(f"⚠️ Pure JAX forward creation failed: {e}")
+  # Determine policies to benchmark
+  if isinstance(remat_policy, bool):
+    remat_str = "full" if remat_policy else "none"
+  else:
+    remat_str = str(remat_policy).lower()
 
-  kernel_names = [
-      "Pure JAX GDN (Reference)",
-      "Canonical GDN Kernel (use_gdn_kernel=True)",
-  ]
-  fwd_fns = [jit_fwd_pure, jit_fwd_kernel]
-  train_fns = [jit_train_pure, jit_train_kernel]
-  params_list = [params_pure, params_kernel]
+  if remat_str == "both":
+    policies = ["full", "none"]
+  elif remat_str in ("full", "none"):
+    policies = [remat_str]
+  else:
+    raise ValueError(f"Unknown remat_policy: {remat_policy}. Expected 'full', 'none', or 'both'.")
 
-  # Memory Profile Analysis (HBM Usage)
-  fwd_act_mbs, train_peak_mbs, bwd_peak_mbs = run_memory_profile_analysis(
-      kernel_names=kernel_names,
-      fwd_fns=fwd_fns,
-      train_fns=train_fns,
-      params_list=params_list,
-      inputs=inputs,
-      seq_len=slen,
-      batch_size=batch,
-  )
-
-  # Warmup all forward and train step functions
-  print(
-      f"\nWarming up kernels ({num_warmup} warmups each to complete JIT"
-      " compilation)..."
-  )
-  warmup_kernels = [
-      ("Pure JAX Forward", jit_fwd_pure, params_pure),
-      ("Pure JAX Train Step", jit_train_pure, params_pure),
-      ("Canonical GDN Kernel Forward", jit_fwd_kernel, params_kernel),
-      ("Canonical GDN Kernel Train Step", jit_train_kernel, params_kernel),
-  ]
-  for name, fn, p in warmup_kernels:
-    for _ in range(num_warmup):
-      out = fn(p, inputs)
-      jax.block_until_ready(out)
-  print("✅ Warmup complete. All JIT compilations finished.")
+  tol = 1e-3 if backend == "cpu" else 1e-4
+  abs_tol = 1e-5
+  overall_numerical_diverged = False
+  results = {}
 
   log_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "/tmp/xprof_traces")
   os.makedirs(log_dir, exist_ok=True)
@@ -803,29 +860,195 @@ def run_gdn_comparison(
     print(f"  -> {t_avg:.2f} ms")
     return t_avg
 
-  t_fwd_pure = timed_benchmark("Pure JAX Forward", "PureJAX_Fwd", jit_fwd_pure, params_pure, inputs)
-  t_train_pure = timed_benchmark("Pure JAX Train Step", "PureJAX_Bwd", jit_train_pure, params_pure, inputs)
-  t_bwd_pure = max(t_train_pure - t_fwd_pure, 0.0)
+  # Benchmark Forward Passes
+  print(f"\nWarming up forward passes ({num_warmup} warmups each)...")
+  for _ in range(num_warmup):
+    if pure_fwd_ok:
+      jax.block_until_ready(jit_fwd_pure(params_pure, inputs))
+    if kernel_fwd_ok:
+      jax.block_until_ready(jit_fwd_kernel(params_kernel, inputs))
 
-  t_fwd_kernel = timed_benchmark(
-      "Canonical GDN Kernel Forward",
-      "GdnKernel_Fwd",
-      jit_fwd_kernel,
-      params_kernel,
-      inputs,
-  )
-  if kernel_train_ok:
-    t_train_kernel = timed_benchmark(
-        "Canonical GDN Kernel Train Step",
-        "GdnKernel_Bwd",
-        jit_train_kernel,
-        params_kernel,
-        inputs,
+  t_fwd_pure = timed_benchmark("Pure JAX Forward", "PureJAX_Fwd", jit_fwd_pure, params_pure, inputs) if pure_fwd_ok else float("nan")
+  t_fwd_kernel = timed_benchmark("Canonical GDN Kernel Forward", "GdnKernel_Fwd", jit_fwd_kernel, params_kernel, inputs) if kernel_fwd_ok else float("nan")
+
+  for policy in policies:
+    use_remat = (policy == "full")
+    print(f"\n{'='*90}")
+    print(f">>> EVALUATING CONFIGURATION: remat={policy.upper()} (Pure JAX vs Canonical GDN Kernel)")
+    print(f"{'='*90}")
+
+    jit_train_pure, _ = create_jitted_train_step(
+        pure_jax_model,
+        inputs.shape,
+        fwd_scope=f"PureJAX_Fwd_{policy}",
+        bwd_scope=f"PureJAX_Bwd_{policy}",
+        remat=use_remat,
     )
-    t_bwd_kernel = max(t_train_kernel - t_fwd_kernel, 0.0)
-  else:
-    t_train_kernel = float("nan")
-    t_bwd_kernel = float("nan")
+    jit_train_kernel, _ = create_jitted_train_step(
+        gdn_kernel_model,
+        inputs.shape,
+        fwd_scope=f"GdnKernel_Fwd_{policy}",
+        bwd_scope=f"GdnKernel_Bwd_{policy}",
+        remat=use_remat,
+    )
+
+    pure_train_ok = False
+    try:
+      print(f"[{time.strftime('%X')}] Compiling Pure JAX training step (remat={policy})...")
+      lowered_pure = jit_train_pure.lower(params_pure, inputs)
+      compiled_train_pure = lowered_pure.compile()
+      if hasattr(compiled_train_pure, "memory_analysis"):
+        try:
+          jit_train_pure._cached_memory_analysis = compiled_train_pure.memory_analysis()
+        except Exception:
+          pass
+      loss_pure, out_pure, grads_pure = compiled_train_pure(params_pure, inputs)
+      jax.block_until_ready((loss_pure, out_pure, grads_pure))
+      pure_train_ok = True
+      print(f"[{time.strftime('%X')}] ✅ Pure JAX training step (remat={policy}) complete.")
+    except Exception as e:
+      print(f"⚠️ [{time.strftime('%X')}] Pure JAX train step (remat={policy}) failed: {e}")
+      loss_pure, out_pure, grads_pure = None, None, None
+
+    kernel_train_ok = False
+    try:
+      print(f"[{time.strftime('%X')}] Compiling Canonical GDN Kernel training step (remat={policy})...")
+      lowered_kernel = jit_train_kernel.lower(params_kernel, inputs)
+      compiled_train_kernel = lowered_kernel.compile()
+      if hasattr(compiled_train_kernel, "memory_analysis"):
+        try:
+          jit_train_kernel._cached_memory_analysis = compiled_train_kernel.memory_analysis()
+        except Exception:
+          pass
+      loss_kernel, out_kernel, grads_kernel = compiled_train_kernel(params_kernel, inputs)
+      jax.block_until_ready((loss_kernel, out_kernel, grads_kernel))
+      kernel_train_ok = True
+      print(f"[{time.strftime('%X')}] ✅ Canonical GDN Kernel training step (remat={policy}) complete.")
+    except Exception as e:
+      print(f"⚠️ [{time.strftime('%X')}] Canonical GDN Kernel train step (remat={policy}) failed: {e}")
+      loss_kernel, out_kernel, grads_kernel = None, None, None
+
+    # Numerical equivalence check
+    policy_diverged = False
+    policy_diffs = {}
+    if pure_train_ok and kernel_train_ok:
+      policy_diverged = print_numerical_correctness_table(
+          out_ref=out_pure,
+          out_test=out_kernel,
+          loss_ref=loss_pure,
+          loss_test=loss_kernel,
+          grads_ref=grads_pure,
+          grads_test=grads_kernel,
+          tolerance=tol,
+          abs_tolerance=abs_tol,
+          comparison_name=f"Pure JAX vs Canonical GDN Kernel (remat={policy})",
+          diff_records=policy_diffs,
+      )
+      if policy_diverged:
+        overall_numerical_diverged = True
+      else:
+        print(
+            f"\n✅ Canonical GDN Kernel (remat={policy}) matched Pure JAX within FP32 tolerance (< {tol:.0e})!"
+        )
+    else:
+      policy_diverged = True
+      overall_numerical_diverged = True
+
+    # Memory Profile Analysis
+    fwd_act_mbs, train_peak_mbs, bwd_peak_mbs = run_memory_profile_analysis(
+        kernel_names=[
+            f"Pure JAX GDN (remat={policy})",
+            f"Canonical GDN Kernel (remat={policy})",
+        ],
+        fwd_fns=[jit_fwd_pure, jit_fwd_kernel],
+        train_fns=[jit_train_pure, jit_train_kernel],
+        params_list=[params_pure, params_kernel],
+        inputs=inputs,
+        seq_len=slen,
+        batch_size=batch,
+        policy_label=f"remat={policy}, ",
+    )
+
+    # Warmup and Timed Benchmark
+    print(f"\nWarming up train step kernels (remat={policy}, {num_warmup} warmups each)...")
+    if pure_train_ok:
+      for _ in range(num_warmup):
+        jax.block_until_ready(jit_train_pure(params_pure, inputs))
+    if kernel_train_ok:
+      for _ in range(num_warmup):
+        jax.block_until_ready(jit_train_kernel(params_kernel, inputs))
+
+    if pure_train_ok:
+      t_train_pure = timed_benchmark(
+          f"Pure JAX Train Step (remat={policy})",
+          f"PureJAX_Train_{policy}",
+          jit_train_pure,
+          params_pure,
+          inputs,
+      )
+      t_bwd_pure = max(t_train_pure - t_fwd_pure, 0.0)
+    else:
+      t_train_pure = float("nan")
+      t_bwd_pure = float("nan")
+
+    if kernel_train_ok:
+      t_train_kernel = timed_benchmark(
+          f"Canonical GDN Kernel Train Step (remat={policy})",
+          f"GdnKernel_Train_{policy}",
+          jit_train_kernel,
+          params_kernel,
+          inputs,
+      )
+      t_bwd_kernel = max(t_train_kernel - t_fwd_kernel, 0.0)
+    else:
+      t_train_kernel = float("nan")
+      t_bwd_kernel = float("nan")
+
+    kernel_names_policy = [
+        f"Pure JAX GDN (remat={policy})",
+        f"Canonical GDN Kernel (remat={policy})",
+    ]
+    fwd_lats = [t_fwd_pure, t_fwd_kernel]
+    bwd_lats = [t_bwd_pure, t_bwd_kernel]
+    train_lats = [t_train_pure, t_train_kernel]
+
+    print_latency_comparison(
+        kernel_names=kernel_names_policy,
+        fwd_lats=fwd_lats,
+        bwd_lats=bwd_lats,
+        train_lats=train_lats,
+        policy_label=f"[remat={policy}] ",
+    )
+
+    print_tradeoff_table(
+        ref_name=kernel_names_policy[0],
+        kernel_name=kernel_names_policy[1],
+        fwd_ref=t_fwd_pure,
+        fwd_k=t_fwd_kernel,
+        bwd_ref=t_bwd_pure,
+        bwd_k=t_bwd_kernel,
+        train_ref=t_train_pure,
+        train_k=t_train_kernel,
+        fwd_mem_ref=fwd_act_mbs[0],
+        fwd_mem_k=fwd_act_mbs[1],
+        train_mem_ref=train_peak_mbs[0],
+        train_mem_k=train_peak_mbs[1],
+        policy_label=f"[remat={policy}] ",
+    )
+
+    results[policy] = {
+        "t_fwd_pure": t_fwd_pure,
+        "t_fwd_kernel": t_fwd_kernel,
+        "t_bwd_pure": t_bwd_pure,
+        "t_bwd_kernel": t_bwd_kernel,
+        "t_train_pure": t_train_pure,
+        "t_train_kernel": t_train_kernel,
+        "fwd_act_mbs": fwd_act_mbs,
+        "bwd_peak_mbs": bwd_peak_mbs,
+        "train_peak_mbs": train_peak_mbs,
+        "diverged": policy_diverged,
+        "diff_records": policy_diffs,
+    }
 
   if tracing_active:
     try:
@@ -846,31 +1069,9 @@ def run_gdn_comparison(
     except Exception:
       pass
 
-  fwd_lats = [t_fwd_pure, t_fwd_kernel]
-  bwd_lats = [t_bwd_pure, t_bwd_kernel]
-  train_lats = [t_train_pure, t_train_kernel]
-
-  print_latency_comparison(
-      kernel_names=kernel_names,
-      fwd_lats=fwd_lats,
-      bwd_lats=bwd_lats,
-      train_lats=train_lats,
-  )
-
-  print_tradeoff_table(
-      ref_name=kernel_names[0],
-      kernel_name=kernel_names[1],
-      fwd_ref=t_fwd_pure,
-      fwd_k=t_fwd_kernel,
-      bwd_ref=t_bwd_pure,
-      bwd_k=t_bwd_kernel,
-      train_ref=t_train_pure,
-      train_k=t_train_kernel,
-      fwd_mem_ref=fwd_act_mbs[0],
-      fwd_mem_k=fwd_act_mbs[1],
-      train_mem_ref=train_peak_mbs[0],
-      train_mem_k=train_peak_mbs[1],
-  )
+  # If multiple policies were evaluated, print cross-policy summary table
+  if len(policies) > 1:
+    print_cross_policy_summary(results)
 
   return overall_numerical_diverged
 
@@ -911,6 +1112,7 @@ class HybridGdnBenchmarkTest(absltest.TestCase):
           head_dim=128,
           conv_kernel_dim=4,
           chunk_size=64,
+          remat_policy="both",
       )
     else:
       print(
@@ -932,6 +1134,7 @@ class HybridGdnBenchmarkTest(absltest.TestCase):
           head_dim=128,
           conv_kernel_dim=4,
           chunk_size=64,
+          remat_policy="both",
       )
     self.assertFalse(
         diverged, "GDN Kernel gradients diverged beyond tolerance in FP32!"
@@ -958,6 +1161,13 @@ if __name__ == "__main__":
   parser.add_argument("--head_dim", type=int, default=128)
   parser.add_argument("--conv_kernel_dim", type=int, default=4)
   parser.add_argument("--chunk_size", type=int, default=64)
+  parser.add_argument(
+      "--remat",
+      type=str,
+      default="both",
+      choices=["full", "none", "both"],
+      help="Remat policy: 'full', 'none', or 'both'",
+  )
 
   if "--benchmark" in sys.argv:
     sys.argv.remove("--benchmark")
@@ -974,6 +1184,7 @@ if __name__ == "__main__":
         head_dim=args.head_dim,
         conv_kernel_dim=args.conv_kernel_dim,
         chunk_size=args.chunk_size,
+        remat_policy=args.remat,
     )
   else:
     absltest.main()
