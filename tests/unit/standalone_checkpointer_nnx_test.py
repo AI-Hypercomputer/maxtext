@@ -119,7 +119,7 @@ class CheckpointLoopTest(unittest.TestCase):
     config = self._create_mock_config(start_from_checkpoint=False)
     mock_state = mock.MagicMock()
     mock_ckpt_mgr = mock.MagicMock()
-    mock_ckpt_mgr.restore.return_value = {"items": mock_state}
+    mock_ckpt_mgr.load_checkpointables.return_value = {"items": mock_state}
 
     with (
         mock.patch("maxtext.utils.standalone_checkpointer.from_config"),
@@ -144,14 +144,14 @@ class CheckpointLoopTest(unittest.TestCase):
     mock_setup.assert_called_once()
     mock_sleep.assert_called_once()
     mock_system.assert_called_once_with("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
-    mock_ckpt_mgr.restore.assert_called_once_with(1)
+    mock_ckpt_mgr.load_checkpointables.assert_called_once_with(1, {"items": mock_state})
 
   def test_checkpoint_loop_start_from_checkpoint(self):
     """Tests initializing state from an existing checkpoint."""
     config = self._create_mock_config(start_from_checkpoint=True)
     mock_state = mock.MagicMock()
     mock_ckpt_mgr = mock.MagicMock()
-    mock_ckpt_mgr.restore.return_value = {"items": mock_state}
+    mock_ckpt_mgr.load_checkpointables.return_value = {"items": mock_state}
 
     with (
         mock.patch("maxtext.utils.standalone_checkpointer.from_config"),
@@ -183,7 +183,7 @@ class CheckpointLoopTest(unittest.TestCase):
     config = self._create_mock_config(start_from_checkpoint=True)
     mock_state = mock.MagicMock()
     mock_ckpt_mgr = mock.MagicMock()
-    mock_ckpt_mgr.restore.return_value = {"items": mock_state}
+    mock_ckpt_mgr.load_checkpointables.return_value = {"items": mock_state}
 
     with (
         mock.patch("maxtext.utils.standalone_checkpointer.from_config"),
@@ -216,7 +216,7 @@ class CheckpointLoopTest(unittest.TestCase):
     mock_state = mock.MagicMock()
     mock_state.to_pure_dict.return_value = {"params": {}}
     mock_ckpt_mgr = mock.MagicMock()
-    mock_ckpt_mgr.restore.return_value = {"items": mock_state}
+    mock_ckpt_mgr.load_checkpointables.return_value = {"items": mock_state}
 
     with (
         mock.patch("maxtext.utils.maxtext_utils.get_mesh_from_config"),
