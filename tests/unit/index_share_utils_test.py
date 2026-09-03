@@ -55,6 +55,28 @@ class IndexShareUtilsTest(unittest.TestCase):
     # Layer 4 serves 3 layers (4, 5, 6) -> size 3
     self.assertEqual(sizes, (4, 4, 4, 4, 3, 3, 3))
 
+  def test_pattern_expansion_78_layers(self):
+    pattern = index_share_utils.parse_index_share_pattern("FSSS", 78)
+    self.assertEqual(len(pattern), 78)
+    self.assertEqual(pattern[0], "F")
+    self.assertEqual(pattern[1], "S")
+    self.assertEqual(pattern[2], "S")
+    self.assertEqual(pattern[3], "S")
+    self.assertEqual(pattern[4], "F")
+    num_f = sum(1 for p in pattern if p == "F")
+    num_s = sum(1 for p in pattern if p == "S")
+    self.assertEqual(num_f, 20)
+    self.assertEqual(num_s, 58)
+
+  def test_checkpoint_donor_resolution(self):
+    pattern = index_share_utils.parse_index_share_pattern("FSSS", 12)
+    for l in range(4):
+      self.assertEqual(index_share_utils.get_donor_layer_idx(l, pattern), 0)
+    for l in range(4, 8):
+      self.assertEqual(index_share_utils.get_donor_layer_idx(l, pattern), 4)
+    for l in range(8, 12):
+      self.assertEqual(index_share_utils.get_donor_layer_idx(l, pattern), 8)
+
   def test_is_shared_layer(self):
     pattern = ("F", "S", "S", "F")
     self.assertFalse(index_share_utils.is_shared_layer(0, pattern))

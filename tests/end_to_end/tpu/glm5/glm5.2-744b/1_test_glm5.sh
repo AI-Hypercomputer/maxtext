@@ -25,11 +25,11 @@ echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 # Step 1: Checkpoint conversion
 # HF checkpoint: https://huggingface.co/zai-org/GLM-5.2
 BF16_HF_PATH=${BF16_HF_PATH:-gs://maxtext-glm5-europe-west4/glm5.2_raw}
-if [ -z "${BF16_LOCAL_PATH}" ] && [ ! -d "/home/rishabhbaghel_google_com/glm5.2_raw" ]; then
+if [ -z "${BF16_LOCAL_PATH}" ] && [ ! -d "${HOME}/glm5.2_raw" ]; then
   export BF16_LOCAL_PATH=/tmp/glm5.2_raw
   gcloud storage cp -r ${BF16_HF_PATH} /tmp || true
 fi
-BF16_LOCAL_PATH=${BF16_LOCAL_PATH:-/home/rishabhbaghel_google_com/glm5.2_raw}
+BF16_LOCAL_PATH=${BF16_LOCAL_PATH:-${HOME}/glm5.2_raw}
 
 # scanned
 python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \

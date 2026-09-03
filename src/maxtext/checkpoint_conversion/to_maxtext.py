@@ -109,7 +109,7 @@ def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any]) ->
         donor_key = f"model.layers.{candidate_idx}.{rest}"
         try:
           return getter_fn(donor_key)
-        except Exception:  # pylint: disable=broad-exception-caught
+        except (KeyError, ValueError, FileNotFoundError):
           continue
   return None
 
@@ -488,10 +488,7 @@ def _build_single_axis_stacked_tensor(
       try:
         hf_tensor_numpy = tensor_getter_fn(hf_key_single)
       except (ValueError, KeyError) as e:
-        resolved = _resolve_shared_indexer_tensor(hf_key_single, tensor_getter_fn)
-        if resolved is not None:
-          hf_tensor_numpy = resolved
-        elif "indexer" in str(hf_key_single) and str(hf_key_single).startswith("model.layers."):
+        if "indexer" in str(hf_key_single) and str(hf_key_single).startswith("model.layers."):
           hf_tensor_numpy = np.zeros(mt_slice_shape, dtype=np.float32)
         else:
           raise e
@@ -1030,10 +1027,6 @@ def main(
 
       def _eager_getter(key):
         if key not in hf_state_dict_numpy:
-          if getattr(config, "use_index_share", False):
-            donor_tensor = _resolve_shared_indexer_tensor(key, _eager_getter)
-            if donor_tensor is not None:
-              return donor_tensor
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
         v = hf_state_dict_numpy[key]
         # target dtype is "float32"

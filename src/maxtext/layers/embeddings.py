@@ -2044,7 +2044,7 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
       self,
       inputs: jnp.ndarray,
       position: jnp.ndarray,
-      unsqueeze_dim: int | None = 2,
+      unsqueeze_dim: int | None = 1,
       reverse: bool = False,
   ) -> jnp.ndarray:
     """Applies interleaved Rotary Position Embedding to the inputs.
@@ -2113,8 +2113,6 @@ def _apply_rotary_pos_emb(
   # Insert an expansion dimension to align the frequency tensors (e.g., [B, S, D])
   # with the attention head axes of the input tensor (e.g., [B, S, H, D]).
   if unsqueeze_dim is not None:
-    if unsqueeze_dim < 0:
-      unsqueeze_dim = cos.ndim + unsqueeze_dim + 1
     cos = jnp.expand_dims(cos, axis=unsqueeze_dim)
     sin = jnp.expand_dims(sin, axis=unsqueeze_dim)
 
