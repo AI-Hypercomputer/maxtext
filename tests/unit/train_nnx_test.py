@@ -24,6 +24,7 @@ import types as pytypes
 import unittest
 
 from flax import nnx
+from flax.nnx import variablelib
 import jax
 import jax.numpy as jnp
 from maxtext.layers import nnx_scan
@@ -99,6 +100,17 @@ class _TinyDecoder(nnx.Module):
     del enable_dropout, decoder_target_tokens, decoder_target_mask
     h = self.embed(decoder_input_tokens)
     return self.proj(h)
+
+
+_OVERWRITE_WITH_GRADIENT = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
+
+
+class _CustomGradientModel(nnx.Module):
+  """Small model with custom state differentiated outside the optimizer."""
+
+  def __init__(self):
+    self.weight = nnx.Param(jnp.array(1.0))
+    self.custom_state = _OVERWRITE_WITH_GRADIENT(jnp.array(2.0))
 
 
 class GateLogit(nnx.Module):
@@ -367,6 +379,48 @@ class TestTrainStepNNX(unittest.TestCase):
     )
     self.assertIsInstance(new_state, nnx.State)
     self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
+
+  def test_custom_state_keeps_gradient_update(self):
+    """Checks that old custom state does not overwrite its gradient update."""
+    cfg = _Cfg()
+    model = _CustomGradientModel()
+    ts = train_state_nnx.TrainStateNNX(
+        model,
+        nnx.Optimizer(model, optax.sgd(0.1), wrt=nnx.Param),
+    )
+    state_graphdef, state_pure = nnx.split(ts)
+
+    def fake_loss_fn(local_model, *_args, **_kwargs):
+      loss = local_model.weight.get_value() + 3.0 * local_model.custom_state.get_value()
+      return loss, {
+          "intermediate_outputs": {},
+          "xent_sum": loss,
+          "z_loss": jnp.array(0.0),
+          "total_weights": jnp.array(1.0),
+          "moe_lb_loss": jnp.array(0.0),
+          "indexer_loss": jnp.array(0.0),
+          "moe_bias_updates": None,
+          "mtp_moe_bias_updates": None,
+          "mtp_loss": jnp.array(0.0),
+          "batch_stats": None,
+      }
+
+    original_loss_fn = pre_train.loss_fn
+    try:
+      pre_train.loss_fn = fake_loss_fn
+      new_state, _ = pre_train.train_step(
+          state_graphdef,
+          cfg,
+          state_mesh_shardings=None,
+          params_shardings=None,
+          state=state_pure,
+          data={},
+      )
+    finally:
+      pre_train.loss_fn = original_loss_fn
+
+    # The custom gradient is 3.0. It must not be replaced by the old state (2.0).
+    np.testing.assert_allclose(np.asarray(new_state.model.custom_state.get_value()), 3.0)
 
 
 class TestEvalStepNNX(unittest.TestCase):
