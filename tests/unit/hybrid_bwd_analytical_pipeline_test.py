@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for hybrid_bwd_analytical_pipeline with manual analytical backward pass."""
+"""Unit tests for hybrid_bwd_analytical_pipeline with GDN kernel backward pass."""
 
 import functools
 from absl.testing import absltest
@@ -28,7 +28,7 @@ except ImportError:
   from maxtext.src.maxtext.models import qwen3
 
 
-class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
+class HybridBwdGdnKernelPipelineTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -186,7 +186,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
         qkv_conv, expected_qkv_conv, rtol=1e-5, atol=1e-5
     )
 
-  def test_fused_conv1d_gdn_analytical_gradient_against_autodiff(self):
+  def test_fused_conv1d_gdn_kernel_gradient_against_autodiff(self):
     """Compares hybrid_fused_conv1d_gdn custom VJP against JAX autodiff on pure JAX."""
     batch_size = 1
     chunk_size = 64
@@ -247,8 +247,8 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
         loss_pure, argnums=(0, 1, 2, 3, 4, 5, 6)
     )(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
 
-    # 2. Kernel Gradients via Analytical custom VJP
-    def loss_analytical(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
+    # 2. Kernel Gradients via GDN Kernel custom VJP
+    def loss_gdn_kernel(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
       out, _ = (
           hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn(
               qkv=qkv_in,
@@ -272,12 +272,14 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
       )
       return jnp.sum(out * do)
 
+    loss_analytical = loss_gdn_kernel
+
     act_dqkv, act_db, act_da, act_dcw, act_dcb, act_dal, act_ddt = jax.grad(
-        loss_analytical, argnums=(0, 1, 2, 3, 4, 5, 6)
+        loss_gdn_kernel, argnums=(0, 1, 2, 3, 4, 5, 6)
     )(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
 
     print(
-        "\n--- Analytical Kernel Custom VJP vs Pure JAX Autodiff Breakdown ---"
+        "\n--- GDN Kernel Custom VJP vs Pure JAX Autodiff Breakdown ---"
     )
     comparisons = [
         ("beta (d_b)", exp_db, act_db),
@@ -309,8 +311,8 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
         " CPU!"
     )
 
-  def test_fused_conv1d_gdn_analytical_conv_bias_none(self):
-    """Verifies analytical backward executes correctly when conv_bias is None."""
+  def test_fused_conv1d_gdn_kernel_conv_bias_none(self):
+    """Verifies GDN kernel backward executes correctly when conv_bias is None."""
     batch_size = 1
     chunk_size = 32
     num_chunks = 2
@@ -374,8 +376,8 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
       self.assertIsNotNone(g)
       self.assertFalse(np.any(np.isnan(np.array(g))))
 
-  def test_fused_conv1d_gdn_analytical_multi_batch(self):
-    """Verifies analytical backward handles batch_size > 1."""
+  def test_fused_conv1d_gdn_kernel_multi_batch(self):
+    """Verifies GDN kernel backward handles batch_size > 1."""
     batch_size = 2
     chunk_size = 32
     num_chunks = 2
@@ -586,7 +588,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
     )
     np.testing.assert_allclose(t_inv_cached, t_inv_ref, rtol=1e-6, atol=1e-6)
 
-  def test_fused_conv1d_gdn_analytical_bwd_with_cached_tinv_in_residuals(self):
+  def test_fused_conv1d_gdn_kernel_bwd_with_cached_tinv_in_residuals(self):
     """Verifies _hybrid_fused_conv1d_gdn_bwd gives identical grads with cached t_inv."""
     batch_size = 1
     chunk_size = 32
@@ -824,7 +826,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
     )
     np.testing.assert_allclose(t_inv, exp_t_inv, rtol=1e-5, atol=1e-5)
 
-  def test_fused_conv1d_gdn_analytical_gradient_with_initial_states(self):
+  def test_fused_conv1d_gdn_kernel_gradient_with_initial_states(self):
     """Verifies custom VJP gradients when initial conv_state and recurrent_state are provided."""
     batch_size = 1
     chunk_size = 32
@@ -889,7 +891,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
       )
       return jnp.sum(out * do)
 
-    def loss_analytical(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
+    def loss_gdn_kernel(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
       out, _ = (
           hybrid_bwd_analytical_pipeline.hybrid_fused_conv1d_gdn(
               qkv=qkv_in,
@@ -913,10 +915,12 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
       )
       return jnp.sum(out * do)
 
+    loss_analytical = loss_gdn_kernel
+
     exp_grads = jax.grad(loss_pure, argnums=(0, 1, 2, 3, 4, 5, 6))(
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias
     )
-    act_grads = jax.grad(loss_analytical, argnums=(0, 1, 2, 3, 4, 5, 6))(
+    act_grads = jax.grad(loss_gdn_kernel, argnums=(0, 1, 2, 3, 4, 5, 6))(
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias
     )
 
@@ -924,7 +928,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
       self.assertIsNotNone(act_g)
       np.testing.assert_allclose(exp_g, act_g, rtol=1e-3, atol=1e-3)
 
-  def test_analytical_bwd_multi_group_head_parallel(self):
+  def test_gdn_kernel_bwd_multi_group_head_parallel(self):
     """Verifies multi-group head-parallel grid dispatch matches reference."""
     batch_size = 1
     chunk_size = 32
@@ -996,7 +1000,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
     np.testing.assert_allclose(dal1, dal2, rtol=1e-3, atol=1e-3)
     np.testing.assert_allclose(ddt1, ddt2, rtol=1e-3, atol=1e-3)
 
-  def test_analytical_bwd_variable_length_segment_ids_reset(self):
+  def test_gdn_kernel_bwd_variable_length_segment_ids_reset(self):
     """Verifies segment_ids document boundaries reset carried state gradient to prevent leakage."""
     batch_size = 1
     chunk_size = 32
@@ -1080,7 +1084,7 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
         atol=1e-6,
     )
 
-  def test_fused_conv1d_gdn_analytical_bwd_with_head_tile(self):
+  def test_fused_conv1d_gdn_kernel_bwd_with_head_tile(self):
     """Verifies pallas_fused_conv1d_gdn_bwd_computation forwards head_tile correctly."""
     batch_size = 1
     chunk_size = 32
@@ -1155,7 +1159,14 @@ class HybridBwdAnalyticalPipelineTest(absltest.TestCase):
       if g1 is not None and g2 is not None:
         np.testing.assert_allclose(g1, g2, rtol=5e-3, atol=1e-1)
 
-  test_analytical_bwd_matches_autodiff_fp32 = test_fused_conv1d_gdn_analytical_gradient_against_autodiff
+  test_gdn_kernel_bwd_matches_autodiff_fp32 = (
+      test_fused_conv1d_gdn_kernel_gradient_against_autodiff
+  )
+
+
+# Backwards compatibility alias for external imports
+if __name__ != "__main__":
+  HybridBwdAnalyticalPipelineTest = HybridBwdGdnKernelPipelineTest
 
 
 if __name__ == "__main__":

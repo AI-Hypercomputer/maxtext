@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Benchmarking and verification script for Analytical Hybrid GDN kernel on Cloud TPU.
+"""Benchmarking and verification script for Canonical GDN kernel on Cloud TPU.
 
 Authoritative 2-way comparison:
 1. Pure JAX GDN (Reference)
@@ -562,15 +562,15 @@ def print_tradeoff_table(
   print(sep)
 
 
-def run_analytical_comparison(
+def run_gdn_comparison(
     batch_size: int | None = None,
     seq_len: int | None = None,
     iters: int | None = None,
     warmup: int | None = None,
     dtype_str: str | None = None,
-    hidden_size: int = 2048,
-    num_key_heads: int = 8,
-    num_value_heads: int = 16,
+    hidden_size: int = 4096,
+    num_key_heads: int = 16,
+    num_value_heads: int = 64,
     head_dim: int = 128,
     conv_kernel_dim: int = 4,
     chunk_size: int = 64,
@@ -875,35 +875,39 @@ def run_analytical_comparison(
   return overall_numerical_diverged
 
 
-class HybridGdnAnalyticalBenchmarkTest(absltest.TestCase):
+# Backwards compatibility alias
+run_analytical_comparison = run_gdn_comparison
+
+
+class HybridGdnBenchmarkTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
     jax.config.update("jax_default_matmul_precision", "highest")
     hybrid_bwd_analytical_pipeline.ensure_cpu_interpret_registered()
 
-  def test_benchmark_8k_fp32(self):
-    """Primary benchmark testing Pure JAX vs Canonical GDN Kernel (Decoupled v1.5) in FP32 at 8k with scaled-down dimensions."""
+  def test_benchmark_397b_8k_fp32(self):
+    """Primary benchmark testing Pure JAX vs Canonical GDN Kernel (Decoupled v1.5) in FP32 at full Qwen3.5-397B config (S=8192, H=4096, V=64, K=16)."""
     backend = jax.default_backend()
     if backend == "tpu":
       print(
           "\n========================================================================================="
       )
       print(
-          ">>> BENCHMARK: Dedicated 8k FP32 Comparison (Pure JAX vs Canonical GDN Kernel - Scaled-Down Config)"
+          ">>> BENCHMARK: Dedicated 8k FP32 Comparison (Pure JAX vs Canonical GDN Kernel - Full Qwen3.5-397B Config)"
       )
       print(
           "========================================================================================="
       )
-      diverged = run_analytical_comparison(
+      diverged = run_gdn_comparison(
           batch_size=1,
           seq_len=8192,
           iters=10,
           warmup=3,
           dtype_str="float32",
-          hidden_size=2048,
-          num_key_heads=8,
-          num_value_heads=16,
+          hidden_size=4096,
+          num_key_heads=16,
+          num_value_heads=64,
           head_dim=128,
           conv_kernel_dim=4,
           chunk_size=64,
@@ -916,7 +920,7 @@ class HybridGdnAnalyticalBenchmarkTest(absltest.TestCase):
       print(
           "========================================================================================="
       )
-      diverged = run_analytical_comparison(
+      diverged = run_gdn_comparison(
           batch_size=1,
           seq_len=128,
           iters=3,
@@ -930,27 +934,44 @@ class HybridGdnAnalyticalBenchmarkTest(absltest.TestCase):
           chunk_size=64,
       )
     self.assertFalse(
-        diverged, "Analytical GDN gradients diverged beyond tolerance in FP32!"
+        diverged, "GDN Kernel gradients diverged beyond tolerance in FP32!"
     )
 
 
+# Backwards compatibility alias for external imports
+if __name__ != "__main__":
+  HybridGdnAnalyticalBenchmarkTest = HybridGdnBenchmarkTest
+
+
 if __name__ == "__main__":
-  parser = argparse.ArgumentParser(description="Benchmark Analytical GDN")
+  parser = argparse.ArgumentParser(description="Benchmark GDN Kernel")
   parser.add_argument("--batch_size", type=int, default=None)
   parser.add_argument("--seq_len", type=int, default=None)
   parser.add_argument("--iters", type=int, default=None)
   parser.add_argument("--warmup", type=int, default=None)
   parser.add_argument("--dtype", type=str, default=None)
+  parser.add_argument("--hidden_size", type=int, default=4096)
+  parser.add_argument("--num_key_heads", type=int, default=16)
+  parser.add_argument("--num_value_heads", type=int, default=64)
+  parser.add_argument("--head_dim", type=int, default=128)
+  parser.add_argument("--conv_kernel_dim", type=int, default=4)
+  parser.add_argument("--chunk_size", type=int, default=64)
 
   if "--benchmark" in sys.argv:
     sys.argv.remove("--benchmark")
     args, _ = parser.parse_known_args()
-    run_analytical_comparison(
+    run_gdn_comparison(
         batch_size=args.batch_size,
         seq_len=args.seq_len,
         iters=args.iters,
         warmup=args.warmup,
         dtype_str=args.dtype,
+        hidden_size=args.hidden_size,
+        num_key_heads=args.num_key_heads,
+        num_value_heads=args.num_value_heads,
+        head_dim=args.head_dim,
+        conv_kernel_dim=args.conv_kernel_dim,
+        chunk_size=args.chunk_size,
     )
   else:
     absltest.main()
