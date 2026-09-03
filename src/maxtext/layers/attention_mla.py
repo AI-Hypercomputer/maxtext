@@ -268,6 +268,19 @@ class Indexer(nnx.Module):
       raw_mask = indexer_score >= indexer_cutoff_threshold
       return jnp.where(raw_mask, val_true, val_false)
 
+  def compute_k(
+      self,
+      inputs_kv: Array,
+      inputs_positions: Optional[Array | None] = None,
+  ) -> Array:
+    """Projects and applies partial RoPE to inputs_kv for indexer key representation."""
+    inputs_kv = jax.lax.stop_gradient(inputs_kv)
+    k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
+    k = self.k_norm(k)
+    k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
+    k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
+    return k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
+
   def __call__(
       self,
       inputs_q: Array,
@@ -279,6 +292,8 @@ class Indexer(nnx.Module):
       previous_chunk: Any = None,
       kv_cache: Any = None,
       model_mode: str = MODEL_MODE_TRAIN,
+      k_cached: Optional[Array] = None,
+      cached_s: Optional[Array] = None,
   ):
     """Computes the index score to determine the top-k relevant tokens.
 
@@ -307,6 +322,8 @@ class Indexer(nnx.Module):
       previous_chunk: Previous chunk info for prefill.
       kv_cache: Key-value cache used when serving models.
       model_mode: "train", "prefill", or "autoregressive".
+      k_cached: Optional pre-updated indexer keys from cache.
+      cached_s: Optional pre-updated segment IDs from cache.
 
     Returns:
       indexer_mask: A sparse mask [b, t, s] with 0.0 for top-k selected tokens
@@ -352,17 +369,16 @@ class Indexer(nnx.Module):
     q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
 
     # Key Processing: Project from Input
-    k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
-    k = self.k_norm(k)
-    k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
-    k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
-    k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
+    if k_cached is not None:
+      k = k_cached
+    else:
+      k = self.compute_k(inputs_kv, inputs_positions=inputs_positions)
 
-    # Update and retrieve from cache if not training
-    cached_s = None
-    if model_mode != MODEL_MODE_TRAIN:
-      k_cached, cached_s = self.update_indexer_cache(kv_cache, k, decoder_segment_ids, model_mode, previous_chunk)
-      k = k_cached if k_cached is not None else k
+      # Update and retrieve from cache if not training
+      cached_s = None
+      if model_mode != MODEL_MODE_TRAIN:
+        k_cached, cached_s = self.update_indexer_cache(kv_cache, k, decoder_segment_ids, model_mode, previous_chunk)
+        k = k_cached if k_cached is not None else k
 
     # NOTE: If the total available sequence length <= topk, indexer always selects all tokens.
     if k.shape[1] <= self.indexer_topk:
@@ -1327,6 +1343,13 @@ class MLA(Attention):
       if attention_mask is not None:
         attention_mask = attention_mask.squeeze(axis=(1, 2))
 
+      k_cached, cached_s = None, None
+      if self.indexer is not None and self.IndexerKVCache_0 is not None and model_mode != MODEL_MODE_TRAIN:
+        k_idx = self.indexer.compute_k(inputs_kv, inputs_positions=inputs_positions)
+        k_cached, cached_s = self.indexer.update_indexer_cache(
+            self.IndexerKVCache_0, k_idx, decoder_segment_ids, model_mode, previous_chunk
+        )
+
       if self.indexer is not None or getattr(self.config, "use_index_share", False):
 
         def _run_full(_):
@@ -1350,6 +1373,8 @@ class MLA(Attention):
                 previous_chunk=previous_chunk,
                 kv_cache=self.IndexerKVCache_0,
                 model_mode=model_mode,
+                k_cached=k_cached,
+                cached_s=cached_s,
             )
             topk = getattr(self.config, "indexer_topk", 0)
             if getattr(self.config, "use_index_share", False):
