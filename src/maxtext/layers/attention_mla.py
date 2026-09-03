@@ -1359,7 +1359,7 @@ class MLA(Attention):
               q_len = query.shape[1]
               kv_len = key.shape[1] if key is not None else 0
               topk = getattr(self.config, "indexer_topk", 0)
-              mask = jnp.zeros((batch, q_len, kv_len), dtype=query.dtype)
+              mask = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
               indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
               score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
               return mask, indices, score
@@ -1380,6 +1380,9 @@ class MLA(Attention):
             if getattr(self.config, "use_index_share", False):
               if indices is None or indices.shape != (query.shape[0], query.shape[1], topk):
                 indices = jnp.zeros((query.shape[0], query.shape[1], topk), dtype=jnp.int32)
+            mask = mask.astype(jnp.float32)
+            indices = indices.astype(jnp.int32)
+            score = score.astype(jnp.float32)
             mask = checkpoint_name(mask, "full_layer_indexer_mask")
             indices = checkpoint_name(indices, "full_layer_topk_indices")
             return mask, indices, score
@@ -1391,7 +1394,7 @@ class MLA(Attention):
               q_len = query.shape[1]
               kv_len = key.shape[1] if key is not None else 0
               topk = getattr(self.config, "indexer_topk", 0)
-              mask = jnp.zeros((batch, q_len, kv_len), dtype=query.dtype)
+              mask = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
               indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
               score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
               return mask, indices, score
@@ -1399,6 +1402,9 @@ class MLA(Attention):
             topk = getattr(self.config, "indexer_topk", 0)
             if indices is None or indices.shape != (query.shape[0], query.shape[1], topk):
               indices = jnp.zeros((query.shape[0], query.shape[1], topk), dtype=jnp.int32)
+            mask = mask.astype(jnp.float32)
+            indices = indices.astype(jnp.int32)
+            score = score.astype(jnp.float32)
             mask = checkpoint_name(mask, "shared_layer_reused_mask")
             indices = checkpoint_name(indices, "shared_layer_reused_indices")
             return mask, indices, score

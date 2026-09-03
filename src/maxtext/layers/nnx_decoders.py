@@ -1101,7 +1101,7 @@ class NNXDecoder(nnx.Module):
       if cached_indexer_state is None:
         batch, seq_len = x_in.shape[0], x_in.shape[1]
         topk = getattr(self.config, "indexer_topk", 2048)
-        dummy_mask = jnp.zeros((batch, seq_len, seq_len), dtype=jnp.bfloat16)
+        dummy_mask = jnp.zeros((batch, seq_len, seq_len), dtype=jnp.float32)
         dummy_indices = jnp.zeros((batch, seq_len, topk), dtype=jnp.int32)
         dummy_score = jnp.zeros((batch, seq_len, seq_len), dtype=jnp.float32)
         cached_indexer_state = (dummy_mask, dummy_indices, dummy_score)
