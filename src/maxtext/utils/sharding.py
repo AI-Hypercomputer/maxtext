@@ -190,7 +190,8 @@ def remove_size_one_mesh_axis(spec, mesh):
   if spec is None:
     return None
   new_spec = []  # type: ignore
-  for s in spec:
+  # Iterate `.partitions`: a spec carrying reduced/unreduced axes refuses plain iteration.
+  for s in spec.partitions:
     if s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)  # type: ignore
     elif isinstance(s, tuple):
@@ -207,6 +208,37 @@ def mesh_axes_for_dim(axis_names):
   if isinstance(axis_names, str):
     return (axis_names,)
   return tuple(axis for axis in axis_names if axis is not None)
+
+
+def batch_mesh_axes(mesh, rules=None):
+  """Returns the mesh axes of size > 1 that the activation batch dimension is sharded over."""
+  spec = logical_to_mesh_axes(("activation_batch",), mesh, rules=rules)
+  if spec is None:
+    return frozenset()
+  return frozenset(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
+
+
+def carry_reduced_axes(spec, value):
+  """Copies the `reduced` mesh axes of `value`'s own spec onto `spec`.
+
+  Gradient accumulation marks the parameters it carries through the scan `reduced` over
+  the data axis so their cotangents come out `unreduced` and reduce once after the loop.
+  A spec rebuilt from the logical axis rules has no such tag, so resharding a parameter
+  onto it drops the parameter off the deferred path and its gradient reduces eagerly
+  instead. Copying the tag across keeps it on.
+
+  The tag is left off when it would overlap the partitions, which a PartitionSpec rejects,
+  and when `value` has no spec to read, which is the case outside explicit sharding.
+  """
+  if spec is None or value is None:
+    return spec
+  try:
+    reduced = jax.typeof(value).sharding.spec.reduced
+  except (AttributeError, TypeError):
+    return spec
+  if not reduced or reduced & set(get_mesh_axes_used_by_tensor_spec(spec)):
+    return spec
+  return spec.update(reduced=reduced)
 
 
 def mesh_axes_size(mesh, axes, *, label):
@@ -239,7 +271,8 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
   if spec is None or mesh is None or not shape:
     return spec
   new_spec = []
-  for i, s in enumerate(spec):
+  # Iterate `.partitions`: a spec carrying reduced/unreduced axes refuses plain iteration.
+  for i, s in enumerate(spec.partitions):
     if i >= len(shape) or s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)
     else:
@@ -442,6 +475,9 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
     A set of strings, where each string is a mesh axis name used by the
     tensor's sharding spec. Returns an empty set for unsharded tensors.
   """
+  # Read through `.partitions`: a spec carrying reduced/unreduced axes refuses plain iteration.
+  if isinstance(tensor_sharding_spec, P):
+    tensor_sharding_spec = tensor_sharding_spec.partitions
   # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
   tensor_sharding_spec = sum(
       [

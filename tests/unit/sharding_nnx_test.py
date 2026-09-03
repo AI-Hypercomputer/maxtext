@@ -504,5 +504,37 @@ class TruncateOutShardingTest(unittest.TestCase):
     self.assertEqual(truncated.reduced, frozenset({"data"}))
 
 
+class TaggedPartitionSpecTest(unittest.TestCase):
+  """A spec carrying reduced/unreduced axes must survive the sharding helpers.
+
+  JAX rejects indexing, slicing, unpacking and iterating such a spec — only `.partitions`
+  reads through it — so every helper that rebuilds a spec has to go through that path.
+  A tagged axis can never also appear in the partitions, so these specs tag "data" while
+  sharding over the other axes.
+  """
+
+  # Only mesh.shape is read by the helpers below, so an abstract mesh keeps the axis
+  # sizes fixed regardless of how many devices the test runner has.
+  mesh = jax.sharding.AbstractMesh((2, 1, 4), ("data", "fsdp", "model"))
+
+  def test_mesh_axes_used_by_tagged_spec(self):
+    spec = PartitionSpec(("fsdp", "model"), None, unreduced={"data"})
+    self.assertEqual(sharding.get_mesh_axes_used_by_tensor_spec(spec), ["fsdp", "model"])
+
+  def test_remove_size_one_mesh_axis_keeps_tags(self):
+    # "fsdp" has size 1, so it is dropped from the partitions while "model" stays.
+    spec = PartitionSpec("fsdp", "model", reduced={"data"})
+    trimmed = sharding.remove_size_one_mesh_axis(spec, self.mesh)
+    self.assertEqual(trimmed.partitions, (None, "model"))
+    self.assertEqual(trimmed.reduced, frozenset({"data"}))
+
+  def test_adjust_pspec_for_indivisible_shapes_keeps_tags(self):
+    # A dimension of 6 does not divide evenly over the 4-way "model" axis, so it is unsharded.
+    spec = PartitionSpec("model", "fsdp", unreduced={"data"})
+    adjusted = sharding.adjust_pspec_for_indivisible_shapes(spec, (6, 8), self.mesh)
+    self.assertEqual(adjusted.partitions, (None, "fsdp"))
+    self.assertEqual(adjusted.unreduced, frozenset({"data"}))
+
+
 if __name__ == "__main__":
   unittest.main()
