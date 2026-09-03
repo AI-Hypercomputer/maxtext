@@ -1379,7 +1379,10 @@ class Qwen3NextScannableBlock(nnx.Module):
     """Runs the local (linear attention / GatedDeltaNet) layers via a per-layer rematerialized jax.lax.scan."""
     remat = self._remat_enabled
     if forced_routed_experts is None:
-      apply_fn = lambda layer, carry: self._run_layer(layer, carry, layer_kwargs)[0]
+
+      def apply_fn(layer, carry):
+        return self._run_layer(layer, carry, layer_kwargs)[0]
+
     else:
       # Router replay: one slice of forced routing per local layer, fed through
       # the scan's xs so each iteration sees its own layer's expert indices.
