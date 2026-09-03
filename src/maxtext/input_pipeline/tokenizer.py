@@ -20,7 +20,7 @@ from maxtext.utils import max_logging
 import transformers
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
-from google3.third_party.sentencepiece.src.python.sentencepiece_processor import SentencePieceProcessor
+from sentencepiece import SentencePieceProcessor
 
 
 class TikTokenTokenizer:
