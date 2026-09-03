@@ -15,6 +15,7 @@
 """Tests for linears.py."""
 
 import functools
+import re
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -182,6 +183,16 @@ class DenseGeneralTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "slice_bounds .* must be valid and within"):
       layer(inputs, slice_bounds=(0, 100))
 
+  @staticmethod
+  def _explicit_mesh():
+    """A mesh whose axes carry their shardings in the type system.
+
+    The flag only does anything under one of these -- that is where JAX puts a
+    sharding barrier between the weight-gradient dot and its transpose -- so
+    every test of the mechanism has to run inside one.
+    """
+    return jax.make_mesh((1, 1), ("fsdp", "tensor"), axis_types=(jax.sharding.AxisType.Explicit,) * 2)
+
   def _make_kernel_ordered_pair(self, in_features_shape, out_features_shape, axis=-1, use_bias=False):
     """Builds a default layer and a weight_grad_in_kernel_order twin sharing weights.
 
@@ -211,70 +222,72 @@ class DenseGeneralTest(unittest.TestCase):
     cases = ((4, 8, -1), (4, (2, 8), -1), ((2, 3), 8, (1, 2)))
     for in_features_shape, out_features_shape, axis in cases:
       with self.subTest(in_features_shape=in_features_shape, out_features_shape=out_features_shape):
-        default, ordered = self._make_kernel_ordered_pair(in_features_shape, out_features_shape, axis=axis)
-        shape = (2, 3) if axis == -1 else (5,)
-        shape += (in_features_shape,) if isinstance(in_features_shape, int) else tuple(in_features_shape)
-        inputs = jax.random.normal(jax.random.PRNGKey(0), shape)
-        np.testing.assert_array_equal(default(inputs), ordered(inputs))
+        with jax.set_mesh(self._explicit_mesh()):
+          default, ordered = self._make_kernel_ordered_pair(in_features_shape, out_features_shape, axis=axis)
+          shape = (2, 3) if axis == -1 else (5,)
+          shape += (in_features_shape,) if isinstance(in_features_shape, int) else tuple(in_features_shape)
+          inputs = jax.random.normal(jax.random.PRNGKey(0), shape)
+          np.testing.assert_array_equal(default(inputs), ordered(inputs))
 
   def test_weight_grad_in_kernel_order_gradients_match(self):
-    """Reordering the contraction must not change the gradient beyond float noise."""
+    """The region moves no arithmetic, so every gradient must come out bit-identical."""
     cases = ((4, 8, -1), (4, (2, 8), -1), ((2, 3), 8, (1, 2)))
     for in_features_shape, out_features_shape, axis in cases:
       with self.subTest(in_features_shape=in_features_shape, out_features_shape=out_features_shape):
-        default, ordered = self._make_kernel_ordered_pair(in_features_shape, out_features_shape, axis=axis)
-        shape = (2, 3) if axis == -1 else (5,)
-        shape += (in_features_shape,) if isinstance(in_features_shape, int) else tuple(in_features_shape)
-        inputs = jax.random.normal(jax.random.PRNGKey(0), shape)
+        with jax.set_mesh(self._explicit_mesh()):
+          default, ordered = self._make_kernel_ordered_pair(in_features_shape, out_features_shape, axis=axis)
+          shape = (2, 3) if axis == -1 else (5,)
+          shape += (in_features_shape,) if isinstance(in_features_shape, int) else tuple(in_features_shape)
+          inputs = jax.random.normal(jax.random.PRNGKey(0), shape)
 
-        def loss(layer, x):
-          return jnp.sum(jnp.sin(layer(x)))
+          def loss(layer, x):
+            return jnp.sum(jnp.sin(layer(x)))
 
-        grad_default = nnx.grad(loss)(default, inputs).kernel[...]
-        grad_ordered = nnx.grad(loss)(ordered, inputs).kernel[...]
-        self.assertEqual(grad_ordered.shape, ordered.kernel[...].shape)
-        np.testing.assert_allclose(grad_default, grad_ordered, rtol=1e-5, atol=1e-6)
+          grad_default = nnx.grad(loss)(default, inputs).kernel[...]
+          grad_ordered = nnx.grad(loss)(ordered, inputs).kernel[...]
+          self.assertEqual(grad_ordered.shape, ordered.kernel[...].shape)
+          np.testing.assert_array_equal(grad_default, grad_ordered)
 
-        grad_x_default = jax.grad(functools.partial(loss, default))(inputs)
-        grad_x_ordered = jax.grad(functools.partial(loss, ordered))(inputs)
-        np.testing.assert_allclose(grad_x_default, grad_x_ordered, rtol=1e-5, atol=1e-6)
+          grad_x_default = jax.grad(functools.partial(loss, default))(inputs)
+          grad_x_ordered = jax.grad(functools.partial(loss, ordered))(inputs)
+          np.testing.assert_array_equal(grad_x_default, grad_x_ordered)
 
   def test_weight_grad_in_kernel_order_lm_head_shape(self):
-    """The LM head's 2-D kernel is the only shape the config flag enables.
+    """The LM head's 2-D kernel is the shape the config flag enables by default.
 
-    Reordering the contraction reassociates the sum, so the gradient agrees to
-    float rounding rather than exactly. The stored kernel -- and therefore the
-    initialization -- is untouched, so the difference stays at rounding level
-    instead of changing the training trajectory.
+    Bit-identical here matters more than anywhere else: the head's gradient
+    feeds the largest parameter in most models, so a reassociated sum would show
+    up in the training trajectory rather than staying at rounding level.
     """
     for dtype in (jnp.float32, jnp.bfloat16):
       with self.subTest(dtype=jnp.dtype(dtype).name):
-        default, ordered = self._make_kernel_ordered_pair(8, 32)
-        inputs = jax.random.normal(jax.random.PRNGKey(0), (2, 5, 8), dtype)
-        weights = jax.random.normal(jax.random.PRNGKey(1), (2, 5, 32), dtype)
+        with jax.set_mesh(self._explicit_mesh()):
+          default, ordered = self._make_kernel_ordered_pair(8, 32)
+          inputs = jax.random.normal(jax.random.PRNGKey(0), (2, 5, 8), dtype)
+          weights = jax.random.normal(jax.random.PRNGKey(1), (2, 5, 32), dtype)
 
-        def loss(layer, x, weights=weights):
-          return jnp.sum((layer(x) * weights).astype(jnp.float32))
+          def loss(layer, x, weights=weights):
+            return jnp.sum((layer(x) * weights).astype(jnp.float32))
 
-        grad_default = nnx.grad(loss)(default, inputs).kernel[...]
-        grad_ordered = nnx.grad(loss)(ordered, inputs).kernel[...]
-        scale = float(jnp.abs(grad_default).max())
-        self.assertLess(float(jnp.abs(grad_default - grad_ordered).max()), 1e-5 * scale)
+          grad_default = nnx.grad(loss)(default, inputs).kernel[...]
+          grad_ordered = nnx.grad(loss)(ordered, inputs).kernel[...]
+          np.testing.assert_array_equal(grad_default, grad_ordered)
 
   def test_weight_grad_in_kernel_order_composes_with_remat(self):
     # The LM head sits outside the scanned stack, but training still wraps it in
-    # remat, and a custom_vjp that breaks under checkpointing is unusable.
-    default, ordered = self._make_kernel_ordered_pair(4, 8)
-    inputs = jax.random.normal(jax.random.PRNGKey(0), (2, 3, 4))
+    # remat, and the region is re-traced on the recomputed forward pass.
+    with jax.set_mesh(self._explicit_mesh()):
+      default, ordered = self._make_kernel_ordered_pair(4, 8)
+      inputs = jax.random.normal(jax.random.PRNGKey(0), (2, 3, 4))
 
-    def grads(layer):
-      return nnx.grad(nnx.remat(lambda l, x: jnp.sum(jnp.sin(l(x)))))(layer, inputs).kernel[...]
+      def grads(layer):
+        return nnx.grad(nnx.remat(lambda l, x: jnp.sum(jnp.sin(l(x)))))(layer, inputs).kernel[...]
 
-    np.testing.assert_allclose(grads(default), grads(ordered), rtol=1e-5, atol=1e-6)
+      np.testing.assert_array_equal(grads(default), grads(ordered))
 
   def test_weight_grad_in_kernel_order_ignored_under_auto(self):
-    # Under auto sharding XLA folds the transpose itself, so the custom_vjp buys
-    # nothing and must not take over the dot.
+    # Under auto sharding there is no barrier for the region to remove -- XLA
+    # folds the transpose itself -- so the dot must be left alone.
     layer = linears.DenseGeneral(
         in_features_shape=4,
         out_features_shape=8,
@@ -286,11 +299,13 @@ class DenseGeneralTest(unittest.TestCase):
     reference = linears.DenseGeneral(
         in_features_shape=4, out_features_shape=8, shard_mode=ShardMode.AUTO, rngs=nnx.Rngs(params=0)
     )
-    np.testing.assert_array_equal(layer(inputs), reference(inputs))
+    with patch.object(linears, "_dot_general_in_auto_axes") as spy:
+      np.testing.assert_array_equal(layer(inputs), reference(inputs))
+    spy.assert_not_called()
 
   def test_weight_grad_in_kernel_order_yields_to_quantization(self):
-    # The custom_vjp has to own the whole dot, so it must step aside for a
-    # quantized one rather than wrap it.
+    # The region has to own the whole dot, so it must step aside for a quantized
+    # one rather than wrap it.
     mock_quant = MagicMock()
     mock_quant.quant_mode = None
     mock_instance = mock_quant.dot_general_cls.return_value.return_value
@@ -306,35 +321,45 @@ class DenseGeneralTest(unittest.TestCase):
         rngs=self.rngs,
     )
     inputs = jax.random.normal(jax.random.PRNGKey(0), (2, 3, 4))
-    with patch.object(linears, "_dot_general_kernel_ordered_grad") as spy:
+    with patch.object(linears, "_dot_general_in_auto_axes") as spy:
       layer(inputs)
     spy.assert_not_called()
 
-  def test_weight_grad_in_kernel_order_emits_no_transpose(self):
-    """The mechanism itself: no transpose on the weight-gradient path."""
-    default, ordered = self._make_kernel_ordered_pair(4, 8)
-    inputs = jax.random.normal(jax.random.PRNGKey(0), (2, 3, 4))
+  def test_weight_grad_in_kernel_order_drops_the_sharding_barrier(self):
+    """The mechanism itself: nothing between the weight-gradient dot and its transpose.
 
-    def count_transposes(layer):
-      def loss(l, x):
-        return jnp.sum(jnp.sin(l(x)))
+    Autodiff still writes the transpose either way. What the flag changes is
+    whether a `sdy.sharding_constraint` sits in between -- XLA's algebraic
+    simplifier will not fold `transpose(dot(A, B))` back into a single dot
+    across one, so the transpose survives to codegen and the gradient has to be
+    relaid out before it can be written back to the parameter.
+    """
+    with jax.set_mesh(self._explicit_mesh()):
+      default, ordered = self._make_kernel_ordered_pair(4, 8)
+      inputs = jax.random.normal(jax.random.PRNGKey(0), (2, 3, 4))
 
-      text = nnx.jit(nnx.grad(loss)).lower(layer, inputs).as_text()
-      return text.count("stablehlo.transpose")
+      def transpose_operand_op(layer):
+        """The op producing the value the weight-gradient transpose consumes."""
 
-    self.assertEqual(count_transposes(ordered), 0)
-    self.assertGreater(count_transposes(default), 0)
+        def loss(l, x):
+          return jnp.sum(jnp.sin(l(x)))
 
-  @staticmethod
-  def _explicit_mesh():
-    return jax.make_mesh((1, 1), ("fsdp", "tensor"), axis_types=(jax.sharding.AxisType.Explicit,) * 2)
+        text = nnx.jit(nnx.grad(loss)).lower(layer, inputs).as_text()
+        defining_op = dict(re.findall(r"(%\w+) = ([\w.]+)", text))
+        transposed = re.findall(r"= stablehlo\.transpose (%\w+)", text)
+        self.assertEqual(len(transposed), 1)
+        return defining_op[transposed[0]]
+
+      self.assertEqual(transpose_operand_op(ordered), "stablehlo.dot_general")
+      self.assertEqual(transpose_operand_op(default), "sdy.sharding_constraint")
 
   def test_weight_grad_in_kernel_order_with_replicated_kernel(self):
-    """A replicated kernel still has to spell out the gradient's sharding.
+    """A replicated kernel still has to spell out what the region produces.
 
-    The gradient dot contracts over the sharded token axes, which JAX refuses to
-    resolve on its own -- omitting `out_sharding` there raises instead of
-    defaulting to replicated.
+    `auto_axes` has no default for `out_sharding`, and the shape it is handed
+    here is the awkward one: the forward dot's output is sharded over a batch
+    axis the kernel knows nothing about, so the answer has to come from the
+    operands rather than from the kernel's own sharding.
     """
     mesh = self._explicit_mesh()
     with jax.set_mesh(mesh):
@@ -352,7 +377,7 @@ class DenseGeneralTest(unittest.TestCase):
         return jnp.sum(jnp.sin(dot(x, k)))
 
       ordered = functools.partial(
-          linears._dot_general_kernel_ordered_grad,  # pylint: disable=protected-access
+          linears._dot_general_in_auto_axes,  # pylint: disable=protected-access
           dimension_numbers=dimension_numbers,
           precision=None,
           out_sharding=None,
@@ -367,10 +392,10 @@ class DenseGeneralTest(unittest.TestCase):
   def test_weight_grad_in_kernel_order_with_permuted_axes(self):
     """Dimension numbers that do not pair operand axes in ascending order.
 
-    No `DenseGeneral` layout builds these today, but the backward pass permutes
-    its dots' outputs back into operand order and the `out_sharding` it hands
-    those dots has to be permuted the same way or the custom_vjp returns a
-    cotangent whose type does not match its primal.
+    No `DenseGeneral` layout builds these today, but they are the case where the
+    region's operands come back out permuted, so they check that leaving and
+    re-entering the type system lands every cotangent on the sharding its primal
+    had.
     """
     mesh = self._explicit_mesh()
     with jax.set_mesh(mesh):
@@ -392,7 +417,7 @@ class DenseGeneralTest(unittest.TestCase):
         return jnp.sum(jnp.sin(dot(x, k)))
 
       ordered = functools.partial(
-          linears._dot_general_kernel_ordered_grad,  # pylint: disable=protected-access
+          linears._dot_general_in_auto_axes,  # pylint: disable=protected-access
           dimension_numbers=dimension_numbers,
           precision=None,
           out_sharding=out_sharding,
