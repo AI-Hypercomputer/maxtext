@@ -35,13 +35,15 @@ def parse_and_keep_features(dataset, config, data_columns, tokenize):
   return dataset
 
 
-def get_tokenizer_and_pad_id(config):
+def get_tokenizer_and_pad_id(config, add_bos: bool | None = None, add_eos: bool | None = None):
   """Builds tokenizer and extracts pad_id safely."""
+  bos = config.add_bos if add_bos is None else add_bos
+  eos = config.add_eos if add_eos is None else add_eos
   tokenizer_model = tokenizer.build_tokenizer(
       config.tokenizer_path,
       config.tokenizer_type,
-      config.add_bos,
-      config.add_eos,
+      bos,
+      eos,
       config.hf_access_token,
   )
   if tokenizer_model.pad_id is not None:
