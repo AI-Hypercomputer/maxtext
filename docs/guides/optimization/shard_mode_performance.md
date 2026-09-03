@@ -24,6 +24,13 @@ because two of the corrections reverse a conclusion that looked solid at the tim
 Revised 2026-09-03: the whole matrix re-measured at above-gate geometry (§5.4), the LM-head flag
 turned **on by default** where it can act, a second flag added for the dense-layer gradients (§4.8),
 and a mode-independent 1.4% win found and shipped along the way (§5.5).
+Revised again 2026-09-03 after a depth sweep: **every "explicit wins" row in this document sits at a
+scanned-stack depth where an unrelated XLA layout pathology inflates both modes by ~25% (§4.9)**.
+With those depths excluded explicit needs *both* kernel-order flags to reach parity, so
+`dense_weight_grad_in_kernel_order` now also defaults on under explicit (§4.8), and both flags are
+now implemented with `jax.sharding.auto_axes` rather than a hand-written `custom_vjp` (§8 item 01).
+The eight-model matrix was then re-run on that build at healthy depths: **§5.6 supersedes §5.4 and
+is the table to quote.**
 
 `shard_mode` (`src/maxtext/configs/base.yml:554`) selects how MaxText expresses sharding:
 
@@ -142,6 +149,15 @@ ______________________________________________________________________
     > (L12/L14/L16), at any vocab (4096 or 32000) — while explicit without it is +3.25% on qwen3.
     > It is therefore now tri-state and resolves to **on** wherever it can act: `shard_mode: explicit` and an untied head. Writing it out is only needed to reproduce a measurement.
 
+    > *Revised again (2026-09-03).* The mechanism is unchanged; the implementation is not. The
+    > hand-written `custom_vjp` has been replaced by a `jax.sharding.auto_axes` region around the
+    > forward dot, which drops the barrier for the length of that one dot and lets Shardy
+    > re-propagate the operands' shardings exactly as `shard_mode: auto` would — so XLA performs the
+    > fold itself instead of MaxText hand-writing around it. Same step times to within 0.15 pp on all
+    > five models measured both ways, 114 fewer lines, gradients now **bit-identical** to the default
+    > rule rather than agreeing to rounding, and it works at all 17 call sites including MLA
+    > (§8 item 01).
+
 11. **With that default, explicit is faster than `auto` on five of eight onboarded models and inside
     the run-to-run spread on a sixth.** The one number a user needs is §5.4: at emb 2048 / mlp 8192 /
     16 layers, with nothing in the config but `shard_mode`, the median across the eight models is
@@ -150,6 +166,20 @@ ______________________________________________________________________
     `dense_weight_grad_in_kernel_order`, which ships default-off because its sign is model-dependent
     (§4.8): it is worth 0.90 pp on gemma3 and 0.16 pp on deepseek, and costs 0.06–0.60% on the other
     six. With those two per-model settings applied, no model regresses by more than 0.041%.
+
+    > *Superseded (2026-09-03).* Both halves of this item are contaminated by §4.9. **Sixteen layers
+    > is one of the depths where the layout pathology fires**, and that pathology is worth ~25% of
+    > step time — enough that scheduling noise inside it swamps a 0.4% sharding effect and, on five
+    > of eight models, flips its sign. Re-measuring llama2 at L16 with the pathology removed
+    > (`param_scan_axis: 0`) turns the "explicit wins by 0.494%" of §5.4 into **explicit loses by
+    > 1.482%**, and the dense flag takes it to **+0.006%**. Across 15 (model, depth) pairs at
+    > *healthy* depths the LM-head flag alone leaves a median **+0.463%** penalty (worst +1.038% on
+    > gemma2) while both flags together give a median **+0.005%** and a full range of
+    > **−0.183% … +0.134%**. So the second flag is not a two-model carve-out at all — it is the other
+    > half of the fix, it now defaults on under explicit too, and the honest summary of both is
+    > *parity with `auto`, reliably*, rather than a win. The eight-model matrix re-run on that build
+    > at healthy depths is **§5.6**: median **+0.000%**, worst **+0.133%**, and the only two rows
+    > outside their own rep spread are `gemma-2b` (−0.685%) and `gemma3-4b` (−0.374%), both wins.
 
 12. **The largest single win found here is not a sharding fix at all.** `YarnRotaryEmbedding` built
     its whole `[max_position_embeddings, head_dim/2]` frequency table inside every layer of every
@@ -165,12 +195,27 @@ ______________________________________________________________________
     > different matrix from the same seed at the flipped shape — perturbs the loss ~35× more than
     > explicit's own noise. It has been removed rather than shipped alongside a strictly better flag.
 
+13. **The biggest number found in this whole investigation is not a sharding number either: a
+    scanned stack whose length is 8, 16, 24 (or 2 or 4) costs ~25% of step time, in both modes.**
+    `param_scan_axis: 1` stacks each parameter as `[in, L, out]`. At those lengths XLA assigns the
+    gradient stack layout `{2,0,1}` instead of `{2,1,0}`, so the per-iteration
+    `dynamic-update-slice` writes a degenerate `T(1,128)`-tiled slice: **8.16 ms of a 36.5 ms step**
+    on llama2 at L8. Walking depth 2→24 the ns/layer trend is flat at ~3.3 M except at exactly those
+    lengths, where it jumps 25–34%. `param_scan_axis: 0` removes it (**L8 −23.6%, L16 −24.9%**) and
+    costs 0.18–0.28% at healthy depths. It survives at production geometry (+14.1% at L8, +11.5% at
+    L16). See §4.9 — and note that **every benchmark in this document before §4.9 used a stack length
+    of 4, 8 or 16**, so it is the most consequential methodology finding here.
+
 **Practical guidance:** as of this revision, `shard_mode: explicit` with nothing else written out is
-the faster mode on most onboarded models at realistic geometry (§5.4), so choose on capability
-(§6, §7) and treat performance as a tie-breaker rather than a tax. Two carve-outs remain: **gemma3
-and deepseek want `dense_weight_grad_in_kernel_order: true`** (§4.8), and **pure data parallelism**
-was +10% before the LM-head fix — re-verify it for your geometry rather than assuming the fix
-covers it, since the DP measurement predates the default flip.
+**at parity** with `auto` on all eight onboarded models at realistic geometry and healthy depth —
+median **+0.000%**, worst case **+0.133%** against a 0.16% rep spread, and two models (`gemma-2b`
+−0.685%, `gemma3-4b` −0.374%) where explicit wins outright (§5.6; §4.8 gives the same picture over
+15 (model, depth) pairs, median +0.005%, worst +0.134%). Choose on capability (§6, §7) and treat
+performance as a non-issue rather than a tax. Both kernel-order flags now default on where they can
+act; nothing needs to be written out. Two things to still verify for yourself: **pure data
+parallelism** was +10% before the LM-head fix and has not been re-measured, and if your
+`base_num_decoder_layers` is a multiple of 8 you are paying §4.9's ~25% in both modes and should try
+`param_scan_axis: 0`.
 
 ______________________________________________________________________
 
@@ -840,6 +885,164 @@ below the threshold against six above is not enough to fit one. **That is why th
 default-off and the LM-head flag does not** — the LM-head transpose is a missed fold with one sign,
 this is a layout trade with two.
 
+> *Superseded (2026-09-03) — and the paragraph above contains its own refutation.* "A 16-deep stack
+> forces a relayout anyway, because the optimizer wants `T(1,128)` on a tensor the scan writes with
+> `T(8,128)`" is not a property of 16-deep stacks. It is §4.9: the degenerate layout XLA picks for a
+> stack whose length is a multiple of 8, in **both** sharding modes, at a cost of ~25% of step time.
+> Every "the flag loses here" data point sat inside it. Read on.
+
+#### The resolution: measure at a depth where nothing else is happening
+
+Re-running the same comparison at depths that are *not* multiples of 8 — where the `dynamic-update-slice`
+is a well-tiled `{2,1,0}` write and the step is 25% cheaper — reverses the conclusion. Fifteen
+(model, depth) pairs, d16 geometry, 2 reps each, medians, both columns against that config's own
+`auto`:
+
+| model      |   L | `explicit` (LM-head flag only) | `explicit` + dense flag |
+| ---------- | --: | -----------------------------: | ----------------------: |
+| llama2     |  12 |                        +0.622% |                 −0.016% |
+| llama2     |  14 |                        +0.391% |                 +0.002% |
+| llama2     |  18 |                        +0.429% |                 +0.005% |
+| llama2     |  20 |                        +0.463% |                 +0.005% |
+| mistral    |  12 |                        +0.598% |                 +0.051% |
+| mistral    |  14 |                        +0.919% |                 −0.007% |
+| qwen3      |  12 |                        +0.354% |                 +0.044% |
+| qwen3      |  14 |                        +0.397% |                 +0.052% |
+| qwen3      |  18 |                        +0.534% |                 +0.008% |
+| gemma2     |  12 |                        +0.950% |                 −0.095% |
+| gemma2     |  14 |                        +1.038% |                 −0.183% |
+| gemma3     |  18 |                        +0.803% |                 −0.101% |
+| mixtral    |  12 |                        −0.115% |                 +0.134% |
+| mixtral    |  14 |                        −0.053% |                 +0.052% |
+| deepseek   |  12 |                        −0.348% |                 +0.061% |
+| **median** |     |                    **+0.463%** |             **+0.005%** |
+
+**Range: `explicit` alone −0.348% … +1.038%; with the dense flag −0.183% … +0.134%.** The flag is
+not a two-model carve-out and it is not a coin flip — it is a *variance eliminator*. It costs at
+most 0.19 pp anywhere and it removes a penalty that is otherwise present on 12 of 15 configs. The
+one model where it gives something up, mixtral, gives up 0.06–0.25 pp; the six models where the
+original table said it "costs 0.06–0.60%" were reading scheduling noise inside the §4.9 pathology.
+
+The two flags are also **independent and additive**, which is the check that they are two instances
+of one mechanism rather than one effect measured twice. At L18, all four combinations, against the
+same `auto`:
+
+| config                       |  llama2 L18 |   qwen3 L18 |
+| ---------------------------- | ----------: | ----------: |
+| `explicit`, neither flag     |     +1.098% |     +5.579% |
+| dense flag only              |     +0.621% |     +4.853% |
+| LM-head flag only            |     +0.429% |     +0.534% |
+| **both flags** (the default) | **+0.005%** | **+0.008%** |
+
+qwen3 is the clean case: its untied 151,936-entry head dominates, so the LM-head flag is worth 5 pp
+and the dense flag 0.7 pp; on llama2 the two are the same size. Neither subsumes the other, and the
+sum of the two individual gains predicts the joint one to within 0.03 pp on llama2 and 0.2 pp on
+qwen3. **Both flags therefore now resolve to on under `shard_mode: explicit`.**
+
+One disclosure that does not fit the pattern and is not being papered over: **on mixtral the
+LM-head flag forfeits a reproducible ~1.4%.** Explicit with *neither* flag reads −1.436% / −1.448% /
+−1.522% at L12 / L14 / L16 against `auto`, and turning the LM-head flag on lands it back on `auto`'s
+schedule (−0.115% / −0.053% / −0.012%). That is an MoE-scan scheduling windfall, not an LM-head
+effect — shrinking mixtral's vocab 8× leaves the spread unchanged (§8 item 01) — and deepseek, the
+other MoE model, has the *opposite* sign (the LM-head flag takes it from +0.947% to +0.176% at L8).
+One model in one direction is not a rule to encode in a default, so the default stands and the cost
+is stated here. A mixtral user who has measured this may set `lm_head_weight_grad_in_kernel_order: false`.
+
+______________________________________________________________________
+
+### 4.9 Not a sharding effect at all: `param_scan_axis: 1` degenerates when the stack length is a multiple of 8
+
+This section exists because it invalidates measurements elsewhere in this document, not because it
+has anything to do with `shard_mode`. The effect is **identical in both modes** — it was found by
+sweeping `auto` alone.
+
+Walk llama2 down the depth ladder at d16 geometry (emb 2048, mlp 8192, seq 1024, pdbs 1, fsdp 4),
+2 reps per point, and step time is not proportional to depth:
+
+|      L |   `auto` ns |      ns/layer |  `explicit` | `explicit` + dense |
+| -----: | ----------: | ------------: | ----------: | -----------------: |
+|  **2** |  11,007,529 | **5,503,764** | **−0.902%** |            −0.050% |
+|      3 |  12,494,770 |     4,164,923 |     +0.027% |            +0.002% |
+|  **4** |  19,376,215 | **4,844,054** | **−0.517%** |            +0.083% |
+|      5 |  18,731,819 |     3,746,364 |     +0.465% |            +0.074% |
+|      6 |  21,837,597 |     3,639,600 |     +0.343% |            +0.037% |
+|      7 |  24,953,852 |     3,564,836 |     +0.330% |            +0.018% |
+|  **8** |  36,536,639 | **4,567,080** | **−0.444%** |            −0.034% |
+|      9 |  31,091,571 |     3,454,619 |     +0.342% |            +0.004% |
+|     10 |  34,169,574 |     3,416,957 |     +0.409% |            +0.004% |
+|     12 |  40,345,816 |     3,362,151 |     +0.622% |            −0.016% |
+|     14 |  46,583,332 |     3,327,381 |     +0.391% |            +0.002% |
+| **16** |  70,094,537 | **4,380,909** | **−0.494%** |                  — |
+|     18 |  58,852,896 |     3,269,605 |     +0.429% |            +0.005% |
+|     20 |  65,004,700 |     3,250,235 |     +0.463% |            +0.005% |
+| **24** | 104,650,808 | **4,360,450** | **−0.542%** |            −0.024% |
+
+Two patterns, and they are the same pattern. The ns/layer column decays smoothly from 4.16 M at L3
+to 3.25 M at L20 — **except** at L2, L4, L8, L16 and L24, where it is 25–34% above the trend. And
+those five depths are **exactly** the five where `explicit` "beats" `auto`. Everywhere else explicit
+is +0.33% to +0.62%, monotonically, with a rep spread under 0.1%.
+
+**The HLO says what it is.** Diffing the L8 and L9 `auto` dumps (`opdiff.py`), the scanned gradient
+stack changes layout:
+
+```
+L9   f32[9,512,8192]{2,1,0:T(8,128)}      <- normal, row-major, 8x128 tiles
+L8   f32[8,512,8192]{2,0,1:T(8,128)}      <- middle dimension made minor
+```
+
+and with it every per-iteration write into that stack:
+
+```
+L8   dynamic-update-slice(f32[8,512,8192]{2,0,1}, f32[1,512,8192]{2,0,1:T(1,128)S(1)} %copy, ...)
+                            three families, 34,480 + 31,730 + 31,676 us = 97,886 us / profile
+                            = 8.16 ms of a 36.5 ms step = 22% of the step
+```
+
+`T(1,128)` is a degenerate tile — one row per tile instead of eight — so the write moves 8× the
+minimum number of tiles. The same three families are present, at the same cost, in the `explicit`
+and `explicit`+flags dumps: this is XLA's layout assignment reacting to the stack's leading
+dimension, and sharding mode has no input to it.
+
+**`param_scan_axis: 0` removes it.** That config stacks parameters as `[L, in, out]` instead of
+`[in, L, out]`:
+
+| llama2, d16 | `param_scan_axis: 1` | `param_scan_axis: 0` |            Δ |
+| ----------- | -------------------: | -------------------: | -----------: |
+| L8          |           36,535,103 |           27,917,743 | **−23.587%** |
+| L9          |           31,091,571 |           31,003,302 |      −0.284% |
+| L16         |           70,096,329 |           52,622,643 | **−24.928%** |
+| L18         |           58,852,896 |           58,747,091 |      −0.180% |
+
+So it is worth ~24% at the bad depths and ~0.2% at the good ones — the two are the same measurement,
+because `param_scan_axis: 0`'s L8 and L16 sit on the healthy ns/layer trend that `param_scan_axis: 1`
+only reaches at non-multiples of 8. It is **not** an artifact of the shrunk geometry either. At
+`prod` (16 query heads, seq 4096) the same jump is there:
+
+| llama2, prod |     step ns |  ns/layer | vs the next depth up |
+| ------------ | ----------: | --------: | -------------------: |
+| L8           |  79,070,204 | 9,883,776 |          **+14.07%** |
+| L9           |  77,978,783 | 8,664,309 |                    — |
+| L16          | 151,238,509 | 9,452,407 |          **+11.45%** |
+| L18          | 152,662,296 | 8,481,239 |                    — |
+
+**What this costs the rest of this document.** Every headline comparison before this section was run
+at L4 (§5.1, §5.2), L8 (deepseek) or L16 (§5.4, §4.8) — all inside the pathology. The clearest
+correction is §5.4's llama2 row. Re-run at L16 with the pathology removed:
+
+| llama2, L16, `param_scan_axis: 0` |    step ns |   vs `auto` |
+| --------------------------------- | ---------: | ----------: |
+| `auto`                            | 52,622,643 |           — |
+| `explicit` (LM-head flag only)    | 53,402,334 | **+1.482%** |
+| `explicit` + dense flag           | 52,625,548 | **+0.006%** |
+
+§5.4 reports the same model at the same depth as **−0.494% for explicit**. The sign is opposite. A
+0.4% sharding effect measured on top of a 25% layout artifact is measuring the artifact's scheduling
+noise, and this is why the flag-default conclusion changed (§4.8).
+
+This has not been chased further. Whether `param_scan_axis: 0` should become the MaxText default is
+a question about checkpoint layout, optimizer-state layout and every model config, not a question
+about sharding, and it wants its own investigation (§8 item 03).
+
 ______________________________________________________________________
 
 ## 5. Results
@@ -870,9 +1073,9 @@ copies\] by the per-op decomposition in §4.4.
 (§4.7) — a different code path from the model at any realistic depth. Re-run at 12 layers it is
 **−0.58%**. Read the matrix as 9 models plus one methodology finding.
 
-> **This table is superseded by §5.4** and is kept only because §4 refers to its dumps. Every row is
+> **This table is superseded by §5.6** and is kept only because §4 refers to its dumps. Every row is
 > below XLA's minor-most AR→RS gate (§4.2) and none has the LM-head fix, so it measures the worst
-> case of a mode that no longer exists. Quote §5.4 instead.
+> case of a mode that no longer exists. Quote §5.6 instead.
 
 > **Removed from this table:** the "Δ collective bytes" and "collective count" columns that appeared
 > in the first revision of this document. Both are artifacts — see §3 caveats 1 and 2. Explicit's
@@ -1066,6 +1269,14 @@ Four things to keep in mind before quoting this table:
 4. **The dense flag is not a general recommendation.** On the six models not shown in its column it
    costs 0.06–0.60% (§4.8, §8 item 02).
 
+> **Superseded (2026-09-03): read this table only for its `auto` column.** Sixteen layers is one of
+> the depths where §4.9's layout pathology fires, and it is worth ~25% of step time in both modes.
+> Six of these eight rows are at L16 (gemma3 is at L18 and deepseek at L8 — L8 is also inside the
+> pathology, so only gemma3's row is clean). Re-running llama2 at L16 with `param_scan_axis: 0`
+> gives `explicit` **+1.482%**, not the −0.494% above; the caveat 4 note about the dense flag costing
+> 0.06–0.60% is the same artifact. The replacement table, at a healthy depth and with both flags
+> defaulted on, is **§5.6**.
+
 ### 5.5 A mode-independent 1.4%: the YaRN frequency table was rebuilt inside every layer
 
 Not a `shard_mode` finding — it was found while looking for one, it helps both modes equally, and it
@@ -1120,6 +1331,57 @@ Scope: this reaches every model with a `YarnRotaryEmbedding` and a `max_position
 larger than `max_target_length` — deepseek2/3 (163,840) most of all. `LlamaVisionRotaryEmbedding`
 was deliberately left alone: it consumes the whole table by design, and `llama4` is not on the
 explicit whitelist anyway.
+
+### 5.6 The table to quote — eight models, shipped defaults, at a depth where §4.9 is not firing
+
+This replaces §5.4. Same eight models, same geometry (emb 2048 / mlp 8192 / seq 1024 / pdbs 1 /
+fsdp 4, four chips), same protocol (3 reps per arm, medians), re-run on the build this document
+describes. Two things changed: every model now sits at a scanned-stack length that is **not** a
+multiple of 8 (§4.9), and the `explicit` column has **nothing in the config but
+`shard_mode: explicit`** — both `lm_head_weight_grad_in_kernel_order` and
+`dense_weight_grad_in_kernel_order` resolve to on by themselves (§8 items 01–02). Sorted by margin.
+
+| model           | layers | tied |   `auto` ns | `explicit` ns |           Δ | rep spread A/B |
+| --------------- | -----: | :--: | ----------: | ------------: | ----------: | -------------: |
+| `gemma-2b`      |     18 | yes  |  78,786,920 |    78,247,099 | **−0.685%** |  0.08% / 0.06% |
+| `gemma3-4b`     |     18 | yes  |  88,335,850 |    88,005,221 | **−0.374%** |  0.21% / 0.31% |
+| `mixtral-8x7b`  |     14 |  no  | 309,329,429 |   309,088,916 |     −0.078% |  0.08% / 0.07% |
+| `llama2-7b`     |     18 |  no  |  58,858,748 |    58,857,796 |     −0.002% |  0.02% / 0.04% |
+| `gemma2-2b`     |     18 | yes  | 150,702,912 |   150,706,999 |     +0.003% |  0.06% / 0.02% |
+| `mistral-7b`    |     18 |  no  |  58,432,480 |    58,443,356 |     +0.019% |  0.02% / 0.01% |
+| `qwen3-8b`      |     18 |  no  |  72,851,689 |    72,914,405 |     +0.086% |  0.18% / 0.24% |
+| `deepseek2-16b` |     12 |  no  | 360,257,035 |   360,735,487 |     +0.133% |  0.16% / 0.05% |
+
+**Median +0.000%. Worst case +0.133%, against a 0.16% rep spread on the same row.** Six of the eight
+rows are inside their own rep spread in both directions — that is the definition of a tie. The two
+that are not are `gemma-2b` and `gemma3-4b`, and `explicit` wins both.
+
+The three models this revision set out to fix, before and after (before = §5.4, `explicit` with only
+the LM-head flag defaulted on, at the depth §5.4 used):
+
+| model           | §5.4 (LM-head flag only) | §5.6 (both flags, healthy depth) |
+| --------------- | -----------------------: | -------------------------------: |
+| `gemma3-4b`     |                  +0.803% |                      **−0.374%** |
+| `mixtral-8x7b`  |                  +0.041% |                      **−0.078%** |
+| `deepseek2-16b` |                  +0.176% |                      **+0.133%** |
+
+gemma3 is the one where the flag does real work: 1.18 pp, and it changes the sign. mixtral and
+deepseek were already inside noise in §5.4 and are still inside noise here; what the dense flag buys
+on those two is not a win but the absence of a tail — across the 15 healthy (model, depth) pairs in
+§4.8 the worst `explicit` row goes from +1.038% to +0.134% when it is on.
+
+Four caveats before quoting this:
+
+1. **mixtral is at 14 layers and deepseek at 12, not 18.** At 18 both run out of HBM at this
+   geometry — deepseek asks for 43.56 G of HLO temporaries against 31.24 G available — so the sweep
+   fails outright rather than producing a slow number. 14 and 12 are both healthy stack lengths
+   under §4.9, which is the property that matters; §4.8 measures the same two models at the same two
+   depths with all four flag combinations if you want the decomposition.
+2. **gemma3's depth must be a multiple of 6** (§4.7): `scan_length = num_layers // 6`, and at any
+   other depth the remainder is unrolled alongside the scan and dominates the comparison.
+3. **It is one geometry and one mesh.** Four chips, fsdp 4, seq 1024, pdbs 1. Above the AR→RS gate
+   (§4.2/§5.3), which is the point, but not a production model and not a production topology.
+4. **Rows under ~0.15% are ties, not results.** The rep spreads are in the table for that reason.
 
 ______________________________________________________________________
 
@@ -1298,14 +1560,22 @@ ______________________________________________________________________
 
 ### For users choosing a mode today
 
-- **Most models, most geometries: just set `shard_mode: explicit` and write nothing else.** The
-  LM-head flag now defaults on where it can act, and with it explicit is faster on five of the eight
-  onboarded models and inside the rep spread on a sixth (§5.4). Choose on capability, not on this
-  table.
-- **gemma3 and deepseek: also set `dense_weight_grad_in_kernel_order: true`.** These are the two
-  models where explicit still loses by default (+0.803% and +0.176%), and the flag takes gemma3 to
-  −0.101% and deepseek to +0.021%. It is inert under `auto` and does not touch the checkpoint. Do
-  not set it on anything else without measuring — it costs 0.06–0.60% on the other six (§4.8).
+- **Most models, most geometries: just set `shard_mode: explicit` and write nothing else.** Both
+  kernel-order flags now default on where they can act, and with them explicit is at parity with
+  `auto` on every onboarded model at every healthy depth measured: median **+0.000%** and worst case
+  **+0.133%** across all eight models on the shipped defaults (§5.6), median +0.005% across the 15
+  (model, depth) pairs of §4.8. Choose on capability.
+- **Do not write `dense_weight_grad_in_kernel_order` out any more.** The "gemma3 and deepseek only"
+  advice this line used to carry was an artifact of benchmarking at 16 layers (§4.9); the flag is
+  now on by default under explicit and there is no model it should be turned off for.
+- **`base_num_decoder_layers` a multiple of 8?** You are paying ~25% of step time to an XLA layout
+  pathology, in *either* mode, and `param_scan_axis: 0` recovers it (§4.9). Unrelated to
+  `shard_mode`, larger than everything else in this document, and not yet validated as a default —
+  measure it on your config.
+- **mixtral only:** explicit with **neither** kernel-order flag is ~1.4% faster than `auto` at
+  L12–L16, and the shipped default gives that up to land on parity (−0.078% at L14, §5.6). If you
+  run mixtral and can measure it, `lm_head_weight_grad_in_kernel_order: false` is worth trying; no
+  other model behaves this way, and deepseek behaves the opposite way (§4.8).
 - **gemma3 specifically:** never benchmark it below 6 layers, and prefer a multiple of 6.
   `scan_length = num_layers // 6`, so a 4-layer proxy unrolls the whole decoder and measures a
   different program (§4.7), and any remainder is unrolled alongside the scan.
@@ -1335,14 +1605,31 @@ ______________________________________________________________________
     > `lm_head_kernel_transposed`, storing the kernel as `[vocab, embed]`: that one works, but it is
     > dominated on every axis by what follows, so it has been removed rather than shipped beside it.
 
-    Since the barrier cannot be removed, remove the *need* for the fold. Autodiff's default transpose
-    rule builds the weight gradient as `transpose(dot(g, inputs))` and relies on `algsimp` folding the
-    transpose back into the dot; under explicit that fold never happens. A hand-written `custom_vjp`
-    contracts `dk` straight into the kernel's own axis order instead, so there is no transpose to
-    fold. `_dot_general_kernel_ordered_grad` in `linears.py` implements it, `DenseGeneral`'s
-    `weight_grad_in_kernel_order` gates it, and `lm_head_weight_grad_in_kernel_order` in `base.yml`
-    wires it to the untied head. It self-disables under `auto` (where the fold does happen)
-    and under quantization (where it does not own the dot).
+    Since the barrier cannot be removed globally, remove it *locally*, for the length of the one dot
+    that needs the fold. Autodiff's default transpose rule builds the weight gradient as
+    `transpose(dot(g, inputs))` and relies on `algsimp` folding the transpose back into the dot;
+    under explicit that fold never happens because a `Sharding` custom-call sits between the two.
+    Tracing the forward dot inside a `jax.sharding.auto_axes` region takes its operands' shardings
+    out of the type system for that dot only — Shardy then re-propagates them exactly as
+    `shard_mode: auto` does — so the barrier is never emitted there, XLA folds the transpose itself,
+    and the gradient comes out in the kernel's stored order. `_dot_general_in_auto_axes` in
+    `linears.py` is the whole implementation, `DenseGeneral`'s `weight_grad_in_kernel_order` gates
+    it, and `lm_head_weight_grad_in_kernel_order` in `base.yml` wires it to the untied head. It
+    self-disables outside an explicit mesh (where there is no barrier) and under quantization (where
+    it does not own the dot).
+
+    > *Implementation note (2026-09-03).* This shipped first as a hand-written `custom_vjp`
+    > (`_dot_general_kernel_ordered_grad`) that contracted `dk` straight into the kernel's axis order,
+    > so that no transpose was ever emitted. The `auto_axes` region reaches the same place by letting
+    > XLA do the fold, and is better on four counts: it is **114 lines shorter**, its gradients are
+    > **bit-identical** to the default rule rather than agreeing to rounding (it reassociates
+    > nothing — the numerical-equivalence table below becomes vacuous for column D), it has no
+    > batch-dimension restriction so it reaches all 17 call sites including MLA and the MoE shared
+    > MLP, and it cannot drift from JAX's transpose rule because it *is* JAX's transpose rule. The
+    > two were measured against each other on all five models at both flag settings and agree to
+    > within **0.15 pp** everywhere (llama2 −0.494 vs −0.449, qwen3 −0.537 vs −0.443, mixtral +0.041
+    > vs +0.083, gemma3 +0.803 vs +0.958, deepseek +0.176 vs +0.202). The `custom_vjp` has been
+    > deleted.
 
     **Why this and not the transposed kernel.** They reach the same layout, but only the `custom_vjp`
     recovers the *collective*. On llama2/shrink/fsdp4 the kernel-order dump gains
@@ -1433,8 +1720,8 @@ ______________________________________________________________________
     `resolve_lm_head_weight_grad_in_kernel_order` in `types.py` does the resolution, rejecting an
     explicit `true` on a tied head rather than silently ignoring it.
 
-02. **Ship `dense_weight_grad_in_kernel_order` — but leave it off, and say why (§4.8).** The same
-    `custom_vjp` wired to every other `DenseGeneral`: the three `MlpBlock` projections
+02. **Ship `dense_weight_grad_in_kernel_order` — on by default under explicit (§4.8).** The same
+    region wired to every other `DenseGeneral`: the three `MlpBlock` projections
     (`linears.py:650,670,689`), the four attention projections (`attentions.py:700,737,779,835`) and
     the nine MLA / Indexer projections (`attention_mla.py:141,157,177,814,830,852,868,893`).
 
@@ -1464,7 +1751,51 @@ ______________________________________________________________________
     a default would be fitting an XLA layout heuristic. **Leave it off, document the two models, and
     revisit if a third data point ever lands between 3 and 16.**
 
-03. **Do not build a lookup table you index once (§5.5) — and do not expect an A/B to find it.**
+    > *Reversed (2026-09-03).* The "discriminator" was §4.9. Stack depth 16 is one of the lengths
+    > where `param_scan_axis: 1` degenerates and the step gets 25% more expensive in **both** modes;
+    > the six models that "lost" were all measured there, and what was being read as a layout trade
+    > was scheduling noise on top of an artifact. Measured at depths that are not multiples of 8 —
+    > 15 (model, depth) pairs across seven models — the flag never costs more than 0.19 pp and
+    > removes a +0.35% to +1.04% penalty on 12 of 15 (§4.8, resolution table). It is therefore now
+    > tri-state like its LM-head counterpart and resolves to **on** under `shard_mode: explicit`;
+    > `resolve_dense_weight_grad_in_kernel_order` in `types.py` does the resolution. There is no
+    > tied-head carve-out here — every model has these projections.
+    >
+    > The two flags are independent and additive: at L18, explicit costs +1.098% (llama2) / +5.579%
+    > (qwen3) with neither, +0.621% / +4.853% with this one alone, +0.429% / +0.534% with the LM-head
+    > flag alone, and **+0.005% / +0.008%** with both.
+    >
+    > One model pays for the *LM-head* default: mixtral is −1.4% against `auto` with **neither** flag
+    > at L12/L14/L16 and lands on parity with both. That is an MoE-scan scheduling windfall unrelated
+    > to the head (an 8× vocab shrink leaves it unchanged) and deepseek's MoE has the opposite sign,
+    > so it is disclosed rather than encoded. A mixtral user who measures it can set
+    > `lm_head_weight_grad_in_kernel_order: false`.
+
+03. **Investigate `param_scan_axis: 0` as the default — it is worth ~25% at any depth that is a
+    multiple of 8, in both modes (§4.9).** This is not a sharding item and it is the largest number
+    in this document. `param_scan_axis: 1` stacks scanned parameters as `[in, L, out]`; when `L` is
+    a multiple of 8 (also at L2 and L4) XLA lays the gradient stack out `{2,0,1}` and every
+    per-iteration `dynamic-update-slice` writes a `T(1,128)`-tiled slice — one row per tile.
+    Measured on llama2 at d16: **L8 −23.6%, L16 −24.9%** from flipping to `param_scan_axis: 0`,
+    against −0.18…−0.28% at L9/L18 where the pathology is absent. It persists at `prod` geometry
+    (+14.1% / +11.5%). The ns/layer trend across L2…L24 is flat except at exactly those depths.
+
+    What is *not* established: whether `param_scan_axis: 0` is safe as a global default. It changes
+    the on-disk parameter-stack layout, so it interacts with checkpoint compatibility and with every
+    optimizer-state layout, and it has only been measured on one model family, one geometry and one
+    chip count. The tractable next steps are (a) reproduce the ns/layer discontinuity on a second
+    model family and a second topology, (b) check whether the degenerate layout is reachable through
+    an XLA layout hint instead of a config change, and (c) work out whether a checkpoint written at
+    one `param_scan_axis` can be read at the other. **Until then, the actionable advice is narrower:
+    do not benchmark anything at a layer count that is a multiple of 8, and if your production depth
+    is one, try the flag.**
+
+    The one thing this item settles immediately is a measurement rule for the rest of this document:
+    §5.1/§5.2 (L4), §5.4 (L16, plus deepseek at L8) and §4.8's original table (L16) are all inside
+    the pathology, and a sub-1% sharding delta measured there is measuring the artifact's scheduling
+    noise. §4.8 and §5.6 are the depths where that is not true.
+
+04. **Do not build a lookup table you index once (§5.5) — and do not expect an A/B to find it.**
     `YarnRotaryEmbedding.freqs_cis` materialized `f32[163840, 32]` inside every layer of every step
     to read 1024 rows out of it; computing the rows straight from `position` is **−1.4% of step
     time in both modes**. It survived a full mode-comparison sweep precisely because both modes paid
@@ -1478,7 +1809,7 @@ ______________________________________________________________________
     `broadcast(f32[] 0)` at 0.8–1.2% of step is JAX's `lax.scan` `ys` output buffers, not a MaxText
     bug.
 
-04. **Do not bother eliding redundant `reshard` barriers — tested, worth exactly zero.** The obvious
+05. **Do not bother eliding redundant `reshard` barriers — tested, worth exactly zero.** The obvious
     companion fix to item 1 is to stop emitting a barrier when the reshard is a no-op (the value's
     aval already carries the requested sharding), on the theory that fewer barriers means more folds.
     It was implemented and measured, and it does not work:
@@ -1496,39 +1827,39 @@ ______________________________________________________________________
     elided. Recorded here so the next person does not spend the week: **the barrier count is not the
     lever, the gradient orientation is.**
 
-05. **Add `shard_mode` to the golden suites (§7.3).** Until CI compares modes, every regression here
+06. **Add `shard_mode` to the golden suites (§7.3).** Until CI compares modes, every regression here
     can silently return. `tests/integration/hlo_diff_test.py` is the cheapest place to start; assert
     on `after_codegen` reduce-scatter counts, not on static collective byte totals.
 
-06. **Any HLO byte-counter used to compare modes must descend into
+07. **Any HLO byte-counter used to compare modes must descend into
     `kind=kCustom, calls=%all-reduce-scatter.*` fusions** and report the post-slice shape. Counting
     the `all-reduce` inside the fusion at its pre-slice shape reports auto's wins as if they were
     losses, which is how the "identical bytes" claim survived a full sweep here.
 
-07. **Re-examine the `check_vma` ban (§7.1).** JAX 0.11.1 accepts `check_vma=True` on an all-Explicit
+08. **Re-examine the `check_vma` ban (§7.1).** JAX 0.11.1 accepts `check_vma=True` on an all-Explicit
     mesh; the restriction appears to be MaxText-imposed. Lifting it would give the MoE models on the
     explicit whitelist back a documented optimization.
 
-08. **Validate `fused_qkv` + explicit and context-parallel + explicit** in `types.py` so users get a
+09. **Validate `fused_qkv` + explicit and context-parallel + explicit** in `types.py` so users get a
     MaxText message instead of a raw JAX trace error.
 
-09. **Fix `gcs_utils.upload_dump()`** to no-op (or write locally) for non-`gs://` paths — today it
+10. **Fix `gcs_utils.upload_dump()`** to no-op (or write locally) for non-`gs://` paths — today it
     crashes after training and destroys the profile.
 
-10. **Make explicit mode not defeat remat CSE on unrolled blocks (§4.7).** With `remat_policy: full`
+11. **Make explicit mode not defeat remat CSE on unrolled blocks (§4.7).** With `remat_policy: full`
     and no scan, auto CSEs the recomputed forward against the original (61 remat-tagged instructions
     of 11,209); explicit cannot (1,013 of 12,452), costing 279.5 µs. This bites any config where a
     block is unrolled — gemma3 below 6 layers today, but also `scan_layers: false` runs generally.
 
-11. **Deduplicate the tied-embedding bf16 cast (§4.6).** `embeddings.py:235-240`'s `.T` makes explicit
+12. **Deduplicate the tied-embedding bf16 cast (§4.6).** `embeddings.py:235-240`'s `.T` makes explicit
     materialize the 128 MB embedding shard in bf16 **twice** (+80–82 µs on every gemma). Hoisting the
     cast above the transpose, or reusing one converted value for both consumers, is a pure win and is
     independent of everything else in this document.
 
-12. **Investigate the tuple-repack all-reduce tax (§6.2)** — the one measured explicit cost that grows
+13. **Investigate the tuple-repack all-reduce tax (§6.2)** — the one measured explicit cost that grows
     with depth (+112 → +219 → +379 µs from 4 to 12 layers on gemma3).
 
-13. **Delete or rewire `validate_shard_mode`** (§7.4) — as dead code it actively misinforms.
+14. **Delete or rewire `validate_shard_mode`** (§7.4) — as dead code it actively misinforms.
 
 ### Levers that were tried and do not work
 
@@ -1538,12 +1869,12 @@ reasoned about, and each survived an adversarial attempt to rescue it.
 | candidate                                                                                                                                                                                                                   | verdict                                                                                                                                                                                                                                                                                                            |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Stop pinning the logits output under explicit                                                                                                                                                                               | 0-line HLO diff. The barriers are JAX's, not MaxText's (§4.5).                                                                                                                                                                                                                                                     |
-| Elide no-op `reshard` barriers                                                                                                                                                                                              | Op-identical executable on all three configs (item 04).                                                                                                                                                                                                                                                            |
+| Elide no-op `reshard` barriers                                                                                                                                                                                              | Op-identical executable on all three configs (item 05).                                                                                                                                                                                                                                                            |
 | `lm_head_kernel_transposed` (store the kernel `[vocab, embed]`)                                                                                                                                                             | Works, but slower on 4 of 7 configs, no checkpoint path, and re-initializes the model. Removed (item 01).                                                                                                                                                                                                          |
 | Reshard the RMSNorm scale under explicit outside TP                                                                                                                                                                         | Implemented and reverted — negative on every non-TP config.                                                                                                                                                                                                                                                        |
 | Sliced/prefetched MoE expert weights via MSA                                                                                                                                                                                | No measurable effect; the expert all-gathers are already overlapped.                                                                                                                                                                                                                                               |
 | Remove the rotated-reduce-scatter `collective-permute` fixup                                                                                                                                                                | Backwards: it is an `auto`-mode op that explicit already deletes (§6.3). There was nothing on the explicit side to remove, and it is not caused by `_permuted_sharding`.                                                                                                                                           |
-| `param_scan_axis: 1` + XLA tiling as the dense-flag discriminator                                                                                                                                                           | Does not separate the winners from the losers; every model in the sweep uses the same value.                                                                                                                                                                                                                       |
+| `param_scan_axis: 1` + XLA tiling as the dense-flag discriminator                                                                                                                                                           | Correct as stated — every model uses the same value, so it cannot separate models — but the conclusion drawn from it was wrong. It separates *depths*, and that is the whole discriminator: §4.9, worth ~25% of step time in both modes.                                                                           |
 | 3-D kernels / MLA low-rank / gemma3's attention pattern / contracting-axis-vs-FSDP, as the dense-flag discriminator                                                                                                         | None separate the sign. gemma3-L18's win is carried by plain 2-D `[embed, mlp]` `MlpBlock` kernels — the same sites that lose on llama2 — and deepseek's by its length-1 dense-layer scan (4,640 µs of `f32[512,1,8192]` copies) plus 500 µs on the MoE shared MLP, not by MLA (MLA's 4-D gradients move ~170 µs). |
 | Rematerializing RoPE sin/cos in the backward pass                                                                                                                                                                           | Mode-neutral: identical to 0.1 µs in both arms.                                                                                                                                                                                                                                                                    |
 | `LlamaVisionRotaryEmbedding`'s full-table build                                                                                                                                                                             | Consumes the whole table by design, and `llama4` is not on the explicit whitelist — unreachable.                                                                                                                                                                                                                   |
@@ -1556,6 +1887,14 @@ cost on llama2 / mistral / qwen3 at d16 found **nothing above ~0.10% of step**. 
 is llama2's scan gradient-stack `dynamic-update-slice` at +68 µs/step (+0.098%), and it has an
 identical signature and op count (960 / 960) in both arms with a sign that flips by model — i.e. it
 is scheduling around a shared op, not an explicit-mode defect.
+
+> *Postscript (2026-09-03).* That last sentence is right about the sharding question and badly
+> understated about everything else. The shared op it dismisses is §4.9's degenerate
+> `dynamic-update-slice`, and at d16/L16 it is not +68 µs of *delta* but **8.2 ms of step**, ~22% of
+> the whole thing, paid identically by both modes. A/B diffing two modes cannot see a cost both
+> modes pay — the same blind spot that hid the YaRN table (§5.5). Both were found only by looking at
+> one mode's absolute profile, which is now the second entry in a very short list of things a
+> mode-comparison sweep structurally cannot find.
 
 ______________________________________________________________________
 
@@ -1583,6 +1922,9 @@ that cost time to discover:
   profile is flushed (§8 item 6).
 - Clear `jax_cache_dir`. A persistent-cache hit skips compilation and therefore suppresses the HLO
   dump, while producing an identical executable and step time.
+- The geometry above is the *shrink* used by §5.1–§5.2 and by §4's dumps. Everything from §4.8
+  onward — including §5.6 — uses `base_emb_dim=2048 base_mlp_dim=8192 base_num_query_heads=8 base_num_kv_heads=8 head_dim=128` (referred to as **d16**) with `base_num_decoder_layers` varied
+  per row, plus `base_moe_mlp_dim=8192` on mixtral. §5.6 writes out nothing else but `shard_mode`.
 
 Timings are `train_step` durations read off `/device:TPU:0` in the `.xplane.pb`, median of the 3
 profiled steps; HLO facts are from `*after_optimizations.txt` and `*after_codegen*`. The TPU is a
@@ -1621,18 +1963,57 @@ Added with the 2026-09-03 revision:
   a production model and it is not a production mesh. Nothing here was re-measured at emb 4096,
   seq ≥ 4096, pure DP, pure TP or multi-host with the new default on — the §5.2 and §5.3 rows are
   all pre-flag and should be read as upper bounds.
+
 - **3 reps per arm, medians compared.** Several §5.4 deltas (mixtral +0.009%, deepseek's +0.012%
   over 8 reps) are inside the noise floor and are reported as ties, not wins. Only the ≥ 0.2% rows
   should be read as directional.
+
 - **The dense flag's discriminator is fitted to eight points**, with two on one side of the
   threshold and six on the other, and it is a layout proxy rather than a proven mechanism (§4.8).
   It is documented as a per-model recommendation for exactly the two models it was measured on.
+
+  > *Withdrawn (2026-09-03).* There is no discriminator; all eight points were measured inside
+  > §4.9's layout pathology. See §4.8's resolution table.
+
 - **The YaRN finding was measured on deepseek only.** It is the only model in the sweep whose
   `max_position_embeddings` (163,840) dwarfs `max_target_length` by enough for the table build to
   dominate; the fix is unconditional, so other YaRN models get whatever their ratio is worth, which
   was not measured.
+
 - **`deepseek3-671b-batchsplit` newly resolves the LM-head flag to `true`** and was verified by
   inspection only — the flag's permutation is the identity for a 2-D `[embed_vocab, vocab]` kernel,
   and the `reduced=`/`unreduced=` tags live on decoder-layer weight gradients inside
   `deepseek_batchsplit.py`'s `shard_map`s, never on the LM head. That config does not fit on the
   hardware used here, so it has not been run.
+
+  > *Amended (2026-09-03).* It now resolves **both** flags to `true`. The dense flag reaches the
+  > decoder-layer projections, which is where `deepseek_batchsplit.py`'s `reduced=`/`unreduced=`
+  > tags live. Those tags are applied to gradients inside a `shard_map`, and the `auto_axes` region
+  > wraps only the forward `dot_general` in `DenseGeneral` — a different program point — so the two
+  > should not interact. That reasoning has not been run on hardware either.
+
+Added with the second 2026-09-03 revision:
+
+- **§4.9's pathology is characterized on one model family.** llama2 at d16 and at `prod`, plus the
+  consequence visible in gemma3's and deepseek's short scans. The rule "stack length a multiple of 8
+  (also 2 and 4)" is read off 15 depths on one model; it has not been checked on a second topology,
+  a second chip generation, or a non-Adam optimizer, and no XLA-side explanation for *why* layout
+  assignment picks `{2,0,1}` at those lengths has been established.
+- **The dense flag's new default rests on 15 (model, depth) pairs at one geometry.** Seven models,
+  depths 12–20, d16, 2 reps each. Its worst measured cost is +0.134% (mixtral L12). It has not been
+  measured at `prod`, at emb 4096, under TP or DP, or on any depth above 20.
+- **The `auto_axes` and `custom_vjp` implementations were compared at L16** — inside the pathology.
+  Their agreement (≤0.15 pp on five models, both flag settings) is therefore an agreement between
+  two noisy measurements; the claim it supports is "the swap is not a regression", not "the swap is
+  worth +0.05%". The bit-exactness claim is separate and is asserted by unit test, not by benchmark.
+- **mixtral's −1.4% no-flag win is unexplained.** It reproduces at L12, L14 and L16, survives an 8×
+  vocab shrink, and has the opposite sign on the other MoE model in the sweep. It is disclosed as a
+  cost of the shipped default rather than attributed.
+- **§5.6's two MoE rows are at different depths from the other six.** mixtral is at 14 layers and
+  deepseek at 12 because at 18 both exceed HBM at this geometry (deepseek asks 43.56 G of HLO
+  temporaries against 31.24 G available). Both are healthy stack lengths under §4.9, so the
+  comparison is sound, but the eight rows are not all the same program size and the table should not
+  be read as a cross-model ranking — only each row against its own `auto`.
+- **Nothing in §5.6 is multi-host.** Every number in this document is a single 4-chip v5e host. The
+  collective topology that explicit's `reduced=`/`unreduced=` tags exist to exploit (§6.1) only
+  appears at scale, and so does the failure mode that would most plausibly break parity.
