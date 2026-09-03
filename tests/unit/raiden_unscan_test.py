@@ -204,6 +204,39 @@ class UnscanLayersTest(absltest.TestCase):
     # layer 3: repeat 1, slot 1
     np.testing.assert_array_equal(np.asarray(_unwrap(unscanned["layers_3"]["kernel"])), np.asarray(k1[:, 1, :]))
 
+  def test_nested_block_layout_unscans_correctly(self):
+    """Qwen3-Next/Qwen3.5's nested scanned block unrolls into interleaved per-layer entries.
+
+    `local_layers` stacks every cycle slot but the last on `scan_axis + 1`, and `global_layer`
+    is the last slot. A cycle of 3 puts two slots on the nested axis, so a swapped repeat or
+    slot index lands a slice on the wrong layer.
+    """
+    num_layers = 6
+    cycle_interval = 3
+    repeats = num_layers // cycle_interval  # 2
+    num_local = cycle_interval - 1  # 2
+
+    local = jnp.arange(_IN * repeats * num_local * _OUT, dtype=jnp.float32).reshape(_IN, repeats, num_local, _OUT)
+    glob = (jnp.arange(_IN * repeats * _OUT, dtype=jnp.float32) + 1000).reshape(_IN, repeats, _OUT)
+    state = {
+        "layers": {
+            "local_layers": {"kernel": local},
+            "global_layer": {"kernel": glob},
+        },
+        "embed": jnp.zeros((_VOCAB, _IN)),
+    }
+
+    unscanned = raiden_unscan.unscan_layers(state, num_layers=num_layers, cycle_interval=cycle_interval)
+    expected_names = sorted(["['embed'].value"] + [f"['layers_{i}']['kernel'].value" for i in range(num_layers)])
+    self.assertEqual(_names(unscanned), expected_names)
+
+    for i in range(repeats):
+      for j in range(num_local):
+        got = np.asarray(_unwrap(unscanned[f"layers_{i * cycle_interval + j}"]["kernel"]))
+        np.testing.assert_array_equal(got, np.asarray(local[:, i, j, :]))
+      got = np.asarray(_unwrap(unscanned[f"layers_{i * cycle_interval + num_local}"]["kernel"]))
+      np.testing.assert_array_equal(got, np.asarray(glob[:, i, :]))
+
   def test_inhomogeneous_config_mismatches_raise(self):
     """Every way a cycle config can disagree with the tree must fail loudly.
 
@@ -239,6 +272,13 @@ class UnscanLayersTest(absltest.TestCase):
             4,
             2,
             r"does not have a 'layer_<slot>' cycle prefix",
+        ),
+        (
+            "local_layers without the nested slot axis",
+            {"layers": {"local_layers": {"kernel": jnp.zeros((_IN, 2, _OUT))}}},
+            4,
+            2,
+            r"expected axis 2 to hold the 1 'local_layers' cycle slots",
         ),
         ("cycle_interval below 1", two_slots, 4, 0, r"cycle_interval must be >= 1"),
     ]
