@@ -604,13 +604,14 @@ class LogitsAndLoss(BaseModel):
   )
   logits_dot_in_fp32: bool = Field(False, description="Use fp32 for the logits dot product for stability.")
   cast_logits_to_fp32: bool = Field(True, description="Whether to cast the final logits to fp32.")
-  lm_head_weight_grad_in_kernel_order: bool = Field(
-      False,
+  lm_head_weight_grad_in_kernel_order: bool | None = Field(
+      None,
       description=(
           "Compute the untied LM head's weight gradient directly in the kernel's stored axis order via a "
           "custom_vjp, so autodiff emits no transpose after the gradient dot. Recovers the weight-gradient "
           "reduce-scatter that shard_mode=explicit otherwise loses, leaving the stored kernel and its "
-          "initialization untouched. No effect under shard_mode=auto."
+          "initialization untouched. No effect under shard_mode=auto. None means on for an untied model "
+          "under shard_mode=explicit and off everywhere else."
       ),
   )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
@@ -3294,11 +3295,19 @@ class MaxTextConfig(
     return self
 
   @model_validator(mode="after")
-  def validate_lm_head_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
-    """Reject lm_head_weight_grad_in_kernel_order where it cannot be honored."""
-    if not self.lm_head_weight_grad_in_kernel_order:
-      return self
-    if self.logits_via_embedding:
+  def resolve_lm_head_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Resolve the tri-state flag, and reject it where it cannot be honored.
+
+    The transpose it removes only exists under explicit sharding, and on an untied
+    model removing it has been a win or a wash on every configuration measured
+    (docs/guides/optimization/shard_mode_performance.md section 5) -- on qwen3-8b it
+    is the difference between +3.25% and -0.41% against `auto`. So the default is
+    "on wherever it can do anything", and writing the flag out is only needed to
+    reproduce a measurement.
+    """
+    if self.lm_head_weight_grad_in_kernel_order is None:
+      self.lm_head_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT and not self.logits_via_embedding
+    elif self.lm_head_weight_grad_in_kernel_order and self.logits_via_embedding:
       raise ValueError(
           "lm_head_weight_grad_in_kernel_order only applies to the untied LM head, but logits_via_embedding is True."
       )

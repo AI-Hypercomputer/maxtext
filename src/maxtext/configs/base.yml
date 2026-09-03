@@ -206,8 +206,9 @@ cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher preci
 # barrier algsimp will not cross, so the gradient is left sharded on its minor-most dimension and loses the
 # all-reduce -> reduce-scatter fusion (see docs/guides/optimization/shard_mode_performance.md). The stored kernel
 # and its initialization are untouched, so no checkpoint conversion is needed; gradients differ from the default
-# rule only by floating-point reassociation. No effect under shard_mode: auto, where XLA folds the transpose itself.
-lm_head_weight_grad_in_kernel_order: false
+# rule only by floating-point reassociation. No effect under shard_mode: auto, where XLA folds the transpose itself,
+# and none on a tied head, which has no kernel of its own -- so None means on exactly where it can do something.
+lm_head_weight_grad_in_kernel_order: None  # on for an untied model under shard_mode: explicit if None
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the Indexer across the unsharded local heads dimension natively.
