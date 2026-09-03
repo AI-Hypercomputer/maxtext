@@ -1284,7 +1284,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
-
+    # pyrefly: ignore[unsupported-operation]
     hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
         process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
     )
@@ -1402,400 +1402,81 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
   }
 
   if scan_layers:
+    # 2. Scanned blocks. One block covers a single period of the hybrid attention
+    # pattern: `layer_cycle_interval - 1` linear-attention (GatedDeltaNet) layers
+    # run as an inner scan, then one full-attention layer. The resulting params are:
+    #   layers-local_layers-*  -> nested [block][local]  (doubly scanned)
+    #   layers-global_layer-*  -> flat [block]           (block scan only; the
+    #     length-1 _scan_global_layer scan is a runtime memory boundary, not a
+    #     param stack)
+    # Routed-expert weights carry an additional leading expert axis, so they are
+    # nested one level deeper: [expert][block][local] and [expert][block].
+    # Qwen3NextScannableBlock requires the full-attention layer to be last in the
+    # period, so the local positions are 0..cycle-2 and the global position is
+    # cycle-1.
     num_blocks = num_main_layers // layer_cycle_interval
-    num_scanned = num_blocks * layer_cycle_interval
-    num_remaining = num_main_layers % layer_cycle_interval
-
-    def hf_layer(idx, suffix):
-      return f"model.layers.{idx}.{suffix}"
-
-    local_prefix = "params-decoder-scanned_blocks-local_layers"
     local_positions = list(range(layer_cycle_interval - 1))
-
-    # Local / linear attention layers (nested [block][local])
-    mapping.update({
-        f"{local_prefix}-input_layernorm-scale": [
-            [
-                hf_layer(b * layer_cycle_interval + l, "input_layernorm.weight")
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-post_attention_layernorm-scale": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l,
-                    "post_attention_layernorm.weight",
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-attention-in_proj_qkvz-kernel": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l,
-                    "linear_attn.in_proj_qkvz.weight",
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-attention-in_proj_ba-kernel": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l,
-                    "linear_attn.in_proj_ba.weight",
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-attention-conv1d-kernel": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l, "linear_attn.conv1d.weight"
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-attention-A_log": [
-            [
-                hf_layer(b * layer_cycle_interval + l, "linear_attn.A_log")
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-attention-dt_bias": [
-            [
-                hf_layer(b * layer_cycle_interval + l, "linear_attn.dt_bias")
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-attention-norm-rms_norm-scale": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l, "linear_attn.norm.weight"
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-attention-out_proj-kernel": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l, "linear_attn.out_proj.weight"
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-mlp-routed_experts-gate-kernel": [
-            [
-                hf_layer(b * layer_cycle_interval + l, "mlp.gate.weight")
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-mlp-shared_expert-wi_0-kernel": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l,
-                    "mlp.shared_expert.gate_proj.weight",
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-mlp-shared_expert-wi_1-kernel": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l,
-                    "mlp.shared_expert.up_proj.weight",
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-mlp-shared_expert-wo-kernel": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l,
-                    "mlp.shared_expert.down_proj.weight",
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-mlp-shared_expert_gate-kernel": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + l,
-                    "mlp.shared_expert_gate.weight",
-                )
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
-        ],
-        f"{local_prefix}-mlp-routed_experts-wi_0": [
-            [
-                [
-                    hf_layer(
-                        b * layer_cycle_interval + l,
-                        f"mlp.experts.{e}.gate_proj.weight",
-                    )
-                    for l in local_positions
-                ]
-                for b in range(num_blocks)
-            ]
-            for e in range(num_experts)
-        ],
-        f"{local_prefix}-mlp-routed_experts-wi_1": [
-            [
-                [
-                    hf_layer(
-                        b * layer_cycle_interval + l,
-                        f"mlp.experts.{e}.up_proj.weight",
-                    )
-                    for l in local_positions
-                ]
-                for b in range(num_blocks)
-            ]
-            for e in range(num_experts)
-        ],
-        f"{local_prefix}-mlp-routed_experts-wo": [
-            [
-                [
-                    hf_layer(
-                        b * layer_cycle_interval + l,
-                        f"mlp.experts.{e}.down_proj.weight",
-                    )
-                    for l in local_positions
-                ]
-                for b in range(num_blocks)
-            ]
-            for e in range(num_experts)
-        ],
-    })
-
-    global_prefix = "params-decoder-scanned_blocks-global_layer"
     global_position = layer_cycle_interval - 1
 
-    # Global attention layer (flat over blocks)
-    mapping.update({
-        f"{global_prefix}-input_layernorm-scale": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "input_layernorm.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-post_attention_layernorm-scale": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "post_attention_layernorm.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-attention-attention-query-kernel": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "self_attn.q_proj.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-attention-attention-key-kernel": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "self_attn.k_proj.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-attention-attention-value-kernel": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "self_attn.v_proj.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-attention-attention-out-kernel": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "self_attn.o_proj.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-attention-attention-query_norm-scale": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "self_attn.q_norm.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-attention-attention-key_norm-scale": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "self_attn.k_norm.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-mlp-routed_experts-gate-kernel": [
-            hf_layer(
-                b * layer_cycle_interval + global_position, "mlp.gate.weight"
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-mlp-shared_expert-wi_0-kernel": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "mlp.shared_expert.gate_proj.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-mlp-shared_expert-wi_1-kernel": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "mlp.shared_expert.up_proj.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-mlp-shared_expert-wo-kernel": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "mlp.shared_expert.down_proj.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-mlp-shared_expert_gate-kernel": [
-            hf_layer(
-                b * layer_cycle_interval + global_position,
-                "mlp.shared_expert_gate.weight",
-            )
-            for b in range(num_blocks)
-        ],
-        f"{global_prefix}-mlp-routed_experts-wi_0": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + global_position,
-                    f"mlp.experts.{e}.gate_proj.weight",
-                )
-                for b in range(num_blocks)
-            ]
-            for e in range(num_experts)
-        ],
-        f"{global_prefix}-mlp-routed_experts-wi_1": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + global_position,
-                    f"mlp.experts.{e}.up_proj.weight",
-                )
-                for b in range(num_blocks)
-            ]
-            for e in range(num_experts)
-        ],
-        f"{global_prefix}-mlp-routed_experts-wo": [
-            [
-                hf_layer(
-                    b * layer_cycle_interval + global_position,
-                    f"mlp.experts.{e}.down_proj.weight",
-                )
-                for b in range(num_blocks)
-            ]
-            for e in range(num_experts)
-        ],
-    })
+    def hf_layer(block_idx, position, suffix):
+      return f"model.layers.{block_idx * layer_cycle_interval + position}.{suffix}"
 
-    # Remainder layers if any
-    if num_remaining > 0:
-      for rem_idx in range(num_remaining):
-        hf_layer_idx = num_scanned + rem_idx
-        prefix = f"params-decoder-layers_{hf_layer_idx}"
-        layer_in_block = rem_idx % layer_cycle_interval
-        is_full_attention_layer = (
-            layer_in_block + 1
-        ) % layer_cycle_interval == 0
-        mapping[f"{prefix}-input_layernorm-scale"] = (
-            f"model.layers.{hf_layer_idx}.input_layernorm.weight"
-        )
-        mapping[f"{prefix}-post_attention_layernorm-scale"] = (
-            f"model.layers.{hf_layer_idx}.post_attention_layernorm.weight"
-        )
-        if is_full_attention_layer:
-          mapping.update({
-              f"{prefix}-attention-attention-query-kernel": (
-                  f"model.layers.{hf_layer_idx}.self_attn.q_proj.weight"
-              ),
-              f"{prefix}-attention-attention-key-kernel": (
-                  f"model.layers.{hf_layer_idx}.self_attn.k_proj.weight"
-              ),
-              f"{prefix}-attention-attention-value-kernel": (
-                  f"model.layers.{hf_layer_idx}.self_attn.v_proj.weight"
-              ),
-              f"{prefix}-attention-attention-out-kernel": (
-                  f"model.layers.{hf_layer_idx}.self_attn.o_proj.weight"
-              ),
-              f"{prefix}-attention-attention-query_norm-scale": (
-                  f"model.layers.{hf_layer_idx}.self_attn.q_norm.weight"
-              ),
-              f"{prefix}-attention-attention-key_norm-scale": (
-                  f"model.layers.{hf_layer_idx}.self_attn.k_norm.weight"
-              ),
-          })
-        else:
-          mapping.update({
-              f"{prefix}-attention-in_proj_qkvz-kernel": (
-                  f"model.layers.{hf_layer_idx}.linear_attn.in_proj_qkvz.weight"
-              ),
-              f"{prefix}-attention-in_proj_ba-kernel": (
-                  f"model.layers.{hf_layer_idx}.linear_attn.in_proj_ba.weight"
-              ),
-              f"{prefix}-attention-conv1d-kernel": (
-                  f"model.layers.{hf_layer_idx}.linear_attn.conv1d.weight"
-              ),
-              f"{prefix}-attention-A_log": (
-                  f"model.layers.{hf_layer_idx}.linear_attn.A_log"
-              ),
-              f"{prefix}-attention-dt_bias": (
-                  f"model.layers.{hf_layer_idx}.linear_attn.dt_bias"
-              ),
-              f"{prefix}-attention-norm-rms_norm-scale": (
-                  f"model.layers.{hf_layer_idx}.linear_attn.norm.weight"
-              ),
-              f"{prefix}-attention-out_proj-kernel": (
-                  f"model.layers.{hf_layer_idx}.linear_attn.out_proj.weight"
-              ),
-          })
-        mapping.update({
-            f"{prefix}-mlp-routed_experts-gate-kernel": (
-                f"model.layers.{hf_layer_idx}.mlp.gate.weight"
-            ),
-            f"{prefix}-mlp-shared_expert-wi_0-kernel": (
-                f"model.layers.{hf_layer_idx}.mlp.shared_expert.gate_proj.weight"
-            ),
-            f"{prefix}-mlp-shared_expert-wi_1-kernel": (
-                f"model.layers.{hf_layer_idx}.mlp.shared_expert.up_proj.weight"
-            ),
-            f"{prefix}-mlp-shared_expert-wo-kernel": (
-                f"model.layers.{hf_layer_idx}.mlp.shared_expert.down_proj.weight"
-            ),
-            f"{prefix}-mlp-shared_expert_gate-kernel": (
-                f"model.layers.{hf_layer_idx}.mlp.shared_expert_gate.weight"
-            ),
-            f"{prefix}-mlp-routed_experts-wi_0": [
-                f"model.layers.{hf_layer_idx}.mlp.experts.{e}.gate_proj.weight"
-                for e in range(num_experts)
-            ],
-            f"{prefix}-mlp-routed_experts-wi_1": [
-                f"model.layers.{hf_layer_idx}.mlp.experts.{e}.up_proj.weight"
-                for e in range(num_experts)
-            ],
-            f"{prefix}-mlp-routed_experts-wo": [
-                f"model.layers.{hf_layer_idx}.mlp.experts.{e}.down_proj.weight"
-                for e in range(num_experts)
-            ],
-        })
+    # (maxtext subkey, hf suffix) pairs shared by both the local and global layers.
+    shared_specs = [
+        ("input_layernorm-scale", "input_layernorm.weight"),
+        ("post_attention_layernorm-scale", "post_attention_layernorm.weight"),
+        ("mlp-routed_experts-gate-kernel", "mlp.gate.weight"),
+        ("mlp-shared_expert-wi_0-kernel", "mlp.shared_expert.gate_proj.weight"),
+        ("mlp-shared_expert-wi_1-kernel", "mlp.shared_expert.up_proj.weight"),
+        ("mlp-shared_expert-wo-kernel", "mlp.shared_expert.down_proj.weight"),
+        ("mlp-shared_expert_gate-kernel", "mlp.shared_expert_gate.weight"),
+    ]
+    # Linear (GatedDeltaNet) attention: only ever on the local layers.
+    local_specs = shared_specs + [
+        ("attention-in_proj_qkvz-kernel", "linear_attn.in_proj_qkvz.weight"),
+        ("attention-in_proj_ba-kernel", "linear_attn.in_proj_ba.weight"),
+        ("attention-conv1d-kernel", "linear_attn.conv1d.weight"),
+        ("attention-A_log", "linear_attn.A_log"),
+        ("attention-dt_bias", "linear_attn.dt_bias"),
+        ("attention-norm-rms_norm-scale", "linear_attn.norm.weight"),
+        ("attention-out_proj-kernel", "linear_attn.out_proj.weight"),
+    ]
+    # Full attention: only ever on the global layer.
+    global_specs = shared_specs + [
+        ("attention-attention-query-kernel", "self_attn.q_proj.weight"),
+        ("attention-attention-key-kernel", "self_attn.k_proj.weight"),
+        ("attention-attention-value-kernel", "self_attn.v_proj.weight"),
+        ("attention-attention-out-kernel", "self_attn.o_proj.weight"),
+        ("attention-attention-query_norm-scale", "self_attn.q_norm.weight"),
+        ("attention-attention-key_norm-scale", "self_attn.k_norm.weight"),
+    ]
+    expert_specs = [
+        ("mlp-routed_experts-wi_0", "gate_proj.weight"),
+        ("mlp-routed_experts-wi_1", "up_proj.weight"),
+        ("mlp-routed_experts-wo", "down_proj.weight"),
+    ]
+
+    local_prefix = "params-decoder-layers-local_layers"
+    for subkey, suffix in local_specs:
+      mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          [hf_layer(b, p, suffix) for p in local_positions] for b in range(num_blocks)
+      ]
+    for subkey, suffix in expert_specs:
+      mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          [[hf_layer(b, p, f"mlp.experts.{e}.{suffix}") for p in local_positions] for b in range(num_blocks)]
+          for e in range(num_experts)
+      ]
+
+    global_prefix = "params-decoder-layers-global_layer"
+    for subkey, suffix in global_specs:
+      mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          hf_layer(b, global_position, suffix) for b in range(num_blocks)
+      ]
+    for subkey, suffix in expert_specs:
+      mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          [hf_layer(b, global_position, f"mlp.experts.{e}.{suffix}") for b in range(num_blocks)]
+          for e in range(num_experts)
+      ]
   else:
     # Unscanned layer mapping
     for i in range(num_main_layers):
@@ -1887,8 +1568,24 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
       "params-decoder-logits_dense-kernel": transpose,
   }
 
-  def _attach_block_hooks(prefix, is_global):
-    if is_global:
+  layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
+  num_main_layers = config["num_hidden_layers"]
+  # Scanned blocks expose two prefixes -- the stacked local (linear-attention) layers
+  # and the single global (full-attention) layer -- rather than one prefix per position
+  # in the cycle. Unscanned models keep one prefix per decoder layer.
+  if scan_layers:
+    layer_prefixes = [
+        ("params-decoder-layers-local_layers", False),
+        ("params-decoder-layers-global_layer", True),
+    ]
+  else:
+    layer_prefixes = [
+        (f"params-decoder-layers_{i}", (i % layer_cycle_interval + 1) % layer_cycle_interval == 0)
+        for i in range(num_main_layers)
+    ]
+
+  for prefix, is_full_attention_layer in layer_prefixes:
+    if is_full_attention_layer:
       for key in ["query", "key", "value", "out"]:
         hooks[f"{prefix}-attention-attention-{key}-kernel"] = reshape_kernel  # pyrefly: ignore[bad-assignment]
     else:
@@ -1907,22 +1604,6 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     hooks[f"{mlp_prefix}-routed_experts-wi_0"] = transpose
     hooks[f"{mlp_prefix}-routed_experts-wi_1"] = transpose
     hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose
-
-  if scan_layers:
-    _attach_block_hooks(
-        "params-decoder-scanned_blocks-local_layers", is_global=False
-    )
-    _attach_block_hooks(
-        "params-decoder-scanned_blocks-global_layer", is_global=True
-    )
-  else:
-    for i in range(config.base_num_decoder_layers):
-      prefix = f"params-decoder-layers_{i}"
-      block_idx = i % config.inhomogeneous_layer_cycle_interval
-      is_full_attention_layer = (
-          block_idx + 1
-      ) % config.inhomogeneous_layer_cycle_interval == 0
-      _attach_block_hooks(prefix, is_global=is_full_attention_layer)
 
   return hooks
 
@@ -2273,6 +1954,7 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     hooks[f"{prefix}-GptOssMlp-gate-kernel"] = transpose
     # `composite_mt_key`: A hook for combining multiple MaxText params.
     hooks[(f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1")] = interleave  # pyrefly: ignore[unsupported-operation]
+    # pyrefly: ignore[unsupported-operation]
     hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = (
         interleave  # pyrefly: ignore[unsupported-operation]
     )
@@ -3194,20 +2876,11 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
     local_positions = list(range(attention_pattern_length - 1))
     for subkey, suffix, gate in param_specs:
       if _spec_active(gate):
-        mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[no-matching-overload]
-            [
-                hf_layer(b * attention_pattern_length + l, suffix)
-                for l in local_positions
-            ]
-            for b in range(num_blocks)
+        mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+            [hf_layer(b * attention_pattern_length + l, suffix) for l in local_positions] for b in range(num_blocks)
         ]
-    mapping[f"{local_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[no-matching-overload]
-        [
-            hf_layer(
-                b * attention_pattern_length + l, "self_attn.v_proj.weight"
-            )
-            for l in local_positions
-        ]
+    mapping[f"{local_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+        [hf_layer(b * attention_pattern_length + l, "self_attn.v_proj.weight") for l in local_positions]
         for b in range(num_blocks)
     ]
 
@@ -3216,17 +2889,12 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
     global_position = attention_pattern_length - 1
     for subkey, suffix, gate in param_specs:
       if _spec_active(gate):
-        mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[no-matching-overload]
-            hf_layer(b * attention_pattern_length + global_position, suffix)
-            for b in range(num_blocks)
+        mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+            hf_layer(b * attention_pattern_length + global_position, suffix) for b in range(num_blocks)
         ]
     if not share_kv_projections:
-      mapping[f"{global_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[no-matching-overload]
-          hf_layer(
-              b * attention_pattern_length + global_position,
-              "self_attn.v_proj.weight",
-          )
-          for b in range(num_blocks)
+      mapping[f"{global_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+          hf_layer(b * attention_pattern_length + global_position, "self_attn.v_proj.weight") for b in range(num_blocks)
       ]
 
     # Remainder layers
@@ -4087,15 +3755,17 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       scan_layers=scan_layers,
       saving_to_hf=saving_to_hf,
   )
-  mapping.update(text_hooks)
 
   def process_wi_0_wi_1_fused(input_tensor, target_shape=None):
     if saving_to_hf:
       wi_0, wi_1 = input_tensor
-      return np.concatenate([wi_0, wi_1], axis=-1)
+      gate_up = np.concatenate([wi_0, wi_1], axis=-1)
+      return gate_up
     else:
-      wi_0, wi_1 = np.split(input_tensor, 2, axis=-1)
-      return np.stack([wi_0, wi_1], axis=-1)
+      gate, up = np.split(input_tensor, 2, axis=-1)
+      return np.stack([gate, up], axis=-1)
+
+  mapping.update(text_hooks)
 
   # Special case for Qwen3-VL: MaxText model has separate wi_0 and wi_1 weights
   # for the MoE block, but the HF model expects a single fused weight.
@@ -4346,7 +4016,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
             }
         )
 
-    mapping.update(layer_map)
+    mapping.update(layer_map)  # pyrefly: ignore[no-matching-overload]
 
   if not scan_layers:
     for i in range(n_layers):
@@ -4370,7 +4040,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     return np.transpose(input_tensor)
 
   def ones_norm(input_tensor, target_shape=None):
-    return np.ones(target_shape, dtype=np.float32)
+    return np.ones(target_shape, dtype=np.float32)  # pyrefly: ignore[no-matching-overload]
 
   def identity(input_tensor, target_shape=None):
     return input_tensor
@@ -4401,9 +4071,9 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     if saving_to_hf:
       tensor = np.transpose(input_tensor, (0, 2, 1))
       return tensor.reshape(target_shape)
-    num_heads = target_shape[0]
-    embed_dim = target_shape[1]
-    kv_lora_rank = target_shape[2]
+    num_heads = target_shape[0]  # pyrefly: ignore[unsupported-operation]
+    embed_dim = target_shape[1]  # pyrefly: ignore[unsupported-operation]
+    kv_lora_rank = target_shape[2]  # pyrefly: ignore[unsupported-operation]
     tensor = input_tensor.reshape((num_heads, kv_lora_rank, embed_dim))
     return np.transpose(tensor, (0, 2, 1))
 
@@ -4559,6 +4229,7 @@ PARAM_MAPPING = {
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4612,6 +4283,7 @@ HOOK_FNS = {
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,

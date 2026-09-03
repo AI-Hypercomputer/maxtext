@@ -102,34 +102,147 @@ class ParamMappingTest(unittest.TestCase):
     self.assertIn("params-token_embedder-embedding", mapping)
 
   def test_qwen3_next_mapping_scanned(self):
+    num_layers, cycle, num_experts = 8, 4, 2
     config = {
-        "num_hidden_layers": 4,
-        "num_experts": 2,
+        "num_hidden_layers": num_layers,
+        "num_experts": num_experts,
     }
     maxtext_config = mock.Mock()
-    maxtext_config.inhomogeneous_layer_cycle_interval = 2
+    maxtext_config.inhomogeneous_layer_cycle_interval = cycle
     mapping = param_mapping.QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
-    self.assertIn(
-        "params-decoder-scanned_blocks-local_layers-input_layernorm-scale",
-        mapping,
-    )
-    self.assertIn(
-        "params-decoder-scanned_blocks-global_layer-input_layernorm-scale",
-        mapping,
-    )
-    num_blocks = (
-        config["num_hidden_layers"]
-        // maxtext_config.inhomogeneous_layer_cycle_interval
-    )
-    local_val = mapping[
-        "params-decoder-scanned_blocks-local_layers-input_layernorm-scale"
-    ]
-    global_val = mapping[
-        "params-decoder-scanned_blocks-global_layer-input_layernorm-scale"
-    ]
+
+    # A block covers one period of the hybrid pattern: `cycle - 1` linear-attention
+    # layers as an inner scan, then one full-attention layer.
+    num_blocks, num_local = num_layers // cycle, cycle - 1
+    local_prefix = "params-decoder-layers-local_layers"
+    global_prefix = "params-decoder-layers-global_layer"
+    self.assertIn(f"{local_prefix}-attention-in_proj_qkvz-kernel", mapping)
+    self.assertIn(f"{global_prefix}-attention-attention-query-kernel", mapping)
+    # Linear attention only exists on the local layers, full attention only on the global one.
+    self.assertNotIn(f"{global_prefix}-attention-in_proj_qkvz-kernel", mapping)
+    self.assertNotIn(f"{local_prefix}-attention-attention-query-kernel", mapping)
+
+    # local_layers values are nested [block][local]; global_layer is flat over blocks.
+    local_val = mapping[f"{local_prefix}-attention-in_proj_qkvz-kernel"]
     self.assertEqual(len(local_val), num_blocks)
-    self.assertEqual(len(local_val[0]), 1)
+    self.assertEqual(len(local_val[0]), num_local)
+    self.assertEqual(local_val[0][0], "model.layers.0.linear_attn.in_proj_qkvz.weight")
+    global_val = mapping[f"{global_prefix}-attention-attention-query-kernel"]
     self.assertEqual(len(global_val), num_blocks)
+    # The full-attention layer is last in the period.
+    self.assertEqual(global_val[0], f"model.layers.{cycle - 1}.self_attn.q_proj.weight")
+
+    # Routed experts add a leading expert axis: [expert][block][local] and [expert][block].
+    local_experts = mapping[f"{local_prefix}-mlp-routed_experts-wi_0"]
+    self.assertEqual(len(local_experts), num_experts)
+    self.assertEqual(len(local_experts[0]), num_blocks)
+    self.assertEqual(len(local_experts[0][0]), num_local)
+    self.assertEqual(local_experts[1][0][0], "model.layers.0.mlp.experts.1.gate_proj.weight")
+    global_experts = mapping[f"{global_prefix}-mlp-routed_experts-wi_0"]
+    self.assertEqual(len(global_experts), num_experts)
+    self.assertEqual(len(global_experts[0]), num_blocks)
+
+  @staticmethod
+  def _indices_from_name(name):
+    """Parses a synthetic HF key such as "e1_b0_l2" back into its stacked-axis indices."""
+    return tuple(int(part[1:]) for part in name.split("_"))
+
+  def _qwen3_next_conversion_config(self):
+    cfg = mock.Mock()
+    cfg.param_scan_axis = 1
+    cfg.scan_layers = True
+    cfg.weight_dtype = "float32"
+    cfg.rope_type = ""
+    cfg.model_name = "qwen3-next-80b-a3b"
+    return cfg
+
+  def _assert_stack_unstack_roundtrip(self, mt_key, hf_names, target_shape, slice_shape, value_of, cfg):
+    """Stacking HF weights into `target_shape` (to_maxtext) then un-stacking them back
+    (to_huggingface) must be the identity, with every stacked axis in the right place."""
+
+    def getter(name):
+      return value_of(*self._indices_from_name(name))
+
+    stacked = _build_multi_axis_stacked_tensor(hf_names, getter, None, target_shape, cfg, mt_key)
+    self.assertEqual(stacked.shape, target_shape)
+
+    param_map = {mt_key: hf_names}
+    flat_names = []
+
+    def flatten(keys):
+      if isinstance(keys, list):
+        for sub in keys:
+          flatten(sub)
+      else:
+        flat_names.append(keys)
+
+    flatten(hf_names)
+    hf_shape_map = {name: slice_shape for name in flat_names}
+    out = dict(process_maxtext_param(mt_key, stacked, param_map, {}, hf_shape_map, cfg))
+    self.assertEqual(len(out), len(flat_names))
+    for name in flat_names:
+      np.testing.assert_array_equal(out[name], value_of(*self._indices_from_name(name)))
+    return stacked
+
+  def test_qwen3_next_local_layers_stack_unstack_roundtrip(self):
+    """The local layers of a qwen3-next block are an inner scan, so their two stacked axes
+    land at (param_scan_axis, param_scan_axis + 1) -- e.g. (emb, blocks, local)."""
+    num_blocks, num_local = 2, 3
+    slice_shape = (4, 3)  # per-(block, local) HF weight shape
+    cfg = self._qwen3_next_conversion_config()
+    mt_key = "params-decoder-layers-local_layers-attention-in_proj_qkvz-kernel"
+
+    def value_of(b, l):
+      return np.full(slice_shape, b * 100 + l, dtype=np.float32)
+
+    hf_names = [[f"b{b}_l{l}" for l in range(num_local)] for b in range(num_blocks)]
+    # blocks at axis 1, local at axis 2.
+    target_shape = (slice_shape[0], num_blocks, num_local, slice_shape[1])
+
+    stacked = self._assert_stack_unstack_roundtrip(mt_key, hf_names, target_shape, slice_shape, value_of, cfg)
+    for b in range(num_blocks):
+      for l in range(num_local):
+        np.testing.assert_array_equal(stacked[:, b, l, :], value_of(b, l))
+
+  def test_qwen3_next_routed_experts_stack_unstack_roundtrip(self):
+    """qwen3-next's routed experts are expert-stacked *inside* the nested block scan, so they
+    need three stacked axes: the expert axis still leads, then (blocks, local)."""
+    num_experts, num_blocks, num_local = 2, 2, 3
+    slice_shape = (4, 3)  # per-(expert, block, local) HF weight shape
+    cfg = self._qwen3_next_conversion_config()
+    mt_key = "params-decoder-layers-local_layers-mlp-routed_experts-wi_0"
+
+    def value_of(e, b, l):
+      return np.full(slice_shape, e * 10000 + b * 100 + l, dtype=np.float32)
+
+    hf_names = [[[f"e{e}_b{b}_l{l}" for l in range(num_local)] for b in range(num_blocks)] for e in range(num_experts)]
+    # experts at axis 0, blocks at axis 1, local at axis 2.
+    target_shape = (num_experts, num_blocks, num_local, *slice_shape)
+
+    stacked = self._assert_stack_unstack_roundtrip(mt_key, hf_names, target_shape, slice_shape, value_of, cfg)
+    for e in range(num_experts):
+      for b in range(num_blocks):
+        for l in range(num_local):
+          np.testing.assert_array_equal(stacked[e, b, l], value_of(e, b, l))
+
+  def test_qwen3_next_global_layer_experts_stack_unstack_roundtrip(self):
+    """The global (full-attention) layer is not inside the inner scan, so its routed experts
+    keep the plain scanned-MoE layout with both stacked axes leading: (experts, blocks)."""
+    num_experts, num_blocks = 2, 3
+    slice_shape = (4, 3)
+    cfg = self._qwen3_next_conversion_config()
+    mt_key = "params-decoder-layers-global_layer-mlp-routed_experts-wi_0"
+
+    def value_of(e, b):
+      return np.full(slice_shape, e * 100 + b, dtype=np.float32)
+
+    hf_names = [[f"e{e}_b{b}" for b in range(num_blocks)] for e in range(num_experts)]
+    target_shape = (num_experts, num_blocks, *slice_shape)
+
+    stacked = self._assert_stack_unstack_roundtrip(mt_key, hf_names, target_shape, slice_shape, value_of, cfg)
+    for e in range(num_experts):
+      for b in range(num_blocks):
+        np.testing.assert_array_equal(stacked[e, b], value_of(e, b))
 
   def test_deepseek_mapping(self):
     config = {

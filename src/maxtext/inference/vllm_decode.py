@@ -41,6 +41,7 @@ from maxtext.common.common_types import Config
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
+from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
@@ -56,7 +57,15 @@ from vllm import LLM
 from vllm.config import ModelConfig
 from vllm.sampling_params import SamplingParams
 
-ModelConfig.uses_mrope = property(lambda _: False)
+_USE_MROPE = False
+_ORIGINAL_USES_MROPE = ModelConfig.uses_mrope.fget
+
+
+def _uses_mrope(self):
+  return _ORIGINAL_USES_MROPE(self) if _USE_MROPE else False
+
+
+ModelConfig.uses_mrope = property(_uses_mrope)
 
 # --- DEFINE FLAGS GLOBALLY ---
 FLAGS = flags.FLAGS
@@ -65,12 +74,18 @@ flags.DEFINE_bool("use_tunix", False, "Whether to use Tunix for vLLM decoding.")
 flags.DEFINE_integer("seed", 42, "Random seed for sampling.")
 
 
-def build_chat_messages(config: Config) -> list[dict[str, str]]:
+def build_chat_messages(config: Config) -> list[dict[str, Any]]:
   """Builds the chat message list, prepending a system prompt when set."""
   messages = []
   if config.system_prompt:
     messages.append({"role": "system", "content": config.system_prompt})
-  messages.append({"role": "user", "content": config.prompt})
+
+  if config.use_multimodal and config.image_path:
+    content = [{"type": "image"} for _ in config.image_path.split(",")]
+    content.append({"type": "text", "text": config.prompt})
+    messages.append({"role": "user", "content": content})
+  else:
+    messages.append({"role": "user", "content": config.prompt})
   return messages
 
 
@@ -125,6 +140,9 @@ def decode_with_vllm(config: Config) -> None:
   if config.max_num_seqs is not None:
     vllm_args["max_num_seqs"] = config.max_num_seqs
 
+  global _USE_MROPE
+  _USE_MROPE = config.use_multimodal and config.use_mrope
+
   max_logging.log(
       f"Initializing LLM with DP={config.ici_data_parallelism}, TP={config.ici_tensor_parallelism} "
       f"and EP={config.ici_expert_parallelism if enable_expert_parallel else 1}..."
@@ -155,6 +173,11 @@ def decode_with_vllm(config: Config) -> None:
     prompts = [input_with_chat_template]
 
   max_prompt_length = max(len(tokenizer.encode(p)) for p in prompts)
+
+  if config.use_multimodal and config.image_path:
+    images = [mm_utils.load_image_from_path(path.strip()) for path in config.image_path.split(",")]
+    image_data = images[0] if len(images) == 1 else images
+    prompts = [{"prompt": prompts[0], "multi_modal_data": {"image": image_data}}]
   max_tokens_to_generate = config.max_target_length - max_prompt_length
   if max_tokens_to_generate <= 0:
     raise ValueError(
@@ -299,7 +322,6 @@ def decode_with_tunix(
 def main(argv: Sequence[str]) -> None:
   # Keep these in main(): registering the adapter and setting engine env flags
   # at import time would leak into any process that merely imports this module.
-  adapter.register()
   os.environ["SKIP_JAX_PRECOMPILE"] = "1"
   os.environ["NEW_MODEL_DESIGN"] = "1"
 
@@ -311,6 +333,7 @@ def main(argv: Sequence[str]) -> None:
     )
 
   config = pyconfig.initialize(argv)
+  adapter.register(config)
 
   if FLAGS.use_tunix:
     maxtext_model, mesh = model_creation_utils.from_pretrained(config)

@@ -641,6 +641,7 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
+        DecoderBlockType.ENVY,
     ):
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
@@ -689,14 +690,24 @@ class Decoder(nn.Module):
       deterministic,
       model_mode,
       multimodal_input=None,
+      decoder_input_embeddings=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
+
     cfg = self.config
 
-    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    # vLLM passes token IDs for text-only requests, but passes complete, premerged
+    # text and multimodal embeddings for multimodal requests. The latter enter
+    # through `decoder_input_embeddings` to avoid embedding and merging them again.
+    y = (
+        decoder_input_embeddings
+        if decoder_input_embeddings is not None
+        else shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    )
 
-    # Merge the image embeddings with the text embeddings for multimodal models
-    if multimodal_input is not None:
+    # Precomputed embeddings are complete (including any multimodal replacements),
+    # so only merge modality embeddings when token embeddings were created here.
+    if decoder_input_embeddings is None and multimodal_input is not None:
       image_embeddings = multimodal_input.image_embeddings
       bidirectional_mask = multimodal_input.bidirectional_mask
       image_masks = multimodal_input.image_masks
@@ -723,6 +734,7 @@ class Decoder(nn.Module):
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
+            "maxtext-omni-gemma3-qwen3",
         ]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -862,6 +874,7 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      decoder_input_embeddings=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -875,13 +888,11 @@ class Decoder(nn.Module):
         deterministic,
         model_mode,
         multimodal_input=multimodal_input,
+        decoder_input_embeddings=decoder_input_embeddings,
     )
 
     mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
-    if cfg.mhc_expansion_rate > 1 and cfg.decoder_block in (
-        DecoderBlockType.DEEPSEEK,
-        DecoderBlockType.DEEPSEEK4,
-    ):
+    if cfg.mhc_expansion_rate > 1:
       # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
       y = mhc_expand(y)
 
@@ -1291,10 +1302,7 @@ class Decoder(nn.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    if cfg.mhc_expansion_rate > 1 and cfg.decoder_block in (
-        DecoderBlockType.DEEPSEEK,
-        DecoderBlockType.DEEPSEEK4,
-    ):
+    if cfg.mhc_expansion_rate > 1:
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
         hidden_state = mhc.DeepSeek4HyperHeadToLinen(
             config=cfg,
@@ -1471,15 +1479,14 @@ class Decoder(nn.Module):
           kv_caches, num_full_blocks, block_pattern_len, stack=True
       )
 
+      # Positional order must match Qwen3NextScannableBlock.__call__.
       broadcast_args_spec = [
           (decoder_segment_ids, nn.broadcast),
           (decoder_positions, nn.broadcast),
           (deterministic, nn.broadcast),
           (model_mode, nn.broadcast),
-          (slot, nn.broadcast),
-          (None, nn.broadcast),  # page_state
           (previous_chunk, nn.broadcast),
-          (None, nn.broadcast),  # bidirectional_mask
+          (slot, nn.broadcast),
           (kv_cache_scanned, 0 if kv_caches is not None else nn.broadcast),
           (attention_metadata, nn.broadcast),
       ]
@@ -1512,44 +1519,45 @@ class Decoder(nn.Module):
           num_of_layers=block_pattern_len,
           remat_policy_fn=policy,
           apply_internal_remat=True,
-          name="scanned_blocks",
+          # Keep the Linen parameter path identical to the pure-NNX decoder's
+          # `self.layers`, so a single checkpoint mapping serves both.
+          name="layers",
       )(
           y, *broadcast_args
       )
 
       maxtext_utils.update_kv_caches_after_scan(
-          kv_caches,
-          returned_kv_cache,
-          num_full_blocks,
-          block_pattern_len,
-          stacked=True,
+          kv_caches, returned_kv_cache, num_full_blocks, block_pattern_len, stacked=True
       )
 
-    # Process any remaining layers that don't fit into a full scanned block
-    for layer_id in range(
-        cfg.num_decoder_layers - remainder_layers, cfg.num_decoder_layers
-    ):
-      layer = qwen3.Qwen3NextDecoderLayerToLinen(
+    # Layers past the last whole block go into a short block of their own. It is a
+    # Qwen3NextScannableBlock like the scanned ones, named `layers_remainder`, so the
+    # parameter paths still match the pure-NNX decoder's and one mapping serves both.
+    if remainder_layers > 0:
+      start_idx = cfg.num_decoder_layers - remainder_layers
+      remainder_kv = tuple(kv_caches[start_idx:]) if kv_caches is not None else None
+      y_and_kv = qwen3.Qwen3NextScannableBlockToLinen(
           config=cfg,
           mesh=mesh,
-          model_mode=model_mode,
           quant=self.quant,
-          layer_idx=layer_id,
-      )
-      kv_cache = kv_caches[layer_id] if kv_caches is not None else None
-
-      remainder_args = (
+          model_mode=model_mode,
+          num_of_layers=remainder_layers,
+          layer_idx_offset=start_idx,
+          remat_policy_fn=self.get_remat_policy(),
+          apply_internal_remat=True,
+          name="layers_remainder",
+      )(
+          y,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
           previous_chunk,
           slot,
-          kv_cache,
+          remainder_kv,
           attention_metadata,
       )
 
-      y_and_kv = layer(y, *remainder_args)
       if isinstance(y_and_kv, tuple):
         y = y_and_kv[0]
         new_kv = y_and_kv[1]
@@ -1558,7 +1566,8 @@ class Decoder(nn.Module):
         new_kv = None
 
       if kv_caches is not None and new_kv is not None:
-        kv_caches[layer_id] = new_kv
+        for offset, updated_item in enumerate(new_kv):
+          kv_caches[start_idx + offset] = updated_item
 
     return y
 

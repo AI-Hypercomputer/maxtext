@@ -44,9 +44,9 @@ class Train(unittest.TestCase):
             None,
             get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
-            f"base_output_directory={self.base_output_directory}",
+            f"base_output_directory={test_tmpdir}",
             "run_name=runner_test",
-            r"dataset_path={self.dataset_path}",
+            r"dataset_path=/cns/iq-d/home/megascale-xla-testing/maxtext-dataset/maxtext-dataset-2",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",

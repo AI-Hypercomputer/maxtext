@@ -1,0 +1,111 @@
+base_config: "base.yml"
+model_name: "qwen3-30b-a3b-base"
+
+student_overrides:
+  model_name: "qwen3-30b-a3b-base"
+  override_model_config: True
+  base_num_query_heads: 16
+  head_dim: 256
+  base_num_kv_heads: 2
+  rope_max_timescale: 1_000_000
+  load_parameters_path: "<path-to-checkpoint>"
+
+teacher_overrides:
+  override_model_config: True
+  model_name: "qwen3-30b-a3b-base"
+  rope_max_timescale: 1_000_000
+  load_parameters_path: "<path-to-checkpoint>"
+
+distill_alpha: 1.0
+distill_temperature: 1.0
+distill_temperature_end: 1.0
+distill_temperature_schedule: "constant"
+distill_beta: 1.0
+distill_layer_indices: [0,1,2,3,4,5,6,7]
+enable_nnx: True
+load_balance_loss_weight: 0.001
+
+ici_fsdp_parallelism: -1
+ici_data_parallelism: 1
+
+megablox: False
+use_tokamax_gmm: False
+
+# Grain dataset (will be rewritten to /bigstore/ajkv-eu/dataset/dolma3-dolmino-full/ internally)
+dataset_type: "grain"
+grain_file_type: "arrayrecord"
+grain_train_files: "gs://agagik-us/array-record/sft-mix/mmlu-aux-msgs/*.arrayrecord"
+grain_worker_count: 16
+grain_ram_budget_mb: 1024
+grain_per_worker_buffer_size: 1
+grain_prefetch_buffer_size: 256
+num_epoch: 10
+
+tokenizer_path: "src/maxtext/assets/tokenizers/qwen3-tokenizer"
+tokenizer_type: "huggingface"
+
+max_target_length: 8192
+max_prefill_predict_length: 4096
+per_device_batch_size: 8
+gradient_accumulation_steps: 1
+
+# Activation offload to fit pdbs=8.
+remat_policy: 'custom'
+decoder_layer_input: 'offload'
+
+steps: 24000
+learning_rate_schedule_steps: 24000
+warmup_steps_fraction: 0.02
+learning_rate: 2.5e-5
+learning_rate_final_fraction: 0.0
+log_period: 10
+checkpoint_period: 100
+max_num_checkpoints_to_keep: 100
+checkpoint_storage_concurrent_gb: 40
+save_checkpoint_on_completion: True
+enable_checkpointing: True
+async_checkpointing: True
+skip_jax_distributed_system: False
+
+adam_b1: 0.9
+adam_b2: 0.95
+adam_eps: 1.2e-8
+adam_weight_decay: 0.01
+adamw_mask: ['.*embedding.*', '.*norm.*', '.*bias']
+z_loss_multiplier: 1.0e-5
+float32_logits: True
+
+attention: "flash"
+use_tokamax_splash: True
+sa_use_fused_bwd_kernel: True
+
+compile_xla_flags: "--xla_tpu_scoped_vmem_limit_kib=61440"
+
+# Cut Splash Attention memory footprint in half to fit 16MB for v5p
+sa_block_q: 512
+sa_block_kv: 512
+sa_block_kv_compute: 256
+sa_block_q_dkv: 1024
+sa_block_kv_dkv: 1024
+sa_block_kv_dkv_compute: 512
+sa_block_q_dq: 512
+sa_block_kv_dq: 512
+
+sa_q_layout: "HEAD_DIM_MINOR"
+sa_k_layout: "SEQ_MINOR"
+sa_v_layout: "HEAD_DIM_MINOR"
+
+# Cut Megablox / Ragged Dot memory footprint in half to fit 16MB for v5p
+wi_tile_fwd_embed_dim: 1024
+wi_tile_dlhs_embed_dim: 1024
+wi_tile_drhs_embed_dim: 1024
+wo_tile_fwd_embed_dim: 1024
+wo_tile_dlhs_embed_dim: 1024
+wo_tile_drhs_embed_dim: 1024
+
+wi_tile_fwd_mlp_dim: 768
+wi_tile_dlhs_mlp_dim: 768
+wi_tile_drhs_mlp_dim: 768
+wo_tile_fwd_mlp_dim: 768
+wo_tile_dlhs_mlp_dim: 768
+wo_tile_drhs_mlp_dim: 768

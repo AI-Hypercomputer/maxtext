@@ -37,7 +37,7 @@ from absl import app
 from absl import flags
 from absl import logging
 
-from sentencepiece import SentencePieceTrainer
+from google3.third_party.sentencepiece.src.python.sentencepiece_trainer import SentencePieceTrainer
 
 import jax
 import grain.python as grain

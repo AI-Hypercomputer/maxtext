@@ -40,10 +40,11 @@ class _CallableStubBase:
     self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME)
     self.captured = {}
 
-  def __call__(self, *, decoder_input_tokens, decoder_positions, decoder_segment_ids):
+  def __call__(self, *, decoder_input_tokens, decoder_positions, decoder_segment_ids, forced_routed_experts=None):
     self.captured["decoder_input_tokens"] = decoder_input_tokens
     self.captured["decoder_positions"] = decoder_positions
     self.captured["decoder_segment_ids"] = decoder_segment_ids
+    self.captured["forced_routed_experts"] = forced_routed_experts
     # Return dummy logits shaped [B, L, V=2] so the adapter has something to forward.
     b, l = decoder_input_tokens.shape
     return jnp.zeros((b, l, 2), dtype=jnp.float32)
@@ -114,6 +115,33 @@ class TunixAdapterSegmentIdsTest(unittest.TestCase):
     adapter(input_tokens, positions, None, None, decoder_segment_ids=explicit_seg)
 
     np.testing.assert_array_equal(np.asarray(self.base.captured["decoder_segment_ids"]), np.asarray(explicit_seg))
+
+  def test_forwards_forced_routed_experts(self):
+    """The stub captures the kwarg but nothing asserted on it, so deleting the
+
+    forwarding from the adapter would have passed CI.
+    """
+    adapter = TunixMaxTextAdapter(base_model=self.base, pad_id=99)
+
+    input_tokens = jnp.array([[10, 11, 12, 99, 99]], dtype=jnp.int32)
+    positions = jnp.arange(5, dtype=jnp.int32)[None, :]
+    forced = jnp.zeros((1, 5, 2), dtype=jnp.int32)
+
+    adapter(input_tokens, positions, None, None, forced_routed_experts=forced)
+
+    np.testing.assert_array_equal(
+        np.asarray(self.base.captured["forced_routed_experts"]),
+        np.asarray(forced),
+    )
+
+  def test_omits_forced_routed_experts_by_default(self):
+    adapter = TunixMaxTextAdapter(base_model=self.base, pad_id=99)
+    input_tokens = jnp.array([[10, 11, 12, 99, 99]], dtype=jnp.int32)
+    positions = jnp.arange(5, dtype=jnp.int32)[None, :]
+
+    adapter(input_tokens, positions, None, None)
+
+    self.assertIsNone(self.base.captured["forced_routed_experts"])
 
   def test_returns_logits_and_none_tuple(self):
     """Adapter's __call__ contract: return (logits, None) to match Tunix's

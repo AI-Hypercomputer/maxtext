@@ -45,9 +45,9 @@ class Train(unittest.TestCase):
             None,
             get_test_config_path("gpu/gpu_smoke_test.yml"),
             # pylint: disable=f-string-without-interpolation
-            f"base_output_directory={self.base_output_directory}",
+            f"base_output_directory={test_tmpdir}",
             "run_name=runner_test",
-            r"dataset_path={self.dataset_path}",
+            r"dataset_path=/cns/iq-d/home/megascale-xla-testing/maxtext-dataset/maxtext-dataset-2",
             "enable_checkpointing=False",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",

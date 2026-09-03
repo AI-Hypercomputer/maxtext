@@ -2,33 +2,33 @@
 set -e
 
 # Activate Python virtual environment
-source /home/darisoy_google_com/maxtext_venv/bin/activate
+source /usr/local/google/home/muskansh/maxtext_env/bin/activate
 
 # --- Environment Variables ---
 export PROJECT_ID="tpu-prod-env-one-vm"
-export CLUSTER_NAME="bodaborg-v6e-256-lcscld-c"
-export ZONE="southamerica-west1-a"
+export CLUSTER_NAME="v6e-256-c2b3-b478935789"
+export ZONE="us-central2"
 
 # --- Configuration & Automated Image Build ---
 TIMESTAMP=$(date +%m%d%H%M%S)
-export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:darisoy_${TIMESTAMP}"
-export WORKLOAD_NAME="darisoy-qn80b-${TIMESTAMP}"
+export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:muskansh_${TIMESTAMP}"
+export WORKLOAD_NAME="muskansh-qn80b-${TIMESTAMP}"
 export DEVICE_TYPE="v6e-256"
 export NUM_SLICES=1
 export PRIORITY="very-high"
 export MAX_RESTARTS=0
-export NUM_STEPS=20
+export NUM_STEPS=1
 export MODEL_NAME="qwen3-next-80b-a3b"
-export BASE_OUTPUT_DIR="gs://darisoy-hlo-dumps/qwen3-next-80b-profiles/run-${TIMESTAMP}"
+export BASE_OUTPUT_DIR="/tmp/qwen3-next-80b-profiles/run-${TIMESTAMP}"
 
 echo "========================================================================"
-echo "Building and uploading Docker runner image from /home/darisoy_google_com/maxtext"
+echo "Building and uploading Docker runner image from /usr/local/google/home/muskansh/maxtext"
 echo "Target Image: ${WORKLOAD_IMAGE}"
 echo "========================================================================"
 
 (
-  cd /home/darisoy_google_com/maxtext && \
-  sudo CLOUD_IMAGE_NAME="${WORKLOAD_IMAGE}" \
+  cd /usr/local/google/home/muskansh/maxtext && \
+  CLOUD_IMAGE_NAME="${WORKLOAD_IMAGE}" \
        BASE_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:latest" \
        bash src/dependencies/scripts/docker_upload_runner.sh
 )
@@ -178,7 +178,7 @@ python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml ${M
 # --- XPK Workload Creation ---
 echo "Creating XPK workload: ${WORKLOAD_NAME} on cluster: ${CLUSTER_NAME}"
 
-PYTHONPATH=/home/darisoy_google_com/xpk/src python3 -m xpk.main workload create \
+PYTHONPATH=/usr/local/google/home/muskansh/xpk/src python3 -m xpk.main workload create \
   --cluster="${CLUSTER_NAME}" \
   --project="${PROJECT_ID}" \
   --zone="${ZONE}" \

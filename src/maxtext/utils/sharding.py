@@ -264,8 +264,6 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
 
 def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Variable:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
-  if not hasattr(v, "get_value"):
-    return NamedSharding(mesh, P())
   val = v.get_value()
   if not hasattr(val, "shape"):
     # `val` is either truly leafless (e.g. optax MaskedNode) or a composite
@@ -397,6 +395,17 @@ def create_sharding(mesh, logical_names, rules=None):
   return NamedSharding(mesh, spec)
 
 
+def _truncate_pspec(pspec: P, out_ndim: int) -> P:
+  """Drop trailing entries of a PartitionSpec, keeping any unreduced/reduced annotation.
+
+  Slicing a PartitionSpec directly raises once it carries an unreduced/reduced set — and
+  the annotation describes a cross-replica state of the whole array, not of a particular
+  dimension, so it has to survive the truncation. Gradient accumulation marks gradients
+  unreduced over "data" before resharding them, which is how such specs get here.
+  """
+  return P(*pspec.partitions[:out_ndim], unreduced=pspec.unreduced, reduced=pspec.reduced)
+
+
 def truncate_out_sharding(out_sharding, out_ndim: int):
   """Truncates out_sharding if tensor ndim is less than out_sharding pspec length."""
   if out_sharding is None:
@@ -405,11 +414,11 @@ def truncate_out_sharding(out_sharding, out_ndim: int):
     if len(out_sharding.spec) > out_ndim:
       return NamedSharding(
           out_sharding.mesh,
-          P(*out_sharding.spec[:out_ndim]),
+          _truncate_pspec(out_sharding.spec, out_ndim),
       )
   elif isinstance(out_sharding, P):
     if len(out_sharding) > out_ndim:
-      return P(*out_sharding[:out_ndim])
+      return _truncate_pspec(out_sharding, out_ndim)
   elif isinstance(out_sharding, (tuple, list)):
     if len(out_sharding) > out_ndim:
       return tuple(out_sharding[:out_ndim])
@@ -805,21 +814,19 @@ def maybe_update_params_sharding_with_opt_nnx(
 
   # Update model parameter sharding to match the mu (first moment) sharding.
   # This ensures parameter sharding is consistent with the Zero-1 distributed layout.
-  # Build a path → new_PS lookup across every collected mu tree, then update
-  # model_shardings at those paths while preserving rngs and any other non-Param
-  # variables. A partitioned optimizer (e.g. Muon: a 'muon' branch owning the 2D
-  # weights plus an 'adam' fallback owning the rest) holds one param-mirroring mu
-  # per branch, with optax MaskedNode at every position the branch does NOT own —
-  # so each param's sharding must come from whichever branch actually tracks it,
-  # and MaskedNode placeholders must never overwrite a real param sharding (they
-  # otherwise clobber the shardings tree and crash with_sharding_constraint with
-  # a MaskedNode-vs-leaf pytree structure error).
+  # Build a path → new_PS lookup from sharded_fp32_params (mu), then update model_shardings
+  # at those paths while preserving rngs and any other non-Param variables.
   mu_lookup = {}
   for mu_tree in mu_trees:
     for path, mu_var in jax.tree_util.tree_leaves_with_path(mu_tree, is_leaf=lambda x: isinstance(x, nnx.Variable)):
       if not isinstance(mu_var, nnx.Variable):
         continue
       mu_value = mu_var.get_value()
+      # A partitioned optimizer (e.g. Muon: a 'muon' branch owning the 2D
+      # weights plus an 'adam' fallback owning the rest) holds one param-mirroring mu
+      # per branch, with optax MaskedNode at every position the branch does NOT own —
+      # so each param's sharding must come from whichever branch actually tracks it,
+      # and MaskedNode placeholders must never overwrite a real param sharding.
       if not isinstance(mu_value, NamedSharding):
         continue  # skip MaskedNode / other non-sharding placeholders
       mu_lookup.setdefault(path, mu_value)

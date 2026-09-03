@@ -38,4 +38,3 @@ __all__ = [
     "UnsupportedInputError",
     "hbm_specs",
 ]
-
