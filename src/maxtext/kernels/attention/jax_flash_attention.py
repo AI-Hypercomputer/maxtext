@@ -18,7 +18,11 @@ from typing import Optional, Tuple, Union
 import jax
 from jax.experimental import layout
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
-from jax.experimental.xla_metadata import must_fuse_call
+try:
+  from jax.experimental.xla_metadata import must_fuse_call
+except (ImportError, AttributeError):
+  def must_fuse_call(name=""):
+    return lambda f: f
 import jax.numpy as jnp
 from maxtext.kernels.attention import splash_attention_kernel
 
