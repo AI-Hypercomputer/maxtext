@@ -1549,7 +1549,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
         optimizer=self.optimizer,
-        accumulated_grads=self._reduced_accumulated_grads(),
+        # Not `_reduced_accumulated_grads()`: unlike the save path, nothing here reads the
+        # value. `CheckpointManager.restore_checkpoint` builds its restore target from the
+        # model's params and overwrites this field, so reducing would run the deferred
+        # all-reduce over the whole gradient tree, and allocate a second copy of it, for a
+        # value that is thrown away. In the one corner where it does survive the call --
+        # metadata says `micro_step_count > 0` but the checkpoint holds no accumulator --
+        # unreduced is the form the already-compiled kernels want, and `_conform_accumulator`
+        # below is then a no-op instead of a reshard back.
+        accumulated_grads=self._accumulated_grads,
     )
 
     restored_step, restored_checkpoint_state, restored_metadata = self._checkpoint_manager.restore_checkpoint(
