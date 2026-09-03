@@ -96,10 +96,26 @@ def _aval_sharding(value):
     sharding = jax.typeof(value).sharding
   except Exception:  # pylint: disable=broad-except
     return None
-  spec = getattr(sharding, "spec", None)
-  if spec is None or all(p is None for p in spec):
-    return None
-  return sharding
+  # A fully replicated aval still needs its `out_sharding` spelled out: the
+  # gradient dots below contract over sharded token axes, which JAX refuses to
+  # resolve on its own.
+  return sharding if getattr(sharding, "spec", None) is not None else None
+
+
+def _permuted_sharding(value, produced_axes):
+  """`value`'s sharding with its axes reordered into `produced_axes` order.
+
+  The gradient dots emit the operand's axes in `produced_axes` order and only
+  then permute them back, so the `out_sharding` handed to the dot has to be
+  permuted the same way. For every layout this path is enabled for
+  `produced_axes` is the identity and this is just `_aval_sharding`.
+  """
+  sharding = _aval_sharding(value)
+  produced_axes = tuple(produced_axes)
+  if sharding is None or produced_axes == tuple(range(len(produced_axes))):
+    return sharding
+  spec = sharding.spec
+  return sharding.update(spec=jax.sharding.PartitionSpec(*(spec[a] for a in produced_axes)))
 
 
 def _restore_axis_order(value, produced_axes):
@@ -156,26 +172,26 @@ def _dot_general_kernel_ordered_grad_bwd(dimension_numbers, precision, out_shard
   # to them one for one. The result carries the kernel's contracting axes (in
   # ascending operand order) followed by its free axes -- the kernel's own order
   # whenever it is stored in_features-major.
+  dk_axes = tuple(rhs_contract[lhs_contract.index(a)] for a in sorted(lhs_contract)) + rhs_free
   dk = lax.dot_general(
       inputs,
       g,
       ((lhs_free, tuple(range(n_lhs_free))), ((), ())),
       precision=precision,
-      out_sharding=_aval_sharding(kernel),
+      out_sharding=_permuted_sharding(kernel, dk_axes),
   )
-  dk_axes = tuple(rhs_contract[lhs_contract.index(a)] for a in sorted(lhs_contract)) + rhs_free
   dk = _restore_axis_order(dk, dk_axes)
 
   # dx contracts g's trailing axes against the kernel's free axes, likewise
   # paired one for one.
+  dx_axes = lhs_free + tuple(lhs_contract[rhs_contract.index(a)] for a in sorted(rhs_contract))
   dx = lax.dot_general(
       g,
       kernel,
       ((tuple(range(n_lhs_free, g.ndim)), rhs_free), ((), ())),
       precision=precision,
-      out_sharding=_aval_sharding(inputs),
+      out_sharding=_permuted_sharding(inputs, dx_axes),
   )
-  dx_axes = lhs_free + tuple(lhs_contract[rhs_contract.index(a)] for a in sorted(rhs_contract))
   dx = _restore_axis_order(dx, dx_axes)
   return dx, dk
 
@@ -631,6 +647,7 @@ class MlpBlock(nnx.Module):
           quant=self.quant,
           use_bias=self.use_bias,
           shard_mode=self.config.shard_mode,
+          weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
           matmul_precision=self.config.matmul_precision,
           mesh=self.mesh,
           use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
@@ -650,6 +667,7 @@ class MlpBlock(nnx.Module):
             quant=self.quant,
             use_bias=self.use_bias,
             shard_mode=self.config.shard_mode,
+            weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
             matmul_precision=self.config.matmul_precision,
             mesh=self.mesh,
             use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
@@ -668,6 +686,7 @@ class MlpBlock(nnx.Module):
         quant=self.quant,
         use_bias=self.use_bias,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         matmul_precision=self.config.matmul_precision,
         mesh=self.mesh,
         use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,

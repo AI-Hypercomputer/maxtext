@@ -1267,6 +1267,21 @@ class LayoutAndSharding(BaseModel):
       False,
       description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
   )
+  dense_weight_grad_in_kernel_order: bool = Field(
+      False,
+      description=(
+          "Compute the per-layer attention and MLP projection weight gradients directly in each kernel's stored "
+          "axis order via a custom_vjp, so autodiff emits no transpose after the gradient dot. This is the "
+          "in-loop counterpart of lm_head_weight_grad_in_kernel_order, but unlike that flag it is a trade rather "
+          "than a fix, so it defaults off. Under shard_mode=explicit the Sharding custom-calls decouple the "
+          "gradient's layout from the stored parameter's, leaving XLA free to pick it; this flag declines that "
+          "freedom and reproduces shard_mode=auto's layout op for op. Measured, that is worth roughly -0.3% on "
+          "gemma3 and -0.2% on deepseek, whose scanned gradient stacks are 3 and 1 deep, and costs 0.06%-0.60% on "
+          "the models whose stacks are 16 deep (docs/guides/optimization/shard_mode_performance.md section 4.8). "
+          "Measure before turning it on for anything else. Stored kernels and their initialization are untouched. "
+          "No effect under shard_mode=auto or on quantized layers."
+      ),
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",

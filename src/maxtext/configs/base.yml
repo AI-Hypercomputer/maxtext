@@ -718,6 +718,17 @@ shard_optimizer_over_data: false
 # when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 dense_fsdp_use_two_stage_all_gather: false
 
+# The in-loop counterpart of lm_head_weight_grad_in_kernel_order: compute the attention q/k/v/out and MLP wi/wo
+# weight gradients with a hand-written backward pass that contracts straight into each kernel's stored orientation.
+# Unlike the LM head flag this is a trade, not a fix, so it defaults off. Under shard_mode: explicit XLA is free to
+# pick the gradient's layout -- the Sharding custom-calls decouple it from the stored parameter's -- and this flag
+# declines that freedom, reproducing shard_mode: auto's layout op for op. Measured, that is worth roughly -0.3% on
+# gemma3 and -0.2% on deepseek, whose scanned gradient stacks are 3 and 1 deep, and costs 0.06%-0.60% on the models
+# whose stacks are 16 deep (see docs/guides/optimization/shard_mode_performance.md section 4.8). Turn it on for
+# gemma3 and deepseek; measure before turning it on for anything else. Stored kernels and their initialization are
+# untouched, so no checkpoint conversion is needed. No effect under shard_mode: auto or on quantized layers.
+dense_weight_grad_in_kernel_order: false
+
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
