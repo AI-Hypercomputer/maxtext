@@ -2620,6 +2620,19 @@ class RoutedMoE(nnx.Module):
           logical_axes=gate_logits_logical_axes,
       )
 
+    if jnp.dtype(self.weight_dtype) == jnp.dtype(self.dtype):
+      # Keep the FSDP all-gather below inside the decoder loop. Under a scanned decoder the
+      # kernels arrive as a per-layer dynamic-slice of a stacked, fsdp-sharded param, and the
+      # pspecs above have the fsdp axis stripped so XLA inserts the all-gather right here.
+      # With nothing in between, XLA rewrites all_gather(dynamic_slice(w)) into
+      # dynamic_slice(all_gather(w)); that gather is loop invariant, so it is hoisted out of
+      # the scan and every layer's gathered expert kernel is live at once
+      # (num_layers * num_experts * embed * mlp * dtype bytes -- 51 GB for qwen3-next-80b).
+      # The `jnp.asarray(kernel, self.dtype)` cast in __call__ normally sits between the two
+      # and blocks the rewrite; when weight_dtype == dtype it is an identity, so pin the
+      # gather here instead. Only needed in that case, as the barrier costs a few percent of
+      # peak memory when XLA is otherwise free to schedule around the cast.
+      w0_kernel, w1_kernel, wo_kernel = jax.lax.optimization_barrier((w0_kernel, w1_kernel, wo_kernel))
     w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
     w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
     wo_kernel = self._maybe_shard_with_pspec(wo_kernel, wo_pspec)
