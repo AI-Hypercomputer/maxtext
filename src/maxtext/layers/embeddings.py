@@ -232,9 +232,18 @@ def attend_on_embedding(
   if out_sharding is not None:
     out_sharding = truncate_out_sharding(out_sharding, query.ndim)
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
-  return jnp.dot(
+  # Contract over the table's feature axis instead of materializing `table.T`.
+  # Under `shard_mode: explicit` the transposed table is a distinct typed value,
+  # so XLA cannot fold it into the dot's dimension numbers: the (large) table
+  # shard is cast to bf16 once for the input lookup in `Embed.__call__` and a
+  # second time here, and the tied head's weight gradient comes out flipped.
+  # Expressing the transpose as dimension numbers keeps both consumers on one
+  # cast and leaves the gradient in the table's own axis order. Under `auto`
+  # this is a no-op -- XLA already folded the `.T` away.
+  return jnp.einsum(
+      "...e,ve->...v",
       query,
-      jnp.asarray(embedding_table, jnp.bfloat16).T,
+      jnp.asarray(embedding_table, jnp.bfloat16),
       preferred_element_type=attend_dtype,
       out_sharding=out_sharding,
   )
