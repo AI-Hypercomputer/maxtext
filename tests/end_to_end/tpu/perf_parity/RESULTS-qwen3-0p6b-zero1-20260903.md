@@ -6,8 +6,8 @@ as the thing being varied. `PeftTrainer v2` has no Zero-1, so its arms shard the
 instead — plain data parallelism and FSDP — which is the "or fsdp/tp for the tunix side"
 half of the comparison. Both trainers drive the same MaxText model.
 
-Five arms, each at GA=1 and GA=8. The three engine arms differ in one thing each, so the
-cost of the mesh mode and the cost of the feature come apart:
+Six arms, each at GA=1 and GA=8. The arms differ in one thing each, so the cost of the mesh
+mode and the cost of the feature come apart:
 
 | Arm | Mesh | `shard_mode` | Zero-1 |
 | --- | --- | --- | --- |
@@ -15,7 +15,12 @@ cost of the mesh mode and the cost of the feature come apart:
 | engine, explicit control | dp=8 | explicit | — |
 | engine, Zero-1 | dp=8 | explicit | on |
 | `PeftTrainer v2`, DP | dp=8 | auto | n/a |
+| `PeftTrainer v2`, DP explicit | dp=8 | explicit | n/a |
 | `PeftTrainer v2`, FSDP | fsdp=8 | auto | n/a |
+
+The `PeftTrainer` explicit arm is what keeps the headline honest: `--explicit` is what lets
+the engine defer its all-reduce, and without running the same flag on the other trainer there
+is no way to tell an engine capability from a property of Explicit axes.
 
 Run 2026-09-03 at `18f4a2332` — PR #5060's scripts merged with PR #5099's engine
 (`engine-ga-unreduced`). **The engine-side Zero-1 support is #5099, not #5060.** This
@@ -30,19 +35,26 @@ second copy of the baseline. The runner greps for that line for exactly this rea
    **371.7 ms to 247.4 ms, a 1.50x speedup**. Under Explicit axes the cotangents come out
    `unreduced`, so the data-parallel all-reduce moves out of every micro-batch and into
    `update()`: one all-reduce per optimizer step instead of eight.
-2. **Zero-1 itself is cheap and buys real memory.** On top of the explicit control it costs
+2. **The deferral is an engine capability, not a property of Explicit axes.** The same flag on
+   `PeftTrainer` makes it **1.31x slower** at GA=8 (356.8 → 465.7 ms) and 14% slower at GA=1 —
+   opposite sign, same mesh, same optimizer. Its per-micro-batch step goes *up*, 42.73 →
+   56.04 ms, while its update is unchanged: nothing moves out of the micro-batch, and the
+   collectives that GSPMD had been free to rearrange under `auto` now get placed literally.
+   Same-mesh, same-mode, GA=8: **247.4 ms against 465.7 ms, 1.88x** — the largest
+   trainer-attributable gap in this study.
+3. **Zero-1 itself is cheap and buys real memory.** On top of the explicit control it costs
    **3.2 ms (1.3%)** at GA=8 and **4.0 ms (6.4%)** at GA=1, and saves **4.04 G of 12.74 G
    (32%)** at GA=8, **2.20 G of 9.96 G (22%)** at GA=1.
-3. **All of Zero-1's cost is in `update()`, provably.** The `jit_first_kernel` and
+4. **All of Zero-1's cost is in `update()`, provably.** The `jit_first_kernel` and
    `jit_accum_kernel` modules carry *identical HLO program hashes* in the explicit and Zero-1
    traces (`1445966014043162594`, `614701509375139023`). Only `jit__update_kernel` differs,
    and it differs by +2.90 ms at GA=8 and +2.85 ms at GA=1.
-4. **At depth the engine beats `PeftTrainer` on the same mesh; at GA=1 it does not.** GA=8:
+5. **At depth the engine beats `PeftTrainer` on the same mesh; at GA=1 it does not.** GA=8:
    250.6 ms engine Zero-1 against 356.8 ms PeftTrainer DP (**1.42x**) and 337.4 ms PeftTrainer
    FSDP (**1.35x**). GA=1: 66.1 ms against 56.0 and 46.4 ms — PeftTrainer leads, because at
    GA=1 there is nothing to defer and the engine still pays its second dispatch and ~19 ms of
    host-side nnx graph work.
-5. **FSDP is the better memory lever at this model size, and it is not close.** 2.04 G against
+6. **FSDP is the better memory lever at this model size, and it is not close.** 2.04 G against
    Zero-1's 8.70 G at GA=8. Zero-1 shards the two Adam moments; FSDP shards the parameters,
    the gradients *and* the moments. At 0.6 B the replicated parameters and gradient
    accumulator are the bulk of what is left, and Zero-1 does not touch them. The engine
@@ -103,6 +115,7 @@ for GA in 1 8; do
   python engine_profile.py       $SHAPE --dp 8 --explicit --no-trace --ga $GA   # control
   python engine_profile.py       $SHAPE --dp 8 --zero1    --no-trace --ga $GA   # feature
   python peft_trainer_profile.py $SHAPE --dp 8            --no-trace --ga $GA
+  python peft_trainer_profile.py $SHAPE --dp 8 --explicit --no-trace --ga $GA   # the control
   python peft_trainer_profile.py $SHAPE --fsdp 8          --no-trace --ga $GA
 done
 
@@ -111,10 +124,11 @@ PERF_PARITY_PROFILE_ROOT=/tmp/traces python engine_profile.py $SHAPE --dp 8 --ze
 python xplane_device_summary.py --steps 3 /tmp/traces/<arm>/plugins/profile/<ts>/<host>.xplane.pb
 ```
 
-The explicit control is traced too. `shard_mode` is not only a layout choice on this engine —
-Explicit axes are what let the gradients come out `unreduced` — so the control and the
+Both explicit controls are traced. `shard_mode` is not only a layout choice on this engine —
+Explicit axes are what let the gradients come out `unreduced` — so the engine's control and
 baseline compile to visibly different kernels, and without it there is no way to say how much
-of the Zero-1 arm's time is Zero-1.
+of the Zero-1 arm's time is Zero-1. The `PeftTrainer` explicit arm is the other half of that
+control: it is what separates an engine capability from a property of the mesh mode.
 
 ## 1. Headline: wall clock and peak HBM, five arms
 
@@ -126,6 +140,7 @@ Median ms/step, `--no-trace`, n=19. Peak HBM per device, of 101.72 G available.
 | engine, dp=8 explicit | 62.1 | 9.96 G | **247.4** | 12.74 G |
 | engine, dp=8 explicit + **Zero-1** | 66.1 | **7.76 G** | 250.6 | **8.70 G** |
 | `PeftTrainer v2`, dp=8 | 56.0 | 10.00 G | 356.8 | 12.35 G |
+| `PeftTrainer v2`, dp=8 explicit | 64.0 | 10.47 G | 465.7 | 12.39 G |
 | `PeftTrainer v2`, fsdp=8 | **46.4** | **1.74 G** | 337.4 | **2.04 G** |
 
 Read down the three engine rows: the mesh mode is worth 1.50x at GA=8 and costs 1.8% at GA=1;
@@ -133,6 +148,14 @@ Zero-1 costs 1.3% at GA=8 and 6.4% at GA=1 and returns 32% / 22% of the memory.
 
 Read across the GA=8 column: the engine's explicit path is the fastest arm measured, and
 Zero-1 gives up 3.2 ms of that lead to undercut every other arm's memory except FSDP's.
+
+**Hold `shard_mode` equal and the ranking inverts**, which is the one comparison in this table
+that isolates the trainer:
+
+| dp=8, GA=8 | Engine | `PeftTrainer v2` | Winner |
+| --- | --- | --- | --- |
+| `shard_mode=auto` | 371.7 ms | 356.8 ms | Peft, 1.04x |
+| `shard_mode=explicit` | **247.4 ms** | 465.7 ms | **engine, 1.88x** |
 
 ## 2. Where the time goes
 
@@ -157,6 +180,7 @@ hash. A GA=8 step is one `first_kernel`, seven `accum_kernel`, one `_update_kern
 | engine, explicit | 23.17 `(1445966…)` | 25.03 `(614701…)` | 27.81 `(10326704…)` | **226.19** |
 | engine, explicit + Zero-1 | 23.31 `(1445966…)` | 25.07 `(614701…)` | 30.71 `(8707565…)` | **229.51** |
 | `PeftTrainer`, dp=8 | `jit__fwd_bwd_step` 42.73 x8 | | `jit__update_step` 6.82 | **348.66** |
+| `PeftTrainer`, dp=8 explicit | `jit__fwd_bwd_step` 56.04 x8 | | `jit__update_step` 6.89 | **455.21** |
 | `PeftTrainer`, fsdp=8 | `jit__fwd_bwd_step` 40.79 x8 | | `jit__update_step` 1.69 | **328.01** |
 
 ### The deferral moves one all-reduce, and the same ~21 ms shows up on both sides of the move
@@ -190,12 +214,34 @@ The consistency of that figure across two very different step shapes is the stro
 evidence in this document that the feature does what it says: it touches the optimizer step
 and only the optimizer step.
 
-### `PeftTrainer` has no deferral, and FSDP does not supply one
+### `PeftTrainer` has no deferral — Explicit axes cost it 31%
 
-FSDP cuts the per-micro-batch cost only from 42.73 to 40.79 ms. Sharding the parameters
-replaces the gradient all-reduce with a parameter all-gather plus a gradient reduce-scatter —
-about the same traffic, still once per micro-batch. The engine's explicit path runs the same
-micro-batch in 25.03 ms, **1.63x faster**, because it does not run the collective there at all.
+The control that matters: `peft_trainer_profile.py` honours `--explicit` too, so the flag can
+be held equal across trainers. Doing so does not give `PeftTrainer` the deferral. It makes it
+slower.
+
+| dp=8, GA=8 | per micro-batch | update | step total | wall |
+| --- | --- | --- | --- | --- |
+| `PeftTrainer`, auto | 42.73 ms | 6.82 | 348.66 | 356.8 |
+| `PeftTrainer`, explicit | **56.04 ms** | 6.89 | 455.21 | 465.7 |
+| engine, explicit | **25.03 ms** | 27.81 | 226.19 | 247.4 |
+
+Its per-micro-batch cost goes *up* by 13.31 ms and its update is unchanged to within 0.07 ms.
+Nothing moved. Under `auto`, GSPMD is free to place and rearrange the data-parallel
+collectives; under `explicit` they are placed as written, and tunix's train step has no path
+that emits them anywhere but inside the micro-batch. The engine's step is written to exploit
+Explicit axes — its `fwd_bwd` returns `unreduced` cotangents for `update()` to reduce — and
+that is a property of the trainer, not of the mesh mode.
+
+This is what rules out the alternative reading of §1: that the 1.50x is something any trainer
+would get from `shard_mode=explicit`. The same flag is worth 1.50x to one trainer and −1.31x
+to the other.
+
+**FSDP does not supply a deferral either.** It cuts the per-micro-batch cost only from 42.73 to
+40.79 ms. Sharding the parameters replaces the gradient all-reduce with a parameter all-gather
+plus a gradient reduce-scatter — about the same traffic, still once per micro-batch. The
+engine's explicit path runs the same micro-batch in 25.03 ms, **1.63x faster**, because it does
+not run the collective there at all.
 
 ## 3. Where the memory goes
 
@@ -220,7 +266,7 @@ pass, which is what §2 measures — not that it saves more bytes. It does not.
 
 ## 4. Traces
 
-All ten `.xplane.pb` files, from the `--steps 6` traced runs:
+All eleven `.xplane.pb` files, from the `--steps 6` traced runs:
 
 ```
 gs://chengnuojin-xprof/zero1-qwen3-0p6b-20260903/qwen3-0.6b-engine-dp8-adamw/plugins/profile/run/t1v-n-c9d27794-w-0.xplane.pb
@@ -231,6 +277,7 @@ gs://chengnuojin-xprof/zero1-qwen3-0p6b-20260903/qwen3-0.6b-engine-ga8-dp8-adamw
 gs://chengnuojin-xprof/zero1-qwen3-0p6b-20260903/qwen3-0.6b-engine-ga8-dp8-adamw-zero1/plugins/profile/run/t1v-n-c9d27794-w-0.xplane.pb
 gs://chengnuojin-xprof/zero1-qwen3-0p6b-20260903/qwen3-0.6b-maxtext-dp8-adamw/plugins/profile/run/t1v-n-c9d27794-w-0.xplane.pb
 gs://chengnuojin-xprof/zero1-qwen3-0p6b-20260903/qwen3-0.6b-maxtext-ga8-dp8-adamw/plugins/profile/run/t1v-n-c9d27794-w-0.xplane.pb
+gs://chengnuojin-xprof/zero1-qwen3-0p6b-20260903/qwen3-0.6b-maxtext-ga8-dp8-adamw-explicit/plugins/profile/run/t1v-n-c9d27794-w-0.xplane.pb
 gs://chengnuojin-xprof/zero1-qwen3-0p6b-20260903/qwen3-0.6b-maxtext-adamw/plugins/profile/run/t1v-n-c9d27794-w-0.xplane.pb
 gs://chengnuojin-xprof/zero1-qwen3-0p6b-20260903/qwen3-0.6b-maxtext-ga8-adamw/plugins/profile/run/t1v-n-c9d27794-w-0.xplane.pb
 ```

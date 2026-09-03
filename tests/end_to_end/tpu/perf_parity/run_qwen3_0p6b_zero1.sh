@@ -21,18 +21,25 @@
 # GSPMD may ignore), it is mutually exclusive with FSDP, and it is vacuous under `sgd` --
 # hence `--dp 8 --opt adamw`, which is not the shape the other two runners use.
 #
-# Five arms, each at GA=1 and GA=8. The three engine arms differ in one thing each, so the
-# cost of the mesh mode and the cost of the feature come apart:
+# Six arms, each at GA=1 and GA=8. The arms differ in one thing each, so the cost of the mesh
+# mode and the cost of the feature come apart:
 #
 #   engine   dp=8 auto      adamw            the baseline: replicated optimizer
 #   engine   dp=8 explicit  adamw            the same run, Explicit axes -- isolates the mesh mode
 #   engine   dp=8 explicit  adamw  zero1     the feature
 #   peft     dp=8 auto      adamw            PeftTrainer on the same mesh; it has no Zero-1
+#   peft     dp=8 explicit  adamw            the same mesh mode on the other trainer
 #   peft     fsdp=8 auto    adamw            what tunix would do instead to save the memory
 #
-# The last two are the "(or fsdp/tp for the tunix side)" half of the comparison: PeftTrainer
+# The last three are the "(or fsdp/tp for the tunix side)" half of the comparison: PeftTrainer
 # cannot shard an optimizer over a data axis, so its way out of a replicated optimizer is to
 # shard the parameters instead. Both answers cost a collective; the arms say which is cheaper.
+#
+# `peft dp=8 explicit` is the arm that keeps the headline honest. `--explicit` is what lets the
+# engine defer its all-reduce, and without running the same flag on the other trainer there is
+# no way to tell an engine capability from a property of Explicit axes. It is the latter that
+# the result rules out: the same flag makes the engine 1.50x faster at GA=8 and PeftTrainer
+# 1.31x slower.
 #
 # Engine-side Zero-1 support is newer than this rig. Every engine arm prints a `zero1:` line
 # -- ACTIVE, DECLINED with a reason, or UNSUPPORTED on a build without it -- and a DECLINED
@@ -70,6 +77,7 @@ for ga in 1 8; do
   run "engine-explicit-ga$ga" python engine_profile.py       $SHAPE $DP --explicit --no-trace --ga "$ga"
   run "engine-zero1-ga$ga"    python engine_profile.py       $SHAPE $DP --zero1    --no-trace --ga "$ga"
   run "peft-dp-ga$ga"         python peft_trainer_profile.py $SHAPE $DP            --no-trace --ga "$ga"
+  run "peft-explicit-ga$ga"   python peft_trainer_profile.py $SHAPE $DP --explicit --no-trace --ga "$ga"
   run "peft-fsdp-ga$ga"       python peft_trainer_profile.py $SHAPE --fsdp 8       --no-trace --ga "$ga"
 done
 
@@ -82,7 +90,8 @@ for ga in 1 8; do
   for arm in "engine-base:engine_profile.py:" \
              "engine-explicit:engine_profile.py:--explicit" \
              "engine-zero1:engine_profile.py:--zero1" \
-             "peft-dp:peft_trainer_profile.py:" ; do
+             "peft-dp:peft_trainer_profile.py:" \
+             "peft-explicit:peft_trainer_profile.py:--explicit" ; do
     IFS=: read -r name script extra <<< "$arm"
     PERF_PARITY_PROFILE_ROOT="$OUT/traces" \
       python "$script" $SHAPE $DP $extra --steps 6 --ga "$ga" > "$OUT/traced-$name-ga$ga.log" 2>&1
