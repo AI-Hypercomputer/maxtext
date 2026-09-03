@@ -38,7 +38,9 @@ from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 
 from tunix.generate import mappings
+from tunix.generate import utils as tunix_gen_utils
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+from tunix.rl import reshard as tunix_reshard
 from tunix.rl.rollout import base_rollout, vllm_rollout
 
 from maxtext.integration.vllm.convert_utils import _sharding_summary
@@ -46,10 +48,10 @@ from maxtext.integration.vllm.weight_converter import (
     WeightConverter,
     MODEL_TO_CONVERSION_RULES,
 )
+from maxtext.integration.vllm.torchax_converter.base import BaseMaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
-
 
 # Sentinel distinguishing "this model has no entry" from "this model has an
 # entry whose value is None", which means direct-sync-only.
@@ -73,10 +75,27 @@ def _create_model_converter(
     mesh: jax.sharding.Mesh,
     use_hf_mapping: bool = False,
     use_weight_converter: bool = False,
+    use_standalone_converter: bool = False,
+    sharding_hints: Optional[dict] = None,
     debug: bool = False,
 ):
   """Instantiate the converter for a MaxText model name."""
   tp = config.rollout_tensor_parallelism
+  if use_standalone_converter:
+    # Standalone torchax converters emit the tpu-inference runner's internal
+    # layout keyed by its state names; MaxTextVllmSampler syncs them with
+    # `_sync_standalone_converted`. Requires vLLM to run its *native* model
+    # (no MaxTextForCausalLM overrides).
+    if model_name.startswith("qwen3.5"):
+      return Qwen35MaxTextToVLLMConverter(
+          config=config,
+          mesh=mesh,
+          vllm_attn_dp=sharding_hints.get("attn_dp_size", 1) if sharding_hints else 1,
+          vllm_use_ep=sharding_hints.get("enable_expert_parallel", False) if sharding_hints else False,
+      )
+    if model_name.startswith("gemma4"):
+      return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+    raise NotImplementedError(f"use_standalone_converter: no standalone torchax converter for {model_name}")
   if not use_hf_mapping and not use_weight_converter:
     # Default MaxText-to-MaxText sync uses direct transfer_state_directly with unroll
     return None
@@ -463,6 +482,17 @@ class MaxTextVllmSampler(VllmSampler):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
+    if isinstance(self._converter, BaseMaxTextToVLLMConverter):
+      try:
+        return self._sync_standalone_converted(updated_weights)
+      except BaseException:
+        logging.error("MaxTextVllmSampler standalone sync failed:\n%s", traceback.format_exc())
+        for handler in logging.getLogger().handlers:
+          try:
+            handler.flush()
+          except Exception:  # pylint: disable=broad-except
+            pass
+        raise
     if self._converter is None:
       if self._direct_maxtext_sync:
         updated_weights = unroll_qwen_scanned_weights(
@@ -485,6 +515,92 @@ class MaxTextVllmSampler(VllmSampler):
         except Exception:  # pylint: disable=broad-except
           pass
       raise
+
+  def _sync_standalone_converted(self, updated_weights):
+    """Standalone torchax-converter sync path.
+
+    The converter emits tensors in the tpu-inference runner's *internal* layout,
+    keyed by its state names, so this bypasses Tunix's mapped/direct transfers:
+    tear down the KV cache, convert, reshard each tensor onto its existing
+    sharding (chunked, Pathways-aware) and assign into the runner's flat state
+    dict in place.
+    """
+    runner = self._model_runner
+    state = runner.state
+    if not isinstance(state, dict):
+      raise TypeError(
+          "Standalone torchax converters target the vLLM (torchax) model "
+          "implementation, whose runner state is a flat dict; got "
+          f"{type(state).__name__}. Remove MaxTextForCausalLM overrides so "
+          "vLLM runs its native model."
+      )
+
+    if self.llm is not None:
+      self.llm.reset_prefix_cache()
+      self.llm.collective_rpc("delete_kv_cache")
+    elif self._driver is not None:
+      self._driver.llm_engine.reset_prefix_cache()
+      self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    jax.effects_barrier()
+
+    start = time.time()
+    pure = updated_weights.to_pure_dict() if hasattr(updated_weights, "to_pure_dict") else updated_weights
+    converted = self._converter.convert(pure)
+
+    src = {k: v for k, v in converted.items() if k in state}
+    version_aliases = sorted(set(converted) - set(src))
+    if version_aliases:
+      logging.info(
+          "Standalone sync: %d converted tensors have no runner target (vLLM version aliases), e.g. %s",
+          len(version_aliases),
+          version_aliases[:3],
+      )
+    uncovered = [k for k in state if k not in src and not k.rsplit(".", 1)[-1].startswith("_") and "rotary_emb" not in k]
+    if uncovered:
+      logging.warning(
+          "Standalone sync: %d runner tensors NOT covered by the converter (stale weights!), e.g. %s",
+          len(uncovered),
+          uncovered[:5],
+      )
+
+    spec = {k: state[k] for k in src}
+    expected = {k: (tuple(v.shape), v.dtype) for k, v in spec.items()}
+    chunk = getattr(self.config, "reshard_chunk_size", None)
+    delete_dst = getattr(self.config, "delete_dst_buffers", True)
+    reshard_in_chunks = getattr(tunix_gen_utils, "_reshard_in_chunks", None)
+    if chunk and reshard_in_chunks is None:
+      logging.warning("Standalone sync: this Tunix has no _reshard_in_chunks; falling back to one reshard call.")
+      chunk = None
+    if chunk:
+      resharded = reshard_in_chunks(
+          src_flat=dict(src),
+          spec_flat=spec,
+          reshard_fn=tunix_reshard.reshard_pytree,
+          chunk_size=chunk,
+          delete_spec_buffers=delete_dst,
+      )
+    else:
+      shardings = {k: v.sharding for k, v in spec.items()}
+      if delete_dst:
+        tunix_gen_utils._delete_target_buffers(spec, src)  # pylint: disable=protected-access
+      resharded = tunix_reshard.reshard_pytree(src, shardings)
+
+    for k in src:
+      new = resharded[k]
+      shape, dtype = expected[k]
+      if tuple(new.shape) != shape or new.dtype != dtype:
+        raise ValueError(
+            f"{k}: converter produced {tuple(new.shape)}/{new.dtype}, the runner expects {shape}/{dtype}; "
+            "the converter's layout is out of date with tpu-inference."
+        )
+      state[k] = new
+    runner.state_leaves = state
+    logging.info("Standalone sync: updated %d/%d runner tensors in %.1fs", len(src), len(state), time.time() - start)
+
+    if self.llm is not None:
+      self.llm.collective_rpc("reinitialize_kv_cache")
+    elif self._driver is not None:
+      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
@@ -542,6 +658,21 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         getattr(maxtext_config, "use_weight_converter", False)
         or vllm_additional_config.get("use_weight_converter", False)
     )
+    use_standalone_converter = bool(
+        getattr(maxtext_config, "use_standalone_converter", False)
+        or vllm_additional_config.get("use_standalone_converter", False)
+    )
+    # Sampler sharding the standalone converter must mirror: attention DP from
+    # the sharding_strategy blob, expert parallelism from the vLLM engine kwargs.
+    strategy = {}
+    sharding_blob = vllm_additional_config.get("sharding") if isinstance(vllm_additional_config, dict) else None
+    if isinstance(sharding_blob, dict):
+      strategy = sharding_blob.get("sharding_strategy") or {}
+    rollout_vllm_kwargs = getattr(rollout_config, "rollout_vllm_kwargs", None) or {}
+    sharding_hints = {
+        "attn_dp_size": (int(strategy.get("attn_dp_size") or 1) if strategy.get("enable_dp_attention", False) else 1),
+        "enable_expert_parallel": bool(rollout_vllm_kwargs.get("enable_expert_parallel", False)),
+    }
     # Accepted from either spelling, matching use_weight_converter above, so a
     # debug run can be triggered by editing the same JSON blob.
     self._weight_sync_debug = bool(
@@ -553,6 +684,8 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         mesh=mesh,
         use_hf_mapping=use_hf,
         use_weight_converter=use_weight_converter,
+        use_standalone_converter=use_standalone_converter,
+        sharding_hints=sharding_hints,
         debug=self._weight_sync_debug,
     )
 
