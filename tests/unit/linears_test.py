@@ -325,6 +325,86 @@ class DenseGeneralTest(unittest.TestCase):
     self.assertEqual(count_transposes(ordered), 0)
     self.assertGreater(count_transposes(default), 0)
 
+  @staticmethod
+  def _explicit_mesh():
+    return jax.make_mesh((1, 1), ("fsdp", "tensor"), axis_types=(jax.sharding.AxisType.Explicit,) * 2)
+
+  def test_weight_grad_in_kernel_order_with_replicated_kernel(self):
+    """A replicated kernel still has to spell out the gradient's sharding.
+
+    The gradient dot contracts over the sharded token axes, which JAX refuses to
+    resolve on its own -- omitting `out_sharding` there raises instead of
+    defaulting to replicated.
+    """
+    mesh = self._explicit_mesh()
+    with jax.set_mesh(mesh):
+      inputs = jax.sharding.reshard(
+          jax.random.normal(jax.random.PRNGKey(0), (2, 4, 8)),
+          jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", None, None)),
+      )
+      kernel = jax.sharding.reshard(
+          jax.random.normal(jax.random.PRNGKey(1), (8, 16)),
+          jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None)),
+      )
+      dimension_numbers = (((2,), (0,)), ((), ()))
+
+      def loss(x, k, dot):
+        return jnp.sum(jnp.sin(dot(x, k)))
+
+      ordered = functools.partial(
+          linears._dot_general_kernel_ordered_grad,  # pylint: disable=protected-access
+          dimension_numbers=dimension_numbers,
+          precision=None,
+          out_sharding=None,
+      )
+      reference = functools.partial(jax.lax.dot_general, dimension_numbers=dimension_numbers)
+      grad_ordered = jax.jit(jax.grad(loss, argnums=(0, 1)), static_argnums=2)(inputs, kernel, ordered)
+      grad_reference = jax.jit(jax.grad(loss, argnums=(0, 1)), static_argnums=2)(inputs, kernel, reference)
+      for got, want in zip(grad_ordered, grad_reference):
+        self.assertEqual(jax.typeof(got).sharding.spec, jax.typeof(want).sharding.spec)
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+
+  def test_weight_grad_in_kernel_order_with_permuted_axes(self):
+    """Dimension numbers that do not pair operand axes in ascending order.
+
+    No `DenseGeneral` layout builds these today, but the backward pass permutes
+    its dots' outputs back into operand order and the `out_sharding` it hands
+    those dots has to be permuted the same way or the custom_vjp returns a
+    cotangent whose type does not match its primal.
+    """
+    mesh = self._explicit_mesh()
+    with jax.set_mesh(mesh):
+      # `inputs` contracts its trailing axes against the kernel's *leading* axes
+      # in reverse order, so both the dk and the dx dot come out permuted, and
+      # the permutation moves a sharded axis.
+      inputs = jax.sharding.reshard(
+          jax.random.normal(jax.random.PRNGKey(0), (2, 5, 3, 4)),
+          jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", None, "tensor", None)),
+      )
+      kernel = jax.sharding.reshard(
+          jax.random.normal(jax.random.PRNGKey(1), (4, 3, 7)),
+          jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "tensor", None)),
+      )
+      dimension_numbers = (((2, 3), (1, 0)), ((), ()))
+      out_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", None, None))
+
+      def loss(x, k, dot):
+        return jnp.sum(jnp.sin(dot(x, k)))
+
+      ordered = functools.partial(
+          linears._dot_general_kernel_ordered_grad,  # pylint: disable=protected-access
+          dimension_numbers=dimension_numbers,
+          precision=None,
+          out_sharding=out_sharding,
+      )
+      reference = functools.partial(jax.lax.dot_general, dimension_numbers=dimension_numbers, out_sharding=out_sharding)
+      grad_ordered = jax.jit(jax.grad(loss, argnums=(0, 1)), static_argnums=2)(inputs, kernel, ordered)
+      grad_reference = jax.jit(jax.grad(loss, argnums=(0, 1)), static_argnums=2)(inputs, kernel, reference)
+      for got, want in zip(grad_ordered, grad_reference):
+        self.assertEqual(got.shape, want.shape)
+        self.assertEqual(jax.typeof(got).sharding.spec, jax.typeof(want).sharding.spec)
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+
   def _run_dense_test(self, axis, in_feat_shape, expected_shape):
     batch_size = 2
     seq_len = 3
