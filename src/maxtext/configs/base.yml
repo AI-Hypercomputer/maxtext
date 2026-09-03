@@ -490,6 +490,13 @@ record_internal_nn_metrics: 0
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
 base_output_directory: ""
 
+# Whether to enable MLPerf logging (mllog). Default is false.
+enable_mllog: false
+
+# File name for exporting MLPerf mllog entries in base_output_directory (e.g. "mllog.log" or "seed_1.out").
+# If base_output_directory is set and mllog_file is empty, defaults to "mllog.log" inside base_output_directory/run_name.
+mllog_file: ""
+
 # Multi-tier checkpointing is an experimental Orbax feature that: periodically saves to persistent storage(GCS bucket) dictated by `multi_tier_checkpointing_backup_interval_minutes` and,
 # saves to a local directory for smaller checkpoint intervals(local_checkpoint_period).
 # The local checkpoint directory must be specified when enabling multi-tier checkpointing.

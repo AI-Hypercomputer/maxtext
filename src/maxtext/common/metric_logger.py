@@ -25,12 +25,12 @@ import enum
 import numpy as np
 
 import jax
-
 from maxtext.utils.globals import EPS
 from maxtext.common.gcloud_stub import mldiagnostics_modules
 from maxtext.common.gcloud_stub import workload_monitor
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
 from maxtext.utils import exceptions
+from maxtext.utils import mllog_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -93,13 +93,14 @@ class MetricLogger:
   Logger for saving metrics to a local file, GCS and TensorBoard.
   """
 
-  def __init__(self, config, learning_rate_schedule):
+  def __init__(self, config, learning_rate_schedule, start_step=0):
     self.writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name, config.enable_tensorboard)
     self.config = config
     self.metadata = {}
     self.running_gcs_metrics = [] if config.gcs_metrics else None
     self.performance_metric_queue = self.get_performance_metric_queue(config)
     self.learning_rate_schedule = learning_rate_schedule
+    self.start_step = start_step
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     # self.buffered_metrics is a polymorphic deferred-write queue. Entries are one of:
     #   ("train", train_step, metrics, step_time_delta)
@@ -493,6 +494,7 @@ class MetricLogger:
 
     self.write_metrics(self.cumulative_eval_metrics, train_step, metric_type="eval")
     self._pending_eval_step_count = 0
+    mllog_utils.check_eval(self.config, train_step + 1, eval_loss, self.start_step)
     if self.config.target_eval_loss and eval_loss <= self.config.target_eval_loss:
       raise exceptions.StopTraining(f"Target loss {self.config.target_eval_loss=} is achieved.")
 
@@ -507,4 +509,5 @@ class MetricLogger:
       self._flush_one_buffered_entry(entry)
     self.buffered_metrics = []
 
+    mllog_utils.flush_and_sync(force=True)
     max_utils.close_summary_writer(self.writer)
