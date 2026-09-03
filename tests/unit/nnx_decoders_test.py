@@ -23,6 +23,7 @@ Tests cover:
 """
 
 # pylint: disable=unbalanced-tuple-unpacking
+import re
 import sys
 from types import SimpleNamespace
 import unittest
@@ -36,6 +37,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax import nnx
+from flax import traverse_util
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import (
@@ -49,6 +51,7 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.configs import pyconfig
+from maxtext.integration.tunix.weight_mapping import raiden_unscan
 from maxtext.layers import linears
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
@@ -1072,6 +1075,23 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "full-attention layer last"):
       self._build(layer_idx_offset=1)
 
+  def test_rejects_forced_routing_that_does_not_cover_every_sub_layer(self):
+    """Router replay is sliced per sub-layer, so a mismatched leading axis must not be broadcast."""
+    cfg, block = self.cfg, self.block
+    inputs, segment_ids, positions = self._inputs(cfg)
+    forced_routed_experts = jnp.zeros(
+        (block.num_of_layers + 1, 1, cfg.max_target_length, cfg.num_experts_per_tok), dtype=jnp.int32
+    )
+    with self.assertRaisesRegex(ValueError, "one slice per sub-layer"):
+      block(
+          inputs,
+          segment_ids,
+          positions,
+          True,
+          MODEL_MODE_TRAIN,
+          forced_routed_experts=forced_routed_experts,
+      )
+
 
 class TestNNXDecoderQwen3Next(unittest.TestCase):
   """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
@@ -1194,6 +1214,56 @@ class TestNNXDecoderQwen3_5(TestNNXDecoderQwen3Next):
   """Runs the NNXDecoder wiring tests against Qwen3.5."""
 
   MODEL_CONFIG = _QWEN3_5_CONFIG
+
+  def test_raiden_unscan_reproduces_the_unscanned_decoder(self):
+    """Raiden's unscan of the nested block state must load into an unscanned decoder unchanged.
+
+    Raiden binds trainer and sampler tensors by name, and the sampler runs
+    ``scan_layers=False``, so every name and shape has to match and the loaded
+    decoder has to give the scanned decoder's logits. A cycle of 3 over 6 layers
+    puts two slots in ``local_layers`` and two repeats on the scan axis, so a
+    swapped slot or repeat index changes the output.
+    """
+    cfg, decoder, shared_embedding = self._build(6, inhomogeneous_layer_cycle_interval=3)
+    unscanned_cfg, unscanned_decoder, _ = self._build(6, inhomogeneous_layer_cycle_interval=3, scan_layers=False)
+
+    unscanned = raiden_unscan.unscan_layers(
+        nnx.state(decoder, nnx.Param),
+        num_layers=cfg.num_decoder_layers,
+        scan_axis=cfg.param_scan_axis,
+        cycle_interval=cfg.inhomogeneous_layer_cycle_interval,
+    )
+
+    def shapes(tree):
+      return {jax.tree_util.keystr(path): leaf.shape for path, leaf in jax.tree_util.tree_leaves_with_path(tree)}
+
+    self.assertEqual(shapes(unscanned), shapes(nnx.state(unscanned_decoder, nnx.Param)))
+    nnx.update(unscanned_decoder, unscanned)
+
+    # Every loaded leaf must be exactly its block/slot slice of the scanned state:
+    # slot j of repeat i is layer i * cycle + j, and the last slot is the global layer.
+    axis, cycle = cfg.param_scan_axis, cfg.inhomogeneous_layer_cycle_interval
+    scanned = traverse_util.flatten_dict(nnx.state(decoder, nnx.Param).to_pure_dict())
+    loaded = traverse_util.flatten_dict(nnx.state(unscanned_decoder, nnx.Param).to_pure_dict())
+    for key, value in loaded.items():
+      idx = next((i for i, k in enumerate(key) if isinstance(k, str) and re.fullmatch(r"layers_\d+", k)), None)
+      if idx is None:
+        expected = scanned[key]
+      else:
+        repeat, slot = divmod(int(key[idx].split("_")[1]), cycle)
+        sub = "global_layer" if slot == cycle - 1 else "local_layers"
+        expected = np.take(np.asarray(scanned[key[:idx] + ("layers", sub) + key[idx + 1 :]]), repeat, axis=axis)
+        if sub == "local_layers":
+          expected = np.take(expected, slot, axis=axis)
+      np.testing.assert_array_equal(np.asarray(value), expected, err_msg=str(key))
+
+    # Scanned and unscanned forwards differ by float rounding that grows with the device count.
+    np.testing.assert_allclose(
+        np.asarray(self._run(unscanned_cfg, unscanned_decoder, shared_embedding)),
+        np.asarray(self._run(cfg, decoder, shared_embedding)),
+        rtol=1e-3,
+        atol=1e-3,
+    )
 
 
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
