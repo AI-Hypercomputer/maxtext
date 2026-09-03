@@ -916,9 +916,7 @@ class DeepseekV4Indexer(nnx.Module):
         return carry + score_chunk, None
 
       init_score = jnp.zeros((batch_size, seq_len, compressed_len), dtype=jnp.float32)
-      index_scores, _ = jax.lax.scan(
-          jax.checkpoint(scan_body_indexer), init_score, {"q": q_h, "w": w_h}
-      )
+      index_scores, _ = jax.lax.scan(jax.checkpoint(scan_body_indexer), init_score, {"q": q_h, "w": w_h})
     else:
       compressed_kv = jnp.expand_dims(compressed, axis=1)
       compressed_kv = jnp.broadcast_to(
