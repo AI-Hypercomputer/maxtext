@@ -1365,9 +1365,9 @@ class Qwen3NextScannableBlock(nnx.Module):
         rngs=rngs,
     )
 
-  def _run_layer(self, layer, y, layer_kwargs, kv_cache=None):
+  def _run_layer(self, layer, y, layer_kwargs, kv_cache=None, forced_routed_experts=None):
     """Invokes one Qwen3NextDecoderLayer, returning (output, updated_kv_cache)."""
-    out = layer(y, **layer_kwargs, kv_cache=kv_cache)
+    out = layer(y, **layer_kwargs, kv_cache=kv_cache, forced_routed_experts=forced_routed_experts)
     return out if isinstance(out, tuple) else (out, None)
 
   @property
@@ -1375,21 +1375,30 @@ class Qwen3NextScannableBlock(nnx.Module):
     """Whether the block rematerializes its own layers."""
     return self.apply_internal_remat and self.config.remat_policy != "none"
 
-  def _scan_local_layers(self, y, layer_kwargs):
+  def _scan_local_layers(self, y, layer_kwargs, forced_routed_experts=None):
     """Runs the local (linear attention / GatedDeltaNet) layers via a per-layer rematerialized jax.lax.scan."""
     remat = self._remat_enabled
+    if forced_routed_experts is None:
+      apply_fn = lambda layer, carry: self._run_layer(layer, carry, layer_kwargs)[0]
+    else:
+      # Router replay: one slice of forced routing per local layer, fed through
+      # the scan's xs so each iteration sees its own layer's expert indices.
+      def apply_fn(layer, carry, routing):
+        return self._run_layer(layer, carry, layer_kwargs, forced_routed_experts=routing)[0]
+
     return nnx_scan.apply_scanned_layers(
         self.local_layers,
         y,
         length=self.num_local,
         param_scan_axis=self.config.param_scan_axis,
-        apply_fn=lambda layer, carry: self._run_layer(layer, carry, layer_kwargs)[0],
+        apply_fn=apply_fn,
+        xs=forced_routed_experts,
         remat=remat,
         remat_policy=self.remat_policy_fn if remat else None,
         prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config) if remat else True,
     )
 
-  def _scan_global_layer(self, y, layer_kwargs):
+  def _scan_global_layer(self, y, layer_kwargs, forced_routed_experts=None):
     """Runs the single global-attention layer inside a length-1 jax.lax.scan."""
     cfg = self.config
     graphdef_g, intermediate_g, other_g = nnx.split(self.global_layer, nnx.Intermediate, ...)
@@ -1398,7 +1407,9 @@ class Qwen3NextScannableBlock(nnx.Module):
     def run_global_layer(carry, intermediate_slice):
       hidden_states, other = carry
       layer = nnx.merge(graphdef_g, intermediate_slice, other)
-      new_hidden_states = self._run_layer(layer, hidden_states, layer_kwargs)[0]
+      new_hidden_states = self._run_layer(
+          layer, hidden_states, layer_kwargs, forced_routed_experts=forced_routed_experts
+      )[0]
       _, new_intermediate, new_other = nnx.split(layer, nnx.Intermediate, ...)
       return (new_hidden_states, new_other), new_intermediate
 
@@ -1428,7 +1439,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     nnx.update(self.global_layer, final_other, intermediate_state)
     return y
 
-  def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs):
+  def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs, forced_routed_experts=None):
     """Runs the block with externally-supplied per-layer kv caches.
 
     Inference KV caches are a Python list of per-layer entries, so this path
@@ -1446,7 +1457,8 @@ class Qwen3NextScannableBlock(nnx.Module):
         current_state = jax.tree.map(lambda x, i=i: x[i], state)
         layer = nnx.merge(graphdef, current_params, current_state)
         current_kv = kv_cache[i] if (kv_cache is not None and i < len(kv_cache)) else None
-        y, new_kv = self._run_layer(layer, y, layer_kwargs, current_kv)
+        current_routing = None if forced_routed_experts is None else forced_routed_experts[i]
+        y, new_kv = self._run_layer(layer, y, layer_kwargs, current_kv, forced_routed_experts=current_routing)
         updated_kvs.append(new_kv)
         # Collect only non-Param state: parameters are read-only here, so stacking
         # them back would allocate a second copy of every layer weight. Non-Param
@@ -1458,7 +1470,8 @@ class Qwen3NextScannableBlock(nnx.Module):
 
     if self.global_layer is not None:
       global_kv = kv_cache[self.num_local] if (kv_cache is not None and self.num_local < len(kv_cache)) else None
-      y, new_kv = self._run_layer(self.global_layer, y, layer_kwargs, global_kv)
+      global_routing = None if forced_routed_experts is None else forced_routed_experts[self.num_local]
+      y, new_kv = self._run_layer(self.global_layer, y, layer_kwargs, global_kv, forced_routed_experts=global_routing)
       updated_kvs.append(new_kv)
 
     return y, tuple(updated_kvs)
@@ -1474,11 +1487,15 @@ class Qwen3NextScannableBlock(nnx.Module):
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
+      forced_routed_experts=None,
   ) -> tuple[Array, None]:
     """Applies the block of decoder layers to the input carry.
 
     Args:
       carry: The input tensor from the previous scan iteration.
+      forced_routed_experts: Optional router replay indices for this block,
+        shaped `[num_of_layers, batch, seq, top_k]` -- one slice per sub-layer,
+        in block order (the local layers first, the full-attention layer last).
       # ... other arguments are broadcasted to each iteration.
 
     Returns:
@@ -1499,14 +1516,22 @@ class Qwen3NextScannableBlock(nnx.Module):
         "attention_metadata": attention_metadata,
     }
 
+    if forced_routed_experts is not None and forced_routed_experts.shape[0] != self.num_of_layers:
+      raise ValueError(
+          f"forced_routed_experts must carry one slice per sub-layer of the block: expected leading axis "
+          f"{self.num_of_layers}, got {forced_routed_experts.shape[0]} (shape {forced_routed_experts.shape})."
+      )
+
     if kv_cache is not None:
-      return self._forward_with_external_kv_cache(inputs, kv_cache, layer_kwargs)
+      return self._forward_with_external_kv_cache(inputs, kv_cache, layer_kwargs, forced_routed_experts)
 
     y = inputs
     if self.local_layers is not None:
-      y = self._scan_local_layers(y, layer_kwargs)
+      local_routing = None if forced_routed_experts is None else forced_routed_experts[: self.num_local]
+      y = self._scan_local_layers(y, layer_kwargs, local_routing)
     if self.global_layer is not None:
-      y = self._scan_global_layer(y, layer_kwargs)
+      global_routing = None if forced_routed_experts is None else forced_routed_experts[self.num_local]
+      y = self._scan_global_layer(y, layer_kwargs, global_routing)
 
     if cfg.scan_layers:
       return y, None
@@ -1568,20 +1593,9 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
-      self.attention = Qwen3NextFullAttention(
-          config=cfg,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=model_mode,
-          layer_idx=self.layer_idx,
-          rngs=rngs,
-      )
+      self.attention = self._make_full_attention(rngs=rngs)
     else:
-      batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
-      dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
-      self.attention = Qwen3NextGatedDeltaNet(
-          config=cfg, inputs_shape=dummy_inputs_shape, mesh=self.mesh, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs
-      )
+      self.attention = self._make_linear_attention(rngs=rngs)
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
@@ -1592,8 +1606,41 @@ class Qwen3NextDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    # Instantiate our `Qwen3NextSparseMoeBlock`.
-    self.mlp = Qwen3NextSparseMoeBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    self.mlp = self._make_mlp(rngs=rngs)
+
+  # The three factories below are the only places a sibling architecture that reuses
+  # this layer (Qwen3.5) has to diverge, so they are overridable hooks rather than
+  # inline constructor calls. `__init__` binds what they return to `attention` and
+  # `mlp`, which are checkpoint parameter paths, so an override has to keep the
+  # sub-module's own parameter names too.
+  def _make_full_attention(self, *, rngs: nnx.Rngs):
+    """Builds the full-attention sub-block used on the last layer of every cycle."""
+    return Qwen3NextFullAttention(
+        config=self.config,
+        mesh=self.mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        layer_idx=self.layer_idx,
+        rngs=rngs,
+    )
+
+  def _make_linear_attention(self, *, rngs: nnx.Rngs):
+    """Builds the linear-attention (GatedDeltaNet) sub-block used on all other layers."""
+    cfg = self.config
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, self.model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, cfg.emb_dim)
+    return Qwen3NextGatedDeltaNet(
+        config=cfg,
+        inputs_shape=dummy_inputs_shape,
+        mesh=self.mesh,
+        dtype=cfg.dtype,
+        model_mode=self.model_mode,
+        rngs=rngs,
+    )
+
+  def _make_mlp(self, *, rngs: nnx.Rngs):
+    """Builds the sparse MoE block."""
+    return Qwen3NextSparseMoeBlock(config=self.config, mesh=self.mesh, quant=self.quant, rngs=rngs)
 
   def __call__(
       self,
@@ -1606,6 +1653,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
       slot: None | int = None,
       kv_cache: None | dict[str, Array] = None,
       attention_metadata: None | dict[str, Any] = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -1648,10 +1696,16 @@ class Qwen3NextDecoderLayer(nnx.Module):
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
     # Instantiate and call our `Qwen3NextSparseMoeBlock`.
-    mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
+    mlp_output, load_balance_loss = self.mlp(
+        hidden_states,
+        deterministic=deterministic,
+        forced_routed_experts=forced_routed_experts,
+    )
 
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.
+    # Assigned rather than sown: `sow` appends to a tuple, so the layer's Intermediate
+    # structure would grow on every call, which a `jax.lax.scan` body cannot express.
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 

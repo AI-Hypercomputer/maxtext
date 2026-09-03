@@ -119,6 +119,24 @@ def _source_tree(fused_moe_on_target: bool):
   }
 
 
+def _nested_source_tree(fused_moe_on_target: bool):
+  """Trainer state in the nested-scan layout `Qwen3NextScannableBlock` produces.
+
+  Same values as `_source_tree`, restacked the way the shared Qwen3-Next block
+  stores them: slots `0..C-2` share one `local_layers` module with the cycle
+  slot on `SCAN_AXIS + 1`, and slot `C-1` becomes `global_layer` with the block
+  axis alone. Converting either tree must yield the same rollout weights.
+  """
+  legacy = _source_tree(fused_moe_on_target)["base"]["decoder"]["layers"]
+  local_slots = [legacy[f"layer_{slot}"] for slot in range(CYCLE - 1)]
+  tree = _source_tree(fused_moe_on_target)
+  tree["base"]["decoder"]["layers"] = {
+      "local_layers": jax.tree.map(lambda *slots: jnp.stack(slots, axis=SCAN_AXIS + 1), *local_slots),
+      "global_layer": legacy[f"layer_{CYCLE - 1}"],
+  }
+  return tree
+
+
 def _target_tree(moe_intermediate=MOE_DIM, fused=True, wo_intermediate=MOE_DIM):
   """Rollout state: unrolled `layers_{0..7}`, optionally fused MoE.
 
@@ -189,6 +207,34 @@ class ScannedToUnrolledMappingTest(unittest.TestCase):
         np.asarray(out["token_embedder"]["embedding"]),
         np.asarray(_arr(16, EMB)),
     )
+
+  def test_nested_scan_layout_converts_identically(self):
+    """Qwen3.5 moved onto Qwen3-Next's nested block scan.
+
+    The cycle's linear-attention layers now live in one `local_layers` module
+    with the slot on `SCAN_AXIS + 1` instead of one module per slot, so the
+    converter has to read that layout too -- and read it to the same answer.
+    """
+    target = _target_tree()
+    legacy = traverse_util.flatten_dict(MaxTextToMaxTextConverter(_config()).convert(_source_tree(True), target))
+    nested = traverse_util.flatten_dict(MaxTextToMaxTextConverter(_config()).convert(_nested_source_tree(True), target))
+    self.assertEqual(set(legacy), set(nested))
+    for key, want in legacy.items():
+      np.testing.assert_array_equal(
+          np.asarray(nested[key]),
+          np.asarray(want),
+          err_msg=f"{'.'.join(map(str, key))} differs between the per-slot and nested layouts",
+      )
+
+  def test_nested_local_layers_shorter_than_the_cycle_is_rejected(self):
+    """A `local_layers` axis that cannot cover every slot must not slice silently."""
+    source = _nested_source_tree(True)
+    local = source["base"]["decoder"]["layers"]["local_layers"]
+    local["input_layernorm"]["scale"] = jnp.take(
+        local["input_layernorm"]["scale"], jnp.arange(CYCLE - 2), axis=SCAN_AXIS + 1
+    )
+    with self.assertRaisesRegex(ConversionPlanError, "nested cycle-slot axis"):
+      MaxTextToMaxTextConverter(_config()).convert(source, _target_tree())
 
   def test_plan_is_built_once_and_reused(self):
     converter = MaxTextToMaxTextConverter(_config())

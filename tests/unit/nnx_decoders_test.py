@@ -977,6 +977,23 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "full-attention layer last"):
       self._build(layer_idx_offset=1)
 
+  def test_rejects_forced_routing_that_does_not_cover_every_sub_layer(self):
+    """Router replay is sliced per sub-layer, so a mismatched leading axis must not be broadcast."""
+    cfg, block = self.cfg, self.block
+    inputs, segment_ids, positions = self._inputs(cfg)
+    forced_routed_experts = jnp.zeros(
+        (block.num_of_layers + 1, 1, cfg.max_target_length, cfg.num_experts_per_tok), dtype=jnp.int32
+    )
+    with self.assertRaisesRegex(ValueError, "one slice per sub-layer"):
+      block(
+          inputs,
+          segment_ids,
+          positions,
+          True,
+          MODEL_MODE_TRAIN,
+          forced_routed_experts=forced_routed_experts,
+      )
+
 
 class TestNNXDecoderQwen3Next(unittest.TestCase):
   """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""

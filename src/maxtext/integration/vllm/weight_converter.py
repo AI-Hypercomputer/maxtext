@@ -482,6 +482,9 @@ class _PlanEntry:
   # Index along the scan axis, or None when the source is already per-layer.
   slice_index: Optional[int]
   op: str  # "identity" | "slice" | "fuse_moe"
+  # Index along the nested cycle-slot axis (`scan_axis + 1`), or None when the
+  # source stacks blocks alone. Only `local_layers` sources carry one.
+  local_index: Optional[int] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -506,21 +509,25 @@ class _PlanGroup:
   # Dot-joined source path, precomputed for diagnostics and for the
   # leaf-name check inside `_align_per_axis`.
   source_path: str
+  # Shared by every entry in the group: see `_PlanEntry.local_index`.
+  local_index: Optional[int] = None
 
 
 def _group_plan(plan: List[_PlanEntry]) -> List[_PlanGroup]:
   """Collapses per-leaf plan entries into one group per source parameter.
 
-  Entries are grouped by `(source_keys, op)`. Target shape is deliberately
-  *not* part of the key: every rollout layer reading a given scanned source
-  must share a shape, and if two did not, the bulk unstack would produce the
-  wrong shape for one of them -- which `convert()`'s post-execution shape
-  check catches loudly rather than silently writing incorrect weights.
+  Entries are grouped by `(source_keys, op, local_index)`. Target shape is
+  deliberately *not* part of the key: every rollout layer reading a given
+  scanned source must share a shape, and if two did not, the bulk unstack would
+  produce the wrong shape for one of them -- which `convert()`'s post-execution
+  shape check catches loudly rather than silently writing incorrect weights.
+  `local_index` *is* part of the key, because one nested `local_layers` source
+  feeds a different set of rollout layers at each cycle slot.
   """
   grouped: Dict[Tuple[Any, ...], List[_PlanEntry]] = {}
   order: List[Tuple[Any, ...]] = []
   for entry in plan:
-    key = (entry.source_keys, entry.op)
+    key = (entry.source_keys, entry.op, entry.local_index)
     if key not in grouped:
       grouped[key] = []
       order.append(key)
@@ -529,11 +536,12 @@ def _group_plan(plan: List[_PlanEntry]) -> List[_PlanGroup]:
   groups: List[_PlanGroup] = []
   for key in order:
     entries = grouped[key]
-    source_keys, op = key
+    source_keys, op, local_index = key
     groups.append(
         _PlanGroup(
             source_keys=source_keys,
             op=op,
+            local_index=local_index,
             targets=tuple(
                 (e.slice_index, e.target_key)
                 # `identity` entries carry no index; -1 keeps the sort key
@@ -691,18 +699,29 @@ class MaxTextToMaxTextConverter:
   # -------------------------------------------------------------- #
   def _scanned_candidates(
       self, key_tuple: Tuple[Any, ...], prefix_len: int, suffix_start: int, slot: int
-  ) -> List[Tuple[Any, ...]]:
-    """Source keys that could hold the scanned form of a target layer key."""
+  ) -> List[Tuple[Tuple[Any, ...], Optional[int]]]:
+    """Source keys that could hold the scanned form of a target layer key.
+
+    Each candidate is paired with the index to take along the nested cycle-slot
+    axis, or None when the source stacks blocks alone. `Qwen3NextScannableBlock`
+    nests two scans: the cycle's linear-attention layers share one
+    `local_layers` module whose slot sits on `scan_axis + 1`, while the trailing
+    full-attention layer sits in `global_layer` with no slot axis at all.
+    """
     prefix, suffix = key_tuple[:prefix_len], key_tuple[suffix_start:]
     if self.cycle > 1:
-      # Inhomogeneous: `Qwen3_5ScannableBlock` holds `layer_0..layer_{C-1}`.
-      return [
-          prefix + ("layers", f"layer_{slot}") + suffix,
-          prefix + ("layers", str(slot)) + suffix,
-          prefix + ("layers", slot) + suffix,
+      if slot == self.cycle - 1:
+        candidates = [(prefix + ("layers", "global_layer") + suffix, None)]
+      else:
+        candidates = [(prefix + ("layers", "local_layers") + suffix, slot)]
+      # Trainer states predating the nested scan kept one module per slot.
+      return candidates + [
+          (prefix + ("layers", f"layer_{slot}") + suffix, None),
+          (prefix + ("layers", str(slot)) + suffix, None),
+          (prefix + ("layers", slot) + suffix, None),
       ]
     # Homogeneous: a single scanned `layers` container.
-    return [prefix + ("layers",) + suffix]
+    return [(prefix + ("layers",) + suffix, None)]
 
   def _build_plan(
       self,
@@ -740,18 +759,19 @@ class MaxTextToMaxTextConverter:
       candidates = self._scanned_candidates(tgt_key, prefix_len, suffix_start, slot)
 
       # 2. Scanned source, sliced at this block index.
-      matched = next((c for c in candidates if c in src_flat), None)
+      matched = next(((c, li) for c, li in candidates if c in src_flat), None)
       if matched is not None:
-        plan.append(_PlanEntry(tgt_key, (matched,), block, "slice"))
-        consumed.add(matched)
+        matched_key, local_index = matched
+        plan.append(_PlanEntry(tgt_key, (matched_key,), block, "slice", local_index))
+        consumed.add(matched_key)
         continue
 
       # 3. Rollout pre-fuses MoE `wi`; trainer still has `wi_0`/`wi_1`.
       if tgt_key and tgt_key[-1] == "wi":
-        for cand in candidates:
+        for cand, local_index in candidates:
           wi_0, wi_1 = cand[:-1] + ("wi_0",), cand[:-1] + ("wi_1",)
           if wi_0 in src_flat and wi_1 in src_flat:
-            plan.append(_PlanEntry(tgt_key, (wi_0, wi_1), block, "fuse_moe"))
+            plan.append(_PlanEntry(tgt_key, (wi_0, wi_1), block, "fuse_moe", local_index))
             consumed.update((wi_0, wi_1))
             break
         else:
@@ -862,15 +882,37 @@ class MaxTextToMaxTextConverter:
       )
 
     if group.op == "fuse_moe":
-      wi_0, wi_1 = (_apply_dtype_cast(src_flat[k], first_tgt.dtype, path) for k in group.source_keys)
+      wi_0, wi_1 = (
+          self._take_cycle_slot(_apply_dtype_cast(src_flat[k], first_tgt.dtype, path), group) for k in group.source_keys
+      )
       self._check_scan_axis(wi_0, path)
       per_block = self._fuse_moe_bulk(wi_0, wi_1, first_tgt, path)
     else:  # "slice"
       val = _apply_dtype_cast(src_flat[group.source_keys[0]], first_tgt.dtype, path)
+      val = self._take_cycle_slot(val, group)
       self._check_scan_axis(val, path)
       per_block = _bulk_align_and_unstack(val, self.scan_axis, first_tgt, path)
 
     return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
+
+  def _take_cycle_slot(self, val, group: _PlanGroup):
+    """Drops the nested cycle-slot axis from a `local_layers` source.
+
+    Everything downstream expects blocks on `scan_axis` and no other stacked
+    axis, so the slot is selected here -- once per group, before the bulk
+    alignment and unstack, rather than once per target layer.
+    """
+    if group.local_index is None:
+      return val
+    slot_axis = self.scan_axis + 1
+    if val.ndim <= slot_axis or val.shape[slot_axis] <= group.local_index:
+      raise ConversionPlanError(
+          f"Expected a nested cycle-slot axis holding at least "
+          f"{group.local_index + 1} slots on axis {slot_axis} of "
+          f"{group.source_path}, found shape {val.shape}. Check "
+          "param_scan_axis and inhomogeneous_layer_cycle_interval."
+      )
+    return jnp.take(val, group.local_index, axis=slot_axis)
 
   def _check_scan_axis(self, val, path: str) -> None:
     if val.shape[self.scan_axis] != self.num_blocks:

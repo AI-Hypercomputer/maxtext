@@ -225,6 +225,65 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), 4)
 
   @pytest.mark.cpu_only
+  def test_unrolls_the_nested_local_and_global_block_scan(self):
+    """Qwen3-Next and Qwen3.5 nest the cycle's local layers into one module.
+
+    `local_layers` stacks blocks on `scan_axis` and the cycle slot on
+    `scan_axis + 1`; `global_layer` holds the trailing full-attention layer on
+    the block axis alone. Together they must still unroll to a dense
+    `layers_{global_idx}` run, with each slot landing on its own layer.
+    """
+    num_blocks, num_local = 2, 3
+    cycle = num_local + 1
+    local_probe = np.zeros((2, num_blocks, num_local, 1), dtype=np.float32)
+    global_probe = np.zeros((2, num_blocks, 1), dtype=np.float32)
+    for block in range(num_blocks):
+      for slot in range(num_local):
+        local_probe[:, block, slot, :] = block * cycle + slot
+      global_probe[:, block, :] = block * cycle + num_local
+    weights = MockWeights(
+        {
+            "base": {
+                "decoder": {
+                    "layers": {
+                        "local_layers": {"probe": local_probe},
+                        "global_layer": {"probe": global_probe},
+                    },
+                    "decoder_norm": {"scale": np.ones(2)},
+                }
+            }
+        }
+    )
+
+    unrolled = unroll_qwen_scanned_weights(weights)
+
+    decoder = unrolled["base"]["decoder"]
+    for layer_idx in range(num_blocks * cycle):
+      self.assertIn(f"layers_{layer_idx}", decoder)
+      np.testing.assert_array_equal(
+          decoder[f"layers_{layer_idx}"]["probe"],
+          np.full((2, 1), layer_idx, dtype=np.float32),
+      )
+    np.testing.assert_array_equal(decoder["decoder_norm"]["scale"], np.ones(2))
+    target = {
+        "model": {
+            "decoder": {
+                f"layers_{layer_idx}": {"probe": np.zeros((2, 1), dtype=np.float32)}
+                for layer_idx in range(num_blocks * cycle)
+            }
+        }
+    }
+    self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), num_blocks * cycle)
+
+  @pytest.mark.cpu_only
+  def test_rejects_nested_local_layers_without_a_cycle_slot_axis(self):
+    """A `local_layers` tensor missing its slot axis must not be read as flat."""
+    weights = MockWeights({"decoder": {"layers": {"local_layers": {"probe": np.ones((2, 2))}}}})
+
+    with self.assertRaisesRegex(ValueError, "has no scan axis"):
+      unroll_qwen_scanned_weights(weights)
+
+  @pytest.mark.cpu_only
   def test_correctly_unrolls_homogeneous_scanned_weights(self):
     """Verify homogeneous scanned layers (LLaMA, Qwen Base) unroll to layers_{global_idx}."""
     # 4 layers stacked on scan_axis=1 (feature_dim=2, num_layers=4, hidden=1)

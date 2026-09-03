@@ -96,7 +96,8 @@ def apply_scanned_layers(
     *,
     length: int,
     param_scan_axis: int,
-    apply_fn: Callable[[nnx.Module, Any], Any],
+    apply_fn: Callable[..., Any],
+    xs: Any | None = None,
     remat: bool = False,
     remat_policy: Callable[..., Any] | None = None,
     prevent_cse: bool = True,
@@ -108,6 +109,11 @@ def apply_scanned_layers(
   defines the model-specific module invocation and must return the next carry.
   ``remat`` is separate from ``remat_policy`` because ``None`` is JAX's full
   rematerialization policy, not an indication that rematerialization is off.
+
+  ``xs`` is an optional pytree of per-layer inputs whose leaves have a leading
+  axis of ``length``; each iteration's slice is passed to ``apply_fn`` as a
+  third argument. Callers that pass no ``xs`` keep the two-argument ``apply_fn``
+  signature.
 
   Externally managed per-layer state, such as KV caches, is not supported by
   this scan path.
@@ -170,14 +176,19 @@ def apply_scanned_layers(
     return leaf
 
   def scan_body(current_carry, scanned_state):
-    current_params, current_rest = scanned_state
+    if xs is None:
+      current_params, current_rest = scanned_state
+      apply_args = ()
+    else:
+      current_params, current_rest, current_xs = scanned_state
+      apply_args = (current_xs,)
     current_params = jax.tree.map(
         _strip_scan_metadata,
         current_params,
         is_leaf=lambda x: hasattr(x, "replace") and hasattr(x, "value"),
     )
     current_layer = nnx.merge(layer_graphdef, current_params, current_rest)
-    next_carry = apply_fn(current_layer, current_carry)
+    next_carry = apply_fn(current_layer, current_carry, *apply_args)
     # Drop the parameters that were carried in: ``jax.lax.scan`` stacks every
     # output, so returning them would materialize a second copy of the stacked
     # layer weights. Parameters created inside the body are still returned.
@@ -188,9 +199,8 @@ def apply_scanned_layers(
     return next_carry, (new_params, updated_rest)
 
   scan_fn = jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse) if remat else scan_body
-  final_carry, (scanned_new_params, scanned_rest) = jax.lax.scan(
-      scan_fn, carry, (params, rest), length=length, unroll=unroll
-  )
+  scan_xs = (params, rest) if xs is None else (params, rest, xs)
+  final_carry, (scanned_new_params, scanned_rest) = jax.lax.scan(scan_fn, carry, scan_xs, length=length, unroll=unroll)
 
   if param_scan_axis != 0:
     scanned_new_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), scanned_new_params)

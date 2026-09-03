@@ -703,6 +703,31 @@ class TrainerRouterReplayTest(unittest.TestCase):
         "qwen3.5 scanned per-layer",
     )
 
+  def test_per_layer_routing_reaches_the_scan_remainder_block(self):
+    """Layers past the last whole cycle live in a separate remainder block.
+
+    With 3 layers and a cycle of 2 the scan covers layers 0-1 and layer 2 is
+    applied afterwards, so the remainder needs its own slice of the routing.
+    """
+    seq_len, batch_size, top_k, num_experts = 8, 1, 2, 4
+    cycle_interval, layers = 2, 3
+    cfg = self._qwen35_cfg(
+        seq_len,
+        batch_size,
+        num_experts,
+        top_k,
+        "test_router_replay_scan_remainder",
+        base_num_decoder_layers=layers,
+        num_decoder_layers=layers,
+        inhomogeneous_layer_cycle_interval=cycle_interval,
+    )
+    # Only the trailing (remainder) layer's routing differs between a and b, so
+    # the losses can only diverge if the remainder block replays its own slice.
+    shared = jnp.zeros((batch_size, seq_len, layers, top_k), dtype=jnp.int32)
+    a = shared.at[:, :, -1, :].set(1)
+    b = shared.at[:, :, -1, :].set(3)
+    self._assert_routing_is_load_bearing(cfg, seq_len, batch_size, a, b, "qwen3.5 scan remainder")
+
   def test_loss_fn_with_forced_routed_experts_gemma4(self):
     """Gemma4 is supported unscanned only (its scanned path raises), and it is
 

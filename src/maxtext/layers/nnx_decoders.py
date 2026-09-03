@@ -230,6 +230,43 @@ class NNXDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
+def forced_routed_experts_per_layer(forced_routed_experts: jax.Array, num_layers: int) -> jax.Array:
+  """Normalizes a batch's forced_routed_experts to a per-decoder-layer stack.
+
+  Every supported architecture is homogeneous-MoE, so the layer axis is simply
+  the decoder layer index.
+
+  Args:
+    forced_routed_experts: `[batch, seq, num_layers, top_k]` (per-layer) or
+      `[batch, seq, top_k]` (broadcast to every layer).
+    num_layers: Total decoder layers.
+
+  Returns:
+    Array shaped `[num_layers, batch, seq, top_k]`.
+
+  Raises:
+    ValueError: If forced_routed_experts is not 3D or 4D, or its layer axis
+      does not match `num_layers`.
+  """
+  fre = forced_routed_experts
+  if fre.ndim not in (3, 4):
+    raise ValueError(
+        "forced_routed_experts must be [batch, seq, top_k] (3D, broadcast to"
+        " every layer) or [batch, seq, num_layers, top_k] (4D, per-layer); got"
+        f" ndim={fre.ndim} with shape {fre.shape}."
+    )
+  if fre.ndim == 4:
+    if fre.shape[2] != num_layers:
+      raise ValueError(
+          "forced_routed_experts layer axis must equal the number of decoder"
+          f" layers ({num_layers}); got {fre.shape[2]} (shape {fre.shape})."
+      )
+    # [batch, seq, num_layers, top_k] -> [num_layers, batch, seq, top_k]
+    return jnp.moveaxis(fre, 2, 0)
+  # [batch, seq, top_k]: same forced routing for every layer.
+  return jnp.broadcast_to(fre[None], (num_layers,) + fre.shape)
+
+
 def reshape_forced_routed_experts_for_scan(
     forced_routed_experts: jax.Array,
     num_layers: int,
@@ -239,8 +276,7 @@ def reshape_forced_routed_experts_for_scan(
   """Reshapes a batch's forced_routed_experts into jax.lax.scan's xs layout.
 
   The outer scan runs `scan_length` iterations, each covering a cycle of
-  `layers_per_cycle` decoder layers. Every supported architecture is
-  homogeneous-MoE, so the layer axis is simply the decoder layer index.
+  `layers_per_cycle` decoder layers.
 
   Args:
     forced_routed_experts: `[batch, seq, num_layers, top_k]` (per-layer) or
@@ -255,19 +291,7 @@ def reshape_forced_routed_experts_for_scan(
   Raises:
     ValueError: If forced_routed_experts is not 3D or 4D.
   """
-  fre = forced_routed_experts
-  if fre.ndim not in (3, 4):
-    raise ValueError(
-        "forced_routed_experts must be [batch, seq, top_k] (3D, broadcast to"
-        " every layer) or [batch, seq, num_layers, top_k] (4D, per-layer); got"
-        f" ndim={fre.ndim} with shape {fre.shape}."
-    )
-  if fre.ndim == 4:
-    # [batch, seq, num_layers, top_k] -> [num_layers, batch, seq, top_k]
-    fre = jnp.moveaxis(fre, 2, 0)
-  else:
-    # [batch, seq, top_k]: same forced routing for every layer.
-    fre = jnp.broadcast_to(fre[None], (num_layers,) + fre.shape)
+  fre = forced_routed_experts_per_layer(forced_routed_experts, num_layers)
   return jnp.reshape(fre, (scan_length, layers_per_cycle) + fre.shape[1:])
 
 
@@ -2420,10 +2444,34 @@ class NNXDecoder(nnx.Module):
     Layers past the last whole block are applied afterwards, in a short
     remainder block, so a layer count that is not a multiple of the cycle keeps
     all its layers.
+
+    Forced routing (router replay) is sliced per decoder layer here and handed
+    to each block as its own `[block_length, batch, seq, top_k]` stack, which
+    the block then splits between its local scan and its global layer.
     """
     cfg = self.config
     block_length = cfg.inhomogeneous_layer_cycle_interval
     scan_length = cfg.num_decoder_layers // block_length
+    num_scanned_layers = scan_length * block_length
+
+    layer_kwargs = dict(layer_kwargs)
+    forced_routed_experts = layer_kwargs.pop("forced_routed_experts", None)
+    forced_routed_experts_scanned = None
+    remainder_forced_routed_experts = None
+    if forced_routed_experts is not None:
+      if kv_caches is not None:
+        # The kv-cache path below unrolls into _apply_layers_sequentially, which
+        # threads either kv caches or scan xs, not both.
+        raise NotImplementedError(
+            "Forced routing is not supported together with externally-managed (vLLM) kv_caches in scanned layers."
+        )
+      per_layer = forced_routed_experts_per_layer(forced_routed_experts, cfg.num_decoder_layers)
+      if scan_length > 0:
+        forced_routed_experts_scanned = jnp.reshape(
+            per_layer[:num_scanned_layers], (scan_length, block_length) + per_layer.shape[1:]
+        )
+      remainder_forced_routed_experts = per_layer[num_scanned_layers:]
+
     if scan_length > 0:
       grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
       y, self.layers, _ = self._apply_layers_sequentially(
@@ -2433,19 +2481,22 @@ class NNXDecoder(nnx.Module):
           length=scan_length,
           kv_caches_stacked=grouped_kv_caches,
           skip_block_remat=True,
+          forced_routed_experts_scanned=forced_routed_experts_scanned,
           **layer_kwargs,
       )
       maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, block_length, stacked=False)
 
     num_remaining_layers = cfg.num_decoder_layers % block_length
     if num_remaining_layers > 0:
+      if remainder_forced_routed_experts is not None:
+        layer_kwargs["forced_routed_experts"] = remainder_forced_routed_experts
       y = self._apply_remainder_block(
           self.layers_remainder,
           y,
           layer_args,
           layer_kwargs,
           kv_caches=kv_caches,
-          start_idx=scan_length * block_length,
+          start_idx=num_scanned_layers,
           num_remaining_layers=num_remaining_layers,
       )
     return y
