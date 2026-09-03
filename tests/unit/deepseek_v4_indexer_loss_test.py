@@ -207,7 +207,7 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
     np.testing.assert_allclose(float(loss), 0.0, atol=1e-5)
 
   def test_csa_indexer_loss_head_chunking_parity(self):
-    """Test that head chunking scan produces bitwise identical loss to native einsum."""
+    """Test that head chunking scan produces loss mathematically equivalent within FP tolerance to native einsum."""
     config_chunked = self._get_config(mla_qk_head_chunk_size=2)
     config_native = self._get_config(mla_qk_head_chunk_size=0)
     attn_chunked = self._init_csa_attention(config_chunked)
@@ -310,6 +310,7 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
 
     q_grad_norm = jnp.linalg.norm(grads.csa_compressor.indexer.q_proj.kernel.get_value())
     self.assertGreater(float(q_grad_norm), 0.0)
+    self.assertGreater(float(jnp.linalg.norm(grads.csa_compressor.indexer.weights_proj.kernel.get_value())), 0.0)
 
     # Gradients must not leak into main model projections
     self.assertAlmostEqual(float(jnp.linalg.norm(grads.wq_a.kernel.get_value())), 0.0)
