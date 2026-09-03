@@ -77,6 +77,7 @@ logical_axis_rules: [
                       ['gdn_head', ['fsdp_transpose', 'expert']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
                       ['embed', ['fsdp', 'context', 'expert']],
+                      ['embed_attn', ['fsdp', 'context', 'expert']],
                       ['norm', []],
                       ['layers', 'stage'],
                       ['dense_layers', []],

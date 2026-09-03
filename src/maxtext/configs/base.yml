@@ -50,7 +50,7 @@ load_full_state_path: ""
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
-enable_checkpointing: true
+enable_checkpointing: false
 save_checkpoint_on_start: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
@@ -63,6 +63,15 @@ enable_single_replica_ckpt_restoring: false
 checkpoint_todelete_subdir: None
 # Full path to move checkpoints to before deletion.
 checkpoint_todelete_full_path: None
+
+# Interval in seconds between iterations in standalone checkpointer benchmark loop
+standalone_checkpointer_per_step_interval: 0.0
+# Whether to execute sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' before restoring a checkpoint in standalone_checkpointer loop
+standalone_checkpointer_drop_page_cache_before_restore: false
+# Whether to also restore checkpoint after saving in each step of standalone_checkpointer loop
+standalone_checkpointer_enable_restore_in_loop: true
+# Whether to start by attempting to load an existing checkpoint in standalone_checkpointer
+standalone_checkpointer_start_from_checkpoint: false
 
 force_unroll: false # during generate_param_only_checkpoint should we unroll the loop?
 
@@ -78,7 +87,9 @@ checkpoint_storage_use_zarr3: true
 # default concurrent gb for PytreeCheckpointHandler is 96GB
 checkpoint_storage_concurrent_gb: 96
 
-# Bool flag for enabling Orbax v1.
+# TODO: b/529622681 - Remove deprecated settings.
+# DEPRECATED: Orbax v1 is now always used for checkpointing; this flag is
+# ignored and will be removed in a future release.
 enable_orbax_v1: false
 # function for processing loaded checkpoint dict into a format maxtext can understand. (for other formats, i.e. safetensors)
 checkpoint_conversion_fn: none
@@ -286,6 +297,9 @@ moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
+# Keep embed_moe sharded so we can manually QAG it over FSDP.
+# Requires quantization to be specified and weight_quantization_calibration_method to be fixed (static scaling mode).
+shard_embed_moe_on_fsdp: false
 # use fsdp and fsdp_transpose axes for sharding the moe weights
 use_2d_fsdp_sharding: false
 
@@ -578,6 +592,7 @@ logical_axis_rules: [
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
                       ['kv_lora', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
                       ["kv_lora_up_proj", []],
+                      ['embed_attn', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
                       # ==========================================
                       # Mixture of Experts (MoE)
                       # ==========================================
@@ -782,7 +797,7 @@ sft_train_on_completion_only: false
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
-dataset_type: tfds
+dataset_type: synthetic
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.1.0'
@@ -1379,6 +1394,8 @@ mhc_pallas_kernel_fwd_block_size: 256
 # TPU v7x if we go higher. For TPU v6 (Trillium), there is more VMEM, so 256
 # works and provides better results.
 mhc_pallas_kernel_bwd_block_size: 128
+# Feature block size for backward pass of MHC Pallas kernel.
+mhc_pallas_kernel_bwd_feature_block_size: 1024
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.

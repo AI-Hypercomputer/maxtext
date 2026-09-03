@@ -169,14 +169,29 @@ def get_shaped_batch(config, batch_sharding=None):
     shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
     shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   if config.use_multimodal:
-    image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
-    )
-    shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
-    # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
-    # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
-    if "llama4" in config.model_name:
-      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
+    is_video = getattr(config, "video_max_grid_t", None) is not None
+    if is_video:
+      max_t = config.video_max_grid_t
+      max_h = config.video_max_grid_h
+      max_w = config.video_max_grid_w
+      tps = config.temporal_patch_size_for_vit
+      patch = config.patch_size_for_vit
+      channels = config.num_channels_for_vit
+      batch_size = config.micro_batch_size_to_train_on
+      video_shape = (batch_size, channels, max_t * tps, max_h * patch, max_w * patch)
+      video_mask_shape = (batch_size, 1, max_t * tps, max_h * patch, max_w * patch)
+      shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
+      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
+      shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
+    else:
+      image_shape = mm_processor.get_dummy_image_shape_for_init(
+          config.model_name, batch_size=config.micro_batch_size_to_train_on
+      )
+      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
+      # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
+      # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
+      if "llama4" in config.model_name:
+        shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)
@@ -2193,58 +2208,15 @@ def create_device_mesh(config, devices=None):
   num_slices = 1 if getattr(config, "inference_benchmark_test", False) else num_slices
   num_devices_per_slice = num_devices // num_slices
 
-  # Find possible unspecified parallelisms
-  ici_parallelism = getattr(config, "ici_parallelism", None)
-  if ici_parallelism is None:
-    ici_map = {
-        "diloco": getattr(config, "ici_diloco_parallelism", 1),
-        "data": getattr(config, "ici_data_parallelism", 1),
-        "stage": getattr(config, "ici_pipeline_parallelism", 1),
-        "fsdp": getattr(config, "ici_fsdp_parallelism", -1),
-        "fsdp_transpose": getattr(config, "ici_fsdp_transpose_parallelism", 1),
-        "sequence": getattr(config, "ici_sequence_parallelism", 1),
-        "context": getattr(config, "ici_context_parallelism", 1),
-        "context_usp_ulysses": getattr(config, "ici_context_usp_ulysses_parallelism", 1),
-        "context_autoregressive": getattr(config, "ici_context_autoregressive_parallelism", 1),
-        "tensor": getattr(config, "ici_tensor_parallelism", 1),
-        "tensor_sequence": getattr(config, "ici_tensor_sequence_parallelism", 1),
-        "model": getattr(config, "ici_tensor_parallelism", 1),
-        "expert": getattr(config, "ici_expert_parallelism", 1),
-        "autoregressive": getattr(config, "ici_autoregressive_parallelism", 1),
-        "attn_dp": 1,
-        "attn_dp_expert": 1,
-    }
-    ici_parallelism = [ici_map[axis] for axis in config.mesh_axes]
-  else:
-    ici_parallelism = ici_parallelism.copy()
+  # Find possible unspecified parallelisms. The config derives these per-axis lists from
+  # its `mesh_axes`, so they are the single source of truth for the mesh shape.
+  ici_parallelism = config.ici_parallelism.copy()
   ici_parallelism = max_utils.fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
   if num_slices > 1:
-    dcn_parallelism = getattr(config, "dcn_parallelism", None)
-    if dcn_parallelism is None:
-      dcn_map = {
-          "diloco": getattr(config, "dcn_diloco_parallelism", 1),
-          "data": getattr(config, "dcn_data_parallelism", 1),
-          "stage": getattr(config, "dcn_pipeline_parallelism", 1),
-          "fsdp": getattr(config, "dcn_fsdp_parallelism", 1),
-          "fsdp_transpose": getattr(config, "dcn_fsdp_transpose_parallelism", 1),
-          "sequence": getattr(config, "dcn_sequence_parallelism", 1),
-          "context": getattr(config, "dcn_context_parallelism", 1),
-          "context_usp_ulysses": getattr(config, "dcn_context_usp_ulysses_parallelism", 1),
-          "context_autoregressive": getattr(config, "dcn_context_autoregressive_parallelism", 1),
-          "tensor": getattr(config, "dcn_tensor_parallelism", 1),
-          "tensor_sequence": getattr(config, "dcn_tensor_sequence_parallelism", 1),
-          "model": getattr(config, "dcn_tensor_parallelism", 1),
-          "expert": getattr(config, "dcn_expert_parallelism", 1),
-          "autoregressive": getattr(config, "dcn_autoregressive_parallelism", 1),
-          "attn_dp": 1,
-          "attn_dp_expert": 1,
-      }
-      dcn_parallelism = [dcn_map[axis] for axis in config.mesh_axes]
-    else:
-      dcn_parallelism = dcn_parallelism.copy()
+    dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
 
     if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):

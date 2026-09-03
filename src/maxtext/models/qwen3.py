@@ -30,13 +30,28 @@ from jax.experimental import xla_metadata
 import jax.nn
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, AttentionType, BATCH, Config, DType, EMBED, LENGTH, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
-from maxtext.common.common_types import HyperConnectionType
-from maxtext.common.common_types import KV_BATCH, KV_HEAD
-from maxtext.inference import kvcache
+from flax import linen as nn
+from maxtext.common.common_types import (
+    Array,
+    AttentionType,
+    BATCH,
+    Config,
+    DType,
+    EMBED,
+    HyperConnectionType,
+    KV_BATCH,
+    KV_HEAD,
+    LENGTH,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_TRAIN,
+    ShardMode,
+)
+from maxtext.kernels.attention import gdn_cp
 from maxtext.utils.sharding import (
+    create_sharding,
     get_logical_axis_rules,
     logical_to_mesh_axes,
+    maybe_shard_with_logical,
     remove_incompatible_mesh_axes_from_partition_spec,
 )
 from maxtext.layers import attentions
@@ -46,6 +61,7 @@ from maxtext.layers import moe
 from maxtext.layers import nnx_scan
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
+from maxtext.layers import nnx_scan
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import PositionalEmbedding, Qwen3OmniMoeVisionPosEmbedInterpolate
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
@@ -55,11 +71,27 @@ from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGate
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes
+from maxtext.inference import kvcache
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
 # -----------------------------------------
+
+
+def gdn_context_axes(cfg) -> tuple[str, ...]:
+  """Mesh axes carrying the GatedDeltaNet sequence, empty when it is replicated.
+
+  Either context knob can carry it, and both can be live at once, so this
+  returns a tuple that `lax` collectives accept directly.
+  """
+  return tuple(
+      name
+      for name, size in (
+          ("context", cfg.ici_context_parallelism),
+          ("context_usp_ulysses", getattr(cfg, "ici_context_usp_ulysses_parallelism", 1)),
+      )
+      if size > 1
+  )
 
 
 def naive_jax_chunk_gated_delta_rule(
@@ -196,6 +228,7 @@ def jax_chunk_gated_delta_rule(
     chunk_size: int = 64,
     initial_state: None | Array = None,
     use_qk_norm_in_gdn: bool = False,
+    cp_axis: None | str = None,
     compute_dtype: jnp.dtype = jnp.bfloat16,
 ) -> tuple[Array, None | Array]:
   """Optimized JAX implementation of Gated Delta Rule."""
@@ -351,7 +384,15 @@ def jax_chunk_gated_delta_rule(
 
     return h_new, o_c
 
-  final_h, o_chunks = lax.scan(scan_body, h_init, xs)
+  if cp_axis is None:
+    final_h, o_chunks = lax.scan(scan_body, h_init, xs)
+  else:
+    # Sequence is sharded over cp_axis, so a sequential scan over chunks is not
+    # available. Fold the local chunks into one affine map, exchange those, then
+    # replay locally from the correct incoming state. See kernels/attention/gdn_cp.py.
+    A_loc, B_loc = gdn_cp.compose_local(w_scan, u_scan, k_scan, g_scan)
+    h_in, final_h = gdn_cp.incoming_state(A_loc, B_loc, h_init, cp_axis)
+    _, o_chunks = lax.scan(scan_body, h_in, xs)
 
   # =========================================================================
   # STAGE 4: FINALIZATION
@@ -519,7 +560,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(self.key_dim * 2 + self.value_dim * 2),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        kernel_axes=("embed", "gdn_head"),
+        kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         rngs=rngs,
     )
@@ -528,7 +569,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(self.num_v_heads * 2),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        kernel_axes=("embed", "gdn_head"),
+        kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         rngs=rngs,
     )
@@ -567,7 +608,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(in_features,),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        kernel_axes=("gdn_head", "embed"),
+        kernel_axes=("gdn_head", "embed_attn"),
         matmul_precision=cfg.matmul_precision,
         rngs=rngs,
     )
@@ -622,9 +663,16 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       logical_rules = (
           None
           if self.config.using_pipeline_parallelism
-          else self.config.logical_axis_rules
+          else get_logical_axis_rules()
       )
-      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
+      # LENGTH, not None. This with_sharding_constraint told XLA to gather the
+      # full sequence onto every device for the qkvz projection. With ctx=2 at
+      # seq 32,768 that is six live bf16[2, 32768, 16, 512] buffers of 1.07 GB
+      # each -- found by diffing XLA buffer assignment between ctx=1 and ctx=2,
+      # and the reason the first version of this patch cut GDN memory but still
+      # lost overall.
+      cp_len = LENGTH if gdn_context_axes(cfg) else None
+      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
       qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
           qkvz_pspec,
@@ -1013,6 +1061,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             initial_state=recurrent_state,
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=cfg.dtype,
+            cp_axis=cp_axes or None,
         )
       elif getattr(cfg, "use_gdn_kernel", False):
         core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
@@ -1027,7 +1076,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             compute_dtype=cfg.dtype,
         )
       elif self.mesh is not None:
-        logical_rules = self.config.logical_axis_rules
+        logical_rules = (
+            None
+            if self.config.using_pipeline_parallelism
+            else get_logical_axis_rules()
+        )
         recurrent_state_arg = (
             recurrent_state
             if recurrent_state is not None
@@ -1036,9 +1089,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
                 dtype=cfg.dtype,
             )
         )
-        qkv_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
-        g_beta_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD), mesh=self.mesh, rules=logical_rules)
-        state_pspec = logical_to_mesh_axes((KV_BATCH, KV_HEAD, None, None), mesh=self.mesh, rules=logical_rules)
+        cp_axes = gdn_context_axes(cfg)
+        cp_len = LENGTH if cp_axes else None
+        qkv_pspec = logical_to_mesh_axes(
+            (KV_BATCH, cp_len, KV_HEAD, None), mesh=self.mesh, rules=logical_rules
+        )
+        g_beta_pspec = logical_to_mesh_axes(
+            (KV_BATCH, cp_len, KV_HEAD), mesh=self.mesh, rules=logical_rules
+        )
+        state_pspec = logical_to_mesh_axes(
+            (KV_BATCH, KV_HEAD, None, None), mesh=self.mesh, rules=logical_rules
+        )
         # Keep every shard_map input/output batch spec consistent when replication is required.
         qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
             qkv_pspec,
@@ -1090,6 +1151,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
               initial_state=init_h,
               use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
               compute_dtype=cfg.dtype,
+              cp_axis=cp_axes or None,
           )
 
         core_attn_out, next_recurrent_state = shard_mapped_delta_rule(
@@ -1297,41 +1359,51 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         rngs=rngs,
     )
 
-    # 2. Instantiate and apply the shared expert(s).
-    shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(cfg)
-    self.shared_expert = MlpBlock(
-        config=cfg,
-        mesh=mesh,
-        in_features=cfg.emb_dim,
-        intermediate_dim=cfg.shared_experts * shared_expert_mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        quant=self.quant,
-        model_mode=config.model_call_mode,
-        rngs=rngs,
-    )
-
-    # 3. Instantiate the (optional) gate for the shared expert.
-    if cfg.moe_shared_expert_gate:
-      self.shared_expert_gate = DenseGeneral(
-          in_features_shape=cfg.emb_dim,
-          out_features_shape=1,
-          use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
+    # 2. Instantiate and apply the shared expert(s), if the config asks for one.
+    # cfg.shared_experts defaults to 0. Building the expert every time puts an
+    # extra full-size MLP in every layer of a dense configuration.
+    self.use_shared_expert = cfg.shared_experts > 0
+    if self.use_shared_expert:
+      shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(cfg)
+      self.shared_expert = MlpBlock(
+          config=cfg,
+          mesh=mesh,
+          in_features=cfg.emb_dim,
+          intermediate_dim=cfg.shared_experts * shared_expert_mlp_dim,
+          activations=cfg.mlp_activations,
+          intermediate_dropout_rate=cfg.dropout_rate,
           dtype=cfg.dtype,
-          kernel_init=max_initializers.nd_dense_init(
-              cfg.dense_init_scale, "fan_in", "truncated_normal"
-          ),
-          kernel_axes=("embed", None),
-          matmul_precision=cfg.matmul_precision,
+          weight_dtype=cfg.weight_dtype,
+          quant=self.quant,
+          model_mode=config.model_call_mode,
           rngs=rngs,
       )
+
+      # 3. Instantiate the (optional) gate for the shared expert.
+      if cfg.moe_shared_expert_gate:
+        self.shared_expert_gate = DenseGeneral(
+            in_features_shape=cfg.emb_dim,
+            out_features_shape=1,
+            use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
+            dtype=cfg.dtype,
+            kernel_init=max_initializers.nd_dense_init(
+                cfg.dense_init_scale, "fan_in", "truncated_normal"
+            ),
+            kernel_axes=("embed", None),
+            matmul_precision=cfg.matmul_precision,
+            rngs=rngs,
+        )
+      else:
+        self.shared_expert_gate = None
     else:
+      self.shared_expert = None
       self.shared_expert_gate = None
 
   def __call__(
-      self, hidden_states: Array, deterministic: bool
+      self,
+      hidden_states: Array,
+      deterministic: bool,
+      forced_routed_experts: jnp.ndarray | None = None,
   ) -> tuple[Array, Array | None, Array | None]:
     """Applies the sparse MoE block to the input hidden states.
 
@@ -1350,8 +1422,11 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     """
     # 1. Apply the routed experts block.
     routed_output, load_balance_loss, moe_bias_updates = self.routed_experts(
-        hidden_states
+        hidden_states, forced_routed_experts=forced_routed_experts
     )
+
+    if not self.use_shared_expert:
+      return routed_output, load_balance_loss, moe_bias_updates
 
     # 2. Apply the shared expert.
     shared_expert_output = self.shared_expert(hidden_states, deterministic=deterministic)
@@ -1372,9 +1447,22 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
 class Qwen3NextScannableBlock(nnx.Module):
   """A scannable block of Qwen3-Next decoder layers with hierarchical nested scans.
 
-  Linear attention layers (local) are scanned via
-  `nnx_scan.apply_scanned_layers`
-  while full attention (global) is scanned via a length-1 `jax.lax.scan`.
+  One block covers a single period of the attention pattern defined by
+  `config.inhomogeneous_layer_cycle_interval`: several linear-attention
+  (GatedDeltaNet) layers plus one full-attention layer. The linear-attention
+  layers are homogeneous, so they are stacked and run through
+  `nnx_scan.apply_scanned_layers`; the lone full-attention layer runs inside a
+  trip-count-one `jax.lax.scan` that acts as an XLA scheduling barrier.
+
+  Nesting the scans this way lets each sub-layer be rematerialized on its own
+  (`apply_internal_remat`) instead of rematerializing the whole block, so only
+  one sub-layer's activations are live at a time.
+
+  Attributes:
+    config: The model configuration object.
+    mesh: The device mesh for sharding.
+    model_mode: The operational mode (e.g., 'train', 'prefill').
+    quant: Optional quantization configuration.
   """
 
   def __init__(
@@ -1398,26 +1486,48 @@ class Qwen3NextScannableBlock(nnx.Module):
     self.remat_policy_fn = remat_policy_fn
     self.apply_internal_remat = apply_internal_remat
     cfg = self.config
+    self.is_mhc_enabled = cfg.mhc_expansion_rate > 1
+    if self.is_mhc_enabled:
+      self.activation_axis_names = (
+          "activation_batch",
+          "activation_norm_length",
+          "mhc",
+          "activation_embed",
+      )
+    else:
+      self.activation_axis_names = (
+          "activation_batch",
+          "activation_norm_length",
+          "activation_embed",
+      )
     if num_of_layers is None:
       num_of_layers = cfg.inhomogeneous_layer_cycle_interval
     self.num_of_layers = num_of_layers
     self.layer_idx_offset = layer_idx_offset
 
     cycle_interval = cfg.inhomogeneous_layer_cycle_interval
+    # Qwen3-Next puts the full-attention layer last in every cycle, which is what
+    # Qwen3NextDecoderLayer derives from layer_idx when it is not told explicitly.
     full_attention_offset = (
-        getattr(cfg, "full_attention_layer_offset", 0) % cycle_interval
+        getattr(cfg, "full_attention_layer_offset", -1) % cycle_interval
     )
 
-    self.num_local = sum(
-        1
-        for i in range(num_of_layers)
-        if (layer_idx_offset + i) % cycle_interval != full_attention_offset
-    )
-    self.num_global = sum(
-        1
-        for i in range(num_of_layers)
-        if (layer_idx_offset + i) % cycle_interval == full_attention_offset
-    )
+    positions = [(layer_idx_offset + i) % cycle_interval for i in range(num_of_layers)]
+    self.num_local = sum(1 for p in positions if p != full_attention_offset)
+    self.num_global = sum(1 for p in positions if p == full_attention_offset)
+    if self.num_global > 1:
+      raise ValueError(
+          f"A Qwen3-Next scannable block spans {num_of_layers} layers starting at offset {layer_idx_offset}, which "
+          f"covers {self.num_global} full-attention layers; the block supports at most one."
+      )
+    # The local scan runs before the global layer, so the block only reproduces the
+    # model's layer order when the full-attention layer is last in the period.
+    if self.num_global == 1 and positions[-1] != full_attention_offset:
+      raise ValueError(
+          f"Qwen3-Next scannable block expects the full-attention layer last in the block, but a block of "
+          f"{num_of_layers} layers starting at layer_idx_offset={layer_idx_offset} lands it at block position "
+          f"{positions.index(full_attention_offset)}. Blocks must start on a cycle boundary."
+      )
 
     if self.num_local > 0:
       self.local_layers = nnx_scan.create_scanned_layers(
@@ -1471,22 +1581,16 @@ class Qwen3NextScannableBlock(nnx.Module):
         y,
         length=self.num_local,
         param_scan_axis=self.config.param_scan_axis,
-        apply_fn=lambda layer, carry: self._run_layer(
-            layer, carry, layer_kwargs
-        )[0],
+        apply_fn=lambda layer, carry: self._run_layer(layer, carry, layer_kwargs)[0],
         remat=remat,
         remat_policy=self.remat_policy_fn if remat else None,
-        prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config)
-        if remat
-        else True,
+        prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config) if remat else True,
     )
 
   def _scan_global_layer(self, y, layer_kwargs):
     """Runs the single global-attention layer inside a length-1 jax.lax.scan."""
     cfg = self.config
-    graphdef_g, intermediate_g, other_g = nnx.split(
-        self.global_layer, nnx.Intermediate, ...
-    )
+    graphdef_g, intermediate_g, other_g = nnx.split(self.global_layer, nnx.Intermediate, ...)
     intermediate_xs = jax.tree.map(lambda x: x[None], intermediate_g)
 
     def run_global_layer(carry, intermediate_slice):
@@ -1500,9 +1604,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     offload_names = maxtext_utils.get_save_and_offload_names(cfg)
     if offload_names[0] or offload_names[1]:
       save_names, offload_to_device = offload_names
-      global_remat_policy = jax.checkpoint_policies.save_only_these_names(
-          *(save_names + offload_to_device)
-      )
+      global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
 
     if self._remat_enabled:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
@@ -1512,9 +1614,7 @@ class Qwen3NextScannableBlock(nnx.Module):
           prevent_cse=prevent_cse,
       )
 
-    with xla_metadata.set_xla_metadata(
-        **{"skip-simplify-while-loops_trip-count-one": "true"}
-    ):
+    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
       (y, final_other), stacked_intermediate = jax.lax.scan(
           run_global_layer,
           (y, other_g),
@@ -1527,7 +1627,11 @@ class Qwen3NextScannableBlock(nnx.Module):
     return y
 
   def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs):
-    """Runs the block with externally-supplied per-layer kv caches."""
+    """Runs the block with externally-supplied per-layer kv caches.
+
+    Inference KV caches are a Python list of per-layer entries, so this path
+    unrolls the local layers statically rather than scanning them.
+    """
     updated_kvs = []
     if self.local_layers is not None:
       graphdef, params, state = nnx.split(self.local_layers, nnx.Param, ...)
@@ -1539,30 +1643,19 @@ class Qwen3NextScannableBlock(nnx.Module):
         current_params = jax.tree.map(lambda x, i=i: x[i], params)
         current_state = jax.tree.map(lambda x, i=i: x[i], state)
         layer = nnx.merge(graphdef, current_params, current_state)
-        current_kv = (
-            kv_cache[i]
-            if (kv_cache is not None and i < len(kv_cache))
-            else None
-        )
+        current_kv = kv_cache[i] if (kv_cache is not None and i < len(kv_cache)) else None
         y, new_kv = self._run_layer(layer, y, layer_kwargs, current_kv)
         updated_kvs.append(new_kv)
-        per_layer_states.append(nnx.state(layer))
+        # Collect only non-Param state: parameters are read-only here, so stacking
+        # them back would allocate a second copy of every layer weight. Non-Param
+        # state is stacked on axis 0, matching nnx_scan.create_scanned_layers.
+        _, _, updated_state = nnx.split(layer, nnx.Param, ...)
+        per_layer_states.append(updated_state)
 
-      stacked_state = jax.tree.map(lambda *xs: jnp.stack(xs), *per_layer_states)
-      if scan_axis != 0:
-        stacked_params, stacked_other = stacked_state.split(nnx.Param, ...)
-        stacked_params = jax.tree.map(
-            lambda x: jnp.moveaxis(x, 0, scan_axis), stacked_params
-        )
-        stacked_state = nnx.State.merge(stacked_params, stacked_other)
-      nnx.update(self.local_layers, stacked_state)
+      nnx.update(self.local_layers, jax.tree.map(lambda *xs: jnp.stack(xs), *per_layer_states))
 
     if self.global_layer is not None:
-      global_kv = (
-          kv_cache[self.num_local]
-          if (kv_cache is not None and self.num_local < len(kv_cache))
-          else None
-      )
+      global_kv = kv_cache[self.num_local] if (kv_cache is not None and self.num_local < len(kv_cache)) else None
       y, new_kv = self._run_layer(self.global_layer, y, layer_kwargs, global_kv)
       updated_kvs.append(new_kv)
 
@@ -1584,7 +1677,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     inputs = carry
     inputs = nn.with_logical_constraint(
         inputs,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
+        self.activation_axis_names,
     )
 
     layer_kwargs = {
@@ -1598,9 +1691,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     }
 
     if kv_cache is not None:
-      return self._forward_with_external_kv_cache(
-          inputs, kv_cache, layer_kwargs
-      )
+      return self._forward_with_external_kv_cache(inputs, kv_cache, layer_kwargs)
 
     y = inputs
     if self.local_layers is not None:
@@ -1649,8 +1740,20 @@ class Qwen3NextDecoderLayer(nnx.Module):
     self.layer_idx = layer_idx
     self.quant = quant
     cfg = self.config
-    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
     self.is_mhc_enabled = cfg.mhc_expansion_rate > 1
+    if self.is_mhc_enabled:
+      self.activation_axis_names = (
+          "activation_batch",
+          "activation_norm_length",
+          "mhc",
+          "activation_embed",
+      )
+    else:
+      self.activation_axis_names = (
+          "activation_batch",
+          "activation_norm_length",
+          "activation_embed",
+      )
 
     if is_dense_layer is None:
       is_dense_layer = layer_idx < cfg.first_num_dense_layers
@@ -1670,13 +1773,12 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # picks which position in the cycle is full attention; -1 (Python's negative-modulo
     # wraps to cycle-1) reproduces the original "last position in the cycle" schedule.
     full_attention_offset = (
-        cfg.full_attention_layer_offset % cfg.inhomogeneous_layer_cycle_interval
+        getattr(cfg, "full_attention_layer_offset", -1) % cfg.inhomogeneous_layer_cycle_interval
     )
     if is_full_attention_layer is None:
       is_full_attention_layer = (
           self.is_dense_layer
-          or self.layer_idx % cfg.inhomogeneous_layer_cycle_interval
-          == full_attention_offset
+          or self.layer_idx % cfg.inhomogeneous_layer_cycle_interval == full_attention_offset
       )
     self.is_full_attention_layer = is_full_attention_layer
 
@@ -1739,11 +1841,17 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
   def pre_attention_norm_op(self, x):
     normed = self.input_layernorm(x)
-    return nn.with_logical_constraint(normed, self.activation_axis_names)
+    return nn.with_logical_constraint(
+        normed,
+        ("activation_batch", "activation_norm_length", "activation_embed"),
+    )
 
   def post_attention_norm_op(self, x):
     normed = self.post_attention_layernorm(x)
-    return nn.with_logical_constraint(normed, self.activation_axis_names)
+    return nn.with_logical_constraint(
+        normed,
+        ("activation_batch", "activation_norm_length", "activation_embed"),
+    )
 
   def attention_branch(
       self,
@@ -1804,12 +1912,9 @@ class Qwen3NextDecoderLayer(nnx.Module):
       inputs = inputs[0]
 
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
-    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    # inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     if self.is_mhc_enabled:
-      mhc_expand, mhc_reduce = mhc.get_functions(self.config.mhc_expansion_rate)
-      inputs = mhc_expand(inputs)
-
       intermediate_inputs, _ = self.mhc_attention(
           self.pre_attention_norm_op,
           self.attention_branch,
@@ -1844,7 +1949,6 @@ class Qwen3NextDecoderLayer(nnx.Module):
       ):
         self.moe_bias_updates = nnx.Intermediate(moe_bias_updates)
 
-      layer_output = mhc_reduce(layer_output)
       layer_output = nn.with_logical_constraint(
           layer_output, self.activation_axis_names
       )
@@ -1940,12 +2044,33 @@ class AttentionWithNorm(nnx.Module):
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.mlp_activation_axis_names = ("activation_batch", "activation_norm_length", "activation_mlp")
+
+    # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
+    # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
+    if config.shard_mode == ShardMode.EXPLICIT:
+      self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+      self.mlp_intermediate_sharding = create_sharding(
+          mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules()
+      )
+      self._maybe_shard_with_logical = functools.partial(
+          maybe_shard_with_logical,
+          mesh=mesh,
+          shard_mode=config.shard_mode,
+          debug_sharding=config.debug_sharding,
+          extra_stack_level=1,
+      )
+    else:
+      self.out_sharding = None
+      self.mlp_intermediate_sharding = None
+      self._maybe_shard_with_logical = lambda inputs, *args, **kwargs: inputs
 
     # Corresponds to Qwen3's `input_layernorm`
     self.pre_self_attention_layer_norm = RMSNorm(
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
         rngs=rngs,
@@ -1986,6 +2111,7 @@ class AttentionWithNorm(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
         rngs=rngs,
@@ -2002,11 +2128,11 @@ class AttentionWithNorm(nnx.Module):
       attention_metadata: None | dict[str, Any] = None,
   ):
     """Applies self-attention with pre and post-layer normalization."""
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # Pre attention norm
-    lnx = self.pre_self_attention_layer_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=self.out_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
     # Self attention
     attention_lnx, kv_cache = self.self_attention(
         lnx,
@@ -2015,15 +2141,16 @@ class AttentionWithNorm(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        out_sharding=self.out_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
     # Residual connection after attention
     intermediate_inputs = inputs + attention_lnx
     # Post attention norm
-    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
     return hidden_states, intermediate_inputs, kv_cache
 
 
@@ -2081,11 +2208,16 @@ class Qwen3DecoderLayer(AttentionWithNorm):
         attention_metadata=attention_metadata,
     )
 
-    mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self.mlp(
+        hidden_states,
+        deterministic=deterministic,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
+    )
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     layer_output = intermediate_inputs + mlp_lnx
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
     return layer_output, kv_cache
 
@@ -2152,13 +2284,13 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         attention_metadata=attention_metadata,
     )
 
-    mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states, out_sharding=self.out_sharding)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 
     layer_output = intermediate_inputs + mlp_lnx
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
     if is_scan_carry:
 

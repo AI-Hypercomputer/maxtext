@@ -194,7 +194,9 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   elif config.opt_type == "muon":
     # extract muon dimension number from model structure
     if model is not None:
-      muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config, mesh=mesh)
+      muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(
+          model, config, mesh=mesh
+      )
     else:
       raise ValueError("Please specify model to extract muon dimension number.")
 

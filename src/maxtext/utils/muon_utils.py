@@ -47,7 +47,8 @@ def _is_path_contain_any(tuples, path):
   return any(x in path for x in tuples)
 
 
-# Parameters excluded from Muon updates (e.g. 1D norms, embeddings, scalars, routing gates)
+
+# Parameters excluded from Muon updates (e.g. 1D norms, embeddings, scalars)
 EXCLUDED_SUBSTRINGS = (
     "scale",
     "embedding",
@@ -61,19 +62,11 @@ EXCLUDED_SUBSTRINGS = (
     "A_log",
     "dt_bias",
     "conv1d",
-    "post_alpha",
-    "pre_alpha",
-    "res_alpha",
+    "shared_expert_gate",
 )
 
 EXCLUDED_EXACT_SEGMENTS = {
     "bias",
-    "gate",
-    "shared_expert_gate",
-    "router",
-    "moe_gate",
-    "expert_gate",
-    "router_weights",
 }
 
 # Attention module identifiers and tensor projection names that require
@@ -85,6 +78,7 @@ ATTENTION_BLOCK_NAMES = (
     "self_attn",
     "attn",
     "attention_mla",
+    "GptOssAttention",
 )
 
 ATTENTION_QKV_NAMES = (
@@ -101,6 +95,13 @@ ATTENTION_QKV_NAMES = (
 
 ATTENTION_OUT_NAMES = ("out", "o_proj")
 
+MOE_BLOCK_NAMES = (
+    "MoeBlock_0",
+    "moe_block",
+    "routed_experts",
+    "GptOssMlp",
+)
+
 
 def transform_logic(path: Tuple[str, ...], shape: Optional[Tuple[int, ...]] = None) -> Optional[mdn]:
   """Determines Muon dimension numbers based on parameter path and shape.
@@ -109,55 +110,84 @@ def transform_logic(path: Tuple[str, ...], shape: Optional[Tuple[int, ...]] = No
   to its corresponding MuonDimensionNumbers (mdn) specifying the reduction
   and output axes for 2D matrix orthogonalization.
 
-  Negative indexing is used throughout to ensure dimension numbers remain
-  invariant to leading batch and scanned-layer axes.
+  In MaxText, layer scanning places the layer scan axis at index 1
+  (`param_scan_axis = 1`), resulting in shapes:
+    - Standard weights / MLPs: [in_features, num_layers, out_features]
+    - Attention QKV: [in_features, num_layers, num_heads, head_dim]
+    - Attention Out: [num_heads, num_layers, head_dim, out_features]
+    - MoE routed experts: [num_experts, num_layers, in_features, out_features]
+    - Grouped linear (o_a_proj): [o_groups, num_layers, in_features_per_group, out_features_per_group]
 
   Strategy:
-    1. Exclusions: Non-matrix, 1D, scalar, embedding, state-space, or gating
-       parameters are excluded (returns None) and optimized via AdamW.
-    2. Head-expanded Attention: QKV and Output projections with 3D/4D shapes
-       map to head-aware reduction and output axes.
-    3. Standard Weights: Default 2D matrix mapping (-2, -1) for MLPs,
-       MoE routed experts, GDN, and dense projections.
+    1. Exclusions: Non-matrix, 1D, scalar, embedding, or state-space parameters
+       are excluded (returns None) and optimized via AdamW.
+    2. MoE Routed Experts: [num_experts, ..., in_features, out_features]
+       map to reduction axis (-2,) and output axis (-1,).
+       Note: gate.kernel is [in_features, (num_layers), num_experts] and uses standard (0,) and (-1,).
+    3. Grouped Linear: [n_groups, ..., in_features_per_group, out_features_per_group]
+       maps to reduction axis (-2,) and output axis (-1,).
+    4. Head-expanded Attention: QKV and Output projections with 3D/4D shapes
+       map to head-aware reduction and output axes:
+       - QKV: reduction (0,), output (-2, -1)
+       - Out (unflattened): reduction (0, -2), output (-1,)
+    5. Standard Weights: Default 2D matrix mapping (0,) and (-1,) for MLPs,
+       GDN, shared experts, MHC alpha projections, and dense projections.
 
   Args:
     path: Tuple of strings representing the parameter's hierarchical path.
     shape: Optional shape tuple of the parameter tensor.
 
   Returns:
-    An instance of `MuonDimensionNumbers` if a valid mapping is found, or `None`
-    if the parameter is excluded from Muon updates.
+    An instance of `optax.contrib.MuonDimensionNumbers` if a valid mapping is
+    found, or `None` if the parameter is excluded from Muon updates.
   """
-  # 1. Exclude 1D / scalar parameters
+  # Exclude 1D / scalar parameters
   if shape is not None and len(shape) < 2:
     return None
 
-  # 2. Exclude non-matrix parameters, embeddings, biases, normalization, and routing gates
-  if any(segment in EXCLUDED_EXACT_SEGMENTS or any(x in segment for x in EXCLUDED_SUBSTRINGS) for segment in path):
+  # Exclude non-matrix parameters, embeddings, biases, and normalization
+  if any(
+      segment in EXCLUDED_EXACT_SEGMENTS
+      or (segment.endswith("bias") and segment != "position_bias")
+      or any(x in segment for x in EXCLUDED_SUBSTRINGS)
+      for segment in path
+  ):
     return None
 
-  # 3. Head-expanded attention projections (3D unscanned or 4D scanned)
+  # MoE routed expert weights: [num_experts, (num_layers), in_features, out_features]
+  if _is_path_contain_any(MOE_BLOCK_NAMES, path):
+    if _is_path_contain_any(("wi", "wi_0", "wi_1", "wo", "gate_up_proj"), path):
+      return mdn((-2,), (-1,))
+
+  # Block-diagonal grouped linear layer (e.g. DeepSeek-V4 attention output projection):
+  # [n_groups, (num_layers), in_features_per_group, out_features_per_group] -> reduce (-2,), output (-1,)
+  if "o_a_proj" in path:
+    return mdn((-2,), (-1,))
+
+  # Head-expanded attention projections (3D unscanned or 4D scanned)
   if _is_path_contain_any(ATTENTION_BLOCK_NAMES, path) and (shape is None or len(shape) > 2):
     if _is_path_contain_any(ATTENTION_QKV_NAMES, path):
-      # [..., in_features, num_heads, head_dim] -> reduce (-3,), output (-2, -1)
-      return mdn((-3,), (-2, -1))
+      # [in_features, (num_layers), num_heads, head_dim] -> reduce (0,), output (-2, -1)
+      return mdn((0,), (-2, -1))
     if _is_path_contain_any(ATTENTION_OUT_NAMES, path):
-      # [..., num_heads, head_dim, out_features] -> reduce (-3, -2), output (-1,)
-      return mdn((-3, -2), (-1,))
+      # Standard attention out projection: [num_heads, (num_layers), head_dim, out_features] -> reduce (0, -2), output (-1,)
+      # Note: Qwen3-Next flattens heads into a 2D projection (in_features = num_heads * head_dim),
+      # so its out projection is a standard 2D matrix [in_features, (num_layers), out_features] -> reduce (0,), output (-1,)
+      if _is_path_contain_any(("self_attention", "GptOssAttention"), path) or (shape is not None and len(shape) == 4):
+        return mdn((0, -2), (-1,))
 
-  # 4. Standard 2D matrix weights (dense MLPs, MoE routed experts, GDN, shared experts)
-  # [..., in_features, out_features] -> reduce (-2,), output (-1,)
-  return mdn((-2,), (-1,))
+  # Standard 2D matrix weights (dense MLPs, shared experts, GDN, MHC alpha, dense projections, router weights)
+  # [in_features, (num_layers), out_features] -> reduce (0,), output (-1,)
+  return mdn((0,), (-1,))
 
 
 def get_transform_tree(tree, mesh=None, path=()):
-  """Recursively extracts MuonDimensionNumbers and shardings for Linen abstract parameters."""
+  """Recursively extracts `MuonDimensionNumbers` and shardings for Linen abstract parameters."""
   if isinstance(tree, (dict, collections.abc.Mapping)) or hasattr(tree, "items"):
     return {k: get_transform_tree(v, mesh=mesh, path=path + (k,)) for k, v in tree.items()}
   else:
     val = getattr(tree, "value", tree)
     val_shape = getattr(val, "shape", None)
-    # Determine reduction and output axes based on parameter path and tensor rank
     dim_num = transform_logic(path, shape=val_shape)
     if dim_num is not None:
       names = getattr(tree, "names", None)
@@ -181,7 +211,9 @@ def get_transform_tree(tree, mesh=None, path=()):
     return None
 
 
-def get_muon_weight_dimension_numbers(model, config=None, mesh=None, verbose=False):
+def get_muon_weight_dimension_numbers(
+    model, config=None, mesh=None, verbose=False
+):
   """Extracts a matching pytree of MuonDimensionNumbers with physical shardings from a model.
 
   Evaluates within an active `nn_partitioning.axis_rules` context to map logical
@@ -191,7 +223,9 @@ def get_muon_weight_dimension_numbers(model, config=None, mesh=None, verbose=Fal
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
-  logical_rules = getattr(config, "logical_axis_rules", ()) if config is not None else ()
+  logical_rules = (
+      getattr(config, "logical_axis_rules", ()) if config is not None else ()
+  )
   # Populate logical axis rules in Flax context for automatic NamedSharding resolution
   with nn_partitioning.axis_rules(logical_rules):
     if isinstance(model, nnx.Module):
@@ -199,20 +233,36 @@ def get_muon_weight_dimension_numbers(model, config=None, mesh=None, verbose=Fal
       _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
 
       # Resolve physical NamedSharding for each parameter under the active axis rules
-      named_sharding_state = sharding_lib.nnx_construct_named_sharding(abstract_param, mesh) if mesh is not None else None
+      named_sharding_state = (
+          sharding_lib.nnx_construct_named_sharding(abstract_param, mesh)
+          if mesh is not None
+          else None
+      )
       abstract_dict = nnx.to_pure_dict(abstract_param)
-      named_sharding_dict = nnx.to_pure_dict(named_sharding_state) if named_sharding_state is not None else abstract_dict
+      named_sharding_dict = (
+          nnx.to_pure_dict(named_sharding_state)
+          if named_sharding_state is not None
+          else abstract_dict
+      )
 
-      def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], leaf, abs_leaf):
-        path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
-        abs_val = abs_leaf.get_value() if hasattr(abs_leaf, "get_value") else abs_leaf
+      def apply_transform_nnx(
+          path: Tuple[jax.tree_util.KeyEntry, ...], leaf, abs_leaf
+      ):
+        path_strings = tuple(
+            p.key for p in path if isinstance(p, jax.tree_util.DictKey)
+        )
+        abs_val = (
+            abs_leaf.get_value() if hasattr(abs_leaf, "get_value") else abs_leaf
+        )
         val_shape = getattr(abs_val, "shape", None)
         dim_num = transform_logic(path_strings, shape=val_shape)
         if dim_num is not None:
           val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
           sharding = (
               val
-              if isinstance(val, (jax.sharding.NamedSharding, jax.sharding.PartitionSpec))
+              if isinstance(
+                  val, (jax.sharding.NamedSharding, jax.sharding.PartitionSpec)
+              )
               else getattr(leaf, "sharding", None)
           )
           if isinstance(sharding, jax.ShapeDtypeStruct) or not isinstance(
@@ -234,7 +284,9 @@ def get_muon_weight_dimension_numbers(model, config=None, mesh=None, verbose=Fal
 
     else:  # Linen
       abstract_param = maxtext_utils.get_abstract_param(model, config)
-      muon_weight_dimension_numbers = get_transform_tree(abstract_param, mesh=mesh)
+      muon_weight_dimension_numbers = get_transform_tree(
+          abstract_param, mesh=mesh
+      )
 
     if verbose:
       _print_structure_debug(abstract_param, muon_weight_dimension_numbers)
@@ -310,7 +362,9 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False, pure_nnx=False):
   else:
     model = models.transformer_as_linen(config, mesh=mesh, quant=quant)
   # Get dimension number
-  muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config, mesh=mesh, verbose=verbose)
+  muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(
+      model, config, mesh=mesh, verbose=verbose
+  )
   if pure_nnx:
     muon_weight_dimension_numbers = {"params": nnx.to_pure_dict(muon_weight_dimension_numbers)}
   return muon_weight_dimension_numbers

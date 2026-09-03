@@ -32,14 +32,18 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes
 
 
+@functools.lru_cache(maxsize=None)
+def _get_permutation_indices(k: int) -> tuple[tuple[int, ...], ...]:
+  return tuple(itertools.permutations(range(k)))
+
+
 def get_permutation_matrices(k: int) -> Array:
   """Generates all permutation matrices of size k.
 
   Reference: mHC-lite: https://openreview.net/pdf?id=5IJX6kvOif
   Shape: (k!, k, k)
   """
-  perms = list(itertools.permutations(range(k)))
-  perms_array = jnp.array(perms)
+  perms_array = jnp.array(_get_permutation_indices(k))
   return jnp.eye(k)[perms_array]
 
 
@@ -143,7 +147,6 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       res_out_dim = num_perms
       res_beta_shape = (num_perms,)
       res_beta_sharding = (None,)
-      self.permutation_matrices = get_permutation_matrices(self.k)
     else:
       res_out_dim = self.k * self.k
       res_beta_shape = (self.k, self.k)
@@ -225,7 +228,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       # Use float32 for numerical stability during softmax
       weights = jax.nn.softmax(intermediate.astype(jnp.float32), axis=-1).astype(self.dtype)
       # Sum the permutation matrices with the weights
-      permutation_matrices = self.permutation_matrices.astype(self.dtype)
+      permutation_matrices = get_permutation_matrices(self.k).astype(self.dtype)
       output = jnp.einsum(
           "bsn,nkm -> bskm",
           weights,
@@ -285,13 +288,17 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       bwd_block_size = getattr(
           self.config, "mhc_pallas_kernel_bwd_block_size", 128
       )
+      bwd_feature_block_size = getattr(
+          self.config, "mhc_pallas_kernel_bwd_feature_block_size", 1024
+      )
       kernel_config = mhc_kernel.MhcKernelConfig(
           block_size=fwd_block_size,
           bwd_block_size=bwd_block_size,
+          bwd_feature_block_size=bwd_feature_block_size,
           rms_epsilon=self.config.normalization_layer_epsilon,
       )
       weights = self._get_mhc_weights()
-      perms = jnp.asarray(self.permutation_matrices, self.dtype)
+      perms = jnp.asarray(get_permutation_matrices(self.k), self.dtype)
       if self.mesh is not None:
         rules = get_logical_axis_rules()
         x_pspec = logical_to_mesh_axes(
@@ -400,9 +407,13 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       bwd_block_size = getattr(
           self.config, "mhc_pallas_kernel_bwd_block_size", 128
       )
+      bwd_feature_block_size = getattr(
+          self.config, "mhc_pallas_kernel_bwd_feature_block_size", 1024
+      )
       kernel_config = mhc_kernel.MhcKernelConfig(
           block_size=fwd_block_size,
           bwd_block_size=bwd_block_size,
+          bwd_feature_block_size=bwd_feature_block_size,
       )
       if self.mesh is not None:
         rules = get_logical_axis_rules()
