@@ -876,6 +876,14 @@ class TestMuonLogic(unittest.TestCase):
     self.assertEqual(result.reduction_axis, (-2,))
     self.assertEqual(result.output_axis, (-1,))
 
+  def test_transform_logic_moe_routers(self):
+    path = ("layers_0", "MoeBlock_0", "gate", "kernel")
+    self.assertEqual(muon_utils.transform_logic(path, include_routers=True), mdn((0,), (-1,)))
+    self.assertIsNone(muon_utils.transform_logic(path, include_routers=False))
+
+    path_expert = ("layers_0", "MoeBlock_0", "wi_0")
+    self.assertEqual(muon_utils.transform_logic(path_expert, include_routers=False), mdn((-2,), (-1,)))
+
   def test_transform_logic_attention(self):
     path_out = ("layers_0", "self_attention", "out", "kernel")
     self.assertEqual(muon_utils.transform_logic(path_out), mdn((0, -2), (-1,)))
