@@ -565,6 +565,7 @@ class DiLoCoTest(unittest.TestCase):
               "",
               get_test_config_path(),
               "enable_diloco=false",
+              "enable_checkpointing=true",
               f"load_full_state_path={items_path}",
           ]
       )
