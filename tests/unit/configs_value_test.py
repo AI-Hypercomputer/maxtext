@@ -96,6 +96,39 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_te_moe_block_rejects_unsupported_options_during_config_validation(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_no_quant",
+        # Prevent the general EP validation from masking the more specific
+        # te_moe_block/use_random_routing incompatibility under test.
+        "override_logical_axis_rules": True,
+    }
+    invalid_configs = (
+        ({"norm_topk_prob": True}, "te_moe_block=True does not currently support norm_topk_prob=True."),
+        ({"use_random_routing": True}, "te_moe_block=True does not support use_random_routing=True."),
+        (
+            {"decoder_block": types.DecoderBlockType.LLAMA4},
+            "te_moe_block=True does not currently support Llama4 routing semantics.",
+        ),
+        (
+            {"te_gmm_quantization": ""},
+            "te_gmm_quantization must be specified when te_moe_block=True.",
+        ),
+    )
+
+    for overrides, expected_error in invalid_configs:
+      with self.subTest(overrides=overrides):
+        with self.assertRaises(pydantic.ValidationError) as context:
+          types.MaxTextConfig(**{**common_config, **overrides})
+        self.assertIn(expected_error, str(context.exception))
+
   def test_tpu_tokamax_ring_config_validation_accepts_initial_config(self):
     argv = [
         "",

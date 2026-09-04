@@ -3410,17 +3410,6 @@ class RoutedMoE(nnx.Module):
           "Please upgrade to the latest version of TransformerEngine."
       ) from exc
 
-    if self.config.norm_topk_prob:
-      raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
-    if self.config.use_random_routing:
-      raise ValueError("te_moe_block=True does not support use_random_routing=True.")
-    if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
-      raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
-    if not self.config.te_gmm_quantization:
-      raise ValueError(
-          "te_gmm_quantization must be specified when te_moe_block=True. "
-          "te_gmm_quantization=te_no_quant is supported for BF16."
-      )
     if self.quant is None or not hasattr(self.quant, "get_moe_block_quantizer_sets"):
       raise ValueError("te_moe_block=True requires TransformerEngine quantization or te_gmm_quantization=te_no_quant.")
 

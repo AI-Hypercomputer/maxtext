@@ -4300,8 +4300,17 @@ class MaxTextConfig(
         raise ValueError("te_moe_block=True requires prefuse_moe_weights=True.")
       if self.te_moe_block and self.routed_bias_update_rate > 0.0:
         raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
-      if self.te_moe_block and self.te_gmm_quantization == TEGroupedGemmQuantizationType.EMPTY:
-        raise ValueError("te_gmm_quantization must be specified when te_moe_block=True.")
+      if self.te_moe_block and self.norm_topk_prob:
+        raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
+      if self.te_moe_block and self.use_random_routing:
+        raise ValueError("te_moe_block=True does not support use_random_routing=True.")
+      if self.te_moe_block and self.decoder_block == DecoderBlockType.LLAMA4:
+        raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
+      if self.te_moe_block and not self.te_gmm_quantization:
+        raise ValueError(
+            "te_gmm_quantization must be specified when te_moe_block=True. "
+            "te_gmm_quantization=te_no_quant is supported for BF16."
+        )
       if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
         raise ValueError(
             "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
