@@ -2134,17 +2134,16 @@ function flakyCellTip(evt,id,idx){
   let body;
   const isGate=j.lane==='Hosted'||j.lane==='Build';
   const cal=flakyCalc();
-  // Look up failed tests: first try PR-specific match, then fall back to all tests for this job
+  // Look up failed tests: only show tests that actually failed in this PR
   const testsForPr=FLAKY_TESTS.filter(x=>x.job===id&&x.prs.includes(c.pr));
-  const testsForJob=testsForPr.length?testsForPr:FLAKY_TESTS.filter(x=>x.job===id);
-  const tests=testsForJob
+  const tests=testsForPr
     .map(x=>({name:x.test,cause:x.cause,n:x.prs.filter(p=>p!=='#null'&&cal.iset.has(thIdxOf(p))).length||x.prs.length}))
     .sort((a,b)=>b.n-a.n||a.name.localeCompare(b.name));
   const testBlock=tests.length
     ?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">${tests.length===1?'1 test':tests.length+' tests'} failed:</div>${listOf(tests)}`
     :isGate
       ?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">Gate job &mdash; no individual test results.</div>`
-      :`<div style="font-size:12px;color:var(--ink2);margin-top:6px">Job failed due to setup or infrastructure issue.</div>`;
+      :`<div style="font-size:12px;color:var(--ink2);margin-top:6px">No test details collected for this run.</div>`;
   if(e){
     body=`<div style="font-size:13px;color:var(--warn)">Failed first, passed on re-run</div>`+testBlock;
   }else if(f){
@@ -2363,13 +2362,7 @@ function openFlakyPop(id,pr){
       testMap[key].prs.push(...(inRange.length?inRange:x.prs));
     }
   });
-  // If PR-specific found nothing, fall back to all tests for this job
-  if(pr&&!Object.keys(testMap).length){
-    FLAKY_TESTS.filter(x=>x.job===id).forEach(x=>{
-      const key=x.test;
-      if(!testMap[key])testMap[key]={name:x.test,cause:x.cause,count:x.prs.length,prs:x.prs};
-    });
-  }
+  // No fallback: only show tests that actually failed in this PR/job
   const testList=Object.values(testMap).sort((a,b)=>b.count-a.count||a.name.localeCompare(b.name));
   const prLabel=pr?TH_COMMITS.find(c=>c.pr===pr):null;
   const testListH=testList.length
