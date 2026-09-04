@@ -76,6 +76,7 @@ from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
+from maxtext.utils import mllog_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
 
@@ -890,6 +891,15 @@ def training_loop_iteration(
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
 
+  completed_step = step + 1
+  mllog_utils.tracked_stats(
+      config,
+      completed_step,
+      step_time_delta.total_seconds(),
+      metrics["scalar"]["learning/loss"],
+      start_step=start_step,
+  )
+
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
@@ -912,6 +922,7 @@ def training_loop_iteration(
     # Explicitly reset the eval iterator and counters before starting the eval loop
     eval_data_iterator.reset()
     metric_logger_instance.reset_eval_metrics()
+    mllog_utils.eval_start(config, completed_step, start_step=start_step)
     max_logging.log(f"Starting eval after train step {step}")
 
     eval_step_count = 0
@@ -1023,7 +1034,9 @@ def train_loop(config, recorder, state=None):
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats)
   prof = profiler.Profiler(config, offset_step=start_step)
-  metric_logger_instance = metric_logger.MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
+  metric_logger_instance = metric_logger.MetricLogger(
+      config=config, learning_rate_schedule=learning_rate_schedule, start_step=start_step
+  )
 
   # Write train config params, num model params, and XLA flags to tensorboard
   if isinstance(model, nn.Module):
@@ -1085,6 +1098,11 @@ def train_loop(config, recorder, state=None):
   try:
     python_vars["last_step_completion"] = datetime.datetime.now()
 
+    mllog_utils.init_print(config, start_step)
+    mllog_utils.init_stop()
+    mllog_utils.run_start()
+    mllog_utils.block_start(config, start_step)
+
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
       training_loop_iteration(jax_device_state, python_vars, immutable_data)
@@ -1095,7 +1113,6 @@ def train_loop(config, recorder, state=None):
 
     if immutable_data["save_checkpoint_on_completion"]:
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
-
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
       checkpointing.wait_until_finished(checkpoint_manager)
@@ -1107,6 +1124,9 @@ def train_loop(config, recorder, state=None):
   finally:
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
+      samples_count = (python_vars["step"] - immutable_data["start_step"]) * config.global_batch_size_to_train_on
+      mllog_utils.run_stop(status="success", current_epoch_num=samples_count)
+    mllog_utils.flush_and_sync()
     metric_logger_instance.flush_metrics_and_cleanup()
     train_utils.maybe_cleanup_dcn_throttling(config)
 
@@ -1141,6 +1161,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
     max_utils.bootstrap_transformer_engine_cgemm(config)
 
   # Create the Goodput recorder
+  mllog_utils.init_start(config)
   recorder = create_goodput_recorder(config)
 
   return config, recorder
