@@ -1594,6 +1594,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metadata: Checkpoint metadata payload from Orchestrator.
       **kwargs: Additional checkpoint saving options.
     """
+    if os.getenv("DISABLE_CHECKPOINTING", "false").lower() in ("1", "true", "yes"):
+      logging.info("Checkpointing is disabled via DISABLE_CHECKPOINTING. Skipping save_checkpoint.")
+      return
+
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
 
