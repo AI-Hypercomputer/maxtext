@@ -629,6 +629,15 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         use_rollout_logps=trainer_config.rl.use_rollout_logps,
         force_on_policy_ratio=trainer_config.rl.force_on_policy_ratio,
         log_sampler_trainer_agreement=(trainer_config.rl.log_sampler_trainer_agreement),
+        # Tunix wants a tuple: the bucket edges are formatted into metric names,
+        # so they have to be hashable and stable across the step.
+        sampler_is_length_buckets=(
+            tuple(trainer_config.rl.sampler_is_length_buckets)
+            if trainer_config.rl.sampler_is_length_buckets
+            else None
+        ),
+        truncated_importance_sampling_ratio_min=(trainer_config.rl.truncated_importance_sampling_ratio_min),
+        truncated_importance_sampling_ratio=(trainer_config.rl.truncated_importance_sampling_ratio),
     )
     max_logging.log(
         "GRPO config resolved:\n"

@@ -2619,6 +2619,32 @@ class RL(BaseModel):
           "force_on_policy_ratio otherwise leaves no trainer logps to compare."
       ),
   )
+  sampler_is_length_buckets: Optional[list[int]] = Field(
+      None,
+      description=(
+          "Inclusive upper bounds, in completion tokens, of the length buckets used by the "
+          "sampler_is/lenscale/* diagnostic; one open-ended bucket is appended. Measures how the "
+          "per-sequence sampler-vs-trainer offset scales with sequence length, which distinguishes "
+          "iid token noise (shrinks as 1/sqrt(T)) from a systematic within-sequence bias (does not). "
+          "Choose edges that split the completion-length distribution into comparably populated bins. "
+          "None disables the diagnostic. Requires log_sampler_trainer_agreement or rollout logps."
+      ),
+  )
+  truncated_importance_sampling_ratio_min: Optional[float] = Field(
+      None,
+      description=(
+          "Lower end of the keep-band for the sequence-level importance-sampling filter, reported "
+          "(not applied) as sampler_is/is_oob_ratio. Must be set together with "
+          "truncated_importance_sampling_ratio. No default band; supply the one your recipe specifies."
+      ),
+  )
+  truncated_importance_sampling_ratio: Optional[float] = Field(
+      None,
+      description=(
+          "Upper end of the keep-band for the sequence-level importance-sampling filter. See "
+          "truncated_importance_sampling_ratio_min."
+      ),
+  )
 
 
 class RLDataset(BaseModel):
