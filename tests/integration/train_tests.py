@@ -484,10 +484,18 @@ class TrainTests(unittest.TestCase):
   def test_gpu_te_nvfp4(self):
     train_main(TrainTests.CONFIGS["te_nvfp4"] + ["attention=dot_product"])
 
-  @pytest.mark.skip(reason="No runner with GPU arch >= 100 is available")
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_te_moe_block(self):
+    gpu_device = jax.devices("gpu")[0]
+    compute_capability = getattr(gpu_device, "compute_capability", None)
+    try:
+      if float(compute_capability) < 10.0:
+        pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
+    except Exception:  # pylint: disable=broad-exception-caught
+      # Non-numeric or unknown capability (e.g. ROCm 'gfx942') — skip the test.
+      pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
+
     train_main(
         TrainTests.CONFIGS["synthetic"]
         + [
