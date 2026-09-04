@@ -931,6 +931,17 @@ def main(
     simulated_cpu_devices_count: int = 16,
 ) -> None:
   overall_start = time.time()
+  cleaned_args = []
+  for arg in args:
+    if arg.startswith("save_dtype="):
+      save_dtype = arg.split("=", 1)[1]
+    elif arg.startswith("hf_model_path="):
+      hf_model_path = arg.split("=", 1)[1]
+    elif arg.startswith("lazy_load_tensors="):
+      lazy_load_tensors = str2bool(arg.split("=", 1)[1])
+    else:
+      cleaned_args.append(arg)
+  args = cleaned_args
   # Check if the user is using an Instruct version. If so, use the base model architecture
   for i, arg in enumerate(args):
     if arg.startswith("model_name="):
@@ -1284,6 +1295,23 @@ if __name__ == "__main__":
   parser.add_argument(
       "--simulated_cpu_devices_count", type=int, required=False, default=16, help="Sharding of checkpoint"
   )
+  # Normalize key=value CLI arguments for local_args if passed without leading dashes
+  normalized_argv = [sys.argv[0]]
+  for arg in sys.argv[1:]:
+    for prefix in (
+        "save_dtype=",
+        "hf_model_path=",
+        "lazy_load_tensors=",
+        "eager_load_method=",
+        "revision=",
+        "simulated_cpu_devices_count=",
+    ):
+      if arg.startswith(prefix):
+        arg = "--" + arg
+        break
+    normalized_argv.append(arg)
+  sys.argv = normalized_argv
+
   # Parse local arguments
   # Parse known args returns the namespace AND the list of remaining arguments
   local_args, remaining_args = parser.parse_known_args()
