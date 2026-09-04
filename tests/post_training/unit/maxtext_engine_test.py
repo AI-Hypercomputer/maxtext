@@ -1349,6 +1349,43 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("perplexity", processed)
     self.assertAlmostEqual(processed["perplexity"], float(np.exp(6.0)), places=3)
 
+  def _grads_scaled(self, scale):
+    return {"a": jnp.array([3.0, 4.0]) * scale, "b": jnp.array([[1.0, 2.0]]) * scale}
+
+  def test_clip_by_grad_norm_matches_optax(self):
+    """The hand-rolled scale is `optax.clip_by_global_norm`'s, on the norm already in hand.
+
+    Both sides of the threshold, because the scale is a `where` and only one branch is
+    exercised by a given gradient tree.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    for scale, case in ((100.0, "above the threshold"), (1e-3, "below the threshold")):
+      with self.subTest(case):
+        grads = self._grads_scaled(scale)
+        threshold = t._config.gradient_clipping_threshold
+        expected, _ = optax.clip_by_global_norm(threshold).update(grads, None, None)
+        got = t._clip_by_grad_norm(grads, maxtext_engine.max_utils.l2norm_pytree(grads))
+        jax.tree.map(lambda e, g: np.testing.assert_allclose(e, g, rtol=1e-6), expected, got)
+
+  def test_clip_by_grad_norm_does_not_divide_by_zero(self):
+    """An all-zero gradient tree has to survive the `threshold / norm` branch it discards.
+
+    Compared against the analytic answer rather than optax, because optax is the side that
+    fails here: `clip_by_global_norm` divides by the norm unguarded and leans on
+    `lax.select` to drop the result, so the value is right but a NaN is computed to get
+    there and `debug_nans` stops on it. Reusing the caller's norm is what makes guarding it
+    possible, so this is a hazard the change removes rather than one it has to avoid
+    introducing.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    grads = self._grads_scaled(0.0)
+    with jax.debug_nans(True):
+      got = t._clip_by_grad_norm(grads, maxtext_engine.max_utils.l2norm_pytree(grads))
+    jax.tree.map(lambda g: np.testing.assert_array_equal(g, jnp.zeros_like(g)), got)
+
+    with self.assertRaises(FloatingPointError), jax.debug_nans(True):
+      optax.clip_by_global_norm(t._config.gradient_clipping_threshold).update(grads, None, None)
+
 
 if __name__ == "__main__":
   absltest.main()
