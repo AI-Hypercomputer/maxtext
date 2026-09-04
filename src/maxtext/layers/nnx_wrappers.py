@@ -33,6 +33,7 @@ from flax.nnx import Pytree
 from flax.nnx.rnglib import Rngs
 import jax
 from jax import tree_util as jtu
+from maxtext.utils import debug_tensor_interceptors
 import qwix
 
 M = tp.TypeVar("M", bound=Module)
@@ -525,6 +526,12 @@ class ToLinen(linen.Module):
       # update linen variables before call module to save initial state
       self._update_variables(module)
       _fix_for_qwix_quantization(module)
+      if debug_tensor_interceptors.is_debug_telemetry_active():
+        dbg_cfg, dbg_step = debug_tensor_interceptors.get_active_telemetry_context()
+        dbg_parent = "/".join(self.path) if self.scope is not None and self.path else self.name or ""
+        module = debug_tensor_interceptors.wrap_nnx_module_for_debug(
+            module, parent_path=dbg_parent, step=dbg_step, config=dbg_cfg
+        )
       method_fn = _get_module_method(module, nnx_method)
       out = method_fn(module, *args, **kwargs)
       return out
@@ -598,6 +605,12 @@ class ToLinen(linen.Module):
     module = nnx.merge(graphdef, full_state)
 
     _fix_for_qwix_quantization(module)
+    if debug_tensor_interceptors.is_debug_telemetry_active():
+      dbg_cfg, dbg_step = debug_tensor_interceptors.get_active_telemetry_context()
+      dbg_parent = "/".join(self.path) if self.scope is not None and self.path else self.name or ""
+      module = debug_tensor_interceptors.wrap_nnx_module_for_debug(
+          module, parent_path=dbg_parent, step=dbg_step, config=dbg_cfg
+      )
     method_fn = _get_module_method(module, nnx_method)
     out = method_fn(module, *args, **kwargs)
     self._update_variables(module)

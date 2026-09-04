@@ -2360,6 +2360,24 @@ class DevelopmentAndDebugging(BaseModel):
       False,
       description="If True, perform extra checks using jax.checkify, affecting performance.",
   )
+  debug_tensor_distribution: bool = Field(
+      False,
+      description="Enable tensor distribution debugging in FWD and BWD passes.",
+  )
+  debug_tensor_distribution_layers: str = Field(
+      "all",
+      description=(
+          "Filter layers/submodules to debug ('all' or comma-separated names/indices, "
+          "e.g. '0,1', 'layers_0,layers_1', 'moe', 'attention')."
+      ),
+  )
+  debug_tensor_distribution_step_interval: PositiveInt = Field(
+      1,
+      description=(
+          "Step frequency interval (in training steps) for debug tensor logging "
+          "(e.g. 1 logs every step, 10 logs every 10 steps)."
+      ),
+  )
 
   @classmethod
   def _clean_empty_string_for_list(cls, v: Any) -> Any:
@@ -4716,6 +4734,33 @@ class MaxTextConfig(
             f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
             f"max_target_length={self.max_target_length}."
         )
+
+    if self.debug_tensor_distribution:
+      if self.debug_tensor_distribution_step_interval < 1:
+        raise ValueError(
+            f"debug_tensor_distribution_step_interval must be >= 1, got {self.debug_tensor_distribution_step_interval}."
+        )
+      if self.debug_tensor_distribution_layers and self.debug_tensor_distribution_layers != "all":
+        num_layers = self.num_decoder_layers or self.base_num_decoder_layers
+        for raw_item in self.debug_tensor_distribution_layers.split(","):
+          item = raw_item.strip()
+          if not item:
+            continue
+          target = item.split("/")[-1]
+          if target.startswith("layers_"):
+            target = target[len("layers_") :]
+          elif target.startswith("layer_"):
+            target = target[len("layer_") :]
+          try:
+            layer_idx = int(target)
+          except ValueError:
+            layer_idx = None
+          if layer_idx is not None:
+            if layer_idx < 0 or (num_layers and layer_idx >= num_layers):
+              raise ValueError(
+                  f"debug_tensor_distribution_layers specifies layer index {layer_idx}, which is "
+                  f">= number of model layers ({num_layers})."
+              )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
