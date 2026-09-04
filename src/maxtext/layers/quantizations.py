@@ -875,6 +875,7 @@ class NANOOFp8Provider(qwix.QtProvider):
 
 
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
+  """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
   if config.weight_sparsity_n and config.weight_sparsity_m:
     sparsity_rule = sparsity.SparsityRule(
@@ -883,9 +884,15 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
         weight_sparsity_update_step=config.weight_sparsity_update_step,
         weight_sparsity_start_step=config.weight_sparsity_start_step,
     )
+
+  if config.quantize_mtp:
+    module_path = "(decoder/.*layers.*|mtp_block/.*)"
+  else:
+    module_path = "decoder/.*layers.*"
+
   return [
       qwix.QtRule(
-          module_path="decoder/.*layers.*",
+          module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
           act_qtype=jnp.float8_e4m3fn,
           bwd_qtype=jnp.float8_e5m2,
