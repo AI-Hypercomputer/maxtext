@@ -2776,6 +2776,29 @@ class RL(BaseModel):
           "If None, no chunking is applied, which may lead to OOM errors if tensors are too large."
       ),
   )
+  use_rollout_logps: bool = Field(
+      True,
+      description=(
+          "Use rollout engine's logprobs as old_per_token_logps. "
+          "False selects the step-0 re-forward path (trainer recomputes them)"
+      ),
+  )
+  force_on_policy_ratio: bool = Field(
+      False,
+      description=(
+          "Pin the PPO/GRPO surrogate ratio to exactly 1.0 by using "
+          "stop_gradient(current_logp) as old_per_token_logps. Valid only for "
+          "single-iteration on-policy training (num_iterations=1)."
+      ),
+  )
+  log_sampler_trainer_agreement: bool = Field(
+      False,
+      description=(
+          "Compute an extra trainer forward pass per step to log sampler-vs-trainer "
+          "logp agreement metrics. Costs ~1 forward pass; needed because "
+          "force_on_policy_ratio otherwise leaves no trainer logps to compare."
+      ),
+  )
 
 
 class RLDataset(BaseModel):
