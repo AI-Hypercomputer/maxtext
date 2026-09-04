@@ -53,6 +53,7 @@ from maxtext.common.gcloud_stub import gcs_storage
 from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
 from maxtext.utils import max_logging
 import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp_v1
 
 _storage = gcs_storage()
 Client = _storage.Client
@@ -1238,6 +1239,7 @@ def save_weights_to_checkpoint(
     use_ocdbt: bool,
     use_zarr3: bool,
     config=None,
+    checkpointables_registry: ocp_v1.handlers.CheckpointableHandlerRegistry | None = None,
 ):
   """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
 
@@ -1254,6 +1256,10 @@ def save_weights_to_checkpoint(
           (OCDBT) format for improved metadata handling.
       use_zarr3: If True, uses the Zarr3 storage format for the underlying array data.
       config: Optional config to save along with checkpoint metadata.
+      checkpointables_registry: Optional Orbax v1 handler registry, for converters whose
+          weight pytrees hold leaf types Orbax does not know natively. Only matters when
+          device_count is 1; above that shard_jax_weights has already materialized every
+          leaf into a sharded jax.Array.
   """
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -1281,6 +1287,7 @@ def save_weights_to_checkpoint(
       save_interval_steps,
       use_ocdbt=use_ocdbt,
       use_zarr3=use_zarr3,
+      checkpointables_registry=checkpointables_registry,
   )
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")

@@ -375,6 +375,7 @@ def create_orbax_checkpoint_manager(
     todelete_subdir: str | None = None,
     todelete_full_path: str | None = None,
     ocdbt_target_data_file_size_bytes: int | None = None,
+    checkpointables_registry: ocp.handlers.CheckpointableHandlerRegistry | None = None,
 ):
   """Returns an Orbax v1 training ``Checkpointer``, or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -411,6 +412,7 @@ def create_orbax_checkpoint_manager(
       todelete_full_path=todelete_full_path,
       todelete_subdir=todelete_subdir,
       partial_load=True,
+      checkpointables_registry=checkpointables_registry,
   )
 
   manager = ocp.training.Checkpointer(
