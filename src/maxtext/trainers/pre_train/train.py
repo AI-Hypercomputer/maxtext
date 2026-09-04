@@ -21,6 +21,7 @@
 from typing import Any, Sequence, TypedDict
 import datetime
 import functools
+import gc
 import os
 
 from absl import app
@@ -436,6 +437,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "mtp_loss": mtp_loss,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
+  has_moe_overflow = jnp.bool_(False)
+  if config.retry_when_tokens_dropped:
+    moe_overflow_flags = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_has_overflow")
+    if moe_overflow_flags:
+      has_moe_overflow = jnp.any(jnp.stack([jnp.any(x) for x in moe_overflow_flags]))
+  aux["has_moe_overflow"] = has_moe_overflow
   return loss, aux
 
 
@@ -582,6 +589,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   xent_sum = aux["xent_sum"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
+  has_moe_overflow = aux.get("has_moe_overflow")
   indexer_loss = aux.get("indexer_loss", 0.0)
   z_loss = aux.get("z_loss", 0.0)
   moe_bias_updates = aux.get("moe_bias_updates")
@@ -771,6 +779,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "scalar": scalar_metrics,
       "scalars": {},
   }
+  if config.retry_when_tokens_dropped:
+    metrics["has_moe_overflow"] = has_moe_overflow if has_moe_overflow is not None else jnp.bool_(False)
   if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -834,6 +844,7 @@ def training_loop_iteration(
   mesh = jax_device_state["mesh"]
   state_mesh_shardings = jax_device_state["state_mesh_shardings"]
   p_train_step = jax_device_state["p_train_step"]
+  p_train_step_dropless = jax_device_state.get("p_train_step_dropless", None)
   p_eval_step = jax_device_state["p_eval_step"]
   model = jax_device_state["model"]
 
@@ -885,7 +896,26 @@ def training_loop_iteration(
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_train):
         if shard_optimizer_over_data and isinstance(model, nn.Module):
           state = sharding.maybe_shard_with_name(state, state_mesh_shardings, shard_mode)
-        state, metrics = p_train_step(state, example_batch, *step_rng_args)
+        if config.retry_when_tokens_dropped and p_train_step_dropless is not None:
+          candidate_state, metrics = p_train_step(state, example_batch, *step_rng_args)
+          if bool(metrics.get("has_moe_overflow")):
+            max_logging.log(
+                f"Step {step}: MoE ragged buffer overflow detected! "
+                f"Discarding candidate state and replaying step with dropless buffer..."
+            )
+            # Explicitly deallocate device buffers held by candidate_state before replaying
+            # with p_train_step_dropless to avoid pinning two ~13.4 GB model states in HBM.
+            jax.tree_util.tree_map(
+                lambda x: x.delete() if hasattr(x, "delete") else None,
+                candidate_state,
+            )
+            del candidate_state
+            gc.collect()
+            state, metrics = p_train_step_dropless(state, example_batch, *step_rng_args)
+          else:
+            state = candidate_state
+        else:
+          state, metrics = p_train_step(state, example_batch, *step_rng_args)
 
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
@@ -968,6 +998,8 @@ def train_loop(config, recorder, state=None):
   start_step = get_first_step(model, state)  # this is the start_step for training
   train_utils.validate_completed_steps(start_step, config.steps)
 
+  jit_model_dropless = None
+
   if isinstance(model, nn.Module):
     jit_model = model
   elif config.enable_diloco:
@@ -975,6 +1007,18 @@ def train_loop(config, recorder, state=None):
     jit_model = model
   else:
     jit_model, state = nnx.split(state)
+    if config.retry_when_tokens_dropped:
+      reconstructed = nnx.merge(jit_model, state)
+      for _, module in nnx.iter_graph(reconstructed):
+        if type(module).__name__ == "RoutedMoE":
+          module.force_dropless_buffer = True
+          module.num_moe_token_chunks = getattr(config, "retry_num_moe_token_chunks", 2)
+          module.moe_chunk_barrier = True
+        elif type(module).__name__ == "Decoder":
+          module.remat_policy_override = "full"
+      jit_model_dropless, _ = nnx.split(reconstructed)
+      del reconstructed, _
+      gc.collect()
 
   if config.pure_nnx and config.enable_diloco:
     # DiLoCoTrainState.params already holds the param shardings the inner step needs;
@@ -994,6 +1038,20 @@ def train_loop(config, recorder, state=None):
       eval_data_iterator,
       params_shardings,
   )
+
+  p_train_step_dropless = None
+  if jit_model_dropless is not None:
+    p_train_step_dropless, _ = train_utils.jit_train_and_eval_step(
+        config,
+        jit_model_dropless,
+        mesh,
+        state,
+        state_mesh_shardings,
+        train_step,
+        eval_step=None,
+        eval_data_iterator=None,
+        params_shardings=params_shardings,
+    )
 
   # Do not enter the legacy `mesh` context manager here: the training loop calls
   # p_train_step without it, and the mismatch in jit's tracing-cache key would
@@ -1043,6 +1101,7 @@ def train_loop(config, recorder, state=None):
       "mesh": mesh,
       "state_mesh_shardings": state_mesh_shardings,
       "p_train_step": p_train_step,
+      "p_train_step_dropless": p_train_step_dropless,
       "p_eval_step": p_eval_step,
       "model": model,
   }
