@@ -747,9 +747,9 @@ class CompressedAttention(BaseModel):
 
 
 class AttentionIndexer(BaseModel):
-  """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
+  """Configuration for DeepSeek Sparse Attention (DSA): MLA or Compressed Attention with indexer."""
 
-  use_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
+  use_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA or Compressed Attention.")
   indexer_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
   indexer_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
   indexer_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
@@ -4123,10 +4123,11 @@ class MaxTextConfig(
         )
 
     if self.use_indexer:
-      if self.attention_type != AttentionType.MLA.value:
+      if self.attention_type not in (AttentionType.MLA.value, AttentionType.COMPRESSED.value):
         raise ValueError(
-            f"`use_indexer=True` requires `attention_type='{AttentionType.MLA.value}'`, since only the "
-            "MLA indexer produces this mask."
+            f"`use_indexer=True` requires `attention_type='{AttentionType.MLA.value}'` or "
+            f"`attention_type='{AttentionType.COMPRESSED.value}'`, since only MLA and "
+            "Compressed Attention indexers produce this mask."
         )
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
@@ -4134,23 +4135,35 @@ class MaxTextConfig(
       supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
       if not (supports_dot_product or supports_flash_splash):
         raise ValueError(
-            "Sparse indexer is only supported with dot_product attention or flash attention with tokamax splash."
+            f"Sparse indexer with {self.attention_type} is only supported with dot_product attention or flash "
+            "attention with tokamax splash."
         )
-      if (
-          self.attention == "flash"
-          and self.context_parallel_strategy == "all_gather"
-          and self.ici_context_parallelism * self.dcn_context_parallelism > 1
-          and self.attention_sink
-      ):
-        raise ValueError(
-            "Sparse indexer with all-gather context parallelism for flash attention does not support attention sinks."
-        )
-      if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
-        raise ValueError(
-            f"`indexer_topk` ({self.indexer_topk}) must be < `max_target_length` ({self.max_target_length}) "
-            "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
-            "short-circuits to select all tokens and no indexer loss is produced."
-        )
+      if self.attention_type == AttentionType.MLA.value:
+        if (
+            self.attention == "flash"
+            and self.context_parallel_strategy == "all_gather"
+            and self.ici_context_parallelism * self.dcn_context_parallelism > 1
+            and self.attention_sink
+        ):
+          raise ValueError(
+              "Sparse indexer with all-gather context parallelism for flash attention does not support attention sinks."
+          )
+        if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
+          raise ValueError(
+              f"`indexer_topk` ({self.indexer_topk}) must be < `max_target_length` ({self.max_target_length}) "
+              "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
+              "short-circuits to select all tokens and no indexer loss is produced."
+          )
+      elif self.attention_type == AttentionType.COMPRESSED.value:
+        # DeepSeek-V4 CSA natively uses a compression rate of 4 for the indexer blocks.
+        compress_rate = 4
+        max_blocks = self.max_target_length // compress_rate
+        if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk > max_blocks:
+          raise ValueError(
+              f"`indexer_topk` ({self.indexer_topk}) must be <= total compressed blocks ({max_blocks}) "
+              f"(max_target_length={self.max_target_length} // compress_rate={compress_rate}) "
+              "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`)."
+          )
     if not self.use_indexer and self.indexer_cutoff_threshold != RematLocation.REMAT:
       raise ValueError(
           f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
