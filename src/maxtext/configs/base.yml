@@ -1191,6 +1191,8 @@ monitor_step_time_deviation: true
 step_deviation_interval_seconds: 30
 enable_gcp_goodput_metrics: true
 enable_gcp_step_deviation_metrics: true
+rolling_windows_seconds: [3600, 86400, 259200, 432000]
+enable_rolling_window_goodput: true
 
 # GCP workload monitoring
 report_heartbeat_metric_for_gcp_monitoring: false

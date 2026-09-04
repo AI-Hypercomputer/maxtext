@@ -100,14 +100,126 @@ class GoodputUtilsTest(unittest.TestCase):
     mock_record_job_start_time.assert_called_once()
     mock_record_job_end_time.assert_not_called()
 
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_rolling_window_goodput_uploader")
   @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_goodput_uploader")
   @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_goodput_uploader")
-  def test_monitor_goodput(self, mock_start_goodput_uploader, mock_stop_goodput_uploader):
+  def test_monitor_goodput(self, mock_start_goodput_uploader, mock_stop_goodput_uploader, *unused_rolling_mocks):
     mock_start_goodput_uploader.return_value = mock.MagicMock()
 
     with maybe_monitor_goodput(self.config):
       mock_start_goodput_uploader.assert_called()
     mock_stop_goodput_uploader.assert_called()
+
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_goodput_uploader")
+  def test_monitor_rolling_window_goodput(
+      self, mock_start_goodput, mock_stop_goodput, mock_start_rolling, mock_stop_rolling
+  ):
+    """Both uploaders start; on exit the rolling window stops before the cumulative one."""
+    windows = [3600, 86400]
+    config = _ConfigOverride(self.config, enable_rolling_window_goodput=True, rolling_windows_seconds=windows)
+    calls = mock.Mock()
+    calls.attach_mock(mock_stop_rolling, "stop_rolling")
+    calls.attach_mock(mock_stop_goodput, "stop_goodput")
+
+    with maybe_monitor_goodput(config):
+      mock_start_goodput.assert_called_once()
+      mock_start_rolling.assert_called_once_with(windows)
+      mock_stop_rolling.assert_not_called()
+
+    self.assertEqual(calls.mock_calls, [mock.call.stop_rolling(), mock.call.stop_goodput()])
+
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_goodput_uploader")
+  def test_monitor_rolling_window_goodput_disabled(
+      self, mock_start_goodput, mock_stop_goodput, mock_start_rolling, mock_stop_rolling
+  ):
+    """enable_rolling_window_goodput=False only runs the cumulative uploader."""
+    config = _ConfigOverride(self.config, enable_rolling_window_goodput=False)
+
+    with maybe_monitor_goodput(config):
+      mock_start_goodput.assert_called_once()
+
+    mock_stop_goodput.assert_called_once()
+    mock_start_rolling.assert_not_called()
+    mock_stop_rolling.assert_not_called()
+
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_rolling_window_goodput_uploader")
+  @mock.patch(
+      "ml_goodput_measurement.monitoring.GoodputMonitor.start_rolling_window_goodput_uploader",
+      side_effect=RuntimeError("start boom"),
+  )
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_goodput_uploader")
+  def test_monitor_rolling_window_goodput_start_failure_degrades_gracefully(
+      self, unused_mock_start_goodput, mock_stop_goodput, mock_start_rolling, mock_stop_rolling
+  ):
+    """A failing rolling window start is swallowed; the body still runs and nothing is stopped twice."""
+    config = _ConfigOverride(self.config, enable_rolling_window_goodput=True)
+    body_ran = False
+
+    with maybe_monitor_goodput(config):  # Must not raise.
+      body_ran = True
+
+    self.assertTrue(body_ran)
+    mock_start_rolling.assert_called_once()
+    mock_stop_rolling.assert_not_called()  # Never started, so never stopped.
+    mock_stop_goodput.assert_called_once()  # Cumulative monitoring is unaffected.
+
+  @mock.patch(
+      "ml_goodput_measurement.monitoring.GoodputMonitor.stop_rolling_window_goodput_uploader",
+      side_effect=RuntimeError("stop boom"),
+  )
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_goodput_uploader")
+  def test_monitor_rolling_window_goodput_stop_failure_degrades_gracefully(
+      self, unused_mock_start_goodput, mock_stop_goodput, unused_mock_start_rolling, mock_stop_rolling
+  ):
+    """A failing rolling window stop is swallowed and the cumulative uploader is still stopped."""
+    config = _ConfigOverride(self.config, enable_rolling_window_goodput=True)
+
+    with maybe_monitor_goodput(config):  # Must not raise on exit.
+      pass
+
+    mock_stop_rolling.assert_called_once()
+    mock_stop_goodput.assert_called_once()
+
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_goodput_uploader")
+  def test_monitor_rolling_window_goodput_propagates_body_exception(
+      self, unused_mock_start_goodput, mock_stop_goodput, unused_mock_start_rolling, mock_stop_rolling
+  ):
+    """Graceful degradation must not swallow errors raised by training itself."""
+    config = _ConfigOverride(self.config, enable_rolling_window_goodput=True)
+
+    class TrainingError(Exception):
+      pass
+
+    with self.assertRaises(TrainingError):
+      with maybe_monitor_goodput(config):
+        raise TrainingError()
+
+    mock_stop_rolling.assert_called_once()
+    mock_stop_goodput.assert_called_once()
+
+  def test_rolling_windows_seconds_rejects_empty_list(self):
+    """An empty window list would spawn an idle uploader process, so config validation rejects it."""
+    with self.assertRaisesRegex(Exception, "rolling_windows_seconds"):
+      pyconfig.initialize(
+          [None, get_test_config_path()],
+          base_output_directory=get_test_base_output_directory(),
+          run_name="runner_test",
+          enable_checkpointing=False,
+          rolling_windows_seconds=[],
+      )
 
   def test_job_recording_constants(self):
     """Constants must map to the recorder method names."""
@@ -183,11 +295,13 @@ class GoodputUtilsTest(unittest.TestCase):
     # here - that name is itself patched to a Mock for this test, so it isn't a usable type.
     self.assertIsInstance(monitor, monitoring.GoodputMonitor)
 
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_rolling_window_goodput_uploader")
   @mock.patch("ml_goodput_measurement.monitoring_elastic.ElasticGoodputMonitor.stop_goodput_uploader")
   @mock.patch("ml_goodput_measurement.monitoring_elastic.ElasticGoodputMonitor.start_goodput_uploader")
   @mock.patch("maxtext.utils.elastic_utils.should_use_elastic")
   def test_monitor_goodput_elastic(
-      self, mock_should_use_elastic, mock_start_goodput_uploader, mock_stop_goodput_uploader
+      self, mock_should_use_elastic, mock_start_goodput_uploader, mock_stop_goodput_uploader, *unused_rolling_mocks
   ):
     """maybe_monitor_goodput actually starts/stops an ElasticGoodputMonitor when elastic is active."""
     mock_should_use_elastic.return_value = True
