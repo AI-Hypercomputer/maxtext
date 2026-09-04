@@ -15,10 +15,13 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 
 ### Mandatory Technical Principles & Constraints
 > [!IMPORTANT]
-> **1. Usage of FFI is Mandatory for Success**:
-> Without the JAX FFI backend (`weight_synchronizer_ffi`), we cannot scale the system to larger models (like Qwen3.5-35B). Non-FFI staging routes entire weight trees through client host memory or proxy runtime, which inevitably triggers fatal **Host Out-Of-Memory (OOM)** errors and proxy transfer timeouts. Hacking around or changing the architectural goals is not acceptable.
+> **1. Development Scale vs. Ultimate Target (Scaling to 3T Models)**:
+> The **0.6B** and **35B** models are strictly temporary development milestones to validate functionality, synchronization correctness, and distributed runtime orchestration. The ultimate goal of the team is to scale distributed RL to **3 Trillion (3T) parameter models**.
+>
+> **2. Usage of FFI is Mandatory for Success**:
+> Because the target is multi-trillion parameter scaling, direct **JAX FFI device-to-device synchronization** (`weight_synchronizer_ffi`) is mandatory. Non-FFI staging routes weight trees through client host memory or proxy runtime, which inevitably triggers fatal **Host Out-Of-Memory (OOM)** errors and proxy transfer timeouts. Hacking around FFI or compromising the architecture is completely unacceptable.
 > 
-> **2. Rigorous Bug Reporting & Isolated Reproductions**:
+> **3. Rigorous Bug Reporting & Isolated Reproductions**:
 > If any component (such as FFI, tpu-sync, or Pathways) fails or behaves unexpectedly, we must NOT implement hacky bypasses that compromise long-term scalability. Instead:
 > - File clear, easy-to-reproduce bug reports for the corresponding component teams (Pathways, TPU Sync, or Compiler).
 > - Provide standalone minimal reproduction scripts that isolate the failing behavior **without** pulling in the full complex integration across `tunix` / `maxtext` / `tpu-inference` / `vllm` / `tpu-sync`.
