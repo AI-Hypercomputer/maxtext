@@ -2483,6 +2483,7 @@ class RoutedMoE(nnx.Module):
             scatter_dimension=0,
             tiled=True,
         )
+        output = adc.checkpoint_name(output, "moe_combine")
         return output, routing.lb_loss, routing.bias_updates
 
       if self.get_expert_parallelism_size() > 1:
@@ -2504,6 +2505,7 @@ class RoutedMoE(nnx.Module):
             output_shape,
             is_batch_sharded_by_expert,
         )
+        intermediate_output = adc.checkpoint_name(intermediate_output, "moe_combine")
 
       output = self.unpermute(
           intermediate_output,
