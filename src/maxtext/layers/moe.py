@@ -670,17 +670,29 @@ class RoutedMoE(nnx.Module):
 
     if not quantizations.in_serve_mode(self.quant) and ctypes.is_fp8_dtype(self.weight_dtype):
       scale_dtype = jnp.float32
+      block_size = getattr(self.config, "weight_block_size", None)
+      if block_size is not None:
+        if isinstance(block_size, (list, tuple)):
+          b_in = block_size[0]
+          b_out = block_size[1] if len(block_size) > 1 else block_size[0]
+        else:
+          b_in = block_size
+          b_out = block_size
+        in_blocks = self.moe_expert_input_dim // b_in if self.moe_expert_input_dim >= b_in else self.moe_expert_input_dim
+        out_blocks = moe_intermediate_dim // b_out if moe_intermediate_dim >= b_out else moe_intermediate_dim
+        if self.config.prefuse_moe_weights:
+          fused_out_dim = moe_intermediate_dim * 2
+          fused_out_blocks = fused_out_dim // b_out if fused_out_dim >= b_out else fused_out_dim
+          wi_scale_shape = (num_experts, in_blocks, fused_out_blocks)
+          wo_scale_shape = (self.num_experts, out_blocks, in_blocks)
+        else:
+          wi_scale_shape = (num_experts, in_blocks, out_blocks)
+          wo_scale_shape = (self.num_experts, out_blocks, in_blocks)
+      else:
+        wi_scale_shape = (num_experts,)
+        wo_scale_shape = (self.num_experts,)
+
       if self.config.prefuse_moe_weights:
-        wi_scale_shape = (
-            num_experts,
-            self.moe_expert_input_dim // 128,
-            (moe_intermediate_dim * 2) // 128,
-        )
-        wo_scale_shape = (
-            self.num_experts,
-            moe_intermediate_dim // 128,
-            self.moe_expert_input_dim // 128,
-        )
         self.wi_scale = nnx.Param(
             jnp.ones(wi_scale_shape, dtype=scale_dtype),
             sharding=self.wi_kernel_axes,
@@ -692,16 +704,6 @@ class RoutedMoE(nnx.Module):
         self.wi_0_scale = None
         self.wi_1_scale = None
       else:
-        wi_scale_shape = (
-            num_experts,
-            self.moe_expert_input_dim // 128,
-            moe_intermediate_dim // 128,
-        )
-        wo_scale_shape = (
-            self.num_experts,
-            moe_intermediate_dim // 128,
-            self.moe_expert_input_dim // 128,
-        )
         self.wi_0_scale = nnx.Param(
             jnp.ones(wi_scale_shape, dtype=scale_dtype),
             sharding=self.wi_kernel_axes,

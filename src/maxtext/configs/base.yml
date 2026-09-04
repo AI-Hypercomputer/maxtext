@@ -174,6 +174,8 @@ decoder_block: "llama2" # which style of decoderblock to use.
 weight_dtype: "float32"
 # List of module names or patterns to keep unquantized in model dtype (e.g. bfloat16) even when weight_dtype is FP8
 unquantized_modules: []
+# Block size for block-scaled quantized weights (e.g. 128 for 128x128 block scaling). null for per-tensor scaling.
+weight_block_size: null
 global_parameter_scale: 1
 base_emb_dim: 2048
 base_num_query_heads: 16

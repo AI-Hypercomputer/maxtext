@@ -293,7 +293,13 @@ class DenseGeneral(nnx.Module):
       if scale_shape is not None:
         resolved_scale_shape = canonicalize_tuple(scale_shape)
       elif block_size is not None:
-        resolved_scale_shape = tuple(d // block_size for d in kernel_shape)
+        if isinstance(block_size, int):
+          resolved_scale_shape = tuple(d if d < block_size else d // block_size for d in kernel_shape)
+        elif len(block_size) == len(kernel_shape):
+          resolved_scale_shape = tuple(d if d < b else d // b for d, b in zip(kernel_shape, block_size))
+        else:
+          b = block_size[0]
+          resolved_scale_shape = tuple(d if d < b else d // b for d in kernel_shape)
       else:
         resolved_scale_shape = ()
 
@@ -637,6 +643,8 @@ class MlpBlock(nnx.Module):
     else:
       self.intermediate_logical = ("activation_batch", "activation_length", "activation_mlp")
 
+    block_size = getattr(config, "weight_block_size", None)
+
     if config.fused_mlp:
       self.wi = DenseGeneral(
           in_features_shape=in_features,
@@ -652,6 +660,7 @@ class MlpBlock(nnx.Module):
           mesh=self.mesh,
           use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
           debug_sharding=self.config.debug_sharding,
+          block_size=block_size,
           rngs=rngs,
       )
     else:
@@ -671,6 +680,7 @@ class MlpBlock(nnx.Module):
             mesh=self.mesh,
             use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
             debug_sharding=self.config.debug_sharding,
+            block_size=block_size,
             rngs=rngs,
         )
         setattr(self, dense_name, module)
@@ -689,6 +699,7 @@ class MlpBlock(nnx.Module):
         mesh=self.mesh,
         use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
         debug_sharding=self.config.debug_sharding,
+        block_size=block_size,
         rngs=rngs,
     )
 

@@ -685,6 +685,7 @@ class Attention(nnx.Module):
     if self.is_qwen3_hybrid:
       out_features = (self.num_query_heads, self.head_dim * 2)
 
+    block_size = getattr(self.config, "weight_block_size", None)
     return DenseGeneral(
         in_features_shape=in_features,
         out_features_shape=out_features,
@@ -697,6 +698,7 @@ class Attention(nnx.Module):
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         shard_mode=self.config.shard_mode,
+        block_size=block_size,
         rngs=self.rngs,
     )
 
@@ -723,6 +725,7 @@ class Attention(nnx.Module):
     )
     self._validate_kv_head_sharding(kernel_axes)
 
+    block_size = getattr(self.config, "weight_block_size", None)
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_kv_shape),
         out_features_shape=(self.num_kv_heads, self.head_dim),
@@ -735,6 +738,7 @@ class Attention(nnx.Module):
         shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
+        block_size=block_size,
         rngs=self.rngs,
     )
 
@@ -819,6 +823,7 @@ class Attention(nnx.Module):
       out_kernel_axis = ("mlp", "embed_attn")
       axis = (-1,)
 
+    block_size = getattr(self.config, "weight_block_size", None)
     return DenseGeneral(
         in_features_shape=in_features,
         out_features_shape=out_features,
@@ -831,6 +836,7 @@ class Attention(nnx.Module):
         shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
         use_bias=False if self.is_qwen2 else self.use_bias_in_projections,
+        block_size=block_size,
         rngs=self.rngs,
     )
 

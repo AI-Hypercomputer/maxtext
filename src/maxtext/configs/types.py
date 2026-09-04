@@ -467,6 +467,13 @@ class Quantization(BaseModel):
           "(e.g. bfloat16) even when weight_dtype is FP8."
       ),
   )
+  weight_block_size: None | int | list[int] = Field(
+      None,
+      description=(
+          "Block size for block-scaled quantized weights (e.g. 128 for 128x128 block scaling). "
+          "None for per-tensor scaling."
+      ),
+  )
   replicate_quant_scale: bool = Field(
       False,
       description="Replicates quantization scale to avoid inefficient XLA fusion.",
