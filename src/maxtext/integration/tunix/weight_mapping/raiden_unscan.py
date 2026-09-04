@@ -44,6 +44,21 @@ from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 
 
+def _slice_along_axis(arr: Any, idx: int, axis: int) -> Any:
+  """Slices a tensor or abstract ShapeDtypeStruct along a specific axis."""
+  if isinstance(arr, jax.ShapeDtypeStruct):
+    new_shape = arr.shape[:axis] + arr.shape[axis + 1 :]
+    new_sharding = None
+    sharding = getattr(arr, "sharding", None)
+    if isinstance(sharding, jax.sharding.NamedSharding):
+      spec = list(sharding.spec)
+      spec = (spec + [None] * len(arr.shape))[: len(arr.shape)]
+      new_spec = tuple(spec[:axis] + spec[axis + 1 :])
+      new_sharding = jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+    return jax.ShapeDtypeStruct(new_shape, arr.dtype, sharding=new_sharding)
+  return jax.lax.index_in_dim(arr, idx, axis=axis, keepdims=False)
+
+
 def unscan_layers(
     state: Any,
     num_layers: int,
@@ -133,7 +148,7 @@ def unscan_layers(
       )
 
     for i in range(expected):
-      sliced = jax.lax.index_in_dim(arr, i, axis=scan_axis, keepdims=False)
+      sliced = _slice_along_axis(arr, i, axis=scan_axis)
       layer_no = i * cycle_interval + slot if slot is not None else i
       new_key = prefix + (f"{layer_container}_{layer_no}",) + suffix
       new_flat[new_key] = sliced
