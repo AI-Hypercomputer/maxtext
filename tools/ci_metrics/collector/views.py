@@ -1285,6 +1285,12 @@ def build_flaky_view(data: MonthData) -> dict[str, Any]:
     last = data.last_attempt(run_id)
     if last is None:
       continue
+    # Skip superseded runs: a PR that pushed twice has an earlier run where
+    # jobs may have failed, but the developer fixed the code and pushed again.
+    # Only the representative run (the one the PR merged with) counts.
+    # Scheduled runs (no PR) are always kept.
+    if pr_number is not None and not data.is_representative(run_id):
+      continue
     for event in sorted(events, key=lambda row: (row.failed_attempt, row.job_name)):
       parsed = derive.parse_execute_tests_name(event.job_name)
       flavor = parsed[0] if parsed else None
