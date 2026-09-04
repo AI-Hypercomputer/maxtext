@@ -2818,6 +2818,16 @@ class RL(BaseModel):
           "None disables the diagnostic. Requires log_sampler_trainer_agreement or rollout logps."
       ),
   )
+  sampler_is_report_bands: Optional[list[list[float]]] = Field(
+      None,
+      description=(
+          "Keep-bands to report a would-be sequence drop rate for, without applying them, as "
+          "sampler_is/would_drop_<lo>_<hi>. Each entry is an ordered [min, max] pair on the "
+          "per-sequence geometric-mean sampler-to-trainer ratio. Lets a band be chosen from data "
+          "before truncated_importance_sampling_type switches it on. No band is assumed; None "
+          "disables the reporting. Example: [[0.999,1.002],[0.99,1.01]]."
+      ),
+  )
   truncated_importance_sampling_ratio_min: Optional[float] = Field(
       None,
       description=(
