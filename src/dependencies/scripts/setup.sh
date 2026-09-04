@@ -125,18 +125,24 @@ fi
 echo "Python version check passed. Continuing with script."
 echo "--------------------------------------------------"
 
-apt-get update && apt-get install -y sudo
+apt-get update && apt-get upgrade -y && apt-get install -y sudo
 (sudo bash || bash) <<'EOF'
-apt update && \
-apt install -y numactl lsb-release gnupg curl net-tools iproute2 procps lsof git ethtool && \
+# sudo strips the exports set by the parent shell, so re-export them here to
+# keep apt-get non-interactive.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_SUSPEND=1
+export NEEDRESTART_MODE=l
+apt-get update && \
+apt-get upgrade -y && \
+apt-get install -y numactl lsb-release gnupg curl net-tools iproute2 procps lsof git ethtool && \
 export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
 echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
 curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-apt update -y && apt -y install gcsfuse
+apt-get update -y && apt-get -y install gcsfuse
 rm -rf /var/lib/apt/lists/*
 EOF
 
-python3 -m pip install -U setuptools wheel uv
+python3 -m pip install --no-cache-dir -U pip setuptools wheel uv
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -203,6 +209,14 @@ install_maxtext_package_without_deps() {
     fi
 }
 
+cleanup_unneeded_build_artifacts() {
+    echo "Cleaning up build artifacts that trigger security scanners..."
+    # Clean up flaxlib_src Cargo.lock / unneeded source files
+    rm -rf /usr/local/lib/python3*/site-packages/flaxlib_src
+    # Clean up embedded virtualenv seed wheels if virtualenv was installed
+    find /usr/local /root -name "*.whl" -path "*/virtualenv/seed/wheels/embed/*" -delete 2>/dev/null || true
+}
+
 install_maxtext_with_deps() {
     if [[ "$DEVICE" != "tpu" && "$DEVICE" != "gpu" ]]; then
       echo -e "\n\nError: DEVICE must be either 'tpu' or 'gpu'.\n\n"
@@ -219,6 +233,7 @@ install_maxtext_with_deps() {
     python3 -m src.dependencies.scripts.install_pre_train_extra_deps
 
     install_maxtext_package_without_deps
+    cleanup_unneeded_build_artifacts
 }
 
 install_post_training_deps() {
@@ -243,6 +258,7 @@ install_post_training_deps() {
     echo "Installing requirements from $dep_name"
     UV_TORCH_BACKEND=cpu python3 -m uv pip install --resolution=lowest -r "$dep_name"
     python3 -m src.dependencies.scripts.install_post_train_extra_deps
+    cleanup_unneeded_build_artifacts
 }
 
 # ---------- Post-Training workflow installation ----------
