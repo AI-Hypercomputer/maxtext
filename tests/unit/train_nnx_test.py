@@ -181,6 +181,14 @@ class _TinyDecoderMoEBiasWithMTP(_TinyDecoderMoEBias):
     return out
 
 
+class _TinyDecoderGateBiasNoSow(_TinyDecoder):
+  """`_TinyDecoder` with GateLogit bias but no sown moe_bias_updates."""
+
+  def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
+    super().__init__(vocab_size, hidden, rngs=rngs)
+    self.decoder = nnx.Dict({"gate": GateLogit(bias_shape=(3, 2))})
+
+
 from maxtext.layers.attention_mla import indexer_losses
 
 
@@ -543,6 +551,27 @@ class TestRoutedBiasReadNNX(unittest.TestCase):
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     _, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
     self.assertIsNone(aux["moe_bias_updates"])
+
+  def test_train_step_with_routed_bias_enabled_but_no_updates(self):
+    """Ensures train_step does not crash when routed_bias is True but no bias updates were sown."""
+    cfg = _Cfg()
+    cfg.routed_bias = True
+    cfg.routed_bias_update_rate = 0.001
+    model = _TinyDecoderGateBiasNoSow(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    optimizer = nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param)
+    ts = train_state_nnx.TrainStateNNX(model, optimizer)
+    state_graphdef, state_pure = nnx.split(ts)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    new_state, _ = pre_train.train_step(
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=state_pure,
+        data=data,
+    )
+    self.assertIsNotNone(new_state)
 
 
 class TestRecordActivationMetricsParity(unittest.TestCase):

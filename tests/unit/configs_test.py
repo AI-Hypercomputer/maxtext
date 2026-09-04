@@ -208,6 +208,9 @@ DEEPSEEK_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "deepseek3-671b-2dfsdp.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-671b-batchsplit.yml"),
 ]
+_LINEAGE_CONFIG = os.path.join(CONFIGS_DIR, "models", "deepseek3-671b-lineage.yml")
+if os.path.exists(_LINEAGE_CONFIG):
+  DEEPSEEK_CONFIGS.append(_LINEAGE_CONFIG)
 
 
 @pytest.mark.parametrize("config_file", DEEPSEEK_CONFIGS)

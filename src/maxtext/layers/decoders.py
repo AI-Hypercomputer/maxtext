@@ -63,6 +63,11 @@ from maxtext.models import (
     qwen3_5,
     simple_layer,
 )
+
+try:
+  from maxtext.models import lineage_adapter
+except ImportError:
+  lineage_adapter = None
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils import max_logging
@@ -958,105 +963,19 @@ class Decoder(nn.Module):
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
-          layer_call_kwargs = {
-              "previous_chunk": previous_chunk,
-              "slot": slot,
-          }
-          dense_layer = RemattedBlockLayers[0]
-          moe_layer = RemattedBlockLayers[1]
-          if cfg.engram_layers:
-            original_dense_call = dense_layer.__call__
-            original_moe_call = moe_layer.__call__
-            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-            moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
-
-            common_kwargs = {
-                "dense_layer": dense_layer,
-                "moe_layer": moe_layer,
-                "original_dense_call": original_dense_call,
-                "original_moe_call": original_moe_call,
-                "layer_call_kwargs": layer_call_kwargs,
-                "decoder_segment_ids": decoder_segment_ids,
-                "decoder_positions": decoder_positions,
-                "deterministic": deterministic,
-                "model_mode": model_mode,
-                "decoder_input_tokens": decoder_input_tokens,
-                "broadcast_args": broadcast_args,
-            }
-
-            # Apply Dense Layers
-            y = self._apply_interleaved_scanned_layers(
-                y,
-                layer_type="dense",
-                start_idx=0,
-                end_idx=cfg.first_num_dense_layers,
-                engram_indices=cfg.engram_layers,
-                **common_kwargs,
-            )
-
-            # Apply MoE Layers
-            y = self._apply_interleaved_scanned_layers(
-                y,
-                layer_type="moe",
-                start_idx=cfg.first_num_dense_layers,
-                end_idx=cfg.num_decoder_layers,
-                engram_indices=cfg.engram_layers,
-                **common_kwargs,
-            )
-          else:
-            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-            y, _ = self.scan_decoder_layers(
-                cfg,
-                dense_layer,
-                cfg.first_num_dense_layers,
-                "dense_layers",
-                mesh,
-                in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-                model_mode=model_mode,
-            )(y, *broadcast_args)
-            moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
-            num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-
-            # If batch-split schedule is used and initialization is complete,
-            # as detected by immutable params, use deepseek_batchsplit custom
-            # scan with initialized parameters.
-            if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
-              # old version of batch-split that fully uses qwix quantization.
-              if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
-                y = deepseek_batchsplit_fp8.scan_batch_split_layers(
-                    y,
-                    self.variables["params"]["moe_layers"],
-                    decoder_positions,
-                    decoder_segment_ids,
-                    model_mode=model_mode,
-                    mesh=mesh,
-                    quant=self.quant,
-                    cfg=cfg,
-                    policy=policy,
-                )
-              else:
-                # bf16 and fp8 code path for pure-JAX batch-split.
-                # fp8 code path supports both manual quantization and qwix
-                # quantization.
-                y = deepseek_batchsplit.scan_batch_split_layers(
-                    y,
-                    self.variables["params"]["moe_layers"],
-                    decoder_positions,
-                    mesh=mesh,
-                    cfg=cfg,
-                    num_layers=num_moe_layers,
-                )
-            else:
-              y, _ = self.scan_decoder_layers(
-                  cfg,
-                  moe_layer,
-                  num_moe_layers,
-                  "moe_layers",
-                  mesh,
-                  in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-                  model_mode=model_mode,
-              )(y, *broadcast_args)
+          y = self._apply_deepseek_scanned_blocks(
+              y,
+              RemattedBlockLayers,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              decoder_input_tokens,
+              previous_chunk,
+              slot,
+              broadcast_args,
+              policy,
+          )
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
           y = self._apply_gemma3_scanned_blocks(
@@ -1343,6 +1262,138 @@ class Decoder(nn.Module):
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.
     return logits, hidden_state, kv_caches
+
+  def _apply_deepseek_scanned_blocks(
+      self,
+      y,
+      RemattedBlockLayers,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      decoder_input_tokens,
+      previous_chunk,
+      slot,
+      broadcast_args,
+      policy,
+  ):
+    """Applies DeepSeek scanned decoder blocks, handling dense and MoE layers."""
+    cfg = self.config
+    mesh = self.mesh
+
+    assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
+    layer_call_kwargs = {
+        "previous_chunk": previous_chunk,
+        "slot": slot,
+    }
+    dense_layer = RemattedBlockLayers[0]
+    moe_layer = RemattedBlockLayers[1]
+    if cfg.engram_layers:
+      original_dense_call = dense_layer.__call__
+      original_moe_call = moe_layer.__call__
+      dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
+      moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
+
+      common_kwargs = {
+          "dense_layer": dense_layer,
+          "moe_layer": moe_layer,
+          "original_dense_call": original_dense_call,
+          "original_moe_call": original_moe_call,
+          "layer_call_kwargs": layer_call_kwargs,
+          "decoder_segment_ids": decoder_segment_ids,
+          "decoder_positions": decoder_positions,
+          "deterministic": deterministic,
+          "model_mode": model_mode,
+          "decoder_input_tokens": decoder_input_tokens,
+          "broadcast_args": broadcast_args,
+      }
+
+      # Apply Dense Layers
+      y = self._apply_interleaved_scanned_layers(
+          y,
+          layer_type="dense",
+          start_idx=0,
+          end_idx=cfg.first_num_dense_layers,
+          engram_indices=cfg.engram_layers,
+          **common_kwargs,
+      )
+
+      # Apply MoE Layers
+      y = self._apply_interleaved_scanned_layers(
+          y,
+          layer_type="moe",
+          start_idx=cfg.first_num_dense_layers,
+          end_idx=cfg.num_decoder_layers,
+          engram_indices=cfg.engram_layers,
+          **common_kwargs,
+      )
+    else:
+      num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+      if getattr(cfg, "use_lineage", False) and not self.is_mutable_collection("params"):
+        y = lineage_adapter.run_lineage_dsv3(
+            inputs=y,
+            dense_params=self.variables["params"]["dense_layers"],
+            sparse_params=self.variables["params"]["moe_layers"],
+            decoder_positions=decoder_positions,
+            mesh=mesh,
+            cfg=cfg,
+            decoder_segment_ids=decoder_segment_ids,
+            num_dense_layers=cfg.first_num_dense_layers,
+            num_sparse_layers=num_moe_layers,
+        )
+      else:
+        dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
+        y, _ = self.scan_decoder_layers(
+            cfg,
+            dense_layer,
+            cfg.first_num_dense_layers,
+            "dense_layers",
+            mesh,
+            in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+            model_mode=model_mode,
+        )(y, *broadcast_args)
+        moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
+
+        # If batch-split schedule is used and initialization is complete,
+        # as detected by immutable params, use deepseek_batchsplit custom
+        # scan with initialized parameters.
+        if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
+          # old version of batch-split that fully uses qwix quantization.
+          if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
+            y = deepseek_batchsplit_fp8.scan_batch_split_layers(
+                y,
+                self.variables["params"]["moe_layers"],
+                decoder_positions,
+                decoder_segment_ids,
+                model_mode=model_mode,
+                mesh=mesh,
+                quant=self.quant,
+                cfg=cfg,
+                policy=policy,
+            )
+          else:
+            # bf16 and fp8 code path for pure-JAX batch-split.
+            # fp8 code path supports both manual quantization and qwix
+            # quantization.
+            y = deepseek_batchsplit.scan_batch_split_layers(
+                y,
+                self.variables["params"]["moe_layers"],
+                decoder_positions,
+                mesh=mesh,
+                cfg=cfg,
+                num_layers=num_moe_layers,
+            )
+        else:
+          y, _ = self.scan_decoder_layers(
+              cfg,
+              moe_layer,
+              num_moe_layers,
+              "moe_layers",
+              mesh,
+              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
+          )(y, *broadcast_args)
+    return y
 
   def _apply_gemma3_scanned_blocks(
       self,

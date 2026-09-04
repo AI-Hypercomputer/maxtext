@@ -712,7 +712,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
         decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
         decoder_bias = _find_gate_bias(decoder_layer)
-        if decoder_bias is not None:
+        if decoder_bias is not None and moe_bias_updates is not None:
           decoder_bias.value = decoder_bias.value + jnp.array(moe_bias_updates[0])
 
         # 2. Update auxiliary MTP MoE layers (if enabled).
