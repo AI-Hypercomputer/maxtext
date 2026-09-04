@@ -21,6 +21,7 @@ from pathlib import Path
 from etils import epath
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+import re
 
 import yaml
 
@@ -223,7 +224,9 @@ def gcs_glob_pattern(pattern):
   """
   storage_client = storage.Client()
   bucket_name, glob_pattern = parse_gcs_bucket_and_prefix(pattern)
-  blobs = storage_client.list_blobs(bucket_name, match_glob=glob_pattern)
+
+  literal_prefix = re.split(r"[*?\[]", glob_pattern, maxsplit=1)[0]
+  blobs = storage_client.list_blobs(bucket_name, prefix=literal_prefix or None, match_glob=glob_pattern)
   data_files = [f"gs://{bucket_name}/{blob.name}" for blob in blobs]
   return data_files
 
