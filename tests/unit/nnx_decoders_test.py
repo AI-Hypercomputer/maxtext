@@ -1099,6 +1099,74 @@ class TestQwen3NextDecoderParity(unittest.TestCase):
     self.assertEqual(self._param_tree(6, True), self._param_tree(6, False))
 
 
+class TestQwen3NextDecoderLayerInputOffload(unittest.TestCase):
+  """`decoder_layer_input` must be nameable and offloadable on the Qwen3-Next stack.
+
+  Two things have to hold for `remat_policy=custom decoder_layer_input=offload` to
+  do anything. The layers have to attach the name (otherwise the policy matches
+  nothing and the setting is silently ignored), and the offloaded residual has to
+  survive lowering -- XLA cannot carry a pinned-host tensor out of two nested
+  scans, which is why the block loop unrolls when the policy offloads.
+  """
+
+  def _grad_jaxpr(self, num_decoder_layers=8, **overrides):
+    """Returns the printed jaxpr of a gradient through the scanned Qwen3-Next decoder."""
+    cfg = _make_config(
+        **{
+            **_QWEN3_NEXT_CONFIG,
+            "base_num_decoder_layers": num_decoder_layers,
+            "scan_layers": True,
+            **overrides,
+        }
+    )
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        config=cfg,
+        mesh=mesh,
+        rngs=nnx.Rngs(params=0),
+    )
+    batch, seq = cfg.global_batch_size_to_train_on, cfg.max_target_length
+    ids = jnp.zeros((batch, seq), dtype=jnp.int32)
+    segment_ids = jnp.full((batch, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq)[None], (batch, seq))
+
+    decoder_graphdef, decoder_params, decoder_rest = nnx.split(decoder, nnx.Param, ...)
+    embed_graphdef, embed_params, embed_rest = nnx.split(embedding, nnx.Param, ...)
+
+    def loss(dec_params, emb_params, dec_rest, emb_rest):
+      dec = nnx.merge(decoder_graphdef, dec_params, dec_rest)
+      emb = nnx.merge(embed_graphdef, emb_params, emb_rest)
+      logits, _, _ = dec(
+          emb,
+          ids,
+          decoder_positions=positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.sum(logits**2)
+
+    jaxpr = jax.make_jaxpr(jax.grad(loss, argnums=(0, 1)))(decoder_params, embed_params, decoder_rest, embed_rest)
+    return jaxpr.pretty_print(use_color=False)
+
+  def test_layers_name_their_input_for_the_remat_policy(self):
+    """Without the name, `decoder_layer_input=device|offload` would be a no-op."""
+    self.assertIn("name=decoder_layer_input", self._grad_jaxpr(remat_policy="full"))
+
+  def test_offloading_policy_moves_the_residual_to_host(self):
+    """`MemorySpace.Host` is how a device_put to pinned host renders in a jaxpr."""
+    offloaded = self._grad_jaxpr(remat_policy="custom", decoder_layer_input="offload")
+    self.assertIn("MemorySpace.Host", offloaded)
+
+  def test_no_host_transfer_without_an_offloading_policy(self):
+    """Nothing should reach host memory when every checkpointed tensor stays on device."""
+    self.assertNotIn("MemorySpace.Host", self._grad_jaxpr(remat_policy="full"))
+
+
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
   """Tests for Deepseek and Gemma4 specific decoder logic."""
 

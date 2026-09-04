@@ -1864,5 +1864,28 @@ class TestGetSaveAndOffloadNames(unittest.TestCase):
       self.assertEqual(maxtext_utils.get_save_and_offload_names(self._cfg(policy)), ([], []))
 
 
+class TestOffloadNeedsStaticUnroll(unittest.TestCase):
+  """Tests for maxtext_utils.offload_needs_static_unroll (pure config logic, no device needed)."""
+
+  _cfg = staticmethod(TestGetSaveAndOffloadNames._cfg)  # pylint: disable=protected-access
+
+  def test_offloading_policy_needs_a_static_unroll(self):
+    """An offloaded residual cannot cross two nested scans, so the inner loop must be a Python loop."""
+    cfg = self._cfg("custom", tensors_to_offload=["decoder_layer_input"])
+    self.assertTrue(maxtext_utils.offload_needs_static_unroll(cfg))
+
+  def test_preset_offload_policies_also_need_it(self):
+    """The named offload presets go through the same save/offload split, so they unroll too."""
+    for policy in ("qkv_proj_offloaded", "minimal_offloaded"):
+      self.assertTrue(maxtext_utils.offload_needs_static_unroll(self._cfg(policy)))
+
+  def test_device_only_policies_keep_the_inner_scan(self):
+    """Unrolling costs compile time, so policies that offload nothing must not pay it."""
+    self.assertFalse(maxtext_utils.offload_needs_static_unroll(self._cfg("full")))
+    self.assertFalse(
+        maxtext_utils.offload_needs_static_unroll(self._cfg("custom", tensors_on_device=["decoder_layer_input"]))
+    )
+
+
 if __name__ == "__main__":
   unittest.main()

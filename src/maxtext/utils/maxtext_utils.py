@@ -261,6 +261,40 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   return [], []
 
 
+def offload_needs_static_unroll(config) -> bool:
+  """Whether a rematerialized inner layer loop must be a Python loop rather than a scan.
+
+  Hybrid models (Gemma4, Qwen3-Next) scan over *blocks*, and each block scans over
+  its own layers and rematerializes them itself. When the remat policy offloads a
+  tensor, the block's inner scan emits that residual as a pinned-host stacked
+  output and the outer block scan stacks it once more. XLA's host-offload pass
+  cannot pair the copy-start/copy-done across those two levels, and the compile
+  fails post-optimization (``Bitcast cannot have different memory spaces``, or an
+  ``async-start ... operand`` shape mismatch between the ``S(5)`` and default
+  memory spaces).
+
+  Unrolling the inner loop in Python keeps every offloaded residual exactly one
+  scan level deep -- the same shape a homogeneous model such as Llama2 produces --
+  while leaving the outer block loop rolled, so XLA still pipelines one block's
+  host copies at a time. ``jax.lax.scan(..., unroll=n)`` is not a substitute: it
+  removes the loop but still stacks the per-iteration outputs, so the extra
+  dimension survives.
+
+  Only applied when the policy actually offloads something. It grows the block
+  body by the number of layers per block, which costs compile time that runs
+  keeping every checkpointed tensor in HBM should not pay.
+
+  Losing the inner loop also costs some HBM, because the rematerialized forward
+  is no longer confined to one loop iteration, so the unroll only pays for itself
+  when the policy offloads enough. On qwen3-next-80b at 8k tokens the unroll
+  costs 2.5GB and ``minimal_offloaded`` moves 16.9GB off device, a 13.2GB win;
+  offloading only ``decoder_layer_input`` moves 1.2GB against a 4.3GB unroll and
+  comes out 1.3GB behind.
+  """
+  _, offload_names = get_save_and_offload_names(config)
+  return bool(offload_names)
+
+
 def load_compiled(config, partial_train, state, execution_devices):
   """# Loading a serialized compiled train step function."""
 
