@@ -861,8 +861,9 @@ class YarnRotaryEmbedding(nnx.Module):
     if self.pairwise and not self.interleave:
       raise ValueError("rope_pairwise=True requires rope_interleave=True.")
 
+    # freqs are [batch, length, half_dim]; the trailing head-dim slice is never sharded.
     self.freqs_sharding = (
-        create_sharding(mesh, ("activation_batch", "activation_length", "q_heads"))
+        create_sharding(mesh, ("activation_batch", "activation_length", None))
         if shard_mode == ShardMode.EXPLICIT
         else None
     )
@@ -981,10 +982,6 @@ class YarnRotaryEmbedding(nnx.Module):
         pairs = pairs.astype(jnp.float32)
         cos = jnp.real(freqs)[..., jnp.newaxis]
         sin = jnp.imag(freqs)[..., jnp.newaxis]
-        if self.shard_mode == ShardMode.EXPLICIT:
-          rotated_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", None, None, None))
-          cos = jnp.broadcast_to(cos, pairs.shape, out_sharding=rotated_sharding)
-          sin = jnp.broadcast_to(sin, pairs.shape, out_sharding=rotated_sharding)
         swapped = jnp.flip(pairs, axis=-1)
         sign = jnp.asarray([-1.0, 1.0], dtype=jnp.float32)
         rotated_pairs = pairs * cos + swapped * sin * sign
@@ -1004,12 +1001,6 @@ class YarnRotaryEmbedding(nnx.Module):
 
       inputs_complex = first_half + 1j * second_half  # shape: [b, s, n, half_dim]
       # Apply the rotary transformation via complex multiplication.
-      rotated_sharding = (
-          create_sharding(self.mesh, ("activation_batch", "activation_length", None, None))
-          if self.shard_mode == ShardMode.EXPLICIT
-          else None
-      )
-      freqs = jnp.broadcast_to(freqs, inputs_complex.shape, out_sharding=rotated_sharding)
       rotated = jnp.multiply(inputs_complex, freqs)  # shape: [b, s, n, half_dim]
 
       # Convert the complex result back to a real tensor.
