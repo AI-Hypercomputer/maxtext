@@ -115,6 +115,7 @@ num_batches: 4
 # and/or async sampling and training.
 train_micro_batch_size: -1
 rollout_micro_batch_size: -1
+max_seq_token_per_tpu: 0  # > 0 packs sequences into rows of this many tokens for training; 0 = one padded row per sequence
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200
@@ -176,6 +177,7 @@ enable_dp_attention: false
 # Performance tuning for samplers
 max_num_batched_tokens: null
 max_num_seqs: null
+vllm_block_size: null  # KV-cache page size; null lets the backend choose
 # If true, enables asynchronous scheduling in vLLM for faster generation
 async_scheduling: true
 # stop generation when any of these strings is generated
