@@ -2545,6 +2545,44 @@ class SparseCoreOffloadTest(parameterized.TestCase):
     diff_summary = compare_tree(ref_grads, grads, relative_norm_diff_threshold=1e-5)
     max_logging.log("\n" + diff_summary)
 
+  def test_explicit_fsdp_weight_gather_matches_the_implicit_one(self):
+    """The graph rewrite behind `fsdp_all_gather` is numerically transparent on its own.
+
+    The target replaces the implicit gather at the `sparse_matmul` shard_map
+    boundary with an explicit `jax.lax.all_gather` inside the manual region,
+    whose transpose is the reduce-scatter of the weight gradients. Get that
+    transpose wrong -- `to="invarying"` lowers to a bare slice with no `psum` --
+    and the forward value stays correct while the gradients are silently
+    unreduced, so only a gradient comparison catches it.
+
+    On a chip whose SparseCore cannot offload an all-gather the target is
+    dropped and the rewrite never happens, which would leave this comparing the
+    baseline against itself. The capability gate is patched out so the rewrite
+    runs everywhere; the per-collective gate inside `sparsecore.offload` still
+    suppresses the annotation, which is what keeps XLA from aborting the
+    compile, and the count below pins that down.
+    """
+    ref_loss, ref_grads, ref_hlo = self._loss_and_grads("sc_fsdp_ag_ref", moe_sparse_core_offload_targets="", **_FSDP)
+
+    def keep_every_target(targets, *_args, **_kwargs):
+      return sparsecore.parse_offload_targets(targets)
+
+    with mock.patch.object(sparsecore, "supported_offload_targets", keep_every_target):
+      loss, grads, hlo = self._loss_and_grads(
+          "sc_fsdp_ag_forced", moe_sparse_core_offload_targets=sparsecore.FSDP_ALL_GATHER, **_FSDP
+      )
+
+    # The explicit gather's transpose is what turns the weight-gradient
+    # all-reduces into reduce-scatters, so this both proves the rewrite happened
+    # -- without it the comparison below would be the baseline against itself --
+    # and shows the transpose is the collective it is supposed to be.
+    self.assertEqual(ref_hlo.count("reduce-scatter("), 0)
+    self.assertGreater(hlo.count("reduce-scatter("), 0)
+    annotated = hlo.count('_xla_compute_type="sparseoffload"') > 0
+    self.assertEqual(annotated, sparsecore.supports_collective_offload(sparsecore.ALL_GATHER))
+    self.assertAlmostEqual(loss, ref_loss, places=6)
+    max_logging.log("\n" + compare_tree(ref_grads, grads, relative_norm_diff_threshold=1e-5))
+
   def test_disabled_offload_leaves_the_hlo_untouched(self):
     """Backward compatibility: the default config compiles to the same HLO as before."""
     _, _, hlo = self._loss_and_grads("sc_offload_disabled", ici_fsdp_parallelism=-1)
