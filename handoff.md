@@ -11,7 +11,7 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 1. **MaxText** (`AI-Hypercomputer/maxtext`): Serving as the `MaxTextTrainingEngine` trainer under the Pathways runtime on TPU v5p slices.
 2. **Tunix** (`google/tunix`): Orchestrating the distributed GRPO program, managing prompt dispatch, batching, reward computation, and weight version transitions.
 3. **vLLM / tpu-inference** (`vllm-project/tpu-inference`): Serving as the rollout worker via `RLVllmSampler` using `flax_nnx` model runners on TPU v5p.
-4. **Raiden FFI** (`tpu_raiden_jax`): Providing low-latency TPU host-to-host DMA weight synchronization between trainer and rollout workers over the control/data plane.
+4. **Raiden** (`tpu_raiden_jax`): Providing low-latency TPU host-to-host DMA weight synchronization between trainer and rollout workers over the control/data plane.
 
 ### Target Hardware & Topology
 - **Cluster**: `bodaborg-v5p-nap` (GCP Project: `cloud-tpu-shared-capacity`, Region: `europe-west4`, Zone: `europe-west4-b`).

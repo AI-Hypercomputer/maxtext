@@ -6,7 +6,7 @@ The system architecture consists of:
 - **Orchestrator**: Tunix distributed runtime (`K8sExecutor` / `ClusterOrchestrator`) driving GRPO sampling, reward scoring (GSM8K), and policy step coordination.
 - **Trainer**: MaxText training engine running on TPU pods under the Pathways runtime.
 - **Rollout Worker**: vLLM using `tpu-inference`'s `RLVllmSampler` (`VllmSamplerAdapter` via `SAMPLER=vllm`) serving on TPU pods.
-- **Weight Transfer**: Raiden FFI weight synchronization performing direct TPU-to-TPU host memory DMA transfer between Trainer and Rollout.
+- **Weight Transfer**: Raiden weight synchronization performing direct TPU-to-TPU host memory DMA transfer between Trainer and Rollout.
 
 ---
 
@@ -18,7 +18,7 @@ If you want to run immediately without building container images or wheels from 
 
 | Component | URI / Location | Notes |
 | :--- | :--- | :--- |
-| **Runner Container** | `gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2` | Verified working image for Qwen3-0.6B E2E GRPO. Contains JAX, MaxText, Tunix, TPU-Inference, and Raiden FFI. |
+| **Runner Container** | `gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner:yixuann-raiden-debug-0903-2` | Verified working image for Qwen3-0.6B E2E GRPO. Contains JAX, MaxText, Tunix, TPU-Inference, and Raiden. |
 | **Pathways Server** | `us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:raiden_20260812` | Unsanitized server image supporting Raiden RDMA / DMA. |
 | **Pathways Proxy** | `us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:raiden_20260812` | Unsanitized proxy server image. |
 | **Raiden Wheel** | `gs://mohitkhatwani-logs/wheels/tpu_sync/tpu_raiden_jax-0.0.1.dev20260903185444-cp312-cp312-manylinux_2_31_x86_64.whl` | Baked into the container image. |
