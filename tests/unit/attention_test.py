@@ -622,6 +622,8 @@ class BlockCausalMaskTest(unittest.TestCase):
         causal_block_size=4,
         context_parallel_load_balance=True,
         context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
+        logical_axis_rules=[["activation_q_length", ["context"]]],
         shard_mode="auto",
         debug_sharding=False,
         eval_interval=-1,
@@ -630,23 +632,24 @@ class BlockCausalMaskTest(unittest.TestCase):
     if len(devices) < 2:
       self.skipTest("Need at least 2 devices to test chunk mask")
     mesh = Mesh(devices[:2], ["context"])
-    op = AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=sequence_length,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        attention_type=AttentionType.BLOCK_DIFFUSION,
-    )
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      op = AttentionOp(
+          config=config,
+          num_query_heads=1,
+          num_kv_heads=1,
+          max_target_length=sequence_length,
+          mesh=mesh,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.BLOCK_DIFFUSION,
+      )
 
-    mask = op.generate_attention_mask(
-        query,
-        key,
-        segment_ids,
-        MODEL_MODE_TRAIN,
-        segment_positions=positions,
-    )
+      mask = op.generate_attention_mask(
+          query,
+          key,
+          segment_ids,
+          MODEL_MODE_TRAIN,
+          segment_positions=positions,
+      )
 
     expected = np.asarray(positions[0])[:, None] // 4 >= np.asarray(positions[0])[None, :] // 4
     np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected)
@@ -920,6 +923,7 @@ class LoadBalancedMaskTest(unittest.TestCase):
     config = types.SimpleNamespace(
         context_parallel_load_balance=True,
         context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
         using_pipeline_parallelism=False,
         logical_axis_rules=[["segment_ids_batch", ["context"]]],
         shard_mode="auto",
@@ -936,24 +940,27 @@ class LoadBalancedMaskTest(unittest.TestCase):
     query = jnp.zeros((1, seq_len, 1, 128))
     key = jnp.zeros((1, seq_len, 1, 128))
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
-    op = AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=seq_len,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        attention_type=AttentionType.LOCAL_SLIDING,
-        sliding_window_size=sliding_window_size,
-    )
+    # Only the query-length rule: `segment_ids_batch` -> context would shard this batch of 1
+    # across the 4-way context mesh.
+    with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
+      op = AttentionOp(
+          config=config,
+          num_query_heads=1,
+          num_kv_heads=1,
+          max_target_length=seq_len,
+          mesh=mesh,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.LOCAL_SLIDING,
+          sliding_window_size=sliding_window_size,
+      )
 
-    mask = op.generate_attention_mask(
-        query,
-        key,
-        decoder_segment_ids,
-        MODEL_MODE_TRAIN,
-        segment_positions=positions,
-    )
+      mask = op.generate_attention_mask(
+          query,
+          key,
+          decoder_segment_ids,
+          MODEL_MODE_TRAIN,
+          segment_positions=positions,
+      )
 
     expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
     for r, q_pos in enumerate(np.asarray(positions[0])):
@@ -967,6 +974,7 @@ class LoadBalancedMaskTest(unittest.TestCase):
     config = types.SimpleNamespace(
         context_parallel_load_balance=True,
         context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
         using_pipeline_parallelism=False,
         logical_axis_rules=[["segment_ids_batch", ["context"]]],
         shard_mode="auto",
@@ -983,24 +991,27 @@ class LoadBalancedMaskTest(unittest.TestCase):
     query = jnp.zeros((1, seq_len, 1, 128))
     key = jnp.zeros((1, seq_len, 1, 128))
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
-    op = AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=seq_len,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        attention_type=AttentionType.CHUNK,
-        chunk_attn_window_size=chunk_size,
-    )
+    # Only the query-length rule: `segment_ids_batch` -> context would shard this batch of 1
+    # across the 4-way context mesh.
+    with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
+      op = AttentionOp(
+          config=config,
+          num_query_heads=1,
+          num_kv_heads=1,
+          max_target_length=seq_len,
+          mesh=mesh,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.CHUNK,
+          chunk_attn_window_size=chunk_size,
+      )
 
-    mask = op.generate_attention_mask(
-        query,
-        key,
-        decoder_segment_ids,
-        MODEL_MODE_TRAIN,
-        segment_positions=positions,
-    )
+      mask = op.generate_attention_mask(
+          query,
+          key,
+          decoder_segment_ids,
+          MODEL_MODE_TRAIN,
+          segment_positions=positions,
+      )
 
     expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
     for r, q_pos in enumerate(np.asarray(positions[0])):
