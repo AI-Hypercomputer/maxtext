@@ -185,6 +185,58 @@ class LoraUtilsTest(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "no LoRA parameters found"):
         lora_utils._verify_lora_parameters(mock_model, mock_config)
 
+  def test_verify_lora_parameters_with_precomputed_matched_modules(self):
+    """Test verification using precomputed matched_modules set."""
+    mock_model = mock.MagicMock()
+    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
+    mock_config.lora = mock.MagicMock()
+    mock_config.lora.lora_module_path = ".*mlp/wi_0.*"
+
+    matched_modules = {"decoder/layers/0/mlp/wi_0", "decoder/layers/1/mlp/wi_0"}
+
+    with (
+        mock.patch("maxtext.utils.lora_utils.nnx.iter_graph") as mock_iter_graph,
+        mock.patch("maxtext.utils.max_logging.log") as mock_log,
+    ):
+      lora_utils._verify_lora_parameters(mock_model, mock_config, matched_modules=matched_modules)
+      mock_iter_graph.assert_not_called()
+      log_calls = [call[0][0] for call in mock_log.call_args_list]
+      self.assertTrue(any("successfully matched 2 target submodules" in msg for msg in log_calls))
+
+  def test_verify_lora_parameters_matched_modules_but_no_lora_param(self):
+    """Test verification raises ValueError when modules match in architecture but no LoRAParam in state."""
+    mock_model = mock.MagicMock()
+    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
+    mock_config.lora = mock.MagicMock()
+    mock_config.lora.lora_module_path = ".*mlp/wi_0.*"
+
+    mock_modules = [
+        (("decoder", "layers", "0", "mlp", "wi_0"), mock.MagicMock()),
+    ]
+
+    with (
+        mock.patch("maxtext.utils.lora_utils.nnx.iter_graph", return_value=[]),
+        mock.patch("flax.nnx.iter_modules", return_value=mock_modules),
+        mock.patch("maxtext.utils.lora_utils.is_lora_enabled", return_value=False),
+        mock.patch("maxtext.utils.max_logging.log") as mock_log,
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "LoRA module path matched target modules, but nnx.LoRAParam is still missing"
+      ):
+        lora_utils._verify_lora_parameters(mock_model, mock_config)
+      log_calls = [call[0][0] for call in mock_log.call_args_list]
+      self.assertTrue(any("LoRA target verification" in msg for msg in log_calls))
+
+  def test_load_lora_module_configs_caching(self):
+    """Test that _load_lora_module_configs caches its return value."""
+    lora_utils._load_lora_module_configs.cache_clear()
+    cfg1 = lora_utils._load_lora_module_configs()
+    cfg2 = lora_utils._load_lora_module_configs()
+    self.assertIs(cfg1, cfg2)
+    cache_info = lora_utils._load_lora_module_configs.cache_info()
+    self.assertGreaterEqual(cache_info.hits, 1)
+    self.assertEqual(cache_info.currsize, 1)
+
   def test_apply_lora_to_model_disabled(self):
     """Test applying LoRA when it is disabled in config."""
     cfg = _make_config(lora={"enable_lora": False})
@@ -289,6 +341,10 @@ class LoraUtilsTest(unittest.TestCase):
   def test_apply_lora_multihost_mock(self):
     """Test applying LoRA with a dummy mesh to trigger the multi-host reshard callback."""
     self._run_apply_lora_test(scan_layers=False, mock_multihost=True)
+
+  def test_apply_qlora_multihost_mock(self):
+    """Test applying QLoRA with a dummy mesh to verify QArray is untouched on multi-host."""
+    self._run_apply_lora_test(scan_layers=False, weight_qtype="int8", tile_size=32, mock_multihost=True)
 
   def test_restore_lora_from_path(self):
     """Test restoration of LoRA parameters from a path."""
