@@ -174,8 +174,11 @@ def Qwen3NextRMSNorm(
           epsilon=epsilon,
           dtype=dtype,
           weight_dtype=weight_dtype,
+          shard_mode=shard_mode if shard_mode is not None else ShardMode.AUTO,
+          kernel_axes=kernel_axes if kernel_axes is not None else (),
           scale_init=linen_initializers.zeros,
           scale_offset=1.0,
+          parameter_memory_host_offload=bool(parameter_memory_host_offload),
           rngs=rngs,
       )
   )
@@ -196,7 +199,16 @@ class Qwen3NextRMSNormGated(nnx.Module):
     weight_dtype: The datatype of the internal RMSNorm scale.
   """
 
-  def __init__(self, num_features: int, epsilon: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      num_features: int,
+      epsilon: float,
+      dtype: DType,
+      weight_dtype: DType,
+      shard_mode: ShardMode = ShardMode.AUTO,
+      *,
+      rngs: nnx.Rngs,
+  ):
     self.num_features = num_features
     self.epsilon = epsilon
     self.dtype = dtype
@@ -207,12 +219,13 @@ class Qwen3NextRMSNormGated(nnx.Module):
             epsilon=self.epsilon,
             dtype=dtype,
             weight_dtype=weight_dtype,
+            shard_mode=shard_mode,
             scale_init=nnx.initializers.ones,
             rngs=rngs,
         )
     )
 
-  def __call__(self, hidden_states: Array, gate: Array) -> Array:
+  def __call__(self, hidden_states: Array, gate: Array, out_sharding: NamedSharding | None = None) -> Array:
     """
     Applies RMSNorm and then a SiLU gate.
 
@@ -220,11 +233,13 @@ class Qwen3NextRMSNormGated(nnx.Module):
       hidden_states: The input array to be normalized (o). Shape: (..., F)
       gate: The gating array for the activation (z). Shape: (..., F)
             where F is num_features.
+      out_sharding: Optional layout for the normalized states, honoured only
+        under `ShardMode.EXPLICIT`.
 
     Returns:
       The normalized and gated output array. Shape: (..., F)
     """
-    normalized_states = self.rms_norm(hidden_states)
+    normalized_states = self.rms_norm(hidden_states, out_sharding=out_sharding)
 
     # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
     gated_states = normalized_states * jax.nn.silu(gate.astype(jnp.float32))
