@@ -697,6 +697,7 @@ class Attention(nnx.Module):
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
@@ -733,6 +734,7 @@ class Attention(nnx.Module):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
@@ -774,6 +776,7 @@ class Attention(nnx.Module):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
@@ -829,6 +832,7 @@ class Attention(nnx.Module):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         matmul_precision=self.config.matmul_precision,
         use_bias=False if self.is_qwen2 else self.use_bias_in_projections,
         rngs=self.rngs,

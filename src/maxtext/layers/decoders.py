@@ -849,6 +849,7 @@ class Decoder(nn.Module):
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+          weight_grad_in_kernel_order=cfg.lm_head_weight_grad_in_kernel_order,
       )(
           y,
           out_sharding=out_sharding,

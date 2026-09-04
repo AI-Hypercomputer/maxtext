@@ -35,6 +35,20 @@ from maxtext.utils.sharding import logical_to_mesh_axes, create_sharding, trunca
 _MAX_WAVELENGTH = 10_000
 
 
+def _cis(theta: Array) -> Array:
+  """`exp(1j * theta)` for real `theta`, written as `cos(theta) + 1j*sin(theta)`.
+
+  Bit-identical to `jnp.exp(1j * theta)`, but it does not go through XLA's
+  overflow-safe complex `exponential` expansion, which evaluates
+  `exp(real(1j*theta)) == exp(0)` over the whole tensor. Under
+  `shard_mode: explicit` it evaluates it *twice*: the `Sharding` custom-call on
+  the broadcast `1j` keeps the simplifier from commuting the constant to the
+  right, so the reassociation that lets CSE merge the two `exponential`s never
+  fires.
+  """
+  return jax.lax.complex(jnp.cos(theta), jnp.sin(theta))
+
+
 def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> Array:
   """Moves embedding table to device if parameter offloading is enabled."""
   if config.parameter_memory_host_offload:
@@ -232,9 +246,18 @@ def attend_on_embedding(
   if out_sharding is not None:
     out_sharding = truncate_out_sharding(out_sharding, query.ndim)
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
-  return jnp.dot(
+  # Contract over the table's feature axis instead of materializing `table.T`.
+  # Under `shard_mode: explicit` the transposed table is a distinct typed value,
+  # so XLA cannot fold it into the dot's dimension numbers: the (large) table
+  # shard is cast to bf16 once for the input lookup in `Embed.__call__` and a
+  # second time here, and the tied head's weight gradient comes out flipped.
+  # Expressing the transpose as dimension numbers keeps both consumers on one
+  # cast and leaves the gradient in the table's own axis order. Under `auto`
+  # this is a no-op -- XLA already folded the `.T` away.
+  return jnp.einsum(
+      "...e,ve->...v",
       query,
-      jnp.asarray(embedding_table, jnp.bfloat16).T,
+      jnp.asarray(embedding_table, jnp.bfloat16),
       preferred_element_type=attend_dtype,
       out_sharding=out_sharding,
   )
@@ -871,8 +894,8 @@ class YarnRotaryEmbedding(nnx.Module):
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
 
   @property
-  def freqs_cis(self):
-    """Frequencies for rotary embedding."""
+  def corrected_freqs(self):
+    """The per-dimension rotary frequencies, shape [half_dim]."""
     half_dim = self.embedding_dims // 2
     # Compute base frequencies for each (even-indexed) dimension.
     # (Note: We use jnp.arange with float32 for precision.)
@@ -888,15 +911,26 @@ class YarnRotaryEmbedding(nnx.Module):
     )
     smooth = 1 - self._linear_ramp_factor(low, high, half_dim)
     # The corrected frequency is a weighted mix of the scaled and base values.
-    freqs = freqs / self.rope_factor * (1 - smooth) + freqs * smooth
+    return freqs / self.rope_factor * (1 - smooth) + freqs * smooth
 
+  @property
+  def freqs_cis(self):
+    """Frequencies for every position, shape [max_position_embeddings, half_dim]."""
     # Precompute frequencies for all positions by taking the outer product.
     t = jnp.arange(self.max_position_embeddings, dtype=jnp.float32)  # shape [max_position_embeddings]
     # This gives a [max_position_embeddings, half_dim] tensor with rows as time steps.
-    freqs = jnp.outer(t, freqs)
+    return _cis(jnp.outer(t, self.corrected_freqs))
 
-    # Compute the complex “cis” values: exp(i * theta).
-    return jnp.exp(1j * freqs)  # shape [max_position_embeddings, half_dim]
+  def freqs_cis_at(self, position: Array, out_sharding=None) -> Array:
+    """`freqs_cis[position]`, without building the whole table to index it.
+
+    Row `p` of `freqs_cis` is `exp(1j * p * corrected_freqs)`, so the rows a step
+    actually reads can be produced straight from `position`. The table itself is
+    traced, not a constant XLA can hoist or fold, so building it costs
+    `max_position_embeddings` rows *inside every layer, every step* — on
+    deepseek2-16b that is 163,840 rows of which `max_target_length` are read.
+    """
+    return _cis(jnp.einsum("bs,h->bsh", position.astype(jnp.float32), self.corrected_freqs, out_sharding=out_sharding))
 
   def _find_correction_dim(self, num_rotations: float, dim: int, base: float, max_position_embeddings: int) -> float:
     """Compute the correction dimension for a given number of rotations."""
@@ -967,10 +1001,9 @@ class YarnRotaryEmbedding(nnx.Module):
     else:
       position = position.astype(jnp.int32)
 
-    # Lookup the precomputed frequencies using the position indices.
-    # self.freqs_cis has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
-    # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
-    freqs = self.freqs_cis.at[position].get(out_sharding=self.freqs_sharding)  # shape: [B, S, half_dim]
+    # Build the frequencies for these positions directly, rather than indexing
+    # them out of the full [max_position_embeddings, half_dim] table.
+    freqs = self.freqs_cis_at(position, out_sharding=self.freqs_sharding)  # shape: [B, S, half_dim]
     freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
 
     if self.interleave and self.pairwise:

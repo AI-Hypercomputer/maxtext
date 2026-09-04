@@ -285,6 +285,45 @@ class PyconfigTest(unittest.TestCase):
         )
         self.assertEqual(config.decoder_block.value, decoder_block)
 
+  def test_lm_head_weight_grad_in_kernel_order_default(self):
+    """Left unset, the flag is on exactly where it can do something."""
+
+    def resolve(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          **kwargs,
+      ).lm_head_weight_grad_in_kernel_order
+
+    # The transpose it removes only exists under explicit sharding, on an untied head.
+    self.assertTrue(resolve(shard_mode="explicit"))
+    self.assertFalse(resolve(shard_mode="auto"))
+    self.assertFalse(resolve(shard_mode="explicit", logits_via_embedding=True))
+    # Writing it out still wins over the default, in both directions.
+    self.assertFalse(resolve(shard_mode="explicit", lm_head_weight_grad_in_kernel_order=False))
+    self.assertTrue(resolve(shard_mode="auto", lm_head_weight_grad_in_kernel_order=True))
+    # But asking for it on a tied head is still a hard error, not a silent no-op.
+    with self.assertRaisesRegex(Exception, "only applies to the untied LM head"):
+      resolve(shard_mode="explicit", logits_via_embedding=True, lm_head_weight_grad_in_kernel_order=True)
+
+  def test_dense_weight_grad_in_kernel_order_default(self):
+    """The in-loop counterpart follows the same rule, minus the tied-head carve-out."""
+
+    def resolve(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          **kwargs,
+      ).dense_weight_grad_in_kernel_order
+
+    self.assertTrue(resolve(shard_mode="explicit"))
+    self.assertFalse(resolve(shard_mode="auto"))
+    # Unlike the LM head, every model has these projections, tied or not.
+    self.assertTrue(resolve(shard_mode="explicit", logits_via_embedding=True))
+    # Writing it out still wins over the default, in both directions.
+    self.assertFalse(resolve(shard_mode="explicit", dense_weight_grad_in_kernel_order=False))
+    self.assertTrue(resolve(shard_mode="auto", dense_weight_grad_in_kernel_order=True))
+
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
     self.assertEqual(resolve_config_path(__file__), __file__)

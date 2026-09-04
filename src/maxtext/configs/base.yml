@@ -202,6 +202,15 @@ logits_via_embedding: false
 normalize_embedding_logits: true  # whether to normalize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
+# Trace the untied LM head's dot inside a jax.sharding.auto_axes region so that XLA folds the transpose back into
+# the gradient dot and the weight gradient comes out in the kernel's stored orientation. Without the region that
+# fold never happens under shard_mode: explicit, because the Sharding custom-call on every dot output is a barrier
+# algsimp will not cross, so the gradient is left sharded on its minor-most dimension and loses the all-reduce ->
+# reduce-scatter fusion (see docs/guides/optimization/shard_mode_performance.md). The stored kernel, its
+# initialization and the arithmetic are untouched, so gradients are bit-identical to the default rule and no
+# checkpoint conversion is needed. No effect under shard_mode: auto, where XLA folds the transpose itself, and none
+# on a tied head, which has no kernel of its own -- so None means on exactly where it can do something.
+lm_head_weight_grad_in_kernel_order: None  # on for an untied model under shard_mode: explicit if None
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the Indexer across the unsharded local heads dimension natively.
@@ -711,6 +720,16 @@ shard_optimizer_over_data: false
 
 # when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 dense_fsdp_use_two_stage_all_gather: false
+
+# The in-loop counterpart of lm_head_weight_grad_in_kernel_order: trace the attention q/k/v/out and MLP wi/wo dots
+# inside a jax.sharding.auto_axes region so that XLA folds the transpose back into the gradient dot and each weight
+# gradient comes out in its kernel's stored orientation. Same barrier as the LM head flag, same default rule -- None
+# means on wherever it can act, i.e. under shard_mode: explicit. Without it explicit is 0.33%-1.48% slower than auto
+# at every measured layer count that is not a multiple of 8; with it explicit lands within 0.2% of auto everywhere,
+# and the two flags are additive (see docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels,
+# their initialization and the arithmetic are untouched, so gradients are bit-identical to the default rule and no
+# checkpoint conversion is needed. No effect under shard_mode: auto or on quantized layers.
+dense_weight_grad_in_kernel_order: None  # on under shard_mode: explicit if None
 
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
