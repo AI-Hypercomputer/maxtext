@@ -561,6 +561,12 @@ def main(config, test_args):  # pylint: disable=W0621
 
       max_kl_div_val = jax.numpy.max(kl_div)
       max_kl_div_idx = jax.numpy.argmax(kl_div)
+      avg_kl_div_val = jax.numpy.mean(kl_div)
+
+      max_logging.log(f"\nAverage KL divergence per token (D_KL(P_golden || Q_model)): {avg_kl_div_val.item():.2e}")
+      formatted_list = [f"{float(x):.2e}" for x in kl_div]
+      max_logging.log(f"Per-token KL Divergences: \n{formatted_list}")
+      max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div_val.item():.2e}")
 
       # print per token kl for debugging, omit for multimodal as the seq length is usually long
       per_token_kl = "" if config.use_multimodal else f"KL divergence = {kl_div}, "
@@ -690,7 +696,18 @@ def main(config, test_args):  # pylint: disable=W0621
 
       # --- HF Forward Pass ---
       with torch.no_grad():
-        hf_logits_torch = hf_model(**inputs).logits
+        hf_outputs = hf_model(**inputs, output_hidden_states=True)
+        hf_logits_torch = hf_outputs.logits
+        if hasattr(hf_outputs, "hidden_states") and hf_outputs.hidden_states is not None:
+          max_logging.log("--- DUMPING HF INTERMEDIATE ACTIVATIONS ---")
+          max_logging.log(f"Number of layers extracted: {len(hf_outputs.hidden_states)}")
+          for i, layer_tensor in enumerate(hf_outputs.hidden_states):
+<<<<<<< HEAD
+            max_logging.log(f"HF Layer {i} Shape: {layer_tensor.shape}, IsFinite: {torch.isfinite(layer_tensor).all()}, IsFinite: {torch.isfinite(layer_tensor).all()}, IsFinite: {torch.isfinite(layer_tensor).all()}, Norm: {torch.norm(layer_tensor, p=2).item():.4f}")
+=======
+            max_logging.log(f"HF Layer {i} Shape: {layer_tensor.shape}, IsFinite: {torch.isfinite(layer_tensor).all()}, Norm: {torch.norm(layer_tensor.to(torch.float32), p=2).item():.4f}")
+>>>>>>> 2ab776dba (fix(validation): streamline decoding and stream popen outputs)
+          max_logging.log("-------------------------------------------")
 
       # --- MaxText Forward Pass ---
       if maxtext_state is None:
