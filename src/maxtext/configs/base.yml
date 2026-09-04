@@ -294,6 +294,24 @@ norm_topk_prob: false # boolean to enable the top-k probability normalization. q
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
+# Comma-separated list of MoE ops to run on the TPU SparseCore instead of the TensorCore, freeing
+# TensorCore cycles for the expert GEMMs. Empty (the default) keeps everything on the TensorCore.
+# Supported targets, or "all" for every one of them:
+#   fsdp_all_gather - the MoE weight all-gather over the fsdp / fsdp_transpose axes
+#   ep_collectives  - the expert-parallel activation all-gathers and ragged all-to-alls
+#   ragged_sort     - the routing index math (argsorts, group sizes, offsets) in the ragged sort kernels
+# Requires a TPU with a SparseCore (v5p, v6e, tpu7x or newer); MaxText raises otherwise.
+#
+# Offloading never changes results, but the two collective targets interact with the
+# --xla_tpu_enable_sparse_core_collective_offload_* flags (see benchmarks/xla_flags_library.py,
+# on by default from Ironwood on). With the matching flag set, XLA CHECK-fails instead of
+# falling back when the chip cannot lower an annotated collective. Measured on v5p: annotated
+# all-reduce and reduce-scatter are accepted, all-gather is rejected at every rank, so
+# fsdp_all_gather plus --xla_tpu_enable_sparse_core_collective_offload_all_gather=true aborts
+# the compiler there. fsdp_all_gather is still useful without that flag: it turns the implicit
+# boundary all-gather into an explicit one inside the sparse_matmul shard_map, which lets the
+# backward pass reduce-scatter the weight gradients instead of all-reducing them.
+moe_sparse_core_offload_targets: ""
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
