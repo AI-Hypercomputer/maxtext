@@ -126,6 +126,17 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     max_logging.log(f"  Config Batch: {self.batch_size}, SeqLen: {self.seq_len}, EmbedDim: {self.embed_dim}")
     max_logging.log(f"  Output shape: {output_hidden_state.shape}")
 
+  def test_multi_token_prediction_layer_final_norm(self):
+    """Tests that final_norm is instantiated, accessible via property, and operational."""
+    self.assertTrue(hasattr(self.mtp_layer, "final_norm"))
+    self.assertTrue(hasattr(self.mtp_layer, f"mtp_{TEST_LAYER_NUM}_final_norm"))
+    self.assertIs(self.mtp_layer.final_norm, getattr(self.mtp_layer, f"mtp_{TEST_LAYER_NUM}_final_norm"))
+
+    norm_output = self.mtp_layer.final_norm(self.prev_hidden_state)
+    self.assertEqual(norm_output.shape, self.prev_hidden_state.shape)
+    self.assertEqual(norm_output.dtype, self.cfg.dtype)
+    self.assertFalse(jnp.isnan(norm_output).any())
+
 
 class _MockDecoderForMTP:
   """A mock decoder that simulates the behavior needed by MTPBlock."""
@@ -133,14 +144,16 @@ class _MockDecoderForMTP:
   def __init__(self, config: Config):
     self.config = config
     self.model_mode = MODEL_MODE_TRAIN
+    self.last_normalize_y = None
 
   def _apply_embedding(self, _shared_embedding, input_ids, _position_ids, _deterministic, model_mode):
     """Returns a zero tensor with the correct embedding shape."""
     batch_size, seq_len = input_ids.shape
     return jnp.zeros((batch_size, seq_len, self.config.base_emb_dim), dtype=self.config.dtype)
 
-  def apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode):
+  def apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode, normalize_y=True):
     """Returns a zero tensor with the correct logit shape."""
+    self.last_normalize_y = normalize_y
     batch_size, seq_len, _ = hidden_state.shape
     return jnp.zeros((batch_size, seq_len, self.config.vocab_size), dtype=self.config.dtype)
 
@@ -267,6 +280,26 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
     self.assertEqual(len(losses_val), self.cfg.mtp_num_layers)
     self.assertEqual(len(weights_val), self.cfg.mtp_num_layers)
+
+  def test_final_norm_in_mtp_block_forward(self):
+    """Verifies that MTPBlock executes final_norm and passes normalize_y=False to apply_output_head."""
+    _ = self.test_model(
+        main_hidden_state=self.main_hidden_state,
+        input_ids=self.input_ids,
+        target_ids=self.target_ids,
+        target_mask=self.target_mask,
+        position_ids=self.position_ids,
+        decoder_segment_ids=self.decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
+    self.assertFalse(self.test_model.decoder.last_normalize_y)
+    state = nnx.state(self.test_model)
+    for k in range(1, self.cfg.mtp_num_layers + 1):
+      mtp_layer_state = getattr(state.mtp_block, f"mtp_layer_{k}")
+      self.assertTrue(hasattr(mtp_layer_state, f"mtp_{k}_final_norm"))
+      final_norm_scale = getattr(mtp_layer_state, f"mtp_{k}_final_norm").scale.value
+      self.assertEqual(final_norm_scale.shape, (self.cfg.base_emb_dim,))
 
   def _forward(self, model):
     return model(

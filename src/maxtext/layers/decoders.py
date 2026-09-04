@@ -794,23 +794,24 @@ class Decoder(nn.Module):
     return y
 
   @nn.compact
-  def apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
+  def apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode, normalize_y=True):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
-    if cfg.shard_mode == ShardMode.EXPLICIT:
-      norm_out_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", "activation_embed"))
-    else:
-      norm_out_sharding = None
+    if normalize_y:
+      if cfg.shard_mode == ShardMode.EXPLICIT:
+        norm_out_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", "activation_embed"))
+      else:
+        norm_out_sharding = None
 
-    y = self.get_norm_layer(num_features=y.shape[-1])(
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="decoder_norm",
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
-    )(y, out_sharding=norm_out_sharding)
+      y = self.get_norm_layer(num_features=y.shape[-1])(
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="decoder_norm",
+          epsilon=cfg.normalization_layer_epsilon,
+          kernel_axes=("norm",),
+          parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+      )(y, out_sharding=norm_out_sharding)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):

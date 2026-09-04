@@ -178,7 +178,6 @@ MODEL_PARAMS_DICT = {
 # The MTP block in MaxText will reuse the main embedding and output head.
 MTP_KEYS_TO_SKIP = [
     "model.layers.61.embed_tokens.weight",
-    "model.layers.61.shared_head.norm.weight",
     "model.layers.61.shared_head.head.weight",
 ]
 
@@ -267,6 +266,7 @@ def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_ma
             f"model.layers.{layer_idx}.enorm.weight": "mtp_block.mtp_layer_1.mtp_1_embedding_norm.scale",
             f"model.layers.{layer_idx}.hnorm.weight": "mtp_block.mtp_layer_1.mtp_1_hidden_state_norm.scale",
             f"model.layers.{layer_idx}.eh_proj.weight": "mtp_block.mtp_layer_1.mtp_1_projection.kernel",
+            f"model.layers.{layer_idx}.shared_head.norm.weight": "mtp_block.mtp_layer_1.mtp_1_final_norm.scale",
         }
     )
     for expert_idx in range(num_experts):
@@ -649,6 +649,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
             "mtp_1_embedding_norm": {"scale": None},
             "mtp_1_hidden_state_norm": {"scale": None},
             "mtp_1_projection": {"kernel": None},
+            "mtp_1_final_norm": {"scale": None},
             "mtp_1_transformer_layer": {
                 "pre_self_attention_layer_norm": {"scale": None},
                 "post_self_attention_layer_norm": {"scale": None},
@@ -684,6 +685,9 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
     )
     jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_projection"]["kernel"] = (
         chkpt_vars["mtp_block.mtp_layer_1.mtp_1_projection.kernel"].to(torch.float16).numpy().transpose()
+    )
+    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_final_norm"]["scale"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_final_norm.scale"].to(torch.float16).numpy()
     )
 
     # MTP internal transformer layer - Attention and Norms
