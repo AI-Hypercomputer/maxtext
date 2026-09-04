@@ -50,7 +50,6 @@ from maxtext.common.common_types import Config, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.layers import linears
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils.sharding import logical_to_mesh_axes
-from maxtext.utils.cp_utils import halo_exchange_for_conv
 
 
 # Sequence is padded to a multiple of this size before the KDA kernel, so
@@ -62,6 +61,84 @@ def _l2_normalize(x, axis=-1, eps=1e-6):
   x_f = x.astype(jnp.float32)
   rstd = jax.lax.rsqrt(jnp.sum(x_f * x_f, axis=axis, keepdims=True) + eps)
   return (x_f * rstd).astype(x.dtype)
+
+
+def _has_named_axis(axis_name: str) -> bool:
+  """Check whether *axis_name* is bound in the current shard_map / mesh scope."""
+  try:
+    jax.lax.axis_index(axis_name)
+    return True
+  except NameError:
+    return False
+
+
+def halo_exchange_for_conv(
+    x: jax.Array,
+    halo_size: int,
+    axis_name: str = "context",
+    seq_axis: int = 1,
+) -> jax.Array:
+  """Prepend ``halo_size`` tokens from the previous CP rank for causal conv.
+
+  KDA's ``ShortConvolution`` is the only user today; the helper lives in this
+  module accordingly. The caller receives ``[halo_size + T_local, …]`` so the
+  per-tap loop naturally reads the correct context window. Halos are fetched
+  via a forward-ring ``ppermute``: rank *i* sends its last ``halo_size``
+  tokens to rank *i+1*; rank 0 receives zeros (sequence start).
+
+  When no CP axis is in scope or ``cp_size == 1`` the function degrades to
+  left zero-padding, which is the correct causal-convolution boundary for a
+  single-device / no-CP run.
+
+  Constraint: the exchange only reads from the immediately preceding rank,
+  so ``halo_size`` must not exceed the local sequence length. A larger
+  receptive field (kernel_size - 1 > T_local) would need tokens from
+  multiple previous ranks, which is not implemented; a ``ValueError`` is
+  raised instead of silently reading the wrong context.
+
+  Args:
+    x: Tensor shaped ``[B, T, …]`` (seq_axis = 1).
+    halo_size: Number of tokens to pull from the previous rank.
+    axis_name: Mesh axis along which the sequence is sharded.
+    seq_axis: The sequence dimension index (default 1).
+
+  Returns:
+    ``x`` with ``halo_size`` context tokens prepended along *seq_axis*.
+  """
+  if halo_size <= 0:
+    return x
+
+  # Left zero-pad — works correctly for both no-CP and CP.
+  pad_width = [(0, 0)] * x.ndim
+  pad_width[seq_axis] = (halo_size, 0)
+  zero_padded = jnp.pad(x, pad_width)
+
+  if not _has_named_axis(axis_name):
+    return zero_padded
+
+  cp_size = jax.lax.psum(1, axis_name=axis_name)
+  if cp_size == 1:
+    return zero_padded
+
+  t_local = x.shape[seq_axis]
+  if halo_size > t_local:
+    raise ValueError(
+        f"halo_exchange_for_conv: halo_size ({halo_size}) exceeds the local "
+        f"sequence length ({t_local}) on the '{axis_name}' axis. The causal "
+        "convolution receptive field would span multiple CP ranks, which is "
+        "not implemented. Use a smaller linear_conv_kernel_dim, a longer "
+        "sequence, or a smaller CP size."
+    )
+
+  # Forward ring: each rank sends its tail to the next rank.
+  tail = jax.lax.dynamic_slice_in_dim(x, x.shape[seq_axis] - halo_size, halo_size, axis=seq_axis)
+  perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
+  halo = jax.lax.ppermute(tail, axis_name=axis_name, perm=perm)
+
+  cp_rank = jax.lax.axis_index(axis_name)
+  halo = jnp.where(cp_rank == 0, jnp.zeros_like(halo), halo)
+
+  return jnp.concatenate([halo, x], axis=seq_axis)
 
 
 class ShortConvolution(nnx.Module):
@@ -538,6 +615,13 @@ class KimiDeltaAttention(nnx.Module):
           stacklevel=2,
       )
     n_max = cfg.max_segments_per_seq if cfg.max_segments_per_seq > 0 else None
+    if cp_size > 1 and decoder_segment_ids is None:
+      # Under CP the tokamax kernel derives per-rank cu_seqlens / chain
+      # metadata from segment_ids, so a seg tensor must always be present.
+      # Without user segmentation, synthesize a single all-ones segment —
+      # done outside shard_map so a real array is sharded through.
+      decoder_segment_ids = jnp.ones((B, T), dtype=jnp.int32)
+      n_max = 1
 
     # Call KDA kernel via shard_map (tokamax kernels cannot be auto-partitioned).
     with jax.named_scope("kda_kernel"):
@@ -573,10 +657,10 @@ class KimiDeltaAttention(nnx.Module):
         if decoder_segment_ids is not None:
           decoder_segment_ids = _wsc(decoder_segment_ids, seg_pspec)
 
-      # CP: tokamax kernel derives CP metadata from segment_ids.
-      # Always pass a seg arg when CP is active so the kernel can
-      # compute cu_seqlens / chain fields via one small all_gather.
-      has_seg = decoder_segment_ids is not None or cp_size > 1
+      # Under CP a seg tensor is always present (synthesized above when
+      # the user supplies none), so the kernel can derive cu_seqlens / chain
+      # fields via one small all_gather.
+      has_seg = decoder_segment_ids is not None
       base_in_specs = (
           qkv_pspec,
           qkv_pspec,
@@ -613,14 +697,6 @@ class KimiDeltaAttention(nnx.Module):
       def _shard_map_chunk_kda(*args):
         q, k, v, g, beta, a_log, delta_time_bias_2d, *rest = args
         seg = rest[0] if rest else None
-        max_num_segments = n_max
-
-        # CP: provide a dummy seg (all-ones) so the kernel has
-        # segment_ids to derive cu_seqlens from, even when the user
-        # hasn't supplied real segmentation info.
-        if seg is None and cp_size > 1:
-          seg = jnp.ones(q.shape[:2], dtype=jnp.int32)
-          max_num_segments = 1
 
         delta_time_bias_flat = delta_time_bias_2d.reshape(-1)
         o, _ = chunk_kda(
@@ -638,19 +714,14 @@ class KimiDeltaAttention(nnx.Module):
             use_qk_l2norm=False,
             use_gate_in_kernel=True,
             lower_bound=lower_bound,
-            max_num_segments=max_num_segments,
+            max_num_segments=n_max,
             context_parallel_metadata=cp_ctx,
         )
         return o
 
       kda_args = (q, k, v, g, beta, self.A_log.value, delta_time_bias_2d)
       if has_seg:
-        if decoder_segment_ids is not None:
-          kda_args = kda_args + (decoder_segment_ids,)
-        else:
-          # CP without varlen: pass None; the shard_map function
-          # synthesises a dummy seg internally.
-          kda_args = kda_args + (None,)
+        kda_args = kda_args + (decoder_segment_ids,)
       o = _shard_map_chunk_kda(*kda_args)
 
     # Analogous to MLA's `context` (see attention_op.py); a remat boundary

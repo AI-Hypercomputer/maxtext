@@ -29,11 +29,13 @@ Run with: python -m pytest tests/unit/kda_attention_test.py -v
 """
 
 import functools
+from types import SimpleNamespace
 
 import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 import ml_dtypes
 from flax import nnx
 
@@ -51,8 +53,8 @@ from maxtext.configs.types import KdaAttention
 from maxtext.kernels.kda import chunk_kda
 from maxtext.kernels.kda.tokamax import tokamax_chunk_kda
 from maxtext.layers import attention_kda
-from maxtext.layers.attention_kda import ShortConvolution, _l2_normalize
-from maxtext.utils.cp_utils import halo_exchange_for_conv
+from maxtext.layers.attention_kda import ShortConvolution, _l2_normalize, halo_exchange_for_conv
+from maxtext.layers.normalizations import RMSNorm
 
 # Marker policy: `tpu_only` is applied per test/class — only where a test
 # invokes the tokamax Mosaic Pallas kernel or multi-device CP. Pure
@@ -183,13 +185,12 @@ class TestKimiDeltaAttention:
   def _make_attn(self, mesh, **config_overrides):
     cfg = _MockKdaConfig(**config_overrides)
     rngs = nnx.Rngs(0)
-    with mesh:
-      return attention_kda.KimiDeltaAttention(
-          config=cfg,
-          layer_idx=0,
-          mesh=mesh,
-          rngs=rngs,
-      )
+    return attention_kda.KimiDeltaAttention(
+        config=cfg,
+        layer_idx=0,
+        mesh=mesh,
+        rngs=rngs,
+    )
 
   def test_init_head_dims(self, mesh):
     """Head dims derived from global config: head_dim=32, base_num_query_heads=4."""
@@ -205,23 +206,23 @@ class TestKimiDeltaAttention:
     assert attn.q_conv is None
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_forward_no_conv(self, mesh):
     """Forward with linear_conv_kernel_dim=0 (the conv path is skipped entirely)."""
     attn = self._make_attn(mesh, linear_conv_kernel_dim=0)
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
-    with mesh:
-      output, _ = attn(x)
+    output, _ = attn(x)
     assert output.shape == (1, 64, 128)
     assert jnp.isfinite(output).all()
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_lower_bound_warns_without_safe_gate(self, mesh):
     """use_kda_safe_gate=False with a non-zero kda_lower_bound must warn."""
     attn = self._make_attn(mesh, use_kda_safe_gate=False, kda_lower_bound=-1.0)
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
     with pytest.warns(UserWarning, match="use_kda_safe_gate=False"):
-      with mesh:
-        output, _ = attn(x)
+      output, _ = attn(x)
     assert jnp.isfinite(output).all()
 
   def test_init_has_gate_and_norm(self, mesh):
@@ -233,45 +234,46 @@ class TestKimiDeltaAttention:
     assert hasattr(attn, "dt_bias")
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_forward_shape(self, mesh):
     attn = self._make_attn(mesh)
     B, T, D = 2, 64, 128
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
-    with mesh:
-      output, aux = attn(x)
+    output, aux = attn(x)
     assert output.shape == (B, T, D)
     assert aux is None
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_forward_no_nan_inf(self, mesh):
     attn = self._make_attn(mesh)
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
-    with mesh:
-      output, _ = attn(x)
+    output, _ = attn(x)
     assert not jnp.any(jnp.isnan(output))
     assert not jnp.any(jnp.isinf(output))
     assert jnp.any(output != 0)
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_sequence_padding(self, mesh):
     """Non-divisible sequence lengths should be handled via padding."""
     attn = self._make_attn(mesh)
     B, T, D = 1, 100, 128  # 100 not divisible by the KDA chunk alignment (64)
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
-    with mesh:
-      output, _ = attn(x)
+    output, _ = attn(x)
     assert output.shape == (B, T, D)
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_deterministic(self, mesh):
     attn = self._make_attn(mesh)
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
-    with mesh:
-      o1, _ = attn(x)
-      o2, _ = attn(x)
+    o1, _ = attn(x)
+    o2, _ = attn(x)
     assert jnp.allclose(o1, o2, atol=1e-5)
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_packed_sequences_supported(self, mesh):
     """Test that KDA supports packed sequences with segment_ids."""
     attn = self._make_attn(mesh)
@@ -285,14 +287,14 @@ class TestKimiDeltaAttention:
         ],
         dtype=jnp.int32,
     )
-    with mesh:
-      o, _ = attn(x, decoder_segment_ids=seg_ids)
+    o, _ = attn(x, decoder_segment_ids=seg_ids)
     # Output shape should match input
     assert o.shape == (B, T, hidden_dim)
     # No NaN or Inf
     assert jnp.isfinite(o).all()
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_segment_ids_padding_alignment(self, mesh):
     """When T % 64 != 0, segment_ids should be padded along with hidden_states."""
     attn = self._make_attn(mesh)
@@ -304,8 +306,7 @@ class TestKimiDeltaAttention:
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, hidden_dim))
     # segment_ids shorter than padded length (100 -> 128 after pad)
     seg_ids = jnp.array([[1, 1, 1, 2, 2, 2, 3, 3] + [0] * (T - 8)], dtype=jnp.int32)
-    with mesh:
-      o, _ = attn(x, decoder_segment_ids=seg_ids)
+    o, _ = attn(x, decoder_segment_ids=seg_ids)
     # Output shape should match input (unpadded back from 128 to 100)
     assert o.shape == (B, T, hidden_dim)
     # First 8 positions should have segment info, rest may be affected by padding
@@ -313,13 +314,13 @@ class TestKimiDeltaAttention:
     assert jnp.isfinite(o).all()
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_segment_ids_none_fallback(self, mesh):
     """Test that segment_ids=None falls back to legacy behavior."""
     attn = self._make_attn(mesh)
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
-    with mesh:
-      o1, _ = attn(x, decoder_segment_ids=None)
-      o2, _ = attn(x)  # Default None
+    o1, _ = attn(x, decoder_segment_ids=None)
+    o2, _ = attn(x)  # Default None
     assert jnp.allclose(o1, o2, atol=1e-5)
 
   @pytest.mark.tpu_only
@@ -344,9 +345,8 @@ class TestKimiDeltaAttention:
     seg_base = jnp.array([[1] * T, [1, 1, 2, 2, 2, 3, 3, 3] + [0] * (T - 8)], dtype=jnp.int32)
     seg_modified = jnp.array([[1] * T, [1, 1, 2, 2, 2, 4, 4, 4] + [0] * (T - 8)], dtype=jnp.int32)
 
-    with mesh:
-      o1, _ = attn(x, decoder_segment_ids=seg_base)
-      o2, _ = attn(x, decoder_segment_ids=seg_modified)
+    o1, _ = attn(x, decoder_segment_ids=seg_base)
+    o2, _ = attn(x, decoder_segment_ids=seg_modified)
 
     # Hard verification: row0 output is bit-exact unchanged (atol=0 means strict equality)
     assert jnp.allclose(o1[0], o2[0], atol=0.0), (
@@ -354,6 +354,7 @@ class TestKimiDeltaAttention:
     )
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_packed_segment_no_leak_within_row(self, mesh):
     """Within a single row, changing tokens in segment 2 must not affect segment 1's
     output (and vice versa). Complements test_row_independence (cross-row) by
@@ -369,10 +370,9 @@ class TestKimiDeltaAttention:
     x_mod2 = x_base.at[0, 32:, :].set(jax.random.normal(key, (32, hidden_dim)))  # change seg2 tokens
     x_mod1 = x_base.at[0, :32, :].set(jax.random.normal(key, (32, hidden_dim)))  # change seg1 tokens
 
-    with mesh:
-      o_base, _ = attn(x_base, decoder_segment_ids=seg)
-      o_mod2, _ = attn(x_mod2, decoder_segment_ids=seg)
-      o_mod1, _ = attn(x_mod1, decoder_segment_ids=seg)
+    o_base, _ = attn(x_base, decoder_segment_ids=seg)
+    o_mod2, _ = attn(x_mod2, decoder_segment_ids=seg)
+    o_mod1, _ = attn(x_mod1, decoder_segment_ids=seg)
 
     # Changing segment 2 must leave segment 1's positions bit-exact unchanged.
     assert jnp.allclose(
@@ -625,34 +625,33 @@ class TestQkL2Norm:
     return jax.sharding.Mesh(jax.devices(), ("x",))
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_qk_l2norm_applied_outside_kernel(self, mesh):
     """With use_qk_norm=True, Q and K should be L2-normalized before kernel call."""
     cfg = _MockKdaConfig(use_qk_norm=True)
     rngs = nnx.Rngs(0)
-    with mesh:
-      attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+    attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
     B, T, D = 1, 64, 128
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
-    with mesh:
-      output, _ = attn(x)
+    output, _ = attn(x)
     assert output.shape == (B, T, D)
     assert not jnp.any(jnp.isnan(output))
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_qk_l2norm_skipped_when_disabled(self, mesh):
     """With use_qk_norm=False, forward pass should still work without L2 norm."""
     cfg = _MockKdaConfig(use_qk_norm=False)
     rngs = nnx.Rngs(0)
-    with mesh:
-      attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+    attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
     B, T, D = 1, 64, 128
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
-    with mesh:
-      output, _ = attn(x)
+    output, _ = attn(x)
     assert output.shape == (B, T, D)
     assert not jnp.any(jnp.isnan(output))
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
   def test_l2norm_changes_output(self, mesh):
     """Enabling vs disabling L2 norm should produce different outputs."""
     B, T, D = 1, 64, 128
@@ -660,15 +659,13 @@ class TestQkL2Norm:
 
     rngs_on = nnx.Rngs(0)
     cfg_on = _MockKdaConfig(use_qk_norm=True)
-    with mesh:
-      attn_on = attention_kda.KimiDeltaAttention(config=cfg_on, layer_idx=0, mesh=mesh, rngs=rngs_on)
-      out_on, _ = attn_on(x)
+    attn_on = attention_kda.KimiDeltaAttention(config=cfg_on, layer_idx=0, mesh=mesh, rngs=rngs_on)
+    out_on, _ = attn_on(x)
 
     rngs_off = nnx.Rngs(0)
     cfg_off = _MockKdaConfig(use_qk_norm=False)
-    with mesh:
-      attn_off = attention_kda.KimiDeltaAttention(config=cfg_off, layer_idx=0, mesh=mesh, rngs=rngs_off)
-      out_off, _ = attn_off(x)
+    attn_off = attention_kda.KimiDeltaAttention(config=cfg_off, layer_idx=0, mesh=mesh, rngs=rngs_off)
+    out_off, _ = attn_off(x)
 
     assert not jnp.allclose(out_on, out_off, atol=1e-4), "L2 norm on/off should produce different outputs"
 
@@ -707,13 +704,12 @@ class TestKdaBackward:
   def _make_attn(self, mesh, **config_overrides):
     cfg = _MockKdaConfig(**config_overrides)
     rngs = nnx.Rngs(0)
-    with mesh:
-      return attention_kda.KimiDeltaAttention(
-          config=cfg,
-          layer_idx=0,
-          mesh=mesh,
-          rngs=rngs,
-      )
+    return attention_kda.KimiDeltaAttention(
+        config=cfg,
+        layer_idx=0,
+        mesh=mesh,
+        rngs=rngs,
+    )
 
   def _run_vjp(self, module, inp, mesh):
     """Run gradient using value_and_grad instead of vjp."""
@@ -721,8 +717,7 @@ class TestKdaBackward:
 
     def forward_fn(params, x):
       model = nnx.merge(graphdef, params, other)
-      with mesh:
-        out, _ = model(x)
+      out, _ = model(x)
       # Return scalar loss for gradient computation
       return jnp.sum(out)
 
@@ -739,8 +734,7 @@ class TestKdaBackward:
     attn = self._make_attn(mesh)
     B, T, D = 1, 64, 128
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
-    with mesh:
-      _, grad_input = self._run_vjp(attn, x, mesh)
+    _, grad_input = self._run_vjp(attn, x, mesh)
     assert not jnp.any(jnp.isnan(grad_input)), "grad_input contains NaN"
     assert not jnp.any(jnp.isinf(grad_input)), "grad_input contains Inf"
     assert jnp.any(grad_input != 0), "grad_input is all zeros"
@@ -751,9 +745,8 @@ class TestKdaBackward:
     attn = self._make_attn(mesh)
     B, T, D = 1, 64, 128
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
-    with mesh:
-      _, grad1 = self._run_vjp(attn, x, mesh)
-      _, grad2 = self._run_vjp(attn, x, mesh)
+    _, grad1 = self._run_vjp(attn, x, mesh)
+    _, grad2 = self._run_vjp(attn, x, mesh)
     assert jnp.allclose(grad1, grad2, atol=1e-5), "Backward is not deterministic"
 
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
@@ -762,8 +755,7 @@ class TestKdaBackward:
     attn = self._make_attn(mesh)
     B, T, D = 1, 64, 128
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
-    with mesh:
-      grad_params, _ = self._run_vjp(attn, x, mesh)
+    grad_params, _ = self._run_vjp(attn, x, mesh)
 
     flat_grads = jax.tree.leaves(grad_params)
     for i, g in enumerate(flat_grads):
@@ -777,8 +769,7 @@ class TestKdaBackward:
     attn = self._make_attn(mesh, dtype=jnp.bfloat16, weight_dtype=jnp.bfloat16)
     B, T, D = 1, 64, 128
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D), dtype=jnp.bfloat16)
-    with mesh:
-      grad_params, grad_input = self._run_vjp(attn, x, mesh)
+    grad_params, grad_input = self._run_vjp(attn, x, mesh)
     assert not jnp.any(jnp.isnan(grad_input)), "bf16 grad_input contains NaN"
     assert not jnp.any(jnp.isinf(grad_input)), "bf16 grad_input contains Inf"
     assert jnp.any(grad_input != 0), "bf16 grad_input is all zeros"
@@ -812,8 +803,7 @@ class TestKdaLayerParity:
     mesh = jax.sharding.Mesh(jax.devices(), ("x",))
     cfg = _MockKdaConfig()
     rngs = nnx.Rngs(0)
-    with mesh:
-      attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+    attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
 
     B, T, D = 2, 128, 128
     x = jax.random.normal(jax.random.PRNGKey(13), (B, T, D))
@@ -821,8 +811,7 @@ class TestKdaLayerParity:
     seg_ids = jnp.array([[1] * 64 + [2] * 64, [1] * 128], dtype=jnp.int32)
 
     def _loss(model, x_in):
-      with mesh:
-        o, _ = model(x_in, decoder_segment_ids=seg_ids)
+      o, _ = model(x_in, decoder_segment_ids=seg_ids)
       return o.astype(jnp.float32).sum()
 
     # Input gradients: differentiate the output sum w.r.t. the input.
@@ -836,8 +825,7 @@ class TestKdaLayerParity:
       return _loss(nnx.merge(graphdef, params, other), x)
 
     def _run():
-      with mesh:
-        o, _ = attn(x, decoder_segment_ids=seg_ids)
+      o, _ = attn(x, decoder_segment_ids=seg_ids)
       return (
           jax.device_get(o),
           jax.device_get(jax.grad(_loss_x)(x)),
@@ -1290,29 +1278,25 @@ class TestKdaCp:
       # head_dim must be a multiple of 128 under CP (mosaic kernel constraint).
       cfg = _MockKdaConfig(head_dim=128)
       rngs = nnx.Rngs(0)
-      with mesh:
-        return attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+      return attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
 
     attn_cp = _build(mesh_cp)
     # Non-CP reference: same weights on a mesh without a CP axis.
     mesh_ref = jax.sharding.Mesh(np.array(jax.devices()), ("x",))
     attn_ref = _build(mesh_ref)
 
-    with mesh_cp:
-      o_cp, _ = attn_cp(x)
+    o_cp, _ = attn_cp(x)
     o_full = jax.device_get(
         jax.lax.with_sharding_constraint(o_cp, jax.sharding.NamedSharding(mesh_cp, jax.sharding.PartitionSpec()))
     )
-    with mesh_ref:
-      o_ref, _ = attn_ref(x)
+    o_ref, _ = attn_ref(x)
 
     _assert_close(o_full, jax.device_get(o_ref), "kda_cp_full_layer_dummy_seg", atol=5e-3, rtol=1e-3)
     assert not np.any(np.isnan(o_full)), "NaN in full-layer CP output"
 
     # CP backward through the whole layer (conv shard_map + kernel shard_map).
     def _sum_cp(x):
-      with mesh_cp:
-        o, _ = attn_cp(x)
+      o, _ = attn_cp(x)
       return o.astype(jnp.float32).sum()
 
     grad_x = jax.device_get(jax.grad(_sum_cp)(x))
@@ -1344,8 +1328,7 @@ class TestKdaCp:
       # head_dim must be a multiple of 128 under CP (mosaic kernel constraint).
       cfg = _MockKdaConfig(head_dim=128)
       rngs = nnx.Rngs(0)
-      with mesh:
-        return attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+      return attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
 
     attn_cp = _build(mesh_cp)
     attn_ref = _build(mesh_ref)
@@ -1362,13 +1345,11 @@ class TestKdaCp:
     )
 
     # --- Forward: CP vs non-CP ---
-    with mesh_cp:
-      o_cp, _ = attn_cp(x, decoder_segment_ids=seg_ids)
+    o_cp, _ = attn_cp(x, decoder_segment_ids=seg_ids)
     o_cp_full = jax.device_get(
         jax.lax.with_sharding_constraint(o_cp, jax.sharding.NamedSharding(mesh_cp, jax.sharding.PartitionSpec()))
     )
-    with mesh_ref:
-      o_ref, _ = attn_ref(x, decoder_segment_ids=seg_ids)
+    o_ref, _ = attn_ref(x, decoder_segment_ids=seg_ids)
     # Full-layer tolerance: 2x the kernel-level CP tolerance (5e-3, tokamax CI
     # baseline) since the gated norm / output projection propagate the
     # cross-rank chunk-boundary rounding through the rest of the layer.
@@ -1381,8 +1362,7 @@ class TestKdaCp:
 
       def loss_fn(params, x):
         model = nnx.merge(graphdef, params, other)
-        with mesh:
-          o, _ = model(x, decoder_segment_ids=seg_ids)
+        o, _ = model(x, decoder_segment_ids=seg_ids)
         return o.astype(jnp.float32).sum()
 
       _, (grad_params, grad_x) = jax.value_and_grad(loss_fn, argnums=(0, 1))(params, x)
@@ -1415,14 +1395,12 @@ class TestKdaCp:
     mesh = self._cp_mesh(cp_size=2)
     cfg = _MockKdaConfig(head_dim=128)
     rngs = nnx.Rngs(0)
-    with mesh:
-      attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+    attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
 
     monkeypatch.setattr(attention_kda, "TokamaxContextParallelMetadata", None)
     x = jax.random.normal(jax.random.PRNGKey(0), (2, 128, 128))
     with pytest.raises(ImportError, match="ContextParallelMetadata"):
-      with mesh:
-        attn(x)
+      attn(x)
 
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   def test_kda_cp_rejects_load_balance(self):
@@ -1430,13 +1408,12 @@ class TestKdaCp:
     mesh = self._cp_mesh(cp_size=2)
     cfg = _MockKdaConfig(context_parallel_load_balance=True)
     rngs = nnx.Rngs(0)
-    with mesh:
-      attn = attention_kda.KimiDeltaAttention(
-          config=cfg,
-          layer_idx=0,
-          mesh=mesh,
-          rngs=rngs,
-      )
+    attn = attention_kda.KimiDeltaAttention(
+        config=cfg,
+        layer_idx=0,
+        mesh=mesh,
+        rngs=rngs,
+    )
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
     with pytest.raises(ValueError, match="load_balance"):
       attn(x)
@@ -1447,16 +1424,14 @@ class TestKdaCp:
     mesh = jax.sharding.Mesh(jax.devices(), ("x",))
     cfg = _MockKdaConfig()
     rngs = nnx.Rngs(0)
-    with mesh:
-      attn = attention_kda.KimiDeltaAttention(
-          config=cfg,
-          layer_idx=0,
-          mesh=mesh,
-          rngs=rngs,
-      )
+    attn = attention_kda.KimiDeltaAttention(
+        config=cfg,
+        layer_idx=0,
+        mesh=mesh,
+        rngs=rngs,
+    )
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
-    with mesh:
-      output, _ = attn(x)
+    output, _ = attn(x)
     assert output.shape == (1, 64, 128)
     assert jnp.isfinite(output).all()
 
@@ -1496,8 +1471,7 @@ class TestKdaConfigGuards:
     """Layer must fail fast when packed sequences are used without max_segments_per_seq."""
     cfg = _MockKdaConfig(max_segments_per_seq=-1)
     rngs = nnx.Rngs(0)
-    with mesh:
-      attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
+    attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
     seg = jnp.ones((1, 64), dtype=jnp.int32)
     with pytest.raises(ValueError, match="max_segments_per_seq"):
@@ -1548,3 +1522,152 @@ class TestKdaKernelGuards:
     q, k, v, g, beta = self._dummy_inputs()
     with pytest.raises(NotImplementedError, match="output_final_state"):
       tokamax_chunk_kda(q, k, v, g, beta, scale=0.25, output_final_state=True)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end training smoke (delayed-copy task; replaces the former
+# scripts/dev/kda_e2e_smoke.py)
+# ---------------------------------------------------------------------------
+
+_KDA_SMOKE_VOCAB = 128
+
+
+class _KdaBlock(nnx.Module):
+  """Pre-norm transformer block: RMSNorm -> KimiDeltaAttention -> MLP."""
+
+  def __init__(self, cfg, mesh, layer_idx, *, rngs):
+    self.attn_norm = RMSNorm(
+        num_features=cfg.base_emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        rngs=rngs,
+    )
+    self.attn = attention_kda.KimiDeltaAttention(cfg, layer_idx=layer_idx, mesh=mesh, rngs=rngs)
+    self.mlp_norm = RMSNorm(
+        num_features=cfg.base_emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        rngs=rngs,
+    )
+    hidden = 4 * cfg.base_emb_dim
+    self.wi = nnx.Linear(cfg.base_emb_dim, hidden, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
+    self.wo = nnx.Linear(hidden, cfg.base_emb_dim, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
+
+  def __call__(self, x):
+    attn_out, _ = self.attn(self.attn_norm(x).astype(self.attn.config.dtype))
+    x = x + attn_out.astype(x.dtype)
+    h = nnx.gelu(self.wi(self.mlp_norm(x)))
+    x = x + self.wo(h).astype(x.dtype)
+    return x
+
+
+class _TinyKdaLM(nnx.Module):
+  """Embed -> N x _KdaBlock -> RMSNorm -> lm_head."""
+
+  def __init__(self, cfg, mesh, num_layers, *, rngs):
+    self.embed = nnx.Embed(_KDA_SMOKE_VOCAB, cfg.base_emb_dim, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
+    self.blocks = nnx.List([_KdaBlock(cfg, mesh, i, rngs=rngs) for i in range(num_layers)])
+    self.final_norm = RMSNorm(
+        num_features=cfg.base_emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        rngs=rngs,
+    )
+    self.lm_head = nnx.Linear(
+        cfg.base_emb_dim, _KDA_SMOKE_VOCAB, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs
+    )
+
+  def __call__(self, tokens):
+    x = self.embed(tokens)
+    for block in self.blocks:
+      x = block(x)
+    return self.lm_head(self.final_norm(x))
+
+
+def _delayed_copy_dataset(seed, num_seqs, seq_len, delay):
+  """Delayed-copy sequences over random tokens: t[i] = t[i-delay]."""
+  rng = np.random.default_rng(seed)
+  total = seq_len + 1
+  seqs = rng.integers(0, _KDA_SMOKE_VOCAB, size=(num_seqs, total), dtype=np.int32)
+  for i in range(delay, total):
+    seqs[:, i] = seqs[:, i - delay]
+  return seqs
+
+
+class TestKdaE2eSmoke:
+  """End-to-end training smoke for the KimiDeltaAttention layer.
+
+  The task is delayed copy: i.i.d. tokens with ``t[i] = t[i-delay]`` where
+  ``delay`` exceeds the short convolution's receptive field. Neither a
+  memoryless model nor the convolution alone can predict the next token, so
+  the loss collapses to near zero only if the KDA recurrent state carries
+  history — validating the full forward/backward/optimizer chain through the
+  real Pallas kernels.
+  """
+
+  @pytest.mark.tpu_only
+  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
+  def test_delayed_copy_loss_collapses(self):
+    seq_len, delay, steps, batch, num_layers = 64, 5, 300, 32, 2
+    cfg = SimpleNamespace(
+        base_emb_dim=256,
+        base_num_query_heads=8,
+        head_dim=64,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        attention_bias=False,
+        shard_mode="auto",
+        matmul_precision="default",
+        normalization_layer_epsilon=1e-6,
+        logical_axis_rules=[],
+        linear_conv_kernel_dim=4,
+        use_qk_norm=True,
+        use_kda_safe_gate=True,
+        kda_lower_bound=-5.0,
+        max_segments_per_seq=25,
+        context_sharding="context",
+    )
+    # Delay beyond the conv receptive field, or the task is solvable without
+    # any KDA state (see review of the original permutation task).
+    assert delay > cfg.linear_conv_kernel_dim
+
+    mesh = jax.sharding.Mesh(np.array(jax.devices()), ("x",))
+    rngs = nnx.Rngs(0)
+    model = _TinyKdaLM(cfg, mesh, num_layers, rngs=rngs)
+
+    data = _delayed_copy_dataset(seed=42, num_seqs=4096, seq_len=seq_len, delay=delay)
+    # Label position j predicts token j+1 = t[j+1-delay]; positions with
+    # j+1 < delay have random targets (irreducible), so mask them out.
+    loss_mask = jnp.asarray(np.arange(seq_len) >= delay - 1, dtype=jnp.float32)[None, :]
+    optimizer = nnx.Optimizer(model, optax.adamw(1e-3), wrt=nnx.Param)
+
+    def masked_ce(logits, labels):
+      ce = optax.softmax_cross_entropy_with_integer_labels(logits=logits.astype(jnp.float32), labels=labels)
+      return (ce * loss_mask).sum() / loss_mask.sum() / labels.shape[0]
+
+    @nnx.jit
+    def train_step(model, optimizer, tokens):
+      def loss_fn(model):
+        logits = model(tokens[:, :-1])
+        return masked_ce(logits, tokens[:, 1:]), logits
+
+      (loss, _), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
+      optimizer.update(model, grads)
+      return loss
+
+    perm_rng = np.random.default_rng(1)
+    losses = []
+    for step in range(steps):
+      idx = perm_rng.integers(0, data.shape[0], size=batch)
+      loss_val = float(train_step(model, optimizer, jnp.asarray(data[idx])))
+      assert np.isfinite(loss_val), f"non-finite loss {loss_val} at step {step}"
+      losses.append(loss_val)
+
+    init_loss, final_loss = losses[0], float(np.mean(losses[-20:]))
+    assert final_loss < 0.5 * init_loss and final_loss < 1.0, (
+        f"delayed-copy loss did not collapse: init={init_loss:.4f} final={final_loss:.4f} "
+        "(the KDA recurrent state is not carrying history through training)"
+    )

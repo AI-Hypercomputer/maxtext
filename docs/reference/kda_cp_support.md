@@ -23,7 +23,7 @@ CP (cp_size > 1):
 
 Key difference from MLA CP: MLA relies on splash attention kernel internally doing implicit all_gather K/V → local attention; KDA does not rely on all_gather. Instead, `ContextParallelMetadata` lets the kernel coordinate recurrent state across ranks during forward/backward.
 
-### Plan 1: `halo_exchange_for_conv` (`utils/cp_utils.py`, new file)
+### Plan 1: `halo_exchange_for_conv` (in `layers/attention_kda.py`, KDA-specific)
 
 ShortConvolution is a causal 1D depthwise convolution. Under CP sharding, each rank lacks the preceding `kernel_size-1` historical tokens at its left boundary.
 
@@ -139,17 +139,15 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 
 ## Files Changed
 
-| File                               | Change                                                           |   Lines   |
-| ---------------------------------- | ---------------------------------------------------------------- | :-------: |
-| `layers/attention_kda.py`          | **New**: `KimiDeltaAttention`, `ShortConvolution`, CP support    |   ~672    |
-| `kernels/kda/__init__.py`          | **New**: `chunk_kda()` entry point                               |    ~99    |
-| `kernels/kda/tokamax.py`           | **New**: tokamax backend adapter (lazy import)                   |   ~143    |
-| `utils/cp_utils.py`                | **New**: `halo_exchange_for_conv` (+ oversized-halo guard)       |    ~95    |
-| `configs/types.py`                 | **Modified**: `KdaAttention` config class + validators           |   +~90    |
-| `tests/unit/kda_attention_test.py` | **New**: layer + conv halo + CP fwd/bwd + packed-seg CP + parity |   ~1550   |
-| `scripts/dev/kda_e2e_smoke.py`     | **New**: e2e smoke, history-dependent delayed-copy task          |   ~235    |
-| `docs/reference/kda_cp_support.md` | **New**: design doc                                              |     —     |
-| `**Total**`                        |                                                                  | **~2985** |
+| File                               | Change                                                                            |   Lines   |
+| ---------------------------------- | --------------------------------------------------------------------------------- | :-------: |
+| `layers/attention_kda.py`          | **New**: `KimiDeltaAttention`, `ShortConvolution`, CP support                     |   ~743    |
+| `kernels/kda/__init__.py`          | **New**: `chunk_kda()` entry point                                                |    ~99    |
+| `kernels/kda/tokamax.py`           | **New**: tokamax backend adapter (lazy import)                                    |   ~143    |
+| `configs/types.py`                 | **Modified**: `KdaAttention` config class + validators                            |   +~90    |
+| `tests/unit/kda_attention_test.py` | **New**: layer + conv halo + CP fwd/bwd + packed-seg CP + parity + e2e smoke test |   ~1675   |
+| `docs/reference/kda_cp_support.md` | **New**: design doc                                                               |     —     |
+| `**Total**`                        |                                                                                   | **~3035** |
 
 ## Key Constraints
 

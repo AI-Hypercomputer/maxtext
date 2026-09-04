@@ -115,9 +115,18 @@ def tokamax_chunk_kda(
 
   # Deliberately lazy: importing the KDA API must not fail at module import
   # time on installs without tokamax; only an actual KDA call requires it.
-  from tokamax._src.ops.experimental.kda.api import (  # pylint: disable=import-outside-toplevel
-      kimi_delta_attention,
-  )
+  try:
+    from tokamax._src.ops.experimental.kda.api import (  # pylint: disable=import-outside-toplevel
+        kimi_delta_attention,
+    )
+  except ImportError as exc:
+    raise ImportError(
+        "KDA requires the tokamax KDA API (tokamax._src.ops.experimental.kda.api), "
+        "which is not available in the installed tokamax build. The KDA kernels "
+        "have landed on openxla/tokamax main but no public release contains them "
+        "yet — install tokamax from source (openxla/tokamax main, or the "
+        "antgroup/kda-pallas-kernel branch) until the first release ships."
+    ) from exc
 
   q_h, k_h, v_h, g_h, beta_h = _to_tokamax(q, k, v, g, beta)
 
