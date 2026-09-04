@@ -58,31 +58,31 @@ _KDA_TEST_SEQ = 64  # multiple of the KDA chunk size
 
 def _kda_pyconfig(**kwargs):
   """Build a tiny train config that selects the KDA attention variant."""
-  defaults = dict(
-      per_device_batch_size=4.0,
-      run_name="test",
-      enable_checkpointing=False,
-      decoder_block="default",  # generic NNXDecoderLayer, where the KDA branch lives
-      base_num_decoder_layers=2,
-      attention="dot_product",
-      attention_type="kda",
-      scan_layers=False,
-      max_target_length=_KDA_TEST_SEQ,
-      base_emb_dim=128,
-      base_num_query_heads=4,
-      base_num_kv_heads=4,
-      head_dim=128,
-      vocab_size=_KDA_TEST_VOCAB,
-      max_prefill_predict_length=4,
+  defaults = {
+      "per_device_batch_size": 4.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "decoder_block": "default",  # generic NNXDecoderLayer, where the KDA branch lives
+      "base_num_decoder_layers": 2,
+      "attention": "dot_product",
+      "attention_type": "kda",
+      "scan_layers": False,
+      "max_target_length": _KDA_TEST_SEQ,
+      "base_emb_dim": 128,
+      "base_num_query_heads": 4,
+      "base_num_kv_heads": 4,
+      "head_dim": 128,
+      "vocab_size": _KDA_TEST_VOCAB,
+      "max_prefill_predict_length": 4,
       # Bounded-decay (safe) gate keeps the Delta-Rule recurrence stable,
       # matching the standalone layer smoke. fp32 for the same reason; bf16
       # hyperparameter tuning for KDA models belongs to the model-landing
       # follow-up, not the integration validation.
-      use_kda_safe_gate=True,
-      kda_lower_bound=-5.0,
-      dtype="float32",
-      weight_dtype="float32",
-  )
+      "use_kda_safe_gate": True,
+      "kda_lower_bound": -5.0,
+      "dtype": "float32",
+      "weight_dtype": "float32",
+  }
   defaults.update(kwargs)
   return pyconfig.initialize([sys.argv[0], get_test_config_path()], **defaults)
 
