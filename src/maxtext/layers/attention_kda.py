@@ -586,10 +586,14 @@ class KimiDeltaAttention(nnx.Module):
     k = jax.nn.silu(k)
     v = jax.nn.silu(v)
 
-    # Apply L2 normalization to Q/K outside the kernel (matching Megatron kda.py:824-828)
-    if cfg.use_qk_norm:
-      q = _l2_normalize(q)
-      k = _l2_normalize(k)
+    # Apply L2 normalization to Q/K outside the kernel (matching Megatron
+    # kda.py:824-828). Always on for KDA: the Delta-Rule recurrence is
+    # numerically unstable with unbounded q/k (training diverges to NaN in
+    # bf16), and QK L2-norm is part of the KDA architecture in the reference.
+    # This is independent of the shared `use_qk_norm` flag, which belongs to
+    # dot-product attention.
+    q = _l2_normalize(q)
+    k = _l2_normalize(k)
 
     # Generate gate g (raw projection, gate transform done inside kernel)
     with jax.named_scope("gate_proj"):

@@ -632,8 +632,8 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
-      "global", description="The variant of attention to use."
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "kda", "full", "compressed", "block_diffusion"] = (
+      Field("global", description="The variant of attention to use.")
   )
   share_kv_projections: bool = Field(
       False,
@@ -4732,6 +4732,12 @@ class MaxTextConfig(
     if self.use_qk_clip and self.attention_type != "mla":
       raise ValueError(
           f"QK-Clip is only supported when attention_type='mla', but found attention_type='{self.attention_type}'."
+      )
+
+    if self.attention_type == "kda" and self.scan_layers:
+      raise ValueError(
+          "attention_type='kda' requires scan_layers=false: KDA layers have not been validated "
+          "inside a scanned layer stack. Set scan_layers: false."
       )
 
     if self.use_qk_clip and self.attn_logits_soft_cap is not None:

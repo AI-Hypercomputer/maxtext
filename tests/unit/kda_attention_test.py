@@ -639,21 +639,12 @@ class TestQkL2Norm:
 
   @pytest.mark.tpu_only
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
-  def test_qk_l2norm_skipped_when_disabled(self, mesh):
-    """With use_qk_norm=False, forward pass should still work without L2 norm."""
-    cfg = _MockKdaConfig(use_qk_norm=False)
-    rngs = nnx.Rngs(0)
-    attn = attention_kda.KimiDeltaAttention(config=cfg, layer_idx=0, mesh=mesh, rngs=rngs)
-    B, T, D = 1, 64, 128
-    x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
-    output, _ = attn(x)
-    assert output.shape == (B, T, D)
-    assert not jnp.any(jnp.isnan(output))
+  def test_qk_l2norm_always_on_regardless_of_flag(self, mesh):
+    """KDA always L2-normalizes Q/K: the shared use_qk_norm flag does not turn it off.
 
-  @pytest.mark.tpu_only
-  @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="KDA API not available in the installed tokamax")
-  def test_l2norm_changes_output(self, mesh):
-    """Enabling vs disabling L2 norm should produce different outputs."""
+    The Delta-Rule recurrence diverges without bounded q/k, so the norm is part
+    of the KDA architecture regardless of the dot-product-attention flag.
+    """
     B, T, D = 1, 64, 128
     x = jax.random.normal(jax.random.PRNGKey(0), (B, T, D))
 
@@ -667,7 +658,8 @@ class TestQkL2Norm:
     attn_off = attention_kda.KimiDeltaAttention(config=cfg_off, layer_idx=0, mesh=mesh, rngs=rngs_off)
     out_off, _ = attn_off(x)
 
-    assert not jnp.allclose(out_on, out_off, atol=1e-4), "L2 norm on/off should produce different outputs"
+    # Identical weights + input, only the flag differs -> outputs must match.
+    assert jnp.allclose(out_on, out_off, atol=1e-5), "KDA must L2-normalize Q/K regardless of use_qk_norm"
 
   def test_l2_normalize_produces_unit_norm(self):
     """Direct check that _l2_normalize yields unit L2 norm along the last axis.
