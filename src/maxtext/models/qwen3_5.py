@@ -25,6 +25,7 @@ from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import Config, Array
+from maxtext.layers.linears import MlpBlock
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
@@ -168,7 +169,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
           config=cfg, inputs_shape=dummy_inputs_shape, mesh=self.mesh, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs
       )
 
-    # Second LayerNorm, applied before the MoE block.
+    # Second LayerNorm, applied before the MoE/MLP block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
@@ -177,8 +178,23 @@ class Qwen3_5DecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    # Instantiate our `Qwen3_5SparseMoEBlock`.
-    self.mlp = Qwen3_5SparseMoEBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    # Conditionally instantiate MoE or dense MLP.
+    if getattr(cfg, "num_experts", 1) > 1:
+      self.mlp = Qwen3_5SparseMoEBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    else:
+      self.mlp = MlpBlock(
+          in_features=cfg.emb_dim,
+          intermediate_dim=cfg.mlp_dim,
+          activations=cfg.mlp_activations,
+          intermediate_dropout_rate=cfg.dropout_rate,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          config=cfg,
+          mesh=mesh,
+          quant=quant,
+          model_mode=model_mode,
+          rngs=rngs,
+      )
 
   def __call__(
       self,
@@ -226,26 +242,26 @@ class Qwen3_5DecoderLayer(nnx.Module):
     hidden_states = residual + attention_output
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
-    # Prepare for the MoE block by capturing the new residual
+    # Prepare for the MoE/MLP block by capturing the new residual
     residual = hidden_states
 
-    # Second LayerNorm, applied before the MoE block.
+    # Second LayerNorm, applied before the MoE/MLP block.
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
-    # Instantiate and call our `Qwen3_5SparseMoEBlock`.
-    mlp_output, load_balance_loss = self.mlp(
-        hidden_states,
-        deterministic=deterministic,
-        forced_routed_experts=forced_routed_experts,
-    )
+    # Instantiate and call our MLP / MoE block.
+    if getattr(self.config, "num_experts", 1) > 1:
+      mlp_output, load_balance_loss = self.mlp(
+          hidden_states,
+          deterministic=deterministic,
+          forced_routed_experts=forced_routed_experts,
+      )
+      if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+        self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+    else:
+      mlp_output = self.mlp(hidden_states, deterministic=deterministic)
 
-    # We sow the load balancing loss so it can be collected and added to the total loss
-    # during training.
-    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
-
-    # Final residual connection (after the MoE block)
+    # Final residual connection (after the MoE/MLP block)
     layer_output = residual + mlp_output
     layer_output = nn.with_logical_constraint(
         layer_output,

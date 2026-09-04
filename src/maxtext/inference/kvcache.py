@@ -405,7 +405,7 @@ class KVCache(BaseCache):
       cache_batch_axis_name = CACHE_BATCH_PREFILL if model_mode == MODEL_MODE_PREFILL else CACHE_BATCH
 
       self.cached_prefill_key = nnx.Cache(
-          jnp.zeros((self.batch, self.key_heads, self.key_head_size, self.value_head_size), dtype=dtype),
+          jnp.zeros((self.batch, self.key_heads, self.key_head_size, self.value_head_size), dtype=jnp.float32),
           out_sharding=(cache_batch_axis_name, CACHE_HEADS, None, None),
       )
       self.cached_prefill_value = nnx.Cache(
