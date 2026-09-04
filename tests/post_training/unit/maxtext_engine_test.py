@@ -1349,6 +1349,94 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("perplexity", processed)
     self.assertAlmostEqual(processed["perplexity"], float(np.exp(6.0)), places=3)
 
+  def test_live_objects_are_not_walked_on_the_step_path(self):
+    """The step path publishes to the pure mirror only; `nnx.update` is deferred.
+
+    The saving this buys is the whole point of the deferral -- `nnx.update` walks the
+    module graph, and its cost scales with the graph rather than the state written -- so a
+    step that walks it anyway has silently lost it.
+
+    Only writes aimed at the engine's own live objects count. `nnx.Optimizer.update` calls
+    `nnx.update` internally, on the state the kernel merged locally, and that is neither
+    publication nor something this change can avoid.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+
+    live = (t._model, t._state, t._optimizer)
+    walked = []
+    real_update = maxtext_engine.nnx.update
+
+    def spy(target, *args, **kwargs):
+      if any(target is obj for obj in live):
+        walked.append(target)
+      return real_update(target, *args, **kwargs)
+
+    with mock.patch.object(maxtext_engine.nnx, "update", spy):
+      t.fwd_bwd(DummyPayload())
+      t.update()
+
+    self.assertEmpty(walked, "the step path wrote to the live NNX objects")
+    self.assertTrue(t._live_stale, "nothing was deferred, so the publish was skipped, not deferred")
+
+  def test_reading_the_model_flushes_a_deferred_publish(self):
+    """A deferred publish is invisible: every public reader syncs before it answers."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertTrue(t._live_stale, "nothing was deferred, so this test proves nothing")
+
+    published = nnx.state(t.model, nnx.Param)
+    self.assertFalse(t._live_stale)
+    jax.tree.map(np.testing.assert_array_equal, jax.tree.leaves(published), jax.tree.leaves(t._params_pure))
+
+  def test_dropping_the_pure_state_flushes_rather_than_drops_the_step(self):
+    """Invalidating the mirror must not discard an update that was only deferred."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    expected = jax.tree.leaves(t._params_pure)
+
+    t._invalidate_pure_state()
+    self.assertFalse(t._live_stale)
+    jax.tree.map(np.testing.assert_array_equal, jax.tree.leaves(nnx.state(t._model, nnx.Param)), expected)
+
+  def test_publication_stays_eager_without_a_pure_mirror(self):
+    """With the pure state disabled there is nothing to publish from later."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    t._disable_pure_state("test")
+
+    with mock.patch.object(maxtext_engine.nnx, "update", wraps=maxtext_engine.nnx.update) as spy:
+      t._publish_to_live(t._model, nnx.state(t._model, nnx.Param))
+    self.assertEqual(spy.call_count, 1)
+    self.assertFalse(t._live_stale)
+
+  def test_clip_by_grad_norm_matches_optax(self):
+    """The hand-rolled scale is `optax.clip_by_global_norm`'s, on the norm already in hand.
+
+    Both sides of the threshold, because the scale is a `where` and only one branch is
+    exercised by a given gradient tree.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    for scale, case in ((100.0, "above the threshold"), (1e-3, "below the threshold")):
+      with self.subTest(case):
+        grads = {"a": jnp.array([3.0, 4.0]) * scale, "b": jnp.array([[1.0, 2.0]]) * scale}
+        threshold = t._config.gradient_clipping_threshold
+        expected, _ = optax.clip_by_global_norm(threshold).update(grads, None, None)
+        got = t._clip_by_grad_norm(grads, maxtext_engine.max_utils.l2norm_pytree(grads))
+        jax.tree.map(lambda e, g: np.testing.assert_allclose(e, g, rtol=1e-6), expected, got)
+
 
 if __name__ == "__main__":
   absltest.main()
