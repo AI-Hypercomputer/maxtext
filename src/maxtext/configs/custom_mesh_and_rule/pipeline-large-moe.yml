@@ -36,6 +36,7 @@ logical_axis_rules: [
                       ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'context', 'expert']],
                       ['activation_heads', ['tensor']],
                       ['activation_kv_heads', ['tensor']],
+                      ['indexer_topk_seq', ['tensor']],
                       ['activation_length', ['context']],
                       ['activation_length_attn', ['context']],
                       ['activation_q_length', ['context']],
