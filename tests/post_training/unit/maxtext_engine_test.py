@@ -1117,6 +1117,42 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # The recorder is drained, so a later pass cannot re-write this one's numbers.
     self.assertEmpty(t._eval_metrics_recorder.get_metrics_history(clear_cache=False))
 
+  def test_eval_step_traces_under_the_mesh_and_axis_rules(self):
+    """The eval kernel is traced under the same context every training kernel gets.
+
+    `fwd_bwd` and `update` wrap their kernel calls in `_sharding_ctx`; eval was the one step
+    path that did not. Under `shard_mode=auto` that only costs partitioning quality, so it
+    goes unnoticed, but the MaxText layers call `jax.sharding.reshard(x, P(...))` and a bare
+    `PartitionSpec` with no mesh in context is an error rather than a no-op under explicit
+    axis types -- there, an eval kernel traced outside the context raises instead of running.
+
+    Both branches: `compile()` picks which of the two eval paths a run takes, and they were
+    missing the context independently.
+    """
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        seen = {}
+
+        def loss_fn(model, *_args, _seen=seen, **_kwargs):
+          # Read from inside the kernel, which is the only place that matters: `jax.jit` is
+          # lazy, so a context entered around the compile call and not the kernel call would
+          # still leave the trace bare.
+          _seen["mesh"] = jax.sharding.get_abstract_mesh()
+          _seen["rules"] = maxtext_engine.nn_partitioning.get_axis_rules()
+          return (
+              abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights.value), denominator=jnp.array(1.0)),
+              {},
+          )
+
+        t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+        t.with_loss_fn(loss_fn)
+        if compiled:
+          t.compile(DummyPayload())
+        t.eval_step(DummyPayload())
+
+        self.assertFalse(seen["mesh"].empty, "the eval kernel was traced with no mesh in context")
+        self.assertTrue(seen["rules"], "the eval kernel was traced with an empty logical axis rule set")
+
   def test_get_metrics_returns_one_buffer_and_a_sentinel_when_empty(self):
     """`get_metrics` returns a single buffer, matching both ABCs.
 
