@@ -50,7 +50,7 @@ If the `docker run hello-world` command fails with a permission denied error (e.
 
 ## Installation Modes
 
-Follow the instructions in the [Installation guide](../install_maxtext.md) to install the `maxtext[runner]` extra, which includes all necessary dependencies for building MaxText Docker images and running workloads through XPK. It automatically installs XPK, so you do not need to install it separately to manage your clusters and workloads.
+Follow the instructions in the [Installation guide](https://maxtext.readthedocs.io/en/maxtext-v0.2.3/install_maxtext.html) to install the `maxtext[runner]` extra, which includes all necessary dependencies for building MaxText Docker images and running workloads through XPK. It automatically installs XPK, so you do not need to install it separately to manage your clusters and workloads.
 
 ## Pre-built MaxText Docker images
 
