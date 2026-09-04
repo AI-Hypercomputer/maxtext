@@ -591,7 +591,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # calls `optimizer.update(model, grads)`, which is the nnx.Optimizer signature, and
     # `checkpointing.CheckpointState` expects an nnx.Optimizer too, so wrap it here. `wrt=nnx.Param`
     # covers every parameter, which is correct only because LoRA is rejected above.
-    self._learning_rate_schedule, tx = train_utils.create_training_optimizer(self._config, self._model)
+    self._learning_rate_schedule, tx = train_utils.create_training_optimizer(self._config, self._model, mesh=self._mesh)
     self._optimizer = nnx.Optimizer(self._model, tx, wrt=nnx.Param)
     self._train_step: int = 0
 
