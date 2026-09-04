@@ -2312,11 +2312,14 @@ function openFlakyTestPop(testName,jobId){
   const share=FLAKY_TESTS.filter(x=>x.job===jobId&&x.test!==testName&&x.prs.some(p=>inPrs.includes(p)));
   const rowsH=inPrs.map(p=>{
     const e=j.events.find(x=>x.pr===p)||{};
+    const fl=(j.fails||[]).find(x=>x.pr===p);
+    const rid=e.runId||(fl&&fl.runId);
     const chip=`<span class="mono" style="font-size:13px;color:var(--ink2)">${p}</span>`;
+    const runLink=rid?`<a href="https://github.com/${REPO}/actions/runs/${rid}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-size:12px" title="View CI run">run &rarr;</a>`:'';
     return `<div style="display:grid;grid-template-columns:80px 64px 1fr auto;gap:12px;align-items:center;padding:8px 4px;border-top:1px solid var(--grid)">
       <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${e.date||''}</span>
       <span class="mono" style="font-size:13px;color:var(--ink2)">${ft.cause}</span>
-      </div>`;
+      <span>${runLink}</span></div>`;
   }).join('');
   $('#wkpop-body').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
@@ -2391,8 +2394,14 @@ function openFlakyPop(id,pr){
       if(!pr)return '';
       const prNum=pr.replace('#','');
       if(!prNum||prNum==='null')return '';
+      const ev=j.events.find(x=>x.pr===pr);
+      const fl=(j.fails||[]).find(x=>x.pr===pr);
+      const rid=(ev&&ev.runId)||(fl&&fl.runId);
+      const runUrl=rid?'https://github.com/'+REPO+'/actions/runs/'+rid:null;
       const prUrl='https://github.com/'+REPO+'/pull/'+prNum;
-      return`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--grid)"><a href="${prUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;font-size:13px;cursor:pointer">View PR #${prNum} on GitHub &rarr;</a></div>`;
+      return`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--grid)">`
+        +(runUrl?`<a href="${runUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;font-size:13px;cursor:pointer">View CI run on GitHub &rarr;</a> &nbsp; `:'')
+        +`<a href="${prUrl}" target="_blank" rel="noopener" style="color:var(--muted);text-decoration:underline;font-size:12px;cursor:pointer">PR #${prNum}</a></div>`;
     })()}
 `;
   $('#wkpop').style.display='flex';
@@ -2685,13 +2694,13 @@ function adaptViews(v){
     const id=r.flavor?(r.worker==null?r.flavor:`${r.flavor}#${r.worker}`):jobSlug(r);
     const g=rescueByJob[id]=rescueByJob[id]||{id,name:r.job_name||id,lane:r.lane||'',events:[],fails:[]};
     if(!r.rescued){
-      if(!g.fails.some(f=>f.pr==='#'+r.pr))g.fails.push({pr:'#'+r.pr,url:r.html_url||null});
+      if(!g.fails.some(f=>f.pr==='#'+r.pr))g.fails.push({pr:'#'+r.pr,url:r.html_url||null,runId:r.run_id});
       return;
     }
     g.events.push({pr:'#'+r.pr,date:(times[String(r.pr)]||'').split(' ').slice(0,2).join(' '),
       wasted:r.wasted_seconds==null?null:mins(r.wasted_seconds),
       cause:r.failed_conclusion||r.final_conclusion||'',
-      url:r.html_url||null});
+      url:r.html_url||null,runId:r.run_id});
   });
 
   // Two things this list has to get right, both invisible while the view is empty.
