@@ -637,6 +637,8 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
   )
   fake_moe._maybe_shard_with_pspec = lambda value, _pspec, **_kwargs: value  # pylint: disable=protected-access
   fake_moe.sow = lambda *_args, **_kwargs: None
+  # No SparseCore offload targets, i.e. the default `moe_sparse_core_offload_targets`.
+  fake_moe._sparse_core_offload_targets = frozenset  # pylint: disable=protected-access
 
   inputs = SimpleNamespace(shape=(4, 1024, 2048))
   gate_logits = SimpleNamespace(shape=(4, 1024, 256))
@@ -4813,6 +4815,10 @@ class SparseCoreOffloadTest(parameterized.TestCase):
   )
   def test_offload_is_numerically_transparent(self, parallelism, targets):
     """Enabling a target annotates the HLO without changing loss or gradients."""
+    if targets == sparsecore.FSDP_ALL_GATHER and not sparsecore.supports_collective_offload(sparsecore.ALL_GATHER):
+      # The target is dropped on such a chip, so there would be nothing to
+      # assert; see `sparsecore.supported_offload_targets`.
+      self.skipTest("This chip's SparseCore cannot offload an all-gather.")
     ref_loss, ref_grads, ref_hlo = self._loss_and_grads(
         f"sc_offload_ref_{targets}", moe_sparse_core_offload_targets="", **parallelism
     )
