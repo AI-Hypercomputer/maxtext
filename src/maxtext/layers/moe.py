@@ -27,7 +27,9 @@ from flax import struct
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental import xla_metadata
+from jax.experimental.compute_on import compute_on
 import jax.numpy as jnp
+import re
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
@@ -40,6 +42,7 @@ from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
+from maxtext.utils import accelerator_to_spec_map
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -183,6 +186,121 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 
 
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5, 6))
+def _fsdp_all_gather_with_rs(
+    w,
+    target_pspec: jax.sharding.PartitionSpec | None,
+    orig_pspec: jax.sharding.PartitionSpec | None,
+    mesh: Mesh,
+    shard_mode: ShardMode,
+    pin_to_sparse_core: bool = False,
+    sc_id: int = 0,
+):
+  """All-gather FSDP weight in forward pass; custom VJP reduce-scatters in backward pass."""
+  if w is None or target_pspec is None:
+    return w
+
+  def _ag_fn(x):
+    return maybe_shard_with_pspec(x, target_pspec, mesh, shard_mode)
+
+  if pin_to_sparse_core:
+    _ag_fn = compute_on(
+        _ag_fn,
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [sc_id]}},
+    )
+
+  return _ag_fn(w)
+
+
+def _fsdp_all_gather_with_rs_fwd(
+    w,
+    target_pspec,
+    orig_pspec,
+    mesh,
+    shard_mode,
+    pin_to_sparse_core: bool = False,
+    sc_id: int = 0,
+):
+  """Forward pass for _fsdp_all_gather_with_rs."""
+  out = _fsdp_all_gather_with_rs(
+      w,
+      target_pspec,
+      orig_pspec,
+      mesh,
+      shard_mode,
+      pin_to_sparse_core,
+      sc_id,
+  )
+  return out, None
+
+
+def _fsdp_all_gather_with_rs_bwd(
+    target_pspec,
+    orig_pspec,
+    mesh,
+    shard_mode,
+    pin_to_sparse_core,
+    sc_id,
+    res,
+    grad_w_gathered,
+):
+  """Backward pass for _fsdp_all_gather_with_rs performing Reduce-Scatter."""
+  del target_pspec, res
+  if grad_w_gathered is None or orig_pspec is None:
+    return (grad_w_gathered,)
+
+  def _rs_fn(g):
+    return maybe_shard_with_pspec(g, orig_pspec, mesh, shard_mode)
+
+  if pin_to_sparse_core:
+    _rs_fn = compute_on(
+        _rs_fn,
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [sc_id]}},
+    )
+
+  grad_w = _rs_fn(grad_w_gathered)
+  return (grad_w,)
+
+
+_fsdp_all_gather_with_rs.defvjp(_fsdp_all_gather_with_rs_fwd, _fsdp_all_gather_with_rs_bwd)
+
+
+def _is_non_gen7_tpu(config) -> bool:
+  """Returns True if the runtime backend or compile target is TPU but NOT Gen7."""
+  compile_topo = getattr(config, "compile_topology", None)
+  if compile_topo:
+    topo_lower = compile_topo.lower()
+    try:
+      spec = accelerator_to_spec_map.get_system_characteristics(compile_topo)
+      if spec and spec.platform == "tpu":
+        return not ("tpu7" in topo_lower or "v7" in topo_lower)
+    except (ValueError, KeyError, AttributeError):
+      if "v" in topo_lower or "tpu" in topo_lower:
+        return not ("tpu7" in topo_lower or "v7" in topo_lower)
+    return False
+
+  try:
+    devices = jax.devices()
+  except (RuntimeError, IndexError, ValueError):
+    return False
+
+  tpu_devices = [d for d in devices if d.platform == "tpu"]
+  if not tpu_devices:
+    return False
+
+  device_kind = tpu_devices[0].device_kind
+  if any(gen7_id in device_kind for gen7_id in ("TPU7", "TPU v7", "TPU7x")):
+    return False
+  match = re.match(r"TPU[^\d]*(\d+)", device_kind)
+  if match and int(match.group(1)) == 7:
+    return False
+  return True
 
 
 def get_batchsplit_init_kernel_axes():
@@ -734,6 +852,14 @@ class RoutedMoE(nnx.Module):
     ):
       self.wo.value = self.wo.value * self.per_expert_scale.value[:, None, None]
 
+    self.pin_fsdp_ag = self.config.moe_pin_sparse_core_fsdp_all_gather or self.config.moe_pin_sparse_core_all_gathers
+    self.pin_ep_ag = self.config.moe_pin_sparse_core_ep_all_gather or self.config.moe_pin_sparse_core_all_gathers
+    if self.pin_fsdp_ag or self.pin_ep_ag:
+      if _is_non_gen7_tpu(self.config):
+        max_logging.log("Disabling SparseCore collective offloading because backend is TPU but not Gen7.")
+        self.pin_fsdp_ag = False
+        self.pin_ep_ag = False
+
   def _maybe_shard_with_logical(self, inputs, logical_name):
     return maybe_shard_with_logical(
         inputs,
@@ -758,6 +884,22 @@ class RoutedMoE(nnx.Module):
         extra_stack_level=1,
         logical_axes=logical_axes,
     )
+
+  def _get_weight_orig_pspec(self, tensor, fallback_logical_axes):
+    """Resolves the original sharding PartitionSpec of a weight tensor before All-Gather."""
+    if tensor is None:
+      return None
+    sharding = getattr(tensor, "sharding", None)
+    if isinstance(sharding, jax.sharding.NamedSharding):
+      return sharding.spec
+    aval = getattr(tensor, "aval", None)
+    if aval is not None:
+      aval_sharding = getattr(aval, "sharding", None)
+      if isinstance(aval_sharding, jax.sharding.NamedSharding):
+        return aval_sharding.spec
+    if fallback_logical_axes is not None:
+      return self._logical_to_mesh_axes(fallback_logical_axes)
+    return None
 
   def _maybe_shard_moe_dispatch(self, inputs, logical_axis, peel_expert):
     """Shard a MoE dispatch/MLP activation. When `peel_expert` is set, drop the 'expert'
@@ -1873,17 +2015,33 @@ class RoutedMoE(nnx.Module):
       # expert shards, and then routes within each shard.
 
       # Duplicate inputs to all expert shards.
-      x, logits, pre_bias_logits = tuple(
-          jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True) for z in (x, logits, pre_bias_logits)
-      )
-      if forced_routed_experts is not None:
-        # Must follow the same all-gather as logits: routing is done on the
-        # gathered batch, so a shard-local replay would not line up.
-        forced_routed_experts = jax.lax.all_gather(
-            forced_routed_experts,
-            axis_name=self._expert_parallelism_name,
-            tiled=True,
+      if self.pin_ep_ag:
+
+        @functools.partial(
+            compute_on,
+            compute_type="tpu_sparsecore",
+            out_memory_spaces=jax.memory.Space.Device,
+            compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
         )
+        def _ep_all_gather(z):
+          return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+
+        x, logits, pre_bias_logits = tuple(_ep_all_gather(z) for z in (x, logits, pre_bias_logits))
+        if forced_routed_experts is not None:
+          forced_routed_experts = _ep_all_gather(forced_routed_experts)
+      else:
+        x, logits, pre_bias_logits = tuple(
+            jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+            for z in (x, logits, pre_bias_logits)
+        )
+        if forced_routed_experts is not None:
+          # Must follow the same all-gather as logits: routing is done on the
+          # gathered batch, so a shard-local replay would not line up.
+          forced_routed_experts = jax.lax.all_gather(
+              forced_routed_experts,
+              axis_name=self._expert_parallelism_name,
+              tiled=True,
+          )
 
       # "Route" tokens within each shard.
       num_experts_per_shard = self.config.num_experts // num_ep
@@ -2667,15 +2825,80 @@ class RoutedMoE(nnx.Module):
           logical_axes=gate_logits_logical_axes,
       )
 
-    w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
-    w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
-    wo_kernel = self._maybe_shard_with_pspec(wo_kernel, wo_pspec)
-    if w0_bias is not None:
-      w0_bias = self._maybe_shard_with_pspec(w0_bias, w0_bias_pspec)
-    if w1_bias is not None:
-      w1_bias = self._maybe_shard_with_pspec(w1_bias, w1_bias_pspec)
-    if wo_bias is not None:
-      wo_bias = self._maybe_shard_with_pspec(wo_bias, wo_bias_pspec)
+    if self.pin_fsdp_ag:
+      w0_orig_pspec = self._get_weight_orig_pspec(w0_kernel, self.wi_kernel_axes)
+      w1_orig_pspec = self._get_weight_orig_pspec(w1_kernel, self.wi_kernel_axes)
+      wo_orig_pspec = self._get_weight_orig_pspec(wo_kernel, self.wo_kernel_axes)
+      w0_kernel = _fsdp_all_gather_with_rs(
+          w0_kernel,
+          w0_pspec,
+          w0_orig_pspec,
+          self.mesh,
+          self.config.shard_mode,
+          pin_to_sparse_core=True,
+          sc_id=self.config.moe_fsdp_all_gather_sparse_core_id,
+      )
+      w1_kernel = _fsdp_all_gather_with_rs(
+          w1_kernel,
+          w1_pspec,
+          w1_orig_pspec,
+          self.mesh,
+          self.config.shard_mode,
+          pin_to_sparse_core=True,
+          sc_id=self.config.moe_fsdp_all_gather_sparse_core_id,
+      )
+      wo_kernel = _fsdp_all_gather_with_rs(
+          wo_kernel,
+          wo_pspec,
+          wo_orig_pspec,
+          self.mesh,
+          self.config.shard_mode,
+          pin_to_sparse_core=True,
+          sc_id=self.config.moe_fsdp_all_gather_sparse_core_id,
+      )
+      if w0_bias is not None:
+        w0_bias_orig_pspec = self._get_weight_orig_pspec(w0_bias, ("exp", "activation_mlp"))
+        w0_bias = _fsdp_all_gather_with_rs(
+            w0_bias,
+            w0_bias_pspec,
+            w0_bias_orig_pspec,
+            self.mesh,
+            self.config.shard_mode,
+            pin_to_sparse_core=True,
+            sc_id=self.config.moe_fsdp_all_gather_sparse_core_id,
+        )
+      if w1_bias is not None:
+        w1_bias_orig_pspec = self._get_weight_orig_pspec(w1_bias, ("exp", "activation_mlp"))
+        w1_bias = _fsdp_all_gather_with_rs(
+            w1_bias,
+            w1_bias_pspec,
+            w1_bias_orig_pspec,
+            self.mesh,
+            self.config.shard_mode,
+            pin_to_sparse_core=True,
+            sc_id=self.config.moe_fsdp_all_gather_sparse_core_id,
+        )
+      if wo_bias is not None:
+        wo_bias_orig_pspec = self._get_weight_orig_pspec(wo_bias, ("exp", "activation_embed"))
+        wo_bias = _fsdp_all_gather_with_rs(
+            wo_bias,
+            wo_bias_pspec,
+            wo_bias_orig_pspec,
+            self.mesh,
+            self.config.shard_mode,
+            pin_to_sparse_core=True,
+            sc_id=self.config.moe_fsdp_all_gather_sparse_core_id,
+        )
+    else:
+      w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
+      w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
+      wo_kernel = self._maybe_shard_with_pspec(wo_kernel, wo_pspec)
+      if w0_bias is not None:
+        w0_bias = self._maybe_shard_with_pspec(w0_bias, w0_bias_pspec)
+      if w1_bias is not None:
+        w1_bias = self._maybe_shard_with_pspec(w1_bias, w1_bias_pspec)
+      if wo_bias is not None:
+        wo_bias = self._maybe_shard_with_pspec(wo_bias, wo_bias_pspec)
 
     return sparse_matmul_route_and_compute(
         inputs,

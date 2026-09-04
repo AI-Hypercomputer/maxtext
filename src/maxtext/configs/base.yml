@@ -292,6 +292,13 @@ use_gmm_v2_heuristic_tiling: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
+# SparseCore offloading for MoE collectives
+moe_pin_sparse_core_all_gathers: false
+moe_pin_sparse_core_fsdp_all_gather: false
+moe_pin_sparse_core_ep_all_gather: false
+moe_fsdp_all_gather_sparse_core_id: 0
+moe_ep_all_gather_sparse_core_id: 1
+
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
