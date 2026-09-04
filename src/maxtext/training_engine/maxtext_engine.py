@@ -541,6 +541,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_eval: Any = None
     self._compiled_eval_signature: Any = None
     self._signature_compare_warned: bool = False
+    # True when the pure mirror has advanced past the live NNX objects; see `_publish_to_live`.
+    self._live_stale: bool = False
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     model_or_model_mesh_pair = model_creation_utils.from_pretrained(
@@ -608,6 +610,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   @property
   def model(self) -> Any:
     """Returns the NNX model instance."""
+    self._sync_live_objects()
     return self._model
 
   @model.setter
@@ -626,6 +629,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   @property
   def optimizer(self) -> Any:
     """Returns the NNX optimizer instance."""
+    self._sync_live_objects()
     return self._optimizer
 
   @optimizer.setter
@@ -654,6 +658,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   @property
   def state(self) -> Any:
     """Returns the current train state, initializing it if necessary."""
+    self._sync_live_objects()
     if self._state is None and self._model is not None and self._optimizer is not None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
     return self._state
@@ -747,10 +752,65 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     For the three ways the live NNX variables get replaced behind the engine's back: the
     `model`/`optimizer`/`state` setters, and a checkpoint restore.
+
+    Flushes a deferred publish before forgetting the mirror it would have been published
+    from, so dropping the cache never drops a step's results with it.
     """
+    self._sync_live_objects()
     self._params_pure = None
     self._rest_pure = None
     self._state_pure = None
+
+  def _publish_to_live(self, target: Any, pure: Any) -> None:
+    """Writes `pure` into the live NNX objects, or defers it when the mirror can do it.
+
+    `nnx.update` walks the module graph, and its cost is the graph's size rather than the
+    state's: 6.2 ms to publish 180 leaves of non-parameter state into an unrolled 28-layer
+    qwen3-0.6b, once per *micro-batch*, and 16.7 ms for the parameters once per update.
+    That was the last per-step graph walk left after `_refresh_pure_state` removed the
+    `nnx.split`s.
+
+    Nothing inside the step path reads it back -- `_read_model_pure` and `_read_state_pure`
+    answer from the pure mirror, and the live objects are used only as containers -- so the
+    walk is pure publication, for readers outside the engine. It is deferred to
+    `_sync_live_objects`, which the property getters and every method that reads real
+    values call first.
+
+    Deferral is only possible while the mirror is authoritative. With the pure state
+    disabled there is nothing to publish from later, so the write happens now, as it always
+    did.
+    """
+    if self._params_pure is None:
+      nnx.update(target, pure)
+      return
+    self._live_stale = True
+
+  def _sync_live_objects(self) -> None:
+    """Brings `self._model`/`self._state` up to date with the pure mirror.
+
+    Every caller that reads values off the live NNX objects -- the `model`, `optimizer` and
+    `state` properties, checkpointing, weight sync -- goes through here first. It is also
+    the reason a deferred publish cannot be observed: the arrays a reader would otherwise
+    find are not merely stale but *deleted*, since `update()` donates the state it passed
+    to the update kernel.
+
+    One write covers both deferral sites. `fwd_bwd` defers the model's non-parameter state
+    and `update` the whole train state, but `_publish_model_rest` has already folded the
+    former into `_state_pure`, and the live model is the same object the state holds under
+    `_MODEL_STATE_KEY` -- so publishing the state publishes the model with it.
+    """
+    if not self._live_stale:
+      return
+    # Cleared first: `nnx.update` cannot re-enter this, but a raising one must not leave the
+    # flag set and re-run the same failed write on the next read.
+    self._live_stale = False
+    # `_state_pure` is what `_publish_to_live` gated its deferral on -- it checks
+    # `_params_pure`, and the three move together, being set as a group by
+    # `_refresh_pure_state` and `_publish_state` and cleared as one by
+    # `_invalidate_pure_state`. Should they ever stop moving together, this drops the write
+    # the flag promised, so keep them set and cleared as a group.
+    if self._state is not None and self._state_pure is not None:
+      nnx.update(self._state, self._state_pure)
 
   def _disable_pure_state(self, reason: str) -> None:
     """Falls back to re-splitting the module graph on every step, saying so once."""
@@ -796,9 +856,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Once per compile rather than once per step, which is the point: the two `nnx.split`
     calls the step path used to make walked 1756 graph nodes for 92 ms of a 283 ms step on
     an unrolled qwen3-0.6b, against 0.84 ms for `nnx.split_state` over the flat state.
-    Publication is unchanged -- `fwd_bwd` and `update` still `nnx.update` the live objects
-    where they always did, so `self.model` and `self.state` are never stale.
+    Publication out of the step path is deferred rather than eager -- see
+    `_publish_to_live` -- so this syncs first, since it re-reads the live objects it is
+    about to split.
     """
+    self._sync_live_objects()
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
     model = getattr(self._state, _MODEL_STATE_KEY, self._model)
@@ -1307,6 +1369,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _compile_eval_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
     """JIT-compiles the forward-only eval kernel for one batch structure."""
+    # Its caller has synced already, but this splits the live model rather than reading the
+    # mirror, so it does not get to assume that: the shardings below are taken off the
+    # leaves it finds, and a deferred publish leaves those holding donated arrays.
+    self._sync_live_objects()
     self._model_graphdef, params_pure, rest_pure = nnx.split(self._model, nnx.Param, ...)
 
     def kernel(params, rest, dynamic):
@@ -1406,8 +1472,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         loss, aux, new_rest, acc_grads, acc_denom = self._fwd_bwd_kernel(
             params, rest, batch, self._accumulated_grads, self._accumulated_denominator
         )
-    nnx.update(model, new_rest)
     self._publish_model_rest(new_rest)
+    self._publish_to_live(model, new_rest)
 
     # Don't add metrics to the throttler queue because metrics are logged after
     # the update step.
@@ -1474,8 +1540,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         new_state_pure, grad_norm, is_skipped = self._update_kernel(
             state_pure, self._accumulated_grads, self._accumulated_denominator, mean_loss
         )
-    nnx.update(self._state, new_state_pure)
     self._publish_state(new_state_pure)
+    self._publish_to_live(self._state, new_state_pure)
 
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
@@ -1487,6 +1553,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # entries until it pops them, which pinned three parameter trees, and once the state is
     # donated a late pop raises "Array has been deleted". The norm comes out of the same
     # executable, so its readiness still means the update landed. Tunix v2 does the same.
+    if grad_norm is None:
+      # The fallback below reads leaves off the live objects, which a deferred publish
+      # leaves holding the arrays `update()` just donated.
+      self._sync_live_objects()
     self._throttler.add_computation(
         grad_norm if grad_norm is not None else (self._state if self._state is not None else self._model),
         self._metrics_recorder.get_step_metrics(self.train_step),
@@ -1539,6 +1609,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       **kwargs: Additional keyword arguments for evaluation.
     """
     batch = self._prepare_batch(payload)
+
+    # Eval is the one step path that reads real values off the live model instead of the
+    # pure mirror, so it is also the one that has to flush a deferred publish. Skipping it
+    # does not evaluate stale weights, it raises: `update()` donates the state it passes to
+    # the update kernel, so the parameters split out below would be deleted arrays.
+    self._sync_live_objects()
 
     model = getattr(self._state, "model", self._model) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
@@ -1594,6 +1670,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metadata: Checkpoint metadata payload from Orchestrator.
       **kwargs: Additional checkpoint saving options.
     """
+    self._sync_live_objects()
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
 
@@ -1651,6 +1728,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       The metadata PyTree of the restored checkpoint.
     """
+    self._sync_live_objects()
     step = kwargs.get("step", None)
     checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
@@ -1847,6 +1925,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _get_trainable_params_state(self) -> Any:
     """Extracts pure parameter weights from the model, excluding optimizer and RNG state."""
+    self._sync_live_objects()
     model = getattr(self._state, "model", None) if self._state is not None else self._model
     if isinstance(model, nnx.Module):
       return nnx.state(model, nnx.Param)

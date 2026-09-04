@@ -1349,6 +1349,100 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("perplexity", processed)
     self.assertAlmostEqual(processed["perplexity"], float(np.exp(6.0)), places=3)
 
+  def test_live_objects_are_not_walked_on_the_step_path(self):
+    """The step path publishes to the pure mirror only; `nnx.update` is deferred.
+
+    The saving this buys is the whole point of the deferral -- `nnx.update` walks the
+    module graph, and its cost scales with the graph rather than the state written -- so a
+    step that walks it anyway has silently lost it.
+
+    Only writes aimed at the engine's own live objects count. `nnx.Optimizer.update` calls
+    `nnx.update` internally, on the state the kernel merged locally, and that is neither
+    publication nor something this change can avoid.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+
+    live = (t._model, t._state, t._optimizer)
+    walked = []
+    real_update = maxtext_engine.nnx.update
+
+    def spy(target, *args, **kwargs):
+      if any(target is obj for obj in live):
+        walked.append(target)
+      return real_update(target, *args, **kwargs)
+
+    with mock.patch.object(maxtext_engine.nnx, "update", spy):
+      t.fwd_bwd(DummyPayload())
+      t.update()
+
+    self.assertEmpty(walked, "the step path wrote to the live NNX objects")
+    self.assertTrue(t._live_stale, "nothing was deferred, so the publish was skipped, not deferred")
+
+  def test_reading_the_model_flushes_a_deferred_publish(self):
+    """A deferred publish is invisible: every public reader syncs before it answers."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertTrue(t._live_stale, "nothing was deferred, so this test proves nothing")
+
+    published = nnx.state(t.model, nnx.Param)
+    self.assertFalse(t._live_stale)
+    jax.tree.map(np.testing.assert_array_equal, jax.tree.leaves(published), jax.tree.leaves(t._params_pure))
+
+  def test_eval_after_update_flushes_a_deferred_publish(self):
+    """`eval_step` reads the live model rather than the mirror, so it syncs like a getter.
+
+    The eval path is the exception to "nothing inside the step path reads the live objects
+    back", and it is the one place the deferral can be observed. Not as stale weights
+    either: `update()` donates the state it hands the update kernel, so an unsynced
+    `eval_step` splits deleted arrays out of the live model and raises inside the kernel.
+
+    Ordered after an `update()` on purpose -- the pre-existing eval tests call `eval_step`
+    on a freshly compiled engine, which never defers anything.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertTrue(t._live_stale, "nothing was deferred, so this test proves nothing")
+
+    t.eval_step(DummyPayload())
+    self.assertFalse(t._live_stale)
+
+  def test_dropping_the_pure_state_flushes_rather_than_drops_the_step(self):
+    """Invalidating the mirror must not discard an update that was only deferred."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    expected = jax.tree.leaves(t._params_pure)
+
+    t._invalidate_pure_state()
+    self.assertFalse(t._live_stale)
+    jax.tree.map(np.testing.assert_array_equal, jax.tree.leaves(nnx.state(t._model, nnx.Param)), expected)
+
+  def test_publication_stays_eager_without_a_pure_mirror(self):
+    """With the pure state disabled there is nothing to publish from later."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    t._disable_pure_state("test")
+
+    with mock.patch.object(maxtext_engine.nnx, "update", wraps=maxtext_engine.nnx.update) as spy:
+      t._publish_to_live(t._model, nnx.state(t._model, nnx.Param))
+    self.assertEqual(spy.call_count, 1)
+    self.assertFalse(t._live_stale)
+
 
 if __name__ == "__main__":
   absltest.main()
