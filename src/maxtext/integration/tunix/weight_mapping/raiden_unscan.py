@@ -96,7 +96,7 @@ def unscan_layers(
     suffix = key[idx + 1 :]
     arr = getattr(value, "value", value)
 
-    if not hasattr(arr, "shape") or arr.ndim <= scan_axis:
+    if arr is None or not hasattr(arr, "shape") or getattr(arr, "ndim", 0) <= scan_axis:
       # Not a per-layer leaf (shouldn't happen for real params under
       # `layers`, but don't silently drop anything unexpected). Keep the
       # original (possibly already-wrapped) value, matching pre-existing

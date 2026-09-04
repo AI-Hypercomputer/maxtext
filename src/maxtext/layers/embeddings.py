@@ -1913,6 +1913,10 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     if self.head_dim != inputs.shape[3]:
       raise ValueError("The head dim of the rotary position embedding must match the hidden dimension of the inputs.")
 
+    # Normalize trailing singleton: (batch, seq, 1) -> (batch, seq)
+    if position.ndim == 3 and position.shape[-1] == 1:
+      position = jnp.squeeze(position, axis=-1)
+
     # Handle both 2D (text-only) and 3D (multimodal) position IDs
     if position.ndim == 2:
       # Text-only: expand (batch, seq) -> (batch, seq, 3) with same positions

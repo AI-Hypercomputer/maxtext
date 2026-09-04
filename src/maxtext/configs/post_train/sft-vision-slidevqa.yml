@@ -23,8 +23,9 @@ packing: false  # packing is not supported yet
 freeze_vision_encoder_params: true
 learning_rate: 2.e-5
 
-# -------------- HF pipeline --------------
-dataset_type: hf
+# -------------- Grain pipeline --------------
+dataset_type: grain
+grain_file_type: parquet
 hf_path: 'NTT-hil-insight/SlideVQA'
 train_split: 'train'
 hf_eval_split: 'val'

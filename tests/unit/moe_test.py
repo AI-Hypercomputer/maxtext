@@ -1131,8 +1131,9 @@ class RoutedMoeTest(parameterized.TestCase):
     # through `ring_ragged_sort`'s custom_vjp backward (the kernel under
     # test). Without checking this, DCE removes the bwd entirely.
     self.assertEqual(x_grad_ref.shape, x_grad_rs.shape, "Hidden-state grad shape mismatch")
+    x_atol = 8e-2 * jnp.max(jnp.abs(x_grad_ref.astype(jnp.float32)))
     self.assertTrue(
-        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=8e-2),
+        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=x_atol),
         msg=(
             "Hidden-state gradient mismatch: max abs diff="
             f"{jnp.max(jnp.abs(x_grad_rs.astype(jnp.float32) - x_grad_ref.astype(jnp.float32)))}"
@@ -1145,11 +1146,13 @@ class RoutedMoeTest(parameterized.TestCase):
     self.assertEqual(treedef_ref, treedef_rs, "Gradient pytree structures differ")
     for i, (g_ref, g_rs) in enumerate(zip(leaves_ref, leaves_rs)):
       self.assertEqual(g_ref.shape, g_rs.shape, f"Grad shape mismatch at leaf {i}")
+      # Scaled to the leaf: a fixed atol passes a leaf whose whole gradient is below it.
+      atol = 8e-2 * jnp.max(jnp.abs(g_ref.astype(jnp.float32)))
       self.assertTrue(
-          jnp.allclose(g_rs.astype(jnp.float32), g_ref.astype(jnp.float32), rtol=1e-2, atol=8e-2),
+          jnp.allclose(g_rs.astype(jnp.float32), g_ref.astype(jnp.float32), rtol=1e-2, atol=atol),
           msg=(
               f"Gradient mismatch at leaf {i} (shape={g_ref.shape}): "
-              f"max abs diff={jnp.max(jnp.abs(g_rs.astype(jnp.float32) - g_ref.astype(jnp.float32)))}"
+              f"max abs diff={jnp.max(jnp.abs(g_rs.astype(jnp.float32) - g_ref.astype(jnp.float32)))}, {atol=}"
           ),
       )
 
@@ -2062,6 +2065,68 @@ class GetEinsumTest(parameterized.TestCase):
     relative_error = np.linalg.norm(actual - expected) / np.linalg.norm(expected)
     self.assertLess(relative_error, 0.22)
     self.assertFalse(np.allclose(actual, expected))
+
+
+class SparseMatmulQuantizationTest(parameterized.TestCase):
+  """The dtypes RoutedMoE hands the grouped matmul on the sparse_matmul path."""
+
+  @parameterized.named_parameters(
+      ("fp8", "fp8", False, jnp.float8_e4m3fn),
+      ("nanoo_fp8", "nanoo_fp8", False, jnp.float8_e4m3fnuz),
+      ("int8", "int8", False, jnp.int8),
+      ("unquantized", "", False, None),
+      # Under qwix a non-fp8_full scheme declares no gmm rule, so the gmm is left alone.
+      ("fp8_under_qwix", "fp8", True, None),
+      ("int8_under_qwix", "int8", True, None),
+  )
+  def test_gmm_quantize_dtypes(self, quantization, use_qwix_quantization, expected_dtype):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="sparse_matmul_quantization_test",
+        enable_checkpointing=False,
+        decoder_block="mixtral",
+        num_experts=4,
+        num_experts_per_tok=2,
+        base_emb_dim=64,
+        base_mlp_dim=32,
+        base_moe_mlp_dim=32,
+        dtype="float32",
+        weight_dtype="float32",
+        sparse_matmul=True,
+        megablox=True,
+        max_target_length=8,
+        per_device_batch_size=1,
+        quantization=quantization,
+        use_qwix_quantization=use_qwix_quantization,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    model = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=Mesh(devices_array, cfg.mesh_axes),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=jnp.float32,
+        quant=configure_quantization(cfg),
+        rngs=nnx.Rngs(0),
+    )
+
+    calls = []
+
+    def record_gmm(**kwargs):
+      calls.append(kwargs)
+      return jnp.zeros((kwargs["lhs"].shape[0], kwargs["rhs"].shape[-1]), dtype=kwargs["preferred_element_type"])
+
+    inputs = jax.random.normal(jax.random.PRNGKey(0), (1, 8, cfg.base_emb_dim), dtype=jnp.float32)
+    with mock.patch.object(moe.mblx, "gmm", record_gmm):
+      with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        model(inputs)
+
+    self.assertNotEmpty(calls)
+    for kwargs in calls:
+      self.assertEqual(kwargs["lhs_quantize_dtype"], expected_dtype)
+      self.assertEqual(kwargs["rhs_quantize_dtype"], expected_dtype)
 
 
 def make_moe(cfg, mesh):

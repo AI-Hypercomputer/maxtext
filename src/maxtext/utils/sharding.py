@@ -209,6 +209,16 @@ def mesh_axes_for_dim(axis_names):
   return tuple(axis for axis in axis_names if axis is not None)
 
 
+def batch_mesh_axes(mesh, rules=None):
+  """Returns the mesh axes of size > 1 that the activation batch dimension is sharded over."""
+  spec = logical_to_mesh_axes(("activation_batch",), mesh, rules=rules)
+  # A rule that resolves to a rank-0 spec leaves no dimension to read, so there is nothing the
+  # batch is sharded over.
+  if spec is None or not spec.partitions:
+    return frozenset()
+  return frozenset(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
+
+
 def mesh_axes_size(mesh, axes, *, label):
   """Returns the product of mesh sizes for a set of axes."""
   size = 1
@@ -389,7 +399,21 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
 
 def create_sharding(mesh, logical_names, rules=None):
   """Create NamedSharding with given logical names."""
-  return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
+  spec = logical_to_mesh_axes(logical_names, mesh, rules=rules)
+  if spec is None:
+    spec = P()
+  return NamedSharding(mesh, spec)
+
+
+def _truncate_pspec(pspec: P, out_ndim: int) -> P:
+  """Drop trailing entries of a PartitionSpec, keeping any unreduced/reduced annotation.
+
+  Slicing a PartitionSpec directly raises once it carries an unreduced/reduced set — and
+  the annotation describes a cross-replica state of the whole array, not of a particular
+  dimension, so it has to survive the truncation. Gradient accumulation marks gradients
+  unreduced over "data" before resharding them, which is how such specs get here.
+  """
+  return P(*pspec.partitions[:out_ndim], unreduced=pspec.unreduced, reduced=pspec.reduced)
 
 
 def truncate_out_sharding(out_sharding, out_ndim: int):
@@ -400,11 +424,11 @@ def truncate_out_sharding(out_sharding, out_ndim: int):
     if len(out_sharding.spec) > out_ndim:
       return NamedSharding(
           out_sharding.mesh,
-          P(*out_sharding.spec[:out_ndim]),
+          _truncate_pspec(out_sharding.spec, out_ndim),
       )
   elif isinstance(out_sharding, P):
     if len(out_sharding) > out_ndim:
-      return P(*out_sharding[:out_ndim])
+      return _truncate_pspec(out_sharding, out_ndim)
   elif isinstance(out_sharding, (tuple, list)):
     if len(out_sharding) > out_ndim:
       return tuple(out_sharding[:out_ndim])
@@ -662,7 +686,12 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     raise AssertionError(f"Could not shard {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}") from e
   pspec = sharding.spec
 
-  if "data" in jax.tree.leaves(pspec):
+  # `tuple(pspec)`, not `pspec`: a PartitionSpec is a pytree *leaf*, so flattening one gives
+  # back the spec itself and this guard never fired. Its entries are what have to be walked,
+  # and they nest -- a dimension sharded over two axes is a tuple. Without this, a leaf
+  # already sharded over "data" gets a second one and `NamedSharding` rejects the result
+  # outright (`DuplicateSpecError: P(('data', 'data'), None)`).
+  if "data" in jax.tree.leaves(tuple(pspec)):
     return sharding
 
   for idx, (size, partition) in enumerate(zip(sharded_shape, pspec)):
@@ -779,43 +808,43 @@ def maybe_update_params_sharding_with_opt_nnx(
     # state_mesh_shardings.optimizer contains the sharding for the nnx.Optimizer
     opt_state = state_mesh_shardings.optimizer.opt_state
 
-    def find_adam_mu(obj):
-      # 1. Direct hit on ScaleByAdamState (Linen path or unflattened NNX)
-      if isinstance(obj, optax.ScaleByAdamState):
-        return obj.mu
-
-      # 2. Check for flattened ScaleByAdamState (nnx.State/dict)
-      # These nodes contain 'mu', 'nu', and 'count' as keys.
-      if hasattr(obj, "__getitem__") and "mu" in obj and "nu" in obj:
-        return obj["mu"]
-
-      # 3. Recursive search through containers (nnx.State, dict, list, tuple)
-      values = None
-      if hasattr(obj, "values"):  # Handles nnx.State and dict
-        values = obj.values()
+    def collect_mu_trees(obj, out):
+      if isinstance(obj, nnx.Variable):
+        return
+      if hasattr(obj, "get") and "mu" in obj:
+        out.append(obj["mu"])
+      elif hasattr(obj, "values"):
+        for v in obj.values():
+          collect_mu_trees(v, out)
       elif isinstance(obj, (list, tuple)):
-        values = obj
+        for v in obj:
+          collect_mu_trees(v, out)
 
-      if values:
-        for v in values:
-          res = find_adam_mu(v)
-          if res is not None:
-            return res
-      return None
-
-    sharded_fp32_params = find_adam_mu(opt_state)
+    mu_trees = []
+    collect_mu_trees(opt_state, mu_trees)
+    sharded_fp32_params = mu_trees or None
   if sharded_fp32_params is None:
     actual_type = type(state_mesh_shardings.optimizer.get("opt_state", "None"))
-    raise NotImplementedError(f"Could not find Adam optimizer state in: {actual_type}")
+    raise NotImplementedError(f"Could not find Adam/Muon optimizer state in: {actual_type}")
 
   # Update model parameter sharding to match the mu (first moment) sharding.
   # This ensures parameter sharding is consistent with the Zero-1 distributed layout.
   # Build a path → new_PS lookup from sharded_fp32_params (mu), then update model_shardings
   # at those paths while preserving rngs and any other non-Param variables.
-  mu_leaves_with_paths = list(
-      jax.tree_util.tree_leaves_with_path(sharded_fp32_params, is_leaf=lambda x: isinstance(x, nnx.Variable))
-  )
-  mu_lookup = {path: mu_var.get_value() for path, mu_var in mu_leaves_with_paths}
+  mu_lookup = {}
+  for mu_tree in mu_trees:
+    for path, mu_var in jax.tree_util.tree_leaves_with_path(mu_tree, is_leaf=lambda x: isinstance(x, nnx.Variable)):
+      if not isinstance(mu_var, nnx.Variable):
+        continue
+      mu_value = mu_var.get_value()
+      # A partitioned optimizer (e.g. Muon: a 'muon' branch owning the 2D
+      # weights plus an 'adam' fallback owning the rest) holds one param-mirroring mu
+      # per branch, with optax MaskedNode at every position the branch does NOT own —
+      # so each param's sharding must come from whichever branch actually tracks it,
+      # and MaskedNode placeholders must never overwrite a real param sharding.
+      if not isinstance(mu_value, NamedSharding):
+        continue  # skip MaskedNode / other non-sharding placeholders
+      mu_lookup.setdefault(path, mu_value)
 
   def _update_model_var(path, var):
     if path in mu_lookup:

@@ -231,6 +231,7 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
         hook_fn,
         target_leaf,
         maxtext_config,
+        mt_key,
     )
 
     # Execute transformation and assign to flat_restored

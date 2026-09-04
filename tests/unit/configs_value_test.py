@@ -237,6 +237,30 @@ class ConfigTest(absltest.TestCase):
     self.assertTrue(config.use_indexer)
     self.assertEqual(config.attention_type, "mla")
 
+  def test_indexer_all_gather_context_parallelism_rejects_attention_sink(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_indexer=True",
+        "q_lora_rank=1",
+        "attention_sink=True",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=all_gather",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "does not support attention sinks"):
+        pyconfig.initialize(argv)
+
   def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
     base_args = [
         "",
@@ -897,6 +921,22 @@ class ConfigTest(absltest.TestCase):
     ]
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
+
+
+class MMapDatasetConfigTest(absltest.TestCase):
+  """Tests for mmap-specific configuration defaults and accepted values."""
+
+  def test_default_is_25_preserving_prior_behavior(self):
+    config = types.MMapDataset()
+    self.assertEqual(config.packing_max_segments_per_sample, 25)
+
+  def test_custom_value_is_accepted(self):
+    config = types.MMapDataset(packing_max_segments_per_sample=64)
+    self.assertEqual(config.packing_max_segments_per_sample, 64)
+
+  def test_zero_disables_merging_round_trip(self):
+    config = types.MMapDataset(packing_max_segments_per_sample=0)
+    self.assertEqual(config.packing_max_segments_per_sample, 0)
 
 
 if __name__ == "__main__":

@@ -12,21 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Rule tuned for DeepSeek V3 MLPerf training at 4k sequence length.
+# This rule uses data, FSDP, FSDP_transpose and expert, and assigns them as:
 #
-# Same mesh and philosophy as ep-as-dp.yml, i.e. data, FSDP, FSDP_transpose and
-# expert, where the expert axis acts as data parallelism in components except
-# the core MoE part (between EP all2all).
+#   FSDP acts like DP for attn, but FSDP for moe
+#   EP acts like FSDP for attn, and EP for moe
 #
-# The difference is the attention weights. In ep-as-dp.yml they are sharded on
-# fsdp / fsdp_transpose, so every attention projection pays an FSDP all-gather.
-# At 4k sequence length these projections are small and their all-gather makes
-# the attention layer latency bound. Here all attention weights ('q_lora',
-# 'kv_lora' and 'embed_attn') are instead sharded on the expert physical axis
-# and replicated over fsdp / fsdp_transpose. Since the expert axis carries the
-# batch outside of MoE, sharding attention weights on it behaves like FSDP over
-# the (much smaller and faster) expert axis, which trades HBM for a cheaper
-# collective. MoE and dense MLP weights are untouched and keep using FSDP.
+# That is, attention weights ('q_lora', 'kv_lora' and 'embed_attn') are sharded
+# on the expert axis and replicated over fsdp / fsdp_transpose, while MoE and
+# dense MLP weights keep using FSDP as in ep-as-dp.yml. Outside the core MoE
+# part (between EP all2all) the expert axis carries the batch, so sharding the
+# attention weights on it behaves like FSDP over a much smaller and faster axis:
+# it trades HBM for a cheaper all-gather.
+#
+# This is mainly useful for large scale training. The attention weights are
+# small, so once the FSDP rank is large (larger than 512) each shard is tiny and
+# their all-gather is dominated by latency rather than bandwidth, which makes
+# the attention layer latency bound. Sharding the attention weights on the
+# (much smaller) expert axis keeps the per-shard slice large enough that the
+# collective stays bandwidth bound, at the cost of replicating those weights
+# over fsdp / fsdp_transpose. MoE weights are large enough to keep scaling with
+# FSDP, so they are left alone. DeepSeek V3 MLPerf training at 4k sequence
+# length is one such case.
 
 mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert']
 data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert']]
@@ -55,7 +61,8 @@ logical_axis_rules: [
                       ['activation_kv', []],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_head_dim', []],
-                      # Attention Weights, sharded on expert instead of fsdp
+                      # Attention Weights, sharded on expert instead of fsdp:
+                      # fsdp acts like DP here, expert acts like FSDP
                       ['q_lora', ['expert']],
                       ["q_lora_up_proj", []],
                       ['kv_lora', ['expert']],

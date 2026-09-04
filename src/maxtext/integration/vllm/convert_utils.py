@@ -533,12 +533,7 @@ def _fuse_and_unstack_moe(
     scan_fused_axis: int,
     tgt_fused_axis: int,
 ) -> Tuple[jax.Array | np.ndarray, ...]:
-  """Fuses the whole *scanned* wi_0/wi_1 at once, then unstacks per layer.
-
-  The per-layer alternative (slice both operands, fuse, repeat N times) issues
-  N independent fuse programs and allocates N sets of padded intermediates.
-  Doing it in bulk under a single trace lets XLA emit one program for every
-  layer, and the unstack that follows is a free view of the fused result.
+  """Fuses wi_0/wi_1 per unstacked layer to keep peak intermediate HBM allocation low.
 
   Args:
     wi_0: Scanned gate kernel, `num_blocks` at `scan_axis`.
@@ -552,10 +547,12 @@ def _fuse_and_unstack_moe(
   Returns:
     `num_blocks` per-layer arrays, each of shape `tgt_shape`.
   """
-  scanned_fused_shape = list(wi_0.shape)
-  scanned_fused_shape[scan_fused_axis] = tgt_shape[tgt_fused_axis]
-  fused = _interleave_moe_weights(wi_0, wi_1, tuple(scanned_fused_shape), n_shards, axis=scan_fused_axis)
-  return tuple(jnp.unstack(fused, axis=scan_axis))
+  unstacked_0 = jnp.unstack(wi_0, axis=scan_axis)
+  unstacked_1 = jnp.unstack(wi_1, axis=scan_axis)
+  return tuple(
+      _interleave_moe_weights(w0, w1, tgt_shape, n_shards, axis=tgt_fused_axis)
+      for w0, w1 in zip(unstacked_0, unstacked_1)
+  )
 
 
 def _align_to_model_shape(

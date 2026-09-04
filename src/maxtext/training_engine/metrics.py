@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import dataclasses
+import enum
 import os
 from typing import Any
 
@@ -32,12 +33,26 @@ import numpy as np
 _METRICS_TO_LOG = [
     "learning_rate",
     "loss",
+    "perplexity",
     "total_weights",
     "gradient_norm",
     "step_skipped",
     "step_time",
     "tflops",
 ]
+
+# Completed step buffers to keep resident. Each holds live device arrays and nothing on the
+# engine's step path removes one, so unbounded history grows HBM, and checkpoint size with
+# it. A window rather than Tunix's single prior step, so batched readers still work.
+_DEFAULT_MAX_BUFFERED_STEPS = 128
+
+
+class Mode(str, enum.Enum):
+  TRAIN = "train"
+  EVAL = "eval"
+
+  def __str__(self):
+    return self.value
 
 
 class MetricsRecorder:
@@ -52,8 +67,17 @@ class MetricsRecorder:
   for processing.
   """
 
-  def __init__(self):
+  def __init__(self, max_buffered_steps: int = _DEFAULT_MAX_BUFFERED_STEPS, mode: Mode = Mode.TRAIN) -> None:
+    """Initializes the recorder.
+
+    Args:
+      max_buffered_steps: How many completed step buffers to retain; older ones are evicted
+        as new steps start. Zero or less retains everything.
+    """
     self._metrics_buffer: list[abstract_engine.MetricsBuffer] = []
+    self._mode = mode
+    self._max_buffered_steps = max_buffered_steps
+    self._dropped_buffer_count = 0
 
   def buffer_metrics(
       self,
@@ -71,11 +95,34 @@ class MetricsRecorder:
       aggregation_fn: Optional aggregation function to apply to the metric.
     """
     if not self._metrics_buffer or self._metrics_buffer[-1].id != train_step:
-      new_buffer = abstract_engine.MetricsBuffer(id=train_step, mode="train")
+      new_buffer = abstract_engine.MetricsBuffer(id=train_step, mode=self._mode)
       self._metrics_buffer.append(new_buffer)
+      self._evict_old_buffers()
 
     # Record the new metric in the buffer for the current step.
     self._record_metric(name, metric, aggregation_fn=aggregation_fn)
+
+  def _evict_old_buffers(self) -> None:
+    """Drops the oldest step buffers once the retention window is full.
+
+    Only runs when a *new* step starts, so the current step's buffer is never a candidate.
+    """
+    if self._max_buffered_steps <= 0 or len(self._metrics_buffer) <= self._max_buffered_steps:
+      return
+    num_dropped = len(self._metrics_buffer) - self._max_buffered_steps
+    oldest_dropped_id = self._metrics_buffer[0].id
+    del self._metrics_buffer[:num_dropped]
+    self._dropped_buffer_count += num_dropped
+    logging.log_every_n(
+        logging.WARNING,
+        "Metrics history is full at %d step(s); evicting buffers from step %s onwards "
+        "(%d dropped so far). Drain it with MetricsRecorder.get_metrics_history() or the "
+        "engine's get_metrics() if you need every step.",
+        self._max_buffered_steps,
+        self._max_buffered_steps,
+        oldest_dropped_id,
+        self._dropped_buffer_count,
+    )
 
   def _record_metric(
       self,
@@ -119,13 +166,14 @@ class MetricsRecorder:
     """Returns every cached step buffer and optionally clears the metrics cache.
 
     The engine's own `get_metrics` returns only the most recent buffer, per the trainer
-    contract. This is the accessor that keeps the full history reachable.
+    contract. This is the accessor that keeps the history reachable -- the last
+    `max_buffered_steps` of it.
 
     Args:
       clear_cache: Whether to reset cached metrics after retrieval.
 
     Returns:
-      One on-device MetricsBuffer per recorded train step, oldest first.
+      One on-device MetricsBuffer per retained train step, oldest first.
     """
     metrics_to_return = self._metrics_buffer
     if clear_cache:
@@ -157,7 +205,7 @@ class MetricsLogger:
   results to TensorBoard and console stdout.
   """
 
-  def __init__(self, config: pyconfig.HyperParameters):
+  def __init__(self, config: pyconfig.HyperParameters) -> None:
     """Initializes the metrics logger.
 
     Args:
@@ -181,48 +229,58 @@ class MetricsLogger:
     max_utils.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self._tb_writer)
     maxtext_utils.add_config_to_summary_writer(self._config, self._tb_writer)
 
-  def _log_metrics(self, step: int, metrics: dict[str, Any]) -> None:
+  def _log_metrics(self, step: int, metrics: dict[str, Any], mode: Mode) -> None:
     """Logs the metrics to the console.
 
     Args:
       step: The train step for which to log the metrics.
       metrics: Dictionary mapping metric names to reduced Python floats/numpy
         arrays.
+      mode: The mode of the training engine.
     """
-    log_message = [f"Completed step: {step}"]
-    for k in _METRICS_TO_LOG:
-      if k in metrics:
-        if k == "learning_rate":
-          log_message.append(f"{k}: {metrics[k]:.3e}")
-        else:
-          log_message.append(f"{k}: {metrics[k]:.3f}")
+    if mode == Mode.TRAIN:
+      log_message = [f"Train step: {step}"]
+      for k in ["loss", "perplexity"]:
+        if k in metrics:
+          val = metrics[k]
+          log_message.append(f"{k}: {val:.3f}")
+      if len(log_message) > 1:
+        logging.info(", ".join(log_message))
+    elif mode == Mode.EVAL:
+      loss = metrics.get("loss")
+      if loss is not None:
+        logging.info(
+            "Eval step %d evaluation loss: %f",
+            step,
+            loss,
+        )
 
-    logging.info(", ".join(log_message))
-
-  def write_metrics(self, metrics: abstract_engine.MetricsBuffer) -> None:
+  def write_metrics(self, metrics: abstract_engine.MetricsBuffer, mode: Mode = Mode.TRAIN) -> None:
     """Write metrics to the console and TensorBoard.
 
     Args:
       metrics: MetricsBuffer containing the metrics to write.
+      mode: The mode of the training engine.
     """
     processed_metrics = self.process_metrics(metrics)
-    self._log_metrics(metrics.id, processed_metrics)
-    self._write_metrics_to_tensorboard(metrics.id, processed_metrics)
+    self._log_metrics(step=metrics.id, metrics=processed_metrics, mode=mode)
+    self._write_metrics_to_tensorboard(step=metrics.id, metrics=processed_metrics, mode=mode)
 
-  def _write_metrics_to_tensorboard(self, step: int, metrics: dict[str, Any]) -> None:
+  def _write_metrics_to_tensorboard(self, step: int, metrics: dict[str, Any], mode: Mode = Mode.TRAIN) -> None:
     """Write metrics to TensorBoard.
 
     Args:
       step: The train step for which to write the metrics.
       metrics: Dictionary mapping metric names to reduced Python floats/numpy
         arrays.
+      mode: The mode of the training engine.
     """
     if self._tb_writer is None:
       return
 
     if jax.process_index() == 0:
       for metric_name, value in metrics.items():
-        self._tb_writer.add_scalar(metric_name, value, step)
+        self._tb_writer.add_scalar(f"{mode}/{metric_name}", value, step)
 
     if step % self._config.log_period == 0:
       logging.info(
@@ -271,6 +329,9 @@ class MetricsLogger:
       if isinstance(host_val, (np.ndarray, jax.Array)):
         host_val = host_val.item() if host_val.size == 1 else float(np.mean(host_val))
       processed[name] = host_val
+
+    if "loss" in processed:
+      processed["perplexity"] = float(np.exp(np.asarray(processed["loss"], dtype=np.float64)))
     return processed
 
   def cleanup(self) -> None:

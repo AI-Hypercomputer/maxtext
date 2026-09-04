@@ -18,7 +18,7 @@ import functools
 import json
 import qwix.pallas as qpl
 import re
-from typing import Tuple, Sequence, Callable
+from typing import ClassVar, Tuple, Sequence, Callable
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -79,6 +79,11 @@ _TILE_SIZE = "tile_size"  # Tile size for subchannel
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""
+
+  # Whether this backend's dot_general draws RNGs at apply time, as AQT and NVFP4
+  # stochastic rounding do. False lets the Linen->NNX bridge drop its forked Rngs after
+  # init; the default makes opting out deliberate.
+  needs_apply_rngs: ClassVar[bool] = True
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
@@ -143,6 +148,10 @@ def _rhs_axis_metadata_wrapper(
 @dataclass
 class AqtQuantization:
   """Configures AQT quantization github.com/google/aqt."""
+
+  # Declared, not inherited: this class sits outside the Quantization hierarchy. AQT
+  # sets rng_type="jax.uniform" and stochastic rounding draws at apply time.
+  needs_apply_rngs: ClassVar[bool] = True
 
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
@@ -226,6 +235,9 @@ class AqtQuantization:
 class QwixQuantization:
   """Configures Qwix quantization github.com/google/qwix, for training only."""
 
+  # Declared, not inherited: this class sits outside the Quantization hierarchy.
+  needs_apply_rngs: ClassVar[bool] = True
+
   quant_mode = "train"  # needed by external call
   act_calibration_method: str = "absmax"
   weight_calibration_method: str = "absmax"
@@ -306,7 +318,13 @@ class QwixEinsum(nn.Module):
 class Fp8Quantization(Quantization):
   """Configures Fp8 quantization for NVIDIA GPUs"""
 
+  # Flax's fp8 ops scale from amax history, never from make_rng at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
+
   quant_mode = "train"
+  # The forward dtype, for callers that quantize an operand themselves rather than through
+  # `dot_general_cls` or `einsum`, such as the grouped matmul in MoE.
+  quantize_dtype = jnp.float8_e4m3fn
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
@@ -395,7 +413,11 @@ class Fp8Einsum(nn.Module):
 class NANOOFp8Quantization(Quantization):
   """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
 
+  # Same as Fp8Quantization: nn.NANOOFp8DotGeneralOp never draws at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
+
   quant_mode = "train"
+  quantize_dtype = jnp.float8_e4m3fnuz
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
@@ -1086,6 +1108,19 @@ class TransformerEngineQuantization(Quantization):
     if recipe_name not in RECIPES:
       raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")
     return RECIPES[recipe_name]()
+
+  @property
+  def needs_apply_rngs(self) -> bool:
+    """Whether this recipe draws RNGs at apply time.
+
+    Only NVFP4 does, and only while stochastic rounding is on: TE draws ``sr_rng`` for
+    the DGRAD quantizer. The other recipes take their scales from the tensors.
+    """
+    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+    if not isinstance(self._recipe, recipe.NVFP4BlockScaling):  # pytype: disable=module-attr
+      return False
+    return not self._recipe.disable_stochastic_rounding
 
   def get_block_size(self):
     """Get the block size for quantization for recipes that require blocks.

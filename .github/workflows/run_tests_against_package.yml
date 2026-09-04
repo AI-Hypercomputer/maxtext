@@ -151,6 +151,13 @@ jobs:
       - name: Copy test assets files
         if: ${{ !inputs.maxtext_installed }}
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
+      - name: Download Converted Test Durations
+        if: inputs.total_workers > 1
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-durations-${{ github.run_id }}-${{ inputs.flavor }}
+          path: .
+        continue-on-error: true
       - name: Run Tests
         shell: bash
         run: |
@@ -221,11 +228,18 @@ jobs:
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split
-            if [ "${INPUTS_DEVICE_TYPE}" = "tpu" ]; then
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP}"
+            if [ -f .test_durations ]; then
+              echo "Using downloaded .test_durations with least_duration splitting algorithm."
+              SPLIT_ALGO="--splitting-algorithm least_duration"
             else
+              echo "Warning: .test_durations not found. Falling back to default split."
+              SPLIT_ALGO=""
+            fi
+            if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
               $PYTHON_EXE -m pip install --quiet pytest-xdist
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto ${SPLIT_ALGO}"
+            else
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
             fi
           else
             SPLIT_ARGS=""
@@ -245,7 +259,13 @@ jobs:
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS} &
             PYTEST_PID=$!
-            wait "$PYTEST_PID"
+            PYTEST_EXIT_CODE=0
+            wait "$PYTEST_PID" || PYTEST_EXIT_CODE=$?
+            if [ "$PYTEST_EXIT_CODE" -eq 5 ]; then
+              echo "No tests collected for worker group ${INPUTS_WORKER_GROUP} (pytest exit code 5), treating as success."
+            elif [ "$PYTEST_EXIT_CODE" -ne 0 ]; then
+              exit "$PYTEST_EXIT_CODE"
+            fi
           fi
 
         env:

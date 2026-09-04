@@ -19,10 +19,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import yaml
 
 from maxtext.configs import pyconfig
 from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
-from maxtext.configs.types import _normalize_axes, infer_cp_axes, infer_ep_axes
+from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
@@ -48,12 +49,37 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_gdn_context_parallelism_rejects_load_balance(self):
+    """The reorder composes the GatedDeltaNet recurrence out of order.
+
+    context_parallel_load_balance defaults to true, so this has to raise rather
+    than warn: the run trains either way and the loss falls either way.
+    """
+    with self.assertRaisesRegex(ValueError, "requires context_parallel_load_balance=False"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          model_name="qwen3-next-80b-a3b",
+          ici_context_parallelism=4,
+          context_parallel_load_balance=True,
+      )
+
+  def test_gdn_context_parallelism_accepts_load_balance_off(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        model_name="qwen3-next-80b-a3b",
+        ici_context_parallelism=4,
+        context_parallel_load_balance=False,
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(config.context_parallel_load_balance)
+
   def test_managed_mldiagnostics_storage_path(self):
     # Test completely omitting the parameter (defaults to "" from base.yml)
     config_omitted = pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
         run_name="test_run_1",
         base_output_directory="gs://base_dir1",
+        skip_jax_distributed_system=True,
     )
     self.assertEqual(
         config_omitted.managed_mldiagnostics_dir,
@@ -65,6 +91,7 @@ class PyconfigTest(unittest.TestCase):
         run_name="test_run_2",
         base_output_directory="gs://base_dir2",
         managed_mldiagnostics_storage_path="",
+        skip_jax_distributed_system=True,
     )
     self.assertEqual(
         config_none.managed_mldiagnostics_dir,
@@ -76,6 +103,7 @@ class PyconfigTest(unittest.TestCase):
         run_name="test_run_3",
         base_output_directory="gs://base_dir3",
         managed_mldiagnostics_storage_path="gs://custom_base",
+        skip_jax_distributed_system=True,
     )
     self.assertEqual(
         config_custom.managed_mldiagnostics_dir,
@@ -119,6 +147,52 @@ class PyconfigTest(unittest.TestCase):
     )
     with self.assertRaises(ValueError):
       config_inference.ici_fsdp_parallelism = 4
+
+  def _zero1_config(self, **kwargs):
+    return pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_optimizer_over_data=True,
+        **kwargs,
+    )
+
+  def test_zero1_without_fsdp_is_allowed(self):
+    """Data-parallel-only Zero-1 is the supported configuration."""
+    config = self._zero1_config(ici_data_parallelism=-1, ici_fsdp_parallelism=1)
+    self.assertTrue(config.shard_optimizer_over_data)
+
+  def test_zero1_with_mesh_axes_omitting_fsdp_allowed(self):
+    """Custom mesh_axes that omit 'fsdp' or 'fsdp_transpose' do not raise KeyError."""
+    self.assertEqual(_resolved_fsdp_size(["data", "tensor"], [2, 4], 8), 1)
+
+  def test_zero1_with_fsdp_raises_error(self):
+    """Zero-1 shards the optimizer moments over "data" on top of the parameter layout.
+
+    FSDP shards the parameters over "fsdp", so the two together leave the gradients
+    sharded P('fsdp', ...) while the moments they are added to are sharded
+    P(('data', 'fsdp'), ...) — an outright type error under explicit sharding, and an
+    extra collective under auto. The combination is refused when the config is built.
+    """
+    with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
+      self._zero1_config(ici_data_parallelism=1, ici_fsdp_parallelism=2)
+
+  def test_zero1_with_fsdp_transpose_raises_error(self):
+    with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
+      self._zero1_config(ici_data_parallelism=1, ici_fsdp_parallelism=1, ici_fsdp_transpose_parallelism=2)
+
+  def test_zero1_with_autofilled_fsdp_raises_error(self):
+    """`ici_fsdp_parallelism=-1` absorbs whatever data parallelism leaves behind.
+
+    The check has to resolve the -1 the way mesh creation later will, otherwise this
+    config — four-way FSDP on a v5p-8 — would slip through and fail at trace time.
+    """
+    with self.assertRaisesRegex(ValueError, "cannot be combined with FSDP"):
+      self._zero1_config(
+          compile_topology="v5p-8",
+          compile_topology_num_slices=1,
+          ici_data_parallelism=2,
+          ici_fsdp_parallelism=-1,
+      )
 
   def test_overriding_model(self):
     config = pyconfig.initialize(
@@ -198,6 +272,18 @@ class PyconfigTest(unittest.TestCase):
           use_multimodal=True,
           scan_layers=False,  # Required by the Qwen3-VL deepstack path; unrelated to sharding.
       )
+
+  def test_explicit_sharding_mistral_decoder_support(self):
+    """The Mistral-family decoders that have been onboarded to explicit sharding are accepted."""
+    for decoder_block in ("mistral", "mixtral"):
+      with self.subTest(decoder_block=decoder_block):
+        config = pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            shard_mode="explicit",
+            decoder_block=decoder_block,
+        )
+        self.assertEqual(config.decoder_block.value, decoder_block)
 
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
@@ -553,6 +639,66 @@ assert train._TF_AVAILABLE is False
         quantization="int8",
         weight_quantization_calibration_method="fixed,-1,1",
     )
+
+  def test_base_yml_types_parity(self):
+    """Verifies that types.MaxTextConfig() defaults match MaxTextConfig(**base_yaml)."""
+    base_yml_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+    with open(base_yml_path, "r", encoding="utf-8") as f:
+      base_yaml = yaml.safe_load(f)
+
+    # 1. Ensure all base.yml keys exist in types.py
+    pydantic_fields = pyconfig.types.MaxTextConfig.model_fields
+    for key in base_yaml.keys():
+      if key == "base_config":
+        continue
+      self.assertIn(
+          key,
+          pydantic_fields,
+          f"Key '{key}' from base.yml is missing in types.MaxTextConfig",
+      )
+
+    # Clean YAML dictionary (normalize string 'none' to None)
+    clean_yaml = {}
+    for k, v in base_yaml.items():
+      if k in ("base_config", "run_name"):
+        continue
+      if isinstance(v, str) and v.lower() == "none":
+        clean_yaml[k] = None
+      elif k == "tokenizer_path" and v == "":
+        clean_yaml[k] = None
+      else:
+        clean_yaml[k] = v
+
+    # 2. Instantiate MaxTextConfig with pure defaults vs cleaned base.yml.
+    # Note: MaxTextConfig.__init__ sets os.environ["XLA_FLAGS"] as a side-effect during validation,
+    # so we clean it up between instantiations to ensure identical test conditions.
+    orig_xla_flags = os.environ.pop("XLA_FLAGS", None)
+    try:
+      cfg_defaults = pyconfig.types.MaxTextConfig(run_name="parity_test_run")
+      os.environ.pop("XLA_FLAGS", None)
+      cfg_from_yaml = pyconfig.types.MaxTextConfig(run_name="parity_test_run", **clean_yaml)
+    finally:
+      if orig_xla_flags is not None:
+        os.environ["XLA_FLAGS"] = orig_xla_flags
+      else:
+        os.environ.pop("XLA_FLAGS", None)
+
+    for field_name in pydantic_fields.keys():
+      if field_name in pyconfig.types.DerivedValues.model_fields:
+        continue
+
+      val_default = getattr(cfg_defaults, field_name)
+      val_yaml = getattr(cfg_from_yaml, field_name)
+
+      # Treat None and "" as semantically equivalent for unset optional string/path fields
+      if (val_default is None and val_yaml == "") or (val_default == "" and val_yaml is None):
+        continue
+
+      self.assertEqual(
+          val_default,
+          val_yaml,
+          f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
+      )
 
 
 if __name__ == "__main__":

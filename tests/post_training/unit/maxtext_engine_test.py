@@ -22,11 +22,13 @@ from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
+from flax import struct
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
+from maxtext.training_engine import metrics as metrics_module
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
@@ -47,7 +49,20 @@ class DummyNNXModel(nnx.Module):
     self.weights = nnx.Param(jnp.array([1.0, 2.0]))
 
 
-@dataclasses.dataclass(kw_only=True)
+class DummyStatefulNNXModel(nnx.Module):
+  """A model whose state is not all `nnx.Param`, so `rest` is non-empty.
+
+  `DummyNNXModel` is parameter-only, which makes `nnx.split(model, nnx.Param, ...)` return an
+  empty `rest` and every publish of non-parameter state a no-op. Real models carry RNG
+  counters and batch statistics, so one model here has to as well.
+  """
+
+  def __init__(self):
+    self.weights = nnx.Param(jnp.array([1.0, 2.0]))
+    self.calls = nnx.BatchStat(jnp.array(0.0))
+
+
+@struct.dataclass(frozen=True, kw_only=True)
 class DummyPayload(abstract_engine.TrainerPayload):
   token_ids: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
   token_mask: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
@@ -112,6 +127,20 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     overrides.update(kwargs)
     return pyconfig.initialize([None, get_test_config_path()], **overrides)
 
+  def _mock_orbax_manager(self, engine, latest_step=None):
+    """Installs a mock Orbax manager and returns it."""
+    mock_orbax_mgr = mock.MagicMock()
+    mock_orbax_mgr.latest_step.return_value = latest_step
+    mock_orbax_mgr.save.return_value = True
+    engine._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+    return mock_orbax_mgr
+
+  def _mock_saved_micro_step_count(self, mock_orbax_mgr, micro_step_count):
+    """Makes the mocked Orbax manager report how far into its step a saved checkpoint got."""
+    saved_metadata = mock.MagicMock()
+    saved_metadata.custom_metadata = {"micro_step_count": micro_step_count}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+
   def test_raises_type_error_for_non_pyconfig(self):
     invalid_config = abstract_engine.TrainingConfig()
     with self.assertRaises(TypeError):
@@ -147,6 +176,80 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       self.assertIsNone(t._accumulated_grads)
     self.assertEqual(t.train_step, 2)
 
+  def test_compiled_steps_publish_weights_and_non_param_state(self):
+    """Exercises the cached pure-state path end to end, which nothing else on CPU does.
+
+    Three conditions have to hold at once for the cache to be involved, and no other test
+    here meets all three: the model must have non-`Param` state (otherwise `_publish_model_rest`
+    is vacuous), `compile()` must be called (the cache is seeded by `_compile_for_batch`, so
+    the eager path never touches it), and `update()` must run (only that reaches
+    `_publish_state`). Two steps rather than one, because the interesting failure is the
+    second step reading a stale or wrongly-partitioned cache written by the first.
+    """
+    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(self.mock_config), self.mock_config.mesh_axes)
+    self.mock_from_pretrained.return_value = (DummyStatefulNNXModel(), mesh)
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    def loss_fn(model, *_args, **_kwargs):
+      # Mutating a non-`Param` makes `new_rest` differ from the cached `rest`; scaling the
+      # loss by it turns a stale publish into a wrong gradient, not just a wrong counter.
+      model.calls.value = model.calls.value + 1.0
+      return (
+          abstract_engine.WeightedMetric(
+              unreduced_sum=jnp.sum(model.weights.value) * model.calls.value,
+              denominator=jnp.array(1.0),
+          ),
+          {},
+      )
+
+    t.with_loss_fn(loss_fn)
+    payload = DummyPayload()
+    before = np.asarray(t.model.weights.value)
+
+    t.compile(payload)
+    self.assertIsNotNone(t._params_pure, "compile() did not seed the pure-state cache")
+    for _ in range(2):
+      t.fwd_bwd(payload)
+      t.update()
+
+    self.assertIsNotNone(t._params_pure, "the pure-state cache fell back to re-splitting the graph")
+    # `nnx.update` is the publish barrier: the live module must track the cache.
+    self.assertEqual(float(t.model.calls.value), 2.0)
+    self.assertGreater(float(np.abs(np.asarray(t.model.weights.value) - before).max()), 0.0)
+    self.assertEqual(t.train_step, 2)
+
+  def test_gradient_norm_is_over_the_accumulated_normalized_gradient(self):
+    """Pins down *which* gradient is normed once accumulation no longer means-of-means.
+
+    `test_gradient_norm_is_recorded_every_step` already covers the norm existing with
+    `skip_step_on_spikes` off, on a single micro-batch. Two micro-batches here, so the value
+    can only come out right if the norm is taken over the accumulated sum after its single
+    division by the accumulated denominator: a norm over either micro-batch's own gradient
+    reads sqrt(2), and one taken before the division reads 4x this. The micro-batches are
+    uniform, so this does not separate sum/sum from mean-of-means -- §3 of the parity write-up
+    is where that distinction is measured.
+    """
+    self.assertFalse(self.mock_config.skip_step_on_spikes)
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    # d(unreduced_sum)/dw is 1.0 per element, so two micro-batches accumulate [2.0, 2.0]
+    # against a denominator of 8.0 -> [0.25, 0.25], whose l2 norm is sqrt(2 * 0.25**2).
+    t.with_loss_fn(
+        lambda model, *_args, **_kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights.value), denominator=jnp.array(4.0)),
+            {},
+        )
+    )
+    payload = DummyPayload()
+    t.fwd_bwd(payload)
+    t.fwd_bwd(payload)
+    t.update()
+
+    metrics = t.get_metrics(clear_cache=True)
+    self.assertIn("gradient_norm", metrics.scalar_metrics)
+    recorded = np.asarray(metrics.scalar_metrics["gradient_norm"]).reshape(-1)
+    self.assertEqual(recorded.shape, (1,), "one norm per update, not one per micro-batch")
+    np.testing.assert_allclose(recorded[0], np.sqrt(2 * 0.25**2), rtol=1e-5)
+
   @mock.patch("orbax.checkpoint.CheckpointManager")
   def test_max_text_trainer_checkpoint_manager_init(self, mock_create_mgr):
     mock_config = self.setup_config(enable_checkpointing=True)
@@ -165,10 +268,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_config = self.setup_config(enable_checkpointing=True)
 
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    mock_orbax_mgr = mock.MagicMock()
-    mock_orbax_mgr.latest_step.return_value = None
-    mock_orbax_mgr.save.return_value = True
-    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+    mock_orbax_mgr = self._mock_orbax_manager(t)
 
     dummy_metadata = mock.MagicMock()
     t.save_checkpoint(metadata=dummy_metadata)
@@ -176,7 +276,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # Verify orbax save was called
     mock_orbax_mgr.save.assert_called_once()
     call_kwargs = mock_orbax_mgr.save.call_args.kwargs
-    self.assertNotIn("micro_step_count", call_kwargs["custom_metadata"])
+    self.assertEqual(call_kwargs["custom_metadata"]["micro_step_count"], 0)
     self.assertEqual(call_kwargs["custom_metadata"]["additional_metadata"], dummy_metadata)
     args_dict = (
         dict(call_kwargs["args"].items())
@@ -184,35 +284,177 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         else call_kwargs["args"].__dict__
     )
     self.assertIn("model_params", args_dict)
-    self.assertIn("accumulated_metrics", args_dict)
+    self.assertNotIn("accumulated_metrics", args_dict)
     self.assertNotIn("accumulated_grads", args_dict)
+
+  def test_save_checkpoint_omits_items_with_no_leaves(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+
+    # When no metrics have been recorded, accumulated_metrics is empty list and not saved
+    t.save_checkpoint(metadata=None)
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    self.assertNotIn("accumulated_metrics", args_dict)
+
+    # When accumulated_metrics is None in CheckpointState, it is not saved
+    mock_orbax_mgr.reset_mock()
+    ckpt_state_none = maxtext_engine.checkpointing.CheckpointState(
+        model=t.model,
+        accumulated_metrics=None,
+    )
+    t._checkpoint_manager.save_checkpoint(
+        step=1,
+        checkpoint_state=ckpt_state_none,
+        force=True,
+    )
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    self.assertNotIn("accumulated_metrics", args_dict)
+
+    # When accumulated_metrics is empty list in CheckpointState, it is not saved
+    mock_orbax_mgr.reset_mock()
+    ckpt_state_empty = maxtext_engine.checkpointing.CheckpointState(
+        model=t.model,
+        accumulated_metrics=[],
+    )
+    t._checkpoint_manager.save_checkpoint(
+        step=2,
+        checkpoint_state=ckpt_state_empty,
+        force=True,
+    )
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    self.assertNotIn("accumulated_metrics", args_dict)
 
   def test_save_checkpoint_skips_if_already_saved(self):
     mock_config = self.setup_config(enable_checkpointing=True)
 
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    mock_orbax_mgr = mock.MagicMock()
-    mock_orbax_mgr.latest_step.return_value = 10
-    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
-    t.train_step = 10
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=10)
 
-    t.save_checkpoint(metadata={"key": "val"})
+    t.save_checkpoint(metadata={"step": 10})
+    mock_orbax_mgr.save.assert_not_called()
+    mock_orbax_mgr.delete.assert_not_called()
+
+  def test_save_checkpoint_overwrites_intra_step_checkpoint_at_same_step(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=10)
+    self._mock_saved_micro_step_count(mock_orbax_mgr, 2)
+
+    # The step that intra-step checkpoint belongs to has since run to completion.
+    t.train_step = 10
+    t._micro_step_count = 0
+
+    t.save_checkpoint(metadata=None)
+
+    mock_orbax_mgr.wait_until_finished.assert_called()
+    mock_orbax_mgr.delete.assert_called_once_with(10)
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    self.assertEqual(call_kwargs["step"], 10)
+    # Orbax's save-interval policy would otherwise decline a step it has already saved.
+    self.assertTrue(call_kwargs["force"])
+    self.assertEqual(call_kwargs["custom_metadata"]["micro_step_count"], 0)
+
+  def test_save_checkpoint_overwrites_less_complete_intra_step_checkpoint(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=10)
+    self._mock_saved_micro_step_count(mock_orbax_mgr, 1)
+
+    t.train_step = 9
+    t._micro_step_count = 3
+    t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+
+    t.save_checkpoint(metadata=None)
+
+    mock_orbax_mgr.delete.assert_called_once_with(10)
+    self.assertEqual(mock_orbax_mgr.save.call_args.kwargs["custom_metadata"]["micro_step_count"], 3)
+
+  def test_save_checkpoint_never_overwrites_a_complete_step(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=10)
+    self._mock_saved_micro_step_count(mock_orbax_mgr, 0)
+
+    t.train_step = 10
+    t._micro_step_count = 0
+
+    t.save_checkpoint(metadata=None)
+
+    mock_orbax_mgr.save.assert_not_called()
+    mock_orbax_mgr.delete.assert_not_called()
+
+  def test_update_supersedes_intra_step_checkpoint_it_resumed_from(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=5)
+    self._mock_saved_micro_step_count(mock_orbax_mgr, 2)
+
+    # State as `restore_checkpoint` leaves it after loading an intra-step checkpoint at 5.
+    t.train_step = 4
+    t._resumed_mid_step = True
+
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t.compile(payload)
+    t.fwd_bwd(payload)
+    self.assertEqual(t.update(), 5)
+
+    # The completed step must land on disk now, not a checkpoint period later.
+    mock_orbax_mgr.delete.assert_called_once_with(5)
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    self.assertEqual(call_kwargs["step"], 5)
+    self.assertEqual(call_kwargs["custom_metadata"]["micro_step_count"], 0)
+    self.assertFalse(t._resumed_mid_step)
+
+  def test_update_does_not_checkpoint_when_not_resumed_mid_step(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t.compile(payload)
+    t.fwd_bwd(payload)
+    t.update()
+
     mock_orbax_mgr.save.assert_not_called()
 
   def test_save_checkpoint_drains_inflight_throttler(self):
     mock_config = self.setup_config(enable_checkpointing=True)
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    mock_orbax_mgr = mock.MagicMock()
-    mock_orbax_mgr.latest_step.return_value = None
-    mock_orbax_mgr.save.return_value = True
-    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+    mock_orbax_mgr = self._mock_orbax_manager(t)
 
     # Add a dummy item to the throttler queue.
     dummy_computation = jnp.array(1.0)
     t._throttler.add_computation(computation=dummy_computation, metrics=None)
     self.assertEqual(t._throttler._inflight_queue.qsize(), 1)
 
-    t.save_checkpoint(metadata={"test": "val"})
+    t.save_checkpoint(metadata={"step": 10})
 
     # Checkpoint should be saved and throttler queue should be drained.
     mock_orbax_mgr.save.assert_called_once()
@@ -221,13 +463,12 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
   def test_save_checkpoint_called_after_fwd_bwd_before_update(self):
     mock_config = self.setup_config(enable_checkpointing=True)
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    mock_orbax_mgr = mock.MagicMock()
-    mock_orbax_mgr.latest_step.return_value = None
-    mock_orbax_mgr.save.return_value = True
-    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+    mock_orbax_mgr = self._mock_orbax_manager(t)
 
     t._micro_step_count = 1
+    t.train_step = 10
     t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+    t._accumulated_denominator = jnp.float32(6.0)
 
     dummy_metadata = mock.MagicMock()
     t.save_checkpoint(metadata=dummy_metadata)
@@ -236,6 +477,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_orbax_mgr.save.assert_called_once()
     call_kwargs = mock_orbax_mgr.save.call_args.kwargs
     self.assertEqual(call_kwargs["custom_metadata"]["micro_step_count"], 1)
+    # The gradients are saved unreduced, so their divisor has to ride along with them.
+    self.assertEqual(call_kwargs["custom_metadata"]["accumulated_denominator"], 6.0)
     self.assertEqual(call_kwargs["custom_metadata"]["additional_metadata"], dummy_metadata)
     args_dict = (
         dict(call_kwargs["args"].items())
@@ -243,16 +486,40 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         else call_kwargs["args"].__dict__
     )
     self.assertIn("model_params", args_dict)
-    self.assertIn("accumulated_metrics", args_dict)
+    self.assertNotIn("accumulated_metrics", args_dict)
     self.assertIn("accumulated_grads", args_dict)
+
+  def test_close_writes_final_checkpoint(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=3)
+    t.train_step = 4
+    t._micro_step_count = 0
+
+    t.close()
+
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    self.assertEqual(call_kwargs["step"], 4)
+    self.assertTrue(call_kwargs["force"])
+
+  def test_close_saves_an_incomplete_step(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=4)
+    mock_logger = mock.MagicMock()
+    t._throttler._metrics_logger = mock_logger
+    t.train_step = 4
+    t.record_metrics("loss", jnp.array(1.5))
+    t._micro_step_count = 2
+    t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+
+    t.close()
+
+    self.assertEqual(mock_orbax_mgr.save.call_args.kwargs["step"], 5)
 
   def test_restore_checkpoint_no_checkpoint_returns_defaults(self):
     mock_config = self.setup_config(enable_checkpointing=True)
 
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    mock_orbax_mgr = mock.MagicMock()
-    mock_orbax_mgr.latest_step.return_value = None
-    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+    _ = self._mock_orbax_manager(t)
 
     restored_metadata = t.restore_checkpoint()
     self.assertIsNone(restored_metadata)
@@ -260,8 +527,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
   def test_restore_checkpoint_restores_ckpt_metadata(self):
     mock_config = self.setup_config(enable_checkpointing=True)
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    mock_orbax_mgr = mock.MagicMock()
-    mock_orbax_mgr.latest_step.return_value = 10
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=10)
 
     # Mock metadata with item_metadata and custom_metadata attributes
     dummy_metadata = mock.MagicMock()
@@ -288,8 +554,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
   def test_restore_intra_step_checkpoint(self):
     mock_config = self.setup_config(enable_checkpointing=True)
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    mock_orbax_mgr = mock.MagicMock()
-    mock_orbax_mgr.latest_step.return_value = 5
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=5)
 
     # Mock metadata with item_metadata and custom_metadata attributes
     dummy_metadata = mock.MagicMock()
@@ -320,6 +585,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     _ = t.restore_checkpoint(step=5)
     self.assertEqual(t._micro_step_count, 2)
+    # Flags the partial checkpoint at step 5 for replacement once that step completes.
+    self.assertTrue(t._resumed_mid_step)
     self.assertEqual(t._accumulated_grads, dummy_grads)
     self.assertEqual(len(t._cached_losses), 2)
     self.assertTrue(isinstance(t._cached_losses[0], abstract_engine.WeightedMetric))
@@ -384,19 +651,20 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertEqual(t.train_step, 1)
     # wait_for_next() in update() sees qsize=2 (full), so it pops
     # index 0 (loss for micro_step_count=0), leaving qsize=1.
-    # Then add_computation() queues the updated model state and step 0 metrics.
+    # Then add_computation() queues the update's gradient norm and step 0 metrics.
     # Since we removed the trailing wait_for_next() from update(), qsize
     # remains 2.
     self.assertEqual(t._throttler._inflight_queue.qsize(), 2)
-    expected_state_leaves = jax.tree.leaves(t._state if t._state else t._model)
     for idx, (computation, metrics) in enumerate(t._throttler._inflight_queue.queue):
       if idx == 0:
         # Loss for micro_step_count=0.
         self.assertIsNone(metrics)
       if idx == 1:
-        # Metrics for train_step=0.
+        # Metrics for train_step=0, waited on through the update's gradient norm -- one
+        # scalar out of the same executable, not the state, whose buffers get donated away.
         self.assertIsNotNone(metrics)
-        self.assertEqual(computation, expected_state_leaves)
+        self.assertLen(computation, 1)
+        self.assertEqual(jnp.shape(computation[0]), ())
 
     # train_step=1: fwd_bwd + update
     # Calling fwd_bwd() while queue is full (qsize=2) triggers wait_for_next(),
@@ -436,8 +704,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertEqual(t._micro_step_count, 1)
     self.assertIsNotNone(t._accumulated_grads)
 
-    # Check that grad is scaled by 1/4.0
-    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    # Gradients accumulate unreduced: d(unreduced_sum)/dw is 8.0 per element and the 1/4.0
+    # from the denominator is applied once, in update().
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
+    np.testing.assert_allclose(t._accumulated_denominator, 4.0, rtol=1e-5)
 
     metrics = t.get_metrics(clear_cache=True)
     self.assertIn("loss", metrics.weighted_metrics)
@@ -470,8 +740,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t.with_loss_fn(custom_loss, has_aux=True)
     t.fwd_bwd(payload)
 
-    # Check that grad is scaled by 1/4.0
-    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    # Unreduced, with the 1/4.0 deferred to update().
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
+    np.testing.assert_allclose(t._accumulated_denominator, 4.0, rtol=1e-5)
     metrics = t.get_metrics(clear_cache=True)
     self.assertIn("loss", metrics.weighted_metrics)
     self.assertIn("aux_stat", metrics.scalar_metrics)
@@ -495,7 +766,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     # Arrived by keyword, under the names the adapter chose.
     self.assertEqual(sorted(seen), ["alpha", "beta"])
-    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
 
   def test_without_gen_model_input_fn_the_maxtext_convention_is_kept(self):
     """With no adapter, the loss still gets MaxText's positional signature."""
@@ -566,7 +837,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     compiled.fwd_bwd(DummyPayload())
 
     np.testing.assert_allclose(compiled._accumulated_grads["weights"], eager._accumulated_grads["weights"], rtol=1e-5)
-    np.testing.assert_allclose(compiled._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    np.testing.assert_allclose(compiled._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
 
   def test_compile_without_dummy_data_defers_to_first_fwd_bwd(self):
     """`compile(None)` cannot know input shapes, so it defers instead of failing.
@@ -585,7 +856,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # Deferred, not abandoned: the first real batch supplies the shapes.
     t.fwd_bwd(DummyPayload())
     self.assertTrue(t._compiled)
-    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
 
   def test_compiled_kernel_is_rebuilt_when_a_static_loss_argument_changes(self):
     """A changed non-traced loss argument must reach the loss, not the stale closure.
@@ -611,14 +882,14 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t.compile(DummyPayload())
 
     t.fwd_bwd(DummyPayload())
-    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
 
     # Same payload shapes, different static value: only the static half of the signature
     # can catch this.
     holder[0] = types.SimpleNamespace(scale=3.0)
     t._accumulated_grads = None
     t.fwd_bwd(DummyPayload())
-    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([6.0, 6.0]), rtol=1e-5)
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([24.0, 24.0]), rtol=1e-5)
 
   def test_uncomparable_static_arguments_warn_once(self):
     """An uncomparable static argument recompiles every step, and says so once.
@@ -795,13 +1066,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("loss", buf.weighted_metrics)
     self.assertNotIn("loss", buf.scalar_metrics)
 
-  def test_eval_step_warns_once_and_mutates_no_state(self):
-    """eval_step is an unimplemented no-op, but an audible one, and it disturbs nothing.
-
-    `AbstractTrainer.eval_step` forbids mutating trainer state, so this asserts against a
-    populated engine -- gradients accumulated and a micro step counted -- rather than a
-    fresh one, where "unchanged" would be trivially true.
-    """
+  def test_eval_step_records_eval_metrics_and_mutates_no_training_state(self):
+    """eval_step scores a batch without disturbing training, and its metrics stay separate."""
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
     t.with_loss_fn(
         lambda *args, **kwargs: (
@@ -815,18 +1081,41 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     micro_steps_before = t._micro_step_count
     train_step_before = t.train_step
     self.assertEqual(micro_steps_before, 1)
+    train_entries_before = t._metrics_recorder.get_step_metrics(train_step_before).weighted_metrics["loss"]
+    train_entries_before = train_entries_before.unreduced_sum.size
 
-    with self.assertLogs(level="WARNING") as logs:
-      t.eval_step(DummyPayload())
-      t.eval_step(DummyPayload())
-      t.eval_step(DummyPayload())
+    with mock.patch.object(t._metrics_logger, "write_metrics") as write_metrics:
+      with t.eval_context():
+        t.eval_step(DummyPayload())
+        t.eval_step(DummyPayload())
+        t.eval_step(DummyPayload())
 
-    eval_warnings = [line for line in logs.output if "eval_step is not implemented" in line]
-    self.assertLen(eval_warnings, 1)
-
+    # Nothing about the in-flight training step moved.
     self.assertEqual(t._micro_step_count, micro_steps_before)
     self.assertEqual(t.train_step, train_step_before)
     jax.tree.map(np.testing.assert_array_equal, grads_before, t._accumulated_grads)
+
+    # The train buffer still holds exactly the one fwd_bwd loss: no eval leaked into it.
+    train_buf = t._metrics_recorder.get_step_metrics(train_step_before)
+    self.assertEqual(train_buf.weighted_metrics["loss"].unreduced_sum.size, train_entries_before)
+    self.assertEqual(train_buf.mode, metrics_module.Mode.TRAIN)
+
+    # Leaving the context writes the pass once, tagged eval, against the step it ran at --
+    # not once per micro-batch, which would put three points on the curve at one x.
+    self.assertEqual(write_metrics.call_count, 1)
+    eval_buf = write_metrics.call_args.args[0]
+    self.assertEqual(write_metrics.call_args.kwargs["mode"], metrics_module.Mode.EVAL)
+    self.assertEqual(eval_buf.mode, metrics_module.Mode.EVAL)
+    self.assertEqual(eval_buf.id, train_step_before)
+
+    # All three micro-batches accumulated into that one buffer. `compute()` is elementwise,
+    # so it stays per-micro-batch here; `process_metrics` is what averages it down.
+    eval_loss = eval_buf.weighted_metrics["loss"]
+    self.assertEqual(eval_loss.unreduced_sum.size, 3)
+    self.assertAlmostEqual(float(np.mean(np.asarray(eval_loss.compute()))), 0.5, places=4)
+
+    # The recorder is drained, so a later pass cannot re-write this one's numbers.
+    self.assertEmpty(t._eval_metrics_recorder.get_metrics_history(clear_cache=False))
 
   def test_get_metrics_returns_one_buffer_and_a_sentinel_when_empty(self):
     """`get_metrics` returns a single buffer, matching both ABCs.
@@ -870,6 +1159,33 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       newest = t.get_metrics(clear_cache=True)
     self.assertEqual(newest.id, 2)
     self.assertIn("dropping 2 older buffer", "".join(logs.output))
+
+  def test_metrics_history_is_bounded(self):
+    """The step history is a window, so a driver that never drains it cannot grow forever.
+
+    Each retained buffer pins live device arrays and `save_checkpoint` serializes the whole
+    history, so an unbounded list would cost HBM and checkpoint latency linear in step count.
+    """
+    recorder = metrics_module.MetricsRecorder(max_buffered_steps=4)
+    for step in range(10):
+      recorder.buffer_metrics(train_step=step, name="loss", metric=jnp.array(float(step)))
+
+    history = recorder.get_metrics_history(clear_cache=False)
+    self.assertLen(history, 4)
+    # The newest steps are the ones kept, and the step currently being written is never evicted.
+    self.assertEqual([b.id for b in history], [6, 7, 8, 9])
+    self.assertEqual(recorder.get_step_metrics(9).id, 9)
+    self.assertEqual(recorder._dropped_buffer_count, 6)
+
+    # Opting out is possible for drivers that drain the history themselves.
+    unbounded = metrics_module.MetricsRecorder(max_buffered_steps=0)
+    for step in range(10):
+      unbounded.buffer_metrics(train_step=step, name="loss", metric=jnp.array(float(step)))
+    self.assertLen(unbounded.get_metrics_history(clear_cache=False), 10)
+
+    # The engine's own recorder is bounded by default.
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    self.assertGreater(t._metrics_recorder._max_buffered_steps, 0)
 
   def test_has_aux_false_drops_tuple_aux(self):
     """`has_aux=False` suppresses aux recording; `has_aux=True` keeps it.
@@ -946,8 +1262,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t.with_loss_fn(_loss_fn)
     t.fwd_bwd(payload)
 
-    # d(unreduced_sum)/dw is 8.0 per element, scaled by compute_scale() = 1/4.0.
-    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    # d(unreduced_sum)/dw is 8.0 per element; the 1/4.0 is applied once, in update().
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
     metrics = t.get_metrics(clear_cache=True)
     self.assertIn("loss", metrics.weighted_metrics)
     self.assertAlmostEqual(float(metrics.weighted_metrics["loss"].compute().item()), 6.0, places=4)
@@ -978,13 +1294,60 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t.with_loss_fn(_tunix_loss_fn)
     t.fwd_bwd(payload)
 
-    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
     metrics = t.get_metrics(clear_cache=True)
     self.assertIn("loss", metrics.weighted_metrics)
     self.assertIn("metric_a", metrics.weighted_metrics)
     self.assertIn("metric_b", metrics.scalar_metrics)
     self.assertAlmostEqual(float(metrics.weighted_metrics["loss"].compute().item()), 6.0, places=4)
     self.assertAlmostEqual(float(metrics.weighted_metrics["metric_a"].compute().item()), 4.0, places=4)
+
+  def _weighted_loss_fn(self, model, *_args, **_kwargs):
+    """Loss whose gradient wrt the dummy model's weights is exactly [2.0, 2.0].
+
+    `unreduced_sum` is 8 * sum(w) = 24.0 over a denominator of 4.0, so the reported loss
+    is 6.0 and each gradient element is 8.0 * compute_scale() = 2.0.
+    """
+    return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0))
+
+  def test_enable_lora_is_rejected_instead_of_silently_full_finetuning(self):
+    """This engine has no LoRA path, so the flag must fail loudly."""
+    self.assertFalse(self.mock_config.lora.enable_lora, "the default config must not enable LoRA")
+    maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    self.mock_from_pretrained.assert_called_once()
+    self.mock_from_pretrained.reset_mock()
+
+    lora_config = self.setup_config(lora={"enable_lora": True, "lora_rank": 8, "lora_alpha": 16.0})
+    with self.assertRaisesRegex(NotImplementedError, "does not support LoRA"):
+      maxtext_engine.MaxTextTrainingEngine(lora_config)
+    self.mock_from_pretrained.assert_not_called()
+
+  def test_gradient_norm_is_recorded_every_step(self):
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16")
+    self.assertFalse(cfg.skip_step_on_spikes, "this test covers the default, spike-detection-off path")
+
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.fwd_bwd(DummyPayload())
+    t.update()
+
+    buffer = t.get_metrics(clear_cache=True)
+    self.assertIn("gradient_norm", buffer.scalar_metrics)
+    grad_norm = buffer.scalar_metrics["gradient_norm"]
+    np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(8.0)], rtol=1e-3)
+    self.assertNotIn("step_skipped", buffer.scalar_metrics)
+
+  def test_perplexity_is_emitted_alongside_the_loss(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.fwd_bwd(DummyPayload())
+    t.update()
+
+    processed = metrics_module.MetricsLogger(self.mock_config).process_metrics(t.get_metrics(clear_cache=True))
+
+    self.assertAlmostEqual(processed["loss"], 6.0, places=4)
+    self.assertIn("perplexity", processed)
+    self.assertAlmostEqual(processed["perplexity"], float(np.exp(6.0)), places=3)
 
 
 if __name__ == "__main__":
