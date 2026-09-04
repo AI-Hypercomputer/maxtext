@@ -1365,22 +1365,27 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       interleaved = np.concatenate([q_r, k_r, v_r, z_r], axis=1)
       return interleaved.reshape(-1, qkv_m.shape[-1]).T
 
+  raw_block_size = getattr(maxtext_config, "weight_block_size", None)
+  if raw_block_size is None and isinstance(config, dict):
+    raw_block_size = config.get("quantization_config", {}).get("weight_block_size", 128)
+  weight_block_size = raw_block_size[0] if isinstance(raw_block_size, (list, tuple)) else (raw_block_size or 128)
+
   def concat_qkvz_scales_and_transpose(input_tensor, target_shape=None):
     if saving_to_hf:
       t_m = input_tensor.T
       t_r = t_m.reshape(H_k, -1, t_m.shape[-1])
-      d_k_blocks = max(1, D_k // 128)
-      d_v_blocks = max(1, (V_per_K * D_v) // 128)
+      d_k_blocks = max(1, D_k // weight_block_size)
+      d_v_blocks = max(1, (V_per_K * D_v) // weight_block_size)
       q_scale = t_r[:, :d_k_blocks, :].reshape(H_k * d_k_blocks, -1)
       k_scale = t_r[:, d_k_blocks : 2 * d_k_blocks, :].reshape(H_k * d_k_blocks, -1)
-      v_scale = t_r[:, 2 * d_k_blocks : 2 * d_k_blocks + d_v_blocks, :].reshape(H_v * max(1, D_v // 128), -1)
-      z_scale = t_r[:, 2 * d_k_blocks + d_v_blocks :, :].reshape(H_v * max(1, D_v // 128), -1)
+      v_scale = t_r[:, 2 * d_k_blocks : 2 * d_k_blocks + d_v_blocks, :].reshape(H_v * max(1, D_v // weight_block_size), -1)
+      z_scale = t_r[:, 2 * d_k_blocks + d_v_blocks :, :].reshape(H_v * max(1, D_v // weight_block_size), -1)
       qkv_scale = np.concatenate([q_scale, k_scale, v_scale], axis=0)
       return qkv_scale, z_scale
     else:
       qkv_scale, z_scale = input_tensor
-      d_k_blocks = max(1, D_k // 128)
-      d_v_blocks = max(1, (V_per_K * D_v) // 128)
+      d_k_blocks = max(1, D_k // weight_block_size)
+      d_v_blocks = max(1, (V_per_K * D_v) // weight_block_size)
       Q_blocks = H_k * d_k_blocks
       K_blocks = H_k * d_k_blocks
 
