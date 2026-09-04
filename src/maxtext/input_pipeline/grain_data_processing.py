@@ -732,11 +732,11 @@ def vision_sft_preprocessing_pipeline(
 
 def _get_pipeline_fn(config):
   """Returns the appropriate preprocessing pipeline function based on config."""
-  if config.use_sft and config.use_multimodal:
+  if getattr(config, "use_sft", False) and getattr(config, "use_multimodal", False):
     return vision_sft_preprocessing_pipeline
-  if config.use_dpo:
+  if getattr(config, "use_dpo", False):
     return dpo_preprocessing_pipeline
-  if config.use_sft:
+  if getattr(config, "use_sft", False):
     return sft_preprocessing_pipeline
   return pretrain_preprocessing_pipeline
 
@@ -831,8 +831,8 @@ def make_grain_train_iterator(
       "grain_worker_count": config.grain_worker_count,
       "grain_per_worker_buffer_size": config.grain_per_worker_buffer_size,
   }
-  if config.use_sft and config.use_multimodal:
-    preprocessing_fn_kwargs["image_column"] = config.train_image_column
+  if getattr(config, "use_sft", False) and getattr(config, "use_multimodal", False):
+    preprocessing_fn_kwargs["image_column"] = getattr(config, "train_image_column", None)
 
   preprocessing_fn = functools.partial(
       pipeline_fn,
@@ -977,8 +977,8 @@ def make_grain_eval_iterator(
       "grain_worker_count": config.grain_worker_count_eval,
       "grain_per_worker_buffer_size": config.grain_per_worker_buffer_size_eval,
   }
-  if config.use_sft and config.use_multimodal:
-    eval_preprocessing_fn_kwargs["image_column"] = config.eval_image_column
+  if getattr(config, "use_sft", False) and getattr(config, "use_multimodal", False):
+    eval_preprocessing_fn_kwargs["image_column"] = getattr(config, "eval_image_column", None)
 
   preprocessing_fn = functools.partial(
       pipeline_fn,
