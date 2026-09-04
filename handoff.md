@@ -1,6 +1,6 @@
 # Handoff & Session State: Qwen3.5 Distributed RL on GKE TPU v5p
 
-This document captures the complete background, architecture, verified end-to-end milestones, debugging history, repository diffs, and exact instructions to resume and scale distributed RL runs with Raiden weight synchronization.
+This document captures the complete background, architecture, verified end-to-end milestones, debugging history, repository diffs, mandatory technical constraints, and exact instructions to resume and scale distributed RL runs with Raiden weight synchronization.
 
 ---
 
@@ -12,6 +12,16 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 2. **Tunix** (`google/tunix`): Orchestrating the distributed GRPO program, managing prompt dispatch, batching, reward computation, and weight version transitions.
 3. **vLLM / tpu-inference** (`vllm-project/tpu-inference`): Serving as the rollout worker via `RLVllmSampler` using `flax_nnx` model runners on TPU v5p.
 4. **Raiden** (`tpu_raiden_jax`): Providing low-latency TPU host-to-host DMA weight synchronization between trainer and rollout workers over the control/data plane.
+
+### Mandatory Technical Principles & Constraints
+> [!IMPORTANT]
+> **1. Usage of FFI is Mandatory for Success**:
+> Without the JAX FFI backend (`weight_synchronizer_ffi`), we cannot scale the system to larger models (like Qwen3.5-35B). Non-FFI staging routes entire weight trees through client host memory or proxy runtime, which inevitably triggers fatal **Host Out-Of-Memory (OOM)** errors and proxy transfer timeouts. Hacking around or changing the architectural goals is not acceptable.
+> 
+> **2. Rigorous Bug Reporting & Isolated Reproductions**:
+> If any component (such as FFI, tpu-sync, or Pathways) fails or behaves unexpectedly, we must NOT implement hacky bypasses that compromise long-term scalability. Instead:
+> - File clear, easy-to-reproduce bug reports for the corresponding component teams (Pathways, TPU Sync, or Compiler).
+> - Provide standalone minimal reproduction scripts that isolate the failing behavior **without** pulling in the full complex integration across `tunix` / `maxtext` / `tpu-inference` / `vllm` / `tpu-sync`.
 
 ### Target Hardware & Topology
 - **Cluster**: `bodaborg-v5p-nap` (GCP Project: `cloud-tpu-shared-capacity`, Region: `europe-west4`, Zone: `europe-west4-b`).
@@ -162,6 +172,9 @@ The workload `igorts-v8-06b` ran to completion with 0 errors on the cluster usin
 2. **Build and Tag Verified Container Image**:
    - Build a fresh image containing the sorted `raiden_synchronizer.py` and filtered `raiden_worker_sync.py`.
    - Test manifest preflight on Qwen3.5-35B to verify `673 source var(s) == 673 destination var(s)`.
+3. **Verify JAX FFI Integration**:
+   - Verify that `weight_synchronizer_ffi` functions as required for Pathways direct TPU device transfer.
+   - If FFI encounters runtime incompatibilities with libtpu or Pathways proxies, produce a **standalone reproduction script** (e.g. 2-node minimal JAX FFI transfer without MaxText/Tunix) and file a bug report for the compiler/TPU sync teams.
 
 ### B. Validating Multi-Rollout Worker Execution (`--rollout-replicas=2`)
 - Run `launch_raiden.sh start --model qwen3-0.6b --rollout-replicas=2`.
