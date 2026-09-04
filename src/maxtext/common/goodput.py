@@ -79,12 +79,28 @@ def maybe_monitor_goodput(config):
         gcp_options=gcp_options,
     )
     goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
-    yield
+    max_logging.log("Started Cumulative Goodput upload to Tensorboard & GCM in the background!")
+    with maybe_monitor_rolling_window_goodput(goodput_monitor, config):
+      yield
   finally:
     if goodput_monitor:
       goodput_monitor.stop_goodput_uploader()
-      max_logging.log("Flushed final metrics and safe exited from Goodput monitoring.")
+      max_logging.log("Flushed final metrics and safe exited from cumulative Goodput monitoring.")
+
+
+@contextlib.contextmanager
+def maybe_monitor_rolling_window_goodput(goodput_monitor, config):
+  """Monitor rolling window goodput if enabled on the lead host."""
+  if _GOODPUT_STUB or not goodput_monitor:
+    yield
+    return
+  try:
+    goodput_monitor.start_rolling_window_goodput_uploader(config.rolling_windows_seconds)
+    max_logging.log("Started Rolling Window Goodput upload to Tensorboard & GCM in the background!")
+    yield
+  finally:
+    goodput_monitor.stop_rolling_window_goodput_uploader()
+    max_logging.log("Flushed final metrics and safe exited from rolling window Goodput monitoring.")
 
 
 @contextlib.contextmanager

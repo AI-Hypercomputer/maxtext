@@ -2001,6 +2001,7 @@ class Goodput(BaseModel):
   step_deviation_interval_seconds: int = Field(30, description="Interval to check step time deviation.")
   enable_gcp_goodput_metrics: bool = Field(True, description="Enable GCP goodput metrics.")
   enable_gcp_step_deviation_metrics: bool = Field(True, description="Enable GCP step deviation metrics.")
+  rolling_windows_seconds: list[int] = Field([3600, 86400], description="Rolling window intervals in seconds.")
 
 
 class ElasticTraining(BaseModel):
