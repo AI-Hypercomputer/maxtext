@@ -1211,6 +1211,10 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           out_features_shape=1,
           use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
           dtype=cfg.dtype,
+          # Without this the kernel stays at DenseGeneral's float32 default
+          # regardless of weight_dtype, leaving this one param fp32 against the
+          # rest of the model's bf16.
+          weight_dtype=cfg.weight_dtype,
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
           matmul_precision=cfg.matmul_precision,
