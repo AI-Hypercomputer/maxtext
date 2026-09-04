@@ -99,16 +99,17 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock(
         num_decoder_layers=8, num_experts=1, inhomogeneous_layer_cycle_interval=4, weight_dtype="bfloat16"
     )
-    for scanned in (False, True):
-      with self.subTest(scan_layers=scanned):
-        mapping = param_mapping.PARAM_MAPPING["qwen3.5-9b"](config, maxtext_config, scan_layers=scanned)
-        for index in range(4 if scanned else 8):
-          prefix = f"params-decoder-layers-layer_{index}" if scanned else f"params-decoder-layers_{index}"
-          indices = range(index, 8, 4) if scanned else [index]
-          for mt_name, hf_name in (("wi_0", "gate_proj"), ("wi_1", "up_proj"), ("wo", "down_proj")):
-            expected = [f"model.language_model.layers.{i}.mlp.{hf_name}.weight" for i in indices]
-            self.assertEqual(mapping[f"{prefix}-mlp-{mt_name}-kernel"], expected if scanned else expected[0])
-        self.assertFalse(any("routed_experts" in str(key) or "shared_expert" in str(key) for key in mapping))
+    for model_name in ("qwen3.5-9b", "qwen3.8-27b"):
+      for scanned in (False, True):
+        with self.subTest(model_name=model_name, scan_layers=scanned):
+          mapping = param_mapping.PARAM_MAPPING[model_name](config, maxtext_config, scan_layers=scanned)
+          for index in range(4 if scanned else 8):
+            prefix = f"params-decoder-layers-layer_{index}" if scanned else f"params-decoder-layers_{index}"
+            indices = range(index, 8, 4) if scanned else [index]
+            for mt_name, hf_name in (("wi_0", "gate_proj"), ("wi_1", "up_proj"), ("wo", "down_proj")):
+              expected = [f"model.language_model.layers.{i}.mlp.{hf_name}.weight" for i in indices]
+              self.assertEqual(mapping[f"{prefix}-mlp-{mt_name}-kernel"], expected if scanned else expected[0])
+          self.assertFalse(any("routed_experts" in str(key) or "shared_expert" in str(key) for key in mapping))
 
   def test_qwen3_next_mapping(self):
     config = {

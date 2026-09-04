@@ -51,6 +51,7 @@ base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", 
 jax_config = pyconfig.initialize(
     ["", base_config_path],
     model_name="qwen3.5-397b-a17b",
+    skip_jax_distributed_system=True,
     attention="dot_product",
     attention_type="full",
     matmul_precision="highest",
@@ -161,6 +162,169 @@ class TestQwen3_5MoeVisionEncoderEndToEnd(unittest.TestCase):
         atol=2e-2,
         error_msg="Qwen3.5 JAX subclassed vision tower final output differs from PyTorch reference",
     )
+
+
+
+
+class TestQwen3_8_27BDecoderLayers(unittest.TestCase):
+  """Layer-wise equivalence test for Qwen3.8-27B dense GDN + FullAttention decoder layers."""
+
+  def setUp(self):
+    np.random.seed(42)
+    torch.manual_seed(42)
+    devices = jax.devices()
+    self.mesh = Mesh(np.array(devices[:1]), axis_names=("data",))
+    self.cfg = pyconfig.initialize(
+        ["", base_config_path],
+        model_name="qwen3.8-27b",
+        override_model_config=True,
+        skip_jax_distributed_system=True,
+        base_emb_dim=128,
+        base_mlp_dim=256,
+        base_num_query_heads=6,
+        base_num_kv_heads=2,
+        head_dim=32,
+        gdn_num_key_heads=4,
+        gdn_num_value_heads=12,
+        gdn_key_head_dim=16,
+        gdn_value_head_dim=16,
+        gdn_conv_kernel_dim=4,
+        gdn_chunk_size=4,
+        base_num_decoder_layers=4,
+        attention="dot_product",
+        matmul_precision="highest",
+        dtype="float32",
+        weight_dtype="float32",
+        float32_logits=True,
+        float32_qk_product=True,
+    )
+
+  def test_gdn_and_full_attention_dense_decoder_layers_match_torch(self):
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import (
+        Qwen3_5DecoderLayer as TorchQwen3_5DecoderLayer,
+        Qwen3_5TextRotaryEmbedding,
+    )
+    from maxtext.models.qwen3_5 import Qwen3_5DecoderLayer as JaxQwen3_5DecoderLayer
+    from maxtext.checkpoint_conversion.utils import param_mapping
+
+    pt_cfg = Qwen3_5TextConfig(
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=4,
+        num_attention_heads=6,
+        num_key_value_heads=2,
+        head_dim=32,
+        linear_num_key_heads=4,
+        linear_num_value_heads=12,
+        linear_key_head_dim=16,
+        linear_value_head_dim=16,
+        linear_conv_kernel_dim=4,
+        rms_norm_eps=1e-6,
+        partial_rotary_factor=0.25,
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 10000000,
+            "partial_rotary_factor": 0.25,
+            "mrope_interleaved": True,
+            "mrope_section": [2, 1, 1],
+        },
+        layer_types=["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+        attn_implementation="eager",
+    )
+    hooks = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        {"text_config": pt_cfg.to_dict()}, self.cfg, scan_layers=False, saving_to_hf=False
+    )
+
+    batch, seq_len, emb_dim = 2, 8, 128
+    x_np = np.random.randn(batch, seq_len, emb_dim).astype(np.float32) * 0.1
+    x_pt = torch.from_numpy(x_np)
+    x_jax = jnp.array(x_np)
+    pos_pt = torch.arange(seq_len).unsqueeze(0).expand(3, batch, seq_len)
+    pos_jax = jnp.broadcast_to(jnp.arange(seq_len)[None, :], (batch, seq_len))
+    seg_jax = jnp.ones((batch, seq_len), dtype=jnp.int32)
+    rotary = Qwen3_5TextRotaryEmbedding(pt_cfg)
+    pos_emb_pt = rotary(x_pt, pos_pt)
+    causal_mask = torch.triu(torch.full((1, 1, seq_len, seq_len), float("-inf")), diagonal=1)
+
+    for layer_idx in (0, 3):
+      with self.subTest(layer_idx=layer_idx):
+        pt_layer = TorchQwen3_5DecoderLayer(pt_cfg, layer_idx=layer_idx).eval()
+        jax_layer = JaxQwen3_5DecoderLayer(
+            config=self.cfg, mesh=self.mesh, model_mode="train", layer_idx=layer_idx, rngs=nnx.Rngs(0)
+        )
+        prefix = f"params-decoder-layers_{layer_idx}"
+        jax_layer.input_layernorm.scale[...] = jnp.array(pt_layer.input_layernorm.weight.numpy())
+        jax_layer.post_attention_layernorm.scale[...] = jnp.array(pt_layer.post_attention_layernorm.weight.numpy())
+        jax_layer.mlp.wi_0.kernel[...] = jnp.array(
+            hooks[f"{prefix}-mlp-wi_0-kernel"](pt_layer.mlp.gate_proj.weight.numpy(), jax_layer.mlp.wi_0.kernel[...].shape)
+        )
+        jax_layer.mlp.wi_1.kernel[...] = jnp.array(
+            hooks[f"{prefix}-mlp-wi_1-kernel"](pt_layer.mlp.up_proj.weight.numpy(), jax_layer.mlp.wi_1.kernel[...].shape)
+        )
+        jax_layer.mlp.wo.kernel[...] = jnp.array(
+            hooks[f"{prefix}-mlp-wo-kernel"](pt_layer.mlp.down_proj.weight.numpy(), jax_layer.mlp.wo.kernel[...].shape)
+        )
+        if layer_idx == 0:
+          qkv_w = pt_layer.linear_attn.in_proj_qkv.weight.numpy()
+          z_w = pt_layer.linear_attn.in_proj_z.weight.numpy()
+          jax_layer.attention.in_proj_qkvz.kernel[...] = jnp.array(
+              hooks[f"{prefix}-attention-in_proj_qkvz-kernel"]((qkv_w, z_w))
+          )
+          b_w = pt_layer.linear_attn.in_proj_b.weight.numpy()
+          a_w = pt_layer.linear_attn.in_proj_a.weight.numpy()
+          jax_layer.attention.in_proj_ba.kernel[...] = jnp.array(
+              hooks[f"{prefix}-attention-in_proj_ba-kernel"]((b_w, a_w))
+          )
+          jax_layer.attention.conv1d.kernel[...] = jnp.array(
+              hooks[f"{prefix}-attention-conv1d-kernel"](pt_layer.linear_attn.conv1d.weight.numpy())
+          )
+          jax_layer.attention.A_log[...] = jnp.array(pt_layer.linear_attn.A_log.numpy())
+          jax_layer.attention.dt_bias[...] = jnp.array(pt_layer.linear_attn.dt_bias.numpy())
+          jax_layer.attention.norm.rms_norm.scale[...] = jnp.array(pt_layer.linear_attn.norm.weight.numpy())
+          jax_layer.attention.out_proj.kernel[...] = jnp.array(
+              hooks[f"{prefix}-attention-out_proj-kernel"](pt_layer.linear_attn.out_proj.weight.numpy())
+          )
+        else:
+          jax_layer.attention.attention.query.kernel[...] = jnp.array(
+              hooks[f"{prefix}-attention-attention-query-kernel"](
+                  pt_layer.self_attn.q_proj.weight.numpy(), jax_layer.attention.attention.query.kernel[...].shape
+              )
+          )
+          jax_layer.attention.attention.key.kernel[...] = jnp.array(
+              hooks[f"{prefix}-attention-attention-key-kernel"](
+                  pt_layer.self_attn.k_proj.weight.numpy(), jax_layer.attention.attention.key.kernel[...].shape
+              )
+          )
+          jax_layer.attention.attention.value.kernel[...] = jnp.array(
+              hooks[f"{prefix}-attention-attention-value-kernel"](
+                  pt_layer.self_attn.v_proj.weight.numpy(), jax_layer.attention.attention.value.kernel[...].shape
+              )
+          )
+          jax_layer.attention.attention.out.kernel[...] = jnp.array(
+              hooks[f"{prefix}-attention-attention-out-kernel"](
+                  pt_layer.self_attn.o_proj.weight.numpy(), jax_layer.attention.attention.out.kernel[...].shape
+              )
+          )
+          jax_layer.attention.attention.query_norm.scale[...] = jnp.array(pt_layer.self_attn.q_norm.weight.numpy())
+          jax_layer.attention.attention.key_norm.scale[...] = jnp.array(pt_layer.self_attn.k_norm.weight.numpy())
+
+        pt_out = pt_layer(
+            x_pt,
+            attention_mask=causal_mask if layer_idx == 3 else None,
+            position_ids=pos_pt,
+            position_embeddings=pos_emb_pt,
+        )
+        if isinstance(pt_out, tuple):
+          pt_out = pt_out[0]
+        jax_out, _ = jax_layer(x_jax, seg_jax, pos_jax, deterministic=True, model_mode="train")
+        assert_all_close_jax_torch(
+            jax_out,
+            pt_out,
+            rtol=1e-5,
+            atol=1e-5,
+            error_msg=f"Qwen3.8-27B decoder layer {layer_idx} output differs from PyTorch reference",
+        )
 
 
 if __name__ == "__main__":

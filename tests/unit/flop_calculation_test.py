@@ -243,6 +243,7 @@ class FlopCalculation(parameterized.TestCase):
 
   @parameterized.named_parameters(
       ("dense_9b", "qwen3.5-9b", 32, 0),
+      ("dense_27b", "qwen3.8-27b", 64, 0),
       ("moe_35b", "qwen3.5-35b-a3b", 0, 40),
       ("moe_397b", "qwen3.5-397b-a17b", 0, 60),
   )
