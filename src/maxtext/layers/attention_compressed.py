@@ -45,6 +45,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference.kvcache import KVQuant
 from maxtext.inference import kvcache
+from maxtext.kernels.attention import csa_streamindex
 
 
 class CSAPoolingConfig(enum.IntEnum):
@@ -874,20 +875,28 @@ class DeepseekV4Indexer(nnx.Module):
       return jnp.zeros((batch_size, seq_len, min(self.index_topk, compressed_len)), dtype=jnp.int32)
 
     # --- TOP-K ROUTING MATH (Executes in both Prefill and AR) ---
-    compressed_kv = jnp.expand_dims(compressed, axis=1)
-    compressed_kv = jnp.broadcast_to(compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim))
-
     q = self.q_proj(q_latent).reshape((batch_size, seq_len, self.index_n_heads, self.index_head_dim))
     q = jnp.transpose(q, (0, 2, 1, 3))
     q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
-
-    q = q.astype(jnp.float32)
-    compressed_kv = compressed_kv.astype(jnp.float32)
-
-    scores = jnp.einsum("bhsd,bhwd->bhsw", q, compressed_kv)
-    scores = jax.nn.relu(scores) * self.softmax_scale
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
-    index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights)
+    if self.config.use_csa_streamindex_kernel:
+      index_scores = csa_streamindex.csa_streamindex_score(
+          q=q,
+          compressed=compressed,
+          weights=weights,
+          softmax_scale=self.softmax_scale,
+          compress_rate=self.compress_rate,
+      )
+    else:
+      compressed_kv = jnp.expand_dims(compressed, axis=1)
+      compressed_kv = jnp.broadcast_to(
+          compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim)
+      )
+      q = q.astype(jnp.float32)
+      compressed_kv = compressed_kv.astype(jnp.float32)
+      scores = jnp.einsum("bhsd,bhwd->bhsw", q, compressed_kv)
+      scores = jax.nn.relu(scores) * self.softmax_scale
+      index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights)
 
     k = min(self.index_topk, compressed_len)
 
@@ -897,8 +906,9 @@ class DeepseekV4Indexer(nnx.Module):
       block_positions = position_ids[:, : usable_len : self.compress_rate]
       future_mask = (block_positions[:, None, :] + self.compress_rate) > (position_ids[:, :, None] + 1)
 
-    # Apply the mask to the scores
-    index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
+    # Apply the mask to the scores if not already applied by the kernel
+    if not self.config.use_csa_streamindex_kernel:
+      index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
     combined_invalid = future_mask
     if attention_mask is not None:
