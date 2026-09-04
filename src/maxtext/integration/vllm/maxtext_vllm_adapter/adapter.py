@@ -243,6 +243,7 @@ class MaxTextForCausalLM(nnx.Module):
     """Dummy method to satisfy vLLM's internal cleanup logic."""
     return []
 
+  # pylint: disable=keyword-arg-before-vararg
   def __call__(
       self,
       kv_caches: list[jax.Array],
@@ -311,8 +312,12 @@ class MaxTextForCausalLM(nnx.Module):
     # Present the decoder a layer-ordered view of the physical cache list. With
     # the vLLM hybrid layout all Mamba/GDN caches precede the attention caches,
     # so kv_caches[lyr] would otherwise hand an attention layer a 3D conv state.
-    physical_indices = resolve_layer_kv_cache_indices(_layer_name_to_kvcache_index, len(kv_caches))
-    layer_kv_caches = gather_layer_kv_caches(kv_caches, physical_indices)
+    if kv_caches is not None:
+      physical_indices = resolve_layer_kv_cache_indices(_layer_name_to_kvcache_index, len(kv_caches))
+      layer_kv_caches = gather_layer_kv_caches(kv_caches, physical_indices)
+    else:
+      physical_indices = None
+      layer_kv_caches = None
 
     # MaxText decode treats vLLM's flattened tokens as a batch with seq_len=1.
     # MRoPE positions arrive channel-first and must also move their 3 channels
@@ -327,7 +332,10 @@ class MaxTextForCausalLM(nnx.Module):
       decoder_input_embeddings = None
       input_ids = jnp.expand_dims(input_ids, axis=1)
 
-    input_positions = normalize_vllm_input_positions(attention_metadata.input_positions)
+    positions = getattr(attention_metadata, "input_positions", None)
+    if positions is None:
+      positions = _input_positions
+    input_positions = normalize_vllm_input_positions(positions)
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
@@ -348,7 +356,8 @@ class MaxTextForCausalLM(nnx.Module):
         hidden, layer_kv_caches = res
 
       # Hand the updated caches back in the runner's physical order.
-      kv_caches = scatter_layer_kv_caches(kv_caches, layer_kv_caches, physical_indices)
+      if kv_caches is not None:
+        kv_caches = scatter_layer_kv_caches(kv_caches, layer_kv_caches, physical_indices)
 
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
       hidden = hidden.reshape((-1, hidden.shape[-1]))

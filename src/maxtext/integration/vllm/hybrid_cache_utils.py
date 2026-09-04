@@ -102,7 +102,7 @@ def resolve_layer_kv_cache_indices(layer_name_to_kvcache_index: Any, num_kv_cach
   for name, physical_index in layer_name_to_kvcache_index.items():
     # Other entries (e.g. a per-layer auxiliary cache suffix) are not decoder
     # layers and are left to the model that declared them.
-    if not name.startswith(_LAYER_NAME_PREFIX):
+    if not isinstance(name, str) or not name.startswith(_LAYER_NAME_PREFIX):
       continue
     suffix = name[len(_LAYER_NAME_PREFIX) :]
     if not suffix.isdigit():
@@ -151,6 +151,10 @@ def scatter_layer_kv_caches(
   """
   if physical_indices is None:
     return layer_kv_caches
+  if len(layer_kv_caches) != len(physical_indices):
+    raise ValueError(
+        f"Expected layer_kv_caches to have length {len(physical_indices)}, " f"but got {len(layer_kv_caches)}."
+    )
   updated = list(kv_caches)
   for lyr, idx in enumerate(physical_indices):
     updated[idx] = layer_kv_caches[lyr]

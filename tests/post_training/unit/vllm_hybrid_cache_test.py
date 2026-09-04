@@ -153,7 +153,7 @@ class LayerOrderedKvCachesTest(unittest.TestCase):
 
   @pytest.mark.cpu_only
   def test_non_layer_entries_are_ignored(self):
-    index_map = {"layer.0": 0, "layer.1": 1, "layer.1.rope_cache": 2}
+    index_map = {"layer.0": 0, "layer.1": 1, "layer.1.rope_cache": 2, 42: 3}
 
     self.assertEqual(resolve_layer_kv_cache_indices(index_map, 3), [0, 1])
 
@@ -163,3 +163,8 @@ class LayerOrderedKvCachesTest(unittest.TestCase):
       resolve_layer_kv_cache_indices({"layer.0": 0, "layer.2": 1}, 2)
     with self.assertRaisesRegex(ValueError, "outside the kv_caches list"):
       resolve_layer_kv_cache_indices({"layer.0": 0, "layer.1": 5}, 2)
+
+  @pytest.mark.cpu_only
+  def test_scatter_rejects_length_mismatch(self):
+    with self.assertRaisesRegex(ValueError, "Expected layer_kv_caches to have length"):
+      scatter_layer_kv_caches(["c0", "c1"], ["c0'"], [0, 1])
