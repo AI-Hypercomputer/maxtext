@@ -4338,6 +4338,7 @@ class MaxTextConfig(
           "deepseek",
           "mistral",
           "mixtral",
+          "qwen2",
           "qwen3",
           "qwen3_moe",
           "qwen3_custom_moe",
