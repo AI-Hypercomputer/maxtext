@@ -1624,6 +1624,66 @@ class RoutedMoeTest(parameterized.TestCase):
     )
     self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
 
+  # Rows are batch shards and columns are expert shards; each batch shard sends eight assignments.
+  _TRAFFIC_MATRIX = np.array([[4, 1, 2, 1], [3, 2, 1, 2], [1, 2, 2, 3], [2, 1, 0, 5]], dtype=np.int32)
+
+  def test_ragged_all_to_all_output_buffer_zero_init(self):
+    """The all-to-all destination buffer is zeroed only when requested."""
+    # pylint: disable=protected-access
+    shape = (6, 4)
+
+    def emitted_primitives(zero_init):
+      jaxpr = jax.make_jaxpr(lambda: moe._ragged_all_to_all_output_buffer(shape, jnp.bfloat16, zero_init=zero_init))()
+      return [str(eqn.primitive) for eqn in jaxpr.jaxpr.eqns]
+
+    # Empty buffers may read as zero, so the emitted primitive distinguishes the allocation paths.
+    self.assertNotIn("empty", emitted_primitives(zero_init=True))
+    self.assertIn("empty", emitted_primitives(zero_init=False))
+
+    zeroed = moe._ragged_all_to_all_output_buffer(shape, jnp.bfloat16, zero_init=True)
+    self.assertEqual((zeroed.shape, zeroed.dtype), (shape, jnp.bfloat16))
+    np.testing.assert_array_equal(np.asarray(zeroed, dtype=np.float32), np.zeros(shape, np.float32))
+
+  def test_truncated_combine_leaves_dropped_assignments_unwritten(self):
+    """A dropped assignment contributes zero to the combined token."""
+    # pylint: disable=protected-access
+    num_ep, buffer_size, emb, top_k = 4, 6, 2, 2
+    sizes = self._TRAFFIC_MATRIX
+    origin = 1
+    rows = int(sizes[origin].sum())
+    marker = np.broadcast_to((np.arange(rows, dtype=np.float32) + 1)[:, None], (rows, emb))
+
+    def replay_combine(destination):
+      """Replays combine's row copies because ragged all-to-all has no CPU lowering."""
+      destination = np.array(destination, dtype=np.float32)
+      for expert_shard in range(num_ep):
+        _, send_sz, out_off, _ = moe.RoutedMoE.get_all_to_all_params(
+            jnp.asarray(sizes),
+            expert_shard,
+            num_ep,
+            ragged_buffer_factor=1.0,
+            buffer_size=buffer_size,
+            is_dispatch=False,
+        )
+        start = int(np.asarray(out_off)[origin])
+        end = start + int(np.asarray(send_sz)[origin])
+        destination[start:end] = marker[start:end]
+      return destination
+
+    def weighted_unpermute(combined):
+      """Applies the reshape and weighted sum from `RoutedMoE.unpermute`."""
+      return np.einsum("BKE,BK->BE", combined.reshape(-1, top_k, emb), np.full((rows // top_k, top_k), 0.5, np.float32))
+
+    dropped = np.flatnonzero(~replay_combine(np.zeros((rows, emb))).any(axis=1))
+    np.testing.assert_array_equal(dropped, [2])
+
+    poisoned = weighted_unpermute(replay_combine(np.full((rows, emb), np.nan, np.float32)))
+    self.assertTrue(np.isnan(poisoned[int(dropped[0]) // top_k]).all())
+
+    combined = replay_combine(moe._ragged_all_to_all_output_buffer((rows, emb), jnp.float32, zero_init=True))
+    np.testing.assert_array_equal(combined[dropped], 0.0)
+    np.testing.assert_array_equal(weighted_unpermute(combined)[int(dropped[0]) // top_k], 0.5 * marker[3])
+
   @parameterized.named_parameters(
       {
           "testcase_name": f"{base_name}_ep{ici_expert_parallelism}" + ("_qag" if shard_embed_moe_on_fsdp else ""),
