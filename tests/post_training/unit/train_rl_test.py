@@ -64,6 +64,14 @@ class TrainRLTest(unittest.TestCase):
     self.assertEqual(config.max_seq_token_per_tpu, 12288)
     self.assertEqual(config.vllm_block_size, 128)
 
+  def test_rl_config_packing_budget_must_fit_a_maximal_sequence(self):
+    """A packed row must hold prompt cap + generation cap (= max_target_length)."""
+    with self.assertRaisesRegex(ValueError, "max_seq_token_per_tpu"):
+      types.RLConfig(model_name="gemma4-26b", max_target_length=4096, max_seq_token_per_tpu=2048)
+
+    config = types.RLConfig(model_name="gemma4-26b", max_target_length=4096, max_seq_token_per_tpu=4096)
+    self.assertEqual(config.max_seq_token_per_tpu, 4096)
+
   @pytest.mark.cpu_only
   def test_rollout_prefix_caching_respects_config_for_attention_model(self):
     config = SimpleNamespace(

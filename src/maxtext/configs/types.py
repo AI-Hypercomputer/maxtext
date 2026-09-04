@@ -5038,6 +5038,16 @@ class RLConfig(
     if model_name is None:
       raise ValueError("model_name is not set. Please pass model_name in your command.")
 
+    # With sequence packing on, a maximal sequence (prompt cap + generation
+    # cap = max_target_length) must fit in one packed row. Tunix checks this
+    # too, but only in the learner, after the models are already on the
+    # accelerators; fail here, before any of that work.
+    if 0 < self.max_seq_token_per_tpu < self.max_target_length:
+      raise ValueError(
+          f"max_seq_token_per_tpu ({self.max_seq_token_per_tpu}) must be at least "
+          f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
+      )
+
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)
     if tokenizer_path is None:
