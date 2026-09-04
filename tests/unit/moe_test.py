@@ -513,16 +513,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
     ),
 )
 def test_sparse_matmul_pins_expert_kernel_all_gather_when_the_upcast_is_an_identity(weight_dtype, dtype, expect_barrier):
-  """Sparse MoE keeps the FSDP kernel gather from being hoisted out of a scanned decoder.
-
-  The kernel pspecs drop the fsdp axis so XLA emits the all-gather at the sharding
-  constraint. Under a scanned decoder the kernels are a per-layer dynamic-slice of a
-  stacked param, and with nothing between the slice and the collective XLA turns
-  all_gather(dynamic_slice(w)) into the loop-invariant dynamic_slice(all_gather(w)) and
-  hoists it, making every layer's gathered expert kernel live at once. The
-  `jnp.asarray(kernel, dtype)` upcast usually separates them; when weight_dtype == dtype
-  it is an identity, so an optimization barrier has to stand in for it.
-  """
+  """Sparse MoE keeps the FSDP kernel gather from being hoisted out of a scanned decoder."""
   fake_moe = SimpleNamespace(
       config=SimpleNamespace(
           shard_exp_on_fsdp=False,
@@ -575,16 +566,12 @@ def test_sparse_matmul_pins_expert_kernel_all_gather_when_the_upcast_is_an_ident
         None,
     )
 
-  # Identity, not equality: the stand-in kernels all share a shape, so SimpleNamespace
-  # equality cannot tell a barrier output from the raw kernel it replaced.
   def was_sharded(value):
     return any(value is candidate for candidate in sharded)
 
   if expect_barrier:
     assert barrier.call_count == 1
     assert all(a is b for a, b in zip(barrier.call_args.args[0], (w0, w1, wo), strict=True))
-    # The constraint must consume the barrier's outputs; a barrier whose results are
-    # dropped still lets XLA reorder the gather above the per-layer slice.
     assert all(was_sharded(kernel) for kernel in barriered)
     assert not any(was_sharded(kernel) for kernel in (w0, w1, wo))
   else:

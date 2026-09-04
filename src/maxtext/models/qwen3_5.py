@@ -49,14 +49,7 @@ class Qwen3_5SparseMoEBlock(Qwen3NextSparseMoeBlock):
 
 
 class Qwen3_5ScannableBlock(Qwen3NextScannableBlock):
-  """Scanned Structure for Text-only Architecture, explicitly invoking Qwen3_5 layers.
-
-  Qwen3.5 repeats the same hybrid attention period as Qwen3-Next -- several
-  GatedDeltaNet layers followed by one full-attention layer -- so it reuses
-  Qwen3-Next's hierarchical nested scans (an inner scan over the homogeneous
-  linear-attention layers plus a trip-count-one scan over the full-attention
-  layer) and only swaps in the Qwen3.5 decoder layer.
-  """
+  """Scanned Structure for Text-only Architecture, explicitly invoking Qwen3_5 layers."""
 
   def _make_decoder_layer(self, *, layer_idx, is_full_attention_layer, rngs):
     return Qwen3_5DecoderLayer(
@@ -72,13 +65,6 @@ class Qwen3_5ScannableBlock(Qwen3NextScannableBlock):
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
   """Qwen3.5 hybrid decoder layer.
-
-  Qwen3.5's decoder layer is structurally identical to Qwen3-Next's -- norm,
-  either full or linear attention, norm, sparse MoE, with residuals around the
-  attention and MoE halves -- so the whole forward pass is inherited. Only the
-  sub-block factories are overridden, to build the Qwen3.5 sub-classes. The
-  attribute names (`input_layernorm`, `attention`, `post_attention_layernorm`,
-  `mlp`) are therefore shared, and so are the checkpoint parameter paths.
 
   Attributes:
     config: The model configuration object.

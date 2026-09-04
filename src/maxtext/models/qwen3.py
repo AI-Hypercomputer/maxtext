@@ -1350,11 +1350,7 @@ class Qwen3NextScannableBlock(nnx.Module):
       self.global_layer = None
 
   def _make_decoder_layer(self, *, layer_idx, is_full_attention_layer, rngs):
-    """Builds one sub-layer of the block.
-
-    Subclasses for architectures that share this block structure (e.g. Qwen3.5)
-    override this to swap in their own decoder layer class.
-    """
+    """Builds one sub-layer of the block."""
     return Qwen3NextDecoderLayer(
         config=self.config,
         mesh=self.mesh,
@@ -1384,8 +1380,7 @@ class Qwen3NextScannableBlock(nnx.Module):
         return self._run_layer(layer, carry, layer_kwargs)[0]
 
     else:
-      # Router replay: one slice of forced routing per local layer, fed through
-      # the scan's xs so each iteration sees its own layer's expert indices.
+
       def apply_fn(layer, carry, routing):
         return self._run_layer(layer, carry, layer_kwargs, forced_routed_experts=routing)[0]
 
@@ -1611,11 +1606,6 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     self.mlp = self._make_mlp(rngs=rngs)
 
-  # The three factories below are the only places a sibling architecture that reuses
-  # this layer (Qwen3.5) has to diverge, so they are overridable hooks rather than
-  # inline constructor calls. `__init__` binds what they return to `attention` and
-  # `mlp`, which are checkpoint parameter paths, so an override has to keep the
-  # sub-module's own parameter names too.
   def _make_full_attention(self, *, rngs: nnx.Rngs):
     """Builds the full-attention sub-block used on the last layer of every cycle."""
     return Qwen3NextFullAttention(
@@ -1707,8 +1697,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.
-    # Assigned rather than sown: `sow` appends to a tuple, so the layer's Intermediate
-    # structure would grow on every call, which a `jax.lax.scan` body cannot express.
+    # Assigned, not sown: `sow` appends, so Intermediate would grow per call, which a scan body cannot express.
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 

@@ -155,14 +155,11 @@ class ParamMappingTest(unittest.TestCase):
     num_blocks, num_local = num_layers // cycle, cycle - 1
     local_prefix = "params-decoder-layers-local_layers"
     global_prefix = "params-decoder-layers-global_layer"
-    # Linear attention only exists on the local layers, full attention only on the global one.
     self.assertIn(f"{local_prefix}-attention-in_proj_qkvz-kernel", mapping)
     self.assertIn(f"{global_prefix}-attention-attention-query-kernel", mapping)
     self.assertNotIn(f"{global_prefix}-attention-in_proj_qkvz-kernel", mapping)
     self.assertNotIn(f"{local_prefix}-attention-attention-query-kernel", mapping)
 
-    # local_layers values are nested [block][local]; global_layer is flat over blocks.
-    # A tuple of HF names is a composite source the hook fuses, not a stacking axis.
     local_val = mapping[f"{local_prefix}-attention-in_proj_qkvz-kernel"]
     self.assertEqual(len(local_val), num_blocks)
     self.assertEqual(len(local_val[0]), num_local)
@@ -175,11 +172,8 @@ class ParamMappingTest(unittest.TestCase):
     )
     global_val = mapping[f"{global_prefix}-attention-attention-query-kernel"]
     self.assertEqual(len(global_val), num_blocks)
-    # The full-attention layer is last in the period.
     self.assertEqual(global_val[0], f"model.language_model.layers.{cycle - 1}.self_attn.q_proj.weight")
 
-    # Fused experts: one HF tensor feeds both wi_0 and wi_1, so it is keyed by the pair
-    # and carries no extra per-expert axis (unlike Qwen3-Next).
     fused_local = mapping[(f"{local_prefix}-mlp-routed_experts-wi_0", f"{local_prefix}-mlp-routed_experts-wi_1")]
     self.assertEqual(len(fused_local), num_blocks)
     self.assertEqual(len(fused_local[0]), num_local)
@@ -188,12 +182,7 @@ class ParamMappingTest(unittest.TestCase):
     self.assertEqual(len(fused_global), num_blocks)
 
   def test_qwen3_5_composite_key_uses_the_nested_scan_axes(self):
-    """A composite (tuple) MaxText key must still be recognised as a nested block scan.
-
-    Qwen3.5's fused gate_up_proj is keyed by the (wi_0, wi_1) pair, so a layout
-    check that only looks at `str` keys would place the (blocks, local) axes at
-    the leading positions and silently transpose the weights.
-    """
+    """A composite (tuple) MaxText key must still be recognised as a nested block scan."""
     cfg = mock.Mock()
     cfg.param_scan_axis = 1
     local_key = "params-decoder-layers-local_layers-mlp-routed_experts-wi_0"

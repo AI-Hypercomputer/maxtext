@@ -511,8 +511,6 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
-    # Qwen3-Next and Qwen3.5 share the same hybrid attention period, so they share
-    # the same nested-scan block structure.
     self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
@@ -2444,10 +2442,6 @@ class NNXDecoder(nnx.Module):
     Layers past the last whole block are applied afterwards, in a short
     remainder block, so a layer count that is not a multiple of the cycle keeps
     all its layers.
-
-    Forced routing (router replay) is sliced per decoder layer here and handed
-    to each block as its own `[block_length, batch, seq, top_k]` stack, which
-    the block then splits between its local scan and its global layer.
     """
     cfg = self.config
     block_length = cfg.inhomogeneous_layer_cycle_interval
@@ -2460,8 +2454,7 @@ class NNXDecoder(nnx.Module):
     remainder_forced_routed_experts = None
     if forced_routed_experts is not None:
       if kv_caches is not None:
-        # The kv-cache path below unrolls into _apply_layers_sequentially, which
-        # threads either kv caches or scan xs, not both.
+        # _apply_layers_sequentially threads either kv caches or scan xs, not both.
         raise NotImplementedError(
             "Forced routing is not supported together with externally-managed (vLLM) kv_caches in scanned layers."
         )

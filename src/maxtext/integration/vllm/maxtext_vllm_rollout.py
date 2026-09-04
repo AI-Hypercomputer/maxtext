@@ -189,28 +189,18 @@ def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_block
   return -1, None
 
 
-# `Qwen3NextScannableBlock` (shared by Qwen3-Next and Qwen3.5) nests two scans:
-# the cycle's linear-attention layers share a single `local_layers` module, with
-# blocks on `scan_axis` and the cycle slot on `scan_axis + 1`, while the trailing
-# full-attention layer sits in `global_layer` with blocks on `scan_axis` alone.
 _QWEN_NESTED_LOCAL = "local_layers"
 _QWEN_NESTED_GLOBAL = "global_layer"
 
 
 class _QwenScannedRef(NamedTuple):
-  """Where a scanned Qwen parameter sits, and how it maps onto cycle slots.
+  """Where a scanned Qwen parameter sits, and how it maps onto cycle slots."""
 
-  `slot_idx` is the parameter's fixed position in the layer cycle. It is None
-  for the two nested containers: `local_layers` spans several slots, read off
-  `scan_axis + 1` rather than off the key, and `global_layer` always takes
-  whichever slot closes the cycle.
-  """
-
-  container_idx: int  # Position of "layers" in the key tuple, or -1 for no match.
+  container_idx: int
   slot_idx: Optional[int]
-  consumed: int  # Key elements the container occupies.
-  nested: bool  # Slots are stacked on `scan_axis + 1`.
-  trailing: bool  # Occupies the last slot of the cycle.
+  consumed: int
+  nested: bool
+  trailing: bool
 
 
 _NO_QWEN_SCAN = _QwenScannedRef(-1, -1, 0, False, False)
@@ -238,12 +228,8 @@ def _find_qwen_scanned_layer_idx(key_tuple) -> _QwenScannedRef:
 def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Optional[int] = None):
   """Unroll Qwen's heterogeneous or homogeneous scanned blocks for an unscanned MaxText target.
 
-  Qwen 3 Next/3.5 training stores a repeating layer cycle under a nested scan:
-  `decoder.layers.local_layers` holds the cycle's linear-attention layers with
-  repetitions on `scan_axis` and the cycle slot on `scan_axis + 1`, and
-  `decoder.layers.global_layer` holds the trailing full-attention layer with
-  repetitions on `scan_axis` alone. Trainer states predating that layout, which
-  kept one `decoder.layers.layer_{slot}` module per slot, are still accepted.
+  Qwen 3 Next/3.5 training nests two scans: `decoder.layers.local_layers` holds the cycle's linear-attention
+  layers with the slot on `scan_axis + 1`, and `decoder.layers.global_layer` holds the trailing full-attention layer.
   Qwen 3 base training stores homogeneous layers as `decoder.layers.*` stacked on `scan_axis`.
   The inference model stores every layer as a direct decoder attribute named
   `layers_{global_index}`. Tunix's generic direct-sync mapper cannot bridge
@@ -276,8 +262,6 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
     ref = _find_qwen_scanned_layer_idx(key)
     if ref.container_idx == -1 or "dropout" in key or "rngs" in key:
       continue
-    # A nested `local_layers` parameter carries its cycle slots on the axis just
-    # past the block axis, so it needs one dimension more than a flat one.
     min_ndim = scan_axis + 2 if ref.nested else scan_axis + 1
     if not hasattr(value, "shape") or len(value.shape) < min_ndim:
       raise ValueError(f"Qwen scanned parameter {'.'.join(map(str, key))} has no scan axis {scan_axis}: {value!r}")
@@ -296,8 +280,6 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
 
   if len(local_widths) > 1:
     raise ValueError(f"Qwen nested `local_layers` parameters disagree on cycle width: {sorted(local_widths)}")
-  # `global_layer` closes the cycle, so its slot is whatever follows the local
-  # ones. Resolved here because the key alone does not carry the index.
   trailing_slot = (max(slot_indices) + 1) if slot_indices else 0
   if has_trailing:
     slot_indices.add(trailing_slot)
@@ -321,8 +303,6 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
   for key, value, ref in scanned_keys:
     prefix = key[: ref.container_idx]
     suffix = key[ref.container_idx + ref.consumed :]
-    # `local_layers` supplies several cycle slots from one tensor; every other
-    # container supplies exactly one, at a slot fixed above.
     if ref.nested:
       slots = tuple(range(value.shape[scan_axis + 1]))
     else:
@@ -332,8 +312,7 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
       for local_idx, slot_idx in enumerate(slots):
         global_idx = repetition * pattern_length + slot_idx
         new_key = prefix + (f"layers_{global_idx}",) + suffix
-        # Taking the block collapses `scan_axis`, so the nested slot axis has
-        # shifted down into it.
+        # Taking the block collapsed `scan_axis`, so the nested slot axis has shifted down into it.
         new_flat_w[new_key] = jnp.take(block, local_idx, axis=scan_axis) if ref.nested else block
 
   logging.info(

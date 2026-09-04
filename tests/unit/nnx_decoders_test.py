@@ -902,7 +902,7 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
 
   @classmethod
   def _build(cls, layer_idx_offset=0, **overrides):
-    """Builds one scannable block; overrides go to the config, layer_idx_offset to the block."""
+    """Builds one scannable block; overrides go to the config."""
     cfg = _make_config(**{**cls.MODEL_CONFIG, **overrides})
     block = cls.BLOCK_CLS(
         config=cfg,
@@ -1123,15 +1123,11 @@ class TestQwen3NextDecoderParity(unittest.TestCase):
     self.assertEqual(self._param_tree(6, True), self._param_tree(6, False))
 
 
-# Qwen3.5 repeats Qwen3-Next's hybrid attention period and reuses its scannable
-# block, so it gets the same coverage over its own layer classes and config.
 _QWEN3_5_CONFIG = {
     **_QWEN3_NEXT_CONFIG,
     "run_name": "qwen3_5_scannable_block_test",
     "model_name": "qwen3.5-35b-a3b",
-    # Qwen3.5 uses MRoPE, whose sections must cover rotary_dim / 2 frequencies. The
-    # shipped [11, 11, 10] is sized for the real head_dim (256), not this tiny one
-    # (32 * partial_rotary_factor 0.25 / 2 = 4).
+    # MRoPE sections must cover rotary_dim / 2, which is 4 here, not the shipped [11, 11, 10].
     "mrope_section": [2, 1, 1],
 }
 

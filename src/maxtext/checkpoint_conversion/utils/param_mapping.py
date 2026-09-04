@@ -881,18 +881,8 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   }
 
   if scan_layers:
-    # 2. Scanned blocks. One block covers a single period of the hybrid attention
-    # pattern: `layer_cycle_interval - 1` linear-attention (GatedDeltaNet) layers
-    # run as an inner scan, then one full-attention layer. The resulting params are:
-    #   layers-local_layers-*  -> nested [block][local]  (doubly scanned)
-    #   layers-global_layer-*  -> flat [block]           (block scan only; the
-    #     length-1 _scan_global_layer scan is a runtime memory boundary, not a
-    #     param stack)
-    # Qwen3.5 stores its routed experts fused, so unlike Qwen3-Next there is no
-    # extra per-expert axis to nest.
-    # Qwen3NextScannableBlock requires the full-attention layer to be last in the
-    # period, so the local positions are 0..cycle-2 and the global position is
-    # cycle-1.
+    # The length-1 _scan_global_layer scan is a memory boundary, not a param stack, so
+    # global_layer params stay flat [block] while local_layers nest [block][local].
     num_blocks = num_main_layers // layer_cycle_interval
     local_positions = list(range(layer_cycle_interval - 1))
     global_position = layer_cycle_interval - 1
@@ -900,8 +890,6 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
     def hf_layer(block_idx, position, suffix):
       return f"model.language_model.layers.{block_idx * layer_cycle_interval + position}.{suffix}"
 
-    # (maxtext subkey, hf suffix) pairs shared by both the local and global layers.
-    # A tuple of suffixes means MaxText concatenates the HF tensors into one kernel.
     shared_specs = [
         ("input_layernorm-scale", "input_layernorm.weight"),
         ("post_attention_layernorm-scale", "post_attention_layernorm.weight"),
@@ -912,7 +900,6 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
         ("mlp-shared_expert_gate-kernel", "mlp.shared_expert_gate.weight"),
         ("mlp-routed_experts-wo", "mlp.experts.down_proj"),
     ]
-    # Linear (GatedDeltaNet) attention: only ever on the local layers.
     local_specs = shared_specs + [
         ("attention-in_proj_qkvz-kernel", ("linear_attn.in_proj_qkv.weight", "linear_attn.in_proj_z.weight")),
         ("attention-in_proj_ba-kernel", ("linear_attn.in_proj_b.weight", "linear_attn.in_proj_a.weight")),
@@ -922,7 +909,6 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
         ("attention-norm-rms_norm-scale", "linear_attn.norm.weight"),
         ("attention-out_proj-kernel", "linear_attn.out_proj.weight"),
     ]
-    # Full attention: only ever on the global layer.
     global_specs = shared_specs + [
         ("attention-attention-query-kernel", "self_attn.q_proj.weight"),
         ("attention-attention-key-kernel", "self_attn.k_proj.weight"),
@@ -943,7 +929,6 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
           [hf_entry(b, p, suffix) for p in local_positions] for b in range(num_blocks)
       ]
-    # Fused gate_up_proj feeds both wi_0 and wi_1, so it is keyed by the pair.
     mapping[(f"{local_prefix}-mlp-routed_experts-wi_0", f"{local_prefix}-mlp-routed_experts-wi_1")] = [
         [hf_layer(b, p, "mlp.experts.gate_up_proj") for p in local_positions] for b in range(num_blocks)
     ]
@@ -1226,9 +1211,6 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
 
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
   num_main_layers = config["text_config"]["num_hidden_layers"]
-  # Scanned blocks expose two prefixes -- the stacked local (linear-attention) layers
-  # and the single global (full-attention) layer -- rather than one prefix per position
-  # in the cycle. Unscanned models keep one prefix per decoder layer.
   if scan_layers:
     layer_prefixes = [
         ("params-decoder-layers-local_layers", False),

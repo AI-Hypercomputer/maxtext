@@ -704,11 +704,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
 
   def test_per_layer_routing_reaches_the_scan_remainder_block(self):
-    """Layers past the last whole cycle live in a separate remainder block.
-
-    With 3 layers and a cycle of 2 the scan covers layers 0-1 and layer 2 is
-    applied afterwards, so the remainder needs its own slice of the routing.
-    """
+    """Layers past the last whole cycle live in a separate remainder block."""
     seq_len, batch_size, top_k, num_experts = 8, 1, 2, 4
     cycle_interval, layers = 2, 3
     cfg = self._qwen35_cfg(
@@ -721,8 +717,6 @@ class TrainerRouterReplayTest(unittest.TestCase):
         num_decoder_layers=layers,
         inhomogeneous_layer_cycle_interval=cycle_interval,
     )
-    # Only the trailing (remainder) layer's routing differs between a and b, so
-    # the losses can only diverge if the remainder block replays its own slice.
     shared = jnp.zeros((batch_size, seq_len, layers, top_k), dtype=jnp.int32)
     a = shared.at[:, :, -1, :].set(1)
     b = shared.at[:, :, -1, :].set(3)

@@ -482,8 +482,6 @@ class _PlanEntry:
   # Index along the scan axis, or None when the source is already per-layer.
   slice_index: Optional[int]
   op: str  # "identity" | "slice" | "fuse_moe"
-  # Index along the nested cycle-slot axis (`scan_axis + 1`), or None when the
-  # source stacks blocks alone. Only `local_layers` sources carry one.
   local_index: Optional[int] = None
 
 
@@ -509,7 +507,6 @@ class _PlanGroup:
   # Dot-joined source path, precomputed for diagnostics and for the
   # leaf-name check inside `_align_per_axis`.
   source_path: str
-  # Shared by every entry in the group: see `_PlanEntry.local_index`.
   local_index: Optional[int] = None
 
 
@@ -521,8 +518,6 @@ def _group_plan(plan: List[_PlanEntry]) -> List[_PlanGroup]:
   scanned source must share a shape, and if two did not, the bulk unstack would
   produce the wrong shape for one of them -- which `convert()`'s post-execution
   shape check catches loudly rather than silently writing incorrect weights.
-  `local_index` *is* part of the key, because one nested `local_layers` source
-  feeds a different set of rollout layers at each cycle slot.
   """
   grouped: Dict[Tuple[Any, ...], List[_PlanEntry]] = {}
   order: List[Tuple[Any, ...]] = []
@@ -702,11 +697,7 @@ class MaxTextToMaxTextConverter:
   ) -> List[Tuple[Tuple[Any, ...], Optional[int]]]:
     """Source keys that could hold the scanned form of a target layer key.
 
-    Each candidate is paired with the index to take along the nested cycle-slot
-    axis, or None when the source stacks blocks alone. `Qwen3NextScannableBlock`
-    nests two scans: the cycle's linear-attention layers share one
-    `local_layers` module whose slot sits on `scan_axis + 1`, while the trailing
-    full-attention layer sits in `global_layer` with no slot axis at all.
+    Each candidate is paired with the index to take along the nested cycle-slot axis, or None when there is none.
     """
     prefix, suffix = key_tuple[:prefix_len], key_tuple[suffix_start:]
     if self.cycle > 1:
@@ -896,12 +887,7 @@ class MaxTextToMaxTextConverter:
     return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
 
   def _take_cycle_slot(self, val, group: _PlanGroup):
-    """Drops the nested cycle-slot axis from a `local_layers` source.
-
-    Everything downstream expects blocks on `scan_axis` and no other stacked
-    axis, so the slot is selected here -- once per group, before the bulk
-    alignment and unstack, rather than once per target layer.
-    """
+    """Drops the nested cycle-slot axis from a `local_layers` source."""
     if group.local_index is None:
       return val
     slot_axis = self.scan_axis + 1

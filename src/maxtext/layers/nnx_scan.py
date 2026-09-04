@@ -110,11 +110,6 @@ def apply_scanned_layers(
   ``remat`` is separate from ``remat_policy`` because ``None`` is JAX's full
   rematerialization policy, not an indication that rematerialization is off.
 
-  ``xs`` is an optional pytree of per-layer inputs whose leaves have a leading
-  axis of ``length``; each iteration's slice is passed to ``apply_fn`` as a
-  third argument. Callers that pass no ``xs`` keep the two-argument ``apply_fn``
-  signature.
-
   Externally managed per-layer state, such as KV caches, is not supported by
   this scan path.
 

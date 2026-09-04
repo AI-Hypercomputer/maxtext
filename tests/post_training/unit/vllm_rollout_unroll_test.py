@@ -226,13 +226,7 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
 
   @pytest.mark.cpu_only
   def test_unrolls_the_nested_local_and_global_block_scan(self):
-    """Qwen3-Next and Qwen3.5 nest the cycle's local layers into one module.
-
-    `local_layers` stacks blocks on `scan_axis` and the cycle slot on
-    `scan_axis + 1`; `global_layer` holds the trailing full-attention layer on
-    the block axis alone. Together they must still unroll to a dense
-    `layers_{global_idx}` run, with each slot landing on its own layer.
-    """
+    """Nested `local_layers` plus `global_layer` unroll to a dense `layers_{global_idx}` run."""
     num_blocks, num_local = 2, 3
     cycle = num_local + 1
     local_probe = np.zeros((2, num_blocks, num_local, 1), dtype=np.float32)

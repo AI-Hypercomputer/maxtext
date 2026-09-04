@@ -120,13 +120,7 @@ def _source_tree(fused_moe_on_target: bool):
 
 
 def _nested_source_tree(fused_moe_on_target: bool):
-  """Trainer state in the nested-scan layout `Qwen3NextScannableBlock` produces.
-
-  Same values as `_source_tree`, restacked the way the shared Qwen3-Next block
-  stores them: slots `0..C-2` share one `local_layers` module with the cycle
-  slot on `SCAN_AXIS + 1`, and slot `C-1` becomes `global_layer` with the block
-  axis alone. Converting either tree must yield the same rollout weights.
-  """
+  """Trainer state in the nested-scan layout `Qwen3NextScannableBlock` produces."""
   legacy = _source_tree(fused_moe_on_target)["base"]["decoder"]["layers"]
   local_slots = [legacy[f"layer_{slot}"] for slot in range(CYCLE - 1)]
   tree = _source_tree(fused_moe_on_target)
@@ -209,12 +203,7 @@ class ScannedToUnrolledMappingTest(unittest.TestCase):
     )
 
   def test_nested_scan_layout_converts_identically(self):
-    """Qwen3.5 moved onto Qwen3-Next's nested block scan.
-
-    The cycle's linear-attention layers now live in one `local_layers` module
-    with the slot on `SCAN_AXIS + 1` instead of one module per slot, so the
-    converter has to read that layout too -- and read it to the same answer.
-    """
+    """The nested-scan layout converts to the same rollout weights as the per-slot layout."""
     target = _target_tree()
     legacy = traverse_util.flatten_dict(MaxTextToMaxTextConverter(_config()).convert(_source_tree(True), target))
     nested = traverse_util.flatten_dict(MaxTextToMaxTextConverter(_config()).convert(_nested_source_tree(True), target))
