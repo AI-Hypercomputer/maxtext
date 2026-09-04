@@ -579,6 +579,10 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         ),
         truncated_importance_sampling_ratio_min=(trainer_config.rl.truncated_importance_sampling_ratio_min),
         truncated_importance_sampling_ratio=(trainer_config.rl.truncated_importance_sampling_ratio),
+        truncated_importance_sampling_type=(trainer_config.rl.truncated_importance_sampling_type),
+        overlong_loss_masking=trainer_config.rl.overlong_loss_masking,
+        seq_logprob_error_threshold=trainer_config.rl.seq_logprob_error_threshold,
+        advantage_estimator=trainer_config.rl.advantage_estimator,
     )
     max_logging.log(
         "GRPO config resolved:\n"

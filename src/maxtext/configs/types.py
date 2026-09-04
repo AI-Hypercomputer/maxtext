@@ -2833,6 +2833,43 @@ class RL(BaseModel):
           "truncated_importance_sampling_ratio_min."
       ),
   )
+  truncated_importance_sampling_type: Optional[Literal["seq-mask-tis"]] = Field(
+      None,
+      description=(
+          "Apply the truncated importance-sampling correction rather than only reporting it. "
+          "'seq-mask-tis' weights each token by its raw sampler-to-trainer importance ratio and "
+          "zeroes the weights of any sequence whose geometric-mean ratio leaves the band above. "
+          "Requires the band and rollout log-probabilities. NOTE dropped sequences stay in the loss "
+          "denominator, so a high tis/is_oob_ratio scales the gradient down -- watch that metric. "
+          "None leaves the correction off and the band purely diagnostic."
+      ),
+  )
+  overlong_loss_masking: bool = Field(
+      False,
+      description=(
+          "Drop rollout-truncated sequences from the policy update entirely. Removes them from the "
+          "loss AND its denominator, so survivors keep full gradient magnitude and only the effective "
+          "batch size shrinks. Distinct from rl.overlong_filter, which instead suppresses the final "
+          "reward, giving a truncated sequence a negative advantage inside its GRPO group."
+      ),
+  )
+  seq_logprob_error_threshold: Optional[float] = Field(
+      None,
+      description=(
+          "Drop sequences whose multiplicative probability error, mean_t exp(|log trainer_t - log "
+          "sampler_t|), exceeds this. 1.0 is perfect sampler/trainer agreement. Catches plumbing and "
+          "truncation faults rather than ordinary numerical drift. Requires rollout log-probabilities; "
+          "read sample_mask/mult_prob_error_{mean,max} before choosing a value. None disables."
+      ),
+  )
+  advantage_estimator: Literal["grpo", "grpo-loo", "rloo", "drgrpo"] = Field(
+      "grpo",
+      description=(
+          "Group-relative advantage estimator. 'grpo' uses the plain group mean and std. 'grpo-loo' "
+          "excludes each sample from its own baseline and scale, removing a systematic 1-1/G "
+          "under-scaling of every gradient. 'rloo' uses a leave-one-out mean with no std division."
+      ),
+  )
 
 
 class RLDataset(BaseModel):
