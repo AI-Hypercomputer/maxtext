@@ -161,12 +161,15 @@ cd ~/git/maxtext && git remote add fork git@github.com:<YOUR_USER>/maxtext.git
 
 ### 2.2 Patches Required Per Repository
 
+> [!TIP]
+> **Branch Naming Convention**: To avoid collisions when multiple engineers work on the same repositories, name your feature branches `${USER}/qwen35-run` (e.g. `igorts/qwen35-run`).
+
 #### A. `vllm-project/tpu-inference`
 
 Start from `origin/main`:
 ```bash
 cd ~/git/tpu-inference
-git checkout -b qwen35-run origin/main
+git checkout -b ${USER}/qwen35-run origin/main
 ```
 
 Check and cherry-pick the following branches / commits:
@@ -184,13 +187,13 @@ Check and cherry-pick the following branches / commits:
      git cherry-pick fc0eda397dcd1cb1bb0603a6d0603a3ccc87f0f7
      ```
 
-2. **vLLM Interface & NVFP4 Compatibility** (Commit `0ec3d5d3c` on `igorts-git/tpu-inference:qwen35-run`):
+2. **vLLM Interface & NVFP4 Compatibility** (Commit `0ec3d5d3c` on branch `igorts/qwen35-run`):
    - **Why needed**:
      - Gracefully catches `ImportError` if `nvfp4` quantization configs are absent in the local vLLM installation.
      - Adds compatibility shims for newer vLLM KV cache interface: `KVCacheTensor.layers` mapping to `shared_by`, and `AttentionSpec.num_states` mapping to `block_size`.
    - **How to apply**:
      ```bash
-     git fetch https://github.com/igorts-git/tpu-inference.git qwen35-run
+     git fetch https://github.com/igorts-git/tpu-inference.git igorts/qwen35-run
      git cherry-pick 0ec3d5d3c
      ```
 
@@ -201,10 +204,10 @@ Check and cherry-pick the following branches / commits:
 Start from `origin/main`:
 ```bash
 cd ~/git/tunix
-git checkout -b qwen35-run origin/main
+git checkout -b ${USER}/qwen35-run origin/main
 ```
 
-Check and cherry-pick the following commits (all available on branch `qwen35-run` at `https://github.com/google/tunix` and `git@github.com:igorts-git/tunix.git`):
+Check and cherry-pick the following commits (all available on branch `igorts/qwen35-run` at `https://github.com/google/tunix` and `git@github.com:igorts-git/tunix.git`):
 
 1. **Commit `06b4c599`** (*Make MaxText-trainer Raiden weight-sync work end to end*):
    - Preloads Raiden before JAX initialization in distributed runtime.
@@ -232,7 +235,7 @@ Check and cherry-pick the following commits (all available on branch `qwen35-run
 
 **How to apply all in one rebase**:
 ```bash
-git fetch https://github.com/igorts-git/tunix.git qwen35-run
+git fetch https://github.com/igorts-git/tunix.git igorts/qwen35-run
 git rebase FETCH_HEAD
 ```
 
@@ -243,7 +246,7 @@ git rebase FETCH_HEAD
 Check `origin/main`:
 ```bash
 cd ~/git/maxtext
-git checkout -b qwen35-run origin/main
+git checkout -b ${USER}/qwen35-run origin/main
 ```
 
 - **PR #5073** (`1066d2a24` / `9fa415f2a`):
