@@ -45,15 +45,15 @@ These configurations do 3 things:
      ```
      Note: If you want to use only one slice, you need to replace node-prefix with node-id, and remove node-count.
 
-     Here is an example of creating a GKE cluster with XPK using the `--network` and `--subnetwork` flags (`--network=mtu9k --subnetwork=mtu9k`).
+    For new GKE deployments, configure the network and subnetwork through Cluster Toolkit. See the [Cluster Toolkit guide](../../../docs/run_maxtext/run_maxtext_via_cluster_toolkit.md).
      ```
      export CLUSTER_ARGUMENTS="--network=mtu9k --subnetwork=mtu9k"
 
-     python3 xpk/xpk.py cluster create --cluster ${YOUR_CLUSTER_NAME?} --tpu-type ${ACCELERATOR_TYPE?} --num-slices ${NUM_SLICES?} --custom-cluster-arguments="${CLUSTER_ARGUMENTS?}"
+    gcloud container clusters get-credentials ${YOUR_CLUSTER_NAME?} --zone ${ZONE?} --project ${PROJECT?}
      ```
 
 ### Run model config scripts on TPUs
-1. You can run these model configs on the GCE platform using `multihost_runner.py` or `multihost_job.py`, or on the GKE platform using [XPK](https://github.com/google/xpk). Take a look at the [getting_started](https://github.com/google/maxtext/tree/main/getting_started) directory for directions on how to set up your TPUs and use these tools.
+1. You can run these model configs on the GCE platform using `multihost_runner.py` or `multihost_job.py`, or on GKE using Cluster Toolkit's `gcluster job submit`. See the [Cluster Toolkit guide](../../../docs/run_maxtext/run_maxtext_via_cluster_toolkit.md) for setup instructions.
 
 2. Here are some example commands to run the model configs:
 
@@ -69,9 +69,10 @@ These configurations do 3 things:
     # Add --CQR_EXTRA_ARGS="--network=mtu9k" to the command if you would like to use the custom MTU network.
     ```
 
-    Running with `XPK` on GKE:
+    Running with Cluster Toolkit on GKE:
     ```
-    xpk workload create --cluster ${YOUR_CLUSTER_NAME?} --docker-image gcr.io/${PROJECT?}/${YOUR_IMAGE_NAME?} --workload ${YOUR_RUN_NAME?} --tpu-type=${ACCELERATOR_TYPE?} --num-slices=${NUM_SLICES?} --command "bash src/maxtext/configs/tpu/v5p/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH?} DATASET_PATH=${MAXTEXT_DATASET_PATH?} PLATFORM=gke"
+    gcloud container clusters get-credentials ${YOUR_CLUSTER_NAME?} --zone ${ZONE?} --project ${PROJECT?}
+    gcluster job submit --image gcr.io/${PROJECT?}/${YOUR_IMAGE_NAME?} --name ${YOUR_RUN_NAME?} --compute-type ${COMPUTE_TYPE?} --topology ${TOPOLOGY?} --command "bash src/maxtext/configs/tpu/v5p/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH?} DATASET_PATH=${MAXTEXT_DATASET_PATH?} PLATFORM=gke"
     ```
 
     Note: When running these scripts, be sure to specify the `PLATFORM` flag with the correct platform you are running on `"gce"` or `"gke"`.

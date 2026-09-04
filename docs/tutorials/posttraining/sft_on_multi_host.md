@@ -34,18 +34,24 @@ Before starting, ensure you have:
   - **Artifact Registry Writer** (`roles/artifactregistry.writer`) to upload Docker images.
   - **Storage Admin** (`roles/storage.admin`) or **Storage Object Admin** (`roles/storage.objectAdmin`) combined with **Storage Legacy Bucket Reader** (`roles/storage.legacyBucketReader`) on your GCS bucket to read/write checkpoints and logs. (Note: A bucket-level read permission like `storage.buckets.get` is required by JAX/TensorStore to verify bucket existence and metadata; using `roles/storage.objectAdmin` alone will cause a misleading "bucket not found" error).
 - A Hugging Face account with an access token for downloading models.
-- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+- Cluster Toolkit installed and configured. Follow [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md) for `gcluster` setup.
   - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-cli-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
-- A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- A GKE cluster configured for Cluster Toolkit, including healthy Kueue and JobSet components.
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Build and upload MaxText Docker image
 
 For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](build-docker).
 
-## Create GKE cluster
+## Configure GKE cluster with Cluster Toolkit
 
-Use a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster).
+Configure access to the target cluster with `gcloud`, then configure the project, cluster, and location with `gcluster` as described in [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md):
+
+```bash
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --zone ${ZONE?} \
+  --project ${PROJECT_ID?}
+```
 
 ## Environment configuration
 
@@ -91,12 +97,17 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 # of your cluster:
 
 # 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --zone ${ZONE?} --project ${PROJECT_ID?}
 
 # 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
 export TPU_TYPE=<TPU_TYPE>
 export NUM_SLICES=<NUM_SLICES>
+
+# Cluster Toolkit workload placement. See the Cluster Toolkit guide for the
+# compute type and topology matching your TPU slice.
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
@@ -154,20 +165,19 @@ This section provides the command to run SFT on a GKE cluster.
 ### SFT with Multi-Controller JAX (McJAX)
 
 ```bash
-xpk workload create \
---cluster=${GKE_CLUSTER?} \
---project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload=${RUN_NAME?} \
---tpu-type=${TPU_TYPE?} \
---num-slices=${NUM_SLICES?} \
---command "python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?}  per_device_batch_size=1 steps=${STEPS?} profiler=xplane hf_path=${DATASET_NAME?} train_split=${TRAIN_SPLIT?} train_data_columns=${TRAIN_DATA_COLUMNS?}"
+gcluster job submit \
+--image=${DOCKER_IMAGE?} \
+--command "python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane hf_path=${DATASET_NAME?} train_split=${TRAIN_SPLIT?} train_data_columns=${TRAIN_DATA_COLUMNS?}" \
+--name=${RUN_NAME?} \
+--compute-type=${COMPUTE_TYPE?} \
+--topology=${TOPOLOGY?}
 ```
 
 Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
 
 ### SFT with Pathways
+
+> **Legacy:** This workflow uses the XPK-based Pathways integration. New deployments should use Cluster Toolkit for GKE cluster setup and job submission. This section is retained for older environments and compatibility.
 
 ```bash
 export USE_PATHWAYS=1

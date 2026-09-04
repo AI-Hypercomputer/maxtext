@@ -73,12 +73,11 @@ This is the easiest way to get started with the latest stable version.
      ```
 
    - **Option 4:** Install `maxtext[runner]`, used for building MaxText's Docker
-     images and scheduling workloads through XPK. Once installed, you will have
-     access to the `build_maxtext_docker_image`, `upload_maxtext_docker_image`,
-     and `xpk` commands. For more details on building and uploading Docker
-     images, see the
-     [Build MaxText Docker Image](build-docker)
-     guide.
+     images and scheduling workloads with Cluster Toolkit. Once installed, you
+     will have access to the `build_maxtext_docker_image`,
+     `upload_maxtext_docker_image`, and the `gcluster` CLI for GKE job
+     submission. For more details on building and uploading Docker images, see
+     the [Build MaxText Docker Image](build-docker) guide.
 
      ```bash
      uv pip install maxtext[runner]=={{version}} --resolution=lowest

@@ -36,8 +36,8 @@ Before starting, ensure you have:
 - Access to a Google Cloud Project with TPU quotas.
 - A Hugging Face account with an access token for downloading models.
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
-- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
-- A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- Cluster Toolkit installed and configured. Follow [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md) for `gcluster` setup.
+- A GKE cluster configured for Cluster Toolkit, including healthy Kueue and JobSet components.
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Build and upload MaxText Docker image
@@ -87,12 +87,15 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 # of your cluster:
 
 # 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --zone ${ZONE?} --project ${PROJECT_ID?}
 
 # 2. Find your TPU type (e.g., 'v6e-256') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
 export TPU_TYPE=<TPU_TYPE>
 export NUM_SLICES=<NUM_SLICES>
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
+export CPU_COMPUTE_TYPE=<CPU_COMPUTE_TYPE>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
@@ -158,19 +161,23 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # gs://my-bucket/my-checkpoint-directory/0/
 ## Submit workload on GKE cluster
 
 This section provides the command to run LoRA Fine-Tuning on a GKE cluster.
+Before submitting a job, configure access to the cluster with `gcloud`:
+
+```bash
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --zone ${ZONE?} \
+  --project ${PROJECT_ID?}
+```
 
 ### Run a Fresh LoRA Fine-Tuning on Hugging Face Dataset
 
 ```bash
-xpk workload create-pathways \
---cluster=${GKE_CLUSTER?} \
---project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload=${RUN_NAME?} \
---tpu-type=${TPU_TYPE?} \
---num-slices=${NUM_SLICES?} \
---command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 \
+gcluster job submit \
+--image=${DOCKER_IMAGE?} \
+--name=${RUN_NAME?} \
+--compute-type=${COMPUTE_TYPE?} \
+--topology=${TOPOLOGY?} \
+--command="\
 python3 -m maxtext.trainers.post_train.sft.train_sft \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
@@ -192,8 +199,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
   lora.lora_rank=${LORA_RANK?} \
   lora.lora_alpha=${LORA_ALPHA?} \
   checkpoint_storage_use_zarr3=False \
-  checkpoint_storage_use_ocdbt=False \
-  enable_single_controller=True"
+  checkpoint_storage_use_ocdbt=False"
 ```
 
 Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
@@ -204,17 +210,16 @@ If you want to resume training from a previous run or further fine-tune an exist
 
 #### Step 1: Convert HF LoRA adapter to MaxText format
 
+> For new deployments, run this conversion with Cluster Toolkit after configuring the cluster with `gcloud container clusters get-credentials` above.
+
 If your LoRA adapter is currently in Hugging Face format, you must convert it to MaxText format before it can be loaded. Use the integrated conversion utility:
 
 ```sh
-xpk workload create \
---cluster=${GKE_CLUSTER?} \
---project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload=${RUN_NAME?} \
---tpu-type=${TPU_TYPE?} \
---num-slices=${NUM_SLICES?} \
+gcluster job submit \
+--image=${DOCKER_IMAGE?} \
+--name=${RUN_NAME?}-convert \
+--compute-type=${CPU_COMPUTE_TYPE?} \
+--topology=1x1x1 \
 --command="python3 -m maxtext.checkpoint_conversion.to_maxtext \
   model_name=${MODEL?} \
   hf_lora_adapter_path=${HF_LORA_ADAPTER_PATH?} \
@@ -236,6 +241,8 @@ export LORA_RESTORE_PATH=<LORA_RESTORE_PATH> # e.g., gs://my-bucket/run-1/checkp
 ```
 
 #### Step 3: Run LoRA Fine-Tuning with the Restore Path
+
+> **Legacy:** This resume example uses the XPK-based Pathways integration. The `gcloud` command configures cluster access, but cannot submit a Pathways workload. A dedicated Cluster Toolkit Pathways launcher is required.
 
 Once your environment variables and checkpoints are ready, you can start the LoRA fine-tuning process.
 
@@ -281,17 +288,16 @@ Your fine-tuned model checkpoints will be saved here: `$BASE_OUTPUT_DIRECTORY/$R
 
 ## (Optional) Convert Fine-tuned LoRA to Hugging Face Format
 
+> For new deployments, run this conversion with Cluster Toolkit after configuring the cluster with `gcloud container clusters get-credentials` above.
+
 After completing the fine-tuning process, your LoRA weights are stored in MaxText/Orbax format. To use these weights with the Hugging Face ecosystem (e.g., for inference or sharing), convert them back using the `to_huggingface.py` script.
 
 ```sh
-xpk workload create \
---cluster=${GKE_CLUSTER?} \
---project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload="${RUN_NAME?}-to-hf" \
---tpu-type=${TPU_TYPE?} \
---num-slices=1 \
+gcluster job submit \
+--image=${DOCKER_IMAGE?} \
+--name="${RUN_NAME?}-to-hf" \
+--compute-type=${CPU_COMPUTE_TYPE?} \
+--topology=1x1x1 \
 --command="python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name=${MODEL?} \
     lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/checkpoints/<STEPS>/model_params \

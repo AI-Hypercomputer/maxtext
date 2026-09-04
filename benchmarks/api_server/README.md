@@ -83,12 +83,12 @@ The server is now ready to accept requests on port 8000.
 
 ## Deploying on a GKE Cluster (Multi-Host)
 
-For large models that require a multi-host TPU setup, you can deploy the server using the [xpk (Kubernetes Pod Executor) tool](https://github.com/AI-Hypercomputer/xpk). The recommended approach is to create a single submission script to configure and launch the workload.
+For large models that require a multi-host TPU setup, you can deploy the server as a GKE JobSet using the [Cluster Toolkit](https://cloud.google.com/cluster-toolkit/docs/overview) `gcluster` CLI. The recommended approach is to create a single submission script to configure and launch the workload.
 
 
 ### 1. Create a Job Submission Script
 
-Create a new bash script (e.g., `launch_gke_server.sh`) to hold your configuration and `xpk` command. This makes launching jobs repeatable and easy to modify.
+Create a new bash script (e.g., `launch_gke_server.sh`) to hold your configuration and `gcluster` command. This makes launching jobs repeatable and easy to modify.
 
 For your convenience, the script below is also available as a template file at `benchmarks/api_server/launch_gke_server.sh.template`.
 
@@ -108,8 +108,10 @@ export CLUSTER="<your-gke-cluster>"
 export DEVICE_TYPE="v5p-16"
 export PROJECT="<your-gcp-project>"
 export ZONE="<your-gcp-zone>"
+export COMPUTE_TYPE="<cluster-toolkit-compute-type>"
+export TOPOLOGY="<tpu-topology>"
 
-# -- XPK Workload Configuration --
+# -- Cluster Toolkit Workload Configuration --
 # (<YYYY-MM-DD>, <your_hugging_face_token>)
 export RUNNAME="my-server-$(date +%Y-%m-%d-%H-%M-%S)"
 export DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:<YYYY-MM-DD>"
@@ -150,15 +152,23 @@ CMD="export HF_TOKEN=${HF_TOKEN?} && \
 # 3. Launch the Workload
 # ==============================================================================
 echo "Launching workload ${RUNNAME?}..."
-xpk workload create --workload "${RUNNAME?}" \
-  --base-docker-image "${DOCKER_IMAGE?}" \
-  --command "${CMD?}" \
-  --num-slices=1  \
-  --cluster "${CLUSTER?}" --device-type "${DEVICE_TYPE?}" --project "${PROJECT?}" --zone "${ZONE?}"
+gcloud config set project "${PROJECT?}"
+gcloud container clusters get-credentials "${CLUSTER?}" \
+  --zone "${ZONE?}" \
+  --project "${PROJECT?}"
+gcluster job config set project "${PROJECT?}"
+gcluster job config set cluster "${CLUSTER?}"
+gcluster job config set location "${ZONE?}"
+gcluster job submit \
+  --image="${DOCKER_IMAGE?}" \
+  --command="${CMD?}" \
+  --name="${RUNNAME?}" \
+  --compute-type="${COMPUTE_TYPE?}" \
+  --topology="${TOPOLOGY?}"
 
 echo "Workload ${RUNNAME?} created."
 echo "Use the following command to connect:"
-echo "bash benchmarks/api_server/port_forward_xpk.sh job_name=${RUNNAME?} project=${PROJECT?} zone=${ZONE?} cluster=${CLUSTER?}"
+echo "kubectl get pods -l gcluster.google.com/workload=${RUNNAME?}"
 ```
 
 ### 2. Launch the Workload
@@ -172,14 +182,14 @@ chmod +x launch_gke_server.sh
 
 ### 3. Connect to the Server
 
-The API server only runs on the first host/worker (rank 0 on GPU) of the workload. To connect to it, use the `port_forward_xpk.sh` script as instructed in the output of your launch script.
+The API server only runs on the first host/worker (rank 0 on GPU) of the workload. To connect to it, authenticate with `gcloud` and use `kubectl port-forward`.
 
 ```bash
-bash benchmarks/api_server/port_forward_xpk.sh \
-  job_name=<your_job_name> \
-  project=<your-gcp-project> \
-  zone=<your-gcp-zone> \
-  cluster=<your-gke-cluster>
+gcloud container clusters get-credentials <your-gke-cluster> \
+  --zone <your-gcp-zone> \
+  --project <your-gcp-project>
+kubectl get pods -l gcluster.google.com/workload=<your_job_name>
+kubectl port-forward <server-pod-name> 8000:8000
 ```
 
 The script will automatically find the correct pod and establish the port-forward connection. Your server is now accessible at `http://localhost:8000`.

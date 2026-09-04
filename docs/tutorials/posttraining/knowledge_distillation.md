@@ -320,7 +320,41 @@ The schedule values above are a strong default for same-size pruning recovery. S
 
 > **Note:** `distill_layer_indices` is applied to **both** student and teacher activations identically. When the two have different depths (Pattern A or a depth-pruned Pattern B), every index must be valid on the *smaller* side, and same-numbered layers are aligned across the two models. The trainer cannot map student layer *i* to teacher layer *f(i)* for arbitrary *f*. If the depths differ significantly, prefer logit-only distillation (`distill_beta=0`).
 
-#### Multi-host on GKE via XPK
+#### Legacy multi-host on GKE via XPK
+
+> **Legacy:** This workflow uses the XPK-specific `run_distill_xpk.sh` launcher. New deployments should prefer Cluster Toolkit for GKE cluster setup and job submission. The section is retained until a dedicated `gcluster` distillation launcher is available.
+
+#### Cluster Toolkit multi-host submission
+
+For new deployments, submit the distillation trainer directly as a Cluster
+Toolkit JobSet. This replaces the XPK workload submission; image preparation,
+dataset mounting, and retry behavior must be included in the image or command.
+
+```bash
+export PROJECT_ID=<GCP_PROJECT_ID>
+export GKE_CLUSTER=<GKE_CLUSTER_NAME>
+export ZONE=<GCP_ZONE>
+export RUN_NAME=<DISTILL_RUN_NAME>
+export IMAGE_URI=<ARTIFACT_REGISTRY_IMAGE_URI>
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
+export TOPOLOGY=<TPU_TOPOLOGY>
+export BASE_OUTPUT_DIRECTORY=gs://<BUCKET>/distillation
+
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --zone ${ZONE?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${ZONE?}
+
+gcluster job submit \
+  --image ${IMAGE_URI?} \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --command "python3 -m maxtext.trainers.post_train.distillation.train_distill src/maxtext/configs/post_train/distillation.yml base_output_directory=${BASE_OUTPUT_DIRECTORY?} run_name=${RUN_NAME?}"
+```
 
 A reference launcher is provided at `src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh`. It handles image preparation (`prep_image` layers Tunix on top of the MaxText base image), workload submission, log streaming, and an auto-resume loop for long-running jobs.
 

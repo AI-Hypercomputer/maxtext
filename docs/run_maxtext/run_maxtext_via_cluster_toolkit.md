@@ -84,7 +84,7 @@ First, ensure your local `kubectl` is authenticated with your target GKE cluster
 
 ```bash
 gcloud container clusters get-credentials <GKE_CLUSTER_NAME> \
-  --region <GCP_REGION_OR_ZONE> \
+  --zone <GCP_ZONE> \
   --project <GCP_PROJECT_ID>
 ```
 

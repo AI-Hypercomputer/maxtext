@@ -47,7 +47,8 @@ rely on the vLLM library.
 - [Build and Upload MaxText Docker Image](#build-and-upload-maxtext-docker-image)
 - [Setup Environment Variables](#setup-environment-variables)
 - [Get Your Model Checkpoint](#get-your-model-checkpoint)
-- [Submit your RL workload via Pathways](#submit-your-rl-workload-via-pathways)
+- [Submit your RL workload with Cluster Toolkit](#submit-your-rl-workload-with-cluster-toolkit)
+- [Legacy: Submit your RL workload via Pathways](#legacy-submit-your-rl-workload-via-pathways)
 - [Managing Workloads](#managing-workloads)
 - [Troubleshooting](#troubleshooting)
 
@@ -61,9 +62,9 @@ Before starting, ensure you have:
   - **Artifact Registry Writer** (`roles/artifactregistry.writer`) to upload Docker images.
   - **Storage Admin** (`roles/storage.admin`) or **Storage Object Admin** (`roles/storage.objectAdmin`) combined with **Storage Legacy Bucket Reader** (`roles/storage.legacyBucketReader`) on your GCS bucket to read/write checkpoints and logs. (Note: A bucket-level read permission like `storage.buckets.get` is required by JAX/TensorStore to verify bucket existence and metadata; using `roles/storage.objectAdmin` alone will cause a misleading "bucket not found" error).
 - A Hugging Face account with an access token for downloading models.
-- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+- Cluster Toolkit installed and configured. Follow [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md) for `gcluster` setup.
   - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-cli-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
-- A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- A GKE cluster configured for Cluster Toolkit, with healthy Kueue and JobSet components.
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Build and upload MaxText Docker image
@@ -118,7 +119,7 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 # of your cluster:
 
 # 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --zone ${ZONE?} --project ${PROJECT_ID?}
 
 # 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
@@ -156,10 +157,88 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 > - If you do explicitly provide a `scan_layers` argument, it must match the checkpoint's saved setting or a `ValueError` mismatch error will be raised.
 >   See the [Checkpoints concept guide](../../reference/core_concepts/checkpoints.md) for more details.
 
-## Submit your RL workload via Pathways
+## Submit your RL workload with Cluster Toolkit
+
+Configure `kubectl` and `gcluster` for the target cluster before submitting:
+
+```bash
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --zone ${ZONE?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${ZONE?}
+```
+
+Set the Cluster Toolkit placement values. `TOPOLOGY` must match the TPU slice
+available on the cluster; for example, verify the supported topology before
+using a four-slice v6e cluster.
+
+```bash
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
+export TOPOLOGY=<TPU_TOPOLOGY>
+```
+
+Cluster Toolkit runs the RL process directly in the GKE JobSet. Therefore, the
+Pathways-only environment variables `JAX_PLATFORMS=proxy`,
+`JAX_BACKEND_TARGET`, and `ENABLE_PATHWAYS_PERSISTENCE` are intentionally not
+included.
+
+### Submit GRPO workload
+
+```bash
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?}-grpo \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?}-grpo \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  rollout_tensor_parallelism=8 \
+  hf_access_token=${HF_TOKEN?}"
+```
+
+### Submit GSPO workload
+
+Use the same command for GSPO and add `loss_algo=gspo-token` to the MaxText
+arguments:
+
+```bash
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?}-gspo \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?}-gspo \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  rollout_tensor_parallelism=8 \
+  hf_access_token=${HF_TOKEN?} \
+  loss_algo=gspo-token"
+```
+
+Monitor the Cluster Toolkit jobs with `gcluster job list` and
+`gcluster job logs <JOB_NAME>`. If the RL implementation requires Pathways
+proxy services for a particular model or vLLM configuration, this standard
+JobSet command is not equivalent for that configuration; use the legacy
+section until the model configuration is adapted for direct multi-host JAX.
+
+## Legacy: Submit your RL workload via Pathways
 
 See the **Troubleshooting** section for concise instructions on how to retry or
 resume a failed workload.
+
+The commands in this section require the legacy XPK installation and a
+Pathways-ready GKE cluster. They are retained for existing deployments only;
+new workloads should use the Cluster Toolkit commands above.
 
 Ensure you have a Pathways-ready GKE cluster (as mentioned in Prerequisites) and
 submit the `train_rl.py` script via XPK.
@@ -206,12 +285,12 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 ## Managing Workloads
 
 - **Monitor workload status**: Check Pathways job status: `kubectl get pathwaysjob`. Check pod status: `kubectl get pods`.
-- **Delete a workload**: To remove a failed or unwanted Pathways job, use XPK:
+- **Delete a workload**: Configure access with `gcloud`, then remove the Pathways JobSet with `kubectl`:
   ```bash
-  xpk workload delete \
-      --workload ${RUN_NAME?} \
-      --cluster ${GKE_CLUSTER?} \
+  gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+      --zone ${ZONE?} \
       --project ${PROJECT_ID?}
+  kubectl delete pathwaysjob ${RUN_NAME?}
   ```
   In case the job still lingers on, you can use
   `kubectl get pods` to obtain the name of the pod and then run: `kubectl delete pod <POD_NAME>`.

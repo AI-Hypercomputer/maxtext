@@ -18,7 +18,39 @@
 
 # At scale with XPK
 
-This guide provides the recommended workflow for running MaxText on Google Kubernetes Engine (GKE) using the **Accelerated Processing Kit (XPK)**. For a complete reference on XPK, please see the [official XPK repository](https://github.com/AI-Hypercomputer/xpk).
+```{warning}
+This guide is kept for legacy compatibility only. The recommended path for new GKE deployments is [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). XPK is deprecated and should not be used for new cluster provisioning or workload orchestration.
+
+For a direct Cluster Toolkit command reference, see [At scale with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). The XPK commands below are retained only for existing deployments.
+
+## Cluster Toolkit replacement
+
+For new deployments, configure GKE access and submit the equivalent standard
+multi-host JobSet with Cluster Toolkit:
+
+```bash
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --zone ${ZONE?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${ZONE?}
+
+gcluster job submit \
+  --image ${DOCKER_IMAGE?} \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --command "python3 -m maxtext.trainers.pre_train.train <MAXTEXT_ARGS>"
+```
+
+Monitor and cancel the new job with `gcluster job logs ${RUN_NAME?}` and
+`gcluster job cancel ${RUN_NAME?}`. Use the full Cluster Toolkit guide for
+image-building and topology details.
+```
+
+This guide documents the older workflow for running MaxText on Google Kubernetes Engine (GKE) using the **Accelerated Processing Kit (XPK)**. For a complete reference on XPK, please see the [official XPK repository](https://github.com/AI-Hypercomputer/xpk).
 
 ## Overview of the workflow
 

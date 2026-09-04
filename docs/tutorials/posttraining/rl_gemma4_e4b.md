@@ -16,6 +16,8 @@
 
 # Reinforcement Learning with gemma4-e4b on Multi-Host TPUs
 
+> **Legacy:** This tutorial uses an XPK-based Pathways launcher. New deployments should prefer Cluster Toolkit for GKE cluster setup and job submission. This page is retained for older environments and compatibility.
+
 This tutorial provides step-by-step instructions for setting up the environment
 and training the gemma4-e4b model with GRPO on the [OpenMathInstruct-2 dataset](https://huggingface.co/datasets/nvidia/OpenMathInstruct-2) on a Cloud TPU v6e (Trillium) GKE cluster using a `v6e-32` (4x8) slice.
 
@@ -26,7 +28,7 @@ Before starting, ensure you have:
 - Access to a Google Cloud Project with TPU quotas.
 - A Hugging Face account with an access token for downloading models (the `google/gemma-4-E4B` and `google/gemma-4-E4B-it` repositories are gated; request access before proceeding).
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
-- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+- XPK installed for this legacy workflow (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
@@ -98,7 +100,37 @@ Both files are already included under `src/maxtext/examples/chat_templates/`, so
 
 For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext.md).
 
-### Submit your workload
+### Cluster Toolkit submission
+
+For a new GKE deployment, authenticate with `gcloud` and submit the RL trainer
+as a standard Cluster Toolkit JobSet. Use a TPU compute type and topology that
+match the target cluster:
+
+```bash
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
+export TOPOLOGY=<TPU_TOPOLOGY>
+
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${CLUSTER_NAME?} \
+  --zone ${ZONE?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${CLUSTER_NAME?}
+gcluster job config set location ${ZONE?}
+
+gcluster job submit \
+  --image ${DOCKER_IMAGE?} \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=gemma4-e4b load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?}"
+```
+
+This standard JobSet path replaces the Pathways proxy environment. Remove
+`JAX_PLATFORMS=proxy`, `JAX_BACKEND_TARGET`, and
+`ENABLE_PATHWAYS_PERSISTENCE` from the command.
+
+### Legacy XPK/Pathways submission
 
 ```bash
 # The Docker image you pushed in the previous step
@@ -109,7 +141,7 @@ export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 run_tutorial maxtext/trainers/post_train/rl/scripts/run_gemma4_e4b_rl.sh
 ```
 
-> **Note:** The `run_gemma4_e4b_rl.sh` script pins the Pathways component images to specific versions via the xpk `--server-image` and `--proxy-server-image` flags (set through the `PATHWAYS_SERVER_IMAGE` and `PATHWAYS_PROXY_SERVER_IMAGE` variables at the top of the script). The `--server-image` is used for both the Pathways resource-manager server and the workers (the reference config uses the same image for both). Update these variables if you need a different Pathways release.
+> **Legacy launcher note:** The `run_gemma4_e4b_rl.sh` script invokes XPK and pins Pathways component images through the `--server-image` and `--proxy-server-image` flags. It is not a Cluster Toolkit workflow. A dedicated `gcluster` launcher is required before this recipe can be migrated.
 
 ### Monitor your workload
 

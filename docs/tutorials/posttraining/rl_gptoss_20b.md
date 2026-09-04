@@ -16,6 +16,8 @@
 
 # Reinforcement Learning with GPT-OSS 20B on Multi-Host TPUs
 
+> **Legacy:** This tutorial uses an XPK-based Pathways launcher. New deployments should prefer Cluster Toolkit for GKE cluster setup and job submission. This page is retained for older environments and compatibility.
+
 This tutorial provides step-by-step instructions for setting up the environment
 and training the GPT-OSS 20B model on the [GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k) on a GKE cluster with `v5p-64` nodes.
 
@@ -26,7 +28,7 @@ Before starting, ensure you have:
 - Access to a Google Cloud Project with TPU quotas.
 - A Hugging Face account with an access token for downloading models.
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
-- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+- XPK installed for this legacy workflow (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
@@ -86,7 +88,35 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext.md).
 
-### Submit your workload
+### Cluster Toolkit submission
+
+For a new GKE deployment, authenticate with `gcloud` and submit the RL trainer
+as a standard Cluster Toolkit JobSet:
+
+```bash
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
+export TOPOLOGY=<TPU_TOPOLOGY>
+
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${CLUSTER_NAME?} \
+  --zone ${ZONE?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${CLUSTER_NAME?}
+gcluster job config set location ${ZONE?}
+
+gcluster job submit \
+  --image ${DOCKER_IMAGE?} \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=gpt-oss-20b load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?}"
+```
+
+Remove the Pathways-only proxy environment variables from the command. Use
+the legacy section only when the model configuration still requires Pathways.
+
+### Legacy XPK/Pathways submission
 
 ```bash
 # The Docker image you pushed in the previous step

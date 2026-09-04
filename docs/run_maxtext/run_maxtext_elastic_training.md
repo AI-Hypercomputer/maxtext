@@ -40,14 +40,12 @@ This demo shows recovery via *checkpoint restore* on a fixed mesh: when a slice 
 
 ## 1. Prerequisites
 
-This guide assumes you already have a **Pathways-enabled GKE cluster** created with `xpk`, and a MaxText Docker image in your Artifact Registry. If you don't:
+This guide assumes you already have a GKE cluster configured for Cluster
+Toolkit, a Pathways runtime available to the workload, and a MaxText Docker
+image in Artifact Registry. If you don't:
 
-1. **Install XPK and create a Pathways GKE cluster.** Follow [Running MaxText with XPK](run_maxtext_via_xpk.md) and the [Pathways & XPK cluster guide](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster#xpk). Cluster creation and management is out of scope for this page.
+1. **Install Cluster Toolkit and configure GKE.** Follow [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). Cluster creation and management is out of scope for this page.
 2. **Build and upload the MaxText Docker image.** See [Build MaxText](../build_maxtext.md).
-
-```{note}
-If you installed `xpk` inside a Python virtual environment (`venv`), reactivate it (e.g., `source <VENV_NAME>/bin/activate`) in any new terminal before running `xpk` commands, or you will hit a `Command xpk not found` error.
-```
 
 ## 2. Environment configuration
 
@@ -56,8 +54,8 @@ Set these environment variables in your shell. Replace the placeholders with you
 ```bash
 # Google Cloud Configuration
 export PROJECT_ID=<GCP project ID>
-export ZONE=<GCP location>        # e.g., 'us-central1'
-export GKE_CLUSTER=<cluster name> # your Pathways-enabled cluster
+export ZONE=<GCP_REGION_OR_ZONE> # e.g., 'us-central1'
+export GKE_CLUSTER=<cluster name>
 
 # Workload Configuration
 # Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores/periods).
@@ -69,27 +67,32 @@ export NUM_SLICES=3             # total slices in the run
 
 # MaxText & Storage Configuration
 export BASE_OUTPUT_DIRECTORY=<gcs bucket path>  # e.g., gs://my-bucket/maxtext-runs
-export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/<your maxtext image>"
+export DOCKER_IMAGE=<ARTIFACT_REGISTRY_IMAGE_URI>
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
+export TOPOLOGY=<TPU_TOPOLOGY>
 ```
 
 ## 3. Launch the elastic workload
 
-Submit the run with `xpk workload create-pathways`. Two sets of flags make it elastic:
-
-- **On the `xpk` side**, `--elastic-slices` tells Pathways how many slices the workload is allowed to lose and keep going, and `--max-slice-restarts` caps how many times a slice's workers may be restarted.
-- **On the MaxText side** (inside `--command`), `elastic_enabled=true` turns on the `elastic_retry` wrapper, and `enable_single_controller=True` runs training through Pathways. `checkpoint_period` is kept small so a recovery rewinds only a little.
+Configure the GKE credentials and Cluster Toolkit job settings before
+submitting the workload. Pathways must be started by the JobSet workload
+definition or by the container image; `gcluster` does not infer a Pathways
+runtime from MaxText arguments.
 
 ```bash
-xpk workload create-pathways \
-  --workload=${RUN_NAME?} \
-  --cluster=${GKE_CLUSTER?} \
-  --project=${PROJECT_ID?} \
-  --zone=${ZONE?} \
-  --tpu-type=${TPU_TYPE?} \
-  --num-slices=${NUM_SLICES?} \
-  --docker-image=${DOCKER_IMAGE?} \
-  --elastic-slices=1 \
-  --max-slice-restarts=10 \
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --zone ${ZONE?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${ZONE?}
+
+gcluster job submit \
+  --image ${DOCKER_IMAGE?} \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
   --command="python3 -m maxtext.trainers.pre_train.train \
     src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
@@ -110,7 +113,10 @@ xpk workload create-pathways \
 ```
 
 ```{note}
-`--elastic-slices=1` means the run tolerates losing **one** slice at a time out of `${NUM_SLICES}`. Keep `--max-slice-restarts` and the MaxText `elastic_max_retries` consistent with how many failures you want to ride out.
+  Cluster Toolkit has no direct equivalents for XPK's `--elastic-slices` and
+  `--max-slice-restarts`. If in-process Pathways recovery is required, configure
+  the corresponding slice and restart policy in the Pathways-aware JobSet
+  template. The MaxText retry settings alone do not create that runtime.
 ```
 
 ```{warning}
@@ -122,7 +128,9 @@ xpk workload create-pathways \
 List the workload and follow its logs through the Cloud Console (**Kubernetes Engine → Workloads →** your run **→ Logs**), or:
 
 ```bash
-xpk workload list --cluster=${GKE_CLUSTER?} --project=${PROJECT_ID?} --zone=${ZONE?}
+gcluster job list
+gcluster job logs ${RUN_NAME?}
+kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
 ```
 
 After XLA compilation (a couple of minutes) you should see elastic training enabled and a steady stream of steps:
@@ -141,10 +149,12 @@ Let it run until the step counter passes the first checkpoint (here, step ~130, 
 To see recovery, remove a worker on one slice. Connect to the cluster and delete a worker pod immediately (`--grace-period=0 --force`), so it does not drain gracefully. This mimics an abrupt hardware failure rather than a clean shutdown:
 
 ```bash
-gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --zone ${ZONE?} --project ${PROJECT_ID?}
 
 # Pick a worker pod on one slice and remove it immediately.
-WORKER=$(kubectl get pods -o name | grep "${RUN_NAME?}" | grep worker | head -1)
+WORKER=$(kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?} \
+  -o name | grep worker | head -1)
 kubectl delete ${WORKER?} --grace-period=0 --force
 ```
 
@@ -171,19 +181,26 @@ The step counter dropping (for example `150 -> 101`) is the rewind to the last c
 Delete the workload to stop the meter. TPU slices are expensive, so don't skip this.
 
 ```bash
-xpk workload delete --workload=${RUN_NAME?} --cluster=${GKE_CLUSTER?} --project=${PROJECT_ID?} --zone=${ZONE?}
+kubectl delete jobset ${RUN_NAME?}
 ```
 
-If you created the cluster only for this demo, delete it too (see the [XPK documentation](https://github.com/AI-Hypercomputer/xpk) for `xpk cluster delete`).
+You can also cancel the workload through Cluster Toolkit:
+
+```bash
+gcluster job cancel ${RUN_NAME?}
+```
+
+If you created the cluster only for this demo, delete it separately with your
+normal GKE cluster administration workflow.
 
 ## Going further
 
 - **The elastic flags** are documented in `src/maxtext/configs/base.yml`: `elastic_enabled`, `elastic_timeout_seconds`, `elastic_max_retries`, plus `enable_single_controller` (runs training through Pathways) and `checkpoint_period`.
 - **A larger model** changes the checkpoint size that streams through Pathways during recovery; size the controller and adjust `checkpoint_period` accordingly.
-- **Custom Pathways server args** can be passed through `xpk` with `--custom-pathways-proxy-server-args` if you need finer control than `--elastic-slices` exposes.
+- **Custom Pathways server args** must be provided through the Pathways-aware
+  JobSet or workload template submitted through Cluster Toolkit.
 
 ## More information
 
-- [Running MaxText with XPK](run_maxtext_via_xpk.md)
 - [Running MaxText via Pathways](run_maxtext_via_pathways.md)
 - [Pathways on Cloud documentation](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro)
