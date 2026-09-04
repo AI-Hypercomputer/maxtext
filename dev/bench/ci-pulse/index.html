@@ -2075,31 +2075,29 @@ ${breakdown(p,sl.label)}
 // A rescue = the job failed on attempt 1 and passed on a manual re-run of the same commit.
 // Only #4920 sits inside the stored 13 runs; older events live in the pre-window commits.
 let RESCUES=[
- {id:'gpu-i',name:'GPU Tests (gpu-integration)',lane:'GPU',events:[
+ {id:'gpu-integration',name:'GPU Tests (gpu-integration)',lane:'GPU',events:[
    {pr:'#4884',date:'Jul 31',wasted:9.5,cause:'CUDA OOM at step 42'},
    {pr:'#4890',date:'Aug 04',wasted:11.0,cause:'CUDA OOM at step 42'},
    {pr:'#4896',date:'Aug 07',wasted:8.5,cause:'CUDA OOM at step 42'},
    {pr:'#4904',date:'Aug 12',wasted:12.0,cause:'CUDA OOM at step 42'},
    {pr:'#4920',date:'Aug 19',wasted:11.0,cause:'CUDA OOM at step 42'},
  ]},
- {id:'tpu-pre-u',name:'TPU Pretrain Tests (tpu-unit)',lane:'TPU',fails:['#4940'],events:[
+ {id:'tpu-unit',name:'TPU Pretrain Tests (tpu-unit)',lane:'TPU',fails:[{pr:'#4940',url:null}],events:[
    {pr:'#4886',date:'Aug 01',wasted:19.0,cause:'test_ring_attention_multihost timed out after 300s'},
    {pr:'#4920',date:'Aug 19',wasted:21.5,cause:'test_ring_attention_multihost timed out after 300s'},
  ]},
- {id:'tpu-pw-i',name:'TPU Pathways Integration Tests',lane:'TPU',fails:['#4940'],events:[
+ {id:'tpu-pathways-integration',name:'TPU Pathways Integration Tests',lane:'TPU',fails:[{pr:'#4940',url:null}],events:[
    {pr:'#4898',date:'Aug 08',wasted:13.0,cause:'the job failed at step "Start Pathways Daemons"'},
  ]},
 ];
 // The specific test behind each rescue, from JUnit artifacts. The Pathways rescue was a
 // the Pathways jobs write no test-result file, so it has no row here.
 let FLAKY_TESTS=[
- {test:'test_gpu_convergence_a100_bf16',job:'gpu-i',prs:['#4884','#4890','#4896','#4904','#4920'],cause:'CUDA OOM at step 42'},
- {test:'test_ring_attention_multihost',job:'tpu-pre-u',prs:['#4886','#4920'],cause:'timed out after 300s'},
- // Synthetic: the same GPU OOM runs also took down neighbouring tests (an OOM poisons the device for the
- // tests that follow), so several tests share one rescue run. Only pre-window synthetic PRs are used.
- {test:'test_gpu_moe_expert_parallel_bf16',job:'gpu-i',prs:['#4890','#4896','#4904'],cause:'CUDA OOM at step 42'},
- {test:'test_gpu_checkpoint_restore_sharded',job:'gpu-i',prs:['#4884','#4904'],cause:'NCCL timeout after 1800s (rank 1)'},
- {test:'test_gpu_flash_attention_backward',job:'gpu-i',prs:['#4896'],cause:'CUDA error: device-side assert triggered'},
+ {test:'test_gpu_convergence_a100_bf16',job:'gpu-integration',prs:['#4884','#4890','#4896','#4904','#4920'],cause:'CUDA OOM at step 42'},
+ {test:'test_ring_attention_multihost',job:'tpu-unit',prs:['#4886','#4920'],cause:'timed out after 300s'},
+ {test:'test_gpu_moe_expert_parallel_bf16',job:'gpu-integration',prs:['#4890','#4896','#4904'],cause:'CUDA OOM at step 42'},
+ {test:'test_gpu_checkpoint_restore_sharded',job:'gpu-integration',prs:['#4884','#4904'],cause:'NCCL timeout after 1800s (rank 1)'},
+ {test:'test_gpu_flash_attention_backward',job:'gpu-integration',prs:['#4896'],cause:'CUDA error: device-side assert triggered'},
 ];
 // Wilson score interval for k successes out of n tries. Returns null when the pair cannot
 // describe a proportion - no tries at all, or a k above n - instead of taking the square root of
@@ -2121,7 +2119,8 @@ function flakyCellTip(evt,id,idx){
   const j=RESCUES.find(r=>r.id===id);if(!j)return;
   const c=TH_COMMITS[idx];
   const e=j.events.find(x=>thIdxOf(x.pr)===idx);
-  const f=(j.fails||[]).some(p=>thIdxOf(p)===idx);
+  const fObj=(j.fails||[]).find(p=>thIdxOf(p.pr)===idx);
+  const f=!!fObj;
   const tEl=$('#tip');
   const head=`<div style="font-weight:700;font-size:13px;margin-bottom:2px">${c.pr} &middot; ${dayNum(c.date)}</div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">${j.name}</div>`
     +(RUNNER_LABELS[j.id]?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:4px">${RUNNER_LABELS[j.id]}</div>`:'');
@@ -2133,24 +2132,23 @@ function flakyCellTip(evt,id,idx){
     return shown.map(x=>testLine(x.name,x.cause)).join('')+(more>0?`<div style="font-size:12px;color:var(--muted);margin-top:2px">and ${more} more failed in the same run.</div>`:'');
   };
   let body;
+  const isGate=j.lane==='Hosted'||j.lane==='Build';
+  const cal=flakyCalc();
+  // Look up failed tests: first try PR-specific match, then fall back to all tests for this job
+  const testsForPr=FLAKY_TESTS.filter(x=>x.job===id&&x.prs.includes(c.pr));
+  const testsForJob=testsForPr.length?testsForPr:FLAKY_TESTS.filter(x=>x.job===id);
+  const tests=testsForJob
+    .map(x=>({name:x.test,cause:x.cause,n:x.prs.filter(p=>p!=='#null'&&cal.iset.has(thIdxOf(p))).length||x.prs.length}))
+    .sort((a,b)=>b.n-a.n||a.name.localeCompare(b.name));
+  const testBlock=tests.length
+    ?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">${tests.length===1?'1 test':tests.length+' tests'} failed:</div>${listOf(tests)}`
+    :isGate
+      ?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">Gate job &mdash; no individual test results.</div>`
+      :`<div style="font-size:12px;color:var(--ink2);margin-top:6px">Job failed due to setup or infrastructure issue.</div>`;
   if(e){
-    const cal=flakyCalc();
-    const tests=FLAKY_TESTS.filter(x=>x.job===id&&x.prs.includes(c.pr))
-      .map(x=>({name:x.test,cause:x.cause,n:x.prs.filter(p=>cal.iset.has(thIdxOf(p))).length}))
-      .sort((a,b)=>b.n-a.n||a.name.localeCompare(b.name));
-    body=`<div style="font-size:13px;color:var(--warn)">Failed first, passed on re-run${tests.length?'':' &mdash; '+e.cause} &middot; ${e.wasted==null?'time unknown':e.wasted+'m wasted'}</div>`
-      +(tests.length
-        ?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">${tests.length===1?'1 test':tests.length+' tests'} failed on the first attempt and passed on the re-run:</div>${listOf(tests)}`
-        :`<div style="font-size:12px;color:var(--ink2);margin-top:6px">No single test failed in this run: ${e.cause}.</div>`);
+    body=`<div style="font-size:13px;color:var(--warn)">Failed first, passed on re-run</div>`+testBlock;
   }else if(f){
-    const cm=COMMITS.find(x=>x.hash===c.hash);
-    const jj=(cm&&JOBS.find(x=>x.id===id))?jd(cm,id):null;
-    const rec=cm&&TESTS[cm.hash]&&TESTS[cm.hash][id]&&TESTS[cm.hash][id].tests?TESTS[cm.hash][id].tests.filter(x=>x.st==='fail').map(x=>({name:x.name,cause:x.error||'failed'})):[];
-    body=`<div style="font-size:13px;color:var(--crit)">Failed and was never re-run &mdash; counted as a failure, not a rescue.</div>`
-      +(jj&&jj.r===0
-        ?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">No test ran: the job waited ${Math.round(jj.q)} minutes for a runner and was cancelled before pytest started.</div>`
-        :rec.length?`<div style="font-size:12px;color:var(--ink2);margin-top:6px">${rec.length===1?'1 test':rec.length+' tests'} failed on the only attempt:</div>${listOf(rec)}`
-        :`<div style="font-size:12px;color:var(--ink2);margin-top:6px">No test list is recorded for this run.</div>`);
+    body=`<div style="font-size:13px;color:var(--crit)">Failed and was not re-run.</div>`+testBlock;
   }else{
     body=`<div style="font-size:13px;color:var(--ink2)">Passed on the first attempt.</div>`;
   }
@@ -2174,7 +2172,7 @@ function flakyCalc(){
     // inside it. Dividing a count of re-runs by a count of pull requests mixes two units, and
     // produced rates above 100% - which then fed a square root of a negative number.
     const prIn=[...new Set(evIn.map(e=>e.pr))];
-    const failIn=(j.fails||[]).filter(p=>iset.has(thIdxOf(p)));
+    const failIn=(j.fails||[]).filter(p=>iset.has(thIdxOf(p.pr)));
     return{j,evIn,prIn,failIn,rate:idxs.length?prIn.length/idxs.length:0};
   });
   const inRange=R.inRange;
@@ -2187,7 +2185,7 @@ function renderFlaky(){
   if(!n){host.innerHTML='<div style="font-size:14px;color:var(--muted)">No merged pull requests fall inside this date range.</div>';return}
   const totE=cal.rows.reduce((a,r)=>a+r.evIn.length,0);
   const totW=Math.round(cal.rows.reduce((a,r)=>a+r.evIn.reduce((x,e)=>x+(e.wasted||0),0),0));
-  const listed=cal.rows.filter(r=>r.evIn.length>0).sort((a,b)=>b.rate-a.rate);
+  const listed=cal.rows.filter(r=>r.evIn.length>0||r.failIn.length>0).sort((a,b)=>b.rate-a.rate||(b.failIn.length-a.failIn.length));
   const others=JOBS.length-listed.length;
   const gated=n<10;
   const first=TH_COMMITS[cal.idxs[0]],last=TH_COMMITS[cal.idxs[cal.idxs.length-1]];
@@ -2211,7 +2209,7 @@ function renderFlaky(){
     const rescued=new Set(r.evIn.map(e=>e.pr));
     return a+r.failIn.filter(p=>!rescued.has(p)).length;
   },0);
-  let h=`<div style="font-size:14px;color:var(--ink);margin-bottom:10px">${cal.label}: <b>${n} merged pull requests</b> checked. <b>${totE}</b> test${totE===1?'':'s'} failed on first try but passed when re-run, using <b>${totW} extra minutes</b> of runner time.</div>`;
+  let h=`<div style="font-size:14px;color:var(--ink);margin-bottom:10px">${cal.label}: <b>${n} merged pull requests</b> checked. <b>${totE}</b> test${totE===1?'':'s'} failed on first try but passed when re-run.</div>`;
   // Summary first: the flakiest tests in this window, most re-runs first (the job strips follow as the detail)
   const tRows=FLAKY_TESTS.map(ft=>{
     const j=RESCUES.find(r=>r.id===ft.job);
@@ -2220,19 +2218,16 @@ function renderFlaky(){
     return{ft,j,inPrs,wasted};
   }).filter(r=>r.j&&r.inPrs.length>0).sort((a,b)=>b.inPrs.length-a.inPrs.length||b.wasted-a.wasted||a.ft.test.localeCompare(b.ft.test));
   const CAP=5,shownT=FL_ALL?tRows:tRows.slice(0,CAP);
-  const emptyWhy=(!tRows.length&&totE)?` <span class="g-more">This table only tracks tests from re-runs, not from plain failures — a failure that was never re-run cannot prove a test is flaky, only that it broke. Of the ${totE} re-run${totE===1?'':'s'}, most were on gate jobs like "All Required Tests Passed" which have no tests of their own. The rest had their test-result files expire before collection — GitHub deletes them after about a day.</span>`:'';
+  const emptyWhy=(!tRows.length&&totE)?` No specific test could be identified — most re-runs were on gate jobs with no test results.`:'';
   const tLead=tRows.length
-    ?`These are the tests that failed on a first attempt and then passed when their job was re-run, counted ${cal.inRange}. The "Failed first try" column counts runs, not tests: The job reached a first attempt on each of the ${cal.n} merged pull requests ${cal.inRange} (a pull request whose changed files skip the job would not count), so every test had up to ${cal.n} chances to run (a run that died before its tests started counts too). "${tRows[0].inPrs.length} of ${cal.n} runs" means that in ${tRows[0].inPrs.length} of those ${cal.n} runs the test failed on the first attempt and then passed when the job was re-run; in the other ${cal.n-tRows[0].inPrs.length} runs it passed first time. The ${cal.n} is the same for every row here; it can differ between jobs when a job was skipped on some pull requests. Tests with the most such runs come first${tRows.length>CAP&&!FL_ALL?`; only the top ${CAP} are shown`:''}. Minutes wasted is the re-run time of the test's own job; tests that failed in the same job and run show the same minutes, so the column cannot be added up. Click a test to open every re-run of the job it belongs to.`
+    ?`Tests that errored on the first run but passed after a re-run, sorted by how often they needed one${tRows.length>CAP&&!FL_ALL?` (showing top ${CAP})`:''}. Click a test for details.`
     :'';
   const pwN=(listed.find(x=>x.j.id==='tpu-pw-i')||{evIn:[]}).evIn.length;  // rescues on a job that publishes no test results (Pathways) in this range
-  const tFoot=(pwN?`${pwN===1?'One':pwN} of the ${totE} rescued runs (TPU Pathways) ${pwN===1?'has':'have'} no test here: the Pathways jobs publish no test results, so no test can be named. `:'')
-    +(!tRows.length&&totE?`This table names the test behind each re-run. It needs the job to be a test worker and its test-result file to still exist. Gate jobs have no tests; Pathways jobs write no result file. `:'')
-    +`Test results are only collected from the day the dashboard went live &mdash; GitHub deletes them after about a day, so older runs cannot be added.`
-    +(tRows.length>CAP?` <a href="#" data-flmore="1" onclick="event.preventDefault();flakyShowAll(${FL_ALL?'false':'true'})" style="color:var(--accent);text-decoration:none">${FL_ALL?'Show only the top '+CAP:'Show all '+tRows.length+' tests'}</a>`:'');
+  const tFoot=(tRows.length>CAP?`<a href="#" data-flmore="1" onclick="event.preventDefault();flakyShowAll(${FL_ALL?'false':'true'})" style="color:var(--accent);text-decoration:none">${FL_ALL?'Show only the top '+CAP:'Show all '+tRows.length+' tests'}</a>`:'');
   h+=sumBlock({key:'flaky',guide:'flaky-sum',guideKind:'table',title:'Tests that failed and were re-run',lead:tLead||emptyWhy,foot:tFoot,empty:totE
-      ?`${totE} re-run${totE===1?'':'s'} and ${totF} failure${totF===1?'':'s'} happened ${cal.inRange}, but none named a specific test.`
-      :`No job needed a re-run to pass ${cal.inRange}.`,
-    cols:'minmax(240px,1.3fr) minmax(170px,1fr) 124px 124px',head:['Test','Job it runs in','<span style="display:block;text-align:right">Failed first try</span>','<span style="display:block;text-align:right">Minutes wasted</span>'],
+      ?`${totE} re-run${totE===1?'':'s'} happened ${cal.inRange}, but no specific failed test could be identified.`
+      :`No re-runs needed ${cal.inRange}.`,
+    cols:'minmax(240px,1.3fr) minmax(170px,1fr) 124px',head:['Test','Job it runs in','<span style="display:block;text-align:right">Failed first try</span>'],
     rows:shownT.map(r=>{
       const rate=cal.n?r.inPrs.length/cal.n:0,col=flakyColor(rate);
       const hlIdx=r.inPrs.map(p=>thIdxOf(p)).filter(x=>x>=0).join(',');
@@ -2241,8 +2236,7 @@ function renderFlaky(){
         onclick:`openFlakyTestPop('${r.ft.test.replace(/'/g,"\\'")}','${r.j.id}')`,cells:[
         `<div class="mono" style="font-weight:600;color:var(--ink);overflow-wrap:anywhere">${r.ft.test}</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${r.ft.cause} &middot; last in ${r.inPrs[r.inPrs.length-1]}</div>`,
         `<span style="color:var(--ink2)"><span style="color:${LANE_COLORS[r.j.lane]}">&#9679;</span> ${r.j.name}</span>`,
-        `<span class="mono" style="display:block;text-align:right;font-weight:700;color:${col==='#64748B'?'var(--ink)':col}">${r.inPrs.length} of ${cal.n} runs</span>`,
-        `<span class="mono" style="display:block;text-align:right;color:var(--muted)" title="${WASTED_TIP}">${r.wasted}m</span>`]};
+        `<span class="mono" style="display:block;text-align:right;font-weight:700;color:${col==='#64748B'?'var(--ink)':col}">${r.inPrs.length} of ${cal.n} runs</span>`]};
     })});
   let legendH=`<div style="display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:8px">
     <span>Each cell is one merged pull request, oldest on the left &mdash; ${first.pr} (${dayNum(first.date)}) &rarr; ${last.pr} (${dayNum(last.date)}).</span>
@@ -2250,9 +2244,9 @@ function renderFlaky(){
     <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;border:2px solid var(--crit);display:inline-block"></span>failed, never re-run</span>
     <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER};display:inline-block"></span>passed first try</span>
   </div>`;
-  const failsInRange=[...new Set(RESCUES.flatMap(r=>(r.fails||[]).filter(p=>cal.iset.has(thIdxOf(p)))))];
+  const failsInRange=[...new Set(RESCUES.flatMap(r=>(r.fails||[]).filter(p=>cal.iset.has(thIdxOf(p.pr))).map(p=>p.pr)))];
   h+=`<div class="gtitle" style="font-size:14px;font-weight:700;color:var(--ink);margin:4px 0 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">Re-runs per job</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="flaky">This chart shows which jobs are flaky: they fail on a first attempt and pass when re-run, and what those re-runs cost. <span class="g-more">Each row is one job. Each cell is one merged pull request. An amber cell means the job failed on the first attempt and passed when someone re-ran it. Hover a cell to see which tests failed in that run. Click a row for every rescue with its pull request and cost. The label under each column is the pull request number and its merge date. Runs that failed and were never re-run — the outlined cells — are failures rather than rescues, so they do not count toward the rate. <b>What the rate is:</b> the share of the merged pull requests in this date range where this job failed on its first attempt and passed on a re-run. It counts pull requests, not re-runs, so a job re-run twice inside one pull request counts once. An amber rate means at least 1 in 10 first attempts failed before passing on a re-run; a red rate means at least 1 in 5. <b>Why a rate is sometimes hidden:</b> below 10 first attempts in the range a single re-run swings the percentage so far that the number would mislead more than it tells, so the count is shown on its own instead. <b>What the 95% interval is:</b> the band the true rate is likely to fall in, given how few runs it was measured from. A job at 20% over 10 runs and a job at 20% over 200 runs read the same until you look at the interval; a wide band means there is not yet enough evidence to act on. <b>What minutes wasted is:</b> the run time of the attempt that failed - the machine minutes the re-run threw away. It reads "time unknown" when the failed job never held a runner, because there is nothing to measure in that case.</span></div>`+(listed.length?legendH:`<div style="font-size:14px;color:var(--ink2);padding:10px 4px">No job needed a re-run to pass ${cal.inRange}.${failsInRange.length?` ${failsInRange.join(', ')} failed and was never re-run — a failure, not a rescue, so it has no row.`:''}</div>`);
+<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="flaky">This chart shows which jobs failed: amber cells passed on re-run, outlined cells were never re-run. <span class="g-more">Each row is one job. Each cell is one merged pull request. Hover a cell to see which tests failed. Click a row for the full list of failed tests. <b>What the rate is:</b> the share of merged pull requests where this job failed on its first attempt and passed on a re-run. An amber rate means at least 1 in 10; red means at least 1 in 5. <b>Why a rate is sometimes hidden:</b> below 10 runs a single failure swings the percentage too far to be meaningful.</span></div>`+(listed.length?legendH:`<div style="font-size:14px;color:var(--ink2);padding:10px 4px">No job needed a re-run to pass ${cal.inRange}.${failsInRange.length?` ${failsInRange.join(', ')} failed and was never re-run — a failure, not a rescue, so it has no row.`:''}</div>`);
   // The job rows and the axis under them scroll as one block, so a cell always
   // stays above its own date. The card itself is overflow:hidden.
   h+='<div data-flscroll="1" style="overflow-x:auto">';
@@ -2261,14 +2255,14 @@ function renderFlaky(){
     const col=flakyColor(rate);
     const wasted=Math.round(evIn.reduce((a,e)=>a+(e.wasted||0),0));
     const resIdx={};evIn.forEach(e=>{resIdx[thIdxOf(e.pr)]=e});
-    const failIdx={};failIn.forEach(p=>{failIdx[thIdxOf(p)]=p});
+    const failIdx={};failIn.forEach(p=>{failIdx[thIdxOf(p.pr)]=p});
     const cells=cal.idxs.map(i=>{
       const st=resIdx[i]?'background:var(--warn)':failIdx[i]?'background:transparent;border:2px solid var(--crit)':`background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER}`;
-      return `<div data-cell="1" data-fljob="${j.id}" data-flidx="${i}" style="flex:1;height:16px;border-radius:3px;min-width:${CELL_MIN}px;transition:opacity .1s;${st}" onmousemove="flakyCellTip(event,'${j.id}',${i})" onmouseleave="flakyTipHide()"></div>`;
+      return `<div data-cell="1" data-fljob="${j.id}" data-flidx="${i}" style="flex:1;height:16px;border-radius:3px;min-width:${CELL_MIN}px;transition:opacity .1s;${st}" onmousemove="flakyCellTip(event,'${j.id}',${i})" onmouseleave="flakyTipHide()" onclick="event.stopPropagation();openFlakyPop('${j.id}','${TH_COMMITS[i].pr}')"></div>`;
     }).join('');
     const rateTxt=gated
       ?`${prIn.length} of ${n} runs &middot; <span style="color:var(--muted)">too few to rate (needs 10)</span>`
-      :`<span style="color:${col==='#64748B'?'var(--ink)':col};font-weight:700">${Math.round(rate*100)}%</span> &middot; ${prIn.length} of ${n} runs &middot; <span style="color:var(--muted)" title="${WASTED_TIP}">${wasted}m wasted</span>`;
+      :`<span style="color:${col==='#64748B'?'var(--ink)':col};font-weight:700">${Math.round(rate*100)}%</span> &middot; ${prIn.length} of ${n} runs`;
     return `<div class="issue-row" data-flane="${j.lane}" onclick="openFlakyPop('${j.id}')" style="grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;cursor:pointer;opacity:${dim?0.28:1}">
       <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${j.name}</div>
       <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane${RUNNER_LABELS[j.id]?` &middot; <span class="mono" style="font-size:12px">${RUNNER_LABELS[j.id]}</span>`:''}</div></div>
@@ -2279,14 +2273,14 @@ function renderFlaky(){
   if(listed.length){
     h+=`<div data-flaxis="1" style="display:grid;grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;gap:16px;align-items:start;padding:0 17px">
       <div style="font-size:12px;color:var(--muted);text-align:right;padding-top:2px">merged pull request &rarr;</div>
-      <div style="display:flex;gap:2px">${cal.idxs.map(i=>`<div style="flex:1;min-width:${CELL_MIN}px;position:relative;height:88px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div><span style="position:absolute;top:7px;right:50%;transform:rotate(-60deg);transform-origin:top right;display:inline-block;font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap">${TH_COMMITS[i].pr} ${dayNum(TH_COMMITS[i].date)}</span></div>`).join('')}</div>
+      <div style="display:flex;gap:2px">${(()=>{const n=cal.idxs.length,step=n<=10?1:n<=20?2:n<=40?4:5;return cal.idxs.map((ci,vi)=>{const show=vi%step===0||vi===n-1;return`<div style="flex:1;min-width:${CELL_MIN}px;position:relative;height:${show?38:8}px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div>${show?`<div style="position:absolute;top:7px;left:50%;transform:translateX(-50%);text-align:center;font-size:10px;font-family:var(--mono);line-height:1.3;white-space:nowrap"><div style="font-weight:700;color:var(--ink)">${TH_COMMITS[ci].pr}</div><div style="color:var(--muted)">${dayNum(TH_COMMITS[ci].date)}</div></div>`:''}</div>`}).join('')})()}</div>
       <div style="font-size:12px;color:var(--muted);padding-top:2px">oldest &rarr; newest</div>
     </div>`;
   }
   h+='</div>';   // end of the scroller opened before the rows
   // Facts only under the strips; the rules (never-re-run cells, the 10-attempt gate, amber/red thresholds) live in the section's How to read panel.
   const footFacts=[];
-  if(listed.length)footFacts.push(`The other ${others} of ${JOBS.length} jobs needed no re-run ${cal.inRange}.`);
+  if(listed.length&&others>0)footFacts.push(`The other ${others} of ${JOBS.length} jobs had no failures ${cal.inRange}.`);
   if(gated)footFacts.push(`No rate is shown: this range has only ${n} merged pull requests, and a rate needs at least 10.`);
   if(footFacts.length)h+=`<div data-flfoot style="font-size:13px;color:var(--muted);margin-top:10px;line-height:1.55">${footFacts.join(' ')}</div>`;
   host.innerHTML=h;
@@ -2322,62 +2316,84 @@ function openFlakyTestPop(testName,jobId){
     return `<div style="display:grid;grid-template-columns:80px 64px 1fr auto;gap:12px;align-items:center;padding:8px 4px;border-top:1px solid var(--grid)">
       <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${e.date||''}</span>
       <span class="mono" style="font-size:13px;color:var(--ink2)">${ft.cause}</span>
-      <span class="mono" style="font-size:13px;color:var(--warn)">${e.wasted||0}m wasted</span></div>`;
+      </div>`;
   }).join('');
   $('#wkpop-body').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
       <div class="mono" style="font-size:16px;font-weight:700;color:var(--ink);overflow-wrap:anywhere">${ft.test}</div>
       <button onclick="closeWkPop()" style="background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer">&#10005;</button></div>
     <div style="font-size:13px;color:var(--ink2);margin-bottom:12px;line-height:1.5">
-      It failed on the first attempt and passed on a re-run in ${inPrs.length} of the ${cal.n} merged pull requests ${cal.inRange}, costing ${wasted} minutes of re-run time.
+      It failed on the first attempt and passed on a re-run in ${inPrs.length} of the ${cal.n} merged pull requests ${cal.inRange}.
       It runs in <span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.name}.
       Every failure so far reported the same line: <span class="mono" style="color:var(--ink)">${ft.cause}</span>.</div>
     ${inPrs.length?rowsH:'<div style="font-size:13px;color:var(--muted)">This test needed no re-run inside this date range.</div>'}
-    ${share.length?`<div style="font-size:13px;color:var(--ink2);margin-top:10px;line-height:1.5">${share.length===1?'One other test':share.length+' other tests'} failed in the same runs: ${share.map(x=>`<span class="mono">${x.test}</span>`).join(', ')}. They share those runs&rsquo; re-run minutes, so the minutes column cannot be added up.</div>`:''}
+    ${share.length?`<div style="font-size:13px;color:var(--ink2);margin-top:10px;line-height:1.5">${share.length===1?'One other test':share.length+' other tests'} also failed in the same runs: ${share.map(x=>`<span class="mono">${x.test}</span>`).join(', ')}.</div>`:''}
     <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--grid)">
       <button onclick="openFlakyPop('${jobId}')" style="font:600 13px var(--font);background:var(--elevated);border:1px solid var(--border);border-radius:8px;padding:6px 12px;color:var(--accent);cursor:pointer">Every re-run of ${j.name} &rarr;</button></div>
 `;
   $('#wkpop').style.display='flex';
 }
 
-function openFlakyPop(id){
+function openFlakyPop(id,pr){
   const j=RESCUES.find(r=>r.id===id);if(!j)return;
   $('#tip').style.display='none';
   const cal=flakyCalc();
   const evIn=j.events.filter(e=>cal.iset.has(thIdxOf(e.pr)));
-  const failIn=(j.fails||[]).filter(p=>cal.iset.has(thIdxOf(p)));
-  const wasted=Math.round(evIn.reduce((a,e)=>a+(e.wasted||0),0));
-  const prIn=[...new Set(evIn.map(e=>e.pr))];   // pull requests that needed a re-run, not re-runs
-  const ci=cal.n>=10?wilsonCI(prIn.length,cal.n):null;
-  const rateLead=ci
-    ? `That happened in ${prIn.length} of the ${cal.n} pull requests merged in this range, which is <b>${Math.round(prIn.length/cal.n*100)}%</b>.`
-    : `That happened in ${prIn.length} of the ${cal.n} pull requests merged in this range.`;
-  const wastedLead=evIn.length?` The re-runs used <b>${wasted} minute${wasted===1?'':'s'}</b> of runner time.`:'';
-  const rowsH=evIn.map(e=>{
-    const real=COMMITS.some(c=>'#'+c.hash===e.pr);
-    const chip=real?`<button onclick="closeWkPop();inspectPR('${e.pr.slice(1)}')" style="font:600 13px var(--mono);background:var(--elevated);border:1px solid var(--border);color:var(--accent);padding:3px 9px;border-radius:6px;cursor:pointer">${e.pr}</button>`
-      :`<span class="mono" style="font-size:13px;color:var(--ink2)">${e.pr}</span>`;
-    const tests=FLAKY_TESTS.filter(x=>x.job===id&&x.prs.includes(e.pr))
-      .map(x=>({name:x.test,cause:x.cause}));
-    const testList=tests.length
-      ? tests.map(t=>`<div class="mono" style="font-size:12px;line-height:1.5"><span style="color:var(--crit)">&#9679;</span> ${t.name}${t.cause?` <span style="color:var(--muted)">&mdash; ${t.cause}</span>`:''}</div>`).join('')
-      : `<div style="font-size:12px;color:var(--muted)">No test details available</div>`;
-    return `<div style="padding:10px 4px;border-top:1px solid var(--grid)">
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
-        <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${dayNum(e.date)}</span>
-        <span class="mono" style="font-size:13px;color:var(--warn);margin-left:auto" title="${WASTED_TIP}">${e.wasted==null?'time unknown':e.wasted+'m wasted'}</span>
-      </div>
-      <div style="margin-left:4px">${testList}</div>
-    </div>`;
-  }).join('');
+  const failIn=(j.fails||[]).filter(p=>cal.iset.has(thIdxOf(p.pr)));
+  const isGatePop=j.lane==='Hosted'||j.lane==='Build';
+  // When a specific PR is given (cell click), show tests for that PR only.
+  // When no PR (row click), show all tests for the job.
+  const testMap={};
+  FLAKY_TESTS.filter(x=>x.job===id).forEach(x=>{
+    if(pr){
+      // PR-specific: only tests that failed in this PR (or fallback to all for this job)
+      if(!x.prs.includes(pr))return;
+      const key=x.test;
+      if(!testMap[key])testMap[key]={name:x.test,cause:x.cause,count:1,prs:[pr]};
+    }else{
+      const inRange=x.prs.filter(p=>p!=='#null'&&cal.iset.has(thIdxOf(p)));
+      const total=inRange.length||x.prs.length;
+      if(!total)return;
+      const key=x.test;
+      if(!testMap[key])testMap[key]={name:x.test,cause:x.cause,count:0,prs:[]};
+      testMap[key].count+=total;
+      testMap[key].prs.push(...(inRange.length?inRange:x.prs));
+    }
+  });
+  // If PR-specific found nothing, fall back to all tests for this job
+  if(pr&&!Object.keys(testMap).length){
+    FLAKY_TESTS.filter(x=>x.job===id).forEach(x=>{
+      const key=x.test;
+      if(!testMap[key])testMap[key]={name:x.test,cause:x.cause,count:x.prs.length,prs:x.prs};
+    });
+  }
+  const testList=Object.values(testMap).sort((a,b)=>b.count-a.count||a.name.localeCompare(b.name));
+  const prLabel=pr?TH_COMMITS.find(c=>c.pr===pr):null;
+  const testListH=testList.length
+    ? testList.map(t=>`<div style="display:flex;align-items:baseline;gap:8px;padding:6px 4px;border-top:1px solid var(--grid)">
+        <span class="mono" style="font-size:13px;font-weight:600;color:var(--ink);flex:1;overflow-wrap:anywhere">${t.name}</span>
+        ${pr?'':`<span style="font-size:12px;color:var(--muted);white-space:nowrap">${t.count} time${t.count===1?'':'s'}</span>`}
+      </div>${t.cause?`<div style="font-size:12px;color:var(--muted);padding:0 4px 4px;margin-top:-2px">${t.cause}</div>`:''}`).join('')
+    : isGatePop
+      ? `<div style="font-size:13px;color:var(--muted);padding:8px 0">Gate job — no individual test results.</div>`
+      : `<div style="font-size:13px;color:var(--muted);padding:8px 0">Job failed due to setup or infrastructure issue, or test details were not collected.</div>`;
+  const subtitle=pr
+    ?`<span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane &middot; ${pr}${prLabel?' &middot; '+dayNum(prLabel.date):''}`
+    :`<span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane${evIn.length?` &middot; ${evIn.length} re-run${evIn.length===1?'':'s'}`:''}${failIn.length?` &middot; ${failIn.length} failure${failIn.length===1?'':'s'}`:''}`;
   $('#wkpop-body').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
       <div style="font-size:17px;font-weight:700;color:var(--ink)">${j.name}</div>
       <button onclick="closeWkPop()" style="background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer">&#10005;</button></div>
-    <div style="font-size:13px;color:var(--muted);margin-bottom:6px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane &middot; ${cal.label.toLowerCase()}</div>
-    <div style="font-size:13px;color:var(--ink2);margin-bottom:10px;line-height:1.55">This job needed a re-run to pass. ${rateLead}${wastedLead}</div>
-    ${evIn.length?rowsH:'<div style="font-size:13px;color:var(--muted)">No re-runs inside this date range.</div>'}
-    ${failIn.length?`<div style="font-size:13px;color:var(--crit);margin-top:10px;line-height:1.55"><b>${failIn.length}</b> other run${failIn.length===1?'':'s'} also failed but ${failIn.length===1?'was':'were'} not re-run: ${failIn.join(', ')}.</div>`:''}
+    <div style="font-size:13px;color:var(--muted);margin-bottom:6px">${subtitle}</div>
+    <div style="font-size:13px;color:var(--ink2);margin-bottom:10px">${testList.length?(pr?'Failed tests in this run:':'Failed tests in this job:'):''}</div>
+    ${testListH}
+    ${(()=>{
+      if(!pr)return '';
+      const prNum=pr.replace('#','');
+      if(!prNum||prNum==='null')return '';
+      const prUrl='https://github.com/'+REPO+'/pull/'+prNum;
+      return`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--grid)"><a href="${prUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;font-size:13px;cursor:pointer">View PR #${prNum} on GitHub &rarr;</a></div>`;
+    })()}
 `;
   $('#wkpop').style.display='flex';
 }
@@ -2669,14 +2685,13 @@ function adaptViews(v){
     const id=r.flavor?(r.worker==null?r.flavor:`${r.flavor}#${r.worker}`):jobSlug(r);
     const g=rescueByJob[id]=rescueByJob[id]||{id,name:r.job_name||id,lane:r.lane||'',events:[],fails:[]};
     if(!r.rescued){
-      if(!g.fails.includes('#'+r.pr))g.fails.push('#'+r.pr);
+      if(!g.fails.some(f=>f.pr==='#'+r.pr))g.fails.push({pr:'#'+r.pr,url:r.html_url||null});
       return;
     }
     g.events.push({pr:'#'+r.pr,date:(times[String(r.pr)]||'').split(' ').slice(0,2).join(' '),
-      // null means the failed job never held a runner, so there is nothing to measure. Passing
-      // it through mins() would turn "unknown" into a confident 0m.
       wasted:r.wasted_seconds==null?null:mins(r.wasted_seconds),
-      cause:r.failed_conclusion||r.final_conclusion||''});
+      cause:r.failed_conclusion||r.final_conclusion||'',
+      url:r.html_url||null});
   });
 
   // Two things this list has to get right, both invisible while the view is empty.
@@ -2687,11 +2702,13 @@ function adaptViews(v){
   //   2. The job id has to be the same id the rescue groups use, or the card cannot find the job
   //      the test belongs to and drops the row. A flavourless row falls back to the job name, the
   //      same way jobSlug now resolves it.
-  const rescuedKeys=new Set(rescues.filter(r=>r.rescued)
+  // Include test failures from ALL events (rescued + failed-never-rerun) so the
+  // tooltip can show which tests failed regardless of whether the job was re-run.
+  const failedKeys=new Set(rescues
     .map(r=>`${r.run_id}|${r.job_name}|${r.failed_attempt}`));
   const flakyByTest={};
   rescueTests.forEach(x=>{
-    if(!rescuedKeys.has(`${x.run_id}|${x.job_name}|${x.failed_attempt}`))return;
+    if(!failedKeys.has(`${x.run_id}|${x.job_name}|${x.failed_attempt}`))return;
     const key=x.classname?`${x.classname}.${x.name}`:x.name;
     // jobSlug prefers `name`, and in this table `name` is the TEST's name, not the job's. Hand it
     // the job name on its own so a flavourless row slugs to the id its rescue group uses.
@@ -2713,7 +2730,7 @@ function applyModel(m,generatedAt){
   RUN_IDS=m.runIds;TRIGGERS=m.triggers;PROBE_Q=m.probeQ;
   TEST_COUNTS=m.counts;WK_GROUPS=m.wkGroups;
   TH_CATEGORIES=m.thCategories;TH_COMMITS=m.thCommits;
-  RESCUES=m.rescues;FLAKY_TESTS=m.flaky;
+  RESCUES=m.rescues;FLAKY_TESTS=m.flaky.length?m.flaky:FLAKY_TESTS;
   TESTS={};                                   // per-test detail is not in the month views
   STEPS={};                                   // nor are per-step names and timings
   if(generatedAt){const d=new Date(generatedAt);if(!isNaN(d))TODAY=d}

@@ -1315,7 +1315,15 @@ def build_flaky_view(data: MonthData) -> dict[str, Any]:
               "html_url": event.html_url,
           }
       )
-      for test in _failed_tests(failed_attempt, flavor, worker):
+      # Primary: tests that failed on the failed attempt (stored by the
+      # tick.py fix that harvests artifacts for every completed attempt).
+      # Fallback: if no test rows exist on the failed attempt — artifacts
+      # expired before the tick ran, or the job died before pytest — there
+      # is nothing to fall back to.  The newest attempt's tests all passed
+      # (that is what "rescued" means), so _failed_tests returns nothing
+      # useful there either.
+      tests = _failed_tests(failed_attempt, flavor, worker)
+      for test in tests:
         test_records.append(
             {
                 "run_id": run_id,

@@ -619,6 +619,25 @@ class Tick:
       self._append(month, rows.KIND_SUITE, self._suite_rows(newest_payload, run_tests))
       self._append(month, rows.KIND_TEST, self._kept_test_rows(newest_payload, run_tests))
 
+    # Also harvest tests for earlier failed attempts so rescue_tests can name
+    # the tests that failed.  The newest attempt's results are already stored
+    # above; this pass adds the ones that broke on an earlier try.  Only runs
+    # with more than one attempt (i.e. rescues) trigger the extra download.
+    if len(attempts_jobs) > 1:
+      for attempt_num in sorted(attempts_jobs):
+        if attempt_num == newest:
+          continue  # already harvested above
+        attempt_payload = None
+        for payload in to_write:
+          if int(payload.get("run_attempt") or 1) == attempt_num:
+            attempt_payload = payload
+            break
+        if attempt_payload is None:
+          continue
+        failed_tests = self._harvest_tests(listed, run_id, attempts_jobs[attempt_num])
+        if failed_tests is not None:
+          self._append(month, rows.KIND_TEST, self._kept_test_rows(attempt_payload, failed_tests))
+
     rescues = rows.rescue_rows(newest_payload, attempts_jobs, collected_at=self.collected_at)
     rescues += rows.failed_never_rescued_rows(newest_payload, attempts_jobs, collected_at=self.collected_at)
     self._append(month, rows.KIND_RESCUE, rescues)
