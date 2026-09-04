@@ -5,7 +5,7 @@ This guide documents all steps required to get to a runnable stage for distribut
 The system architecture consists of:
 - **Orchestrator**: Tunix distributed runtime (`K8sExecutor`) driving GRPO sampling, reward scoring (GSM8K), and policy step coordination.
 - **Trainer**: MaxText training engine running on TPU pods under the Pathways runtime.
-- **Rollout Worker**: vLLM (`InprocessVllmSamplerAdapter`) serving on TPU pods under Pathways.
+- **Rollout Worker**: vLLM using `tpu-inference`'s `RLVllmSampler` (`VllmSamplerAdapter` via `SAMPLER=vllm`) serving on TPU pods under Pathways.
 - **Weight Transfer**: Raiden FFI weight synchronization performing direct TPU-to-TPU host memory / DMA transfer between Trainer and Rollout.
 
 ---
@@ -56,6 +56,7 @@ MAXTEXT_MODEL_NAME=qwen3-0.6b \
 TRAINER_BACKEND=maxtext \
 MAXTEXT_CKPT=gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items \
 WEIGHT_SYNC_MODE=raiden \
+SAMPLER=vllm \
 VERIFY_WEIGHTS=true \
 DEBUG=1 \
 MAX_STEPS=2 \
@@ -66,21 +67,30 @@ MAXTEXT_OUTPUT_DIR=/tmp/maxtext_output \
 bash tunix/experimental/examples/math_gsm8k_dist/k8s_launcher.sh --target=bodaborg-v5p-nap --command=start
 ```
 
+> [!IMPORTANT]
+> **Use `SAMPLER=vllm` (`RLVllmSampler`)**: Always ensure `SAMPLER=vllm` is set (now defaulted in `k8s_launcher.sh`). This activates `VllmSamplerAdapter` wrapping `tpu_inference.rl.RLVllmSampler`, which binds Raiden in the TPUWorker subprocess, clears/reinitializes the KV cache (`free_kv_cache=True` in `pre_weight_sync`, `finish_weight_update` in `post_weight_sync`), and waits on the device transfer barrier (`raiden_h2d`). Running with `SAMPLER=inprocess_vllm` bypasses engine-level weight updates and causes the rollout workers to generate character gibberish.
+
+
 ---
 
 ### 1.4 Running Qwen3.5-35B (MoE)
 
 **Hardware Topology**:
-- Trainer: 1x `v5p-128` (64 TPU chips) or 1x `v5p-64` (32 TPU chips)
-- Rollout: 1x `v5p-32` (16 TPU chips) or 1x `v5p-64` (32 TPU chips)
+- **Lean Configuration (Recommended for scarce resources / NAP)**:
+  - Trainer: 1x `v5p-16` (`tpuv5:2x2x2`, 8 TPU chips)
+  - Rollout: 1x `v5p-8` (`tpuv5:2x2x1`, 4 TPU chips)
+  - *Total: 12 TPU chips* (Qwen3.5-35B has ~35B total / ~3B active params; at ~70 GB bfloat16 weights, it fits comfortably within the 95 GB/chip HBM of v5p).
+- **Scaled Configuration (Optional for higher throughput)**:
+  - Trainer: 1x `v5p-64` (32 chips) or 1x `v5p-128` (64 chips)
+  - Rollout: 1x `v5p-32` (16 chips) or 1x `v5p-64` (32 chips)
 
 **Key Configuration Differences for 35B**:
 1. `MAXTEXT_MODEL_NAME=qwen3.5-35b-a3b` uses the MoE architecture defined in `maxtext/configs/models/qwen3.5-35b-a3b.yml`.
-2. `TRAINER_MESH_TP=8` and `ROLLOUT_MESH_TP=8`: Sets tensor parallelism to 8 across the 256 routed experts and GDN linear attention layers.
-3. `MAXTEXT_PADDED_MOE_MLP_DIM`: For TP=8 on Qwen MoE architectures, intermediate dimension must align to TPU matrix multiplication blocks (e.g., padded to 1024 or 512).
+2. `TRAINER_MESH_TP=1` and `TRAINER_MESH_FSDP=8` for the 8-chip trainer slice.
+3. `ROLLOUT_MESH_TP=2` (or `4`) for the 4-chip rollout slice.
 4. `use_standalone_converter`: Wires the Qwen3.5 standalone converter (merged in MaxText PR #5073) into rollout weight synchronization.
 
-**Execution Command**:
+**Execution Command (Lean 12-Chip Configuration)**:
 
 ```bash
 MODEL_NAME=qwen3.5-35b \
@@ -88,11 +98,13 @@ MODEL_ID=Qwen/Qwen3.5-35B-A3B \
 MAXTEXT_MODEL_NAME=qwen3.5-35b-a3b \
 TRAINER_BACKEND=maxtext \
 MAXTEXT_CKPT=gs://<YOUR_BUCKET>/qwen3.5-35b/pathways-compat/0/items \
-TRAINER_MESH_TP=8 \
-TRAINER_MESH_EXPERT=1 \
-ROLLOUT_MESH_TP=8 \
-MAXTEXT_PADDED_MOE_MLP_DIM=1024 \
+TRAINER_TPU_SLICE=tpuv5:2x2x2 \
+TRAINER_MESH_FSDP=8 \
+TRAINER_MESH_TP=1 \
+ROLLOUT_TPU_SLICE=tpuv5:2x2x1 \
+ROLLOUT_MESH_TP=2 \
 WEIGHT_SYNC_MODE=raiden \
+SAMPLER=vllm \
 VERIFY_WEIGHTS=true \
 DEBUG=1 \
 MAX_STEPS=2 \
@@ -222,20 +234,17 @@ Check and cherry-pick the following commits (all available on branch `igorts/qwe
    - Adds Pathways rollout jobset templates (`jobset.pathways.yaml`).
    - Adds `Dockerfile.maxtext` multi-package container build.
 
-4. **Commit `69be4481`** (*Normalize base parameter prefix in Raiden sync*):
-   - **Why needed**: `TunixMaxTextAdapter` creates parameters rooted under `['base']` (e.g. `['base']['decoder']...`) while vLLM and HuggingFace models use `['model']`. Normalizes names in `raiden_synchronizer.py` so the controller can pair trainer source slices with rollout destination slices.
-
-5. **Commit `72f7ad67`** (*Allow synchronous submit within running loops and use absolute output path*):
+4. **Commit `732d059b`** (*Allow synchronous submit within running loops and use absolute output path*):
    - **Why needed**:
      - `GrpcRemoteActorHandle.submit()` dispatches to a dedicated background loop via `run_coroutine_threadsafe()`; removes restrictive assertion that caused `RuntimeError` when called from async worker threads.
      - Normalizes `maxtext_output_directory` to an absolute path in `run_trainer_node.py` to prevent Orbax checkpoint path failures.
 
-6. **Commit `d4349c9c`** (*Update launcher defaults and container bootstrap patches*):
-   - **Why needed**: Sets `MAXTEXT_OUTPUT_DIR=/tmp/maxtext_output` by default and injects `AttentionSpec.num_states` compatibility shim into container rollout startup command.
+5. **Commit `8c599eb6`** (*Update launcher defaults, sampler, and bodaborg slice topology*):
+   - **Why needed**: Sets `MAXTEXT_OUTPUT_DIR=/tmp/maxtext_output` by default, sets `SAMPLER=vllm` by default across launcher scripts to ensure `RLVllmSampler` is used, configures `bodaborg-v5p-nap` trainer slice to `tpuv5:2x2x2` (8 chips) to match the cluster reservation, defaults rollout on bodaborg to `jobset.tpu.yaml` to avoid Pathways PJRT array mismatch, and injects `KVCacheTensor.layers` and `AttentionSpec.num_states` compatibility shims into container rollout startup command.
 
 **How to apply all in one rebase**:
 ```bash
-git fetch https://github.com/igorts-git/tunix.git igorts/qwen35-run
+git fetch https://github.com/google/tunix.git igorts/qwen35-run
 git rebase FETCH_HEAD
 ```
 
@@ -321,28 +330,34 @@ rsync -av --delete --exclude='.git' --exclude='venv' --exclude='.venv' ~/git/tpu
 rsync -av --delete --exclude='.git' --exclude='venv' --exclude='.venv' ~/git/maxtext/ .docker/maxtext/
 ```
 
-#### Step 2: Build the Image with Podman or Docker
+#### Step 2: Build the Image with Docker
 
 ```bash
 REGISTRY="europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext"
 TAG="$(whoami)-maxtext:$(date +%Y%m%d)"
 FULL_IMAGE="${REGISTRY}/${TAG}"
 
-podman build -t "${FULL_IMAGE}" -f Dockerfile.maxtext .
+docker build -t "${FULL_IMAGE}" -f Dockerfile.maxtext .
 ```
 
 #### Step 3: Push to Artifact Registry
 
-Authenticate with an ephemeral Google Cloud access token and push:
+Authenticate Docker with Google Cloud Artifact Registry and push:
 
 ```bash
-gcloud auth print-access-token | podman login \
-  --authfile=/tmp/podman_auth.json \
+# Configure Docker credential helper for Artifact Registry:
+gcloud auth configure-docker europe-west4-docker.pkg.dev
+
+docker push "${FULL_IMAGE}"
+```
+
+Alternatively, authenticate with an ephemeral access token:
+```bash
+gcloud auth print-access-token | docker login \
   -u oauth2accesstoken \
   --password-stdin europe-west4-docker.pkg.dev
 
-podman push --authfile=/tmp/podman_auth.json "${FULL_IMAGE}"
-rm -f /tmp/podman_auth.json
+docker push "${FULL_IMAGE}"
 ```
 
 Now you can point `TUNIX_IMAGE=${FULL_IMAGE}` in your `k8s_launcher.sh` runs!
