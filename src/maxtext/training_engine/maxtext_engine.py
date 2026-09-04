@@ -61,6 +61,10 @@ _MODEL_STATE_KEY = "model"
 # Where the same split puts the `nnx.Optimizer`, including the optax state Zero-1 shards.
 _OPTIMIZER_STATE_KEY = "optimizer"
 
+# The kernels an update is made of, in the order a step runs them. `compile_kernels()` is
+# keyed by these, and so is the ahead-of-time entry point in `maxtext_engine_compile`.
+KERNEL_NAMES = ("fwd_bwd", "fwd_bwd_accum", "update")
+
 _PURE_STATE_FALLBACK_WARNING = (
     "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
     "update will re-walk the NNX module graph. That is correct but slow -- the two "
@@ -75,14 +79,16 @@ def _is_jax_dynamic(value: Any) -> bool:
   A `gen_model_input_fn` returns the loss function's keyword arguments, and only some of
   them are arrays. Tunix's GRPO adapter, for instance, returns a `TrainExample` alongside
   an `algo_config` object and integer `pad_id`/`eos_id`. The arrays must be traced; the
-  rest must be closed over, or `jax.jit` rejects the call outright.
+  rest must be closed over, or `jax.jit` rejects the call outright. `jax.ShapeDtypeStruct`
+  counts too: `compile_kernels()` drives the whole path on shapes alone, and an aval closed over as a
+  constant cannot be traced at all.
   """
   leaves = jax.tree.leaves(value)
   if not leaves:
     # An all-`None` subtree (e.g. an unset `ref_per_token_logps`) flattens to nothing. It
     # carries no data either way, so tracing it is harmless and keeps the treedef intact.
     return True
-  return any(isinstance(leaf, (jax.Array, np.ndarray, np.generic)) for leaf in leaves)
+  return any(isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct, np.ndarray, np.generic)) for leaf in leaves)
 
 
 def _split_static_and_dynamic(batch: Any) -> tuple[Any, dict[str, Any]]:
@@ -348,6 +354,13 @@ def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutpu
   )
 
 
+def _to_aval(value: Any) -> Any:
+  """Returns `value` as a `jax.ShapeDtypeStruct` on the sharding it carries, or unchanged if it has no shape."""
+  if not hasattr(value, "shape") or not hasattr(value, "dtype"):
+    return value
+  return jax.ShapeDtypeStruct(value.shape, value.dtype, sharding=getattr(value, "sharding", None))
+
+
 @struct.dataclass(frozen=True, kw_only=True)
 class RouterReplayTrainerPayload(abstract_engine.TrainerPayload):
   """A TrainerPayload extension carrying forced router-replay expert decisions.
@@ -538,26 +551,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # every eager caller compile or make a deferred compile never happen.
     self._compile_requested = False
     self._compiled_signature: Any = None
+    # `{kernel name: the jitted wrapper}` staged by the last `_compile_for_batch`; empty until
+    # then, and only ever read straight after one, since a recompile replaces every entry.
+    self._jitted_kernels: dict[str, Any] = {}
     self._compiled_eval: Any = None
     self._compiled_eval_signature: Any = None
     self._signature_compare_warned: bool = False
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
-    model_or_model_mesh_pair = model_creation_utils.from_pretrained(
-        config=self._config,
-        mesh=self._mesh,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rng_key=self._init_rng,
-        wrap_with_tunix_adapter=wrap_with_tunix_adapter,
-        tokenizer_pad_id=tokenizer_pad_id,
-    )
-    # `from_pretrained` returns `(model, mesh)` when it had to derive the mesh itself, and just the model
-    # when one was supplied. Adopt the derived mesh so `self._model` is always a module and `compile()` can
-    # still build shardings.
-    if self._mesh is None:
-      self._model, self._mesh = model_or_model_mesh_pair
-    else:
-      self._model = model_or_model_mesh_pair
+    self._model = self._build_model(wrap_with_tunix_adapter, tokenizer_pad_id)
     self._state: Any = None
     # Pure-pytree mirror of the model and train state, carried across steps so the step path
     # never re-walks the module graph. `None` means "not cached".
@@ -592,11 +594,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # `checkpointing.CheckpointState` expects an nnx.Optimizer too, so wrap it here. `wrt=nnx.Param`
     # covers every parameter, which is correct only because LoRA is rejected above.
     self._learning_rate_schedule, tx = train_utils.create_training_optimizer(self._config, self._model)
-    self._optimizer = nnx.Optimizer(self._model, tx, wrt=nnx.Param)
+    self._optimizer = self._build_optimizer(tx)
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(
-        checkpoint_dir=self._config.checkpoint_dir,
+        checkpoint_dir=self._checkpoint_dir(),
         config=self._config,
     )
     self._metrics_recorder = metrics_module.MetricsRecorder()
@@ -604,6 +606,35 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._metrics_logger = metrics_module.MetricsLogger(config=self._config)
     self._throttler = inflight_throttler.InflightThrottler(config=self._config, metrics_logger=self._metrics_logger)
     self._raiden_sync: Any = None
+
+  def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
+    """Returns the model to train, adopting a mesh when this engine was given none."""
+    model_or_model_mesh_pair = model_creation_utils.from_pretrained(
+        config=self._config,
+        mesh=self._mesh,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rng_key=self._init_rng,
+        wrap_with_tunix_adapter=wrap_with_tunix_adapter,
+        tokenizer_pad_id=tokenizer_pad_id,
+    )
+    # `from_pretrained` returns `(model, mesh)` only when it had to derive the mesh itself. Adopt the
+    # derived one so `self._model` is always a module and `compile()` can still build shardings.
+    if self._mesh is not None:
+      return model_or_model_mesh_pair
+    model, self._mesh = model_or_model_mesh_pair
+    return model
+
+  def _build_optimizer(self, tx: Any) -> Any:
+    """Returns the `nnx.Optimizer` for `self._model`.
+
+    A subclass that cannot allocate moments overrides this, and may install `self._state` and
+    rebind `self._model` on the way: `__init__` does not touch either again.
+    """
+    return nnx.Optimizer(self._model, tx, wrt=nnx.Param)
+
+  def _checkpoint_dir(self) -> str:
+    """Returns the directory this engine checkpoints through; an empty string disables Orbax entirely."""
+    return self._config.checkpoint_dir
 
   @property
   def model(self) -> Any:
@@ -883,6 +914,42 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     return jax.tree.map(target, params_pure, params_shardings)
 
+  def _place_leaf(self, leaf: Any, target: jax.sharding.Sharding) -> Any:
+    """Returns one train-state leaf committed to `target`."""
+    return jax.device_put(leaf, target)
+
+  def _place_state_on_mesh(self) -> None:
+    """Commits every train-state leaf to this mesh, in place, before anything is compiled.
+
+    `nnx.Optimizer` builds optax's `count` and its own `step` with `jnp.zeros` under no mesh, so
+    they reach the first update uncommitted and come back from it committed -- a second argument
+    signature, and a second compile of the largest kernel in the engine. Settling them up front
+    makes steps one and two the same program. Also covers state that arrives later, from a
+    restore or a public setter.
+    """
+    if self._mesh is None or self._state is None:
+      return
+    moved = False
+
+    def place(leaf):
+      nonlocal moved
+      # `device_put` would turn a Python scalar in the state into a device array.
+      if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
+        return leaf
+      leaf_sharding = getattr(leaf, "sharding", None)
+      if isinstance(leaf_sharding, jax.sharding.NamedSharding) and leaf_sharding.mesh == self._mesh:
+        return leaf
+      moved = True
+      return self._place_leaf(leaf, self._mesh_sharding(leaf))
+
+    placed = jax.tree.map(place, self._read_state_pure())
+    if not moved:
+      return
+    with self._sharding_ctx():
+      nnx.update(self._state, placed)
+    self._invalidate_pure_state()
+    self._refresh_pure_state()
+
   def _shard_optimizer_state_over_data(self) -> None:
     """Moves the optimizer's parameter-shaped state onto the Zero-1 layout, in place.
 
@@ -913,7 +980,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if target is None:
         return leaf
       moved = True
-      return jax.device_put(leaf, target)
+      return self._place_leaf(leaf, target)
 
     optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
     if not moved:
@@ -1205,6 +1272,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # The only place the graphs are walked: a recompile is when they may legitimately have
     # changed shape, and everything after is maintained as plain pytrees.
     self._refresh_pure_state()
+    # Before the Zero-1 pass and the shardings read off the state below.
+    self._place_state_on_mesh()
     # Before the shardings below are read off the state: this is what puts the optimizer
     # moments on the Zero-1 layout, and `state_mesh_shardings` has to see them there.
     self._shard_optimizer_state_over_data()
@@ -1302,6 +1371,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         out_shardings=update_out_shardings,
         donate_argnums=(0,),
     )
+    # The same three wrappers by name, which is what `_lower_kernels()` traces: `compile()` overwrites
+    # the attributes above with the executables they lower to, and an executable cannot be
+    # lowered again.
+    self._jitted_kernels = {
+        "fwd_bwd": self._compiled_fwd_bwd,
+        "fwd_bwd_accum": self._compiled_fwd_bwd_accum,
+        "update": self._compiled_update,
+    }
     self._compiled_signature = _batch_signature(dynamic_batch, static_batch)
     self._compiled = True
 
@@ -1329,14 +1406,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     )
     self._compiled_eval_signature = _batch_signature(dynamic_batch, static_batch)
 
-  def compile(self, dummy_data: abstract_engine.TrainerPayload) -> None:
-    """Triggers SPMD JIT compilation of fwd_bwd and update steps.
+  def compile(
+      self,
+      dummy_data: abstract_engine.TrainerPayload,
+      compiler_options: dict[str, Any] | None = None,
+  ) -> None:
+    """Triggers SPMD compilation of the fwd_bwd, update and eval steps.
 
     Args:
       dummy_data: Sample TrainerPayload providing representative tensor shapes. Its shapes
         must match the real batches, or the first `fwd_bwd` simply recompiles. When it is
         `None` the engine cannot know the input shapes, so it stays on the eager path and
         compiles lazily on the first `fwd_bwd` instead.
+      compiler_options: Optional dictionary of compilation options passed to XLA compiler.
     """
     # Recorded even when compilation is deferred: it is what tells `fwd_bwd` the caller
     # wants the compiled path at all. Engines that never call `compile` stay eager.
@@ -1346,18 +1428,116 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if dummy_data is None:
       # Callers driving a generic worker lifecycle (Tunix's `TrainerWorker.compile`) pass
-      # nothing to compile against. Deferring costs nothing measurable: `jax.jit` is lazy,
-      # so even with a payload this method only stages the wrappers and XLA still runs on
-      # the first `fwd_bwd`. Logged at info, not warning -- the first `fwd_bwd` compiles
-      # against the real batch, whose shapes are right by construction.
+      # nothing to compile against. When dummy_data is None the engine cannot know the
+      # input shapes, so it compiles against the first fwd_bwd payload instead.
       logging.info(
           "MaxTextTrainingEngine.compile() was called without dummy_data; compiling "
           "against the first fwd_bwd payload instead."
       )
       return
 
+    compiled = self.compile_kernels(dummy_data, compiler_options)
+    self._compiled_fwd_bwd = compiled["fwd_bwd"]
+    self._compiled_fwd_bwd_accum = compiled["fwd_bwd_accum"]
+    self._compiled_update = compiled["update"]
+    self._compile_eval(dummy_data, compiler_options)
+
+  def compile_kernels(
+      self,
+      dummy_data: abstract_engine.TrainerPayload,
+      compiler_options: dict[str, Any] | None = None,
+  ) -> dict[str, jax.stages.Compiled]:
+    """Lowers and compiles every kernel, and hands them back rather than installing them.
+
+    The body of `compile()` with the engine's own bookkeeping left out, so a caller that
+    only wants the executables -- the ahead-of-time path, which compiles for a topology it
+    cannot run on -- gets them from the same code the live path uses.
+
+    Args:
+      dummy_data: As `compile()`'s, but required: there is no first `fwd_bwd` to defer to.
+      compiler_options: XLA options, defaulting to `config.compile_xla_flags`.
+
+    Returns:
+      `{kernel name: jax.stages.Compiled}`, keyed by `KERNEL_NAMES`.
+    """
+    options = self._xla_options(compiler_options)
+    lowered = self._lower_kernels(dummy_data)
+    with self._sharding_ctx():
+      return {name: lowered[name].compile(compiler_options=options) for name in KERNEL_NAMES}
+
+  def _xla_options(self, compiler_options: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Returns the XLA options to compile with: the caller's, or `config.compile_xla_flags`."""
+    if compiler_options is None and getattr(self._config, "compile_xla_flags", ""):
+      return max_utils.parse_libtpu_flags_to_dict(self._config.compile_xla_flags)
+    return compiler_options
+
+  def _compile_eval(self, dummy_data: abstract_engine.TrainerPayload, compiler_options: dict[str, Any] | None) -> None:
+    """Compiles the forward-only eval kernel, so the first `eval_step` does not stall on XLA.
+
+    The eval kernel is not part of an update, so it is not one of `KERNEL_NAMES` and the
+    ahead-of-time report does not cover it; this is only for the live engine. An eval batch
+    shaped unlike `dummy_data` still recompiles inside `eval_step`, as an unforeseen training
+    batch does inside `fwd_bwd`.
+    """
+    dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
+    self._compile_eval_for_batch(dynamic_batch, static_batch)
+    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    with self._sharding_ctx():
+      # `_compile_eval_for_batch` leaves the jitted wrapper here; lowering it replaces it with
+      # what it compiles to, which is what `eval_step` then dispatches through.
+      self._compiled_eval = self._compiled_eval.lower(
+          jax.tree.map(_to_aval, params_pure),
+          jax.tree.map(_to_aval, rest_pure),
+          jax.tree.map(_to_aval, dynamic_batch),
+      ).compile(compiler_options=self._xla_options(compiler_options))
+
+  def _lower_kernels(self, dummy_data: abstract_engine.TrainerPayload) -> dict[str, jax.stages.Lowered]:
+    """Lowers every kernel this engine runs, the half of `compile_kernels` before XLA runs.
+
+    Not public: `jax.jit` offers no way to compile without lowering first, so this exists because
+    `compile_kernels` needs it, not because a caller does. Routes through `_compile_for_batch`,
+    the same method the live path calls on its first `fwd_bwd`, so the shapes and the shardings
+    are the live ones by construction. The accumulating kernel is lowered even for a
+    single-micro-batch run, where the live engine never traces it: omitting the kernel that holds
+    the extra parameter-sized accumulator would understate the peak that decides whether a
+    configuration fits.
+
+    Args:
+      dummy_data: One micro-batch, real or abstract, whose structure must match the batches the
+        engine will be given, exactly as `compile()`'s does.
+
+    Returns:
+      `{kernel name: jax.stages.Lowered}`, keyed by `KERNEL_NAMES`.
+
+    Raises:
+      ValueError: If `dummy_data` is None.
+    """
+    if dummy_data is None:
+      raise ValueError(
+          "compile_kernels() needs a dummy payload -- unlike compile(), it cannot defer to the first real batch."
+      )
     dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
     self._compile_for_batch(dynamic_batch, static_batch)
+
+    state_aval = jax.tree.map(_to_aval, self._read_state_pure())
+    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    params_aval = jax.tree.map(_to_aval, params_pure)
+    rest_aval = jax.tree.map(_to_aval, rest_pure)
+    batch_aval = jax.tree.map(_to_aval, dynamic_batch)
+    mean_loss_aval = jax.ShapeDtypeStruct((), jnp.float32) if self._config.skip_step_on_spikes else None
+
+    with self._sharding_ctx():
+      fwd_bwd = self._jitted_kernels["fwd_bwd"].lower(params_aval, rest_aval, batch_aval)
+      # Off the kernel's own outputs, not predicted from the parameters: the gradients differ by
+      # `grad_dtype` and, under deferral, an `unreduced` tag.
+      _, _, _, grads_aval, denominator_aval = fwd_bwd.out_info
+      return {
+          "fwd_bwd": fwd_bwd,
+          "fwd_bwd_accum": self._jitted_kernels["fwd_bwd_accum"].lower(
+              params_aval, rest_aval, batch_aval, grads_aval, denominator_aval
+          ),
+          "update": self._jitted_kernels["update"].lower(state_aval, grads_aval, denominator_aval, mean_loss_aval),
+      }
 
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
