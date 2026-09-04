@@ -1885,10 +1885,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     """
     token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
     engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
-    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+    if token_params_is_stub or engine_api_is_stub:
       raise RuntimeError(
-          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; get_tokenizer is unsupported. "
-          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
+          "JetStream is not installed or stubbed; get_tokenizer is unsupported. "
+          "Install optional dependencies with: install_tpu_pre_train_extra_deps --with-tf"
       )
     try:
       # pyrefly: ignore[missing-attribute]
@@ -1909,10 +1909,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     """Return a tokenizer"""
     token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
     engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
-    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+    if token_params_is_stub or engine_api_is_stub:
       raise RuntimeError(
-          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; build_tokenizer is unsupported. "
-          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
+          "JetStream is not installed or stubbed; build_tokenizer is unsupported. "
+          "Install optional dependencies with: install_tpu_pre_train_extra_deps --with-tf"
       )
     if metadata.tokenizer_type == TokenizerType.tiktoken:  # pyrefly: ignore[missing-attribute]
       return token_utils.TikToken(metadata)
