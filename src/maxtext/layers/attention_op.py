@@ -659,7 +659,9 @@ class AttentionOp(nnx.Module):
     self.chunk_attn_window_size = chunk_attn_window_size
     self.use_ragged_attention = use_ragged_attention
     self.ragged_block_size = ragged_block_size
-    self.rngs = rngs
+    # Only the cudnn_flash_te bridge draws from these, and only with attention dropout
+    # on; holding them otherwise leaves dead RNG state in the model.
+    self.rngs = rngs if dropout_rate > 0.0 else None
     if self.attention_kernel == "flash" and tokamax_ring_attention.is_context_parallel_ring_requested(self.config):
       target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
       if target_hardware == "tpu":
@@ -2449,6 +2451,8 @@ class AttentionOp(nnx.Module):
             "use attention=dot_product."
         )
     # Handle packing configurations
+    # Only the attention-sinks path lazy_inits, and only it reads this.
+    dummy_attn_mask = None
     if self.config.packing and self.config.dataset_type != "synthetic":
       if using_context_parallelism and not using_load_balanced_ring_cp:
         raise ValueError("Packing is only supported for load balanced ring attention with context parallelism.")
@@ -2469,9 +2473,8 @@ class AttentionOp(nnx.Module):
           return SequenceDescriptor.from_segment_ids_and_pos(segment_ids=segment_ids, segment_pos=segment_positions)
 
       attn_mask = _sequence_descriptor(decoder_segment_ids)
-      # Create dummy SequenceDescriptor for lazy_init
-      dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      dummy_attn_mask = _sequence_descriptor(dummy_segment_ids)
+      if sinks is not None:
+        dummy_attn_mask = _sequence_descriptor(jnp.ones(shape=query.shape[:2], dtype=jnp.int32))
       max_segments_per_seq = self.config.max_segments_per_seq
     elif using_context_parallelism:
       if self.attention_type == AttentionType.LOCAL_SLIDING:
@@ -2481,12 +2484,10 @@ class AttentionOp(nnx.Module):
         )
       # Context parallelism without packing: only supports causal masking, but not sliding window attention
       attn_mask = None
-      dummy_attn_mask = None
       mask_type = "causal"
     elif model_mode == MODEL_MODE_PREFILL and self.config.attention_kernel == "cudnn":
       # Prefill with CUDNN attention does not support packing or context parallelism.
       attn_mask = None
-      dummy_attn_mask = None
       mask_type = "causal"
     else:
       # Dense BSHD layout: no context parallelism, and either packing is off or
@@ -2499,10 +2500,11 @@ class AttentionOp(nnx.Module):
       if decoder_segment_ids is None:
         # Without segment ids every token is valid, and FULL would yield no mask at all.
         decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      dummy_attn_mask = jnp.zeros(
-          (1, 1, 1, self.max_target_length, self.max_target_length),
-          dtype=jnp.uint8,
-      )
+      if sinks is not None:
+        dummy_attn_mask = jnp.zeros(
+            (1, 1, 1, self.max_target_length, self.max_target_length),
+            dtype=jnp.uint8,
+        )
       mask_attention_type = self.attention_type
       if mask_attention_type == AttentionType.LOCAL_SLIDING:
         mask_attention_type = AttentionType.FULL
@@ -2536,27 +2538,35 @@ class AttentionOp(nnx.Module):
         softmax_type="learnable" if sinks is not None else "vanilla",
     )
 
-    dpa_layer = nnx_wrappers.ToNNX(dpa_layer, rngs=self.rngs)
-    dummy_query_prefill = jnp.zeros(
-        (1, self.max_target_length, self.num_query_heads, self.config.head_dim),
-        dtype=self.dtype,
-    )
-    dummy_key_prefill = jnp.zeros(
-        (1, self.max_target_length, self.num_kv_heads, self.config.head_dim),
-        dtype=self.dtype,
-    )
-    dummy_value_prefill = jnp.zeros(
-        (1, self.max_target_length, self.num_kv_heads, self.config.head_dim),
-        dtype=self.dtype,
-    )
-
-    dpa_layer.lazy_init(
-        dummy_query_prefill,
-        dummy_key_prefill,
-        dummy_value_prefill,
-        sequence_descriptor=dummy_attn_mask,
-    )
+    # lazy_init only for attention sinks: that is the one case where TE declares a variable
+    # (softmax_offset, which the graft below needs). Otherwise it declares none, and priming
+    # the bridge only bought an extra full-length forward trace per layer.
+    bridge_rngs = self.rngs
+    if sinks is not None and bridge_rngs is None:
+      # self.rngs is None without attention dropout, but lazy_init still needs a params key.
+      # The value it draws is overwritten by the graft below, and this Rngs is local to the
+      # call, so it never reaches the model state.
+      bridge_rngs = nnx.Rngs(params=0)
+    dpa_layer = nnx_wrappers.ToNNX(dpa_layer, rngs=bridge_rngs)
     if sinks is not None:
+      dummy_query_prefill = jnp.zeros(
+          (1, self.max_target_length, self.num_query_heads, self.config.head_dim),
+          dtype=self.dtype,
+      )
+      dummy_key_prefill = jnp.zeros(
+          (1, self.max_target_length, self.num_kv_heads, self.config.head_dim),
+          dtype=self.dtype,
+      )
+      dummy_value_prefill = jnp.zeros(
+          (1, self.max_target_length, self.num_kv_heads, self.config.head_dim),
+          dtype=self.dtype,
+      )
+      dpa_layer.lazy_init(
+          dummy_query_prefill,
+          dummy_key_prefill,
+          dummy_value_prefill,
+          sequence_descriptor=dummy_attn_mask,
+      )
       _inject_te_softmax_offset(dpa_layer, _sinks_to_te_softmax_offset(sinks, self.num_query_heads))
     return dpa_layer(query, key, value, sequence_descriptor=attn_mask)
 

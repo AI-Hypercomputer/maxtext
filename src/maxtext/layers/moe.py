@@ -410,6 +410,9 @@ class GateLogit(nnx.Module):
       setattr(self, self._quant_dot_general_name, quant_dot_general)
       dummy_inputs = jnp.zeros((1, *self.in_features_shape), dtype=self.dtype)
       self(dummy_inputs, _initializing=True)
+      # See the matching comment in linears.py.
+      if not quant.needs_apply_rngs:
+        quant_dot_general.release_rngs()
     else:
       self._quant_dot_general_name = None
 

@@ -212,6 +212,9 @@ class DenseGeneral(nnx.Module):
       block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE MXFP8
       dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
       self(dummy_inputs, _initializing=True)
+      # Backends that never draw at apply time leave dead RNG state in the model.
+      if not quant.needs_apply_rngs:
+        quant_dot_general.release_rngs()
     else:
       self._quant_dot_general_name = None
 
@@ -413,10 +416,16 @@ class Dropout(nnx.Dropout):
     self.deterministic = deterministic
     self.rng_collection = rng_collection
 
-    if isinstance(rngs, nnx.Rngs):
-      self.rngs = rngs.fork() if hasattr(type(rngs), "fork") else rngs
-    else:
+    if not isinstance(rngs, nnx.Rngs):
       raise TypeError(f"rngs must be a Rngs, RngStream or None, but got {type(rngs)}.")
+
+    # fork() advances the caller's streams, so fork even at rate 0: skipping it would
+    # shift every later draw and change parameter initialization.
+    forked = rngs.fork() if hasattr(type(rngs), "fork") else rngs
+
+    # nnx.Dropout returns its input before touching self.rngs at rate 0, so keeping the
+    # fork would only add dead RNG state to the model.
+    self.rngs = forked if rate > 0.0 else nnx.data(None)
 
 
 class MlpBlock(nnx.Module):
