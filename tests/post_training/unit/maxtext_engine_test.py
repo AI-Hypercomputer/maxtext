@@ -1395,6 +1395,27 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertFalse(t._live_stale)
     jax.tree.map(np.testing.assert_array_equal, jax.tree.leaves(published), jax.tree.leaves(t._params_pure))
 
+  def test_eval_after_update_flushes_a_deferred_publish(self):
+    """`eval_step` reads the live model rather than the mirror, so it syncs like a getter.
+
+    The eval path is the exception to "nothing inside the step path reads the live objects
+    back", and it is the one place the deferral can be observed. Not as stale weights
+    either: `update()` donates the state it hands the update kernel, so an unsynced
+    `eval_step` splits deleted arrays out of the live model and raises inside the kernel.
+
+    Ordered after an `update()` on purpose -- the pre-existing eval tests call `eval_step`
+    on a freshly compiled engine, which never defers anything.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertTrue(t._live_stale, "nothing was deferred, so this test proves nothing")
+
+    t.eval_step(DummyPayload())
+    self.assertFalse(t._live_stale)
+
   def test_dropping_the_pure_state_flushes_rather_than_drops_the_step(self):
     """Invalidating the mirror must not discard an update that was only deferred."""
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
@@ -1421,21 +1442,6 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       t._publish_to_live(t._model, nnx.state(t._model, nnx.Param))
     self.assertEqual(spy.call_count, 1)
     self.assertFalse(t._live_stale)
-
-  def test_clip_by_grad_norm_matches_optax(self):
-    """The hand-rolled scale is `optax.clip_by_global_norm`'s, on the norm already in hand.
-
-    Both sides of the threshold, because the scale is a `where` and only one branch is
-    exercised by a given gradient tree.
-    """
-    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
-    for scale, case in ((100.0, "above the threshold"), (1e-3, "below the threshold")):
-      with self.subTest(case):
-        grads = {"a": jnp.array([3.0, 4.0]) * scale, "b": jnp.array([[1.0, 2.0]]) * scale}
-        threshold = t._config.gradient_clipping_threshold
-        expected, _ = optax.clip_by_global_norm(threshold).update(grads, None, None)
-        got = t._clip_by_grad_norm(grads, maxtext_engine.max_utils.l2norm_pytree(grads))
-        jax.tree.map(lambda e, g: np.testing.assert_allclose(e, g, rtol=1e-6), expected, got)
 
 
 if __name__ == "__main__":

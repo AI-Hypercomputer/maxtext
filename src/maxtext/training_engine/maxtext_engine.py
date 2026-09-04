@@ -793,12 +793,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     the reason a deferred publish cannot be observed: the arrays a reader would otherwise
     find are not merely stale but *deleted*, since `update()` donates the state it passed
     to the update kernel.
+
+    One write covers both deferral sites. `fwd_bwd` defers the model's non-parameter state
+    and `update` the whole train state, but `_publish_model_rest` has already folded the
+    former into `_state_pure`, and the live model is the same object the state holds under
+    `_MODEL_STATE_KEY` -- so publishing the state publishes the model with it.
     """
     if not self._live_stale:
       return
     # Cleared first: `nnx.update` cannot re-enter this, but a raising one must not leave the
     # flag set and re-run the same failed write on the next read.
     self._live_stale = False
+    # `_state_pure` is what `_publish_to_live` gated its deferral on -- it checks
+    # `_params_pure`, and the three move together, being set as a group by
+    # `_refresh_pure_state` and `_publish_state` and cleared as one by
+    # `_invalidate_pure_state`. Should they ever stop moving together, this drops the write
+    # the flag promised, so keep them set and cleared as a group.
     if self._state is not None and self._state_pure is not None:
       nnx.update(self._state, self._state_pure)
 
@@ -1059,32 +1069,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     acc_grads = jax.tree.map(jnp.add, acc_grads, micro_grads)
     return loss_out.primary_loss, loss_out.aux_metrics, new_rest, acc_grads, acc_denom + denominator
 
-  def _clip_by_grad_norm(self, grads, grad_norm):
-    """Clips `grads` to the configured threshold, reusing the norm already computed.
-
-    `optax.clip_by_global_norm` -- which `maxtext_utils.apply_gradient_clipping` wraps --
-    recomputes `global_norm(grads)` internally, so the caller's `grad_norm` one line above
-    made it a second full pass over every gradient plus a second cross-replica reduction of
-    a scalar. The scale below is optax's exactly (`1` when under the threshold, else
-    `threshold / norm`), applied to the norm the caller already has.
-
-    Reusing it is also the more accurate of the two. The caller's is computed in float32
-    for the reason stated at its call site -- a sum of squares over bf16 overflows on
-    production-size models -- while optax's runs in the gradients' own dtype, so under
-    `grad_dtype=bfloat16` the engine was guarding its reported norm and then clipping with
-    an unguarded one. At the default `grad_dtype=float32` the two are the same number and
-    this changes nothing numerically.
-
-    The fp8 path stays with optax: `apply_gradient_clipping` holds
-    `OVERWRITE_WITH_GRADIENT` out of both the norm and the scaling, and that carve-out is
-    not worth reproducing for the saving.
-    """
-    threshold = self._config.gradient_clipping_threshold
-    if maxtext_utils.OVERWRITE_WITH_GRADIENT in grads:
-      return maxtext_utils.apply_gradient_clipping(grads, None, threshold)
-    scale = jnp.where(grad_norm < threshold, 1.0, threshold / grad_norm)
-    return jax.tree.map(lambda g: g * scale.astype(g.dtype), grads)
-
   def _update_kernel(self, state_pure, accumulated_grads, accumulated_denominator, mean_loss):
     """Applies accumulated gradients to update the NNX model state.
 
@@ -1126,7 +1110,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # overflows on production-size models.
       grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), grads))
       if self._config.gradient_clipping_threshold > 0:
-        grads = self._clip_by_grad_norm(grads, grad_norm)
+        grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if hasattr(local_state, "apply_gradients"):
         if self._config.skip_step_on_spikes:
@@ -1385,6 +1369,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _compile_eval_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
     """JIT-compiles the forward-only eval kernel for one batch structure."""
+    # Its caller has synced already, but this splits the live model rather than reading the
+    # mirror, so it does not get to assume that: the shardings below are taken off the
+    # leaves it finds, and a deferred publish leaves those holding donated arrays.
+    self._sync_live_objects()
     self._model_graphdef, params_pure, rest_pure = nnx.split(self._model, nnx.Param, ...)
 
     def kernel(params, rest, dynamic):
@@ -1621,6 +1609,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       **kwargs: Additional keyword arguments for evaluation.
     """
     batch = self._prepare_batch(payload)
+
+    # Eval is the one step path that reads real values off the live model instead of the
+    # pure mirror, so it is also the one that has to flush a deferred publish. Skipping it
+    # does not evaluate stale weights, it raises: `update()` donates the state it passes to
+    # the update kernel, so the parameters split out below would be deleted arrays.
+    self._sync_live_objects()
 
     model = getattr(self._state, "model", self._model) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
