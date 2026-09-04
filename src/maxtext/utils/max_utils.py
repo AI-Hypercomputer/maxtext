@@ -484,6 +484,69 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
   return parallelism_vals
 
 
+def create_ring_axis_device_mesh(ici_parallelism, mesh_axes, devices, ring_axis):
+  """Creates an ICI device mesh with `ring_axis` groups arranged as physical TPU rings."""
+  if ring_axis not in mesh_axes:
+    raise ValueError(f"mesh_ring_axis={ring_axis} is not one of the mesh axes {mesh_axes}")
+  axis = list(mesh_axes).index(ring_axis)
+  ring = ici_parallelism[axis]
+  if ring % 2:
+    raise ValueError(f"mesh_ring_axis={ring_axis} needs an even parallelism, got {ring}")
+
+  coords = np.array([d.coords for d in devices])
+  origin, extent = coords.min(axis=0), coords.max(axis=0) - coords.min(axis=0) + 1
+  physical = np.full(tuple(extent), None, dtype=object)
+  for device, coord in zip(devices, coords):
+    physical[tuple(coord - origin)] = device
+  physical = physical.reshape([dim for dim in extent if dim > 1])
+  if physical.ndim != 2:
+    raise ValueError(f"mesh_ring_axis needs a 2D slice of the torus, got physical shape {tuple(extent)}")
+  if None in physical:
+    raise ValueError("The physical device grid is not fully populated (contains missing devices/coordinates).")
+  ring_height, ring_width = ring // 2, 2
+  # Determine if transposing is needed/preferred to allow valid tiling and logical axis alignment.
+  can_tile_normal = (physical.shape[0] % ring_height == 0) and (physical.shape[1] % ring_width == 0)
+  can_tile_transposed = (physical.shape[1] % ring_height == 0) and (physical.shape[0] % ring_width == 0)
+
+  other_axes = [size for i, size in enumerate(ici_parallelism) if i != axis]
+  non_trivial_other_axes = [size for size in other_axes if size > 1]
+  if len(non_trivial_other_axes) == 2:
+    target_shape = tuple(non_trivial_other_axes)
+    normal_ring_shape = (physical.shape[0] // ring_height, physical.shape[1] // ring_width)
+    transposed_ring_shape = (physical.shape[1] // ring_height, physical.shape[0] // ring_width)
+    if can_tile_transposed and transposed_ring_shape == target_shape:
+      physical = physical.T
+    elif can_tile_normal and normal_ring_shape == target_shape:
+      pass
+    elif not can_tile_normal and can_tile_transposed:
+      physical = physical.T
+    elif can_tile_normal and can_tile_transposed and physical.shape[0] > physical.shape[1]:
+      physical = physical.T
+  else:
+    if not can_tile_normal and can_tile_transposed:
+      physical = physical.T
+    elif can_tile_normal and can_tile_transposed and physical.shape[0] > physical.shape[1]:
+      physical = physical.T
+  if physical.shape[0] % ring_height or physical.shape[1] % ring_width:
+    raise ValueError(
+        f"mesh_ring_axis={ring_axis} of size {ring} needs a {ring_height}x{ring_width} block to tile the"
+        f" physical mesh {physical.shape}"
+    )
+
+  rings = []
+  for i in range(physical.shape[0] // ring_height):
+    for j in range(physical.shape[1] // ring_width):
+      left = list(physical[i * ring_height : (i + 1) * ring_height, ring_width * j])
+      right = list(physical[i * ring_height : (i + 1) * ring_height, ring_width * j + 1])
+      rings.append(left + right[::-1])
+
+  mesh = np.array(rings, dtype=object)
+  other_axes = [size for i, size in enumerate(ici_parallelism) if i != axis]
+  mesh = np.moveaxis(mesh.reshape([*other_axes, ring]), -1, axis)
+  max_logging.log(f"Laid the '{ring_axis}' mesh axis out as a {ring_height}x{ring_width} physical ring")
+  return mesh
+
+
 def reshape_mesh_to_rings(a, strategy):
   """Reshape device mesh to rings for 64x4 or 32x8 mesh shape"""
   b = []

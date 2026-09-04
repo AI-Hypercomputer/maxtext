@@ -1341,6 +1341,7 @@ class HardwareAndMesh(BaseModel):
       ),
   )
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
+  mesh_ring_axis: str = Field("", description="Logical mesh axis to lay out as a physical TPU ring; empty disables.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
   pure_nnx_decoder: bool = Field(
       True,
