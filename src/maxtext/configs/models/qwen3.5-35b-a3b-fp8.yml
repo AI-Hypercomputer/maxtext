@@ -14,6 +14,8 @@
 
 # model config for qwen3.5-35b-a3b-fp8 (FP8 weight-only storage with dynamic dequantization)
 
+base_config: "base.yml"
+
 decoder_block: "qwen3_5"
 
 # Core Architectural Parameters
@@ -75,6 +77,7 @@ use_mrope: true
 mrope_section: [11, 11, 10]
 
 weight_dtype: "float8_e4m3fn"
+weight_block_size: 128
 dtype: "bfloat16"
 unquantized_modules: [
   "token_embedder",

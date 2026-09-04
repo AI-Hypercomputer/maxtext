@@ -524,6 +524,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     else:
       self.cache = None  # No cache for train mode or when inputs_shape not provided
 
+    block_size = getattr(cfg, "weight_block_size", None)
+
     # Submodule instantiations
     self.in_proj_qkvz = DenseGeneral(
         in_features_shape=in_features,
@@ -532,6 +534,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         weight_dtype=cfg.weight_dtype,
         kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
+        block_size=block_size,
         rngs=rngs,
     )
     self.in_proj_ba = DenseGeneral(
@@ -587,6 +590,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         weight_dtype=cfg.weight_dtype,
         kernel_axes=("gdn_head", "embed_attn"),
         matmul_precision=cfg.matmul_precision,
+        block_size=block_size,
         rngs=rngs,
     )
 

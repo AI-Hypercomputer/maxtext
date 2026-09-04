@@ -15,6 +15,7 @@ sys.argv = [
     "max_prefill_predict_length=4",
     "max_target_length=4",
     "async_checkpointing=false",
+    "sparse_matmul=false",
     "ici_fsdp_parallelism=1",
     "ici_expert_parallelism=-1",
     "matmul_precision=highest",
