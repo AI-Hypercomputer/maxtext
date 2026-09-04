@@ -1609,6 +1609,63 @@ except AttributeError:
   qwen3_5_397b_a17b_config = PTConfig(**qwen3_5_397b_a17b_dict)  # pytype: disable=wrong-arg-types
 
 
+qwen3_8_27b_dict = {
+    "architectures": ["Qwen3_5ForConditionalGeneration"],
+    "model_type": "qwen3_5",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "attn_output_gate": True,
+        "dtype": "bfloat16",
+        "eos_token_id": 248044,
+        "full_attention_interval": 4,
+        "head_dim": 256,
+        "hidden_act": "silu",
+        "hidden_size": 5120,
+        "initializer_range": 0.02,
+        "intermediate_size": 17408,
+        "layer_types": [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+        ]
+        * 16,
+        "linear_conv_kernel_dim": 4,
+        "linear_key_head_dim": 128,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 48,
+        "linear_value_head_dim": 128,
+        "mamba_ssm_dtype": "float32",
+        "max_position_embeddings": 262144,
+        "model_type": "qwen3_5_text",
+        "mtp_num_hidden_layers": 1,
+        "mtp_use_dedicated_embeddings": False,
+        "num_attention_heads": 24,
+        "num_hidden_layers": 64,
+        "num_key_value_heads": 4,
+        "output_gate_type": "swish",
+        "partial_rotary_factor": 0.25,
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+            "mrope_interleaved": True,
+            "mrope_section": [11, 11, 10],
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10000000,
+            "rope_type": "default",
+        },
+        "tie_word_embeddings": False,
+        "use_cache": True,
+        "vocab_size": 248320,
+    },
+}
+
+try:
+  qwen3_8_27b_config = transformers.Qwen3_5Config(**qwen3_8_27b_dict)  # pyrefly: ignore[missing-attribute]
+except (AttributeError, TypeError):
+  qwen3_8_27b_config = PTConfig(**qwen3_8_27b_dict)  # pytype: disable=wrong-arg-types
+
+
 # from https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1/blob/main/config.json
 mixtral_8x7b_dict = {
     "architectures": ["MixtralForCausalLM"],
@@ -1982,6 +2039,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-next-80b-a3b": qwen3_next_80b_a3b_config,
     "qwen3.5-397b-a17b": qwen3_5_397b_a17b_config,
     "qwen3.5-35b-a3b": qwen3_5_35b_a3b_config,
+    "qwen3.8-27b": qwen3_8_27b_config,
     "mixtral-8x7b": mixtral_8x7b_config,
     "mixtral-8x22b": mixtral_8x22b_config,
     "olmo3-7b": olmo3_7b_config,
