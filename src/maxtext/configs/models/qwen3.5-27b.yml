@@ -1,0 +1,66 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Model config for Qwen/Qwen3.8-27B.
+#
+# Naming: the HF release label is "Qwen3.8-27B", but its `model_type` is `qwen3_5`
+# and it shares the Qwen3.5 backbone, so it is registered here under the qwen3.5-*
+# family alongside qwen3.5-35b-a3b and qwen3.5-397b-a17b.
+#
+# This is the DENSE member of the family: `num_experts` is absent from the HF config,
+# so it is left unset here and defaults to 1, which selects the dense `MlpBlock` branch
+# in models/qwen3_5.py and keeps the MoE validation in configs/types.py from firing.
+#
+# All values below are taken from the HF config.json for Qwen/Qwen3.8-27B.
+
+decoder_block: "qwen3_5"
+
+# Core Architectural Parameters
+base_emb_dim: 5120                       # hidden_size
+base_num_decoder_layers: 64              # num_hidden_layers
+base_num_query_heads: 24                 # num_attention_heads
+base_num_kv_heads: 4                     # num_key_value_heads
+head_dim: 256
+base_mlp_dim: 17408                      # intermediate_size
+mlp_activations: ["silu", "linear"]      # hidden_act "silu" implies SwiGLU
+vocab_size: 248320
+normalization_layer_epsilon: 1.0e-6      # rms_norm_eps
+logits_via_embedding: false              # tie_word_embeddings: false
+
+# Hybrid attention layout.
+# HF layer_types is [linear, linear, linear, full, ...] with full_attention_interval 4,
+# which matches the `(layer_idx + 1) % interval == 0` dispatch in models/qwen3_5.py.
+# 64 layers -> 16 full-attention + 48 linear-attention (GDN).
+inhomogeneous_layer_cycle_interval: 4
+
+# GatedDeltaNet Specific Parameters for Linear Attention (GDN)
+gdn_conv_kernel_dim: 4                   # linear_conv_kernel_dim
+gdn_key_head_dim: 128                    # linear_key_head_dim
+gdn_value_head_dim: 128                  # linear_value_head_dim
+gdn_num_key_heads: 16                    # linear_num_key_heads
+gdn_num_value_heads: 48                  # linear_num_value_heads (default is 32)
+gdn_chunk_size: 64
+
+# RoPE Settings
+rope_max_timescale: 10000000             # rope_parameters.rope_theta
+partial_rotary_factor: 0.25
+
+# General Model Settings
+enable_dropout: False
+tokenizer_type: "huggingface"
+
+# Vision tower is present in the checkpoint (depth 27, hidden 1152, out_hidden 5120)
+# but is intentionally not configured here: this config is text-only, matching a
+# --language-model-only bring-up. Enabling use_multimodal additionally requires adding
+# "qwen3.5-27b" to valid_mm_models in configs/types.py and setting the *_for_vit keys.
