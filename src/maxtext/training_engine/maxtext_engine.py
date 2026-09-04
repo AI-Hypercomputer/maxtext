@@ -1908,6 +1908,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             params_state,
             num_layers=self._config.num_decoder_layers,
             scan_axis=self._config.param_scan_axis,
+            cycle_interval=self._config.inhomogeneous_layer_cycle_interval,
         )
 
       # 3. Bind parameters to the Raiden transport. Construct the synchronizer
