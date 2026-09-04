@@ -4057,14 +4057,6 @@ class MaxTextConfig(
           "`TokenizeAndChunk` uses `apply`, which produces a many-to-one "
           "IterDataset transform that `ElasticIterator` forbids."
       )
-    if self.grain_use_elastic_iterator and (
-        self.grain_train_mixture_config_path or ";" in (self.grain_train_files or "")
-    ):
-      raise ValueError(
-          "`grain_use_elastic_iterator=True` does not support dataset mixtures. "
-          "Set `grain_train_mixture_config_path` to empty and use a single "
-          "`grain_train_files` pattern (no ';' separator)."
-      )
     if (self.load_parameters_path or self.load_full_state_path) and not self.enable_checkpointing:
       raise ValueError("You must set enable_checkpointing=True to load a checkpoint.")
     if self.enable_multi_tier_checkpointing:
