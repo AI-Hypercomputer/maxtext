@@ -632,8 +632,8 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
-      "global", description="The variant of attention to use."
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "kda", "full", "compressed", "block_diffusion"] = (
+      Field("global", description="The variant of attention to use.")
   )
   share_kv_projections: bool = Field(
       False,
@@ -744,6 +744,81 @@ class CompressedAttention(BaseModel):
   compressed_rope_max_timescale: int = Field(
       160000, description="If positive, used for Compressed Sparse/Heavy Attention."
   )
+
+
+class KdaAttention(BaseModel):
+  """KDA (Kimi Delta Attention) configuration.
+
+  These fields are placed in a separate class from MlaAttention for clear responsibility separation.
+  """
+
+  linear_conv_kernel_dim: int = Field(
+      4,
+      ge=0,
+      description=(
+          "Convolution kernel dimension for linear attention layers (KDA). "
+          "This specifies the size of the depthwise causal 1D convolution applied to Q, K and V "
+          "for local dependency modeling. Default 4 matches the reference Megatron implementation."
+      ),
+  )
+  use_kda_lora: bool = Field(
+      False,
+      description=(
+          "Reserved for a future LoRA (Low-Rank Adaptation) KDA variant. "
+          "The current KimiDeltaAttention layer only implements the full-rank "
+          "(no-LoRA) path and does not read this flag."
+      ),
+  )
+  use_kda_safe_gate: bool = Field(
+      False,
+      description=(
+          "Whether to use the numerically safe (sigmoid lower-bound) gate path in KDA "
+          "layers instead of the standard softplus activation. When True, "
+          "``kda_lower_bound`` is passed to the tokamax kernel as ``lower_bound``; "
+          "when False the kernel uses its standard gate activation."
+      ),
+  )
+  kda_lower_bound: float = Field(
+      0.0,
+      description=(
+          "Lower bound for the sigmoid gate path in KDA layers, used only when "
+          "``use_kda_safe_gate=True``. Passed to the tokamax kernel as "
+          "``lower_bound`` (which requires a value in ``[-5, 0)``). "
+          "-5.0 is a common choice."
+      ),
+  )
+
+  @field_validator("kda_lower_bound")
+  @classmethod
+  def _check_kda_lower_bound_finite(cls, v: float) -> float:
+    if not math.isfinite(v):
+      raise ValueError(f"kda_lower_bound must be finite, got {v}")
+    return v
+
+  @field_validator("use_kda_lora")
+  @classmethod
+  def _check_use_kda_lora_not_set(cls, v: bool) -> bool:
+    if v:
+      raise ValueError(
+          "use_kda_lora=True is not implemented: KimiDeltaAttention only "
+          "implements the full-rank (no-LoRA) path. Leave it False."
+      )
+    return v
+
+  @model_validator(mode="after")
+  def _check_safe_gate_lower_bound(self):
+    """Cross-field guard: the sigmoid gate path requires lower_bound in [-5, 0).
+
+    Rejects invalid combinations at config time instead of failing deep in
+    tokamax kernel binding (tokamax enforces the same range on `lower_bound`).
+    """
+    if self.use_kda_safe_gate and (self.kda_lower_bound < -5.0 or self.kda_lower_bound >= 0.0):
+      raise ValueError(
+          "use_kda_safe_gate=True requires kda_lower_bound in [-5, 0) "
+          f"(the tokamax sigmoid gate path constraint), got "
+          f"kda_lower_bound={self.kda_lower_bound}. A common choice is -5.0."
+      )
+    return self
 
 
 class AttentionIndexer(BaseModel):
@@ -3174,6 +3249,7 @@ class MaxTextConfig(
     # Attention Mechanisms
     Attention,
     MlaAttention,
+    KdaAttention,
     CompressedAttention,
     MoBa,
     AttentionIndexer,
@@ -4656,6 +4732,12 @@ class MaxTextConfig(
     if self.use_qk_clip and self.attention_type != "mla":
       raise ValueError(
           f"QK-Clip is only supported when attention_type='mla', but found attention_type='{self.attention_type}'."
+      )
+
+    if self.attention_type == "kda" and self.scan_layers:
+      raise ValueError(
+          "attention_type='kda' requires scan_layers=false: KDA layers have not been validated "
+          "inside a scanned layer stack. Set scan_layers: false."
       )
 
     if self.use_qk_clip and self.attn_logits_soft_cap is not None:
