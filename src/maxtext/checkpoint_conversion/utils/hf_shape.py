@@ -704,15 +704,18 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
   vocab_size = config["vocab_size"]
   num_attention_heads = config["num_attention_heads"]
   num_key_value_heads = config["num_key_value_heads"]
-  num_experts = config["num_experts"]
+  # Dense members of the Qwen3.5 family (e.g. qwen3.5-27b) omit every MoE key.
+  num_experts = config.get("num_experts", 1)
+  is_moe = num_experts > 1
   head_dim = config["head_dim"]
   linear_conv_kernel_dim = config["linear_conv_kernel_dim"]
   linear_key_head_dim = config["linear_key_head_dim"]
   linear_value_head_dim = config["linear_value_head_dim"]
   linear_num_key_heads = config["linear_num_key_heads"]
   linear_num_value_heads = config["linear_num_value_heads"]
-  moe_intermediate_size = config["moe_intermediate_size"]
-  shared_expert_intermediate_size = config["shared_expert_intermediate_size"]
+  moe_intermediate_size = config.get("moe_intermediate_size")
+  shared_expert_intermediate_size = config.get("shared_expert_intermediate_size")
+  intermediate_size = config.get("intermediate_size")
   cycle_interval = config["full_attention_interval"]
 
   # --- Calculated Values ---
@@ -776,27 +779,37 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
           }
       )
 
-    # --- MLP Logic (MoE + Shared) ---
-    mapping.update(
-        {
-            # Router
-            f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
-            # Shared Experts (SwiGLU - Separate Weights)
-            f"{layer_prefix}.mlp.shared_expert.gate_proj.weight": [shared_expert_intermediate_size, hidden_size],
-            f"{layer_prefix}.mlp.shared_expert.up_proj.weight": [shared_expert_intermediate_size, hidden_size],
-            f"{layer_prefix}.mlp.shared_expert.down_proj.weight": [hidden_size, shared_expert_intermediate_size],
-            # Shared Expert Gate (learned scaling factor)
-            f"{layer_prefix}.mlp.shared_expert_gate.weight": [1, hidden_size],
-        }
-    )
+    if is_moe:
+      # --- MLP Logic (MoE + Shared) ---
+      mapping.update(
+          {
+              # Router
+              f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
+              # Shared Experts (SwiGLU - Separate Weights)
+              f"{layer_prefix}.mlp.shared_expert.gate_proj.weight": [shared_expert_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.shared_expert.up_proj.weight": [shared_expert_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.shared_expert.down_proj.weight": [hidden_size, shared_expert_intermediate_size],
+              # Shared Expert Gate (learned scaling factor)
+              f"{layer_prefix}.mlp.shared_expert_gate.weight": [1, hidden_size],
+          }
+      )
 
-    # --- Vectorized & Fused Routed Experts (No loop, no .weight suffix) ---
-    mapping.update(
-        {
-            f"{layer_prefix}.mlp.experts.gate_up_proj": [num_experts, 2 * moe_intermediate_size, hidden_size],
-            f"{layer_prefix}.mlp.experts.down_proj": [num_experts, hidden_size, moe_intermediate_size],
-        }
-    )
+      # --- Vectorized & Fused Routed Experts (No loop, no .weight suffix) ---
+      mapping.update(
+          {
+              f"{layer_prefix}.mlp.experts.gate_up_proj": [num_experts, 2 * moe_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.experts.down_proj": [num_experts, hidden_size, moe_intermediate_size],
+          }
+      )
+    else:
+      # --- MLP Logic (Dense SwiGLU) ---
+      mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+          }
+      )
 
   return mapping
 
@@ -1318,5 +1331,6 @@ HF_SHAPE = {
     "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-a3b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.5-27b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
 }

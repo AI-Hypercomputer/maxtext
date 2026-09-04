@@ -872,6 +872,10 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   """
   num_main_layers = config["text_config"]["num_hidden_layers"]
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
+  # Qwen3.5 ships dense (e.g. qwen3.5-27b) and MoE (e.g. qwen3.5-35b-a3b) models on the
+  # same backbone. A dense checkpoint carries `mlp.{gate,up,down}_proj.weight` where a MoE
+  # one carries the router, the shared expert and the fused routed experts.
+  is_moe = maxtext_config.num_experts > 1
 
   # 1. Non-layer specific weight mappings
   mapping = {
@@ -956,38 +960,55 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
             }
         )
 
-      # 3. Handle MLP: Gates and Shared Experts
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-mlp-routed_experts-gate-kernel": [
-                  f"model.language_model.layers.{i}.mlp.gate.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wi_0-kernel": [
-                  f"model.language_model.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wi_1-kernel": [
-                  f"model.language_model.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wo-kernel": [
-                  f"model.language_model.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert_gate-kernel": [
-                  f"model.language_model.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices
-              ],
-          }
-      )
+      # 3. Handle MLP
+      if is_moe:
+        # 3a. Router gate, shared expert and shared-expert gate
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
+            {
+                f"{prefix}-mlp-routed_experts-gate-kernel": [
+                    f"model.language_model.layers.{i}.mlp.gate.weight" for i in hf_indices
+                ],
+                f"{prefix}-mlp-shared_expert-wi_0-kernel": [
+                    f"model.language_model.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices
+                ],
+                f"{prefix}-mlp-shared_expert-wi_1-kernel": [
+                    f"model.language_model.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices
+                ],
+                f"{prefix}-mlp-shared_expert-wo-kernel": [
+                    f"model.language_model.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices
+                ],
+                f"{prefix}-mlp-shared_expert_gate-kernel": [
+                    f"model.language_model.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices
+                ],
+            }
+        )
 
-      # 4. Handle MoE Routed Experts
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-mlp-routed_experts-wo": [
-                  f"model.language_model.layers.{i}.mlp.experts.down_proj" for i in hf_indices
-              ],
-              (f"{prefix}-mlp-routed_experts-wi_0", f"{prefix}-mlp-routed_experts-wi_1"): [
-                  f"model.language_model.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices
-              ],
-          }
-      )
+        # 4. Handle MoE Routed Experts
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
+            {
+                f"{prefix}-mlp-routed_experts-wo": [
+                    f"model.language_model.layers.{i}.mlp.experts.down_proj" for i in hf_indices
+                ],
+                (f"{prefix}-mlp-routed_experts-wi_0", f"{prefix}-mlp-routed_experts-wi_1"): [
+                    f"model.language_model.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices
+                ],
+            }
+        )
+      else:
+        # 3b. Dense MLP (SwiGLU). No router, no shared expert, no routed experts.
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
+            {
+                f"{prefix}-mlp-wi_0-kernel": [
+                    f"model.language_model.layers.{i}.mlp.gate_proj.weight" for i in hf_indices
+                ],
+                f"{prefix}-mlp-wi_1-kernel": [
+                    f"model.language_model.layers.{i}.mlp.up_proj.weight" for i in hf_indices
+                ],
+                f"{prefix}-mlp-wo-kernel": [
+                    f"model.language_model.layers.{i}.mlp.down_proj.weight" for i in hf_indices
+                ],
+            }
+        )
   else:
     # Unscanned layer mapping
     for i in range(num_main_layers):
@@ -1038,26 +1059,36 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       # MLP: Gates and Shared Experts
       hf_mlp = f"model.language_model.layers.{i}.mlp"
 
-      mapping.update(
-          {
-              f"{prefix}-mlp-routed_experts-gate-kernel": (f"{hf_mlp}.gate.weight"),
-              f"{prefix}-mlp-shared_expert-wi_0-kernel": (f"{hf_mlp}.shared_expert.gate_proj.weight"),
-              f"{prefix}-mlp-shared_expert-wi_1-kernel": (f"{hf_mlp}.shared_expert.up_proj.weight"),
-              f"{prefix}-mlp-shared_expert-wo-kernel": (f"{hf_mlp}.shared_expert.down_proj.weight"),
-              f"{prefix}-mlp-shared_expert_gate-kernel": (f"{hf_mlp}.shared_expert_gate.weight"),
-          }
-      )
+      if is_moe:
+        mapping.update(
+            {
+                f"{prefix}-mlp-routed_experts-gate-kernel": (f"{hf_mlp}.gate.weight"),
+                f"{prefix}-mlp-shared_expert-wi_0-kernel": (f"{hf_mlp}.shared_expert.gate_proj.weight"),
+                f"{prefix}-mlp-shared_expert-wi_1-kernel": (f"{hf_mlp}.shared_expert.up_proj.weight"),
+                f"{prefix}-mlp-shared_expert-wo-kernel": (f"{hf_mlp}.shared_expert.down_proj.weight"),
+                f"{prefix}-mlp-shared_expert_gate-kernel": (f"{hf_mlp}.shared_expert_gate.weight"),
+            }
+        )
 
-      # MoE Routed Experts
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-mlp-routed_experts-wo": f"model.language_model.layers.{i}.mlp.experts.down_proj",
-              (
-                  f"{prefix}-mlp-routed_experts-wi_0",
-                  f"{prefix}-mlp-routed_experts-wi_1",
-              ): f"model.language_model.layers.{i}.mlp.experts.gate_up_proj",
-          }
-      )
+        # MoE Routed Experts
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
+            {
+                f"{prefix}-mlp-routed_experts-wo": f"model.language_model.layers.{i}.mlp.experts.down_proj",
+                (
+                    f"{prefix}-mlp-routed_experts-wi_0",
+                    f"{prefix}-mlp-routed_experts-wi_1",
+                ): f"model.language_model.layers.{i}.mlp.experts.gate_up_proj",
+            }
+        )
+      else:
+        # Dense MLP (SwiGLU).
+        mapping.update(
+            {
+                f"{prefix}-mlp-wi_0-kernel": (f"{hf_mlp}.gate_proj.weight"),
+                f"{prefix}-mlp-wi_1-kernel": (f"{hf_mlp}.up_proj.weight"),
+                f"{prefix}-mlp-wo-kernel": (f"{hf_mlp}.down_proj.weight"),
+            }
+        )
 
   # Vision mapping for Qwen3.5
   if maxtext_config.use_multimodal and "vision_config" in config:
@@ -1279,16 +1310,23 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       hooks[f"{prefix}-attention-conv1d-kernel"] = permute_conv
 
     mlp_prefix = f"{prefix}-mlp"
-    hooks[f"{mlp_prefix}-routed_experts-gate-kernel"] = transpose
-    hooks[f"{mlp_prefix}-shared_expert-wi_0-kernel"] = transpose
-    hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel"] = transpose
-    hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
-    hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
-    # pyrefly: ignore[unsupported-operation]
-    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
-        process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
-    )
-    hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
+    if maxtext_config.num_experts > 1:
+      hooks[f"{mlp_prefix}-routed_experts-gate-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert-wi_0-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
+      # pyrefly: ignore[unsupported-operation]
+      hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
+          process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
+      )
+      hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
+    else:
+      # Dense MLP. The MoE variant's `shared_expert` is the same `MlpBlock` class the
+      # dense branch instantiates, so its kernels take the same plain `transpose`.
+      hooks[f"{mlp_prefix}-wi_0-kernel"] = transpose
+      hooks[f"{mlp_prefix}-wi_1-kernel"] = transpose
+      hooks[f"{mlp_prefix}-wo-kernel"] = transpose
 
   # Vision hooks for Qwen3.5
   vision_config = config.get("vision_config", None)
@@ -4299,6 +4337,7 @@ PARAM_MAPPING = {
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3.5-27b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4355,6 +4394,7 @@ HOOK_FNS = {
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3.5-27b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
