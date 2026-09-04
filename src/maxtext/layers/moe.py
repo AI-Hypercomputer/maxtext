@@ -996,12 +996,13 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
   ):
     """Permute tokens to group by expert to fit gmm call."""
+    is_qarray = isinstance(inputs, qpl.QArray)
+    raw_inputs = inputs.qvalue if is_qarray else inputs
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
-    inputs_shape = inputs.shape
+    inputs_shape = raw_inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
-    inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
+    inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
-
     lb_loss = None
     # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
     probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
@@ -1095,13 +1096,16 @@ class RoutedMoE(nnx.Module):
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe).astype(self.dtype)
+        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts)
       else:
+        # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
-            self.dtype
-        )
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
+      
+      if not is_qarray:
+        sorted_inputs = sorted_inputs.astype(self.dtype)
+
+      group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -1133,6 +1137,9 @@ class RoutedMoE(nnx.Module):
           repeats=group_size,
           total_repeat_length=math.prod(selected_experts.shape),
       )
+
+    if is_qarray:
+      sorted_inputs = qpl.QArray(qvalue=sorted_inputs, scale=inputs.scale)
 
     return (
         sorted_inputs,
@@ -1636,6 +1643,8 @@ class RoutedMoE(nnx.Module):
         partial_sum=None,
     ):
       def extract_vma(tensor):
+        if isinstance(tensor, qpl.QArray):
+          tensor = tensor.qvalue
         # Parses the varying mesh axes from JAX's type string for a tensor inside shard_map.
         # jax.typeof(t) renders as e.g. 'f32[128,256]{V:(expert, fsdp)}'; this extracts
         # ('expert', 'fsdp'). Returns () if the tensor has no varying axes.
@@ -1647,17 +1656,29 @@ class RoutedMoE(nnx.Module):
           return tuple(sorted(a.strip() for a in vma_content.split(",")))
         return tuple()
 
-      lhs_vma_axes = extract_vma(inputs)
-      rhs_vma_axes = extract_vma(kernel)
+      # VMA (varying mesh axes) extraction is only required for the legacy Megablox backend
+      # fallback (_fwd_run_megablox) to restore lost sharding properties via jax.lax.pcast.
+      # Tokamax and GMM v2 track shard mapping natively and do not consume VMA axes.
+      if self.config.megablox and not self.config.use_tokamax_gmm and not self.config.moe_quantize_token_all_gather:
+        lhs_vma_axes = extract_vma(inputs)
+        rhs_vma_axes = extract_vma(kernel)
+      else:
+        lhs_vma_axes = tuple()
+        rhs_vma_axes = tuple()
       if inputs.shape[0] != expert_assignments.shape[0]:
-        raise ValueError("The number of input tokens must match the number of expert assignments!")
+        raise ValueError("The number of input tokens must match the number of expert" " assignments!")
 
       tokamax_group_sizes = get_tokamax_group_sizes(group_sizes, inputs, kernel)
       orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
-      inputs, padding_amount = max_utils.maybe_pad(inputs, self.config.wi_tile_fwd_batch_seq)
+      if isinstance(inputs, qpl.QArray):
+        padded_qval, padding_amount = max_utils.maybe_pad(inputs.qvalue, self.config.wi_tile_fwd_batch_seq)
+        inputs = qpl.QArray(qvalue=padded_qval, scale=inputs.scale)
+      else:
+        inputs, padding_amount = max_utils.maybe_pad(inputs, self.config.wi_tile_fwd_batch_seq)
       if padding_amount > 0 and partial_sum is not None:
         partial_sum = jnp.pad(partial_sum, ((0, padding_amount), (0, 0)))
-      inputs = inputs.astype(self.dtype)
+      if not isinstance(inputs, qpl.QArray):
+        inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
       lhs_quantize_dtype, rhs_quantize_dtype = get_quantization_dtypes()
 
@@ -1670,7 +1691,10 @@ class RoutedMoE(nnx.Module):
       # We support various implementations for gmm - tokamax gmm (v1, v2), older forked megablox, or jax.lax.ragged_dot
       # Determine whether we can use: tokamax gmm v1 (quantized)
       is_tokamax_v1_unquantized = (
-          self.config.use_tokamax_gmm and not self.config.quantization and not self.config.use_gmm_v2
+          self.config.use_tokamax_gmm
+          and not self.config.quantization
+          and not self.config.use_gmm_v2
+          and not isinstance(inputs, qpl.QArray)
       )
       # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
       use_custom_vjp_gmm = self.config.use_tokamax_gmm or self.config.megablox
@@ -1698,9 +1722,7 @@ class RoutedMoE(nnx.Module):
             group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
-            # Only "fp8_full" quantizes GMM; other schemes (e.g. "fp8", "int8")
-            # do not define a GMM quantization rule.
-            use_qwix_quantization=bool(self.config.quantization == "fp8_full") and self.config.use_qwix_quantization,
+            use_qwix_quantization=bool(self.config.quantization) and self.config.use_qwix_quantization,
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,
@@ -1873,9 +1895,31 @@ class RoutedMoE(nnx.Module):
       # expert shards, and then routes within each shard.
 
       # Duplicate inputs to all expert shards.
-      x, logits, pre_bias_logits = tuple(
-          jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True) for z in (x, logits, pre_bias_logits)
-      )
+      if self.config.moe_quantize_token_all_gather:
+        calibration_method = self.config.act_quantization_calibration_method
+        if num_ep > 1 and (calibration_method is None or calibration_method.lower().startswith("absmax")):
+          global_max = jax.lax.pmax(jnp.max(jnp.abs(x)), axis_name=self._expert_parallelism_name)
+          dtype_max = jnp.finfo(jnp.float8_e4m3fn).max
+          scale = (global_max / dtype_max).astype(x.dtype)
+          qval = jnp.clip(x / scale, -dtype_max, dtype_max).astype(jnp.float8_e4m3fn)
+          x_input = qpl.QArray(qvalue=qval, scale=jnp.reshape(scale, (1,)))
+        else:
+          x_input = qpl.quantize(
+              x,
+              qtype=jnp.float8_e4m3fn,
+              channelwise_axes=(),
+              calibration_method=calibration_method,
+          )
+        x_gathered_qval, logits, pre_bias_logits = tuple(
+            jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True) if z is not None else None
+            for z in (x_input.qvalue, logits, pre_bias_logits)
+        )
+        x = qpl.QArray(qvalue=x_gathered_qval, scale=x_input.scale)
+      else:
+        x, logits, pre_bias_logits = tuple(
+            jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True) if z is not None else None
+            for z in (x, logits, pre_bias_logits)
+        )
       if forced_routed_experts is not None:
         # Must follow the same all-gather as logits: routing is done on the
         # gathered batch, so a shard-local replay would not line up.
@@ -3479,14 +3523,9 @@ class RoutedMoE(nnx.Module):
       w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
       w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
 
-    # For fused MoE path (inference only), if we have not fused expert
-    # scales at init, we must apply them to wo_kernel here because
-    # fused_moe_func doesn't support them. Other paths (dense/sparse
-    # matmul) apply them to top_k_weights in get_topk.
-    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
-    if is_fused_moe_path:
-      if self.per_expert_scale is not None and not (cfg.model_call_mode == "inference" and cfg.fuse_expert_scales):
-        wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
+    # Only apply per expert scales if we have not fused with the out-projections at init time.
+    if self.per_expert_scale is not None and cfg.model_call_mode != "inference" and not cfg.fuse_expert_scales:
+      wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
 
     if self.wi_0_sparsity_module is not None:
       _, w0_kernel = self.wi_0_sparsity_module(jnp.zeros_like(w0_kernel), w0_kernel)
