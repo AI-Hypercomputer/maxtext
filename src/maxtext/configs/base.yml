@@ -245,7 +245,7 @@ te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE
 # null means the TE EP receive capacity is set to the dropless worst case where overflow will never happen, at the cost of higher memory usage.
 te_ep_receive_capacity_factor: null # factor over TE EP's aligned perfectly balanced receive capacity; null reserves the dropless worst case
 te_ep_overflow_check_every_n_steps: 20 # host checks buffered TE EP overflow results at this training-step interval
-te_gmm_quantization: "" # quantization mode for TE GMM matmuls, must be specified when te_moe_block is true.
+te_gmm_quantization: "" # quantization mode for TE GMM matmuls; available options are te_no_quant and te_mxfp8; must be specified when te_moe_block is true
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).

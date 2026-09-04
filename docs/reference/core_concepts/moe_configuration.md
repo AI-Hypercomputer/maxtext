@@ -113,6 +113,19 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `prefuse_moe_weights`: If enabled alongside `sparse_matmul=True`, fuses the two FFN1 grouped GEMMs (wi_0 and wi_1) into a single grouped GEMM call. Expert weights are stored in a concatenated `(num_experts, embed_dim, 2 * mlp_dim)` shape, so input activations are loaded from HBM once per forward pass instead of twice. Backend-agnostic (works with Megablox, JAX Ragged Dot, and Tokamax). When used with `attention=vllm_rpa`, the fused weight tensor is passed directly to the vLLM-TPU serving kernel without splitting.
 
+#### TransformerEngine MoEBlock
+
+`te_moe_block`: If enabled, uses TransformerEngine's fused expert-parallel MoEBlock for routing, dispatch, grouped GEMMs, and combining expert outputs. It requires `sparse_matmul=True`, `prefuse_moe_weights=True`, TransformerEngine with JAX expert-parallel MoE support, and one GPU per process.
+
+`te_gmm_quantization`: Selects the quantization mode for TransformerEngine grouped GEMMs. This must be set when `te_moe_block=True`. Available options are:
+
+- `te_no_quant`: Uses the model's default precision, such as BF16, without quantization.
+- `te_mxfp8`: Uses MXFP8 quantization.
+
+`te_ep_receive_capacity_factor`: Sets the expert-parallel receive capacity relative to aligned, perfectly balanced routing. `1.0` reserves exactly the balanced capacity, while values greater than `1.0` provide additional room for routing imbalance. The capacity is capped at the dropless worst case. The default, `null`, reserves that worst-case capacity so overflow cannot occur, at the cost of higher memory usage.
+
+`te_ep_overflow_check_every_n_steps`: Sets the number of training steps between host-side checks of buffered receive-capacity overflow results. An overflowing step skips its optimizer update immediately on device. At the next check, training raises an error that reports the observed demand and configured capacity. The default is `20`.
+
 `use_batch_split_schedule` (experimental): If enabled, split batch into micro-batches to hide communications that yields performance benefits.
 
 ## 2. Sharding
