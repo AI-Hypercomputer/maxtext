@@ -96,7 +96,7 @@ Both files are already included under `src/maxtext/examples/chat_templates/`, so
 
 ### Build and Upload MaxText Docker Image
 
-For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext.md).
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../build_maxtext.md).
 
 ### Submit your workload
 
