@@ -1554,9 +1554,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       signature = _batch_signature(dynamic_batch, static_batch)
       if self._compiled_eval is None or self._needs_recompile(signature, self._compiled_eval_signature):
         self._compile_eval_for_batch(dynamic_batch, static_batch)
-      loss, aux = self._compiled_eval(params, rest, dynamic_batch)
+      # Around the call, as `fwd_bwd` and `update` do: `jax.jit` is lazy, so this is where
+      # the eval kernel is traced and where the mesh and the axis rules have to be live.
+      with self._sharding_ctx():
+        loss, aux = self._compiled_eval(params, rest, dynamic_batch)
     else:
-      loss, aux = self._eval_kernel(params, rest, batch)
+      with self._sharding_ctx():
+        loss, aux = self._eval_kernel(params, rest, batch)
 
     # No metrics attached: eval metrics are buffered by `_eval_metrics_recorder` and written
     # in EVAL mode when `eval_context` exits.
