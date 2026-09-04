@@ -44,7 +44,7 @@ If you want to run immediately without building container images or compiling C+
 ### Step 1: Connect to the GKE Cluster
 ```bash
 gcloud container clusters get-credentials bodaborg-v5p-nap \
-  --zone europe-west4-b \
+  --region europe-west4 \
   --project cloud-tpu-shared-capacity
 ```
 
@@ -227,10 +227,10 @@ Pathways runs a distributed resource manager (`pathways-rm`), proxy server (`pat
 The default verified images used by `launch_raiden.sh` are:
 ```bash
 # Server / Worker image (runs on TPU hosts):
-export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:raiden_20260812"
+export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260904"
 
 # Proxy image (runs in user pod):
-export PATHWAYS_PROXY_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:raiden_20260812"
+export PATHWAYS_PROXY_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260904"
 ```
 
 To plug in custom or newer Pathways server/proxy images:

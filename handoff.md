@@ -156,7 +156,7 @@ ab694ded                   Raiden weight sync: transport selection, multihost sh
 ### Connect to Cluster
 ```bash
 gcloud container clusters get-credentials bodaborg-v5p-nap \
-  --zone europe-west4-b \
+  --region europe-west4 \
   --project cloud-tpu-shared-capacity
 ```
 
