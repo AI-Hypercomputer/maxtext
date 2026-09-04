@@ -987,7 +987,13 @@ FSDP_MESH_AXES = ("fsdp", "fsdp_transpose")
 
 
 def _pspec_axes_per_dim(pspec, ndim):
-  """Normalizes a PartitionSpec into one axis-name tuple per array dim."""
+  """Normalizes a PartitionSpec into one axis-name tuple per array dim.
+
+  Returns `None` if `pspec` names more dims than `ndim`, since silently ignoring
+  the extra ones would describe a different sharding than the caller passed.
+  """
+  if len(pspec) > ndim:
+    return None
   per_dim = []
   for i in range(ndim):
     axis = pspec[i] if i < len(pspec) else None
@@ -1000,6 +1006,18 @@ def _pspec_axes_per_dim(pspec, ndim):
   return per_dim
 
 
+def mesh_axes_in_pspec(pspec):
+  """Returns the set of mesh axis names a PartitionSpec shards over, on any dim."""
+  if pspec is None:
+    return set()
+  axes = set()
+  for entry in pspec:
+    if entry is None:
+      continue
+    axes.update((entry,) if isinstance(entry, str) else entry)
+  return axes
+
+
 def all_gather_axes_between_pspecs(source_pspec, target_pspec, ndim):
   """Returns the `(dim, axes)` all-gathers that take `source_pspec` to `target_pspec`.
 
@@ -1009,6 +1027,8 @@ def all_gather_axes_between_pspecs(source_pspec, target_pspec, ndim):
   """
   source = _pspec_axes_per_dim(source_pspec, ndim)
   target = _pspec_axes_per_dim(target_pspec, ndim)
+  if source is None or target is None:
+    return None
   gathers = []
   for dim, (src_axes, tgt_axes) in enumerate(zip(source, target)):
     if src_axes == tgt_axes:

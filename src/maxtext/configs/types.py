@@ -984,7 +984,8 @@ class MoEGeneral(BaseModel):
       "",
       description="Comma-separated list of MoE ops to run on the TPU SparseCore instead of the TensorCore. "
       f"Supported targets: {', '.join(sparsecore.OFFLOAD_TARGETS)}; 'all' enables every one of them. "
-      "Empty (the default) keeps everything on the TensorCore. Requires a TPU with a SparseCore.",
+      "Empty (the default) keeps everything on the TensorCore. Requires a TPU with a SparseCore; targets "
+      "whose collectives that SparseCore cannot run are warned about and ignored.",
   )
   shard_exp_on_fsdp: bool = Field(
       False,
@@ -3302,6 +3303,10 @@ class MaxTextConfig(
           "SparseCore (v5p, v6e, tpu7x or newer), but the target hardware has none. Set it to '' to keep "
           "these ops on the TensorCore."
       )
+    # Warns now, at startup, for any target this chip cannot serve, rather than
+    # leaving the first one to surface mid-trace. Unserviceable targets are
+    # dropped instead of rejected so the same config runs on every chip.
+    sparsecore.supported_offload_targets(self.moe_sparse_core_offload_targets, self.compile_topology, self.hardware)
 
   def validate_ragged_buffer_factor(self):
     if self.ragged_buffer_factor <= 0:

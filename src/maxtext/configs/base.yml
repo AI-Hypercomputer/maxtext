@@ -302,15 +302,13 @@ moe_fsdp_use_two_stage_all_gather: false
 #   ragged_sort     - the routing index math (argsorts, group sizes, offsets) in the ragged sort kernels
 # Requires a TPU with a SparseCore (v5p, v6e, tpu7x or newer); MaxText raises otherwise.
 #
-# Offloading never changes results, but the two collective targets interact with the
-# --xla_tpu_enable_sparse_core_collective_offload_* flags (see benchmarks/xla_flags_library.py,
-# on by default from Ironwood on). With the matching flag set, XLA CHECK-fails instead of
-# falling back when the chip cannot lower an annotated collective. Measured on v5p: annotated
-# all-reduce and reduce-scatter are accepted, all-gather is rejected at every rank, so
-# fsdp_all_gather plus --xla_tpu_enable_sparse_core_collective_offload_all_gather=true aborts
-# the compiler there. fsdp_all_gather is still useful without that flag: it turns the implicit
-# boundary all-gather into an explicit one inside the sparse_matmul shard_map, which lets the
-# backward pass reduce-scatter the weight gradients instead of all-reducing them.
+# Offloading never changes results. For collectives it is not merely a hint though: XLA's
+# SparseCore collective-offload pass reads the annotation as "force this one" and CHECK-fails,
+# aborting the compile, on an annotated collective the chip cannot lower. MaxText therefore
+# only annotates a collective its SparseCore is known to run (utils/sparsecore.py). Offloading
+# an all-gather needs Ironwood, and a reduce-scatter transposes to one in the backward pass, so on
+# v5p/v6e the fsdp_all_gather target logs a warning and is ignored, and ep_collectives is left with
+# just its ragged all-to-alls. ragged_sort is not a collective and runs everywhere.
 moe_sparse_core_offload_targets: ""
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
