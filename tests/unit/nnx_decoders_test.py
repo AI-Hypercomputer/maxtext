@@ -52,7 +52,7 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.models import gemma4, gemma4_small, qwen3
+from maxtext.models import gemma4, gemma4_small, qwen3, qwen3_5
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx
@@ -894,26 +894,29 @@ _QWEN3_NEXT_CONFIG = {
 }
 
 
-def _build_qwen3_next_block(layer_idx_offset=0, **overrides):
-  """Builds one Qwen3-Next scannable block; overrides go to the config."""
-  cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, **overrides})
-  block = qwen3.Qwen3NextScannableBlock(
-      config=cfg,
-      mesh=_make_mesh(cfg),
-      model_mode=MODEL_MODE_TRAIN,
-      layer_idx_offset=layer_idx_offset,
-      rngs=nnx.Rngs(0),
-  )
-  return cfg, block
-
-
 class TestQwen3NextScannableBlock(unittest.TestCase):
   """Tests Qwen3-Next's nested local(scan)/global(length-1 scan) decoder block."""
+
+  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
+  BLOCK_CLS = qwen3.Qwen3NextScannableBlock
+
+  @classmethod
+  def _build(cls, layer_idx_offset=0, **overrides):
+    """Builds one scannable block; overrides go to the config."""
+    cfg = _make_config(**{**cls.MODEL_CONFIG, **overrides})
+    block = cls.BLOCK_CLS(
+        config=cfg,
+        mesh=_make_mesh(cfg),
+        model_mode=MODEL_MODE_TRAIN,
+        layer_idx_offset=layer_idx_offset,
+        rngs=nnx.Rngs(0),
+    )
+    return cfg, block
 
   @classmethod
   def setUpClass(cls):
     """Builds the block once; it costs several seconds and no test here mutates it."""
-    cls.cfg, cls.block = _build_qwen3_next_block()
+    cls.cfg, cls.block = cls._build()
 
   def _inputs(self, cfg):
     inputs = jax.random.normal(jax.random.PRNGKey(1), (1, cfg.max_target_length, cfg.emb_dim), dtype=jnp.float32)
@@ -972,16 +975,35 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     local-scan-then-global would silently reorder the model, so it is rejected.
     """
     with self.assertRaisesRegex(ValueError, "full-attention layer last"):
-      _build_qwen3_next_block(layer_idx_offset=1)
+      self._build(layer_idx_offset=1)
+
+  def test_rejects_forced_routing_that_does_not_cover_every_sub_layer(self):
+    """Router replay is sliced per sub-layer, so a mismatched leading axis must not be broadcast."""
+    cfg, block = self.cfg, self.block
+    inputs, segment_ids, positions = self._inputs(cfg)
+    forced_routed_experts = jnp.zeros(
+        (block.num_of_layers + 1, 1, cfg.max_target_length, cfg.num_experts_per_tok), dtype=jnp.int32
+    )
+    with self.assertRaisesRegex(ValueError, "one slice per sub-layer"):
+      block(
+          inputs,
+          segment_ids,
+          positions,
+          True,
+          MODEL_MODE_TRAIN,
+          forced_routed_experts=forced_routed_experts,
+      )
 
 
 class TestNNXDecoderQwen3Next(unittest.TestCase):
   """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
 
+  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
+
   def _build(self, num_decoder_layers, **overrides):
     """Builds a scanned Qwen3-Next decoder and its shared embedding."""
     cfg = _make_config(
-        **{**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True, **overrides}
+        **{**self.MODEL_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True, **overrides}
     )
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
@@ -1074,6 +1096,8 @@ class TestQwen3NextDecoderParity(unittest.TestCase):
   conversion on whichever side the mapping was not written against.
   """
 
+  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
+
   def _param_tree(self, num_decoder_layers, pure_nnx_decoder):
     """Returns {parameter key: shape} for the chosen decoder implementation."""
     # pylint: disable=import-outside-toplevel
@@ -1081,7 +1105,7 @@ class TestQwen3NextDecoderParity(unittest.TestCase):
 
     cfg = _make_config(
         **{
-            **_QWEN3_NEXT_CONFIG,
+            **self.MODEL_CONFIG,
             "base_num_decoder_layers": num_decoder_layers,
             "scan_layers": True,
             "pure_nnx_decoder": pure_nnx_decoder,
@@ -1097,6 +1121,38 @@ class TestQwen3NextDecoderParity(unittest.TestCase):
     """6 layers is one whole period plus a two-layer remainder, which both decoders
     have to put in a `layers_remainder` block rather than spell out layer by layer."""
     self.assertEqual(self._param_tree(6, True), self._param_tree(6, False))
+
+
+_QWEN3_5_CONFIG = {
+    **_QWEN3_NEXT_CONFIG,
+    "run_name": "qwen3_5_scannable_block_test",
+    "model_name": "qwen3.5-35b-a3b",
+    # MRoPE sections must cover rotary_dim / 2, which is 4 here, not the shipped [11, 11, 10].
+    "mrope_section": [2, 1, 1],
+}
+
+
+class TestQwen3_5ScannableBlock(TestQwen3NextScannableBlock):
+  """Runs the Qwen3-Next scannable-block tests against Qwen3.5's block."""
+
+  MODEL_CONFIG = _QWEN3_5_CONFIG
+  BLOCK_CLS = qwen3_5.Qwen3_5ScannableBlock
+
+  def test_block_uses_qwen3_5_layers(self):
+    """The block must build Qwen3.5 decoder layers, not Qwen3-Next ones."""
+    self.assertIsInstance(self.block.global_layer, qwen3_5.Qwen3_5DecoderLayer)
+
+
+class TestNNXDecoderQwen3_5(TestNNXDecoderQwen3Next):
+  """Runs the NNXDecoder wiring tests against Qwen3.5."""
+
+  MODEL_CONFIG = _QWEN3_5_CONFIG
+
+
+class TestQwen3_5DecoderParity(TestQwen3NextDecoderParity):
+  """Runs the Linen/NNX parameter-tree parity tests against Qwen3.5."""
+
+  MODEL_CONFIG = _QWEN3_5_CONFIG
 
 
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):

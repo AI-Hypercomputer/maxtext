@@ -1085,8 +1085,8 @@ class Decoder(nn.Module):
               kv_caches=kv_caches,
               attention_metadata=attention_metadata,
           )
-        elif cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
-          y = self._apply_qwen3_next_scanned_blocks(
+        elif cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+          y = self._apply_qwen3_hybrid_scanned_blocks(
               y,
               decoder_segment_ids,
               decoder_positions,
@@ -1449,7 +1449,7 @@ class Decoder(nn.Module):
 
     return y
 
-  def _apply_qwen3_next_scanned_blocks(
+  def _apply_qwen3_hybrid_scanned_blocks(
       self,
       y,
       decoder_segment_ids,
@@ -1461,10 +1461,15 @@ class Decoder(nn.Module):
       kv_caches=None,
       attention_metadata=None,
   ):
-    """Applies Qwen3-Next scanned decoder blocks, handling main scan and remainders."""
+    """Applies Qwen3-Next/Qwen3.5 scanned decoder blocks, handling main scan and remainders."""
 
     cfg = self.config
     mesh = self.mesh
+    ScannableBlockToLinen = (
+        qwen3_5.Qwen3_5ScannableBlockToLinen
+        if cfg.decoder_block == DecoderBlockType.QWEN3_5
+        else qwen3.Qwen3NextScannableBlockToLinen
+    )
 
     # Define the repeating pattern length and calculate how many full blocks to scan
     block_pattern_len = cfg.inhomogeneous_layer_cycle_interval
@@ -1472,7 +1477,6 @@ class Decoder(nn.Module):
     remainder_layers = cfg.num_decoder_layers % block_pattern_len
 
     if num_full_blocks > 0:
-      ScannableBlockToLinen = qwen3.Qwen3NextScannableBlockToLinen
       policy = self.get_remat_policy()
 
       kv_cache_scanned = maxtext_utils.prepare_kv_caches_for_scan(
@@ -1536,7 +1540,7 @@ class Decoder(nn.Module):
     if remainder_layers > 0:
       start_idx = cfg.num_decoder_layers - remainder_layers
       remainder_kv = tuple(kv_caches[start_idx:]) if kv_caches is not None else None
-      y_and_kv = qwen3.Qwen3NextScannableBlockToLinen(
+      y_and_kv = ScannableBlockToLinen(
           config=cfg,
           mesh=mesh,
           quant=self.quant,

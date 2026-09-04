@@ -460,6 +460,8 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
       mesh=SimpleNamespace(shape={"fsdp": 32, "expert": expert_parallelism}),
       rngs=object(),
       get_expert_parallelism_size=lambda: expert_parallelism,
+      weight_dtype=jnp.float32,
+      dtype=jnp.bfloat16,
   )
   original_batch_partition = "fsdp" if expert_parallelism == 1 else ("fsdp", "expert")
   fake_moe._logical_to_mesh_axes = lambda logical_axes: P(  # pylint: disable=protected-access
@@ -500,6 +502,81 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
   assert captured["in_specs"][2] is None
   assert captured["in_specs"][9] is None
   assert captured["out_specs"][0] == P(batch_partition, None, None)
+
+
+@pytest.mark.parametrize(
+    ("weight_dtype", "dtype", "expect_barrier"),
+    (
+        (jnp.bfloat16, jnp.bfloat16, True),
+        (jnp.float32, jnp.float32, True),
+        (jnp.float32, jnp.bfloat16, False),
+    ),
+)
+def test_sparse_matmul_pins_expert_kernel_all_gather_when_the_upcast_is_an_identity(weight_dtype, dtype, expect_barrier):
+  """Sparse MoE keeps the FSDP kernel gather from being hoisted out of a scanned decoder."""
+  fake_moe = SimpleNamespace(
+      config=SimpleNamespace(
+          shard_exp_on_fsdp=False,
+          use_2d_fsdp_sharding=False,
+          shard_embed_moe_on_fsdp=False,
+          model_name="qwen3.5-35b-a3b",
+          check_vma=False,
+          moe_fsdp_use_two_stage_all_gather=False,
+      ),
+      mesh=SimpleNamespace(shape={"fsdp": 32, "expert": 1}),
+      rngs=object(),
+      get_expert_parallelism_size=lambda: 1,
+      weight_dtype=weight_dtype,
+      dtype=dtype,
+  )
+  fake_moe._logical_to_mesh_axes = lambda logical_axes: P(  # pylint: disable=protected-access
+      *("fsdp" if axis == "activation_batch" else None for axis in logical_axes)
+  )
+  sharded = []
+
+  def record_shard(value, _pspec, **_kwargs):
+    sharded.append(value)
+    return value
+
+  fake_moe._maybe_shard_with_pspec = record_shard  # pylint: disable=protected-access
+
+  w0 = SimpleNamespace(shape=(256, 2048, 512))
+  w1 = SimpleNamespace(shape=(256, 2048, 512))
+  wo = SimpleNamespace(shape=(256, 512, 2048))
+  barriered = tuple(SimpleNamespace(shape=w.shape) for w in (w0, w1, wo))
+
+  def fake_shard_map(function, *, mesh, in_specs, out_specs, check_vma):
+    del function, mesh, in_specs, out_specs, check_vma
+    return lambda x, *_args: (x, None, None)
+
+  with (
+      mock.patch.object(jax, "shard_map", side_effect=fake_shard_map),
+      mock.patch.object(jax.lax, "optimization_barrier", return_value=barriered) as barrier,
+  ):
+    moe.RoutedMoE.sparse_matmul(
+        fake_moe,
+        SimpleNamespace(shape=(4, 1024, 2048)),
+        SimpleNamespace(shape=(4, 1024, 256)),
+        None,
+        w0,
+        w1,
+        wo,
+        None,
+        None,
+        None,
+    )
+
+  def was_sharded(value):
+    return any(value is candidate for candidate in sharded)
+
+  if expect_barrier:
+    assert barrier.call_count == 1
+    assert all(a is b for a, b in zip(barrier.call_args.args[0], (w0, w1, wo), strict=True))
+    assert all(was_sharded(kernel) for kernel in barriered)
+    assert not any(was_sharded(kernel) for kernel in (w0, w1, wo))
+  else:
+    barrier.assert_not_called()
+    assert all(was_sharded(kernel) for kernel in (w0, w1, wo))
 
 
 class RoutedMoeTest(parameterized.TestCase):
