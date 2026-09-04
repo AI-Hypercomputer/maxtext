@@ -249,6 +249,45 @@ def format_fn(x, eos_id: int = 1, pad_id: int = 0):
   return x
 
 
+def chunk_token_stream(dataset, feature_key="targets", sequence_length=4096):
+  """Flattens a dataset of token sequences across document boundaries and chunks them.
+
+  Unlike reduce_concat_tokens/split_tokens, this does not use padded_batch or
+  boolean-mask stripping, preserving all valid token IDs (including 0) and
+  guaranteeing 0% padding waste.
+  """
+  ds = dataset.map(lambda x: tf.cast(x[feature_key], tf.int32), num_parallel_calls=AUTOTUNE)
+  ds = ds.unbatch()
+  ds = ds.batch(sequence_length, drop_remainder=True)
+  return ds.map(lambda tokens: {feature_key: tokens}, num_parallel_calls=AUTOTUNE)
+
+
+def format_continuous_stream_fn(x, max_target_length: int, eos_id: int = 1):
+  """Format function for continuous token stream chunks.
+
+  Sets monotonic position IDs 0..max_target_length-1, uniform 1s for segmentation
+  to allow standard causal cross-document attention, and ensures 100% loss participation.
+  """
+  targets_raw = tf.cast(x["targets"], tf.int32)
+  inputs = targets_raw
+  targets = _shift_left_and_pad(targets_raw, eos_id)
+
+  inputs_position = tf.range(max_target_length, dtype=tf.int32)
+  targets_position = inputs_position
+
+  inputs_segmentation = tf.ones([max_target_length], dtype=tf.int32)
+  targets_segmentation = tf.ones([max_target_length], dtype=tf.int32)
+
+  return {
+      "inputs": inputs,
+      "targets": targets,
+      "inputs_position": inputs_position,
+      "targets_position": targets_position,
+      "inputs_segmentation": inputs_segmentation,
+      "targets_segmentation": targets_segmentation,
+  }
+
+
 def preprocess_train_dataset(
     train_ds: tf.data.Dataset,
     sp_tokenizer,
@@ -259,30 +298,44 @@ def preprocess_train_dataset(
     is_tokenized_dataset: bool = False,
 ) -> tf.data.Dataset:
   """Preprocess the training dataset."""
-  if sp_tokenizer.pad_id is not None:
-    pad_id = sp_tokenizer.pad_id
-  elif sp_tokenizer.unk_id is not None:
-    pad_id = sp_tokenizer.unk_id
+  if sp_tokenizer is not None:
+    if getattr(sp_tokenizer, "pad_id", None) is not None:
+      pad_id = sp_tokenizer.pad_id
+    elif getattr(sp_tokenizer, "unk_id", None) is not None:
+      pad_id = sp_tokenizer.unk_id
+    else:
+      pad_id = -1
+    eos_id = getattr(sp_tokenizer, "eos_id", 1)
+    if callable(eos_id):
+      eos_id = eos_id()
+    if eos_id is None:
+      eos_id = 1
   else:
     pad_id = -1
+    eos_id = 1
 
-  # Skip tokenization/chunking for pre-tokenized data (e.g. integer 'ids'):
-  # 1. TokenizeOp expects string inputs, not integer IDs.
-  # 2. reduce_concat_tokens/split_tokens strip padding via bool-cast, dropping
-  #    valid token ID 0.
-  # 3. sequence_packing directly packs pre-tokenized documents preserving
-  #    segment boundaries.
-  if not is_tokenized_dataset:
+  if is_tokenized_dataset:
+    # Continuous stream chunking for pre-tokenized TFDS shards:
+    # 1. Flatten token streams into contiguous max_target_length chunks across document boundaries (0% padding).
+    # 2. Set monotonic position IDs: [0, 1, ..., max_target_length - 1].
+    # 3. Uniform 1s for segmentation to allow cross-document causal attention and 100% loss participation.
+    train_ds = chunk_token_stream(train_ds, feature_key="targets", sequence_length=max_target_length)
+    train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
+    train_ds = train_ds.map(
+        lambda x: format_continuous_stream_fn(x, max_target_length=max_target_length, eos_id=eos_id),
+        num_parallel_calls=AUTOTUNE,
+    )
+  else:
     train_ds = train_ds.map(
         lambda x: TokenizeOp(tokenizer_model=sp_tokenizer, features=x, data_keys=("targets",)),
         num_parallel_calls=AUTOTUNE,
     )
     train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
     train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
+    train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
+    train_ds = sequence_packing.pack_dataset(train_ds, max_target_length, pad_id=pad_id)
+    train_ds = train_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
 
-  train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
-  train_ds = sequence_packing.pack_dataset(train_ds, max_target_length, pad_id=pad_id)
-  train_ds = train_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
   train_ds = train_ds.batch(train_global_batch_size_to_load // jax.process_count(), drop_remainder=True)
   train_ds = train_ds.prefetch(AUTOTUNE)
   return train_ds
@@ -297,8 +350,29 @@ def preprocess_eval_dataset(
     is_tokenized_dataset: bool = True,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
-  # group text up to max_target_length if the dataset is not pre-tokenized/pre-processed
-  if not is_tokenized_dataset:
+  if sp_tokenizer is not None:
+    if getattr(sp_tokenizer, "pad_id", None) is not None:
+      pad_id = sp_tokenizer.pad_id
+    elif getattr(sp_tokenizer, "unk_id", None) is not None:
+      pad_id = sp_tokenizer.unk_id
+    else:
+      pad_id = -1
+    eos_id = getattr(sp_tokenizer, "eos_id", 1)
+    if callable(eos_id):
+      eos_id = eos_id()
+    if eos_id is None:
+      eos_id = 1
+  else:
+    pad_id = -1
+    eos_id = 1
+
+  if is_tokenized_dataset:
+    eval_ds = chunk_token_stream(eval_ds, feature_key="targets", sequence_length=max_target_length)
+    eval_ds = eval_ds.map(
+        lambda x: format_continuous_stream_fn(x, max_target_length=max_target_length, eos_id=eos_id),
+        num_parallel_calls=AUTOTUNE,
+    )
+  else:
     eval_ds = eval_ds.map(
         lambda x: TokenizeOp(tokenizer_model=sp_tokenizer, features=x, data_keys=("targets",)),
         num_parallel_calls=AUTOTUNE,
@@ -307,16 +381,8 @@ def preprocess_eval_dataset(
     #   to avoid padding tokens inserted in group text
     eval_ds = reduce_concat_tokens(eval_ds, feature_key="targets", batch_size=24567)
     eval_ds = split_tokens_to_targets_length(eval_ds, max_target_length)
-
-  if sp_tokenizer.pad_id is not None:
-    pad_id = sp_tokenizer.pad_id
-  elif sp_tokenizer.unk_id is not None:
-    pad_id = sp_tokenizer.unk_id
-  else:
-    pad_id = -1
-  eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length, pad_id=pad_id)
-
-  eval_ds = eval_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
+    eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length, pad_id=pad_id)
+    eval_ds = eval_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
 
   # ensure array split in an equal division for each device
   # pad zeros up to the same batch_size among all processes
