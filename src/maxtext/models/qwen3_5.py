@@ -24,7 +24,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from maxtext.common.common_types import Config, Array
+from maxtext.common.common_types import Config, Array, get_weight_dtype
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
@@ -138,7 +138,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "norm"),
         rngs=rngs,
     )
 
@@ -167,7 +167,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "norm"),
         rngs=rngs,
     )
 
