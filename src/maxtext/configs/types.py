@@ -276,6 +276,7 @@ ModelName = Literal[
     "qwen3-vl-4b",
     "qwen3-vl-30b-a3b",
     "qwen3-next-80b-a3b",
+    "qwen3-next-80b-a3b-256e",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-35b-a3b",
@@ -1097,6 +1098,9 @@ class DeepSeekMoE(BaseModel):
 
   first_num_dense_layers: NonNegativeInt = Field(0, description="Number of initial dense layers in the model.")
   shared_experts: NonNegativeInt = Field(0, description="Number of shared experts.")
+  moe_shared_expert_gate: bool = Field(
+      False, description="Whether to use a gate on shared experts."
+  )
   routed_scaling_factor: float = Field(1.0, description="Scaling factor for routing scores.")
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
@@ -1140,6 +1144,19 @@ class Qwen3Next(BaseModel):
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+  use_gdn_kernel: bool = Field(
+      False,
+      description="Whether to use GDN Pallas kernel.",
+  )
+  use_hybrid_gdn: bool = Field(
+      False,
+      description=(
+          "Whether to use hybrid GDN v3 Tokamax forward + Custom VJP backward."
+      ),
+  )
+  full_attention_layer_offset: int = Field(
+      0, description="Offset for full attention layer."
+  )
 
 
 class HardwareAndMesh(BaseModel):
@@ -2000,12 +2017,26 @@ class Muon(BaseModel):
 
   muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
   muon_weight_decay: float = Field(
-      0,
-      description="Strength of the weight decay regularization. This is multiplied with the learning rate.",
+      0.0,
+      description=(
+          "Strength of the weight decay regularization. This is multiplied with"
+          " the learning rate."
+      ),
   )
   muon_consistent_rms: float | None = Field(
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
+  )
+  muon_ns_steps: int = Field(
+      5,
+      description="Number of Newton-Schulz iterations for Muon optimizer.",
+  )
+  muon_use_all_to_all: bool = Field(
+      True,
+      description=(
+          "Whether to use all-to-all communication during Newton-Schulz"
+          " iterations in Muon optimizer."
+      ),
   )
 
 
@@ -3186,9 +3217,12 @@ class MaxTextConfig(
       raise ValueError("TPU USP attention does not support sparse indexer masks.")
     if self.attention_type != "global":
       raise ValueError("TPU USP attention is initially supported only for global causal attention.")
-    if self.context_parallel_load_balance and usp_ring_size % 2 != 0:
+    if self.packing:
+      raise ValueError("TPU USP attention does not support packing yet.")
+    if self.context_parallel_load_balance:
       raise ValueError(
-          "TPU USP attention with context_parallel_load_balance=True requires an even ici_context_parallelism."
+          "TPU USP attention does not support"
+          " context_parallel_load_balance=True."
       )
     if self.use_ragged_attention:
       raise ValueError("TPU USP attention does not support ragged attention.")
@@ -4067,13 +4101,27 @@ class MaxTextConfig(
       if (
           self.routed_bias
           and self.routed_bias_update_rate > 0.0
-          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
+          and self.decoder_block
+          not in (
+              DecoderBlockType.DEEPSEEK,
+              DecoderBlockType.DEEPSEEK4,
+              DecoderBlockType.QWEN3_NEXT,
+          )
       ):
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
-      if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
         raise ValueError(
-            "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
-            "Please set pure_nnx=True or disable routed_bias."
+            "Loss-free load balancing is only supported for the DeepSeek,"
+            " DeepSeek4, and Qwen3-Next decoder blocks."
+        )
+      if (
+          not self.pure_nnx
+          and self.routed_bias
+          and self.decoder_block
+          in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.QWEN3_NEXT)
+      ):
+        raise ValueError(
+            "Auxiliary-loss-free routed bias for DeepSeek V4 and Qwen3-Next is"
+            " only supported in pure NNX mode. Please set pure_nnx=True or"
+            " disable routed_bias."
         )
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
@@ -4363,6 +4411,16 @@ class MaxTextConfig(
       rotary_dim = int(self.head_dim * self.partial_rotary_factor)
       if rotary_dim % 2 != 0:
         raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
+      gdn_context_parallel_size = self.ici_context_parallelism * self.dcn_context_parallelism
+      if gdn_context_parallel_size > 1 and self.context_parallel_load_balance:
+        raise ValueError(
+            "GatedDeltaNet context parallelism requires context_parallel_load_balance=False. The GatedDeltaNet "
+            "layers carry a recurrence, so device order is sequence order: device i composes the state left by "
+            "device i-1. DUAL_CHUNK_SWAP hands device 0 the first and last chunks, device 1 the second and "
+            "second-to-last, and so on, which composes the segments out of order. Softmax attention tolerates the "
+            "reorder because it rebuilds the causal mask from positions; a recurrence cannot. The run still trains "
+            "and the loss still falls, so set this explicitly rather than relying on the failure being visible."
+        )
     else:
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
@@ -4440,9 +4498,10 @@ class MaxTextConfig(
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
-        DecoderBlockType.QWEN3_MOE,
-        DecoderBlockType.QWEN3_CUSTOM_MOE,
         DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_5,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,

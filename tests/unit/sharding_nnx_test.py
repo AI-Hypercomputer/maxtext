@@ -203,7 +203,6 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
     for leaf in leaves:
       self.assertIsInstance(leaf.get_value(), NamedSharding)
 
-
 class TestNnxConstructNamedSharding(unittest.TestCase):
   """Unit tests for nnx_construct_named_sharding covering every branch.
 

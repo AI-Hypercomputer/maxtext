@@ -13,24 +13,23 @@
 # limitations under the License.
 
 """Unit tests for all optimizers."""
+
 import re
+from typing import NamedTuple
 import unittest
-from unittest.mock import patch, MagicMock
-import jax
-import optax
-import jax.numpy as jnp
+from unittest.mock import MagicMock, patch
 
-import pytest
-from absl.testing import parameterized
+from absl.testing import absltest, parameterized
 from flax import nnx
-from optax.contrib import MuonDimensionNumbers as mdn
-
+import jax
+import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
+from maxtext.optimizers.muon import MuonDimensionNumbers as mdn
 from maxtext.utils import maxtext_utils, muon_utils
 from tests.utils.test_helpers import get_test_config_path
-from typing import NamedTuple
-
+import optax
+import pytest
 
 # deepseek2, specific: q_lora_rank=0
 # applicable: deepseek2-16, but not deepseek2-236b (q_lora_rank=1536)
@@ -156,7 +155,9 @@ GEMMA3_DIMENSION_NUMBER = {
         "decoder": {
             "decoder_norm": {"scale": None},
             "layers": {f"layers_{i}": _GEMMA3_LAYER for i in range(6)},
-            "layers_remainder": {f"layers_{i}": _GEMMA3_LAYER for i in range(4)},
+            "layers_remainder": {
+                f"layers_{i}": _GEMMA3_LAYER for i in range(4)
+            },
         },
         "token_embedder": {"embedding": None},
     }
@@ -170,15 +171,29 @@ LLAMA2_DIMENSION_NUMBER = {
             "decoder_norm": {"scale": None},
             "layers": {
                 "mlp": {
-                    "wi_0": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-                    "wi_1": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-                    "wo": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+                    "wi_0": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-1,))
+                    },
+                    "wi_1": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-1,))
+                    },
+                    "wo": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-1,))
+                    },
                 },
                 "self_attention": {
-                    "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "out": {"kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))},
+                    "query": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "key": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "value": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "out": {
+                        "kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))
+                    },
                 },
                 "post_self_attention_layer_norm": {"scale": None},
                 "pre_self_attention_layer_norm": {"scale": None},
@@ -198,15 +213,29 @@ QWEN3_DIMENSION_NUMBER = {
             "decoder_norm": {"scale": None},
             "layers": {
                 "mlp": {
-                    "wi_0": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-                    "wi_1": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-                    "wo": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+                    "wi_0": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-1,))
+                    },
+                    "wi_1": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-1,))
+                    },
+                    "wo": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-1,))
+                    },
                 },
                 "self_attention": {
-                    "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "out": {"kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))},
+                    "query": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "key": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "value": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "out": {
+                        "kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))
+                    },
                     "key_norm": {"scale": None},
                     "query_norm": {"scale": None},
                 },
@@ -218,7 +247,6 @@ QWEN3_DIMENSION_NUMBER = {
     }
 }
 
-
 # qwen3 MoE (e.g. qwen3-30b-a3b)
 QWEN3_MOE_DIMENSION_NUMBER = {
     "params": {
@@ -226,7 +254,7 @@ QWEN3_MOE_DIMENSION_NUMBER = {
             "decoder_norm": {"scale": None},
             "layers": {
                 "moe_block": {
-                    "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+                    "gate": {"kernel": mdn((0,), (-1,))},
                     "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
                     "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
                     "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
@@ -234,10 +262,18 @@ QWEN3_MOE_DIMENSION_NUMBER = {
                 "post_self_attention_layer_norm": {"scale": None},
                 "pre_self_attention_layer_norm": {"scale": None},
                 "self_attention": {
-                    "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "out": {"kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))},
+                    "query": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "key": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "value": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "out": {
+                        "kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))
+                    },
                     "key_norm": {"scale": None},
                     "query_norm": {"scale": None},
                 },
@@ -256,9 +292,11 @@ QWEN3_CUSTOM_MOE_DIMENSION_NUMBER = {
             "decoder_norm": {"scale": None},
             "layers": {
                 "latent_norm": {"scale": None},
-                "layer_up_projection": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+                "layer_up_projection": {
+                    "kernel": mdn(reduction_axis=(0,), output_axis=(-1,))
+                },
                 "moe_block": {
-                    "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+                    "gate": {"kernel": mdn((0,), (-1,))},
                     "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
                     "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
                     "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
@@ -266,10 +304,18 @@ QWEN3_CUSTOM_MOE_DIMENSION_NUMBER = {
                 "post_self_attention_layer_norm": {"scale": None},
                 "pre_self_attention_layer_norm": {"scale": None},
                 "self_attention": {
-                    "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
-                    "out": {"kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))},
+                    "query": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "key": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "value": {
+                        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))
+                    },
+                    "out": {
+                        "kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))
+                    },
                     "key_norm": {"scale": None},
                     "query_norm": {"scale": None},
                 },
@@ -284,7 +330,7 @@ QWEN3_CUSTOM_MOE_DIMENSION_NUMBER = {
 # qwen3-next (e.g. qwen3-next-80b-a3b)
 _QWEN3_NEXT_MLP = {
     "routed_experts": {
-        "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "gate": {"kernel": mdn((0,), (-1,))},
         "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
         "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
         "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
@@ -351,15 +397,27 @@ QWEN3_NEXT_DIMENSION_NUMBER = {
 
 # gpt-oss (e.g. gpt-oss-20b)
 _GPT_OSS_ATTENTION = {
-    "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1)), "bias": None},
-    "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1)), "bias": None},
-    "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1)), "bias": None},
-    "out": {"kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,)), "bias": None},
+    "query": {
+        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1)),
+        "bias": None,
+    },
+    "key": {
+        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1)),
+        "bias": None,
+    },
+    "value": {
+        "kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1)),
+        "bias": None,
+    },
+    "out": {
+        "kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,)),
+        "bias": None,
+    },
     "sinks": None,
 }
 
 _GPT_OSS_MLP = {
-    "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,)), "bias": None},
+    "gate": {"kernel": mdn((0,), (-1,)), "bias": None},
     "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
     "wi_0_bias": None,
     "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
@@ -391,20 +449,7 @@ GPT_OSS_DIMENSION_NUMBER = {
 
 
 # deepseek4 building blocks
-_DEEPSEEK4_MHC_ATTENTION = {
-    "mhc_norm": {"scale": None},
-    "post_alpha": mdn(reduction_axis=(0,), output_axis=(-1,)),
-    "post_alpha_scale": None,
-    "post_beta": None,
-    "pre_alpha": mdn(reduction_axis=(0,), output_axis=(-1,)),
-    "pre_alpha_scale": None,
-    "pre_beta": None,
-    "res_alpha": mdn(reduction_axis=(0,), output_axis=(-1,)),
-    "res_alpha_scale": None,
-    "res_beta": None,
-}
-
-_DEEPSEEK4_MHC_MLP = {
+_DEEPSEEK4_MHC = {
     "mhc_norm": {"scale": None},
     "post_alpha": mdn(reduction_axis=(0,), output_axis=(-1,)),
     "post_alpha_scale": None,
@@ -419,7 +464,7 @@ _DEEPSEEK4_MHC_MLP = {
 
 _DEEPSEEK4_MLP = {
     "MoeBlock_0": {
-        "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "gate": {"kernel": mdn((0,), (-1,))},
         "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
         "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
         "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
@@ -448,12 +493,16 @@ _DEEPSEEK4_ATTN_CSA = {
     "csa_compressor": {
         "gate_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
         "indexer": {
-            "gate_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+            "gate_proj": {
+                "kernel": mdn(reduction_axis=(0,), output_axis=(-1,))
+            },
             "kv_norm": {"scale": None},
             "kv_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
             "position_bias": mdn(reduction_axis=(0,), output_axis=(-1,)),
             "q_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-            "weights_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+            "weights_proj": {
+                "kernel": mdn(reduction_axis=(0,), output_axis=(-1,))
+            },
         },
         "kv_norm": {"scale": None},
         "kv_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
@@ -487,8 +536,8 @@ _DEEPSEEK4_ATTN_HCA = {
 }
 
 _DEEPSEEK4_LAYER_BASIC = {
-    "mhc_attention": _DEEPSEEK4_MHC_ATTENTION,
-    "mhc_mlp": _DEEPSEEK4_MHC_MLP,
+    "mhc_attention": _DEEPSEEK4_MHC,
+    "mhc_mlp": _DEEPSEEK4_MHC,
     "mlp": _DEEPSEEK4_MLP,
     "post_self_attention_layer_norm": {"scale": None},
     "pre_self_attention_layer_norm": {"scale": None},
@@ -496,8 +545,8 @@ _DEEPSEEK4_LAYER_BASIC = {
 }
 
 _DEEPSEEK4_LAYER_CSA_PREFIX = {
-    "mhc_attention": _DEEPSEEK4_MHC_ATTENTION,
-    "mhc_mlp": _DEEPSEEK4_MHC_MLP,
+    "mhc_attention": _DEEPSEEK4_MHC,
+    "mhc_mlp": _DEEPSEEK4_MHC,
     "mlp": _DEEPSEEK4_MLP,
     "post_self_attention_layer_norm": {"scale": None},
     "pre_self_attention_layer_norm": {"scale": None},
@@ -505,8 +554,8 @@ _DEEPSEEK4_LAYER_CSA_PREFIX = {
 }
 
 _DEEPSEEK4_LAYER_CSA_SCANNED = {
-    "mhc_attention": _DEEPSEEK4_MHC_ATTENTION,
-    "mhc_mlp": _DEEPSEEK4_MHC_MLP,
+    "mhc_attention": _DEEPSEEK4_MHC,
+    "mhc_mlp": _DEEPSEEK4_MHC,
     "mlp": _DEEPSEEK4_MLP_SCANNED,
     "post_self_attention_layer_norm": {"scale": None},
     "pre_self_attention_layer_norm": {"scale": None},
@@ -514,8 +563,8 @@ _DEEPSEEK4_LAYER_CSA_SCANNED = {
 }
 
 _DEEPSEEK4_LAYER_HCA_SCANNED = {
-    "mhc_attention": _DEEPSEEK4_MHC_ATTENTION,
-    "mhc_mlp": _DEEPSEEK4_MHC_MLP,
+    "mhc_attention": _DEEPSEEK4_MHC,
+    "mhc_mlp": _DEEPSEEK4_MHC,
     "mlp": _DEEPSEEK4_MLP_SCANNED,
     "post_self_attention_layer_norm": {"scale": None},
     "pre_self_attention_layer_norm": {"scale": None},
@@ -564,18 +613,24 @@ class MuonDimensionTest(parameterized.TestCase):
       ("gemma3-4b", "gemma3-4b", GEMMA3_DIMENSION_NUMBER),
       ("qwen3-0.6b", "qwen3-0.6b", QWEN3_DIMENSION_NUMBER),
       ("qwen3-30b-a3b", "qwen3-30b-a3b", QWEN3_MOE_DIMENSION_NUMBER),
-      ("qwen3-custom-30b-a3b", "qwen3-custom-30b-a3b", QWEN3_CUSTOM_MOE_DIMENSION_NUMBER),
+      (
+          "qwen3-custom-30b-a3b",
+          "qwen3-custom-30b-a3b",
+          QWEN3_CUSTOM_MOE_DIMENSION_NUMBER,
+      ),
       ("qwen3-next-80b-a3b", "qwen3-next-80b-a3b", QWEN3_NEXT_DIMENSION_NUMBER),
       ("gpt-oss-20b", "gpt-oss-20b", GPT_OSS_DIMENSION_NUMBER),
   )
   @pytest.mark.tpu_only
   def test_model_integration(self, model_name, expected_output):
-    """
-    Initializes the specified MaxText model and asserts that the generated
+    """Initializes the specified MaxText model and asserts that the generated
+
     Muon dimension numbers match the hardcoded reference.
     """
     is_pure_nnx = model_name in {"deepseek4-284b"}
-    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, pure_nnx=is_pure_nnx)
+    actual_output = muon_utils.get_model_mdn(
+        model_name, scan_layers=True, pure_nnx=is_pure_nnx
+    )
     if "params" in expected_output and "params" in actual_output:
       self.assertEqual(actual_output["params"], expected_output["params"])
     else:
@@ -596,12 +651,21 @@ class AdamWMaskTest(parameterized.TestCase):
   def test_get_adamw_mask_with_valid_mask(self):
     """Directly test the get_adamw_mask function with valid mask"""
     # Case 2: Mask in config
-    argv = ["", get_test_config_path(), "run_name=test", "adamw_mask=['bias', '.*norm', '.*ln.*']"]
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "adamw_mask=['bias', '.*norm', '.*ln.*']",
+    ]
     config = pyconfig.initialize(argv)
     mask_fn = optimizers.get_adamw_mask(config)
     self.assertTrue(callable(mask_fn))
 
-    params = {"layer1": {"kernel": 1, "bias": 2}, "layer2": {"layer_norm": {"scale": 3}}, "layer3": {"ln": {"scale": 4}}}
+    params = {
+        "layer1": {"kernel": 1, "bias": 2},
+        "layer2": {"layer_norm": {"scale": 3}},
+        "layer3": {"ln": {"scale": 4}},
+    }
     mask = mask_fn(params)
     self.assertTrue(mask["layer1"]["kernel"])
     self.assertFalse(mask["layer1"]["bias"])
@@ -619,7 +683,10 @@ class AdamWMaskTest(parameterized.TestCase):
       optimizers.get_adamw_mask(config)
 
   def test_get_adamw_mask_with_getattrkey(self):
-    """Test that get_adamw_mask correctly handles GetAttrKey (e.g. from NamedTuples)"""
+    """Test that get_adamw_mask correctly handles GetAttrKey (e.g.
+
+    from NamedTuples)
+    """
 
     class MyParams(NamedTuple):
       kernel: jax.Array
@@ -636,10 +703,10 @@ class AdamWMaskTest(parameterized.TestCase):
     self.assertFalse(mask.bias)
 
   @parameterized.named_parameters(
-      ("adamw", "adamw", "maxtext.optimizers.optimizers.optax.adamw"),
-      ("adam_pax", "adam_pax", "maxtext.optimizers.optimizers.adam_pax"),
+      ("adamw", "adamw", optimizers.optax, "adamw"),
+      ("adam_pax", "adam_pax", optimizers, "adam_pax"),
   )
-  def test_optimizer_with_mask(self, opt_type, mock_path):
+  def test_optimizer_with_mask(self, opt_type, mock_target, mock_attr):
     """Test that optimizer receives the mask function from config and it works as expected"""
     # Create a config with a mask list including regex
     argv = [
@@ -652,7 +719,7 @@ class AdamWMaskTest(parameterized.TestCase):
     config = pyconfig.initialize(argv)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
 
-    with patch(mock_path) as mock_opt:
+    with patch.object(mock_target, mock_attr) as mock_opt:
       # Call get_optimizer
       optimizers.get_optimizer(config, learning_rate_schedule)
 
@@ -665,7 +732,11 @@ class AdamWMaskTest(parameterized.TestCase):
       self.assertIsNotNone(mask_fn)
 
       # Test the behavior of mask_fn
-      params = {"layer1": {"kernel": 1, "bias": 2}, "layer2": {"layer_norm": {"scale": 3}}, "layer3": [4, 5]}
+      params = {
+          "layer1": {"kernel": 1, "bias": 2},
+          "layer2": {"layer_norm": {"scale": 3}},
+          "layer3": [4, 5],
+      }
 
       mask = mask_fn(params)
 
@@ -680,16 +751,16 @@ class AdamWMaskTest(parameterized.TestCase):
       self.assertTrue(mask["layer3"][1])
 
   @parameterized.named_parameters(
-      ("adamw", "adamw", "maxtext.optimizers.optimizers.optax.adamw"),
-      ("adam_pax", "adam_pax", "maxtext.optimizers.optimizers.adam_pax"),
+      ("adamw", "adamw", optimizers.optax, "adamw"),
+      ("adam_pax", "adam_pax", optimizers, "adam_pax"),
   )
-  def test_optimizer_without_mask(self, opt_type, mock_path):
+  def test_optimizer_without_mask(self, opt_type, mock_target, mock_attr):
     """Test that optimizer receives None for mask when config is empty"""
     argv = ["", get_test_config_path(), "run_name=test", f"opt_type={opt_type}"]
     config = pyconfig.initialize(argv)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
 
-    with patch(mock_path) as mock_opt:
+    with patch.object(mock_target, mock_attr) as mock_opt:
       # Call get_optimizer
       optimizers.get_optimizer(config, learning_rate_schedule)
 
@@ -702,7 +773,8 @@ class AdamWMaskTest(parameterized.TestCase):
 class AdamPaxScalarLearningRateTest(parameterized.TestCase):
   """Cover both branches of adam_pax's callable-vs-scalar learning_rate_fn guard.
 
-  adam_pax accepts either a callable schedule (the usual case) or a pre-evaluated
+  adam_pax accepts either a callable schedule (the usual case) or a
+  pre-evaluated
   scalar (when wrapped by optax.inject_hyperparams). Both must produce identical
   parameter updates for the same effective learning rate.
   """
@@ -760,13 +832,18 @@ class TrainableParametersMaskTest(parameterized.TestCase):
     # We can test the optimizer by creating some dummy params and gradients
     # and checking if the updates are zeroed out for non-trainable parameters.
     params = {
-        "layer1": {"kernel": jax.numpy.ones((2, 2)), "indexer": jax.numpy.ones((2, 2))},
+        "layer1": {
+            "kernel": jax.numpy.ones((2, 2)),
+            "indexer": jax.numpy.ones((2, 2)),
+        },
         "layer2": {"layer_norm": {"scale": jax.numpy.ones((2, 2))}},
         "layer3": {"ln": {"scale": jax.numpy.ones((2, 2))}},
     }
 
     # Give some non-zero gradients
-    grads = jax.tree_util.tree_map(lambda x: jax.numpy.ones_like(x) * 0.5, params)
+    grads = jax.tree_util.tree_map(
+        lambda x: jax.numpy.ones_like(x) * 0.5, params
+    )
 
     # Initialize optimizer state
     opt_state = opt.init(params)
@@ -781,11 +858,18 @@ class TrainableParametersMaskTest(parameterized.TestCase):
     # 'layer1/indexer' matches, so it should be trained (update != 0)
     self.assertFalse(jax.numpy.all(updates["layer1"]["indexer"] == 0))
     # 'layer2/layer_norm/scale' matches, so it should be trained (update != 0)
-    self.assertFalse(jax.numpy.all(updates["layer2"]["layer_norm"]["scale"] == 0))
+    self.assertFalse(
+        jax.numpy.all(updates["layer2"]["layer_norm"]["scale"] == 0)
+    )
 
   def test_get_optimizer_without_trainable_mask(self):
     """Test get_optimizer when trainable_parameters_mask is empty."""
-    argv = ["", get_test_config_path(), "run_name=test", "trainable_parameters_mask=[]"]
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "trainable_parameters_mask=[]",
+    ]
     config = pyconfig.initialize(argv)
 
     # Use a constant learning rate > 0 to ensure non-zero updates
@@ -809,7 +893,9 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
 
   def _run_spike_test(self, spike_kwargs):
     inner_opt = optax.sgd(0.1)
-    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+    opt = optimizers.skip_step_on_spikes(
+        inner_opt, interval=4, scaling_factor=1.0
+    )
 
     params = {"x": jnp.array([1.0])}
     opt_state = opt.init(params)
@@ -818,18 +904,24 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
     base_kwargs = {k: jnp.array(1.0) for k in spike_kwargs.keys()}
 
     # Step 0: count = 0 < 2, will not skip (count should be >= interval / 2)
-    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, **base_kwargs)
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, **base_kwargs
+    )
     self.assertFalse(jnp.all(updates["x"] == 0.0))
     self.assertFalse(opt_state["is_skipped"])
 
     # Step 1: count = 1 < 2, will not skip. mean=1.0, std=0.0 (count should be >= interval / 2)
-    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, **base_kwargs)
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, **base_kwargs
+    )
     self.assertFalse(jnp.all(updates["x"] == 0.0))
     self.assertFalse(opt_state["is_skipped"])
 
     # Step 2: count = 2. Spike!
     spike_kwargs_jnp = {k: jnp.array(v) for k, v in spike_kwargs.items()}
-    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, **spike_kwargs_jnp)
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, **spike_kwargs_jnp
+    )
     self.assertTrue(jnp.all(updates["x"] == 0.0))
     self.assertTrue(opt_state["is_skipped"])
 
@@ -844,7 +936,9 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
 
   def test_no_skip_without_kwargs(self):
     inner_opt = optax.sgd(0.1)
-    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+    opt = optimizers.skip_step_on_spikes(
+        inner_opt, interval=4, scaling_factor=1.0
+    )
 
     params = {"x": jnp.array([1.0])}
     opt_state = opt.init(params)
@@ -862,14 +956,20 @@ class TestMuonLogic(unittest.TestCase):
 
   def test_is_path_contain_any(self):
     # pylint: disable=protected-access
-    self.assertTrue(muon_utils._is_path_contain_any(("a", "b"), ("x", "a", "z")))
-    self.assertFalse(muon_utils._is_path_contain_any(("a", "b"), ("x", "y", "z")))
+    self.assertTrue(
+        muon_utils._is_path_contain_any(("a", "b"), ("x", "a", "z"))
+    )
+    self.assertFalse(
+        muon_utils._is_path_contain_any(("a", "b"), ("x", "y", "z"))
+    )
 
   def test_transform_logic_exclusions(self):
     self.assertIsNone(muon_utils.transform_logic(("layer_0", "bias")))
     self.assertIsNone(muon_utils.transform_logic(("layer_0", "scale")))
     self.assertIsNone(muon_utils.transform_logic(("embedding", "kernel")))
-    self.assertIsNone(muon_utils.transform_logic(("layer_0", "attention", "A_log")))
+    self.assertIsNone(
+        muon_utils.transform_logic(("layer_0", "attention", "A_log"))
+    )
 
   def test_transform_logic_moe(self):
     path = ("layers_0", "MoeBlock_0", "wi_0")
@@ -885,19 +985,44 @@ class TestMuonLogic(unittest.TestCase):
     self.assertEqual(muon_utils.transform_logic(path_q), mdn((0,), (-2, -1)))
 
     path_gpt_out = ("layers_0", "GptOssAttention", "out", "kernel")
-    self.assertEqual(muon_utils.transform_logic(path_gpt_out), mdn((0, -2), (-1,)))
+    self.assertEqual(
+        muon_utils.transform_logic(path_gpt_out), mdn((0, -2), (-1,))
+    )
 
     path_gpt_q = ("layers_0", "GptOssAttention", "query", "kernel")
-    self.assertEqual(muon_utils.transform_logic(path_gpt_q), mdn((0,), (-2, -1)))
+    self.assertEqual(
+        muon_utils.transform_logic(path_gpt_q), mdn((0,), (-2, -1))
+    )
 
-    path_qwen3_next_q = ("layers_0", "attention", "attention", "query", "kernel")
-    self.assertEqual(muon_utils.transform_logic(path_qwen3_next_q), mdn((0,), (-2, -1)))
+    path_qwen3_next_q = (
+        "layers_0",
+        "attention",
+        "attention",
+        "query",
+        "kernel",
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(path_qwen3_next_q), mdn((0,), (-2, -1))
+    )
 
-    path_qwen3_next_out = ("layers_0", "attention", "attention", "out", "kernel")
-    self.assertEqual(muon_utils.transform_logic(path_qwen3_next_out), mdn((0,), (-1,)))
+    path_qwen3_next_out = (
+        "layers_0",
+        "attention",
+        "attention",
+        "out",
+        "kernel",
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(path_qwen3_next_out), mdn((0,), (-1,))
+    )
 
   def test_get_transform_tree(self):
-    fake_tree = {"params": {"layer_0": {"kernel": "leaf", "bias": "leaf"}, "MoeBlock_0": {"wi_0": "leaf"}}}
+    fake_tree = {
+        "params": {
+            "layer_0": {"kernel": "leaf", "bias": "leaf"},
+            "MoeBlock_0": {"wi_0": "leaf"},
+        }
+    }
     result = muon_utils.get_transform_tree(fake_tree)
     self.assertEqual(result["params"]["layer_0"]["kernel"], mdn((0,), (-1,)))
     self.assertIsNone(result["params"]["layer_0"]["bias"])
@@ -956,8 +1081,8 @@ class TestMuonLogic(unittest.TestCase):
 
       def __init__(self, rngs: nnx.Rngs):
         self.self_attention = nnx.Module()
-        self.self_attention.query = nnx.Linear(8, 8, rngs=rngs)
-        self.self_attention.out = nnx.Linear(8, 8, rngs=rngs)
+        self.self_attention.query = nnx.Param(jnp.ones((8, 4, 2)))
+        self.self_attention.out = nnx.Param(jnp.ones((4, 2, 8)))
 
     # Use eval_shape to create an abstract version of the model.
     model = nnx.eval_shape(lambda: DeepSeekAttention(nnx.Rngs(0)))
@@ -965,9 +1090,9 @@ class TestMuonLogic(unittest.TestCase):
     result = muon_utils.get_muon_weight_dimension_numbers(model, config)
 
     # Check attention query: [0] -> [-2, -1]
-    self.assertEqual(result.self_attention.query.kernel, mdn((0,), (-2, -1)))
+    self.assertEqual(result.self_attention.query, mdn((0,), (-2, -1)))
     # Check attention out: [0, -2] -> [-1]
-    self.assertEqual(result.self_attention.out.kernel, mdn((0, -2), (-1,)))
+    self.assertEqual(result.self_attention.out, mdn((0, -2), (-1,)))
 
   def test_muon_newton_schulz_config(self):
     """Verifies that muon optimizer configures Newton-Schulz parameters correctly based on model."""
@@ -986,8 +1111,10 @@ class TestMuonLogic(unittest.TestCase):
     config_ds4 = pyconfig.initialize(argv_ds4)
 
     with (
-        patch("maxtext.optimizers.optimizers.get_muon_weight_dimension_numbers") as mock_get_mdn,
-        patch("maxtext.optimizers.optimizers.muon") as mock_muon,
+        patch.object(
+            optimizers, "get_muon_weight_dimension_numbers"
+        ) as mock_get_mdn,
+        patch.object(optimizers, "muon") as mock_muon,
     ):
       mock_get_mdn.return_value = {}
       optimizers.get_optimizer(config_ds4, learning_rate_schedule, model=model)
@@ -998,15 +1125,25 @@ class TestMuonLogic(unittest.TestCase):
       self.assertEqual(kwargs["ns_coeffs"][-1], (2.0, -1.5, 0.5))
 
     # Case 2: Standard Model (Llama2) (Defaults to 5-step schedule)
-    argv_llama = ["", get_test_config_path(), "run_name=test", "opt_type=muon", "model_name=llama2-7b"]
+    argv_llama = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "opt_type=muon",
+        "model_name=llama2-7b",
+    ]
     config_llama = pyconfig.initialize(argv_llama)
 
     with (
-        patch("maxtext.optimizers.optimizers.get_muon_weight_dimension_numbers") as mock_get_mdn,
-        patch("maxtext.optimizers.optimizers.muon") as mock_muon,
+        patch.object(
+            optimizers, "get_muon_weight_dimension_numbers"
+        ) as mock_get_mdn,
+        patch.object(optimizers, "muon") as mock_muon,
     ):
       mock_get_mdn.return_value = {}
-      optimizers.get_optimizer(config_llama, learning_rate_schedule, model=model)
+      optimizers.get_optimizer(
+          config_llama, learning_rate_schedule, model=model
+      )
       mock_muon.assert_called_once()
       _, kwargs = mock_muon.call_args
       self.assertEqual(kwargs["ns_steps"], 5)
@@ -1014,4 +1151,4 @@ class TestMuonLogic(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

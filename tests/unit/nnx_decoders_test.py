@@ -28,22 +28,18 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-import jax
-import jax.numpy as jnp
-import numpy as np
 from flax import linen as nn
 from flax import nnx
+import jax
+import jax.numpy as jnp
 from jax.sharding import Mesh
-
 from maxtext.common.common_types import (
+    AttentionType,
     DECODING_ACTIVE_SEQUENCE_INDICATOR,
+    DecoderBlockType,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
-    AttentionType,
-    DecoderBlockType,
     MultimodalInput,
 )
 from maxtext.configs import pyconfig
@@ -57,6 +53,8 @@ from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+import pytest
 
 # ---------------------------------------------------------------------------
 # Shared minimal config overrides used across most tests
@@ -625,7 +623,9 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         _deterministic,
         _model_mode,
         multimodal_input=None,
+        decoder_input_embeddings=None,
     ):
+      del decoder_input_embeddings
       captured["multimodal_input"] = multimodal_input
       batch = self.cfg.global_batch_size_to_train_on
       seq_len = self.cfg.max_target_length
@@ -654,6 +654,26 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
     self.assertTrue(jnp.array_equal(forwarded.audio_embeddings, sentinel_aud_emb))
     self.assertTrue(jnp.array_equal(forwarded.audio_masks, sentinel_aud_mask))
     self.assertTrue(jnp.array_equal(forwarded.bidirectional_mask, sentinel_bidir))
+
+  def test_precomputed_embeddings_bypass_initial_multimodal_merge(self):
+    """Complete input embeddings must not be merged with vision embeddings again."""
+    ids, _, positions = self._make_token_inputs()
+    embeddings = jnp.ones(
+        (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length, self.cfg.emb_dim),
+        dtype=self.cfg.dtype,
+    )
+
+    result = self.decoder._apply_embedding(  # pylint: disable=protected-access
+        lambda *_args, **_kwargs: self.fail("token embedding should be bypassed"),
+        ids,
+        positions,
+        True,
+        MODEL_MODE_TRAIN,
+        multimodal_input=object(),
+        decoder_input_embeddings=embeddings,
+    )
+
+    self.assertTrue(jnp.array_equal(result, embeddings))
 
   def test_different_random_seeds_produce_different_logits(self):
     """Two randomly-initialised decoders should not produce identical logits."""
@@ -715,6 +735,107 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
     self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+
+
+class _StatefulQwen3NextDecoderLayer(nnx.Module):
+  """Small stand-in that exposes cache ordering and mutable-state updates for Qwen3-Next."""
+
+  def __init__(self, *, layer_idx, **unused_kwargs):
+    is_global = (layer_idx + 1) % 4 == 0
+    self.increment = 10 if is_global else 1
+    self.call_count = nnx.Intermediate(jnp.array(0, dtype=jnp.int32))
+    self.received_attention_metadata = nnx.Intermediate(jnp.array(False))
+
+  def __call__(
+      self,
+      inputs,
+      *unused_args,
+      kv_cache=None,
+      attention_metadata=None,
+      **unused_kwargs,
+  ):
+    self.call_count.value += 1
+    self.received_attention_metadata.value = attention_metadata is not None
+    output = inputs + self.increment
+    if kv_cache is None:
+      return output
+    return output, kv_cache + self.increment
+
+
+class TestQwen3NextScannableBlock(unittest.TestCase):
+  """Tests Qwen3-Next's nested local/global decoder block behavior."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = SimpleNamespace(
+        dtype=jnp.float32,
+        param_scan_axis=1,
+        remat_policy="none",
+        scan_layers=True,
+        inhomogeneous_layer_cycle_interval=4,
+        full_attention_layer_offset=3,
+    )
+
+  def _make_block(self):
+    return qwen3.Qwen3NextScannableBlock(
+        config=self.config,
+        mesh=None,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=nnx.Rngs(0),
+    )
+
+  def test_updates_state_through_global_single_iteration_scan(self):
+    with mock.patch.object(
+        qwen3, "Qwen3NextDecoderLayer", _StatefulQwen3NextDecoderLayer
+    ):
+      block = self._make_block()
+      output, updated_kvs = block(
+          jnp.zeros((1, 1, 1)),
+          decoder_segment_ids=None,
+          decoder_positions=None,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 13))
+    self.assertIsNone(updated_kvs)
+    np.testing.assert_array_equal(
+        block.local_layers.call_count.value, jnp.ones(3, dtype=jnp.int32)
+    )
+    np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
+
+  def test_restores_local_state_and_preserves_kv_order(self):
+    attention_metadata = object()
+
+    with mock.patch.object(
+        qwen3, "Qwen3NextDecoderLayer", _StatefulQwen3NextDecoderLayer
+    ):
+      block = self._make_block()
+      output, updated_kvs = block(
+          jnp.zeros((1, 1, 1)),
+          decoder_segment_ids=None,
+          decoder_positions=None,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=tuple(jnp.array(i) for i in range(4)),
+          attention_metadata=attention_metadata,
+      )
+
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 13))
+    np.testing.assert_array_equal(
+        jnp.stack(updated_kvs), jnp.array([1, 2, 3, 13])
+    )
+    np.testing.assert_array_equal(
+        block.local_layers.call_count.value, jnp.ones(3, dtype=jnp.int32)
+    )
+    np.testing.assert_array_equal(
+        block.local_layers.received_attention_metadata.value,
+        jnp.ones(3, dtype=jnp.bool_),
+    )
+    np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
+    np.testing.assert_array_equal(
+        block.global_layer.received_attention_metadata.value, True
+    )
 
 
 class _StatefulGemma4DecoderLayer(nnx.Module):
@@ -1077,6 +1198,56 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
     self.assertEqual(len(updated_kvs), num_layers)
     np.testing.assert_allclose(y_external, y_scanned, rtol=1e-5, atol=1e-5)
 
+  def test_qwen3_next_scanned_layers(self):
+    """Test NNXDecoder with qwen3_next block, dense prefix, and scan_layers=True."""
+    cfg = _make_config(
+        decoder_block="qwen3_next",
+        scan_layers=True,
+        first_num_dense_layers=1,
+        inhomogeneous_layer_cycle_interval=3,
+        full_attention_layer_offset=0,
+        num_decoder_layers=4,
+        base_emb_dim=128,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=128,
+        shared_experts=1,
+        num_experts=4,
+        num_experts_per_tok=2,
+        gdn_num_key_heads=4,
+        gdn_num_value_heads=4,
+        gdn_key_head_dim=32,
+        gdn_value_head_dim=32,
+        vocab_size=256,
+        max_target_length=16,
+    )
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=self.mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=self.rngs,
+    )
+    shared_embedding = self._make_shared_embedding(cfg)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(
+        logits.shape,
+        (
+            cfg.global_batch_size_to_train_on,
+            cfg.max_target_length,
+            cfg.vocab_size,
+        ),
+    )
+
 
 @pytest.mark.tpu_only
 class TestGemma4SmallNNXDecoder(unittest.TestCase):
@@ -1317,7 +1488,5 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
       )
     finally:
       maxtext_utils_nnx.nnx_add_and_sync_scan_axis = original_add_scan_axis
-
-
 if __name__ == "__main__":
   unittest.main()

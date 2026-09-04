@@ -304,6 +304,7 @@ use_2d_fsdp_sharding: false
 # deepseek moe
 first_num_dense_layers: 0 # number of initial dense layers in the model
 shared_experts: 0
+moe_shared_expert_gate: false
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: false # a flag if a learnable bias is added for routing
@@ -316,6 +317,8 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # all-to-all communication with compute. Currently only implemented with DeepSeek sparse layers.
 use_batch_split_schedule: false # a flag if splitting batch into micro-batches to hide communications that yields performance benefits.
 batch_split_factor: 1 # the factor by which to split the batch. Only used if use_batch_split_schedule is true.
+
+full_attention_layer_offset: 0
 
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
@@ -792,7 +795,7 @@ sft_train_on_completion_only: false
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
-dataset_type: tfds
+dataset_type: synthetic
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.1.0'
@@ -1019,6 +1022,8 @@ mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inher
 muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
+muon_ns_steps: 5 # Number of Newton-Schulz iterations for Muon optimizer.
+muon_use_all_to_all: true # Whether to use all-to-all communication during Newton-Schulz iterations in Muon.
 
 
 # Use iota operator in Embed
@@ -1344,6 +1349,10 @@ gdn_chunk_size: 64
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
+# Whether to use GDN Pallas kernel
+use_gdn_kernel: false
+# Whether to use hybrid GDN v3 Tokamax forward + Custom VJP backward
+use_hybrid_gdn: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

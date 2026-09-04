@@ -18,11 +18,10 @@
 import re
 import jax
 import jax.numpy as jnp
-
-import optax
-from optax.contrib._muon import muon
 from maxtext.common.common_types import DecoderBlockType
+from maxtext.optimizers.muon import muon
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
+import optax
 
 
 def _get_path_mask_fn(patterns, match_returns_true=True):
@@ -166,7 +165,7 @@ def skip_step_on_spikes(
   return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
-def get_optimizer(config, learning_rate_schedule, model=None):
+def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   """Create optimizer."""
   if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -195,7 +194,9 @@ def get_optimizer(config, learning_rate_schedule, model=None):
   elif config.opt_type == "muon":
     # extract muon dimension number from model structure
     if model is not None:
-      muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config)
+      muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(
+          model, config, mesh=mesh
+      )
     else:
       raise ValueError("Please specify model to extract muon dimension number.")
 
@@ -204,7 +205,9 @@ def get_optimizer(config, learning_rate_schedule, model=None):
       ns_steps = 10
     else:
       ns_coeffs = (3.4445, -4.7750, 2.0315)
-      ns_steps = 5
+      ns_steps = getattr(config, "muon_ns_steps", 5)
+
+    use_all_to_all = getattr(config, "muon_use_all_to_all", True)
 
     muon_kwargs = {
         # Shared parameters: "nesterov" uses default
@@ -218,6 +221,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         "consistent_rms": config.muon_consistent_rms,
         "ns_coeffs": ns_coeffs,
         "ns_steps": ns_steps,
+        "use_all_to_all": use_all_to_all,
         # AdamW-specific parameters
         "adam_b1": config.adam_b1,
         "adam_b2": config.adam_b2,
