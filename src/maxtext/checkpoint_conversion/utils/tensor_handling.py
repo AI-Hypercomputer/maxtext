@@ -63,9 +63,6 @@ def stacked_axes(mt_key: str, config, depth: int) -> tuple:
     routed experts): the expert axis still leads, giving
     ``(0, param_scan_axis, param_scan_axis + 1)``.
   """
-  # A tuple is the composite-MaxText-key convention (e.g. Qwen3.5's fused
-  # gate_up_proj feeding wi_0 and wi_1); every component shares the same prefix,
-  # so the first one decides the layout.
   if isinstance(mt_key, tuple) and mt_key:
     mt_key = mt_key[0]
   if isinstance(mt_key, str) and "-local_layers" in mt_key:
