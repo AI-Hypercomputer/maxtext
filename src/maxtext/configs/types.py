@@ -700,7 +700,7 @@ class Attention(BaseModel):
       0,
       ge=0,
       description=(
-          "Chunk size over heads dimension for QK attention dot product in mla.  "
+          "Chunk size over heads dimension for QK attention dot product in MLA and CSA (DeepSeek-V4).  "
           "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
       ),
   )

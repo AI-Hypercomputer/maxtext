@@ -73,6 +73,7 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
       use_indexer=True,
       indexer_loss_scaling_factor=0.5,
       indexer_sparse_training=False,
+      mla_qk_head_chunk_size=0,
       indexer_topk=None,
   ):
     """Constructs a test MaxTextConfig with CSA indexer configuration."""
@@ -87,6 +88,7 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
         f"use_indexer={use_indexer}",
         f"indexer_loss_scaling_factor={indexer_loss_scaling_factor}",
         f"indexer_sparse_training={indexer_sparse_training}",
+        f"mla_qk_head_chunk_size={mla_qk_head_chunk_size}",
         f"max_target_length={self.seq_len}",
         f"indexer_topk={topk}",
         f"indexer_n_heads={self.indexer_n_heads}",
@@ -100,6 +102,7 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
         "o_groups=2",
         "o_lora_rank=16",
         "enable_checkpointing=False",
+        "vocab_size=32",
     ]
     return pyconfig.initialize(argv)
 
@@ -202,6 +205,123 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
         scaling_factor=1.0,
     )
     np.testing.assert_allclose(float(loss), 0.0, atol=1e-5)
+
+  def test_csa_indexer_loss_head_chunking_parity(self):
+    """Test that head chunking scan produces loss mathematically equivalent within FP tolerance to native einsum."""
+    config_chunked = self._get_config(mla_qk_head_chunk_size=2)
+    config_native = self._get_config(mla_qk_head_chunk_size=0)
+    attn_chunked = self._init_csa_attention(config_chunked)
+    attn_native = self._init_csa_attention(config_native)
+
+    n_windows = self.seq_len // self.compress_ratio
+    rng = jax.random.PRNGKey(42)
+    k1, k2, k3 = jax.random.split(rng, 3)
+    query = jax.random.normal(
+        k1, (self.batch_size, self.seq_len, config_chunked.num_query_heads, config_chunked.head_dim)
+    )
+    compressed_kv = jax.random.normal(
+        k2, (self.batch_size, n_windows, config_chunked.num_kv_heads, config_chunked.head_dim)
+    )
+    indexer_score = jax.random.normal(k3, (self.batch_size, self.seq_len, n_windows))
+    compressed_mask = jnp.zeros((self.batch_size, 1, self.seq_len, n_windows))
+
+    loss_chunked = attn_chunked.calculate_csa_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        compressed_kv=compressed_kv,
+        compressed_mask=compressed_mask,
+        segment_mask=None,
+        position_ids=None,
+        sparse_loss=False,
+        scaling_factor=1.0,
+    )
+    loss_native = attn_native.calculate_csa_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        compressed_kv=compressed_kv,
+        compressed_mask=compressed_mask,
+        segment_mask=None,
+        position_ids=None,
+        sparse_loss=False,
+        scaling_factor=1.0,
+    )
+    np.testing.assert_allclose(float(loss_chunked), float(loss_native), rtol=1e-5, atol=1e-5)
+
+  def test_csa_indexer_scoring_head_chunking_parity(self):
+    """Test that indexer forward scoring produces identical top-k indices and scores with chunking."""
+    config_chunked = self._get_config(mla_qk_head_chunk_size=2)
+    config_native = self._get_config(mla_qk_head_chunk_size=0)
+    attn_chunked = self._init_csa_attention(config_chunked)
+    attn_native = self._init_csa_attention(config_native)
+
+    idx_chunked = attn_chunked.csa_compressor.indexer
+    idx_native = attn_native.csa_compressor.indexer
+    nnx.update(idx_chunked, nnx.state(idx_native))
+
+    hidden_states = jax.random.normal(jax.random.PRNGKey(10), (self.batch_size, self.seq_len, config_native.emb_dim))
+    q_latent = jax.random.normal(jax.random.PRNGKey(11), (self.batch_size, self.seq_len, config_native.q_lora_rank))
+    positions = jnp.broadcast_to(jnp.arange(self.seq_len)[None, :], (self.batch_size, self.seq_len))
+
+    topk_chunked, scores_chunked = idx_chunked(
+        hidden_states=hidden_states,
+        q_latent=q_latent,
+        position_ids=positions,
+        model_mode=MODEL_MODE_TRAIN,
+        return_scores=True,
+    )
+    topk_native, scores_native = idx_native(
+        hidden_states=hidden_states,
+        q_latent=q_latent,
+        position_ids=positions,
+        model_mode=MODEL_MODE_TRAIN,
+        return_scores=True,
+    )
+    np.testing.assert_array_equal(np.array(topk_chunked), np.array(topk_native))
+    np.testing.assert_allclose(np.array(scores_chunked), np.array(scores_native), rtol=1e-5, atol=1e-5)
+
+  def test_csa_indexer_chunked_gradients_flow(self):
+    """Test that gradients flow through indexer under head chunking with jax.checkpoint rematerialization."""
+    config = self._get_config(indexer_loss_scaling_factor=1.0, indexer_sparse_training=False, mla_qk_head_chunk_size=2)
+    attn = self._init_csa_attention(config)
+
+    inputs_q = jax.random.normal(jax.random.PRNGKey(1), (self.batch_size, self.seq_len, config.emb_dim))
+    inputs_kv = jax.random.normal(jax.random.PRNGKey(2), (self.batch_size, self.seq_len, config.emb_dim))
+    positions = jnp.broadcast_to(jnp.arange(self.seq_len)[None, :], (self.batch_size, self.seq_len))
+    segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
+
+    def loss_fn(attn_model, q, kv, seg=segment_ids, pos=positions):
+      attn_model(
+          inputs_q=q,
+          inputs_kv=kv,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return attn_model.indexer_loss.get_value()
+
+    grad_model_fn = nnx.grad(loss_fn, argnums=0)
+    grads = grad_model_fn(attn, inputs_q, inputs_kv)
+
+    self.assertIsNotNone(grads.csa_compressor.indexer.q_proj.kernel)
+    self.assertIsNotNone(grads.csa_compressor.indexer.kv_proj.kernel)
+    self.assertIsNotNone(grads.csa_compressor.indexer.gate_proj.kernel)
+    self.assertIsNotNone(grads.csa_compressor.indexer.weights_proj.kernel)
+
+    q_grad_norm = jnp.linalg.norm(grads.csa_compressor.indexer.q_proj.kernel.get_value())
+    self.assertGreater(float(q_grad_norm), 0.0)
+    self.assertGreater(float(jnp.linalg.norm(grads.csa_compressor.indexer.weights_proj.kernel.get_value())), 0.0)
+
+    # Gradients must not leak into main model projections
+    self.assertAlmostEqual(float(jnp.linalg.norm(grads.wq_a.kernel.get_value())), 0.0)
+    self.assertAlmostEqual(float(jnp.linalg.norm(grads.wq_b.kernel.get_value())), 0.0)
+    self.assertAlmostEqual(float(jnp.linalg.norm(grads.wkv.kernel.get_value())), 0.0)
+
+    # Gradients with respect to inputs must be zero
+    grad_inputs_fn = nnx.grad(loss_fn, argnums=(1, 2))
+    grad_q, grad_kv = grad_inputs_fn(attn, inputs_q, inputs_kv)
+    self.assertAlmostEqual(float(jnp.linalg.norm(grad_q)), 0.0)
+    self.assertAlmostEqual(float(jnp.linalg.norm(grad_kv)), 0.0)
 
   def test_csa_indexer_gradients_flow(self):
     """Test that gradients flow to indexer parameters and do not leak into main projections or inputs."""
