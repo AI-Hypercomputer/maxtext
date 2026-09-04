@@ -1906,6 +1906,8 @@ class GrainMmapNpyEvalConfigTest(TestCase):
         tokenize_eval_data=False,
         colocated_python_data_input=False,
         generate_padding_batch_eval=False,
+        use_sft=False,
+        use_multimodal=False,
     )
 
   @staticmethod
