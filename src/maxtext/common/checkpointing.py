@@ -379,6 +379,9 @@ def create_orbax_checkpoint_manager(
     enable_autocheckpoint: bool = False,
     todelete_subdir: str | None = None,
     todelete_full_path: str | None = None,
+    checkpoint_storage_target_data_file_size_bytes: int | None = None,
+    *args,
+    **kwargs,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:

@@ -102,7 +102,6 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
-        config.checkpoint_storage_target_data_file_size_bytes,
     )
 
   # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
