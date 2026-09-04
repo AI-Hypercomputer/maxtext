@@ -179,6 +179,9 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
         "If the checkpoint was saved with scan_layers=True (stacked layers), convert it to "
         "unscanned format before loading with vLLM (vllm.yml sets scan_layers=False)."
     )
+  if len(ckpt_shape) == 2 and ckpt_shape == model_shape[::-1]:
+    return jax.device_put(jnp.transpose(ckpt_arr), model_arr.sharding)
+
   axes = _normalize_logical_axes(logical_axes)
   if axes is None or len(axes) != len(model_shape):
     axes = (None,) * len(model_shape)
