@@ -1344,7 +1344,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     # Setting the entry to None makes `from ... import raiden_synchronizer` raise
     # ImportError, which is what an installed tunix without the module does.
-    with mock.patch.dict(sys.modules, {"tunix.experimental.worker.raiden_synchronizer": None}):
+    with mock.patch.dict(sys.modules, {"tunix.experimental.weight_sync.raiden_synchronizer": None}):
       with self.assertRaisesRegex(RuntimeError, "raiden_synchronizer"):
         t.prepare_weight_sync()
 

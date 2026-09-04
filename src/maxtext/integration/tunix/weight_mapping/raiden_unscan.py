@@ -37,7 +37,7 @@ simpler, single-axis case directly instead of adapting that function.
 """
 
 import gc
-from typing import Any, Iterator, Tuple, List, Dict
+from typing import Any, Iterator, Tuple, List
 
 import jax
 from flax import nnx

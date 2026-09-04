@@ -35,17 +35,11 @@ from maxtext.integration.vllm.convert_utils import (
     _jit_unstack,
     _scanned_sharding_from_per_layer,
     _sharding_summary,
+    normalize_dtype,
+    reclaim_host_memory,
 )
 
 _MOE_MLP_WEIGHTS = frozenset({"wi_0", "wi_1", "wo", "wi"})
-
-
-def _malloc_trim() -> None:
-  try:
-    import ctypes  # pylint: disable=g-import-not-at-top
-    ctypes.CDLL("libc.so.6").malloc_trim(0)
-  except Exception:
-    pass
 
 
 # ==========================================
@@ -597,13 +591,6 @@ class ConversionPlanError(WeightConverterError, ValueError):
   """Raised when the source and target trees cannot be fully reconciled."""
 
 
-class UnscanShapeMismatch(WeightConverterError, ValueError):
-  """Raised when an unscan shape mismatch is detected."""
-
-
-class WeightSyncBindError(WeightConverterError, RuntimeError):
-  """Raised when parameter binding to Raiden synchronizer fails."""
-
 
 def _is_non_weight_path(key_tuple: Tuple[Any, ...]) -> bool:
   return any(isinstance(part, str) and part.lstrip("_").startswith(_NON_WEIGHT_PATH_PREFIXES) for part in key_tuple)
@@ -710,6 +697,7 @@ class MaxTextToMaxTextConverter:
       debug: bool = False,
       prefuse_moe_weights: Optional[bool] = None,
       target_dtype: Optional[Any] = None,
+      is_pathways: Optional[bool] = None,
   ):
     self.config = config
     self.moe_fused_layout = moe_fused_layout
@@ -722,6 +710,14 @@ class MaxTextToMaxTextConverter:
     )
     self.padded_base_moe_mlp_dim = getattr(config, "padded_base_moe_mlp_dim", None)
     self.target_dtype = target_dtype if target_dtype is not None else getattr(config, "weight_dtype", None)
+
+    if is_pathways is not None:
+      self.is_pathways = is_pathways
+    else:
+      backend_platform = getattr(jax.devices()[0], "platform", "").lower() if jax.devices() else ""
+      self.is_pathways = (backend_platform == "proxy") or (
+          "proxy" in os.environ.get("JAX_PLATFORMS", "") and bool(os.environ.get("JAX_BACKEND_TARGET"))
+      )
 
     self.cycle = int(getattr(config, "inhomogeneous_layer_cycle_interval", 1) or 1)
     self.num_decoder_layers = int(config.num_decoder_layers)
@@ -750,15 +746,7 @@ class MaxTextToMaxTextConverter:
     )
 
   def _resolve_target_dtype(self):
-    if self.target_dtype is None:
-      return None
-    if isinstance(self.target_dtype, str):
-      if self.target_dtype in ("bfloat16", "bf16"):
-        return jnp.bfloat16
-      if self.target_dtype in ("float32", "fp32"):
-        return jnp.float32
-      return jnp.dtype(self.target_dtype)
-    return self.target_dtype
+    return normalize_dtype(self.target_dtype)
 
   # -------------------------------------------------------------- #
   # Plan construction
@@ -801,23 +789,8 @@ class MaxTextToMaxTextConverter:
       rest = src_key[idx + 1 :]
 
       if self.cycle == 1:
-        # Homogeneous: ("decoder", "layers", "self_attention", "query", "kernel")
-        is_wi_0 = bool(rest and rest[-1] == "wi_0")
-        wi_1_key = src_key[:-1] + ("wi_1",) if is_wi_0 else None
-        fuse_moe = self.prefuse_moe_weights and is_wi_0 and (wi_1_key in src_flat)
-
-        if fuse_moe:
-          consumed_wi_1.add(wi_1_key)
-          for i in range(self.num_decoder_layers):
-            tgt_key = prefix + (f"layers_{i}",) + rest[:-1] + ("wi",)
-            plan.append(_PlanEntry(tgt_key, (src_key, wi_1_key), i, "fuse_moe"))
-        elif self.prefuse_moe_weights and rest and rest[-1] == "wi_1" and (src_key[:-1] + ("wi_0",) in src_flat):
-          continue
-        else:
-          for i in range(self.num_decoder_layers):
-            tgt_key = prefix + (f"layers_{i}",) + rest
-            plan.append(_PlanEntry(tgt_key, (src_key,), i, "slice"))
-
+        slot = 0
+        suffix = rest
       else:
         # Inhomogeneous hybrid cycle: ("decoder", "layers", "layer_0", "input_layernorm", "scale")
         slot_token = rest[0]
@@ -829,25 +802,25 @@ class MaxTextToMaxTextConverter:
           slot = slot_token
         else:
           raise ConversionPlanError(f"Unexpected slot token {slot_token!r} in key {src_key}")
-
         suffix = rest[1:]
-        is_wi_0 = bool(suffix and suffix[-1] == "wi_0")
-        wi_1_key = src_key[:-1] + ("wi_1",) if is_wi_0 else None
-        fuse_moe = self.prefuse_moe_weights and is_wi_0 and (wi_1_key in src_flat)
 
-        if fuse_moe:
-          consumed_wi_1.add(wi_1_key)
-          for b in range(self.num_blocks):
-            global_idx = b * self.cycle + slot
-            tgt_key = prefix + (f"layers_{global_idx}",) + suffix[:-1] + ("wi",)
-            plan.append(_PlanEntry(tgt_key, (src_key, wi_1_key), b, "fuse_moe"))
-        elif self.prefuse_moe_weights and suffix and suffix[-1] == "wi_1" and (src_key[:-1] + ("wi_0",) in src_flat):
-          continue
-        else:
-          for b in range(self.num_blocks):
-            global_idx = b * self.cycle + slot
-            tgt_key = prefix + (f"layers_{global_idx}",) + suffix
-            plan.append(_PlanEntry(tgt_key, (src_key,), b, "slice"))
+      is_wi_0 = bool(suffix and suffix[-1] == "wi_0")
+      wi_1_key = src_key[:-1] + ("wi_1",) if is_wi_0 else None
+      fuse_moe = self.prefuse_moe_weights and is_wi_0 and (wi_1_key in src_flat)
+
+      if fuse_moe:
+        consumed_wi_1.add(wi_1_key)
+        for b in range(self.num_blocks):
+          global_idx = b * self.cycle + slot
+          tgt_key = prefix + (f"layers_{global_idx}",) + suffix[:-1] + ("wi",)
+          plan.append(_PlanEntry(tgt_key, (src_key, wi_1_key), b, "fuse_moe"))
+      elif self.prefuse_moe_weights and suffix and suffix[-1] == "wi_1" and (src_key[:-1] + ("wi_0",) in src_flat):
+        continue
+      else:
+        for b in range(self.num_blocks):
+          global_idx = b * self.cycle + slot
+          tgt_key = prefix + (f"layers_{global_idx}",) + suffix
+          plan.append(_PlanEntry(tgt_key, (src_key,), b, "slice"))
 
     return plan
 
@@ -1044,21 +1017,9 @@ class MaxTextToMaxTextConverter:
   def _execute_group_target_free(self, group: _PlanGroup, src_flat):
     path = group.source_path
     target_dtype = self._resolve_target_dtype()
-    is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
 
     if group.op == "identity":
       raw_val = src_flat[group.source_keys[0]]
-      if isinstance(raw_val, jax.ShapeDtypeStruct):
-        val = _apply_dtype_cast(raw_val, target_dtype, path)
-        return [(tgt_key, val) for _, tgt_key in group.targets]
-      if is_pathways:
-        np_val = np.asarray(jax.device_get(raw_val))
-        if target_dtype is not None:
-          np_val = np_val.astype(target_dtype)
-        cpu = jax.local_devices(backend="cpu")[0]
-        val = jax.device_put(np_val, cpu)
-        del np_val
-        return [(tgt_key, val) for _, tgt_key in group.targets]
       val = _apply_dtype_cast(raw_val, target_dtype, path)
       return [(tgt_key, val) for _, tgt_key in group.targets]
 
@@ -1071,60 +1032,6 @@ class MaxTextToMaxTextConverter:
     if group.op == "fuse_moe":
       raw_0 = src_flat[group.source_keys[0]]
       raw_1 = src_flat[group.source_keys[1]]
-      if isinstance(raw_0, jax.ShapeDtypeStruct):
-        wi_0, wi_1 = (_apply_dtype_cast(raw_0, target_dtype, path), _apply_dtype_cast(raw_1, target_dtype, path))
-        self._check_scan_axis(wi_0, path)
-        per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
-        return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
-
-      if is_pathways:
-        wi_0 = np.asarray(jax.device_get(raw_0))
-        wi_1 = np.asarray(jax.device_get(raw_1))
-        if target_dtype is not None:
-          wi_0 = wi_0.astype(target_dtype)
-          wi_1 = wi_1.astype(target_dtype)
-        self._check_scan_axis(wi_0, path)
-        unpadded_dim = wi_0.shape[-1]
-        target_intermediate = (
-            self.padded_base_moe_mlp_dim
-            if (self.padded_base_moe_mlp_dim is not None and self.padded_base_moe_mlp_dim > unpadded_dim)
-            else unpadded_dim
-        )
-        tgt_shape = (wi_0.shape[0], wi_0.shape[2], 2 * target_intermediate)
-        tgt_fused_axis = len(tgt_shape) - 1
-        scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
-
-        if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-          n_shards = 1
-          target_half_dim = target_intermediate
-          current_total_size = wi_0.shape[scan_fused_axis]
-          chunk_size = current_total_size // n_shards
-          target_chunk_size = target_half_dim // n_shards
-          pad_amount = target_chunk_size - chunk_size
-          if pad_amount > 0:
-            pad_spec = [(0, 0)] * wi_0.ndim
-            pad_spec[scan_fused_axis] = (0, pad_amount)
-            wi_0 = np.pad(wi_0, pad_spec)
-            wi_1 = np.pad(wi_1, pad_spec)
-          fused = np.concatenate([wi_0, wi_1], axis=scan_fused_axis)
-        elif self.moe_fused_layout == MoEFusedLayout.CONCAT:
-          if target_intermediate > unpadded_dim:
-            pad_spec = [(0, 0)] * wi_0.ndim
-            pad_spec[-1] = (0, target_intermediate - unpadded_dim)
-            wi_0 = np.pad(wi_0, pad_spec)
-            wi_1 = np.pad(wi_1, pad_spec)
-          fused = np.concatenate([wi_0, wi_1], axis=scan_fused_axis)
-        else:
-          raise ConversionPlanError(f"Unknown moe_fused_layout: {self.moe_fused_layout!r}")
-
-        cpu = jax.local_devices(backend="cpu")[0]
-        per_block = tuple(
-            jax.device_put(np.ascontiguousarray(fused.take(indices=i, axis=self.scan_axis)), cpu)
-            for i in range(self.num_blocks)
-        )
-        del fused, wi_0, wi_1
-        return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
-
       wi_0, wi_1 = (_apply_dtype_cast(raw_0, target_dtype, path), _apply_dtype_cast(raw_1, target_dtype, path))
       self._check_scan_axis(wi_0, path)
       per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
@@ -1132,41 +1039,6 @@ class MaxTextToMaxTextConverter:
 
     # group.op == "slice"
     raw_val = src_flat[group.source_keys[0]]
-    if isinstance(raw_val, jax.ShapeDtypeStruct):
-      val = _apply_dtype_cast(raw_val, target_dtype, path)
-      self._check_scan_axis(val, path)
-      per_block = self._slice_bulk_target_free(val, path)
-      return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
-
-    if is_pathways:
-      np_val = np.asarray(jax.device_get(raw_val))
-      if target_dtype is not None:
-        np_val = np_val.astype(target_dtype)
-      self._check_scan_axis(np_val, path)
-      last_key = path.split(".")[-1]
-      if last_key in _MOE_MLP_WEIGHTS and self.padded_base_moe_mlp_dim is not None:
-        if last_key == "wo":
-          intermediate_axis = 2
-          if self.padded_base_moe_mlp_dim > np_val.shape[intermediate_axis]:
-            pad_amount = self.padded_base_moe_mlp_dim - np_val.shape[intermediate_axis]
-            pad_spec = [(0, 0)] * np_val.ndim
-            pad_spec[intermediate_axis] = (0, pad_amount)
-            np_val = np.pad(np_val, pad_spec)
-        elif last_key in ("wi_0", "wi_1", "wi"):
-          intermediate_axis = len(np_val.shape) - 1
-          if self.padded_base_moe_mlp_dim > np_val.shape[intermediate_axis]:
-            pad_amount = self.padded_base_moe_mlp_dim - np_val.shape[intermediate_axis]
-            pad_spec = [(0, 0)] * np_val.ndim
-            pad_spec[intermediate_axis] = (0, pad_amount)
-            np_val = np.pad(np_val, pad_spec)
-      cpu = jax.local_devices(backend="cpu")[0]
-      per_block = tuple(
-          jax.device_put(np.ascontiguousarray(np_val.take(indices=i, axis=self.scan_axis)), cpu)
-          for i in range(self.num_blocks)
-      )
-      del np_val
-      return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
-
     val = _apply_dtype_cast(raw_val, target_dtype, path)
     self._check_scan_axis(val, path)
     per_block = self._slice_bulk_target_free(val, path)
@@ -1219,8 +1091,7 @@ class MaxTextToMaxTextConverter:
       flat_result = {}
       for piece in self.convert_streaming(src_pytree, target_state=None):
         flat_result.update(traverse_util.flatten_dict(piece))
-      gc.collect()
-      _malloc_trim()
+      reclaim_host_memory()
       return traverse_util.unflatten_dict(flat_result)
 
     src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
@@ -1305,8 +1176,7 @@ class MaxTextToMaxTextConverter:
     gc.collect()
     nested = traverse_util.unflatten_dict(result)
     del result
-    gc.collect()
-    _malloc_trim()
+    reclaim_host_memory()
     return jax.tree_util.tree_map(
         lambda x: nnx.Param(x) if not isinstance(x, (nnx.Param, nnx.Variable)) else x,
         nested,
@@ -1330,8 +1200,6 @@ class MaxTextToMaxTextConverter:
 
     src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
     src_flat, src_root = _strip_root(src_flat, "base")
-    if not src_root:
-      src_root = ("base",)
 
     if self._plan is None:
       self._plan = self._build_target_free_plan(src_flat)
@@ -1357,8 +1225,7 @@ class MaxTextToMaxTextConverter:
       )
 
     del src_flat
-    gc.collect()
-    _malloc_trim()
+    reclaim_host_memory()
 
 
 def _rekey_to_target(flat_dotted: Dict[str, Any], target_state: Any) -> Dict[str, Any]:

@@ -55,9 +55,7 @@ def compute_padded_moe_mlp_dim(
     return hidden_size
 
   if (hidden_size // moe_mlp_tp_size) % (2 * num_lanes) != 0:
-    padded_hidden_size = next_power_of_two(hidden_size)
-    while (padded_hidden_size // moe_mlp_tp_size) < (2 * num_lanes):
-      padded_hidden_size = next_power_of_two(padded_hidden_size + 1)
-    return padded_hidden_size
+    min_required = 2 * num_lanes * moe_mlp_tp_size
+    return next_power_of_two(max(hidden_size, min_required))
 
   return hidden_size

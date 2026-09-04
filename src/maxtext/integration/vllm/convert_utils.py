@@ -160,15 +160,33 @@ class ShapeMismatchError(ValueError):
   """Raised when source and target shapes are incompatible."""
 
 
-def _apply_dtype_cast(val: Any, tgt_dtype: Any, src_key: str) -> Any:
-  """Casts val to target dtype if needed, logging a warning on type mismatch."""
+def reclaim_host_memory() -> None:
+  """Runs garbage collection and triggers libc malloc_trim to return free heap to the OS."""
+  import gc  # pylint: disable=g-import-not-at-top
+  gc.collect()
+  try:
+    import ctypes  # pylint: disable=g-import-not-at-top
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.debug("reclaim_host_memory: malloc_trim unavailable or failed: %s", e)
+
+
+def normalize_dtype(tgt_dtype: Any) -> Any:
+  """Normalizes string or dtype representations into a standard jnp.dtype."""
+  if tgt_dtype is None:
+    return None
   if isinstance(tgt_dtype, str):
     if tgt_dtype in ("bfloat16", "bf16"):
-      tgt_dtype = jnp.bfloat16
-    elif tgt_dtype in ("float32", "fp32"):
-      tgt_dtype = jnp.float32
-    else:
-      tgt_dtype = jnp.dtype(tgt_dtype)
+      return jnp.bfloat16
+    if tgt_dtype in ("float32", "fp32"):
+      return jnp.float32
+    return jnp.dtype(tgt_dtype)
+  return tgt_dtype
+
+
+def _apply_dtype_cast(val: Any, tgt_dtype: Any, src_key: str) -> Any:
+  """Casts val to target dtype if needed, logging a warning on type mismatch."""
+  tgt_dtype = normalize_dtype(tgt_dtype)
   if isinstance(val, jax.ShapeDtypeStruct):
     if tgt_dtype is not None and val.dtype != tgt_dtype:
       return jax.ShapeDtypeStruct(val.shape, tgt_dtype)
@@ -546,7 +564,7 @@ def _fuse_and_unstack_moe(
     scan_axis: int,
     n_shards: int,
     tgt_shape: Tuple[int, ...],
-    scan_fused_axis: int,
+    scan_fused_axis: int,  # TODO(follow-up): Unused in function body, preserved for caller compatibility.
     tgt_fused_axis: int,
 ) -> Tuple[jax.Array | np.ndarray, ...]:
   """Fuses wi_0/wi_1 per unstacked layer to keep peak intermediate HBM allocation low.

@@ -537,13 +537,14 @@ class TargetFreeConversionTest(unittest.TestCase):
     }
     converter = WeightConverter(config=cfg, rollout_backend="maxtext")
     out = converter.convert(source, target_state=None)
-    self.assertIn("token_embedder", out)
-    self.assertIn("decoder", out)
+    out_root = out["base"] if "base" in out else out
+    self.assertIn("token_embedder", out_root)
+    self.assertIn("decoder", out_root)
     for i in range(4):
       layer_key = f"layers_{i}"
-      self.assertIn(layer_key, out["decoder"])
-      scale = getattr(out["decoder"][layer_key]["input_layernorm"]["scale"], "value", out["decoder"][layer_key]["input_layernorm"]["scale"])
-      query = getattr(out["decoder"][layer_key]["self_attention"]["query"]["kernel"], "value", out["decoder"][layer_key]["self_attention"]["query"]["kernel"])
+      self.assertIn(layer_key, out_root["decoder"])
+      scale = getattr(out_root["decoder"][layer_key]["input_layernorm"]["scale"], "value", out_root["decoder"][layer_key]["input_layernorm"]["scale"])
+      query = getattr(out_root["decoder"][layer_key]["self_attention"]["query"]["kernel"], "value", out_root["decoder"][layer_key]["self_attention"]["query"]["kernel"])
       self.assertEqual(scale.shape, (EMB,))
       self.assertEqual(query.shape, (EMB, 2, 4))
 
@@ -552,10 +553,11 @@ class TargetFreeConversionTest(unittest.TestCase):
     source = _source_tree(True)
     converter = WeightConverter(config=cfg, rollout_backend="maxtext")
     out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
     src_layers = source["base"]["decoder"]["layers"]
     for layer in range(NUM_LAYERS):
       slot, block = layer % CYCLE, layer // CYCLE
-      got = getattr(out["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"], "value", out["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"])
+      got = getattr(out_root["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"], "value", out_root["decoder"][f"layers_{layer}"]["input_layernorm"]["scale"])
       want = jnp.take(src_layers[f"layer_{slot}"]["input_layernorm"]["scale"], block, axis=SCAN_AXIS)
       np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
 
@@ -573,8 +575,9 @@ class TargetFreeConversionTest(unittest.TestCase):
     source = _source_tree(True)
     converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=True)
     out = converter.convert(source, target_state=None)
-    wi = getattr(out["decoder"]["layers_0"]["moe_block"]["wi"], "value", out["decoder"]["layers_0"]["moe_block"]["wi"])
-    wo = getattr(out["decoder"]["layers_0"]["moe_block"]["wo"], "value", out["decoder"]["layers_0"]["moe_block"]["wo"])
+    out_root = out["base"] if "base" in out else out
+    wi = getattr(out_root["decoder"]["layers_0"]["moe_block"]["wi"], "value", out_root["decoder"]["layers_0"]["moe_block"]["wi"])
+    wo = getattr(out_root["decoder"]["layers_0"]["moe_block"]["wo"], "value", out_root["decoder"]["layers_0"]["moe_block"]["wo"])
     self.assertEqual(wi.shape, (EXPERTS, EMB, padded_dim * 2))
     self.assertEqual(wo.shape, (EXPERTS, padded_dim, EMB))
 
@@ -588,10 +591,11 @@ class TargetFreeConversionTest(unittest.TestCase):
     abstract_source = jax.tree_util.tree_map(to_struct, _source_tree(True))
     converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=True)
     out = converter.convert(abstract_source, target_state=None)
+    out_root = out["base"] if "base" in out else out
     for leaf in jax.tree_util.tree_leaves(out):
       val = getattr(leaf, "value", leaf)
       self.assertIsInstance(val, jax.ShapeDtypeStruct)
-    wi = getattr(out["decoder"]["layers_0"]["moe_block"]["wi"], "value", out["decoder"]["layers_0"]["moe_block"]["wi"])
+    wi = getattr(out_root["decoder"]["layers_0"]["moe_block"]["wi"], "value", out_root["decoder"]["layers_0"]["moe_block"]["wi"])
     self.assertEqual(wi.shape, (EXPERTS, EMB, 32))
 
   def test_case_5_host_memory_profiling(self):

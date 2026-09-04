@@ -40,7 +40,7 @@ import pytest
 # failure where it does not -- rather than passing or failing on which tunix happens to
 # be installed.
 try:
-  importlib.import_module("tunix.experimental.worker.raiden_synchronizer")
+  importlib.import_module("tunix.experimental.weight_sync.raiden_synchronizer")
   _RAIDEN_AVAILABLE = True
 except ImportError:
   _RAIDEN_AVAILABLE = False

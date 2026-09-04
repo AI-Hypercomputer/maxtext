@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for MaxTextTrainingEngine.prepare_weight_sync streaming logic."""
+"""Unit tests for MaxTextTrainingEngine.prepare_weight_sync single synchronizer logic."""
 
 import os
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=8")
@@ -32,7 +32,7 @@ except ImportError:
 
 import jax
 import jax.numpy as jnp
-from maxtext.training_engine.maxtext_engine import MaxTextTrainingEngine, _RAIDEN_WORKER_INDEX_STRIDE
+from maxtext.training_engine.maxtext_engine import MaxTextTrainingEngine
 
 
 class PrepareWeightSyncTest(unittest.TestCase):
@@ -41,7 +41,7 @@ class PrepareWeightSyncTest(unittest.TestCase):
     super().setUp()
     # Create engine instance without running heavy __init__
     self.engine = MaxTextTrainingEngine.__new__(MaxTextTrainingEngine)
-    self.engine._raiden_syncs = None
+    self.engine._raiden_sync = None
     self.engine._last_staged_step = None
     self.engine._staged_metadata = None
     self.engine._train_step = 0
@@ -55,7 +55,6 @@ class PrepareWeightSyncTest(unittest.TestCase):
     self.engine._use_weight_converter = True
     self.engine._weight_converter = mock.MagicMock()
     self.engine._rollout_backend = "maxtext"
-    self.engine._warned_raiden_sync_chunks = False
     self.engine._get_trainable_params_state = mock.MagicMock(return_value={"layer": jnp.zeros((4, 4))})
 
   def _make_dummy_metadata(self, num_vars=2):
@@ -65,19 +64,12 @@ class PrepareWeightSyncTest(unittest.TestCase):
     return meta
 
   @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
-  def test_sync_binds_converted_state_and_accumulates_metadata(self, mock_sync_cls):
-    created_syncs = []
-
-    def make_sync(*args, **kwargs):
-      s = mock.MagicMock()
-      s.active = True
-      s.worker_index = kwargs.get("worker_index")
-      s.work_unit_metadata.return_value = self._make_dummy_metadata(num_vars=2)
-      s.checksums.return_value = {}
-      created_syncs.append(s)
-      return s
-
-    mock_sync_cls.side_effect = make_sync
+  def test_single_synchronizer_creation_and_binding(self, mock_sync_cls):
+    mock_sync = mock.MagicMock()
+    mock_sync.active = True
+    mock_sync.work_unit_metadata.return_value = self._make_dummy_metadata(num_vars=2)
+    mock_sync.checksums.return_value = {}
+    mock_sync_cls.return_value = mock_sync
 
     converted = {"param_0": 0, "param_1": 1}
     self.engine._weight_converter.convert.return_value = converted
@@ -85,56 +77,82 @@ class PrepareWeightSyncTest(unittest.TestCase):
     metadata = self.engine.prepare_weight_sync()
 
     self.assertEqual(len(metadata), 1)
-    self.assertEqual(len(self.engine._raiden_syncs), 1)
-    self.assertEqual(len(created_syncs), 1)
+    self.assertIs(self.engine._raiden_sync, mock_sync)
+    mock_sync_cls.assert_called_once_with(
+        job_name="trainer",
+        worker_index=jax.process_index(),
+        auto_h2d=False,
+        host_stage=False,
+        parallelism=4,
+    )
 
-    s = created_syncs[0]
-    self.assertEqual(s.worker_index, jax.process_index())
-    s.bind.assert_called_once_with(converted)
-    s.d2h.assert_called_once()
-    s.work_unit_metadata.assert_called_once()
+    self.engine._weight_converter.convert.assert_called_once()
+    mock_sync.bind.assert_called_once_with(converted)
+    mock_sync.d2h.assert_called_once()
+    mock_sync.work_unit_metadata.assert_called_once()
 
   @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
-  def test_rebind_reuses_sync_instances(self, mock_sync_cls):
-    mock_syncs = []
-
-    def make_sync(*args, **kwargs):
-      s = mock.MagicMock()
-      s.active = True
-      s.worker_index = kwargs.get("worker_index")
-      s.work_unit_metadata.return_value = self._make_dummy_metadata(num_vars=2)
-      mock_syncs.append(s)
-      return s
-
-    mock_sync_cls.side_effect = make_sync
+  def test_rebind_reuses_single_sync_instance(self, mock_sync_cls):
+    mock_sync = mock.MagicMock()
+    mock_sync.active = True
+    mock_sync.work_unit_metadata.return_value = self._make_dummy_metadata(num_vars=2)
+    mock_sync.checksums.return_value = {}
+    mock_sync_cls.return_value = mock_sync
 
     # Round 1
     self.engine._weight_converter.convert.return_value = {"p0": 0}
     self.engine.prepare_weight_sync()
-    self.assertEqual(len(mock_syncs), 1)
-    first_round_syncs = list(self.engine._raiden_syncs)
+    self.assertEqual(mock_sync_cls.call_count, 1)
 
     # Round 2 at step 1
     self.engine._train_step = 1
     self.engine._weight_converter.convert.return_value = {"p0": 0}
     self.engine.prepare_weight_sync()
 
-    # No new instances created
-    self.assertEqual(len(mock_syncs), 1)
-    self.assertEqual(self.engine._raiden_syncs, first_round_syncs)
+    # Still only 1 synchronizer instance created
+    self.assertEqual(mock_sync_cls.call_count, 1)
+    self.assertEqual(mock_sync.bind.call_count, 2)
 
-  @mock.patch.dict(os.environ, {"RAIDEN_WEIGHT_SYNC_CHUNKS": "4"})
-  @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
-  def test_deprecated_chunks_env_var_warning(self, mock_sync_cls):
-    mock_sync_cls.side_effect = lambda *a, **kw: mock.MagicMock(
-        active=True, work_unit_metadata=mock.MagicMock(return_value=self._make_dummy_metadata())
-    )
-    self.engine._weight_converter.convert_streaming.return_value = iter([{"p0": 0}])
-    with mock.patch("absl.logging.warning") as mock_warn:
-      self.engine.prepare_weight_sync()
-      mock_warn.assert_called()
-      self.assertTrue(any("RAIDEN_WEIGHT_SYNC_CHUNKS is deprecated" in str(call) for call in mock_warn.call_args_list))
-    self.assertTrue(self.engine._warned_raiden_sync_chunks)
+  def test_release_weight_sync(self):
+    mock_sync = mock.MagicMock()
+    self.engine._raiden_sync = mock_sync
+    self.engine._last_staged_step = 1
+    self.engine._staged_metadata = [{"metadata": "dummy"}]
+
+    res = self.engine.release_weight_sync()
+
+    self.assertTrue(res)
+    self.assertIsNone(self.engine._last_staged_step)
+    self.assertIsNone(self.engine._staged_metadata)
+    mock_sync.metrics.assert_called_once()
+
+  def test_release_weight_sync_without_syncs(self):
+    self.engine._raiden_sync = None
+    self.engine._last_staged_step = 1
+    self.engine._staged_metadata = [{"metadata": "dummy"}]
+
+    res = self.engine.release_weight_sync()
+
+    self.assertTrue(res)
+    self.assertIsNone(self.engine._last_staged_step)
+    self.assertIsNone(self.engine._staged_metadata)
+
+  def test_close(self):
+    mock_sync = mock.MagicMock()
+    self.engine._raiden_sync = mock_sync
+    self.engine._last_staged_step = 1
+    self.engine._staged_metadata = [{"metadata": "dummy"}]
+    self.engine.save_checkpoint = mock.MagicMock()
+    self.engine._checkpoint_manager = mock.MagicMock()
+    self.engine._throttler = mock.MagicMock()
+    self.engine._metrics_recorder = mock.MagicMock()
+
+    self.engine.close()
+
+    mock_sync.close.assert_called_once()
+    self.assertIsNone(self.engine._raiden_sync)
+    self.assertIsNone(self.engine._last_staged_step)
+    self.assertIsNone(self.engine._staged_metadata)
 
 
 if __name__ == "__main__":

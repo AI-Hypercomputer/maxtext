@@ -38,6 +38,7 @@ from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
+from maxtext.integration.vllm.convert_utils import reclaim_host_memory
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
@@ -65,16 +66,6 @@ _PURE_STATE_FALLBACK_WARNING = (
     "`nnx.split` calls cost ~92 ms per step on an unrolled 28-layer qwen3-0.6b, against "
     "~2 ms for the pure-state equivalent. Logged once per engine instance."
 )
-
-_RAIDEN_WORKER_INDEX_STRIDE = 10_000  # >> any plausible piece count (dozens-to-low-hundreds of groups)
-
-
-def _malloc_trim() -> None:
-  try:
-    import ctypes  # pylint: disable=g-import-not-at-top
-    ctypes.CDLL("libc.so.6").malloc_trim(0)
-  except Exception:
-    pass
 
 
 def _is_jax_dynamic(value: Any) -> bool:
@@ -418,10 +409,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     )
     self._metrics_recorder = metrics_module.MetricsRecorder()
     self._throttler = inflight_throttler.InflightThrottler(config=self._config)
-    self._raiden_syncs: Any = None
+    self._raiden_sync: Any = None
     self._last_staged_step: Optional[int] = None
     self._staged_metadata: Any = None
-    self._warned_raiden_sync_chunks: bool = False
     vllm_cfg = getattr(self._config, "vllm", {})
     if isinstance(vllm_cfg, dict):
       vllm_use_wc = vllm_cfg.get("use_weight_converter", False)
@@ -1464,9 +1454,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return nnx.state(model, nnx.Param)
     return self.model
 
-  def _raiden_worker_index(self, piece_idx: int) -> int:
-    return jax.process_index() * _RAIDEN_WORKER_INDEX_STRIDE + piece_idx + 1
-
   def prepare_weight_sync(
       self,
       staging_transport: str = "raiden",
@@ -1497,7 +1484,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         ) from exc
 
       if (
-          self._raiden_syncs is not None
+          self._raiden_sync is not None
           and self._last_staged_step == self.train_step
           and self._staged_metadata is not None
       ):
@@ -1508,25 +1495,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
         return self._staged_metadata
 
-      if self._raiden_syncs is not None:
-        for sync in self._raiden_syncs:
-          sync.release_host_arrays()
-        gc.collect()
-        _malloc_trim()
-
       # 1. Drain all in-flight TPU computations to ensure weights are fully updated
       self._throttler.wait_for_all()
-      gc.collect()
+      reclaim_host_memory()
 
       # 2. Extract clean trainable parameters
       params_state = self._get_trainable_params_state()
-      piece_batch = max(1, int(os.environ.get("RAIDEN_STREAM_PIECE_BATCH", "1")))
-      if "RAIDEN_WEIGHT_SYNC_CHUNKS" in os.environ and not self._warned_raiden_sync_chunks:
-        logging.warning(
-            "RAIDEN_WEIGHT_SYNC_CHUNKS is deprecated and no longer affects Raiden staging; "
-            "use RAIDEN_STREAM_PIECE_BATCH instead."
-        )
-        self._warned_raiden_sync_chunks = True
 
       if self._use_weight_converter:
         if self._weight_converter is None:
@@ -1556,46 +1530,69 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           converted_state = params_state
 
       del params_state
-      gc.collect()
+      reclaim_host_memory()
 
-      if self._raiden_syncs is None:
-        is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
-        self._raiden_syncs = [
-            raiden_synchronizer.RaidenSynchronizer(
-                job_name="trainer",
-                worker_index=jax.process_index(),
-                auto_h2d=False,
-                host_stage=is_pathways,
-                parallelism=4,
-            )
-        ]
+      # 3. Bind parameters to the Raiden transport. Construct the synchronizer
+      # once, matching the persistent-instance-per-cycle pattern the rebind
+      # optimization depends on.
+      #
+      # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set), trainer params
+      # are proxy-backed. Raiden must use FFI (weight_synchronizer_ffi) to bind
+      # directly to device arrays on Pathways TPU workers without host CPU staging,
+      # avoiding client host OOM and multi-minute proxy transfer timeouts.
+      backend_platform = getattr(jax.devices()[0], "platform", "").lower() if jax.devices() else ""
+      is_pathways = (backend_platform == "proxy") or (
+          "proxy" in os.environ.get("JAX_PLATFORMS", "") and bool(os.environ.get("JAX_BACKEND_TARGET"))
+      )
+      if is_pathways and getattr(raiden_synchronizer, "_raiden_ffi", None) is None:
+        raise RuntimeError(
+            "Under Pathways (JAX_PLATFORMS=proxy), Raiden weight synchronization "
+            "requires weight_synchronizer_ffi (from tpu_raiden_jax) to avoid client host OOM "
+            "and proxy staging timeouts. However, _raiden_ffi is not available in "
+            "tunix.experimental.weight_sync.raiden_synchronizer. Please ensure a "
+            "compatible tpu_raiden_jax wheel with FFI support is installed."
+        )
 
-      sync = self._raiden_syncs[0]
-      sync.bind(converted_state)
+      if self._raiden_sync is None:
+        self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
+            job_name="trainer",
+            worker_index=jax.process_index(),
+            auto_h2d=False,
+            host_stage=is_pathways,
+            parallelism=4,
+        )
+
+      self._raiden_sync.bind(converted_state)
       del converted_state
-      gc.collect()
-      _malloc_trim()
+      reclaim_host_memory()
 
-      # 4. Initiate Device-to-Host transfer to stage for network transfer.
-      if sync.active:
-        sync.d2h()
+      # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
+      if is_pathways or self._raiden_sync.active:
+        self._raiden_sync.d2h()
 
       verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
       if verify_weights:
-        logging.info("Source weights checksums: %s", sync.checksums())
+        logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
 
-      metadata = sync.work_unit_metadata()
+      metadata = self._raiden_sync.work_unit_metadata()
       total_variables = len(metadata.variables)
       all_metadata = [metadata]
 
-      gc.collect()
-      _malloc_trim()
+      reclaim_host_memory()
+
+      try:
+        import resource  # pylint: disable=g-import-not-at-top
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+        mem_info = f", host memory max RSS: {rss_mb:.1f} MB"
+      except Exception:  # pylint: disable=broad-exception-caught
+        mem_info = ""
 
       logging.info(
-          "Trainer prepared weight sync for step %d: registered %d variables across 1 piece(s) on mesh %s",
+          "Trainer prepared weight sync for step %d: registered %d variables on mesh %s%s",
           self.train_step,
           total_variables,
-          all_metadata[0].mesh_axes if all_metadata else None,
+          metadata.mesh_axes,
+          mem_info,
       )
       self._last_staged_step = self.train_step
       self._staged_metadata = all_metadata
@@ -1610,21 +1607,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Releases staged weight buffers after transfer completion."""
     self._last_staged_step = None
     self._staged_metadata = None
-    if self._raiden_syncs:
-      for sync in self._raiden_syncs:
-        logging.vlog(1, "Trainer Raiden metrics: %s", sync.metrics())
-        sync.release_host_arrays()
-    gc.collect()
-    _malloc_trim()
+    if self._raiden_sync:
+      logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
+    reclaim_host_memory()
+    try:
+      import resource  # pylint: disable=g-import-not-at-top
+      rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+      logging.info("Trainer released weight sync: host memory max RSS: %.1f MB", rss_mb)
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
     return True
 
   def close(self) -> None:
     """Closes the trainer, writes buffered metrics and final checkpoint."""
-    if self._raiden_syncs:
-      for sync in self._raiden_syncs:
-        if hasattr(sync, "close"):
-          sync.close()
-      self._raiden_syncs = None
+    if self._raiden_sync:
+      if hasattr(self._raiden_sync, "close"):
+        self._raiden_sync.close()
+      self._raiden_sync = None
     self._last_staged_step = None
     self._staged_metadata = None
 
