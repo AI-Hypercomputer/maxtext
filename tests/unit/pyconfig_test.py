@@ -295,6 +295,27 @@ class PyconfigTest(unittest.TestCase):
     )
     self.assertEqual(config.decoder_block.value, "qwen2")
 
+  def test_explicit_sharding_llama4_decoder_support(self):
+    """The Llama4 decoder is accepted by explicit sharding, but its vision encoder is not."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_mode="explicit",
+        decoder_block="llama4",
+    )
+    self.assertEqual(config.decoder_block.value, "llama4")
+
+    # Only the text stack is onboarded; the Llama4 vision encoder is not.
+    with self.assertRaisesRegex(Exception, "not supported with `use_multimodal`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          model_name="llama4-17b-16e",
+          override_model_config=True,
+          use_multimodal=True,
+      )
+
   def test_explicit_sharding_kimi_k2_support(self):
     """Kimi-K2 runs on the deepseek decoder block, so it is accepted under explicit sharding."""
     config = pyconfig.initialize(

@@ -1261,6 +1261,78 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_llama4_explicit_sharding_zero1(self):
+    """AOT test for Llama4 under explicit sharding with ZeRO-1 and gradient accumulation.
+
+    Explicit sharding type-checks every operation's layout rather than letting GSPMD infer
+    one, so a missing `out_sharding` in the Llama4 decoder fails the trace here rather than
+    silently costing a collective at a scale we cannot reach in a test.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_llama4_explicit_sharding_zero1.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=llama4-17b-16e",
+            "override_model_config=True",
+            # ZeRO-1 replicates the parameters over the data axis, so the full 16-expert
+            # model does not fit in HBM. Keep four experts and eight layers, which with a
+            # MoE step of 2 still covers both the dense and the MoE layer variant.
+            "base_num_decoder_layers=8",
+            "interleave_moe_layer_step=2",
+            "num_experts=4",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "attention=flash",
+            "remat_policy=full",
+            "shard_mode=explicit",
+            # ZeRO-1 needs a "data" axis to shard the moments over, and MaxTextConfig
+            # rejects combining it with FSDP.
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=4",
+            "shard_optimizer_over_data=True",
+            # The Llama4 configs default to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+        )
+    )
+
+  def test_llama4_17b_128e_explicit_sharding(self):
+    """AOT test for Llama4 Maverick at full size under explicit sharding.
+
+    The 128-expert config interleaves dense and MoE layers, so this covers both layer
+    variants at a scale where the expert axis is actually sharded. The mesh is FSDP 64 x
+    expert 8, both of which have to divide the v5p-1024 physical mesh.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_llama4_17b_128e_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-1024",
+            "compile_topology_num_slices=1",
+            "model_name=llama4-17b-128e",
+            # Only needed so the tokenizer below can replace the model config's default.
+            "override_model_config=True",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=64",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "shard_mode=explicit",
+            # The Llama4 configs default to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+        )
+    )
+
   def test_vocab_tiling_bf16_nnx(self):
     """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp).
 
