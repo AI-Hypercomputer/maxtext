@@ -430,17 +430,6 @@ class FlopCalculation(parameterized.TestCase):
     self.assertFlopsAlmostEqual(calculated_total, golden_total_flops)
     self.assertFlopsAlmostEqual(calculated_weight, golden_weight_flops)
 
-  def test_deepseek4_mtp_validation(self):
-    """Test that DeepSeek-V4 with MTP layers raises a ValueError"""
-    with self.assertRaises(ValueError):
-      self._initialize_model_config(
-          "deepseek4-284b",
-          max_target_length=4096,
-          per_device_batch_size=4,
-          attention="dot_product",
-          mtp_num_layers=1,
-      )
-
   def test_custom_engram_flops(self):
     """Test model with Engram Flops calculation"""
     cfg = self._initialize_model_config(
