@@ -16,27 +16,24 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import functools
 from typing import Any, cast
 
-from jax.sharding import Mesh
-import jax.numpy as jnp
-
-from flax import linen as nn
 from flax import nnx
-
-from maxtext.common.common_types import Config, Array
+import jax.numpy as jnp
+from jax.sharding import Mesh
+from maxtext.common.common_types import Array, Config, ShardMode
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.utils import max_utils
-
 from maxtext.models.qwen3 import (
-    Qwen3NextGatedDeltaNet,
     Qwen3NextFullAttention,
+    Qwen3NextGatedDeltaNet,
     Qwen3NextSparseMoeBlock,
 )
-
+from maxtext.utils import max_utils
+from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 # -----------------------------------------
 # Qwen3.5 Layer Implementations
@@ -138,6 +135,32 @@ class Qwen3_5DecoderLayer(nnx.Module):
     self.quant = quant
     cfg = self.config
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.mlp_activation_axis_names = (
+        "activation_batch",
+        "activation_norm_length",
+        "activation_mlp",
+    )
+
+    # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
+    # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
+    if cfg.shard_mode == ShardMode.EXPLICIT:
+      self.out_sharding = create_sharding(
+          mesh, self.activation_axis_names, rules=get_logical_axis_rules()
+      )
+      self.mlp_intermediate_sharding = create_sharding(
+          mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules()
+      )
+      self._maybe_shard_with_logical = functools.partial(
+          maybe_shard_with_logical,
+          mesh=mesh,
+          shard_mode=cfg.shard_mode,
+          debug_sharding=cfg.debug_sharding,
+          extra_stack_level=1,
+      )
+    else:
+      self.out_sharding = None
+      self.mlp_intermediate_sharding = None
+      self._maybe_shard_with_logical = lambda inputs, *args, **kwargs: inputs
 
     # First LayerNorm, applied before the attention block.
     self.input_layernorm = Qwen3NextRMSNorm(
@@ -145,6 +168,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        shard_mode=cfg.shard_mode,
         rngs=rngs,
     )
 
@@ -174,6 +198,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        shard_mode=cfg.shard_mode,
         rngs=rngs,
     )
 
@@ -196,15 +221,20 @@ class Qwen3_5DecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     residual = inputs
 
     # First LayerNorm, applied before the attention block.
-    hidden_states = self.input_layernorm(inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    hidden_states = self.input_layernorm(inputs, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(
+        hidden_states, self.activation_axis_names
+    )
 
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3_5FullAttention):
-      attention_output, new_kv_cache = cast(Qwen3_5FullAttention, self.attention)(
+      attention_output, new_kv_cache = cast(
+          Qwen3_5FullAttention, self.attention
+      )(
           hidden_states,
           decoder_segment_ids,
           decoder_positions,
@@ -212,32 +242,47 @@ class Qwen3_5DecoderLayer(nnx.Module):
           model_mode,
           kv_cache=kv_cache,
           attention_metadata=attention_metadata,
+          out_sharding=self.out_sharding,
       )
     else:
-      attention_output, new_kv_cache = cast(Qwen3_5GatedDeltaNet, self.attention)(
+      attention_output, new_kv_cache = cast(
+          Qwen3_5GatedDeltaNet, self.attention
+      )(
           hidden_states,
           model_mode=model_mode,
           kv_cache=kv_cache,
           decoder_segment_ids=decoder_segment_ids,
           attention_metadata=attention_metadata,
+          out_sharding=self.out_sharding,
       )
 
     # First residual connection after attention
+    attention_output = self._maybe_shard_with_logical(
+        attention_output, self.activation_axis_names
+    )
     hidden_states = residual + attention_output
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    hidden_states = self._maybe_shard_with_logical(
+        hidden_states, self.activation_axis_names
+    )
 
     # Prepare for the MoE block by capturing the new residual
     residual = hidden_states
 
     # Second LayerNorm, applied before the MoE block.
-    hidden_states = self.post_attention_layernorm(hidden_states)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    hidden_states = self.post_attention_layernorm(
+        hidden_states, out_sharding=self.out_sharding
+    )
+    hidden_states = self._maybe_shard_with_logical(
+        hidden_states, self.activation_axis_names
+    )
 
     # Instantiate and call our `Qwen3_5SparseMoEBlock`.
     mlp_output, load_balance_loss = self.mlp(
         hidden_states,
         deterministic=deterministic,
         forced_routed_experts=forced_routed_experts,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
     )
 
     # We sow the load balancing loss so it can be collected and added to the total loss
@@ -246,8 +291,11 @@ class Qwen3_5DecoderLayer(nnx.Module):
       self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
 
     # Final residual connection (after the MoE block)
+    mlp_output = self._maybe_shard_with_logical(
+        mlp_output, self.activation_axis_names
+    )
     layer_output = residual + mlp_output
-    layer_output = nn.with_logical_constraint(
+    layer_output = self._maybe_shard_with_logical(
         layer_output,
         self.activation_axis_names,
     )
