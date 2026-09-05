@@ -222,9 +222,7 @@ class TrainTests(unittest.TestCase):
       # The Qwen3.5 model configs default to a HuggingFace tokenizer that is not
       # vendored in the repo; use the checked-in tiktoken asset instead.
       "tokenizer_type=tiktoken",
-      (
-          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"
-      ),
+      (rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
   ]
 
   # Same sublayers as Qwen3.5, wired together by Qwen3NextScannableBlock rather than a
@@ -1072,26 +1070,20 @@ class TrainTests(unittest.TestCase):
     for decoder_block, model_overrides in self._QWEN3_HYBRID_MODELS.items():
       with self.subTest(decoder_block=decoder_block):
         args = parallelism[decoder_block]
-        auto_losses = self._losses(
-            f"{decoder_block}_auto", model_overrides, args + ["shard_mode=auto"]
-        )
+        auto_losses = self._losses(f"{decoder_block}_auto", model_overrides, args + ["shard_mode=auto"])
         explicit_losses = self._losses(
             f"{decoder_block}_explicit",
             model_overrides,
             args + ["shard_mode=explicit"],
         )
         print(f"[{decoder_block}] auto losses: {auto_losses}", flush=True)
-        print(
-            f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True
-        )
+        print(f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True)
         self.assertTrue(auto_losses, "auto run produced no metrics")
         # `activation_batch` carries the expert axis, so pinning it reassociates the
         # backward reductions: the forward pass is bit-for-bit and the drift only appears
         # once gradients flow. Over 20 steps it stays below 4e-5 relative and changes
         # sign, i.e. it is float noise rather than the two runs pulling apart.
-        np.testing.assert_allclose(
-            explicit_losses, auto_losses, rtol=1e-4, atol=0.0
-        )
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-4, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
@@ -1127,8 +1119,7 @@ class TrainTests(unittest.TestCase):
         sharded = self._losses(
             f"{decoder_block}_ga_zero1",
             model_overrides,
-            zero1_ga
-            + ["shard_mode=explicit", "shard_optimizer_over_data=True"],
+            zero1_ga + ["shard_mode=explicit", "shard_optimizer_over_data=True"],
         )
         print(f"[{decoder_block}] auto + GA losses: {baseline}", flush=True)
         print(

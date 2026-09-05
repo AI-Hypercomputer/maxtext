@@ -285,14 +285,10 @@ class PyconfigTest(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "requires `sparse_matmul=True`"):
           initialize(sparse_matmul=False, megablox=False)
 
-        with self.assertRaisesRegex(
-            Exception, "does not support context parallelism"
-        ):
+        with self.assertRaisesRegex(Exception, "does not support context parallelism"):
           initialize(ici_context_parallelism=2)
 
-        with self.assertRaisesRegex(
-            Exception, "does not support context parallelism"
-        ):
+        with self.assertRaisesRegex(Exception, "does not support context parallelism"):
           initialize(ici_context_usp_ulysses_parallelism=2)
 
   def test_explicit_sharding_mistral_decoder_support(self):
