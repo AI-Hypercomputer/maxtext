@@ -50,7 +50,7 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 - Ran simulation of Raiden schedule: **0 destination bounds violations**.
 - Clean container image built from source git checkouts:
   ```text
-  europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v12
+  europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v15
   ```
 
 ### C. Milestone 3: Upstream Rebase & Cross-Contributor Synthesis
@@ -68,11 +68,21 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
   - Unified operational launcher (`launch_raiden.sh`) with live log streaming and automated triage.
   - Automatic 2-hour worker self-destruction (`activeDeadlineSeconds: 7200`) and 10-minute cleanup (`ttlSecondsAfterFinished: 600`) on all JobSets as a safety guard against abandoned development workloads (*[DEV ONLY - DO NOT MERGE TO PROD]*).
 
-### D. Current Cluster & Workload State
-- Cluster `bodaborg-v5p-nap` was cleanly purged of all previous test runs (`igorts-rd-35b`).
-- No active or pending jobs for user `igorts` are currently running on the cluster.
-- All YAML generators and templates are armed with a 2-hour `activeDeadlineSeconds` self-destruct timeout and 10-minute post-completion TTL cleanup.
-- Ready to launch fresh workloads when required.
+### D. Milestone 4: Two-Rollout Worker Scaling & Entrypoint Alignment
+- **Consolidated Entrypoints**: Migrated obsolete worker entrypoints in `launch_raiden.sh` from `tunix.experimental.examples.math_gsm8k_dist.run_*.main` to upstream `tunix.experimental.examples.common.run_trainer_node.main` and `run_rollout_node.main`.
+- **Aligned Worker CLI Flags**: Fixed rollout arguments to use `--mesh_tp=${ROLLOUT_MESH_TP}` and `--sampler_data_parallel=${ROLLOUT_DATA_PARALLEL:-1}` (eliminating legacy `--sampler_mesh_tp`). Added `--sampler_type=${SAMPLER}` to trainer.
+- **Fixed `tpu-inference` Quantization Import Bug**: Resolved fatal `ImportError: cannot import name 'is_equal_or_regex_match' from 'vllm.model_executor.layers.quantization.utils.config_utils'` in `tpu_inference/layers/jax/quantization/compressed_tensors.py` by switching to `check_equal_or_regex_match` from `vllm.model_executor.layers.quantization.compressed_tensors.utils`.
+- **Shipped Docker Image `v15`**: Built and pushed `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v15` containing the compiled protobuf stubs and the `compressed_tensors` fix.
+
+### E. Current Cluster & Workload State (`igorts-rd-35b` with 2 Rollouts)
+- Active run `igorts-rd-35b` in namespace `trellis` on regional cluster `bodaborg-v5p-nap` (`europe-west4`, project `cloud-tpu-shared-capacity`):
+  - **Orchestrator**: `igorts-rd-35b-orch-proc-0-0-lpmqd` (`Running` on CPU node `gke-bodaborg-v5p-nap-cpu-np-456be230-vh9c`).
+  - **Rollout 0**: `igorts-rd-35b-roll-0-proc-0-0-jhvd7` (`Running` on TPU v5p-8 `2x2x1` node `gke-tpu-ca14a8fb-ndhm`).
+  - **Rollout 1**: `igorts-rd-35b-roll-1-proc-0-0-7gc8q` (`Running` on TPU v5p-8 `2x2x1` node `gke-tpu-ca14a8fb-jk58`).
+  - **Trainer**: TPU v5p-16 `2x2x2` slice:
+    - Head/Proxy: `igorts-rd-35b-train-proc-0-0-rjhd6` (on `gke-tpu-f58a2f0a-q24j`).
+    - Pathways Worker 0: `igorts-rd-35b-train-pw-node-0-0-gl555` (`Running` on `gke-tpu-f58a2f0a-rgj0`).
+    - Pathways Worker 1: `igorts-rd-35b-train-pw-node-0-1-x6rmb` (`Running` on `gke-tpu-f58a2f0a-q24j`).
 
 ---
 
@@ -112,13 +122,22 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 - Standard single-axis unscanning fails because layer blocks do not map 1:1 to continuous layer indices.
 - Resolved in `raiden_unscan.py` with `cycle_interval` unrolling. Furthermore, `_slice_along_axis` supports `jax.ShapeDtypeStruct` abstract arrays to allow schedule tracing and shape verification without TPU memory allocation.
 
+### 7. Missing `discovery_service_pb2` in Clean Clones
+- When running without local file mounts, fresh clones of Tunix did not contain compiled gRPC/protobuf stubs (`discovery_service_pb2.py`).
+- Resolved by compiling and checking in `discovery_service_pb2.py` and `discovery_service_pb2_grpc.py` into the Tunix repo and baking them into image `v14`+.
+
+### 8. `is_equal_or_regex_match` Import Error in `tpu-inference`
+- Upstream vLLM refactored `config_utils.py` and did not export `is_equal_or_regex_match`.
+- `tpu-inference`'s `compressed_tensors.py` failed during rollout vLLM engine initialization.
+- Resolved by importing `check_equal_or_regex_match` from `vllm.model_executor.layers.quantization.compressed_tensors.utils`.
+
 ---
 
 ## 4. Repositories & Reorganized Commit Stacks
 
-All repositories have been cleanly rebased on the latest `origin/main` with external contributor commits (Mohit Khatwani) at the base and our refined commits stacked on top:
+All repositories are on branch `igorts/qwen35-run`:
 
-### A. `maxtext` (`AI-Hypercomputer/maxtext` branch `igorts/qwen35-run`)
+### A. `maxtext` (`AI-Hypercomputer/maxtext`)
 ```text
 d6dbe5fce (HEAD) docs: update operational manual and session handoff with dev-only guardrails
 d771295b6 [DEV ONLY] [Ours]  feat(engine): support DISABLE_CHECKPOINTING environment variable
@@ -128,23 +147,27 @@ d771295b6 [DEV ONLY] [Ours]  feat(engine): support DISABLE_CHECKPOINTING environ
 4cfec5b20 (origin/main)
 ```
 
-### B. `tpu-inference` (`vllm-project/tpu-inference` branch `igorts/qwen35-run`)
+### B. `tpu-inference` (`vllm-project/tpu-inference`)
 ```text
-29c6d12db (HEAD) fix(raiden): route multi-shard rollout endpoints to distinct NUMA ports
-1fc80182a [Ours]  fix(raiden): filter runtime kv cache parameters and sort array bindings
-8cabf13dc [Ours]  fix(runner,quantization): compatibility fallback for nvfp4 and vllm kv cache interface
-f89fe0090 [Mohit] Add the FFI Raiden h2d path to the rollout worker
+4c23bf207 (HEAD) [Ours]  fix(quantization): fix is_equal_or_regex_match import from vllm compressed_tensors utils
+29c6d12db        [Ours]  fix(raiden): route multi-shard rollout endpoints to distinct NUMA ports
+1fc80182a        [Ours]  fix(raiden): filter runtime kv cache parameters and sort array bindings
+8cabf13dc        [Ours]  fix(runner,quantization): compatibility fallback for nvfp4 and vllm kv cache interface
+f89fe0090        [Mohit] Add the FFI Raiden h2d path to the rollout worker
 ----------------------------------------------------------------------------------------------------
 c82492756 (origin/main, already merged PR #3516)
 ```
 
-### C. `tunix` (`google/tunix` branch `igorts/qwen35-run`)
+### C. `tunix` (`google/tunix`)
 ```text
-7d1275d6 (HEAD) [DEV ONLY] feat(distributed): add 2-hour activeDeadlineSeconds timeout and 10-minute ttlSecondsAfterFinished cleanup
-a7feb9af                   feat(launcher): add launch_raiden.sh operational tool and Dockerfile.maxtext
-3fbeae71        [DEV ONLY] feat(trainer): support DISABLE_CHECKPOINTING in run_trainer_node
-56d8fd53                   fix(raiden): sort variable bindings alphabetically and route non-FFI shards to local endpoints
-ab694ded                   Raiden weight sync: transport selection, multihost shard indexing, per-replica jobs
+f267b737 (HEAD) fix(launcher): update worker entrypoints, rollout tp flags, and default image to v15
+996aec0f        feat(launcher): update default image to v14
+dc8386d8        feat(discovery): commit generated discovery service protobuf stubs
+7d1275d6 [DEV ONLY] feat(distributed): add 2-hour activeDeadlineSeconds timeout and 10-minute ttlSecondsAfterFinished cleanup
+a7feb9af        feat(launcher): add launch_raiden.sh operational tool and Dockerfile.maxtext
+3fbeae71 [DEV ONLY] feat(trainer): support DISABLE_CHECKPOINTING in run_trainer_node
+56d8fd53        fix(raiden): sort variable bindings alphabetically and route non-FFI shards to local endpoints
+ab694ded        Raiden weight sync: transport selection, multihost shard indexing, per-replica jobs
 ----------------------------------------------------------------------------------------------------
 24827016 (origin/main)
 ```
@@ -165,7 +188,7 @@ gcloud container clusters get-credentials bodaborg-v5p-nap \
 export SSH_AUTH_SOCK=~/.tmp/.${USER}.ssh_auth_sock
 ```
 
-### Monitoring the Current Run (`igorts-rd-35b`)
+### Monitoring the Active Run (`igorts-rd-35b`)
 ```bash
 # Check JobSet and pod status
 ./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh status --model qwen3.5-35b
@@ -176,24 +199,28 @@ kubectl describe clusterqueue default | grep -A 10 "tpu-v5p-flavor"
 # Stream orchestrator logs
 ./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh logs orch -f --model qwen3.5-35b
 
-# Stream trainer logs (once admitted)
+# Stream trainer logs
 ./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh logs trainer -f --model qwen3.5-35b
 
-# Stream rollout logs (once admitted)
-./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh logs rollout -f --model qwen3.5-35b
+# Stream rollout 0 logs
+kubectl logs -n trellis -l jobset.sigs.k8s.io/jobset-name=igorts-rd-35b-roll-0 -f
+
+# Stream rollout 1 logs
+kubectl logs -n trellis -l jobset.sigs.k8s.io/jobset-name=igorts-rd-35b-roll-1 -f
 
 # Stop run cleanly
 ./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh stop --model qwen3.5-35b
 ```
 
-### Starting a Fresh 35B Workload
+### Starting a Fresh 35B Workload with 2 Rollout Workers
 ```bash
 ./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh start \
   --model qwen3.5-35b \
-  --rollout-replicas=1 \
-  --image europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v12
+  --rollout-replicas=2 \
+  --image europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v15
 ```
 
 ### Full Operational Documentation
 For the complete guide on building container images from scratch, compiling the Raiden C++ wheel, cherry-pick tables, and Pathways server/proxy images, refer to:
 [`qwen3.5_instructions.md`](file:///usr/local/google/home/igorts/git/maxtext/qwen3.5_instructions.md)
+
