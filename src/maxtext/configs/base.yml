@@ -462,6 +462,11 @@ indexer_sparse_training: false
 # Multiplier for the indexer KL divergence loss
 indexer_loss_scaling_factor: 0.0
 
+# GLM-5.2 Cross-Layer IndexCache / IndexShare
+use_index_share: false
+index_share_pattern: "FSSS"
+prune_shared_indexers: true
+
 # MLA parameters
 q_lora_rank: 0
 kv_lora_rank: 512

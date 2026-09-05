@@ -572,6 +572,7 @@ class MlpBlock(nnx.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.GLM5,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,

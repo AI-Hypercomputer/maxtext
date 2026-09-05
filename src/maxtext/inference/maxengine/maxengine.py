@@ -17,6 +17,7 @@
 from collections import defaultdict
 from typing import Any, Callable
 import functools
+import gc
 import os.path
 import uuid
 import warnings
@@ -488,6 +489,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       nnx.replace_by_pure_dict(rest_state, rest_dict)
       self._nnx_rest_state = rest_state
       del nnx_model, loaded_rest_state, loaded_rest_dict, rest_dict
+      gc.collect()
 
     self.abstract_params = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -674,7 +676,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       is_deepseek = (
           getattr(self.model, "is_deepseek", False)
           or (hasattr(self.model, "decoder") and getattr(self.model.decoder, "is_deepseek", False))
-          or (hasattr(self.config, "decoder_block") and str(self.config.decoder_block).lower() == "deepseek")
+          or (hasattr(self.config, "decoder_block") and str(self.config.decoder_block).lower() in ("deepseek", "glm5"))
       )
       if is_deepseek:
         first_dense = self.config.first_num_dense_layers
@@ -1496,11 +1498,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       ]:
         return full_cache  # we don't even zero these out because we can mask them out.
 
+      ndim_diff = full_cache.ndim - len(annotations)
       batch_idx = -1
       if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
+        batch_idx = annotations.index("cache_batch") + ndim_diff
       elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch")
+        batch_idx = annotations.index("cache_scale_batch") + ndim_diff
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
@@ -1527,7 +1530,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           ## copy prefill cachce
           full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         elif path_key == "cached_ar_lengths":
-          full_cache = full_cache.at[slot].set(0)
+          full_cache = full_cache.at[(slice(None),) * ndim_diff + (slot,)].set(0)
         elif path_key in [
             "cached_prefill_key",
             "cached_prefill_value",
@@ -1617,11 +1620,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       ]:
         return full_cache
 
+      ndim_diff = full_cache.ndim - len(annotations)
       batch_idx = -1
       if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
+        batch_idx = annotations.index("cache_batch") + ndim_diff
       elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch")
+        batch_idx = annotations.index("cache_scale_batch") + ndim_diff
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
@@ -1645,7 +1649,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         return full_cache
       elif path_key == "cached_ar_lengths":
-        return full_cache.at[slot].set(0)
+        return full_cache.at[(slice(None),) * ndim_diff + (slot,)].set(0)
       elif path_key in [
           "cached_prefill_key",
           "cached_prefill_value",
@@ -1755,11 +1759,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       ]:
         return full_cache  # we don't even zero these out because we can mask them out.
 
+      ndim_diff = full_cache.ndim - len(annotations)
       batch_idx = -1
       if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
+        batch_idx = annotations.index("cache_batch") + ndim_diff
       elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch")
+        batch_idx = annotations.index("cache_scale_batch") + ndim_diff
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
@@ -1770,10 +1775,14 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
       if path_key == "cache_ar_segment_id":
         ### goal: zero this out in case there is existing data
-        zeros = jnp.zeros((1, self.config.max_target_length - self.config.max_prefill_predict_length), dtype=jnp.int32)
+        s = list(full_cache.shape)
+        s[batch_idx] = 1
+        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
         return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
       elif path_key == "cache_prefill_segment_id":
-        zeros = jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32)
+        s = list(full_cache.shape)
+        s[batch_idx] = 1
+        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
         ## zero out in case prefill cache is too small to cover
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
         # In case partial_cache is too small to slice at the given index, pad it with an extra seqlen
@@ -1786,15 +1795,15 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         return full_cache
       elif path_key == "cached_ar_lengths":
-        return full_cache.at[slot].set(0)
+        return full_cache.at[(slice(None),) * ndim_diff + (slot,)].set(0)
       elif path_key in [
           "cached_prefill_key",
           "cached_prefill_value",
           "cached_prefill_key_scale",
           "cached_prefill_value_scale",
       ]:
-        seqlen_index = self.config.prefill_cache_axis_order.split(",").index("1")
-        start_indices = [0, 0, 0, 0]
+        seqlen_index = self.config.prefill_cache_axis_order.split(",").index("1") + ndim_diff
+        start_indices = [0] * full_cache.ndim
         start_indices[seqlen_index] = start_idx
         slice_size = list(partial_cache.shape)
         slice_size[seqlen_index] = seq_len

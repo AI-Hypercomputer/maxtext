@@ -73,6 +73,7 @@ from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.globals import EPS
+from maxtext.utils import index_share_utils
 
 
 PLACEHOLDER_SEQ_LEN = 1
@@ -267,6 +268,19 @@ class Indexer(nnx.Module):
       raw_mask = indexer_score >= indexer_cutoff_threshold
       return jnp.where(raw_mask, val_true, val_false)
 
+  def compute_k(
+      self,
+      inputs_kv: Array,
+      inputs_positions: Optional[Array | None] = None,
+  ) -> Array:
+    """Projects and applies partial RoPE to inputs_kv for indexer key representation."""
+    inputs_kv = jax.lax.stop_gradient(inputs_kv)
+    k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
+    k = self.k_norm(k)
+    k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
+    k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
+    return k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
+
   def __call__(
       self,
       inputs_q: Array,
@@ -278,6 +292,8 @@ class Indexer(nnx.Module):
       previous_chunk: Any = None,
       kv_cache: Any = None,
       model_mode: str = MODEL_MODE_TRAIN,
+      k_cached: Optional[Array] = None,
+      cached_s: Optional[Array] = None,
   ):
     """Computes the index score to determine the top-k relevant tokens.
 
@@ -306,6 +322,8 @@ class Indexer(nnx.Module):
       previous_chunk: Previous chunk info for prefill.
       kv_cache: Key-value cache used when serving models.
       model_mode: "train", "prefill", or "autoregressive".
+      k_cached: Optional pre-updated indexer keys from cache.
+      cached_s: Optional pre-updated segment IDs from cache.
 
     Returns:
       indexer_mask: A sparse mask [b, t, s] with 0.0 for top-k selected tokens
@@ -351,21 +369,28 @@ class Indexer(nnx.Module):
     q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
 
     # Key Processing: Project from Input
-    k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
-    k = self.k_norm(k)
-    k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
-    k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
-    k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
+    if k_cached is not None:
+      k = k_cached
+    else:
+      k = self.compute_k(inputs_kv, inputs_positions=inputs_positions)
 
-    # Update and retrieve from cache if not training
-    cached_s = None
-    if model_mode != MODEL_MODE_TRAIN:
-      k_cached, cached_s = self.update_indexer_cache(kv_cache, k, decoder_segment_ids, model_mode, previous_chunk)
-      k = k_cached if k_cached is not None else k
+      # Update and retrieve from cache if not training
+      cached_s = None
+      if model_mode != MODEL_MODE_TRAIN:
+        k_cached, cached_s = self.update_indexer_cache(kv_cache, k, decoder_segment_ids, model_mode, previous_chunk)
+        k = k_cached if k_cached is not None else k
 
     # NOTE: If the total available sequence length <= topk, indexer always selects all tokens.
     if k.shape[1] <= self.indexer_topk:
-      return attention_mask, cached_s, attention_mask
+      full_mask = jnp.zeros((bsz, seqlen, k.shape[1]), dtype=jnp.float32)
+      if cached_s is not None:
+        internal_padding_mask = jnp.where(cached_s > 0, 0.0, DEFAULT_MASK_VALUE)
+        full_mask += internal_padding_mask[:, None, :]
+      if attention_mask is not None:
+        if attention_mask.shape[-1] == k.shape[1] or attention_mask.shape[-1] == 1:
+          full_mask += attention_mask
+      dummy_indices = jnp.zeros((bsz, seqlen, self.indexer_topk), dtype=jnp.int32)
+      return full_mask, dummy_indices, full_mask
 
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q)
@@ -516,6 +541,8 @@ def mla_as_linen(
     mscale: float = 1.0,  # scaling factor for softmax
     rope_factor: float = 40.0,  # rotary embedding factor
     name: str | None = None,
+    is_shared_layer: bool = False,
+    served_group_size: int = 1,
 ):
   """A factory function to create an MLA as a Linen module.
 
@@ -582,6 +609,8 @@ def mla_as_linen(
       mscale=mscale,
       rope_factor=rope_factor,
       name=name,
+      is_shared_layer=is_shared_layer,
+      served_group_size=served_group_size,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
   )
@@ -654,6 +683,8 @@ class MLA(Attention):
       mscale: float = 1.0,  # scaling factor for softmax
       rope_factor: float = 40.0,  # rotary embedding factor
       name: str | None = None,
+      is_shared_layer: bool = False,
+      served_group_size: int = 1,
       rngs: Optional[nnx.Rngs] = None,
   ):
     """Initializes the MLA module.
@@ -733,12 +764,26 @@ class MLA(Attention):
 
     # Initialize Indexer
     self.use_indexer = config.use_indexer
-    if self.use_indexer:
+    self.is_shared_layer = is_shared_layer
+    self.served_group_size = served_group_size
+    if getattr(config, "use_index_share", False):
+      pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
+      self.is_full_tuple = tuple(role == "F" for role in pattern)
+      self.served_group_sizes_tuple = index_share_utils.get_served_group_sizes(pattern)
+    else:
+      self.is_full_tuple = None
+      self.served_group_sizes_tuple = None
+    is_pruned = (
+        getattr(config, "use_index_share", False)
+        and getattr(config, "prune_shared_indexers", True)
+        and self.is_shared_layer
+    )
+    if self.use_indexer and not is_pruned:
       # Need two versions of rope.
       # MLA applies yarn with interleave layout.
       # Indexer applies yarn with concatenate layout.
       indexer_rope = copy.copy(self.rotary_embedding)
-      indexer_rope.interleave = False
+      indexer_rope.interleave = getattr(config, "indexer_rope_interleave", config.rope_interleave)
       self.indexer = Indexer(
           config,
           rngs=rngs,
@@ -1244,7 +1289,9 @@ class MLA(Attention):
       rope_kwargs: dict | None = None,
       kv_cache: Optional[Array] = None,
       attention_metadata: Optional[dict[str, Any]] = None,
-  ) -> tuple[Array, Optional[Array]]:
+      cached_indexer_state: Optional[Any] = None,
+      layer_idx: Optional[Any] = None,
+  ) -> tuple[Array, Optional[Array]] | tuple[Array, Optional[Array], Optional[Any]]:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 
     Args:
@@ -1259,6 +1306,7 @@ class MLA(Attention):
       bidirectional_mask: A mask for bidirectional attention, used in multimodal models.
       kv_cache: Optional key-value cache used when serving models with vLLM.
       attention_metadata: Optional attention-related metadata used when serving models with vLLM.
+      cached_indexer_state: Optional tuple (indexer_mask, topk_indices, indexer_score) from donor F-layer.
 
     Returns:
       A tensor of shape [batch, length, embed_dim] containing the
@@ -1288,6 +1336,7 @@ class MLA(Attention):
 
     # Indexer Logic
     indexer_mask = None
+    new_indexer_state = None
     if self.use_indexer:
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
       attention_mask = self.attention_op.generate_attention_mask(
@@ -1301,20 +1350,114 @@ class MLA(Attention):
       )
       if attention_mask is not None:
         attention_mask = attention_mask.squeeze(axis=(1, 2))
-      # apply indexer, indexer_mask [b, q_len, kv_len]
-      indexer_mask, _, indexer_score = self.indexer(
-          inputs_q=inputs_q,
-          low_rank_q=low_rank_q,
-          inputs_kv=inputs_kv,
-          inputs_positions=inputs_positions,
-          attention_mask=attention_mask,
-          decoder_segment_ids=decoder_segment_ids,
-          previous_chunk=previous_chunk,
-          kv_cache=self.IndexerKVCache_0,
-          model_mode=model_mode,
-      )
 
-      if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0:
+      k_cached, cached_s = None, None
+      if self.indexer is not None and self.IndexerKVCache_0 is not None and model_mode != MODEL_MODE_TRAIN:
+        k_idx = self.indexer.compute_k(inputs_kv, inputs_positions=inputs_positions)
+        k_cached, cached_s = self.indexer.update_indexer_cache(
+            self.IndexerKVCache_0, k_idx, decoder_segment_ids, model_mode, previous_chunk
+        )
+
+      if self.indexer is not None or getattr(self.config, "use_index_share", False):
+
+        target_kv_len = (
+            k_cached.shape[1]
+            if k_cached is not None
+            else (
+                cached_indexer_state[0].shape[-1]
+                if cached_indexer_state is not None
+                else (query.shape[1] if query.shape[1] > 1 else getattr(self.config, "max_target_length", query.shape[1]))
+            )
+        )
+
+        def _run_full(_):
+          with jax.named_scope("glm_full_layer_index_computation"):
+            if self.indexer is None:
+              batch = query.shape[0]
+              q_len = query.shape[1]
+              kv_len = target_kv_len
+              topk = getattr(self.config, "indexer_topk", 0)
+              mask = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
+              indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
+              score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
+              return mask, indices, score
+            mask, indices, score = self.indexer(
+                inputs_q=inputs_q,
+                low_rank_q=low_rank_q,
+                inputs_kv=inputs_kv,
+                inputs_positions=inputs_positions,
+                attention_mask=attention_mask,
+                decoder_segment_ids=decoder_segment_ids,
+                previous_chunk=previous_chunk,
+                kv_cache=self.IndexerKVCache_0,
+                model_mode=model_mode,
+                k_cached=k_cached,
+                cached_s=cached_s,
+            )
+            topk = getattr(self.config, "indexer_topk", 0)
+            if getattr(self.config, "use_index_share", False):
+              if indices is None or indices.shape != (query.shape[0], query.shape[1], topk):
+                indices = jnp.zeros((query.shape[0], query.shape[1], topk), dtype=jnp.int32)
+            mask = mask.astype(jnp.float32)
+            indices = indices.astype(jnp.int32)
+            score = score.astype(jnp.float32)
+            mask = checkpoint_name(mask, "full_layer_indexer_mask")
+            indices = checkpoint_name(indices, "full_layer_topk_indices")
+            return mask, indices, score
+
+        def _run_shared(_):
+          with jax.named_scope("glm_shared_layer_index_reuse"):
+            if cached_indexer_state is None:
+              batch = query.shape[0]
+              q_len = query.shape[1]
+              kv_len = target_kv_len
+              topk = getattr(self.config, "indexer_topk", 0)
+              mask = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
+              indices = jnp.zeros((batch, q_len, topk), dtype=jnp.int32)
+              score = jnp.zeros((batch, q_len, kv_len), dtype=jnp.float32)
+              return mask, indices, score
+            mask, indices, score = cached_indexer_state
+            topk = getattr(self.config, "indexer_topk", 0)
+            if indices is None or indices.shape != (query.shape[0], query.shape[1], topk):
+              indices = jnp.zeros((query.shape[0], query.shape[1], topk), dtype=jnp.int32)
+            mask = mask.astype(jnp.float32)
+            indices = indices.astype(jnp.int32)
+            score = score.astype(jnp.float32)
+            mask = checkpoint_name(mask, "shared_layer_reused_mask")
+            indices = checkpoint_name(indices, "shared_layer_reused_indices")
+            return mask, indices, score
+
+        if getattr(self.config, "use_index_share", False):
+          if self.is_shared_layer:
+            indexer_mask, topk_indices, indexer_score = _run_shared(None)
+          elif layer_idx is not None and self.is_full_tuple is not None:
+            is_full = jnp.array(self.is_full_tuple, dtype=jnp.bool_)[layer_idx]
+            indexer_mask, topk_indices, indexer_score = jax.lax.cond(
+                is_full,
+                _run_full,
+                _run_shared,
+                operand=None,
+            )
+          else:
+            indexer_mask, topk_indices, indexer_score = _run_full(None)
+        else:
+          indexer_mask, topk_indices, indexer_score = _run_full(None)
+
+        new_indexer_state = (indexer_mask, topk_indices, indexer_score)
+      else:
+        indexer_mask, topk_indices, indexer_score = None, None, None
+        new_indexer_state = cached_indexer_state
+
+      if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0 and indexer_score is not None:
+        loss_scale = self.config.indexer_loss_scaling_factor
+        if getattr(self.config, "use_index_share", False):
+          group_size = (
+              jnp.array(self.served_group_sizes_tuple, dtype=jnp.float32)[layer_idx]
+              if layer_idx is not None and self.served_group_sizes_tuple is not None
+              else float(self.served_group_size)
+          )
+          loss_scale = loss_scale / jnp.maximum(group_size, 1.0)
+
         indexer_loss = self.calculate_indexer_loss(
             indexer_score=indexer_score,
             query=query,
@@ -1322,7 +1465,7 @@ class MLA(Attention):
             attention_mask=attention_mask,
             indexer_mask=indexer_mask,
             sparse_loss=self.config.indexer_sparse_training,
-            scaling_factor=self.config.indexer_loss_scaling_factor,
+            scaling_factor=loss_scale,
         )
         self.indexer_loss = indexer_losses(indexer_loss)
 
@@ -1347,4 +1490,6 @@ class MLA(Attention):
     out_sharding = create_sharding(self.mesh, out_logical_name)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
+    if getattr(self.config, "use_index_share", False):
+      return out, kv_cache, new_indexer_state
     return out, kv_cache
