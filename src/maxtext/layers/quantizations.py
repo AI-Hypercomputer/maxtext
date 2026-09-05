@@ -14,6 +14,7 @@
 
 """Quantization library."""
 
+import enum
 import functools
 import json
 import qwix.pallas as qpl
@@ -76,14 +77,30 @@ _A_SCALE = "a_scale"  # Clipping scale for activations
 _TILE_SIZE = "tile_size"  # Tile size for subchannel
 
 
+class ApplyRngs(enum.Enum):
+  """How a quantization backend needs the Linen->NNX bridge to handle its RNGs.
+
+  The bridge forks the caller's `Rngs` into every wrapper it creates, and anything a
+  module holds is model state. Unrolled, that is paid once per layer, so a backend that
+  does not need its own fork should say so.
+  """
+
+  # Never draws at apply time, so the bridge can drop the fork entirely.
+  NONE = "none"
+  # Draws, but its values are decorrelated by something other than the stream, so one
+  # shared stream serves every wrapper.
+  SHARED = "shared"
+  # Draws and needs its own stream. The safe default.
+  PRIVATE = "private"
+
+
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""
 
-  # Whether this backend's dot_general draws RNGs at apply time, as AQT and NVFP4
-  # stochastic rounding do. False lets the Linen->NNX bridge drop its forked Rngs after
-  # init; the default makes opting out deliberate.
-  needs_apply_rngs: ClassVar[bool] = True
+  # How the bridge should handle this backend's RNGs. The default makes anything else
+  # deliberate.
+  apply_rngs: ClassVar[ApplyRngs] = ApplyRngs.PRIVATE
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
@@ -151,7 +168,7 @@ class AqtQuantization:
 
   # Declared, not inherited: this class sits outside the Quantization hierarchy. AQT
   # sets rng_type="jax.uniform" and stochastic rounding draws at apply time.
-  needs_apply_rngs: ClassVar[bool] = True
+  apply_rngs: ClassVar[ApplyRngs] = ApplyRngs.PRIVATE
 
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
@@ -236,7 +253,7 @@ class QwixQuantization:
   """Configures Qwix quantization github.com/google/qwix, for training only."""
 
   # Declared, not inherited: this class sits outside the Quantization hierarchy.
-  needs_apply_rngs: ClassVar[bool] = True
+  apply_rngs: ClassVar[ApplyRngs] = ApplyRngs.PRIVATE
 
   quant_mode = "train"  # needed by external call
   act_calibration_method: str = "absmax"
@@ -319,7 +336,7 @@ class Fp8Quantization(Quantization):
   """Configures Fp8 quantization for NVIDIA GPUs"""
 
   # Flax's fp8 ops scale from amax history, never from make_rng at apply time.
-  needs_apply_rngs: ClassVar[bool] = False
+  apply_rngs: ClassVar[ApplyRngs] = ApplyRngs.NONE
 
   quant_mode = "train"
   # The forward dtype, for callers that quantize an operand themselves rather than through
@@ -414,7 +431,7 @@ class NANOOFp8Quantization(Quantization):
   """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
 
   # Same as Fp8Quantization: nn.NANOOFp8DotGeneralOp never draws at apply time.
-  needs_apply_rngs: ClassVar[bool] = False
+  apply_rngs: ClassVar[ApplyRngs] = ApplyRngs.NONE
 
   quant_mode = "train"
   quantize_dtype = jnp.float8_e4m3fnuz
@@ -1110,17 +1127,19 @@ class TransformerEngineQuantization(Quantization):
     return RECIPES[recipe_name]()
 
   @property
-  def needs_apply_rngs(self) -> bool:
-    """Whether this recipe draws RNGs at apply time.
+  def apply_rngs(self) -> ApplyRngs:
+    """How the bridge should handle this recipe's RNGs.
 
-    Only NVFP4 does, and only while stochastic rounding is on: TE draws ``sr_rng`` for
-    the DGRAD quantizer. The other recipes take their scales from the tensors.
+    Only NVFP4 draws, and only while stochastic rounding is on: TE draws ``sr_rng`` for
+    the DGRAD quantizer. It folds a per-quantizer hash into whatever it draws, so the
+    wrappers do not need streams of their own. The other recipes take their scales from
+    the tensors and never draw.
     """
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     if not isinstance(self._recipe, recipe.NVFP4BlockScaling):  # pytype: disable=module-attr
-      return False
-    return not self._recipe.disable_stochastic_rounding
+      return ApplyRngs.NONE
+    return ApplyRngs.SHARED if not self._recipe.disable_stochastic_rounding else ApplyRngs.NONE
 
   def get_block_size(self):
     """Get the block size for quantization for recipes that require blocks.

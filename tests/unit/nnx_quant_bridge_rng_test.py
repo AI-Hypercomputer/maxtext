@@ -55,7 +55,7 @@ class _StubDotGeneral(nn.Module):
 class _OptOutQuant(quantizations.Quantization):
   """A backend that never draws RNGs at apply time (as TransformerEngine does not)."""
 
-  needs_apply_rngs = False
+  apply_rngs = quantizations.ApplyRngs.NONE
   quant_mode = "train"  # read by quantizations.in_serve_mode()
 
   def dot_general_cls(self, mesh_axes=()):
@@ -64,7 +64,7 @@ class _OptOutQuant(quantizations.Quantization):
 
 
 class _DefaultQuant(quantizations.Quantization):
-  """A backend that leaves `needs_apply_rngs` at its safe default of True."""
+  """A backend that leaves `apply_rngs` at its safe default of PRIVATE."""
 
   quant_mode = "train"
 
@@ -97,7 +97,13 @@ class _DrawingQuant(quantizations.Quantization):
 class _MisdeclaredQuant(_DrawingQuant):
   """A drawing backend that wrongly claims it does not draw."""
 
-  needs_apply_rngs = False
+  apply_rngs = quantizations.ApplyRngs.NONE
+
+
+class _SharedQuant(_DrawingQuant):
+  """A drawing backend whose values do not depend on having a stream of its own."""
+
+  apply_rngs = quantizations.ApplyRngs.SHARED
 
 
 def _rng_state_paths(module) -> list[str]:
@@ -126,7 +132,7 @@ class QuantBridgeRngStateTest(unittest.TestCase):
     self.assertEqual(
         _rng_state_paths(dense),
         [],
-        "A backend with needs_apply_rngs=False must not retain the bridge's forked "
+        "A backend with apply_rngs=NONE must not retain the bridge's forked "
         "Rngs: its counters would be incremented on device every step, once per "
         "unrolled layer.",
     )
@@ -134,7 +140,7 @@ class QuantBridgeRngStateTest(unittest.TestCase):
   def test_default_backend_keeps_rng_state(self):
     """Checks that the opt-out is deliberate and the default stays safe."""
     paths = _rng_state_paths(_make_dense(_DefaultQuant()))
-    self.assertNotEqual(paths, [], "needs_apply_rngs defaults to True, so the Rngs must be kept.")
+    self.assertNotEqual(paths, [], "apply_rngs defaults to PRIVATE, so the Rngs must be kept.")
 
   def test_unquantized_dense_has_no_bridge_state(self):
     self.assertEqual(_rng_state_paths(_make_dense(None)), [])
@@ -213,20 +219,20 @@ class DropoutRngStateTest(unittest.TestCase):
 
 
 class QuantizationFlagTest(unittest.TestCase):
-  """`needs_apply_rngs` must stay safe-by-default and correct per backend."""
+  """`apply_rngs` must stay safe-by-default and correct per backend."""
 
-  def test_base_class_defaults_to_keeping_rngs(self):
-    self.assertTrue(quantizations.Quantization.needs_apply_rngs)
+  def test_base_class_defaults_to_a_private_stream(self):
+    self.assertIs(quantizations.Quantization.apply_rngs, quantizations.ApplyRngs.PRIVATE)
 
-  def test_backends_that_may_draw_at_apply_time_keep_rngs(self):
-    """AQT's config enables jax.uniform RNG, so it must never be opted out silently."""
+  def test_backends_that_may_draw_at_apply_time_keep_their_own_rngs(self):
+    """AQT's config enables jax.uniform RNG, so it must never be narrowed silently."""
     for cls in (quantizations.AqtQuantization, quantizations.QwixQuantization):
-      self.assertTrue(cls.needs_apply_rngs, f"{cls.__name__} must keep its RNGs")
+      self.assertIs(cls.apply_rngs, quantizations.ApplyRngs.PRIVATE, f"{cls.__name__} must keep its own RNGs")
 
   def test_fp8_backends_opt_out(self):
     """Flax's fp8 ops scale from amax history, so they never draw at apply time."""
     for cls in (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization):
-      self.assertFalse(cls.needs_apply_rngs, f"{cls.__name__} must release the bridge's Rngs")
+      self.assertIs(cls.apply_rngs, quantizations.ApplyRngs.NONE, f"{cls.__name__} must release the bridge's Rngs")
 
   def test_every_backend_declares_the_flag(self):
     """Every backend must carry the flag, so the call sites can read it directly.
@@ -234,8 +240,8 @@ class QuantizationFlagTest(unittest.TestCase):
     `AqtQuantization` and `QwixQuantization` sit outside the `Quantization` hierarchy
     and declare it themselves. A backend that is missing it raises AttributeError at
     the call site rather than silently taking a default. `TransformerEngineQuantization`
-    is excluded because its answer depends on the recipe, so it derives the flag per
-    instance; `TransformerEngineRecipeRngTest` covers it.
+    is excluded because its answer depends on the recipe, so it derives it per instance;
+    `TransformerEngineRecipeRngTest` covers it.
     """
     for cls in (
         quantizations.AqtQuantization,
@@ -243,7 +249,7 @@ class QuantizationFlagTest(unittest.TestCase):
         quantizations.Fp8Quantization,
         quantizations.NANOOFp8Quantization,
     ):
-      self.assertIsInstance(cls.needs_apply_rngs, bool, f"{cls.__name__} must declare needs_apply_rngs")
+      self.assertIsInstance(cls.apply_rngs, quantizations.ApplyRngs, f"{cls.__name__} must declare apply_rngs")
 
 
 class ApplyTimeRngTest(unittest.TestCase):
@@ -297,17 +303,54 @@ class Fp8BackendRngStateTest(unittest.TestCase):
     self.assertEqual(counts, [0, 0, 0], f"fp8 RNG state must not scale with layer count, got {counts}")
 
 
+class SharedRngStateTest(unittest.TestCase):
+  """A backend that shares one stream must not add state per unrolled layer.
+
+  This is what NVFP4 needs: it draws every step, so the fork cannot simply be dropped,
+  but TransformerEngine folds a per-quantizer hash into whatever it draws, so one stream
+  serves every wrapper. NNX stores a shared `Rngs` once however many modules hold it.
+  """
+
+  def _stack(self, quant, num_layers):
+    """Builds layers the way an unrolled decoder does, from one `Rngs`."""
+    rngs = nnx.Rngs(params=0, dropout=1, aqt=2)
+    return [
+        linears.DenseGeneral(in_features_shape=8, out_features_shape=4, quant=quant, rngs=rngs) for _ in range(num_layers)
+    ]
+
+  def _rng_leaves(self, layers) -> int:
+    return len(_rng_state_paths(nnx.List(layers)))
+
+  def test_state_does_not_grow_with_layer_count(self):
+    counts = [self._rng_leaves(self._stack(_SharedQuant(), n)) for n in (1, 2, 8)]
+    self.assertEqual(
+        len(set(counts)),
+        1,
+        f"a shared stream must cost the same at any depth, got {counts} for 1/2/8 layers",
+    )
+
+  def test_a_private_backend_still_grows(self):
+    """The contrast, so the test above cannot pass for the wrong reason."""
+    counts = [self._rng_leaves(self._stack(_DrawingQuant(), n)) for n in (1, 2, 8)]
+    self.assertEqual(len(set(counts)), 3, f"a private fork per wrapper should scale, got {counts}")
+
+  def test_sharing_keeps_the_layer_callable(self):
+    out = self._stack(_SharedQuant(), 1)[0](jnp.ones((2, 8), jnp.float32))
+    self.assertEqual(out.shape, (2, 4))
+    self.assertTrue(jnp.all(jnp.isfinite(out)))
+
+
 class TransformerEngineRecipeRngTest(unittest.TestCase):
-  """Only NVFP4 with stochastic rounding on draws at apply time."""
+  """Only NVFP4 with stochastic rounding on draws at apply time, and it can share."""
 
   # te_nvfp4 and te_nvfp4_no_rht both leave disable_stochastic_rounding at its False
   # default, so both draw; disable_rht does not affect rounding.
   EXPECTED = {
-      "te_fp8_delayedscaling": False,
-      "te_fp8_currentscaling": False,
-      "te_mxfp8": False,
-      "te_nvfp4": True,
-      "te_nvfp4_no_rht": True,
+      "te_fp8_delayedscaling": quantizations.ApplyRngs.NONE,
+      "te_fp8_currentscaling": quantizations.ApplyRngs.NONE,
+      "te_mxfp8": quantizations.ApplyRngs.NONE,
+      "te_nvfp4": quantizations.ApplyRngs.SHARED,
+      "te_nvfp4_no_rht": quantizations.ApplyRngs.SHARED,
   }
 
   def test_flag_follows_the_recipe(self):
@@ -320,7 +363,7 @@ class TransformerEngineRecipeRngTest(unittest.TestCase):
       with self.subTest(recipe=name):
         config = types.SimpleNamespace(quantization=name, te_comm_gemm_overlap=None)
         quant = quantizations.TransformerEngineQuantization(config)
-        self.assertEqual(quant.needs_apply_rngs, expected)
+        self.assertIs(quant.apply_rngs, expected)
 
 
 if __name__ == "__main__":

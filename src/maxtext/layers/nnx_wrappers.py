@@ -239,6 +239,20 @@ class ToNNX(Module):
     """
     self.to_nnx__rngs = None
 
+  def share_rngs(self, rngs: Rngs):
+    """Draws from ``rngs`` instead of from this wrapper's own fork.
+
+    ``__init__`` still forked, so the caller's streams have advanced exactly as they
+    would have and parameter initialization is unchanged. What changes is where
+    apply-time draws come from. NNX stores a shared ``Rngs`` once however many modules
+    reference it, so a decoder with ``scan_layers=False`` stops paying for one per layer.
+
+    Only for wrapped modules whose draws are decorrelated by something other than the
+    stream itself, as TransformerEngine's stochastic rounding is by its per-quantizer
+    hash.
+    """
+    self.to_nnx__rngs = rngs
+
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)
