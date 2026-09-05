@@ -495,6 +495,13 @@ class Quantization(BaseModel):
   )
   quant_cfg_path: PathStr = Field("", description="Path to the configuration file for 'intmp' quantization.")
   quantize_kvcache: bool = Field(False, description="If True, quantizes the Key-Value cache.")
+  quantize_mtp: bool = Field(
+      False,
+      description=(
+          "If True, quantizes the Multi-Token Prediction (MTP) block. Only supported with"
+          " `mtp_num_layers > 0` and `quantization=fp8_full`."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -4215,6 +4222,11 @@ class MaxTextConfig(
         raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
+    if self.quantize_mtp:
+      if self.mtp_num_layers <= 0:
+        raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
+      if self.quantization != "fp8_full":
+        raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
     if (
         self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
         and self.gradient_accumulation_steps > 1
