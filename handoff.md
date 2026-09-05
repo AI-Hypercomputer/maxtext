@@ -54,7 +54,7 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 - Ran simulation of Raiden schedule: **0 destination bounds violations**.
 - Clean container image built from source git checkouts:
   ```text
-  europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v15
+  europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v16
   ```
 
 ### C. Milestone 3: Upstream Rebase & Cross-Contributor Synthesis
@@ -76,7 +76,7 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 - **Consolidated Entrypoints**: Migrated obsolete worker entrypoints in `launch_raiden.sh` from `tunix.experimental.examples.math_gsm8k_dist.run_*.main` to upstream `tunix.experimental.examples.common.run_trainer_node.main` and `run_rollout_node.main`.
 - **Aligned Worker CLI Flags**: Fixed rollout arguments to use `--mesh_tp=${ROLLOUT_MESH_TP}` and `--sampler_data_parallel=${ROLLOUT_DATA_PARALLEL:-1}` (eliminating legacy `--sampler_mesh_tp`). Added `--sampler_type=${SAMPLER}` to trainer.
 - **Fixed `tpu-inference` Quantization Import Bug**: Resolved fatal `ImportError: cannot import name 'is_equal_or_regex_match' from 'vllm.model_executor.layers.quantization.utils.config_utils'` in `tpu_inference/layers/jax/quantization/compressed_tensors.py` by switching to `check_equal_or_regex_match` from `vllm.model_executor.layers.quantization.compressed_tensors.utils`.
-- **Shipped Docker Image `v15`**: Built and pushed `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v15` containing the compiled protobuf stubs and the `compressed_tensors` fix.
+- **Shipped Docker Image `v15`**: Built and pushed `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v16` containing the compiled protobuf stubs and the `compressed_tensors` fix.
 
 ### E. Current Cluster & Workload State (`igorts-rd-35b` with 2 Rollouts)
 - Active run `igorts-rd-35b` in namespace `trellis` on regional cluster `bodaborg-v5p-nap` (`europe-west4`, project `cloud-tpu-shared-capacity`):
@@ -221,7 +221,7 @@ kubectl logs -n trellis -l jobset.sigs.k8s.io/jobset-name=igorts-rd-35b-roll-1 -
 ./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh start \
   --model qwen3.5-35b \
   --rollout-replicas=2 \
-  --image europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v15
+  --image europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v16
 ```
 
 ### Full Operational Documentation
