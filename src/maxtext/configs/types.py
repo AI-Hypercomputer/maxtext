@@ -2540,6 +2540,20 @@ class MultimodalGeneral(BaseModel):
       description="The style of VisionEncoderBlock to use (e.g., 'gemma3', 'llama4').",
   )
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
+  standardize_for_vit: bool | None = Field(
+      None,
+      description=(
+          "Whether the vision encoder standardizes exit embeddings with std_bias/std_scale. Mirrors HF"
+          " Gemma-4 vision_config.standardize and is a per-model-family semantic distinction, so it must be set"
+          " EXPLICITLY by every Gemma-4 multimodal model config (no global default is safe): HF registers"
+          " std_bias/std_scale as checkpoint-resident (non-trainable) buffers ONLY when standardize=True."
+          " Gemma-4 26B/31B ship standardize=True (2 std tensors); E2B/E4B ship standardize=False (0 std tensors)."
+          " When False the standardize op is an exact identity and MaxText must NOT construct std_bias/std_scale"
+          " (fabricating them wrongly enters checkpoint-restored committed arrays into the nnx.Param gradient"
+          " filter). None means unset: a Gemma-4 model with use_multimodal=True and this unset is a hard config"
+          " error (see validate_standardize_for_vit) — it must never silently inherit a value."
+      ),
+  )
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
   image_size_for_vit: int | list[int] | None = Field(896, description="Input image size for the Vision Transformer.")
@@ -4299,6 +4313,15 @@ class MaxTextConfig(
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
       raise ValueError(
           f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
+      )
+    # Gemma 4 vision standardization is a per-model-family semantic distinction (HF vision_config.standardize)
+    # and must be set EXPLICITLY — it must never silently inherit a global default, or a standardize=True variant
+    # (26B/31B) would drop its checkpoint-resident std buffers, or a standardize=False variant (E2B/E4B) would
+    # fabricate spurious trainable std leaves. Fail closed when unset for any Gemma-4 model.
+    if self.model_name.startswith("gemma4-") and self.standardize_for_vit is None:
+      raise ValueError(
+          f"{self.model_name}: standardize_for_vit must be set explicitly (True for 26B/31B, False for E2B/E4B) "
+          "to mirror HF vision_config.standardize. Set it in the model config YAML; it must not inherit a default."
       )
     if self.use_multimodal:
       # Gemma 4 small (E2B / E4B) only supports text for now; multimodal
