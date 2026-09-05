@@ -778,6 +778,9 @@ class AttentionIndexer(BaseModel):
           " during ties."
       ),
   )
+  shard_indexer_acts: bool = Field(
+      False, description="Whether to shard CSA indexer score activations over the activation_heads logical axis."
+  )
 
 
 class Llama4Attention(BaseModel):
