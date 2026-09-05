@@ -1574,5 +1574,63 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
       maxtext_utils_nnx.nnx_add_and_sync_scan_axis = original_add_scan_axis
 
 
+class TestNNXDecoderFP8WeightOnly(unittest.TestCase):
+  """Tests for NNXDecoder with FP8 weight-only storage and dynamic dequantization."""
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = _make_config(
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+    )
+    self.mesh = _make_mesh(self.cfg)
+    self.rngs = nnx.Rngs(params=0, dropout=1)
+    self.decoder = NNXDecoder(
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+    self.shared_embedding = Embed(
+        num_embeddings=self.cfg.vocab_size,
+        num_features=self.cfg.emb_dim,
+        dtype=self.cfg.dtype,
+        embedding_init=jax.nn.initializers.normal(stddev=1.0),
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+
+  def test_fp8_weights_and_unquantized_layers(self):
+    """Verifies that dense linear weights are FP8 while embedding and norms are BF16."""
+    layer_0 = self.decoder.layers_0
+    self.assertEqual(layer_0.self_attention.query.kernel[...].dtype, jnp.float8_e4m3fn)
+    self.assertIsNotNone(layer_0.self_attention.query.kernel_scale)
+    self.assertEqual(layer_0.mlp.wi_0.kernel[...].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(self.shared_embedding.embedding[...].dtype, jnp.bfloat16)
+    self.assertEqual(self.decoder.decoder_norm.scale[...].dtype, jnp.bfloat16)
+
+  def test_fp8_forward_pass_execution(self):
+    """Verifies that an end-to-end forward pass with dynamic FP8 dequantization executes and produces valid logits."""
+    cfg = self.cfg
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    logits, hidden_state, _ = self.decoder(
+        self.shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+    self.assertEqual(hidden_state.shape, (batch, seq_len, cfg.emb_dim))
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))
+
+
 if __name__ == "__main__":
   unittest.main()

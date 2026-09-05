@@ -14,6 +14,7 @@
 
 """Common types."""
 import enum
+import fnmatch
 from typing import Any, Sequence
 
 import numpy as np
@@ -27,6 +28,41 @@ Array = jnp.ndarray
 PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
+
+
+def is_fp8_dtype(dtype: Any) -> bool:
+  """Checks whether a dtype is FP8."""
+  return dtype in (
+      "float8_e4m3fn",
+      "float8_e5m2",
+      jnp.float8_e4m3fn,
+      jnp.float8_e5m2,
+  )
+
+
+UNQUANTIZED_MODULE_LEAF_NAMES = frozenset({
+    "token_embedder",
+    "logits_dense",
+    "gate",
+    "shared_expert_gate",
+    "conv1d",
+    "in_proj_ba",
+})
+
+
+def get_weight_dtype(config: Config, module_name: str) -> DType:
+  """Resolves parameter storage dtype for a submodule, honoring unquantized_modules."""
+  if not is_fp8_dtype(config.weight_dtype):
+    return config.weight_dtype
+  leaf_name = module_name.rsplit(".", 1)[-1]
+  if leaf_name in UNQUANTIZED_MODULE_LEAF_NAMES or module_name in UNQUANTIZED_MODULE_LEAF_NAMES:
+    return config.dtype
+  unquantized = getattr(config, "unquantized_modules", None) or ()
+  if any(fnmatch.fnmatch(module_name, p) or fnmatch.fnmatch(leaf_name, p) for p in unquantized):
+    return config.dtype
+  return config.weight_dtype
+
+
 
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]

@@ -36,6 +36,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     MultimodalInput,
     ShardMode,
+    get_weight_dtype,
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import initializers, linears, mhc, moe, normalizations, quantizations
@@ -386,7 +387,7 @@ class NNXScannedPipelineStage(nnx.Module):
 
     scan_axis = self.config.param_scan_axis
     if scan_axis != 0:
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
 
     def layer_fn(carry, scanned_vars):
       current_params, current_state = scanned_vars
@@ -410,7 +411,9 @@ class NNXScannedPipelineStage(nnx.Module):
     if scan_axis != 0:
       scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
       if scanned_params:
-        scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
+        scanned_params = jax.tree.map(
+            lambda x: jnp.moveaxis(x, 0, scan_axis) if x.ndim > scan_axis else x, scanned_params
+        )
       scanned_state = nnx.State.merge(scanned_params, scanned_other)
 
     nnx.update(self.scanned_layers, scanned_state)
@@ -462,10 +465,11 @@ class NNXDecoder(nnx.Module):
         parameter_memory_host_offload=config.parameter_memory_host_offload,
     )
     if not config.logits_via_embedding:
+      logits_weight_dtype = get_weight_dtype(config, "logits_dense")
       self.logits_dense = linears.DenseGeneral(
           in_features_shape=config.emb_dim,
           out_features_shape=config.vocab_size,
-          weight_dtype=config.weight_dtype,
+          weight_dtype=logits_weight_dtype,
           dtype=jnp.float32 if config.logits_dot_in_fp32 else config.dtype,
           kernel_axes=("embed_vocab", "vocab"),
           shard_mode=config.shard_mode,
@@ -1065,7 +1069,7 @@ class NNXDecoder(nnx.Module):
 
     scan_axis = self.config.param_scan_axis
     if scan_axis != 0:
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
 
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)

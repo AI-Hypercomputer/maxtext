@@ -183,6 +183,10 @@ decoder_block: "llama2" # which style of decoderblock to use.
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 weight_dtype: "float32"
+# List of module names or patterns to keep unquantized in model dtype (e.g. bfloat16) even when weight_dtype is FP8
+unquantized_modules: []
+# Block size for block-scaled quantized weights (e.g. 128 for 128x128 block scaling). null for per-tensor scaling.
+weight_block_size: null
 global_parameter_scale: 1
 base_emb_dim: 2048
 base_num_query_heads: 16
