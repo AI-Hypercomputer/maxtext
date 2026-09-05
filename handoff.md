@@ -1,6 +1,10 @@
 # Handoff & Session State: Qwen3.5 Distributed RL on GKE TPU v5p
 **MaxText Trainer + Tunix GRPO + vLLM Rollout + Raiden-FFI Direct Weight Sync**
 
+> [!NOTE]
+> **Active Jetski Trajectory / Conversation ID**: `6a4a2f0a-4ef0-4283-8ed5-9552b38b944a`  
+> **Transcript Log**: `/usr/local/google/home/igorts/.gemini/jetski/brain/6a4a2f0a-4ef0-4283-8ed5-9552b38b944a/.system_generated/logs/transcript.jsonl`
+
 This document captures the complete technical background, architecture, verified milestones, root causes of resolved issues, commit inventory, active cluster state, and exact instructions to resume and scale distributed RL runs with Raiden weight synchronization.
 
 ---
