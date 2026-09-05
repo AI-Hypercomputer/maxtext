@@ -290,19 +290,31 @@ class DenseGeneral(nnx.Module):
 
     should_have_scale = is_fp8_dtype(self.weight_dtype) if has_scale is None else has_scale
     if should_have_scale and not quantizations.in_serve_mode(self.quant):
+      # Phase 1: Resolve scale shape based on quantization granularity
+      # - Explicit scale_shape: user or caller override.
+      # - Block scaling (e.g. Qwen 3.5, block_size=128): scales are partitioned into a grid
+      #   of size (K // 128, N // 128). Dimensions smaller than block_size (e.g. head_dim < 128)
+      #   are preserved as-is.
+      # - Per-tensor scaling (e.g. Llama 3.1): a single scalar float32 scale with empty shape ().
       if scale_shape is not None:
         resolved_scale_shape = canonicalize_tuple(scale_shape)
       elif block_size is not None:
         if isinstance(block_size, int):
-          resolved_scale_shape = tuple(d if d < block_size else d // block_size for d in kernel_shape)
+          block_sizes = (block_size,) * len(kernel_shape)
         elif len(block_size) == len(kernel_shape):
-          resolved_scale_shape = tuple(d if d < b else d // b for d, b in zip(kernel_shape, block_size))
+          block_sizes = tuple(block_size)
         else:
-          b = block_size[0]
-          resolved_scale_shape = tuple(d if d < b else d // b for d in kernel_shape)
+          block_sizes = (block_size[0],) * len(kernel_shape)
+        resolved_scale_shape = tuple(d if d < b else d // b for d, b in zip(kernel_shape, block_sizes))
       else:
         resolved_scale_shape = ()
 
+      # Phase 2: Resolve scale sharding axes to match the weight tensor's mesh partitioning
+      # - Scalar scale (): cannot be sharded across mesh devices, so sharding is empty ().
+      # - Block scale grid (matching kernel rank): inherits kernel_axes for any dimension
+      #   spanning multiple blocks (> 1), ensuring the scale grid partitions synchronously
+      #   with the weight matrix under FSDP, TP, or expert parallelism.
+      # - Unpartitioned dimension (dimension size == 1): does not require sharding (None).
       if scale_axes is not None:
         resolved_scale_axes = scale_axes
       elif len(resolved_scale_shape) == 0:

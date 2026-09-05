@@ -125,6 +125,7 @@ class Embed(nnx.Module):
     self.mesh = mesh
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
+    self.attend_dtype = attend_dtype
     embed_weight_dtype = get_weight_dtype(self.config, "token_embedder")
     self.embedding = nnx.Param(
         embedding_init(
