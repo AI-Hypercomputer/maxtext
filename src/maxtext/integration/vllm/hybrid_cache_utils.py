@@ -15,9 +15,48 @@
 """Model-specific helpers shared by MaxText's vLLM adapter."""
 
 import math
+import re
 from typing import Any
 
 import jax.numpy as jnp
+
+
+def map_layer_names_to_indices(
+    layer_name_to_kvcache_index: Any,
+) -> dict[int, int]:
+  """Builds a mapping from layer index (int) to KV cache index (int).
+
+  In hybrid models (e.g. Qwen3.5 GDN + Full Attention), vLLM groups KV cache
+  tensors by layer type, so the physical cache list does not match 1:1 with
+  decoder layer index (e.g. GDN layers 0..29 followed by Full Attention 30..39).
+  `layer_name_to_kvcache_index` provides the mapping from layer name (e.g.
+  'layer.3', 'model.layers.3.self_attn') to cache index.
+  """
+  if layer_name_to_kvcache_index is None:
+    return {}
+  try:
+    mapping = dict(layer_name_to_kvcache_index)
+  except (TypeError, ValueError):
+    return {}
+  lyr_to_cache_idx: dict[int, int] = {}
+  for k, idx in mapping.items():
+    parsed_lyr = None
+    if isinstance(k, int):
+      parsed_lyr = k
+    elif isinstance(k, str):
+      if k.isdigit():
+        parsed_lyr = int(k)
+      else:
+        m = re.search(r"(?:layers?|layer)[._](\d+)", k)
+        if m:
+          parsed_lyr = int(m.group(1))
+        else:
+          m = re.search(r"\b(\d+)\b", k)
+          if m:
+            parsed_lyr = int(m.group(1))
+    if parsed_lyr is not None:
+      lyr_to_cache_idx[parsed_lyr] = int(idx)
+  return lyr_to_cache_idx
 
 
 def normalize_vllm_input_positions(input_positions: Any):

@@ -464,17 +464,25 @@ class MaxTextVllmSampler(VllmSampler):
       self,
       tokenizer: Any,
       config: VllmConfig,
-      converter: Any = None,
       direct_maxtext_sync: bool = False,
       scan_axis: int = 1,
       layer_pattern_length: Optional[int] = None,
   ):
     super().__init__(tokenizer=tokenizer, config=config)
-    self._converter = converter
-    self.converter = converter
     self._direct_maxtext_sync = direct_maxtext_sync
     self._scan_axis = scan_axis
     self._layer_pattern_length = layer_pattern_length
+    model_config = getattr(config, "model_config", None)
+    model_name = getattr(model_config, "model", "") or ""
+    architectures = getattr(model_config, "architectures", []) or []
+    hf_config = getattr(model_config, "hf_config", None)
+    model_type = getattr(hf_config, "model_type", "") or ""
+    arch_str = " ".join(str(a) for a in architectures)
+    self._is_gemma = (
+        "gemma" in str(model_name).lower()
+        or "gemma" in str(model_type).lower()
+        or "gemma" in str(arch_str).lower()
+    )
 
   def update_params(
       self,
@@ -494,12 +502,7 @@ class MaxTextVllmSampler(VllmSampler):
             pass
         raise
     if self._converter is None:
-      if self._direct_maxtext_sync:
-        updated_weights = unroll_qwen_scanned_weights(
-            updated_weights,
-            scan_axis=self._scan_axis,
-            pattern_length=self._layer_pattern_length,
-        )
+      if self._direct_maxtext_sync and self._is_gemma:
         updated_weights = unroll_gemma_scanned_weights(updated_weights)
     try:
       return super().update_params(updated_weights, filter_types)
@@ -742,7 +745,6 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             additional_config=rollout_additional_config,
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
         ),
-        converter=converter,
         direct_maxtext_sync=direct_maxtext_sync,
         scan_axis=getattr(maxtext_config, "param_scan_axis", 1),
         layer_pattern_length=getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", None),

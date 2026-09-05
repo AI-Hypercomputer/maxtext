@@ -33,6 +33,7 @@ from maxtext.layers import linears
 from maxtext.layers import mhc
 from maxtext.layers import normalizations
 from maxtext.layers import pipeline
+from maxtext.integration.vllm.hybrid_cache_utils import map_layer_names_to_indices
 from maxtext.layers.nnx_decoders import NNXDecoderLayer, NNXSequentialPipelineStage, NNXScannedPipelineStage
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import attention_as_linen
@@ -875,6 +876,8 @@ class Decoder(nn.Module):
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
       decoder_input_embeddings=None,
+      layer_name_to_kvcache_index=None,
+      **kwargs,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -1228,7 +1231,9 @@ class Decoder(nn.Module):
               slot=slot,
           )
         else:
+          lyr_to_cache_idx = map_layer_names_to_indices(layer_name_to_kvcache_index)
           for lyr in range(cfg.num_decoder_layers):
+            cache_idx = lyr_to_cache_idx.get(lyr, lyr)
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
             layer_call_kwargs = {}
@@ -1260,9 +1265,9 @@ class Decoder(nn.Module):
             if kv_caches is not None:
               # For all decoder blocks (including QWEN3_NEXT/QWEN3_5 with vLLM flat-list
               # kv_caches), pass the per-layer cache directly. For hybrid attention+GDN
-              # models, kv_caches[lyr] is a regular attention cache for attention layers
+              # models, kv_caches[cache_idx] is a regular attention cache for attention layers
               # and a (conv_state, recurrent_state) paged-mamba tuple for GDN layers.
-              kv_cache = kv_caches[lyr]
+              kv_cache = kv_caches[cache_idx]
 
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
@@ -1284,7 +1289,7 @@ class Decoder(nn.Module):
                 **layer_call_kwargs,
             )
             if kv_caches is not None and returned_cache is not None:
-              kv_caches[lyr] = returned_cache
+              kv_caches[cache_idx] = returned_cache
 
             if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
               visual_embeds = deepstack_visual_embeds[lyr]

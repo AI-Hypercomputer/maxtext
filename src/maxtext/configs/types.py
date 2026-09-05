@@ -2705,6 +2705,10 @@ class VLLM(BaseModel):
           "the legacy transfer_state_directly / transfer_state_with_mappings paths."
       ),
   )
+  rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
+      "maxtext",
+      description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
+  )
   weight_sync_debug: bool = Field(
       False,
       description=(
