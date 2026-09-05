@@ -1068,7 +1068,12 @@ class TrainTests(unittest.TestCase):
         # a large fraction of a model this small, so relax the unsharded-parameter check.
         "qwen3_next": [
             "ici_fsdp_parallelism=1",
-            "ici_tensor_parallelism=-1",
+            # `gdn_num_key_heads=4` caps how far the head axis can shard, so pin the
+            # degree rather than take the device count: `-1` resolves to 8 on tpu7x-8
+            # and the gated-delta-net reshapes then fail to divide. Whatever is left
+            # over goes to data parallelism, which both shard modes see alike.
+            "ici_tensor_parallelism=4",
+            "ici_data_parallelism=-1",
             "sharding_tolerance=0.5",
         ],
     }
