@@ -76,61 +76,88 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 - **Consolidated Entrypoints**: Migrated obsolete worker entrypoints in `launch_raiden.sh` from `tunix.experimental.examples.math_gsm8k_dist.run_*.main` to upstream `tunix.experimental.examples.common.run_trainer_node.main` and `run_rollout_node.main`.
 - **Aligned Worker CLI Flags**: Fixed rollout arguments to use `--mesh_tp=${ROLLOUT_MESH_TP}` and `--sampler_data_parallel=${ROLLOUT_DATA_PARALLEL:-1}` (eliminating legacy `--sampler_mesh_tp`). Added `--sampler_type=${SAMPLER}` to trainer.
 - **Fixed `tpu-inference` Quantization Import Bug**: Resolved fatal `ImportError: cannot import name 'is_equal_or_regex_match' from 'vllm.model_executor.layers.quantization.utils.config_utils'` in `tpu_inference/layers/jax/quantization/compressed_tensors.py` by switching to `check_equal_or_regex_match` from `vllm.model_executor.layers.quantization.compressed_tensors.utils`.
-- **Shipped Docker Image `v15`**: Built and pushed `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v16` containing the compiled protobuf stubs and the `compressed_tensors` fix.
 
-### E. Current Cluster & Workload State (`igorts-rd-35b` with 2 Rollouts)
-- Active run `igorts-rd-35b` in namespace `trellis` on regional cluster `bodaborg-v5p-nap` (`europe-west4`, project `cloud-tpu-shared-capacity`):
-  - **Orchestrator**: `igorts-rd-35b-orch-proc-0-0-lpmqd` (`Running` on CPU node `gke-bodaborg-v5p-nap-cpu-np-456be230-vh9c`).
-  - **Rollout 0**: `igorts-rd-35b-roll-0-proc-0-0-jhvd7` (`Running` on TPU v5p-8 `2x2x1` node `gke-tpu-ca14a8fb-ndhm`).
-  - **Rollout 1**: `igorts-rd-35b-roll-1-proc-0-0-7gc8q` (`Running` on TPU v5p-8 `2x2x1` node `gke-tpu-ca14a8fb-jk58`).
-  - **Trainer**: TPU v5p-16 `2x2x2` slice:
-    - Head/Proxy: `igorts-rd-35b-train-proc-0-0-rjhd6` (on `gke-tpu-f58a2f0a-q24j`).
-    - Pathways Worker 0: `igorts-rd-35b-train-pw-node-0-0-gl555` (`Running` on `gke-tpu-f58a2f0a-rgj0`).
-    - Pathways Worker 1: `igorts-rd-35b-train-pw-node-0-1-x6rmb` (`Running` on `gke-tpu-f58a2f0a-q24j`).
+### E. Milestone 5: Full 2-Rollout E2E Training & Weight Synchronization Verified on Qwen3.5-35B (`igorts-rd-35b`, image `v17`)
+- **Fixed `compute_on2` Missing Keyword Argument `out_memory_spaces`**:
+  - Upstream JAX has both `compute_on(compute_type: str)` and `compute_on2(f=None, *, compute_type, out_memory_spaces, compiler_options=None)`.
+  - The TPU-sync FFI wheel calls `@compute_on.compute_on(compute_type="device_host")` without `out_memory_spaces`.
+  - Tunix's `_ensure_ffi_compute_on_compat()` in `raiden_synchronizer.py` originally aliased `compute_on` directly to `compute_on2`, crashing with `TypeError: compute_on2() missing 1 required keyword-only argument: 'out_memory_spaces'`.
+  - Fixed by wrapping `compute_on2` with default `out_memory_spaces=jax.memory.Space.Device` and inspecting `VAR_KEYWORD` (`**kwargs`) signatures properly (commit `6d41e392`).
+- **Added `.dockerignore`**: Excluded `.git`, `.docker`, `venv`, and `raiden_wheels` to eliminate massive build context transfers during container builds (commit `e610a647`).
+- **Built & Deployed Image `v17`**:
+  - Image: `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v17`.
+- **Factual Proofs of End-to-End Distributed RL Execution**:
+  - **FFI D2H Step 0**: All 673 parameter arrays (34,660,610,688 elements) synchronized via JAX FFI on Pathways across 8 devices (`__grand_total__: 304540017.18895197`).
+  - **Initial Weight Transfer `wsync-v0-r0`**: Pushed overlap from Trainer (8 shards) to both Rollout 0 (2 shards) and Rollout 1 (2 shards).
+  - **Step 0 Rollouts**: Both Rollout 0 (`task_1` through `task_4`) and Rollout 1 (`task_1` through `task_4`) generated completions via vLLM on GSM8K.
+  - **Step 0 Trainer Optimization**: Trainer executed forward/backward pass and completed Step 0 (`Train step: 0, loss: 0.000, perplexity: 1.000`).
+  - **Step 1 Weight Transfer `wsync-v1-r1`**: Trainer executed FFI D2H and initiated weight transfer. Both rollouts synchronized weights (`__grand_total__: 152417095.39363503`), reset prefix caches, reinitialized KV caches, and advanced policy version to 1.
+  - **Step 1 Rollouts**: Rollout 0 (`task_5`, `task_6`) and Rollout 1 (`task_5` through `task_10`) generated completions.
+  - **Step 1 Trainer Optimization**: Trainer executed forward/backward pass and completed Step 1 (`Train step: 1, loss: 0.000, perplexity: 1.000`).
+  - **Step 2 Weight Transfer `wsync-v2-r2`**: Trainer executed FFI D2H and updated rollout weights.
+  - **Workload Clean Completion**: Orchestrator completed 2 steps, advanced policy to version 2, and exited with code 0:
+    ```text
+    2026-09-05 00:54:08,207 - [Orchestrator] <<< Step 1 finished | Advanced to Policy Version: 2
+    2026-09-05 00:54:08,213 - [Orchestrator] Shutting down cluster workers...
+    2026-09-05 00:54:08,265 - [Orchestrator] === GRPO Training Finished Successfully ===
+      Final step: 1
+      Final policy version: 2
+      Total rollouts: 8
+      Total microbatches: 1
+      Final step reward: mean=0.0000, std=0.0000
+    2026-09-05 00:54:08,265 - [Orchestrator] discovery server stopped
+    EXIT_CODE=0
+    ```
 
 ---
 
 ## 3. Root Cause Analysis & Key Technical Insights
 
-### 1. Why `skip_tiling=False` Produces Repetitive Newline Gibberish
+### 1. `compute_on2` Signature Mismatch with JAX FFI TPU-Sync
+- Upstream JAX has both `compute_on(compute_type: str)` and `compute_on2(f=None, *, compute_type, out_memory_spaces, compiler_options=None)`.
+- The TPU-sync FFI wheel calls `@compute_on.compute_on(compute_type="device_host")` without `out_memory_spaces`.
+- If `_ensure_ffi_compute_on_compat` monkeypatches `compute_on` directly to `compute_on2`, it crashes on missing `out_memory_spaces`.
+- Wrapping `compute_on2` with default `out_memory_spaces=jax.memory.Space.Device` resolves the compatibility barrier between JAX FFI and recent JAX releases.
+
+### 2. Why `skip_tiling=False` Produces Repetitive Newline Gibberish
 - On TPU, device-to-host DMA transfers 2D tensors directly in hardware tiled memory layout (typically `(8, 128)`).
 - When Raiden-FFI is used without CPU staging, memory remains tiled.
 - If `skip_tiling=False` is passed, the receiver mistakenly assumes linear memory and attempts to tile already-tiled memory, corrupting byte layouts and causing the LLM to emit repetitive newline (`\n\n\n...`) tokens.
 - Default `RaidenTransferOptions(parallelism=16)` leaves `skip_tiling=None`, allowing `raiden_controller.py` to automatically deduce `skip_tiling=True` for FFI aligned transfers.
 
-### 2. Multi-Host Torus Device Reordering Bug (`jnp.arange` vs `d.id`)
+### 3. Multi-Host Torus Device Reordering Bug (`jnp.arange` vs `d.id`)
 - On single-host slices (`tpuv5:2x2x1`, 4 chips), device IDs are sequential `[0, 1, 2, 3]`.
 - On multi-host slices (`tpuv5:2x2x2`, 8 chips across 2 hosts), `jax.experimental.mesh_utils.create_device_mesh` reorders devices for 3D torus topology (e.g. `[0, 1, 3, 2, 6, 7, 5, 4]`).
 - Keying FFI global shard indices off `d.id` assigned shards to incorrect physical TPU offsets in Raiden's native layer.
 - Resolved by indexing `global_ids` via `jnp.arange(mesh.devices.size).reshape(task_mesh_shape)`.
 
-### 3. Rollout Stale Weight Caching (`refresh_model_state_leaves`)
+### 4. Rollout Stale Weight Caching (`refresh_model_state_leaves`)
 - In `tpu-inference`, vLLM captures a `self.state_leaves` view at initialization time.
 - Under JAX FFI H2D, new array buffers are created and replace the leaves of `self.state`.
 - Without re-extracting `state_leaves` via `refresh_model_state_leaves()`, vLLM's `model_fn` continued passing pre-sync step-0 buffers into compiled execution graphs, resulting in silent weight staleness despite reporting successful syncs.
 
-### 4. Why Shard 1 Encountered Corrupted / Missing Weights on Bare-Metal Rollout
+### 5. Why Shard 1 Encountered Corrupted / Missing Weights on Bare-Metal Rollout
 - In multi-slice or multi-shard rollout topologies (`TP=2`), `NumaAwareWeightSynchronizer` creates a sub-synchronizer per NUMA node / port.
 - Previously, `metadata_dict()` in `raiden_worker_sync.py` advertised `[f"{ip}:{local_port}"] * num_shards`, pointing all shards to port 20001 (sub-synchronizer 0).
 - Sub-synchronizer 0 rejected or misrouted pushes destined for shard 1, producing a ~4x checksum discrepancy.
 - Resolved by using `self._sync.get_local_endpoints()` to assign each shard index to its distinct NUMA port endpoint.
 
-### 5. Why Pathways Miscomputed `devices_per_host`
+### 6. Why Pathways Miscomputed `devices_per_host`
 - In non-proxy JAX, `num_processes` is computed by counting unique `device.process_index`.
 - Under Pathways proxy runtime, all devices report `process_index=0`.
 - As a result, `devices_per_host = 8 // 1 = 8` was computed instead of `4`, breaking slice offset calculations.
 - Resolved by resolving hosts via `device.task_id` / `device.host_id` and supporting explicit `RAIDEN_DEVICES_PER_HOST` overrides.
 
-### 6. Interleaved Scanned Layers in Qwen3.5-35B-A3B & Abstract Array Support
+### 7. Interleaved Scanned Layers in Qwen3.5-35B-A3B & Abstract Array Support
 - Qwen3.5-35B-A3B groups layers into repeating cycles (1 dense layer + 3 MoE layers, grouped into blocks).
 - Standard single-axis unscanning fails because layer blocks do not map 1:1 to continuous layer indices.
 - Resolved in `raiden_unscan.py` with `cycle_interval` unrolling. Furthermore, `_slice_along_axis` supports `jax.ShapeDtypeStruct` abstract arrays to allow schedule tracing and shape verification without TPU memory allocation.
 
-### 7. Missing `discovery_service_pb2` in Clean Clones
+### 8. Missing `discovery_service_pb2` in Clean Clones
 - When running without local file mounts, fresh clones of Tunix did not contain compiled gRPC/protobuf stubs (`discovery_service_pb2.py`).
 - Resolved by compiling and checking in `discovery_service_pb2.py` and `discovery_service_pb2_grpc.py` into the Tunix repo and baking them into image `v14`+.
 
-### 8. `is_equal_or_regex_match` Import Error in `tpu-inference`
+### 9. `is_equal_or_regex_match` Import Error in `tpu-inference`
 - Upstream vLLM refactored `config_utils.py` and did not export `is_equal_or_regex_match`.
 - `tpu-inference`'s `compressed_tensors.py` failed during rollout vLLM engine initialization.
 - Resolved by importing `check_equal_or_regex_match` from `vllm.model_executor.layers.quantization.compressed_tensors.utils`.
@@ -143,35 +170,40 @@ All repositories are on branch `igorts/qwen35-run`:
 
 ### A. `maxtext` (`AI-Hypercomputer/maxtext`)
 ```text
-d6dbe5fce (HEAD) docs: update operational manual and session handoff with dev-only guardrails
-d771295b6 [DEV ONLY] [Ours]  feat(engine): support DISABLE_CHECKPOINTING environment variable
-67ef9188b            [Ours]  feat(tunix): support abstract ShapeDtypeStruct unrolling in raiden_unscan
-551ea2ff7            [Mohit] Support inhomogeneous layer cycles when unscanning for Raiden weight sync
+d771295b6 [DEV ONLY - DO NOT MERGE TO PROD] feat(engine): support DISABLE_CHECKPOINTING environment variable
+67ef9188b feat(tunix): support abstract ShapeDtypeStruct unrolling in raiden_unscan
+551ea2ff7 Support inhomogeneous layer cycles when unscanning for Raiden weight sync
 ----------------------------------------------------------------------------------------------------
 4cfec5b20 (origin/main)
 ```
 
 ### B. `tpu-inference` (`vllm-project/tpu-inference`)
 ```text
-4c23bf207 (HEAD) [Ours]  fix(quantization): fix is_equal_or_regex_match import from vllm compressed_tensors utils
-29c6d12db        [Ours]  fix(raiden): route multi-shard rollout endpoints to distinct NUMA ports
-1fc80182a        [Ours]  fix(raiden): filter runtime kv cache parameters and sort array bindings
-8cabf13dc        [Ours]  fix(runner,quantization): compatibility fallback for nvfp4 and vllm kv cache interface
-f89fe0090        [Mohit] Add the FFI Raiden h2d path to the rollout worker
+4c23bf207 (HEAD) fix(quantization): fix is_equal_or_regex_match import from vllm compressed_tensors utils
+29c6d12db fix(raiden): route multi-shard rollout endpoints to distinct NUMA ports
+1fc80182a fix(raiden): filter runtime kv cache parameters and sort array bindings
+8cabf13dc fix(runner,quantization): compatibility fallback for nvfp4 and vllm kv cache interface
+f89fe0090 Add the FFI Raiden h2d path to the rollout worker
 ----------------------------------------------------------------------------------------------------
-c82492756 (origin/main, already merged PR #3516)
+c82492756 (origin/main)
 ```
 
 ### C. `tunix` (`google/tunix`)
 ```text
-f267b737 (HEAD) fix(launcher): update worker entrypoints, rollout tp flags, and default image to v15
-996aec0f        feat(launcher): update default image to v14
-dc8386d8        feat(discovery): commit generated discovery service protobuf stubs
-7d1275d6 [DEV ONLY] feat(distributed): add 2-hour activeDeadlineSeconds timeout and 10-minute ttlSecondsAfterFinished cleanup
-a7feb9af        feat(launcher): add launch_raiden.sh operational tool and Dockerfile.maxtext
-3fbeae71 [DEV ONLY] feat(trainer): support DISABLE_CHECKPOINTING in run_trainer_node
-56d8fd53        fix(raiden): sort variable bindings alphabetically and route non-FFI shards to local endpoints
-ab694ded        Raiden weight sync: transport selection, multihost shard indexing, per-replica jobs
+e610a647 (HEAD) build(docker): add .dockerignore to exclude git, venv, and docker caches
+6d41e392 fix(raiden): make compute_on monkeypatch robust to arbitrary kwargs and default out_memory_spaces
+f267b737 fix(launcher): update worker entrypoints, rollout tp flags, and default image to v15
+996aec0f feat(launcher): update default image to v14
+dc8386d8 feat(discovery): commit generated discovery service protobuf stubs
+7f5adbfa fix(deployment): add cpu-np node pool taint toleration to jobset.cpu.yaml
+2d9b0f85 feat(launcher): add K8S_NAMESPACE support defaulting to trellis with ample TPU quota
+dd6b3fff feat(launcher): update default image tag for qwen3.5-35b to v13
+925b5d2c feat(launcher): update default Pathways images to datenglin raiden_20260904
+7d1275d6 [DEV ONLY - DO NOT MERGE TO PROD] feat(distributed): add 2-hour activeDeadlineSeconds timeout and 10-minute ttlSecondsAfterFinished cleanup
+a7feb9af feat(launcher): add launch_raiden.sh operational tool and Dockerfile.maxtext
+3fbeae71 [DEV ONLY - DO NOT MERGE TO PROD] feat(trainer): support DISABLE_CHECKPOINTING in run_trainer_node
+56d8fd53 fix(raiden): sort variable bindings alphabetically and route non-FFI shards to local endpoints
+ab694ded Raiden weight sync: transport selection, multihost shard indexing, per-replica jobs
 ----------------------------------------------------------------------------------------------------
 24827016 (origin/main)
 ```
@@ -221,7 +253,7 @@ kubectl logs -n trellis -l jobset.sigs.k8s.io/jobset-name=igorts-rd-35b-roll-1 -
 ./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh start \
   --model qwen3.5-35b \
   --rollout-replicas=2 \
-  --image europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v16
+  --image europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v17
 ```
 
 ### Full Operational Documentation
