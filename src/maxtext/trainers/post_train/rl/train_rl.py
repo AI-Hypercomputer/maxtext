@@ -391,7 +391,8 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
   # Setup checkpointing
   if trainer_config.enable_checkpointing:
     checkpointing_options = ocp.CheckpointManagerOptions(
-        save_interval_steps=trainer_config.checkpoint_period, max_to_keep=trainer_config.max_num_checkpoints_to_keep
+        save_interval_steps=trainer_config.checkpoint_period,
+        max_to_keep=trainer_config.max_num_checkpoints_to_keep,
     )
     checkpoint_dir = trainer_config.checkpoint_dir
   else:
@@ -399,15 +400,41 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
     checkpoint_dir = None
 
   # Set up micro batching
-  train_micro_batch_size = None if trainer_config.train_micro_batch_size == -1 else trainer_config.train_micro_batch_size
+  train_micro_batch_size = (
+      None
+      if trainer_config.train_micro_batch_size == -1
+      else trainer_config.train_micro_batch_size
+  )
   rollout_micro_batch_size = (
-      None if trainer_config.rollout_micro_batch_size == -1 else trainer_config.rollout_micro_batch_size
+      None
+      if trainer_config.rollout_micro_batch_size == -1
+      else trainer_config.rollout_micro_batch_size
   )
 
   # Setup metrics logging
-  metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=trainer_config.tensorboard_dir, flush_every_n_steps=trainer_config.log_period
-  )
+  if getattr(trainer_config, "managed_mldiagnostics", False):
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from maxtext.trainers.post_train.rl import mldiag_backend
+    # pylint: enable=g-import-not-at-top,import-outside-toplevel
+
+    backend_list = [lambda: mldiag_backend.MLDiagScalarBackend(trainer_config)]
+    if getattr(trainer_config, "enable_tensorboard", False):
+      backend_list.append(
+          lambda: metrics_logger.TensorboardBackend(  # pylint: disable=unnecessary-lambda
+              log_dir=trainer_config.tensorboard_dir,
+              flush_every_n_steps=trainer_config.log_period,
+          )
+      )
+    metrics_logging_options = metrics_logger.MetricsLoggerOptions(
+        log_dir=trainer_config.tensorboard_dir or "",
+        flush_every_n_steps=trainer_config.log_period,
+        backend_kwargs={"custom_backend": backend_list},
+    )
+  else:
+    metrics_logging_options = metrics_logger.MetricsLoggerOptions(
+        log_dir=trainer_config.tensorboard_dir or "",
+        flush_every_n_steps=trainer_config.log_period,
+    )
 
   profiler_options = None
   if trainer_config.profiler == "xplane":
