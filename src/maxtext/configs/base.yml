@@ -295,6 +295,22 @@ norm_topk_prob: false # boolean to enable the top-k probability normalization. q
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
+# Comma-separated list of MoE ops to run on the TPU SparseCore instead of the TensorCore, freeing
+# TensorCore cycles for the expert GEMMs. Empty (the default) keeps everything on the TensorCore.
+# Supported targets, or "all" for every one of them:
+#   fsdp_all_gather - the MoE weight all-gather over the fsdp / fsdp_transpose axes
+#   ep_collectives  - the expert-parallel activation all-gathers and ragged all-to-alls
+#   ragged_sort     - the routing index math (argsorts, group sizes, offsets) in the ragged sort kernels
+# Requires a TPU with a SparseCore (v5p, v6e, tpu7x or newer); MaxText raises otherwise.
+#
+# Offloading never changes results. For collectives it is not merely a hint though: XLA's
+# SparseCore collective-offload pass reads the annotation as "force this one" and CHECK-fails,
+# aborting the compile, on an annotated collective the chip cannot lower. MaxText therefore
+# only annotates a collective its SparseCore is known to run (utils/sparsecore.py). Offloading
+# an all-gather needs Ironwood, and a reduce-scatter transposes to one in the backward pass, so on
+# v5p/v6e the fsdp_all_gather target logs a warning and is ignored, and ep_collectives is left with
+# just its ragged all-to-alls. ragged_sort is not a collective and runs everywhere.
+moe_sparse_core_offload_targets: ""
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false

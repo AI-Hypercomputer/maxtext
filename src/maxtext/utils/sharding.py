@@ -986,6 +986,59 @@ def get_formatted_sharding_annotations(params, mesh=None):
 FSDP_MESH_AXES = ("fsdp", "fsdp_transpose")
 
 
+def _pspec_axes_per_dim(pspec, ndim):
+  """Normalizes a PartitionSpec into one axis-name tuple per array dim.
+
+  Returns `None` if `pspec` names more dims than `ndim`, since silently ignoring
+  the extra ones would describe a different sharding than the caller passed.
+  """
+  if len(pspec) > ndim:
+    return None
+  per_dim = []
+  for i in range(ndim):
+    axis = pspec[i] if i < len(pspec) else None
+    if axis is None:
+      per_dim.append(())
+    elif isinstance(axis, str):
+      per_dim.append((axis,))
+    else:
+      per_dim.append(tuple(axis))
+  return per_dim
+
+
+def mesh_axes_in_pspec(pspec):
+  """Returns the set of mesh axis names a PartitionSpec shards over, on any dim."""
+  if pspec is None:
+    return set()
+  axes = set()
+  for entry in pspec:
+    if entry is None:
+      continue
+    axes.update((entry,) if isinstance(entry, str) else entry)
+  return axes
+
+
+def all_gather_axes_between_pspecs(source_pspec, target_pspec, ndim):
+  """Returns the `(dim, axes)` all-gathers that take `source_pspec` to `target_pspec`.
+
+  Returns `None` when the transition is not a pure all-gather, i.e. when some dim
+  gains an axis or drops one from anywhere but the end of its axis tuple. Callers
+  are expected to fall back to a plain sharding constraint in that case.
+  """
+  source = _pspec_axes_per_dim(source_pspec, ndim)
+  target = _pspec_axes_per_dim(target_pspec, ndim)
+  if source is None or target is None:
+    return None
+  gathers = []
+  for dim, (src_axes, tgt_axes) in enumerate(zip(source, target)):
+    if src_axes == tgt_axes:
+      continue
+    if src_axes[: len(tgt_axes)] != tgt_axes:
+      return None
+    gathers.append((dim, src_axes[len(tgt_axes) :]))
+  return gathers
+
+
 def remove_mesh_axes_from_partition_spec(pspec, axes_to_remove, dims=None):
   """Return `pspec` with `axes_to_remove` stripped from the given dims.
 

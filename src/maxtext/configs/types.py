@@ -37,6 +37,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
 from maxtext.utils import accelerator_to_spec_map
+from maxtext.utils import sparsecore
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
 from pydantic.functional_validators import field_validator, model_validator
@@ -986,6 +987,13 @@ class MoEGeneral(BaseModel):
   moe_fsdp_use_two_stage_all_gather: bool = Field(
       False,
       description="Use two separate All-Gather calls for MoE weights sharded on both FSDP and FSDP-transpose.",
+  )
+  moe_sparse_core_offload_targets: str = Field(
+      "",
+      description="Comma-separated list of MoE ops to run on the TPU SparseCore instead of the TensorCore. "
+      f"Supported targets: {', '.join(sparsecore.OFFLOAD_TARGETS)}; 'all' enables every one of them. "
+      "Empty (the default) keeps everything on the TensorCore. Requires a TPU with a SparseCore; targets "
+      "whose collectives that SparseCore cannot run are warned about and ignored.",
   )
   shard_exp_on_fsdp: bool = Field(
       False,
@@ -3291,6 +3299,23 @@ class MaxTextConfig(
           f"Found other ICI axes enabled: {active}."
       )
 
+  def _validate_sparse_core_offload(self):
+    """Validates moe_sparse_core_offload_targets against the target hardware."""
+    # Raises on unrecognized target names.
+    targets = sparsecore.parse_offload_targets(self.moe_sparse_core_offload_targets)
+    if not targets:
+      return
+    if not sparsecore.has_sparse_core(self.compile_topology, self.hardware):
+      raise ValueError(
+          f"moe_sparse_core_offload_targets={self.moe_sparse_core_offload_targets!r} requires a TPU with a "
+          "SparseCore (v5p, v6e, tpu7x or newer), but the target hardware has none. Set it to '' to keep "
+          "these ops on the TensorCore."
+      )
+    # Warns now, at startup, for any target this chip cannot serve, rather than
+    # leaving the first one to surface mid-trace. Unserviceable targets are
+    # dropped instead of rejected so the same config runs on every chip.
+    sparsecore.supported_offload_targets(self.moe_sparse_core_offload_targets, self.compile_topology, self.hardware)
+
   def validate_ragged_buffer_factor(self):
     if self.ragged_buffer_factor <= 0:
       return  # Not using a ragged buffer factor
@@ -4852,6 +4877,7 @@ class MaxTextConfig(
       )
 
     self._validate_check_vma_is_supported()
+    self._validate_sparse_core_offload()
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):

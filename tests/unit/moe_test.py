@@ -34,7 +34,7 @@ from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import configure_quantization, Fp8Quantization
-from maxtext.utils import max_logging, maxtext_utils
+from maxtext.utils import max_logging, maxtext_utils, sparsecore
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
 
@@ -466,6 +466,8 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
       *(original_batch_partition if axis == "activation_batch" else None for axis in logical_axes)
   )
   fake_moe._maybe_shard_with_pspec = lambda value, _pspec, **_kwargs: value  # pylint: disable=protected-access
+  # No SparseCore offload targets, i.e. the default `moe_sparse_core_offload_targets`.
+  fake_moe._sparse_core_offload_targets = frozenset  # pylint: disable=protected-access
 
   inputs = SimpleNamespace(shape=(4, 1024, 2048))
   gate_logits = SimpleNamespace(shape=(4, 1024, 256))
@@ -2430,6 +2432,161 @@ class FusedMlpMoETest(unittest.TestCase):
         rtol=1e-2,
         atol=1e-2,
     )
+
+
+# Meshes exercised by SparseCoreOffloadTest, spelled out so that enabling one
+# axis does not leave `ici_fsdp_parallelism` at its `-1` default.
+_FSDP = {"ici_fsdp_parallelism": -1, "ici_expert_parallelism": 1}
+_EP = {"ici_fsdp_parallelism": 1, "ici_expert_parallelism": -1}
+# The ragged gather/reduce kernels partition the hidden dimension across
+# SparseCore lanes, so they need a realistically wide embedding to be legal.
+_EP_RAGGED = {**_EP, "use_ragged_sort": True, "base_emb_dim": 4096}
+
+
+@pytest.mark.tpu_only
+class SparseCoreOffloadTest(parameterized.TestCase):
+  """Tests for `moe_sparse_core_offload_targets`.
+
+  Moving an op to the SparseCore is a scheduling hint, so each target must (a)
+  actually annotate ops in the compiled HLO and (b) leave the loss and every
+  parameter gradient unchanged. The backward pass is the interesting half: the
+  offload is applied to real collectives inside the `sparse_matmul` shard_map,
+  and a collective whose transpose rule drops a reduction would still produce a
+  correct forward value.
+  """
+
+  BASE_CONFIG = {
+      "enable_checkpointing": False,
+      "model_name": "mixtral-8x7b",
+      "override_model_config": True,
+      "base_emb_dim": 512,
+      "base_mlp_dim": 256,
+      "base_moe_mlp_dim": 256,
+      "dtype": "bfloat16",
+      "megablox": True,
+      "sparse_matmul": True,
+      "per_device_batch_size": 1,
+      "max_target_length": 64,
+      "float32_gate_logits": True,
+  }
+
+  def setUp(self):
+    super().setUp()
+    if not sparsecore.has_sparse_core():
+      self.skipTest("Requires a TPU with a SparseCore (v5p, v6e, tpu7x or newer).")
+
+  def _loss_and_grads(self, run_name, **overrides):
+    """Returns `(loss, param_grads, hlo_text)` for one MoE config."""
+    cfg = pyconfig.initialize([None, get_test_config_path()], run_name=run_name, **{**self.BASE_CONFIG, **overrides})
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = moe.get_routed_moe(
+        name="MoeBlock",
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+    )
+    inputs = jax.random.uniform(
+        jax.random.PRNGKey(1),
+        (int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    def loss_fn(params, x):
+      output, load_balance_loss, _ = model.apply({"params": params}, x)
+      loss = jnp.mean(output.astype(jnp.float32) ** 2)
+      if load_balance_loss is not None:
+        loss += load_balance_loss.astype(jnp.float32)
+      return loss
+
+    def init():
+      return model.init({"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(0)}, inputs)
+
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      var_shardings = nn.logical_to_mesh_sharding(
+          nn.get_partition_spec(jax.eval_shape(init)), mesh, cfg.logical_axis_rules
+      )
+      variables = jax.jit(init, out_shardings=var_shardings)()
+      # Constraining the gradients back to the parameter sharding mirrors a real
+      # train step, which is what makes the weight-gradient collectives appear.
+      step = jax.jit(jax.value_and_grad(loss_fn), out_shardings=(None, var_shardings["params"]))
+      hlo_text = step.lower(variables["params"], inputs).compile().as_text()
+      loss, grads = jax.block_until_ready(step(variables["params"], inputs))
+    return float(loss), grads, hlo_text
+
+  @parameterized.named_parameters(
+      ("fsdp_all_gather", _FSDP, sparsecore.FSDP_ALL_GATHER),
+      ("ep_collectives", _EP, sparsecore.EP_COLLECTIVES),
+      ("ragged_sort", _EP_RAGGED, sparsecore.RAGGED_SORT),
+      ("all_targets", _EP_RAGGED, "all"),
+  )
+  def test_offload_is_numerically_transparent(self, parallelism, targets):
+    """Enabling a target annotates the HLO without changing loss or gradients."""
+    if targets == sparsecore.FSDP_ALL_GATHER and not sparsecore.supports_collective_offload(sparsecore.ALL_GATHER):
+      # The target is dropped on such a chip, so there would be nothing to
+      # assert; see `sparsecore.supported_offload_targets`.
+      self.skipTest("This chip's SparseCore cannot offload an all-gather.")
+    ref_loss, ref_grads, ref_hlo = self._loss_and_grads(
+        f"sc_offload_ref_{targets}", moe_sparse_core_offload_targets="", **parallelism
+    )
+    loss, grads, hlo = self._loss_and_grads(
+        f"sc_offload_{targets}", moe_sparse_core_offload_targets=targets, **parallelism
+    )
+
+    annotation = '_xla_compute_type="sparseoffload"'
+    self.assertEqual(ref_hlo.count(annotation), 0, "The baseline must not offload anything to the SparseCore.")
+    self.assertGreater(hlo.count(annotation), 0, f"Offload target {targets!r} annotated no ops.")
+
+    self.assertAlmostEqual(loss, ref_loss, places=6)
+    diff_summary = compare_tree(ref_grads, grads, relative_norm_diff_threshold=1e-5)
+    max_logging.log("\n" + diff_summary)
+
+  def test_explicit_fsdp_weight_gather_matches_the_implicit_one(self):
+    """The graph rewrite behind `fsdp_all_gather` is numerically transparent on its own.
+
+    The target replaces the implicit gather at the `sparse_matmul` shard_map
+    boundary with an explicit `jax.lax.all_gather` inside the manual region,
+    whose transpose is the reduce-scatter of the weight gradients. Get that
+    transpose wrong -- `to="invarying"` lowers to a bare slice with no `psum` --
+    and the forward value stays correct while the gradients are silently
+    unreduced, so only a gradient comparison catches it.
+
+    On a chip whose SparseCore cannot offload an all-gather the target is
+    dropped and the rewrite never happens, which would leave this comparing the
+    baseline against itself. The capability gate is patched out so the rewrite
+    runs everywhere; the per-collective gate inside `sparsecore.offload` still
+    suppresses the annotation, which is what keeps XLA from aborting the
+    compile, and the count below pins that down.
+    """
+    ref_loss, ref_grads, ref_hlo = self._loss_and_grads("sc_fsdp_ag_ref", moe_sparse_core_offload_targets="", **_FSDP)
+
+    def keep_every_target(targets, *_args, **_kwargs):
+      return sparsecore.parse_offload_targets(targets)
+
+    with mock.patch.object(sparsecore, "supported_offload_targets", keep_every_target):
+      loss, grads, hlo = self._loss_and_grads(
+          "sc_fsdp_ag_forced", moe_sparse_core_offload_targets=sparsecore.FSDP_ALL_GATHER, **_FSDP
+      )
+
+    # The explicit gather's transpose is what turns the weight-gradient
+    # all-reduces into reduce-scatters, so this both proves the rewrite happened
+    # -- without it the comparison below would be the baseline against itself --
+    # and shows the transpose is the collective it is supposed to be.
+    self.assertEqual(ref_hlo.count("reduce-scatter("), 0)
+    self.assertGreater(hlo.count("reduce-scatter("), 0)
+    annotated = hlo.count('_xla_compute_type="sparseoffload"') > 0
+    self.assertEqual(annotated, sparsecore.supports_collective_offload(sparsecore.ALL_GATHER))
+    self.assertAlmostEqual(loss, ref_loss, places=6)
+    max_logging.log("\n" + compare_tree(ref_grads, grads, relative_norm_diff_threshold=1e-5))
+
+  def test_disabled_offload_leaves_the_hlo_untouched(self):
+    """Backward compatibility: the default config compiles to the same HLO as before."""
+    _, _, hlo = self._loss_and_grads("sc_offload_disabled", ici_fsdp_parallelism=-1)
+    self.assertEqual(hlo.count('_xla_compute_type="sparseoffload"'), 0)
 
 
 if __name__ == "__main__":
