@@ -591,6 +591,34 @@ class TrainTests(unittest.TestCase):
   def test_gpu_te_nvfp4(self):
     train_main(TrainTests.CONFIGS["te_nvfp4"] + ["attention=dot_product"])
 
+  @pytest.mark.skip(reason="No runner with GPU arch >= 100 is available")
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_moe_block(self):
+    train_main(
+        TrainTests.CONFIGS["synthetic"]
+        + [
+            "attention=dot_product",
+            "quantization=te_no_quant",
+            "base_emb_dim=32",
+            "decoder_block=deepseek",
+            "attention_type=mla",
+            "num_experts=4",
+            "num_experts_per_tok=2",
+            "shared_experts=1",
+            "base_moe_mlp_dim=32",
+            "sparse_matmul=True",
+            "megablox=False",
+            "prefuse_moe_weights=True",
+            "te_moe_block=True",
+            "te_gmm_quantization=te_no_quant",
+            "hardware=gpu_multiprocess",
+            "ici_fsdp_parallelism=1",
+            "ici_expert_parallelism=-1",
+            "enable_tensorboard=False",
+        ]
+    )
+
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_dropout(self):

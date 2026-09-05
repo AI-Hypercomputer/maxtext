@@ -97,11 +97,20 @@ class QuantizationType(str, Enum):
   FP8_NANO_V2 = "fp8_nanoo"
   FP8_GPU = "fp8_gpu"
   FP8_FULL = "fp8_full"
+  TE_NO_QUANT = "te_no_quant"
   TE_FP8_DS = "te_fp8_delayedscaling"
   TE_FP8_CS = "te_fp8_currentscaling"
   TE_MXFP8 = "te_mxfp8"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
+
+
+class TEGroupedGemmQuantizationType(str, Enum):
+  """Supported quantization schemes for TE grouped GEMM in MoE layers."""
+
+  EMPTY = ""
+  TE_NO_QUANT = "te_no_quant"  # Default precision, e.g. BF16, without quantization
+  TE_MXFP8 = "te_mxfp8"
 
 
 class TeCommGemmOverlapPolicy(str, Enum):
@@ -928,6 +937,33 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  te_moe_block: bool = Field(
+      False,
+      description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
+  )
+  te_ep_receive_capacity_factor: Optional[float] = Field(
+      None,
+      ge=1.0,
+      description=(
+          "TE EP receive-capacity factor relative to aligned perfectly balanced routing. "
+          "A value of 1.0 corresponds to the aligned perfectly balanced routing capacity."
+          "A value of 1.5 corresponds to 1.5 times the aligned perfectly balanced routing capacity,"
+          " and can be used to provide extra buffer for routing imbalances."
+          "The capacity is capped at the dropless worst case. None (the default) reserves the worst-case capacity."
+      ),
+  )
+  te_ep_overflow_check_every_n_steps: PositiveInt = Field(
+      20,
+      description=(
+          "Number of training steps buffered between host-side TE EP receive-capacity overflow checks. "
+          "Overflowing steps still skip their optimizer update immediately on device."
+      ),
+  )
+  te_gmm_quantization: None | TEGroupedGemmQuantizationType = Field(
+      TEGroupedGemmQuantizationType.EMPTY,
+      description="Quantization mode for TransformerEngine grouped GEMMs.",
+  )
+
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
       description=(
@@ -4271,6 +4307,14 @@ class MaxTextConfig(
           and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
       ):
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if self.te_moe_block and not self.sparse_matmul:
+        raise ValueError("te_moe_block=True requires sparse_matmul=True.")
+      if self.te_moe_block and not self.prefuse_moe_weights:
+        raise ValueError("te_moe_block=True requires prefuse_moe_weights=True.")
+      if self.te_moe_block and self.routed_bias_update_rate > 0.0:
+        raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
+      if self.te_moe_block and self.te_gmm_quantization == TEGroupedGemmQuantizationType.EMPTY:
+        raise ValueError("te_gmm_quantization must be specified when te_moe_block=True.")
       if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
         raise ValueError(
             "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
