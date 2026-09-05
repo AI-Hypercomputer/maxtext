@@ -257,18 +257,20 @@ def _gathered_elements(hlo: str) -> int:
 class _KernelHlo:
   """Captures the arguments the engine passes one jitted kernel, to re-lower it later.
 
-  `jax.jit` keeps no handle on the executable it cached, so the only way to read a kernel's
-  optimized HLO is to lower it again. Recording `ShapeDtypeStruct`s rather than the arrays
-  themselves keeps that independent of donation -- `_compiled_update` donates its state, so
-  by the time a test asks for the HLO those buffers are gone.
+  An executable keeps no handle on the lowering it came from, so the only way to read a
+  kernel's optimized HLO is to lower it again, through the jitted wrapper `compile()` built it
+  from. Recording `ShapeDtypeStruct`s rather than the arrays themselves keeps that independent
+  of donation -- `_compiled_update` donates its state, so by the time a test asks for the HLO
+  those buffers are gone.
 
   Lowering is lazy and memoized: it is a full XLA compile, and only a third of the tests
   below want HLO at all. It needs the mesh set, because the fwd/bwd kernels apply the
   `reduced` tag while tracing, and by then the run that recorded the avals is long over.
   """
 
-  def __init__(self, engine, attr: str, mesh):
-    self._jitted = getattr(engine, attr)
+  def __init__(self, engine, kernel: str, attr: str, mesh):
+    self._dispatched = getattr(engine, attr)
+    self._jitted = engine._jitted_kernels[kernel]  # pylint: disable=protected-access
     self._mesh = mesh
     self._avals = None
     self._text = None
@@ -282,7 +284,7 @@ class _KernelHlo:
           lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None)),
           args,
       )
-    return self._jitted(*args)
+    return self._dispatched(*args)
 
   def text(self) -> str:
     if self._avals is None:
@@ -308,7 +310,12 @@ class _Recipe:
     return {"shard_optimizer_over_data": self.zero1, "opt_type": self.opt_type}
 
 
-_KERNELS = {"first": "_compiled_fwd_bwd", "accum": "_compiled_fwd_bwd_accum", "update": "_compiled_update"}
+# Probe name -> the engine's name for that kernel, and the attribute it dispatches through.
+_KERNELS = {
+    "first": ("fwd_bwd", "_compiled_fwd_bwd"),
+    "accum": ("fwd_bwd_accum", "_compiled_fwd_bwd_accum"),
+    "update": ("update", "_compiled_update"),
+}
 
 
 class _Run:
@@ -330,7 +337,7 @@ class _Run:
       stack.enter_context(jax.set_mesh(self.mesh))
       self.engine = maxtext_engine.MaxTextTrainingEngine(self.config, mesh=self.mesh)
       self.engine.compile(_batch(self.config, 0))
-      self._probes = {name: _KernelHlo(self.engine, attr, self.mesh) for name, attr in _KERNELS.items()}
+      self._probes = {name: _KernelHlo(self.engine, kernel, attr, self.mesh) for name, (kernel, attr) in _KERNELS.items()}
       norms = []
       for step in range(recipe.steps):
         for micro in range(recipe.micro_batches):
