@@ -222,9 +222,7 @@ class TrainTests(unittest.TestCase):
       # The Qwen3.5 model configs default to a HuggingFace tokenizer that is not
       # vendored in the repo; use the checked-in tiktoken asset instead.
       "tokenizer_type=tiktoken",
-      (
-          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"
-      ),
+      (rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
   ]
 
   # Same sublayers as Qwen3.5, wired together by Qwen3NextScannableBlock rather than a
@@ -857,8 +855,13 @@ class TrainTests(unittest.TestCase):
         print(f"[{decoder_block}] auto losses: {auto_losses}", flush=True)
         print(f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True)
         self.assertTrue(auto_losses, "auto run produced no metrics")
-        # The two runs execute the same math, so they match bit-for-bit.
-        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-6, atol=0.0)
+        # The two runs execute the same math, but not necessarily in the same order: once
+        # tensor parallelism fully shards `heads` (8 heads on an 8-device mesh, as on
+        # tpu7x-8) the layout pinned under explicit sharding reassociates the backward
+        # reductions. The forward pass stays bit-for-bit and the drift only appears once
+        # gradients flow -- under 1e-5 relative at step 3, i.e. float noise rather than
+        # the two runs pulling apart.
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-4, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
@@ -1065,33 +1068,32 @@ class TrainTests(unittest.TestCase):
         # a large fraction of a model this small, so relax the unsharded-parameter check.
         "qwen3_next": [
             "ici_fsdp_parallelism=1",
-            "ici_tensor_parallelism=-1",
+            # `gdn_num_key_heads=4` caps how far the head axis can shard, so pin the
+            # degree rather than take the device count: `-1` resolves to 8 on tpu7x-8
+            # and the gated-delta-net reshapes then fail to divide. Whatever is left
+            # over goes to data parallelism, which both shard modes see alike.
+            "ici_tensor_parallelism=4",
+            "ici_data_parallelism=-1",
             "sharding_tolerance=0.5",
         ],
     }
     for decoder_block, model_overrides in self._QWEN3_HYBRID_MODELS.items():
       with self.subTest(decoder_block=decoder_block):
         args = parallelism[decoder_block]
-        auto_losses = self._losses(
-            f"{decoder_block}_auto", model_overrides, args + ["shard_mode=auto"]
-        )
+        auto_losses = self._losses(f"{decoder_block}_auto", model_overrides, args + ["shard_mode=auto"])
         explicit_losses = self._losses(
             f"{decoder_block}_explicit",
             model_overrides,
             args + ["shard_mode=explicit"],
         )
         print(f"[{decoder_block}] auto losses: {auto_losses}", flush=True)
-        print(
-            f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True
-        )
+        print(f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True)
         self.assertTrue(auto_losses, "auto run produced no metrics")
         # `activation_batch` carries the expert axis, so pinning it reassociates the
         # backward reductions: the forward pass is bit-for-bit and the drift only appears
         # once gradients flow. Over 20 steps it stays below 4e-5 relative and changes
         # sign, i.e. it is float noise rather than the two runs pulling apart.
-        np.testing.assert_allclose(
-            explicit_losses, auto_losses, rtol=1e-4, atol=0.0
-        )
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-4, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
@@ -1127,8 +1129,7 @@ class TrainTests(unittest.TestCase):
         sharded = self._losses(
             f"{decoder_block}_ga_zero1",
             model_overrides,
-            zero1_ga
-            + ["shard_mode=explicit", "shard_optimizer_over_data=True"],
+            zero1_ga + ["shard_mode=explicit", "shard_optimizer_over_data=True"],
         )
         print(f"[{decoder_block}] auto + GA losses: {baseline}", flush=True)
         print(

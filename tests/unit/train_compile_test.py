@@ -1149,53 +1149,53 @@ class TrainCompile(parameterized.TestCase):
     the
     layout it was handed.
     """
-    compiled_trainstep_file = os.path.join(
-        gettempdir(), "test_qwen3_next_explicit_sharding.pickle"
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_next_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "ici_fsdp_parallelism=32",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+        )
     )
-    train_compile_main((
-        "",
-        get_test_config_path(),
-        f"compiled_trainstep_file={compiled_trainstep_file}",
-        "compile_topology=v5p-512",
-        "compile_topology_num_slices=1",
-        "model_name=qwen3-next-80b-a3b",
-        "per_device_batch_size=1.0",
-        "max_target_length=1024",
-        "ici_fsdp_parallelism=32",
-        "ici_expert_parallelism=8",
-        "sparse_matmul=True",
-        "megablox=True",
-        "attention=flash",
-        "use_tokamax_splash=True",
-        "shard_mode=explicit",
-    ))
 
   def test_qwen3_next_explicit_sharding_zero1(self):
     """AOT test for qwen3-next under explicit sharding with ZeRO-1 and gradient accumulation."""
-    compiled_trainstep_file = os.path.join(
-        gettempdir(), "test_qwen3_next_explicit_sharding_zero1.pickle"
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_next_explicit_sharding_zero1.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=4",
+            "shard_optimizer_over_data=True",
+        )
     )
-    train_compile_main((
-        "",
-        get_test_config_path(),
-        f"compiled_trainstep_file={compiled_trainstep_file}",
-        "compile_topology=v5p-256",
-        "compile_topology_num_slices=1",
-        "model_name=qwen3-next-80b-a3b",
-        "override_model_config=True",
-        "base_num_decoder_layers=4",
-        "per_device_batch_size=1.0",
-        "max_target_length=1024",
-        "sparse_matmul=True",
-        "megablox=True",
-        "attention=flash",
-        "use_tokamax_splash=True",
-        "shard_mode=explicit",
-        "ici_data_parallelism=-1",
-        "ici_fsdp_parallelism=1",
-        "gradient_accumulation_steps=4",
-        "shard_optimizer_over_data=True",
-    ))
 
   def test_qwen3_5_explicit_sharding(self):
     """AOT test for qwen3-5 under explicit sharding, at FSDP 32 x expert 8.
@@ -1206,31 +1206,29 @@ class TrainCompile(parameterized.TestCase):
     silently
     costing a collective at a scale a real test cannot reach.
     """
-    compiled_trainstep_file = os.path.join(
-        gettempdir(), "test_qwen3_5_explicit_sharding.pickle"
-    )
-    train_compile_main((
-        "",
-        get_test_config_path(),
-        f"compiled_trainstep_file={compiled_trainstep_file}",
-        "compile_topology=v5p-512",
-        "compile_topology_num_slices=1",
-        "model_name=qwen3.5-397b-a17b",
-        "per_device_batch_size=1.0",
-        "max_target_length=1024",
-        "ici_fsdp_parallelism=32",
-        "ici_expert_parallelism=8",
-        "sparse_matmul=True",
-        "megablox=True",
-        "attention=flash",
-        "use_tokamax_splash=True",
-        "shard_mode=explicit",
-        # Qwen3.5 defaults to a HuggingFace tokenizer that is not vendored.
-        "tokenizer_type=tiktoken",
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_5_explicit_sharding.pickle")
+    train_compile_main(
         (
-            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"
-        ),
-    ))
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.5-397b-a17b",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "ici_fsdp_parallelism=32",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+            # Qwen3.5 defaults to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            (f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
+        )
+    )
 
   def test_qwen3_5_explicit_sharding_zero1(self):
     """AOT test for qwen3-5 under explicit sharding with ZeRO-1 and gradient accumulation.
@@ -1245,34 +1243,32 @@ class TrainCompile(parameterized.TestCase):
     variants
     while staying small enough to hold data-parallel replicas of the parameters.
     """
-    compiled_trainstep_file = os.path.join(
-        gettempdir(), "test_qwen3_5_explicit_sharding_zero1.pickle"
-    )
-    train_compile_main((
-        "",
-        get_test_config_path(),
-        f"compiled_trainstep_file={compiled_trainstep_file}",
-        "compile_topology=v5p-256",
-        "compile_topology_num_slices=1",
-        "model_name=qwen3.5-35b-a3b",
-        "override_model_config=True",
-        "base_num_decoder_layers=4",
-        "per_device_batch_size=1.0",
-        "max_target_length=1024",
-        "sparse_matmul=True",
-        "megablox=True",
-        "attention=flash",
-        "use_tokamax_splash=True",
-        "shard_mode=explicit",
-        "ici_data_parallelism=-1",
-        "ici_fsdp_parallelism=1",
-        "gradient_accumulation_steps=4",
-        "shard_optimizer_over_data=True",
-        "tokenizer_type=tiktoken",
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_5_explicit_sharding_zero1.pickle")
+    train_compile_main(
         (
-            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"
-        ),
-    ))
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.5-35b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=4",
+            "shard_optimizer_over_data=True",
+            "tokenizer_type=tiktoken",
+            (f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
+        )
+    )
 
   def test_serialization_and_deserialization_formats(self):
     """Tests that our custom binary save/load functions work securely and legacy fallback triggers warning."""

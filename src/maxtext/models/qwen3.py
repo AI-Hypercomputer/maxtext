@@ -624,9 +624,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     cp_len = LENGTH if gdn_context_axes(self.config) else None
 
     def _sharding(logical_axes):
-      pspec = logical_to_mesh_axes(
-          logical_axes, mesh=self.mesh, rules=logical_rules
-      )
+      pspec = logical_to_mesh_axes(logical_axes, mesh=self.mesh, rules=logical_rules)
       # Training microbatches can be smaller than the physical batch partition.
       # Only dim 0 is inspected, so the trailing sizes are placeholders.
       shape = (batch,) + (1,) * (len(logical_axes) - 1)
@@ -654,9 +652,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # hidden_states: (B, S, E)
     cfg = self.config
     batch, seq_len, _ = hidden_states.shape
-    flat_sharding, head_sharding, state_sharding = (
-        self._explicit_activation_shardings(batch)
-    )
+    flat_sharding, head_sharding, state_sharding = self._explicit_activation_shardings(batch)
 
     active_cache = kv_cache if kv_cache is not None else self.cache
 
@@ -759,13 +755,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     b_raw, a_raw = jnp.split(mixed_ba, split_indices_ba, axis=3)
 
     # b: (B, S, H_v)
-    b = jnp.reshape(
-        b_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding
-    )
+    b = jnp.reshape(b_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding)
     # a: (B, S, H_v)
-    a = jnp.reshape(
-        a_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding
-    )
+    a = jnp.reshape(a_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding)
 
     if use_paged_state:
       # =========================================================================
@@ -1051,9 +1043,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         value = jax.sharding.reshard(value, qkv_pspec)
         g = jax.sharding.reshard(g, g_beta_pspec)
         beta = jax.sharding.reshard(beta, g_beta_pspec)
-        recurrent_state_arg = jax.sharding.reshard(
-            recurrent_state_arg, state_pspec
-        )
+        recurrent_state_arg = jax.sharding.reshard(recurrent_state_arg, state_pspec)
 
       @functools.partial(
           jax.shard_map,
@@ -1127,15 +1117,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # The normalization and gating is applied per-head on the value dimension.
 
     # Apply the norm and gate. Output shape: (B, S, H_v, D_v)
-    gated_output_reshaped = self.norm(
-        core_attn_out, z, out_sharding=head_sharding
-    )
+    gated_output_reshaped = self.norm(core_attn_out, z, out_sharding=head_sharding)
 
     # Reshape back to a single feature dimension for the final projection.
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
-    gated_output = jnp.reshape(
-        gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding
-    )
+    gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
 
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output, out_sharding=out_sharding)
@@ -1692,9 +1678,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
     # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
     if cfg.shard_mode == ShardMode.EXPLICIT:
-      self.out_sharding = create_sharding(
-          mesh, self.activation_axis_names, rules=get_logical_axis_rules()
-      )
+      self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
       self.mlp_intermediate_sharding = create_sharding(
           mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules()
       )
@@ -1777,15 +1761,11 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # First LayerNorm, applied before the attention block.
     hidden_states = self.input_layernorm(inputs, out_sharding=self.out_sharding)
-    hidden_states = self._maybe_shard_with_logical(
-        hidden_states, self.activation_axis_names
-    )
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3NextFullAttention):
-      attention_output, new_kv_cache = cast(
-          Qwen3NextFullAttention, self.attention
-      )(
+      attention_output, new_kv_cache = cast(Qwen3NextFullAttention, self.attention)(
           hidden_states,
           decoder_segment_ids,
           decoder_positions,
@@ -1796,9 +1776,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           out_sharding=self.out_sharding,
       )
     else:
-      attention_output, new_kv_cache = cast(
-          Qwen3NextGatedDeltaNet, self.attention
-      )(
+      attention_output, new_kv_cache = cast(Qwen3NextGatedDeltaNet, self.attention)(
           hidden_states,
           model_mode=model_mode,
           kv_cache=kv_cache,
@@ -1808,24 +1786,16 @@ class Qwen3NextDecoderLayer(nnx.Module):
       )
 
     # First residual connection after attention
-    attention_output = self._maybe_shard_with_logical(
-        attention_output, self.activation_axis_names
-    )
+    attention_output = self._maybe_shard_with_logical(attention_output, self.activation_axis_names)
     hidden_states = residual + attention_output
-    hidden_states = self._maybe_shard_with_logical(
-        hidden_states, self.activation_axis_names
-    )
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     # Prepare for the MoE block by capturing the new residual
     residual = hidden_states
 
     # Second LayerNorm, applied before the MoE block.
-    hidden_states = self.post_attention_layernorm(
-        hidden_states, out_sharding=self.out_sharding
-    )
-    hidden_states = self._maybe_shard_with_logical(
-        hidden_states, self.activation_axis_names
-    )
+    hidden_states = self.post_attention_layernorm(hidden_states, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     # Instantiate and call our `Qwen3NextSparseMoeBlock`.
     mlp_output, load_balance_loss = self.mlp(
@@ -1841,9 +1811,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
       self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 
     # Final residual connection (after the MoE block)
-    mlp_output = self._maybe_shard_with_logical(
-        mlp_output, self.activation_axis_names
-    )
+    mlp_output = self._maybe_shard_with_logical(mlp_output, self.activation_axis_names)
     layer_output = residual + mlp_output
     layer_output = self._maybe_shard_with_logical(
         layer_output,
