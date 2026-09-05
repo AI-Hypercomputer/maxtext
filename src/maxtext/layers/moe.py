@@ -3364,12 +3364,23 @@ class RoutedMoE(nnx.Module):
         self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4)
     )
 
-    output_2d = fused_moe_func(
+    # The fused kernel quantizes for itself: expert weights go in pre-quantized with
+    # per-block scales (when the qwix rule covers the grouped matmul) and the kernel
+    # quantizes the activations in-kernel, accumulating in f32. The call runs outside
+    # qwix's interception: qwix only guards pallas_call, while the kernel is launched
+    # through pl.kernel, so under a QtProvider its tiled matmuls would otherwise be
+    # fake-quantized into fp8 x fp8 with a bf16 accumulator, which Mosaic rejects.
+    rule = quantizations.get_fused_moe_rule()
+    quantized_w1, w1_scale = quantizations.quantize_weight_for_fused_moe(fused_kernel, rule)
+    quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
+    fused_moe = quantizations.without_qwix_interception(fused_moe_func)
+
+    output_2d = fused_moe(
         hidden_states=hidden_states,
-        w1=fused_kernel,
-        w2=wo_kernel,
-        w1_scale=None,
-        w2_scale=None,
+        w1=quantized_w1,
+        w2=quantized_w2,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
         w1_bias=None,
         w2_bias=None,
         gating_output=gating_output,
