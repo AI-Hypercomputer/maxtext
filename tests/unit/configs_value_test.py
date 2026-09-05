@@ -129,6 +129,47 @@ class ConfigTest(absltest.TestCase):
           types.MaxTextConfig(**{**common_config, **overrides})
         self.assertIn(expected_error, str(context.exception))
 
+  def test_te_moe_block_uses_ragged_buffer_factor_validation(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_no_quant",
+    }
+
+    # TE accepts the native worst-case sentinel and a finite factor even when
+    # EP is not enabled in the MaxText logical rules.
+    for factor in (-1.0, 0.0, 1.0, 1.5):
+      with self.subTest(factor=factor):
+        config = types.MaxTextConfig(**common_config, ragged_buffer_factor=factor)
+        self.assertEqual(config.ragged_buffer_factor, factor)
+
+    with self.assertRaises(pydantic.ValidationError) as context:
+      types.MaxTextConfig(**common_config, ragged_buffer_factor=0.5)
+    self.assertIn("te_moe_block=True requires ragged_buffer_factor >= 1.0", str(context.exception))
+
+    # Native ring-of-experts keeps its existing ragged-sort restriction, while
+    # TE MoEBlock bypasses that native implementation and its validation.
+    native_ring_config = {
+        **common_config,
+        "te_moe_block": False,
+        "te_gmm_quantization": "",
+        "override_logical_axis_rules": True,
+        "use_ring_of_experts": True,
+        "ragged_buffer_factor": 1.5,
+    }
+    with self.assertRaises(pydantic.ValidationError) as context:
+      types.MaxTextConfig(**native_ring_config)
+    self.assertIn("Ragged buffer factor is currently only supported with", str(context.exception))
+
+    te_ring_config = {**native_ring_config, "te_moe_block": True, "te_gmm_quantization": "te_no_quant"}
+    config = types.MaxTextConfig(**te_ring_config)
+    self.assertEqual(config.ragged_buffer_factor, 1.5)
+
   def test_tpu_tokamax_ring_config_validation_accepts_initial_config(self):
     argv = [
         "",

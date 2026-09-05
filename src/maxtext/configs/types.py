@@ -885,7 +885,10 @@ class MoEGeneral(BaseModel):
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
   ragged_buffer_factor: float = Field(
       -1.0,
-      description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
+      description=(
+          "Factor over the balanced routed-MoE receive capacity. If <= 0, the active MoE backend reserves its "
+          "dropless worst-case capacity."
+      ),
   )
   num_moe_token_chunks: PositiveInt = Field(
       1,
@@ -933,21 +936,11 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
   )
-  te_ep_receive_capacity_factor: Optional[float] = Field(
-      None,
-      ge=1.0,
-      description=(
-          "TE EP receive-capacity factor relative to aligned perfectly balanced routing. "
-          "A value of 1.0 corresponds to the aligned perfectly balanced routing capacity."
-          "A value of 1.5 corresponds to 1.5 times the aligned perfectly balanced routing capacity,"
-          " and can be used to provide extra buffer for routing imbalances."
-          "The capacity is capped at the dropless worst case. None (the default) reserves the worst-case capacity."
-      ),
-  )
   te_ep_overflow_check_every_n_steps: PositiveInt = Field(
       20,
       description=(
-          "Number of training steps buffered between host-side TE EP receive-capacity overflow checks. "
+          "Number of training steps buffered between host-side TE EP receive-capacity overflow checks when "
+          "ragged_buffer_factor limits the TE receive capacity. "
           "Overflowing steps still skip their optimizer update immediately on device."
       ),
   )
@@ -3320,6 +3313,11 @@ class MaxTextConfig(
       )
 
   def validate_ragged_buffer_factor(self):
+    if self.te_moe_block:
+      if 0 < self.ragged_buffer_factor < 1.0:
+        raise ValueError("te_moe_block=True requires ragged_buffer_factor >= 1.0, or <= 0 for worst-case capacity.")
+      return
+
     if self.ragged_buffer_factor <= 0:
       return  # Not using a ragged buffer factor
 
@@ -3514,10 +3512,11 @@ class MaxTextConfig(
         _ep_disabled_flags = {
             "use_random_routing": False,
             "use_ragged_sort": False,
-            "ragged_buffer_factor": -1.0,
             "use_ring_of_experts": False,
             "num_moe_emb_chunks": 0,
         }
+        if not self.te_moe_block:
+          _ep_disabled_flags["ragged_buffer_factor"] = -1.0
         for flag_name, disabled_value in _ep_disabled_flags.items():
           current = getattr(self, flag_name)
           if current != disabled_value:

@@ -1143,9 +1143,9 @@ def train_loop(config, recorder, state=None):
               f"check ending at step {step}): "
               f"observed padded receive demand {observed} exceeds "
               f"recv_capacity_per_rank {capacity} "
-              f"(te_ep_receive_capacity_factor={config.te_ep_receive_capacity_factor}). "
-              "The optimizer update was skipped; increase te_ep_receive_capacity_factor, "
-              "or set it to null to reserve worst-case dropless capacity."
+              f"(ragged_buffer_factor={config.ragged_buffer_factor}). "
+              "The optimizer update was skipped; increase ragged_buffer_factor, "
+              "or set it to -1 to reserve worst-case dropless capacity."
           )
           max_logging.error(message)
           raise RuntimeError(message)

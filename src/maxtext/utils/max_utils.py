@@ -1312,7 +1312,7 @@ def maybe_bootstrap_te_moe(config, mesh, shaped_batch):
       max_tokens_per_rank=max_tokens_per_rank,
       ep_size=ep_size,
   )
-  recv_capacity_factor = config.te_ep_receive_capacity_factor
+  recv_capacity_factor = None if config.ragged_buffer_factor <= 0 else config.ragged_buffer_factor
   recv_capacity_per_rank = get_moe_recv_capacity_per_rank(
       num_experts=config.num_experts,
       num_experts_per_tok=config.num_experts_per_tok,
