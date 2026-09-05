@@ -855,8 +855,13 @@ class TrainTests(unittest.TestCase):
         print(f"[{decoder_block}] auto losses: {auto_losses}", flush=True)
         print(f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True)
         self.assertTrue(auto_losses, "auto run produced no metrics")
-        # The two runs execute the same math, so they match bit-for-bit.
-        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-6, atol=0.0)
+        # The two runs execute the same math, but not necessarily in the same order: once
+        # tensor parallelism fully shards `heads` (8 heads on an 8-device mesh, as on
+        # tpu7x-8) the layout pinned under explicit sharding reassociates the backward
+        # reductions. The forward pass stays bit-for-bit and the drift only appears once
+        # gradients flow -- under 1e-5 relative at step 3, i.e. float noise rather than
+        # the two runs pulling apart.
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-4, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
