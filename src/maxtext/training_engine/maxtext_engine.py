@@ -1222,6 +1222,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metadata: Checkpoint metadata payload from Orchestrator.
       **kwargs: Additional checkpoint saving options.
     """
+    if os.environ.get("DISABLE_CHECKPOINTING", "false").lower() in ("true", "1"):
+      logging.info("Checkpoint saving is disabled via DISABLE_CHECKPOINTING.")
+      return
+
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
 
@@ -1525,6 +1529,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
               params_state,
               num_layers=self._config.num_decoder_layers,
               scan_axis=self._config.param_scan_axis,
+              cycle_interval=self._config.inhomogeneous_layer_cycle_interval,
           )
         else:
           converted_state = params_state
@@ -1553,12 +1558,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             "compatible tpu_raiden_jax wheel with FFI support is installed."
         )
 
+      use_raiden_ffi = os.environ.get("USE_RAIDEN_FFI", "false").lower() == "true"
+      host_stage = is_pathways and not use_raiden_ffi
+
       if self._raiden_sync is None:
         self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
             job_name="trainer",
             worker_index=jax.process_index(),
             auto_h2d=False,
-            host_stage=is_pathways,
+            host_stage=host_stage,
             parallelism=4,
         )
 
@@ -1572,11 +1580,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
       verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
       if verify_weights:
-        logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
+        if is_pathways and not host_stage:
+          logging.info(
+              "Skipping host-side checksum calculation in FFI mode to preserve 0 MB host memory staging."
+          )
+        else:
+          logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
 
-      metadata = self._raiden_sync.work_unit_metadata()
-      total_variables = len(metadata.variables)
-      all_metadata = [metadata]
+      all_metadata = self._raiden_sync.work_unit_metadata_all()
+      total_variables = sum(len(m.variables) for m in all_metadata)
 
       reclaim_host_memory()
 
@@ -1588,10 +1600,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         mem_info = ""
 
       logging.info(
-          "Trainer prepared weight sync for step %d: registered %d variables on mesh %s%s",
+          "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s%s",
           self.train_step,
+          len(all_metadata),
           total_variables,
-          metadata.mesh_axes,
+          all_metadata[0].mesh_axes if all_metadata else (),
           mem_info,
       )
       self._last_staged_step = self.train_step

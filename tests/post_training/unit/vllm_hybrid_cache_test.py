@@ -22,7 +22,11 @@ import numpy as np
 import pytest
 import torch
 
-from maxtext.integration.vllm.hybrid_cache_utils import build_qwen_gdn_cache_layout, normalize_vllm_input_positions
+from maxtext.integration.vllm.hybrid_cache_utils import (
+    build_qwen_gdn_cache_layout,
+    map_layer_names_to_indices,
+    normalize_vllm_input_positions,
+)
 
 
 pytestmark = [pytest.mark.post_training]
@@ -87,6 +91,45 @@ class VllmInputPositionsTest(unittest.TestCase):
   def test_rejects_unknown_position_layout(self):
     with self.assertRaisesRegex(ValueError, r"got \(2, 4\)"):
       normalize_vllm_input_positions(jnp.zeros((2, 4), dtype=jnp.int32))
+
+
+class MapLayerNamesToIndicesTest(unittest.TestCase):
+  """Verify layer name to cache index mappings for hybrid models."""
+
+  @pytest.mark.cpu_only
+  def test_none_or_empty_returns_empty_dict(self):
+    self.assertEqual(map_layer_names_to_indices(None), {})
+    self.assertEqual(map_layer_names_to_indices([]), {})
+    self.assertEqual(map_layer_names_to_indices({}), {})
+    self.assertEqual(map_layer_names_to_indices("not-a-dict"), {})
+
+  @pytest.mark.cpu_only
+  def test_maps_tuple_pairs_from_vllm_layer_names(self):
+    input_pairs = [
+        ("layer.0", 0),
+        ("layer.1", 1),
+        ("layer.2", 2),
+        ("layer.3", 30),
+        ("layer.7", 31),
+    ]
+    expected = {0: 0, 1: 1, 2: 2, 3: 30, 7: 31}
+    self.assertEqual(map_layer_names_to_indices(input_pairs), expected)
+
+  @pytest.mark.cpu_only
+  def test_maps_module_names_with_linear_and_self_attn(self):
+    input_dict = {
+        "model.layers.0.linear_attn": 0,
+        "model.layers.1.linear_attn": 1,
+        "model.layers.3.self_attn": 30,
+        "model.layers.7.self_attn": 31,
+    }
+    expected = {0: 0, 1: 1, 3: 30, 7: 31}
+    self.assertEqual(map_layer_names_to_indices(input_dict), expected)
+
+  @pytest.mark.cpu_only
+  def test_maps_numeric_keys(self):
+    self.assertEqual(map_layer_names_to_indices({0: 0, 3: 30}), {0: 0, 3: 30})
+    self.assertEqual(map_layer_names_to_indices({"0": 0, "3": 30}), {0: 0, 3: 30})
 
 
 if __name__ == "__main__":

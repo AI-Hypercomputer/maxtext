@@ -1020,7 +1020,8 @@ class MaxTextToMaxTextConverter:
 
     if group.op == "identity":
       raw_val = src_flat[group.source_keys[0]]
-      val = _apply_dtype_cast(raw_val, target_dtype, path)
+      tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
+      val = _apply_dtype_cast(raw_val, tgt_dt, path)
       return [(tgt_key, val) for _, tgt_key in group.targets]
 
     if any(idx is None for idx, _ in group.targets):
@@ -1039,7 +1040,8 @@ class MaxTextToMaxTextConverter:
 
     # group.op == "slice"
     raw_val = src_flat[group.source_keys[0]]
-    val = _apply_dtype_cast(raw_val, target_dtype, path)
+    tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
+    val = _apply_dtype_cast(raw_val, tgt_dt, path)
     self._check_scan_axis(val, path)
     per_block = self._slice_bulk_target_free(val, path)
     return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]

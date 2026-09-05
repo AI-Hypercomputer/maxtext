@@ -106,7 +106,10 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       else vllm_config.model_config.hf_config
   )
   hidden_size = getattr(hf_config, "moe_intermediate_size", None)
-  num_lanes = pltpu.get_tpu_info().num_lanes
+  try:
+    num_lanes = pltpu.get_tpu_info().num_lanes
+  except Exception:
+    num_lanes = 128
   num_kv_heads = hf_config.num_key_value_heads
 
   # Number of KV heads in global attention layers (None if the field is absent or unset).
@@ -286,6 +289,10 @@ class MaxTextForCausalLM(nnx.Module):
 
     input_positions = normalize_vllm_input_positions(attention_metadata.input_positions)
 
+    layer_name_to_kvcache_index = kwargs.pop("layer_name_to_kvcache_index", None)
+    if layer_name_to_kvcache_index is None and len(args) > 2:
+      layer_name_to_kvcache_index = args[2]
+
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
       expert_indices = None
@@ -296,6 +303,7 @@ class MaxTextForCausalLM(nnx.Module):
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           model_mode=self.model_mode,
+          layer_name_to_kvcache_index=layer_name_to_kvcache_index,
           **kwargs,
       )
 
@@ -416,6 +424,7 @@ class MaxTextForCausalLM(nnx.Module):
         if self.maxtext_config.lora.lora_restore_path:
           lora_utils.restore_lora_from_path(model, self.maxtext_config)
       self.model = nnx.data(model)
+    patch_raiden_worker_h2d()
 
   def get_mrope_input_positions(
       self,
@@ -559,3 +568,15 @@ def patch_kv_cache_manager():
 
   KVCacheManager.get_kv_cache_spec = patched_get_kv_cache_spec
   max_logging.log("Successfully applied KVCacheManager patch for hybrid GDN models.")
+
+
+def patch_raiden_worker_h2d():
+  """Monkey-patches TPUWorker.raiden_h2d and RaidenWorkerSync to apply Raiden weights to runner."""
+  try:
+    from tunix.experimental.weight_sync.raiden_synchronizer import patch_raiden_worker_sync
+    patch_raiden_worker_sync()
+  except Exception as e:
+    max_logging.log(f"Skipping raiden worker sync patch: {e}")
+
+
+patch_raiden_worker_h2d()
