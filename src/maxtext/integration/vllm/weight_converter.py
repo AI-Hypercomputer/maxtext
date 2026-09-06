@@ -298,7 +298,17 @@ class WeightConverter:
           "MaxText-to-MaxText path, or a non-empty rule list."
       )
     self.rules = rules
-    self.tp = tp
+    self.tp = int(
+        tp
+        if tp > 1
+        else (
+            getattr(config, "rollout_tensor_parallelism", 0)
+            or getattr(config, "rollout_mesh_tp", 0)
+            or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
+            or os.environ.get("ROLLOUT_MESH_TP", 0)
+            or 1
+        )
+    )
     self.num_kv_heads = num_kv_heads
     self.head_dim = head_dim
     # Read by the rollout engine to decide whether to trace the reshard
@@ -316,6 +326,7 @@ class WeightConverter:
         )
       self._direct = MaxTextToMaxTextConverter(
           config=config,
+          tp=self.tp,
           moe_fused_layout=(moe_fused_layout or MoEFusedLayout.PER_SHARD_INTERLEAVE),
           allow_unused_source_keys=allow_unused_source_keys,
           debug=debug,
@@ -692,6 +703,7 @@ class MaxTextToMaxTextConverter:
   def __init__(
       self,
       config: Any,
+      tp: int = 1,
       moe_fused_layout: str = MoEFusedLayout.PER_SHARD_INTERLEAVE,
       allow_unused_source_keys: Tuple[str, ...] = (),
       debug: bool = False,
@@ -700,13 +712,28 @@ class MaxTextToMaxTextConverter:
       is_pathways: Optional[bool] = None,
   ):
     self.config = config
+    self.tp = int(
+        tp
+        if tp > 1
+        else (
+            getattr(config, "rollout_tensor_parallelism", 0)
+            or getattr(config, "rollout_mesh_tp", 0)
+            or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
+            or os.environ.get("ROLLOUT_MESH_TP", 0)
+            or 1
+        )
+    )
     self.moe_fused_layout = moe_fused_layout
     self.allow_unused_source_keys = allow_unused_source_keys
     self.debug = debug
     self.prefuse_moe_weights = (
         prefuse_moe_weights
         if prefuse_moe_weights is not None
-        else getattr(config, "prefuse_moe_weights", False)
+        else (
+            getattr(config, "prefuse_moe_weights", None)
+            if getattr(config, "prefuse_moe_weights", None) is not None
+            else os.environ.get("PREFUSE_MOE_WEIGHTS", "0").lower() in ("1", "true", "yes")
+        )
     )
     self.padded_base_moe_mlp_dim = getattr(config, "padded_base_moe_mlp_dim", None)
     self.target_dtype = target_dtype if target_dtype is not None else getattr(config, "weight_dtype", None)
@@ -924,11 +951,14 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
+      n_shards = _get_n_shards(tgt_val, tgt_fused_axis)
+      if n_shards == 1 and self.tp > 1:
+        n_shards = self.tp
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,
           self.scan_axis,
-          _get_n_shards(tgt_val, tgt_fused_axis),
+          n_shards,
           tgt_shape,
           scan_fused_axis,
           tgt_fused_axis,
@@ -992,7 +1022,7 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      n_shards = _get_n_shards(wi_0, scan_fused_axis)
+      n_shards = self.tp if self.tp > 1 else _get_n_shards(wi_0, scan_fused_axis)
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,

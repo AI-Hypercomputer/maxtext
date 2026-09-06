@@ -430,10 +430,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         or vllm_backend
         or os.environ.get("ROLLOUT_BACKEND", "maxtext")
     )
+    rollout_tp = int(
+        getattr(self._config, "rollout_tensor_parallelism", 0)
+        or getattr(self._config, "rollout_mesh_tp", 0)
+        or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
+        or os.environ.get("ROLLOUT_MESH_TP", 0)
+        or 1
+    )
+    prefuse_moe = (
+        getattr(self._config, "prefuse_moe_weights", None)
+        if getattr(self._config, "prefuse_moe_weights", None) is not None
+        else (
+            os.environ.get("PREFUSE_MOE_WEIGHTS", "0").lower() in ("1", "true", "yes")
+        )
+    )
     if self._use_weight_converter:
       from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
       self._weight_converter = WeightConverter(
           config=self._config,
+          tp=rollout_tp,
+          prefuse_moe_weights=prefuse_moe,
           rollout_backend=self._rollout_backend,
           debug=getattr(self._config, "weight_sync_debug", False),
       )
@@ -871,7 +887,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._gen_model_input_fn is not None:
       return self._gen_model_input_fn(payload)
     if dataclasses.is_dataclass(payload):
-      return {k: getattr(payload, k) for k in payload.__dataclass_fields__ if getattr(payload, k) is not None}
+      return {
+          k: getattr(payload, k)
+          for k in payload.__dataclass_fields__
+          if getattr(payload, k) is not None and k != "metadata"
+      }
     return payload
 
   def _mesh_sharding(self, leaf: Any) -> jax.sharding.Sharding | None:
@@ -1509,8 +1529,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if self._use_weight_converter:
         if self._weight_converter is None:
           from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+          rollout_tp = int(
+              getattr(self._config, "rollout_tensor_parallelism", 0)
+              or getattr(self._config, "rollout_mesh_tp", 0)
+              or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
+              or os.environ.get("ROLLOUT_MESH_TP", 0)
+              or 1
+          )
+          prefuse_moe = (
+              getattr(self._config, "prefuse_moe_weights", None)
+              if getattr(self._config, "prefuse_moe_weights", None) is not None
+              else (
+                  os.environ.get("PREFUSE_MOE_WEIGHTS", "0").lower() in ("1", "true", "yes")
+              )
+          )
           self._weight_converter = WeightConverter(
               config=self._config,
+              tp=rollout_tp,
+              prefuse_moe_weights=prefuse_moe,
               rollout_backend=self._rollout_backend,
               debug=getattr(self._config, "weight_sync_debug", False),
           )
@@ -1549,7 +1585,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       is_pathways = (backend_platform == "proxy") or (
           "proxy" in os.environ.get("JAX_PLATFORMS", "") and bool(os.environ.get("JAX_BACKEND_TARGET"))
       )
-      if is_pathways and getattr(raiden_synchronizer, "_raiden_ffi", None) is None:
+      get_ffi = getattr(raiden_synchronizer, "_get_raiden_ffi", None)
+      ffi_available = (
+          (get_ffi() is not None)
+          if get_ffi
+          else (getattr(raiden_synchronizer, "_raiden_ffi", None) is not None)
+      )
+      if is_pathways and not ffi_available:
         raise RuntimeError(
             "Under Pathways (JAX_PLATFORMS=proxy), Raiden weight synchronization "
             "requires weight_synchronizer_ffi (from tpu_raiden_jax) to avoid client host OOM "
