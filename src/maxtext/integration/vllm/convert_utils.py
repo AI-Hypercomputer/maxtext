@@ -41,12 +41,69 @@ Still imported from Tunix at runtime, i.e. the remaining port surface:
     `_bulk_align_and_unstack`; that patch goes away once the port lands.
 """
 
-import jax
-from absl import logging
+import os
+import sys
 from typing import Mapping, Any, Callable, Dict, Tuple, Optional
 import functools
-import numpy as np
+from absl import logging
+import jax
 import jax.numpy as jnp
+import numpy as np
+
+TPU_V5P_SUBCORE_LANE_SIZE = 128
+MOE_MLP_WEIGHT_NAMES = frozenset({"wi", "wi_0", "wi_1", "wo"})
+_MOE_MLP_WEIGHTS = MOE_MLP_WEIGHT_NAMES
+
+
+def pad_to_tpu_lanes(dim: int, lane_size: int = TPU_V5P_SUBCORE_LANE_SIZE) -> int:
+  """Rounds dimension up to the nearest multiple of TPU lane size."""
+  return ((dim + lane_size - 1) // lane_size) * lane_size
+
+
+def resolve_rollout_tp(config: Any, tp: int = 1) -> int:
+  """Resolves rollout TP from config, environment, or default."""
+  if tp > 1:
+    return int(tp)
+  return int(
+      getattr(config, "rollout_tensor_parallelism", 0)
+      or getattr(config, "rollout_mesh_tp", 0)
+      or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
+      or os.environ.get("ROLLOUT_MESH_TP", 0)
+      or 1
+  )
+
+
+def resolve_prefuse_moe_weights(
+    config: Any, prefuse_moe_weights: Optional[bool] = None
+) -> bool:
+  """Resolves MoE prefuse flag from override, config, or environment."""
+  if prefuse_moe_weights is not None:
+    return bool(prefuse_moe_weights)
+  if config is not None and getattr(config, "prefuse_moe_weights", None) is not None:
+    return bool(config.prefuse_moe_weights)
+  return os.environ.get("PREFUSE_MOE_WEIGHTS", "0").lower() in ("1", "true", "yes")
+
+
+def is_pathways_environment() -> bool:
+  """Checks if running under Pathways TPU proxy environment."""
+  devices = jax.devices() if jax.device_count() else []
+  backend_platform = getattr(devices[0], "platform", "").lower() if devices else ""
+  return (backend_platform == "proxy") or (
+      "proxy" in os.environ.get("JAX_PLATFORMS", "")
+      and bool(os.environ.get("JAX_BACKEND_TARGET"))
+  )
+
+
+def get_host_rss_mb() -> float:
+  """Returns current process peak RSS in MB."""
+  import resource  # pylint: disable=g-import-not-at-top
+
+  return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+
+def is_verify_weights_enabled() -> bool:
+  """Returns whether weight verification / checksum validation is active."""
+  return os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
 
 
 def _delete_target_buffers(tgt_flat: Mapping[str, Any], src_flat: Mapping[str, Any]):
@@ -163,12 +220,15 @@ class ShapeMismatchError(ValueError):
 def reclaim_host_memory() -> None:
   """Runs garbage collection and triggers libc malloc_trim to return free heap to the OS."""
   import gc  # pylint: disable=g-import-not-at-top
+
   gc.collect()
-  try:
-    import ctypes  # pylint: disable=g-import-not-at-top
-    ctypes.CDLL("libc.so.6").malloc_trim(0)
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.debug("reclaim_host_memory: malloc_trim unavailable or failed: %s", e)
+  if sys.platform.startswith("linux"):
+    try:
+      import ctypes  # pylint: disable=g-import-not-at-top
+
+      ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.debug("reclaim_host_memory: malloc_trim unavailable or failed: %s", e)
 
 
 def normalize_dtype(tgt_dtype: Any) -> Any:

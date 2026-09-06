@@ -26,6 +26,7 @@ import numpy as np
 from typing import List, Union, Any, Dict, Optional, Mapping, Tuple, Iterator
 from flax import traverse_util, nnx
 from maxtext.integration.vllm.convert_utils import (
+    MOE_MLP_WEIGHT_NAMES,
     _align_per_axis,
     _apply_dtype_cast,
     _bulk_align_and_unstack,
@@ -35,11 +36,15 @@ from maxtext.integration.vllm.convert_utils import (
     _jit_unstack,
     _scanned_sharding_from_per_layer,
     _sharding_summary,
+    is_pathways_environment,
     normalize_dtype,
+    pad_to_tpu_lanes,
     reclaim_host_memory,
+    resolve_prefuse_moe_weights,
+    resolve_rollout_tp,
 )
 
-_MOE_MLP_WEIGHTS = frozenset({"wi_0", "wi_1", "wo", "wi"})
+_MOE_MLP_WEIGHTS = MOE_MLP_WEIGHT_NAMES
 
 
 # ==========================================
@@ -204,7 +209,7 @@ class MoEFuseGateUpPrefused(Operation):
         w0 = w[:, :d_inner, :]
         w1 = w[:, d_inner:, :]
         chunk_size = d_inner // tp
-        padded_chunk_size = ((chunk_size + 127) // 128) * 128
+        padded_chunk_size = pad_to_tpu_lanes(chunk_size)
         pad_amount = padded_chunk_size - chunk_size
         gate_chunks = w0.reshape(num_experts, tp, chunk_size, d_model)
         up_chunks = w1.reshape(num_experts, tp, chunk_size, d_model)
@@ -298,17 +303,7 @@ class WeightConverter:
           "MaxText-to-MaxText path, or a non-empty rule list."
       )
     self.rules = rules
-    self.tp = int(
-        tp
-        if tp > 1
-        else (
-            getattr(config, "rollout_tensor_parallelism", 0)
-            or getattr(config, "rollout_mesh_tp", 0)
-            or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
-            or os.environ.get("ROLLOUT_MESH_TP", 0)
-            or 1
-        )
-    )
+    self.tp = resolve_rollout_tp(config, tp)
     self.num_kv_heads = num_kv_heads
     self.head_dim = head_dim
     # Read by the rollout engine to decide whether to trace the reshard
@@ -336,9 +331,18 @@ class WeightConverter:
       logging.info("WeightConverter: direct MaxText-to-MaxText mode (debug=%s).", debug)
     else:
       if self.rules is None and config is not None:
-        model_name = getattr(config, "model_name", "")
-        if model_name in MODEL_TO_CONVERSION_RULES and MODEL_TO_CONVERSION_RULES[model_name] is not None:
-          self.rules = MODEL_TO_CONVERSION_RULES[model_name]
+        for candidate_key in [
+            getattr(config, "model_name", ""),
+            getattr(config, "decoder_block", ""),
+            getattr(config, "model_type", ""),
+        ]:
+          if (
+              candidate_key
+              and candidate_key in MODEL_TO_CONVERSION_RULES
+              and MODEL_TO_CONVERSION_RULES[candidate_key] is not None
+          ):
+            self.rules = MODEL_TO_CONVERSION_RULES[candidate_key]
+            break
       logging.info(
           "WeightConverter: torchax rule mode (tp=%d, %d rules).",
           self.tp,
@@ -712,39 +716,17 @@ class MaxTextToMaxTextConverter:
       is_pathways: Optional[bool] = None,
   ):
     self.config = config
-    self.tp = int(
-        tp
-        if tp > 1
-        else (
-            getattr(config, "rollout_tensor_parallelism", 0)
-            or getattr(config, "rollout_mesh_tp", 0)
-            or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
-            or os.environ.get("ROLLOUT_MESH_TP", 0)
-            or 1
-        )
-    )
+    self.tp = resolve_rollout_tp(config, tp)
     self.moe_fused_layout = moe_fused_layout
     self.allow_unused_source_keys = allow_unused_source_keys
     self.debug = debug
-    self.prefuse_moe_weights = (
-        prefuse_moe_weights
-        if prefuse_moe_weights is not None
-        else (
-            getattr(config, "prefuse_moe_weights", None)
-            if getattr(config, "prefuse_moe_weights", None) is not None
-            else os.environ.get("PREFUSE_MOE_WEIGHTS", "0").lower() in ("1", "true", "yes")
-        )
-    )
+    self.prefuse_moe_weights = resolve_prefuse_moe_weights(config, prefuse_moe_weights)
     self.padded_base_moe_mlp_dim = getattr(config, "padded_base_moe_mlp_dim", None)
     self.target_dtype = target_dtype if target_dtype is not None else getattr(config, "weight_dtype", None)
 
-    if is_pathways is not None:
-      self.is_pathways = is_pathways
-    else:
-      backend_platform = getattr(jax.devices()[0], "platform", "").lower() if jax.devices() else ""
-      self.is_pathways = (backend_platform == "proxy") or (
-          "proxy" in os.environ.get("JAX_PLATFORMS", "") and bool(os.environ.get("JAX_BACKEND_TARGET"))
-      )
+    self.is_pathways = (
+        is_pathways if is_pathways is not None else is_pathways_environment()
+    )
 
     self.cycle = int(getattr(config, "inhomogeneous_layer_cycle_interval", 1) or 1)
     self.num_decoder_layers = int(config.num_decoder_layers)

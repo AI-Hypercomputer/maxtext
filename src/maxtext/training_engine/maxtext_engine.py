@@ -38,7 +38,13 @@ from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
-from maxtext.integration.vllm.convert_utils import reclaim_host_memory
+from maxtext.integration.vllm.convert_utils import (
+    get_host_rss_mb,
+    is_verify_weights_enabled,
+    reclaim_host_memory,
+    resolve_prefuse_moe_weights,
+    resolve_rollout_tp,
+)
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
@@ -430,20 +436,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         or vllm_backend
         or os.environ.get("ROLLOUT_BACKEND", "maxtext")
     )
-    rollout_tp = int(
-        getattr(self._config, "rollout_tensor_parallelism", 0)
-        or getattr(self._config, "rollout_mesh_tp", 0)
-        or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
-        or os.environ.get("ROLLOUT_MESH_TP", 0)
-        or 1
-    )
-    prefuse_moe = (
-        getattr(self._config, "prefuse_moe_weights", None)
-        if getattr(self._config, "prefuse_moe_weights", None) is not None
-        else (
-            os.environ.get("PREFUSE_MOE_WEIGHTS", "0").lower() in ("1", "true", "yes")
-        )
-    )
+    rollout_tp = resolve_rollout_tp(self._config)
+    prefuse_moe = resolve_prefuse_moe_weights(self._config)
     if self._use_weight_converter:
       from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
       self._weight_converter = WeightConverter(
@@ -1529,20 +1523,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if self._use_weight_converter:
         if self._weight_converter is None:
           from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
-          rollout_tp = int(
-              getattr(self._config, "rollout_tensor_parallelism", 0)
-              or getattr(self._config, "rollout_mesh_tp", 0)
-              or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
-              or os.environ.get("ROLLOUT_MESH_TP", 0)
-              or 1
-          )
-          prefuse_moe = (
-              getattr(self._config, "prefuse_moe_weights", None)
-              if getattr(self._config, "prefuse_moe_weights", None) is not None
-              else (
-                  os.environ.get("PREFUSE_MOE_WEIGHTS", "0").lower() in ("1", "true", "yes")
-              )
-          )
+          rollout_tp = resolve_rollout_tp(self._config)
+          prefuse_moe = resolve_prefuse_moe_weights(self._config)
           self._weight_converter = WeightConverter(
               config=self._config,
               tp=rollout_tp,
@@ -1620,7 +1602,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if is_pathways or self._raiden_sync.active:
         self._raiden_sync.d2h()
 
-      verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
+      verify_weights = is_verify_weights_enabled()
       if verify_weights:
         if is_pathways and not host_stage:
           logging.info(
@@ -1635,8 +1617,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       reclaim_host_memory()
 
       try:
-        import resource  # pylint: disable=g-import-not-at-top
-        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+        rss_mb = get_host_rss_mb()
         mem_info = f", host memory max RSS: {rss_mb:.1f} MB"
       except Exception:  # pylint: disable=broad-exception-caught
         mem_info = ""
@@ -1666,8 +1647,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
     reclaim_host_memory()
     try:
-      import resource  # pylint: disable=g-import-not-at-top
-      rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+      rss_mb = get_host_rss_mb()
       logging.info("Trainer released weight sync: host memory max RSS: %.1f MB", rss_mb)
     except Exception:  # pylint: disable=broad-exception-caught
       pass

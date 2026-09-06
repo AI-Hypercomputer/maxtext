@@ -441,13 +441,26 @@ def unroll_gemma_scanned_weights(weights):
     else:
       new_flat_w[k] = v
 
-  assert unrolled_count > 0, "MaxTextVllmSampler: Detected scanned structure, but failed to unroll any layers!"
+  if unrolled_count <= 0:
+    raise ValueError(
+        "MaxTextVllmSampler: Detected scanned structure, but failed to unroll any layers!"
+    )
 
   logging.info(
       "MaxTextVllmSampler: Successfully unrolled %d scanned tensor components into vLLM-compatible nnx.List format.",
       unrolled_count,
   )
   return unflatten_dict(new_flat_w)
+
+
+def _log_and_flush_traceback(msg: str) -> None:
+  """Logs an error with formatted traceback and flushes all logging handlers."""
+  logging.error("%s:\n%s", msg, traceback.format_exc())
+  for handler in logging.getLogger().handlers:
+    try:
+      handler.flush()
+    except Exception:  # pylint: disable=broad-except
+      pass
 
 
 class MaxTextVllmSampler(VllmSampler):
@@ -494,12 +507,7 @@ class MaxTextVllmSampler(VllmSampler):
       try:
         return self._sync_standalone_converted(updated_weights)
       except BaseException:
-        logging.error("MaxTextVllmSampler standalone sync failed:\n%s", traceback.format_exc())
-        for handler in logging.getLogger().handlers:
-          try:
-            handler.flush()
-          except Exception:  # pylint: disable=broad-except
-            pass
+        _log_and_flush_traceback("MaxTextVllmSampler standalone sync failed")
         raise
     if self._converter is None:
       if self._direct_maxtext_sync and self._is_gemma:
@@ -511,12 +519,7 @@ class MaxTextVllmSampler(VllmSampler):
       # down, and the teardown races the normal exception propagation -- the
       # Python traceback is routinely truncated or lost entirely in the worker
       # logs. Force it out before re-raising.
-      logging.error("MaxTextVllmSampler.update_params failed:\n%s", traceback.format_exc())
-      for handler in logging.getLogger().handlers:
-        try:
-          handler.flush()
-        except Exception:  # pylint: disable=broad-except
-          pass
+      _log_and_flush_traceback("MaxTextVllmSampler.update_params failed")
       raise
 
   def _sync_standalone_converted(self, updated_weights):

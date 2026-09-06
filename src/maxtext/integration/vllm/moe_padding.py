@@ -17,6 +17,9 @@
 from typing import Optional
 
 
+TPU_V5P_SUBCORE_LANE_SIZE = 128
+
+
 def next_power_of_two(x: int) -> int:
   """Finds the smallest power of 2 >= x using bit manipulation.
 
@@ -26,7 +29,8 @@ def next_power_of_two(x: int) -> int:
   Returns:
     The smallest integer power of 2 that is >= x.
   """
-  assert x > 0
+  if x <= 0:
+    raise ValueError(f"Input x must be positive, got {x}")
   if x == 1:
     return 1
   return 1 << (x - 1).bit_length()
@@ -35,7 +39,7 @@ def next_power_of_two(x: int) -> int:
 def compute_padded_moe_mlp_dim(
     hidden_size: Optional[int],
     moe_mlp_tp_size: int,
-    num_lanes: int = 128,
+    num_lanes: int = TPU_V5P_SUBCORE_LANE_SIZE,
 ) -> Optional[int]:
   """Computes padded MoE intermediate size for GMM_v2 kernel requirements.
 
