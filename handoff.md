@@ -115,6 +115,36 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
   - **Automatic Cluster Cleanup**:
     - The ephemeral dev guardrail `ttlSecondsAfterFinished: 600` successfully reclaimed all JobSet pods, releasing TPU slices automatically after run completion.
 
+### F. Diagnostic Study Step 1: Reproducing Mohit's Baseline (Qwen3-0.6B, 1 Rollout Worker, `igorts-rd-06b`)
+- **Execution & Parameters**:
+  - Model: `Qwen3-0.6B` (`gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items`)
+  - Trainer: `tpuv5:2x2x2` (Dual-host Pathways, `FSDP=8`), Rollout: `tpuv5:2x2x1` (1 replica, `TP=2`).
+  - Image: `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v17`.
+- **Factual Results**:
+  - All workers registered cleanly with orchestrator discovery server:
+    ```text
+    2026-09-06 16:16:49,022 - [Orchestrator] Cluster workers ready: ['igorts-rd-06b-roll', 'igorts-rd-06b-train']. Starting StandardRLProgram execution...
+    ```
+  - Initial weight sync `wsync-v0-r0` succeeded and KV caches initialized:
+    ```text
+    2026-09-06 16:17:12,377 - [Orchestrator] transfer wsync-v0-r0: expected_block_count auto; deferring to the controller's schedule-derived count
+    ```
+  - Step 0 and Step 1 training completed cleanly, final policy advanced to version 2, and program exited with `EXIT_CODE=0`:
+    ```text
+    2026-09-06 16:18:15,366 - [Orchestrator] transfer wsync-v2-r2: expected_block_count auto; deferring to the controller's schedule-derived count
+    Program End: Sun Sep  6 16:18:24 UTC 2026
+    EXIT_CODE=0
+    ```
+  - **Confirmation**: Confirmed that Qwen3-0.6B baseline with 1 rollout worker runs end-to-end cleanly with 0 errors.
+
+### G. Diagnostic Study Step 2: Testing 35B with 1 Rollout Worker (`igorts-rd-35b`)
+- **Execution & Parameters**:
+  - Model: `Qwen3.5-35B-A3B` (`gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items`)
+  - Trainer: `tpuv5:2x2x2` (Dual-host Pathways, `FSDP=8`), Rollout: `tpuv5:2x2x1` (1 replica, `TP=2`).
+  - Image: `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v17`.
+- **Status**:
+  - Workload launched and pods scheduled on TPU nodes. Monitoring rollout generation text to isolate whether repetitive token generation is tied to 35B model checkpoint / unscanning vs. multi-worker rollout setup.
+
 ---
 
 ## 3. Root Cause Analysis & Key Technical Insights
