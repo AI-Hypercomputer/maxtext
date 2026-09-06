@@ -557,35 +557,42 @@ def _align_per_axis(
   return _jit_repeat_axes(arr, tuple(repeats))
 
 
-@functools.partial(jax.jit, static_argnames=("tgt_shape", "n_shards", "axis"))
+@functools.partial(jax.jit, static_argnames=("tgt_shape", "n_shards", "axis", "lane_size"))
 def _interleave_moe_weights(
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
+    lane_size: int = TPU_V5P_SUBCORE_LANE_SIZE,
 ) -> jax.Array | np.ndarray:
-  """Interleaves wi_0 and wi_1 per-shard into a single tensor.
+  """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
 
-  JIT-compiled: run eagerly this is 2 reshapes + 2 `jnp.pad` + 1 concatenate +
+  Under TPU GMM kernels (e.g. `gmm_v2.py`), each TP shard expects Gate and Up
+  to alternate in 128-lane chunks (`deinterleave_lane`) along the inner dimension:
+  `[Gate_c0 (128), Up_c0 (128), Gate_c1 (128), Up_c1 (128), ...]`.
+
+  JIT-compiled: run eagerly this is 2 reshapes + 2 `jnp.pad` + 1 stack/concat +
   1 reshape, and every intermediate becomes a materialized device buffer. Under
   one trace XLA fuses the pads into the concatenate's output write, so the only
   buffer allocated is the result. On a 48-layer MoE model called once per layer
   that is the difference between ~3x and ~1x the output size in live transient
   memory, plus ~5 fewer dispatches per call.
 
-  `tgt_shape`, `n_shards` and `axis` are static, so the trace is keyed on them;
+  `tgt_shape`, `n_shards`, `axis` and `lane_size` are static, so the trace is keyed on them;
   identical layers share a single compilation.
   """
   if axis is None:
     axis = len(tgt_shape) - 1
+  elif axis < 0:
+    axis = len(tgt_shape) + axis
 
   target_half_dim = tgt_shape[axis] // 2
+  target_chunk_size = target_half_dim // n_shards
 
   def _pad_and_chunk(arr):
     current_total_size = arr.shape[axis]
     chunk_size = current_total_size // n_shards
-    target_chunk_size = target_half_dim // n_shards
 
     # Safely reshape to expose per-shard chunk without assuming the last axis
     new_shape = list(arr.shape)
@@ -603,8 +610,20 @@ def _interleave_moe_weights(
   p_wi_0 = _pad_and_chunk(wi_0)
   p_wi_1 = _pad_and_chunk(wi_1)
 
-  # Interleave along the chunked dimension
-  combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+  if lane_size > 0 and target_chunk_size % lane_size == 0:
+    # Interleave in 128-lane chunks within each shard:
+    # [Gate_c0 (128), Up_c0 (128), Gate_c1 (128), Up_c1 (128), ...]
+    num_lanes = target_chunk_size // lane_size
+    shape_lanes = list(p_wi_0.shape)
+    shape_lanes[axis + 1] = num_lanes
+    shape_lanes.insert(axis + 2, lane_size)
+    p_wi_0 = p_wi_0.reshape(shape_lanes)
+    p_wi_1 = p_wi_1.reshape(shape_lanes)
+    combined = jnp.stack([p_wi_0, p_wi_1], axis=axis + 2)
+  else:
+    # Fallback when dimension is not divisible by lane_size:
+    combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+
   return combined.reshape(tgt_shape)
 
 
