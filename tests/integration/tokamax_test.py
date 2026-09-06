@@ -41,7 +41,14 @@ class Train(parameterized.TestCase):
           "ici_expert_parallelism": ici_expert_parallelism,
           "moe_quantize_token_all_gather": moe_quantize_token_all_gather,
       }
-      for base_name, quantization, use_gmm_v2, use_gmm_v2_heuristic_tiling, ici_expert_parallelism, moe_quantize_token_all_gather in [
+      for (
+          base_name,
+          quantization,
+          use_gmm_v2,
+          use_gmm_v2_heuristic_tiling,
+          ici_expert_parallelism,
+          moe_quantize_token_all_gather,
+      ) in [
           ("tokamax_v1_bf16", "", False, False, 1, False),
           ("tokamax_v1_fp8", "fp8", False, False, 1, False),  # not quantize gmm
           ("tokamax_v1_fp8_full", "fp8_full", False, False, 1, False),  # quantize gmm

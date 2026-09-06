@@ -25,10 +25,10 @@ from maxtext.kernels.megablox import backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.layers import quantizations
-from maxtext.utils import max_logging
 import qwix
 import qwix.pallas as qpl
 import tokamax
+# from maxtext.utils import max_logging
 
 
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
@@ -238,7 +238,15 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
-  return out, (lhs, rhs, group_sizes, group_offset, partial_sum, lhs_is_qarray, rhs_is_qarray)  # pyrefly: ignore[bad-return]
+  return out, (
+      lhs,
+      rhs,
+      group_sizes,
+      group_offset,
+      partial_sum,
+      lhs_is_qarray,
+      rhs_is_qarray,
+  )  # pyrefly: ignore[bad-return]
 
 
 def _fwd_quantize_activation_and_weight(

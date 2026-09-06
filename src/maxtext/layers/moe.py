@@ -1101,7 +1101,7 @@ class RoutedMoE(nnx.Module):
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
         sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
-      
+
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
 
