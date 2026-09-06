@@ -217,6 +217,25 @@ def should_prevent_cse_in_remat(config):
   return True
 
 
+def _expand_gdn_remat_names(names: list[str]) -> list[str]:
+  """Expands high-level GDN remat identifiers to individual checkpointed tensor names."""
+  expanded = list(names)
+  if "gdn" in names:
+    expanded.extend(
+        [
+            "gdn_core_attn_out",
+            "gdn_chunk_states",
+            "gdn_t_inv",
+            "gdn_qkv",
+            "gdn_b",
+            "gdn_a",
+        ]
+    )
+  if "gdn_conv" in names:
+    expanded.extend(["gdn_conv_out", "gdn_fwd_conv"])
+  return expanded
+
+
 def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   """Returns the ``(save_names, offload_names)`` split for remat policies built via
   ``jax.checkpoint_policies.save_and_offload_only_these_names``.
@@ -254,7 +273,9 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
         "mlpwo",
     ]
   if config.remat_policy == "custom":
-    return list(config.tensors_on_device or []), list(config.tensors_to_offload or [])
+    save_names = _expand_gdn_remat_names(list(config.tensors_on_device or []))
+    offload_names = _expand_gdn_remat_names(list(config.tensors_to_offload or []))
+    return save_names, offload_names
   return [], []
 
 

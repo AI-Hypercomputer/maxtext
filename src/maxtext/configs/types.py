@@ -1545,6 +1545,14 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
   )
   context: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the attention context.")
+  gdn: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for GatedDeltaNet (GDN) recurrence kernel and residuals (remat, device, offload).",
+  )
+  gdn_conv: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for GatedDeltaNet (GDN) 1D convolution activations (remat, device, offload).",
+  )
   mlpwi: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the first MLP layer's intermediate output.",
@@ -3543,6 +3551,16 @@ class MaxTextConfig(
     return self
 
   @model_validator(mode="after")
+  def validate_gdn_remat_requires_kernel(self) -> "MaxTextConfig":
+    """Raise ValueError if gdn or gdn_conv is configured for device/offload without use_gdn_kernel=True."""
+    if (self.gdn != "remat" or self.gdn_conv != "remat") and not self.use_gdn_kernel:
+      raise ValueError(
+          "Granular GDN rematerialization (setting `gdn` or `gdn_conv` to 'device' or 'offload') "
+          "requires `use_gdn_kernel=True`."
+      )
+    return self
+
+  @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
     Computes all derived values and runs all cross-field validations after initial parsing.
@@ -3965,6 +3983,8 @@ class MaxTextConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "gdn",
+          "gdn_conv",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_mlpwi_1",
@@ -4845,6 +4865,12 @@ class MaxTextConfig(
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
+    if (self.gdn != "remat" or self.gdn_conv != "remat") and not self.use_gdn_kernel:
+      raise ValueError(
+          "Granular GDN rematerialization (setting `gdn` or `gdn_conv` to 'device' or 'offload') "
+          "requires `use_gdn_kernel=True`."
+      )
+
     for val in self.compress_ratios:
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
@@ -5263,6 +5289,8 @@ class RLConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "gdn",
+          "gdn_conv",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_mlpwi_1",
@@ -5283,6 +5311,12 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+
+    if (self.gdn != "remat" or self.gdn_conv != "remat") and not getattr(self, "use_gdn_kernel", False):
+      raise ValueError(
+          "Granular GDN rematerialization (setting `gdn` or `gdn_conv` to 'device' or 'offload') "
+          "requires `use_gdn_kernel=True`."
+      )
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {
