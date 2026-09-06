@@ -524,6 +524,7 @@ class Attention(nnx.Module):
           epsilon=self.config.normalization_layer_epsilon,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
       self.key_norm = Qwen3NextRMSNorm(
@@ -531,6 +532,7 @@ class Attention(nnx.Module):
           epsilon=self.config.normalization_layer_epsilon,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
     else:
