@@ -61,6 +61,7 @@ from maxtext.models import (
     qwen3,
     qwen3_custom,
     qwen3_5,
+    qwen3_8_flash_next,
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
@@ -486,6 +487,12 @@ class Decoder(nn.Module):
         return [qwen3.Qwen3NextScannableBlockToLinen] if self.config.scan_layers else [qwen3.Qwen3NextDecoderLayerToLinen]
       case DecoderBlockType.QWEN3_5:
         return [qwen3_5.Qwen3_5ScannableBlockToLinen] if self.config.scan_layers else [qwen3_5.Qwen3_5DecoderLayerToLinen]
+      case DecoderBlockType.QWEN3_8_FLASH_NEXT:
+        return (
+            [qwen3_8_flash_next.Qwen3_8FlashNextScannableBlockToLinen]
+            if self.config.scan_layers
+            else [qwen3_8_flash_next.Qwen3_8FlashNextDecoderLayerToLinen]
+        )
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE_MLP:
@@ -525,6 +532,9 @@ class Decoder(nn.Module):
         DecoderBlockType.QWEN3_MOE: [qwen3.Qwen3MoeDecoderLayer],
         DecoderBlockType.QWEN3_CUSTOM_MOE: [qwen3_custom.Qwen3CustomMoeDecoderLayer],
         DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
+        DecoderBlockType.QWEN3_8_FLASH_NEXT: get_scannable(
+            qwen3_8_flash_next.Qwen3_8FlashNextDecoderLayer, qwen3_8_flash_next.Qwen3_8FlashNextScannableBlock
+        ),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],

@@ -583,11 +583,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     self.A_log = nnx.Param(a_log_init(rngs.params(), (self.num_v_heads,), dtype=cfg.weight_dtype))
     self.dt_bias = nnx.Param(nnx.initializers.ones(rngs.params(), (self.num_v_heads,), dtype=cfg.weight_dtype))
 
+    output_gate_type = getattr(cfg, "output_gate_type", "silu") or "silu"
     self.norm = Qwen3NextRMSNormGated(
         num_features=self.head_v_dim,  # Normalize over the head dimension (D_v)
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        activation=output_gate_type,
         rngs=rngs,
     )
     self.out_proj = DenseGeneral(

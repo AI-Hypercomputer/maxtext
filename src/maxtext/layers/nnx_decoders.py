@@ -66,6 +66,7 @@ from maxtext.models import (
     qwen2,
     qwen3,
     qwen3_5,
+    qwen3_8_flash_next,
     qwen3_custom,
     simple_layer,
 )
@@ -481,6 +482,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+    self.is_qwen3_8_flash_next = self.config.decoder_block == DecoderBlockType.QWEN3_8_FLASH_NEXT
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -489,6 +491,13 @@ class NNXDecoder(nnx.Module):
           rngs=self.rngs,
       )
 
+    if self.is_qwen3_8_flash_next:
+      self.hyper_connection_mixer = qwen3_8_flash_next.Qwen3_8FlashNextHyperConnection(
+          config=self.config,
+          mesh=self.mesh,
+          use_combine=False,
+          rngs=rngs,
+      )
     self._init_decoder_layers(decoder_block_classes, rngs, mesh)
 
   def _init_decoder_layers(self, decoder_block_classes, rngs, mesh):
@@ -871,6 +880,7 @@ class NNXDecoder(nnx.Module):
       elif config.decoder_block in {
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
+          DecoderBlockType.QWEN3_8_FLASH_NEXT,
           DecoderBlockType.DEEPSEEK4,
       }:
         layer_kwargs = {"layer_idx": lyr}
@@ -1234,6 +1244,9 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
         DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
+        DecoderBlockType.QWEN3_8_FLASH_NEXT: get_scannable(
+            qwen3_8_flash_next.Qwen3_8FlashNextDecoderLayer, qwen3_8_flash_next.Qwen3_8FlashNextScannableBlock
+        ),
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
@@ -1416,6 +1429,7 @@ class NNXDecoder(nnx.Module):
     elif self.config.decoder_block in {
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
+        DecoderBlockType.QWEN3_8_FLASH_NEXT,
     }:
       return functools.partial(
           normalizations.Qwen3NextRMSNorm,
@@ -1545,7 +1559,8 @@ class NNXDecoder(nnx.Module):
     else:
       norm_out_sharding = None
 
-    y = self.decoder_norm(y, out_sharding=norm_out_sharding)
+    if not self.is_qwen3_8_flash_next:
+      y = self.decoder_norm(y, out_sharding=norm_out_sharding)
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
     if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE}:
@@ -1775,6 +1790,8 @@ class NNXDecoder(nnx.Module):
         # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
         y = mhc_expand(y)
 
+    if self.is_qwen3_8_flash_next:
+      y = jnp.tile(y, (1, 1, cfg.hc_count))
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
 
     layer_kwargs = {
@@ -1796,7 +1813,7 @@ class NNXDecoder(nnx.Module):
     if attention_metadata is not None:
       layer_kwargs["attention_metadata"] = attention_metadata
 
-    if cfg.engram_layers and decoder_input_tokens is not None:
+    if (cfg.engram_layers or self.is_qwen3_8_flash_next) and decoder_input_tokens is not None:
       layer_kwargs["decoder_input_tokens"] = decoder_input_tokens
 
     if forced_routed_experts is not None:
@@ -2123,7 +2140,8 @@ class NNXDecoder(nnx.Module):
           if kv_caches is not None:
             if (
                 isinstance(kv_caches, dict)
-                and cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+                and cfg.decoder_block
+                in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.QWEN3_8_FLASH_NEXT)
                 and cfg.attention
                 not in (
                     "vllm_rpa",
@@ -2197,7 +2215,8 @@ class NNXDecoder(nnx.Module):
           if kv_caches is not None and kv_cache is not None:
             if (
                 isinstance(kv_caches, dict)
-                and cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+                and cfg.decoder_block
+                in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.QWEN3_8_FLASH_NEXT)
                 and cfg.attention
                 not in (
                     "vllm_rpa",
@@ -2224,6 +2243,8 @@ class NNXDecoder(nnx.Module):
       else:
         # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
         hidden_state = mhc_reduce(y)
+    elif self.is_qwen3_8_flash_next:
+      hidden_state = self.hyper_connection_mixer(y)
     else:
       hidden_state = y
 

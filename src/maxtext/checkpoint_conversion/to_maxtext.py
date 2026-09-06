@@ -76,6 +76,13 @@ from maxtext.utils import max_logging, max_utils, maxtext_utils
 from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
+
+try:
+  from orbax.checkpoint._src.serialization import type_handlers as v1_type_handlers
+  from orbax.checkpoint._src.serialization import type_handler_registry as v1_registry
+except ImportError:
+  v1_type_handlers = None
+  v1_registry = None
 from safetensors import safe_open
 
 try:
@@ -274,7 +281,10 @@ class LazyTensor:
     return f"LazyTensor(name={self.name}, shape={self.shape}, dtype={self.dtype})"
 
 
-class LazyTensorHandler(type_handlers.NumpyHandler):
+BaseLazyHandler = v1_type_handlers.NumpyHandler if v1_type_handlers is not None else type_handlers.NumpyHandler
+
+
+class LazyTensorHandler(BaseLazyHandler):
   """
   Custom Orbax handler for LazyTensor.
 
@@ -294,7 +304,26 @@ class LazyTensorHandler(type_handlers.NumpyHandler):
 
 # Register LazyTensor with the custom handler.
 # It's safe to register this globally even if eager loading is used.
-type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
+try:
+  from orbax.checkpoint.experimental.v1._src.serialization import registry as v1_registry
+  from orbax.checkpoint.experimental.v1._src.serialization.numpy_leaf_handler import NumpyLeafHandler
+
+  if (
+      LazyTensor,
+      np.ndarray,
+      ("LazyTensor",),
+      NumpyLeafHandler,
+  ) not in v1_registry.STANDARD_TYPE_AND_ABSTRACT_TYPE_AND_TYPESTR_TO_HANDLER:
+    v1_registry.STANDARD_TYPE_AND_ABSTRACT_TYPE_AND_TYPESTR_TO_HANDLER.append(
+        (LazyTensor, np.ndarray, ("LazyTensor",), NumpyLeafHandler)
+    )
+except (ImportError, AttributeError) as e:
+  max_logging.log(f"Warning registering LazyTensor with v1_registry: {e}")
+
+try:
+  type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
+except ValueError as e:
+  max_logging.log(f"Warning registering LazyTensor with type_handlers: {e}")
 
 
 def get_maxtext_model_info(config):

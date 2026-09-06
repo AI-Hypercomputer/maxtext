@@ -1354,8 +1354,20 @@ gdn_num_value_heads: 32
 gdn_chunk_size: 64
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
+# Gated output activation type in GDN (silu or sigmoid)
+output_gate_type: ""
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
+
+# Qwen3.8-Flash-Next Specific Parameters
+hc_count: 4
+hc_lowrank: 320
+ple_layer_ids: "(2,)"
+ple_embed_dim: 2560
+ple_conv_kernel_size: 4
+ngram_size: 3
+ngram_vocab_size_base: 20000000
+heads_per_ngram: 8
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

@@ -1610,6 +1610,90 @@ except AttributeError:
 
 
 # from https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1/blob/main/config.json
+
+qwen3_8_flash_next_dict = {
+    "architectures": ["Qwen4ExpForConditionalGeneration"],
+    "image_token_id": 248056,
+    "model_type": "qwen4_exp",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 248044,
+        "dtype": "bfloat16",
+        "eos_token_id": 248044,
+        "full_attention_interval": 4,
+        "hc_count": 4,
+        "hc_lowrank": 320,
+        "head_dim": 256,
+        "heads_per_ngram": 8,
+        "hidden_act": "silu",
+        "hidden_size": 2560,
+        "indexer_budget": 2048,
+        "indexer_compress_ratio": 4,
+        "indexer_head_dim": 128,
+        "indexer_kv_heads": 1,
+        "indexer_n_heads": 4,
+        "initializer_range": 0.02,
+        "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention"] * 12,
+        "linear_conv_kernel_dim": 4,
+        "linear_key_head_dim": 128,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 48,
+        "linear_value_head_dim": 128,
+        "make_ngram_vocab_size_divisible_by": 128,
+        "mamba_ssm_dtype": "float32",
+        "max_position_embeddings": 262144,
+        "model_type": "qwen4_exp_text",
+        "moe_intermediate_size": 640,
+        "mtp": {
+            "hybrid": True,
+            "layer_types": ["full_attention"],
+            "mtp_use_hidden_state_from_layer": None,
+            "num_hidden_layers": 1,
+            "rope_theta": 10000000,
+        },
+        "mtp_num_hidden_layers": 1,
+        "mtp_use_dedicated_embeddings": False,
+        "ngram_size": 3,
+        "ngram_vocab_size_base": 20000000,
+        "num_attention_heads": 24,
+        "num_experts": 512,
+        "num_experts_per_tok": 10,
+        "num_hidden_layers": 48,
+        "num_key_value_heads": 2,
+        "output_gate_type": "sigmoid",
+        "output_router_logits": False,
+        "pad_token_id": None,
+        "partial_rotary_factor": 0.25,
+        "ple_conv_kernel_size": 4,
+        "ple_embed_dim": 2560,
+        "ple_layer_ids": [2],
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+            "mrope_interleaved": True,
+            "mrope_section": [11, 11, 10],
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10000000,
+            "rope_type": "default",
+        },
+        "router_aux_loss_coef": 0.001,
+        "shared_expert_intermediate_size": 640,
+        "split_ngram_parts": 128,
+        "tie_word_embeddings": False,
+        "use_cache": True,
+        "vocab_size": 248320,
+    },
+    "tie_word_embeddings": False,
+    "transformers_version": "5.8.0.dev0",
+    "video_token_id": 248057,
+}
+
+try:
+  qwen3_8_flash_next_config = transformers.Qwen4ExpConfig(**qwen3_8_flash_next_dict)  # pyrefly: ignore[missing-attribute]
+except AttributeError:
+  qwen3_8_flash_next_config = PTConfig(**qwen3_8_flash_next_dict)  # pytype: disable=wrong-arg-types
+
+
 mixtral_8x7b_dict = {
     "architectures": ["MixtralForCausalLM"],
     "attention_dropout": 0.0,
@@ -2033,6 +2117,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-next-80b-a3b": qwen3_next_80b_a3b_config,
     "qwen3.5-397b-a17b": qwen3_5_397b_a17b_config,
     "qwen3.5-35b-a3b": qwen3_5_35b_a3b_config,
+    "qwen3.8-flash-next": qwen3_8_flash_next_config,
     "mixtral-8x7b": mixtral_8x7b_config,
     "mixtral-8x22b": mixtral_8x22b_config,
     "olmo3-7b": olmo3_7b_config,

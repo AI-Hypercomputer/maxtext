@@ -284,6 +284,7 @@ ModelName = Literal[
     "qwen3-custom-30b-a3b",
     "qwen3.5-35b-a3b",
     "qwen3.5-397b-a17b",
+    "qwen3.8-flash-next",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -1147,6 +1148,20 @@ class Qwen3Next(BaseModel):
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+  output_gate_type: str = Field("silu", description="Gated output activation type in GDN (silu or sigmoid).")
+
+
+class Qwen3_8FlashNext(BaseModel):
+  """Configuration specific to Qwen3.8-Flash-Next models."""
+
+  hc_count: int = Field(4, description="The number of parallel streams in HyperConnection.")
+  hc_lowrank: int = Field(320, description="The bottleneck dimension in HyperConnection.")
+  ple_layer_ids: str | tuple[int, ...] = Field((2,), description="PLE layer IDs (1-based).")
+  ple_embed_dim: int = Field(2560, description="PLE embedding dimension.")
+  ple_conv_kernel_size: int = Field(4, description="PLE convolution kernel size.")
+  ngram_size: int = Field(3, description="PLE n-gram size.")
+  ngram_vocab_size_base: int = Field(20000000, description="PLE n-gram vocab size base.")
+  heads_per_ngram: int = Field(8, description="PLE heads per n-gram.")
 
 
 # ----------------------------------------------------------------------------
@@ -3185,6 +3200,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    Qwen3_8FlashNext,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -4548,6 +4564,7 @@ class MaxTextConfig(
     if self.decoder_block in (
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
+        DecoderBlockType.QWEN3_8_FLASH_NEXT,
     ):
       if int(self.gdn_num_value_heads) % int(self.gdn_num_key_heads) != 0:
         raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")
@@ -4862,6 +4879,7 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
+    Qwen3_8FlashNext,
     MultimodalGeneral,
     Muon,
     FineTuning,

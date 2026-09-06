@@ -51,6 +51,7 @@ The main conversion script uses these mappings to systematically transform each
 parameter from the source checkpoint and build the target checkpoint.
 """
 
+import ast
 import warnings
 import numpy as np
 
@@ -1381,6 +1382,248 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = (
         reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
     )
+
+  return hooks
+
+
+def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping from MaxText to HuggingFace Qwen3.8-Flash-Next weight paths."""
+  num_main_layers = config.get("num_hidden_layers", config.get("text_config", {}).get("num_hidden_layers", 48))
+  layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
+  ple_layer_ids = getattr(maxtext_config, "ple_layer_ids", (2,))
+  if isinstance(ple_layer_ids, str):
+    ple_layer_ids = (
+        ast.literal_eval(ple_layer_ids) if ("(" in ple_layer_ids or "[" in ple_layer_ids) else (int(ple_layer_ids),)
+    )
+
+  mapping = {
+      "params-token_embedder-embedding": "model.language_model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.language_model.hyper_connection_mixer.hc_norm.weight",
+      "params-decoder-hyper_connection_mixer-hc_norm-weight": "model.language_model.hyper_connection_mixer.hc_norm.weight",
+      "params-decoder-hyper_connection_mixer-input_mix_weight_down-kernel": (
+          "model.language_model.hyper_connection_mixer.input_mix_weight_down.weight"
+      ),
+      "params-decoder-hyper_connection_mixer-input_mix_weight_up-kernel": (
+          "model.language_model.hyper_connection_mixer.input_mix_weight_up.weight"
+      ),
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+
+  for i in range(num_main_layers):
+    prefix = f"params-decoder-layers_{i}"
+    hf_layer = f"model.language_model.layers.{i}"
+
+    # HyperConnection
+    mapping[f"{prefix}-attn_hyper_connection-hc_norm-weight"] = f"{hf_layer}.attn_hyper_connection.hc_norm.weight"
+    mapping[f"{prefix}-attn_hyper_connection-input_mix_weight_down-kernel"] = (
+        f"{hf_layer}.attn_hyper_connection.input_mix_weight_down.weight"
+    )
+    mapping[f"{prefix}-attn_hyper_connection-input_mix_weight_up-kernel"] = (
+        f"{hf_layer}.attn_hyper_connection.input_mix_weight_up.weight"
+    )
+    mapping[f"{prefix}-attn_hyper_connection-block_inject_weight-kernel"] = (
+        f"{hf_layer}.attn_hyper_connection.block_inject_weight.weight"
+    )
+
+    mapping[f"{prefix}-mlp_hyper_connection-hc_norm-weight"] = f"{hf_layer}.mlp_hyper_connection.hc_norm.weight"
+    mapping[f"{prefix}-mlp_hyper_connection-input_mix_weight_down-kernel"] = (
+        f"{hf_layer}.mlp_hyper_connection.input_mix_weight_down.weight"
+    )
+    mapping[f"{prefix}-mlp_hyper_connection-input_mix_weight_up-kernel"] = (
+        f"{hf_layer}.mlp_hyper_connection.input_mix_weight_up.weight"
+    )
+    mapping[f"{prefix}-mlp_hyper_connection-block_inject_weight-kernel"] = (
+        f"{hf_layer}.mlp_hyper_connection.block_inject_weight.weight"
+    )
+
+    # PLE
+    if i + 1 in ple_layer_ids:
+      split_shards = config.get("text_config", {}).get("split_ngram_parts", 128)
+      mapping[f"{prefix}-ple-ngram_embedding-embedding"] = tuple(
+          f"{hf_layer}.ple.ple_embedding.ngram_embedding.shard_{s}.weight" for s in range(split_shards)
+      )
+      mapping[f"{prefix}-ple-key_proj-kernel"] = f"{hf_layer}.ple.key_proj.weight"
+      mapping[f"{prefix}-ple-value_proj-kernel"] = f"{hf_layer}.ple.value_proj.weight"
+      mapping[f"{prefix}-ple-norm_key-weight"] = f"{hf_layer}.ple.norm_key.weight"
+      mapping[f"{prefix}-ple-norm_query-weight"] = f"{hf_layer}.ple.norm_query.weight"
+      mapping[f"{prefix}-ple-norm_conv-weight"] = f"{hf_layer}.ple.norm_conv.weight"
+      mapping[f"{prefix}-ple-conv1d-kernel"] = f"{hf_layer}.ple.conv1d.weight"
+
+    # Attention
+    is_full_attention_layer = (i + 1) % layer_cycle_interval == 0
+    if is_full_attention_layer:
+      mapping[f"{prefix}-attention-attention-query-kernel"] = f"{hf_layer}.self_attn.q_proj.weight"
+      mapping[f"{prefix}-attention-attention-key-kernel"] = f"{hf_layer}.self_attn.k_proj.weight"
+      mapping[f"{prefix}-attention-attention-value-kernel"] = f"{hf_layer}.self_attn.v_proj.weight"
+      mapping[f"{prefix}-attention-attention-out-kernel"] = f"{hf_layer}.self_attn.o_proj.weight"
+      mapping[f"{prefix}-attention-attention-query_norm-scale"] = f"{hf_layer}.self_attn.q_norm.weight"
+      mapping[f"{prefix}-attention-attention-key_norm-scale"] = f"{hf_layer}.self_attn.k_norm.weight"
+    else:
+      mapping[f"{prefix}-attention-in_proj_qkvz-kernel"] = (
+          f"{hf_layer}.linear_attn.in_proj_qkv.weight",
+          f"{hf_layer}.linear_attn.in_proj_z.weight",
+      )
+      mapping[f"{prefix}-attention-in_proj_ba-kernel"] = (
+          f"{hf_layer}.linear_attn.in_proj_b.weight",
+          f"{hf_layer}.linear_attn.in_proj_a.weight",
+      )
+      mapping[f"{prefix}-attention-conv1d-kernel"] = f"{hf_layer}.linear_attn.conv1d.weight"
+      mapping[f"{prefix}-attention-A_log"] = f"{hf_layer}.linear_attn.A_log"
+      mapping[f"{prefix}-attention-dt_bias"] = f"{hf_layer}.linear_attn.dt_bias"
+      mapping[f"{prefix}-attention-norm-rms_norm-scale"] = f"{hf_layer}.linear_attn.norm.weight"
+      mapping[f"{prefix}-attention-out_proj-kernel"] = f"{hf_layer}.linear_attn.out_proj.weight"
+
+    # MLP MoE
+    mapping[f"{prefix}-mlp-routed_experts-gate-kernel"] = f"{hf_layer}.mlp.gate.weight"
+    mapping[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = f"{hf_layer}.mlp.shared_expert.gate_proj.weight"
+    mapping[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = f"{hf_layer}.mlp.shared_expert.up_proj.weight"
+    mapping[f"{prefix}-mlp-shared_expert-wo-kernel"] = f"{hf_layer}.mlp.shared_expert.down_proj.weight"
+    mapping[f"{prefix}-mlp-shared_expert_gate-kernel"] = f"{hf_layer}.mlp.shared_expert_gate.weight"
+    mapping[f"{prefix}-mlp-routed_experts-wo"] = f"{hf_layer}.mlp.experts.down_proj"
+    mapping[(f"{prefix}-mlp-routed_experts-wi_0", f"{prefix}-mlp-routed_experts-wi_1")] = (
+        f"{hf_layer}.mlp.experts.gate_up_proj"
+    )
+
+  return mapping
+
+
+def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Transformation hooks for parameters of Qwen3.8-Flash-Next."""
+
+  def transpose(input_tensor, target_shape=None):
+    return input_tensor.T
+
+  def reshape_kernel(input_tensor, target_shape):
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  def permute_conv(input_tensor, target_shape=None):
+    return input_tensor.transpose(2, 1, 0)
+
+  def transpose_expert(input_tensor, target_shape=None):
+    return input_tensor.transpose(0, 2, 1)
+
+  def process_wi_0_wi_1(input_tensor, target_shape=None):
+    if saving_to_hf:
+      wi_0, wi_1 = input_tensor
+      gate_up = np.concatenate([wi_0, wi_1], axis=-1)
+      return gate_up.swapaxes(-1, -2)
+    else:
+      gate, up = np.split(input_tensor, 2, axis=-2)
+      gate = gate.swapaxes(-1, -2)
+      up = up.swapaxes(-1, -2)
+      return np.stack([gate, up], axis=-1)
+
+  def concat_ngram_shards(input_tensor, target_shape=None):
+    return np.concatenate(input_tensor, axis=0)
+
+  text_cfg = config.get("text_config", config)
+  H_k = text_cfg["linear_num_key_heads"]
+  H_v = text_cfg["linear_num_value_heads"]
+  D_k = text_cfg["linear_key_head_dim"]
+  D_v = text_cfg["linear_value_head_dim"]
+  V_per_K = H_v // H_k
+
+  def concat_qkvz_and_transpose(input_tensor, target_shape=None):
+    if saving_to_hf:
+      t_m = input_tensor.T
+      block_size = D_k + D_k + V_per_K * D_v + V_per_K * D_v
+      t_r = t_m.reshape(H_k, block_size, -1)
+      q_r = t_r[:, :D_k, :]
+      k_r = t_r[:, D_k : 2 * D_k, :]
+      v_r = t_r[:, 2 * D_k : 2 * D_k + V_per_K * D_v, :]
+      z_r = t_r[:, 2 * D_k + V_per_K * D_v :, :]
+      q = q_r.reshape(H_k * D_k, -1)
+      k = k_r.reshape(H_k * D_k, -1)
+      v = v_r.reshape(H_v * D_v, -1)
+      z = z_r.reshape(H_v * D_v, -1)
+      qkv = np.concatenate([q, k, v], axis=0)
+      return qkv, z
+    else:
+      qkv_m, z_m = input_tensor
+      Q_dim = H_k * D_k
+      K_dim = H_k * D_k
+      q = qkv_m[:Q_dim, :]
+      k = qkv_m[Q_dim : Q_dim + K_dim, :]
+      v = qkv_m[Q_dim + K_dim :, :]
+      q_r = q.reshape(H_k, D_k, -1)
+      k_r = k.reshape(H_k, D_k, -1)
+      v_r = v.reshape(H_k, V_per_K * D_v, -1)
+      z_r = z_m.reshape(H_k, V_per_K * D_v, -1)
+      interleaved = np.concatenate([q_r, k_r, v_r, z_r], axis=1)
+      return interleaved.reshape(-1, qkv_m.shape[-1]).T
+
+  def concat_ba_and_transpose(input_tensor, target_shape=None):
+    if saving_to_hf:
+      t_m = input_tensor.T
+      block_size = V_per_K * 2
+      t_r = t_m.reshape(H_k, block_size, -1)
+      b_r = t_r[:, :V_per_K, :]
+      a_r = t_r[:, V_per_K:, :]
+      b = b_r.reshape(H_v, -1)
+      a = a_r.reshape(H_v, -1)
+      return b, a
+    else:
+      b_m, a_m = input_tensor
+      b_r = b_m.reshape(H_k, V_per_K, -1)
+      a_r = a_m.reshape(H_k, V_per_K, -1)
+      interleaved = np.concatenate([b_r, a_r], axis=1)
+      return interleaved.reshape(-1, b_m.shape[-1]).T
+
+  def dummy_norm(input_tensor, target_shape=None):
+    return np.ones(target_shape if target_shape is not None else (2560,), dtype=np.float32)
+
+  hooks = {
+      "params-decoder-decoder_norm-scale": dummy_norm,
+      "params-decoder-logits_dense-kernel": transpose,
+      "params-decoder-hyper_connection_mixer-input_mix_weight_down-kernel": transpose,
+      "params-decoder-hyper_connection_mixer-input_mix_weight_up-kernel": transpose,
+  }
+
+  layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
+  num_main_layers = config.get("num_hidden_layers", config.get("text_config", {}).get("num_hidden_layers", 48))
+  ple_layer_ids = getattr(maxtext_config, "ple_layer_ids", (2,))
+  if isinstance(ple_layer_ids, str):
+    ple_layer_ids = (
+        ast.literal_eval(ple_layer_ids) if ("(" in ple_layer_ids or "[" in ple_layer_ids) else (int(ple_layer_ids),)
+    )
+
+  for i in range(num_main_layers):
+    prefix = f"params-decoder-layers_{i}"
+    hooks[f"{prefix}-attn_hyper_connection-input_mix_weight_down-kernel"] = transpose
+    hooks[f"{prefix}-attn_hyper_connection-input_mix_weight_up-kernel"] = transpose
+    hooks[f"{prefix}-attn_hyper_connection-block_inject_weight-kernel"] = transpose
+    hooks[f"{prefix}-mlp_hyper_connection-input_mix_weight_down-kernel"] = transpose
+    hooks[f"{prefix}-mlp_hyper_connection-input_mix_weight_up-kernel"] = transpose
+    hooks[f"{prefix}-mlp_hyper_connection-block_inject_weight-kernel"] = transpose
+
+    if i + 1 in ple_layer_ids:
+      hooks[f"{prefix}-ple-ngram_embedding-embedding"] = concat_ngram_shards
+      hooks[f"{prefix}-ple-key_proj-kernel"] = transpose
+      hooks[f"{prefix}-ple-value_proj-kernel"] = transpose
+      hooks[f"{prefix}-ple-conv1d-kernel"] = permute_conv
+
+    is_full_attention_layer = (i + 1) % layer_cycle_interval == 0
+    if is_full_attention_layer:
+      for key in ["query", "key", "value", "out"]:
+        hooks[f"{prefix}-attention-attention-{key}-kernel"] = reshape_kernel
+    else:
+      hooks[f"{prefix}-attention-in_proj_qkvz-kernel"] = concat_qkvz_and_transpose
+      hooks[f"{prefix}-attention-in_proj_ba-kernel"] = concat_ba_and_transpose
+      hooks[f"{prefix}-attention-out_proj-kernel"] = transpose
+      hooks[f"{prefix}-attention-conv1d-kernel"] = permute_conv
+
+    mlp_prefix = f"{prefix}-mlp"
+    hooks[f"{mlp_prefix}-routed_experts-gate-kernel"] = transpose
+    hooks[f"{mlp_prefix}-shared_expert-wi_0-kernel"] = transpose
+    hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel"] = transpose
+    hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
+    hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
+    hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
+    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = process_wi_0_wi_1
 
   return hooks
 
@@ -4299,6 +4542,7 @@ PARAM_MAPPING = {
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3.8-flash-next": QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4355,6 +4599,7 @@ HOOK_FNS = {
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3.8-flash-next": QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,

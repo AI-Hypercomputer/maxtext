@@ -432,7 +432,9 @@ class Attention(nnx.Module):
 
     self.is_qwen2 = self.config.decoder_block == DecoderBlockType.QWEN2
     self.is_qwen3_hybrid = (
-        self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5) and not self.is_vision
+        self.config.decoder_block
+        in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.QWEN3_8_FLASH_NEXT)
+        and not self.is_vision
     )
 
     # Module attribute names must match names previously passed to Linen for checkpointing
