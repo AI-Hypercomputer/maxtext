@@ -36,6 +36,9 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 >
 > **5. Developer-Only Ephemeral Guardrails (DO NOT MERGE TO PRODUCTION)**:
 > Features such as automatic 2-hour worker timeouts (`activeDeadlineSeconds: 7200`), 10-minute cleanup TTLs (`ttlSecondsAfterFinished: 600`), and checkpoint disabling (`DISABLE_CHECKPOINTING=true`) are strictly temporary development scaffolds designed to protect quota and accelerate debugging. They exist as clearly marked standalone commits (`[DEV ONLY - DO NOT MERGE TO PROD]`) and MUST NOT propagate into production branches or releases.
+>
+> **6. Mandatory Verification of Rollout Text Quality (No Gibberish)**:
+> Program completion (`EXIT_CODE=0`) or successful weight synchronization is NOT sufficient proof of correctness. For every diagnostic baseline and scaling step, the rollout completion text MUST be directly inspected to confirm absence of gibberish (e.g. repetitive exclamation points, repetitive newlines, ASCII garbage, or incoherent multilingual tokens). Workloads must be launched with `--debug` and `--reward_mode=exact` (or inspected via raw rollout buffers) so the sampled response text is printed to stdout/logs and recorded with factual proofs in this document.
 
 ---
 
@@ -135,7 +138,9 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
     Program End: Sun Sep  6 16:18:24 UTC 2026
     EXIT_CODE=0
     ```
-  - **Confirmation**: Confirmed that Qwen3-0.6B baseline with 1 rollout worker runs end-to-end cleanly with 0 errors.
+  - **Execution Confirmation & Pending Text Inspection**:
+    - Confirmed that Qwen3-0.6B baseline with 1 rollout worker runs end-to-end cleanly with 0 crashes (`EXIT_CODE=0`).
+    - **Note on Rollout Text Inspection**: Because `REWARD_MODE=env` evaluated rewards inside the rollout environment without echoing text, raw completion strings were not printed to stdout. Per Principle 6, confirming absence of gibberish is mandatory. A targeted rerun with `--debug` and `--reward_mode=exact` will be run to log and inspect the exact sampled responses for 0.6B.
 
 ### G. Diagnostic Study Step 2: Testing 35B with 1 Rollout Worker (`igorts-rd-35b`)
 - **Execution & Parameters**:
