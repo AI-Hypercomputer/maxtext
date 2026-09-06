@@ -13,7 +13,8 @@
 # limitations under the License.
 # ==============================================================================
 
-# pylint: disable=missing-module-docstring,missing-class-docstring,missing-function-docstring,use-dict-literal
+"""Weight and state reference dataclasses for VMEM."""
+
 import dataclasses
 import functools
 from typing import Any
@@ -22,7 +23,25 @@ import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import config
+
+try:
+  from maxtext.models.kernels.gdn import config
+except (ImportError, ModuleNotFoundError):
+  try:
+    from maxtext.src.maxtext.models.kernels.gdn import config
+  except (ImportError, ModuleNotFoundError):
+    from . import config
+
+
+def _flat_pos(shape: tuple[int, ...], indices: tuple[Any, ...]) -> Any:
+  """Row-major flat offset of `indices` into a logical array of `shape`."""
+  strides = pl.strides_from_shape(shape)
+  assert len(strides) == len(indices)
+
+  pos = 0
+  for stride, idx in zip(strides, indices):
+    pos += stride * idx
+  return pos
 
 
 @jax.tree_util.register_dataclass
@@ -46,41 +65,107 @@ class WeightRefs:
   gdn: GDNWeightsRef
 
 
-@jax.tree_util.register_dataclass
+class FieldOffset:
+  """Descriptor returning the record field at ``data[pos + offset]``.
+
+  Reads a single dynamically-indexed element rather than a slice, since JAX
+  can't slice a range with traced indices. Read-only: metadata is never
+  written.
+  """
+
+  def __init__(self, offset: int):
+    self.offset = offset
+
+  def __get__(self, obj, objtype=None):
+    if obj is None:
+      return self
+    return obj.data[obj.pos + self.offset]
+
+
+# Per-p_id metadata is an array of structs: each p_id's fields sit contiguously
+# and FieldOffset(k) reads the k-th word of its struct.
+#
+# Packed struct: [r_base, packed_word].
+# Fields share packed_word to save SMEM: is_first_tile(0), is_last_tile(1), r_size(2..15), s_idx(16..31).
 @dataclasses.dataclass(frozen=True)
-class SmemWrapper:
-  """Maps physical 1-D data into logical N-D representation."""
+class PackedPIdRecord:
+  """Packed struct [r_base, packed_word]; the four small fields bit-slice word.
+
+  Each bit field masks after shifting, which also clears the sign bits that
+  ``>>`` extends on the signed int32 word.
+  """
+
+  STRUCT_SIZE = 2
+  FIRST_TILE_SHIFT = 0
+  LAST_TILE_SHIFT = 1
+  R_SIZE_SHIFT = 2
+  S_IDX_SHIFT = 16
+  FLAG_MASK = 1
+  R_SIZE_MASK = (1 << (S_IDX_SHIFT - R_SIZE_SHIFT)) - 1
+  S_IDX_MASK = (1 << (32 - S_IDX_SHIFT)) - 1
+  MAX_SEQS = S_IDX_MASK + 1
 
   data: Any
-  shape: tuple[int, ...] = dataclasses.field(metadata=dict(static=True))
+  pos: Any
+  r_base = FieldOffset(0)
+  word = FieldOffset(1)
 
-  def _get_pos(self, indices: tuple[Any, ...]) -> Any:
-    strides = pl.strides_from_shape(self.shape)
-    assert len(strides) == len(indices)
+  @property
+  def s_idx(self):
+    return (self.word >> self.S_IDX_SHIFT) & self.S_IDX_MASK
 
-    pos = 0
-    for stride, idx in zip(strides, indices):
-      pos += stride * idx
-    return pos
+  @property
+  def r_size(self):
+    return (self.word >> self.R_SIZE_SHIFT) & self.R_SIZE_MASK
 
-  def __getitem__(self, indices: tuple[Any, ...]) -> Any:
-    return self.data[self._get_pos(indices)]
+  @property
+  def is_first_tile(self):
+    return (self.word & self.FLAG_MASK) != 0
+
+  @property
+  def is_last_tile(self):
+    return ((self.word >> self.LAST_TILE_SHIFT) & self.FLAG_MASK) != 0
+
+  @classmethod
+  def pack(
+      cls,
+      s_idx: jax.Array,
+      r_size: jax.Array,
+      is_first_tile: jax.Array,
+      is_last_tile: jax.Array,
+  ) -> jax.Array:
+    """Packs s_idx, row size and two tile-state flags into one int32 word."""
+
+    s_idx = s_idx.reshape(-1).astype(jnp.int32)
+    r_size = r_size.reshape(-1).astype(jnp.int32)
+    is_first_tile = is_first_tile.reshape(-1).astype(jnp.int32)
+    is_last_tile = is_last_tile.reshape(-1).astype(jnp.int32)
+    word = s_idx << cls.S_IDX_SHIFT
+    word |= r_size << cls.R_SIZE_SHIFT
+    word |= is_last_tile << cls.LAST_TILE_SHIFT
+    word |= is_first_tile << cls.FIRST_TILE_SHIFT
+    return word
 
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class MetadataRef:
+  """Container for sequence and chunk metadata references."""
+
   num_tiles: Any
-  p_id_to_s_idx: SmemWrapper
-  p_id_to_r_base: SmemWrapper
-  p_id_to_r_size: SmemWrapper
-  p_id_is_first_tile: SmemWrapper
-  p_id_is_last_tile: SmemWrapper
+  # Array of structs holding every p_id's metadata
+  records: Any
   s_idx_has_initial_state: Any
   s_idx_to_state_indices: Any
+  shape: tuple[int, ...] = dataclasses.field(metadata={"static": True})
+
+  def get_record(self, p_id, idx) -> PackedPIdRecord:
+    """View of one p_id's metadata: .r_base / .s_idx / .r_size / .is_*_tile."""
+    record_idx = _flat_pos(self.shape, (p_id, idx))
+    return PackedPIdRecord(self.records, record_idx * PackedPIdRecord.STRUCT_SIZE)
 
   @classmethod
-  def create(
+  def create(  # pyrefly: ignore[bad-override]
       cls,
       cfgs: config.GDNConfig,
       num_tiles: jax.Array,
@@ -91,18 +176,30 @@ class MetadataRef:
       p_id_is_last_tile: jax.Array,
       s_idx_has_initial_state: jax.Array,
       s_idx_to_state_indices: jax.Array,
-  ) -> "MetadataRef":
+  ):
+    """Constructs a MetadataRef instance from packing inputs."""
     # NOTE: First dim does not matter when it comes to calculating stride.
     shape = (1, cfgs.seq_tile_size)
+    assert s_idx_has_initial_state.shape[0] <= PackedPIdRecord.MAX_SEQS, (
+        f"Number of sequences ({s_idx_has_initial_state.shape[0]}) exceeds"
+        f" PackedPIdRecord limit ({PackedPIdRecord.MAX_SEQS})."
+    )
+    assert cfgs.tile_size <= PackedPIdRecord.R_SIZE_MASK, (
+        f"Tile size ({cfgs.tile_size}) exceeds PackedPIdRecord limit" f" ({PackedPIdRecord.R_SIZE_MASK})."
+    )
+
+    r_base = p_id_to_r_base.reshape(-1).astype(jnp.int32)
+    word = PackedPIdRecord.pack(p_id_to_s_idx, p_id_to_r_size, p_id_is_first_tile, p_id_is_last_tile)
+    fields = [r_base, word]
+    # Interleave fields into one array of structs: [rec0_f0, rec0_f1, ...].
+    records = jnp.stack(fields, axis=-1).reshape(-1)
+
     return cls(
         num_tiles=num_tiles,
-        p_id_to_s_idx=SmemWrapper(p_id_to_s_idx, shape),
-        p_id_to_r_base=SmemWrapper(p_id_to_r_base, shape),
-        p_id_to_r_size=SmemWrapper(p_id_to_r_size, shape),
-        p_id_is_first_tile=SmemWrapper(p_id_is_first_tile, shape),
-        p_id_is_last_tile=SmemWrapper(p_id_is_last_tile, shape),
+        records=records,
         s_idx_has_initial_state=s_idx_has_initial_state,
         s_idx_to_state_indices=s_idx_to_state_indices,
+        shape=shape,
     )
 
   def __len__(self) -> int:
@@ -111,12 +208,13 @@ class MetadataRef:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class BaseBufferedRef(pltpu.BufferedRef):
+  """Base class for Pallas BufferedRef with attached GDN configuration."""
 
-  cfg: config.GDNConfig = dataclasses.field(metadata=dict(static=True))
+  cfg: config.GDNConfig = dataclasses.field(metadata={"static": True})
   # NOTE: Despite being ref, metadata_ref should be set to static. This is
   # because the memory will be allocated outside of kernel and metadata_ref
   # merely points to the reference.
-  metadata_ref: MetadataRef = dataclasses.field(metadata=dict(static=True))
+  metadata_ref: MetadataRef = dataclasses.field(metadata={"static": True})
 
   @classmethod
   def create(  # pyrefly: ignore[bad-override]
@@ -129,6 +227,7 @@ class BaseBufferedRef(pltpu.BufferedRef):
       cfg: config.GDNConfig,
       metadata_ref: MetadataRef,
   ):
+    """Creates a BaseBufferedRef wrapping a standard Pallas BufferedRef."""
     standard_ref = pltpu.BufferedRef.create(
         spec=spec,
         dtype_or_type=dtype_or_type,
@@ -147,8 +246,10 @@ class BaseBufferedRef(pltpu.BufferedRef):
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class InBufferedRef(BaseBufferedRef):
+  """Input double-buffered DMA reference for Pallas pipeline."""
 
-  def copy_in(self, src_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
+  def copy_in(self, src_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Initiates asynchronous copy into current input VMEM slot."""
     assert self.sem_recvs is not None
     assert self.window_ref is not None
     slot = self.current_copy_in_slot
@@ -157,15 +258,17 @@ class InBufferedRef(BaseBufferedRef):
     p_id = grid_indices[0]
 
     for idx in range(self.cfg.seq_tile_size):
-      r_base = self.metadata_ref.p_id_to_r_base[p_id, idx]
-      dma_size = self.metadata_ref.p_id_to_r_size[p_id, idx]
+      record = self.metadata_ref.get_record(p_id, idx)
+      r_base = record.r_base
+      dma_size = record.r_size
       pltpu.make_async_copy(
           src_ref.at[pl.ds(r_base, dma_size)],
           vmem_ref.at[idx, pl.ds(0, dma_size)],  # pyrefly: ignore[missing-attribute]
           sem,
       ).start()
 
-  def wait_in(self, src_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
+  def wait_in(self, src_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Waits for asynchronous input copy to complete."""
     assert self.sem_recvs is not None
     assert self.window_ref is not None
     slot = self.current_wait_in_slot
@@ -175,7 +278,7 @@ class InBufferedRef(BaseBufferedRef):
 
     dma_size = 0
     for idx in range(self.cfg.seq_tile_size):
-      dma_size += self.metadata_ref.p_id_to_r_size[p_id, idx]
+      dma_size += self.metadata_ref.get_record(p_id, idx).r_size
 
     pltpu.make_async_copy(
         vmem_ref.at[0, pl.ds(0, dma_size)],  # pyrefly: ignore[missing-attribute]
@@ -187,8 +290,10 @@ class InBufferedRef(BaseBufferedRef):
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class OutBufferedRef(BaseBufferedRef):
+  """Output double-buffered DMA reference for Pallas pipeline."""
 
-  def copy_out(self, dst_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
+  def copy_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Initiates asynchronous copy from current output VMEM slot."""
     assert self.sem_sends is not None
     assert self.window_ref is not None
     slot = self.current_copy_out_slot
@@ -197,15 +302,17 @@ class OutBufferedRef(BaseBufferedRef):
     p_id = grid_indices[0]
 
     for idx in range(self.cfg.seq_tile_size):
-      r_base = self.metadata_ref.p_id_to_r_base[p_id, idx]
-      dma_size = self.metadata_ref.p_id_to_r_size[p_id, idx]
+      record = self.metadata_ref.get_record(p_id, idx)
+      r_base = record.r_base
+      dma_size = record.r_size
       pltpu.make_async_copy(
           vmem_ref.at[idx, pl.ds(0, dma_size)],  # pyrefly: ignore[missing-attribute]
           dst_ref.at[pl.ds(r_base, dma_size)],
           sem,
       ).start()
 
-  def wait_out(self, dst_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
+  def wait_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Waits for asynchronous output copy to complete."""
     assert self.sem_sends is not None
     assert self.window_ref is not None
     slot = self.current_wait_out_slot
@@ -215,7 +322,7 @@ class OutBufferedRef(BaseBufferedRef):
 
     dma_size = 0
     for idx in range(self.cfg.seq_tile_size):
-      dma_size += self.metadata_ref.p_id_to_r_size[p_id, idx]
+      dma_size += self.metadata_ref.get_record(p_id, idx).r_size
 
     pltpu.make_async_copy(
         vmem_ref.at[0, pl.ds(0, dma_size)],  # pyrefly: ignore[missing-attribute]
@@ -226,9 +333,81 @@ class OutBufferedRef(BaseBufferedRef):
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class StateBufferedRef(BaseBufferedRef):
+class TInvBufferedRef(BaseBufferedRef):
+  """DMA buffer for triangular inverse matrix caching (t_inv)."""
 
-  def copy_in(self, src_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
+  def copy_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    assert self.sem_sends is not None
+    assert self.window_ref is not None
+    slot = self.current_copy_out_slot
+    sem = self.sem_sends.at[slot]
+    vmem_ref = self.window_ref.at[slot]
+    p_id = grid_indices[0]
+
+    for idx in range(self.cfg.seq_tile_size):
+      pltpu.make_async_copy(
+          vmem_ref.at[idx],
+          dst_ref.at[p_id + idx],
+          sem,
+      ).start()
+
+  def wait_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    assert self.sem_sends is not None
+    assert self.window_ref is not None
+    slot = self.current_wait_out_slot
+    sem = self.sem_sends.at[slot]
+    vmem_ref = self.window_ref.at[slot]
+
+    for idx in range(self.cfg.seq_tile_size):
+      pltpu.make_async_copy(
+          vmem_ref.at[idx],
+          vmem_ref.at[idx],
+          sem,
+      ).wait()
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ChunkStatesBufferedRef(BaseBufferedRef):
+  """DMA buffer for caching intermediate recurrent chunk states."""
+
+  def copy_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    assert self.sem_sends is not None
+    assert self.window_ref is not None
+    slot = self.current_copy_out_slot
+    sem = self.sem_sends.at[slot]
+    vmem_ref = self.window_ref.at[slot]
+    p_id = grid_indices[0]
+
+    for idx in range(self.cfg.seq_tile_size):
+      pltpu.make_async_copy(
+          vmem_ref.at[idx],
+          dst_ref.at[p_id + idx],
+          sem,
+      ).start()
+
+  def wait_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    assert self.sem_sends is not None
+    assert self.window_ref is not None
+    slot = self.current_wait_out_slot
+    sem = self.sem_sends.at[slot]
+    vmem_ref = self.window_ref.at[slot]
+
+    for idx in range(self.cfg.seq_tile_size):
+      pltpu.make_async_copy(
+          vmem_ref.at[idx],
+          vmem_ref.at[idx],
+          sem,
+      ).wait()
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class StateBufferedRef(BaseBufferedRef):
+  """State buffered reference with conditional first/last tile DMA."""
+
+  def copy_in(self, src_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Initiates asynchronous state copy into VMEM slot."""
     assert self.sem_recvs is not None
     assert self.window_ref is not None
     slot = self.current_copy_in_slot
@@ -237,9 +416,9 @@ class StateBufferedRef(BaseBufferedRef):
     p_id = grid_indices[0]
 
     for idx in range(self.cfg.seq_tile_size):
-
-      is_first_tile = self.metadata_ref.p_id_is_first_tile[p_id, idx]
-      s_idx = self.metadata_ref.p_id_to_s_idx[p_id, idx]
+      record = self.metadata_ref.get_record(p_id, idx)
+      is_first_tile = record.is_first_tile
+      s_idx = record.s_idx
       state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
       has_initial_state = self.metadata_ref.s_idx_has_initial_state[s_idx]
       should_read = jnp.logical_and(is_first_tile, has_initial_state)
@@ -251,7 +430,8 @@ class StateBufferedRef(BaseBufferedRef):
           sem,
       ).start()
 
-  def wait_in(self, src_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
+  def wait_in(self, src_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Waits for asynchronous state input copy to complete."""
     assert self.sem_recvs is not None
     assert self.window_ref is not None
     slot = self.current_wait_in_slot
@@ -261,8 +441,9 @@ class StateBufferedRef(BaseBufferedRef):
 
     dma_size = 0
     for idx in range(self.cfg.seq_tile_size):
-      is_first_tile = self.metadata_ref.p_id_is_first_tile[p_id, idx]
-      s_idx = self.metadata_ref.p_id_to_s_idx[p_id, idx]
+      record = self.metadata_ref.get_record(p_id, idx)
+      is_first_tile = record.is_first_tile
+      s_idx = record.s_idx
       has_initial_state = self.metadata_ref.s_idx_has_initial_state[s_idx]
       should_read = jnp.logical_and(is_first_tile, has_initial_state)
       dma_size += jnp.where(should_read, 1, 0)
@@ -273,7 +454,8 @@ class StateBufferedRef(BaseBufferedRef):
         sem,
     ).wait()
 
-  def copy_out(self, dst_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
+  def copy_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Initiates asynchronous state copy from VMEM slot to HBM."""
     assert self.sem_sends is not None
     assert self.window_ref is not None
     slot = self.current_copy_out_slot
@@ -282,8 +464,9 @@ class StateBufferedRef(BaseBufferedRef):
     p_id = grid_indices[0]
 
     for idx in range(self.cfg.seq_tile_size):
-      is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
-      s_idx = self.metadata_ref.p_id_to_s_idx[p_id, idx]
+      record = self.metadata_ref.get_record(p_id, idx)
+      is_last_tile = record.is_last_tile
+      s_idx = record.s_idx
       state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
       dma_size = jnp.where(is_last_tile, 1, 0)
 
@@ -294,6 +477,7 @@ class StateBufferedRef(BaseBufferedRef):
       ).start()
 
   def wait_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Waits for asynchronous state output copy to complete."""
     assert self.sem_sends is not None
     assert self.window_ref is not None
     slot = self.current_wait_out_slot
@@ -303,7 +487,7 @@ class StateBufferedRef(BaseBufferedRef):
 
     dma_size = 0
     for idx in range(self.cfg.seq_tile_size):
-      is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
+      is_last_tile = self.metadata_ref.get_record(p_id, idx).is_last_tile
       dma_size += jnp.where(is_last_tile, 1, 0)
 
     pltpu.make_async_copy(
@@ -322,14 +506,10 @@ def create_allocs(
     conv_state_ref: jax.Array,
     recurrent_state_ref: jax.Array,
     cfg: config.GDNConfig,
-) -> tuple[
-    InBufferedRef,
-    InBufferedRef,
-    InBufferedRef,
-    StateBufferedRef,
-    StateBufferedRef,
-    OutBufferedRef,
-]:
+    t_inv_ref: jax.Array | None = None,
+    chunk_states_ref: jax.Array | None = None,
+) -> tuple[Any, ...]:
+  """Creates all Pallas double-buffered allocations for GDN kernel."""
   qkv_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.dim_size)
   ba_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.aligned_num_v_heads)
 
@@ -390,4 +570,47 @@ def create_allocs(
   conv_alloc = state_buffered_partial(spec=conv_spec, dtype_or_type=conv_state_ref)
   recurrent_alloc = state_buffered_partial(spec=recurrent_spec, dtype_or_type=recurrent_state_ref)
 
-  return qkv_alloc, b_alloc, a_alloc, conv_alloc, recurrent_alloc, out_alloc
+  allocs = [
+      qkv_alloc,
+      b_alloc,
+      a_alloc,
+      conv_alloc,
+      recurrent_alloc,
+      out_alloc,
+  ]
+
+  if t_inv_ref is not None:
+    t_inv_shape = (
+        cfg.seq_tile_size,
+        cfg.num_v_heads,
+        cfg.chunk_size,
+        cfg.chunk_size,
+    )
+    t_inv_alloc = TInvBufferedRef.output(
+        spec=block_spec_partial(block_shape=t_inv_shape),
+        dtype_or_type=t_inv_ref,
+        buffer_count=pipeline_mode.buffer_count,
+        use_lookahead=pipeline_mode.use_lookahead,
+        cfg=cfg,
+        metadata_ref=metadata_ref,
+    )
+    allocs.append(t_inv_alloc)
+
+  if chunk_states_ref is not None:
+    chunk_states_shape = (
+        cfg.seq_tile_size,
+        cfg.num_v_heads,
+        cfg.kq_head_dim,
+        cfg.v_head_dim,
+    )
+    chunk_states_alloc = ChunkStatesBufferedRef.output(
+        spec=block_spec_partial(block_shape=chunk_states_shape),
+        dtype_or_type=chunk_states_ref,
+        buffer_count=pipeline_mode.buffer_count,
+        use_lookahead=pipeline_mode.use_lookahead,
+        cfg=cfg,
+        metadata_ref=metadata_ref,
+    )
+    allocs.append(chunk_states_alloc)
+
+  return tuple(allocs)

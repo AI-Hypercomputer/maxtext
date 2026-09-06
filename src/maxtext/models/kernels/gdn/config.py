@@ -13,7 +13,8 @@
 # limitations under the License.
 # ==============================================================================
 
-# pylint: disable=missing-module-docstring,missing-class-docstring,missing-function-docstring,use-dict-literal
+"""GDN Configuration dataclass defining GDN tiling, dtypes, and kernel configurations."""
+
 import dataclasses
 import enum
 from typing import Any
@@ -24,10 +25,12 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
 
-DEFAULT_VMEM_LIMIT_FACTOR: float = 0.80
+DEFAULT_VMEM_LIMIT_FACTOR: float = 0.90
 
 
 class GDNMode(enum.StrEnum):
+  """Execution mode for GDN kernel."""
+
   BATCHED = enum.auto()
   PER_SEQ = enum.auto()
 
@@ -45,6 +48,8 @@ class GDNMode(enum.StrEnum):
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class Dtypes:
+  """Dtypes used across GDN operations."""
+
   act_in: jnp.dtype
   act_out: jnp.dtype
   compute: jnp.dtype
@@ -63,6 +68,8 @@ def get_vmem_limit_bytes(
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class GDNConfig:
+  """Configuration dataclass for GDN kernel."""
+
   mode: GDNMode
   dtypes: Dtypes
   batch_size: int
@@ -125,6 +132,7 @@ class GDNConfig:
     )
 
   def get_scratch_shape_dict(self) -> dict[str, Any]:
+    """Returns dictionary of scratch shapes for Pallas pipeline."""
     conv_shape = (self.seq_tile_size, self.prev_kernel_size, 1, self.dim_size)
     recurrent_shape = (
         self.seq_tile_size,
@@ -140,7 +148,7 @@ class GDNConfig:
       carry_conv_scratch = pltpu.VMEM(conv_shape, jnp.float32)
       carry_recurrent_scratch = pltpu.VMEM(recurrent_shape, jnp.float32)
 
-    return dict(
-        carry_conv_scratch_ref=carry_conv_scratch,
-        carry_recurrent_scratch_ref=carry_recurrent_scratch,
-    )
+    return {
+        "carry_conv_scratch_ref": carry_conv_scratch,
+        "carry_recurrent_scratch_ref": carry_recurrent_scratch,
+    }
