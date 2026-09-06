@@ -108,6 +108,12 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
     2026-09-05 00:54:08,265 - [Orchestrator] discovery server stopped
     EXIT_CODE=0
     ```
+  - **Observations on Loss and GSM8K Rewards**:
+    - Scanned checkpoint completions at step 0 produced repetitive ASCII/multilingual strings rather than valid math reasoning responses (`reward = 0.0000`).
+    - With zero rewards and advantage variance of 0 across prompt groups, GRPO policy gradient updates evaluated to zero loss (`loss: 0.000, perplexity: 1.000`).
+    - For future runs aiming to evaluate mathematical capability, calibration of prompt formatting / system prompts or using an instruction-tuned base checkpoint with higher step counts (`MAX_STEPS >= 50`) will be needed to trigger non-zero reward signals.
+  - **Automatic Cluster Cleanup**:
+    - The ephemeral dev guardrail `ttlSecondsAfterFinished: 600` successfully reclaimed all JobSet pods, releasing TPU slices automatically after run completion.
 
 ---
 
@@ -170,6 +176,8 @@ All repositories are on branch `igorts/qwen35-run`:
 
 ### A. `maxtext` (`AI-Hypercomputer/maxtext`)
 ```text
+7f360b70b (HEAD) docs: update handoff with reward/loss observations and TTL cleanup verification
+fa03600d6 docs: document milestone 5 (2-rollout E2E training on Qwen3.5-35B, image v17, compute_on2 fix)
 d771295b6 [DEV ONLY - DO NOT MERGE TO PROD] feat(engine): support DISABLE_CHECKPOINTING environment variable
 67ef9188b feat(tunix): support abstract ShapeDtypeStruct unrolling in raiden_unscan
 551ea2ff7 Support inhomogeneous layer cycles when unscanning for Raiden weight sync
