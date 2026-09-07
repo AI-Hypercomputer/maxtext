@@ -554,7 +554,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       def diff_wrapper(curr_params, custom_params, rest, config, data):
         local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
         loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
-        non_param_rest = nnx.state(local_model, nnx.Not(nnx.Any(nnx.Param, nnx.Intermediate)))
+        # Exclude parameters, custom-gradient state, and intermediates. Custom-
+        # gradient state is updated separately, so stale values must not overwrite
+        # `custom_grads`.
+        non_param_rest = nnx.state(
+            local_model,
+            nnx.Not(nnx.Any(nnx.Param, custom_param_filter, nnx.Intermediate)),
+        )
         return loss, (aux, non_param_rest)
 
       grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)

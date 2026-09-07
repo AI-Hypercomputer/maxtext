@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import dataclasses
+import enum
 import os
 from typing import Any
 
@@ -46,6 +47,14 @@ _METRICS_TO_LOG = [
 _DEFAULT_MAX_BUFFERED_STEPS = 128
 
 
+class Mode(str, enum.Enum):
+  TRAIN = "train"
+  EVAL = "eval"
+
+  def __str__(self):
+    return self.value
+
+
 class MetricsRecorder:
   """Synchronous frontend for buffering and aggregating step metrics on-device.
 
@@ -58,7 +67,7 @@ class MetricsRecorder:
   for processing.
   """
 
-  def __init__(self, max_buffered_steps: int = _DEFAULT_MAX_BUFFERED_STEPS):
+  def __init__(self, max_buffered_steps: int = _DEFAULT_MAX_BUFFERED_STEPS, mode: Mode = Mode.TRAIN) -> None:
     """Initializes the recorder.
 
     Args:
@@ -66,6 +75,7 @@ class MetricsRecorder:
         as new steps start. Zero or less retains everything.
     """
     self._metrics_buffer: list[abstract_engine.MetricsBuffer] = []
+    self._mode = mode
     self._max_buffered_steps = max_buffered_steps
     self._dropped_buffer_count = 0
 
@@ -85,7 +95,7 @@ class MetricsRecorder:
       aggregation_fn: Optional aggregation function to apply to the metric.
     """
     if not self._metrics_buffer or self._metrics_buffer[-1].id != train_step:
-      new_buffer = abstract_engine.MetricsBuffer(id=train_step, mode="train")
+      new_buffer = abstract_engine.MetricsBuffer(id=train_step, mode=self._mode)
       self._metrics_buffer.append(new_buffer)
       self._evict_old_buffers()
 
@@ -195,7 +205,7 @@ class MetricsLogger:
   results to TensorBoard and console stdout.
   """
 
-  def __init__(self, config: pyconfig.HyperParameters):
+  def __init__(self, config: pyconfig.HyperParameters) -> None:
     """Initializes the metrics logger.
 
     Args:
@@ -219,48 +229,58 @@ class MetricsLogger:
     max_utils.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self._tb_writer)
     maxtext_utils.add_config_to_summary_writer(self._config, self._tb_writer)
 
-  def _log_metrics(self, step: int, metrics: dict[str, Any]) -> None:
+  def _log_metrics(self, step: int, metrics: dict[str, Any], mode: Mode) -> None:
     """Logs the metrics to the console.
 
     Args:
       step: The train step for which to log the metrics.
       metrics: Dictionary mapping metric names to reduced Python floats/numpy
         arrays.
+      mode: The mode of the training engine.
     """
-    log_message = [f"Completed step: {step}"]
-    for k in _METRICS_TO_LOG:
-      if k in metrics:
-        if k == "learning_rate":
-          log_message.append(f"{k}: {metrics[k]:.3e}")
-        else:
-          log_message.append(f"{k}: {metrics[k]:.3f}")
+    if mode == Mode.TRAIN:
+      log_message = [f"Train step: {step}"]
+      for k in ["loss", "perplexity"]:
+        if k in metrics:
+          val = metrics[k]
+          log_message.append(f"{k}: {val:.3f}")
+      if len(log_message) > 1:
+        logging.info(", ".join(log_message))
+    elif mode == Mode.EVAL:
+      loss = metrics.get("loss")
+      if loss is not None:
+        logging.info(
+            "Eval step %d evaluation loss: %f",
+            step,
+            loss,
+        )
 
-    logging.info(", ".join(log_message))
-
-  def write_metrics(self, metrics: abstract_engine.MetricsBuffer) -> None:
+  def write_metrics(self, metrics: abstract_engine.MetricsBuffer, mode: Mode = Mode.TRAIN) -> None:
     """Write metrics to the console and TensorBoard.
 
     Args:
       metrics: MetricsBuffer containing the metrics to write.
+      mode: The mode of the training engine.
     """
     processed_metrics = self.process_metrics(metrics)
-    self._log_metrics(metrics.id, processed_metrics)
-    self._write_metrics_to_tensorboard(metrics.id, processed_metrics)
+    self._log_metrics(step=metrics.id, metrics=processed_metrics, mode=mode)
+    self._write_metrics_to_tensorboard(step=metrics.id, metrics=processed_metrics, mode=mode)
 
-  def _write_metrics_to_tensorboard(self, step: int, metrics: dict[str, Any]) -> None:
+  def _write_metrics_to_tensorboard(self, step: int, metrics: dict[str, Any], mode: Mode = Mode.TRAIN) -> None:
     """Write metrics to TensorBoard.
 
     Args:
       step: The train step for which to write the metrics.
       metrics: Dictionary mapping metric names to reduced Python floats/numpy
         arrays.
+      mode: The mode of the training engine.
     """
     if self._tb_writer is None:
       return
 
     if jax.process_index() == 0:
       for metric_name, value in metrics.items():
-        self._tb_writer.add_scalar(metric_name, value, step)
+        self._tb_writer.add_scalar(f"{mode}/{metric_name}", value, step)
 
     if step % self._config.log_period == 0:
       logging.info(

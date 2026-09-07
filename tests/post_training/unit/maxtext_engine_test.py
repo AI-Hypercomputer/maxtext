@@ -1066,13 +1066,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("loss", buf.weighted_metrics)
     self.assertNotIn("loss", buf.scalar_metrics)
 
-  def test_eval_step_warns_once_and_mutates_no_state(self):
-    """eval_step is an unimplemented no-op, but an audible one, and it disturbs nothing.
-
-    `AbstractTrainer.eval_step` forbids mutating trainer state, so this asserts against a
-    populated engine -- gradients accumulated and a micro step counted -- rather than a
-    fresh one, where "unchanged" would be trivially true.
-    """
+  def test_eval_step_records_eval_metrics_and_mutates_no_training_state(self):
+    """eval_step scores a batch without disturbing training, and its metrics stay separate."""
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
     t.with_loss_fn(
         lambda *args, **kwargs: (
@@ -1086,18 +1081,41 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     micro_steps_before = t._micro_step_count
     train_step_before = t.train_step
     self.assertEqual(micro_steps_before, 1)
+    train_entries_before = t._metrics_recorder.get_step_metrics(train_step_before).weighted_metrics["loss"]
+    train_entries_before = train_entries_before.unreduced_sum.size
 
-    with self.assertLogs(level="WARNING") as logs:
-      t.eval_step(DummyPayload())
-      t.eval_step(DummyPayload())
-      t.eval_step(DummyPayload())
+    with mock.patch.object(t._metrics_logger, "write_metrics") as write_metrics:
+      with t.eval_context():
+        t.eval_step(DummyPayload())
+        t.eval_step(DummyPayload())
+        t.eval_step(DummyPayload())
 
-    eval_warnings = [line for line in logs.output if "eval_step is not implemented" in line]
-    self.assertLen(eval_warnings, 1)
-
+    # Nothing about the in-flight training step moved.
     self.assertEqual(t._micro_step_count, micro_steps_before)
     self.assertEqual(t.train_step, train_step_before)
     jax.tree.map(np.testing.assert_array_equal, grads_before, t._accumulated_grads)
+
+    # The train buffer still holds exactly the one fwd_bwd loss: no eval leaked into it.
+    train_buf = t._metrics_recorder.get_step_metrics(train_step_before)
+    self.assertEqual(train_buf.weighted_metrics["loss"].unreduced_sum.size, train_entries_before)
+    self.assertEqual(train_buf.mode, metrics_module.Mode.TRAIN)
+
+    # Leaving the context writes the pass once, tagged eval, against the step it ran at --
+    # not once per micro-batch, which would put three points on the curve at one x.
+    self.assertEqual(write_metrics.call_count, 1)
+    eval_buf = write_metrics.call_args.args[0]
+    self.assertEqual(write_metrics.call_args.kwargs["mode"], metrics_module.Mode.EVAL)
+    self.assertEqual(eval_buf.mode, metrics_module.Mode.EVAL)
+    self.assertEqual(eval_buf.id, train_step_before)
+
+    # All three micro-batches accumulated into that one buffer. `compute()` is elementwise,
+    # so it stays per-micro-batch here; `process_metrics` is what averages it down.
+    eval_loss = eval_buf.weighted_metrics["loss"]
+    self.assertEqual(eval_loss.unreduced_sum.size, 3)
+    self.assertAlmostEqual(float(np.mean(np.asarray(eval_loss.compute()))), 0.5, places=4)
+
+    # The recorder is drained, so a later pass cannot re-write this one's numbers.
+    self.assertEmpty(t._eval_metrics_recorder.get_metrics_history(clear_cache=False))
 
   def test_get_metrics_returns_one_buffer_and_a_sentinel_when_empty(self):
     """`get_metrics` returns a single buffer, matching both ABCs.
