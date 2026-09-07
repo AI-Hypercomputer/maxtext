@@ -131,88 +131,107 @@ To pinpoint what causes repetitive token / gibberish generation on GSM8K, the in
     - The ephemeral dev guardrail `ttlSecondsAfterFinished: 600` successfully reclaimed all JobSet pods, releasing TPU slices automatically after run completion.
 
 ### F. Diagnostic Study Step 1: Reproducing Mohit's Baseline (Qwen3-0.6B, 1 Rollout Worker, `igorts-rd-06b`)
-- **Execution & Parameters**:
+
+#### Phase 1: Unbalanced Shards (Discovery of Partial Overlap Bug)
+- **Configuration**:
   - Model: `Qwen3-0.6B` (`gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items`)
-  - Trainer: `tpuv5:2x2x2` (Dual-host Pathways, `FSDP=8`), Rollout: `tpuv5:2x2x1` (1 replica, `TP=2`).
+  - Trainer: `tpuv5:2x2x2` (Dual-host Pathways, `FSDP=8` = 8 source shards).
+  - Rollout: `tpuv5:2x2x1` (1 replica, `TP=2` = 2 destination shards).
+- **Observed Sampled Responses (GSM8K prompt 0)**:
+  ```text
+  2026-09-07 02:30:37,263 - [Orchestrator] Sampler response for prompt_0:
+  [Sampled Response] ---
+  |
+   eğ
+  =
+  —
+  | | | | ...
+  --- [End Response] ---
+  [Sampled Response] ---
+  aria
+  defangjadirenderherrenderherrenderherrenderrenderrender...
+  --- [End Response] ---
+  ```
+- **Finding**: Destination had only 2 shards vs source's 8 shards, resulting in Raiden transferring **only 2/8 (25%) of tensor shards**. The remaining 75% remained uninitialized, directly causing repetitive ASCII gibberish despite "green" transfer logs.
+
+#### Phase 2: Balanced Shards (Definitive Elimination of Gibberish & Full Verification)
+- **Configuration**:
+  - Model: `Qwen3-0.6B` (`gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items`)
+  - Trainer: `tpuv5:2x2x1` (Single-host Pathways, `--trainer-fsdp=4` $\to$ 4 source shards).
+  - Rollout: `tpuv5:2x2x1` (1 replica, `--rollout-tp=4` $\to$ 4 destination shards).
+  - Orchestrator: `--debug --reward-mode=exact`.
   - Image: `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v17`.
-- **Factual Results**:
-  - All workers registered cleanly with orchestrator discovery server:
+- **Weight Transfer Verification**:
+  ```text
+  src unit job_name='trainer' job_replica_id='' shards=4 ['10.164.0.163:38935', '10.164.0.163:38935', '10.164.0.163:38935', '10.164.0.163:38935']
+  dst unit job_name='igorts-rd-06b-roll' job_replica_id='' shards=4 ['10.164.0.208:42449', '10.164.0.208:42449', '10.164.0.208:42449', '10.164.0.208:42449']
+  ```
+  - **100% full weight transfer (zero partial overlap warning)**.
+- **Rollout Text Quality Inspection (CRITICAL SUCCESS - ZERO GIBBERISH)**:
+  - **Prompt 0 (Field Trip Buses & Teachers)**:
     ```text
-    2026-09-06 16:16:49,022 - [Orchestrator] Cluster workers ready: ['igorts-rd-06b-roll', 'igorts-rd-06b-train']. Starting StandardRLProgram execution...
+    [Sampled Response] ---
+    <thought>
+    The teacher is organizing a field trip and has 2 buses.
+    Each bus has 40 seats.
+    Total seats = 2 * 40 = 80 seats.
+    There are 75 students going on the trip.
+    There are 4 teachers going.
+    Total people going = 75 students + 4 teachers = 79 people.
+    We need to find how many empty seats there will be.
+    Total empty seats = Total seats - Total people = 80 - 79 = 1.
+    ...
+    </thought>
+    To find the number of empty seats on the field trip, follow these steps:
+    1. Calculate the total number of seats on the buses:
+       Total seats = 2 buses x 40 seats/bus = 80 seats
+    2. Calculate the total number of people going on the trip:
+       Total people = 75 students + 4 teachers = 79 people
+    3. Subtract the number of people from the total number of seats:
+       Empty seats = 80 - 79 = 1
+    There will be 1 empty seat.
+    --- [End Response] ---
     ```
-  - Initial weight sync `wsync-v0-r0` succeeded and KV caches initialized:
+  - **Prompt 7 (Lamp and Lightbulbs)**:
     ```text
-    2026-09-06 16:17:12,377 - [Orchestrator] transfer wsync-v0-r0: expected_block_count auto; deferring to the controller's schedule-derived count
+    [Sampled Response] ---
+    <reasoning>
+    Let me solve this step by step.
+
+    First, the problem states that Jim bought a $7 lamp and a bulb which cost $4 less. This means each bulb and lamp together cost $4 less. Let’s break it down:
+
+    - The total cost of one lamp is $7, and the bulb is $4 less, worth $3.
+    - Therefore, the total cost for one lamp and one bulb is $7 + $3.
+
+    Now, Jim bought 2 lamps and 6 bulbs. We can calculate the total cost as follows:
+
+    $$
+    2 \, \text{lamps} \times 7
+    --- [End Response] ---
     ```
-  - Step 0 and Step 1 training completed cleanly, final policy advanced to version 2, and program exited with `EXIT_CODE=0`:
-    ```text
-    2026-09-06 16:18:15,366 - [Orchestrator] transfer wsync-v2-r2: expected_block_count auto; deferring to the controller's schedule-derived count
-    Program End: Sun Sep  6 16:18:24 UTC 2026
-    EXIT_CODE=0
-    ```
-  - **Execution & Text Inspection Results**:
-    - Ran with `--debug --reward-mode=exact` to capture raw completions in orchestrator logs.
-    - Workers initialized and completed initial sync `wsync-v0-r0` and Step 0/1 training (`EXIT_CODE=0`).
-    - **Observed Sampled Responses (GSM8K prompt 0)**:
-      ```text
-      2026-09-07 02:30:37,263 - [Orchestrator] Sampler response for prompt_0:
-      [Sampled Response] ---
-      |
-       eğ
-      =
-      —
-      | | | | ...
-      --- [End Response] ---
-      [Sampled Response] ---
-      aria
-      defangjadirenderherrenderherrenderherrenderrenderrender...
-      --- [End Response] ---
-      [Sampled Response] ---
-      CopyrightCopyrightCopyrightCopyrightCopyrightCopyright...
-      --- [End Response] ---
-      ```
-    - **Outcome**: The 0.6B baseline with 1 rollout worker (`TP=2`) under this configuration **also produced gibberish / repetitive ASCII tokens**.
-    - **CRITICAL ROOT CAUSE IDENTIFIED: Shard Count Mismatch (The Green Partial Overlap Trap)**:
-      - The coordinator logged:
-        ```text
-        destination 'igorts-rd-06b-roll' has 2 shard(s) against the source's 8. Raiden intersects the two global index spaces, so an unequal pair can transfer only the overlap -- a green round that delivers part of the model, with every tensor that did arrive checksumming correctly. Compare __grand_total__ on both sides before trusting this round.
-        ```
-      - Trainer ran with 8 devices (`tpuv5:2x2x2`, `FSDP=8` = 8 source shards).
-      - Rollout ran with 1 replica on `tpuv5:2x2x1` (`TP=2` = 2 destination shards).
-      - Because destination had only 2 shards vs source's 8, Raiden transferred **only 2/8 (25%) of the tensor shards**, leaving the remaining 75% uninitialized/corrupted!
-      - In Mohit's original v5e setup, `TRAINER_MESH_FSDP=16` matched `ROLLOUT_MESH_TP=16` on `tpuv5e:4x4` (16 vs 16 shards, 100% transfer).
-      - Per Mohit's comment in `k8s_launcher.sh`: *"N replicas x ROLLOUT_MESH_TP is the destination shard count. Keep that equal to the trainer's: an unbalanced pair syncs without error but delivers only part of every TP-sharded tensor."*
-      - With $2 \times 2 = 4$ shards in the 2-rollout run or 2 shards in the 1-rollout run, the destination received only a partial slice of the model. Shard alignment ($N_{\text{replicas}} \times \text{ROLLOUT\_MESH\_TP} = N_{\text{trainer\_shards}}$) is strictly required for full weight reconstruction and coherent rollouts.
+- **Execution Completion**:
+  ```text
+  2026-09-07 02:54:00,611 - [Orchestrator] <<< Step 1 finished | Advanced to Policy Version: 2
+  2026-09-07 02:54:00,616 - [Orchestrator] Shutting down cluster workers...
+  2026-09-07 02:54:00,623 - [Orchestrator] === GRPO Training Finished Successfully ===
+    Final step: 1
+    Final policy version: 2
+    Total rollouts: 8
+    Total microbatches: 1
+    Final step reward: mean=0.0000, std=0.0000
+  Program End: Mon Sep  7 02:54:03 UTC 2026
+  EXIT_CODE=0
+  ```
+- **Conclusion**: **Step 1 successfully completed and verified**. Matching the sharding of the rollout worker to the sharding of the trainer ($4 \equiv 4$) completely resolved the gibberish issue, reproducing Mohit's expected behavior.
 
 ### G. Diagnostic Study Step 2: Testing 35B with 1 Rollout Worker (`igorts-rd-35b`)
-- **Execution & Parameters**:
-  - Model: `Qwen3.5-35B-A3B` (`gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items`)
-  - Trainer: `tpuv5:2x2x2` (Dual-host Pathways, `FSDP=8`), Rollout: `tpuv5:2x2x1` (1 replica, `TP=2`).
-  - Image: `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v17`.
-- **Factual Results**:
-  - Both workers initialized and registered cleanly:
-    ```text
-    2026-09-06 23:23:35,934 - [Orchestrator] Cluster workers ready: ['igorts-rd-35b-roll', 'igorts-rd-35b-train']. Starting StandardRLProgram execution...
-    ```
-  - Initial weight sync `wsync-v0-r0` succeeded (673 layers, 34.6B elements).
-  - Step 0 completed, weights updated via FFI and synced (`wsync-v1-r1`), policy advanced to version 1:
-    ```text
-    2026-09-06 23:31:16,773 - [Orchestrator] <<< Step 0 finished | Advanced to Policy Version: 1
-    ```
-  - Step 1 completed, weights updated via FFI and synced (`wsync-v2-r2`), policy advanced to version 2:
-    ```text
-    2026-09-06 23:34:47,892 - [Orchestrator] transfer wsync-v2-r2: expected_block_count auto; deferring to the controller's schedule-derived count
-    2026-09-06 23:35:20,076 - [Orchestrator] <<< Step 1 finished | Advanced to Policy Version: 2
-    2026-09-06 23:35:20,149 - [Orchestrator] === GRPO Training Finished Successfully ===
-      Final step: 1
-      Final policy version: 2
-      Total rollouts: 8
-      Total microbatches: 1
-      Final step reward: mean=0.0000, std=0.0000
-    Program End: Sun Sep  6 23:35:25 UTC 2026
-    EXIT_CODE=0
-    ```
-  - **Outcome**: 35B runs end-to-end with 1 rollout worker and achieves clean convergence through all steps with 0 transport or FFI errors.
+- **Objective**: Switch the balanced 1-rollout worker setup to Qwen3.5-35B-A3B.
+- **Model**: `Qwen3.5-35B-A3B` (`gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items`).
+- **Sharding Configuration**:
+  - Trainer: `tpuv5:2x2x1` (`--trainer-fsdp=4` $\to$ 4 source shards).
+  - Rollout: `tpuv5:2x2x1` (1 replica, `--rollout-tp=4` $\to$ 4 destination shards).
+  - Balanced equality: $4 \equiv 4$ (100% full weight transfer).
+- **Status**: Ready to launch.
 
 ---
 
@@ -390,10 +409,9 @@ For the complete guide on building container images from scratch, compiling the 
 
 | Step | Objective | Model | Workers & Sharding | Text Inspection Result | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Step 1** | Reproduce Mohit baseline (pure Mohit base code) | Qwen3-0.6B | 1 Rollout Worker (`TP=2`, 2 shards vs Trainer 8 shards) | **Gibberish / ASCII Repetition** (`| \n eğ \n = \n —`) due to 25% partial overlap | **Completed (Root Cause Diagnosed)** |
-| **Step 1b** | Re-run Step 1 with balanced shards (100% transfer) | Qwen3-0.6B | Trainer `tpuv5:2x2x1` (`FSDP=4`) vs Rollout `tpuv5:2x2x1` (`TP=4`) | Target: coherent reasoning traces | Next |
-| **Step 2** | Switch to 35B model (1 rollout worker) | Qwen3.5-35B | 1 Rollout Worker (`TP=2`, 2 shards vs Trainer 8 shards) | Run finished with `EXIT_CODE=0`, completed Step 0/1; suffered same partial overlap | **Completed** |
-| **Step 3** | Switch to 35B model + 2 rollout workers (balanced shards) | Qwen3.5-35B | 2 Rollout Workers (`TP=4`, $2 \times 4 = 8$ shards vs Trainer 8 shards) | Verify 100% tensor transfer and coherent math rollouts | **Ready to Launch** |
+| **Step 1** | Reproduce Mohit baseline (pure Mohit base code) with balanced sharding | Qwen3-0.6B | Trainer `tpuv5:2x2x1` (`FSDP=4`) vs Rollout `tpuv5:2x2x1` (`TP=4`, 1 replica) | **Clean Mathematical CoT** (Prompt 0: field trip buses/students; Prompt 7: lamps/bulbs). **Zero gibberish!** 100% transfer. | **Completed & Verified** |
+| **Step 2** | Switch to 35B model (1 rollout worker, balanced shards) | Qwen3.5-35B | Trainer `tpuv5:2x2x1` (`FSDP=4`) vs Rollout `tpuv5:2x2x1` (`TP=4`, 1 replica) | Verify absence of gibberish and clean math reasoning on 35B | **In Progress / Next** |
+| **Step 3** | Switch to 35B model + 2 rollout workers (balanced shards) | Qwen3.5-35B | 2 Rollout Workers (`TP=4`, $2 \times 4 = 8$ shards vs Trainer 8 shards) | Verify 100% tensor transfer and coherent math rollouts across multiple rollout workers | Queued |
 | **Step 4** | Layer in incremental code changes | Qwen3.5-35B | Multi-worker fanout | Verify stability with full custom feature stack | Queued |
 
 ### Key Mathematical Rule for Balanced Weight Sync
