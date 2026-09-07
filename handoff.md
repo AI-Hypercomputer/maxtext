@@ -271,7 +271,11 @@ All repositories are on branch `igorts/qwen35-run`:
 
 ### A. `maxtext` (`AI-Hypercomputer/maxtext`)
 ```text
-7f360b70b (HEAD) docs: update handoff with reward/loss observations and TTL cleanup verification
+3e04222fc (HEAD) docs(handoff): document Step 1 rollout text findings and root cause of partial shard transfer
+2f126bf6d docs(handoff): document Step 2 factual execution results on 35B 1-rollout
+bbe3a5928 docs(handoff): add Principle 6 (Mandatory Verification of Rollout Text Quality) and note for Step 1
+6b3c6ebd5 docs(handoff): document Step 1 reproduction results and Step 2 launch
+001f2d1d3 docs: update handoff with reward/loss observations and TTL cleanup verification
 fa03600d6 docs: document milestone 5 (2-rollout E2E training on Qwen3.5-35B, image v17, compute_on2 fix)
 d771295b6 [DEV ONLY - DO NOT MERGE TO PROD] feat(engine): support DISABLE_CHECKPOINTING environment variable
 67ef9188b feat(tunix): support abstract ShapeDtypeStruct unrolling in raiden_unscan
@@ -293,7 +297,8 @@ c82492756 (origin/main)
 
 ### C. `tunix` (`google/tunix`)
 ```text
-e610a647 (HEAD) build(docker): add .dockerignore to exclude git, venv, and docker caches
+808ee856 (HEAD) feat(launcher): support --debug and --reward-mode flags in launch_raiden.sh
+e610a647 build(docker): add .dockerignore to exclude git, venv, and docker caches
 6d41e392 fix(raiden): make compute_on monkeypatch robust to arbitrary kwargs and default out_memory_spaces
 f267b737 fix(launcher): update worker entrypoints, rollout tp flags, and default image to v15
 996aec0f feat(launcher): update default image to v14
@@ -351,15 +356,38 @@ kubectl logs -n trellis -l jobset.sigs.k8s.io/jobset-name=igorts-rd-35b-roll-1 -
 ./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh stop --model qwen3.5-35b
 ```
 
-### Starting a Fresh 35B Workload with 2 Rollout Workers
+### Starting a Fresh 35B Workload with 2 Rollout Workers (Balanced Shards: TP=4)
 ```bash
-./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh start \
+ROLLOUT_MESH_TP=4 ./tunix/experimental/examples/math_gsm8k_dist/launch_raiden.sh start \
   --model qwen3.5-35b \
   --rollout-replicas=2 \
+  --debug \
+  --reward-mode=exact \
   --image europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v17
 ```
 
 ### Full Operational Documentation
 For the complete guide on building container images from scratch, compiling the Raiden C++ wheel, cherry-pick tables, and Pathways server/proxy images, refer to:
 [`qwen3.5_instructions.md`](file:///usr/local/google/home/igorts/git/maxtext/qwen3.5_instructions.md)
+
+---
+
+## 6. Diagnostic Study Protocol & Execution Matrix
+
+### Protocol Matrix & Current Progress
+
+| Step | Objective | Model | Workers & Sharding | Text Inspection Result | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Step 1** | Reproduce Mohit baseline (pure Mohit base code) | Qwen3-0.6B | 1 Rollout Worker (`TP=2`, 2 shards vs Trainer 8 shards) | **Gibberish / ASCII Repetition** (`| \n eğ \n = \n —`) due to 25% partial overlap | **Completed (Root Cause Diagnosed)** |
+| **Step 1b** | Re-run Step 1 with balanced shards (100% transfer) | Qwen3-0.6B | Trainer `tpuv5:2x2x1` (`FSDP=4`) vs Rollout `tpuv5:2x2x1` (`TP=4`) | Target: coherent reasoning traces | Next |
+| **Step 2** | Switch to 35B model (1 rollout worker) | Qwen3.5-35B | 1 Rollout Worker (`TP=2`, 2 shards vs Trainer 8 shards) | Run finished with `EXIT_CODE=0`, completed Step 0/1; suffered same partial overlap | **Completed** |
+| **Step 3** | Switch to 35B model + 2 rollout workers (balanced shards) | Qwen3.5-35B | 2 Rollout Workers (`TP=4`, $2 \times 4 = 8$ shards vs Trainer 8 shards) | Verify 100% tensor transfer and coherent math rollouts | **Ready to Launch** |
+| **Step 4** | Layer in incremental code changes | Qwen3.5-35B | Multi-worker fanout | Verify stability with full custom feature stack | Queued |
+
+### Key Mathematical Rule for Balanced Weight Sync
+$$\text{Total Rollout Shards} = N_{\text{rollout\_replicas}} \times \text{ROLLOUT\_MESH\_TP} \equiv N_{\text{trainer\_shards}} = N_{\text{trainer\_devices}}$$
+When this equality holds:
+- Raiden global index spaces intersect completely ($100\%$ overlap).
+- `__grand_total__` checksums match identically across source and destination.
+- Rollout workers receive the entire weight tensor set, eliminating uninitialized tensor shards and repetitive gibberish generation.
 
