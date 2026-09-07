@@ -18,6 +18,18 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 3. **vLLM / tpu-inference** (`vllm-project/tpu-inference`): Serving as the rollout worker via `RLVllmSampler` using `flax_nnx` model runners on TPU v5p.
 4. **Raiden** (`tpu_raiden_jax`): Providing low-latency TPU host-to-host DMA weight synchronization directly device-to-device via JAX FFI.
 
+### Diagnostic Study Protocol (The 4-Step Plan to Isolate Gibberish)
+To pinpoint what causes repetitive token / gibberish generation on GSM8K, the investigation strictly follows this 4-step diagnostic plan:
+1. **Step 1: Reproduce Mohit's results (0.6B model, 1 rollout worker, only his code changes)**:
+   - Run baseline with pure Mohit code changes on Qwen3-0.6B with 1 rollout worker.
+   - **Mandatory Verification**: Directly inspect raw rollout completions to confirm absence of gibberish.
+2. **Step 2: Switch to 35B model (1 rollout worker)**:
+   - Maintain the identical 1-rollout worker configuration as Step 1, but switch the model to Qwen3.5-35B to isolate model-scale effects.
+3. **Step 3: Switch to 35B model + 2 rollout workers**:
+   - Scale from 1 rollout worker to 2 rollout workers on 35B to isolate multi-worker fanout and shard distribution dynamics.
+4. **Step 4: Add our code changes**:
+   - Layer our specialized improvements (custom unscanning, entrypoint alignment, local NUMA port routing, etc.) on top to verify full integration stability.
+
 ### Mandatory Technical Principles & Constraints
 > [!IMPORTANT]
 > **1. Development Scale vs. Ultimate Target (Scaling to 3T Models)**:
