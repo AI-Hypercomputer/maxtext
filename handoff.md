@@ -147,8 +147,30 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
   - Model: `Qwen3.5-35B-A3B` (`gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items`)
   - Trainer: `tpuv5:2x2x2` (Dual-host Pathways, `FSDP=8`), Rollout: `tpuv5:2x2x1` (1 replica, `TP=2`).
   - Image: `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v17`.
-- **Status**:
-  - Workload launched and pods scheduled on TPU nodes. Monitoring rollout generation text to isolate whether repetitive token generation is tied to 35B model checkpoint / unscanning vs. multi-worker rollout setup.
+- **Factual Results**:
+  - Both workers initialized and registered cleanly:
+    ```text
+    2026-09-06 23:23:35,934 - [Orchestrator] Cluster workers ready: ['igorts-rd-35b-roll', 'igorts-rd-35b-train']. Starting StandardRLProgram execution...
+    ```
+  - Initial weight sync `wsync-v0-r0` succeeded (673 layers, 34.6B elements).
+  - Step 0 completed, weights updated via FFI and synced (`wsync-v1-r1`), policy advanced to version 1:
+    ```text
+    2026-09-06 23:31:16,773 - [Orchestrator] <<< Step 0 finished | Advanced to Policy Version: 1
+    ```
+  - Step 1 completed, weights updated via FFI and synced (`wsync-v2-r2`), policy advanced to version 2:
+    ```text
+    2026-09-06 23:34:47,892 - [Orchestrator] transfer wsync-v2-r2: expected_block_count auto; deferring to the controller's schedule-derived count
+    2026-09-06 23:35:20,076 - [Orchestrator] <<< Step 1 finished | Advanced to Policy Version: 2
+    2026-09-06 23:35:20,149 - [Orchestrator] === GRPO Training Finished Successfully ===
+      Final step: 1
+      Final policy version: 2
+      Total rollouts: 8
+      Total microbatches: 1
+      Final step reward: mean=0.0000, std=0.0000
+    Program End: Sun Sep  6 23:35:25 UTC 2026
+    EXIT_CODE=0
+    ```
+  - **Outcome**: 35B runs end-to-end with 1 rollout worker and achieves clean convergence through all steps with 0 transport or FFI errors.
 
 ---
 
