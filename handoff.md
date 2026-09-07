@@ -138,9 +138,39 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
     Program End: Sun Sep  6 16:18:24 UTC 2026
     EXIT_CODE=0
     ```
-  - **Execution Confirmation & Pending Text Inspection**:
-    - Confirmed that Qwen3-0.6B baseline with 1 rollout worker runs end-to-end cleanly with 0 crashes (`EXIT_CODE=0`).
-    - **Note on Rollout Text Inspection**: Because `REWARD_MODE=env` evaluated rewards inside the rollout environment without echoing text, raw completion strings were not printed to stdout. Per Principle 6, confirming absence of gibberish is mandatory. A targeted rerun with `--debug` and `--reward_mode=exact` will be run to log and inspect the exact sampled responses for 0.6B.
+  - **Execution & Text Inspection Results**:
+    - Ran with `--debug --reward-mode=exact` to capture raw completions in orchestrator logs.
+    - Workers initialized and completed initial sync `wsync-v0-r0` and Step 0/1 training (`EXIT_CODE=0`).
+    - **Observed Sampled Responses (GSM8K prompt 0)**:
+      ```text
+      2026-09-07 02:30:37,263 - [Orchestrator] Sampler response for prompt_0:
+      [Sampled Response] ---
+      |
+       eğ
+      =
+      —
+      | | | | ...
+      --- [End Response] ---
+      [Sampled Response] ---
+      aria
+      defangjadirenderherrenderherrenderherrenderrenderrender...
+      --- [End Response] ---
+      [Sampled Response] ---
+      CopyrightCopyrightCopyrightCopyrightCopyrightCopyright...
+      --- [End Response] ---
+      ```
+    - **Outcome**: The 0.6B baseline with 1 rollout worker (`TP=2`) under this configuration **also produced gibberish / repetitive ASCII tokens**.
+    - **CRITICAL ROOT CAUSE IDENTIFIED: Shard Count Mismatch (The Green Partial Overlap Trap)**:
+      - The coordinator logged:
+        ```text
+        destination 'igorts-rd-06b-roll' has 2 shard(s) against the source's 8. Raiden intersects the two global index spaces, so an unequal pair can transfer only the overlap -- a green round that delivers part of the model, with every tensor that did arrive checksumming correctly. Compare __grand_total__ on both sides before trusting this round.
+        ```
+      - Trainer ran with 8 devices (`tpuv5:2x2x2`, `FSDP=8` = 8 source shards).
+      - Rollout ran with 1 replica on `tpuv5:2x2x1` (`TP=2` = 2 destination shards).
+      - Because destination had only 2 shards vs source's 8, Raiden transferred **only 2/8 (25%) of the tensor shards**, leaving the remaining 75% uninitialized/corrupted!
+      - In Mohit's original v5e setup, `TRAINER_MESH_FSDP=16` matched `ROLLOUT_MESH_TP=16` on `tpuv5e:4x4` (16 vs 16 shards, 100% transfer).
+      - Per Mohit's comment in `k8s_launcher.sh`: *"N replicas x ROLLOUT_MESH_TP is the destination shard count. Keep that equal to the trainer's: an unbalanced pair syncs without error but delivers only part of every TP-sharded tensor."*
+      - With $2 \times 2 = 4$ shards in the 2-rollout run or 2 shards in the 1-rollout run, the destination received only a partial slice of the model. Shard alignment ($N_{\text{replicas}} \times \text{ROLLOUT\_MESH\_TP} = N_{\text{trainer\_shards}}$) is strictly required for full weight reconstruction and coherent rollouts.
 
 ### G. Diagnostic Study Step 2: Testing 35B with 1 Rollout Worker (`igorts-rd-35b`)
 - **Execution & Parameters**:
@@ -224,6 +254,14 @@ Enable robust, end-to-end distributed Reinforcement Learning (RL) fine-tuning us
 - Upstream vLLM refactored `config_utils.py` and did not export `is_equal_or_regex_match`.
 - `tpu-inference`'s `compressed_tensors.py` failed during rollout vLLM engine initialization.
 - Resolved by importing `check_equal_or_regex_match` from `vllm.model_executor.layers.quantization.compressed_tensors.utils`.
+
+### 10. Shard Count Mismatch: The "Green Transfer with Partial Overlap" Trap
+- In Raiden, the coordinator intersects the global index spaces of the source and destination meshes.
+- When destination shard count ($N_{\text{replicas}} \times \text{ROLLOUT\_MESH\_TP}$) is less than the trainer's shard count ($N_{\text{trainer\_devices}}$), Raiden only transfers the intersection/overlap.
+- Crucially, **the transfer succeeds with exit code 0 and tensors checksum properly**, but only a fraction of the model is transferred (e.g. 2 destination shards vs 8 source shards delivers only 25% of weights). The remaining 75% of weights in the rollout worker remain uninitialized or garbage.
+- This causes the rollout sampler to generate repetitive ASCII / multilingual gibberish despite all logs showing "green" transfers.
+- In Mohit's original v5e configuration, `TRAINER_MESH_FSDP=16` on `tpuv5e:4x4` matched `ROLLOUT_MESH_TP=16` ($1 \times 16 = 16$ shards).
+- To eliminate gibberish, the total destination shard count must equal the trainer's source shard count ($N_{\text{replicas}} \times \text{ROLLOUT\_MESH\_TP} = N_{\text{trainer\_shards}}$).
 
 ---
 
