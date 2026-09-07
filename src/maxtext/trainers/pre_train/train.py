@@ -48,6 +48,8 @@ from maxtext.configs import pyconfig
 from maxtext.configs.types import TeCommGemmOverlapPolicy
 from maxtext.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
 from maxtext.utils.globals import EPS
+from maxtext.utils.debug_tensor_interceptors import debug_telemetry_scope, is_debug_telemetry_active, wrap_nnx_module_for_debug
+from maxtext.utils.debug_tensor_utils import debug_tensor
 from maxtext.utils import elastic_utils
 # Placeholder: internal
 
@@ -107,7 +109,7 @@ def get_first_step(model, state):
 # -----------------------------------------------------------------------------
 
 
-def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True):
+def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True, step=0):
   """loss_fn for both train and eval.
 
   Args:
@@ -116,7 +118,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     data: Batch of data to apply to the model
     dropout_rng: A key to use to generate rng for dropout (Linen); unused for NNX.
     params: Model params (Linen); unused for NNX (params are part of the model).
+    sparsity_state: Batch stats for sparsity
     is_train: True for train_step and False for eval_step
+    step: Current training/evaluation step
 
   Returns:
     loss: average loss
@@ -204,19 +208,21 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         model_vars["batch_stats"] = sparsity_state
     else:
       model_vars = params
-    logits, intermediate_outputs = model.apply(
-        model_vars,
-        data["inputs"],
-        data["inputs_position"],
-        decoder_segment_ids=data["inputs_segmentation"],
-        **encoder_kwargs,
-        enable_dropout=config.enable_dropout if is_train else False,
-        rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
-        mutable=mutable_collections,
-        decoder_target_tokens=data["targets"],
-        decoder_target_mask=data["targets_segmentation"],
-        **forced_routing_kwargs,
-    )
+    with debug_telemetry_scope(config, step=step):
+      logits, intermediate_outputs = model.apply(
+          model_vars,
+          data["inputs"],
+          data["inputs_position"],
+          decoder_segment_ids=data["inputs_segmentation"],
+          **encoder_kwargs,
+          enable_dropout=config.enable_dropout if is_train else False,
+          rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
+          mutable=mutable_collections,
+          decoder_target_tokens=data["targets"],
+          decoder_target_mask=data["targets_segmentation"],
+          **forced_routing_kwargs,
+      )
+    logits = debug_tensor(logits, "loss/logits", enabled=config)
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
@@ -237,6 +243,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         )
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
+      xent = debug_tensor(xent, "loss/cross_entropy_per_token", enabled=config)
 
       xent = sharding.maybe_shard_with_logical(
           xent,
@@ -264,16 +271,20 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       total_z_loss = jnp.sum(z_loss)
   else:
     # Flax NNX model: forward pass, then pop Intermediates sown during it.
-    logits = model(
-        decoder_input_tokens=data["inputs"],
-        decoder_positions=data["inputs_position"],
-        decoder_segment_ids=data["inputs_segmentation"],
-        **encoder_kwargs,
-        enable_dropout=config.enable_dropout if is_train else False,
-        decoder_target_tokens=data["targets"],
-        decoder_target_mask=data["targets_segmentation"],
-        **forced_routing_kwargs,
-    )
+    with debug_telemetry_scope(config, step=step):
+      if is_debug_telemetry_active():
+        wrap_nnx_module_for_debug(model, parent_path="", step=step, config=config)
+      logits = model(
+          decoder_input_tokens=data["inputs"],
+          decoder_positions=data["inputs_position"],
+          decoder_segment_ids=data["inputs_segmentation"],
+          **encoder_kwargs,
+          enable_dropout=config.enable_dropout if is_train else False,
+          decoder_target_tokens=data["targets"],
+          decoder_target_mask=data["targets_segmentation"],
+          **forced_routing_kwargs,
+      )
+    logits = debug_tensor(logits, "loss/logits", enabled=config)
     # mtp_losses and mtp_acceptance subclass nnx.Intermediate, and nnx type filters match
     # subclasses. Pop them before the generic Intermediate pop below, which would otherwise
     # take them too and leave the MTP loss silently reading as 0.
@@ -318,6 +329,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         )
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
+      xent = debug_tensor(xent, "loss/cross_entropy_per_token", enabled=config)
 
       xent = sharding.maybe_shard_with_logical(
           xent,
@@ -436,6 +448,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "mtp_loss": mtp_loss,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
+  loss = debug_tensor(loss, "loss/total_loss", enabled=config)
   return loss, aux
 
 
