@@ -39,6 +39,13 @@ and is the table to quote.** Read §5.7's Table B before quoting Table A, though
 mode-neutral, and the like-for-like comparison is still a tie.
 Three further explicit-only levers (`to="reduced"`, `psum_scatter`, `reduced=` outside `shard_map`)
 were implemented and are negative; they are in §8's negative-results table.
+Revised again 2026-09-07: `lm_head_vocab_parallel` is a layout fix rather than a `shard_mode`
+feature, so it **now defaults on under `auto` too** — worth **−2.63%** to `auto` users, who
+previously had to write it out (§5.8). That makes §5.7's **Table B**, not Table A, the
+shipped-defaults comparison, and Table B is a tie: **±0.21% across fsdp 4, dp 4 and tp 4 on both
+models checked**. Three more explicit-only levers were tried against that fair baseline and are also
+negative (`unreduced=` GA hoisting with `data > 1`, ZeRO-1, tensor parallelism); they are in §8's
+table. The standing conclusion is **parity, reliably** — choose the mode on capability, not speed.
 
 `shard_mode` (`src/maxtext/configs/base.yml:554`) selects how MaxText expresses sharding:
 
@@ -239,21 +246,29 @@ ______________________________________________________________________
     > outside its rep spread — is a statement about the shipped defaults, not about sharding-in-types.**
     > Force the flag on in both modes (Table B) and the answer reverts to the tie item 11 describes:
     > median −0.033%, range −0.152% … +0.068%. Both tables are true; they answer different questions,
-    > and §5.7 says which is which. Making it the `auto` default is §8 item 03.
+    > and §5.7 says which is which.
 
-**Practical guidance:** as of this revision, `shard_mode: explicit` with nothing else written out is
-**faster than `auto` on all eight onboarded models** at this document's geometry and at healthy
-depth — median **−1.283%**, worst case **−0.559%**, best case **−11.114%** (qwen3), with every row an
-order of magnitude outside its own rep spread (§5.7 Table A). Three flags do that work and all three
-now default on where they can act, so nothing needs to be written out. Read §5.7 Table B before
-concluding that explicit sharding is what made it faster: the largest of the three flags,
-`lm_head_vocab_parallel`, is a layout fix that `auto` can take too, and with it forced on in both
-modes the comparison is a tie (median −0.033%). Choose the mode on capability (§6, §7); take the
-speed either way. Three things to still verify for yourself: the vocab-parallel head's win scales
-with `vocab_size / (batch·length)` and this benchmark's `batch·length` is only 4,096, so expect less
-of it at production batch and sequence length; **pure data parallelism** was +10% before the LM-head
-fix and has not been re-measured; and if your `base_num_decoder_layers` is a multiple of 8 you are
-paying §4.9's ~25% in both modes and should try `param_scan_axis: 0`.
+    > *Revised (2026-09-07).* **The flag now defaults on under `auto` as well**, which is the right
+    > resolution of the paragraph above: a mode-neutral layout fix should not be withheld from half
+    > the users, and quoting the resulting gap as a sharding result was misleading. Measured directly,
+    > `auto` llama2-L12 goes 49,746 → 48,440 µs, **−2.63%**, and the resolved default lands on the
+    > forced-on number. The consequence is that **Table B is now the shipped-defaults table**, and the
+    > shipped-defaults answer is a tie: llama2 −0.027%, qwen3 −0.056%, dp4 −0.117%, tp4 +0.204% (§5.8).
+    > Two open items close with it — pure data parallelism, flagged in the practical guidance below as
+    > "+10% and not re-measured", is **−0.117%**; and tensor parallelism, §5.2's one explicit win, is
+    > **+0.204%** once measured at healthy depth with the flag on in both arms.
+
+**Practical guidance:** as of the 2026-09-07 revision, all three flags default on wherever they can
+act and `lm_head_vocab_parallel` — much the largest of them — defaults on under **both** modes, so
+**nothing needs to be written out in either mode and the two are within ±0.21% of each other
+everywhere they were compared** (llama2 fsdp4 −0.027%, qwen3 fsdp4 −0.056%, llama2 dp4 −0.117%,
+llama2 tp4 +0.204%; §5.8). The honest one-liner is *parity, reliably* — down from a +3.25% worst case
+before this work, and with a −2.63% absolute speedup that `auto` users now get for free.
+**Choose the mode on capability (§6, §7), not on speed.** Two things to still verify for yourself:
+the vocab-parallel head's win scales with `vocab_size / (batch·length)` and this benchmark's
+`batch·length` is only 4,096, so expect less of it at production batch and sequence length; and if
+your `base_num_decoder_layers` is a multiple of 8 you are paying §4.9's ~25% in both modes and should
+try `param_scan_axis: 0`.
 
 ______________________________________________________________________
 
@@ -1218,13 +1233,16 @@ which is the comparison a user actually makes, and Table B forces the flag on in
 is what isolates the sharding question. **Table B is a tie; Table A is a win for explicit only
 because the flag ships default-on under explicit.**
 
-It ships that way for the same reason the other two do: the blast radius of a layout change is
-easier to reason about when it is scoped to the mode this investigation actually measured, and under
-`auto` the layout is a request GSPMD may decline rather than a guarantee — the `out_sharding=` on the
-iota is not even expressible there, so `vocab_parallel_one_hot` falls back to a
-`with_sharding_constraint` that Shardy is free to sink or drop. Turning it on under `auto` is one
-line (`lm_head_vocab_parallel: true`) and is measured in Table B; making it the `auto` default wants
-a wider validation sweep than this document ran, and is left as §8 item 03.
+> *Superseded (2026-09-07).* This paragraph used to argue for shipping the flag default-on under
+> explicit only, on the grounds that under `auto` the layout is a request GSPMD may decline rather
+> than a guarantee — the `out_sharding=` on the iota is not expressible there, so
+> `vocab_parallel_one_hot` falls back to a `with_sharding_constraint` that Shardy is free to sink or
+> drop. That risk is real in principle and did not materialize on any model measured: GSPMD honoured
+> the request every time, and `auto` picked up the full win. Withholding a mode-neutral layout fix
+> from half the users, while quoting the resulting gap as a sharding result, was the wrong trade.
+> **The flag now defaults on under both modes** (§5.8), the fallback if GSPMD ever declines is the
+> default orientation — i.e. today's behaviour — and the honest headline comparison is now §5.7
+> Table B, which is a tie.
 
 #### What was tried to make it explicit-only, and did not work
 
@@ -1706,6 +1724,13 @@ Both, for different questions:
   point stands: the explicit-only capability that could open one (`reduced=` / `unreduced=`) is
   still not reachable from where MaxText's bytes are (§4.10, §8's negative-results table).
 
+> *Superseded (2026-09-07).* Table A's premise — that the flag ships on under explicit and off under
+> `auto` — no longer holds. It now ships on under both, so **Table B is the shipped-defaults table
+> as well as the like-for-like one**, and the answer to the first question is "nothing much".
+> Table A is retained because it is the correct answer to a third question: *"what did the
+> vocab-parallel head buy, and how much of the previous revision's headline was it?"* — all of it.
+> See §5.8.
+
 The caveats from §5.6 all carry over unchanged: mixtral is at 14 layers and deepseek at 12 because
 18 does not fit in HBM at this geometry; gemma3's depth must be a multiple of 6 (§4.7); it is one
 geometry (four chips, fsdp 4, seq 1024, pdbs 1) and one topology. One caveat is *new* and specific
@@ -1713,6 +1738,76 @@ to Table A: the vocab-parallel head's win scales with `vocab_size / (batch·leng
 benchmark's `batch·length` is 4,096 — small. **At production batch and sequence length the ratio
 shrinks and so does the win.** qwen3's −11% is what a 151936-entry vocabulary looks like against
 4,096 tokens; do not quote it as a production number.
+
+______________________________________________________________________
+
+### 5.8 The flag in both defaults, and what the fair comparison then says
+
+Everything in this section is `base_num_decoder_layers=12` at d16 (a healthy depth, §4.9), fsdp 4
+unless stated, three reps, median of the three profiled `jit_train_step` module spans on
+`/device:TPU:0`. Rep spread was 0.00–0.14% throughout, so anything under ~0.15% is a tie.
+
+**The default flip does what it should.** `auto`, llama2, with the flag off, forced on, and left to
+resolve:
+
+| `auto`, llama2-L12             | median µs | vs flag-off |
+| ------------------------------ | --------: | ----------: |
+| `lm_head_vocab_parallel=false` |    49,746 |           — |
+| `lm_head_vocab_parallel=true`  |    48,440 |  **−2.63%** |
+| resolved default (this change) |    48,411 |      −2.68% |
+
+The resolved default lands on the forced-on number to within 0.06%, i.e. inside rep spread. `auto`
+users get the win without writing anything out, which is the whole point of the change.
+
+**With both modes on their new defaults, the mode comparison is a tie — everywhere it was checked.**
+
+| config           | `auto` µs | `explicit` µs |   delta |
+| ---------------- | --------: | ------------: | ------: |
+| llama2, fsdp 4   |    48,426 |        48,413 | −0.027% |
+| qwen3, fsdp 4    |    55,044 |        55,013 | −0.056% |
+| llama2, **dp 4** |    54,146 |        54,083 | −0.117% |
+| llama2, **tp 4** |    37,221 |        37,297 | +0.204% |
+
+Two of these settle open items. **Pure data parallelism was the largest outstanding unknown in this
+document** — §1's practical guidance flagged it as "+10% before the LM-head fix and not re-measured".
+It is now **−0.117%**: the LM-head fix did not shrink that regression, it erased it, which makes
+sense once you see that under dp 4 the head kernel is replicated and the old orientation's
+all-gather was pure waste. And **tp 4 is no longer explicit's one win** (§5.2's −0.21% device-side);
+at a healthy depth with the flag on in both arms it is a 0.2% *loss*, small but outside rep spread.
+
+**Where the remaining ±0.2% comes from.** Op-level ledger for qwen3, `auto` vs `explicit`, summed over
+three profiled steps on TPU:0 (total XLA-Ops device time 296,531 vs 296,413 µs, −0.04%):
+
+| opcode                   | `auto` µs | `explicit` µs |    delta | n `auto` | n `explicit` |
+| ------------------------ | --------: | ------------: | -------: | -------: | -----------: |
+| all-gather               |    40,301 |        39,456 | **−845** |      633 |          588 |
+| fusion                   |   113,614 |       114,153 |     +539 |    4,074 |        4,098 |
+| copy-done                |       614 |         1,106 |     +492 |    3,954 |        3,987 |
+| while                    |   131,833 |       131,682 |     −151 |        6 |            6 |
+| collective-permute-start |       210 |           162 |      −48 |       75 |           75 |
+
+That is the whole story of the tie in one table: explicit's structural advantage is real and shows up
+exactly where §6.3 predicts — **45 fewer all-gathers, −845 µs** — and it is handed back in relayout
+copies and fusion scheduling. The copies concentrate on `bf16[1024,2048]`, which is
+`[num_query_heads·head_dim, embed]`, the attention out-projection: 36 → 108 instances, 2 per layer
+per step. This is *not* an uncovered call site — all four `DenseGeneral`s in `attentions.py` already
+pass `weight_grad_in_kernel_order` — and both the extra copies and `auto`'s matching
+`bf16[2048,1024]{0,1}` fusion are memory-space (`S(1)`) traffic that overlaps compute, which is why
+296 ms of op time nets out to a 0.04% difference. Chasing it further was not attempted.
+
+**Numerics are unchanged by the flip, and the two modes are bit-identical to each other.** llama2-L4,
+five steps, synthetic data:
+
+| step | `auto` vp off | `explicit` vp off | `auto` vp on | `explicit` vp on |
+| ---- | ------------: | ----------------: | -----------: | ---------------: |
+| 0    |        10.879 |            10.879 |       10.892 |           10.892 |
+| 4    |         8.871 |             8.871 |        8.885 |            8.885 |
+
+The two modes agree to the printed precision at every step in both arms. The vp-on/vp-off offset is
+the +0.013 documented in §4.10: it is constant across the five steps rather than growing, and it is
+smaller than the 0.037 spread produced by relabelling the mesh axis with no code change at all
+(`ici_fsdp_parallelism=4` 10.879 / `ici_fsdp_transpose_parallelism=4` 10.894 / `2×2` 10.857). It is
+float reassociation from a different contraction layout, not a correctness difference.
 
 ______________________________________________________________________
 
@@ -2106,8 +2201,8 @@ ______________________________________________________________________
     > so it is disclosed rather than encoded. A mixtral user who measures it can set
     > `lm_head_weight_grad_in_kernel_order: false`.
 
-03. **Turn the untied LM head sideways — `lm_head_vocab_parallel`, on by default under explicit
-    (§4.10).** The two items above make the head's weight-gradient collective *cheaper*; this one
+03. **Turn the untied LM head sideways — `lm_head_vocab_parallel`, on by default in *both* modes
+    (§4.10, §5.8).** The two items above make the head's weight-gradient collective *cheaper*; this one
     makes it *disappear*, and shrinks the forward collective by `vocab_size/(batch·length)` at the
     same time. `embed_vocab` puts the FSDP axes on the `[embed, vocab]` kernel's `embed` dimension,
     so the whole kernel is all-gathered forward and a same-shaped gradient reduce-scattered back —
@@ -2115,27 +2210,25 @@ ______________________________________________________________________
     putting the FSDP axes on `vocab` moves both onto the hidden state (25.2 MB) and leaves the
     weight gradient entirely local. `sharding.lm_head_logical_axes` picks the orientation,
     `sharding.vocab_parallel_one_hot` builds the loss's one-hot matrix in the layout the logits now
-    have, and the flag is tri-state like the other two: **on for an untied head under
-    `shard_mode: explicit`**, off on a tied head (where the kernel is the embedding table and is
-    already vocab-sharded), and a hard error rather than a silent no-op if asked for alongside MTP
-    or vocab tiling, both of which own the logits' layout themselves.
+    have, and the flag is tri-state like the other two — but, unlike the other two, its default does
+    not mention `shard_mode` at all: **on for an untied head under either mode**, off on a tied head
+    (where the kernel is the embedding table and is already vocab-sharded), and a hard error rather
+    than a silent no-op if asked for alongside MTP or vocab tiling, both of which own the logits'
+    layout themselves.
 
     Measured, three reps, medians, explicit mode with and without it: **qwen3 −10.94%**, llama2
     −1.72%, mistral −1.68%, deepseek2 −1.31%, mixtral −1.12%; the three gemmas are tied and
-    unaffected. It is the largest sharding win in this document, and it is what takes explicit from
-    7-of-8 (median −0.099%, worst +0.057%) to **8-of-8 against `auto` at shipped defaults** (median
-    −1.283%, worst −0.559%, §5.7 Tables 0 and A).
+    unaffected. It is the largest sharding win in this document.
 
     **Two things to be clear about before quoting it.**
 
-    - **It is mode-neutral.** `auto` wins the same amount when the flag is written out there
-      (llama2 −1.80%, mistral −1.61%, qwen3 −10.96%, deepseek2 −1.28%, mixtral −1.11% — every one
-      within 0.08 pp of its explicit column). §5.7 Table B is the like-for-like comparison
-      and it is a tie. The flag defaults on under explicit only because that is the mode this
-      investigation validated, not because explicit is where it works. **Making it the `auto`
-      default is the obvious follow-up and wants its own sweep** — in particular over real vocab /
-      batch·length ratios, since the win scales with that ratio and inverts nothing but shrinks
-      toward zero as the global batch grows.
+    - **It is mode-neutral, and as of 2026-09-07 it ships on under `auto` too.** `auto` wins the same
+      amount when the flag is written out there (llama2 −1.80%, mistral −1.61%, qwen3 −10.96%,
+      deepseek2 −1.28%, mixtral −1.11% — every one within 0.08 pp of its explicit column), so
+      withholding it from `auto` users bought nothing but a misleading mode comparison. §5.8 measures
+      the default flip directly (`auto` llama2-L12 49,746 → 48,440 µs, **−2.63%**) and confirms the
+      resolved default lands on the flag-on number. The consequence for this document is that §5.7
+      Table A no longer describes the shipped defaults — **Table B does**, and Table B is a tie.
     - **It changes initialization, not arithmetic.** The stored kernel's *shape* is unchanged, so
       Orbax reshards on restore and a resumed run is unaffected; but a fresh run started with the
       flag flipped draws a different matrix from the same seed, because MaxText's init depends on
@@ -2243,24 +2336,27 @@ ______________________________________________________________________
 Recorded so the next person does not spend the time. Each was implemented or measured, not merely
 reasoned about, and each survived an adversarial attempt to rescue it.
 
-| candidate                                                                                                                                                                                                                   | verdict                                                                                                                                                                                                                                                                                                            |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Stop pinning the logits output under explicit                                                                                                                                                                               | 0-line HLO diff. The barriers are JAX's, not MaxText's (§4.5).                                                                                                                                                                                                                                                     |
-| Elide no-op `reshard` barriers                                                                                                                                                                                              | Op-identical executable on all three configs (item 06).                                                                                                                                                                                                                                                            |
-| `lm_head_kernel_transposed` (store the kernel `[vocab, embed]`)                                                                                                                                                             | Works, but slower on 4 of 7 configs, no checkpoint path, and re-initializes the model. Removed (item 01).                                                                                                                                                                                                          |
-| Reshard the RMSNorm scale under explicit outside TP                                                                                                                                                                         | Implemented and reverted — negative on every non-TP config.                                                                                                                                                                                                                                                        |
-| Sliced/prefetched MoE expert weights via MSA                                                                                                                                                                                | No measurable effect; the expert all-gathers are already overlapped.                                                                                                                                                                                                                                               |
-| Remove the rotated-reduce-scatter `collective-permute` fixup                                                                                                                                                                | Backwards: it is an `auto`-mode op that explicit already deletes (§6.3). There was nothing on the explicit side to remove, and it is not caused by `_permuted_sharding`.                                                                                                                                           |
-| `param_scan_axis: 1` + XLA tiling as the dense-flag discriminator                                                                                                                                                           | Correct as stated — every model uses the same value, so it cannot separate models — but the conclusion drawn from it was wrong. It separates *depths*, and that is the whole discriminator: §4.9, worth ~25% of step time in both modes.                                                                           |
-| 3-D kernels / MLA low-rank / gemma3's attention pattern / contracting-axis-vs-FSDP, as the dense-flag discriminator                                                                                                         | None separate the sign. gemma3-L18's win is carried by plain 2-D `[embed, mlp]` `MlpBlock` kernels — the same sites that lose on llama2 — and deepseek's by its length-1 dense-layer scan (4,640 µs of `f32[512,1,8192]` copies) plus 500 µs on the MoE shared MLP, not by MLA (MLA's 4-D gradients move ~170 µs). |
-| Rematerializing RoPE sin/cos in the backward pass                                                                                                                                                                           | Mode-neutral: identical to 0.1 µs in both arms.                                                                                                                                                                                                                                                                    |
-| `LlamaVisionRotaryEmbedding`'s full-table build                                                                                                                                                                             | Consumes the whole table by design, and `llama4` is not on the explicit whitelist — unreachable.                                                                                                                                                                                                                   |
-| Deduplicating the out-projection all-gather                                                                                                                                                                                 | The "extra" all-gather is the same op scheduled differently; no bytes to remove.                                                                                                                                                                                                                                   |
-| The gemma2 padded-reduce-scatter `concatenate`                                                                                                                                                                              | Sign flips by rep; within noise.                                                                                                                                                                                                                                                                                   |
-| deepseek's two remaining duplicated dense-layer weight all-gathers (`bf16[2048,1,8,192]` 371 µs / 12 ops, `bf16[2048,1,576]` 189 µs / 12 ops, both `%copy-done` duplicating an existing `%convert_element_type` all-gather) | Real, explicit-only, and worth **0.009%**. Not worth chasing.                                                                                                                                                                                                                                                      |
-| `jax.lax.all_gather(..., to="reduced")` inside `shard_map` to force a real reduce-scatter on the FSDP weight gradient                                                                                                       | Traces and type-checks, and still lowers to `all-reduce` — at the *padded* `bf16[2112,8192]` shape, so it is **slower**: 644.1 vs 590.5 µs/iter on the isolated `bf16[2048,8192]`/fsdp-4 kernel (§4.10).                                                                                                           |
-| `jax.lax.psum_scatter`, or a `custom_vjp` whose backward is one                                                                                                                                                             | Also lowers to `all-reduce` on this build (320.6 µs, vs 391.1 for all-reduce+slice and 138.5 for the all-gather). Forcing it through a `custom_vjp` is both slower (968.8 µs) and **wrong** — 4× the gradient, because JAX pre-reduces the cotangent when `out_specs` declares the output replicated.              |
-| `reduced={'fsdp'}` to hoist a replicated parameter's per-layer gradient all-reduce out of the layer scan                                                                                                                    | Rejected at trace time outside `shard_map`: *"Inputs cannot be sharded/varying on the same axes that another input is reduced on."* The tag cannot coexist with fsdp-sharded activations, so the hoist would mean wrapping the whole layer body in `shard_map` (§4.10).                                            |
+| candidate                                                                                                                                                                                                                   | verdict                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Stop pinning the logits output under explicit                                                                                                                                                                               | 0-line HLO diff. The barriers are JAX's, not MaxText's (§4.5).                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Elide no-op `reshard` barriers                                                                                                                                                                                              | Op-identical executable on all three configs (item 06).                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `lm_head_kernel_transposed` (store the kernel `[vocab, embed]`)                                                                                                                                                             | Works, but slower on 4 of 7 configs, no checkpoint path, and re-initializes the model. Removed (item 01).                                                                                                                                                                                                                                                                                                                                                             |
+| Reshard the RMSNorm scale under explicit outside TP                                                                                                                                                                         | Implemented and reverted — negative on every non-TP config.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Sliced/prefetched MoE expert weights via MSA                                                                                                                                                                                | No measurable effect; the expert all-gathers are already overlapped.                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Remove the rotated-reduce-scatter `collective-permute` fixup                                                                                                                                                                | Backwards: it is an `auto`-mode op that explicit already deletes (§6.3). There was nothing on the explicit side to remove, and it is not caused by `_permuted_sharding`.                                                                                                                                                                                                                                                                                              |
+| `param_scan_axis: 1` + XLA tiling as the dense-flag discriminator                                                                                                                                                           | Correct as stated — every model uses the same value, so it cannot separate models — but the conclusion drawn from it was wrong. It separates *depths*, and that is the whole discriminator: §4.9, worth ~25% of step time in both modes.                                                                                                                                                                                                                              |
+| 3-D kernels / MLA low-rank / gemma3's attention pattern / contracting-axis-vs-FSDP, as the dense-flag discriminator                                                                                                         | None separate the sign. gemma3-L18's win is carried by plain 2-D `[embed, mlp]` `MlpBlock` kernels — the same sites that lose on llama2 — and deepseek's by its length-1 dense-layer scan (4,640 µs of `f32[512,1,8192]` copies) plus 500 µs on the MoE shared MLP, not by MLA (MLA's 4-D gradients move ~170 µs).                                                                                                                                                    |
+| Rematerializing RoPE sin/cos in the backward pass                                                                                                                                                                           | Mode-neutral: identical to 0.1 µs in both arms.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `LlamaVisionRotaryEmbedding`'s full-table build                                                                                                                                                                             | Consumes the whole table by design, and `llama4` is not on the explicit whitelist — unreachable.                                                                                                                                                                                                                                                                                                                                                                      |
+| Deduplicating the out-projection all-gather                                                                                                                                                                                 | The "extra" all-gather is the same op scheduled differently; no bytes to remove.                                                                                                                                                                                                                                                                                                                                                                                      |
+| The gemma2 padded-reduce-scatter `concatenate`                                                                                                                                                                              | Sign flips by rep; within noise.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| deepseek's two remaining duplicated dense-layer weight all-gathers (`bf16[2048,1,8,192]` 371 µs / 12 ops, `bf16[2048,1,576]` 189 µs / 12 ops, both `%copy-done` duplicating an existing `%convert_element_type` all-gather) | Real, explicit-only, and worth **0.009%**. Not worth chasing.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `jax.lax.all_gather(..., to="reduced")` inside `shard_map` to force a real reduce-scatter on the FSDP weight gradient                                                                                                       | Traces and type-checks, and still lowers to `all-reduce` — at the *padded* `bf16[2112,8192]` shape, so it is **slower**: 644.1 vs 590.5 µs/iter on the isolated `bf16[2048,8192]`/fsdp-4 kernel (§4.10).                                                                                                                                                                                                                                                              |
+| `jax.lax.psum_scatter`, or a `custom_vjp` whose backward is one                                                                                                                                                             | Also lowers to `all-reduce` on this build (320.6 µs, vs 391.1 for all-reduce+slice and 138.5 for the all-gather). Forcing it through a `custom_vjp` is both slower (968.8 µs) and **wrong** — 4× the gradient, because JAX pre-reduces the cotangent when `out_specs` declares the output replicated.                                                                                                                                                                 |
+| `reduced={'fsdp'}` to hoist a replicated parameter's per-layer gradient all-reduce out of the layer scan                                                                                                                    | Rejected at trace time outside `shard_map`: *"Inputs cannot be sharded/varying on the same axes that another input is reduced on."* The tag cannot coexist with fsdp-sharded activations, so the hoist would mean wrapping the whole layer body in `shard_map` (§4.10).                                                                                                                                                                                               |
+| `unreduced={'data'}` gradient-accumulation hoisting, with `data > 1` so the gate at `gradient_accumulation.py:77` actually fires — the one explicit-only path in MaxText that this document had never exercised             | **Traces, fires, and buys nothing.** llama2-L12, dp2×fsdp2: GA 4 `auto` 251,972 vs `explicit` 251,952 µs (−0.008%); GA 8 493,805 vs 494,242 (+0.089%). The HLO says why: both modes emit 20 all-reduces in identically-named computations, and the loop-carried ones are already `%wide.region_0.28_spmd...**.sunk**` in *both* arms. XLA sinks the per-microbatch all-reduce out of the scan on its own, so the tag is hoisting something GSPMD had already hoisted. |
+| ZeRO-1 (`shard_optimizer_over_data`) as an explicit-only win, on the strength of §6.4's "under `auto` GSPMD only papers over it with an extra collective"                                                                   | Unreachable: `types.py` makes ZeRO-1 and FSDP mutually exclusive in *both* modes, so the mismatched-layout add that would cost `auto` a collective never gets built. The quoted sentence describes why the guard exists, not a measured delta.                                                                                                                                                                                                                        |
+| Tensor parallelism as explicit's standing win (§5.2)                                                                                                                                                                        | Does not survive a fair comparison at healthy depth. llama2-L12, tp 4, flag on in both arms: `auto` 37,221 vs `explicit` 37,297 µs, **+0.204%** for explicit — a small loss, not the −0.21% of §5.2 (which was measured at L4, with the flag off in both arms).                                                                                                                                                                                                       |
 
 A related null result worth stating positively: a systematic hunt for *any* remaining explicit-only
 cost on llama2 / mistral / qwen3 at d16 found **nothing above ~0.10% of step**. The largest positive

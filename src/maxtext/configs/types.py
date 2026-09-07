@@ -635,9 +635,9 @@ class LogitsAndLoss(BaseModel):
           "FSDP all-gather of the head kernel and the reduce-scatter of its gradient move onto the hidden state "
           "-- vocab_size/(batch*length) times less traffic -- and the weight gradient needs no collective at all. The "
           "logits come out vocab-sharded, so the loss builds its one-hot targets against a vocab-sharded iota "
-          "rather than gathering them. Arithmetic is unchanged; the stored kernel's sharding is not. None means "
-          "on where it applies and is expressible: an untied head under shard_mode=explicit, without MTP or "
-          "vocab tiling."
+          "rather than gathering them. Arithmetic is unchanged; the stored kernel's sharding is not. This is a "
+          "layout fix rather than a shard_mode feature -- auto reaches the same layout and the same speedup -- so "
+          "None means on under either shard_mode wherever it applies: an untied head, without MTP or vocab tiling."
       ),
   )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
@@ -4966,17 +4966,20 @@ class MaxTextConfig(
     to carry them.
 
     The head is turned sideways only where that is both useful and expressible:
-      - shard_mode explicit, matching the other LM-head layout flag. Nothing here is
-        explicit-only in principle, but under `auto` the layout is a request rather
-        than a guarantee, so it stays opt-in there.
       - an untied head, since a tied one is the embedding table and is already
         sharded on vocab.
       - no MTP, which reshards its logits straight back to batch-sharded, and no
         vocab tiling, which already chunks the vocab dimension itself.
+
+    Unlike the two kernel-order flags, this one is not about `shard_mode` at all: it is a
+    layout fix, and `auto` reaches the same layout and the same speedup when asked to. It
+    therefore defaults on in **both** modes. Under explicit the orientation is a guarantee
+    and under auto it is a request that GSPMD has honoured on every model measured; the
+    fallback if it ever does not is the default orientation, i.e. today's behaviour.
     """
     applicable = not self.logits_via_embedding and self.mtp_num_layers == 0 and self.num_vocab_tiling <= 1
     if self.lm_head_vocab_parallel is None:
-      self.lm_head_vocab_parallel = applicable and self.shard_mode == ShardMode.EXPLICIT
+      self.lm_head_vocab_parallel = applicable
     elif self.lm_head_vocab_parallel and not applicable:
       raise ValueError(
           "lm_head_vocab_parallel needs an untied LM head (logits_via_embedding: False) with neither MTP "

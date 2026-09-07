@@ -372,15 +372,19 @@ class PyconfigTest(unittest.TestCase):
           **kwargs,
       ).lm_head_vocab_parallel
 
+    # A layout fix rather than a shard_mode feature: auto reaches the same layout and the
+    # same speedup, so the default does not depend on the mode.
     self.assertTrue(resolve(shard_mode="explicit"))
-    self.assertFalse(resolve(shard_mode="auto"))
+    self.assertTrue(resolve(shard_mode="auto"))
     # A tied head is the embedding table, already sharded on vocab.
     self.assertFalse(resolve(shard_mode="explicit", logits_via_embedding=True))
+    self.assertFalse(resolve(shard_mode="auto", logits_via_embedding=True))
     # MTP reshards the logits back to batch-sharded, and vocab tiling already chunks vocab.
     self.assertFalse(resolve(shard_mode="explicit", model_name="deepseek3-test", mtp_num_layers=1))
     self.assertFalse(resolve(shard_mode="explicit", num_vocab_tiling=2))
-    # Writing it out still wins over the default, in both directions.
+    # Writing it out still wins over the default, in both directions and both modes.
     self.assertFalse(resolve(shard_mode="explicit", lm_head_vocab_parallel=False))
+    self.assertFalse(resolve(shard_mode="auto", lm_head_vocab_parallel=False))
     self.assertTrue(resolve(shard_mode="auto", lm_head_vocab_parallel=True))
     # But asking for it where the logits' layout is spoken for is an error, not a silent no-op.
     for kwargs in (

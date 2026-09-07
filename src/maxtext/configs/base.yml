@@ -223,7 +223,8 @@ lm_head_weight_grad_in_kernel_order: None  # on for an untied model under shard_
 # and cross entropy's two reductions over vocab become the only added collectives (a few kB each).
 # Arithmetic is unchanged, but the stored kernel's sharding is not, so a checkpoint saved with this on is laid out
 # differently -- Orbax reshards on restore, so this only matters for raw array-level tooling.
-# None means on where it applies and is expressible: an untied head under shard_mode: explicit, without MTP
+# This is a layout fix rather than a shard_mode feature -- shard_mode: auto reaches the same layout and wins by the
+# same amount -- so None means on under either mode wherever it applies: an untied head, without MTP
 # (which reshards its logits straight back to batch-sharded) and without vocab tiling (which already chunks vocab).
 lm_head_vocab_parallel: None
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
