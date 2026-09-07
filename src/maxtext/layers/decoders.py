@@ -813,12 +813,16 @@ class Decoder(nn.Module):
     )(y, out_sharding=norm_out_sharding)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
+    # The vocab-parallel orientation only pays off in training: it trades the kernel's FSDP
+    # collectives for smaller ones on the hidden state, and prefill/decode have no weight
+    # gradient to save and a hidden state of one or a few positions.
+    head_in_axes, kernel_axes, head_out_axes = sharding.lm_head_logical_axes(
+        cfg.lm_head_vocab_parallel and model_mode == MODEL_MODE_TRAIN
+    )
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
     else:
-      out_sharding = create_sharding(
-          self.mesh, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
-      )
+      out_sharding = create_sharding(self.mesh, head_out_axes)
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
@@ -839,12 +843,17 @@ class Decoder(nn.Module):
         logits = logits / cfg.final_logits_soft_cap
         logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
+      if head_in_axes is not None:
+        # Gather the hidden state off the FSDP axes; the kernel stays put.
+        y = sharding.maybe_shard_with_logical(
+            y, head_in_axes, self.mesh, cfg.shard_mode, debug_sharding=cfg.debug_sharding
+        )
       logits = linears.dense_general(
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-          kernel_axes=("embed_vocab", "vocab"),
+          kernel_axes=kernel_axes,
           shard_mode=cfg.shard_mode,
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,

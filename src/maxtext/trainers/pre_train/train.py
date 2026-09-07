@@ -102,6 +102,21 @@ def get_first_step(model, state):
   return int(state.optimizer.step.get_value())
 
 
+def _one_hot_targets(targets, config, mesh):
+  """Expand integer targets into the one-hot matrix cross entropy multiplies with the logits."""
+  if not config.lm_head_vocab_parallel:
+    return jax.nn.one_hot(targets, config.vocab_size)
+  # A vocab-parallel head leaves the logits sharded on vocab rather than on batch, so the
+  # one-hot matrix has to be built in that layout too -- see sharding.vocab_parallel_one_hot.
+  return sharding.vocab_parallel_one_hot(
+      targets,
+      config.vocab_size,
+      mesh,
+      sharding.lm_head_logical_axes(vocab_parallel=True)[2],
+      config.shard_mode,
+  )
+
+
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
@@ -235,7 +250,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
             target_positions,
             data["targets_segmentation"] != 0,
         )
-      one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+      one_hot_targets = _one_hot_targets(data["targets"], config, model.mesh)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
       xent = sharding.maybe_shard_with_logical(
@@ -316,7 +331,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
             target_positions,
             data["targets_segmentation"] != 0,
         )
-      one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+      one_hot_targets = _one_hot_targets(data["targets"], config, model.mesh)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
       xent = sharding.maybe_shard_with_logical(

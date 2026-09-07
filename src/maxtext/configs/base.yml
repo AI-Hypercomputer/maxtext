@@ -212,6 +212,20 @@ cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher preci
 # checkpoint conversion is needed. No effect under shard_mode: auto, where XLA folds the transpose itself, and none
 # on a tied head, which has no kernel of its own -- so None means on exactly where it can do something.
 lm_head_weight_grad_in_kernel_order: None  # on for an untied model under shard_mode: explicit if None
+# Shard the untied LM head on its vocab dimension instead of its embed dimension. By default `embed_vocab` puts the
+# head's [embed, vocab] kernel on the FSDP axes along embed, so every step gathers the whole kernel forward and
+# reduce-scatters a same-sized weight gradient back -- on llama2-7b at d16 that pair costs 1.59 ms, 2.2% of the step.
+# Turning the head sideways (embed replicated, vocab on the FSDP axes) moves both collectives onto the hidden state:
+# the kernel holds emb_dim*vocab_size elements against the hidden state's batch*length*emb_dim, so the traffic drops
+# by vocab_size/(batch*length) -- 7.8x on llama2 at this benchmark's geometry, 37x on qwen3's 151936-entry vocab --
+# and the weight gradient is left needing no collective at all. The logits
+# then come out sharded on vocab, so the loss builds its one-hot targets shard-locally against a vocab-sharded iota
+# and cross entropy's two reductions over vocab become the only added collectives (a few kB each).
+# Arithmetic is unchanged, but the stored kernel's sharding is not, so a checkpoint saved with this on is laid out
+# differently -- Orbax reshards on restore, so this only matters for raw array-level tooling.
+# None means on where it applies and is expressible: an untied head under shard_mode: explicit, without MTP
+# (which reshards its logits straight back to batch-sharded) and without vocab tiling (which already chunks vocab).
+lm_head_vocab_parallel: None
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the Indexer across the unsharded local heads dimension natively.
@@ -571,6 +585,13 @@ logical_axis_rules: [
                       # Vocab Weights
                       ['vocab', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['embed_vocab', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      # The four rules below are only used when lm_head_vocab_parallel is on; they rotate the
+                      # untied LM head off its embed dimension and onto its vocab dimension, so the FSDP axes
+                      # gather the hidden state (batch x length x embed) instead of the kernel (embed x vocab).
+                      ['activation_embed_and_logits_batch_no_fsdp', ['data', 'stage', 'expert']],
+                      ['activation_vocab_fsdp', ['tensor', 'tensor_sequence', 'fsdp', 'fsdp_transpose']],
+                      ['vocab_fsdp', ['tensor', 'tensor_sequence', 'autoregressive', 'fsdp', 'fsdp_transpose']],
+                      ['embed_vocab_replicated', []],
                       # ==========================================
                       # Attention
                       # ==========================================

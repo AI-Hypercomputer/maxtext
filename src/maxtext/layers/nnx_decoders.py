@@ -461,13 +461,16 @@ class NNXDecoder(nnx.Module):
         kernel_axes=("norm",),
         parameter_memory_host_offload=config.parameter_memory_host_offload,
     )
+    # Unlike the linen decoder, the head's kernel is created here rather than on the first
+    # call, so its orientation is fixed by the module's own model_mode.
+    self.lm_head_axes = sharding.lm_head_logical_axes(config.lm_head_vocab_parallel and model_mode == MODEL_MODE_TRAIN)
     if not config.logits_via_embedding:
       self.logits_dense = linears.DenseGeneral(
           in_features_shape=config.emb_dim,
           out_features_shape=config.vocab_size,
           weight_dtype=config.weight_dtype,
           dtype=jnp.float32 if config.logits_dot_in_fp32 else config.dtype,
-          kernel_axes=("embed_vocab", "vocab"),
+          kernel_axes=self.lm_head_axes[1],
           shard_mode=config.shard_mode,
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=config.parameter_memory_host_offload,
@@ -1549,17 +1552,11 @@ class NNXDecoder(nnx.Module):
     y = self.decoder_norm(y, out_sharding=norm_out_sharding)
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
+    head_in_axes, _, head_out_axes = self.lm_head_axes
     if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE}:
       out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
     else:
-      out_sharding = create_sharding(
-          self.mesh,
-          (
-              "activation_embed_and_logits_batch",
-              "activation_length",
-              "activation_vocab",
-          ),
-      )
+      out_sharding = create_sharding(self.mesh, head_out_axes)
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
@@ -1580,6 +1577,11 @@ class NNXDecoder(nnx.Module):
         logits = logits / cfg.final_logits_soft_cap
         logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
+      if head_in_axes is not None:
+        # Gather the hidden state off the FSDP axes; the kernel stays put.
+        y = sharding.maybe_shard_with_logical(
+            y, head_in_axes, self.mesh, cfg.shard_mode, debug_sharding=cfg.debug_sharding
+        )
       logits = self.logits_dense(y, out_sharding=out_sharding)
 
     if self.config.cast_logits_to_fp32:

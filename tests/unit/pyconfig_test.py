@@ -362,6 +362,75 @@ class PyconfigTest(unittest.TestCase):
     self.assertFalse(resolve(shard_mode="explicit", dense_weight_grad_in_kernel_order=False))
     self.assertTrue(resolve(shard_mode="auto", dense_weight_grad_in_kernel_order=True))
 
+  def test_lm_head_vocab_parallel_default(self):
+    """On where the head can be turned sideways at all, off where the logits' layout is spoken for."""
+
+    def resolve(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          **kwargs,
+      ).lm_head_vocab_parallel
+
+    self.assertTrue(resolve(shard_mode="explicit"))
+    self.assertFalse(resolve(shard_mode="auto"))
+    # A tied head is the embedding table, already sharded on vocab.
+    self.assertFalse(resolve(shard_mode="explicit", logits_via_embedding=True))
+    # MTP reshards the logits back to batch-sharded, and vocab tiling already chunks vocab.
+    self.assertFalse(resolve(shard_mode="explicit", model_name="deepseek3-test", mtp_num_layers=1))
+    self.assertFalse(resolve(shard_mode="explicit", num_vocab_tiling=2))
+    # Writing it out still wins over the default, in both directions.
+    self.assertFalse(resolve(shard_mode="explicit", lm_head_vocab_parallel=False))
+    self.assertTrue(resolve(shard_mode="auto", lm_head_vocab_parallel=True))
+    # But asking for it where the logits' layout is spoken for is an error, not a silent no-op.
+    for kwargs in (
+        {"logits_via_embedding": True},
+        {"model_name": "deepseek3-test", "mtp_num_layers": 1},
+        {"num_vocab_tiling": 2},
+    ):
+      with self.subTest(**kwargs), self.assertRaisesRegex(Exception, "lm_head_vocab_parallel needs an untied LM head"):
+        resolve(shard_mode="explicit", lm_head_vocab_parallel=True, **kwargs)
+
+  def test_lm_head_vocab_parallel_injects_its_rules(self):
+    """The four rules the sideways head needs are added to a rule set that lacks them, and only then."""
+    expected = {
+        "activation_embed_and_logits_batch_no_fsdp": ["data", "stage", "expert"],
+        "activation_vocab_fsdp": ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"],
+        "vocab_fsdp": ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"],
+        "embed_vocab_replicated": [],
+    }
+
+    def rules_of(**kwargs):
+      config = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          **kwargs,
+      )
+      return [(rule[0], list(rule[1])) for rule in config.logical_axis_rules]
+
+    # A rule set that predates the flag: only the axes the default orientation needs. It has to
+    # replace base.yml's wholesale, the way a custom mesh-and-rule file does, or the four would
+    # merely be inherited.
+    predates_flag = {
+        "override_logical_axis_rules": True,
+        "logical_axis_rules": [
+            ["activation_embed_and_logits_batch", ["data", "stage", "fsdp", "expert"]],
+            ["activation_length", []],
+            ["activation_embed", []],
+            ["activation_vocab", ["tensor", "tensor_sequence"]],
+            ["embed_vocab", ["fsdp"]],
+            ["vocab", ["tensor", "tensor_sequence", "autoregressive"]],
+        ],
+    }
+    # base.yml already carries all four, so there the validator must be a no-op.
+    for rules in (rules_of(**predates_flag), rules_of()):
+      for name, axes in expected.items():
+        self.assertEqual([r for r in rules if r[0] == name], [(name, axes)])
+    # Off, nothing is added.
+    off = rules_of(lm_head_vocab_parallel=False, **predates_flag)
+    self.assertNotIn("vocab_fsdp", [r[0] for r in off])
+
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
     self.assertEqual(resolve_config_path(__file__), __file__)

@@ -29,6 +29,7 @@ from jax import Array
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
 from maxtext.integration.tunix.utils import VllmWeightMapping
 from maxtext.models.models import Transformer
+from maxtext.utils import sharding
 
 
 import jax
@@ -50,13 +51,13 @@ def _compat_top_k(operand, k, axis=-1):
   try:
     return _orig_top_k(operand, k, axis=axis)
   except Exception:  # pylint: disable=broad-exception-caught
-    sharding = getattr(operand, "sharding", None)
-    if sharding is not None and hasattr(sharding, "spec") and hasattr(sharding, "mesh"):  # pylint: disable=line-too-long
-      spec = list(sharding.spec)
+    operand_sharding = getattr(operand, "sharding", None)
+    if operand_sharding is not None and hasattr(operand_sharding, "spec") and hasattr(operand_sharding, "mesh"):  # pylint: disable=line-too-long
+      spec = list(operand_sharding.spec)
       idx = axis if axis >= 0 else len(spec) + axis
       if 0 <= idx < len(spec):
         spec[idx] = None
-        target_sharding = jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*spec))  # pylint: disable=line-too-long
+        target_sharding = jax.sharding.NamedSharding(operand_sharding.mesh, jax.sharding.PartitionSpec(*spec))  # pylint: disable=line-too-long
         try:
           operand = _orig_wsc(operand, target_sharding)
         except Exception:  # pylint: disable=broad-exception-caught
@@ -121,6 +122,16 @@ class TunixMaxTextAdapter(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         forced_routed_experts=forced_routed_experts,
     )
+    if self.base.config.lm_head_vocab_parallel:
+      # Tunix owns the loss and reaches into the vocab axis to do it -- log-prob gathers,
+      # top-k, softmaxes -- so hand the logits back in the batch-sharded layout it expects
+      # rather than the vocab-sharded one a vocab-parallel head produces.
+      logits = sharding.maybe_shard_with_logical(
+          logits,
+          sharding.lm_head_logical_axes(vocab_parallel=False)[2],
+          self.base.mesh,
+          self.base.config.shard_mode,
+      )
     return logits, None
 
   def to_hf_mappings(self):

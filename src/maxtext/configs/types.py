@@ -628,6 +628,18 @@ class LogitsAndLoss(BaseModel):
           "shard_mode=auto. None means on for an untied model under shard_mode=explicit and off everywhere else."
       ),
   )
+  lm_head_vocab_parallel: bool | None = Field(
+      None,
+      description=(
+          "Shard the untied LM head on its vocab dimension instead of its embed dimension, so that the per-step "
+          "FSDP all-gather of the head kernel and the reduce-scatter of its gradient move onto the hidden state "
+          "-- vocab_size/(batch*length) times less traffic -- and the weight gradient needs no collective at all. The "
+          "logits come out vocab-sharded, so the loss builds its one-hot targets against a vocab-sharded iota "
+          "rather than gathering them. Arithmetic is unchanged; the stored kernel's sharding is not. None means "
+          "on where it applies and is expressible: an untied head under shard_mode=explicit, without MTP or "
+          "vocab tiling."
+      ),
+  )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
@@ -1218,6 +1230,13 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     # Vocab Weights
     ["vocab", ["tensor", "tensor_sequence", "autoregressive"]],
     ["embed_vocab", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    # The four rules below are only used when lm_head_vocab_parallel is on; they rotate the
+    # untied LM head off its embed dimension and onto its vocab dimension, so the FSDP axes
+    # gather the hidden state (batch x length x embed) instead of the kernel (embed x vocab).
+    ["activation_embed_and_logits_batch_no_fsdp", ["data", "stage", "expert"]],
+    ["activation_vocab_fsdp", ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"]],
+    ["vocab_fsdp", ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"]],
+    ["embed_vocab_replicated", []],
     # ==========================================
     # Attention
     # ==========================================
@@ -4935,6 +4954,52 @@ class MaxTextConfig(
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
     return self
+
+  @model_validator(mode="after")
+  def resolve_lm_head_vocab_parallel(self) -> "MaxTextConfig":
+    """Resolve the tri-state flag and make sure the rules it needs are in scope.
+
+    Runs last so that it sees the final `logical_axis_rules`: a custom mesh-and-rule
+    file replaces the list wholesale, and the pipelining path rewrites entries in it.
+    The four rules the vocab-parallel head needs are appended if they are missing,
+    which keeps the flag usable with a custom rule set without asking every such file
+    to carry them.
+
+    The head is turned sideways only where that is both useful and expressible:
+      - shard_mode explicit, matching the other LM-head layout flag. Nothing here is
+        explicit-only in principle, but under `auto` the layout is a request rather
+        than a guarantee, so it stays opt-in there.
+      - an untied head, since a tied one is the embedding table and is already
+        sharded on vocab.
+      - no MTP, which reshards its logits straight back to batch-sharded, and no
+        vocab tiling, which already chunks the vocab dimension itself.
+    """
+    applicable = not self.logits_via_embedding and self.mtp_num_layers == 0 and self.num_vocab_tiling <= 1
+    if self.lm_head_vocab_parallel is None:
+      self.lm_head_vocab_parallel = applicable and self.shard_mode == ShardMode.EXPLICIT
+    elif self.lm_head_vocab_parallel and not applicable:
+      raise ValueError(
+          "lm_head_vocab_parallel needs an untied LM head (logits_via_embedding: False) with neither MTP "
+          f"(mtp_num_layers: {self.mtp_num_layers}) nor vocab tiling (num_vocab_tiling: {self.num_vocab_tiling})."
+      )
+    if self.lm_head_vocab_parallel:
+      named = {rule[0] for rule in self.logical_axis_rules if rule}
+      for name, axes in _VOCAB_PARALLEL_LM_HEAD_RULES:
+        if name not in named:
+          self.logical_axis_rules.append([name, axes])
+    return self
+
+
+# Appended to `logical_axis_rules` when lm_head_vocab_parallel is on and a rule set does not
+# already define them; base.yml carries the same four so the common case is a no-op. Together
+# they put the head's [embed, vocab] kernel on the FSDP axes along vocab instead of embed, and
+# take those axes off the batch dimension of everything the head touches.
+_VOCAB_PARALLEL_LM_HEAD_RULES = (
+    ("activation_embed_and_logits_batch_no_fsdp", ["data", "stage", "expert"]),
+    ("activation_vocab_fsdp", ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"]),
+    ("vocab_fsdp", ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"]),
+    ("embed_vocab_replicated", []),
+)
 
 
 class RLConfig(

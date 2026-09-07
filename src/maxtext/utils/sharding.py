@@ -23,6 +23,7 @@ from flax import linen as nn, nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
 import jax
 from jax.core import Tracer
+import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P, reshard
 from maxtext.common.common_types import ShardMode
 from maxtext.configs import pyconfig
@@ -403,6 +404,75 @@ def create_sharding(mesh, logical_names, rules=None):
   if spec is None:
     spec = P()
   return NamedSharding(mesh, spec)
+
+
+def vocab_parallel_one_hot(targets, num_classes, mesh, logical_axes, shard_mode, *, dtype=jnp.float32):
+  """One-hot `targets` directly in the logits' layout, without gathering the vocab axis.
+
+  `jax.nn.one_hot` grows the class axis out of `targets`, so it inherits the targets'
+  batch sharding and produces a [batch, length, vocab] array laid out across the wrong
+  mesh axis for a vocab-parallel LM head -- reconciling the two would cost an all-to-all
+  the size of the logits. Comparing a vocab-sharded iota against the targets builds the
+  same matrix shard-locally instead: every device only ever holds the columns of the
+  vocab it owns, and the only traffic is the gather of the integer targets, which are
+  vocab_size times smaller than what they expand into.
+
+  Args:
+    targets: integer label array, [batch, length].
+    num_classes: vocabulary size.
+    mesh: JAX device mesh.
+    logical_axes: logical axes of the logits this will be multiplied with.
+    shard_mode: auto or explicit shard mode.
+    dtype: dtype of the returned one-hot array.
+
+  Returns:
+    A [batch, length, num_classes] one-hot array sharded like the logits.
+  """
+  out_sharding = create_sharding(mesh, logical_axes)
+  targets = maybe_shard_with_pspec(targets, P(*out_sharding.spec[: targets.ndim]), mesh, shard_mode)
+  shape = (*targets.shape, num_classes)
+  if shard_mode == ShardMode.EXPLICIT:
+    vocab_ids = jax.lax.broadcasted_iota(targets.dtype, shape, targets.ndim, out_sharding=out_sharding)
+  else:
+    # `out_sharding` only accepts explicit mesh axes, so under auto the iota is laid out
+    # by constraining it after the fact and letting GSPMD sink the sharding into it.
+    vocab_ids = maybe_shard_with_pspec(
+        jax.lax.broadcasted_iota(targets.dtype, shape, targets.ndim), out_sharding.spec, mesh, shard_mode
+    )
+  return (vocab_ids == targets[..., None]).astype(dtype)
+
+
+def lm_head_logical_axes(vocab_parallel: bool):
+  """Logical axes for the untied LM head, in the orientation `lm_head_vocab_parallel` selects.
+
+  The default orientation shards the [embed, vocab] kernel on the FSDP axes along
+  `embed`, so every step all-gathers the whole kernel forward and reduce-scatters a
+  same-sized weight gradient back. The vocab-parallel orientation replicates `embed`
+  and puts the FSDP axes on `vocab` instead: both collectives move onto the hidden
+  state, which carries batch*length*emb_dim elements against the kernel's
+  emb_dim*vocab_size, and the weight gradient becomes purely local. The price is that
+  the logits come out sharded on vocab, so the loss has to build its one-hot
+  targets in that layout (see `vocab_parallel_one_hot` above).
+
+  Args:
+    vocab_parallel: whether to return the vocab-parallel orientation.
+
+  Returns:
+    A (input_axes, kernel_axes, output_axes) triple of logical-axis tuples.
+    `input_axes` is None in the default orientation, where the head takes the hidden
+    state in whatever layout the final norm produced it.
+  """
+  if vocab_parallel:
+    return (
+        ("activation_embed_and_logits_batch_no_fsdp", "activation_length", "activation_embed"),
+        ("embed_vocab_replicated", "vocab_fsdp"),
+        ("activation_embed_and_logits_batch_no_fsdp", "activation_length", "activation_vocab_fsdp"),
+    )
+  return (
+      None,
+      ("embed_vocab", "vocab"),
+      ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
+  )
 
 
 def _truncate_pspec(pspec: P, out_ndim: int) -> P:
