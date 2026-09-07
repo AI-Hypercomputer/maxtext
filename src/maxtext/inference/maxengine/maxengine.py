@@ -671,12 +671,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       # scan_layers=False: split the leading layer axis back into per-layer subtrees.
       stacked = cache["decoder"]["layers"]
       res_cache = {"decoder": {}}
-      is_deepseek = (
-          getattr(self.model, "is_deepseek", False)
-          or (hasattr(self.model, "decoder") and getattr(self.model.decoder, "is_deepseek", False))
+      has_dense_prefix = (
+          getattr(self.model, "has_dense_prefix", False)
+          or (hasattr(self.model, "decoder") and getattr(self.model.decoder, "has_dense_prefix", False))
           or (hasattr(self.config, "decoder_block") and str(self.config.decoder_block).lower() == "deepseek")
       )
-      if is_deepseek:
+      if has_dense_prefix:
         first_dense = self.config.first_num_dense_layers
         num_moe = self.config.num_decoder_layers - first_dense
         layer_keys = [f"dense_layers_{i}" for i in range(first_dense)] + [f"moe_layers_{i}" for i in range(num_moe)]
