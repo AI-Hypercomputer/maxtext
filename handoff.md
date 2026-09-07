@@ -225,13 +225,29 @@ To pinpoint what causes repetitive token / gibberish generation on GSM8K, the in
 - **Conclusion**: **Step 1 successfully completed and verified**. Matching the sharding of the rollout worker to the sharding of the trainer ($4 \equiv 4$) completely resolved the gibberish issue, reproducing Mohit's expected behavior.
 
 ### G. Diagnostic Study Step 2: Testing 35B with 1 Rollout Worker (`igorts-rd-35b`)
-- **Objective**: Switch the balanced 1-rollout worker setup to Qwen3.5-35B-A3B.
+- **Objective**: Test whether the balanced 4-shard configuration from Step 1 can scale directly to Qwen3.5-35B-A3B.
 - **Model**: `Qwen3.5-35B-A3B` (`gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items`).
-- **Sharding Configuration**:
+- **Configuration**:
   - Trainer: `tpuv5:2x2x1` (`--trainer-fsdp=4` $\to$ 4 source shards).
   - Rollout: `tpuv5:2x2x1` (1 replica, `--rollout-tp=4` $\to$ 4 destination shards).
-  - Balanced equality: $4 \equiv 4$ (100% full weight transfer).
-- **Status**: Ready to launch.
+  - Orchestrator: `--debug --reward-mode=exact`.
+  - Image: `europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/rl-maxtext/igorts-maxtext:qwen35-20260904-v17`.
+- **Execution Results**:
+  - Both workers initialized and registered with the discovery server:
+    ```text
+    2026-09-07 03:04:45,055 - [Orchestrator] Registered Orchestrator V2 workers: [WorkerInfo(worker_id='igorts-rd-35b-roll', roles=frozenset({'rollout'}), resources={'remote': True, 'address': 'igorts-rd-35b-roll-proc-0-0.igorts-rd-35b-roll:20001'}), WorkerInfo(worker_id='igorts-rd-35b-train', roles=frozenset({'actor'}), resources={'remote': True, 'address': 'igorts-rd-35b-train-proc-0-0.igorts-rd-35b-train:20002'})]
+    ```
+  - During the initial weight sync `wsync-v0-r0` preparing phase, the Trainer attempted JAX FFI `init_weight_synchronizer_and_d2h`:
+    ```text
+    tunix.experimental.weight_sync.weight_sync_coordinator.WeightSyncError: round 0 (req_id wsync-v0-r0, uuid 1): bind/metadata/source-prepare failed before any destination was quiesced; no rollback needed; final state preparing
+    [TPU_EXECUTE_ERROR='\x10\x01'] [type.googleapis.com/pjrt.OOM='']
+    ```
+- **Diagnostic Conclusion**:
+  - **Memory Constraint Discovered**: On `tpuv5:2x2x1` (4 chips) with `FSDP=4`, each chip must hold ~17.5 GB of weights plus intermediate FFI D2H transfer buffers and runtime activation allocations. This triggers a hardware **TPU HBM Out-Of-Memory (`pjrt.OOM`)** crash during FFI D2H preparation.
+  - **The Sharding Dilemma for 35B with 1 Worker**:
+    - If Trainer uses 4 chips (`FSDP=4`), it crashes with TPU HBM OOM.
+    - If Trainer uses 8 chips (`tpuv5:2x2x2`, `FSDP=8`), it fits in memory (8 source shards), but a single rollout worker on `tpuv5:2x2x1` (max 4 chips $\to$ max 4 destination shards) creates a $4 < 8$ shard count mismatch, triggering the 50% partial overlap bug and repetitive gibberish.
+  - **Necessity of Step 3**: To achieve both memory viability on 35B (8 trainer shards) and 100% full weight transfer without gibberish, rollout must provide **8 destination shards**, which requires **2 rollout workers** ($2 \times \text{TP}=4 = 8$ shards). Step 2 conclusively proves that 35B requires scaling to multi-worker rollout (Step 3).
 
 ---
 
@@ -410,8 +426,8 @@ For the complete guide on building container images from scratch, compiling the 
 | Step | Objective | Model | Workers & Sharding | Text Inspection Result | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Step 1** | Reproduce Mohit baseline (pure Mohit base code) with balanced sharding | Qwen3-0.6B | Trainer `tpuv5:2x2x1` (`FSDP=4`) vs Rollout `tpuv5:2x2x1` (`TP=4`, 1 replica) | **Clean Mathematical CoT** (Prompt 0: field trip buses/students; Prompt 7: lamps/bulbs). **Zero gibberish!** 100% transfer. | **Completed & Verified** |
-| **Step 2** | Switch to 35B model (1 rollout worker, balanced shards) | Qwen3.5-35B | Trainer `tpuv5:2x2x1` (`FSDP=4`) vs Rollout `tpuv5:2x2x1` (`TP=4`, 1 replica) | Verify absence of gibberish and clean math reasoning on 35B | **In Progress / Next** |
-| **Step 3** | Switch to 35B model + 2 rollout workers (balanced shards) | Qwen3.5-35B | 2 Rollout Workers (`TP=4`, $2 \times 4 = 8$ shards vs Trainer 8 shards) | Verify 100% tensor transfer and coherent math rollouts across multiple rollout workers | Queued |
+| **Step 2** | Switch to 35B model (1 rollout worker, balanced shards) | Qwen3.5-35B | Trainer `tpuv5:2x2x1` (`FSDP=4`) vs Rollout `tpuv5:2x2x1` (`TP=4`, 1 replica) | Trainer hits TPU HBM OOM (`pjrt.OOM`) on 4 chips during FFI D2H. Proves 35B requires 8 trainer chips (`FSDP=8`). | **Completed (OOM Constraint Found)** |
+| **Step 3** | Switch to 35B model + 2 rollout workers (balanced shards) | Qwen3.5-35B | Trainer `tpuv5:2x2x2` (`FSDP=8`) vs 2 Rollout Workers (`TP=4`, $2 \times 4 = 8$ shards) | Verify 100% tensor transfer and clean mathematical rollouts across 2 rollout workers | **In Progress / Next** |
 | **Step 4** | Layer in incremental code changes | Qwen3.5-35B | Multi-worker fanout | Verify stability with full custom feature stack | Queued |
 
 ### Key Mathematical Rule for Balanced Weight Sync
