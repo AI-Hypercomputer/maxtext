@@ -140,7 +140,8 @@ class DeepSeekGenericLayer(nnx.Module):
       self.engram = None
 
     # DeepSeek V4 natively overrides this block with CompressedAttention.
-    if self.config.decoder_block != DecoderBlockType.DEEPSEEK4:
+    # GLM-5.2 overrides this in GLMGenericLayer with IndexShare configuration.
+    if self.config.decoder_block not in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.GLM5):
       self.self_attention = attention_mla.MLA(
           config=self.config,
           num_query_heads=self.config.num_query_heads,

@@ -760,7 +760,7 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
@@ -1169,6 +1169,7 @@ def calculate_tflops_training_per_device(config, log=True):
     # calculation based on dropless implementation
     if config.decoder_block in (
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.GLM5,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
@@ -1268,7 +1269,7 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_deepseek4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops
     )
-  elif config.decoder_block == DecoderBlockType.DEEPSEEK:
+  elif config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5):
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
         * 3
@@ -1335,6 +1336,7 @@ def calculate_tflops_training_per_device(config, log=True):
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
       if config.decoder_block in (
           DecoderBlockType.DEEPSEEK,
+          DecoderBlockType.GLM5,
           DecoderBlockType.LLAMA4,
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.GEMMA4,

@@ -16,6 +16,7 @@
 
 import dataclasses
 import functools
+import inspect
 import os
 from typing import Any, Iterable, Optional, Tuple, Union, cast
 
@@ -1048,6 +1049,14 @@ class Attention(nnx.Module):
           inputs, num_frames, height, width, token_mask=token_mask, valid_grid=valid_grid
       )
     else:
+      if rope_kwargs:
+        sig = inspect.signature(self.rotary_embedding.__call__)
+        valid_kwargs = {
+            k: v
+            for k, v in rope_kwargs.items()
+            if k in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        }
+        return self.rotary_embedding(inputs, inputs_positions, **valid_kwargs)
       return self.rotary_embedding(inputs, inputs_positions)
 
   def init_kv_caches(self, inputs_kv_shape: Tuple):
@@ -1069,6 +1078,9 @@ class Attention(nnx.Module):
     # KVCache.
     placeholder_seq_len = 1
 
+    key_head_size = getattr(self, "qk_head_dim", self.head_dim)
+    value_head_size = getattr(self, "v_head_dim", self.head_dim)
+
     return kvcache.KVCache(
         max_prefill_length=self.max_prefill_predict_length,
         max_target_length=self.max_target_length,
@@ -1077,8 +1089,8 @@ class Attention(nnx.Module):
         value_seq_len=placeholder_seq_len,
         key_heads=self.num_kv_heads,
         value_heads=self.num_kv_heads,
-        key_head_size=self.head_dim,
-        value_head_size=self.head_dim,
+        key_head_size=key_head_size,
+        value_head_size=value_head_size,
         dtype=self.dtype,
         kv_quant=self.kv_quant,
         prefill_cache_axis_order=self.prefill_cache_axis_order,

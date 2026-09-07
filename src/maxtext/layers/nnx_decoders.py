@@ -15,6 +15,7 @@
 """Module for decoder layers"""
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
+# pylint: disable=unbalanced-tuple-unpacking
 
 import functools
 import inspect
@@ -56,6 +57,7 @@ from maxtext.models import (
     gemma3,
     gemma4,
     gemma4_small,
+    glm5,
     gpt3,
     gpt_oss,
     llama2,
@@ -475,7 +477,7 @@ class NNXDecoder(nnx.Module):
       )
 
     self.scanned_layers = None
-    self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
+    self.is_deepseek = self.config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5)
     self.is_deepseek4 = self.config.decoder_block == DecoderBlockType.DEEPSEEK4
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
@@ -843,9 +845,10 @@ class NNXDecoder(nnx.Module):
     config = self.config
     dense_cls, moe_cls = decoder_block_classes
     for i in range(config.first_num_dense_layers):
-      self._create_and_register_layer(dense_cls, rngs, "dense_layers", i)
+      self._create_and_register_layer(dense_cls, rngs, "dense_layers", i, layer_idx=i)
     for i in range(config.num_decoder_layers - config.first_num_dense_layers):
-      self._create_and_register_layer(moe_cls, rngs, "moe_layers", i)
+      global_idx = config.first_num_dense_layers + i
+      self._create_and_register_layer(moe_cls, rngs, "moe_layers", i, layer_idx=global_idx)
 
   def _init_sequential_generic(self, decoder_block_classes, rngs):
     """Initializes sequential generic decoder layers with per-architecture layer_kwargs."""
@@ -1054,10 +1057,17 @@ class NNXDecoder(nnx.Module):
       (final_carry, updated_layers, returned_kv_stacked) otherwise.
     """
     if length == 0:
+      if getattr(self.config, "use_index_share", False):
+        return (
+            x_in,
+            layers,
+            kv_caches_stacked,
+            kwargs.get("cached_indexer_state", None),
+        )
       return (
           x_in,
           layers,
-          kv_caches_stacked if kv_caches_stacked is not None else None,
+          kv_caches_stacked,
       )
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
@@ -1083,10 +1093,26 @@ class NNXDecoder(nnx.Module):
 
     use_kv = kv_caches_stacked is not None
     use_forced_routing = forced_routed_experts_scanned is not None
+    is_index_share = getattr(self.config, "use_index_share", False)
+    cached_indexer_state = kwargs.get("cached_indexer_state", None)
+    start_layer_idx = kwargs.get("start_layer_idx", 0)
+
+    if is_index_share:
+      if cached_indexer_state is None:
+        batch, seq_len = x_in.shape[0], x_in.shape[1]
+        topk = getattr(self.config, "indexer_topk", 2048)
+        kv_len = seq_len if seq_len > 1 else getattr(self.config, "max_target_length", seq_len)
+        dummy_mask = jnp.zeros((batch, seq_len, kv_len), dtype=jnp.float32)
+        dummy_indices = jnp.zeros((batch, seq_len, topk), dtype=jnp.int32)
+        dummy_score = jnp.zeros((batch, seq_len, kv_len), dtype=jnp.float32)
+        cached_indexer_state = (dummy_mask, dummy_indices, dummy_score)
+      init_scan_carry = (x_in, cached_indexer_state, start_layer_idx)
+    else:
+      init_scan_carry = x_in
 
     def layer_fn(carry, scanned_vars):
       # Ensure metadata rank matches the sliced values
-      scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, "layers")
+      scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, metadata_axis_name)
 
       # Unpack the sliced variables for THIS layer
       if use_kv:
@@ -1115,14 +1141,28 @@ class NNXDecoder(nnx.Module):
       if use_forced_routing:
         call_kwargs["forced_routed_experts"] = forced_routed_experts_layer
 
-      layer_out = layer(carry, *args, **call_kwargs)
+      if is_index_share:
+        y_in, current_cached_indexer, lyr_idx = carry
+        call_kwargs["cached_indexer_state"] = current_cached_indexer
+        call_kwargs["layer_idx"] = lyr_idx
+      else:
+        y_in = carry
+
+      layer_out = layer(y_in, *args, **call_kwargs)
 
       if isinstance(layer_out, tuple):
-        new_carry = layer_out[0]
+        new_carry_y = layer_out[0]
         updated_kv = layer_out[1] if len(layer_out) > 1 else None
+        new_indexer_state = layer_out[2] if len(layer_out) > 2 else None
       else:
-        new_carry = layer_out
+        new_carry_y = layer_out
         updated_kv = None
+        new_indexer_state = None
+
+      if is_index_share:
+        new_carry = (new_carry_y, new_indexer_state, lyr_idx + 1)
+      else:
+        new_carry = new_carry_y
 
       # Extract the updated state to return it
       if dynamic_graph_init:
@@ -1155,7 +1195,7 @@ class NNXDecoder(nnx.Module):
 
       # kv_caches_stacked is actually the original kv_caches list in this new flow
       kv_caches_list = kv_caches_stacked
-      current_carry = x_in
+      current_carry = init_scan_carry
 
       for i in range(length):
         # Statically slice the parameters and state for this layer
@@ -1170,9 +1210,17 @@ class NNXDecoder(nnx.Module):
         # Update the list in-place (mutates the list passed by reference)
         kv_caches_list[i] = updated_kv
 
+      if is_index_share:
+        final_carry, out_indexer_state, _ = current_carry
+      else:
+        final_carry = current_carry
+        out_indexer_state = None
+
       # We don't need to rebuild scanned_state or return it because during
       # inference with vLLM, parameters do not change and we don't need intermediates.
-      return current_carry, layers, None
+      if is_index_share:
+        return final_carry, layers, None, out_indexer_state
+      return final_carry, layers, None
     else:
       params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
       state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
@@ -1181,14 +1229,18 @@ class NNXDecoder(nnx.Module):
         scan_xs = (params, state, forced_routed_experts_scanned)
       else:
         scan_xs = (params, state)
-      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, scan_xs, unroll=unroll)
+      scan_res_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, init_scan_carry, scan_xs, unroll=unroll)
       returned_kv_stacked = None
+
+      if is_index_share:
+        final_carry, out_indexer_state, _ = scan_res_carry
+      else:
+        final_carry = scan_res_carry
+        out_indexer_state = None
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
       # in the sharding metadata. jax.lax.scan emits it at position 0.
       scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, metadata_axis_name)
-
-      returned_kv_stacked = None
 
     if dynamic_graph_init:
       # If graph changed, we need to merge with the new graphdef.
@@ -1200,6 +1252,8 @@ class NNXDecoder(nnx.Module):
       nnx.update(layers, clean_state)
       out_layers = layers
 
+    if is_index_share:
+      return final_carry, out_layers, returned_kv_stacked if use_kv else None, out_indexer_state
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
 
   def get_decoder_layers(self):
@@ -1230,6 +1284,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
+        DecoderBlockType.GLM5: [glm5.GLMDenseLayer, glm5.GLMMoELayer],
         DecoderBlockType.DEEPSEEK4: get_scannable(deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock),
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
@@ -1383,6 +1438,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.GLM5,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -1952,6 +2008,28 @@ class NNXDecoder(nnx.Module):
                 *layer_args,
                 **common_kwargs,
             )
+          elif getattr(cfg, "use_index_share", False):
+            y, self.dense_layers, _, cached_indexer_state = self._apply_layers_sequentially(
+                self.dense_layers,
+                y,
+                *layer_args,
+                length=cfg.first_num_dense_layers,
+                start_layer_idx=0,
+                cached_indexer_state=None,
+                **layer_kwargs,
+            )
+
+            num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
+
+            y, self.moe_layers, _, _ = self._apply_layers_sequentially(
+                self.moe_layers,
+                y,
+                *layer_args,
+                length=num_moe,
+                start_layer_idx=cfg.first_num_dense_layers,
+                cached_indexer_state=cached_indexer_state,
+                **layer_kwargs,
+            )
           else:
             y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,
@@ -2093,17 +2171,26 @@ class NNXDecoder(nnx.Module):
                 state_in,
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
-          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
+          out = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
+          if getattr(cfg, "use_index_share", False):
+            out_y, out_kv, out_indexer_cache = out
+          else:
+            out_y, out_kv = out
+            out_indexer_cache = None
           state_out = nnx.state(merged_layer)
 
           if dynamic_graph_init:
-            new_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
-            return out_y, out_kv, state_out, new_graphdef
+            out_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
           else:
-            return out_y, out_kv, state_out, graphdef_in
+            out_graphdef = graphdef_in
+
+          if getattr(cfg, "use_index_share", False):
+            return out_y, out_kv, out_indexer_cache, state_out, out_graphdef
+          return out_y, out_kv, state_out, out_graphdef
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
+        cached_indexer_state = None
         for lyr in range(cfg.num_decoder_layers):
           if self.is_deepseek:
             if lyr < cfg.first_num_dense_layers:
@@ -2149,6 +2236,8 @@ class NNXDecoder(nnx.Module):
           )
           if input_tokens is not None:
             layer_kwargs["decoder_input_tokens"] = input_tokens
+          if getattr(cfg, "use_index_share", False):
+            layer_kwargs["cached_indexer_state"] = cached_indexer_state
 
           current_kwargs = dict(layer_kwargs)
 
@@ -2177,9 +2266,14 @@ class NNXDecoder(nnx.Module):
             )
 
           if cfg.remat_policy != "none":
-            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
+            res = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
           else:
-            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
+            res = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
+
+          if getattr(cfg, "use_index_share", False):
+            y, kv_cache, cached_indexer_state, new_state, new_graphdef = res
+          else:
+            y, kv_cache, new_state, new_graphdef = res
 
           if dynamic_graph_init:
             new_layer = nnx.merge(new_graphdef, new_state)
