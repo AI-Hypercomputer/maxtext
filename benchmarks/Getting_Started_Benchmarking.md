@@ -21,12 +21,24 @@ gcluster job config set location ${ZONE?}
 Then use the image, compute type, and topology for the target cluster:
 
 ```shell
+# Cluster Toolkit: McJAX
 gcluster job submit \
   --image <IMAGE_URI> \
   --command "python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5" \
   --name benchmark-mcjax \
   --compute-type <COMPUTE_TYPE> \
   --topology <TOPOLOGY>
+
+# Cluster Toolkit: Pathways
+gcluster job submit \
+  --image <IMAGE_URI> \
+  --name benchmark-pathways \
+  --pathways \
+  --compute-type <COMPUTE_TYPE> \
+  --topology <TOPOLOGY> \
+  --num-slices=1 \
+  --pathways-gcs-location=gs://maxtext-experiments-tpem/ \
+  --command "python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5 enable_single_controller=True"
 ```
 
 The existing Python XPK runner below remains available for older benchmark

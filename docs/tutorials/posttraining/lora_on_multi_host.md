@@ -278,9 +278,49 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
   checkpoint_storage_use_ocdbt=False"
 ```
 
-##### (Legacy) Run LoRA with Pathways
+##### Run LoRA with Pathways via Cluster Toolkit
 
-> **Legacy:** This resume example uses the XPK-based Pathways integration. New deployments should use Cluster Toolkit for GKE cluster setup and job submission. This section is retained for older environments and compatibility.
+If your environment utilizes Pathways orchestration, you can submit the workload using Cluster Toolkit's `--pathways` option:
+
+```bash
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --pathways \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --num-slices=${NUM_SLICES:-1} \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command="\
+python3 -m maxtext.trainers.post_train.sft.train_sft \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  hf_access_token=${HF_TOKEN?} \
+  hf_path=${DATASET_NAME?} \
+  train_split=${TRAIN_SPLIT?} \
+  hf_data_dir=${HF_DATA_DIR?} \
+  train_data_columns=${TRAIN_DATA_COLUMNS?} \
+  steps=${STEPS?} \
+  per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
+  max_target_length=${MAX_TARGET_LENGTH?} \
+  lora.lora_restore_path=${LORA_RESTORE_PATH?} \
+  learning_rate=${LEARNING_RATE?} \
+  chat_template_path=${CHAT_TEMPLATE_PATH?} \
+  enable_nnx=True \
+  pure_nnx_decoder=True \
+  lora.enable_lora=True \
+  lora.lora_rank=${LORA_RANK?} \
+  lora.lora_alpha=${LORA_ALPHA?} \
+  checkpoint_storage_use_zarr3=False \
+  checkpoint_storage_use_ocdbt=False \
+  enable_single_controller=True"
+```
+
+###### (Legacy) Run LoRA with Pathways via XPK
+
+> **Legacy:** For older environments using XPK, you can submit the Pathways workload with `xpk workload create-pathways`:
 
 ```bash
 xpk workload create-pathways \

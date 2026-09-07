@@ -227,27 +227,71 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 
 Monitor the Cluster Toolkit jobs with `gcluster job list` and
 `gcluster job logs <JOB_NAME>`. If the RL implementation requires Pathways
-proxy services for a particular model or vLLM configuration, this standard
-JobSet command is not equivalent for that configuration; use the legacy
-section until the model configuration is adapted for direct multi-host JAX.
+orchestration for a particular model or vLLM configuration, see the Pathways section below.
 
-## Legacy: Submit your RL workload via Pathways
+## Submit your RL workload via Pathways
+
+If your workload configuration requires Pathways orchestration across TPU slices, you can submit the RL trainer using Cluster Toolkit with the `--pathways` option, or via the legacy XPK tool.
 
 See the **Troubleshooting** section for concise instructions on how to retry or
 resume a failed workload.
+
+### Submit Pathways workload with Cluster Toolkit
+
+#### Submit GRPO workload with Cluster Toolkit Pathways
+
+```bash
+gcluster job submit \
+  --image ${DOCKER_IMAGE?} \
+  --name ${RUN_NAME?}-grpo \
+  --pathways \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --num-slices=1 \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?}-grpo \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  rollout_tensor_parallelism=8 \
+  hf_access_token=${HF_TOKEN?} \
+  enable_single_controller=True"
+```
+
+#### Submit GSPO workload with Cluster Toolkit Pathways
+
+```bash
+gcluster job submit \
+  --image ${DOCKER_IMAGE?} \
+  --name ${RUN_NAME?}-gspo \
+  --pathways \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --num-slices=1 \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?}-gspo \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  rollout_tensor_parallelism=8 \
+  hf_access_token=${HF_TOKEN?} \
+  loss_algo=gspo-token \
+  enable_single_controller=True"
+```
+
+### (Legacy) Submit RL workload via XPK Pathways
 
 The commands in this section require the legacy XPK installation and a
 Pathways-ready GKE cluster. They are retained for existing deployments only;
 new workloads should use the Cluster Toolkit commands above.
 
-Ensure you have a Pathways-ready GKE cluster (as mentioned in Prerequisites) and
-submit the `train_rl.py` script via XPK.
-
 > **Note:** XPK v0.14.0+ automatically discovers your cluster's location from
 > GCP. You don't need to specify `--zone` in the commands below. If using an
 > older XPK version, add `--zone=<ZONE>` to the workload commands.
 
-### Submit GRPO workload
+#### Submit GRPO workload via XPK
 
 ```bash
 xpk workload create-pathways --workload ${RUN_NAME?} \
@@ -264,7 +308,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   hf_access_token=${HF_TOKEN?}"
 ```
 
-### Submit GSPO workload
+#### Submit GSPO workload via XPK
 
 ```bash
 xpk workload create-pathways --workload ${RUN_NAME?} \

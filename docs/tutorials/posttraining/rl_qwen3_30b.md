@@ -16,7 +16,7 @@
 
 # Reinforcement Learning with Qwen3-30b-a3b-base on Multi-Host TPUs
 
-> **Legacy:** This tutorial uses an XPK-based Pathways launcher. New deployments should prefer Cluster Toolkit for GKE cluster setup and job submission. This page is retained for older environments and compatibility.
+> **Note:** Cluster Toolkit is recommended for new GKE deployments. Instructions for both Cluster Toolkit and the legacy XPK launcher are provided below.
 
 This tutorial provides step-by-step instructions for setting up the environment
 and training the Qwen3-30b-a3b-base model on the [OpenMathInstruct-2 dataset](https://huggingface.co/datasets/nvidia/OpenMathInstruct-2) on Ironwood GKE cluster with `tpu7x-128` nodes.
@@ -124,10 +124,21 @@ gcluster job submit \
   --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-30b-a3b-base load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?}"
 ```
 
-Remove the Pathways-only proxy environment variables from the command. Use
-the legacy section only when the model configuration still requires Pathways.
+Alternatively, if your environment uses Pathways orchestration, submit the workload with Cluster Toolkit's `--pathways` option:
 
-### Legacy XPK/Pathways submission
+```bash
+gcluster job submit \
+  --image ${DOCKER_IMAGE?} \
+  --name ${RUN_NAME?} \
+  --pathways \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --num-slices=1 \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-30b-a3b-base load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?} enable_single_controller=True"
+```
+
+### (Legacy) XPK/Pathways submission
 
 ```bash
 # Run the RL training script on your cluster

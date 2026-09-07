@@ -103,12 +103,24 @@ your model, dataset, checkpoint, and training schedule. The image-based form
 can be used when the image is already built:
 
 ```bash
+# Standard multi-host JobSet submission
 gcluster job submit \
   --image <FULL_ARTIFACT_REGISTRY_IMAGE_URI> \
   --command "python3 -m maxtext.trainers.pre_train.train <MAXTEXT_ARGS>" \
   --name ${RUN_NAME?} \
   --compute-type ${COMPUTE_TYPE?} \
   --topology ${TOPOLOGY?}
+
+# Pathways multi-slice JobSet submission
+gcluster job submit \
+  --image <FULL_ARTIFACT_REGISTRY_IMAGE_URI> \
+  --name ${RUN_NAME?} \
+  --pathways \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --num-slices=${NUM_SLICES:-1} \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command "python3 -m maxtext.trainers.pre_train.train <MAXTEXT_ARGS> enable_single_controller=True"
 ```
 
 ## Monitor and clean up
@@ -128,8 +140,4 @@ kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?}
 
 ## Compatibility note
 
-The former Pathways workflow provided a proxy backend and a headless mode that
-ran the Python process outside the workload container. Cluster Toolkit's
-standard `gcluster job submit` workflow does not provide those services. Use
-the workload form above for new deployments and remove Pathways-specific JAX
-settings such as `JAX_BACKEND_TARGET=grpc://127.0.0.1:29000`.
+The former XPK-based Pathways workflow supported an interactive proxy backend and headless mode where the Python process ran outside the workload container. In Cluster Toolkit, Pathways jobs run entirely within the GKE cluster using `gcluster job submit --pathways` with `enable_single_controller=True`. Interactive external proxy workflows (`JAX_BACKEND_TARGET=grpc://127.0.0.1:29000`) are not used with Cluster Toolkit; the entire controller and training loop run inside the cluster workload container.

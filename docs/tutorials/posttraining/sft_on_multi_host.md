@@ -180,7 +180,38 @@ Once the fine-tuning is completed, you can access your model checkpoints at `${B
 
 ### SFT with Pathways
 
-> **Legacy:** This workflow uses the XPK-based Pathways integration. New deployments should use Cluster Toolkit for GKE cluster setup and job submission. This section is retained for older environments and compatibility.
+To submit an SFT workload with Pathways using Cluster Toolkit, use `gcluster job submit` with the `--pathways` flag:
+
+```bash
+export USE_PATHWAYS=1
+
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --pathways \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --num-slices=${NUM_SLICES:-1} \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command="python3 -m maxtext.trainers.post_train.sft.train_sft \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    model_name=${MODEL?} \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+    hf_access_token=${HF_TOKEN?} \
+    per_device_batch_size=1 \
+    steps=${STEPS?} \
+    profiler=xplane \
+    checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) \
+    checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) \
+    enable_single_controller=True"
+```
+
+Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
+
+#### (Legacy) SFT with Pathways via XPK
+
+> **Legacy:** For older environments using XPK, you can submit the Pathways workload with `xpk workload create-pathways`:
 
 ```bash
 export USE_PATHWAYS=1

@@ -16,7 +16,7 @@
 
 # Reinforcement Learning with gemma4-e4b on Multi-Host TPUs
 
-> **Legacy:** This tutorial uses an XPK-based Pathways launcher. New deployments should prefer Cluster Toolkit for GKE cluster setup and job submission. This page is retained for older environments and compatibility.
+> **Note:** Cluster Toolkit is recommended for new GKE deployments. Instructions for both Cluster Toolkit and the legacy XPK launcher are provided below.
 
 This tutorial provides step-by-step instructions for setting up the environment
 and training the gemma4-e4b model with GRPO on the [OpenMathInstruct-2 dataset](https://huggingface.co/datasets/nvidia/OpenMathInstruct-2) on a Cloud TPU v6e (Trillium) GKE cluster using a `v6e-32` (4x8) slice.
@@ -137,18 +137,28 @@ gcluster job submit \
   --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=gemma4-e4b load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?}"
 ```
 
-This standard JobSet path replaces the Pathways proxy environment. Remove
-`JAX_PLATFORMS=proxy`, `JAX_BACKEND_TARGET`, and
-`ENABLE_PATHWAYS_PERSISTENCE` from the command.
+Alternatively, if your environment uses Pathways orchestration, submit the workload with Cluster Toolkit's `--pathways` option:
 
-### Legacy XPK/Pathways submission
+```bash
+gcluster job submit \
+  --image ${DOCKER_IMAGE?} \
+  --name ${RUN_NAME?} \
+  --pathways \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --num-slices=1 \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=gemma4-e4b load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?} enable_single_controller=True"
+```
+
+### (Legacy) XPK/Pathways submission
 
 ```bash
 # Run the RL training script on your cluster
 run_tutorial maxtext/trainers/post_train/rl/scripts/run_gemma4_e4b_rl.sh
 ```
 
-> **Legacy launcher note:** The `run_gemma4_e4b_rl.sh` script invokes XPK and pins Pathways component images through the `--server-image` and `--proxy-server-image` flags. It is not a Cluster Toolkit workflow. A dedicated `gcluster` launcher is required before this recipe can be migrated.
+> **Legacy launcher note:** The `run_gemma4_e4b_rl.sh` script invokes XPK and pins Pathways component images through the `--server-image` and `--proxy-server-image` flags. It is not a Cluster Toolkit workflow. For new deployments, use the Cluster Toolkit submission commands above.
 
 ### Monitor your workload
 
