@@ -42,7 +42,7 @@ Before starting, ensure you have:
 
 ## Build and upload MaxText Docker image
 
-For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext.md).
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../build_maxtext.md).
 
 ## Environment configuration
 
@@ -95,7 +95,6 @@ export TPU_TYPE=<TPU_TYPE>
 export NUM_SLICES=<NUM_SLICES>
 export COMPUTE_TYPE=<COMPUTE_TYPE>
 export TOPOLOGY=<TOPOLOGY>
-export CPU_COMPUTE_TYPE=<CPU_COMPUTE_TYPE>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
@@ -161,12 +160,15 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # gs://my-bucket/my-checkpoint-directory/0/
 ## Submit workload on GKE cluster
 
 This section provides the command to run LoRA Fine-Tuning on a GKE cluster.
-Before submitting a job, configure access to the cluster with `gcloud`:
+Before submitting a job, configure access to the cluster with `gcloud` and `gcluster`:
 
 ```bash
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
   --zone ${ZONE?} \
   --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${ZONE?}
 ```
 
 ### Run a Fresh LoRA Fine-Tuning on Hugging Face Dataset
@@ -210,7 +212,7 @@ If you want to resume training from a previous run or further fine-tune an exist
 
 #### Step 1: Convert HF LoRA adapter to MaxText format
 
-> For new deployments, run this conversion with Cluster Toolkit after configuring the cluster with `gcloud container clusters get-credentials` above.
+> For new deployments, run this conversion with Cluster Toolkit after configuring the cluster with `gcloud container clusters get-credentials` and `gcluster job config set` above.
 
 If your LoRA adapter is currently in Hugging Face format, you must convert it to MaxText format before it can be loaded. Use the integrated conversion utility:
 
@@ -218,8 +220,8 @@ If your LoRA adapter is currently in Hugging Face format, you must convert it to
 gcluster job submit \
 --image=${DOCKER_IMAGE?} \
 --name=${RUN_NAME?}-convert \
---compute-type=${CPU_COMPUTE_TYPE?} \
---topology=1x1x1 \
+--compute-type=${COMPUTE_TYPE?} \
+--topology=${TOPOLOGY?} \
 --command="python3 -m maxtext.checkpoint_conversion.to_maxtext \
   model_name=${MODEL?} \
   hf_lora_adapter_path=${HF_LORA_ADAPTER_PATH?} \
@@ -242,11 +244,43 @@ export LORA_RESTORE_PATH=<LORA_RESTORE_PATH> # e.g., gs://my-bucket/run-1/checkp
 
 #### Step 3: Run LoRA Fine-Tuning with the Restore Path
 
-> **Legacy:** This resume example uses the XPK-based Pathways integration. The `gcloud` command configures cluster access, but cannot submit a Pathways workload. A dedicated Cluster Toolkit Pathways launcher is required.
+Once your environment variables and checkpoints are ready, you can start the LoRA fine-tuning process with Cluster Toolkit:
 
-Once your environment variables and checkpoints are ready, you can start the LoRA fine-tuning process.
+```bash
+gcluster job submit \
+--image=${DOCKER_IMAGE?} \
+--name=${RUN_NAME?} \
+--compute-type=${COMPUTE_TYPE?} \
+--topology=${TOPOLOGY?} \
+--command="\
+python3 -m maxtext.trainers.post_train.sft.train_sft \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  hf_access_token=${HF_TOKEN?} \
+  hf_path=${DATASET_NAME?} \
+  train_split=${TRAIN_SPLIT?} \
+  hf_data_dir=${HF_DATA_DIR?} \
+  train_data_columns=${TRAIN_DATA_COLUMNS?} \
+  steps=${STEPS?} \
+  per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
+  max_target_length=${MAX_TARGET_LENGTH?} \
+  lora.lora_restore_path=${LORA_RESTORE_PATH?} \
+  learning_rate=${LEARNING_RATE?} \
+  chat_template_path=${CHAT_TEMPLATE_PATH?} \
+  enable_nnx=True \
+  pure_nnx_decoder=True \
+  lora.enable_lora=True \
+  lora.lora_rank=${LORA_RANK?} \
+  lora.lora_alpha=${LORA_ALPHA?} \
+  checkpoint_storage_use_zarr3=False \
+  checkpoint_storage_use_ocdbt=False"
+```
 
-Execute the following command to begin training:
+##### (Legacy) Run LoRA with Pathways
+
+> **Legacy:** This resume example uses the XPK-based Pathways integration. New deployments should use Cluster Toolkit for GKE cluster setup and job submission. This section is retained for older environments and compatibility.
 
 ```bash
 xpk workload create-pathways \
@@ -288,7 +322,7 @@ Your fine-tuned model checkpoints will be saved here: `$BASE_OUTPUT_DIRECTORY/$R
 
 ## (Optional) Convert Fine-tuned LoRA to Hugging Face Format
 
-> For new deployments, run this conversion with Cluster Toolkit after configuring the cluster with `gcloud container clusters get-credentials` above.
+> For new deployments, run this conversion with Cluster Toolkit after configuring the cluster with `gcloud container clusters get-credentials` and `gcluster job config set` above.
 
 After completing the fine-tuning process, your LoRA weights are stored in MaxText/Orbax format. To use these weights with the Hugging Face ecosystem (e.g., for inference or sharing), convert them back using the `to_huggingface.py` script.
 
@@ -296,14 +330,13 @@ After completing the fine-tuning process, your LoRA weights are stored in MaxTex
 gcluster job submit \
 --image=${DOCKER_IMAGE?} \
 --name="${RUN_NAME?}-to-hf" \
---compute-type=${CPU_COMPUTE_TYPE?} \
---topology=1x1x1 \
+--compute-type=${COMPUTE_TYPE?} \
+--topology=${TOPOLOGY?} \
 --command="python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name=${MODEL?} \
     lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/checkpoints/<STEPS>/model_params \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?}/hf_lora_adapter \
     hf_access_token=${HF_TOKEN?}"
-    
 ```
 
 - `lora.lora_restore_path`: Point this to the specific checkpoint directory (e.g., `.../checkpoints/1000/items`) that you want to export.

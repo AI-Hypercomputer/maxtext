@@ -45,7 +45,7 @@ Toolkit, a Pathways runtime available to the workload, and a MaxText Docker
 image in Artifact Registry. If you don't:
 
 1. **Install Cluster Toolkit and configure GKE.** Follow [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). Cluster creation and management is out of scope for this page.
-2. **Build and upload the MaxText Docker image.** See [Build MaxText](../build_maxtext.md).
+2. **Build and upload the MaxText Docker image.** See [Build MaxText](../tutorials/build_maxtext.md).
 
 ## 2. Environment configuration
 

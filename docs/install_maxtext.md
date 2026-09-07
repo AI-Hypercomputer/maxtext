@@ -72,12 +72,12 @@ This is the easiest way to get started with the latest stable version.
      install_tpu_post_train_extra_deps
      ```
 
-   - **Option 4:** Install `maxtext[runner]`, used for building MaxText's Docker
-     images and scheduling workloads with Cluster Toolkit. Once installed, you
-     will have access to the `build_maxtext_docker_image`,
-     `upload_maxtext_docker_image`, and the `gcluster` CLI for GKE job
-     submission. For more details on building and uploading Docker images, see
-     the [Build MaxText Docker Image](build-docker) guide.
+   - **Option 4:** Install `maxtext[runner]`, used for building and uploading
+     MaxText's Docker images. Once installed, you will have access to the
+     `build_maxtext_docker_image` and `upload_maxtext_docker_image` commands.
+     For GKE job submission, install the `gcluster` CLI separately as described in
+     the [Cluster Toolkit guide](run-cluster-toolkit). For more details on building
+     and uploading Docker images, see the [Build MaxText Docker Image](build-docker) guide.
 
      ```bash
      uv pip install maxtext[runner]=={{version}} --resolution=lowest

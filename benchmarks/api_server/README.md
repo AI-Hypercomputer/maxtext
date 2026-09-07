@@ -192,7 +192,7 @@ kubectl get pods -l gcluster.google.com/workload=<your_job_name>
 kubectl port-forward <server-pod-name> 8000:8000
 ```
 
-The script will automatically find the correct pod and establish the port-forward connection. Your server is now accessible at `http://localhost:8000`.
+Select the first worker pod from the output above and run `kubectl port-forward <server-pod-name> 8000:8000`. Your server is now accessible at `http://localhost:8000`.
 
 ## Interacting with the Server
 

@@ -20,7 +20,7 @@ This directory contains code and documentation for **GRPO**, a reinforcement lea
     *   Follow the instructions to create a GKE cluster with Pathways support: [Create a GKE Cluster with Pathways](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)
     *   This involves setting up node pools for both training and inference.
 3.  **Pathways Container Images:** Your GCP service account must be allowlisted to access the Pathways container images. Contact your Google Cloud representative for assistance.
-4.  **XPK:** (Recommended) Install and configure XPK, the Accelerated Processing Kit, to simplify the management of your GKE cluster and Pathways environment.
+4.  **Cluster Management Tools:** For standard GKE workloads, [Cluster Toolkit](../../../../docs/run_maxtext/run_maxtext_via_cluster_toolkit.md) is recommended. For legacy Pathways-specific orchestration, install and configure XPK to manage your GKE cluster and Pathways environment.
 5. **HF_TOKEN:** You need to have a Hugging Face token to access the models.
 
 ### Setup

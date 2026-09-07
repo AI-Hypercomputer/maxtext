@@ -9,6 +9,8 @@ and [`post_training_index.md`](../../../../../docs/tutorials/post_training_index
 Canonical launcher: [`scripts/run_distill_xpk.sh`](scripts/run_distill_xpk.sh)
 (see its header for all env vars).
 
+> **Note:** For new deployments on GKE, Cluster Toolkit (`gcluster job submit`) is recommended. See [`knowledge_distillation.md`](../../../../../docs/tutorials/posttraining/knowledge_distillation.md#cluster-toolkit-multi-host-submission) for submitting distillation jobs via Cluster Toolkit.
+
 
 ## 1. Pick a config
 

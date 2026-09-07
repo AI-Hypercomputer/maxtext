@@ -68,7 +68,7 @@ following access scope during node pool creation:
 
 Cluster Toolkit is the recommended method to create GKE clusters and node pools for MaxText workloads. The old XPK-based setup path is retained only as a legacy option for older environments.
 
-For new deployments, use the Cluster Toolkit path described in [Running MaxText with Cluster Toolkit](../run_maxtext/run_maxtext_via_cluster_toolkit.md). The XPK docs remain only for legacy compatibility.
+For new deployments, use the Cluster Toolkit path described in [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md). The XPK docs remain only for legacy compatibility.
 
 ```{note}
 Access Scopes are immutable and workloads can only be migrated to new node pools with required access scopes. Access scopes on already created clusters cannot be updated.

@@ -151,13 +151,13 @@ The flags below would give the user access to the ramdisk in their workload:
 1. **Set up environment variables:**
 
    ```bash
-   RAMDISK_DIRECTORY=<your ramdisk directory>
-   WORKLOAD_NAME=<YOUR WORKLOAD NAME>
-   TPU_TYPE=<tpu-type>
-   NUM_SLICES=<number of slices>
    PROJECT_ID=<project-id>
-   LOCAL_CHECKPOINT_PERIOD=<>
-   CHECKPOINT_PEROID=<checkpoint_period>
+   CLUSTER_NAME=<cluster-name>
+   ZONE=<zone>
+   RAMDISK_DIRECTORY=<your ramdisk directory> # example: /tmp/ramdisk
+   WORKLOAD_NAME=<YOUR WORKLOAD NAME>
+   LOCAL_CHECKPOINT_PERIOD=10
+   CHECKPOINT_PERIOD=<checkpoint_period>
    STEPS=<steps>
    DATA_PATH=<dataset path>
    OUTPUT_PATH=<gcs bucket output path>
@@ -175,18 +175,22 @@ The flags below would give the user access to the ramdisk in their workload:
 3. **Run the workload creation command:**
 
    ```bash
-    gcloud container clusters get-credentials ${CLUSTER_NAME?} \
-      --zone ${ZONE?} \
-       --project ${PROJECT_ID?}
+   gcloud container clusters get-credentials ${CLUSTER_NAME?} \
+     --zone ${ZONE?} \
+     --project ${PROJECT_ID?}
 
-    gcluster job submit \
-    --image=${DOCKER_IMAGE?} \
-    --name=${WORKLOAD_NAME?} \
-    --compute-type=${COMPUTE_TYPE?} \
-    --topology=${TOPOLOGY?} \
-    --gke-mtc-enabled \
-    --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
-    --command "python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PEROID?} enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=/${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?}"
+   gcluster job config set project ${PROJECT_ID?}
+   gcluster job config set cluster ${CLUSTER_NAME?}
+   gcluster job config set location ${ZONE?}
+
+   gcluster job submit \
+     --image=${DOCKER_IMAGE?} \
+     --name=${WORKLOAD_NAME?} \
+     --compute-type=${COMPUTE_TYPE?} \
+     --topology=${TOPOLOGY?} \
+     --gke-mtc-enabled \
+     --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
+     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PERIOD?} enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?}"
    ```
 
 ## Deploying MTC on Pathways using Cluster Toolkit
@@ -203,6 +207,9 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
 1. **Set up environment variables:**
 
    ```bash
+   PROJECT_ID="<project-id>"
+   CLUSTER_NAME="<cluster-name>"
+   ZONE="<zone>"
    JOB_NAME="<job-name>"
    COMPUTE_TYPE="<tpu-type>"
    TOPOLOGY="<tpu-topology>"
@@ -243,7 +250,7 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
 3. **Submit the workload:**
 
    ```bash
-   ./gcluster job submit \
+   gcluster job submit \
       --project="${PROJECT_ID}" \
       --cluster="${CLUSTER_NAME}" \
       --location="${ZONE}" \

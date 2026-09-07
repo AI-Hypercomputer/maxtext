@@ -309,9 +309,13 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   - **Solution**: Explicitly pass at least one of them in your training command (e.g., `rollout_tensor_parallelism=8` as shown in the example commands above).
 - **Workload retry / resume**:
   - **Retry (fresh run)**: Use a unique run name to avoid overwriting
-    outputs: `export RUN_NAME=${RUN_NAME?}-retry1 export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items`. Then
-    submit the XPK workload. If "workload already exists" error occurs, pick
-    a new name or list jobs: `kubectl get pathwaysjob`.
+    outputs:
+    ```bash
+    export RUN_NAME=${RUN_NAME?}-retry1
+    export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items
+    ```
+    Then submit the Cluster Toolkit workload (or legacy XPK workload). If a "workload already exists" error occurs, pick
+    a new name or delete the previous job (`gcluster job delete ${RUN_NAME}` or `kubectl delete pathwaysjob ${RUN_NAME}`).
   - **Resume from checkpoint**: Keep the same `RUN_NAME` and set the
     checkpoint path: `export load_parameters_path=${MAXTEXT_CKPT_PATH?}/checkpoint-0000`. Then submit
     the workload again.
@@ -319,5 +323,6 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     resuming.
 
 For more detailed troubleshooting, refer to the
-[MaxText documentation](../../index.md) and
+[MaxText documentation](../../index.md),
+[Cluster Toolkit guide](../../run_maxtext/run_maxtext_via_cluster_toolkit.md), and
 [XPK documentation](https://github.com/AI-Hypercomputer/xpk).

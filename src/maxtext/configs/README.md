@@ -47,9 +47,7 @@ These configurations do 3 things:
 
     For new GKE deployments, configure the network and subnetwork through Cluster Toolkit. See the [Cluster Toolkit guide](../../../docs/run_maxtext/run_maxtext_via_cluster_toolkit.md).
      ```
-     export CLUSTER_ARGUMENTS="--network=mtu9k --subnetwork=mtu9k"
-
-    gcloud container clusters get-credentials ${YOUR_CLUSTER_NAME?} --zone ${ZONE?} --project ${PROJECT?}
+     gcloud container clusters get-credentials ${YOUR_CLUSTER_NAME?} --zone ${ZONE?} --project ${PROJECT?}
      ```
 
 ### Run model config scripts on TPUs
@@ -72,6 +70,9 @@ These configurations do 3 things:
     Running with Cluster Toolkit on GKE:
     ```
     gcloud container clusters get-credentials ${YOUR_CLUSTER_NAME?} --zone ${ZONE?} --project ${PROJECT?}
+    gcluster job config set project ${PROJECT?}
+    gcluster job config set cluster ${YOUR_CLUSTER_NAME?}
+    gcluster job config set location ${ZONE?}
     gcluster job submit --image gcr.io/${PROJECT?}/${YOUR_IMAGE_NAME?} --name ${YOUR_RUN_NAME?} --compute-type ${COMPUTE_TYPE?} --topology ${TOPOLOGY?} --command "bash src/maxtext/configs/tpu/v5p/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH?} DATASET_PATH=${MAXTEXT_DATASET_PATH?} PLATFORM=gke"
     ```
 

@@ -51,6 +51,9 @@ Configure access to the target cluster with `gcloud`, then configure the project
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
   --zone ${ZONE?} \
   --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${ZONE?}
 ```
 
 ## Environment configuration

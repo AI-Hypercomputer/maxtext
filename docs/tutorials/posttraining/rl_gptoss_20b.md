@@ -28,8 +28,9 @@ Before starting, ensure you have:
 - Access to a Google Cloud Project with TPU quotas.
 - A Hugging Face account with an access token for downloading models.
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
-- XPK installed for this legacy workflow (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
-- A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- Cluster Toolkit installed and configured. Follow [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md) for `gcluster` setup.
+- A GKE cluster configured for Cluster Toolkit, including healthy Kueue and JobSet components.
+- (Legacy) XPK installed for the legacy workflow (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)) and a Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Setup Environment Variables
@@ -51,6 +52,16 @@ export ZONE=<ZONE> # e.g., 'us-central1' or 'us-central1-a'
 
 # Use a GCS bucket you own to store logs and checkpoints.
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
+
+# An arbitrary string to identify this specific run.
+export RUN_NAME="rl-gptoss-$(date +%Y%m%d-%H%M%S)"
+
+# The Docker image you pushed in the prerequisite step
+export CLOUD_IMAGE_NAME=<IMAGE_NAME>
+export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+
+# Your Hugging Face access token.
+export HF_TOKEN=<HF_TOKEN>
 ```
 
 ## Authenticate with Hugging Face
@@ -86,7 +97,7 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ### Build and Upload MaxText Docker Image
 
-For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext.md).
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../build_maxtext.md).
 
 ### Cluster Toolkit submission
 
@@ -119,29 +130,32 @@ the legacy section only when the model configuration still requires Pathways.
 ### Legacy XPK/Pathways submission
 
 ```bash
-# The Docker image you pushed in the previous step
-export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
-
 # Run the RL training script on your cluster
 run_tutorial maxtext/trainers/post_train/rl/scripts/run_gptoss_20b_rl.sh
 ```
 
 ### Monitor your workload
 
-To monitor your job's progress, you can use `kubectl` to check the `Jobset` status and stream logs directly from the pods.
+To monitor your job's progress, you can use `gcluster` or `kubectl` to check the `JobSet` status and stream logs directly:
 
 ```bash
-kubectl get jobset -n default ${WORKLOAD_NAME}
+# Check job status with Cluster Toolkit
+gcluster job list
 
-# List pods to find the specific name
-kubectl get pods | grep ${WORKLOAD_NAME}
+# Stream logs with Cluster Toolkit
+gcluster job logs ${RUN_NAME?}
 
-# stream the logs from the running pod (replace <POD_NAME> with the name you found)
-kubectl logs -f <POD_NAME>
+# Alternatively, check JobSet status with kubectl
+kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+
+# List pods
+kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?}
+
+# Stream logs with kubectl
+kubectl logs -f -l gcluster.google.com/workload=${RUN_NAME?}
 ```
 
-Alternatively, after running the bash script, you will also get a link to the Google Cloud Console to view your workload logs. Follow the link to view logs and monitor your workload's progress in the Cloud Console.
+Alternatively, `gcluster job submit` provides a link to the Google Cloud Console to view your workload logs. Follow the link to view logs and monitor your workload's progress in the Cloud Console.
 
 ### Monitor RL Metrics
 

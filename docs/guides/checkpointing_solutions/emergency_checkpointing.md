@@ -132,13 +132,13 @@ The Cluster Toolkit workload must mount the ramdisk so the training process can 
 1. **Set up environment variables:**
 
    ```bash
-   RAMDISK_DIRECTORY=<your ramdisk directory>
-   WORKLOAD_NAME=<YOUR WORKLOAD NAME>
-   TPU_TYPE=<tpu-type>
-   NUM_SLICES=<number of slices>
    PROJECT_ID=<project-id>
-   LOCAL_CHECKPOINT_PERIOD=<>
-   CHECKPOINT_PEROID=<checkpoint_period>
+   CLUSTER_NAME=<cluster-name>
+   ZONE=<zone>
+   RAMDISK_DIRECTORY=<your ramdisk directory> # example: /tmp/ramdisk
+   WORKLOAD_NAME=<YOUR WORKLOAD NAME>
+   LOCAL_CHECKPOINT_PERIOD=10
+   CHECKPOINT_PERIOD=<checkpoint_period>
    STEPS=<steps>
    DATA_PATH=<dataset path>
    OUTPUT_PATH=<gcs bucket output path>
@@ -155,16 +155,20 @@ The Cluster Toolkit workload must mount the ramdisk so the training process can 
 3. **Run the workload creation command:**
 
    ```bash
-    gcloud container clusters get-credentials ${CLUSTER_NAME?} \
-      --zone ${ZONE?} \
-       --project ${PROJECT_ID?}
+   gcloud container clusters get-credentials ${CLUSTER_NAME?} \
+     --zone ${ZONE?} \
+     --project ${PROJECT_ID?}
 
-    gcluster job submit \
-    --image=${DOCKER_IMAGE?} \
-    --name=${WORKLOAD_NAME?} \
-    --compute-type=${COMPUTE_TYPE?} \
-    --topology=${TOPOLOGY?} \
-    --gke-mtc-enabled \
-    --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
-    --command "python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PEROID?} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=/${RAMDISK_DIRECTORY?}"
+   gcluster job config set project ${PROJECT_ID?}
+   gcluster job config set cluster ${CLUSTER_NAME?}
+   gcluster job config set location ${ZONE?}
+
+   gcluster job submit \
+     --image=${DOCKER_IMAGE?} \
+     --name=${WORKLOAD_NAME?} \
+     --compute-type=${COMPUTE_TYPE?} \
+     --topology=${TOPOLOGY?} \
+     --gke-mtc-enabled \
+     --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
+     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PERIOD?} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?}"
    ```
