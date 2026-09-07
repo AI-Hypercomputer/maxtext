@@ -4148,6 +4148,11 @@ class MaxTextConfig(
         DecoderBlockType.QWEN3,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
+        # Hy3 is Qwen3-style GQA + QK-Norm attention over a DeepSeek-V3-style
+        # RoutedAndSharedMoE block, and its dimension numbers come out identical
+        # to those two models'; see `TestHy3MatchesWhitelistedModels` in
+        # tests/unit/muon_utils_test.py, which fails if that stops holding.
+        DecoderBlockType.HY3,
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "

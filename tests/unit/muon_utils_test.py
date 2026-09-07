@@ -18,6 +18,7 @@
 
 import io
 import contextlib
+import functools
 import unittest
 from unittest import mock
 
@@ -237,6 +238,77 @@ class TestPrintStructureDebug(unittest.TestCase):
       muon_utils._print_structure_debug(tree, muon_weight_dimension_numbers={"kernel": mdn((0,), (-1,))})
     out = buf.getvalue()
     self.assertIn("(16, 32)", out)
+
+
+@functools.lru_cache(maxsize=None)
+def _model_dimension_numbers(model_name):
+  """Returns {param path string: mdn} for a model, via the same entry point the allowlist error tells you to run.
+
+  Memoized: building the abstract model dominates the runtime of these tests,
+  and each model is asked about more than once.
+  """
+  tree = muon_utils.get_model_mdn(model_name, scan_layers=True, verbose=False, pure_nnx=True)
+  leaves = jax.tree_util.tree_flatten_with_path(tree, is_leaf=lambda x: x is None or isinstance(x, mdn))[0]
+  return {"/".join(str(getattr(k, "key", k)) for k in path): value for path, value in leaves}
+
+
+class TestHy3MatchesWhitelistedModels(unittest.TestCase):
+  """Justifies Hy3's entry on the Muon allowlist in `configs/types.py`.
+
+  That allowlist means "dimension numbers have been reviewed for this model",
+  so Hy3 needs a reason to be on it. Hy3 is Qwen3-style GQA + QK-Norm attention
+  over a DeepSeek-V3-style `RoutedAndSharedMoE` block, and both Qwen3 and
+  DeepSeek are already on the list -- Hy3 introduces no new weight layout,
+  it recombines two reviewed ones. These tests pin that down: if `transform_logic`
+  or Hy3's module structure ever changes so the mapping diverges, the allowlist
+  entry stops being justified by construction and needs a fresh manual review
+  (`python3 -m maxtext.utils.muon_utils hy3-295b True`).
+  """
+
+  @staticmethod
+  def _subtree(model_name, prefix):
+    """Returns the dimension numbers under `prefix`, rekeyed relative to it so models can be compared."""
+    subtree = {
+        key[len(prefix) :]: value for key, value in _model_dimension_numbers(model_name).items() if key.startswith(prefix)
+    }
+    assert subtree, f"no parameters under {prefix!r} for {model_name}"
+    return subtree
+
+  def test_attention_matches_qwen3(self):
+    """Hy3 and Qwen3 both use plain GQA + QK-Norm, so their attention weights map identically."""
+    self.assertEqual(
+        self._subtree("hy3-tiny", "params/decoder/moe_layers/self_attention/"),
+        self._subtree("qwen3-0.6b", "params/decoder/layers/self_attention/"),
+    )
+
+  def test_moe_block_matches_deepseek(self):
+    """Hy3 and DeepSeek V3 both use `RoutedAndSharedMoE`, so their expert and router weights map identically."""
+    self.assertEqual(
+        self._subtree("hy3-tiny", "params/decoder/moe_layers/Hy3MoeBlock_0/"),
+        self._subtree("deepseek3-tiny", "params/decoder/moe_layers/DeepSeekMoeBlock_0/"),
+    )
+
+  def test_hy3_excludes_norms_router_bias_and_embeddings(self):
+    """Muon orthogonalizes matrices only; 1-D and embedding-like parameters must map to None."""
+    dimension_numbers = _model_dimension_numbers("hy3-tiny")
+    excluded = {key for key, value in dimension_numbers.items() if value is None}
+    self.assertEqual(
+        excluded,
+        {
+            "params/token_embedder/embedding",
+            "params/decoder/logits_dense/kernel",
+            "params/decoder/decoder_norm/scale",
+            "params/decoder/dense_layers/pre_self_attention_layer_norm/scale",
+            "params/decoder/dense_layers/post_self_attention_layer_norm/scale",
+            "params/decoder/dense_layers/self_attention/query_norm/scale",
+            "params/decoder/dense_layers/self_attention/key_norm/scale",
+            "params/decoder/moe_layers/pre_self_attention_layer_norm/scale",
+            "params/decoder/moe_layers/post_self_attention_layer_norm/scale",
+            "params/decoder/moe_layers/self_attention/query_norm/scale",
+            "params/decoder/moe_layers/self_attention/key_norm/scale",
+            "params/decoder/moe_layers/Hy3MoeBlock_0/MoeBlock_0/gate/bias",
+        },
+    )
 
 
 if __name__ == "__main__":
