@@ -382,6 +382,8 @@ class Indexer(nnx.Module):
 
     # NOTE: If the total available sequence length <= topk, indexer always selects all tokens.
     if k.shape[1] <= self.indexer_topk:
+      if attention_mask is None and cached_s is None:
+        return None, None, None
       full_mask = jnp.zeros((bsz, seqlen, k.shape[1]), dtype=jnp.float32)
       if cached_s is not None:
         internal_padding_mask = jnp.where(cached_s > 0, 0.0, DEFAULT_MASK_VALUE)
@@ -1396,13 +1398,20 @@ class MLA(Attention):
             )
             topk = getattr(self.config, "indexer_topk", 0)
             if getattr(self.config, "use_index_share", False):
+              if mask is None:
+                mask = jnp.zeros((query.shape[0], query.shape[1], target_kv_len), dtype=jnp.float32)
               if indices is None or indices.shape != (query.shape[0], query.shape[1], topk):
                 indices = jnp.zeros((query.shape[0], query.shape[1], topk), dtype=jnp.int32)
-            mask = mask.astype(jnp.float32)
-            indices = indices.astype(jnp.int32)
-            score = score.astype(jnp.float32)
-            mask = checkpoint_name(mask, "full_layer_indexer_mask")
-            indices = checkpoint_name(indices, "full_layer_topk_indices")
+              if score is None:
+                score = jnp.zeros((query.shape[0], query.shape[1], target_kv_len), dtype=jnp.float32)
+            if mask is not None:
+              mask = mask.astype(jnp.float32)
+              mask = checkpoint_name(mask, "full_layer_indexer_mask")
+            if indices is not None:
+              indices = indices.astype(jnp.int32)
+              indices = checkpoint_name(indices, "full_layer_topk_indices")
+            if score is not None:
+              score = score.astype(jnp.float32)
             return mask, indices, score
 
         def _run_shared(_):
@@ -1418,13 +1427,21 @@ class MLA(Attention):
               return mask, indices, score
             mask, indices, score = cached_indexer_state
             topk = getattr(self.config, "indexer_topk", 0)
-            if indices is None or indices.shape != (query.shape[0], query.shape[1], topk):
-              indices = jnp.zeros((query.shape[0], query.shape[1], topk), dtype=jnp.int32)
-            mask = mask.astype(jnp.float32)
-            indices = indices.astype(jnp.int32)
-            score = score.astype(jnp.float32)
-            mask = checkpoint_name(mask, "shared_layer_reused_mask")
-            indices = checkpoint_name(indices, "shared_layer_reused_indices")
+            if getattr(self.config, "use_index_share", False):
+              if mask is None:
+                mask = jnp.zeros((query.shape[0], query.shape[1], target_kv_len), dtype=jnp.float32)
+              if indices is None or indices.shape != (query.shape[0], query.shape[1], topk):
+                indices = jnp.zeros((query.shape[0], query.shape[1], topk), dtype=jnp.int32)
+              if score is None:
+                score = jnp.zeros((query.shape[0], query.shape[1], target_kv_len), dtype=jnp.float32)
+            if mask is not None:
+              mask = mask.astype(jnp.float32)
+              mask = checkpoint_name(mask, "shared_layer_reused_mask")
+            if indices is not None:
+              indices = indices.astype(jnp.int32)
+              indices = checkpoint_name(indices, "shared_layer_reused_indices")
+            if score is not None:
+              score = score.astype(jnp.float32)
             return mask, indices, score
 
         if getattr(self.config, "use_index_share", False):
