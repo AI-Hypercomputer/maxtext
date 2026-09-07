@@ -3793,16 +3793,30 @@ class MaxTextConfig(
         self.quantization_local_shard_count = 1
 
     # F. CALCULATE BATCH SIZES
-    def calculate_global_batch_sizes(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps):
-      """Helper to calculate global and micro batch sizes for training and loading."""
-      if per_device_batch_size < 1.0:
-        micro_batch_to_load = num_devices * (expansion_factor if expansion_factor > 0 else 1)
-      else:
-        micro_batch_to_load = int(num_devices * per_device_batch_size * (expansion_factor if expansion_factor > 0 else 1))
-      micro_batch_to_train = int(num_devices * per_device_batch_size)
-      global_batch_to_load = int(micro_batch_to_load * grad_accum_steps)
-      global_batch_to_train = int(micro_batch_to_train * grad_accum_steps)
-      return global_batch_to_load, global_batch_to_train, micro_batch_to_train
+    def calculate_global_batch_sizes(
+        per_device_batch_size, expansion_factor, num_devices, grad_accum_steps=1
+    ):
+      """Helper to calculate global and micro batch sizes for training or evaluation.
+
+      Returns:
+        tuple: (global_batch_to_load, global_batch, micro_batch)
+          - global_batch_to_load: Batch size loaded by the dataloader across hosts
+            (scaled by expansion_factor for partial host loading).
+          - global_batch: Total effective batch size across all devices and
+            gradient accumulation steps (to train or eval on).
+          - micro_batch: Micro-batch size per step across all devices.
+      """
+      micro_batch = int(num_devices * per_device_batch_size)
+      effective_pdbs = max(1.0, per_device_batch_size)
+      expansion = expansion_factor if expansion_factor > 0 else 1
+
+      global_batch = int(num_devices * effective_pdbs * grad_accum_steps)
+      global_batch_to_load = int(global_batch * expansion)
+      # Returns:
+      # 1. global_batch_to_load: Batch size loaded by dataloader (scaled by expansion factor for partial host loading).
+      # 2. global_batch: Total effective batch size across all devices and accumulation steps (train_on / eval_on).
+      # 3. micro_batch: Micro-batch size executed per step across all devices.
+      return global_batch_to_load, global_batch, micro_batch
 
     # Calculate final training batch sizes.
     (

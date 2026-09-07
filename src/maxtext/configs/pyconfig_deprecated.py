@@ -1304,25 +1304,33 @@ def get_individual_scales(scale):
 
 
 def calculate_global_batch_sizes(
-    per_device_batch_size, expansion_factor_real_data, num_devices, gradient_accumulation_steps
+    per_device_batch_size, expansion_factor_real_data, num_devices, gradient_accumulation_steps=1
 ):
-  """Calculates target global batch size from target devices and per_device_batch"""
-  if per_device_batch_size < 1.0:
-    # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
-    if expansion_factor_real_data > 1:
-      micro_batch_size_to_load = num_devices * expansion_factor_real_data
-    else:
-      micro_batch_size_to_load = num_devices
-  else:
-    if expansion_factor_real_data > 1:
-      micro_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)
-    else:
-      micro_batch_size_to_load = int(num_devices * per_device_batch_size)
+  """Calculates target global batch size from target devices and per_device_batch.
 
-  micro_batch_size_to_train_on = int(num_devices * per_device_batch_size)
-  global_batch_size_to_load = int(micro_batch_size_to_load * gradient_accumulation_steps)
-  global_batch_size_to_train_on = int(micro_batch_size_to_train_on * gradient_accumulation_steps)
-  return global_batch_size_to_load, global_batch_size_to_train_on, micro_batch_size_to_train_on
+  Returns:
+    tuple: (global_batch_size_to_load, global_batch_size, micro_batch_size)
+      - global_batch_size_to_load: Batch size loaded by dataloader across hosts
+        (scaled by expansion_factor for partial host loading).
+      - global_batch_size: Total effective batch size across all devices and
+        gradient accumulation steps (to train or eval on).
+      - micro_batch_size: Micro-batch size per step across all devices.
+  """
+  micro_batch_size = int(num_devices * per_device_batch_size)
+  effective_pdbs = max(1.0, per_device_batch_size)
+  expansion = expansion_factor_real_data if expansion_factor_real_data > 1 else 1
+
+  global_batch_size = int(num_devices * effective_pdbs * gradient_accumulation_steps)
+  global_batch_size_to_load = int(global_batch_size * expansion)
+  # Returns:
+  # 1. global_batch_size_to_load: Batch size loaded by dataloader across hosts (scaled by expansion factor).
+  # 2. global_batch_size: Total effective batch size across all devices and accumulation steps.
+  # 3. micro_batch_size: Micro-batch size executed per step across all devices.
+  return global_batch_size_to_load, global_batch_size, micro_batch_size
+
+
+calculate_training_batch_sizes = calculate_global_batch_sizes
+calculate_eval_batch_sizes = calculate_global_batch_sizes
 
 
 def calculate_rampup_samples_and_steps(

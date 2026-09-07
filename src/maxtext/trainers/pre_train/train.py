@@ -76,7 +76,11 @@ from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
-from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
+from maxtext.utils.gradient_accumulation import (
+    get_num_microbatches,
+    gradient_accumulation_loss_and_grad,
+    should_accumulate_fractional_batch,
+)
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
 
 
@@ -138,13 +142,6 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       if data[mask_name].shape != target_shape:
         raise ValueError(f"{mask_name} must match targets shape; got {data[mask_name].shape} and {target_shape}")
 
-  # decimate proportion of data when per_device_batch_size<1
-  if is_train:
-    for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
-  else:
-    for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_eval_on, :]
   # Only forward the kwarg when router replay is actually in use, so models
   # and adapters whose __call__ predates the feature keep working.
   forced_routing_kwargs = (
@@ -357,7 +354,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # Zero1+GA to reduce communication overhead.
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
-  if config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation:
+  if (
+      config.gradient_accumulation_steps > 1 or should_accumulate_fractional_batch(config)
+  ) and not config.use_tunix_gradient_accumulation:
     loss = xent_sum
   else:
     # When using Tunix gradient accumulation, we revert to standard normalization.
@@ -475,7 +474,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     loss_model, loss_params, loss_rng = state.model, None, None
 
   # --- Gradient computation ---
-  if config.gradient_accumulation_steps > 1:
+  if config.gradient_accumulation_steps > 1 or should_accumulate_fractional_batch(config):
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
         loss_fn,
         config,
@@ -782,27 +781,106 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
 
 
+def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
+  """Accumulates eval metrics across microbatches for fractional batch sizes without backprop."""
+  def reshape_to_microbatch_accumulations(batch_arr):
+    microbatch_shape = (
+        batch_arr.shape[0] // num_microbatches,
+        num_microbatches,
+    ) + batch_arr.shape[1:]
+    reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
+    return jnp.swapaxes(reshaped_batch_arr, 0, 1)
+
+  micro_data = jax.tree_util.tree_map(
+      reshape_to_microbatch_accumulations, data
+  )
+
+  def accumulate_eval(acc, micro_batch):
+    _, aux = single_eval_fn(micro_batch)
+    new_acc = {
+        "xent_sum": acc["xent_sum"] + aux["xent_sum"],
+        "total_weights": acc["total_weights"] + aux["total_weights"],
+        "z_loss": acc["z_loss"] + aux.get("z_loss", 0.0),
+        "moe_lb_loss": acc["moe_lb_loss"] + aux.get("moe_lb_loss", 0.0),
+        "indexer_loss": acc["indexer_loss"] + aux.get("indexer_loss", 0.0),
+        "mtp_loss": acc["mtp_loss"] + aux.get("mtp_loss", 0.0),
+    }
+    return new_acc, None
+
+  init_acc = {
+      "xent_sum": 0.0,
+      "total_weights": 0.0,
+      "z_loss": 0.0,
+      "moe_lb_loss": 0.0,
+      "indexer_loss": 0.0,
+      "mtp_loss": 0.0,
+  }
+  acc, _ = jax.lax.scan(
+      accumulate_eval, init_acc, micro_data, length=num_microbatches
+  )
+
+  total_weights = acc["total_weights"]
+  denominator = jnp.maximum(total_weights, 1)
+  loss = (
+      acc["xent_sum"] / denominator
+      + acc["moe_lb_loss"] / num_microbatches
+      + acc["indexer_loss"] / num_microbatches
+      + acc["mtp_loss"] / num_microbatches
+  )
+  loss = jnp.where(total_weights > 0, loss, 0.0)
+  aux = {
+      "xent_sum": acc["xent_sum"],
+      "total_weights": total_weights,
+      "z_loss": acc["z_loss"] / num_microbatches,
+      "moe_lb_loss": acc["moe_lb_loss"] / num_microbatches,
+      "indexer_loss": acc["indexer_loss"] / num_microbatches,
+      "mtp_loss": acc["mtp_loss"] / num_microbatches,
+  }
+  return loss, aux
+
+
 def eval_step(model, config, state, data, dropout_rng=None):
   """eval_step no backprop and new state compared with train_step."""
   if isinstance(model, nn.Module):
     sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
-    pure_params = state.params["params"] if sparsity_enabled else state.params
-    batch_stats = state.params.get("batch_stats", {})
-
-    eval_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=False)
-    loss, aux = eval_loss_fn(pure_params, sparsity_state=batch_stats)
+    eval_params = state.params["params"] if sparsity_enabled else state.params
+    eval_model = model
+    eval_rng = dropout_rng
+    sparsity_state = state.params.get("batch_stats", {})
   else:
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-    loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
+    eval_model = state.model
+    eval_params = None
+    eval_rng = None
+    sparsity_state = None
 
-  mtp_acceptance_rate = 0.0
-  if config.mtp_eval_target_module > 0:
-    mtp_acceptance_rate = calculate_mtp_acceptance_rate(aux["intermediate_outputs"], config)
+  def single_eval_fn(d):
+    return loss_fn(
+        eval_model,
+        config,
+        d,
+        eval_rng,
+        eval_params,
+        sparsity_state=sparsity_state,
+        is_train=False,
+    )
+
+  if should_accumulate_fractional_batch(config, is_train=False):
+    num_microbatches = get_num_microbatches(config, is_train=False)
+    loss, aux = _fractional_batch_eval(single_eval_fn, data, num_microbatches)
+    mtp_acceptance_rate = 0.0
+  else:
+    loss, aux = single_eval_fn(data)
+    mtp_acceptance_rate = 0.0
+    if config.mtp_eval_target_module > 0:
+      mtp_acceptance_rate = calculate_mtp_acceptance_rate(
+          aux["intermediate_outputs"], config
+      )
 
   xent_sum = aux["xent_sum"]
   z_loss = aux.get("z_loss", 0.0)
   total_weights = aux["total_weights"]
-  moe_lb_loss = aux["moe_lb_loss"]
+  moe_lb_loss = aux.get("moe_lb_loss", 0.0)
   indexer_loss = aux.get("indexer_loss", 0.0)
   mtp_loss = aux.get("mtp_loss", 0.0)
   eval_total_loss = xent_sum
