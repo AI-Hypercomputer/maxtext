@@ -573,14 +573,32 @@ class Gemma4VisionEncoderLayer(nnx.Module):
         nnx.initializers.ones(self.rngs.params(), (config.hidden_size_for_vit,), config.weight_dtype), sharding=(None,)
     )
 
-  def __call__(self, inputs: jax.Array, deterministic: bool = False) -> jax.Array:
+  def __call__(
+      self,
+      inputs: jax.Array,
+      positions_xy: jax.Array | None = None,
+      deterministic: bool = False,
+  ) -> jax.Array:
     """Applies the vision encoder layer."""
-    if inputs.ndim == 4:
-      inputs = jnp.expand_dims(inputs, 1)
-    b, n, h, w, c = inputs.shape
-    inputs_flat = jnp.reshape(inputs, (b * n, h, w, c))
-
-    x, positions_xy = self.vision_entry(inputs_flat)
+    if positions_xy is not None:
+      if inputs.ndim == 4:
+        b, n, p, d = inputs.shape
+        inputs_flat = jnp.reshape(inputs, (b * n, p, d))
+        pos_flat = jnp.reshape(positions_xy, (b * n, p, 2))
+      elif inputs.ndim == 3:
+        b, p, d = inputs.shape
+        n = 1
+        inputs_flat = inputs
+        pos_flat = positions_xy
+      else:
+        raise ValueError(f"Unexpected patch inputs shape: {inputs.shape}")
+      x, positions_xy = self.vision_entry(inputs_flat, positions_xy=pos_flat)
+    else:
+      if inputs.ndim == 4:
+        inputs = jnp.expand_dims(inputs, 1)
+      b, n, h, w, c = inputs.shape
+      inputs_flat = jnp.reshape(inputs, (b * n, h, w, c))
+      x, positions_xy = self.vision_entry(inputs_flat)
 
     for i in range(self.config.num_hidden_layers_for_vit):
       layer = getattr(self, f"layer_{i}")

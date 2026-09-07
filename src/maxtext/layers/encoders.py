@@ -106,13 +106,22 @@ class VisionEncoder(nnx.Module):
 
     return encoder_name, projector_name
 
-  def __call__(self, input_images, input_masks=None, video_grid_thw=None, deterministic=False):
+  def __call__(
+      self,
+      input_images,
+      input_masks=None,
+      video_grid_thw=None,
+      positions_xy=None,
+      deterministic=False,
+  ):
     # vision encoder output, frozen params in many cases
     encoder = getattr(self, self.encoder_name)
     if self.vision_encoder_block.value.startswith("qwen3") and input_masks is not None:
       encoder_output = encoder(
           input_images, video_mask=input_masks, video_grid_thw=video_grid_thw, deterministic=deterministic
       )
+    elif self.vision_encoder_block == VisionEncoderBlockType.GEMMA4 and positions_xy is not None:
+      encoder_output = encoder(input_images, positions_xy=positions_xy, deterministic=deterministic)
     else:
       encoder_output = encoder(input_images, deterministic=deterministic)
     deep_feats = None

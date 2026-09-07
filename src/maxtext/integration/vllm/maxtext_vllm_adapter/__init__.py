@@ -17,7 +17,7 @@
 import os
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import register_model
-from .adapter import MaxTextForCausalLM
+from .adapter import MaxTextForCausalLM, patch_kv_cache_manager
 from .multimodal import get_multimodal_handler
 
 
@@ -43,13 +43,13 @@ def register(config=None):
 
   register_model("MaxTextForCausalLM", MaxTextForCausalLM)
 
-  # Dynamically apply KVCacheManager patch when registering the adapter
-  # pylint: disable=import-outside-toplevel
-  from .adapter import patch_kv_cache_manager
-
   patch_kv_cache_manager()
 
   if multimodal_handler is not None:
     multimodal_handler.register_processor(MaxTextForCausalLM)
 
   logger.info("Successfully registered MaxTextForCausalLM model.")
+
+
+# Apply patch at import time
+patch_kv_cache_manager()

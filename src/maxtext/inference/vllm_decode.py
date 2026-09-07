@@ -46,7 +46,10 @@ from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.multimodal.processor_gemma4 import GEMMA4_IMAGE_HEIGHT, GEMMA4_IMAGE_WIDTH
+from PIL import Image
 import transformers
+import yaml
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
 from vllm import LLM
@@ -95,14 +98,31 @@ def decode_with_vllm(config: Config) -> None:
   Args:
     config: MaxText config.
   """
+  hf_overrides = config.vllm_hf_overrides
+  if isinstance(hf_overrides, str):
+    try:
+      hf_overrides = yaml.safe_load(hf_overrides)
+    except (yaml.YAMLError, ValueError):
+      pass
+  if hf_overrides is None:
+    hf_overrides = {}
+  if isinstance(hf_overrides, dict):
+    hf_overrides.setdefault("architectures", ["MaxTextForCausalLM"])
+    if config.model_name.startswith("gemma4"):
+      hf_overrides.setdefault("allow_global_per_layer_attribute_access", True)
+      if "text_config" not in hf_overrides:
+        hf_overrides["text_config"] = {}
+      if isinstance(hf_overrides["text_config"], dict):
+        hf_overrides["text_config"].setdefault("allow_global_per_layer_attribute_access", True)
+
   # Prepare vLLM Arguments
   vllm_args = {
+      "hf_overrides": hf_overrides,
       "model": config.tokenizer_path,
       "max_model_len": config.max_target_length,
       "tensor_parallel_size": config.ici_tensor_parallelism,
       "data_parallel_size": config.ici_data_parallelism,
       "hf_config_path": config.vllm_hf_config_path,
-      "hf_overrides": config.vllm_hf_overrides,
       "gpu_memory_utilization": config.hbm_utilization_vllm,
       "async_scheduling": config.async_scheduling,
       "additional_config": {
@@ -116,6 +136,9 @@ def decode_with_vllm(config: Config) -> None:
               "scan_layers": config.scan_layers,
               "enable_nnx": config.enable_nnx,
               "pure_nnx_decoder": config.pure_nnx_decoder,
+              "global_num_kv_heads": getattr(config, "global_num_kv_heads", None),
+              "global_head_dim": getattr(config, "global_head_dim", None),
+              "override_model_config": getattr(config, "override_model_config", False),
           },
           "sharding": {
               "sharding_strategy": {
@@ -163,19 +186,37 @@ def decode_with_vllm(config: Config) -> None:
 
   prompts = [config.prompt]
   if config.use_chat_template:
-    # Format the prompt using chat template if specified
-    input_with_chat_template = tokenizer.apply_chat_template(
-        build_chat_messages(config),
-        tokenize=False,  # Set to False to get the string
-        add_generation_prompt=True,
-        add_special_tokens=False,  # Prevent adding special tokens
-    )
-    prompts = [input_with_chat_template]
+    if getattr(tokenizer, "chat_template", None) is not None:
+      input_with_chat_template = tokenizer.apply_chat_template(
+          build_chat_messages(config),
+          tokenize=False,  # Set to False to get the string
+          add_generation_prompt=True,
+          add_special_tokens=False,  # Prevent adding special tokens
+      )
+      prompts = [input_with_chat_template]
+    elif config.model_name.startswith("gemma4"):
+      user_prompt = config.prompt
+      if "<|image|>" not in user_prompt and config.use_multimodal:
+        user_prompt = f"<|image|>{user_prompt}"
+      prompts = [f"<|turn>user\n{user_prompt}<turn|>\n<|turn>model\n"]
+
+  if config.use_multimodal and config.image_path:
+    prompt_str = prompts[0]
+    if config.model_name.startswith("gemma4") and "<|image|>" not in prompt_str:
+      prompt_str = f"<|turn>user\n<|image|>{prompt_str}<turn|>\n<|turn>model\n"
+    prompts = [prompt_str]
 
   max_prompt_length = max(len(tokenizer.encode(p)) for p in prompts)
 
   if config.use_multimodal and config.image_path:
-    images = [mm_utils.load_image_from_path(path.strip()) for path in config.image_path.split(",")]
+    images = []
+    for path in config.image_path.split(","):
+      arr = mm_utils.load_image_from_path(path.strip())
+      if config.model_name.startswith("gemma4"):
+        img = Image.fromarray(arr).resize((GEMMA4_IMAGE_WIDTH, GEMMA4_IMAGE_HEIGHT), resample=Image.Resampling.BICUBIC)
+        images.append(img)
+      else:
+        images.append(arr)
     image_data = images[0] if len(images) == 1 else images
     prompts = [{"prompt": prompts[0], "multi_modal_data": {"image": image_data}}]
   max_tokens_to_generate = config.max_target_length - max_prompt_length

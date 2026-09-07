@@ -123,6 +123,24 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
 
   # Number of KV heads in global attention layers (None if the field is absent or unset).
   num_global_kv_heads = getattr(hf_config, "num_global_key_value_heads", None)
+  global_head_dim = getattr(hf_config, "global_head_dim", None)
+  if hasattr(hf_config, "per_layer_config") and hf_config.per_layer_config:
+    try:
+      if "full_attention" in hf_config.per_layer_config:
+        num_global_kv_heads = getattr(hf_config.per_layer_config["full_attention"], "num_key_value_heads", None)
+        global_head_dim = getattr(hf_config.per_layer_config["full_attention"], "head_dim", None)
+      else:
+        for layer_cfg in hf_config.per_layer_config:
+          if getattr(layer_cfg, "num_key_value_heads", None) != num_kv_heads:
+            num_global_kv_heads = getattr(layer_cfg, "num_key_value_heads", None)
+            global_head_dim = getattr(layer_cfg, "head_dim", None)
+            break
+    except (KeyError, AttributeError, TypeError, IndexError):
+      pass
+  if num_global_kv_heads is not None:
+    overrides["global_num_kv_heads"] = num_global_kv_heads
+  if global_head_dim is not None:
+    overrides["global_head_dim"] = global_head_dim
   use_global_kv_heads = num_global_kv_heads is not None
 
   max_logging.log(
@@ -183,6 +201,7 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     )
     overrides["padded_base_moe_mlp_dim"] = padded_hidden_size
 
+  overrides["override_model_config"] = True
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
   return maxtext_config
 
@@ -372,11 +391,19 @@ class MaxTextForCausalLM(nnx.Module):
     Returns:
       A JAX array of embedded input tokens.
     """
+    del is_multimodal
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model is not initialized.")
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       inputs_embeds = self.model.token_embedder(input_ids)
+
+      if multimodal_embeddings is not None:
+        if isinstance(multimodal_embeddings, (list, tuple)):
+          if len(multimodal_embeddings) > 0:
+            multimodal_embeddings = jnp.concatenate(multimodal_embeddings, axis=0)
+          else:
+            multimodal_embeddings = None
 
       if multimodal_embeddings is not None:
         if self.multimodal_handler is None:
@@ -438,6 +465,7 @@ class MaxTextForCausalLM(nnx.Module):
       mm_features: list = None,
   ) -> tuple[jax.Array, int]:
     """Get dummy mrope input positions and delta value for text-only MaxText."""
+    del mm_features
     seq_len = len(input_tokens)
     pos_range = jnp.arange(seq_len, dtype=jnp.int32)
     # M-RoPE expects 3D position vectors (3, seq_len) and position_delta (int)
@@ -469,14 +497,8 @@ def patch_kv_cache_manager():
 
   def patched_get_kv_cache_spec(self):
     runner = self.runner
-    if not hasattr(runner, "model"):
-      return original_get_kv_cache_spec(self)
-
-    model = runner.model
-    if not hasattr(model, "maxtext_config"):
-      return original_get_kv_cache_spec(self)
-
-    cfg = model.maxtext_config
+    model = getattr(runner, "model", None)
+    cfg = getattr(model, "maxtext_config", None)
     decoder_block = getattr(cfg, "decoder_block", "")
 
     decoder_block_str = ""
@@ -555,6 +577,58 @@ def patch_kv_cache_manager():
           num_mamba,
           group_size,
       )
+
+    # Gemma4 support (check runner.model_config as well since runner.model may not be initialized yet)
+    model_config = getattr(runner, "model_config", None)
+    text_config = (
+        getattr(model_config, "hf_text_config", getattr(model_config, "hf_config", None)) if model_config else None
+    )
+    model_type = getattr(text_config, "model_type", "") if text_config else ""
+    if not model_type and model_config:
+      model_type = getattr(getattr(model_config, "hf_config", None), "model_type", "")
+
+    is_gemma4 = decoder_block_str in ("gemma4", "gemma4_small") or model_type.startswith("gemma4")
+    if is_gemma4:
+      from tpu_inference.layers.common.sharding import ShardingAxisName
+      from tpu_inference import utils as common_utils
+
+      tp_axis_name = ShardingAxisName.ATTN_HEAD
+      model_cnt = common_utils.get_mesh_shape_product(self.runner.mesh, tp_axis_name)
+      block_size = self.runner.cache_config.block_size
+
+      num_layers = None
+      if cfg:
+        num_layers = getattr(cfg, "base_num_decoder_layers", None)
+      if num_layers is None and text_config:
+        num_layers = getattr(text_config, "num_hidden_layers", 30)
+      if num_layers is None:
+        num_layers = 30
+
+      kv_cache_spec = {}
+      for i in range(num_layers):
+        layer_num_kv = None
+        layer_head_dim = None
+        if text_config and hasattr(text_config, "per_layer_config") and text_config.per_layer_config is not None:
+          try:
+            layer_cfg = text_config.per_layer_config[i]
+            layer_num_kv = getattr(layer_cfg, "num_key_value_heads", None)
+            layer_head_dim = getattr(layer_cfg, "head_dim", None)
+          except (KeyError, AttributeError, TypeError, IndexError):
+            pass
+        if layer_num_kv is None:
+          is_global = (i + 1) % 6 == 0
+          if is_global:
+            layer_num_kv = getattr(cfg, "global_num_kv_heads", 2) if cfg else 2
+            layer_head_dim = getattr(cfg, "global_head_dim", 512) if cfg else 512
+          else:
+            layer_num_kv = getattr(cfg, "base_num_kv_heads", 8) if cfg else 8
+            layer_head_dim = getattr(cfg, "head_dim", 256) if cfg else 256
+
+        num_kv = common_utils.get_padded_num_heads(layer_num_kv, model_cnt)
+        head_dim = common_utils.get_padded_head_dim(layer_head_dim)
+        layer_name = f"layer.{i}"
+        kv_cache_spec[layer_name] = self._create_attention_spec(block_size, num_kv, head_dim)
+      return kv_cache_spec
 
     kv_cache_spec = original_get_kv_cache_spec(self)
 

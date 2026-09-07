@@ -3388,7 +3388,6 @@ class RoutedMoE(nnx.Module):
         # is what makes expert parallelism usable on TPU generations whose SparseCore has
         # fewer SIMD lanes than the kernel requires (e.g. v5p).
         enable_rs_kernel=tpu_inference_envs.ENABLE_RS_KERNEL,
-        use_gmm_fused_rs_kernel=tpu_inference_envs.USE_GMM_FUSED_RS_KERNEL,
         onehot_moe_permute_threshold=tpu_inference_envs.ONEHOT_MOE_PERMUTE_THRESHOLD,
         moe_chunk_size=tpu_inference_envs.VLLM_MOE_CHUNK_SIZE,
     )
