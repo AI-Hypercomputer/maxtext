@@ -1074,6 +1074,39 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     acc_grads = jax.tree.map(jnp.add, acc_grads, micro_grads)
     return loss_out.primary_loss, loss_out.aux_metrics, new_rest, acc_grads, acc_denom + denominator
 
+  def _clip_by_grad_norm(self, grads, grad_norm):
+    """Clips `grads` to the configured threshold, reusing the norm already computed.
+
+    `optax.clip_by_global_norm` -- which `maxtext_utils.apply_gradient_clipping` wraps --
+    recomputes `global_norm(grads)` internally, so the caller's `grad_norm` one line above
+    made it a second full pass over every gradient plus a second cross-replica reduction of
+    a scalar. The scale below is optax's exactly (`1` when under the threshold, else
+    `threshold / norm`), applied to the norm the caller already has.
+
+    Reusing it is also the more accurate of the two, and this is a numerical change rather
+    than only a saving. The caller's norm is computed in float32 for the reason stated at
+    its call site -- a sum of squares over bf16 overflows on production-size models --
+    while optax's runs in the gradients' own dtype, so under `grad_dtype=bfloat16` the
+    engine was guarding its reported norm and then clipping with an unguarded one. At the
+    default `grad_dtype=float32` the two are the same number and nothing changes.
+
+    The division is guarded the way the denominator above it is: `jnp.where` evaluates both
+    branches, so an all-zero gradient tree would otherwise divide by zero on the branch it
+    then discards -- harmless in the result, but it raises under `debug_nans` and pollutes
+    the cotangent if anything ever differentiates through here.
+
+    The fp8 path stays with optax: `apply_gradient_clipping` holds
+    `OVERWRITE_WITH_GRADIENT` out of both the norm and the scaling, and that carve-out is
+    not worth reproducing for the saving.
+    """
+    threshold = self._config.gradient_clipping_threshold
+    if maxtext_utils.OVERWRITE_WITH_GRADIENT in grads:
+      return maxtext_utils.apply_gradient_clipping(grads, None, threshold)
+    under = grad_norm < threshold
+    safe_norm = jnp.where(under, 1.0, grad_norm)
+    scale = jnp.where(under, 1.0, threshold / safe_norm)
+    return jax.tree.map(lambda g: g * scale.astype(g.dtype), grads)
+
   def _update_kernel(self, state_pure, accumulated_grads, accumulated_denominator, mean_loss):
     """Applies accumulated gradients to update the NNX model state.
 
@@ -1115,7 +1148,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # overflows on production-size models.
       grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), grads))
       if self._config.gradient_clipping_threshold > 0:
-        grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
+        grads = self._clip_by_grad_norm(grads, grad_norm)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if hasattr(local_state, "apply_gradients"):
         if self._config.skip_step_on_spikes:
