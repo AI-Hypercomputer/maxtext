@@ -735,8 +735,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
               if getattr(config, "log_moe_bias_norms", False):
                 bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
       else:
-        # 1. Update main decoder scanned MoE layers.
+        # 1. Update main decoder MoE layers.
         # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
+        #
+        # NOTE: correct only with scan_layers=true. Unscanned decoders name their
+        # layers `moe_layers_0`, `moe_layers_1`, ... individually, so the getattr
+        # below falls back to the whole decoder and `_find_gate_bias` returns only
+        # the *first* layer's bias; the collection loop above also overwrites a
+        # single `moe_bias_updates`, so only the *last* layer's delta survives.
+        # Net effect: layer 0's bias gets layer N-1's update, every other layer
+        # gets none -- silently, no error. Pre-existing, shared with DeepSeek V3.
         decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
         decoder_bias = _find_gate_bias(decoder_layer)
         if decoder_bias is not None:

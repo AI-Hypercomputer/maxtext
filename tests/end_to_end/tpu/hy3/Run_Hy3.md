@@ -20,69 +20,19 @@ Hy3 is an open-weights Mixture-of-Experts (MoE) model released by Tencent ([tenc
 * **Architecture**: 295B total parameters (~21B active parameters per token), 80 decoder layers with a dense 1st layer (`first_num_dense_layers: 1`) followed by 79 MoE layers.
 * **Attention**: Grouped-Query Attention (GQA) with QK-Norm (RMSNorm on Query and Key head vectors) and RoPE.
 * **MoE Routing**: Auxiliary-loss-free routing with Sigmoid activation and bias, 192 routed experts + 1 shared expert (selecting top-8 routed experts per token).
-* **Supported Configs**: `hy3-tiny` (testing/smoke checks), `hy3-295b` (full-scale model).
+* **Model config**: `hy3-295b` — the real model.
+* **Smoke-test config**: `hy3-tiny` — tiny dims, random init, not a usable model.
 
-### Note: MoE load balancing (previously broken, mostly fixed upstream)
+### Note: load-balancing settings
 
-Hy3's aux-loss-free routing (`routed_bias=true`) has two optional training-time
-load-balancing mechanisms, controlled by `routed_bias_update_rate` (EMA-style
-router-bias update) and `load_balance_loss_weight` (gradient-based auxiliary
-loss). Both were broken in this framework (not specific to Hy3 -- the same
-root cause reproduces on DeepSeek V3's `deepseek3-tiny` config) until two
-recent upstream fixes landed:
+Hy3 uses aux-loss-free routing (`routed_bias=true`). Two optional
+training-time knobs, both `0.0` by default in `hy3-tiny.yml` / `hy3-295b.yml`:
 
-- `1e6a5159f` ("[NNX] Preserve Intermediates in scanned layers for MoE load
-  balance loss") fixed `scan_layers=true`: `nnx_decoders.py`'s scanned-layer
-  application no longer discards `nnx.Intermediate` state (the sown
-  `moe_bias_updates`/`moe_lb_loss` values) before `train.py` reads it.
-- `263b8c18e` ("Fix shape mismatch for DeepSeek routed bias updates when MTP
-  is enabled in NNX") fixed the previous total failure on `scan_layers=false`
-  (crash / silently-missing intermediates): the bias-update path now finds
-  the router bias generically via `_find_gate_bias` (searches the module
-  graph by type, `GateLogit`) instead of assuming a hardcoded, scanned-only
-  module path.
-
-Verified with a CPU smoke test (`hy3-tiny`, `routed_bias_update_rate=0.05`,
-`load_balance_loss_weight=0.01`):
-
-- `load_balance_loss_weight` works correctly in both scan modes --
-  `moe_lb_loss` is nonzero and changes every step regardless of
-  `scan_layers`, since it's backpropagated through the normal loss/gradient
-  path and never goes through the mechanism below.
-- `routed_bias_update_rate` works correctly with `scan_layers=true`: the
-  scanned decoder stores all MoE layers' biases as one stacked
-  `(num_experts, num_moe_layers)` array, so there's no per-layer ambiguity.
-  Confirmed by instrumenting each layer's own column of that array (not just
-  the aggregate norm) over 4 steps (3 MoE layers): `[8.5e-05, 8.5e-05,
-  8.5e-05] -> [0.1416, 0.1416, 0.1328] -> [0.2061, 0.2295, 0.1875] ->
-  [0.2891, 0.1328, 0.2354] -> [0.2734, 0.2061, 0.1738]` -- three
-  independently-evolving trajectories, confirming each layer gets its own
-  correct update.
-- **With `scan_layers=false`, `routed_bias_update_rate` is still broken**,
-  just differently than before: each layer's own update signal is now
-  collected correctly, but the code that applies it has two compounding
-  bugs -- `getattr(decoder, "moe_layers", decoder)` falls back to the whole
-  decoder (unscanned layers are attributes named `moe_layers_0`,
-  `moe_layers_1`, ... individually, not a single stacked `moe_layers`), so
-  `_find_gate_bias` only ever finds the *first* layer's bias; and the
-  collection loop keeps overwriting a single `moe_bias_updates` variable, so
-  only the *last* layer's own delta survives. Net effect, confirmed by
-  instrumenting per-layer bias norms over 3 steps (3 MoE layers): layer 0's
-  bias is updated every step, but with layer 2's delta (`8.5e-05 -> 0.1416
-  -> 0.2832 -> 0.4258`); layers 1 and 2 never receive their own update at
-  all (their bias only drifts by the normal optimizer gradient, ~1e-5/step,
-  not the ~0.14/step jump the manual mechanism should produce). This is
-  upstream `train.py` code shared with DeepSeek, not something specific to
-  or fixable within this PR.
-
-**Practical recommendation**: `load_balance_loss_weight` is safe to enable
-in either scan mode. `routed_bias_update_rate` should only be enabled with
-`scan_layers=true` until the `scan_layers=false` bug above is fixed
-upstream -- enabling it with `scan_layers=false` today will silently update
-the wrong layer's bias with the wrong values rather than error out.
-
-`hy3-tiny.yml`/`hy3-295b.yml` leave both settings at their default (`0.0`);
-turning either on by default isn't decided here.
+- `load_balance_loss_weight` — safe to enable in either scan mode.
+- `routed_bias_update_rate` — **only enable with `scan_layers=true`.**
+  With `scan_layers=false` it silently applies the wrong layer's update to
+  the wrong layer instead of erroring out. This is in shared `train.py` code
+  (reproduces on DeepSeek V3 too), not something this PR can fix.
 
 ---
 

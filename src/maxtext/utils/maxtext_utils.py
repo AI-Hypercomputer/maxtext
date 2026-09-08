@@ -1176,12 +1176,10 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.HY3,
     ):
-      # Hy3 (like DeepSeek) splits layers into a dense prefix
-      # (first_num_dense_layers) and MoE layers with a shared expert. The
-      # generic fallback below has no shared-expert term at all, and applies
-      # one MoE-shaped formula uniformly to every layer -- it can't express
-      # "some layers are dense". Both undercount reported TFLOP/s. Training
-      # itself is unaffected; only MFU reporting is.
+      # Hy3, like DeepSeek, splits its layers into a dense prefix
+      # (`first_num_dense_layers`) followed by MoE layers that each carry a
+      # shared expert. `calculate_routed_and_shared_ffn_tflops_per_device` is
+      # the formula that accounts for both.
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
     elif config.decoder_block == DecoderBlockType.QWEN3_CUSTOM_MOE:

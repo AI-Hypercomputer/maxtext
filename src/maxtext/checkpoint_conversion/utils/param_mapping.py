@@ -1792,8 +1792,11 @@ def HY3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   confirmed against the real `tencent/Hy3` `model.safetensors.index.json`,
   not assumed from DeepSeek/Qwen naming conventions.
 
-  Note: layer `num_hidden_layers` (the MTP layer) is intentionally not
-  mapped here -- MTP weights are left randomly initialized on conversion.
+  Note: layer `num_hidden_layers` (the MTP layer) is intentionally not mapped
+  here. Both hy3 configs leave `mtp_num_layers` at 0, so MaxText builds no MTP
+  module and this mapping covers every parameter. If MTP is ever enabled, the
+  `mtp_block` parameters would fall outside this mapping and keep their
+  initialized values.
 
   Returns:
     dict: A mapping where keys are `atomic_mt_key` (single MaxText parameter names).
