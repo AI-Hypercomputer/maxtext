@@ -754,6 +754,17 @@ dense_fsdp_use_two_stage_all_gather: false
 # checkpoint conversion is needed. No effect under shard_mode: auto or on quantized layers.
 dense_weight_grad_in_kernel_order: None  # on under shard_mode: explicit if None
 
+# Gather each FSDP-sharded layer kernel once at the top of the scan body, in config.dtype, and keep the gathered value
+# as a remat residual so the backward pass reads it instead of re-gathering. Mode-neutral: it helps auto and explicit
+# by about the same amount. On qwen3-8b at 12 layers with fsdp=4 it takes explicit from 48,183us to 42,591us and auto
+# from 48,114us to 43,062us at remat_policy: minimal, and from 50,738us/51,103us to 45,022us/44,758us at
+# remat_policy: full (see docs/guides/optimization/shard_mode_performance.md section 4.11). The compute-dtype cast is what
+# makes it pay: held at float32 the residuals cost as much HBM traffic as the re-gather they save. Off by default
+# because those residuals are roughly one bf16 copy of the per-layer kernels -- measure peak HBM before enabling.
+# Numerics are unchanged: only kernels (rank >= 2 float arrays) are touched, never the rank-1 norm scales, and every
+# consumer already casts its kernel to config.dtype before the dot.
+save_fsdp_gathered_weights: false
+
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.

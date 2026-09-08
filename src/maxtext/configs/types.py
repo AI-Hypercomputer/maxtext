@@ -1456,6 +1456,19 @@ class LayoutAndSharding(BaseModel):
           "shard_mode=auto, where XLA folds the transpose itself, or on quantized layers."
       ),
   )
+  save_fsdp_gathered_weights: bool = Field(
+      False,
+      description=(
+          "Gather each FSDP-sharded layer kernel once at the top of the scan body, in config.dtype, and keep the "
+          "gathered value as a remat residual so the backward pass reads it instead of re-gathering. Trades HBM for "
+          "a large step-time win under both shard modes: on qwen3-8b at 12 layers, fsdp=4, it takes explicit from "
+          "48,183us to 42,591us and auto from 48,114us to 43,062us with remat_policy=minimal, and from 50,738us / "
+          "51,103us to 45,022us / 44,758us with remat_policy=full "
+          "(docs/guides/optimization/shard_mode_performance.md section 4.11). Off by default because the residuals cost "
+          "roughly one bf16 copy of the per-layer kernels; measure before enabling on a memory-tight model. Numerics "
+          "are unchanged -- only kernels are touched, and every consumer already casts them to config.dtype."
+      ),
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",
@@ -3532,6 +3545,17 @@ class MaxTextConfig(
     """
     if self.dense_weight_grad_in_kernel_order is None:
       self.dense_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT
+    return self
+
+  @model_validator(mode="after")
+  def validate_save_fsdp_gathered_weights(self) -> "MaxTextConfig":
+    """Reject the two configurations the gathered-weight residual cannot serve."""
+    if self.save_fsdp_gathered_weights and self.quantization:
+      raise ValueError("save_fsdp_gathered_weights casts kernels to config.dtype, which is not valid when quantizing.")
+    if self.save_fsdp_gathered_weights and self.parameter_memory_host_offload:
+      raise ValueError(
+          "save_fsdp_gathered_weights keeps gathered kernels in HBM, which defeats parameter_memory_host_offload."
+      )
     return self
 
   @model_validator(mode="after")

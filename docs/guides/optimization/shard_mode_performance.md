@@ -1292,6 +1292,120 @@ is no checkpoint-conversion path to build.
 
 ______________________________________________________________________
 
+### 4.11 The FSDP weight gather is paid twice under remat — `save_fsdp_gathered_weights`
+
+Nothing in this section is a sharding effect: it costs the same in both modes and the fix helps both
+by the same amount. It is here because it is the largest single lever measured on this rig after
+§4.10, because it is what finally puts explicit *ahead* of auto rather than level with it, and
+because the reason it works is not the obvious one.
+
+#### The mechanism
+
+Inside a scanned decoder stack the layer kernels arrive FSDP-sharded and each one is all-gathered
+where it is first read. The scan body is wrapped in `jax.checkpoint`, so the backward pass re-runs
+that body — and re-runs the gather with it. Every FSDP weight collective in the model is therefore
+on the wire **twice per step**, once in the forward and once in the recomputed forward, and no
+remat policy shipped in `base.yml` can keep the gathered value because it has no name to keep it by.
+
+`hoist_fsdp_weight_gather` in `nnx_decoders.py` gathers the kernels explicitly at the top of the
+scan body and tags each result with `checkpoint_name(..., "gathered_fsdp_weight")`;
+`save_gathered_fsdp_weights_policy` folds that name into whatever `remat_policy` is configured with
+`save_from_both_policies`. The backward pass then reads the residual instead of re-gathering. Under
+`shard_mode: explicit` the gather is a `jax.sharding.reshard` to the FSDP-stripped `PartitionSpec`;
+under `auto` the same spec has to be reconstructed by hand, because `jax.typeof(x).sharding.spec` is
+all-`None` inside a traced body there — the logical names come off the `nnx.Variable` metadata and
+go through `sharding.logical_to_mesh_axes`. Two code paths, one behaviour.
+
+#### Why the obvious version of this does not work
+
+Written the obvious way — gather the parameter as it is, name it, save it — the flag is worth
+essentially nothing:
+
+| qwen3-8b, d16, L12, fsdp 4, `remat_policy: minimal` | explicit |   auto |
+| --------------------------------------------------- | -------: | -----: |
+| no residual                                          |   48,183 | 48,114 |
+| **float32** gathered residual                        |   48,081 | 48,489 |
+| bf16 cast, but *not* saved                           |   48,162 | 48,096 |
+| **bf16 gathered residual**                           |**42,591**| 43,062 |
+
+(µs, median device `jit_train_step`, one rep each except the last row; §9 has the harness.)
+
+The parameters are stored in float32 and every consumer — `DenseGeneral.__call__`, the MoE kernels —
+does `jnp.asarray(kernel, config.dtype)` before its dot. Saved as-is, the residual is a float32 copy
+of a value that is about to be halved anyway, so the HBM traffic it adds cancels the wire traffic it
+removes. Pulling that cast in front of the gather instead halves *both* the bytes on the wire and
+the bytes the residual holds, and only then does the residual pay for itself. Row 3 is the control
+that shows the cast alone does nothing: without a `checkpoint_name` pinning the value, XLA already
+sinks the convert into the gather on its own. **The two changes are worth −0.04% and +0.10%
+separately and −11.6% together.**
+
+Because the cast is exactly the one the consumer was going to do, the arithmetic is unchanged. Only
+kernels are touched — rank ≥ 2 float arrays — so the rank-1 norm scales keep their float32
+accumulation. Twenty-step loss trajectories with the flag on and off agree to three decimals in both
+shard modes on `qwen3-8b`, `mixtral-8x7b` (MoE) and `llama2-7b`; the residual ±0.001 wobble at
+mid-trajectory is the same size as the pre-existing explicit-vs-auto wobble between the two
+unmodified baselines.
+
+#### What it costs
+
+The residuals are stacked across scan iterations, so the bill is one bf16 copy of every gathered
+kernel in the stack. On this geometry — 12 layers, 100.7 MB of MLP kernels plus 16.8 MB of attention
+kernels per layer in bf16 — that predicts ~1.4 GB, and MaxText's compile-time estimate moves by:
+
+| qwen3-8b, d16, L12, fsdp 4 | temp, flag off | temp, flag on |
+| -------------------------- | -------------: | ------------: |
+| `remat_policy: minimal`    |         2.5 GB |        3.6 GB |
+| `remat_policy: full`       |         1.6 GB |        3.2 GB |
+
+This is why the flag is **off by default**. It buys step time with HBM, the amount scales with depth
+× hidden size, and on a memory-tight model it will not fit. It is rejected outright with
+`quantization` (the cast is not valid on a quantized kernel) and with
+`parameter_memory_host_offload` (whose whole point is *not* holding weights in HBM).
+
+#### Measured
+
+Three reps, medians, loss 12.415 in every arm. `LIBTPU_INIT_ARGS` as in §9:
+
+| d16, L12, fsdp 4                     | explicit, off | explicit, on |      Δ | auto, off | auto, on |      Δ |
+| ------------------------------------ | ------------: | -----------: | -----: | --------: | -------: | -----: |
+| `qwen3-8b`, `remat_policy: minimal`  |        48,165 |   **42,619** | −11.5% |    48,127 |   43,039 | −10.6% |
+| `qwen3-8b`, `remat_policy: full`     |        50,734 |   **45,025** | −11.3% |    51,094 |   44,725 | −12.5% |
+| `mixtral-8x7b`, `minimal` (1 rep)    |       261,650 |  **234,412** | −10.4% |   261,636 |  234,618 | −10.3% |
+
+The MoE row matters as a second structure, not just a second model: the expert weights are gathered
+and saved by the same code path, the win is the same size, and mixtral's loss is 10.867 in all four
+arms.
+
+With stock libtpu — no `LIBTPU_INIT_ARGS` at all — the flag is still worth −9.5% (explicit
+51,866 → 46,928) and −9.8% (auto 51,997 → 46,881), so it does not depend on the compiler flags.
+What *does* depend on them is the ordering: the async-all-gather set is what lets the freed schedule
+slack be used, and only with both is explicit ahead —
+
+| qwen3-8b, d16, L12, fsdp 4, `minimal` | explicit |   auto | winner              |
+| ------------------------------------- | -------: | -----: | ------------------- |
+| stock libtpu, no residual             |   51,866 | 51,997 | explicit by 0.25%   |
+| stock libtpu, residual                |   46,928 | 46,881 | auto by 0.10%       |
+| async-AG flags, no residual           |   48,165 | 48,127 | auto by 0.08%       |
+| async-AG flags, residual              |**42,619**| 43,039 | **explicit by 0.98%**|
+
+#### Where it does not hold: per-device batch ≥ 2
+
+The explicit win survives `ici_tensor_parallelism: 2` (48,396 vs 49,178), `max_target_length: 2048`
+(64,543 vs 65,097) and is a wash at `base_emb_dim: 4096` (80,930 vs 80,748), but it inverts as soon
+as the per-device batch grows: auto is ahead by 1.4% at pdbs 2 and by 1.8% at pdbs 4. That is not
+this flag's doing — it is present at pdbs 4 with *none* of it enabled (108,096 vs 106,252) and with
+`remat_policy: full` too. The opcode ledger puts all of it in `fusion` (explicit 272,329 µs vs auto
+265,820 µs over three steps, with *fewer* fusions), and the per-shape ledger localizes it to layout
+assignment: explicit feeds the `wo` weight-gradient dot from `bf16[4,1024,2048]{2,1,0}` where auto
+has already materialized the transposed `bf16[2048,4,1024]{2,0,1}`, and the resulting
+`bf16[8192,2048]` gradient fusion costs 15,866 µs against auto's 12,289 µs at identical shape and
+count. The `Sharding` custom-calls of §4.1 block the layout preference from propagating back into
+the producing fusion. Neither dropping `out_sharding` from the dots (102,627 vs 102,502) nor either
+kernel-order flag reaches it — at pdbs 4 `dense_weight_grad_in_kernel_order` is *helping* explicit
+by 1.5%, not hurting it. It is an XLA layout-assignment difference with no MaxText-side lever.
+
+______________________________________________________________________
+
 ## 5. Results
 
 ### 5.1 Onboarded-model matrix
@@ -1995,6 +2109,12 @@ ______________________________________________________________________
 - **Untied head, and you want the same win under `auto`?** Write `lm_head_vocab_parallel: true`. It
   is measured under `auto` in §5.7 Table B and is worth the same −1.1% … −11.0% there. It is not the
   `auto` default only because that wants a wider validation sweep than this document ran (item 03).
+- **FSDP, per-device batch 1, and ~1.5 GB of HBM headroom?** Write `save_fsdp_gathered_weights: true`
+  and set `LIBTPU_INIT_ARGS` to the async-all-gather set in §9. Worth −11% in *both* modes, and it is
+  the only configuration measured here where explicit finishes ahead of `auto` on its own merits
+  rather than level with it (§4.11). Check the compile-time temp estimate first — it grows by roughly
+  one bf16 copy of the stacked layer kernels. At per-device batch ≥ 2 take the −11% but expect `auto`
+  to stay 1.4–1.8% ahead, for a layout reason unrelated to the flag.
 - **Do not write `dense_weight_grad_in_kernel_order` out any more.** The "gemma3 and deepseek only"
   advice this line used to carry was an artifact of benchmarking at 16 layers (§4.9); the flag is
   now on by default under explicit and there is no model it should be turned off for.
@@ -2401,6 +2521,21 @@ that cost time to discover:
 - The geometry above is the *shrink* used by §5.1–§5.2 and by §4's dumps. Everything from §4.8
   onward — including §5.6 — uses `base_emb_dim=2048 base_mlp_dim=8192 base_num_query_heads=8 base_num_kv_heads=8 head_dim=128` (referred to as **d16**) with `base_num_decoder_layers` varied
   per row, plus `base_moe_mlp_dim=8192` on mixtral. §5.6 writes out nothing else but `shard_mode`.
+- §4.11 additionally sets the libtpu **async-all-gather set**, and says so per table where it does.
+  These go in `LIBTPU_INIT_ARGS`, *not* `XLA_FLAGS` — libtpu silently ignores them in the latter, so
+  a run that looks like it took them may not have:
+
+  ```bash
+  LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true \
+    --xla_max_concurrent_async_all_gathers=16 \
+    --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true \
+    --xla_tpu_enable_async_pincer_emitter=true"
+  ```
+
+  They are mode-neutral (both modes get ~6% at d16) and were picked out of the 1,108 flags listed in
+  the dump's `*.tpu_comp_env.txt`. `--xla_tpu_enable_async_collective_merger=false` crashes the
+  compiler in `AllGatherEmitter::Emit()`; `--xla_all_gather_latency_bound_threshold_in_bytes` and
+  `--xla_tpu_async_collective_fusion_with_start_done_only` are both large regressions.
 
 Timings are `train_step` durations read off `/device:TPU:0` in the `.xplane.pb`, median of the 3
 profiled steps; HLO facts are from `*after_optimizations.txt` and `*after_codegen*`. The TPU is a
