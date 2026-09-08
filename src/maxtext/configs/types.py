@@ -97,11 +97,20 @@ class QuantizationType(str, Enum):
   FP8_NANO_V2 = "fp8_nanoo"
   FP8_GPU = "fp8_gpu"
   FP8_FULL = "fp8_full"
+  TE_NO_QUANT = "te_no_quant"
   TE_FP8_DS = "te_fp8_delayedscaling"
   TE_FP8_CS = "te_fp8_currentscaling"
   TE_MXFP8 = "te_mxfp8"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
+
+
+class TEGroupedGemmQuantizationType(str, Enum):
+  """Supported quantization schemes for TE grouped GEMM in MoE layers."""
+
+  EMPTY = ""
+  TE_NO_QUANT = "te_no_quant"  # Default precision, e.g. BF16, without quantization
+  TE_MXFP8 = "te_mxfp8"
 
 
 class TeCommGemmOverlapPolicy(str, Enum):
@@ -928,6 +937,23 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  te_moe_block: bool = Field(
+      False,
+      description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
+  )
+  te_ep_overflow_check_every_n_steps: PositiveInt = Field(
+      20,
+      description=(
+          "Number of training steps buffered between host-side TE EP receive-capacity overflow checks when "
+          "ragged_buffer_factor limits the TE receive capacity. "
+          "Overflowing steps still skip their optimizer update immediately on device."
+      ),
+  )
+  te_gmm_quantization: None | TEGroupedGemmQuantizationType = Field(
+      TEGroupedGemmQuantizationType.EMPTY,
+      description="Quantization mode for TransformerEngine grouped GEMMs.",
+  )
+
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
       description=(
@@ -3315,6 +3341,12 @@ class MaxTextConfig(
       )
 
   def validate_ragged_buffer_factor(self):
+    """Validates that ragged_buffer_factor is used with supported settings."""
+    if self.te_moe_block:
+      if 0 < self.ragged_buffer_factor < 1.0:
+        raise ValueError("te_moe_block=True requires ragged_buffer_factor >= 1.0, or <= 0 for worst-case capacity.")
+      return
+
     if self.ragged_buffer_factor <= 0:
       return  # Not using a ragged buffer factor
 
@@ -3509,10 +3541,11 @@ class MaxTextConfig(
         _ep_disabled_flags = {
             "use_random_routing": False,
             "use_ragged_sort": False,
-            "ragged_buffer_factor": -1.0,
             "use_ring_of_experts": False,
             "num_moe_emb_chunks": 0,
         }
+        if not self.te_moe_block:
+          _ep_disabled_flags["ragged_buffer_factor"] = -1.0
         for flag_name, disabled_value in _ep_disabled_flags.items():
           current = getattr(self, flag_name)
           if current != disabled_value:
@@ -4294,6 +4327,23 @@ class MaxTextConfig(
           and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
       ):
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if self.te_moe_block and not self.sparse_matmul:
+        raise ValueError("te_moe_block=True requires sparse_matmul=True.")
+      if self.te_moe_block and not self.prefuse_moe_weights:
+        raise ValueError("te_moe_block=True requires prefuse_moe_weights=True.")
+      if self.te_moe_block and self.routed_bias_update_rate > 0.0:
+        raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
+      if self.te_moe_block and self.norm_topk_prob:
+        raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
+      if self.te_moe_block and self.use_random_routing:
+        raise ValueError("te_moe_block=True does not support use_random_routing=True.")
+      if self.te_moe_block and self.decoder_block == DecoderBlockType.LLAMA4:
+        raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
+      if self.te_moe_block and not self.te_gmm_quantization:
+        raise ValueError(
+            "te_gmm_quantization must be specified when te_moe_block=True. "
+            "te_gmm_quantization=te_no_quant is supported for BF16."
+        )
       if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
         raise ValueError(
             "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
