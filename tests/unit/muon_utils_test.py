@@ -426,11 +426,22 @@ class TestHy3MatchesWhitelistedModels(unittest.TestCase):
     )
 
   def test_moe_block_matches_deepseek(self):
-    """Hy3 and DeepSeek V3 both use `RoutedAndSharedMoE`, so their expert and router weights map identically."""
-    self.assertEqual(
-        self._subtree("hy3-tiny", "params/decoder/moe_layers/Hy3MoeBlock_0/"),
-        self._subtree("deepseek3-tiny", "params/decoder/moe_layers/DeepSeekMoeBlock_0/"),
-    )
+    """Hy3 and DeepSeek V3 both use `RoutedAndSharedMoE`, so their expert and router weights map identically.
+
+    One documented exception: upstream keeps DeepSeek's aux-loss-free router
+    bias in a `MoEBiasVar` rather than an `nnx.Param` (see the model-name list
+    in `moe.py`'s `GateLogit.__init__`), which takes it out of the `params`
+    collection entirely. Hy3 is deliberately not on that list -- joining it
+    would also move Hy3's bias out of the collection that checkpoint
+    conversion reads. Assert that this is the *only* difference, so any other
+    divergence still fails.
+    """
+    hy3 = self._subtree("hy3-tiny", "params/decoder/moe_layers/Hy3MoeBlock_0/")
+    deepseek = self._subtree("deepseek3-tiny", "params/decoder/moe_layers/DeepSeekMoeBlock_0/")
+
+    self.assertEqual(set(hy3) - set(deepseek), {"MoeBlock_0/gate/bias"})
+    self.assertEqual(set(deepseek) - set(hy3), set())
+    self.assertEqual({k: v for k, v in hy3.items() if k in deepseek}, deepseek)
 
   def test_hy3_excludes_norms_router_bias_and_embeddings(self):
     """Muon orthogonalizes matrices only; 1-D and embedding-like parameters must map to None."""
