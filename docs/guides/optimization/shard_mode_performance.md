@@ -1404,6 +1404,92 @@ the producing fusion. Neither dropping `out_sharding` from the dots (102,627 vs 
 kernel-order flag reaches it — at pdbs 4 `dense_weight_grad_in_kernel_order` is *helping* explicit
 by 1.5%, not hurting it. It is an XLA layout-assignment difference with no MaxText-side lever.
 
+#### How far it generalizes — the SparseCore flag set, eight models, eight geometries
+
+Everything above is measured with the four-flag async-all-gather set. Production v5p/Ironwood runs
+use a much larger libtpu set that offloads collectives to SparseCore (reproduced in §9 as the
+*SparseCore set*). That set is worth −25.5% on its own — `qwen3-8b` d16 goes 48,165 → 35,884 µs —
+so the first question is whether it simply absorbs what this flag was buying. It does not, but it
+shrinks it, and re-measuring on top of it is what exposes the flag's actual operating range.
+Everything below is one rep, medians, `remat_policy: minimal`, d16, L12, fsdp 4, SparseCore set.
+
+**Across models.** The loss is identical on and off in every arm of every model, so the numerics
+claim generalizes cleanly. The step time does not.
+
+| model            | scan body | explicit off | explicit on |      Δ | auto off | auto on |      Δ |
+| ---------------- | --------: | -----------: | ----------: | -----: | -------: | ------: | -----: |
+| `mixtral-8x7b`   |   1 layer |      180,518 | **165,517** | −8.3%  |  180,959 | 166,044 | −8.2%  |
+| `llama2-7b`      |   1 layer |       30,576 |  **28,987** | −5.2%  |   30,628 |  28,997 | −5.3%  |
+| `mistral-7b`     |   1 layer |       30,267 |  **28,752** | −5.0%  |   30,305 |  28,752 | −5.1%  |
+| `qwen3-8b`       |   1 layer |       35,884 |  **34,213** | −4.7%  |   35,728 |  34,398 | −3.7%  |
+| `gemma-2b`       |   1 layer |       49,135 |  **47,651** | −3.0%  |   49,629 |  48,306 | −2.7%  |
+| `gemma2-2b`      |  2 layers |       73,359 |      73,515 | **+0.2%** |   74,299 |  74,677 | +0.5%  |
+| `gemma3-4b`      |  6 layers |       62,104 |      63,106 | **+1.6%** |   62,742 |  63,626 | +1.4%  |
+| `deepseek2-16b`  |   1 layer |      565,926 |         OOM |      —  |  566,182 |     OOM |      — |
+
+`qwen3-30b-a3b` is out of reach on four chips with or without the flag (218.03G of HLO temporaries
+against 95.74G of HBM), so it says nothing either way. `deepseek2-16b` does say something: at L6 it
+runs with the flag off and needs 103.13G with it on. That is the memory cost above, hit for real.
+
+**Across geometries**, on `qwen3-8b`, the same flag set:
+
+| geometry (from d16, L12, pdbs 1, seq 1024) | tokens/step | explicit off | explicit on |      Δ |
+| ------------------------------------------ | ----------: | -----------: | ----------: | -----: |
+| `base_emb_dim: 4096`                        |       1,024 |       66,472 |  **62,276** | −6.3%  |
+| baseline                                    |       1,024 |       35,884 |  **34,213** | −4.7%  |
+| `remat_policy: full`                        |       1,024 |       39,987 |  **38,772** | −3.0%  |
+| `remat_policy: save_qkv_proj`               |       1,024 |       39,266 |  **38,165** | −2.8%  |
+| `base_num_decoder_layers: 24`               |       1,024 |       94,228 |  **92,487** | −1.8%  |
+| e4k+mlp16k, pdbs 2, `full`                  |       2,048 |      152,223 | **150,352** | −1.2%  |
+| e4k+mlp16k, seq 2048, `full`                |       2,048 |      155,914 | **154,368** | −1.0%  |
+| `per_device_batch_size: 2`                  |       2,048 |       47,798 |      48,028 | +0.5%  |
+| `max_target_length: 2048`                   |       2,048 |       51,606 |      51,994 | +0.8%  |
+| `per_device_batch_size: 4`                  |       4,096 |       84,461 |      85,010 | +0.7%  |
+| seq 4096, `full`                            |       4,096 |      107,968 |     108,569 | +0.6%  |
+| e4k+mlp16k, seq 4096, `full`                |       4,096 |      280,065 |     282,890 | +1.0%  |
+
+Auto tracks explicit to within 0.5 pt on every row; this is not a mode-specific effect.
+
+#### What actually drives the sign — it is the residual, not the hoist
+
+Splitting the transform into its two halves settles it. **A** hoists and casts but does *not* extend
+the remat policy, so the gather moves and narrows but nothing survives the backward pass. **B**
+keeps the residual but skips the cast, so an f32 copy is held:
+
+| explicit, SparseCore set | off | **A** hoist+cast only | **B** f32 residual | on (both) |
+| ------------------------ | ---:| --------------------: | -----------------: | --------: |
+| `qwen3-8b`               | 35,884 |    35,887 (+0.01%) |  39,707 (+10.7%)   | **34,213** |
+| `gemma-2b`               | 49,135 |    49,149 (+0.03%) |  53,547 (+9.0%)    | **47,651** |
+| `gemma2-2b`              | 73,359 |    73,349 (−0.01%) |  87,389 (+19.1%)   |     73,515 |
+| `gemma3-4b`              | 62,104 |    62,111 (+0.01%) |  69,878 (+12.5%)   |     63,106 |
+
+Column **A** is free everywhere — including on `gemma3-4b`, whose scan body is a
+`Gemma3ScannableBlock` holding six decoder layers, so all six gathers get hoisted to the top of the
+block at once. That is worth stating because it is the obvious hypothesis for the gemma rows and it
+is wrong: moving the gathers costs nothing even six at a time. The entire effect, in both
+directions, is column **B** plus the cast. An f32 residual is a 9–19% *loss*; the same residual in
+`config.dtype` is a 3–8% win. The flag is a single bet — trade HBM traffic for an all-gather — and
+the cast is only what halves the price of the bet.
+
+So the sign follows one ratio: how much of the backward pass is FSDP all-gather versus everything
+else contending for HBM. Widen the weights (`base_emb_dim: 4096`, −6.3%) or add experts
+(`mixtral-8x7b`, −8.3%) and the gather grows; add tokens (pdbs or sequence) and the activation
+traffic the residual now competes with grows instead, and past ~2,048 tokens per device-step it
+wins. gemma2/gemma3 are the same story reached from the other side: at d16 their kernels are
+`qwen3-8b`'s, but their 256K-vocab tied-embedding logits and soft-caps make the step 1.7–2.0× as
+long, so the gather is a correspondingly smaller share of it. `gemma-2b` sits right at the boundary
+and still gains 3.0%.
+
+#### When to turn it on
+
+Enable it when the per-device step is small in tokens and large in parameters — 4–8% is available
+at ≤ 2,048 tokens per device-step on dense and MoE models with per-layer scan bodies, and it grows
+with hidden size and expert count. Leave it off above ~4,096 tokens per device-step, on the
+gemma2/gemma3 family, and wherever the compile-time temp estimate has no headroom: the residuals
+cost +25% to +75% of HLO temporaries (`qwen3-8b` 2.6 → 3.3 GB, `llama2-7b` 2.5 → 3.2 GB,
+`gemma3-4b` 5.5 → 7.5 GB, `mixtral-8x7b` 10.8 → 18.9 GB). Measure — the sign is a property of the
+geometry, not of the model, and both shard modes get the same answer.
+
 ______________________________________________________________________
 
 ## 5. Results
@@ -2114,7 +2200,10 @@ ______________________________________________________________________
   the only configuration measured here where explicit finishes ahead of `auto` on its own merits
   rather than level with it (§4.11). Check the compile-time temp estimate first — it grows by roughly
   one bf16 copy of the stacked layer kernels. At per-device batch ≥ 2 take the −11% but expect `auto`
-  to stay 1.4–1.8% ahead, for a layout reason unrelated to the flag.
+  to stay 1.4–1.8% ahead, for a layout reason unrelated to the flag. **Under the production
+  SparseCore flag set the win narrows to 3–8% and acquires a sign condition** — it holds at ≤ 2,048
+  tokens per device-step and reverses above ~4,096, and it reverses on gemma2/gemma3 at any size.
+  §4.11 has the eight-model, twelve-geometry table and the rule.
 - **Do not write `dense_weight_grad_in_kernel_order` out any more.** The "gemma3 and deepseek only"
   advice this line used to carry was an artifact of benchmarking at 16 layers (§4.9); the flag is
   now on by default under explicit and there is no model it should be turned off for.
@@ -2536,6 +2625,50 @@ that cost time to discover:
   the dump's `*.tpu_comp_env.txt`. `--xla_tpu_enable_async_collective_merger=false` crashes the
   compiler in `AllGatherEmitter::Emit()`; `--xla_all_gather_latency_bound_threshold_in_bytes` and
   `--xla_tpu_async_collective_fusion_with_start_done_only` are both large regressions.
+
+  The generalization study at the end of §4.11 instead uses the **SparseCore set** — the flag list
+  production v5p/Ironwood runs carry, which offloads all-gather, all-reduce and reduce-scatter to
+  SparseCore and enables the latency-hiding layer scheduler. All 31 are recognized by this libtpu,
+  and together they are worth −25.5% on `qwen3-8b` d16 (48,165 → 35,884 µs) in *both* shard modes —
+  larger than anything else in this document and orthogonal to `shard_mode`:
+
+  ```bash
+  LIBTPU_INIT_ARGS="--xla_tpu_dvfs_p_state=7 \
+    --xla_tpu_scoped_vmem_limit_kib=65536 \
+    --xla_tpu_bf16_emission_mode=NATIVE_EMISSION \
+    --xla_tpu_enable_sparse_core_reduce_scatter_v2=true \
+    --xla_tpu_enable_sparse_core_collective_offload_all_gather=true \
+    --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true \
+    --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true \
+    --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true \
+    --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true \
+    --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true \
+    --xla_tpu_enable_all_gather_offload_tracing=true \
+    --xla_tpu_use_tc_device_shape_on_sc=true \
+    --xla_sc_disable_megacore_partitioning=true \
+    --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false \
+    --xla_enable_async_all_gather=true \
+    --xla_tpu_prefer_async_allgather_to_allreduce=true \
+    --xla_tpu_use_single_sparse_core_for_all_gather_offload=true \
+    --xla_tpu_enable_concurrent_sparse_core_offloading=true \
+    --xla_tpu_aggressive_opt_barrier_removal=true \
+    --xla_tpu_enable_offloading_gather_to_sparsecore=true \
+    --xla_tpu_sparse_core_all_gather_latency_multiplier=1 \
+    --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3 \
+    --xla_tpu_enable_sparse_core_collective_aggregator=true \
+    --xla_tpu_enable_latency_hiding_layer_scheduler=true \
+    --xla_tpu_scheduler_percent_shared_memory_limit=150 \
+    --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true \
+    --xla_tpu_pcie_bandwidth_multiplier=0.03 \
+    --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true \
+    --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
+    --xla_tpu_enable_3d_reduce_scatter_decomposer=false \
+    --xla_tpu_aggregate_data_dependent_sc_ops=true"
+  ```
+
+  Note that this set disables `fuse_all_gather`, which the async-all-gather set above enables. That
+  is not a conflict: once the all-gather is offloaded to SparseCore the fusion flag is inert
+  (34,204 vs 34,213 µs with it flipped back on), so the two sets do not need reconciling.
 
 Timings are `train_step` durations read off `/device:TPU:0` in the `.xplane.pb`, median of the 3
 profiled steps; HLO facts are from `*after_optimizations.txt` and `*after_codegen*`. The TPU is a

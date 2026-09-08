@@ -1460,13 +1460,17 @@ class LayoutAndSharding(BaseModel):
       False,
       description=(
           "Gather each FSDP-sharded layer kernel once at the top of the scan body, in config.dtype, and keep the "
-          "gathered value as a remat residual so the backward pass reads it instead of re-gathering. Trades HBM for "
-          "a large step-time win under both shard modes: on qwen3-8b at 12 layers, fsdp=4, it takes explicit from "
-          "48,183us to 42,591us and auto from 48,114us to 43,062us with remat_policy=minimal, and from 50,738us / "
-          "51,103us to 45,022us / 44,758us with remat_policy=full "
-          "(docs/guides/optimization/shard_mode_performance.md section 4.11). Off by default because the residuals cost "
-          "roughly one bf16 copy of the per-layer kernels; measure before enabling on a memory-tight model. Numerics "
-          "are unchanged -- only kernels are touched, and every consumer already casts them to config.dtype."
+          "gathered value as a remat residual so the backward pass reads it instead of re-gathering. Mode-neutral: "
+          "auto and explicit get the same answer to within half a point. Whether it is a win depends on how much of "
+          "the backward pass is FSDP all-gather rather than activation traffic, so it has a sign condition: measured "
+          "on v5p with the production SparseCore libtpu flags it is worth -3% to -8% at up to 2,048 tokens per "
+          "device-step (mixtral-8x7b -8.3%, llama2-7b -5.2%, qwen3-8b -4.7%, and -6.3% at base_emb_dim 4096), but it "
+          "costs +0.5% to +1.0% above ~4,096 tokens per device-step and regresses the gemma2/gemma3 family at any "
+          "size, whose 256K-vocab logits dominate the step. See "
+          "docs/guides/optimization/shard_mode_performance.md section 4.11 for the full table and the rule. Off by "
+          "default for that reason and because the residuals grow HLO temporaries by 25%-75% (deepseek2-16b runs "
+          "without it and OOMs with it); measure both step time and peak HBM before enabling. Numerics are "
+          "unchanged -- only kernels are touched, and every consumer already casts them to config.dtype."
       ),
   )
   internal_compile: bool = Field(
