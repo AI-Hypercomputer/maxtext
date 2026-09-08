@@ -927,20 +927,51 @@ class DeepseekV4Indexer(nnx.Module):
       return empty_indices, (jnp.zeros((batch_size, seq_len, 0), dtype=jnp.float32) if return_scores else None)
 
     # --- TOP-K ROUTING MATH (Executes in both Prefill and AR) ---
-    compressed_kv = jnp.expand_dims(compressed, axis=1)
-    compressed_kv = jnp.broadcast_to(compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim))
-
     q = self.q_proj(q_latent).reshape((batch_size, seq_len, self.index_n_heads, self.index_head_dim))
     q = jnp.transpose(q, (0, 2, 1, 3))
     q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
 
-    q = q.astype(jnp.float32)
-    compressed_kv = compressed_kv.astype(jnp.float32)
-
-    scores = jnp.einsum("bhsd,bhwd->bhsw", q, compressed_kv)
-    scores = jax.nn.relu(scores) * self.softmax_scale
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
-    index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights)
+
+    head_chunk_size = getattr(self.config, "csa_qk_head_chunk_size", 0)
+    if head_chunk_size > 0:
+      # Student chunks indexer heads (indexer_n_heads); teacher path
+      # in calculate_csa_indexer_loss chunks query heads (num_query_heads).
+      num_chunks = self.index_n_heads // head_chunk_size
+      q_h = q.transpose(1, 0, 2, 3).reshape(num_chunks, head_chunk_size, batch_size, seq_len, self.index_head_dim)
+      w_h = weights.transpose(2, 0, 1).reshape(num_chunks, head_chunk_size, batch_size, seq_len)
+      compressed_fp32 = compressed.astype(jnp.float32)
+
+      def scan_body_indexer(carry, xs):
+        q_c = xs["q"].astype(jnp.float32)
+        w_c = xs["w"]
+
+        scores_inner = jnp.einsum(
+            "cbsd, bwd -> bcsw",
+            q_c,
+            compressed_fp32,
+            precision=self.config.matmul_precision,
+        )
+        scores_inner = jax.nn.relu(scores_inner) * self.softmax_scale
+        score_chunk = jnp.einsum(
+            "bcsw, cbs -> bsw",
+            scores_inner,
+            w_c,
+            precision=self.config.matmul_precision,
+        )
+        return carry + score_chunk, None
+
+      init_score = jnp.zeros((batch_size, seq_len, compressed_len), dtype=jnp.float32)
+      index_scores, _ = jax.lax.scan(jax.checkpoint(scan_body_indexer), init_score, {"q": q_h, "w": w_h})
+    else:
+      scores = jnp.einsum(
+          "bhsd, bwd -> bhsw",
+          q.astype(jnp.float32),
+          compressed.astype(jnp.float32),
+          precision=self.config.matmul_precision,
+      )
+      scores = jax.nn.relu(scores) * self.softmax_scale
+      index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights, precision=self.config.matmul_precision)
 
     k = min(self.index_topk, compressed_len)
 
@@ -1868,7 +1899,7 @@ class CompressedAttention(Attention):
     if compressed_kv is None or indexer_score is None:
       return jnp.array(0.0, dtype=jnp.float32)
 
-    batch, q_len, _, _ = query.shape
+    batch, q_len, heads, dim = query.shape
     compressed_len = compressed_kv.shape[1]
     if compressed_len == 0:
       return jnp.array(0.0, dtype=jnp.float32)
@@ -1931,16 +1962,41 @@ class CompressedAttention(Attention):
     log_indexer_probs = jnp.where(valid_tokens_mask[:, :, None], log_indexer_probs, 0.0)
 
     # Query is already scaled by softmax_scale in compressed_query_projection; do not scale again
-    attention_scores = jnp.einsum("bthd, bwd -> bhtw", query, k_vec, precision=self.config.matmul_precision)
-    attention_scores = attention_scores + c_mask
+    head_chunk_size = getattr(self.config, "csa_qk_head_chunk_size", 0)
+    if head_chunk_size > 0:
+      # Teacher chunks main model query heads (num_query_heads); student path
+      # in DeepseekV4Indexer chunks indexer heads (indexer_n_heads).
+      num_chunks = heads // head_chunk_size
+      # query: [b, t, h, d] -> [h, b, t, d] -> [num_chunks, head_chunk_size, b, t, d]
+      q_h = query.transpose(2, 0, 1, 3).reshape(num_chunks, head_chunk_size, batch, q_len, dim)
 
-    # Apply NaN shielding for pre-block tokens
-    safe_scores = jnp.where(valid_tokens_mask[:, None, :, None], attention_scores, 0.0)
-    # Softmax covers compressed blocks only (W), ignoring the sliding window keys (S).
-    raw_probs = jax.nn.softmax(safe_scores.astype(jnp.float32), axis=-1)
-    raw_probs = jnp.where(valid_tokens_mask[:, None, :, None], raw_probs, 0.0)
-    target_probs = jnp.sum(raw_probs, axis=1)
-    target_probs = jax.lax.optimization_barrier(target_probs)
+      def scan_body_heads(carry, xs):
+        q_c = xs["q"]  # [h_chunk, b, t, d]
+        attn_chunk = jnp.einsum("hbtd, bwd -> bhtw", q_c, k_vec, precision=self.config.matmul_precision)
+        attn_chunk = attn_chunk + c_mask
+
+        # Apply NaN shielding for pre-block tokens
+        safe_attn = jnp.where(valid_tokens_mask[:, None, :, None], attn_chunk, 0.0)
+        # Softmax covers compressed blocks only (W), ignoring the sliding window keys (S).
+        probs_chunk = jax.nn.softmax(safe_attn.astype(jnp.float32), axis=-1)
+        probs_chunk_sum = jnp.sum(probs_chunk, axis=1)  # [b, t, w]
+
+        return carry + probs_chunk_sum, None
+
+      init_probs = jnp.zeros((batch, q_len, compressed_len), dtype=jnp.float32)
+      target_probs, _ = jax.lax.scan(scan_body_heads, init_probs, {"q": q_h})
+    else:
+      attention_scores = jnp.einsum("bthd, bwd -> bhtw", query, k_vec, precision=self.config.matmul_precision)
+      attention_scores = attention_scores + c_mask
+
+      # Apply NaN shielding for pre-block tokens
+      safe_scores = jnp.where(valid_tokens_mask[:, None, :, None], attention_scores, 0.0)
+      # Softmax covers compressed blocks only (W), ignoring the sliding window keys (S).
+      raw_probs = jax.nn.softmax(safe_scores.astype(jnp.float32), axis=-1)
+      target_probs = jnp.sum(raw_probs, axis=1)
+      # Optimization barrier prevents XLA from fusing downstream operations across the unchunked loss boundary.
+      # Redundant in the chunked path above because jax.lax.scan lowers to an explicit HLO while-loop boundary.
+      target_probs = jax.lax.optimization_barrier(target_probs)
 
     # L1 normalize aggregated target distribution across compressed blocks
     target_probs = jnp.where(valid_tokens_mask[:, :, None], target_probs, 0.0)
