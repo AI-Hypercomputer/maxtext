@@ -438,7 +438,6 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "mtp_loss": mtp_loss,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
-  
   te_moe_block = getattr(config, "te_moe_block", False)
   if te_moe_block:
     overflow_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_capacity_overflow")

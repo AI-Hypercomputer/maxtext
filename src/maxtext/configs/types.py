@@ -3310,6 +3310,7 @@ class MaxTextConfig(
       )
 
   def validate_ragged_buffer_factor(self):
+    """Validates that ragged_buffer_factor is used with supported settings."""
     if self.te_moe_block:
       if 0 < self.ragged_buffer_factor < 1.0:
         raise ValueError("te_moe_block=True requires ragged_buffer_factor >= 1.0, or <= 0 for worst-case capacity.")
