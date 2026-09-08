@@ -83,8 +83,8 @@ def dequantize_weight(
 
   Supports:
     1. No scale (scale is None): casts w to compute_dtype.
-    2. Scalar scale (Llama 3.1 FP8): scalar broadcast multiplication.
-    3. Block-wise scale (Qwen 3.5 FP8): 2D/3D block broadcast multiplication.
+    2. Per-tensor scalar scale: scalar broadcast multiplication.
+    3. Block-wise scale: 2D/3D block broadcast multiplication.
     4. General broadcastable scale: standard JAX broadcasting.
   """
   if scale is None:
@@ -93,11 +93,11 @@ def dequantize_weight(
   w_c = w.astype(compute_dtype)
   scale_c = jnp.asarray(scale, compute_dtype)
 
-  # Scalar scale (Llama 3.1 8B FP8) or matching shape
+  # Per-tensor scalar scale or matching shape
   if scale_c.ndim == 0 or scale_c.shape == w.shape:
     return w_c * scale_c
 
-  # Block-wise scale (Qwen 3.5 35B FP8: 2D for Dense, 3D for MoE)
+  # Block-wise scale (e.g. 2D for Dense, 3D for MoE)
   if scale_c.ndim == w.ndim and any(s > 1 and s != d for s, d in zip(scale_c.shape, w.shape)):
     if not all(d % s == 0 for d, s in zip(w.shape, scale_c.shape)):
       raise ValueError(
@@ -292,10 +292,10 @@ class DenseGeneral(nnx.Module):
     if should_have_scale and not quantizations.in_serve_mode(self.quant):
       # Phase 1: Resolve scale shape based on quantization granularity
       # - Explicit scale_shape: user or caller override.
-      # - Block scaling (e.g. Qwen 3.5, block_size=128): scales are partitioned into a grid
+      # - Block scaling (e.g. block_size=128): scales are partitioned into a grid
       #   of size (K // 128, N // 128). Dimensions smaller than block_size (e.g. head_dim < 128)
       #   are preserved as-is.
-      # - Per-tensor scaling (e.g. Llama 3.1): a single scalar float32 scale with empty shape ().
+      # - Per-tensor scaling: a single scalar float32 scale with empty shape ().
       if scale_shape is not None:
         resolved_scale_shape = canonicalize_tuple(scale_shape)
       elif block_size is not None:
