@@ -156,3 +156,6 @@ gha-creds-*.json
 # vscode workspace
 maxtext.code-workspace
 maxtext_output/
+
+# Benchmark output from tests/end_to_end/tpu/perf_parity (base_output_directory).
+tests/end_to_end/tpu/perf_parity/maxtext_out/
