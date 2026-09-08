@@ -21,6 +21,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
+from flax import struct
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
@@ -42,7 +43,7 @@ class DummyNNXModel(nnx.Module):
     self.weights = nnx.Param(jnp.array([1.0, 2.0]))
 
 
-@dataclasses.dataclass(kw_only=True)
+@struct.dataclass(frozen=True, kw_only=True)
 class DummyPayload(abstract_engine.TrainerPayload):
   """Dummy payload for testing."""
 
@@ -121,6 +122,8 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
         "tensorboard_dir": self.create_tempdir().full_path,
         "skip_jax_distributed_system": True,
         "enable_checkpointing": enable_checkpointing,
+        # Disable scan_layers to prevent prepare_weight_sync from trying to unscan layers on DummyNNXModel
+        "scan_layers": False,
     }
     if enable_checkpointing:
       overrides.update(

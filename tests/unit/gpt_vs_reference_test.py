@@ -25,11 +25,14 @@ import math
 import unittest
 
 import numpy as np
+import pytest
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 
+from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
@@ -511,6 +514,250 @@ class GptOssAttentionTest(unittest.TestCase):
     mse_flash = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_flash) ** 2)
     self.assertLess(mse_flash, 1e-3, f"flash attention mismatch, MSE: {mse_flash}")
     np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_flash, rtol=1e-3, atol=1e-2)
+
+  def _run_cudnn_flash_te_attention_with_sinks(
+      self,
+      attention_type,
+      packing,
+      check_sinks_grad=False,
+  ):
+    """Compare MaxText `cudnn_flash_attention` to the PyTorch reference for one (type, packing) pair.
+
+    Sinks reach Transformer Engine through its internal `softmax_offset` parameter, which MaxText
+    overwrites right after `lazy_init`. The original FULL / packing=False case also checks that
+    the grafted array stays part of the computation, i.e. that gradients still flow back into
+    `sinks`.
+    """
+    te_attention = pytest.importorskip("transformer_engine.jax.attention")
+
+    is_local = attention_type == attentions.AttentionType.LOCAL_SLIDING
+    # Window must be clearly smaller than seq_len or local and global degenerate into the same
+    # computation. Asserted against the causal reference rather than assumed.
+    sliding_window_size = 32
+    # A realistic head_dim for the TE fused kernels, set locally because the shared Config's
+    # head_dim of 8 is what the other tests in this file expect. The head counts are left alone so
+    # that the sinks prepared in setUp can be reused as-is.
+    head_dim = 64
+    tensors = self._pytorch_sinks_attention_reference(
+        is_local=is_local, sliding_window_size=sliding_window_size, head_dim=head_dim
+    )
+    expected_attn_output = tensors["expected_attn_output"]
+    query_bf16 = tensors["query_bf16"]
+    key_bf16 = tensors["key_bf16"]
+    value_bf16 = tensors["value_bf16"]
+
+    cfg_kwargs = {
+        "run_name": f"gpt_oss_attention_test_cudnn_flash_te_{attention_type.name}_packing_{packing}",
+        "enable_checkpointing": False,
+        "model_name": "default",
+        # The fused kernels need bf16/fp16; on fp32 TE falls back to its unfused path.
+        "dtype": "bfloat16",
+        "per_device_batch_size": 1,
+        "max_target_length": self.seq_len,
+        "max_prefill_predict_length": self.seq_len,
+        "base_num_query_heads": self.config.num_attention_heads,
+        "base_num_kv_heads": self.config.num_key_value_heads,
+        "head_dim": head_dim,
+        "attention": "cudnn_flash_te",
+        "attention_bias": False,
+        "attention_sink": True,
+        "packing": packing,
+    }
+    if packing:
+      # Required by configs/types.py when hardware=gpu, packing, and cudnn_flash_te. dataset_type
+      # is left at base.yml's tfds so this combination actually takes the THD packed branch.
+      cfg_kwargs["max_segments_per_seq"] = 32
+    if is_local:
+      cfg_kwargs["attention_type"] = "local_sliding"
+      cfg_kwargs["sliding_window_size"] = sliding_window_size
+
+    cfg_te = pyconfig.initialize([None, get_test_config_path()], **cfg_kwargs)
+    devices_array = maxtext_utils.create_device_mesh(cfg_te)
+    mesh = Mesh(devices_array, cfg_te.mesh_axes)
+
+    def run_cudnn_flash_te_attention(q, k, v, sinks_logits):
+      # Building the layer forks the rng streams, so AttentionOp has to be created inside the
+      # traced function to keep flax from complaining about a mutation across trace levels.
+      attention_op_kwargs = {
+          "config": cfg_te,
+          "mesh": mesh,
+          "attention_kernel": "cudnn_flash_te",
+          "max_target_length": self.seq_len,
+          "num_query_heads": self.config.num_attention_heads,
+          "num_kv_heads": self.config.num_key_value_heads,
+          "dtype": jnp.bfloat16,
+          "attention_type": attention_type,
+          "rngs": nnx.Rngs(0),
+      }
+      if is_local:
+        attention_op_kwargs["sliding_window_size"] = sliding_window_size
+      attention_op_te = attentions.AttentionOp(**attention_op_kwargs)
+      # Non-zero segment ids: TE treats 0 as padding, and zeros would validate attending to nothing.
+      decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
+      # TE 2.17+ requires segment_pos for the THD SequenceDescriptor; a single packed segment is
+      # positions 0..S-1. Passing None hits ValueError before the kernel runs.
+      segment_positions = None
+      if packing:
+        segment_positions = jnp.broadcast_to(
+            jnp.arange(self.seq_len, dtype=jnp.int32)[None, :],
+            (self.batch_size, self.seq_len),
+        )
+      return attention_op_te.cudnn_flash_attention(
+          q,
+          k,
+          v,
+          decoder_segment_ids,
+          segment_positions,
+          "train",
+          sinks=sinks_logits,
+      )
+
+    scaled_query_te_t = jnp.transpose(to_jax(query_bf16.to(torch.float32)), (0, 2, 1, 3)).astype(jnp.bfloat16)
+    key_te_t = jnp.transpose(to_jax(key_bf16.to(torch.float32)), (0, 2, 1, 3)).astype(jnp.bfloat16)
+    value_te_t = jnp.transpose(to_jax(value_bf16.to(torch.float32)), (0, 2, 1, 3)).astype(jnp.bfloat16)
+
+    qkv_layout = te_attention.QKVLayout.THD_THD_THD if packing else te_attention.QKVLayout.BSHD_BSHD_BSHD
+    # Must match AttentionOp.cudnn_flash_attention: TE inclusive [i-left, i] vs MaxText [i-(w-1), i].
+    window_size = (sliding_window_size - 1, 0) if is_local else None
+    fused_kernel_available = te_attention.is_fused_attn_kernel_available(
+        True,  # is_training
+        jnp.bfloat16,
+        jnp.bfloat16,
+        qkv_layout,
+        te_attention.AttnBiasType.NO_BIAS,
+        te_attention.AttnMaskType.PADDING_CAUSAL_MASK,
+        te_attention.AttnSoftmaxType.LEARNABLE_SOFTMAX,
+        0.0,  # dropout_probability
+        self.config.num_attention_heads,
+        self.config.num_key_value_heads,
+        self.seq_len,
+        self.seq_len,
+        head_dim,
+        head_dim,
+        window_size,
+    )
+    if not fused_kernel_available:
+      self.skipTest(
+          "no TE fused attention kernel for "
+          f"{attention_type.name} packing={packing} qkv_layout={qkv_layout.name} "
+          f"window_size={window_size}; would silently validate the unfused fallback"
+      )
+
+    with mesh, nn_partitioning.axis_rules(cfg_te.logical_axis_rules):
+      actual_attn_output_te = jax.jit(run_cudnn_flash_te_attention)(
+          scaled_query_te_t, key_te_t, value_te_t, self.jax_sinks
+      )
+      if check_sinks_grad:
+
+        def sinks_output_sum_of_squares(sinks_logits):
+          output = run_cudnn_flash_te_attention(scaled_query_te_t, key_te_t, value_te_t, sinks_logits)
+          return jnp.sum(output.astype(jnp.float32) ** 2)
+
+        sinks_grad = jax.jit(jax.grad(sinks_output_sum_of_squares))(self.jax_sinks)
+
+    actual_attn_output_te = actual_attn_output_te.astype(jnp.float32)
+    mse_te = float(jnp.mean((to_jax(expected_attn_output) - actual_attn_output_te) ** 2))
+    combo = f"{attention_type.name} packing={packing}"
+    print(f"cudnn_flash_te vs pytorch MSE ({combo}): {mse_te:.6e}")
+    self.assertLess(mse_te, 1e-3, f"cudnn_flash_te attention mismatch ({combo}), MSE: {mse_te}")
+    np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_te, rtol=1e-3, atol=1e-2)
+
+    if check_sinks_grad:
+      # The whole point of grafting sinks into `softmax_offset` is that they stay differentiable.
+      self.assertEqual(sinks_grad.shape, (self.config.num_attention_heads,))
+      self.assertTrue(bool(jnp.all(jnp.isfinite(sinks_grad))), f"non-finite gradient w.r.t. sinks: {sinks_grad}")
+      self.assertGreater(
+          float(jnp.max(jnp.abs(sinks_grad))),
+          0.0,
+          "gradient w.r.t. sinks is identically zero, softmax_offset injection is not taking effect",
+      )
+
+  @pytest.mark.gpu_only
+  def test_cudnn_flash_te_attention_with_sinks(self):
+    """FULL, packing=False: the original TE fused-attn baseline, including sink gradients."""
+    self._run_cudnn_flash_te_attention_with_sinks(attentions.AttentionType.FULL, packing=False, check_sinks_grad=True)
+
+  @pytest.mark.gpu_only
+  def test_cudnn_flash_te_attention_with_sinks_packed(self):
+    """FULL, packing=True: THD SequenceDescriptor branch."""
+    self._run_cudnn_flash_te_attention_with_sinks(attentions.AttentionType.FULL, packing=True)
+
+  @pytest.mark.gpu_only
+  def test_cudnn_flash_te_attention_with_sinks_local_sliding(self):
+    """LOCAL_SLIDING, packing=False: padding seqlens plus window_size=[w-1, 0]."""
+    self._run_cudnn_flash_te_attention_with_sinks(attentions.AttentionType.LOCAL_SLIDING, packing=False)
+
+  @pytest.mark.gpu_only
+  def test_cudnn_flash_te_attention_with_sinks_local_sliding_packed(self):
+    """LOCAL_SLIDING, packing=True: THD SequenceDescriptor plus window_size=[w-1, 0]."""
+    self._run_cudnn_flash_te_attention_with_sinks(attentions.AttentionType.LOCAL_SLIDING, packing=True)
+
+  def _pytorch_sinks_attention_reference(self, *, is_local: bool, sliding_window_size: int, head_dim: int):
+    """QKV, causal/window mask, and PyTorch output used by the TE fused-attn checks."""
+    scaling = 1.0 / (head_dim**0.5)
+    query = torch.randn(self.batch_size, self.config.num_attention_heads, self.seq_len, head_dim)
+    key = torch.randn(self.batch_size, self.config.num_key_value_heads, self.seq_len, head_dim)
+    value = torch.randn(self.batch_size, self.config.num_key_value_heads, self.seq_len, head_dim)
+
+    neg_inf = torch.finfo(torch.float32).min
+    causal_2d = torch.triu(torch.full((self.seq_len, self.seq_len), neg_inf), diagonal=1)
+    attention_mask_2d = causal_2d
+    if is_local:
+      row_ids = torch.arange(self.seq_len).view(self.seq_len, 1)
+      col_ids = torch.arange(self.seq_len).view(1, self.seq_len)
+      sliding_ok = (col_ids > (row_ids - sliding_window_size)) & (col_ids <= row_ids)
+      sliding_2d = torch.where(
+          sliding_ok,
+          torch.zeros(self.seq_len, self.seq_len),
+          torch.full((self.seq_len, self.seq_len), neg_inf),
+      )
+      attention_mask_2d = torch.minimum(causal_2d, sliding_2d)
+
+    causal_mask = causal_2d.reshape(1, 1, self.seq_len, self.seq_len).expand(self.batch_size, 1, -1, -1)
+    attention_mask = attention_mask_2d.reshape(1, 1, self.seq_len, self.seq_len).expand(self.batch_size, 1, -1, -1)
+
+    query_bf16 = (query * scaling).to(torch.bfloat16)
+    key_bf16 = key.to(torch.bfloat16)
+    value_bf16 = value.to(torch.bfloat16)
+    query_ref = query_bf16.to(torch.float32)
+    key_ref = key_bf16.to(torch.float32)
+    value_ref = value_bf16.to(torch.float32)
+
+    expected_attn_output, _ = eager_attention_forward(
+        module=self.mock_module_with_sinks,
+        query=query_ref,
+        key=key_ref,
+        value=value_ref,
+        attention_mask=attention_mask,
+        scaling=1.0,
+        dropout=0.0,
+    )
+
+    if is_local:
+      expected_causal, _ = eager_attention_forward(
+          module=self.mock_module_with_sinks,
+          query=query_ref,
+          key=key_ref,
+          value=value_ref,
+          attention_mask=causal_mask,
+          scaling=1.0,
+          dropout=0.0,
+      )
+      window_vs_causal_mse = float(torch.mean((expected_causal - expected_attn_output) ** 2))
+      self.assertGreater(
+          window_vs_causal_mse,
+          1e-4,
+          "windowed PyTorch reference is indistinguishable from the causal reference at "
+          f"seq_len={self.seq_len} sliding_window_size={sliding_window_size} "
+          f"(MSE={window_vs_causal_mse}); the local case would not actually cover the window",
+      )
+
+    return {
+        "expected_attn_output": expected_attn_output,
+        "query_bf16": query_bf16,
+        "key_bf16": key_bf16,
+        "value_bf16": value_bf16,
+    }
 
 
 class GptOssRotaryEmbedding(nn.Module):

@@ -122,16 +122,22 @@ def apply_scanned_layers(
   if length <= 0:
     return carry
 
-  layer_graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+  layer_graphdef, params, rest = nnx.split(layers, nnx.Param, ...)
   if param_scan_axis != 0:
     params = jax.tree.map(lambda x: jnp.moveaxis(x, param_scan_axis, 0), params)
+
+  # Parameters fed in as scan inputs come back out unchanged, so they must not be
+  # re-emitted as scan outputs (see scan_body). Anything else the body produces --
+  # including parameters materialized while tracing, such as Qwix LoRA adapters,
+  # which are ``nnx.Param`` subclasses -- still has to leave the scan.
+  carried_param_paths = {path for path, _ in nnx.to_flat_state(params)}
 
   def _ensure_stacked(x):
     if hasattr(x, "ndim") and x.ndim == 0:
       return jnp.broadcast_to(x, (length,))
     return x
 
-  state = jax.tree.map(_ensure_stacked, state)
+  rest = jax.tree.map(_ensure_stacked, rest)
 
   def _strip_scan_metadata(leaf):
     if hasattr(leaf, "replace") and hasattr(leaf, "value"):  # pylint: disable=too-many-nested-blocks
@@ -164,23 +170,30 @@ def apply_scanned_layers(
     return leaf
 
   def scan_body(current_carry, scanned_state):
-    current_params, current_state = scanned_state
+    current_params, current_rest = scanned_state
     current_params = jax.tree.map(
         _strip_scan_metadata,
         current_params,
         is_leaf=lambda x: hasattr(x, "replace") and hasattr(x, "value"),
     )
-    current_layer = nnx.merge(layer_graphdef, current_params, current_state)
+    current_layer = nnx.merge(layer_graphdef, current_params, current_rest)
     next_carry = apply_fn(current_layer, current_carry)
-    return next_carry, nnx.state(current_layer)
+    # Drop the parameters that were carried in: ``jax.lax.scan`` stacks every
+    # output, so returning them would materialize a second copy of the stacked
+    # layer weights. Parameters created inside the body are still returned.
+    _, updated_params, updated_rest = nnx.split(current_layer, nnx.Param, ...)
+    new_params = nnx.from_flat_state(
+        [(path, value) for path, value in nnx.to_flat_state(updated_params) if path not in carried_param_paths]
+    )
+    return next_carry, (new_params, updated_rest)
 
   scan_fn = jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse) if remat else scan_body
-  final_carry, scanned_state = jax.lax.scan(scan_fn, carry, (params, state), length=length, unroll=unroll)
+  final_carry, (scanned_new_params, scanned_rest) = jax.lax.scan(
+      scan_fn, carry, (params, rest), length=length, unroll=unroll
+  )
 
   if param_scan_axis != 0:
-    scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
-    scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), scanned_params)
-    scanned_state = nnx.State.merge(scanned_params, scanned_other)
+    scanned_new_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), scanned_new_params)
 
-  nnx.update(layers, scanned_state)
+  nnx.update(layers, scanned_new_params, scanned_rest)
   return final_carry

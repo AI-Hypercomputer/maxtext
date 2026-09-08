@@ -44,11 +44,17 @@ def _align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp
   This is a no-op whenever the two already agree, which includes every
   auto-sharding-equivalent layout for the ordinary layer norms.
   """
-  activation_spec = jax.typeof(y).sharding.spec
+  # Read through `.partitions`: a scale carrying a reduced/unreduced tag (the deferred
+  # data-parallel all-reduce under gradient accumulation) rejects direct indexing. The tags
+  # are carried over to the new spec so the scale keeps its place on the deferred path.
+  activation_axis = jax.typeof(y).sharding.spec.partitions[-1]
   scale_spec = jax.typeof(scale).sharding.spec
-  if scale_spec[-1] == activation_spec[-1]:
+  if scale_spec.partitions[-1] == activation_axis:
     return scale
-  return jax.sharding.reshard(scale, jax.sharding.PartitionSpec(activation_spec[-1]))
+  return jax.sharding.reshard(
+      scale,
+      jax.sharding.PartitionSpec(activation_axis, unreduced=scale_spec.unreduced, reduced=scale_spec.reduced),
+  )
 
 
 class RMSNorm(nnx.Module):
@@ -168,8 +174,11 @@ def Qwen3NextRMSNorm(
           epsilon=epsilon,
           dtype=dtype,
           weight_dtype=weight_dtype,
+          shard_mode=shard_mode if shard_mode is not None else ShardMode.AUTO,
+          kernel_axes=kernel_axes if kernel_axes is not None else (),
           scale_init=linen_initializers.zeros,
           scale_offset=1.0,
+          parameter_memory_host_offload=bool(parameter_memory_host_offload),
           rngs=rngs,
       )
   )
@@ -190,7 +199,16 @@ class Qwen3NextRMSNormGated(nnx.Module):
     weight_dtype: The datatype of the internal RMSNorm scale.
   """
 
-  def __init__(self, num_features: int, epsilon: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      num_features: int,
+      epsilon: float,
+      dtype: DType,
+      weight_dtype: DType,
+      shard_mode: ShardMode = ShardMode.AUTO,
+      *,
+      rngs: nnx.Rngs,
+  ):
     self.num_features = num_features
     self.epsilon = epsilon
     self.dtype = dtype
@@ -201,24 +219,31 @@ class Qwen3NextRMSNormGated(nnx.Module):
             epsilon=self.epsilon,
             dtype=dtype,
             weight_dtype=weight_dtype,
+            shard_mode=shard_mode,
             scale_init=nnx.initializers.ones,
             rngs=rngs,
         )
     )
 
-  def __call__(self, hidden_states: Array, gate: Array) -> Array:
-    """
-    Applies RMSNorm and then a SiLU gate.
+  def __call__(
+      self,
+      hidden_states: Array,
+      gate: Array,
+      out_sharding: NamedSharding | None = None,
+  ) -> Array:
+    """Applies RMSNorm and then a SiLU gate.
 
     Args:
       hidden_states: The input array to be normalized (o). Shape: (..., F)
-      gate: The gating array for the activation (z). Shape: (..., F)
-            where F is num_features.
+      gate: The gating array for the activation (z). Shape: (..., F) where F is
+        num_features.
+      out_sharding: Optional layout for the normalized states, honoured only
+        under `ShardMode.EXPLICIT`.
 
     Returns:
       The normalized and gated output array. Shape: (..., F)
     """
-    normalized_states = self.rms_norm(hidden_states)
+    normalized_states = self.rms_norm(hidden_states, out_sharding=out_sharding)
 
     # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
     gated_states = normalized_states * jax.nn.silu(gate.astype(jnp.float32))

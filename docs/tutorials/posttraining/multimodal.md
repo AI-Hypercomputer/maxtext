@@ -222,7 +222,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft_native \
     enable_checkpointing=True \
     attention=dot_product \
     max_num_images_per_example=1 \
-    dataset_type=hf profiler=xplane
+    dataset_type=grain profiler=xplane
 ```
 
 ## Other Recommendations

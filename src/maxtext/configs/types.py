@@ -277,6 +277,8 @@ ModelName = Literal[
     "qwen3-vl-2b",
     "qwen3-vl-4b",
     "qwen3-vl-30b-a3b",
+    "cosmos3-nano-reasoner",
+    "cosmos3-super-reasoner",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
@@ -493,6 +495,13 @@ class Quantization(BaseModel):
   )
   quant_cfg_path: PathStr = Field("", description="Path to the configuration file for 'intmp' quantization.")
   quantize_kvcache: bool = Field(False, description="If True, quantizes the Key-Value cache.")
+  quantize_mtp: bool = Field(
+      False,
+      description=(
+          "If True, quantizes the Multi-Token Prediction (MTP) block. Only supported with"
+          " `mtp_num_layers > 0` and `quantization=fp8_full`."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -1662,15 +1671,15 @@ class HfDataset(BaseModel):
 class GrainDataset(BaseModel):
   """Configuration specific to Grain datasets."""
 
-  grain_train_files: PathStr = Field("", description="Path to Grain training files.")
-  grain_eval_files: PathStr = Field("", description="Path to Grain evaluation files.")
+  grain_train_files: PathStr = Field("", description="Training source specification for the selected Grain file type.")
+  grain_eval_files: PathStr = Field("", description="Evaluation source specification for the selected Grain file type.")
   grain_train_mixture_config_path: PathStr = Field(
       "",
-      description="Path to a JSON file specifying the mixture weights for Grain training data.",
+      description="Path to an ArrayRecord JSON file specifying Grain training mixture weights.",
   )
   grain_file_type: str = Field(
       "arrayrecord",
-      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet.",
+      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet, mmap, mmap_npy.",
   )
   grain_use_elastic_iterator: bool = Field(
       False,
@@ -1703,6 +1712,35 @@ class GrainDataset(BaseModel):
       ),
   )
   grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
+
+
+class MMapDataset(BaseModel):
+  """Configuration for ``grain_file_type='mmap'`` and ``'mmap_npy'``."""
+
+  mmap_eod_id: int = Field(0, description="EOD token ID already present in the preprocessed Megatron data.")
+  blend_cache_dir: PathStr = Field(
+      "", description="Optional runtime cache for multi-dataset mmap_npy global blend dispatch indices."
+  )
+  blend_index_dir: PathStr = Field(
+      "", description="Optional directory containing pre-generated dataset_index.npy and dataset_sample_index.npy."
+  )
+  reset_attention_mask: bool = Field(
+      True, description="Start a new attention segment and reset positions after every retained EOD boundary."
+  )
+  eod_mask_loss: bool = Field(False, description="Exclude positions whose input token is EOD from the loss.")
+  packing_max_segments_per_sample: int = Field(
+      25,
+      description=(
+          "Short-segment merge divisor: max_target_length // value. Only used with reset_attention_mask=True; "
+          "set <=0 to retain every EOD boundary."
+      ),
+  )
+  mmap_split_sentences: bool = Field(
+      False, description="Whether preprocessing used --split-sentences; enables document-level indexing when true."
+  )
+  mmap_npy_split: str = Field(
+      "", description="mmap_npy split ratio, e.g. '99,1'; training uses split 0 and evaluation uses split 1."
+  )
 
 
 class OlmoGrainDataset(BaseModel):
@@ -3180,6 +3218,7 @@ class MaxTextConfig(
     TfdsDataset,
     HfDataset,
     GrainDataset,
+    MMapDataset,
     OlmoGrainDataset,
     Tokenizer,
     # Inference
@@ -4183,6 +4222,11 @@ class MaxTextConfig(
         raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
+    if self.quantize_mtp:
+      if self.mtp_num_layers <= 0:
+        raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
+      if self.quantization != "fp8_full":
+        raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
     if (
         self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
         and self.gradient_accumulation_steps > 1
@@ -4276,6 +4320,8 @@ class MaxTextConfig(
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
           "maxtext-omni-gemma3-qwen3",
+          "cosmos3-nano-reasoner",
+          "cosmos3-super-reasoner",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
@@ -4304,9 +4350,12 @@ class MaxTextConfig(
           "deepseek",
           "mistral",
           "mixtral",
+          "qwen2",
           "qwen3",
           "qwen3_moe",
           "qwen3_custom_moe",
+          "qwen3_5",
+          "qwen3_next",
           "gemma",
           "gemma2",
           "gemma3",
@@ -4321,6 +4370,34 @@ class MaxTextConfig(
             "'explicit' sharding is not supported with `use_multimodal`; the vision and audio encoders "
             "have not been onboarded to explicit sharding yet."
         )
+      # Both hybrid decoders share the same GatedDeltaNet sublayers, so the same gaps.
+      if self.decoder_block in (
+          DecoderBlockType.QWEN3_5,
+          DecoderBlockType.QWEN3_NEXT,
+      ):
+        decoder_name = self.decoder_block.value
+        if not self.sparse_matmul:
+          raise ValueError(
+              f"'explicit' sharding with the '{decoder_name}' decoder requires"
+              " `sparse_matmul=True`; the dense matmul MoE path has not been"
+              " onboarded to explicit sharding yet."
+          )
+        gdn_context_parallel_size = (
+            self.ici_context_parallelism
+            * self.dcn_context_parallelism
+            * self.ici_context_usp_ulysses_parallelism
+            * self.dcn_context_usp_ulysses_parallelism
+        )
+        if gdn_context_parallel_size > 1:
+          raise ValueError(
+              f"'explicit' sharding with the '{decoder_name}' decoder does not"
+              " support context parallelism yet. The GatedDeltaNet short"
+              " convolution left-pads the sequence by `gdn_conv_kernel_dim -"
+              " 1` and slices the result back, which explicit sharding cannot"
+              " express on a sharded sequence axis. Use `shard_mode=auto` when"
+              " `ici_context_parallelism` or"
+              " `ici_context_usp_ulysses_parallelism` is set."
+          )
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
     if self.ulysses_context_sharding != "context_usp_ulysses":
@@ -4520,6 +4597,16 @@ class MaxTextConfig(
       rotary_dim = int(self.head_dim * self.partial_rotary_factor)
       if rotary_dim % 2 != 0:
         raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
+      gdn_context_parallel_size = self.ici_context_parallelism * self.dcn_context_parallelism
+      if gdn_context_parallel_size > 1 and self.context_parallel_load_balance:
+        raise ValueError(
+            "GatedDeltaNet context parallelism requires context_parallel_load_balance=False. The GatedDeltaNet "
+            "layers carry a recurrence, so device order is sequence order: device i composes the state left by "
+            "device i-1. DUAL_CHUNK_SWAP hands device 0 the first and last chunks, device 1 the second and "
+            "second-to-last, and so on, which composes the segments out of order. Softmax attention tolerates the "
+            "reorder because it rebuilds the causal mask from positions; a recurrence cannot. The run still trains "
+            "and the loss still falls, so set this explicitly rather than relying on the failure being visible."
+        )
     else:
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
