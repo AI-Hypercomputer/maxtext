@@ -40,24 +40,12 @@ def is_fp8_dtype(dtype: Any) -> bool:
   )
 
 
-UNQUANTIZED_MODULE_LEAF_NAMES = frozenset({
-    "token_embedder",
-    "logits_dense",
-    "gate",
-    "shared_expert_gate",
-    "conv1d",
-    "in_proj_ba",
-})
-
-
 def get_weight_dtype(config: Config, module_name: str) -> DType:
   """Resolves parameter storage dtype for a submodule, honoring unquantized_modules."""
   if not is_fp8_dtype(config.weight_dtype):
     return config.weight_dtype
-  leaf_name = module_name.rsplit(".", 1)[-1]
-  if leaf_name in UNQUANTIZED_MODULE_LEAF_NAMES or module_name in UNQUANTIZED_MODULE_LEAF_NAMES:
-    return config.dtype
   unquantized = getattr(config, "unquantized_modules", None) or ()
+  leaf_name = module_name.rsplit(".", 1)[-1]
   if any(fnmatch.fnmatch(module_name, p) or fnmatch.fnmatch(leaf_name, p) for p in unquantized):
     return config.dtype
   return config.weight_dtype

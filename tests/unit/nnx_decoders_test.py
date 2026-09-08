@@ -1326,6 +1326,7 @@ class TestNNXDecoderFP8WeightOnly(unittest.TestCase):
     self.cfg = _make_config(
         weight_dtype="float8_e4m3fn",
         dtype="bfloat16",
+        unquantized_modules=["token_embedder", "logits_dense"],
     )
     self.mesh = _make_mesh(self.cfg)
     self.rngs = nnx.Rngs(params=0, dropout=1)
