@@ -58,6 +58,7 @@ from maxtext.models import (
     gemma4_small,
     gpt3,
     gpt_oss,
+    hy3,
     llama2,
     llama4,
     mistral,
@@ -475,7 +476,11 @@ class NNXDecoder(nnx.Module):
       )
 
     self.scanned_layers = None
-    self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
+    # DeepSeek and Hy3 both use a two-stack dense/MoE layer split driven by `first_num_dense_layers`.
+    # True for decoder blocks whose layers split into a dense prefix
+    # (`first_num_dense_layers`) followed by MoE layers, so the decoder holds two
+    # stacks (`dense_layers` + `moe_layers`) instead of one (`layers`).
+    self.has_dense_prefix = self.config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3)
     self.is_deepseek4 = self.config.decoder_block == DecoderBlockType.DEEPSEEK4
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
@@ -511,8 +516,8 @@ class NNXDecoder(nnx.Module):
   def _init_pipeline_layers(self, decoder_block_classes, rngs, mesh):
     """Initializes decoder layers with pipeline parallelism."""
     config = self.config
-    assert not (config.engram_layers and self.is_deepseek), (
-        "engram_layers + DeepSeek + pipeline_parallelism is not supported. "
+    assert not (config.engram_layers and self.has_dense_prefix), (
+        "engram_layers + deepseek/hy3 + pipeline_parallelism is not supported. "
         "engram interleaving is currently only implemented in the non-pipeline path."
     )
 
@@ -527,7 +532,7 @@ class NNXDecoder(nnx.Module):
         rngs=rngs,
     )
 
-    if self.is_deepseek:
+    if self.has_dense_prefix:
       self._init_pipeline_deepseek(decoder_block_classes, rngs)
     else:
       self._init_pipeline_generic(decoder_block_classes, rngs)
@@ -583,7 +588,7 @@ class NNXDecoder(nnx.Module):
 
   def _init_scanned_layers(self, decoder_block_classes, rngs, mesh):
     """Initializes decoder layers with scanning (non-pipeline)."""
-    if self.is_deepseek:
+    if self.has_dense_prefix:
       self._init_scanned_deepseek(decoder_block_classes, rngs)
     elif self.is_deepseek4:
       self._init_scanned_deepseek4(rngs)
@@ -833,7 +838,7 @@ class NNXDecoder(nnx.Module):
   def _init_sequential_layers(self, decoder_block_classes, rngs):
     """Initializes decoder layers sequentially (no scanning)."""
 
-    if self.is_deepseek:
+    if self.has_dense_prefix:
       self._init_sequential_deepseek(decoder_block_classes, rngs)
     else:
       self._init_sequential_generic(decoder_block_classes, rngs)
@@ -913,7 +918,7 @@ class NNXDecoder(nnx.Module):
   def _get_pipeline_stage_module(self, decoder_blocks, rngs):
     """Retrieves the wrapper module formatted for single pipeline stage execution."""
     cfg = self.config
-    base_stage_cls = decoder_blocks[1] if self.is_deepseek else decoder_blocks[0]
+    base_stage_cls = decoder_blocks[1] if self.has_dense_prefix else decoder_blocks[0]
 
     if cfg.num_layers_per_pipeline_stage == 1:
       return self._create_single_layer(base_stage_cls, rngs)
@@ -1230,6 +1235,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
+        DecoderBlockType.HY3: [hy3.Hy3DenseLayer, hy3.Hy3MoELayer],
         DecoderBlockType.DEEPSEEK4: get_scannable(deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock),
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
@@ -1383,6 +1389,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.HY3,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -1809,7 +1816,7 @@ class NNXDecoder(nnx.Module):
           else None
       )
 
-      if self.is_deepseek:
+      if self.has_dense_prefix:
         # Pre-pipeline: dense layers + outside-pipeline MoE layers under PP-as-DP axis rules.
         logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
         with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
@@ -1926,7 +1933,7 @@ class NNXDecoder(nnx.Module):
             slot=slot,
         )
       elif cfg.scan_layers:
-        if self.is_deepseek:
+        if self.has_dense_prefix:
           if cfg.engram_layers:
             common_kwargs = {
                 "layer_kwargs": layer_kwargs,
@@ -2105,7 +2112,7 @@ class NNXDecoder(nnx.Module):
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
         for lyr in range(cfg.num_decoder_layers):
-          if self.is_deepseek:
+          if self.has_dense_prefix:
             if lyr < cfg.first_num_dense_layers:
               layer = getattr(self, f"dense_layers_{lyr}", None)
             else:
@@ -2183,7 +2190,7 @@ class NNXDecoder(nnx.Module):
 
           if dynamic_graph_init:
             new_layer = nnx.merge(new_graphdef, new_state)
-            if self.is_deepseek:
+            if self.has_dense_prefix:
               if lyr < cfg.first_num_dense_layers:
                 setattr(self, f"dense_layers_{lyr}", new_layer)
               else:
@@ -2692,7 +2699,7 @@ class NNXDecoder(nnx.Module):
         if isinstance(val, (nnx.Module, list)):
           _add(val)
 
-    if self.is_deepseek:
+    if self.has_dense_prefix:
       _append_scanned("dense_layers")
       _append_unscanned("dense_layers")
 

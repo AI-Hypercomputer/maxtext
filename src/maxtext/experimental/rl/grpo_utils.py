@@ -289,7 +289,7 @@ def pathways_reshard(config, inference_engine, params, source_shardings, source_
     source_mesh: The source device mesh.
     destination_shardings: The sharding specification for the destination.
   """
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
     layer_groups = [
         ("dense_layers", config.first_num_dense_layers),
         ("moe_layers", config.base_num_decoder_layers - config.first_num_dense_layers),

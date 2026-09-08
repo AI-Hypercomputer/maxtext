@@ -243,6 +243,8 @@ ModelName = Literal[
     "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
+    "hy3-tiny",
+    "hy3-295b",
     "gemma-7b",
     "gemma-2b",
     "gemma2-2b",
@@ -3901,7 +3903,7 @@ class MaxTextConfig(
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
     if self.pipeline_parallel_layers == -1:
-      if self.decoder_block == DecoderBlockType.DEEPSEEK:
+      if self.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers
         self.pipeline_parallel_layers = moe_layers
       else:
@@ -4268,9 +4270,16 @@ class MaxTextConfig(
       if (
           self.routed_bias
           and self.routed_bias_update_rate > 0.0
-          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
+          and self.decoder_block
+          not in (
+              DecoderBlockType.DEEPSEEK,
+              DecoderBlockType.DEEPSEEK4,
+              DecoderBlockType.HY3,
+          )
       ):
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+        raise ValueError(
+            "Loss-free load balancing is only supported for the DeepSeek, DeepSeek V4, and Hy3 decoder blocks."
+        )
       if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
         raise ValueError(
             "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
@@ -4679,6 +4688,18 @@ class MaxTextConfig(
     if self.use_batch_split_schedule:
       if self.quantization and not self.quantization == "fp8_full":
         raise ValueError("Batch split quantization only supports `quantization=fp8_full`")
+      # `deepseek_batchsplit.fetch_weights` reads MLA parameters by name
+      # (`wq_a`, `wq_b`, `q_norm`, `wkv_a`, `wkv_b`, `kv_norm`), so the schedule
+      # only applies to models whose attention is MLA. The decoder reaches it via
+      # `has_dense_prefix`, which now covers Hy3 as well as DeepSeek, and Hy3's
+      # plain GQA has none of those parameters -- without this it fails with
+      # `KeyError: 'wq_a'` partway through the first forward pass.
+      if self.attention_type != "mla":
+        raise ValueError(
+            "`use_batch_split_schedule=True` requires `attention_type=mla`, "
+            f"got {self.attention_type!r}. The batch-split schedule reads MLA-specific "
+            "attention parameters, so it does not apply to other attention types."
+        )
 
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
@@ -4690,6 +4711,11 @@ class MaxTextConfig(
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
+        # Hy3 is Qwen3-style GQA + QK-Norm attention over a DeepSeek-V3-style
+        # RoutedAndSharedMoE block, and its dimension numbers come out identical
+        # to those two models'; see `TestHy3MatchesWhitelistedModels` in
+        # tests/unit/muon_utils_test.py, which fails if that stops holding.
+        DecoderBlockType.HY3,
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "

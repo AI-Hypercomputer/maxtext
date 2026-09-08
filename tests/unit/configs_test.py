@@ -266,7 +266,20 @@ def test_kimi_configs(config_file):
   run_config_validation(config_file)
 
 
-# --- Test Group 9: Inference-specific Configs ---
+# --- Test Group 9: Hy3 Model Family ---
+
+HY3_CONFIGS = [
+    os.path.join(CONFIGS_DIR, "models", "hy3-tiny.yml"),
+    os.path.join(CONFIGS_DIR, "models", "hy3-295b.yml"),
+]
+
+
+@pytest.mark.parametrize("config_file", HY3_CONFIGS)
+def test_hy3_configs(config_file):
+  run_config_validation(config_file)
+
+
+# --- Test Group 10: Inference-specific Configs ---
 
 INFERENCE_CONFIGS = [
     os.path.join(CONFIGS_DIR, "inference", "inference.yml"),
