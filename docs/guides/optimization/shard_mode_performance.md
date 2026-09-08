@@ -280,7 +280,9 @@ try `param_scan_axis: 0`.
 > longer async window under explicit — and quadrupling the tokens amortizes it. So *parity, reliably*
 > understates it at realistic sequence lengths: the honest one-liner there is **a small but
 > consistent win**, still small enough that §6 and §7 remain the right basis for choosing a mode.
-> See §5.9.
+> Repeating the sweep under the production SparseCore libtpu set gives seven of eight again (median
+> −0.118%) with the two arms swapped — deepseek2 becomes a win, qwen3 becomes the lone +0.046% — so
+> no model loses under both flag sets, and none of this depends on a flag this PR adds. See §5.9.
 
 ______________________________________________________________________
 
@@ -1428,16 +1430,16 @@ Everything below is one rep, medians, `remat_policy: minimal`, d16, L12, fsdp 4,
 **Across models.** The loss is identical on and off in every arm of every model, so the numerics
 claim generalizes cleanly. The step time does not.
 
-| model            | scan body | explicit off | explicit on |      Δ | auto off | auto on |      Δ |
-| ---------------- | --------: | -----------: | ----------: | -----: | -------: | ------: | -----: |
-| `mixtral-8x7b`   |   1 layer |      180,518 | **165,517** | −8.3%  |  180,959 | 166,044 | −8.2%  |
-| `llama2-7b`      |   1 layer |       30,576 |  **28,987** | −5.2%  |   30,628 |  28,997 | −5.3%  |
-| `mistral-7b`     |   1 layer |       30,267 |  **28,752** | −5.0%  |   30,305 |  28,752 | −5.1%  |
-| `qwen3-8b`       |   1 layer |       35,884 |  **34,213** | −4.7%  |   35,728 |  34,398 | −3.7%  |
-| `gemma-2b`       |   1 layer |       49,135 |  **47,651** | −3.0%  |   49,629 |  48,306 | −2.7%  |
-| `gemma2-2b`      |  2 layers |       73,359 |      73,515 | **+0.2%** |   74,299 |  74,677 | +0.5%  |
-| `gemma3-4b`      |  6 layers |       62,104 |      63,106 | **+1.6%** |   62,742 |  63,626 | +1.4%  |
-| `deepseek2-16b`  |   1 layer |      565,926 |         OOM |      —  |  566,182 |     OOM |      — |
+| model           | scan body | explicit off | explicit on |         Δ | auto off | auto on |     Δ |
+| --------------- | --------: | -----------: | ----------: | --------: | -------: | ------: | ----: |
+| `mixtral-8x7b`  |   1 layer |      180,518 | **165,517** |     −8.3% |  180,959 | 166,044 | −8.2% |
+| `llama2-7b`     |   1 layer |       30,576 |  **28,987** |     −5.2% |   30,628 |  28,997 | −5.3% |
+| `mistral-7b`    |   1 layer |       30,267 |  **28,752** |     −5.0% |   30,305 |  28,752 | −5.1% |
+| `qwen3-8b`      |   1 layer |       35,884 |  **34,213** |     −4.7% |   35,728 |  34,398 | −3.7% |
+| `gemma-2b`      |   1 layer |       49,135 |  **47,651** |     −3.0% |   49,629 |  48,306 | −2.7% |
+| `gemma2-2b`     |  2 layers |       73,359 |      73,515 | **+0.2%** |   74,299 |  74,677 | +0.5% |
+| `gemma3-4b`     |  6 layers |       62,104 |      63,106 | **+1.6%** |   62,742 |  63,626 | +1.4% |
+| `deepseek2-16b` |   1 layer |      565,926 |         OOM |         — |  566,182 |     OOM |     — |
 
 `qwen3-30b-a3b` is out of reach on four chips with or without the flag (218.03G of HLO temporaries
 against 95.74G of HBM), so it says nothing either way. `deepseek2-16b` does say something: at L6 it
@@ -1445,20 +1447,20 @@ runs with the flag off and needs 103.13G with it on. That is the memory cost abo
 
 **Across geometries**, on `qwen3-8b`, the same flag set:
 
-| geometry (from d16, L12, pdbs 1, seq 1024) | tokens/step | explicit off | explicit on |      Δ |
-| ------------------------------------------ | ----------: | -----------: | ----------: | -----: |
-| `base_emb_dim: 4096`                        |       1,024 |       66,472 |  **62,276** | −6.3%  |
-| baseline                                    |       1,024 |       35,884 |  **34,213** | −4.7%  |
-| `remat_policy: full`                        |       1,024 |       39,987 |  **38,772** | −3.0%  |
-| `remat_policy: save_qkv_proj`               |       1,024 |       39,266 |  **38,165** | −2.8%  |
-| `base_num_decoder_layers: 24`               |       1,024 |       94,228 |  **92,487** | −1.8%  |
-| e4k+mlp16k, pdbs 2, `full`                  |       2,048 |      152,223 | **150,352** | −1.2%  |
-| e4k+mlp16k, seq 2048, `full`                |       2,048 |      155,914 | **154,368** | −1.0%  |
-| `per_device_batch_size: 2`                  |       2,048 |       47,798 |      48,028 | +0.5%  |
-| `max_target_length: 2048`                   |       2,048 |       51,606 |      51,994 | +0.8%  |
-| `per_device_batch_size: 4`                  |       4,096 |       84,461 |      85,010 | +0.7%  |
-| seq 4096, `full`                            |       4,096 |      107,968 |     108,569 | +0.6%  |
-| e4k+mlp16k, seq 4096, `full`                |       4,096 |      280,065 |     282,890 | +1.0%  |
+| geometry (from d16, L12, pdbs 1, seq 1024) | tokens/step | explicit off | explicit on |     Δ |
+| ------------------------------------------ | ----------: | -----------: | ----------: | ----: |
+| `base_emb_dim: 4096`                       |       1,024 |       66,472 |  **62,276** | −6.3% |
+| baseline                                   |       1,024 |       35,884 |  **34,213** | −4.7% |
+| `remat_policy: full`                       |       1,024 |       39,987 |  **38,772** | −3.0% |
+| `remat_policy: save_qkv_proj`              |       1,024 |       39,266 |  **38,165** | −2.8% |
+| `base_num_decoder_layers: 24`              |       1,024 |       94,228 |  **92,487** | −1.8% |
+| e4k+mlp16k, pdbs 2, `full`                 |       2,048 |      152,223 | **150,352** | −1.2% |
+| e4k+mlp16k, seq 2048, `full`               |       2,048 |      155,914 | **154,368** | −1.0% |
+| `per_device_batch_size: 2`                 |       2,048 |       47,798 |      48,028 | +0.5% |
+| `max_target_length: 2048`                  |       2,048 |       51,606 |      51,994 | +0.8% |
+| `per_device_batch_size: 4`                 |       4,096 |       84,461 |      85,010 | +0.7% |
+| seq 4096, `full`                           |       4,096 |      107,968 |     108,569 | +0.6% |
+| e4k+mlp16k, seq 4096, `full`               |       4,096 |      280,065 |     282,890 | +1.0% |
 
 Auto tracks explicit to within 0.5 pt on every row; this is not a mode-specific effect.
 
@@ -1468,12 +1470,12 @@ Splitting the transform into its two halves settles it. **A** hoists and casts b
 the remat policy, so the gather moves and narrows but nothing survives the backward pass. **B**
 keeps the residual but skips the cast, so an f32 copy is held:
 
-| explicit, SparseCore set | off | **A** hoist+cast only | **B** f32 residual | on (both) |
-| ------------------------ | ---:| --------------------: | -----------------: | --------: |
-| `qwen3-8b`               | 35,884 |    35,887 (+0.01%) |  39,707 (+10.7%)   | **34,213** |
-| `gemma-2b`               | 49,135 |    49,149 (+0.03%) |  53,547 (+9.0%)    | **47,651** |
-| `gemma2-2b`              | 73,359 |    73,349 (−0.01%) |  87,389 (+19.1%)   |     73,515 |
-| `gemma3-4b`              | 62,104 |    62,111 (+0.01%) |  69,878 (+12.5%)   |     63,106 |
+| explicit, SparseCore set |    off | **A** hoist+cast only | **B** f32 residual |  on (both) |
+| ------------------------ | -----: | --------------------: | -----------------: | ---------: |
+| `qwen3-8b`               | 35,884 |       35,887 (+0.01%) |    39,707 (+10.7%) | **34,213** |
+| `gemma-2b`               | 49,135 |       49,149 (+0.03%) |     53,547 (+9.0%) | **47,651** |
+| `gemma2-2b`              | 73,359 |       73,349 (−0.01%) |    87,389 (+19.1%) |     73,515 |
+| `gemma3-4b`              | 62,104 |       62,111 (+0.01%) |    69,878 (+12.5%) |     63,106 |
 
 Column **A** is free everywhere — including on `gemma3-4b`, whose scan body is a
 `Gemma3ScannableBlock` holding six decoder layers, so all six gathers get hoisted to the top of the
@@ -1501,6 +1503,28 @@ gemma2/gemma3 family, and wherever the compile-time temp estimate has no headroo
 cost +25% to +75% of HLO temporaries (`qwen3-8b` 2.6 → 3.3 GB, `llama2-7b` 2.5 → 3.2 GB,
 `gemma3-4b` 5.5 → 7.5 GB, `mixtral-8x7b` 10.8 → 18.9 GB). Measure — the sign is a property of the
 geometry, not of the model, and both shard modes get the same answer.
+
+#### The sign condition does not reproduce on TPU7x, and none of the obvious controls explains it
+
+Read the "leave it off on the gemma2/gemma3 family" rule as a **v5p-8 result**. On the TPU7x
+(Ironwood) 8-chip host §5.9 uses, the flag is a large unconditional win on exactly the models the
+table above records as reversals — and it stays one under every variable that could plausibly
+account for the gap. `explicit`, d16, L12, seq 1024, one rep each:
+
+| control                                         | `gemma2-2b` | `qwen3-8b` |
+| ----------------------------------------------- | ----------: | ---------: |
+| fsdp 8, stock libtpu, `remat_policy: full`      |     −16.48% |    −16.96% |
+| fsdp 8, SparseCore set, `full`                  |     −17.15% |    −16.35% |
+| fsdp 4 × dp 2, SparseCore set, `full`           |     −19.21% |    −15.35% |
+| fsdp 8, SparseCore set, `remat_policy: minimal` |     −10.03% |    −13.74% |
+
+The libtpu flag set is not the discriminator, the FSDP group size is not (row 3 holds tokens per
+*device*-step fixed at 1,024 while halving the gather's participant count), and the remat policy is
+not — `minimal`, the setting the table above was measured at, still gives −10% to −14%. `gemma3-4b`
+behaves the same way (−15.34% at row 1). What is left is the hardware, which was not varied. The
+practical reading: the flag is worth measuring on your own accelerator before believing either sign,
+and on TPU7x it is worth ~15% and the family exclusion does not apply. `auto` tracks `explicit` to
+within 0.5 pt in every one of these arms, so this is still not a mode-specific effect.
 
 ______________________________________________________________________
 
@@ -2134,6 +2158,48 @@ row, gemma2-2b under explicit:
 So the flags are already worth **−0.60%** on the model that looks worst; without them the 1024-token
 picture is materially worse than the one Table A shows.
 
+**The result survives the production libtpu flag set — and that set is not the fast one here.**
+Everything above is stock libtpu. §4.11's generalization study uses the 31-flag *SparseCore set*
+(§9), which offloads all-gather, all-reduce and reduce-scatter to SparseCore, so it is the obvious
+confound: it moves exactly the collective Table A's deficit lives in. Re-running the whole matrix on
+top of it, same geometry, two reps, spread ≤ 0.02%:
+
+**Table C — `max_target_length=4096`, `ici_fsdp_parallelism=8`, SparseCore set.**
+
+| model         |     `auto` ns | `explicit` ns |       delta |
+| ------------- | ------------: | ------------: | ----------: |
+| llama2-7b     |    70,691,844 |    70,232,729 |     −0.649% |
+| mistral-7b    |    70,130,822 |    69,895,777 |     −0.335% |
+| gemma2-2b     |   159,857,690 |   159,531,692 |     −0.204% |
+| gemma-2b      |    90,537,174 |    90,421,099 |     −0.128% |
+| mixtral-8x7b  |   232,384,480 |   232,133,146 |     −0.108% |
+| deepseek2-16b | 1,402,895,843 | 1,402,116,510 |     −0.056% |
+| gemma3-4b     |    92,211,998 |    92,184,340 |     −0.030% |
+| qwen3-8b      |    78,172,668 |    78,208,562 | **+0.046%** |
+|               |               |    **median** |     −0.118% |
+
+Seven of eight still win, and the two arms swap identities: deepseek2-16b — Table B's only positive —
+becomes a win at fsdp 8 under this set, and qwen3-8b — Table B's *largest* win at −1.147% — becomes
+the only positive at +0.046%. No model loses under both flag sets.
+
+The margin shrinks from −0.435% to −0.118% because the set does to the FSDP gather what
+`save_fsdp_gathered_weights` does: takes it off the critical path, and with it most of what separated
+the modes. That is the same mechanism as the two checks above, reached a third way, and it is the
+strongest evidence that the residual is a scheduling property of one collective rather than anything
+structural.
+
+It comes at a price this document should not hide. **At this geometry the SparseCore set is a
+regression**, not the −25.5% it is worth at §4.11's (seq 1024, fsdp 4): comparing the `auto` arms of
+Tables B and C, llama2-7b +5.44%, mistral-7b +4.85%, mixtral-8x7b +2.96%, deepseek2-16b +2.62%,
+qwen3-8b +1.88%, gemma-2b +0.94%, gemma2-2b +0.49%, gemma3-4b −0.07%. Long sequences already overlap
+these collectives with compute, so offloading them buys nothing and adds latency. A user at seq 4096
+would run stock — and on stock, Table B, qwen3-8b is −1.147%. Turning the mesh instead does not
+rescue it: qwen3-8b at `ici_fsdp_parallelism=4 ici_tensor_parallelism=2` under the SparseCore set is
+`auto` 79,595,200 vs `explicit` 80,514,560, **+1.155%**, and both arms are slower than fsdp 8. So
+qwen3's best configuration is stock/fsdp 8, where it wins by the largest margin in the document, and
+deepseek2's is either the EP mesh on stock (−0.059%) or fsdp 8 under the SparseCore set (−0.056%).
+The universal claim is about the best configuration available to each model, not about every cell.
+
 **A negative result — widening the auto-axes region does not help.** `_dot_general_in_auto_axes`
 opens one region per dot, so the region boundary still pins every intermediate's sharding, and with
 it its layout. Tracing the whole `MlpBlock` (`wi` → activation → `wo`) inside a *single* region
@@ -2146,7 +2212,10 @@ mistral-7b, gemma3-4b and mixtral-8x7b print **identical** trajectories; the oth
 last printed digit (±0.001) at every step with no growth in the difference — llama2 differs at step 3
 only, qwen3 at steps 2/4/7, gemma-2b at step 2, gemma2-2b at step 9, deepseek2 at steps 5/10/11. At
 1024 tokens the same check gives mistral-7b, qwen3-8b and mixtral-8x7b identical and the rest within
-±0.001. This is float reassociation from a different contraction order, the same magnitude §5.8
+±0.001. Table C's SparseCore arms give the same answer on a different partition of the models —
+deepseek2-16b, gemma3-4b, mistral-7b and mixtral-8x7b identical, the other four within ±0.001 at two
+or three steps each — which is what a reassociation effect should look like and not what a
+correctness bug would. This is float reassociation from a different contraction order, the same magnitude §5.8
 records, and an order of magnitude below the 0.037 that relabelling a mesh axis produces with no code
 change at all.
 
@@ -2337,7 +2406,9 @@ ______________________________________________________________________
   strict comparison, nothing written out but `shard_mode` — the eight-model median is −0.063% at
   `max_target_length=1024` and **−0.435% at 4,096**, and every model that regressed at 1024 wins at
   4096 (§5.9). The 1024-token deficit is one under-overlapped FSDP weight gather, and it is a fixed
-  cost: more tokens per step dilutes it. Do not tune `shard_mode` on a short-sequence proxy.
+  cost: more tokens per step dilutes it. Do not tune `shard_mode` on a short-sequence proxy. The
+  result holds under the production SparseCore libtpu set too (7 of 8, median −0.118%, §5.9 Table C),
+  though that set is itself a 1–5% regression at seq 4096 and you should not be running it there.
 - **Untied head, and you want the same win under `auto`?** Write `lm_head_vocab_parallel: true`. It
   is measured under `auto` in §5.7 Table B and is worth the same −1.1% … −11.0% there. It is not the
   `auto` default only because that wants a wider validation sweep than this document ran (item 03).
@@ -2349,7 +2420,10 @@ ______________________________________________________________________
   to stay 1.4–1.8% ahead, for a layout reason unrelated to the flag. **Under the production
   SparseCore flag set the win narrows to 3–8% and acquires a sign condition** — it holds at ≤ 2,048
   tokens per device-step and reverses above ~4,096, and it reverses on gemma2/gemma3 at any size.
-  §4.11 has the eight-model, twelve-geometry table and the rule.
+  §4.11 has the eight-model, twelve-geometry table and the rule. **That sign condition is a v5p-8
+  result and does not reproduce on TPU7x**, where the flag is −10% to −19% including on
+  gemma2/gemma3, across both libtpu sets, both remat policies and both FSDP degrees. Measure it on
+  your own accelerator rather than reading either sign off this document.
 - **Do not write `dense_weight_grad_in_kernel_order` out any more.** The "gemma3 and deepseek only"
   advice this line used to carry was an artifact of benchmarking at 16 layers (§4.9); the flag is
   now on by default under explicit and there is no model it should be turned off for.
@@ -2764,7 +2838,8 @@ that cost time to discover:
   HBM/device, JAX 0.11.1 — everything else in this document is a 4-chip v5p-8. It uses d16 at
   `base_num_decoder_layers=12` and `ici_fsdp_parallelism=8`, adds `base_moe_mlp_dim=8192` to
   *deepseek2 as well as* mixtral, and sweeps `max_target_length` ∈ {1024, 4096} × `shard_mode` ×
-  3 reps with nothing else written out. Timings there are the median of the profiled
+  3 reps with nothing else written out, on **stock libtpu** except where Table C says otherwise.
+  Timings there are the median of the profiled
   `jit_train_step` **module** spans (the `XLA Modules` line) rather than the `train_step` op span;
   the two agree to well under the 0.05% rep spread, but do not mix them within a table. Per-op
   ledgers in §5.9 are summed over all eight cores, so their microsecond totals are 8× a
