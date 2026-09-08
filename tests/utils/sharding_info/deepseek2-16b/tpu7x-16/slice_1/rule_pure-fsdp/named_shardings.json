@@ -237,8 +237,8 @@
       }
     },
     "partition_spec": [
-      "fsdp",
-      null
+      null,
+      "fsdp"
     ],
     "shape": [
       2048,
@@ -787,8 +787,8 @@
       }
     },
     "partition_spec": [
-      "fsdp",
-      null
+      null,
+      "fsdp"
     ],
     "shape": [
       2048,
@@ -1325,8 +1325,8 @@
       }
     },
     "partition_spec": [
-      "fsdp",
-      null
+      null,
+      "fsdp"
     ],
     "shape": [
       2048,

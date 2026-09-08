@@ -203,6 +203,30 @@ logits_via_embedding: false
 normalize_embedding_logits: true  # whether to normalize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
+# Trace the untied LM head's dot inside a jax.sharding.auto_axes region so that XLA folds the transpose back into
+# the gradient dot and the weight gradient comes out in the kernel's stored orientation. Without the region that
+# fold never happens under shard_mode: explicit, because the Sharding custom-call on every dot output is a barrier
+# algsimp will not cross, so the gradient is left sharded on its minor-most dimension and loses the all-reduce ->
+# reduce-scatter fusion (see docs/guides/optimization/shard_mode_performance.md). The stored kernel, its
+# initialization and the arithmetic are untouched, so gradients are bit-identical to the default rule and no
+# checkpoint conversion is needed. No effect under shard_mode: auto, where XLA folds the transpose itself, and none
+# on a tied head, which has no kernel of its own -- so None means on exactly where it can do something.
+lm_head_weight_grad_in_kernel_order: None  # on for an untied model under shard_mode: explicit if None
+# Shard the untied LM head on its vocab dimension instead of its embed dimension. By default `embed_vocab` puts the
+# head's [embed, vocab] kernel on the FSDP axes along embed, so every step gathers the whole kernel forward and
+# reduce-scatters a same-sized weight gradient back -- on llama2-7b at d16 that pair costs 1.59 ms, 2.2% of the step.
+# Turning the head sideways (embed replicated, vocab on the FSDP axes) moves both collectives onto the hidden state:
+# the kernel holds emb_dim*vocab_size elements against the hidden state's batch*length*emb_dim, so the traffic drops
+# by vocab_size/(batch*length) -- 7.8x on llama2 at this benchmark's geometry, 37x on qwen3's 151936-entry vocab --
+# and the weight gradient is left needing no collective at all. The logits
+# then come out sharded on vocab, so the loss builds its one-hot targets shard-locally against a vocab-sharded iota
+# and cross entropy's two reductions over vocab become the only added collectives (a few kB each).
+# Arithmetic is unchanged, but the stored kernel's sharding is not, so a checkpoint saved with this on is laid out
+# differently -- Orbax reshards on restore, so this only matters for raw array-level tooling.
+# This is a layout fix rather than a shard_mode feature -- shard_mode: auto reaches the same layout and wins by the
+# same amount -- so None means on under either mode wherever it applies: an untied head, without MTP
+# (which reshards its logits straight back to batch-sharded) and without vocab tiling (which already chunks vocab).
+lm_head_vocab_parallel: None
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the Indexer across the unsharded local heads dimension natively.
@@ -562,6 +586,13 @@ logical_axis_rules: [
                       # Vocab Weights
                       ['vocab', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['embed_vocab', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      # The four rules below are only used when lm_head_vocab_parallel is on; they rotate the
+                      # untied LM head off its embed dimension and onto its vocab dimension, so the FSDP axes
+                      # gather the hidden state (batch x length x embed) instead of the kernel (embed x vocab).
+                      ['activation_embed_and_logits_batch_no_fsdp', ['data', 'stage', 'expert']],
+                      ['activation_vocab_fsdp', ['tensor', 'tensor_sequence', 'fsdp', 'fsdp_transpose']],
+                      ['vocab_fsdp', ['tensor', 'tensor_sequence', 'autoregressive', 'fsdp', 'fsdp_transpose']],
+                      ['embed_vocab_replicated', []],
                       # ==========================================
                       # Attention
                       # ==========================================
@@ -712,6 +743,33 @@ shard_optimizer_over_data: false
 
 # when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 dense_fsdp_use_two_stage_all_gather: false
+
+# The in-loop counterpart of lm_head_weight_grad_in_kernel_order: trace the attention q/k/v/out and MLP wi/wo dots
+# inside a jax.sharding.auto_axes region so that XLA folds the transpose back into the gradient dot and each weight
+# gradient comes out in its kernel's stored orientation. Same barrier as the LM head flag, same default rule -- None
+# means on wherever it can act, i.e. under shard_mode: explicit. Without it explicit is 0.33%-1.48% slower than auto
+# at every measured layer count that is not a multiple of 8; with it explicit lands within 0.2% of auto everywhere,
+# and the two flags are additive (see docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels,
+# their initialization and the arithmetic are untouched, so gradients are bit-identical to the default rule and no
+# checkpoint conversion is needed. No effect under shard_mode: auto or on quantized layers.
+dense_weight_grad_in_kernel_order: None  # on under shard_mode: explicit if None
+
+# Gather each FSDP-sharded layer kernel once at the top of the scan body, in config.dtype, and keep the gathered value
+# as a remat residual so the backward pass reads it instead of re-gathering. Mode-neutral: it helps auto and explicit
+# by about the same amount. The compute-dtype cast is what makes it pay -- held at float32 the residuals cost more HBM
+# traffic than the re-gather they save (+9% to +19%, measured), so the cast is not an optimization on top, it is the
+# whole trade. Whether that trade wins depends on how much of the backward pass is FSDP all-gather rather than
+# activation traffic:
+#   worth it   -- up to ~2,048 tokens per device-step, and more so the wider the model or the more experts it has:
+#                 mixtral-8x7b -8.3%, llama2-7b -5.2%, mistral-7b -5.0%, qwen3-8b -4.7%, -6.3% at base_emb_dim 4096
+#   not worth it -- above ~4,096 tokens per device-step (+0.5% to +1.0%), and on gemma2/gemma3 at any size (+0.2% to
+#                 +1.6%), whose 256K-vocab tied-embedding logits make the step long enough to bury the gather
+# See docs/guides/optimization/shard_mode_performance.md section 4.11 for the eight-model table and the ablation.
+# Off by default for that reason, and because the residuals grow HLO temporaries by 25%-75% (qwen3-8b 2.6 -> 3.3 GB,
+# mixtral-8x7b 10.8 -> 18.9 GB; deepseek2-16b runs without it and OOMs with it). Measure step time and peak HBM.
+# Numerics are unchanged: only kernels (rank >= 2 float arrays) are touched, never the rank-1 norm scales, and every
+# consumer already casts its kernel to config.dtype before the dot.
+save_fsdp_gathered_weights: false
 
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,

@@ -369,12 +369,8 @@
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
-      null
+      null,
+      "fsdp"
     ],
     "shape": [
       2048,
@@ -1216,12 +1212,8 @@
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
-      null
+      null,
+      "fsdp"
     ],
     "shape": [
       2048,
@@ -2043,12 +2035,8 @@
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
-      null
+      null,
+      "fsdp"
     ],
     "shape": [
       2048,

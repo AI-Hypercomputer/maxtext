@@ -1901,17 +1901,13 @@
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "fsdp_transpose",
-        "context",
-        "context_usp_ulysses",
-        "expert"
-      ],
+      null,
       [
         "tensor",
         "tensor_sequence",
-        "autoregressive"
+        "autoregressive",
+        "fsdp",
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -3871,17 +3867,13 @@
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "fsdp_transpose",
-        "context",
-        "context_usp_ulysses",
-        "expert"
-      ],
+      null,
       [
         "tensor",
         "tensor_sequence",
-        "autoregressive"
+        "autoregressive",
+        "fsdp",
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -5807,17 +5799,13 @@
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "fsdp_transpose",
-        "context",
-        "context_usp_ulysses",
-        "expert"
-      ],
+      null,
       [
         "tensor",
         "tensor_sequence",
-        "autoregressive"
+        "autoregressive",
+        "fsdp",
+        "fsdp_transpose"
       ]
     ],
     "shape": [

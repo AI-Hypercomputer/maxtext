@@ -131,6 +131,12 @@
         "logic_axes": "Unknown",
         "PartitionSpec": "P(None,)"
       }
+    },
+    {
+      "decoders/y: bfloat16[192,2048,2880]": {
+        "logic_axes": "('activation_embed_and_logits_batch_no_fsdp', 'activation_length', 'activation_embed')",
+        "PartitionSpec": "P(None, None, None)"
+      }
     }
   ]
 }

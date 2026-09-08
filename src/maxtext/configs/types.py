@@ -618,6 +618,28 @@ class LogitsAndLoss(BaseModel):
   )
   logits_dot_in_fp32: bool = Field(False, description="Use fp32 for the logits dot product for stability.")
   cast_logits_to_fp32: bool = Field(True, description="Whether to cast the final logits to fp32.")
+  lm_head_weight_grad_in_kernel_order: bool | None = Field(
+      None,
+      description=(
+          "Trace the untied LM head's dot inside a jax.sharding.auto_axes region so that XLA folds the "
+          "transpose back into the gradient dot and the weight gradient comes out in the kernel's stored "
+          "axis order. Recovers the weight-gradient reduce-scatter that shard_mode=explicit otherwise loses, "
+          "leaving the stored kernel, its initialization and the arithmetic untouched. No effect under "
+          "shard_mode=auto. None means on for an untied model under shard_mode=explicit and off everywhere else."
+      ),
+  )
+  lm_head_vocab_parallel: bool | None = Field(
+      None,
+      description=(
+          "Shard the untied LM head on its vocab dimension instead of its embed dimension, so that the per-step "
+          "FSDP all-gather of the head kernel and the reduce-scatter of its gradient move onto the hidden state "
+          "-- vocab_size/(batch*length) times less traffic -- and the weight gradient needs no collective at all. The "
+          "logits come out vocab-sharded, so the loss builds its one-hot targets against a vocab-sharded iota "
+          "rather than gathering them. Arithmetic is unchanged; the stored kernel's sharding is not. This is a "
+          "layout fix rather than a shard_mode feature -- auto reaches the same layout and the same speedup -- so "
+          "None means on under either shard_mode wherever it applies: an untied head, without MTP or vocab tiling."
+      ),
+  )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
@@ -1208,6 +1230,13 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     # Vocab Weights
     ["vocab", ["tensor", "tensor_sequence", "autoregressive"]],
     ["embed_vocab", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    # The four rules below are only used when lm_head_vocab_parallel is on; they rotate the
+    # untied LM head off its embed dimension and onto its vocab dimension, so the FSDP axes
+    # gather the hidden state (batch x length x embed) instead of the kernel (embed x vocab).
+    ["activation_embed_and_logits_batch_no_fsdp", ["data", "stage", "expert"]],
+    ["activation_vocab_fsdp", ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"]],
+    ["vocab_fsdp", ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"]],
+    ["embed_vocab_replicated", []],
     # ==========================================
     # Attention
     # ==========================================
@@ -1412,6 +1441,37 @@ class LayoutAndSharding(BaseModel):
   dense_fsdp_use_two_stage_all_gather: bool = Field(
       False,
       description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
+  )
+  dense_weight_grad_in_kernel_order: bool | None = Field(
+      None,
+      description=(
+          "Trace the per-layer attention and MLP projection dots inside a jax.sharding.auto_axes region so that "
+          "XLA folds the transpose back into the gradient dot and each weight gradient comes out in its kernel's "
+          "stored axis order. This is the in-loop counterpart of lm_head_weight_grad_in_kernel_order and, like it, "
+          "None means on wherever it can act: shard_mode=explicit, where the Sharding custom-call on every dot "
+          "output blocks that fold. Without it explicit is 0.33%-1.48% slower than auto at every measured layer "
+          "count that is not a multiple of 8; with it explicit lands within 0.2% of auto everywhere "
+          "(docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels, their initialization "
+          "and the arithmetic are untouched, so gradients are bit-identical to the default rule. No effect under "
+          "shard_mode=auto, where XLA folds the transpose itself, or on quantized layers."
+      ),
+  )
+  save_fsdp_gathered_weights: bool = Field(
+      False,
+      description=(
+          "Gather each FSDP-sharded layer kernel once at the top of the scan body, in config.dtype, and keep the "
+          "gathered value as a remat residual so the backward pass reads it instead of re-gathering. Mode-neutral: "
+          "auto and explicit get the same answer to within half a point. Whether it is a win depends on how much of "
+          "the backward pass is FSDP all-gather rather than activation traffic, so it has a sign condition: measured "
+          "on v5p with the production SparseCore libtpu flags it is worth -3% to -8% at up to 2,048 tokens per "
+          "device-step (mixtral-8x7b -8.3%, llama2-7b -5.2%, qwen3-8b -4.7%, and -6.3% at base_emb_dim 4096), but it "
+          "costs +0.5% to +1.0% above ~4,096 tokens per device-step and regresses the gemma2/gemma3 family at any "
+          "size, whose 256K-vocab logits dominate the step. See "
+          "docs/guides/optimization/shard_mode_performance.md section 4.11 for the full table and the rule. Off by "
+          "default for that reason and because the residuals grow HLO temporaries by 25%-75% (deepseek2-16b runs "
+          "without it and OOMs with it); measure both step time and peak HBM before enabling. Numerics are "
+          "unchanged -- only kernels are touched, and every consumer already casts them to config.dtype."
+      ),
   )
   internal_compile: bool = Field(
       False,
@@ -3168,8 +3228,8 @@ def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
-def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
-  """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
+def _resolved_axis_product(axes, mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
+  """Combined size of `axes`, resolving a `-1` the way mesh creation will.
 
   `maxtext_utils.fill_unspecified_mesh_axes` hands the single -1 entry whatever devices the
   other axes leave over, so config validation has to do the same to see the sizes a run will
@@ -3179,7 +3239,12 @@ def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_device
   specified = prod(size for size in parallelism if size != -1)
   leftover = num_devices // specified if specified > 0 and num_devices > 0 and num_devices % specified == 0 else 1
   sizes = {axis: leftover if size == -1 else size for axis, size in zip(mesh_axes, parallelism)}
-  return max(sizes.get("fsdp", 1), 1) * max(sizes.get("fsdp_transpose", 1), 1)
+  return prod(max(sizes.get(axis, 1), 1) for axis in axes)
+
+
+def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
+  """Combined size of the fsdp mesh axes."""
+  return _resolved_axis_product(("fsdp", "fsdp_transpose"), mesh_axes, parallelism, num_devices)
 
 
 # ----------------------------------------------------------------------------
@@ -3478,6 +3543,50 @@ class MaxTextConfig(
       raise ValueError(
           "shard_embed_moe_on_fsdp requires quantization to be specified and "
           "weight_quantization_calibration_method to be fixed (static scaling mode)."
+      )
+    return self
+
+  @model_validator(mode="after")
+  def resolve_lm_head_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Resolve the tri-state flag, and reject it where it cannot be honored.
+
+    The transpose it removes only exists under explicit sharding, and on an untied
+    model removing it has been a win or a wash on every configuration measured
+    (docs/guides/optimization/shard_mode_performance.md section 5) -- on qwen3-8b it
+    is the difference between +3.25% and -0.41% against `auto`. So the default is
+    "on wherever it can do anything", and writing the flag out is only needed to
+    reproduce a measurement.
+    """
+    if self.lm_head_weight_grad_in_kernel_order is None:
+      self.lm_head_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT and not self.logits_via_embedding
+    elif self.lm_head_weight_grad_in_kernel_order and self.logits_via_embedding:
+      raise ValueError(
+          "lm_head_weight_grad_in_kernel_order only applies to the untied LM head, but logits_via_embedding is True."
+      )
+    return self
+
+  @model_validator(mode="after")
+  def resolve_dense_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Resolve the in-loop counterpart of the LM-head flag.
+
+    Same barrier, same shape of fix, same default rule: on wherever it can act.
+    The two are independent and additive -- on llama2 at 18 layers, explicit
+    costs +1.098% against auto with neither flag, +0.621% with this one alone,
+    +0.429% with the LM-head flag alone and +0.005% with both
+    (docs/guides/optimization/shard_mode_performance.md section 4.8).
+    """
+    if self.dense_weight_grad_in_kernel_order is None:
+      self.dense_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT
+    return self
+
+  @model_validator(mode="after")
+  def validate_save_fsdp_gathered_weights(self) -> "MaxTextConfig":
+    """Reject the two configurations the gathered-weight residual cannot serve."""
+    if self.save_fsdp_gathered_weights and self.quantization:
+      raise ValueError("save_fsdp_gathered_weights casts kernels to config.dtype, which is not valid when quantizing.")
+    if self.save_fsdp_gathered_weights and self.parameter_memory_host_offload:
+      raise ValueError(
+          "save_fsdp_gathered_weights keeps gathered kernels in HBM, which defeats parameter_memory_host_offload."
       )
     return self
 
@@ -4901,6 +5010,81 @@ class MaxTextConfig(
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
     return self
+
+  @model_validator(mode="after")
+  def resolve_lm_head_vocab_parallel(self) -> "MaxTextConfig":
+    """Resolve the tri-state flag and make sure the rules it needs are in scope.
+
+    Runs last so that it sees the final `logical_axis_rules`: a custom mesh-and-rule
+    file replaces the list wholesale, and the pipelining path rewrites entries in it.
+    The four rules the vocab-parallel head needs are appended if they are missing,
+    which keeps the flag usable with a custom rule set without asking every such file
+    to carry them.
+
+    The head is turned sideways only where that is both useful and expressible:
+      - an untied head, since a tied one is the embedding table and is already
+        sharded on vocab.
+      - no MTP, which reshards its logits straight back to batch-sharded, and no
+        vocab tiling, which already chunks the vocab dimension itself.
+      - a vocab dimension the rotated head's axes divide evenly. The default orientation
+        only splits vocab over the tensor axes, so a mesh that adds FSDP to that split can
+        make an otherwise fine vocab size indivisible (olmo3's 100278 over fsdp 4, say).
+
+    Unlike the two kernel-order flags, this one is not about `shard_mode` at all: it is a
+    layout fix, and `auto` reaches the same layout and the same speedup when asked to. It
+    therefore defaults on in **both** modes. Under explicit the orientation is a guarantee
+    and under auto it is a request that GSPMD has honoured on every model measured; the
+    fallback if it ever does not is the default orientation, i.e. today's behaviour.
+    """
+    applicable = not self.logits_via_embedding and self.mtp_num_layers == 0 and self.num_vocab_tiling <= 1
+    if self.lm_head_vocab_parallel and not applicable:
+      raise ValueError(
+          "lm_head_vocab_parallel needs an untied LM head (logits_via_embedding: False) with neither MTP "
+          f"(mtp_num_layers: {self.mtp_num_layers}) nor vocab tiling (num_vocab_tiling: {self.num_vocab_tiling})."
+      )
+    shards = self._vocab_parallel_head_shards()
+    if applicable and self.vocab_size % shards:
+      if self.lm_head_vocab_parallel:
+        raise ValueError(
+            f"lm_head_vocab_parallel splits the LM head's vocab dimension {shards} ways, which does not "
+            f"divide vocab_size {self.vocab_size}. Leave the flag unset to fall back to the default "
+            "orientation, or pick a mesh whose tensor and fsdp axes divide the vocab size."
+        )
+      applicable = False
+    if self.lm_head_vocab_parallel is None:
+      self.lm_head_vocab_parallel = applicable
+    if self.lm_head_vocab_parallel:
+      named = {rule[0] for rule in self.logical_axis_rules if rule}
+      mesh_axes = set(self.mesh_axes)
+      for name, axes in _VOCAB_PARALLEL_LM_HEAD_RULES:
+        if name not in named:
+          # A custom mesh-and-rule file brings its own, usually much shorter, `mesh_axes`, and
+          # a spec naming an axis that mesh does not have raises when it reaches the mesh.
+          self.logical_axis_rules.append([name, [axis for axis in axes if axis in mesh_axes]])
+    return self
+
+  def _vocab_parallel_head_shards(self) -> int:
+    """How many ways the rotated LM head would split its vocab dimension."""
+    rules = {rule[0]: rule[1] for rule in self.logical_axis_rules if rule}
+    axes = rules.get("vocab_fsdp", dict(_VOCAB_PARALLEL_LM_HEAD_RULES)["vocab_fsdp"])
+    axes = [axes] if isinstance(axes, str) else axes
+    ici_devices = self.num_target_devices // max(self.num_slices, 1)
+    return _resolved_axis_product(axes, self.mesh_axes, self.ici_parallelism, ici_devices) * _resolved_axis_product(
+        axes, self.mesh_axes, self.dcn_parallelism, self.num_slices
+    )
+
+
+# Appended to `logical_axis_rules` when lm_head_vocab_parallel is on and a rule set does not
+# already define them, narrowed to the axes the mesh actually has; base.yml carries the same
+# four so the common case is a no-op. Together they put the head's [embed, vocab] kernel on the
+# FSDP axes along vocab instead of embed, and take those axes off the batch dimension of
+# everything the head touches.
+_VOCAB_PARALLEL_LM_HEAD_RULES = (
+    ("activation_embed_and_logits_batch_no_fsdp", ["data", "stage", "expert"]),
+    ("activation_vocab_fsdp", ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"]),
+    ("vocab_fsdp", ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"]),
+    ("embed_vocab_replicated", []),
+)
 
 
 class RLConfig(
