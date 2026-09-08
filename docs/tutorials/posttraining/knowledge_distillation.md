@@ -231,13 +231,13 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
 
 #### b. Install Tunix
 
-The online distillation trainer depends on Tunix. The XPK launcher script ([`scripts/run_distill_xpk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh)) contains a `prep_image` step that layers Tunix on top of the MaxText base image. For local runs, install the same pin used by the launcher — the default `TUNIX_SOURCE` in `run_distill_xpk.sh` is the source of truth. As of this writing:
+The online distillation trainer depends on Tunix. For local runs or custom images, install Tunix from GitHub:
 
 ```bash
 pip install "git+https://github.com/google/tunix@348959d18a4a09c75e58a7d49aec9d8b0eb4a8b6"
 ```
 
-> **Note:** The commit pin above will drift as the launcher is updated. Before installing, check the `TUNIX_SOURCE` default in [`run_distill_xpk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh) and use that spec. Once a Tunix PyPI release ships, this will become a versioned `google-tunix==<ver>` install.
+> **Note:** Once a Tunix PyPI release ships, this will become a versioned `google-tunix==<ver>` install.
 
 ### Configuration
 
@@ -322,9 +322,7 @@ The schedule values above are a strong default for same-size pruning recovery. S
 
 #### Cluster Toolkit multi-host submission
 
-For new deployments, submit the distillation trainer directly as a Cluster
-Toolkit JobSet. This replaces the XPK workload submission; image preparation,
-dataset mounting, and retry behavior must be included in the image or command.
+Submit the distillation trainer directly as a Cluster Toolkit JobSet:
 
 ```bash
 export PROJECT_ID=<GCP_PROJECT_ID>
@@ -352,51 +350,24 @@ gcluster job submit \
   --command "python3 -m maxtext.trainers.post_train.distillation.train_distill src/maxtext/configs/post_train/distillation.yml base_output_directory=${BASE_OUTPUT_DIRECTORY?} run_name=${RUN_NAME?}"
 ```
 
-#### Legacy multi-host on GKE via XPK
+#### Monitor and clean up
 
-> **Legacy:** This workflow uses the XPK-specific `run_distill_xpk.sh` launcher. New deployments should prefer Cluster Toolkit for GKE cluster setup and job submission. The section is retained until a dedicated `gcluster` distillation launcher is available.
-
-A reference launcher is provided at `src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh`. It handles image preparation (`prep_image` layers Tunix on top of the MaxText base image), workload submission, log streaming, and an auto-resume loop for long-running jobs.
-
-Minimum environment variables:
+Monitor the workload and stream logs with Cluster Toolkit:
 
 ```bash
-export XPK_CLUSTER=<your-gke-cluster>
-export XPK_PROJECT=<your-gcp-project>
-export XPK_ZONE=<cluster-zone>             # e.g. us-central1-a
-export XPK_DEVICE_TYPE=<tpu-type>          # e.g. tpu7x-4x4x4, v5p-128
-export XPK_BASE_OUTPUT_DIR=gs://<bucket>/distill-runs
-
-# Distillation hyperparameters (always passed; override yml values)
-export DISTILL_ALPHA=0.9
-export DISTILL_TEMPERATURE=2.0
-export DISTILL_BETA=1.0
-# Layer indices for feature loss. Every index must be valid on the smaller side
-# (student for Pattern A, both for Pattern B). Values below assume a 32-layer
-# student; adjust for other depths — see the Distillation guide's layer-index table.
-export DISTILL_LAYER_INDICES=[3,7,11,15,19,23,27,31]   # no spaces inside brackets
-```
-
-Then:
-
-```bash
-# One-time: layer Tunix on top of the MaxText base image
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh prep_image
-
-# Bake ./src into a runner image and push to gcr.io/$XPK_PROJECT/...:${USER}-distill
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh upload_runner
-
-# Submit a workload
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh submit
+# Check job status
+gcluster job list
 
 # Stream logs
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh monitor
+gcluster job logs ${RUN_NAME?}
 
-# Auto-resume on failure (uses the same workload + base output dir, so checkpoint resume works)
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh resume_until_done
+# Inspect JobSet and pods
+kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?}
+
+# Cancel workload
+gcluster job cancel ${RUN_NAME?}
 ```
-
-The script's header comment lists every supported environment variable.
 
 ### Offline top-k logits variant
 

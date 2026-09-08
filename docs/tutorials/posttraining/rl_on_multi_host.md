@@ -48,7 +48,7 @@ rely on the vLLM library.
 - [Setup Environment Variables](#setup-environment-variables)
 - [Get Your Model Checkpoint](#get-your-model-checkpoint)
 - [Submit your RL workload with Cluster Toolkit](#submit-your-rl-workload-with-cluster-toolkit)
-- [Legacy: Submit your RL workload via Pathways](#legacy-submit-your-rl-workload-via-pathways)
+- [Submit your RL workload via Pathways](#submit-your-rl-workload-via-pathways)
 - [Managing Workloads](#managing-workloads)
 - [Troubleshooting](#troubleshooting)
 
@@ -94,9 +94,8 @@ export HF_TOKEN=<HF_TOKEN>
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
-# We recommend to include the model, user, and timestamp.
-# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
-export RUN_NAME=<RUN_NAME>
+# Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
+export RUN_NAME="rl-$(date +%m%d%H%M%S)"
 
 # The directory containing the MaxText-compatible model checkpoint.
 # If you are converting from a Hugging Face checkpoint, see:
@@ -231,7 +230,7 @@ orchestration for a particular model or vLLM configuration, see the Pathways sec
 
 ## Submit your RL workload via Pathways
 
-If your workload configuration requires Pathways orchestration across TPU slices, you can submit the RL trainer using Cluster Toolkit with the `--pathways` option, or via the legacy XPK tool.
+If your workload configuration requires Pathways orchestration across TPU slices, you can submit the RL trainer using Cluster Toolkit with the `--pathways` option.
 
 See the **Troubleshooting** section for concise instructions on how to retry or
 resume a failed workload.
@@ -281,63 +280,22 @@ gcluster job submit \
   enable_single_controller=True"
 ```
 
-### (Legacy) Submit RL workload via XPK Pathways
-
-The commands in this section require the legacy XPK installation and a
-Pathways-ready GKE cluster. They are retained for existing deployments only;
-new workloads should use the Cluster Toolkit commands above.
-
-> **Note:** XPK v0.14.0+ automatically discovers your cluster's location from
-> GCP. You don't need to specify `--zone` in the commands below. If using an
-> older XPK version, add `--zone=<ZONE>` to the workload commands.
-
-#### Submit GRPO workload via XPK
+## Monitor and clean up
 
 ```bash
-xpk workload create-pathways --workload ${RUN_NAME?} \
---docker-image ${DOCKER_IMAGE?} --cluster ${GKE_CLUSTER?} \
---tpu-type=${TPU_TYPE?} --num-slices=1 \
---project=${PROJECT_ID?} --priority=high \
---command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m maxtext.trainers.post_train.rl.train_rl \
-  model_name=${MODEL?} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-  run_name=${RUN_NAME?} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-  rollout_tensor_parallelism=8 \
-  hf_access_token=${HF_TOKEN?}"
+gcluster job list
+# Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
+gcluster job logs ${RUN_NAME?} --main-only=false
+gcluster job cancel ${RUN_NAME?}
 ```
 
-#### Submit GSPO workload via XPK
+You can also inspect the Kubernetes resources directly:
 
 ```bash
-xpk workload create-pathways --workload ${RUN_NAME?} \
---docker-image ${DOCKER_IMAGE?} --cluster ${GKE_CLUSTER?} \
---tpu-type=${TPU_TYPE?} --num-slices=1 \
---project=${PROJECT_ID?} --priority=high \
---command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m maxtext.trainers.post_train.rl.train_rl \
-  model_name=${MODEL?} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-  run_name=${RUN_NAME?} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-  rollout_tensor_parallelism=8 \
-  hf_access_token=${HF_TOKEN?} \
-  loss_algo=gspo-token"
+kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+# In Pathways workloads, use the jobset-name label to select all pods (both pathways-head and worker pods):
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
 ```
-
-## Managing Workloads
-
-- **Monitor workload status**: Check Pathways job status: `kubectl get pathwaysjob`. Check pod status: `kubectl get pods`.
-- **Delete a workload**: Configure access with `gcloud`, then remove the Pathways JobSet with `kubectl`:
-  ```bash
-  gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-      --zone ${ZONE?} \
-      --project ${PROJECT_ID?}
-  kubectl delete pathwaysjob ${RUN_NAME?}
-  ```
-  In case the job still lingers on, you can use
-  `kubectl get pods` to obtain the name of the pod and then run: `kubectl delete pod <POD_NAME>`.
 
 ## Troubleshooting
 
@@ -358,8 +316,8 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     export RUN_NAME=${RUN_NAME?}-retry1
     export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items
     ```
-    Then submit the Cluster Toolkit workload (or legacy XPK workload). If a "workload already exists" error occurs, pick
-    a new name or delete the previous job (`gcluster job delete ${RUN_NAME}` or `kubectl delete pathwaysjob ${RUN_NAME}`).
+    Then submit the Cluster Toolkit workload. If a "workload already exists" error occurs, pick
+    a new name or cancel the previous job (`gcluster job cancel ${RUN_NAME}`).
   - **Resume from checkpoint**: Keep the same `RUN_NAME` and set the
     checkpoint path: `export load_parameters_path=${MAXTEXT_CKPT_PATH?}/checkpoint-0000`. Then submit
     the workload again.
@@ -367,6 +325,5 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     resuming.
 
 For more detailed troubleshooting, refer to the
-[MaxText documentation](../../index.md),
-[Cluster Toolkit guide](../../run_maxtext/run_maxtext_via_cluster_toolkit.md), and
-[XPK documentation](https://github.com/AI-Hypercomputer/xpk).
+[MaxText documentation](../../index.md) and
+[Cluster Toolkit guide](../../run_maxtext/run_maxtext_via_cluster_toolkit.md).

@@ -80,9 +80,8 @@ export HF_TOKEN=<HF_TOKEN>
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
-# We recommend to include the model, user, and timestamp.
-# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
-export RUN_NAME=<RUN_NAME>
+# Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
+export RUN_NAME="sft-$(date +%m%d%H%M%S)"
 
 # -- Workload configuration --
 # Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
@@ -209,22 +208,19 @@ gcluster job submit \
 
 Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
 
-#### (Legacy) SFT with Pathways via XPK
-
-> **Legacy:** For older environments using XPK, you can submit the Pathways workload with `xpk workload create-pathways`:
-
+## Monitor and clean up
+ 
 ```bash
-export USE_PATHWAYS=1
-
-xpk workload create-pathways \
---cluster=${GKE_CLUSTER?} \
---project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload=${RUN_NAME?} \
---tpu-type=${TPU_TYPE?} \
---num-slices=${NUM_SLICES?} \
---command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) enable_single_controller=True"
+gcluster job list
+# Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
+gcluster job logs ${RUN_NAME?} --main-only=false
+gcluster job cancel ${RUN_NAME?}
 ```
 
-Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
+You can also inspect the Kubernetes resources directly:
+
+```bash
+kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+# In Pathways workloads, use the jobset-name label to select all pods (both pathways-head and worker pods):
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
+```

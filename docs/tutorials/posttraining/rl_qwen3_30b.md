@@ -16,10 +16,8 @@
 
 # Reinforcement Learning with Qwen3-30b-a3b-base on Multi-Host TPUs
 
-> **Note:** Cluster Toolkit is recommended for new GKE deployments. Instructions for both Cluster Toolkit and the legacy XPK launcher are provided below.
-
 This tutorial provides step-by-step instructions for setting up the environment
-and training the Qwen3-30b-a3b-base model on the [OpenMathInstruct-2 dataset](https://huggingface.co/datasets/nvidia/OpenMathInstruct-2) on Ironwood GKE cluster with `tpu7x-128` nodes.
+and training the Qwen3-30b-a3b-base model on the [OpenMathInstruct-2 dataset](https://huggingface.co/datasets/nvidia/OpenMathInstruct-2) on Ironwood GKE cluster with `tpu7x-128` nodes using Cluster Toolkit.
 
 ## Prerequisites
 
@@ -30,7 +28,6 @@ Before starting, ensure you have:
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
 - Cluster Toolkit installed and configured. Follow [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md) for `gcluster` setup.
 - A GKE cluster configured for Cluster Toolkit, including healthy Kueue and JobSet components.
-- (Legacy) XPK installed for the legacy workflow (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)) and a Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Setup Environment Variables
@@ -138,13 +135,6 @@ gcluster job submit \
   --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-30b-a3b-base load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?} enable_single_controller=True"
 ```
 
-### (Legacy) XPK/Pathways submission
-
-```bash
-# Run the RL training script on your cluster
-run_tutorial maxtext/trainers/post_train/rl/scripts/run_qwen3_30b_rl.sh
-```
-
 ### Monitor your workload
 
 To monitor your job's progress, you can use `gcluster` or `kubectl` to check the `JobSet` status and stream logs directly:
@@ -153,17 +143,17 @@ To monitor your job's progress, you can use `gcluster` or `kubectl` to check the
 # Check job status with Cluster Toolkit
 gcluster job list
 
-# Stream logs with Cluster Toolkit
-gcluster job logs ${RUN_NAME?}
+# Stream logs with Cluster Toolkit (specify --main-only=false for Pathways workloads)
+gcluster job logs ${RUN_NAME?} --main-only=false
 
 # Alternatively, check JobSet status with kubectl
 kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
 
-# List pods
-kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?}
+# List pods (use jobset-name to list both head and worker pods in Pathways)
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
 
 # Stream logs with kubectl
-kubectl logs -f -l gcluster.google.com/workload=${RUN_NAME?}
+kubectl logs -f -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?} --all-containers=true
 ```
 
 Alternatively, `gcluster job submit` provides a link to the Google Cloud Console to view your workload logs. Follow the link to view logs and monitor your workload's progress in the Cloud Console.
@@ -185,8 +175,6 @@ For a complete list of collected metrics, see the [Tunix Metrics Documentation](
   - `actor_dequeue_time`: The time spent waiting for data from the rollout workers (relevant when async rollout is enabled).
 - **Performance & Efficiency Metrics:**
   - `step_time_sec`: The execution time for a single training step.
-
-## Convert Checkpoint to Hugging Face Format
 
 ## Convert Checkpoint to Hugging Face Format
 

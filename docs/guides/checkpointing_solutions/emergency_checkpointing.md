@@ -88,7 +88,7 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
    gcloud config set project ${PROJECT_ID?}
    gcloud config set compute/zone ${ZONE?}
    ```
-3. **Configure the cluster:** Follow the Google Cloud Checkpointing Documentation to enable the CSI drivers, MTC configuration, and ramdisk size represented by the values above. There is no direct `gcloud` flag for all XPK MTC options.
+3. **Configure the cluster:** Follow the Google Cloud Checkpointing Documentation to enable the CSI drivers, MTC configuration, and ramdisk size represented by the values above.
 
 ## MaxText configuration
 

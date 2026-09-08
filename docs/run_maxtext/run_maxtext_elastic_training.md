@@ -58,8 +58,8 @@ export ZONE=<GCP_REGION_OR_ZONE> # e.g., 'us-central1'
 export GKE_CLUSTER=<cluster name>
 
 # Workload Configuration
-# Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores/periods).
-export RUN_NAME="elastic-qwen3-$(date +%Y%m%d-%H%M%S)"
+# Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
+export RUN_NAME="elastic-$(date +%m%d%H%M%S)"
 
 # TPU type and slice count. For supported types see src/maxtext/utils/accelerator_to_spec_map.py.
 export TPU_TYPE="v5litepod-16"  # one slice = 16 v5e chips
@@ -75,9 +75,9 @@ export TOPOLOGY=<TPU_TOPOLOGY>
 ## 3. Launch the elastic workload
 
 Configure the GKE credentials and Cluster Toolkit job settings before
-submitting the workload. Pathways must be started by the JobSet workload
-definition or by the container image; `gcluster` does not infer a Pathways
-runtime from MaxText arguments.
+submitting the workload. When submitting with Cluster Toolkit, pass `--pathways`,
+`--num-slices`, `--pathways-gcs-location`, `--pathways-elastic-slices`, and
+`--pathways-max-slice-restarts` to enable elastic training orchestration.
 
 ```bash
 gcloud config set project ${PROJECT_ID?}
@@ -91,8 +91,13 @@ gcluster job config set location ${ZONE?}
 gcluster job submit \
   --image ${DOCKER_IMAGE?} \
   --name ${RUN_NAME?} \
+  --pathways \
   --compute-type ${COMPUTE_TYPE?} \
   --topology ${TOPOLOGY?} \
+  --num-slices=${NUM_SLICES?} \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --pathways-elastic-slices=1 \
+  --pathways-max-slice-restarts=10 \
   --command="python3 -m maxtext.trainers.pre_train.train \
     src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
@@ -113,10 +118,10 @@ gcluster job submit \
 ```
 
 ```{note}
-  Cluster Toolkit has no direct equivalents for XPK's `--elastic-slices` and
-  `--max-slice-restarts`. If in-process Pathways recovery is required, configure
-  the corresponding slice and restart policy in the Pathways-aware JobSet
-  template. The MaxText retry settings alone do not create that runtime.
+  Cluster Toolkit natively supports `--pathways-elastic-slices` (replacing XPK's
+  `--elastic-slices`) and `--pathways-max-slice-restarts` (replacing XPK's
+  `--max-slice-restarts`). These flags configure the Pathways proxy and resource
+  manager to tolerate slice failures and restart failed workers in-process.
 ```
 
 ```{warning}
@@ -129,8 +134,10 @@ List the workload and follow its logs through the Cloud Console (**Kubernetes En
 
 ```bash
 gcluster job list
-gcluster job logs ${RUN_NAME?}
+# Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
+gcluster job logs ${RUN_NAME?} --main-only=false
 kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
 ```
 
 After XLA compilation (a couple of minutes) you should see elastic training enabled and a steady stream of steps:

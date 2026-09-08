@@ -18,15 +18,14 @@
 
 # Via Pathways
 
-This guide is the Cluster Toolkit replacement for the former XPK/Pathways
-workflow. It runs MaxText as a multi-host GKE JobSet using Cluster Toolkit's
-`gcluster` CLI.
+This guide provides the Cluster Toolkit replacement for the former XPK/Pathways
+workflow. It runs MaxText as a multi-slice Pathways workload on Google Kubernetes
+Engine (GKE) using Cluster Toolkit's `gcluster` CLI with the `--pathways` flag.
 
-Cluster Toolkit does not expose a direct replacement for the Pathways proxy or
-headless mode. The supported replacement is a workload that runs entirely in
-the GKE cluster. The former Pathways proxy and headless instructions are not
-part of this guide because they cannot be reproduced with `gcloud` or the
-standard `gcluster job submit` workflow.
+Pathways workloads run entirely within the GKE cluster using `gcluster job submit --pathways`
+with `enable_single_controller=True`. The Cluster Toolkit automatically configures the
+Pathways head components (resource manager, proxy, and leader pod) on CPU node pools
+and manages TPU slices as coordinated JobSets.
 
 ## Prerequisites
 
@@ -55,6 +54,9 @@ gcloud container clusters get-credentials ${GKE_CLUSTER?} \
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${GKE_CLUSTER?}
 gcluster job config set location ${ZONE?}
+
+# If using --base-image with Crane, ensure Docker credentials are configured for Artifact Registry:
+gcloud auth configure-docker <REGION>-docker.pkg.dev
 ```
 
 Verify the cluster prerequisites before submitting a multi-host job:
@@ -68,11 +70,13 @@ kubectl get crd clusterqueues.kueue.x-k8s.io
 ## Configure the workload
 
 ```bash
-export RUN_NAME="maxtext-run-$(date +%Y%m%d-%H%M%S)"
+# Note: Workload name cannot exceed 28 characters due to Kubernetes/GCE resource name limits.
+export RUN_NAME="maxtext-$(date +%m%d%H%M%S)"
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET_PATH>
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
 export TOPOLOGY=<TPU_TOPOLOGY>
 export BASE_IMAGE=<ARTIFACT_REGISTRY_BASE_IMAGE>
+export NUM_SLICES=1
 ```
 
 For example, `ct5p-hightpu-4t` with `4x4x4` is a multi-host TPU topology.
@@ -80,38 +84,36 @@ Choose a compute type and topology supported by the target cluster.
 
 ## Run a batch workload
 
-The following command runs the same synthetic MaxText batch task previously
-shown in the XPK/Pathways guide, using a standard GKE JobSet:
+The following command runs a synthetic MaxText batch training task using Pathways
+orchestration via `gcluster job submit`:
 
 ```bash
 gcluster job submit \
   --base-image ${BASE_IMAGE?} \
   --build-context . \
+  --name ${RUN_NAME?} \
+  --pathways \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --num-slices=${NUM_SLICES:-1} \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
   --command "python3 -m maxtext.trainers.pre_train.train \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     per_device_batch_size=1 \
     enable_checkpointing=false \
     dataset_type=synthetic \
-    run_name=${RUN_NAME?}" \
-  --name ${RUN_NAME?} \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?}
+    steps=10 \
+    enable_single_controller=True \
+    run_name=${RUN_NAME?}"
 ```
 
 To run a real workload, replace the command arguments with the arguments for
-your model, dataset, checkpoint, and training schedule. The image-based form
-can be used when the image is already built:
+your model, dataset, checkpoint, and training schedule. If you already have a
+pre-built container image in Artifact Registry, pass `--image` directly instead
+of `--base-image` and `--build-context`:
 
 ```bash
-# Standard multi-host JobSet submission
-gcluster job submit \
-  --image <FULL_ARTIFACT_REGISTRY_IMAGE_URI> \
-  --command "python3 -m maxtext.trainers.pre_train.train <MAXTEXT_ARGS>" \
-  --name ${RUN_NAME?} \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?}
-
-# Pathways multi-slice JobSet submission
+# Pathways multi-slice JobSet submission with pre-built image
 gcluster job submit \
   --image <FULL_ARTIFACT_REGISTRY_IMAGE_URI> \
   --name ${RUN_NAME?} \
@@ -121,13 +123,22 @@ gcluster job submit \
   --num-slices=${NUM_SLICES:-1} \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
   --command "python3 -m maxtext.trainers.pre_train.train <MAXTEXT_ARGS> enable_single_controller=True"
+
+# Standard multi-host JobSet submission (without Pathways)
+gcluster job submit \
+  --image <FULL_ARTIFACT_REGISTRY_IMAGE_URI> \
+  --command "python3 -m maxtext.trainers.pre_train.train <MAXTEXT_ARGS>" \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?}
 ```
 
 ## Monitor and clean up
 
 ```bash
 gcluster job list
-gcluster job logs ${RUN_NAME?}
+# Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
+gcluster job logs ${RUN_NAME?} --main-only=false
 gcluster job cancel ${RUN_NAME?}
 ```
 
@@ -135,7 +146,10 @@ You can also inspect the Kubernetes resources directly:
 
 ```bash
 kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
-kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?}
+# In Pathways workloads, use the jobset-name label to select all pods (both pathways-head and worker pods):
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
+# Or view the MaxText training logs directly from the head container:
+kubectl logs -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?} -c workload-container -f
 ```
 
 ## Compatibility note
