@@ -3812,10 +3812,6 @@ class MaxTextConfig(
 
       global_batch = int(num_devices * effective_pdbs * grad_accum_steps)
       global_batch_to_load = int(global_batch * expansion)
-      # Returns:
-      # 1. global_batch_to_load: Batch size loaded by dataloader (scaled by expansion factor for partial host loading).
-      # 2. global_batch: Total effective batch size across all devices and accumulation steps (train_on / eval_on).
-      # 3. micro_batch: Micro-batch size executed per step across all devices.
       return global_batch_to_load, global_batch, micro_batch
 
     # Calculate final training batch sizes.
