@@ -43,7 +43,7 @@ LLM_HF_REPO="Qwen/Qwen3-4B"
 
 # Automatically find maxtext package directory
 MAXTEXT_PKG_DIR=$(python3 -c "import os, maxtext; print(os.path.dirname(maxtext.__file__))")
-OMNI_CONFIG_PATH="${MAXTEXT_PKG_DIR}/experimental/omni_poc/omni-gemma3-qwen3.yml"
+OMNI_CONFIG_PATH="${MAXTEXT_PKG_DIR}/experimental/omni_poc/maxtext-omni-gemma3-qwen3.yml"
 
 VISION_CKPT_DIR="${BASE_OUTPUT_DIRECTORY}/${VISION_MAXTEXT_MODEL}_converted"
 LLM_CKPT_DIR="${BASE_OUTPUT_DIRECTORY}/${LLM_MAXTEXT_MODEL}_converted"

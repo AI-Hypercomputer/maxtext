@@ -14,6 +14,7 @@
 
 """Checkpointing utilities for MaxText training engine."""
 
+from collections.abc import Mapping
 import dataclasses
 from typing import Any, List
 
@@ -33,6 +34,9 @@ class CheckpointState:
   optimizer: nnx.optimizer.Optimizer | None = None
   accumulated_metrics: List[abstract_engine.MetricsBuffer] | None = None
   accumulated_grads: Any = None
+  # How many micro-batches of `step` are folded into `accumulated_grads`. 0 for a complete
+  # step, whose gradients have already been applied and discarded.
+  micro_step_count: int = 0
 
 
 class CheckpointManager:
@@ -71,12 +75,67 @@ class CheckpointManager:
     if self._checkpoint_manager:
       self._checkpoint_manager.wait_until_finished()
 
+  def get_saved_micro_step_count(self, step: int) -> int:
+    """Returns how far into `step` the checkpoint already on disk got.
+
+    Args:
+      step: The step whose saved checkpoint should be inspected.
+
+    Returns:
+      0 if that checkpoint covers a complete step, otherwise the number of micro-batches
+      accumulated into it.
+    """
+    if self._checkpoint_manager is None:
+      return 0
+    try:
+      metadata = self._checkpoint_manager.metadata(step)
+    except Exception as e:  # pylint: disable=broad-except
+      logging.warning("Could not read metadata for step %d, treating it as complete: %s", step, e)
+      return 0
+    custom_metadata = getattr(metadata, "custom_metadata", None)
+    if not isinstance(custom_metadata, Mapping):
+      return 0
+    saved = custom_metadata.get("micro_step_count", 0)
+    return saved if isinstance(saved, int) else 0
+
+  def _supersedes_saved_checkpoint(self, step: int, micro_step_count: int) -> bool:
+    """Returns whether a new checkpoint is more complete than the one saved at `step`.
+
+    A complete step is never superseded: once the optimizer update for `step` has been
+    checkpointed there is nothing more to record for it. A partial one is superseded by a
+    complete step, and by a partial one that got further through the same step.
+
+    Args:
+      step: The step both checkpoints belong to.
+      micro_step_count: The new checkpoint's progress through `step`.
+
+    Returns:
+      Whether the new checkpoint should replace the saved one.
+    """
+    saved_micro_step_count = self.get_saved_micro_step_count(step)
+    if saved_micro_step_count == 0:
+      return False
+    return micro_step_count == 0 or micro_step_count > saved_micro_step_count
+
+  def _delete_saved_step(self, step: int) -> None:
+    """Deletes the checkpoint at `step` to make room for a more complete one.
+
+    Orbax refuses to write a step that already exists, so superseding one means removing it
+    first. An async save for this step may still be in flight, so drain before deleting.
+
+    Args:
+      step: The step to delete.
+    """
+    logging.info("Deleting intra-step checkpoint at step %d so a more complete one can replace it.", step)
+    self._checkpoint_manager.wait_until_finished()
+    self._checkpoint_manager.delete(step)
+
   def save_checkpoint(
       self,
       step: int,
       checkpoint_state: CheckpointState,
       custom_metadata: Any = None,
-      force_ckpt_save: bool = False,
+      **kwargs,
   ) -> bool:
     """Saves the params for the given step along with optional intra-step state.
 
@@ -85,7 +144,6 @@ class CheckpointManager:
       checkpoint_state: CheckpointState object containing model, optimizer, and
         optional intra_step_state.
       custom_metadata: Custom metadata to save with the checkpoint.
-      force_ckpt_save: Whether to force save the checkpoint.
 
     Returns:
       Whether the checkpoint was saved.
@@ -94,13 +152,25 @@ class CheckpointManager:
       logging.info("Checkpointing is disabled, skipping save.")
       return False
 
-    # Check if the checkpoint already exists at the current step.
-    if not force_ckpt_save and self.get_latest_step() == step:
-      logging.info(
-          "Checkpoint already saved at step %d, skipping save.",
-          step,
-      )
-      return False
+    # Record micro_step_count on every checkpoint, complete or not, so that a later save at the same step
+    # can tell whether it supersedes what is already on disk.
+    custom_metadata = dict(custom_metadata) if custom_metadata else {}
+    custom_metadata["micro_step_count"] = checkpoint_state.micro_step_count
+
+    # A checkpoint already exists at this step. Skip, unless this one is more complete --
+    # the case that matters is a step resumed from an intra-step checkpoint and then run to
+    # completion, whose finished state would otherwise never reach disk.
+    if self.get_latest_step() == step:
+      if not self._supersedes_saved_checkpoint(step, checkpoint_state.micro_step_count):
+        logging.info(
+            "Checkpoint already saved at step %d, skipping save.",
+            step,
+        )
+        return False
+      self._delete_saved_step(step)
+      # Orbax's save-interval policy declines a step it has already saved, so the
+      # replacement has to be forced through.
+      kwargs["force"] = True
 
     params = nnx.state(checkpoint_state.model)
     jax.block_until_ready(params)
@@ -119,7 +189,7 @@ class CheckpointManager:
       )
       save_args["optimizer_state"] = optimizer_cp_args
 
-    if checkpoint_state.accumulated_metrics is not None:
+    if checkpoint_state.accumulated_metrics:
       jax.block_until_ready(checkpoint_state.accumulated_metrics)
       metrics_cp_args = ocp.args.PyTreeSave(
           item=checkpoint_state.accumulated_metrics,
@@ -145,7 +215,7 @@ class CheckpointManager:
         step=step,
         args=ocp.args.Composite(**save_args),
         custom_metadata=custom_metadata,
-        force=force_ckpt_save,
+        **kwargs,
     )
 
   def restore_checkpoint(

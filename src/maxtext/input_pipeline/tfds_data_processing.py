@@ -24,7 +24,12 @@ try:
   import tensorflow_datasets as tfds
 except ImportError as error:
   raise ImportError(
-      "TensorFlow and tensorflow-datasets are required. Run `pip install tensorflow tensorflow-datasets`"
+      "The deprecated TFDS pipeline requires TensorFlow and tensorflow-datasets.\n\n"
+      "Recommended: migrate to Grain by setting dataset_type=grain and grain_file_type=tfrecord. Existing "
+      "dataset_path, dataset_name, train_split, eval_dataset_name, and eval_split settings will be used to "
+      "automatically construct file paths when grain_train_files or grain_eval_files are not provided. Set the "
+      "grain_train_files or grain_eval_files explicitly for a custom path.\n\n"
+      "To continue using the deprecated TFDS pipeline, run: `pip install tensorflow tensorflow-datasets`."
   ) from error
 
 import jax

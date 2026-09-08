@@ -14,9 +14,9 @@
 
 """Specialised layers for Gemma2."""
 
+import functools
 from typing import Optional
 
-from flax import linen as nn
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
@@ -32,6 +32,7 @@ from maxtext.layers.linears import Dropout, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical
 
 
 # Decoder and Model definitions
@@ -65,6 +66,7 @@ class Gemma2DecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -99,6 +101,7 @@ class Gemma2DecoderLayer(nnx.Module):
           num_features=config.emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
@@ -107,6 +110,7 @@ class Gemma2DecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -130,6 +134,7 @@ class Gemma2DecoderLayer(nnx.Module):
           num_features=config.emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
@@ -140,6 +145,7 @@ class Gemma2DecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -173,6 +179,7 @@ class Gemma2DecoderLayer(nnx.Module):
           num_features=config.emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
@@ -181,6 +188,7 @@ class Gemma2DecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -204,6 +212,7 @@ class Gemma2DecoderLayer(nnx.Module):
           num_features=config.emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
@@ -212,6 +221,14 @@ class Gemma2DecoderLayer(nnx.Module):
       self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
       self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=self.mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+        extra_stack_level=1,
+    )
 
   def __call__(
       self,
@@ -229,11 +246,13 @@ class Gemma2DecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
+    lnx_sharding = create_sharding(self.mesh, self.activation_axis_names)
+    mlp_intermediate_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", "activation_mlp"))
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = self.pre_self_attention_norm_local(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = self.pre_self_attention_norm_local(inputs, out_sharding=lnx_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
 
     attention_lnx, kv_cache = self.self_attention_local(
         lnx,
@@ -242,38 +261,44 @@ class Gemma2DecoderLayer(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        out_sharding=lnx_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
     if self.config.use_post_attn_norm:
-      attention_lnx = self.post_self_attention_norm_local(attention_lnx)
+      attention_lnx = self.post_self_attention_norm_local(attention_lnx, out_sharding=lnx_sharding)
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
     attention_lnx += inputs
     residual = attention_lnx
 
-    attn_output = self.pre_ffw_norm_local(attention_lnx)
+    attn_output = self.pre_ffw_norm_local(attention_lnx, out_sharding=lnx_sharding)
 
     # MLP block.
-    mlp_lnx = self.mlp_local(attn_output, deterministic=deterministic)
+    mlp_lnx = self.mlp_local(
+        attn_output,
+        deterministic=deterministic,
+        intermediate_sharding=mlp_intermediate_sharding,
+        out_sharding=lnx_sharding,
+    )
 
     if self.config.use_post_ffw_norm:
-      mlp_lnx = self.post_ffw_norm_local(mlp_lnx)
+      mlp_lnx = self.post_ffw_norm_local(mlp_lnx, out_sharding=lnx_sharding)
 
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
 
     next_layer_addition_dropped_out = self.dropout(next_layer_addition, deterministic=deterministic)
 
     layer_output = next_layer_addition_dropped_out
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
     ### global part
-    inputs = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = self.pre_self_attention_norm_global(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = self.pre_self_attention_norm_global(inputs, out_sharding=lnx_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
 
     attention_lnx, kv_cache = self.self_attention_global(
         lnx,
@@ -282,29 +307,35 @@ class Gemma2DecoderLayer(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        out_sharding=lnx_sharding,
     )
     if self.config.use_post_attn_norm:
-      attention_lnx = self.post_self_attention_norm_global(attention_lnx)
+      attention_lnx = self.post_self_attention_norm_global(attention_lnx, out_sharding=lnx_sharding)
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
     attention_lnx += inputs
     residual = attention_lnx
 
-    attn_output = self.pre_ffw_norm_global(attention_lnx)
+    attn_output = self.pre_ffw_norm_global(attention_lnx, out_sharding=lnx_sharding)
 
     # MLP block.
-    mlp_lnx = self.mlp_global(attn_output, deterministic=deterministic)
+    mlp_lnx = self.mlp_global(
+        attn_output,
+        deterministic=deterministic,
+        intermediate_sharding=mlp_intermediate_sharding,
+        out_sharding=lnx_sharding,
+    )
     if self.config.use_post_ffw_norm:
-      mlp_lnx = self.post_ffw_norm_global(mlp_lnx)
+      mlp_lnx = self.post_ffw_norm_global(mlp_lnx, out_sharding=lnx_sharding)
 
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
 
     next_layer_addition_dropped_out = self.dropout(next_layer_addition, deterministic=deterministic)
 
     layer_output = next_layer_addition_dropped_out
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
     if getattr(self.config, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))

@@ -34,7 +34,7 @@ jobs:
     needs: build-wheel
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
-      flavor: tpu-integration
+      flavor: cpu-integration
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: false
       maxtext_sha: ${{ github.sha }}
@@ -50,7 +50,6 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.ref }}
-          persist-credentials: false
 
       - name: Download Reference HLO
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -61,7 +60,7 @@ jobs:
       - name: Commit and Push changes
         run: |
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add tests/utils/reference_hlo_*.txt
-          git commit -m "Update reference HLO from CI artifact"
+          git diff --staged --quiet || git commit -m "Update reference HLO from CI artifact"
           git push

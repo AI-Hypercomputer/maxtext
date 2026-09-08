@@ -28,13 +28,13 @@ def _post_apply_bwd(
     d_output: jax.Array,
     config: common.MhcKernelConfig,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-  """Builds the feature-tiled Pallas call for the post-branch backward pass."""
+  """Builds the feature-tiled Pallas pipeline for the post-branch backward pass."""
   tokens, streams, embedding = x.shape
   feature_block_size = min(embedding, config.bwd_feature_block_size)
   feature_blocks = embedding // feature_block_size
   dims = common.MhcDims(tokens=tokens, streams=streams, embedding=embedding)
 
-  def kernel(
+  def pipeline_body(
       x_ref,
       layer_output_ref,
       h_post_ref,
@@ -73,80 +73,67 @@ def _post_apply_bwd(
     def round_d_residual():
       d_residual_ref[...] = d_residual_ref[...].astype(jnp.bfloat16).astype(d_residual_ref.dtype)
 
-  d_x, d_layer_output, d_h_post, d_residual = pl.pallas_call(
-      kernel,
-      out_shape=(
-          jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
-          jax.ShapeDtypeStruct((tokens, embedding), layer_output.dtype),
-          jax.ShapeDtypeStruct((tokens, streams), h_post.dtype),
-          jax.ShapeDtypeStruct((tokens, streams, streams), residual.dtype),
-      ),
+  spec_x = common.feature_tiled_block_spec(
+      (tokens, streams, embedding),
+      config.bwd_block_size,
+      feature_block_size,
+      tiled_feature=True,
+  )
+  spec_layer_output = common.feature_tiled_block_spec(
+      (tokens, embedding),
+      config.bwd_block_size,
+      feature_block_size,
+      tiled_feature=True,
+  )
+  spec_h_post = common.feature_tiled_block_spec(
+      (tokens, streams),
+      config.bwd_block_size,
+      feature_block_size,
+      tiled_feature=False,
+  )
+  spec_residual = common.feature_tiled_block_spec(
+      (tokens, streams, streams),
+      config.bwd_block_size,
+      feature_block_size,
+      tiled_feature=False,
+  )
+
+  kernel_main = pltpu.emit_pipeline(
+      pipeline_body,
       grid=(tokens // config.bwd_block_size, feature_blocks),
       in_specs=(
-          common.feature_tiled_block_spec(
-              (tokens, streams, embedding),
-              config.bwd_block_size,
-              feature_block_size,
-              tiled_feature=True,
-          ),
-          common.feature_tiled_block_spec(
-              (tokens, embedding),
-              config.bwd_block_size,
-              feature_block_size,
-              tiled_feature=True,
-          ),
-          common.feature_tiled_block_spec(
-              (tokens, streams),
-              config.bwd_block_size,
-              feature_block_size,
-              tiled_feature=False,
-          ),
-          common.feature_tiled_block_spec(
-              (tokens, streams, streams),
-              config.bwd_block_size,
-              feature_block_size,
-              tiled_feature=False,
-          ),
-          common.feature_tiled_block_spec(
-              (tokens, streams, embedding),
-              config.bwd_block_size,
-              feature_block_size,
-              tiled_feature=True,
-          ),
+          spec_x,
+          spec_layer_output,
+          spec_h_post,
+          spec_residual,
+          spec_x,
       ),
       out_specs=(
-          common.feature_tiled_block_spec(
-              (tokens, streams, embedding),
-              config.bwd_block_size,
-              feature_block_size,
-              tiled_feature=True,
-          ),
-          common.feature_tiled_block_spec(
-              (tokens, embedding),
-              config.bwd_block_size,
-              feature_block_size,
-              tiled_feature=True,
-          ),
-          common.feature_tiled_block_spec(
-              (tokens, streams),
-              config.bwd_block_size,
-              feature_block_size,
-              tiled_feature=False,
-          ),
-          common.feature_tiled_block_spec(
-              (tokens, streams, streams),
-              config.bwd_block_size,
-              feature_block_size,
-              tiled_feature=False,
-          ),
+          spec_x,
+          spec_layer_output,
+          spec_h_post,
+          spec_residual,
       ),
-      cost_estimate=dims.post_apply_bwd_cost(),
-      compiler_params=pltpu.CompilerParams(
-          vmem_limit_bytes=config.vmem_limit_bytes,
-          dimension_semantics=common.SEQUENTIAL_2D_DIMENSION_SEMANTICS,
-      ),
-      interpret=config.interpret,
-  )(x, layer_output, h_post, residual, d_output)
+      dimension_semantics=common.POST_BWD_DIMENSION_SEMANTICS,
+  )
+
+  with common.tpu_mesh_context():
+    d_x, d_layer_output, d_h_post, d_residual = pl.pallas_call(
+        kernel_main,
+        out_shape=(
+            jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
+            jax.ShapeDtypeStruct((tokens, embedding), layer_output.dtype),
+            jax.ShapeDtypeStruct((tokens, streams), h_post.dtype),
+            jax.ShapeDtypeStruct((tokens, streams, streams), residual.dtype),
+        ),
+        in_specs=common.hbm_specs(5),
+        out_specs=common.hbm_specs(4),
+        cost_estimate=dims.post_apply_bwd_cost(),
+        compiler_params=pltpu.CompilerParams(
+            vmem_limit_bytes=config.vmem_limit_bytes,
+        ),
+        interpret=config.interpret,
+    )(x, layer_output, h_post, residual, d_output)
   return d_x, d_layer_output, d_h_post, d_residual
 
 
@@ -157,40 +144,51 @@ def _pre_apply_bwd(
     d_x_acc: jax.Array,
     config: common.MhcKernelConfig,
 ) -> tuple[jax.Array, jax.Array]:
-  """Builds the Pallas call for the pre-branch backward pass."""
+  """Builds the Pallas pipeline for the pre-branch backward pass."""
   tokens, streams, embedding = x.shape
   dims = common.MhcDims(tokens=tokens, streams=streams, embedding=embedding)
 
-  def kernel(x_ref, h_pre_ref, d_layer_input_ref, d_x_acc_ref, d_x_ref, d_h_pre_ref):
+  def pipeline_body(x_ref, h_pre_ref, d_layer_input_ref, d_x_acc_ref, d_x_ref, d_h_pre_ref):
     _, vjp = jax.vjp(common.pre_apply, x_ref[...], h_pre_ref[...])
     d_x, d_h_pre = vjp(d_layer_input_ref[...])
     d_x_ref[...] = (d_x.astype(jnp.float32) + d_x_acc_ref[...].astype(jnp.float32)).astype(d_x_ref.dtype)
     d_h_pre_ref[...] = d_h_pre
 
-  d_x_acc_out, d_h_pre = pl.pallas_call(
-      kernel,
-      out_shape=(
-          jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
-          jax.ShapeDtypeStruct((tokens, streams), h_pre.dtype),
-      ),
+  spec_x = common.token_block_spec((tokens, streams, embedding), config.bwd_block_size)
+  spec_h_pre = common.token_block_spec((tokens, streams), config.bwd_block_size)
+  spec_d_layer_input = common.token_block_spec((tokens, embedding), config.bwd_block_size)
+
+  kernel_main = pltpu.emit_pipeline(
+      pipeline_body,
       grid=(tokens // config.bwd_block_size,),
       in_specs=(
-          common.token_block_spec((tokens, streams, embedding), config.bwd_block_size),
-          common.token_block_spec((tokens, streams), config.bwd_block_size),
-          common.token_block_spec((tokens, embedding), config.bwd_block_size),
-          common.token_block_spec((tokens, streams, embedding), config.bwd_block_size),
+          spec_x,
+          spec_h_pre,
+          spec_d_layer_input,
+          spec_x,
       ),
       out_specs=(
-          common.token_block_spec((tokens, streams, embedding), config.bwd_block_size),
-          common.token_block_spec((tokens, streams), config.bwd_block_size),
+          spec_x,
+          spec_h_pre,
       ),
-      cost_estimate=dims.pre_apply_bwd_cost(),
-      compiler_params=pltpu.CompilerParams(
-          vmem_limit_bytes=config.vmem_limit_bytes,
-          dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
-      ),
-      interpret=config.interpret,
-  )(x, h_pre, d_layer_input, d_x_acc)
+      dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
+  )
+
+  with common.tpu_mesh_context():
+    d_x_acc_out, d_h_pre = pl.pallas_call(
+        kernel_main,
+        out_shape=(
+            jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
+            jax.ShapeDtypeStruct((tokens, streams), h_pre.dtype),
+        ),
+        in_specs=common.hbm_specs(4),
+        out_specs=common.hbm_specs(2),
+        cost_estimate=dims.pre_apply_bwd_cost(),
+        compiler_params=pltpu.CompilerParams(
+            vmem_limit_bytes=config.vmem_limit_bytes,
+        ),
+        interpret=config.interpret,
+    )(x, h_pre, d_layer_input, d_x_acc)
   return d_x_acc_out, d_h_pre
 
 
@@ -202,7 +200,7 @@ def _coeff_bwd(
     d_x_acc: jax.Array,
     config: common.MhcKernelConfig,
 ) -> tuple[jax.Array, common.MhcCoeffGradients]:
-  """Builds the Pallas call for coefficients and parameter gradients."""
+  """Builds the Pallas pipeline for coefficients and parameter gradients."""
   tokens, streams, embedding = x.shape
   dims = common.MhcDims(
       tokens=tokens,
@@ -211,30 +209,20 @@ def _coeff_bwd(
       num_permutations=permutations.shape[0],
   )
 
-  def kernel(
-      x_ref,
-      phi_ref,
-      pre_scale_ref,
-      pre_bias_ref,
-      post_scale_ref,
-      post_bias_ref,
-      res_scale_ref,
-      res_bias_ref,
-      permutations_ref,
-      d_h_pre_ref,
-      d_h_post_ref,
-      d_residual_ref,
-      d_x_acc_ref,
-      d_x_ref,
-      d_phi_ref,
-      d_pre_scale_ref,
-      d_pre_bias_ref,
-      d_post_scale_ref,
-      d_post_bias_ref,
-      d_res_scale_ref,
-      d_res_bias_ref,
-  ):
+  num_params = len(jax.tree.leaves(coeff_params))
+  num_outputs = len(jax.tree.leaves(d_outputs))
+
+  def pipeline_body(x_ref, *refs):
     program_id = pl.program_id(0)
+
+    ref_iter = iter(refs)
+    param_refs = common.MhcCoeffParams(*(next(ref_iter) for _ in range(num_params)))
+    permutations_ref = next(ref_iter)
+    cotangent_refs = common.MhcCoeffOutputs(*(next(ref_iter) for _ in range(num_outputs)))
+    d_x_acc_ref = next(ref_iter)
+    d_x_ref = next(ref_iter)
+    d_param_refs = common.MhcCoeffParams(*ref_iter)
+
     perms = permutations_ref[...]
 
     def mhc_coeffs_fn(x_val, params_val):
@@ -246,37 +234,13 @@ def _coeff_bwd(
           pre_mapping_epsilon=config.pre_mapping_epsilon,
       )
 
-    param_refs = common.MhcCoeffParams(
-        phi=phi_ref,
-        pre_scale=pre_scale_ref,
-        pre_bias=pre_bias_ref,
-        post_scale=post_scale_ref,
-        post_bias=post_bias_ref,
-        res_scale=res_scale_ref,
-        res_bias=res_bias_ref,
-    )
     params_in = jax.tree.map(lambda ref: ref[...], param_refs)
-    cotangent_refs = common.MhcCoeffOutputs(
-        h_pre=d_h_pre_ref,
-        h_post=d_h_post_ref,
-        residual=d_residual_ref,
-    )
     cotangents = jax.tree.map(lambda ref: ref[...], cotangent_refs)
 
     _, vjp = jax.vjp(mhc_coeffs_fn, x_ref[...], params_in)
     d_x, d_params = vjp(cotangents)
 
     d_x_ref[...] = (d_x.astype(jnp.float32) + d_x_acc_ref[...].astype(jnp.float32)).astype(d_x_ref.dtype)
-
-    d_param_refs = common.MhcCoeffParams(
-        phi=d_phi_ref,
-        pre_scale=d_pre_scale_ref,
-        pre_bias=d_pre_bias_ref,
-        post_scale=d_post_scale_ref,
-        post_bias=d_post_bias_ref,
-        res_scale=d_res_scale_ref,
-        res_bias=d_res_bias_ref,
-    )
 
     @pl.when(program_id == 0)
     def initialize_reductions():
@@ -290,43 +254,55 @@ def _coeff_bwd(
 
     jax.tree.map(_accumulate, d_param_refs, d_params)
 
+  spec_x = common.token_block_spec((tokens, streams, embedding), config.bwd_block_size)
   param_specs = jax.tree.map(lambda p: common.whole(p.shape), coeff_params)
   param_out_shapes = jax.tree.map(lambda p: jax.ShapeDtypeStruct(p.shape, jnp.float32), coeff_params)
   output_specs = jax.tree.map(
       lambda out: common.token_block_spec(out.shape, config.bwd_block_size),
       d_outputs,
   )
-  d_x, *d_param_grads = pl.pallas_call(
-      kernel,
-      out_shape=(
-          jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
-          *jax.tree.leaves(param_out_shapes),
-      ),
+
+  kernel_main = pltpu.emit_pipeline(
+      pipeline_body,
       grid=(tokens // config.bwd_block_size,),
       in_specs=(
-          common.token_block_spec((tokens, streams, embedding), config.bwd_block_size),
+          spec_x,
           *jax.tree.leaves(param_specs),
           common.whole(permutations.shape),
           *jax.tree.leaves(output_specs),
-          common.token_block_spec((tokens, streams, embedding), config.bwd_block_size),
+          spec_x,
       ),
       out_specs=(
-          common.token_block_spec((tokens, streams, embedding), config.bwd_block_size),
+          spec_x,
           *jax.tree.leaves(param_specs),
       ),
-      cost_estimate=dims.coeff_bwd_cost(),
-      compiler_params=pltpu.CompilerParams(
-          vmem_limit_bytes=config.vmem_limit_bytes,
-          dimension_semantics=common.SEQUENTIAL_DIMENSION_SEMANTICS,
-      ),
-      interpret=config.interpret,
-  )(
-      x,
-      *jax.tree.leaves(coeff_params),
-      permutations,
-      *jax.tree.leaves(d_outputs),
-      d_x_acc,
+      dimension_semantics=common.SEQUENTIAL_DIMENSION_SEMANTICS,
   )
+
+  in_specs = common.hbm_specs(1 + num_params + 1 + num_outputs + 1)
+  out_specs = common.hbm_specs(1 + num_params)
+
+  with common.tpu_mesh_context():
+    d_x, *d_param_grads = pl.pallas_call(
+        kernel_main,
+        out_shape=(
+            jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
+            *jax.tree.leaves(param_out_shapes),
+        ),
+        in_specs=in_specs,
+        out_specs=out_specs,
+        cost_estimate=dims.coeff_bwd_cost(),
+        compiler_params=pltpu.CompilerParams(
+            vmem_limit_bytes=config.vmem_limit_bytes,
+        ),
+        interpret=config.interpret,
+    )(
+        x,
+        *jax.tree.leaves(coeff_params),
+        permutations,
+        *jax.tree.leaves(d_outputs),
+        d_x_acc,
+    )
   d_coeff_grads = common.MhcCoeffGradients(*d_param_grads)
   return d_x, d_coeff_grads
 

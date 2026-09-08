@@ -74,4 +74,5 @@ logical_axis_rules: [
                       ['mlp', []],
                       ['layers', 'stage'],
                       ['embed', ['fsdp', 'context', 'expert']],
+                      ['embed_attn', ['fsdp', 'context', 'expert']],
                   ]

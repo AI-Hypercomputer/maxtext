@@ -20,7 +20,88 @@
 
 MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be installed through pip. Please see our [MaxText Installation Guide](install_maxtext.md) for setup instructions.
 
+## Unreleased
+
+<!-- Add new unreleased changes below this line -->
+
 ## Releases
+
+### v0.2.4
+
+#### Changes
+
+- **Flax NNX Migration**: Enabled `pure_nnx`, `enable_nnx`, and `pure_nnx_decoder` configurations by default ([PR #3526](https://github.com/AI-Hypercomputer/maxtext/pull/3526)), migrating MaxText primarily on Flax NNX ([PR #2885](https://github.com/AI-Hypercomputer/maxtext/pull/2885)).
+
+- **Dependency Upgrades**: Upgraded JAX to version 0.10.2 for pre-training and 0.11.0 for post-training.
+
+- **Model Support & Architecture**:
+
+  - **DeepSeek-V4**: Full model integration, decoders, and configuration stack ([PR #4153](https://github.com/AI-Hypercomputer/maxtext/pull/4153)), added HyperHead, aligned Sinkhorn implementation ([PR #4337](https://github.com/AI-Hypercomputer/maxtext/pull/4337)), and added checkpoint conversion support ([PR #4336](https://github.com/AI-Hypercomputer/maxtext/pull/4336)). See the [user guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/deepseek/Run_DeepSeek.md) for more details.
+  - **Qwen3-VL**: Added support for Qwen3-VL models ([PR #4293](https://github.com/AI-Hypercomputer/maxtext/pull/4293), [PR #4517](https://github.com/AI-Hypercomputer/maxtext/pull/4517)) and Qwen3-VL-4B ([PR #4263](https://github.com/AI-Hypercomputer/maxtext/pull/4263)).
+  - **Apple Envy MoE**: Added model configurations and support for Apple Envy Switch architectures.
+  - **Chunked MoE**: Added chunked MoE support via `num_moe_token_chunks` to reduce memory footprint ([PR #4499](https://github.com/AI-Hypercomputer/maxtext/pull/4499)).
+  - **Block Diffusion**: Added block-diffusion pre-training support ([PR #4776](https://github.com/AI-Hypercomputer/maxtext/pull/4776)), model-independent block corruption utilities ([PR #4737](https://github.com/AI-Hypercomputer/maxtext/pull/4737)), and causal-block attention across Dense, Splash, and Tokamax kernels ([PR #4743](https://github.com/AI-Hypercomputer/maxtext/pull/4743)).
+
+- **LoRA & QLoRA**: Added native LoRA and QLoRA support for Gemma4, Gemma3, Qwen3, and Llama3, along with interactive tutorials ([PR #3969](https://github.com/AI-Hypercomputer/maxtext/pull/3969), [PR #4265](https://github.com/AI-Hypercomputer/maxtext/pull/4265), [PR #4068](https://github.com/AI-Hypercomputer/maxtext/pull/4068), [PR #3968](https://github.com/AI-Hypercomputer/maxtext/pull/3968), [PR #3970](https://github.com/AI-Hypercomputer/maxtext/pull/3970), [PR #4417](https://github.com/AI-Hypercomputer/maxtext/pull/4417)).
+
+- **Context Parallelism (CP), Ring Attention**:
+
+  - Added Ulysses and USP CP strategy and packing ([PR #4687](https://github.com/AI-Hypercomputer/maxtext/pull/4687), [PR #4825](https://github.com/AI-Hypercomputer/maxtext/pull/4825), [PR #4836](https://github.com/AI-Hypercomputer/maxtext/pull/4836)), Tokamax load-balanced Ring Attention ([PR #4266](https://github.com/AI-Hypercomputer/maxtext/pull/4266), [PR #4537](https://github.com/AI-Hypercomputer/maxtext/pull/4537), [PR #4622](https://github.com/AI-Hypercomputer/maxtext/pull/4622)), and sequence packing for USP and All-Gather CP ([PR #4230](https://github.com/AI-Hypercomputer/maxtext/pull/4230), [PR #4887](https://github.com/AI-Hypercomputer/maxtext/pull/4887)).
+  - DeepSeek MoE & MLA: Added Ring Attention with DSA Sparse Indexer [PR #4767](https://github.com/AI-Hypercomputer/maxtext/pull/4767), auxiliary loss-free and sequence-wise load balancing [PR #4753](https://github.com/AI-Hypercomputer/maxtext/pull/4753), MLA QK head chunking [PR #4564](https://github.com/AI-Hypercomputer/maxtext/pull/4564), optimized generate_mask [PR #4437](https://github.com/AI-Hypercomputer/maxtext/pull/4437), and Approximate Top-K [PR #4243](https://github.com/AI-Hypercomputer/maxtext/pull/4243).
+  - Positional Embeddings: Added YaRN RoPE config [PR #4238](https://github.com/AI-Hypercomputer/maxtext/pull/4238), standardized MRoPE to BS3 convention for multimodal training [PR #4709](https://github.com/AI-Hypercomputer/maxtext/pull/4709), and fixed Qwen3.5 partial rotary factor handling.
+  - Kernels & Megacore: Added configurable attention_for_vit kernels [PR #4232](https://github.com/AI-Hypercomputer/maxtext/pull/4232) and enabled Megacore for Splash Attention dkv backward [PR #4755](https://github.com/AI-Hypercomputer/maxtext/pull/4755).
+
+- **Quantization & Performance**: Added FP4 [E2M1] ([PR #4495](https://github.com/AI-Hypercomputer/maxtext/pull/4495)) and experimental attention quantization ([PR #4487](https://github.com/AI-Hypercomputer/maxtext/pull/4487)); enabled TE Collective GEMMs ([PR #4470](https://github.com/AI-Hypercomputer/maxtext/pull/4470)) and overlap ([PR #4307](https://github.com/AI-Hypercomputer/maxtext/pull/4307)), MoE comms with collective matmul ([PR #4295](https://github.com/AI-Hypercomputer/maxtext/pull/4295)), Tokamax GMM v2 ([MoE configuration guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/reference/core_concepts/moe_configuration.md)), and double-buffered inner scans during gradient accumulation ([PR #4316](https://github.com/AI-Hypercomputer/maxtext/pull/4316)).
+
+- **Checkpointing**: Added support for Multi-tier checkpointing in Pathways.
+
+- **Goodput & Elasticity**:
+
+  - Added Goodput support for Pathways Elasticity & Slice Efficiency, including `record_slice_state()` to query live slice counts ([PR #4840](https://github.com/AI-Hypercomputer/maxtext/pull/4840)).
+  - Implemented checkpoint-based elasticity using set-based slice tracking ([PR #4245](https://github.com/AI-Hypercomputer/maxtext/pull/4245)).
+
+- **Post Training**:
+
+  - Added `reward_functions_path` and `reward_functions` CLI knobs for custom rewards ([PR #4149](https://github.com/AI-Hypercomputer/maxtext/pull/4149)) to RL training.
+  - Updated tutorials with `AgenticGRPOLearner` for async RL training ([PR #4181](https://github.com/AI-Hypercomputer/maxtext/pull/4181)) and added GRPO Gemma4-e4b tutorial ([PR #4427](https://github.com/AI-Hypercomputer/maxtext/pull/4427)).
+  - Added RL support for Qwen3 30B and GPT-OSS 20B. See the [Qwen3 30B RL tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_qwen3_30b.html) and [GPT-OSS 20B RL tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_gptoss_20b.html) for recipes.
+  - Added support for DPO along with tutorials ([PR #4362](https://github.com/AI-Hypercomputer/maxtext/pull/4362)).
+
+- **Usability & Infrastructure**:
+
+  - Added wandb logging support ([PR #3053](https://github.com/AI-Hypercomputer/maxtext/pull/3053)).
+  - Added Hugging Face Grain streaming integration and onboarding guide ([PR #4486](https://github.com/AI-Hypercomputer/maxtext/pull/4486)).
+  - Added Simple-evals runner support for gpt-oss model family ([PR #4644](https://github.com/AI-Hypercomputer/maxtext/pull/4644)).
+  - Added scripts to run vanilla DiLoCo on MaxText ([PR #4095](https://github.com/AI-Hypercomputer/maxtext/pull/4095)).
+  - Added option to enable on-demand profiling server in ML Diagnostics ([PR #4131](https://github.com/AI-Hypercomputer/maxtext/pull/4131)).
+
+#### Bug Fixes
+
+- **Post-Training**:
+
+  - Resolved Gemma 3/4 RL rollout gibberish issue by unrolling scanned weights for vLLM adapter ([PR #4536](https://github.com/AI-Hypercomputer/maxtext/pull/4536), [PR #4519](https://github.com/AI-Hypercomputer/maxtext/pull/4519), [PR #4404](https://github.com/AI-Hypercomputer/maxtext/pull/4404)).
+  - Fixed RL LR schedule defaults ([PR #4225](https://github.com/AI-Hypercomputer/maxtext/pull/4225)), added `drop_remainder=True` to prevent shape mismatches on tail batches during GRPO training ([PR #4252](https://github.com/AI-Hypercomputer/maxtext/pull/4252)) and resolved Qwen3.5 MRoPE/Kv-cache rollout issues ([PR #4177](https://github.com/AI-Hypercomputer/maxtext/pull/4177)).
+
+- **Compilation**:
+
+  - Fixed double-compilation in `train_step` by matching input sharding ([PR #4174](https://github.com/AI-Hypercomputer/maxtext/pull/4174)).
+  - Truncated out_sharding on extra pspec dimensions ([PR #4769](https://github.com/AI-Hypercomputer/maxtext/pull/4769)) and restricted GMM quantization to fp8_full ([PR #4842](https://github.com/AI-Hypercomputer/maxtext/pull/4842)).
+
+- **Model-Specific Fixes**:
+
+  - Qwen3.5: Applied partial MRoPE for Qwen3.5 ([PR #4764](https://github.com/AI-Hypercomputer/maxtext/pull/4764)).
+  - Mixtral: Fixed EP throughput via configurable expert-axis batch sharding ([PR #4179](https://github.com/AI-Hypercomputer/maxtext/pull/4179)).
+
+- **NNX, MoE & MTP**:
+
+  - Resolved silent zero-loss ([PR #4525](https://github.com/AI-Hypercomputer/maxtext/pull/4525)) and targets_segmentation bugs ([PR #4756](https://github.com/AI-Hypercomputer/maxtext/pull/4756)) in Multi-Token Prediction (MTP).
+  - Preserved scanned layer intermediates for MoE load-balancing loss in NNX ([PR #4829](https://github.com/AI-Hypercomputer/maxtext/pull/4829)).
+  - Relanded Qwix quantization on NNX ([PR #4198](https://github.com/AI-Hypercomputer/maxtext/pull/4198)) and fixed Qwix LoRA mesh sharding ([PR #4866](https://github.com/AI-Hypercomputer/maxtext/pull/4866)).
+
+#### Deprecations
+
+- **Tensor Transpose Parallelism Removed**: Completely removed the `tensor_transpose` physical mesh axis and deleted `ici_tensor_transpose_parallelism` and `dcn_tensor_transpose_parallelism` configuration options.
+- **Flax Linen Deprecation Warning**: Flax Linen is now deprecated in favor of Flax NNX; running with `pure_nnx=False` or `enable_nnx=False` will issue a deprecation warning.
 
 ### v0.2.3
 

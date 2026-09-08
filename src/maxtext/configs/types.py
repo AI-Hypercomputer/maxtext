@@ -16,6 +16,7 @@
 
 # pylint: disable=too-many-lines
 
+import copy
 import datetime
 import enum
 from enum import Enum
@@ -31,6 +32,7 @@ from typing import Any, Literal, NewType, Optional
 import jax
 from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType
 from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
@@ -255,6 +257,7 @@ ModelName = Literal[
     "gemma4-31b",
     "gemma4-e2b",
     "gemma4-e4b",
+    "maxtext-omni-gemma3-qwen3",
     "qwen2.5-1.5b",
     "qwen2.5-7b",
     "qwen2.5-14b",
@@ -276,6 +279,8 @@ ModelName = Literal[
     "qwen3-vl-2b",
     "qwen3-vl-4b",
     "qwen3-vl-30b-a3b",
+    "cosmos3-nano-reasoner",
+    "cosmos3-super-reasoner",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
@@ -359,6 +364,31 @@ class Checkpointing(BaseModel):
       description="Subdirectory to move checkpoints to before deletion. (Ignored if directory is prefixed with gs://)",
   )
   checkpoint_todelete_full_path: str | None = Field(None, description="Full path to move checkpoints to before deletion.")
+  standalone_checkpointer_per_step_interval: float = Field(
+      0.0,
+      description="Interval in seconds between iterations in standalone checkpointer benchmark loop.",
+  )
+  standalone_checkpointer_drop_page_cache_before_restore: bool = Field(
+      False,
+      description=(
+          "Whether to execute sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' before restoring a checkpoint in"
+          " standalone_checkpointer loop (use for storage benchmarking only)."
+      ),
+  )
+  standalone_checkpointer_enable_restore_in_loop: bool = Field(
+      True,
+      description=(
+          "In standalone_checkpointer loop, whether to restore checkpoint after saving in each step (defaults to True"
+          " for bidirectional storage read/write benchmarking)."
+      ),
+  )
+  standalone_checkpointer_start_from_checkpoint: bool = Field(
+      False,
+      description=(
+          "In standalone_checkpointer, whether to start by attempting to load an existing checkpoint before setting"
+          " up training state (for checkpoint restore benchmarking)."
+      ),
+  )
   force_unroll: bool = Field(
       False,
       description="During param-only checkpoint generation, whether to unroll the loop.",
@@ -368,7 +398,10 @@ class Checkpointing(BaseModel):
       description="Set to True if reading from a saved AQT quantized checkpoint.",
   )
   save_quantized_params_path: PathStr = Field("", description="Path to save params quantized on the fly.")
-  enable_orbax_v1: bool = Field(False, description="Bool flag for enabling Orbax v1.")
+  # TODO: b/529622681 - Remove deprecated settings.
+  enable_orbax_v1: bool = Field(
+      False, description="DEPRECATED: Orbax v1 is always used for checkpointing; this flag is ignored."
+  )
   checkpoint_conversion_fn: None | str = Field(None, description="Function for processing loaded checkpoint dict.")
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
@@ -464,6 +497,13 @@ class Quantization(BaseModel):
   )
   quant_cfg_path: PathStr = Field("", description="Path to the configuration file for 'intmp' quantization.")
   quantize_kvcache: bool = Field(False, description="If True, quantizes the Key-Value cache.")
+  quantize_mtp: bool = Field(
+      False,
+      description=(
+          "If True, quantizes the Multi-Token Prediction (MTP) block. Only supported with"
+          " `mtp_num_layers > 0` and `quantization=fp8_full`."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -588,6 +628,10 @@ class LogitsAndLoss(BaseModel):
   num_vocab_tiling: int = Field(
       1,
       description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
+  )
+  vocab_tiling_ag_once: bool = Field(
+      False,
+      description="All gather the output head weight once before the tiled loss so the backward reuses it.",
   )
 
 
@@ -800,15 +844,15 @@ class SplashAttention(BaseModel):
   local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
   local_sa_fuse_reciprocal: bool | None = Field(None, description="Maps to local fuse_reciprocal in SplashConfig.")
   local_sa_use_base2_exp: bool | None = Field(None, description="Maps to local use_base2_exp in SplashConfig.")
-  experimental_sa_quant_q_fp8: bool | None = Field(
-      None,
+  experimental_sa_quant_q_fp8: bool = Field(
+      False,
       description=(
           "Experimental flag: If enabled, the Q tensor in splash attention is"
           " quantized to jnp.float8_e4m3fn, without scaling factors."
       ),
   )
-  experimental_sa_quant_k_fp8: bool | None = Field(
-      None,
+  experimental_sa_quant_k_fp8: bool = Field(
+      False,
       description=(
           "Experimental flag: If enabled, the K tensor in splash attention is"
           " quantized to jnp.float8_e4m3fn, without scaling factors."
@@ -901,6 +945,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
   )
+  moe_use_direct_token_gather: bool = Field(
+      False,
+      description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -946,6 +994,10 @@ class MoEGeneral(BaseModel):
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
   )
+  shard_embed_moe_on_fsdp: bool = Field(
+      False,
+      description="Keep embed_moe sharded so we can manually QAG it over FSDP.",
+  )
   use_2d_fsdp_sharding: bool = Field(
       False,
       description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
@@ -977,6 +1029,17 @@ class MoEGeneral(BaseModel):
   def validate_moe_chunks(self) -> "MoEGeneral":
     if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_sharding_strategy(self) -> "MoEGeneral":
+    """Ensure that only one MoE FSDP sharding strategy is active at a time."""
+    active_sharding_flags = sum([self.shard_exp_on_fsdp, self.use_2d_fsdp_sharding, self.shard_embed_moe_on_fsdp])
+    if active_sharding_flags > 1:
+      raise ValueError(
+          "Only one of shard_exp_on_fsdp, use_2d_fsdp_sharding, or "
+          "shard_embed_moe_on_fsdp can be True at the same time."
+      )
     return self
 
 
@@ -1039,6 +1102,11 @@ class MoEKernels(BaseModel):
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
   )
 
+  use_gmm_v2_heuristic_tiling: bool = Field(
+      False,
+      description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
+  )
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -1090,26 +1158,160 @@ class Qwen3Next(BaseModel):
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
 
 
+# ----------------------------------------------------------------------------
+# Default Mesh Axes, Data Sharding, and Logical Axis Rules
+# ----------------------------------------------------------------------------
+
+DEFAULT_MESH_AXES: list[str] = [
+    "diloco",
+    "data",
+    "stage",
+    "fsdp",
+    "fsdp_transpose",
+    "context",
+    "context_usp_ulysses",
+    "context_autoregressive",
+    "tensor",
+    "tensor_sequence",
+    "expert",
+    "autoregressive",
+]
+
+DEFAULT_DATA_SHARDING: list[list[str]] = [
+    [
+        "data",
+        "stage",
+        "fsdp",
+        "fsdp_transpose",
+        "context",
+        "context_usp_ulysses",
+        "context_autoregressive",
+        "tensor",
+        "tensor_sequence",
+        "expert",
+        "autoregressive",
+    ]
+]
+
+DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
+    ["circular_repeats", []],
+    # ==========================================
+    # Vocabulary Embedding
+    # ==========================================
+    # Vocab Activations
+    ["activation_embed_and_logits_batch", ["data", "stage", "fsdp", "fsdp_transpose", "expert"]],
+    [
+        "activation_embed_and_logits_batch_sequence",
+        ["data", "stage", "fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"],
+    ],
+    ["activation_vocab", ["tensor", "tensor_sequence"]],
+    ["activation_vocab", ["tensor"]],
+    ["activation_vocab", "tensor_sequence"],
+    # Vocab Weights
+    ["vocab", ["tensor", "tensor_sequence", "autoregressive"]],
+    ["embed_vocab", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    # ==========================================
+    # Attention
+    # ==========================================
+    # Attention Activations
+    ["activation_batch_attn", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["activation_input_length_attn", ["tensor_sequence", "context"]],
+    ["activation_heads", ["tensor", "tensor_sequence", "autoregressive"]],
+    ["activation_kv_heads", ["tensor", "tensor_sequence"]],
+    ["activation_length_attn", ["context", "context_usp_ulysses"]],
+    ["activation_q_length", ["context", "context_usp_ulysses"]],
+    ["activation_kv_length", []],
+    ["activation_embed_attn", ["tensor"]],
+    ["activation_kv", ["tensor", "tensor_sequence"]],
+    ["activation_kv_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["activation_kv_head_dim", ["tensor", "tensor_sequence"]],
+    # Attention Weights
+    ["heads", ["tensor", "tensor_sequence", "autoregressive"]],
+    ["q_heads", ["tensor", "tensor_sequence", "autoregressive"]],
+    ["kv_heads", ["tensor", "tensor_sequence", "autoregressive"]],
+    ["qkv", []],
+    ["kv", []],
+    ["kv_head_dim", []],
+    ["q_lora", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    ["q_lora", ["fsdp", "context", "context_usp_ulysses", "expert"]],
+    ["q_lora_up_proj", []],
+    ["kv_lora", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    ["kv_lora", ["fsdp", "context", "context_usp_ulysses", "expert"]],
+    ["kv_lora_up_proj", []],
+    ["embed_attn", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    # ==========================================
+    # Mixture of Experts (MoE)
+    # ==========================================
+    # MoE Activations
+    ["activation_batch_moe", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["activation_length_moe", ["context", "context_usp_ulysses"]],
+    ["activation_norm_length_moe", ["tensor_sequence", "context", "context_usp_ulysses"]],
+    ["activation_embed_moe", ["tensor"]],
+    ["activation_mlp_moe", ["tensor", "tensor_sequence"]],
+    ["activation_exp", ["expert"]],
+    # MoE Weights
+    ["exp", "expert"],
+    ["mlp_moe", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
+    ["embed_moe", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
+    ["embed_moe", ["fsdp", "context", "context_usp_ulysses"]],
+    # ==========================================
+    # Standard MLP / Dense Layers / Model Structure
+    # ==========================================
+    # Dense Activations
+    ["segment_ids_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["activation_mlp", ["tensor", "tensor_sequence"]],
+    # Note activation batch and length also get used in vocab
+    ["activation_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["activation_length", ["context", "context_usp_ulysses"]],
+    ["activation_norm_length", ["tensor_sequence", "context", "context_usp_ulysses"]],
+    ["activation_embed", ["tensor"]],
+    ["activation_stage", "stage"],
+    # General Weights
+    ["mlp", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
+    ["gdn_head", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
+    ["embed", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    ["embed", ["fsdp", "context", "context_usp_ulysses", "expert"]],
+    ["norm", ["tensor"]],
+    ["layers", "stage"],
+    ["diloco", "diloco"],
+    ["engram_dim", ["tensor"]],
+    ["dense_layers", []],
+    ["moe_layers", []],
+    ["local_layers", []],
+    ["mhc", []],
+    # ==========================================
+    # Inference (Prefill, Decode, Cache)
+    # ==========================================
+    ["prefill_activation_length", ["context", "context_usp_ulysses"]],
+    ["prefill_activation_norm_length", ["tensor_sequence", "context", "context_usp_ulysses"]],
+    ["activation_prefill_kv_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["decode_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
+    ["decode_length", []],
+    ["cache_heads", ["autoregressive", "tensor", "tensor_sequence"]],
+    ["paged_kv_heads", ["tensor"]],
+    ["cache_batch_prefill", []],
+    ["cache_batch", []],
+    ["cache_heads_none", []],
+    ["cache_kv", []],
+    ["cache_sequence", []],
+    ["num_pages", []],
+    ["tokens_per_page", []],
+    ["paged_kv_head_dim_size", []],
+    # ==========================================
+    # Deprecated / Scheduled for Removal
+    # ==========================================
+    ["mlp_no_fsdp", ["tensor", "tensor_sequence", "autoregressive"]],
+    ["exp_with_fsdp", "fsdp"],
+]
+
+
 class HardwareAndMesh(BaseModel):
   """Configuration for hardware and parallelism mesh."""
 
   hardware: Literal["tpu", "gpu", "gpu_multiprocess", "cpu"] = Field("tpu", description="The type of hardware to run on.")
   num_slices: int = Field(-1, description="Number of TPU slices. Automatically determined.")
   mesh_axes: list[str] = Field(
-      [
-          "data",
-          "stage",
-          "fsdp",
-          "fsdp_transpose",
-          "sequence",
-          "context",
-          "context_usp_ulysses",
-          "context_autoregressive",
-          "tensor",
-          "tensor_sequence",
-          "expert",
-          "autoregressive",
-      ],
+      default_factory=lambda: copy.deepcopy(DEFAULT_MESH_AXES),
       description="The names of the axes in the logical device mesh.",
   )
   shard_mode: ShardMode = Field("auto", description="can be either auto or explicit")
@@ -1173,11 +1375,18 @@ class HardwareAndMesh(BaseModel):
 class LayoutAndSharding(BaseModel):
   """Configuration for data and model sharding rules."""
 
-  logical_axis_rules: Any = Field([], description="Rules for mapping logical axes to physical mesh axes.")
-  logical_axis_rules_for_eval: Any = Field(
-      [], description="Rules for mapping logical axes to physical mesh axes during evaluation."
+  logical_axis_rules: Any = Field(
+      default_factory=lambda: copy.deepcopy(DEFAULT_LOGICAL_AXIS_RULES),
+      description="Rules for mapping logical axes to physical mesh axes.",
   )
-  data_sharding: Any = Field([], description="Sharding for input data.")
+  logical_axis_rules_for_eval: Any = Field(
+      default_factory=list,
+      description="Rules for mapping logical axes to physical mesh axes during evaluation.",
+  )
+  data_sharding: Any = Field(
+      default_factory=lambda: copy.deepcopy(DEFAULT_DATA_SHARDING),
+      description="Sharding for input data.",
+  )
   context_sharding: str = Field("context", description="Physical axis name for context parallelism.")
   ulysses_context_sharding: str = Field(
       "context_usp_ulysses",
@@ -1278,7 +1487,7 @@ class PipelineParallelism(BaseModel):
   )
   pipeline_fsdp_ag_once: bool = Field(False, description="If True, all-gather FSDP weights once per pipeline repeat.")
   scan_pipeline_iterations: bool = Field(True, description="Use jax.lax.scan over pipeline iterations.")
-  scan_pipeline_repeats: bool = Field(True, description="Use jax.lax.scan over pipeline repeats.")
+  scan_pipeline_repeats: bool = Field(False, description="Use jax.lax.scan over pipeline repeats.")
   scan_layers_per_stage: bool = Field(False, description="Use jax.lax.scan over layers within a stage.")
   set_remat_policy_on_pipeline_iterations: bool = Field(True, description="Set remat policy on the pipeline scan.")
   set_remat_policy_on_layers_per_stage: bool = Field(False, description="Set remat policy on the inner layer scan.")
@@ -1287,11 +1496,11 @@ class PipelineParallelism(BaseModel):
 class RematAndOffload(BaseModel):
   """Configuration for gradient checkpointing (rematerialization) and offloading."""
 
-  remat_policy: str = Field(
+  remat_policy: str | None = Field(
       RematPolicy.FULL.value,
       description="The rematerialization policy, trading off speed and memory.",
   )
-  remat_policy_for_vit: str = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
+  remat_policy_for_vit: str | None = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
   decoder_layer_input: RematLocation = Field(
       RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
   )
@@ -1394,7 +1603,7 @@ class Tokenizer(BaseModel):
 class DatasetGeneral(BaseModel):
   """General configuration for dataset and data loading."""
 
-  dataset_type: DatasetType = Field(DatasetType.TFDS, description="The type of the data loading pipeline.")
+  dataset_type: DatasetType = Field(DatasetType.SYNTHETIC, description="The type of the data loading pipeline.")
   per_device_batch_size: int | float = Field(12, description="The batch size per device.")
   eval_per_device_batch_size: int | float = Field(
       0.0,
@@ -1464,15 +1673,15 @@ class HfDataset(BaseModel):
 class GrainDataset(BaseModel):
   """Configuration specific to Grain datasets."""
 
-  grain_train_files: PathStr = Field("", description="Path to Grain training files.")
-  grain_eval_files: PathStr = Field("", description="Path to Grain evaluation files.")
+  grain_train_files: PathStr = Field("", description="Training source specification for the selected Grain file type.")
+  grain_eval_files: PathStr = Field("", description="Evaluation source specification for the selected Grain file type.")
   grain_train_mixture_config_path: PathStr = Field(
       "",
-      description="Path to a JSON file specifying the mixture weights for Grain training data.",
+      description="Path to an ArrayRecord JSON file specifying Grain training mixture weights.",
   )
   grain_file_type: str = Field(
       "arrayrecord",
-      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet.",
+      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet, mmap, mmap_npy.",
   )
   grain_use_elastic_iterator: bool = Field(
       False,
@@ -1496,7 +1705,44 @@ class GrainDataset(BaseModel):
       16,
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
   )
+  grain_index_storage_option: None | Literal["in_memory", "offloaded"] = Field(
+      None,
+      description=(
+          "ArrayRecord reader index storage. None uses the ArrayRecord reader default. Do not use 'offloaded' with "
+          "direct gs:// paths because it can significantly degrade input performance. For Cloud Storage, use a "
+          "filesystem with metadata caching, such as GCSFUSE."
+      ),
+  )
   grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
+
+
+class MMapDataset(BaseModel):
+  """Configuration for ``grain_file_type='mmap'`` and ``'mmap_npy'``."""
+
+  mmap_eod_id: int = Field(0, description="EOD token ID already present in the preprocessed Megatron data.")
+  blend_cache_dir: PathStr = Field(
+      "", description="Optional runtime cache for multi-dataset mmap_npy global blend dispatch indices."
+  )
+  blend_index_dir: PathStr = Field(
+      "", description="Optional directory containing pre-generated dataset_index.npy and dataset_sample_index.npy."
+  )
+  reset_attention_mask: bool = Field(
+      True, description="Start a new attention segment and reset positions after every retained EOD boundary."
+  )
+  eod_mask_loss: bool = Field(False, description="Exclude positions whose input token is EOD from the loss.")
+  packing_max_segments_per_sample: int = Field(
+      25,
+      description=(
+          "Short-segment merge divisor: max_target_length // value. Only used with reset_attention_mask=True; "
+          "set <=0 to retain every EOD boundary."
+      ),
+  )
+  mmap_split_sentences: bool = Field(
+      False, description="Whether preprocessing used --split-sentences; enables document-level indexing when true."
+  )
+  mmap_npy_split: str = Field(
+      "", description="mmap_npy split ratio, e.g. '99,1'; training uses split 0 and evaluation uses split 1."
+  )
 
 
 class OlmoGrainDataset(BaseModel):
@@ -1770,6 +2016,10 @@ class ManifoldConstrainedHyperConnections(BaseModel):
           " optimal for TPU v7 memory constraints; 256 is optimal for TPU v6."
       ),
   )
+  mhc_pallas_kernel_bwd_feature_block_size: int = Field(
+      1024,
+      description=("Feature block size for backward pass of MHC Pallas kernel."),
+  )
 
   @model_validator(mode="after")
   def validate_mhc_kernel(self) -> "ManifoldConstrainedHyperConnections":
@@ -1783,11 +2033,26 @@ class DilocoParams(BaseModel):
 
   enable_diloco: bool = Field(False, description="Enable Diloco parallelism")
   diloco_sync_period: int = Field(36, description="Diloco sync period.")
+
+  @model_validator(mode="after")
+  def validate_streaming_diloco_params(self) -> "DilocoParams":
+    """Validates streaming DiLoCo parameters."""
+    if self.enable_streaming_diloco:
+      if not self.enable_diloco:
+        raise ValueError("enable_diloco must be True when enable_streaming_diloco is True.")
+      if self.num_diloco_fragments is None:
+        raise ValueError("num_diloco_fragments must be specified when enable_streaming_diloco is True.")
+      if self.num_diloco_fragments < 2:
+        raise ValueError(
+            f"num_diloco_fragments ({self.num_diloco_fragments}) must be at least 2 when enable_streaming_diloco "
+            "is True (1 for non-scanned parameters, at least 1 for scanned layers)."
+        )
+    return self
+
   diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
   diloco_outer_momentum: float = Field(0.9, description="momentum for outer optimizer.")
   dcn_bandwidth_limit: str = Field(
-      "",
-      description="Programmatic DCN egress bandwidth limit (e.g., '28gbit'). Empty means no limit.",
+      "", description="Programmatic DCN egress bandwidth limit per VM (e.g., '28gbit'). Empty means no limit."
   )
   dcn_bandwidth_burst: str = Field("10mb", description="Burst size for Token Bucket Filter (TBF) traffic shaping.")
   dcn_bandwidth_latency: str = Field(
@@ -1795,6 +2060,40 @@ class DilocoParams(BaseModel):
       description="Latency threshold for Token Bucket Filter (TBF) traffic shaping.",
   )
   dcn_bandwidth_interface: str = Field("eth0", description="Network interface to apply bandwidth limits on.")
+
+  # Streaming DiLoCo parameters
+  enable_streaming_diloco: bool = Field(
+      False,
+      description=(
+          "Enable streaming DiLoCo parallelism (https://arxiv.org/abs/2501.18512). Streaming DiLoCo partitions"
+          " model parameters into fragments and pipelines cross-island synchronization one fragment per inner step,"
+          " overlapping inter-cluster communication with accelerator computation."
+      ),
+  )
+  num_diloco_fragments: int | None = Field(
+      None,
+      description=(
+          "Total number of fragments to partition the model layers into (including 1 fragment for non-scanned"
+          " parameters). Required when enable_streaming_diloco is True."
+      ),
+  )
+  use_sequential_layers: bool = Field(False, description="Whether to sync layers sequentially (or interleaved).")
+  num_communication_overlapping_steps: NonNegativeInt = Field(
+      0, description="Steps of communication overlap with computation. \\tau from the paper."
+  )
+  communication_overlapping_alpha: float = Field(
+      0.0,
+      ge=0.0,
+      le=1.0,
+      description=(
+          "Interpolation factor between local and global parameters. alpha=1"
+          " means no communication between islands, alpha=0 means discards any"
+          " updates done in the inner optimizer in the first"
+          " `num_communication_overlapping_steps` steps. alpha=0.5 does a"
+          " uniform average between the local fragment parameters and the"
+          " globally shared one."
+      ),
+  )
 
 
 class Optimizer(BaseModel):
@@ -2058,7 +2357,7 @@ class DevelopmentAndDebugging(BaseModel):
 
   constant_bound_config: list = Field([], description="Legacy configuration for constant bounds.")
   jax_cache_dir: PathStr | None = Field(
-      os.path.join(os.path.expanduser("~"), "jax_cache"),
+      "~/jax_cache",
       description="Directory for JAX compilation cache.",
   )
   jax_distributed_initialization_timeout: int = Field(300, description="Timeout for jax.distributed.initialize.")
@@ -2168,6 +2467,7 @@ class ManagedMLDiagnostics(BaseModel):
   )
   managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
   managed_mldiagnostics_region: str = Field("", description="GCP region for managed mldiagnostics.")
+  managed_mldiagnostics_storage_path: str = Field("", description="Storage path for mldiagnostics (profiles, metrics)")
 
 
 class Goodput(BaseModel):
@@ -2407,6 +2707,32 @@ class VLLM(BaseModel):
   )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
+  use_weight_converter: bool = Field(
+      False,
+      description=(
+          "Use an explicit weight converter for trainer->rollout weight sync instead of "
+          "the legacy transfer_state_directly / transfer_state_with_mappings paths."
+      ),
+  )
+  weight_sync_debug: bool = Field(
+      False,
+      description=(
+          "Log the device placement of every operand during trainer->rollout weight "
+          "conversion, and barrier between conversion steps so a device or sharding "
+          "failure names the parameter that caused it. Serializes the sync; use only "
+          "when debugging a weight-sync crash."
+      ),
+  )
+  log_weight_sync_time: bool = Field(
+      False,
+      description=(
+          "Log the wall time of every trainer->rollout weight sync, blocking on the "
+          "rollout state so the number is execution rather than dispatch. Sync 0 is the "
+          "initial load_checkpoint and pays XLA compilation; syncs 1+ reuse those "
+          "executables, so the gap between them is how much of a sync is compilation "
+          "rather than data movement. Adds one barrier per sync."
+      ),
+  )
   vllm_load_format: str = Field(
       "dummy",
       description="Weight load format for vLLM in converter validation. Options:'auto', 'dummy'.",
@@ -2694,6 +3020,27 @@ class DerivedValues(BaseModel):
 # ----------------------------------------------------------------------------
 
 
+# Decoder blocks that support router replay (`forced_routed_experts`). All are
+# homogeneous-MoE, so a 4D layer axis is just the decoder layer index;
+# interleaved architectures (Llama4/Envy) would need a MoE-only counter.
+# Requires the pure-NNX decoder. GEMMA4 is unscanned-only (see nnx_decoders.py).
+FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS = (
+    DecoderBlockType.QWEN3_5,
+    DecoderBlockType.MIXTRAL,
+    DecoderBlockType.GEMMA4,
+)
+
+
+def check_forced_routing_support(decoder_block: DecoderBlockType) -> None:
+  """Raises NotImplementedError if `decoder_block` does not support router replay."""
+  if decoder_block not in FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS:
+    raise NotImplementedError(
+        "Forced routing (router replay) is only supported for decoder_block in"
+        f" {FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS}; got"
+        f" decoder_block={decoder_block!r}."
+    )
+
+
 def _normalize_axes(axes: Any) -> tuple[str, ...]:
   """Normalize a logical-rule mapping value to a tuple of axis name strings.
 
@@ -2713,6 +3060,22 @@ def _normalize_axes(axes: Any) -> tuple[str, ...]:
   return ()
 
 
+def axes_for_logical(logical_axis_rules: list, logical_axis: str) -> tuple[str, ...]:
+  """Return the physical axes *logical_axis* is mapped to by *logical_axis_rules*.
+
+  Args:
+    logical_axis_rules: The list of ``[logical_name, physical_axes]`` pairs.
+    logical_axis: The logical axis name to look up.
+
+  Returns:
+    A (possibly empty) tuple of physical axis name strings.
+  """
+  for rule in logical_axis_rules:
+    if rule and len(rule) >= 2 and rule[0] == logical_axis:
+      return _normalize_axes(rule[1])
+  return ()
+
+
 def infer_cp_axes(logical_axis_rules: list) -> tuple[str, ...]:
   """Infer which physical mesh axis/axes serve as Context Parallelism (CP).
 
@@ -2727,10 +3090,7 @@ def infer_cp_axes(logical_axis_rules: list) -> tuple[str, ...]:
     A tuple of physical axis name strings that act as CP.  Empty if the
     ``activation_length`` logical axis is not found in the rules.
   """
-  for rule in logical_axis_rules:
-    if rule and len(rule) >= 2 and rule[0] == "activation_length":
-      return _normalize_axes(rule[1])
-  return ()
+  return axes_for_logical(logical_axis_rules, "activation_length")
 
 
 def infer_ep_axes(logical_axis_rules: list) -> tuple[str, ...]:
@@ -2785,6 +3145,20 @@ def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   emb_scale = base_scale + int(rem > 1)
   layer_scale = base_scale
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
+
+
+def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
+  """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
+
+  `maxtext_utils.fill_unspecified_mesh_axes` hands the single -1 entry whatever devices the
+  other axes leave over, so config validation has to do the same to see the sizes a run will
+  really get. A -1 that cannot be resolved here (an unknown device count, say) counts as 1;
+  mesh creation raises on its own if it is still unresolvable there.
+  """
+  specified = prod(size for size in parallelism if size != -1)
+  leftover = num_devices // specified if specified > 0 and num_devices > 0 and num_devices % specified == 0 else 1
+  sizes = {axis: leftover if size == -1 else size for axis, size in zip(mesh_axes, parallelism)}
+  return max(sizes.get("fsdp", 1), 1) * max(sizes.get("fsdp_transpose", 1), 1)
 
 
 # ----------------------------------------------------------------------------
@@ -2846,6 +3220,7 @@ class MaxTextConfig(
     TfdsDataset,
     HfDataset,
     GrainDataset,
+    MMapDataset,
     OlmoGrainDataset,
     Tokenizer,
     # Inference
@@ -3002,8 +3377,10 @@ class MaxTextConfig(
       raise ValueError("TPU USP attention does not support sparse indexer masks.")
     if self.attention_type != "global":
       raise ValueError("TPU USP attention is initially supported only for global causal attention.")
-    if self.context_parallel_load_balance:
-      raise ValueError("TPU USP attention does not support context_parallel_load_balance=True.")
+    if self.context_parallel_load_balance and usp_ring_size % 2 != 0:
+      raise ValueError(
+          "TPU USP attention with context_parallel_load_balance=True requires an even ici_context_parallelism."
+      )
     if self.use_ragged_attention:
       raise ValueError("TPU USP attention does not support ragged attention.")
     if self.attention_sink:
@@ -3072,6 +3449,18 @@ class MaxTextConfig(
       return yaml.safe_load(f) or {}
 
   @model_validator(mode="after")
+  def validate_shard_embed_moe_on_fsdp(self) -> "MaxTextConfig":
+    """Raise ValueError if shard_embed_moe_on_fsdp is used without fixed weight quantization calibration."""
+    if self.shard_embed_moe_on_fsdp and (
+        self.quantization == "" or not self.weight_quantization_calibration_method.startswith("fixed")
+    ):
+      raise ValueError(
+          "shard_embed_moe_on_fsdp requires quantization to be specified and "
+          "weight_quantization_calibration_method to be fixed (static scaling mode)."
+      )
+    return self
+
+  @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
     Computes all derived values and runs all cross-field validations after initial parsing.
@@ -3117,6 +3506,38 @@ class MaxTextConfig(
       eval_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_eval.value)
       self.logical_axis_rules_for_eval = eval_config.get("logical_axis_rules", self.logical_axis_rules)
 
+      # Only the logical rules are swapped for eval; the mesh itself is built once from
+      # the primary rule. Axes the eval rule names but the mesh lacks silently resolve to
+      # "replicated", which is only harmless while those axes would have been size 1.
+      dropped_axes = [axis for axis in eval_config.get("mesh_axes", ()) if axis not in self.mesh_axes]
+      if dropped_axes:
+        logger.warning(
+            "custom_mesh_and_rule_for_eval=%s declares mesh axes %s that are absent from the mesh built for "
+            "custom_mesh_and_rule=%s; they are ignored and any eval rule referencing them is treated as replicated.",
+            self.custom_mesh_and_rule_for_eval.value,
+            dropped_axes,
+            self.custom_mesh_and_rule.value,
+        )
+
+      # The input pipeline reorders the batch once, for the CP extent of the
+      # *train* rules. When the eval rule shards the query differently the
+      # permutation no longer matches, so `AttentionOp` falls back to the plain
+      # causal path at eval. Correct, but a silent loss of load balancing.
+      train_q_axes = axes_for_logical(self.logical_axis_rules, "activation_q_length")
+      eval_q_axes = axes_for_logical(self.logical_axis_rules_for_eval, "activation_q_length")
+      if self.context_parallel_load_balance and train_q_axes != eval_q_axes:
+        logger.warning(
+            "context_parallel_load_balance=True but activation_q_length maps to %s under "
+            "custom_mesh_and_rule=%s and to %s under custom_mesh_and_rule_for_eval=%s. The input pipeline "
+            "reorders for the train extent only, so load balancing is disabled at eval; eval attention runs "
+            "unbalanced (the last CP shard does ~2*cp/(cp+1) of the average work). Everything outside the "
+            "sequence-quadratic term stays balanced.",
+            list(train_q_axes),
+            self.custom_mesh_and_rule.value,
+            list(eval_q_axes),
+            self.custom_mesh_and_rule_for_eval.value,
+        )
+
     # A. SET RUN NAME AND PATHS
     # If run_name is not set, generate one from the JOBSET_NAME environment variable (if available)
     # or create one from the model name and a timestamp.
@@ -3133,7 +3554,8 @@ class MaxTextConfig(
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
       # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
-      self.managed_mldiagnostics_dir = os.path.join(output_dir, "managed-mldiagnostics")
+      telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
+      self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
           None,
@@ -3357,6 +3779,13 @@ class MaxTextConfig(
             "WARNING: AQT quantization is deprecated and will be removed in a future release. "
             "Please migrate to Qwix by setting use_qwix_quantization=True."
         )
+
+    # Deprecated no-op: Orbax v1 is now the only checkpointing path.
+    if self.enable_orbax_v1:
+      max_logging.log(
+          "WARNING: enable_orbax_v1 is deprecated and ignored — Orbax v1 is now always used for "
+          "checkpointing. Remove the flag from your config; it will be deleted in a future release."
+      )
 
     # Default quantization sharding count to number of local devices if not set.
     if self.quantization_local_shard_count == -1:
@@ -3678,8 +4107,17 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
-      raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4:
+      match (self.attention, self.use_tokamax_splash):
+        case ("dot_product", _):
+          pass
+        case ("flash", True):
+          pass
+        case _:
+          raise ValueError(
+              "DeepSeek4 is only supported with `dot_product` attention or `flash` attention "
+              "with `use_tokamax_splash=True`."
+          )
     if self.mla_qk_head_chunk_size > 0:
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(
@@ -3705,8 +4143,17 @@ class MaxTextConfig(
       supports_dot_product = self.attention == "dot_product"
       supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
       if not (supports_dot_product or supports_flash_splash):
-        raise NotImplementedError(
+        raise ValueError(
             "Sparse indexer is only supported with dot_product attention or flash attention with tokamax splash."
+        )
+      if (
+          self.attention == "flash"
+          and self.context_parallel_strategy == "all_gather"
+          and self.ici_context_parallelism * self.dcn_context_parallelism > 1
+          and self.attention_sink
+      ):
+        raise ValueError(
+            "Sparse indexer with all-gather context parallelism for flash attention does not support attention sinks."
         )
       if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
         raise ValueError(
@@ -3777,6 +4224,11 @@ class MaxTextConfig(
         raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
+    if self.quantize_mtp:
+      if self.mtp_num_layers <= 0:
+        raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
+      if self.quantization != "fp8_full":
+        raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
     if (
         self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
         and self.gradient_accumulation_steps > 1
@@ -3792,6 +4244,8 @@ class MaxTextConfig(
             f"Engram vocab size mismatch: expected {self.engram_max_ngram_size - 1} (max_ngram_size - 1), "
             f"but got {self.engram_vocab_bases}."
         )
+    if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
+      raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
     if self.num_experts > 1:
       if self.moe_mlp_dim <= 0:
         raise ValueError("moe_mlp_dim must be positive for MoE models (num_experts > 1)")
@@ -3836,6 +4290,20 @@ class MaxTextConfig(
       self.validate_ragged_buffer_factor()
     self.validate_num_moe_emb_chunks()
 
+    if self.enable_diloco and not self.pure_nnx:
+      raise ValueError("enable_diloco=True requires pure_nnx=True (Linen support for DiLoCo has been removed).")
+
+    if self.enable_streaming_diloco:
+      if not self.scan_layers:
+        raise ValueError("enable_streaming_diloco=True requires scan_layers=True.")
+      if self.num_diloco_fragments is not None and self.num_diloco_fragments > 1:
+        num_transformer_fragments = self.num_diloco_fragments - 1
+        if self.num_decoder_layers % num_transformer_fragments != 0:
+          raise ValueError(
+              f"The number of decoder layers ({self.num_decoder_layers}) must be divisible by "
+              f"(num_diloco_fragments - 1) ({num_transformer_fragments}) when enable_streaming_diloco is True."
+          )
+
     # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
       raise ValueError(
@@ -3860,6 +4328,9 @@ class MaxTextConfig(
           "qwen3-vl-30b-a3b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
+          "maxtext-omni-gemma3-qwen3",
+          "cosmos3-nano-reasoner",
+          "cosmos3-super-reasoner",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
@@ -3881,12 +4352,61 @@ class MaxTextConfig(
     if self.use_sft and self.use_dpo:
       raise ValueError("Only one of `use_sft` or `use_dpo` can be True.")
     if self.shard_mode == ShardMode.EXPLICIT:
-      supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek"}
+      supported_decoders = {
+          "simple",
+          "simple_mlp",
+          "llama2",
+          "deepseek",
+          "mistral",
+          "mixtral",
+          "qwen2",
+          "qwen3",
+          "qwen3_moe",
+          "qwen3_custom_moe",
+          "qwen3_5",
+          "qwen3_next",
+          "gemma",
+          "gemma2",
+          "gemma3",
+      }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
             f"Decoder '{self.decoder_block.value}' is not supported with 'explicit' sharding. "
-            f"Supported options are: {list(supported_decoders)}."
+            f"Supported options are: {sorted(supported_decoders)}."
         )
+      if self.use_multimodal:
+        raise ValueError(
+            "'explicit' sharding is not supported with `use_multimodal`; the vision and audio encoders "
+            "have not been onboarded to explicit sharding yet."
+        )
+      # Both hybrid decoders share the same GatedDeltaNet sublayers, so the same gaps.
+      if self.decoder_block in (
+          DecoderBlockType.QWEN3_5,
+          DecoderBlockType.QWEN3_NEXT,
+      ):
+        decoder_name = self.decoder_block.value
+        if not self.sparse_matmul:
+          raise ValueError(
+              f"'explicit' sharding with the '{decoder_name}' decoder requires"
+              " `sparse_matmul=True`; the dense matmul MoE path has not been"
+              " onboarded to explicit sharding yet."
+          )
+        gdn_context_parallel_size = (
+            self.ici_context_parallelism
+            * self.dcn_context_parallelism
+            * self.ici_context_usp_ulysses_parallelism
+            * self.dcn_context_usp_ulysses_parallelism
+        )
+        if gdn_context_parallel_size > 1:
+          raise ValueError(
+              f"'explicit' sharding with the '{decoder_name}' decoder does not"
+              " support context parallelism yet. The GatedDeltaNet short"
+              " convolution left-pads the sequence by `gdn_conv_kernel_dim -"
+              " 1` and slices the result back, which explicit sharding cannot"
+              " express on a sharded sequence axis. Use `shard_mode=auto` when"
+              " `ici_context_parallelism` or"
+              " `ici_context_usp_ulysses_parallelism` is set."
+          )
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
     if self.ulysses_context_sharding != "context_usp_ulysses":
@@ -4086,6 +4606,16 @@ class MaxTextConfig(
       rotary_dim = int(self.head_dim * self.partial_rotary_factor)
       if rotary_dim % 2 != 0:
         raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
+      gdn_context_parallel_size = self.ici_context_parallelism * self.dcn_context_parallelism
+      if gdn_context_parallel_size > 1 and self.context_parallel_load_balance:
+        raise ValueError(
+            "GatedDeltaNet context parallelism requires context_parallel_load_balance=False. The GatedDeltaNet "
+            "layers carry a recurrence, so device order is sequence order: device i composes the state left by "
+            "device i-1. DUAL_CHUNK_SWAP hands device 0 the first and last chunks, device 1 the second and "
+            "second-to-last, and so on, which composes the segments out of order. Softmax attention tolerates the "
+            "reorder because it rebuilds the causal mask from positions; a recurrence cannot. The run still trains "
+            "and the loss still falls, so set this explicitly rather than relying on the failure being visible."
+        )
     else:
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
@@ -4110,17 +4640,34 @@ class MaxTextConfig(
         raise ValueError("Only supports <= 1 for now, more workers results in duplicated data")
     elif self.dataset_type == DatasetType.GRAIN:
       use_hf_parquet = self.hf_path and self.grain_file_type == "parquet"
+      use_tfds_tfrecord_train = (
+          self.grain_file_type == "tfrecord" and self.dataset_path and self.dataset_name and self.train_split
+      )
+      use_tfds_tfrecord_eval = (
+          self.grain_file_type == "tfrecord" and self.dataset_path and self.eval_dataset_name and self.eval_split
+      )
 
-      if not self.grain_train_files and not self.grain_train_mixture_config_path and not use_hf_parquet:
+      if (
+          not self.grain_train_files
+          and not self.grain_train_mixture_config_path
+          and not use_hf_parquet
+          and not use_tfds_tfrecord_train
+      ):
         raise ValueError(
             "When dataset_type=grain, set grain_train_files, "
-            "grain_train_mixture_config_path, or use hf_path with grain_file_type=parquet."
+            "grain_train_mixture_config_path, use hf_path with grain_file_type=parquet, or use dataset_path, "
+            "dataset_name, and train_split with grain_file_type=tfrecord."
         )
-      if self.eval_interval > 0 and not self.grain_eval_files and not use_hf_parquet:
-        raise ValueError("Please specify grain_eval_files (or hf_path with parquet) or set eval_interval to <=0.")
+      if self.eval_interval > 0 and not self.grain_eval_files and not use_hf_parquet and not use_tfds_tfrecord_eval:
+        raise ValueError(
+            "Please specify grain_eval_files, use hf_path with grain_file_type=parquet, or use dataset_path, "
+            "eval_dataset_name, and eval_split with grain_file_type=tfrecord; otherwise set eval_interval to <=0."
+        )
     elif self.dataset_type == DatasetType.TFDS:
       logger.warning(
-          "tfds pipeline is deprecated. Use dataset_type=grain, grain_file_type=tfrecord, and provide grain_train_files."
+          "tfds pipeline is deprecated. Use dataset_type=grain and grain_file_type=tfrecord. You can keep the same "
+          "dataset_path, dataset_name, train_split, eval_dataset_name, and eval_split settings to automatically construct "
+          "the file paths. Alternatively, provide grain_train_files or grain_eval_files for custom file paths."
       )
       if self.use_dpo:
         raise ValueError(
@@ -4146,6 +4693,10 @@ class MaxTextConfig(
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
         # Hy3 is Qwen3-style GQA + QK-Norm attention over a DeepSeek-V3-style
@@ -4200,6 +4751,9 @@ class MaxTextConfig(
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
 
+    if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
+      raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
+
     for val in self.compress_ratios:
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
@@ -4238,6 +4792,8 @@ class MaxTextConfig(
         "autoregressive": self.ici_autoregressive_parallelism,
         "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
         "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+        "dcp": (1),
+        "pcp": (1),
     }
     self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
@@ -4258,8 +4814,28 @@ class MaxTextConfig(
         "autoregressive": self.dcn_autoregressive_parallelism,
         "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
         "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+        "dcp": (1),
+        "pcp": (1),
     }
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+
+    # Zero-1 (`shard_optimizer_over_data`) shards the optimizer moments over the "data"
+    # axis on top of whatever layout the parameters already have. FSDP shards the
+    # parameters over "fsdp", so combining the two leaves the gradients sharded
+    # P('fsdp', ...) while the moments they are added to are sharded P(('data', 'fsdp'), ...).
+    # Under `shard_mode=explicit` that add is a hard type error, and under `auto` GSPMD
+    # only papers over it with an extra collective. Keep the two mutually exclusive.
+    if self.shard_optimizer_over_data:
+      fsdp_size = _resolved_fsdp_size(
+          self.mesh_axes, self.ici_parallelism, self.num_target_devices // max(self.num_slices, 1)
+      ) * _resolved_fsdp_size(self.mesh_axes, self.dcn_parallelism, self.num_slices)
+      if fsdp_size > 1:
+        raise ValueError(
+            "`shard_optimizer_over_data` (Zero-1) cannot be combined with FSDP: the resolved "
+            f"fsdp/fsdp_transpose mesh axes have a combined size of {fsdp_size}. Set "
+            "`ici_fsdp_parallelism` and `ici_fsdp_transpose_parallelism` (and their `dcn_` "
+            "counterparts) to 1, or turn off `shard_optimizer_over_data`."
+        )
 
     # Diloco params
     # Resolve dcn_diloco_parallelism=-1 if left unspecified, using the same convention as dcn_data_parallelism.
@@ -4338,17 +4914,20 @@ class RLConfig(
     ModelArchitecture,
     MTP,
     MoBa,
-    # Advanced Architectures, Tuning, and Optimizers
+    MlaAttention,
+    CompressedAttention,
+    AttentionIndexer,
+    SplashAttention,
+    Qwen3Next,
+    MultimodalGeneral,
     Muon,
     FineTuning,
     Distillation,
-    # Datasets and Loading Compatibility
     DatasetGeneral,
     TfdsDataset,
     HfDataset,
     GrainDataset,
     OlmoGrainDataset,
-    # Inference, Checkpointing, and Monitoring
     EmergencyCheckpointing,
     ElasticTraining,
     InferenceServer,
@@ -4357,15 +4936,12 @@ class RLConfig(
     Goodput,
     GcpMonitoring,
     ManagedMLDiagnostics,
-    # Positional Embeddings
     PositionalEmbedding,
     Rope,
     YarnRope,
-    # Mixture of Experts
     MoEGeneral,
     MoEKernels,
     DeepSeekMoE,
-    # General MaxText Configs
     RunInfo,
     Checkpointing,
     OrbaxStorage,
@@ -4373,23 +4949,17 @@ class RLConfig(
     Tokenizer,
     AdamW,
     Optimizer,
+    TrainingLoop,
     Quantization,
-    MultimodalGeneral,
     VisionTower,
     VisionProjector,
     AudioEncoder,
-    MlaAttention,
-    CompressedAttention,
-    AttentionIndexer,
-    SplashAttention,
-    Qwen3Next,
-    # Debugging, Profiling, and Telemetry
-    AOT,
     DevelopmentAndDebugging,
     Profiling,
+    AOT,
     Metrics,
     Tensorboard,
-    # For compatibility with trainer in post_train/rl
+    DerivedValues,
     RL,
     RLCluster,
     RLDataset,
@@ -4397,8 +4967,6 @@ class RLConfig(
     RLReward,
     RLSpecialTokens,
     VLLM,
-    TrainingLoop,
-    DerivedValues,
 ):
   """
   Configuration for Reinforcement Learning in MaxText.
@@ -4624,5 +5192,33 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+
+    def get_parallelism_map(prefix: str) -> dict[str, int]:
+      return {
+          "diloco": getattr(self, f"{prefix}_diloco_parallelism"),
+          "data": getattr(self, f"{prefix}_data_parallelism"),
+          "stage": getattr(self, f"{prefix}_pipeline_parallelism"),
+          "fsdp": getattr(self, f"{prefix}_fsdp_parallelism"),
+          "fsdp_transpose": getattr(self, f"{prefix}_fsdp_transpose_parallelism"),
+          "sequence": getattr(self, f"{prefix}_sequence_parallelism"),
+          "context": getattr(self, f"{prefix}_context_parallelism"),
+          "context_usp_ulysses": getattr(self, f"{prefix}_context_usp_ulysses_parallelism"),
+          "context_autoregressive": getattr(self, f"{prefix}_context_autoregressive_parallelism"),
+          "tensor": getattr(self, f"{prefix}_tensor_parallelism"),
+          "tensor_sequence": getattr(self, f"{prefix}_tensor_sequence_parallelism"),
+          "model": getattr(self, f"{prefix}_tensor_parallelism"),
+          "expert": getattr(self, f"{prefix}_expert_parallelism"),
+          "autoregressive": getattr(self, f"{prefix}_autoregressive_parallelism"),
+          "attn_dp": 1,
+          "attn_dp_expert": 1,
+          "dcp": 1,
+          "pcp": 1,
+      }
+
+    ici_map = get_parallelism_map("ici")
+    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+
+    dcn_map = get_parallelism_map("dcn")
+    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     return self

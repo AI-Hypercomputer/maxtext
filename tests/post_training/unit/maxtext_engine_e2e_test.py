@@ -21,13 +21,19 @@ from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
+from flax import struct
+import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
+from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 import optax
 import pytest
+
+# training_engine imports tunix, so these tests need the post-training dependency bundle.
+pytestmark = [pytest.mark.post_training]
 
 
 class DummyNNXModel(nnx.Module):
@@ -37,7 +43,7 @@ class DummyNNXModel(nnx.Module):
     self.weights = nnx.Param(jnp.array([1.0, 2.0]))
 
 
-@dataclasses.dataclass(kw_only=True)
+@struct.dataclass(frozen=True, kw_only=True)
 class DummyPayload(abstract_engine.TrainerPayload):
   """Dummy payload for testing."""
 
@@ -116,6 +122,8 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
         "tensorboard_dir": self.create_tempdir().full_path,
         "skip_jax_distributed_system": True,
         "enable_checkpointing": enable_checkpointing,
+        # Disable scan_layers to prevent prepare_weight_sync from trying to unscan layers on DummyNNXModel
+        "scan_layers": False,
     }
     if enable_checkpointing:
       overrides.update(
@@ -134,10 +142,17 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
   @mock.patch.object(maxtext_engine.model_creation_utils, "from_pretrained")
   def test_e2e_training_loop_exercises_all_trainer_apis(self, mock_from_pretrained, mock_ckpt_mgr, mock_create_opt):
     mock_config = self.setup_config(enable_checkpointing=True)
+    dummy_mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(mock_config), mock_config.mesh_axes)
     dummy_model = DummyNNXModel()
-    mock_from_pretrained.return_value = dummy_model
-    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
-    mock_create_opt.return_value = (lambda step: jnp.array(0.001), dummy_opt)
+    # This test constructs the engine without a mesh, and `from_pretrained` returns
+    # `(model, model.mesh)` in that case -- it enters `with mesh:` before returning, so
+    # the mesh it hands back is never None. (It returns a bare model only when the
+    # caller supplies a mesh, which this test does not.)
+    mock_from_pretrained.return_value = (dummy_model, dummy_mesh)
+    # `create_training_optimizer` returns `(schedule, tx)` where `tx` is a raw optax
+    # GradientTransformation; the engine wraps it in an nnx.Optimizer itself. Returning
+    # an already-wrapped nnx.Optimizer here would make the engine wrap it twice.
+    mock_create_opt.return_value = (lambda step: jnp.array(0.001), optax.sgd(0.01))
 
     mock_ckpt_mgr_inst = mock.MagicMock()
     mock_ckpt_mgr_inst.restore_checkpoint.return_value = (None, None, None)
@@ -171,10 +186,8 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
     )
 
     self.assertLen(history, 4)
-    for metrics_buf_list in history:
-      self.assertIsInstance(metrics_buf_list, list)
-      self.assertNotEmpty(metrics_buf_list)
-      self.assertIsInstance(metrics_buf_list[0], abstract_engine.MetricsBuffer)
+    for metrics_buf in history:
+      self.assertIsInstance(metrics_buf, abstract_engine.MetricsBuffer)
     self.assertEqual(trainer_instance.train_step, 4)
 
 

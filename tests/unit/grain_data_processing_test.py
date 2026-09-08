@@ -18,11 +18,13 @@ import sys
 import os.path
 import tempfile
 import unittest
+from unittest import mock
 import json
 import numpy as np
 
 import jax
 import pytest
+from unittest.mock import patch
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
@@ -32,6 +34,27 @@ from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
+
+
+class TestTfdsTfrecordPathFallback:
+  """Tests TFrecord path construction without reading a dataset."""
+
+  def test_construct_tfds_tfrecord_path(self):
+    with patch.object(grain_data_processing.max_logging, "log") as log:
+      assert (
+          grain_data_processing.construct_tfds_tfrecord_path("  gs://maxtext-dataset/  ", "c4/en:3.0.1", "train")
+          == "gs://maxtext-dataset/c4/en/3.0.1/*-train.tfrecord-*"
+      )
+      log.assert_called_once_with(
+          "Automatically constructed Grain TFRecord path from TFDS configuration: "
+          "gs://maxtext-dataset/c4/en/3.0.1/*-train.tfrecord-*"
+      )
+
+  def test_missing_derived_path_reports_pattern(self, tmp_path):
+    pattern = str(tmp_path / "c4/en/3.0.1/*-train.tfrecord-*")
+
+    with pytest.raises(FileNotFoundError, match=r"No files found matching pattern: .*\*-train\.tfrecord-\*"):
+      grain_data_processing.find_data_files(pattern)
 
 
 class GrainBaseProcessingTest:
@@ -179,6 +202,44 @@ class _GrainArrayRecordSetup:
         **overrides,
     }
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
+
+
+class TestGrainArrayRecordDataSource:
+  """Tests ArrayRecord data source construction."""
+
+  @pytest.mark.parametrize(
+      ("grain_index_storage_option", "expected_reader_options"),
+      [
+          (None, None),
+          ("in_memory", {"index_storage_option": "in_memory"}),
+          ("offloaded", {"index_storage_option": "offloaded"}),
+      ],
+  )
+  def test_index_storage_option_passed_to_arrayrecord_reader(self, grain_index_storage_option, expected_reader_options):
+    map_dataset = mock.MagicMock()
+    with (
+        mock.patch.object(grain_data_processing, "find_data_files", return_value=["data.arrayrecord"]),
+        mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource") as data_source,
+        mock.patch.object(grain_data_processing.grain.MapDataset, "source", return_value=map_dataset),
+    ):
+      grain_data_processing.get_datasets(
+          "data.arrayrecord",
+          "arrayrecord",
+          shuffle=False,
+          shuffle_seed=0,
+          shuffle_buffer_size=1,
+          num_epoch=1,
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          grain_worker_count=0,
+          grain_num_threads=1,
+          grain_prefetch_buffer_size=1,
+          grain_data_source_max_workers=1,
+          grain_index_storage_option=grain_index_storage_option,
+          elastic=True,
+      )
+
+    data_source.assert_called_once_with(["data.arrayrecord"], reader_options=expected_reader_options)
 
 
 class GrainArrayRecordProcessingTest(
@@ -531,6 +592,16 @@ class GrainTFRecordProcessingTest(_GrainTFRecordSetup, GrainDeterminismMixin, Gr
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
+
+  def test_config_accepts_tfds_tfrecord_fallback(self):
+    config = self._make_config(
+        grain_train_files="",
+        dataset_path="gs://maxtext-dataset",
+        dataset_name="c4/en:3.0.1",
+        train_split="train",
+        eval_interval=0,
+    )
+    self.assertEqual(config.grain_train_files, "")
 
 
 class GrainTFRecordPreTokenizedProcessingTest(_GrainTFRecordSetup, GrainBaseProcessingTest, unittest.TestCase):

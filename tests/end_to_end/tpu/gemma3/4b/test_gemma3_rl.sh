@@ -16,6 +16,14 @@
 
 set -ex
 
+export VLLM_WORKER_MULTIPROC_METHOD='spawn'
+export MODEL_IMPL_TYPE='flax_nnx'
+export GRPC_ENABLE_FORK_SUPPORT='0'
+export JAX_RANDOM_WEIGHTS='1'
+export VLLM_ENABLE_V1_MULTIPROCESSING='0'
+export SKIP_JAX_PRECOMPILE='1'
+export NEW_MODEL_DESIGN='0'
+
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 use_pathways=${2:-false}
 MODEL_NAME='gemma3-4b'
@@ -37,22 +45,23 @@ python3 -m maxtext.inference.vllm_decode \
 # Step 2: Run RL on the converted checkpoint
 python3 -m maxtext.trainers.post_train.rl.train_rl \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
-    load_parameters_path=${SCANNED_CKPT_PATH} \
-    run_name=${run_id} rl.loss_algo='grpo' scan_layers=true \
-    num_batches=5 batch_size=1 num_test_batches=5 \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    run_name=${run_id} rl.loss_algo='grpo' scan_layers=false \
+    num_batches=2 batch_size=1 num_test_batches=2 \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
-    rollout_tensor_parallelism=1 \
-    use_standalone_converter=true \
+    chips_per_vm=4 \
+    rollout_tensor_parallelism=4 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    vllm_additional_config='{"maxtext_config": {"model_name": "gemma3-4b", "log_config": "false"}}'
+    vllm_additional_config='{"maxtext_config": {"model_name": "gemma3-4b", "log_config": "false"}}' \
+    hbm_utilization_vllm=0.5
 
 
 # Step 3: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/5/model_params \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.5 \
     prompt='Suggest some famous landmarks in London.' \
-    use_chat_template=True scan_layers=true enable_single_controller=${use_pathways}
+    use_chat_template=True scan_layers=false enable_single_controller=${use_pathways}

@@ -1024,6 +1024,17 @@ class TestMeshUtils(unittest.TestCase):
     # Verify the second argument to create_device_mesh was our device list
     mock_create_device_mesh.assert_called_once_with(config, specific_devices)
 
+  def test_create_device_mesh_honors_non_default_mesh_axes(self):
+    """Tests mesh creation for the vLLM inference axes, which include dcp and pcp."""
+    mesh_axes = ["data", "attn_dp", "model", "expert", "attn_dp_expert", "dcp", "pcp"]
+    config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, mesh_axes=mesh_axes)
+
+    self.assertEqual(len(config.ici_parallelism), len(mesh_axes))
+    self.assertEqual(len(config.dcn_parallelism), len(mesh_axes))
+
+    devices_array = maxtext_utils.create_device_mesh(config, devices=jax.devices()[:1])
+    self.assertEqual(devices_array.shape, (1,) * len(mesh_axes))
+
 
 class TestGetFunctionalTrainWithSignature(unittest.TestCase):
   """Tests for get_functional_train_with_signature."""
@@ -1171,6 +1182,9 @@ class TestGetShapedBatch(unittest.TestCase):
     cfg.use_mrope = use_mrope
     cfg.model_name = model_name
     cfg.training_objective = training_objective
+    cfg.video_max_grid_t = None
+    cfg.video_max_grid_h = None
+    cfg.video_max_grid_w = None
     if enable_diloco:
       cfg.num_diloco_replicas = 2
     return cfg

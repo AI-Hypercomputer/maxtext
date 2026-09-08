@@ -26,6 +26,7 @@ MhcDims = common.MhcDims
 MhcCoeffParams = common.MhcCoeffParams
 MhcCoeffOutputs = common.MhcCoeffOutputs
 MhcCoeffGradients = common.MhcCoeffGradients
+hbm_specs = common.hbm_specs
 
 
 def _validate_implementation(
@@ -59,7 +60,8 @@ def pre(
   Args:
     x: Input streams of shape `(batch, sequence, streams, embedding)`.
     weights: Structured `MhcWeights` container with all layer parameters.
-    permutations: All permutation matrices of shape `(num_permutations, streams, streams)`.
+    permutations: All permutation matrices of shape
+      `(num_permutations, streams, streams)`.
     config: Structured `MhcKernelConfig` tuning and compiler configuration.
     implementation: Preferred implementation (`"mosaic"` or `"mosaic_tpu"`).
 
@@ -93,7 +95,8 @@ def post(
   """Runs the post-gate and residual stream mixing.
 
   Args:
-    layer_output: Output from the wrapped branch of shape `(batch, sequence, embedding)`.
+    layer_output: Output from the wrapped branch of shape
+      `(batch, sequence, embedding)`.
     context: Opaque `MhcContext` returned by `pre`.
     config: Structured `MhcKernelConfig` tuning and compiler configuration.
 

@@ -4,7 +4,7 @@ array-record
 chex
 cloud-accelerator-diagnostics
 datasets
-drjax
+drjax>=0.2.1
 flax
 gcsfs
 google-api-python-client

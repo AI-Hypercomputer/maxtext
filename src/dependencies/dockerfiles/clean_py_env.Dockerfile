@@ -45,7 +45,7 @@ RUN apt-get update && apt-get install -y apt-utils git curl gnupg procps iproute
 RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list
 # Install the Google Cloud SDK
-RUN apt-get update && apt-get install -y google-cloud-sdk && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/*
 # Install gcsfuse
 RUN export GCSFUSE_REPO=gcsfuse-bullseye && \
     echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list && \

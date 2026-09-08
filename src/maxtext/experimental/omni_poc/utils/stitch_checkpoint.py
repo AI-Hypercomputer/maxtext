@@ -21,16 +21,21 @@ This script initializes a target multimodal model and restores subtrees from sep
 
 
 Example usage:
-python -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+JAX_PLATFORMS=cpu python -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+    src/maxtext/experimental/omni_poc/maxtext-omni-gemma3-qwen3.yml \
     --vision_load_path=gs://YOUR_BUCKET_NAME/checkpoints/gemma3-4b_converted/0/items \
     --llm_load_path=gs://YOUR_BUCKET_NAME/checkpoints/qwen3-4b_converted/0/items \
     --stitched_output_path=gs://YOUR_BUCKET_NAME/checkpoints/omni-gemma3-qwen3-4b/0/items
 """
 
+import maxtext
+# Eagerly initialize core MaxText C++ and model dependencies before train.py
+_ = (maxtext.Mesh, maxtext.pyconfig, maxtext.models, maxtext.model_creation_utils)
+
 import os
 from typing import Any, Dict
 
-from absl import app
+from absl import app, flags
 from etils import epath
 from flax import nnx
 import jax
@@ -45,6 +50,11 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
+
+FLAGS = flags.FLAGS
+flags.DEFINE_string("vision_load_path", "", "Path to the vision model checkpoint.")
+flags.DEFINE_string("llm_load_path", "", "Path to the LLM checkpoint.")
+flags.DEFINE_string("stitched_output_path", "", "Path to save the stitched checkpoint.")
 
 
 def _unwrap_var(v):
@@ -139,13 +149,16 @@ def stitch_and_save_checkpoints(
   max_logging.log("=" * 60)
   max_logging.log("Starting Omni Multi-Directory Checkpoint Stitching...")
 
-  vision_model_name = getattr(config, "model_name", None)
+  vision_model_name = getattr(config, "vision_encoder_block", None)
   llm_model_name = getattr(config, "decoder_block", None)
-  assert vision_model_name, "model_name must be configured for vision component."
+  vision_projector_type = getattr(config, "vision_projector_type", None)
+  assert vision_model_name, "vision_encoder_block must be configured for vision component."
   assert llm_model_name, "decoder_block must be configured for LLM component."
+  assert vision_projector_type, "vision_projector_type must be configured for vision component."
 
   max_logging.log(f"  Vision (Model {vision_model_name}) Path: {vision_checkpoint_path}")
   max_logging.log(f"  LLM (Model {llm_model_name}) Path:    {llm_checkpoint_path}")
+  max_logging.log(f"  Projector Type:        {vision_projector_type}")
   max_logging.log(f"  Output Stitched Path:  {output_checkpoint_path}")
   max_logging.log("=" * 60)
 
@@ -206,11 +219,7 @@ def stitch_and_save_checkpoints(
 
   # 4. Assemble: Vision (Model A) + LLM (Model B) + Random Init Projector
   stitched_inner = {k: _assemble(k, v, stitched_subtrees) for k, v in inner_params.items()}
-  final_params = (
-      {"params": stitched_inner}
-      if "params" in params_dict and isinstance(params_dict["params"], dict)
-      else stitched_inner
-  )
+  final_params = {"params": stitched_inner}
 
   # 5. Save unified parameter tree to output_checkpoint_path
   max_logging.log(f"Saving stitched checkpoint to: {output_checkpoint_path}")
@@ -241,13 +250,21 @@ def _load_custom_yaml_overrides(yaml_path: str, omni_keys: set[str]):
 
 
 def main(argv):
-  # Extract omni stitching arguments directly from argv before passing to pyconfig.initialize
-  omni_keys = {"vision_load_path", "llm_load_path", "stitched_output_path", "vision_model_name", "llm_model_name"}
+  omni_keys = {
+      "vision_load_path",
+      "llm_load_path",
+      "stitched_output_path",
+      "vision_model_name",
+      "llm_model_name",
+      "base_config",
+      "model_name",
+  }
   omni_kwargs = {}
   cleaned_argv = []
   for arg in argv:
-    if "=" in arg and arg.split("=", 1)[0] in omni_keys:
-      k, v = arg.split("=", 1)
+    cleaned_arg = arg.lstrip("-")
+    if "=" in cleaned_arg and cleaned_arg.split("=", 1)[0] in omni_keys:
+      k, v = cleaned_arg.split("=", 1)
       omni_kwargs[k] = v
     else:
       cleaned_argv.append(arg)
@@ -275,12 +292,16 @@ def main(argv):
 
     cleaned_argv[1] = os.path.join(pyconfig_mod.MAXTEXT_CONFIGS_DIR, "base.yml")
 
+  if not any(arg.startswith("skip_jax_distributed_system=") for arg in cleaned_argv):
+    cleaned_argv.append("skip_jax_distributed_system=True")
+
   # Initialize MaxText config using standard train.initialize
   config, _ = initialize(cleaned_argv)
-  # Extract paths from command-line arguments
-  vision_path = omni_kwargs.get("vision_load_path")
-  llm_path = omni_kwargs.get("llm_load_path")
-  output_path = omni_kwargs.get("stitched_output_path")
+  object.__setattr__(config, "model_name", "maxtext-omni-gemma3-qwen3")
+  # Extract paths from command-line arguments or FLAGS
+  vision_path = FLAGS.vision_load_path or omni_kwargs.get("vision_load_path")
+  llm_path = FLAGS.llm_load_path or omni_kwargs.get("llm_load_path")
+  output_path = FLAGS.stitched_output_path or omni_kwargs.get("stitched_output_path")
   assert (
       vision_path and llm_path and output_path
   ), "Must specify vision_load_path, llm_load_path, and stitched_output_path"

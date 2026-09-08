@@ -41,7 +41,7 @@ class BaseMaxTextToVLLMConverter(ABC):
     self.vllm_tp = self.config.rollout_tensor_parallelism
     self.vllm_state = {}
 
-  def convert(self, model_state: dict):
+  def convert(self, model_state: dict, **kwargs):
     """Convert a MaxText model state into vLLM weight tensors."""
     logging.info("\n%sStarting Conversion...%s", GREEN, RESET)
     self.vllm_state = {}

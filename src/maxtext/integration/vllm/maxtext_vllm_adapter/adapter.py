@@ -28,6 +28,8 @@ from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from tpu_inference.models.jax.utils.multi_modal_utils import merge_multimodal_embeddings
+from .multimodal import get_multimodal_handler
 
 
 try:
@@ -128,6 +130,23 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       f"num_lanes={num_lanes}, tp={tp}, attn_dp={attn_dp}, ep={ep}, moe_mlp_tp_size={moe_mlp_tp_size}"
   )
 
+  # The native tpu-inference model paths derive use_ep from
+  # parallel_config.enable_expert_parallel, but the mesh built by
+  # ShardingConfigManager.from_vllm_config takes expert parallelism only from
+  # additional_config's sharding_strategy. MaxText derives use_ep from the mesh, so
+  # --enable-expert-parallel alone leaves the experts unsharded here while the native
+  # implementation of the same model runs expert-parallel. Warn rather than fail, since
+  # the run is still correct, only sharded differently than the flag suggests.
+  expert_shard_degree = ep * sharding_config.attn_dp_expert_size
+  if vllm_config.parallel_config.enable_expert_parallel and expert_shard_degree == 1:
+    max_logging.warning(
+        "--enable-expert-parallel was requested but the mesh has no expert shards "
+        f"(expert={ep}, attn_dp_expert={sharding_config.attn_dp_expert_size}), so MaxText will shard the MoE over "
+        "the MLP dimension instead of the expert dimension. The vLLM flag does not reach the JAX mesh; set "
+        'expert_parallelism in the vLLM additional_config sharding_strategy, e.g. \'{"sharding": '
+        '{"sharding_strategy": {"expert_parallelism": <num_devices>}}}\', to actually shard experts.'
+    )
+
   # Replicate the number of KV heads if its less than the total degree of model parallelism
   if kv_tp_size % num_kv_heads == 0 and num_kv_heads < kv_tp_size:
     max_logging.log(
@@ -152,8 +171,15 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     while (padded_hidden_size // moe_mlp_tp_size) < (2 * num_lanes):
       padded_hidden_size = next_power_of_two(padded_hidden_size + 1)
 
-    max_logging.log(
-        f"Padding moe_intermediate_size from {hidden_size} to {padded_hidden_size} to match MLP MoE requirements."
+    # This inflates every expert weight, so it is a real memory/FLOP cost rather than a
+    # cosmetic reshape: at moe_mlp_tp_size=4 a 512-wide MoE is padded to 1024 (2x the MoE
+    # weights), and at moe_mlp_tp_size=8 to 2048 (4x). Log it at WARNING so it is visible
+    # under vLLM's logging configuration, which does not surface absl INFO records.
+    max_logging.warning(
+        f"Padding moe_intermediate_size from {hidden_size} to {padded_hidden_size} to match MLP MoE requirements "
+        f"(moe_mlp_tp_size={moe_mlp_tp_size}, 2*num_lanes={2 * num_lanes}). This multiplies the MoE weights and "
+        f"MoE FLOPs by {padded_hidden_size / hidden_size:g}x. Consider sharding the MoE over the expert axis "
+        f"instead, by setting expert_parallelism in the vLLM additional_config sharding_strategy."
     )
     overrides["padded_base_moe_mlp_dim"] = padded_hidden_size
 
@@ -174,6 +200,7 @@ class MaxTextForCausalLM(nnx.Module):
   # JIT-sharded initialization (via create_nnx_model with out_shardings).
   # When True, model_loader skips wrapping __init__ in an outer bare @jax.jit,
   _self_manages_sharding: bool = True
+  supports_multimodal: bool = False
 
   def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
     """Initializes the MaxTextForCausalLM model.
@@ -186,6 +213,7 @@ class MaxTextForCausalLM(nnx.Module):
     self.vllm_config = vllm_config
     self.cfg = vllm_config.model_config
     self.maxtext_config = generate_maxtext_config(vllm_config)
+    self.multimodal_handler = get_multimodal_handler(self.maxtext_config.model_name)
 
     # Model configuration
     self.mesh = mesh
@@ -260,20 +288,36 @@ class MaxTextForCausalLM(nnx.Module):
     # MaxText decode treats vLLM's flattened tokens as a batch with seq_len=1.
     # MRoPE positions arrive channel-first and must also move their 3 channels
     # to MaxText's trailing dimension.
-    input_ids = jnp.expand_dims(input_ids, axis=1)
+    inputs_embeds = args[0] if args else None
+    if inputs_embeds is not None:
+      decoder_input_embeddings = inputs_embeds[:, None, :].astype(self.maxtext_config.dtype)
+      # tpu-inference passes input_ids=None with precomputed embeddings. The
+      # decoder still requires a shape-compatible token array, but does not use
+      # its values when decoder_input_embeddings is present.
+      input_ids = jnp.zeros((inputs_embeds.shape[0], 1), dtype=jnp.int32)
+    else:
+      decoder_input_embeddings = None
+      input_ids = jnp.expand_dims(input_ids, axis=1)
+
     input_positions = normalize_vllm_input_positions(attention_metadata.input_positions)
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
       expert_indices = None
-      hidden, kv_caches = self.model(
+      res = self.model(
           decoder_input_tokens=input_ids,
+          decoder_input_embeddings=decoder_input_embeddings,
           decoder_positions=input_positions,
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           model_mode=self.model_mode,
           **kwargs,
       )
+
+      if isinstance(res, tuple) and len(res) == 3:
+        hidden, kv_caches, expert_indices = res
+      else:
+        hidden, kv_caches = res
 
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
       hidden = hidden.reshape((-1, hidden.shape[-1]))
@@ -304,11 +348,26 @@ class MaxTextForCausalLM(nnx.Module):
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       return self.model.token_embedder.embedding
 
-  def embed_input_ids(self, input_ids: jax.Array) -> jax.Array:
+  def embed_multimodal(self, **kwargs) -> list[jax.Array]:
+    """Computes embeddings using the configured model family's handler."""
+    if not isinstance(self.model, nnx.Module):
+      raise ValueError("Model is not initialized.")
+    if self.multimodal_handler is None:
+      raise ValueError(f"No vLLM multimodal handler is registered for {self.maxtext_config.model_name!r}.")
+    return self.multimodal_handler.embed_multimodal(self.model, self.maxtext_config, self.mesh, **kwargs)
+
+  def embed_input_ids(
+      self,
+      input_ids: jax.Array,
+      multimodal_embeddings: jax.Array | None = None,
+      is_multimodal: jax.Array | None = None,
+  ) -> jax.Array:
     """Embeds the input token IDs using the model's token embedder.
 
     Args:
       input_ids: A JAX array of input token IDs.
+      multimodal_embeddings: Optional modality embeddings to merge.
+      is_multimodal: Optional mask identifying multimodal inputs.
 
     Returns:
       A JAX array of embedded input tokens.
@@ -317,7 +376,20 @@ class MaxTextForCausalLM(nnx.Module):
       raise ValueError("Model is not initialized.")
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
-      return self.model.token_embedder(input_ids)
+      inputs_embeds = self.model.token_embedder(input_ids)
+
+      if multimodal_embeddings is not None:
+        if self.multimodal_handler is None:
+          raise ValueError(f"No vLLM multimodal handler is registered for {self.maxtext_config.model_name!r}.")
+        placeholder_ids = self.multimodal_handler.placeholder_token_ids(self.cfg.hf_config)
+
+        inputs_embeds = merge_multimodal_embeddings(
+            input_ids,
+            inputs_embeds,
+            multimodal_embeddings,
+            placeholder_ids,
+        )
+      return inputs_embeds
 
   def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
     """Computes the logits from the hidden states using the underlying decoder model.

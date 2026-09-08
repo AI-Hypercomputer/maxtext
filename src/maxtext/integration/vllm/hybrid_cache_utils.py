@@ -17,21 +17,29 @@
 import math
 from typing import Any
 
+import jax.numpy as jnp
+
 
 def normalize_vllm_input_positions(input_positions: Any):
-  """Converts vLLM's flattened position layout to MaxText decode layout.
+  """Converts vLLM's position layout to MaxText decode/prefill layout.
 
-  vLLM supplies ordinary positions as ``(num_tokens,)`` and MRoPE positions
-  as ``(3, num_tokens)``. MaxText treats flattened decode tokens as a batch
-  with a singleton sequence dimension, so it expects ``(num_tokens, 1)`` or
-  ``(num_tokens, 1, 3)``, respectively.
+  vLLM supplies ordinary positions as ``(num_tokens,)``, decode MRoPE positions
+  as ``(3, num_tokens)``, and batched MRoPE positions as ``(3, batch, seq)``.
+  MaxText treats flattened decode tokens as a batch with a singleton sequence dimension,
+  expecting ``(num_tokens, 1)`` or ``(num_tokens, 1, 3)``, and batched MRoPE as
+  ``(batch, seq, 3)``.
   """
+  if input_positions is None:
+    return None
   if input_positions.ndim == 1:
     return input_positions.reshape((-1, 1))
   if input_positions.ndim == 2 and input_positions.shape[0] == 3:
     return input_positions.T[:, None, :]
+  if input_positions.ndim == 3 and input_positions.shape[0] == 3:
+    return jnp.transpose(input_positions, (1, 2, 0))
   raise ValueError(
-      "vLLM input positions must have shape (num_tokens,) or (3, num_tokens); " f"got {input_positions.shape}."
+      "vLLM input positions must have shape (num_tokens,), (3, num_tokens), or (3, batch, seq); "
+      f"got {input_positions.shape}."
   )
 
 

@@ -14,6 +14,7 @@ replicate_quant_scale: true
 
 logical_axis_rules: [
                       ['embed', []],
+                      ['embed_attn', []],
                       ['vocab', ['tensor', 'autoregressive']],
                       ['activation_batch', []],
                       ['activation_length', []],

@@ -13,20 +13,47 @@
 # limitations under the License.
 """Shared zero-cost abstractions, block math, and tiling for mHC-lite Pallas kernels."""
 
+import contextlib
 import dataclasses
+from typing import Any
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
+
+
+@contextlib.contextmanager
+def tpu_mesh_context():
+  """Ensures a valid TPU AbstractMesh is available when running on CPU / interpret mode."""
+  needs_abstract_mesh = False
+  try:
+    if not pltpu.is_tpu_device():
+      needs_abstract_mesh = True
+  except (RuntimeError, ValueError, AttributeError, TypeError):
+    needs_abstract_mesh = True
+
+  if needs_abstract_mesh:
+    abstract_mesh = jax.sharding.AbstractMesh(
+        (),
+        (),
+        abstract_device=jax.sharding.AbstractDevice("TPU7x", 1, "tpu"),
+    )
+    with jax.sharding.use_abstract_mesh(abstract_mesh):
+      yield
+  else:
+    yield
+
 
 DEFAULT_BLOCK_SIZE = 128
 DEFAULT_BWD_BLOCK_SIZE = 32
 DEFAULT_POST_BWD_BLOCK_SIZE = 32
 DEFAULT_POST_BWD_FEATURE_BLOCK_SIZE = 1024
 DEFAULT_VMEM_LIMIT_BYTES = 128 * 1024 * 1024
+HBM_SPEC = pl.BlockSpec(memory_space=pltpu.HBM)
 PARALLEL_DIMENSION_SEMANTICS = (pltpu.PARALLEL,)
 SEQUENTIAL_DIMENSION_SEMANTICS = (pltpu.ARBITRARY,)
 SEQUENTIAL_2D_DIMENSION_SEMANTICS = (pltpu.ARBITRARY, pltpu.ARBITRARY)
+POST_BWD_DIMENSION_SEMANTICS = (pltpu.PARALLEL, pltpu.ARBITRARY)
 # Kernel-level context tuple: `(x, h_post, residual)`.
 type KernelContext = tuple[jax.Array, jax.Array, jax.Array]
 
@@ -95,17 +122,22 @@ class MhcDims:
       - FLOPs:
         1. Fused Projection GEMM: `flattened_x (T, k*d) @ phi (k*d, 2*k+P)`
            [einsum: `tf,fc->tc` where `f = k*d`, `c = 2*k + P`]
-           = `2 * T * (k*d) * (2*k + P)` FLOPs (2 FLOPs per multiply-accumulate).
+           = `2 * T * (k*d) * (2*k + P)` FLOPs (2 FLOPs per
+           multiply-accumulate).
         2. Permutation GEMM: `softmax_weights (T, P) @ permutations (P, k*k)`
            [einsum: `tp,pij->tij` where `i, j` are streams `k, k`]
            = `2 * T * P * k*k` FLOPs.
-        Total FLOPs = `2 * tokens * flattened_size * phi_cols + 2 * tokens * num_permutations * streams^2`.
+        Total FLOPs = `2 * tokens * flattened_size * phi_cols + 2 * tokens *
+        num_permutations * streams^2`.
       - Transcendentals:
         Sigmoid gating for pre/post gates and softmax over permutation logits
-        = `T * (k + k + P) = tokens * (2 * streams + num_permutations) = tokens * phi_cols`.
+        = `T * (k + k + P) = tokens * (2 * streams + num_permutations) = tokens
+        * phi_cols`.
       - Bytes Accessed:
-        Read input `x` (bfloat16: `T * k * d * 2` bytes) + read `phi` (float32: `(k*d) * phi_cols * 4` bytes)
-        = `tokens * streams * embedding * 2 + flattened_size * phi_cols * 4` bytes.
+        Read input `x` (bfloat16: `T * k * d * 2` bytes) + read `phi` (float32:
+        `(k*d) * phi_cols * 4` bytes)
+        = `tokens * streams * embedding * 2 + flattened_size * phi_cols * 4`
+        bytes.
 
     Returns:
       pl.CostEstimate with estimated FLOPs, transcendentals, and bytes accessed.
@@ -116,20 +148,27 @@ class MhcDims:
     )
     transcendentals = int(self.tokens * (2 * self.streams + self.num_permutations))
     bytes_accessed = int(self.tokens * self.streams * self.embedding * 2 + self.flattened_size * self.phi_cols * 4)
-    return pl.CostEstimate(flops=flops, transcendentals=transcendentals, bytes_accessed=bytes_accessed)
+    return pl.CostEstimate(
+        flops=flops,
+        transcendentals=transcendentals,
+        bytes_accessed=bytes_accessed,
+    )
 
   def pre_apply_fwd_cost(self) -> pl.CostEstimate:
     """Estimates compute and memory cost for the forward pre-apply gating kernel.
 
     Mathematical Derivations:
       - FLOPs:
-        Stream reduction `sum_s (h_pre[t, s] * x[t, s, d])` [einsum: `ts,tsd->td`] across `k` streams
-        for each of the `T * d` output elements (vector-matrix product `(1, k) @ (k, d) -> (1, d)` per token).
+        Stream reduction `sum_s (h_pre[t, s] * x[t, s, d])` [einsum:
+        `ts,tsd->td`] across `k` streams
+        for each of the `T * d` output elements (vector-matrix product `(1, k) @
+        (k, d) -> (1, d)` per token).
         = `2 * T * k * d = 2 * tokens * streams * embedding` FLOPs.
       - Transcendentals:
         0 (linear scaling and summation).
       - Bytes Accessed:
-        Read input `x` (bfloat16: `T * k * d * 2` bytes) + write `layer_input` (bfloat16: `T * d * 2` bytes)
+        Read input `x` (bfloat16: `T * k * d * 2` bytes) + write `layer_input`
+        (bfloat16: `T * d * 2` bytes)
         = `tokens * streams * embedding * 2 + tokens * embedding * 2` bytes.
 
     Returns:
@@ -144,17 +183,23 @@ class MhcDims:
 
     Mathematical Derivations:
       - FLOPs:
-        1. Residual mixing contraction `sum_s_in (residual[t, s_in, s_out] * x[t, s_in, d])`
-           [einsum: `tkj,tkd->tjd`] (matrix product `(k, k) @ (k, d) -> (k, d)` per token):
-           `2 * k` FLOPs per output element over `T * k * d` elements = `2 * T * k^2 * d` FLOPs.
-        2. Post-gating and accumulation `h_post[t, s] * layer_output[t, d] + residual_mix[t, s, d]`
+        1. Residual mixing contraction `sum_s_in (residual[t, s_in, s_out] *
+        x[t, s_in, d])`
+           [einsum: `tkj,tkd->tjd`] (matrix product `(k, k) @ (k, d) -> (k, d)`
+           per token):
+           `2 * k` FLOPs per output element over `T * k * d` elements = `2 * T *
+           k^2 * d` FLOPs.
+        2. Post-gating and accumulation `h_post[t, s] * layer_output[t, d] +
+        residual_mix[t, s, d]`
            [einsum: `ts,td->tsd`]:
            `2 * T * k * d` FLOPs (1 multiply + 1 add per element).
-        Total FLOPs = `2 * tokens * streams^2 * embedding + 2 * tokens * streams * embedding`.
+        Total FLOPs = `2 * tokens * streams^2 * embedding + 2 * tokens * streams
+        * embedding`.
       - Transcendentals:
         0.
       - Bytes Accessed:
-        Read `x` (bfloat16: `T * k * d * 2` bytes) + write output (bfloat16: `T * k * d * 2` bytes)
+        Read `x` (bfloat16: `T * k * d * 2` bytes) + write output (bfloat16: `T
+        * k * d * 2` bytes)
         + read `layer_output` and gating/residual context (`T * d * 4` bytes)
         = `2 * tokens * streams * embedding * 2 + tokens * embedding * 4` bytes.
 
@@ -172,15 +217,18 @@ class MhcDims:
 
     Mathematical Derivations:
       - FLOPs:
-        1. Activation cotangent `d_x = h_pre * d_layer_input` [einsum: `ts,td->tsd`] (multiply)
+        1. Activation cotangent `d_x = h_pre * d_layer_input` [einsum:
+        `ts,td->tsd`] (multiply)
            + accumulation with `d_x_acc` (add) = `2 * T * k * d` FLOPs.
-        2. Gate cotangent `d_h_pre = sum_d (x * d_layer_input)` [einsum: `tsd,td->ts`] (multiply + reduce-add)
+        2. Gate cotangent `d_h_pre = sum_d (x * d_layer_input)` [einsum:
+        `tsd,td->ts`] (multiply + reduce-add)
            = `2 * T * k * d` FLOPs.
         Total FLOPs = `4 * tokens * streams * embedding`.
       - Transcendentals:
         0.
       - Bytes Accessed:
-        Read `x` (`T * k * d * 2`) + read `d_x_acc` (`T * k * d * 2`) + write `d_x_acc_out` (`T * k * d * 2`)
+        Read `x` (`T * k * d * 2`) + read `d_x_acc` (`T * k * d * 2`) + write
+        `d_x_acc_out` (`T * k * d * 2`)
         + read `d_layer_input` (`T * d * 2`)
         = `3 * tokens * streams * embedding * 2 + tokens * embedding * 2` bytes.
 
@@ -196,17 +244,23 @@ class MhcDims:
 
     Mathematical Derivations:
       - FLOPs:
-        In-kernel forward recomputation plus VJP of `mhc_coeffs` (evaluating matrix multiplications
-        for activation cotangents `d_x` [einsum: `tc,fc->tf`], parameter gradients `d_phi` [einsum: `tf,tc->fc`],
-        and permutation gradients [einsum: `tij,pij->tp`]), scaling forward GEMMs by 2x:
-        Total FLOPs = `2 * (2 * tokens * flattened_size * phi_cols + 2 * tokens * num_permutations * streams^2)`.
+        In-kernel forward recomputation plus VJP of `mhc_coeffs` (evaluating
+        matrix multiplications
+        for activation cotangents `d_x` [einsum: `tc,fc->tf`], parameter
+        gradients `d_phi` [einsum: `tf,tc->fc`],
+        and permutation gradients [einsum: `tij,pij->tp`]), scaling forward
+        GEMMs by 2x:
+        Total FLOPs = `2 * (2 * tokens * flattened_size * phi_cols + 2 * tokens
+        * num_permutations * streams^2)`.
       - Transcendentals:
         Gating and softmax evaluations across tokens
         = `T * (k + k + P) = tokens * (2 * streams + num_permutations)`.
       - Bytes Accessed:
-        Read `x` (`T * k * d * 2`) + read `d_x_acc` (`T * k * d * 2`) + write `d_x` (`T * k * d * 2`)
+        Read `x` (`T * k * d * 2`) + read `d_x_acc` (`T * k * d * 2`) + write
+        `d_x` (`T * k * d * 2`)
         + read `phi` and write `d_phi` (`2 * (k*d) * phi_cols * 4`)
-        = `3 * tokens * streams * embedding * 2 + 2 * flattened_size * phi_cols * 4` bytes.
+        = `3 * tokens * streams * embedding * 2 + 2 * flattened_size * phi_cols
+        * 4` bytes.
 
     Returns:
       pl.CostEstimate with estimated FLOPs, transcendentals, and bytes accessed.
@@ -222,25 +276,38 @@ class MhcDims:
     bytes_accessed = int(
         3 * self.tokens * self.streams * self.embedding * 2 + 2 * self.flattened_size * self.phi_cols * 4
     )
-    return pl.CostEstimate(flops=flops, transcendentals=transcendentals, bytes_accessed=bytes_accessed)
+    return pl.CostEstimate(
+        flops=flops,
+        transcendentals=transcendentals,
+        bytes_accessed=bytes_accessed,
+    )
 
   def post_apply_bwd_cost(self) -> pl.CostEstimate:
     """Estimates compute and memory cost for the backward post-apply kernel.
 
     Mathematical Derivations:
       - FLOPs:
-        Backward VJP of post-apply evaluates transposed residual contraction `d_x = residual^T @ d_output`
-        [einsum: `tkj,tjd->tkd`] (`2 * T * k^2 * d`), gate reduction `d_layer_output = sum_s (h_post * d_output)`
-        [einsum: `ts,tsd->td`] (`2 * T * k * d`), and feature reductions `d_h_post` [einsum: `td,tsd->ts`]
-        (`2 * T * k * d`) and `d_residual` [einsum: `tjd,tkd->tjk`] (`2 * T * k^2 * d`):
-        Total FLOPs = `4 * tokens * streams^2 * embedding + 4 * tokens * streams * embedding`
-        = `2 * (2 * tokens * streams^2 * embedding + 2 * tokens * streams * embedding)`.
+        Backward VJP of post-apply evaluates transposed residual contraction
+        `d_x = residual^T @ d_output`
+        [einsum: `tkj,tjd->tkd`] (`2 * T * k^2 * d`), gate reduction
+        `d_layer_output = sum_s (h_post * d_output)`
+        [einsum: `ts,tsd->td`] (`2 * T * k * d`), and feature reductions
+        `d_h_post` [einsum: `td,tsd->ts`]
+        (`2 * T * k * d`) and `d_residual` [einsum: `tjd,tkd->tjk`] (`2 * T *
+        k^2 * d`):
+        Total FLOPs = `4 * tokens * streams^2 * embedding + 4 * tokens * streams
+        * embedding`
+        = `2 * (2 * tokens * streams^2 * embedding + 2 * tokens * streams *
+        embedding)`.
       - Transcendentals:
         0.
       - Bytes Accessed:
-        Read `x` (`T * k * d * 2`) + read `d_output` (`T * k * d * 2`) + write `d_x` (`T * k * d * 2`)
-        + read/write `layer_output` and `d_layer_output` (`2 * tokens * embedding * 4`)
-        = `3 * tokens * streams * embedding * 2 + 2 * tokens * embedding * 4` bytes.
+        Read `x` (`T * k * d * 2`) + read `d_output` (`T * k * d * 2`) + write
+        `d_x` (`T * k * d * 2`)
+        + read/write `layer_output` and `d_layer_output` (`2 * tokens *
+        embedding * 4`)
+        = `3 * tokens * streams * embedding * 2 + 2 * tokens * embedding * 4`
+        bytes.
 
     Returns:
       pl.CostEstimate with estimated FLOPs, transcendentals, and bytes accessed.
@@ -325,9 +392,19 @@ class MhcCoeffGradients:
   res_bias: jax.Array
 
 
+def hbm_specs(*args: Any) -> tuple[pl.BlockSpec, ...] | Any:
+  """Returns a tuple or PyTree of HBM BlockSpecs for the given count or arguments."""
+  if len(args) == 1:
+    arg = args[0]
+    if isinstance(arg, int):
+      return (HBM_SPEC,) * arg
+    return jax.tree.map(lambda _: HBM_SPEC, arg)
+  return tuple(HBM_SPEC for _ in range(len(args)))
+
+
 def whole(shape: tuple[int, ...]) -> pl.BlockSpec:
   """Returns a full-array BlockSpec for values that stay VMEM-resident."""
-  return pl.BlockSpec(shape, lambda _: tuple(0 for _ in shape))
+  return pl.BlockSpec(shape, lambda *_: tuple(0 for _ in shape))
 
 
 def token_block_spec(shape: tuple[int, ...], block_size: int) -> pl.BlockSpec:
@@ -415,7 +492,12 @@ def mhc_coeffs(
 ) -> MhcCoeffOutputs:
   """Computes all mHC-lite coefficients without materializing normalized x."""
   tokens, streams, embedding = x.shape
-  dims = MhcDims(tokens=tokens, streams=streams, embedding=embedding, num_permutations=permutations.shape[0])
+  dims = MhcDims(
+      tokens=tokens,
+      streams=streams,
+      embedding=embedding,
+      num_permutations=permutations.shape[0],
+  )
   flattened = x.reshape(tokens, dims.flattened_size)
   projected = fused_project_and_norm(flattened, coeff_params.phi, rms_epsilon)
 
@@ -505,16 +587,16 @@ def validate_token_block_size(tokens: int, block_size: int, *, name: str) -> Non
   if block_size < 8 or block_size % 8:
     raise UnsupportedInputError(f"{name} must be a positive multiple of 8; got {block_size}.")
   if tokens % block_size:
-    raise UnsupportedInputError(f"The per-device token count ({tokens}) must be divisible by {name} ({block_size}).")
+    raise UnsupportedInputError(f"The per-device token count ({tokens}) must be divisible by {name}" f" ({block_size}).")
 
 
 def validate_feature_block_size(embedding: int, block_size: int) -> None:
   """Validates the feature tile used by the post-application backward."""
   if block_size < 128 or block_size % 128:
-    raise UnsupportedInputError(f"bwd_feature_block_size must be a positive multiple of 128; got {block_size}.")
+    raise UnsupportedInputError("bwd_feature_block_size must be a positive multiple of 128; got" f" {block_size}.")
   if embedding % block_size:
     raise UnsupportedInputError(
-        f"The embedding dimension ({embedding}) must be divisible by bwd_feature_block_size ({block_size})."
+        f"The embedding dimension ({embedding}) must be divisible by" f" bwd_feature_block_size ({block_size})."
     )
 
 
@@ -529,12 +611,13 @@ def validate_inputs(
   if x.dtype != jnp.bfloat16:
     raise UnsupportedInputError(f"The mHC Pallas kernel requires bfloat16 activations; got {x.dtype}.")
   if x.ndim != 4:
-    raise UnsupportedInputError(f"Expected x to have shape (batch, sequence, streams, embedding); got {x.shape}.")
+    raise UnsupportedInputError("Expected x to have shape (batch, sequence, streams, embedding); got" f" {x.shape}.")
   batch, sequence, streams, embedding = x.shape
   if streams != 4 or (permutations_shape is not None and permutations_shape != (24, 4, 4)):
     raise UnsupportedInputError(
         "The optimized mHC Pallas kernel currently supports mHC-lite with"
-        f" expansion rate 4 only; got x.shape={x.shape} and permutations.shape={permutations_shape}."
+        f" expansion rate 4 only; got x.shape={x.shape} and"
+        f" permutations.shape={permutations_shape}."
     )
   if embedding % 128:
     raise UnsupportedInputError(f"The embedding dimension must be divisible by 128; got {embedding}.")

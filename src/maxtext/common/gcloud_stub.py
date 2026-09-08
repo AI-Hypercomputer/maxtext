@@ -525,6 +525,9 @@ def _mldiagnostics_stub():  # pragma: no cover - simple placeholder
       """Return a stub context manager."""
       return _StubXprof()
 
+    def machinelearning_run(self, *a, **k):  # pylint: disable=unused-argument
+      """Do nothing: there is no run to register without the real package."""
+
   return _StubMldiag(), True
 
 

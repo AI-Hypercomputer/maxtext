@@ -317,6 +317,50 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         xent_sum_tiled, xent_sum_ref, rtol=self.rtol, atol=self.atol
     ), f"NNX vocab tiling loss {xent_sum_tiled} does not match non-tiled reference {xent_sum_ref}."
 
+  @pytest.mark.cpu_only
+  def test_linen_vocab_tiling_hidden_gradient_respects_outer_loss_scale(self):
+    """The tiled loss's hidden-state gradient obeys the chain rule."""
+    cfg = pyconfig.initialize(
+        self.base_config,
+        run_name="linen_vocab_tiling_outer_loss_scale",
+        enable_checkpointing=False,
+        enable_dropout=False,
+        max_target_length=self.seq_len,
+        per_device_batch_size=self.batch_size,
+        logits_via_embedding=False,
+        base_num_decoder_layers=0,
+        dtype="float32",
+        matmul_precision="high",
+        num_vocab_tiling=4,
+    )
+    quant = quantizations.configure_quantization(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    model = models.transformer_as_linen(cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    rng_model, rng_hidden, rng_targets = jax.random.split(self.rng, 3)
+    params = model.init(
+        {"params": rng_model, "dropout": rng_model},
+        self.dummy_inputs,
+        self.dummy_inputs,
+    )
+    hidden_states = jax.random.normal(rng_hidden, (self.batch_size, self.seq_len, cfg.emb_dim), dtype=jnp.float32)
+    data = {
+        "targets": jax.random.randint(rng_targets, (self.batch_size, self.seq_len), 0, cfg.vocab_size),
+        "targets_segmentation": jnp.ones((self.batch_size, self.seq_len)),
+    }
+
+    def scaled_loss(h, outer_loss_scale):
+      total_loss, _ = vocab_tiling_linen_loss(h, data, cfg, model, params, is_train=True)
+      return outer_loss_scale * total_loss
+
+    grad_with_scale = jax.jit(jax.grad(scaled_loss, argnums=0))
+    base_grad = grad_with_scale(hidden_states, 1.0)
+    doubled_grad = grad_with_scale(hidden_states, 2.0)
+
+    assert jnp.all(jnp.isfinite(base_grad))
+    assert jnp.any(base_grad != 0)
+    assert jnp.allclose(doubled_grad, 2.0 * base_grad, rtol=1e-5, atol=1e-6)
+
   @pytest.mark.tpu_only
   def test_vocab_tiling_gradient_non_tied_embedding(self):
     """
@@ -668,11 +712,13 @@ class VocabTilingNNXTest(unittest.TestCase):
       num_vocab_tiling=4,
       logits_via_embedding=False,
       z_loss_multiplier=1e-4,
+      ici_context_parallelism=1,
+      vocab_tiling_ag_once=False,
   ):
     """Build a pyconfig + matching NNX `Transformer` for the test."""
     cfg = pyconfig.initialize(
         self.base_config,
-        run_name=f"vt_nnx_n{num_vocab_tiling}_emb{logits_via_embedding}_z{z_loss_multiplier}",
+        run_name=f"vt_nnx_n{num_vocab_tiling}_emb{logits_via_embedding}_z{z_loss_multiplier}_cp{ici_context_parallelism}",
         enable_checkpointing=False,
         enable_dropout=False,
         max_target_length=self.seq_len,
@@ -683,6 +729,8 @@ class VocabTilingNNXTest(unittest.TestCase):
         matmul_precision="high",
         num_vocab_tiling=num_vocab_tiling,
         z_loss_multiplier=z_loss_multiplier,
+        ici_context_parallelism=ici_context_parallelism,
+        vocab_tiling_ag_once=vocab_tiling_ag_once,
         pure_nnx=True,
         enable_nnx=True,
         pure_nnx_decoder=True,
@@ -761,9 +809,14 @@ class VocabTilingNNXTest(unittest.TestCase):
     """grad wrapped in jit — see `_vg`."""
     return jax.jit(jax.grad(fn, argnums=argnums))
 
-  def _run_parity(self, *, logits_via_embedding):
+  def _run_parity(self, *, logits_via_embedding, ici_context_parallelism=1, vocab_tiling_ag_once=False):
     """Compare full-vocab xent loss/grads against the tiled custom_vjp path."""
-    cfg, model = self._build_cfg_and_model(num_vocab_tiling=4, logits_via_embedding=logits_via_embedding)
+    cfg, model = self._build_cfg_and_model(
+        num_vocab_tiling=4,
+        logits_via_embedding=logits_via_embedding,
+        ici_context_parallelism=ici_context_parallelism,
+        vocab_tiling_ag_once=vocab_tiling_ag_once,
+    )
     hidden_states, labels, segmentation = self._make_inputs(cfg)
     graphdef, params, rest = self._split_and_axes(cfg, model)
 
@@ -790,6 +843,11 @@ class VocabTilingNNXTest(unittest.TestCase):
   def test_nnx_vocab_tiling_tied_embedding(self):
     """custom_vjp parity when logits share the input embedding table."""
     self._run_parity(logits_via_embedding=True)
+
+  @pytest.mark.tpu_only
+  def test_nnx_vocab_tiling_gradient_context_parallelism(self):
+    """custom_vjp parity when the mesh shards the context axis."""
+    self._run_parity(logits_via_embedding=False, ici_context_parallelism=4, vocab_tiling_ag_once=True)
 
   # ---------- Coverage expansion ----------
 
@@ -873,6 +931,26 @@ class VocabTilingNNXTest(unittest.TestCase):
     assert ref_grad_h.dtype == hidden_states.dtype
     assert tile_grad_h.dtype == hidden_states.dtype
     assert jnp.allclose(ref_grad_h, tile_grad_h, rtol=self.rtol, atol=self.atol), "grad_hidden_states diverged"
+
+  @pytest.mark.cpu_only
+  def test_nnx_vocab_tiling_hidden_gradient_respects_outer_loss_scale(self):
+    """The tiled loss's hidden-state gradient obeys the chain rule."""
+    cfg, model = self._build_cfg_and_model(num_vocab_tiling=4)
+    hidden_states, labels, segmentation = self._make_inputs(cfg)
+    graphdef, params, rest = self._split_and_axes(cfg, model)
+    tile_loss_fn = self._tiled_loss_fn(cfg, graphdef, rest, hidden_states, labels, segmentation)
+
+    def scaled_loss(p, h, outer_loss_scale):
+      return outer_loss_scale * tile_loss_fn(p, h)
+
+    grad_with_scale = self._g(scaled_loss, argnums=1)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      base_grad = grad_with_scale(params, hidden_states, 1.0)
+      doubled_grad = grad_with_scale(params, hidden_states, 2.0)
+
+    assert jnp.all(jnp.isfinite(base_grad))
+    assert jnp.any(base_grad != 0)
+    assert jnp.allclose(doubled_grad, 2.0 * base_grad, rtol=1e-5, atol=1e-6)
 
   @pytest.mark.tpu_only
   def test_nnx_vocab_tiling_bf16_hidden_states(self):

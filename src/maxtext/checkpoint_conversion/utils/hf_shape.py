@@ -153,6 +153,39 @@ def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
   return shapes
 
 
+def _get_gemma4_layer_attention_dims(text_cfg: dict, layer_idx: int, is_global: bool):
+  """Extracts (q_dim, kv_dim, norm_dim) for a Gemma 4 layer accounting for per_layer_config overrides."""
+  num_attention_heads = text_cfg["num_attention_heads"]
+  num_key_value_heads = text_cfg["num_key_value_heads"]
+  head_dim = text_cfg["head_dim"]
+  global_head_dim = text_cfg.get("global_head_dim") or head_dim
+  num_global_key_value_heads = text_cfg.get("num_global_key_value_heads") or num_key_value_heads
+
+  per_layer_config = text_cfg.get("per_layer_config") or {}
+  if isinstance(per_layer_config, list):
+    layer_override = (
+        per_layer_config[layer_idx]
+        if layer_idx < len(per_layer_config) and isinstance(per_layer_config[layer_idx], dict)
+        else {}
+    )
+  elif isinstance(per_layer_config, dict):
+    layer_override = (
+        per_layer_config.get(layer_idx)
+        or per_layer_config.get(str(layer_idx))
+        or per_layer_config.get(f"{layer_idx:02d}")
+        or {}
+    )
+  else:
+    layer_override = {}
+
+  l_heads = layer_override.get("num_attention_heads") or num_attention_heads
+  l_kv_heads = layer_override.get("num_key_value_heads") or (
+      num_global_key_value_heads if is_global else num_key_value_heads
+  )
+  l_head_dim = layer_override.get("head_dim") or (global_head_dim if is_global else head_dim)
+  return l_heads * l_head_dim, l_kv_heads * l_head_dim, l_head_dim
+
+
 def GEMMA4_HF_WEIGHTS_TO_SHAPE(config):
   """Generates shape mapping for Hugging Face Gemma4 parameters.
 
@@ -179,33 +212,22 @@ def GEMMA4_HF_WEIGHTS_TO_SHAPE(config):
   hidden_size = text_cfg["hidden_size"]
   intermediate_size = text_cfg["intermediate_size"]
   num_hidden_layers = text_cfg["num_hidden_layers"]
-  num_attention_heads = text_cfg["num_attention_heads"]
-  num_key_value_heads = text_cfg["num_key_value_heads"]
-  num_global_key_value_heads = text_cfg.get("num_global_key_value_heads", num_key_value_heads)
-  head_dim = text_cfg["head_dim"]
-  global_head_dim = text_cfg.get("global_head_dim", head_dim)
   vocab_size = text_cfg["vocab_size"]
 
   num_experts = text_cfg.get("num_experts")
   num_experts = num_experts if num_experts is not None else 1
   # "moe_intermediate_size" is the canonical key in Gemma4 config; fall back to "expert_intermediate_size"
   expert_intermediate_size = text_cfg.get("moe_intermediate_size") or text_cfg.get("expert_intermediate_size")
+  layer_types = text_cfg.get("layer_types", [])
 
   shapes[f"{text_base}.embed_tokens.weight"] = [vocab_size, hidden_size]
   shapes[f"{text_base}.norm.weight"] = [hidden_size]
 
   for i in range(num_hidden_layers):
     hf_prefix = f"{text_base}.layers.{i}"
-    is_global = (i % 6) == 5
+    is_global = (i < len(layer_types) and layer_types[i] == "full_attention") if layer_types else (i % 6) == 5
 
-    if is_global:
-      q_dim = num_attention_heads * global_head_dim
-      kv_dim = num_global_key_value_heads * global_head_dim
-      norm_dim = global_head_dim
-    else:
-      q_dim = num_attention_heads * head_dim
-      kv_dim = num_key_value_heads * head_dim
-      norm_dim = head_dim
+    q_dim, kv_dim, norm_dim = _get_gemma4_layer_attention_dims(text_cfg, i, is_global)
 
     shapes[f"{hf_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
     shapes[f"{hf_prefix}.self_attn.k_proj.weight"] = [kv_dim, hidden_size]
@@ -291,7 +313,7 @@ def GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE(config):
     * derives global-vs-sliding from the per-model ``layer_types`` list
       (E2B has period-5, E4B has period-6),
     * emits the Per-Layer-Embedding parameters when ``hidden_size_per_layer_input`` > 0,
-    * omits k_proj/v_proj/k_norm/v_norm shapes on KV-shared layers, and
+      * omits k_proj/v_proj/k_norm/v_norm shapes on KV-shared layers, and
     * doubles ``intermediate_size`` on shared layers when ``use_double_wide_mlp``
       is set (E2B).
   """
@@ -304,11 +326,6 @@ def GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE(config):
   hidden_size = text_cfg["hidden_size"]
   intermediate_size = text_cfg["intermediate_size"]
   num_hidden_layers = text_cfg["num_hidden_layers"]
-  num_attention_heads = text_cfg["num_attention_heads"]
-  num_key_value_heads = text_cfg["num_key_value_heads"]
-  num_global_key_value_heads = text_cfg.get("num_global_key_value_heads") or num_key_value_heads
-  head_dim = text_cfg["head_dim"]
-  global_head_dim = text_cfg.get("global_head_dim", head_dim)
   vocab_size = text_cfg["vocab_size"]
   layer_types = text_cfg.get("layer_types", [])
 
@@ -330,15 +347,7 @@ def GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE(config):
     hf_prefix = f"{text_base}.layers.{i}"
     is_global = i < len(layer_types) and layer_types[i] == "full_attention"
     is_shared = num_kv_shared > 0 and i >= first_shared
-
-    if is_global:
-      q_dim = num_attention_heads * global_head_dim
-      kv_dim = num_global_key_value_heads * global_head_dim
-      norm_dim = global_head_dim
-    else:
-      q_dim = num_attention_heads * head_dim
-      kv_dim = num_key_value_heads * head_dim
-      norm_dim = head_dim
+    q_dim, kv_dim, norm_dim = _get_gemma4_layer_attention_dims(text_cfg, i, is_global)
 
     shapes[f"{hf_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
     shapes[f"{hf_prefix}.self_attn.o_proj.weight"] = [hidden_size, q_dim]

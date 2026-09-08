@@ -25,10 +25,15 @@ from maxtext.checkpoint_conversion.to_huggingface import (
     _get_lora_delta,
     _transform_weights_to_adapter,
     _transform_weights_to_full_model,
+    _validate_or_update_architecture,
 )
 from maxtext.checkpoint_conversion.to_maxtext import (
     convert_hf_lora_key_to_maxtext,
     _process_and_stack_weights,
+)
+from maxtext.checkpoint_conversion.utils.hf_shape import (
+    GEMMA4_HF_WEIGHTS_TO_SHAPE,
+    _get_gemma4_layer_attention_dims,
 )
 from maxtext.checkpoint_conversion.utils.utils import (
     _recursive_update,
@@ -550,6 +555,95 @@ class Gemma3And4CheckpointConversionTest(unittest.TestCase):
     self.assertEqual(delta.shape, (2, 16, 32))
     # Math: einsum("lir,lro->lio", A, B) * 2.0 -> 0.25 * 4 * 2.0 = 2.0
     self.assertTrue(np.allclose(delta, 2.0))
+
+  def test_validate_architecture_multimodal_nested_text_config(self):
+    class MockTextConfig:
+      """Mock TextConfig for testing."""
+
+      def __init__(self):
+        self.hidden_size = 2816
+        self.intermediate_size = 2112
+        self.num_hidden_layers = 30
+        self.num_attention_heads = 16
+        self.vocab_size = 262144
+        self.global_head_dim = 512
+        self.num_global_key_value_heads = 2
+
+      @property
+      def head_dim(self):
+        raise RuntimeError("Ambiguous per-layer attribute")
+
+      @property
+      def num_key_value_heads(self):
+        raise RuntimeError("Ambiguous per-layer attribute")
+
+    text_cfg = MockTextConfig()
+    hf_config = SimpleNamespace(text_config=text_cfg)
+    max_config = SimpleNamespace(
+        emb_dim=2816,
+        mlp_dim=2112,
+        num_decoder_layers=30,
+        num_query_heads=16,
+        global_num_kv_heads=2,
+        global_head_dim=512,
+        vocab_size=262144,
+        attention_type="dot_product",
+        model_name="gemma4-26b",
+    )
+
+    # Should validate nested text_config without error
+    _validate_or_update_architecture(hf_config, max_config, override=False)
+
+  def test_gemma4_shape_mapping_per_layer_config(self):
+    cfg = {
+        "text_config": {
+            "hidden_size": 2816,
+            "intermediate_size": 2112,
+            "num_hidden_layers": 6,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 8,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "num_global_key_value_heads": 2,
+            "vocab_size": 262144,
+            "num_experts": 128,
+            "moe_intermediate_size": 704,
+            "per_layer_config": {
+                "05": {"head_dim": 512, "num_key_value_heads": 2},
+            },
+        }
+    }
+    shapes = GEMMA4_HF_WEIGHTS_TO_SHAPE(cfg)
+    # Layer 0: sliding window attention
+    self.assertEqual(shapes["model.layers.0.self_attn.q_proj.weight"], [4096, 2816])
+    self.assertEqual(shapes["model.layers.0.self_attn.k_proj.weight"], [2048, 2816])
+    # Layer 5: global full attention from per_layer_config
+    self.assertEqual(shapes["model.layers.5.self_attn.q_proj.weight"], [8192, 2816])
+    self.assertEqual(shapes["model.layers.5.self_attn.k_proj.weight"], [1024, 2816])
+    self.assertEqual(shapes["model.layers.5.self_attn.q_norm.weight"], [512])
+
+  def test_get_gemma4_layer_attention_dims(self):
+    text_cfg = {
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "head_dim": 256,
+        "global_head_dim": 512,
+        "num_global_key_value_heads": 2,
+        "per_layer_config": {
+            "05": {"head_dim": 512, "num_key_value_heads": 2},
+        },
+    }
+    # Sliding layer (layer 0)
+    q, kv, norm = _get_gemma4_layer_attention_dims(text_cfg, 0, is_global=False)
+    self.assertEqual(q, 16 * 256)
+    self.assertEqual(kv, 8 * 256)
+    self.assertEqual(norm, 256)
+
+    # Global layer with per_layer_config override (layer 5)
+    q, kv, norm = _get_gemma4_layer_attention_dims(text_cfg, 5, is_global=True)
+    self.assertEqual(q, 16 * 512)
+    self.assertEqual(kv, 2 * 512)
+    self.assertEqual(norm, 512)
 
 
 if __name__ == "__main__":

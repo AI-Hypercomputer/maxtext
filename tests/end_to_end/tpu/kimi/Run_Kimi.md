@@ -131,6 +131,8 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     weight_dtype=bfloat16 \
     megablox=True \
     sparse_matmul=True \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH?} \
     scan_layers=True \
     load_parameters_path=${SCANNED_CHECKPOINT?} \

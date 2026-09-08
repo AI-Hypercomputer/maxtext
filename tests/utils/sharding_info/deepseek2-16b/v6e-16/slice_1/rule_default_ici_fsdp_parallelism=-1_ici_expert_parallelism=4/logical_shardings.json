@@ -82,7 +82,7 @@
       "heads",
       "dense_layers",
       "kv",
-      "embed"
+      "embed_attn"
     ],
     "shape": [
       16,
@@ -93,7 +93,7 @@
   },
   ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "dense_layers",
       "q_heads",
       "kv"
@@ -107,7 +107,7 @@
   },
   ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "dense_layers",
       "kv_lora_up_proj"
     ],
@@ -266,7 +266,7 @@
       "heads",
       "moe_layers",
       "kv",
-      "embed"
+      "embed_attn"
     ],
     "shape": [
       16,
@@ -277,7 +277,7 @@
   },
   ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "moe_layers",
       "q_heads",
       "kv"
@@ -291,7 +291,7 @@
   },
   ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "moe_layers",
       "kv_lora_up_proj"
     ],
@@ -408,7 +408,7 @@
       "heads",
       "dense_layers",
       "kv",
-      "embed"
+      "embed_attn"
     ],
     "shape": [
       16,
@@ -419,7 +419,7 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "dense_layers",
       "q_heads",
       "kv"
@@ -433,7 +433,7 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "dense_layers",
       "kv_lora_up_proj"
     ],
@@ -592,7 +592,7 @@
       "heads",
       "moe_layers",
       "kv",
-      "embed"
+      "embed_attn"
     ],
     "shape": [
       16,
@@ -603,7 +603,7 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "moe_layers",
       "q_heads",
       "kv"
@@ -617,7 +617,7 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "moe_layers",
       "kv_lora_up_proj"
     ],
@@ -730,7 +730,7 @@
       "heads",
       "dense_layers",
       "kv",
-      "embed"
+      "embed_attn"
     ],
     "shape": [
       16,
@@ -741,7 +741,7 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "dense_layers",
       "q_heads",
       "kv"
@@ -755,7 +755,7 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "dense_layers",
       "kv_lora_up_proj"
     ],
@@ -914,7 +914,7 @@
       "heads",
       "moe_layers",
       "kv",
-      "embed"
+      "embed_attn"
     ],
     "shape": [
       16,
@@ -925,7 +925,7 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "moe_layers",
       "q_heads",
       "kv"
@@ -939,7 +939,7 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "moe_layers",
       "kv_lora_up_proj"
     ],

@@ -76,6 +76,7 @@ logical_axis_rules: [
                       ['mlp', ['fsdp_transpose']],
                       ['embed', ['fsdp', 'fsdp_transpose']],
                       ['embed', ['fsdp']],
+                      ['embed_attn', ['fsdp', 'fsdp_transpose']],
                       # ==========================================
                       # Deprecated / Scheduled for Removal
                       # ==========================================

@@ -15,7 +15,7 @@
 """Version and package metadata for MaxText."""
 
 __author__ = "Google LLC"
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 __description__ = (
     "MaxText is a high performance, highly scalable, open-source LLM written in"
     " pure Python/Jax and targeting Google Cloud TPUs and GPUs for training and"

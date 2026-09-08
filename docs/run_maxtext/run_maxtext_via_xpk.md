@@ -88,7 +88,7 @@ These commands configure your local environment to connect to Google Cloud servi
 2. **Install GKE auth plugin**
 
    ```
-   sudo apt-get update && sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin
+   sudo apt-get update && sudo apt-get install google-cloud-cli-gke-gcloud-auth-plugin
    ```
 
 3. **Configure Docker credentials**

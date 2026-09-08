@@ -32,6 +32,7 @@ from tempfile import gettempdir, NamedTemporaryFile
 
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path
 
 # Enable JAX compilation cache for testing to speed up AOT compilation
@@ -827,13 +828,40 @@ class TrainCompile(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "linen_scanned", "scan_layers": "true", "enable_nnx": "False"},
-      {"testcase_name": "nnx_scanned", "scan_layers": "true", "enable_nnx": "True"},
+      {
+          "testcase_name": "linen_scanned_dot_product",
+          "scan_layers": "true",
+          "enable_nnx": "False",
+          "attention": "dot_product",
+      },
+      {
+          "testcase_name": "linen_scanned_flash",
+          "scan_layers": "true",
+          "enable_nnx": "False",
+          "attention": "flash",
+      },
+      {
+          "testcase_name": "nnx_scanned_dot_product",
+          "scan_layers": "true",
+          "enable_nnx": "True",
+          "attention": "dot_product",
+      },
+      {
+          "testcase_name": "nnx_scanned_flash",
+          "scan_layers": "true",
+          "enable_nnx": "True",
+          "attention": "flash",
+      },
   )
   @pytest.mark.cpu_only
-  def test_deepseek4(self, scan_layers, enable_nnx):
+  def test_deepseek4(
+      self,
+      scan_layers,
+      enable_nnx,
+      attention="dot_product",
+  ):
     # test deepseek4 compile across Linen and NNX
-    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}_{enable_nnx}.pickle"
+    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}_{enable_nnx}_{attention}.pickle"
     train_compile_main(
         (
             "",
@@ -846,7 +874,16 @@ class TrainCompile(parameterized.TestCase):
             "per_device_batch_size=1",
             "max_target_length=1024",
             f"scan_layers={scan_layers}",
-            "attention=dot_product",
+            f"attention={attention}",
+            "use_tokamax_splash=True",
+            "sa_block_q=128",
+            "sa_block_kv=128",
+            "sa_block_kv_compute=128",
+            "sa_block_q_dkv=128",
+            "sa_block_kv_dkv=128",
+            "sa_block_kv_dkv_compute=128",
+            "sa_block_q_dq=128",
+            "sa_block_kv_dq=128",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             f"enable_nnx={enable_nnx}",
@@ -1133,6 +1170,136 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_qwen3_next_explicit_sharding(self):
+    """AOT test for qwen3-next under explicit sharding, at FSDP 32 x expert 8.
+
+    `Qwen3NextScannableBlock` nests two `jax.lax.scan`s, whose carry layout has
+    to stay
+    invariant across iterations; that only holds if the decoder layer returns
+    the
+    layout it was handed.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_next_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "ici_fsdp_parallelism=32",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+        )
+    )
+
+  def test_qwen3_next_explicit_sharding_zero1(self):
+    """AOT test for qwen3-next under explicit sharding with ZeRO-1 and gradient accumulation."""
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_next_explicit_sharding_zero1.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=4",
+            "shard_optimizer_over_data=True",
+        )
+    )
+
+  def test_qwen3_5_explicit_sharding(self):
+    """AOT test for qwen3-5 under explicit sharding, at FSDP 32 x expert 8.
+
+    Explicit sharding type-checks every operation's layout instead of letting
+    GSPMD
+    infer one, so a missing `out_sharding` fails the trace here rather than
+    silently
+    costing a collective at a scale a real test cannot reach.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_5_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.5-397b-a17b",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "ici_fsdp_parallelism=32",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+            # Qwen3.5 defaults to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            (f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
+        )
+    )
+
+  def test_qwen3_5_explicit_sharding_zero1(self):
+    """AOT test for qwen3-5 under explicit sharding with ZeRO-1 and gradient accumulation.
+
+    ZeRO-1 shards the optimizer moments over "data", so the parameters are
+    all-gathered
+    in bf16 once before the accumulation scan rather than once per microbatch;
+    that
+    reshard only type-checks if the decoder pins its activation layouts. Four
+    layers is
+    one full `inhomogeneous_layer_cycle_interval`, which covers both attention
+    variants
+    while staying small enough to hold data-parallel replicas of the parameters.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_5_explicit_sharding_zero1.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.5-35b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=4",
+            "shard_optimizer_over_data=True",
+            "tokenizer_type=tiktoken",
+            (f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
+        )
+    )
+
   def test_serialization_and_deserialization_formats(self):
     """Tests that our custom binary save/load functions work securely and legacy fallback triggers warning."""
 
@@ -1184,9 +1351,73 @@ class TrainCompile(parameterized.TestCase):
             "base_emb_dim=256",
             "base_mlp_dim=256",
             "base_num_decoder_layers=2",
-            "ici_data_parallelism=4",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
             "shard_optimizer_over_data=true",
             "shard_mode=explicit",
+        )
+    )
+
+  def test_qwen2_explicit_sharding_zero1(self):
+    """AOT test for Qwen2 under explicit sharding with ZeRO-1 and gradient accumulation.
+
+    Explicit sharding type-checks every operation's layout rather than letting GSPMD infer
+    one, so a missing `out_sharding` in the Qwen2 decoder fails the trace here rather than
+    silently costing a collective at a scale we cannot reach in a test.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen2_explicit_sharding_zero1.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen2.5-7b",
+            "override_model_config=True",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "attention=flash",
+            "shard_mode=explicit",
+            # ZeRO-1 needs a "data" axis to shard the moments over, and MaxTextConfig
+            # rejects combining it with FSDP.
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=4",
+            "shard_optimizer_over_data=True",
+            # The Qwen2.5 configs default to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+        )
+    )
+
+  def test_kimi_k2_explicit_sharding(self):
+    """AOT test for Kimi-K2 at full size under explicit sharding.
+
+    Kimi-K2 runs on the deepseek decoder block, so this is the large-scale explicit-sharding
+    check for MLA attention and the shared-expert, sigmoid-routed MoE. The mesh is FSDP 64 x
+    expert 8, both of which have to divide the v5p-1024 physical mesh.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_kimi_k2_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-1024",
+            "compile_topology_num_slices=1",
+            "model_name=kimi-k2-1t",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=64",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "shard_mode=explicit",
+            # Kimi-K2 defaults to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
         )
     )
 

@@ -76,7 +76,12 @@ def add_trailing_slash(path):
 
 
 def upload_blob(destination_gcs_name, source_file_name):
-  """Uploads a file to a GCS location (no-op if not found and decoupled)."""
+  """Uploads a file to a GCS or filesystem/CNS location (no-op if not found and decoupled)."""
+  if not destination_gcs_name.startswith("gs://"):
+    dest = epath.Path(destination_gcs_name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    epath.Path(source_file_name).copy(dest, overwrite=True)
+    return
   if not _gcs_guard("upload_blob"):
     return
   bucket_name, prefix_name = parse_gcs_bucket_and_prefix(destination_gcs_name)
@@ -87,30 +92,44 @@ def upload_blob(destination_gcs_name, source_file_name):
 
 
 def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True, all_host_upload=False):
-  """Uploads a directory to a GCS location, with an optional filter (no-op if not found and decoupled)."""
+  """Uploads a directory to a GCS or filesystem/CNS location, with an optional filter (no-op if not found and decoupled)."""
   if not all_host_upload and jax.process_index() != 0:
     return
-  if not _gcs_guard("upload_dump"):
-    return
-  storage_client = storage.Client()
-  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(target_dir)
-  bucket = storage_client.get_bucket(bucket_name)
   if all_host_upload:
     hostname = socket.gethostname()  # Alternatively can use jax.process_id()
-    prefix_name = os.path.join(prefix_name, hostname)
     target_dir = os.path.join(target_dir, hostname)
   max_logging.log(f"Uploading Dump to {target_dir}...")
-  for root, _, files in os.walk(local_dir):
-    for file in files:
-      if module_name and module_name not in file:
-        continue
-      else:
-        max_logging.log(f"Uploading {file}")
-      local_path = os.path.join(root, file)
-      relative_path = os.path.relpath(local_path, local_dir)
-      blob_name = os.path.join(prefix_name, relative_path)
-      blob = bucket.blob(blob_name)
-      blob.upload_from_filename(local_path)
+  if not target_dir.startswith("gs://"):
+    dest_dir = epath.Path(target_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for root, _, files in os.walk(local_dir):
+      for file in files:
+        if module_name and module_name not in file:
+          continue
+        else:
+          max_logging.log(f"Uploading {file}")
+        local_path = os.path.join(root, file)
+        relative_path = os.path.relpath(local_path, local_dir)
+        dest_path = dest_dir / relative_path
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        epath.Path(local_path).copy(dest_path, overwrite=True)
+  else:
+    if not _gcs_guard("upload_dump"):
+      return
+    storage_client = storage.Client()
+    bucket_name, prefix_name = parse_gcs_bucket_and_prefix(target_dir)
+    bucket = storage_client.get_bucket(bucket_name)
+    for root, _, files in os.walk(local_dir):
+      for file in files:
+        if module_name and module_name not in file:
+          continue
+        else:
+          max_logging.log(f"Uploading {file}")
+        local_path = os.path.join(root, file)
+        relative_path = os.path.relpath(local_path, local_dir)
+        blob_name = os.path.join(prefix_name, relative_path)
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(local_path)
   max_logging.log(f"Dump Uploaded to {target_dir}!")
   if delete_local_after:
     shutil.rmtree(local_dir)

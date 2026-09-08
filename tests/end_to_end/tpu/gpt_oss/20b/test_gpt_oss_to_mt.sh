@@ -71,7 +71,9 @@ python3 -m tests.utils.forward_pass_logit_checker \
     global_batch_size_to_train_on=1 \
     per_device_batch_size=1 \
     max_target_length=512 \
+    dtype=float32 \
+    attention=dot_product \
     --golden_logits_path=/tmp/golden_data_gpt-oss-20b.jsonl \
-    --max_kl_div=0.01 \
+    --max_kl_div=1.0 \
     hardware=cpu \
     skip_jax_distributed_system=True

@@ -28,7 +28,7 @@ def _coeff_fwd(
     permutations: jax.Array,
     config: common.MhcKernelConfig,
 ) -> common.MhcCoeffOutputs:
-  """Builds the Pallas call that computes the shared mHC coefficients."""
+  """Builds the Pallas pipeline that computes the shared mHC coefficients."""
   tokens, streams, embedding = x.shape
   dims = common.MhcDims(
       tokens=tokens,
@@ -37,29 +37,14 @@ def _coeff_fwd(
       num_permutations=permutations.shape[0],
   )
 
-  def kernel(
-      x_ref,
-      phi_ref,
-      pre_scale_ref,
-      pre_bias_ref,
-      post_scale_ref,
-      post_bias_ref,
-      res_scale_ref,
-      res_bias_ref,
-      permutations_ref,
-      h_pre_ref,
-      h_post_ref,
-      residual_ref,
-  ):
-    param_refs = common.MhcCoeffParams(
-        phi=phi_ref,
-        pre_scale=pre_scale_ref,
-        pre_bias=pre_bias_ref,
-        post_scale=post_scale_ref,
-        post_bias=post_bias_ref,
-        res_scale=res_scale_ref,
-        res_bias=res_bias_ref,
-    )
+  num_params = len(jax.tree.leaves(coeff_params))
+
+  def pipeline_body(x_ref, *refs):
+    ref_iter = iter(refs)
+    param_refs = common.MhcCoeffParams(*(next(ref_iter) for _ in range(num_params)))
+    permutations_ref = next(ref_iter)
+    output_refs = common.MhcCoeffOutputs(*ref_iter)
+
     params = jax.tree.map(lambda ref: ref[...], param_refs)
     outputs = common.mhc_coeffs(
         x_ref[...],
@@ -68,47 +53,52 @@ def _coeff_fwd(
         rms_epsilon=config.rms_epsilon,
         pre_mapping_epsilon=config.pre_mapping_epsilon,
     )
-    output_refs = common.MhcCoeffOutputs(
-        h_pre=h_pre_ref,
-        h_post=h_post_ref,
-        residual=residual_ref,
-    )
 
     def _write_output(ref, val):
       ref[...] = val
 
     jax.tree.map(_write_output, output_refs, outputs)
 
+  spec_x = common.token_block_spec((tokens, streams, embedding), config.block_size)
   param_specs = jax.tree.map(lambda p: common.whole(p.shape), coeff_params)
-  h_pre, h_post, residual = pl.pallas_call(
-      kernel,
-      out_shape=(
-          jax.ShapeDtypeStruct((tokens, streams), jnp.float32),
-          jax.ShapeDtypeStruct((tokens, streams), jnp.float32),
-          jax.ShapeDtypeStruct((tokens, streams, streams), jnp.float32),
-      ),
+  output_specs = (
+      common.token_block_spec((tokens, streams), config.block_size),
+      common.token_block_spec((tokens, streams), config.block_size),
+      common.token_block_spec((tokens, streams, streams), config.block_size),
+  )
+
+  kernel_main = pltpu.emit_pipeline(
+      pipeline_body,
       grid=(tokens // config.block_size,),
       in_specs=(
-          common.token_block_spec((tokens, streams, embedding), config.block_size),
+          spec_x,
           *jax.tree.leaves(param_specs),
           common.whole(permutations.shape),
       ),
-      out_specs=(
-          common.token_block_spec((tokens, streams), config.block_size),
-          common.token_block_spec((tokens, streams), config.block_size),
-          common.token_block_spec((tokens, streams, streams), config.block_size),
-      ),
-      cost_estimate=dims.coeff_fwd_cost(),
-      compiler_params=pltpu.CompilerParams(
-          vmem_limit_bytes=config.vmem_limit_bytes,
-          dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
-      ),
-      interpret=config.interpret,
-  )(
-      x,
-      *jax.tree.leaves(coeff_params),
-      permutations,
+      out_specs=output_specs,
+      dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
   )
+
+  with common.tpu_mesh_context():
+    h_pre, h_post, residual = pl.pallas_call(
+        kernel_main,
+        out_shape=(
+            jax.ShapeDtypeStruct((tokens, streams), jnp.float32),
+            jax.ShapeDtypeStruct((tokens, streams), jnp.float32),
+            jax.ShapeDtypeStruct((tokens, streams, streams), jnp.float32),
+        ),
+        in_specs=common.hbm_specs(1 + num_params + 1),
+        out_specs=common.hbm_specs(3),
+        cost_estimate=dims.coeff_fwd_cost(),
+        compiler_params=pltpu.CompilerParams(
+            vmem_limit_bytes=config.vmem_limit_bytes,
+        ),
+        interpret=config.interpret,
+    )(
+        x,
+        *jax.tree.leaves(coeff_params),
+        permutations,
+    )
   return common.MhcCoeffOutputs(h_pre=h_pre, h_post=h_post, residual=residual)
 
 
@@ -117,29 +107,37 @@ def _pre_apply_fwd(
     h_pre: jax.Array,
     config: common.MhcKernelConfig,
 ) -> jax.Array:
-  """Builds the Pallas call for the pre-branch forward pass."""
+  """Builds the Pallas pipeline for the pre-branch forward pass."""
   tokens, streams, embedding = x.shape
   dims = common.MhcDims(tokens=tokens, streams=streams, embedding=embedding)
 
-  def kernel(x_ref, h_pre_ref, output_ref):
+  def pipeline_body(x_ref, h_pre_ref, output_ref):
     output_ref[...] = common.pre_apply(x_ref[...], h_pre_ref[...])
 
-  return pl.pallas_call(
-      kernel,
-      out_shape=jax.ShapeDtypeStruct((tokens, embedding), jnp.bfloat16),
+  spec_x = common.token_block_spec((tokens, streams, embedding), config.block_size)
+  spec_h_pre = common.token_block_spec((tokens, streams), config.block_size)
+  spec_out = common.token_block_spec((tokens, embedding), config.block_size)
+
+  kernel_main = pltpu.emit_pipeline(
+      pipeline_body,
       grid=(tokens // config.block_size,),
-      in_specs=(
-          common.token_block_spec((tokens, streams, embedding), config.block_size),
-          common.token_block_spec((tokens, streams), config.block_size),
-      ),
-      out_specs=common.token_block_spec((tokens, embedding), config.block_size),
-      cost_estimate=dims.pre_apply_fwd_cost(),
-      compiler_params=pltpu.CompilerParams(
-          vmem_limit_bytes=config.vmem_limit_bytes,
-          dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
-      ),
-      interpret=config.interpret,
-  )(x, h_pre)
+      in_specs=(spec_x, spec_h_pre),
+      out_specs=spec_out,
+      dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
+  )
+
+  with common.tpu_mesh_context():
+    return pl.pallas_call(
+        kernel_main,
+        out_shape=jax.ShapeDtypeStruct((tokens, embedding), jnp.bfloat16),
+        in_specs=common.hbm_specs(2),
+        out_specs=common.HBM_SPEC,
+        cost_estimate=dims.pre_apply_fwd_cost(),
+        compiler_params=pltpu.CompilerParams(
+            vmem_limit_bytes=config.vmem_limit_bytes,
+        ),
+        interpret=config.interpret,
+    )(x, h_pre)
 
 
 def _post_apply_fwd(
@@ -149,11 +147,11 @@ def _post_apply_fwd(
     residual: jax.Array,
     config: common.MhcKernelConfig,
 ) -> jax.Array:
-  """Builds the Pallas call for the post-branch forward pass."""
+  """Builds the Pallas pipeline for the post-branch forward pass."""
   tokens, streams, embedding = x.shape
   dims = common.MhcDims(tokens=tokens, streams=streams, embedding=embedding)
 
-  def kernel(x_ref, layer_output_ref, h_post_ref, residual_ref, output_ref):
+  def pipeline_body(x_ref, layer_output_ref, h_post_ref, residual_ref, output_ref):
     output_ref[...] = common.post_apply(
         x_ref[...],
         layer_output_ref[...],
@@ -161,24 +159,36 @@ def _post_apply_fwd(
         residual_ref[...],
     )
 
-  return pl.pallas_call(
-      kernel,
-      out_shape=jax.ShapeDtypeStruct((tokens, streams, embedding), jnp.bfloat16),
+  spec_x = common.token_block_spec((tokens, streams, embedding), config.block_size)
+  spec_layer_output = common.token_block_spec((tokens, embedding), config.block_size)
+  spec_h_post = common.token_block_spec((tokens, streams), config.block_size)
+  spec_residual = common.token_block_spec((tokens, streams, streams), config.block_size)
+
+  kernel_main = pltpu.emit_pipeline(
+      pipeline_body,
       grid=(tokens // config.block_size,),
       in_specs=(
-          common.token_block_spec((tokens, streams, embedding), config.block_size),
-          common.token_block_spec((tokens, embedding), config.block_size),
-          common.token_block_spec((tokens, streams), config.block_size),
-          common.token_block_spec((tokens, streams, streams), config.block_size),
+          spec_x,
+          spec_layer_output,
+          spec_h_post,
+          spec_residual,
       ),
-      out_specs=common.token_block_spec((tokens, streams, embedding), config.block_size),
-      cost_estimate=dims.post_apply_fwd_cost(),
-      compiler_params=pltpu.CompilerParams(
-          vmem_limit_bytes=config.vmem_limit_bytes,
-          dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
-      ),
-      interpret=config.interpret,
-  )(x, layer_output, h_post, residual)
+      out_specs=spec_x,
+      dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
+  )
+
+  with common.tpu_mesh_context():
+    return pl.pallas_call(
+        kernel_main,
+        out_shape=jax.ShapeDtypeStruct((tokens, streams, embedding), jnp.bfloat16),
+        in_specs=common.hbm_specs(4),
+        out_specs=common.HBM_SPEC,
+        cost_estimate=dims.post_apply_fwd_cost(),
+        compiler_params=pltpu.CompilerParams(
+            vmem_limit_bytes=config.vmem_limit_bytes,
+        ),
+        interpret=config.interpret,
+    )(x, layer_output, h_post, residual)
 
 
 def pre_fwd(

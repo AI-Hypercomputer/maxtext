@@ -51,6 +51,7 @@ jobs:
   analyze_code_changes:
     name: Analyze Code Changes for Test Orchestration
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
@@ -128,6 +129,7 @@ jobs:
       needs.analyze_code_changes.outputs.run_tests == 'true' &&
       needs.build_and_upload_maxtext_package.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       total_workers: ${{ steps.set-params.outputs.total_workers }}
       worker_groups: ${{ steps.set-params.outputs.worker_groups }}
@@ -183,8 +185,7 @@ jobs:
     needs: [gate_test_run]
     if: |
       always() &&
-      needs.gate_test_run.result == 'success' &&
-      github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      needs.gate_test_run.result == 'success' && github.event_name != 'pull_request'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -305,6 +306,7 @@ jobs:
     needs: [build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check test results
         run: |
@@ -348,6 +350,7 @@ jobs:
     needs: [analyze_code_changes, build_and_upload_maxtext_package, maxtext_jupyter_notebooks]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check notebooks results
         run: |
@@ -377,6 +380,7 @@ jobs:
     needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       issues: write
     steps:

@@ -8,13 +8,14 @@ This document provides a guide to use the multimodal functionalities in MaxText 
 
 We also provide a [colab](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/sft_multimodal_gemma3_demo.ipynb) for multimodal features demonstration. The following table provides a list of models and modalities we currently support:
 
-| Models                      | Input: Text | Input: Image | Input: Video | Input: Audio | Output |
-| :-------------------------- | :---------: | :----------: | :----------: | :----------: | :----: |
-| **Gemma3** (4B/12B/27B)     |      ✓      |      ✓       |              |              |  Text  |
-| **Gemma4** (26B/31B)        |      ✓      |      ✓       |              |              |  Text  |
-| **Llama4** (Scout/Maverick) |      ✓      |      ✓       |              |              |  Text  |
-| **Qwen3-Omni**              |      ✓      |      ✓       |      ✓       |      ✓       |  Text  |
-| **Qwen3.5** (35B/397B)      |      ✓      |      ✓       |      ✓       |              |  Text  |
+| Models                       | Input: Text | Input: Image | Input: Video | Input: Audio | Output |
+| :--------------------------- | :---------: | :----------: | :----------: | :----------: | :----: |
+| **Gemma3** (4B/12B/27B)      |      ✓      |      ✓       |              |              |  Text  |
+| **Gemma4** (26B/31B)         |      ✓      |      ✓       |              |              |  Text  |
+| **Llama4** (Scout/Maverick)  |      ✓      |      ✓       |              |              |  Text  |
+| **Qwen3-VL** (2B/4B/30B-A3B) |      ✓      |      ✓       |      ✓       |              |  Text  |
+| **Qwen3-Omni**               |      ✓      |      ✓       |      ✓       |      ✓       |  Text  |
+| **Qwen3.5** (35B/397B)       |      ✓      |      ✓       |      ✓       |              |  Text  |
 
 ## Introduction
 
@@ -221,7 +222,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft_native \
     enable_checkpointing=True \
     attention=dot_product \
     max_num_images_per_example=1 \
-    dataset_type=hf profiler=xplane
+    dataset_type=grain profiler=xplane
 ```
 
 ## Other Recommendations

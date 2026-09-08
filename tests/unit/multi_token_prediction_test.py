@@ -15,6 +15,8 @@
 
 import unittest
 import functools
+from types import SimpleNamespace
+from absl import logging as absl_logging
 
 
 import jax
@@ -34,6 +36,7 @@ from maxtext.trainers.pre_train import train as pre_train
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import model_creation_utils
 
 from tests.utils.test_helpers import get_test_config_path
 
@@ -266,6 +269,59 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
     self.assertEqual(len(losses_val), self.cfg.mtp_num_layers)
     self.assertEqual(len(weights_val), self.cfg.mtp_num_layers)
+
+  def _forward(self, model):
+    return model(
+        main_hidden_state=self.main_hidden_state,
+        input_ids=self.input_ids,
+        target_ids=self.target_ids,
+        target_mask=self.target_mask,
+        position_ids=self.position_ids,
+        decoder_segment_ids=self.decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
+
+  def _model_on_a_cp_mesh(self, **overrides):
+    """A test model whose MTP block believes it sits on a 4-way CP mesh.
+
+    Both guards read `self.mesh` and raise before anything downstream touches it,
+    so a stub is enough and the test does not need four devices.
+    """
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="mtp_cp_guard_test",
+        skip_jax_distributed_system=True,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        max_target_length=128,
+        vocab_size=128,
+        **overrides,
+    )
+    model = MTPBlockTestModel(config=cfg, mesh=self.mesh, rngs=nnx.Rngs(params=self.rng, dropout=self.rng))
+    model.mtp_block.mesh = SimpleNamespace(shape={cfg.context_sharding: 4})
+    return model
+
+  def test_cp_guards_fire_on_a_cp_mesh(self):
+    """The CP extent lives on the mesh, so the guards have to read it from there.
+
+    They used to read `getattr(cfg, "context_parallel_size", 1)`; no such config
+    field exists, so both always saw 1 and never fired however the mesh looked.
+    """
+    with self.subTest("load balance"):
+      # DUAL_CHUNK_SWAP order breaks MTP's shift-by-one neighbour fetch.
+      model = self._model_on_a_cp_mesh(mtp_num_layers=1, context_parallel_load_balance=True)
+      with self.assertRaisesRegex(ValueError, "context_parallel_load_balance"):
+        self._forward(model)
+
+    with self.subTest("multi-layer packing"):
+      # load_balance off isolates this guard from the one above.
+      model = self._model_on_a_cp_mesh(mtp_num_layers=2, packing=True, context_parallel_load_balance=False)
+      with self.assertRaisesRegex(ValueError, "only supports mtp_num_layers=1"):
+        self._forward(model)
 
   def test_loss_aggregation_logic(self):
     """
@@ -623,6 +679,42 @@ class MaybeQuantizeModelMTPTest(unittest.TestCase):
     with mesh:
       quantized = quantizations.maybe_quantize_model(model, cfg)
     self.assertIsNotNone(quantized)
+
+
+class MTPQwixInterceptionTest(unittest.TestCase):
+
+  def _assert_mtp_interception(self, quantize_mtp: bool, expected_rule: str):
+    """Verifies Qwix interception behavior for MTP layers."""
+    cfg = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "model_name=deepseek3-671b",
+            "quantization=fp8_full",
+            "use_qwix_quantization=true",
+            "per_device_batch_size=1",
+            "max_target_length=16",
+            "mtp_num_layers=1",
+            f"quantize_mtp={quantize_mtp}",
+        ],
+        run_name="deepseek3_mtp_quantize_test",
+        skip_jax_distributed_system=True,
+    )
+    with self.assertLogs(absl_logging.get_absl_logger(), level="DEBUG") as cm:
+      # Create abstract model using nnx.eval_shape (0 FLOPs, 0 device allocation)
+      _, _ = model_creation_utils.create_nnx_abstract_model(cfg)
+    mtp_logs = [log for log in cm.output if "module='mtp_block" in log and "op=dot_general" in log]
+    self.assertTrue(mtp_logs, "Expected MTP dot_general operations to be traced by Qwix")
+    for log in mtp_logs:
+      self.assertIn(expected_rule, log)
+
+  def test_deepseek3_quantize_mtp_true_intercepts_mtp_ops(self):
+    """DeepSeek3 with quantize_mtp=True must intercept mtp_block dot_general operations."""
+    self._assert_mtp_interception(quantize_mtp=True, expected_rule="rule=0")
+
+  def test_deepseek3_quantize_mtp_false_skips_mtp_ops(self):
+    """DeepSeek3 with quantize_mtp=False must leave mtp_block dot_general unquantized (rule=None)."""
+    self._assert_mtp_interception(quantize_mtp=False, expected_rule="rule=None")
 
 
 try:

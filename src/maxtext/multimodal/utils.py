@@ -14,6 +14,7 @@
 
 """General utility functions for multimodal processing."""
 
+import io
 import os
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -62,7 +63,13 @@ class PreprocessorOutput:
 
 def convert_to_RGB(image):
   """Convert image to RGB format."""
-  if image.mode != "RGB":
+  if isinstance(image, dict) and "bytes" in image and image["bytes"] is not None:
+    image = Image.open(io.BytesIO(image["bytes"]))
+  elif isinstance(image, bytes):
+    image = Image.open(io.BytesIO(image))
+  elif isinstance(image, str):
+    image = Image.open(image)
+  if hasattr(image, "mode") and image.mode != "RGB":
     image = image.convert("RGB")
   return image
 
@@ -190,27 +197,20 @@ def _merge_mm_embeddings_inner(
 ) -> jnp.ndarray:
   """`merge_mm_embeddings` without batch dimension."""
 
+  multimodal_embeddings = multimodal_embeddings.astype(text_embeddings.dtype)
+
   if token_mask is not None:
     # This logic packs valid multimodal tokens to the front of the array.
     # It correctly handles cases where some multimodal tokens are just padding.
     sort_indices = jnp.argsort(-token_mask)  # Sorts descending, putting 1s first
     multimodal_embeddings = multimodal_embeddings[sort_indices]
 
-  # Find positions in the text sequence to place the multimodal embeddings.
-  # The `size` argument ensures a fixed shape for JIT compilation.
-  target_pos = jnp.nonzero(mask, size=multimodal_embeddings.shape[0])  # pyrefly: ignore[bad-argument-type]
-  target_pos = target_pos[0]  # jnp.nonzero returns a tuple of arrays
-
-  # Save the embedding at the first position.
-  first_pos_embedding = text_embeddings[0]
-
-  # Perform the insertion.
-  merged = text_embeddings.at[target_pos, :].set(multimodal_embeddings)
-
-  # Restore the first position's embedding, in case it was overwritten.
-  merged = merged.at[0].set(first_pos_embedding)
-
-  return merged
+  cumsum_mask = jnp.cumsum(mask != 0)
+  mask_bool = (mask != 0) & (cumsum_mask <= multimodal_embeddings.shape[0])
+  mask_expanded = mask_bool[:, jnp.newaxis]
+  mm_token_idx = jnp.clip(cumsum_mask - 1, 0, multimodal_embeddings.shape[0] - 1)
+  mm_aligned = multimodal_embeddings[mm_token_idx, :]
+  return jnp.where(mask_expanded, mm_aligned, text_embeddings)
 
 
 # Following audio functions derived from the HuggingFace implementation

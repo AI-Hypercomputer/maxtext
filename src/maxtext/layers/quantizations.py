@@ -18,7 +18,7 @@ import functools
 import json
 import qwix.pallas as qpl
 import re
-from typing import Tuple, Sequence, Callable
+from typing import ClassVar, Tuple, Sequence, Callable
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -79,6 +79,11 @@ _TILE_SIZE = "tile_size"  # Tile size for subchannel
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""
+
+  # Whether this backend's dot_general draws RNGs at apply time, as AQT and NVFP4
+  # stochastic rounding do. False lets the Linen->NNX bridge drop its forked Rngs after
+  # init; the default makes opting out deliberate.
+  needs_apply_rngs: ClassVar[bool] = True
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
@@ -143,6 +148,10 @@ def _rhs_axis_metadata_wrapper(
 @dataclass
 class AqtQuantization:
   """Configures AQT quantization github.com/google/aqt."""
+
+  # Declared, not inherited: this class sits outside the Quantization hierarchy. AQT
+  # sets rng_type="jax.uniform" and stochastic rounding draws at apply time.
+  needs_apply_rngs: ClassVar[bool] = True
 
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
@@ -226,6 +235,9 @@ class AqtQuantization:
 class QwixQuantization:
   """Configures Qwix quantization github.com/google/qwix, for training only."""
 
+  # Declared, not inherited: this class sits outside the Quantization hierarchy.
+  needs_apply_rngs: ClassVar[bool] = True
+
   quant_mode = "train"  # needed by external call
   act_calibration_method: str = "absmax"
   weight_calibration_method: str = "absmax"
@@ -306,7 +318,13 @@ class QwixEinsum(nn.Module):
 class Fp8Quantization(Quantization):
   """Configures Fp8 quantization for NVIDIA GPUs"""
 
+  # Flax's fp8 ops scale from amax history, never from make_rng at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
+
   quant_mode = "train"
+  # The forward dtype, for callers that quantize an operand themselves rather than through
+  # `dot_general_cls` or `einsum`, such as the grouped matmul in MoE.
+  quantize_dtype = jnp.float8_e4m3fn
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
@@ -395,11 +413,19 @@ class Fp8Einsum(nn.Module):
 class NANOOFp8Quantization(Quantization):
   """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
 
+  # Same as Fp8Quantization: nn.NANOOFp8DotGeneralOp never draws at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
+
   quant_mode = "train"
+  quantize_dtype = jnp.float8_e4m3fnuz
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.NANOOFp8DotGeneralOp
+
+  def einsum(self, dtype: DType = jnp.float32):
+    """Returns an einsum using the NANOO (fnuz) fp8 formats of AMD MI300/MI325."""
+    return Fp8Einsum(dtype=dtype, e4m3_dtype=jnp.float8_e4m3fnuz, e5m2_dtype=jnp.float8_e5m2fnuz)
 
 
 def _get_int8_quant_config(config):
@@ -768,6 +794,59 @@ def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
     return linen_module_cls(name=op_id)(*args, **kwargs)
 
 
+def create_fp8_einsum(quant: Quantization, dtype: DType, rngs: nnx.Rngs) -> nnx_wrappers.ToNNX:
+  """Creates an fp8 einsum that an `nnx.Module` can call.
+
+  An fp8 einsum holds its scaling factors and amax histories in Linen variables, which can
+  only be created while the module is bound to a Linen scope. The bridge into NNX therefore
+  has to happen while the parent module is being built; creating the state on the first call
+  instead would grow the module graph inside the scanned layer loop, which NNX rejects.
+
+  The state has a fixed shape, so a canonical pair of operands is enough to materialize it.
+  The returned einsum still accepts operands of any shape.
+
+  Args:
+    quant: The fp8 quantization providing the einsum.
+    dtype: The computation dtype of the einsum.
+    rngs: The `nnx.Rngs` of the parent module.
+  """
+  wrapper = nnx_wrappers.ToNNX(quant.einsum(dtype=dtype), rngs=rngs)  # pytype: disable=attribute-error
+  dummy_operand = jnp.zeros((1, 1), dtype=dtype)
+  wrapper.lazy_init("ab,bc->ac", dummy_operand, dummy_operand)
+  return wrapper
+
+
+def apply_einsum_in_nnx(parent: nnx.Module, op_id: str, einsum, mutable: Sequence[str], *args):
+  """Applies a quantized Linen einsum from within an NNX parent module.
+
+  A Linen module cannot be called unbound, which is all an `nnx.Module` can offer it, so the
+  einsum is bridged into NNX on first use and the bridged instance is reused afterwards.
+  `op_id` must be unique per call site: two call sites sharing an id would also share
+  quantization state. Bridging here rather than while building the parent needs the operands,
+  so it only suits einsums whose state is shaped after them, such as AQT.
+
+  Args:
+    parent: The NNX module hosting the einsum; it must carry an `rngs` attribute.
+    op_id: Stable identifier for the call site.
+    einsum: The einsum returned by a `Quantization`, either a Linen module or a callable.
+    mutable: Variable collections the einsum writes to.
+    *args: Arguments forwarded to the einsum.
+  """
+  linen_einsum = einsum.func if isinstance(einsum, functools.partial) else einsum
+  if not isinstance(linen_einsum, nn.Module):
+    return einsum(*args)
+
+  # The name must not start with an underscore: NNX treats such attributes as static,
+  # which cannot hold the bridged module's variables.
+  attr_name = f"quant_einsum_{op_id}"
+  wrapper = getattr(parent, attr_name, None)
+  if wrapper is None:
+    wrapper = nnx_wrappers.ToNNX(linen_einsum, rngs=parent.rngs)
+    wrapper.lazy_init(*args)
+    setattr(parent, attr_name, wrapper)
+  return wrapper(*args, mutable=list(mutable))
+
+
 class NvidaFp8Provider(qwix.QtProvider):
   """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
 
@@ -796,6 +875,7 @@ class NANOOFp8Provider(qwix.QtProvider):
 
 
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
+  """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
   if config.weight_sparsity_n and config.weight_sparsity_m:
     sparsity_rule = sparsity.SparsityRule(
@@ -804,9 +884,15 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
         weight_sparsity_update_step=config.weight_sparsity_update_step,
         weight_sparsity_start_step=config.weight_sparsity_start_step,
     )
+
+  if config.quantize_mtp:
+    module_path = "(decoder/.*layers.*|mtp_block/.*)"
+  else:
+    module_path = "decoder/.*layers.*"
+
   return [
       qwix.QtRule(
-          module_path="decoder/.*layers.*",
+          module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
           act_qtype=jnp.float8_e4m3fn,
           bwd_qtype=jnp.float8_e5m2,
@@ -1030,6 +1116,19 @@ class TransformerEngineQuantization(Quantization):
       raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")
     return RECIPES[recipe_name]()
 
+  @property
+  def needs_apply_rngs(self) -> bool:
+    """Whether this recipe draws RNGs at apply time.
+
+    Only NVFP4 does, and only while stochastic rounding is on: TE draws ``sr_rng`` for
+    the DGRAD quantizer. The other recipes take their scales from the tensors.
+    """
+    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+    if not isinstance(self._recipe, recipe.NVFP4BlockScaling):  # pytype: disable=module-attr
+      return False
+    return not self._recipe.disable_stochastic_rounding
+
   def get_block_size(self):
     """Get the block size for quantization for recipes that require blocks.
 
@@ -1109,13 +1208,14 @@ class TransformerEngineQuantization(Quantization):
           # CGEMM in MLP layer (up projection, down projection)
           if mesh_axes[0] == "embed" and mesh_axes[-1] == "mlp":
             return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
-          elif mesh_axes[0] == "mlp" and mesh_axes[-1] == "embed":
+          elif mesh_axes[0] == "mlp" and mesh_axes[-1] in ("embed", "embed_attn"):
+            # 'embed_attn' covers the flattened attention output projection of Qwen3 hybrid models.
             return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
           elif overlap_policy == TeCommGemmOverlapPolicy.FULL:
             # CGEMM also in Attention layer (QKV projection, output projection)
-            if mesh_axes[0] == "embed" and mesh_axes[-1].startswith("kv"):
+            if mesh_axes[0] == "embed_attn" and mesh_axes[-1].startswith("kv"):
               return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
-            elif mesh_axes[0] == "heads" and mesh_axes[-1] == "embed":
+            elif mesh_axes[0] == "heads" and mesh_axes[-1] == "embed_attn":
               return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
 
         return tex.noop_collective_op_set

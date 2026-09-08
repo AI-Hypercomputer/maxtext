@@ -74,7 +74,8 @@ def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
 
   def lora_update_or_base(base_weight, lora_a, lora_b):
     if lora_a is not None and lora_b is not None:
-      return base_weight + jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor
+      delta = (jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor).astype(base_weight.dtype)
+      return (base_weight + delta).astype(base_weight.dtype)
     else:
       return base_weight  # Keep the base weight if no Lora update
 
@@ -113,7 +114,8 @@ def unapply_lora_from_base_params(base_params, lora_params, lora_scale_factor=1.
 
   def lora_update_or_base(base_weight, lora_a, lora_b):
     if lora_a is not None and lora_b is not None:
-      return base_weight - jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor
+      delta = (jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor).astype(base_weight.dtype)
+      return (base_weight - delta).astype(base_weight.dtype)
     else:
       return base_weight  # Keep the base weight if no Lora update
 
@@ -715,15 +717,36 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
 
   sync_lora_metadata(mt_config)
 
+  mesh = getattr(model, "mesh", None)
+  if mesh is None:
+    try:
+      mesh = maxtext_utils.get_mesh_from_config(mt_config)
+    except Exception:  # pylint: disable=broad-exception-caught
+      mesh = None
+
   abstract_lora_params = nnx.state(model, nnx.LoRAParam)
 
+  def _build_target_leaf(v):
+    val = getattr(v, "value", v)
+    pspec = getattr(v, "sharding", None)
+    if not isinstance(pspec, jax.sharding.PartitionSpec):
+      pspec = jax.sharding.PartitionSpec()
+    if mesh is not None:
+      sharding = jax.sharding.NamedSharding(mesh, pspec)
+    else:
+      sharding = getattr(val, "sharding", None)
+
+    if hasattr(val, "shape") and hasattr(val, "dtype"):
+      return {"value": jax.ShapeDtypeStruct(shape=val.shape, dtype=val.dtype, sharding=sharding)}
+    return {"value": val}
+
   target_for_restore = jax.tree.map(
-      lambda v: {"value": v.value},
+      _build_target_leaf,
       abstract_lora_params,
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  sharding_tree = jax.tree.map(lambda x: x.sharding if hasattr(x, "sharding") else None, target_for_restore)
+  sharding_tree = jax.tree.map(lambda x: getattr(x, "sharding", None), target_for_restore)
   restore_args_tree = ocp.checkpoint_utils.construct_restore_args(target_for_restore, sharding_tree)
 
   try:
@@ -829,7 +852,8 @@ def apply_lora_on_base_params_nnx(base_params, lora_params, lora_scale_factor=1.
       lora_a = lora_node["lora_a.kernel"]
       lora_b = lora_node["lora_b.kernel"]
       if lora_a is not None and lora_b is not None:
-        base_node["kernel"] = base_node["kernel"] + jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor
+        delta = (jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor).astype(base_node["kernel"].dtype)
+        base_node["kernel"] = (base_node["kernel"] + delta).astype(base_node["kernel"].dtype)
       return
     for name, lora_child in lora_node.items():
       if _is_nnx_branch(lora_child):
@@ -853,7 +877,8 @@ def unapply_lora_from_base_params_nnx(base_params, lora_params, lora_scale_facto
       lora_a = lora_node["lora_a.kernel"]
       lora_b = lora_node["lora_b.kernel"]
       if lora_a is not None and lora_b is not None:
-        base_node["kernel"] = base_node["kernel"] - jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor
+        delta = (jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor).astype(base_node["kernel"].dtype)
+        base_node["kernel"] = (base_node["kernel"] - delta).astype(base_node["kernel"].dtype)
       return
     for name, lora_child in lora_node.items():
       if _is_nnx_branch(lora_child):

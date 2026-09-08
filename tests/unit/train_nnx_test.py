@@ -24,6 +24,7 @@ import types as pytypes
 import unittest
 
 from flax import nnx
+from flax.nnx import variablelib
 import jax
 import jax.numpy as jnp
 from maxtext.layers import nnx_scan
@@ -101,6 +102,17 @@ class _TinyDecoder(nnx.Module):
     return self.proj(h)
 
 
+_OVERWRITE_WITH_GRADIENT = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
+
+
+class _CustomGradientModel(nnx.Module):
+  """Small model with custom state differentiated outside the optimizer."""
+
+  def __init__(self):
+    self.weight = nnx.Param(jnp.array(1.0))
+    self.custom_state = _OVERWRITE_WITH_GRADIENT(jnp.array(2.0))
+
+
 class GateLogit(nnx.Module):
   """Router gate stub holding bias parameter."""
 
@@ -133,7 +145,8 @@ class _TinyDecoderMoEBias(_TinyDecoder):
 
   def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
     super().__init__(vocab_size, hidden, rngs=rngs)
-    self.decoder = _MoEBiasStub(bias_shape=(3, 2), sow_shape=(2, 3), update_val=1.0)
+    # Using MoEBiasVar, expected bias shape is (num_layers, num_experts)
+    self.decoder = _MoEBiasStub(bias_shape=(2, 3), sow_shape=(2, 3), update_val=1.0)
 
   def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
     out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
@@ -274,6 +287,15 @@ class TestLossFnNNX(unittest.TestCase):
     # eval truncated batch to 1 → total_weights = seq_len * 1
     self.assertEqual(int(aux["total_weights"]), data["targets_segmentation"].shape[1])
 
+  def test_multimodal_model_accepts_text_only_batch(self):
+    cfg, ts = _build_state()
+    cfg.use_multimodal = True
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    loss, _ = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+
+    self.assertTrue(jnp.isfinite(loss))
+
   def test_indexer_dense_warmup_skips_xent(self):
     cfg, ts = _build_state()
     cfg.use_indexer = True
@@ -357,6 +379,48 @@ class TestTrainStepNNX(unittest.TestCase):
     )
     self.assertIsInstance(new_state, nnx.State)
     self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
+
+  def test_custom_state_keeps_gradient_update(self):
+    """Checks that old custom state does not overwrite its gradient update."""
+    cfg = _Cfg()
+    model = _CustomGradientModel()
+    ts = train_state_nnx.TrainStateNNX(
+        model,
+        nnx.Optimizer(model, optax.sgd(0.1), wrt=nnx.Param),
+    )
+    state_graphdef, state_pure = nnx.split(ts)
+
+    def fake_loss_fn(local_model, *_args, **_kwargs):
+      loss = local_model.weight.get_value() + 3.0 * local_model.custom_state.get_value()
+      return loss, {
+          "intermediate_outputs": {},
+          "xent_sum": loss,
+          "z_loss": jnp.array(0.0),
+          "total_weights": jnp.array(1.0),
+          "moe_lb_loss": jnp.array(0.0),
+          "indexer_loss": jnp.array(0.0),
+          "moe_bias_updates": None,
+          "mtp_moe_bias_updates": None,
+          "mtp_loss": jnp.array(0.0),
+          "batch_stats": None,
+      }
+
+    original_loss_fn = pre_train.loss_fn
+    try:
+      pre_train.loss_fn = fake_loss_fn
+      new_state, _ = pre_train.train_step(
+          state_graphdef,
+          cfg,
+          state_mesh_shardings=None,
+          params_shardings=None,
+          state=state_pure,
+          data={},
+      )
+    finally:
+      pre_train.loss_fn = original_loss_fn
+
+    # The custom gradient is 3.0. It must not be replaced by the old state (2.0).
+    np.testing.assert_allclose(np.asarray(new_state.model.custom_state.get_value()), 3.0)
 
 
 class TestEvalStepNNX(unittest.TestCase):
@@ -455,11 +519,11 @@ class TestRoutedBiasReadNNX(unittest.TestCase):
         state=state_pure,
         data=data,
     )
-    # Scanned decoder bias is (num_experts=3, num_layers=2) with update_val=1.0
+    # Scanned decoder bias is (num_layers=2, num_experts=3) with update_val=1.0
     dec_gate = new_state.model.decoder.gate
     np.testing.assert_allclose(
         np.asarray(dec_gate.bias.value),
-        np.full((3, 2), 1.0),
+        np.full((2, 3), 1.0),
     )
     # Distinct updates for each MTP layer (2.0 for layer 1, 3.0 for layer 2)
     mtp1_gate = new_state.model.mtp_block.mtp_layer_1.gate

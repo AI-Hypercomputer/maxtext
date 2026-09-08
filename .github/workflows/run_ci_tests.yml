@@ -31,11 +31,6 @@ on:
       workflow:
         required: true
         type: string
-      additional_image_to_tag:
-        description: 'Optional additional image to tag as latest if tests pass.'
-        required: false
-        type: string
-        default: ''
 permissions:
   contents: read
 
@@ -97,7 +92,6 @@ jobs:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           IMAGE_NAME_EXPR: ${{ inputs.image_name }}
           IMAGE_TAG_EXPR: ${{ inputs.image_tag }}
-          ADDITIONAL_IMAGE_TO_TAG: ${{ inputs.additional_image_to_tag }}
         run: |
           image_name="$IMAGE_NAME_EXPR"
           image_tag="$IMAGE_TAG_EXPR"
@@ -105,15 +99,4 @@ jobs:
 
           # Add the traceability tag to confirm it passed validation suite
           gcloud container images add-tag "${SOURCE_IMAGE}:${image_tag}" \
-            "${SOURCE_IMAGE}:verified-${image_tag}" --quiet
-
-          # TODO: This is a workaround, to be removed when promote_docker_image.yml workflow is stable
-          # Add "latest" tag
-          gcloud container images add-tag "${SOURCE_IMAGE}:${image_tag}" "${SOURCE_IMAGE}:latest" --quiet
-
-          # Add "latest" tag to additional image if specified
-          if [ -n "$ADDITIONAL_IMAGE_TO_TAG" ]; then
-            ADDITIONAL_IMAGE="gcr.io/${PROJECT_NAME}/${ADDITIONAL_IMAGE_TO_TAG}"
-            echo "Tagging ${ADDITIONAL_IMAGE}:${image_tag} as ${ADDITIONAL_IMAGE}:latest"
-            gcloud container images add-tag "${ADDITIONAL_IMAGE}:${image_tag}" "${ADDITIONAL_IMAGE}:latest" --quiet
-          fi
+            "${SOURCE_IMAGE}:verified-ci-${image_tag}" --quiet

@@ -43,9 +43,9 @@ python3 -m maxtext.inference.vllm_decode \
 python3 -m maxtext.trainers.post_train.sft.train_sft \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
-    per_device_batch_size=0.25 \
+    per_device_batch_size=1 \
     run_name=${run_id} \
-    steps=5 \
+    steps=2 \
     scan_layers=true \
     model_name=${MODEL_NAME} \
     checkpoint_storage_use_zarr3=False \
@@ -62,7 +62,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
 # Step 3: Run inference on the checkpoint produced by the SFT run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/5/model_params \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.85 \
     use_chat_template=True \

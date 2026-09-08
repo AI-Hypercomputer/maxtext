@@ -16,10 +16,23 @@
 
 name: Publish MaxText to PyPI
 
-# Triggered by Airflow when E2E DAG completes or can be manually triggered via workflow_dispatch.
+# Triggered by release_pipeline.yml via workflow_call or manually via workflow_dispatch.
 on:
-  repository_dispatch:
-    types: [airflow-dag-complete]
+  workflow_call:
+    inputs:
+      run_id:
+        description: 'GitHub workflow run_id passed to the Airflow DAG run.'
+        required: true
+        type: string
+      maxtext_sha:
+        description: 'MaxText SHA to release to PyPI.'
+        required: true
+        type: string
+      publish:
+        description: 'Set to true to publish to PyPI.'
+        required: false
+        default: true
+        type: boolean
   workflow_dispatch:
     inputs:
       run_id:
@@ -40,77 +53,33 @@ permissions:
   contents: read
 
 jobs:
-  handle_result:
-    name: Handle Airflow DAG Result
-    runs-on: ubuntu-latest
-    # Only run this job if the event that triggered the workflow is 'repository_dispatch'
-    if: github.event_name == 'repository_dispatch'
-    steps:
-      - name: Report DAG result
-        env:
-          STATE: ${{ github.event.client_payload.state }}
-          DAG_ID: ${{ github.event.client_payload.dag_id }}
-          DAG_RUN_ID: ${{ github.event.client_payload.dag_run_id }}
-          SHA: ${{ github.event.client_payload.sha }}
-        run: |
-
-          echo "================================"
-          echo "DAG ID:      ${DAG_ID}"
-          echo "DAG Run ID:  ${DAG_RUN_ID}"
-          echo "Commit SHA:  ${SHA}"
-          echo "State:       ${STATE}"
-          echo "================================"
-
-          # Evaluate state
-          case "${STATE}" in
-            success)
-              echo "DAG '${DAG_ID}' completed successfully."
-              exit 0
-              ;;
-            failed|upstream_failed)
-              echo "DAG '${DAG_ID}' failed with state: ${STATE}."
-              exit 1
-              ;;
-            *)
-              echo "DAG '${DAG_ID}' ended with unexpected state: ${STATE}."
-              exit 1
-              ;;
-          esac
-
   release_approval:
     name: Approve Release
     runs-on: ubuntu-latest
-    needs: handle_result
-    if: |
-      always() &&
-      (needs.handle_result.result == 'success' || needs.handle_result.result == 'skipped') &&
-      (github.event_name == 'repository_dispatch' || inputs.publish)
+    if: inputs.publish == true
     # "release" environment is configured in MaxText repository settings.
     # This environment requires manual approval before proceeding to the next job.
     environment: release
     steps:
-    - name: Acknowledge Approval
-      run: echo "Release approved, proceeding to publishing MaxText package."
+      - name: Acknowledge Approval
+        run: echo "Release approved, proceeding to publishing MaxText package."
 
   build_maxtext_package:
     needs: release_approval
-    if: |
-      always() &&
-      (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
       # Build package from a particular commit to ensure we are publishing the same code that was tested
-      maxtext_sha: ${{ github.event.client_payload.sha || inputs.maxtext_sha }}
+      maxtext_sha: ${{ inputs.maxtext_sha }}
 
   publish_maxtext_to_pypi:
     name: Publish MaxText to PyPI
     needs: [release_approval, build_maxtext_package]
     runs-on: ubuntu-latest
     environment: release
-    if: needs.build_maxtext_package.result == 'success' && (github.event_name == 'repository_dispatch' || inputs.publish)
+    if: needs.build_maxtext_package.result == 'success' && inputs.publish
     permissions:
       id-token: write # required for PyPI Trusted Publishing (OIDC)
       contents: read
@@ -164,11 +133,10 @@ jobs:
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           IMAGE_NAME: ${{ matrix.image_name }}
-          RUN_ID_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.client_payload.github_run_id }}
+          GITHUB_RUN_ID: ${{ inputs.run_id }}
           PYPI_VERSION: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
         run: |
           SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${IMAGE_NAME}"
-          GITHUB_RUN_ID="${RUN_ID_INPUT}"
           gcloud container images add-tag \
             "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
             "${SOURCE_IMAGE}:${PYPI_VERSION}" \

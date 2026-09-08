@@ -16,17 +16,20 @@
 
 
 import datetime
+import pathlib
 from types import SimpleNamespace
 import numpy as np
 import jax
 
 import pytest
+import yaml
 
 from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.lax import with_sharding_constraint
 
+from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import sharding
 
 # Global model and data constants
@@ -296,3 +299,22 @@ def test_with_axis_on_dim_handles_none_and_out_of_range():
   assert sharding.with_axis_on_dim(None, "context", 2) is None
   with pytest.raises(ValueError, match="out of range"):
     sharding.with_axis_on_dim(PartitionSpec("data", None), "context", 2)
+
+
+def test_embed_attn_rule_accompanies_embed_rule():
+  """Every shipped rule set that shards 'embed' must also cover 'embed_attn'.
+
+  The attention projections use the 'embed_attn' logical axis instead of
+  'embed', so a rule set that only defines 'embed' would silently leave the
+  attention weights replicated.
+  """
+  missing = []
+  for path in sorted(pathlib.Path(maxtext_globals.MAXTEXT_CONFIGS_DIR).rglob("*.yml")):
+    rules = yaml.safe_load(path.read_text()).get("logical_axis_rules")
+    if not rules:
+      continue
+    names = {rule[0] for rule in rules}
+    if "embed" in names and "embed_attn" not in names:
+      missing.append(str(path))
+
+  assert not missing, f"logical_axis_rules define 'embed' but not 'embed_attn' in: {missing}"

@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: ""
+      run_e2e_tests:
+        description: 'Whether to run E2E tests after building the Docker images'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -86,10 +91,8 @@ jobs:
           - name: "Pre-Training"
             image_name: maxtext_jax_stable
             workflow: pre-training
-            additional_image_to_tag: maxtext_jax_nightly
           - name: "Post-Training"
             image_name: maxtext_post_training_stable
-            additional_image_to_tag: maxtext_post_training_nightly
             workflow: post-training
     uses: ./.github/workflows/run_ci_tests.yml
     with:
@@ -97,12 +100,11 @@ jobs:
       image_tag: ${{ github.run_id }}
       device: tpu
       workflow: ${{ matrix.workflow }}
-      additional_image_to_tag: ${{ matrix.additional_image_to_tag != '' && (inputs.image_suffix != '' && format('{0}_{1}', matrix.additional_image_to_tag, inputs.image_suffix) || matrix.additional_image_to_tag) || '' }}
 
   run_e2e_tests:
     name: Run E2E tests
     needs: build_and_push_docker_images
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_e2e_tests == true)
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
       mode: stable

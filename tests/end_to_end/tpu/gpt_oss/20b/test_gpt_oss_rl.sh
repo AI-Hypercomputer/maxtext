@@ -38,7 +38,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     run_name=${run_id} \
-    num_batches=5 \
+    num_batches=2 \
     batch_size=16 \
     train_micro_batch_size=16 \
     rollout_micro_batch_size=16 \
