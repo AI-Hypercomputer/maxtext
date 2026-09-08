@@ -43,6 +43,8 @@ rope_max_timescale: 1000000
 global_rope_proportion: 0.25
 local_rope_proportion: 1.0
 final_logits_soft_cap: 30.0
+use_qk_norm: true
+scan_layers: false
 
 # Vision encoder flags — multimodal not yet supported for E2B / E4B.
 vision_encoder_block: "gemma4"
