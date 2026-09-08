@@ -173,6 +173,12 @@
         "logic_axes": "('activation_batch', 'activation_norm_length', 'activation_embed')",
         "PartitionSpec": "P(('fsdp', 'expert'), None, None)"
       }
+    },
+    {
+      "decoders/y: bfloat16[96,2048,2048]": {
+        "logic_axes": "('activation_embed_and_logits_batch_no_fsdp', 'activation_length', 'activation_embed')",
+        "PartitionSpec": "P('expert', None, None)"
+      }
     }
   ]
 }

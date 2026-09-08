@@ -133,8 +133,8 @@
   },
   ".params/['params']/['decoder']/['logits_dense']/['kernel']": {
     "partition_spec": [
-      "embed_vocab",
-      "vocab"
+      "embed_vocab_replicated",
+      "vocab_fsdp"
     ],
     "shape": [
       2048,
@@ -459,8 +459,8 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['logits_dense']/['kernel']": {
     "partition_spec": [
-      "embed_vocab",
-      "vocab"
+      "embed_vocab_replicated",
+      "vocab_fsdp"
     ],
     "shape": [
       2048,
@@ -781,8 +781,8 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['logits_dense']/['kernel']": {
     "partition_spec": [
-      "embed_vocab",
-      "vocab"
+      "embed_vocab_replicated",
+      "vocab_fsdp"
     ],
     "shape": [
       2048,

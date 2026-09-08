@@ -3205,8 +3205,8 @@ def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
-def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
-  """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
+def _resolved_axis_product(axes, mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
+  """Combined size of `axes`, resolving a `-1` the way mesh creation will.
 
   `maxtext_utils.fill_unspecified_mesh_axes` hands the single -1 entry whatever devices the
   other axes leave over, so config validation has to do the same to see the sizes a run will
@@ -3216,7 +3216,12 @@ def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_device
   specified = prod(size for size in parallelism if size != -1)
   leftover = num_devices // specified if specified > 0 and num_devices > 0 and num_devices % specified == 0 else 1
   sizes = {axis: leftover if size == -1 else size for axis, size in zip(mesh_axes, parallelism)}
-  return max(sizes.get("fsdp", 1), 1) * max(sizes.get("fsdp_transpose", 1), 1)
+  return prod(max(sizes.get(axis, 1), 1) for axis in axes)
+
+
+def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
+  """Combined size of the fsdp mesh axes."""
+  return _resolved_axis_product(("fsdp", "fsdp_transpose"), mesh_axes, parallelism, num_devices)
 
 
 # ----------------------------------------------------------------------------
@@ -4998,6 +5003,9 @@ class MaxTextConfig(
         sharded on vocab.
       - no MTP, which reshards its logits straight back to batch-sharded, and no
         vocab tiling, which already chunks the vocab dimension itself.
+      - a vocab dimension the rotated head's axes divide evenly. The default orientation
+        only splits vocab over the tensor axes, so a mesh that adds FSDP to that split can
+        make an otherwise fine vocab size indivisible (olmo3's 100278 over fsdp 4, say).
 
     Unlike the two kernel-order flags, this one is not about `shard_mode` at all: it is a
     layout fix, and `auto` reaches the same layout and the same speedup when asked to. It
@@ -5006,25 +5014,48 @@ class MaxTextConfig(
     fallback if it ever does not is the default orientation, i.e. today's behaviour.
     """
     applicable = not self.logits_via_embedding and self.mtp_num_layers == 0 and self.num_vocab_tiling <= 1
-    if self.lm_head_vocab_parallel is None:
-      self.lm_head_vocab_parallel = applicable
-    elif self.lm_head_vocab_parallel and not applicable:
+    if self.lm_head_vocab_parallel and not applicable:
       raise ValueError(
           "lm_head_vocab_parallel needs an untied LM head (logits_via_embedding: False) with neither MTP "
           f"(mtp_num_layers: {self.mtp_num_layers}) nor vocab tiling (num_vocab_tiling: {self.num_vocab_tiling})."
       )
+    shards = self._vocab_parallel_head_shards()
+    if applicable and self.vocab_size % shards:
+      if self.lm_head_vocab_parallel:
+        raise ValueError(
+            f"lm_head_vocab_parallel splits the LM head's vocab dimension {shards} ways, which does not "
+            f"divide vocab_size {self.vocab_size}. Leave the flag unset to fall back to the default "
+            "orientation, or pick a mesh whose tensor and fsdp axes divide the vocab size."
+        )
+      applicable = False
+    if self.lm_head_vocab_parallel is None:
+      self.lm_head_vocab_parallel = applicable
     if self.lm_head_vocab_parallel:
       named = {rule[0] for rule in self.logical_axis_rules if rule}
+      mesh_axes = set(self.mesh_axes)
       for name, axes in _VOCAB_PARALLEL_LM_HEAD_RULES:
         if name not in named:
-          self.logical_axis_rules.append([name, axes])
+          # A custom mesh-and-rule file brings its own, usually much shorter, `mesh_axes`, and
+          # a spec naming an axis that mesh does not have raises when it reaches the mesh.
+          self.logical_axis_rules.append([name, [axis for axis in axes if axis in mesh_axes]])
     return self
+
+  def _vocab_parallel_head_shards(self) -> int:
+    """How many ways the rotated LM head would split its vocab dimension."""
+    rules = {rule[0]: rule[1] for rule in self.logical_axis_rules if rule}
+    axes = rules.get("vocab_fsdp", dict(_VOCAB_PARALLEL_LM_HEAD_RULES)["vocab_fsdp"])
+    axes = [axes] if isinstance(axes, str) else axes
+    ici_devices = self.num_target_devices // max(self.num_slices, 1)
+    return _resolved_axis_product(axes, self.mesh_axes, self.ici_parallelism, ici_devices) * _resolved_axis_product(
+        axes, self.mesh_axes, self.dcn_parallelism, self.num_slices
+    )
 
 
 # Appended to `logical_axis_rules` when lm_head_vocab_parallel is on and a rule set does not
-# already define them; base.yml carries the same four so the common case is a no-op. Together
-# they put the head's [embed, vocab] kernel on the FSDP axes along vocab instead of embed, and
-# take those axes off the batch dimension of everything the head touches.
+# already define them, narrowed to the axes the mesh actually has; base.yml carries the same
+# four so the common case is a no-op. Together they put the head's [embed, vocab] kernel on the
+# FSDP axes along vocab instead of embed, and take those axes off the batch dimension of
+# everything the head touches.
 _VOCAB_PARALLEL_LM_HEAD_RULES = (
     ("activation_embed_and_logits_batch_no_fsdp", ["data", "stage", "expert"]),
     ("activation_vocab_fsdp", ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"]),

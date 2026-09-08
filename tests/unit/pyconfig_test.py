@@ -395,6 +395,27 @@ class PyconfigTest(unittest.TestCase):
       with self.subTest(**kwargs), self.assertRaisesRegex(Exception, "lm_head_vocab_parallel needs an untied LM head"):
         resolve(shard_mode="explicit", lm_head_vocab_parallel=True, **kwargs)
 
+  def test_lm_head_vocab_parallel_needs_a_divisible_vocab(self):
+    """The rotated head adds the FSDP axes to the vocab split, which not every vocab size survives."""
+
+    def resolve(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          compile_topology="v6e-4",
+          compile_topology_num_slices=1,
+          **kwargs,
+      ).lm_head_vocab_parallel
+
+    # olmo3's vocab size. The default orientation leaves it whole here, since the tensor axes
+    # this mesh has are all 1; the rotated one asks the four-way fsdp axis to split it.
+    self.assertFalse(resolve(vocab_size=100278))
+    self.assertTrue(resolve(vocab_size=100352))
+    # Asking for it anyway is an error rather than a silent fallback.
+    with self.assertRaisesRegex(Exception, "does not divide vocab_size 100278"):
+      resolve(vocab_size=100278, lm_head_vocab_parallel=True)
+
   def test_lm_head_vocab_parallel_injects_its_rules(self):
     """The four rules the sideways head needs are added to a rule set that lacks them, and only then."""
     expected = {

@@ -104,7 +104,7 @@ def get_first_step(model, state):
 
 def _one_hot_targets(targets, config, mesh):
   """Expand integer targets into the one-hot matrix cross entropy multiplies with the logits."""
-  if not config.lm_head_vocab_parallel:
+  if not getattr(config, "lm_head_vocab_parallel", False):
     return jax.nn.one_hot(targets, config.vocab_size)
   # A vocab-parallel head leaves the logits sharded on vocab rather than on batch, so the
   # one-hot matrix has to be built in that layout too -- see sharding.vocab_parallel_one_hot.
