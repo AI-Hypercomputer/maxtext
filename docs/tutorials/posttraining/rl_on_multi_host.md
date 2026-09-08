@@ -157,7 +157,10 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 > - If you do explicitly provide a `scan_layers` argument, it must match the checkpoint's saved setting or a `ValueError` mismatch error will be raised.
 >   See the [Checkpoints concept guide](../../reference/core_concepts/checkpoints.md) for more details.
 
-## Submit your RL workload with Cluster Toolkit
+## Submit your RL workload via Pathways
+
+See the **Troubleshooting** section for concise instructions on how to retry or
+resume a failed workload.
 
 Configure `kubectl` and `gcluster` for the target cluster before submitting:
 
@@ -180,67 +183,7 @@ export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
 export TOPOLOGY=<TPU_TOPOLOGY>
 ```
 
-Cluster Toolkit runs the RL process directly in the GKE JobSet. Therefore, the
-Pathways-only environment variables `JAX_PLATFORMS=proxy`,
-`JAX_BACKEND_TARGET`, and `ENABLE_PATHWAYS_PERSISTENCE` are intentionally not
-included.
-
 ### Submit GRPO workload
-
-```bash
-gcluster job submit \
-  --image=${DOCKER_IMAGE?} \
-  --name=${RUN_NAME?}-grpo \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
-  --command="HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 \
-python3 -m maxtext.trainers.post_train.rl.train_rl \
-  model_name=${MODEL?} \
-  tokenizer_path=${TOKENIZER_PATH?} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-  run_name=${RUN_NAME?}-grpo \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-  rollout_tensor_parallelism=8 \
-  hf_access_token=${HF_TOKEN?}"
-```
-
-### Submit GSPO workload
-
-Use the same command for GSPO and add `loss_algo=gspo-token` to the MaxText
-arguments:
-
-```bash
-gcluster job submit \
-  --image=${DOCKER_IMAGE?} \
-  --name=${RUN_NAME?}-gspo \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
-  --command="HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 \
-python3 -m maxtext.trainers.post_train.rl.train_rl \
-  model_name=${MODEL?} \
-  tokenizer_path=${TOKENIZER_PATH?} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-  run_name=${RUN_NAME?}-gspo \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-  rollout_tensor_parallelism=8 \
-  hf_access_token=${HF_TOKEN?} \
-  loss_algo=gspo-token"
-```
-
-Monitor the Cluster Toolkit jobs with `gcluster job list` and
-`gcluster job logs <JOB_NAME>`. If the RL implementation requires Pathways
-orchestration for a particular model or vLLM configuration, see the Pathways section below.
-
-## Submit your RL workload via Pathways
-
-If your workload configuration requires Pathways orchestration across TPU slices, you can submit the RL trainer using Cluster Toolkit with the `--pathways` option.
-
-See the **Troubleshooting** section for concise instructions on how to retry or
-resume a failed workload.
-
-### Submit Pathways workload with Cluster Toolkit
-
-#### Submit GRPO workload with Cluster Toolkit Pathways
 
 ```bash
 gcluster job submit \
@@ -262,7 +205,7 @@ gcluster job submit \
   enable_single_controller=True"
 ```
 
-#### Submit GSPO workload with Cluster Toolkit Pathways
+### Submit GSPO workload
 
 ```bash
 gcluster job submit \
