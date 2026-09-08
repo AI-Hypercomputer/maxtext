@@ -421,14 +421,6 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
             mtp_moe_bias_updates = []
           mtp_moe_bias_updates.append(val)
 
-  te_moe_block = getattr(config, "te_moe_block", False)
-  if te_moe_block:
-    overflow_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_capacity_overflow")
-    total_recv_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_total_recv_tokens")
-    capacity_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_recv_capacity_per_rank")
-    if not overflow_values or not total_recv_values or not capacity_values:
-      raise ValueError("te_moe_block=True did not produce TE MoE receive-capacity intermediates.")
-
   # Add the model's primary output to the intermediates dict so it can be used
   # by the acceptance rate calculation in eval_step.
   if not is_train and config.mtp_eval_target_module > 0:
