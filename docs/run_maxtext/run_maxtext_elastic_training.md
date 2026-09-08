@@ -61,15 +61,14 @@ export GKE_CLUSTER=<cluster name>
 # Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
 export RUN_NAME="elastic-$(date +%m%d%H%M%S)"
 
-# TPU type and slice count. For supported types see src/maxtext/utils/accelerator_to_spec_map.py.
-export TPU_TYPE="v5litepod-16"  # one slice = 16 v5e chips
-export NUM_SLICES=3             # total slices in the run
+# Hardware & Slice Configuration
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE> # e.g., 'ct5lp-hightpu-4t' for v5e
+export TOPOLOGY=<TPU_TOPOLOGY>                     # e.g., '4x4' (16 chips)
+export NUM_SLICES=3                                # total slices in the run
 
 # MaxText & Storage Configuration
-export BASE_OUTPUT_DIRECTORY=<gcs bucket path>  # e.g., gs://my-bucket/maxtext-runs
-export DOCKER_IMAGE=<ARTIFACT_REGISTRY_IMAGE_URI>
-export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
-export TOPOLOGY=<TPU_TOPOLOGY>
+export BASE_OUTPUT_DIRECTORY=<gcs bucket path>     # e.g., gs://my-bucket/maxtext-runs
+export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
 ```
 
 ## 3. Launch the elastic workload
@@ -122,6 +121,10 @@ gcluster job submit \
   `--elastic-slices`) and `--pathways-max-slice-restarts` (replacing XPK's
   `--max-slice-restarts`). These flags configure the Pathways proxy and resource
   manager to tolerate slice failures and restart failed workers in-process.
+
+  The elastic training configuration parameters (`elastic_enabled`, `elastic_timeout_seconds`,
+  and `elastic_max_retries`) require MaxText 0.2.4 or later (or the official pre-training image
+  `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4`).
 ```
 
 ```{warning}

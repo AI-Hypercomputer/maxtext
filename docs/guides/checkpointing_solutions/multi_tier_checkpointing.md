@@ -118,7 +118,33 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
    gcloud config set project ${PROJECT_ID?}
    gcloud config set compute/zone ${ZONE?}
    ```
-3. **Configure the cluster:** Follow the Google Cloud Checkpointing Documentation to enable the CSI drivers, MTC configuration, and ramdisk size represented by the values above.
+3. **Configure the cluster:** Multi-Tier Checkpointing requires the `HighScaleCheckpointing` and `GcsFuseCsiDriver` addons to be enabled on your GKE cluster.
+
+   - **For an existing cluster**, update the cluster addons:
+     ```bash
+     gcloud container clusters update ${CLUSTER_NAME?} \
+       --update-addons=HighScaleCheckpointing=ENABLED,GcsFuseCsiDriver=ENABLED \
+       --location=${ZONE?}
+     ```
+
+   - **For a new cluster**, include the addons during cluster creation:
+     ```bash
+     gcloud container clusters create ${CLUSTER_NAME?} \
+       --addons=HighScaleCheckpointing,GcsFuseCsiDriver \
+       --location=${ZONE?} \
+       --cluster-version=${GKE_VERSION?}
+     ```
+
+   - **Verify that HighScaleCheckpointing is enabled**:
+     ```bash
+     gcloud container clusters describe ${CLUSTER_NAME?} \
+       --location=${ZONE?} \
+       --format="yaml(addonsConfig.highScaleCheckpointingConfig)"
+     ```
+     The output should confirm `enabled: true`.
+
+     > **Note:** If `HighScaleCheckpointing` is not enabled, Cluster Toolkit (`gcluster job submit`) will reject the workload submission with:
+     > `Error: Multi-Tier Checkpointing (MTC) requires the HighScaleCheckpointing addon to be enabled on the target GKE cluster.`
 
 ## MaxText configuration
 
@@ -169,7 +195,10 @@ The flags below would give the user access to the ramdisk in their workload:
 2. **Define the Docker image:**
 
    ```bash
-   DOCKER_IMAGE=gcr.io/${PROJECT_ID}/${USER}_mtc_runner:latest
+   # Official release pre-training image (recommended)
+   DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+   # Or your custom runner image:
+   # DOCKER_IMAGE="gcr.io/${PROJECT_ID}/${USER}_mtc_runner:latest"
    ```
 
 3. **Run the workload creation command:**
@@ -215,7 +244,7 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
    TOPOLOGY="<tpu-topology>"
    NUM_SLICES="<number-of-slices>"
    OUTPUT_PATH="gs://<bucket>"
-   MAXTEXT_IMAGE="<maxtext-head-image>"
+   MAXTEXT_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
    MAXTEXT_CONFIG="/deps/src/maxtext/configs/base.yml"
    RAMDISK_DIRECTORY="/tmp/mtc_checkpoints"
    LOCAL_CHECKPOINT_PERIOD=10

@@ -333,6 +333,8 @@ export IMAGE_URI=<ARTIFACT_REGISTRY_IMAGE_URI>
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
 export TOPOLOGY=<TPU_TOPOLOGY>
 export BASE_OUTPUT_DIRECTORY=gs://<BUCKET>/distillation
+export TEACHER_CKPT_PATH=gs://<BUCKET>/<TEACHER_MODEL_PATH>/checkpoints/0/items
+export HF_TOKEN=<HF_TOKEN>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
@@ -347,7 +349,7 @@ gcluster job submit \
   --name ${RUN_NAME?} \
   --compute-type ${COMPUTE_TYPE?} \
   --topology ${TOPOLOGY?} \
-  --command "python3 -m maxtext.trainers.post_train.distillation.train_distill src/maxtext/configs/post_train/distillation.yml base_output_directory=${BASE_OUTPUT_DIRECTORY?} run_name=${RUN_NAME?}"
+  --command "python3 -m maxtext.trainers.post_train.distillation.train_distill src/maxtext/configs/post_train/distillation.yml base_output_directory=${BASE_OUTPUT_DIRECTORY?} run_name=${RUN_NAME?} teacher_overrides.load_parameters_path=${TEACHER_CKPT_PATH?} hf_access_token=${HF_TOKEN?}"
 ```
 
 #### Monitor and clean up

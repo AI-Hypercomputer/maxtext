@@ -80,7 +80,7 @@ export HF_TOKEN=<HF_TOKEN>
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
-# Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
+# Note: Workload names cannot exceed 28 characters (or 22 characters when using Pathways due to Kubernetes 63-byte coordinator label limits) and must be valid DNS labels (lowercase alphanumeric and hyphens).
 export RUN_NAME="sft-$(date +%m%d%H%M%S)"
 
 # -- Workload configuration --

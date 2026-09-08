@@ -38,7 +38,7 @@ gcluster job submit \
   --topology <TOPOLOGY> \
   --num-slices=1 \
   --pathways-gcs-location=gs://maxtext-experiments-tpem/ \
-  --command "python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5 enable_single_controller=True"
+  --command "python3 -m benchmarks.benchmark_runner --use_pathways=true on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5"
 ```
 
 The existing Python XPK runner below remains available for older benchmark

@@ -59,6 +59,9 @@ export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 
 # Your Hugging Face access token.
 export HF_TOKEN=<HF_TOKEN>
+
+# Tokenizer path for Qwen3
+export TOKENIZER_PATH="Qwen/Qwen2.5-32B"
 ```
 
 ## Authenticate with Hugging Face
@@ -118,7 +121,7 @@ gcluster job submit \
   --name ${RUN_NAME?} \
   --compute-type ${COMPUTE_TYPE?} \
   --topology ${TOPOLOGY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-30b-a3b-base load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?}"
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-30b-a3b-base tokenizer_path=${TOKENIZER_PATH?} load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?}"
 ```
 
 Alternatively, if your environment uses Pathways orchestration, submit the workload with Cluster Toolkit's `--pathways` option:
@@ -132,7 +135,7 @@ gcluster job submit \
   --topology ${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-30b-a3b-base load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?} enable_single_controller=True"
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-30b-a3b-base tokenizer_path=${TOKENIZER_PATH?} load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?} enable_single_controller=True"
 ```
 
 ### Monitor your workload

@@ -70,8 +70,8 @@ kubectl get crd clusterqueues.kueue.x-k8s.io
 ## Configure the workload
 
 ```bash
-# Note: Workload name cannot exceed 28 characters due to Kubernetes/GCE resource name limits.
-export RUN_NAME="maxtext-$(date +%m%d%H%M%S)"
+# Note: Workload name cannot exceed 22 characters for Pathways workloads due to Kubernetes 63-byte label limit on coordinator address (`<name>-pathways-head-0-0.<name>`).
+export RUN_NAME="pw-$(date +%m%d%H%M%S)"
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET_PATH>
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
 export TOPOLOGY=<TPU_TOPOLOGY>

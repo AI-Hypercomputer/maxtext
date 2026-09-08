@@ -56,7 +56,12 @@ export RUN_NAME=olmo3_7b_stage1
 export BASE_OUTPUT_DIRECTORY=gs://<your-bucket>/olmo/runs
 export COMPUTE_TYPE=<cluster-toolkit-compute-type>
 export TOPOLOGY=<tpu-topology>
-export IMAGE_URI=<artifact-registry-image>
+export IMAGE_URI="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+
+export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json
+export OLMO_GCS_BASE=gs://<your-bucket>/
+export LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+export HF_TOKEN=<your-hf-token>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
@@ -71,11 +76,18 @@ gcluster job submit \
   --name ${RUN_NAME?} \
   --compute-type ${COMPUTE_TYPE?} \
   --topology ${TOPOLOGY?} \
-  --command "bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh"
+  --command "INDEX_PATH=${OLMO_INDEX_PATH?} \
+GCS_BASE=${OLMO_GCS_BASE?} \
+LOCAL_MOUNT=/tmp/olmo-data \
+OUTPUT_DIR=${BASE_OUTPUT_DIRECTORY?} \
+LOAD_PARAMETERS_PATH=${LOAD_PARAMETERS_PATH?} \
+HF_TOKEN=${HF_TOKEN?} \
+MOUNT_GCSFUSE=1 \
+VENV_PATH=/__skip_venv__ \
+bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh"
 ```
 
-Set the data, checkpoint, and launcher environment variables in the image or
-pass them in the command before invoking `run_olmo3_7b_stage1.sh`.
+Set the data, checkpoint, and launcher environment variables before invoking `run_olmo3_7b_stage1.sh`. For smoke testing without tokenized OLMo data, see the single-host or synthetic data section below.
 
 
 ## Quick start (single-host / smoke test)
