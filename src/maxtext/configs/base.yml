@@ -228,10 +228,11 @@ sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 num_moe_token_chunks: 1 # split routed-MoE tokens into N chunks (ring-of-experts path) so each chunk's EP all-gather / reduce-scatter overlaps the previous chunk's GMM compute. 1 = disabled (identical to baseline).
 moe_chunk_barrier: false # wraps its iteration with optimization_barrier to chain the chunked ring-of-experts MoE loop so each chunk's input is fenced on the previous chunk's output, forcing sequential (no-interleave) chunk execution. Math unchanged (barrier is identity), loss bit-exact. Needs num_moe_token_chunks>1 + use_ring_of_experts=True to matter.
-ragged_buffer_factor: -1.0 # factor over the active MoE backend's balanced receive capacity
-# By default (-1), the routed buffer is worst-case sized to ensure no dropping.
-# A positive value scales the balanced receive capacity and can drop tokens when routing exceeds that capacity.
-# TransformerEngine MoEBlock requires positive values to be >= 1.0 and applies its per-expert alignment before scaling.
+ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer for routed MoE activations.
+# By default (-1), the routed buffer is worst case size to ensure no dropping.
+# When set to 1.0 this buffer if set to the size assuming perfectly balanced. If the routing dictates
+# a size larger than this then tokens are dropped.
+# In general if ragged_buffer_factor > 0, the ragged_buffer_size is balanced_size * ragged_buffer_factor.
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss

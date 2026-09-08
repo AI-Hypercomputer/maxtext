@@ -493,7 +493,6 @@ class TrainTests(unittest.TestCase):
       if float(compute_capability) < 10.0:
         pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
     except Exception:  # pylint: disable=broad-exception-caught
-      # Non-numeric or unknown capability (e.g. ROCm 'gfx942') — skip the test.
       pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
 
     train_main(

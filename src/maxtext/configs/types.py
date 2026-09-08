@@ -885,10 +885,7 @@ class MoEGeneral(BaseModel):
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
   ragged_buffer_factor: float = Field(
       -1.0,
-      description=(
-          "Factor over the balanced routed-MoE receive capacity. If <= 0, the active MoE backend reserves its "
-          "dropless worst-case capacity."
-      ),
+      description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
   )
   num_moe_token_chunks: PositiveInt = Field(
       1,
