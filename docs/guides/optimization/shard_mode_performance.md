@@ -1321,12 +1321,12 @@ go through `sharding.logical_to_mesh_axes`. Two code paths, one behaviour.
 Written the obvious way — gather the parameter as it is, name it, save it — the flag is worth
 essentially nothing:
 
-| qwen3-8b, d16, L12, fsdp 4, `remat_policy: minimal` | explicit |   auto |
-| --------------------------------------------------- | -------: | -----: |
-| no residual                                          |   48,183 | 48,114 |
-| **float32** gathered residual                        |   48,081 | 48,489 |
-| bf16 cast, but *not* saved                           |   48,162 | 48,096 |
-| **bf16 gathered residual**                           |**42,591**| 43,062 |
+| qwen3-8b, d16, L12, fsdp 4, `remat_policy: minimal` |   explicit |   auto |
+| --------------------------------------------------- | ---------: | -----: |
+| no residual                                         |     48,183 | 48,114 |
+| **float32** gathered residual                       |     48,081 | 48,489 |
+| bf16 cast, but *not* saved                          |     48,162 | 48,096 |
+| **bf16 gathered residual**                          | **42,591** | 43,062 |
 
 (µs, median device `jit_train_step`, one rep each except the last row; §9 has the harness.)
 
@@ -1366,11 +1366,11 @@ This is why the flag is **off by default**. It buys step time with HBM, the amou
 
 Three reps, medians, loss 12.415 in every arm. `LIBTPU_INIT_ARGS` as in §9:
 
-| d16, L12, fsdp 4                     | explicit, off | explicit, on |      Δ | auto, off | auto, on |      Δ |
-| ------------------------------------ | ------------: | -----------: | -----: | --------: | -------: | -----: |
-| `qwen3-8b`, `remat_policy: minimal`  |        48,165 |   **42,619** | −11.5% |    48,127 |   43,039 | −10.6% |
-| `qwen3-8b`, `remat_policy: full`     |        50,734 |   **45,025** | −11.3% |    51,094 |   44,725 | −12.5% |
-| `mixtral-8x7b`, `minimal` (1 rep)    |       261,650 |  **234,412** | −10.4% |   261,636 |  234,618 | −10.3% |
+| d16, L12, fsdp 4                    | explicit, off | explicit, on |      Δ | auto, off | auto, on |      Δ |
+| ----------------------------------- | ------------: | -----------: | -----: | --------: | -------: | -----: |
+| `qwen3-8b`, `remat_policy: minimal` |        48,165 |   **42,619** | −11.5% |    48,127 |   43,039 | −10.6% |
+| `qwen3-8b`, `remat_policy: full`    |        50,734 |   **45,025** | −11.3% |    51,094 |   44,725 | −12.5% |
+| `mixtral-8x7b`, `minimal` (1 rep)   |       261,650 |  **234,412** | −10.4% |   261,636 |  234,618 | −10.3% |
 
 The MoE row matters as a second structure, not just a second model: the expert weights are gathered
 and saved by the same code path, the win is the same size, and mixtral's loss is 10.867 in all four
@@ -1381,12 +1381,12 @@ With stock libtpu — no `LIBTPU_INIT_ARGS` at all — the flag is still worth �
 What *does* depend on them is the ordering: the async-all-gather set is what lets the freed schedule
 slack be used, and only with both is explicit ahead —
 
-| qwen3-8b, d16, L12, fsdp 4, `minimal` | explicit |   auto | winner              |
-| ------------------------------------- | -------: | -----: | ------------------- |
-| stock libtpu, no residual             |   51,866 | 51,997 | explicit by 0.25%   |
-| stock libtpu, residual                |   46,928 | 46,881 | auto by 0.10%       |
-| async-AG flags, no residual           |   48,165 | 48,127 | auto by 0.08%       |
-| async-AG flags, residual              |**42,619**| 43,039 | **explicit by 0.98%**|
+| qwen3-8b, d16, L12, fsdp 4, `minimal` |   explicit |   auto | winner                |
+| ------------------------------------- | ---------: | -----: | --------------------- |
+| stock libtpu, no residual             |     51,866 | 51,997 | explicit by 0.25%     |
+| stock libtpu, residual                |     46,928 | 46,881 | auto by 0.10%         |
+| async-AG flags, no residual           |     48,165 | 48,127 | auto by 0.08%         |
+| async-AG flags, residual              | **42,619** | 43,039 | **explicit by 0.98%** |
 
 #### Where it does not hold: per-device batch ≥ 2
 
@@ -2605,11 +2605,14 @@ that cost time to discover:
 - Drive the dump through `XLA_FLAGS`, **not** MaxText's `dump_hlo` config — that hook unconditionally
   uploads to GCS and raises on a local `base_output_directory`, aborting the run before the xplane
   profile is flushed (§8 item 7).
+
 - Clear `jax_cache_dir`. A persistent-cache hit skips compilation and therefore suppresses the HLO
   dump, while producing an identical executable and step time.
+
 - The geometry above is the *shrink* used by §5.1–§5.2 and by §4's dumps. Everything from §4.8
   onward — including §5.6 — uses `base_emb_dim=2048 base_mlp_dim=8192 base_num_query_heads=8 base_num_kv_heads=8 head_dim=128` (referred to as **d16**) with `base_num_decoder_layers` varied
   per row, plus `base_moe_mlp_dim=8192` on mixtral. §5.6 writes out nothing else but `shard_mode`.
+
 - §4.11 additionally sets the libtpu **async-all-gather set**, and says so per table where it does.
   These go in `LIBTPU_INIT_ARGS`, *not* `XLA_FLAGS` — libtpu silently ignores them in the latter, so
   a run that looks like it took them may not have:
