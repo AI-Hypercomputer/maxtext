@@ -4688,6 +4688,18 @@ class MaxTextConfig(
     if self.use_batch_split_schedule:
       if self.quantization and not self.quantization == "fp8_full":
         raise ValueError("Batch split quantization only supports `quantization=fp8_full`")
+      # `deepseek_batchsplit.fetch_weights` reads MLA parameters by name
+      # (`wq_a`, `wq_b`, `q_norm`, `wkv_a`, `wkv_b`, `kv_norm`), so the schedule
+      # only applies to models whose attention is MLA. The decoder reaches it via
+      # `has_dense_prefix`, which now covers Hy3 as well as DeepSeek, and Hy3's
+      # plain GQA has none of those parameters -- without this it fails with
+      # `KeyError: 'wq_a'` partway through the first forward pass.
+      if self.attention_type != "mla":
+        raise ValueError(
+            "`use_batch_split_schedule=True` requires `attention_type=mla`, "
+            f"got {self.attention_type!r}. The batch-split schedule reads MLA-specific "
+            "attention parameters, so it does not apply to other attention types."
+        )
 
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
