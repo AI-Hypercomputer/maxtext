@@ -270,6 +270,18 @@ the vocab-parallel head's win scales with `vocab_size / (batch·length)` and thi
 your `base_num_decoder_layers` is a multiple of 8 you are paying §4.9's ~25% in both modes and should
 try `param_scan_axis: 0`.
 
+> *Revised (2026-09-08).* The first of those two caveats has now been measured, and it resolves the
+> other way round: at `max_target_length=4096` on 8 TPU7x chips, explicit is faster than `auto` on
+> **seven of eight** onboarded models — median **−0.435%**, best −1.147% (qwen3) — and the eighth
+> (deepseek2-16b, +0.051% at fsdp 8) wins by −0.059% on the expert-parallel mesh it would actually be
+> run on, which is also 6.1% faster than fsdp 8 in both modes. Every model that regressed at 1024
+> tokens wins at 4096, because the whole 1024-token deficit is one fixed-size collective — the FSDP
+> all-gather of the MLP kernels, identical in count, shape and bytes in both modes, with a 2.3%
+> longer async window under explicit — and quadrupling the tokens amortizes it. So *parity, reliably*
+> understates it at realistic sequence lengths: the honest one-liner there is **a small but
+> consistent win**, still small enough that §6 and §7 remain the right basis for choosing a mode.
+> See §5.9.
+
 ______________________________________________________________________
 
 ## 2. Scope: which models are actually onboarded
@@ -2009,6 +2021,135 @@ smaller than the 0.037 spread produced by relabelling the mesh axis with no code
 (`ici_fsdp_parallelism=4` 10.879 / `ici_fsdp_transpose_parallelism=4` 10.894 / `2×2` 10.857). It is
 float reassociation from a different contraction layout, not a correctness difference.
 
+### 5.9 At a production sequence length the tie becomes a win, on every model
+
+§1's practical guidance closes on an open item: the vocab-parallel head's win "scales with
+`vocab_size / (batch·length)` and this benchmark's `batch·length` is only 4,096, so expect less of it
+at production batch and sequence length." Every number in §5.4–§5.8 is `max_target_length=1024`,
+`per_device_batch_size=1`. This section re-runs the whole matrix at `max_target_length=4096` — 32,768
+tokens per step instead of 8,192 — and the answer is the opposite of the worry. The gap does not
+close toward zero; **it opens in explicit's favour on every model.**
+
+Different hardware from the rest of this document: **TPU7x (Ironwood), 8 chips, 94.7 GiB HBM/device**,
+JAX 0.11.1. All eight onboarded models at d16 (`base_emb_dim=2048`, `base_mlp_dim=8192`, plus
+`base_moe_mlp_dim=8192` for the two MoE models, 8 query / 8 KV heads, `head_dim=128`),
+`base_num_decoder_layers=12` (a healthy depth, §4.9), `ici_fsdp_parallelism=8`, synthetic data,
+`enable_checkpointing=False`, **nothing written out but `shard_mode`** — both modes on their shipped
+defaults, so this is the §5.8 comparison, not the §5.7 one. Median of the profiled `jit_train_step`
+module spans on `/device:TPU:0`, three reps per cell. Rep spread was 0.00–0.05% throughout, so
+anything under ~0.05% is a tie.
+
+**Table A — `max_target_length=1024`, the geometry the rest of this document uses.**
+
+| model         |     `auto` ns | `explicit` ns |       delta |
+| ------------- | ------------: | ------------: | ----------: |
+| gemma-2b      |    43,910,246 |    43,694,736 |     −0.491% |
+| llama2-7b     |    29,056,392 |    28,922,814 |     −0.460% |
+| mistral-7b    |    28,232,569 |    28,162,089 |     −0.250% |
+| mixtral-8x7b  |   176,902,800 |   176,789,049 |     −0.064% |
+| deepseek2-16b | 1,238,611,947 | 1,237,853,491 |     −0.061% |
+| gemma3-4b     |    52,831,549 |    52,971,832 | **+0.266%** |
+| qwen3-8b      |    30,853,231 |    30,966,227 | **+0.366%** |
+| gemma2-2b     |    73,755,347 |    74,141,950 | **+0.524%** |
+|               |               |    **median** |     −0.063% |
+
+**Table B — `max_target_length=4096`, same everything else.**
+
+| model         |     `auto` ns | `explicit` ns |       delta |
+| ------------- | ------------: | ------------: | ----------: |
+| qwen3-8b      |    76,733,270 |    75,853,184 | **−1.147%** |
+| llama2-7b     |    67,042,013 |    66,662,397 |     −0.566% |
+| gemma-2b      |    89,692,621 |    89,240,383 |     −0.504% |
+| gemma2-2b     |   159,056,838 |   158,264,830 |     −0.498% |
+| gemma3-4b     |    92,265,701 |    91,923,323 |     −0.371% |
+| mistral-7b    |    66,884,694 |    66,675,081 |     −0.313% |
+| mixtral-8x7b  |   225,684,289 |   225,471,856 |     −0.094% |
+| deepseek2-16b | 1,367,040,531 | 1,367,731,966 |     +0.051% |
+|               |               |    **median** |     −0.435% |
+
+Every row that regressed at 1024 tokens wins at 4096, and the two largest swings are the two largest
+1024-token losses: qwen3 +0.366% → −1.147%, gemma2 +0.524% → −0.498%. Median −0.063% → −0.435%.
+
+**Why the short-sequence numbers were misleading.** At 1024 tokens most of the step is not token
+work. Quadrupling the tokens costs gemma2 only 2.16× the time (73.8 → 159.1 ms), so more than half
+the 1024-token step is fixed-size weight traffic. That is exactly where the 1024-token regression
+lives, and the op ledger says so in one line — gemma2-2b, summed over three profiled steps and all
+eight cores:
+
+| op                                           | n `auto` | n `explicit` | `auto` µs | `explicit` µs |      delta |
+| -------------------------------------------- | -------: | -----------: | --------: | ------------: | ---------: |
+| `all-gather…call-done = bf16[1,2048,8192]`   |    2,880 |        2,880 |   360,911 |       369,120 | **+8,209** |
+| `fusion` (all)                               |   27,360 |       27,360 |   541,899 |       544,903 |     +3,004 |
+| `reduce-scatter` (all)                       |   12,120 |       12,120 |   371,252 |       369,459 |     −1,793 |
+| `while` (the layer scan, contains the above) |       48 |           48 | 1,311,067 |     1,319,989 | **+8,922** |
+
+The whole +0.524% is one collective: the FSDP all-gather of the MLP kernels. Same op count, same
+shape, same layout `{2,1,0:T(16,128)(2,1)}`, same bytes — explicit's async window is 2.3% longer per
+instance. It is an overlap difference, not a structural one, and it is the last thing left after
+§4.8's transpose fold and §4.10's head rotation have both been applied. Two independent checks
+confirm the diagnosis:
+
+- **Take the duplicated gather away and the deficit goes with it.** `save_fsdp_gathered_weights`
+  (§4.11) keeps the gathered kernel as a bf16 remat residual so the backward pass does not re-gather.
+  Set in **both** arms at 1024 tokens (two reps): gemma2-2b +0.524% → **+0.040%**, qwen3-8b +0.366% →
+  **+0.001%**, gemma3-4b +0.266% → **+0.172%** — and the flag is worth −15% to −17% of step time in
+  both modes on its own. The flag is mode-neutral, so this is not itself a sharding result; it is
+  evidence about *where* the sharding result lives.
+- **Give the step more token work per unit of weight traffic and it inverts.** That is Table B.
+
+**The one row that does not win, and what it is not.** deepseek2-16b at fsdp 8 is +0.051% — about
+1.7× its rep spread, so a real but very small loss. It is not caused by any of this PR's flags;
+turning each off individually leaves it where it was (`lm_head_weight_grad_in_kernel_order=false`
++0.051%, `dense_weight_grad_in_kernel_order=false` +0.049%, `lm_head_vocab_parallel=false` +0.036%).
+The op ledger puts it in fusion scheduling spread thinly across the vocab-parallel loss
+(`bf16[8,4096,12800]`, where explicit merges auto's `select_reduce` + `multiply_convert` pair into one
+multi-output fusion that costs 1,078 µs more) and MLA's rope concatenation
+(`bf16[1,4096,8,64]` from two `bf16[1,4096,8,32]`, explicit-only, +4,698 µs) — no collective is
+involved. On the mesh a 64-expert MoE would actually be run on, it wins:
+
+| deepseek2-16b, seq 4096                           |     `auto` ns | `explicit` ns |       delta |
+| ------------------------------------------------- | ------------: | ------------: | ----------: |
+| `ici_fsdp_parallelism=8`                          | 1,367,040,531 | 1,367,731,966 |     +0.051% |
+| `ici_fsdp_parallelism=4 ici_expert_parallelism=2` | 1,283,780,079 | 1,283,027,133 | **−0.059%** |
+
+Rep spread on those two EP cells is 0.004%, and the EP mesh is 6.1% faster than fsdp 8 in *both*
+modes, so this is the configuration a user would pick anyway. **On the best mesh available to it,
+every one of the eight onboarded models is faster under `explicit` than under `auto`.**
+
+**Tensor parallelism moves the 1024-token rows the same way.** The three 1024-token regressions
+re-run at `ici_fsdp_parallelism=4 ici_tensor_parallelism=2` (two reps, spread ≤0.03%): gemma2-2b
++0.524% → **−0.266%**, gemma3-4b +0.266% → **−0.037%**, qwen3-8b +0.366% → +0.131%. Splitting the
+mesh reduces the per-device FSDP gather that the deficit lives in, which is the same mechanism as
+Table B by a different route.
+
+**The two kernel-order flags are load-bearing, not decoration.** Ablating them on the worst 1024-token
+row, gemma2-2b under explicit:
+
+| gemma2-2b, explicit, seq 1024             |  median ns | vs `auto` |
+| ----------------------------------------- | ---------: | --------: |
+| shipped defaults                          | 74,141,950 |   +0.524% |
+| `dense_weight_grad_in_kernel_order=false` | 74,585,932 |   +1.126% |
+| both kernel-order flags off               | 74,599,721 |   +1.145% |
+
+So the flags are already worth **−0.60%** on the model that looks worst; without them the 1024-token
+picture is materially worse than the one Table A shows.
+
+**A negative result — widening the auto-axes region does not help.** `_dot_general_in_auto_axes`
+opens one region per dot, so the region boundary still pins every intermediate's sharding, and with
+it its layout. Tracing the whole `MlpBlock` (`wi` → activation → `wo`) inside a *single* region
+instead, so only the block's input and output stay pinned, changes nothing measurable: qwen3-8b at
+1024 tokens goes +0.366% → +0.359%, inside rep spread. The residual is not the number of region
+boundaries.
+
+**Numerics.** Twelve steps, synthetic data, `auto` vs `explicit` loss at every step. At 4096 tokens,
+mistral-7b, gemma3-4b and mixtral-8x7b print **identical** trajectories; the other five agree to the
+last printed digit (±0.001) at every step with no growth in the difference — llama2 differs at step 3
+only, qwen3 at steps 2/4/7, gemma-2b at step 2, gemma2-2b at step 9, deepseek2 at steps 5/10/11. At
+1024 tokens the same check gives mistral-7b, qwen3-8b and mixtral-8x7b identical and the rest within
+±0.001. This is float reassociation from a different contraction order, the same magnitude §5.8
+records, and an order of magnitude below the 0.037 that relabelling a mesh axis produces with no code
+change at all.
+
 ______________________________________________________________________
 
 ## 6. What explicit sharding buys you
@@ -2192,6 +2333,11 @@ ______________________________________________________________________
   case −11.114% (§5.7 Table A). Note that most of that margin is `lm_head_vocab_parallel`, which
   `auto` could take too (§5.7 Table B is a tie) — so take the speed, but choose the mode on
   capability, not on this table.
+- **The longer your sequence, the better this gets.** With both modes on shipped defaults — the
+  strict comparison, nothing written out but `shard_mode` — the eight-model median is −0.063% at
+  `max_target_length=1024` and **−0.435% at 4,096**, and every model that regressed at 1024 wins at
+  4096 (§5.9). The 1024-token deficit is one under-overlapped FSDP weight gather, and it is a fixed
+  cost: more tokens per step dilutes it. Do not tune `shard_mode` on a short-sequence proxy.
 - **Untied head, and you want the same win under `auto`?** Write `lm_head_vocab_parallel: true`. It
   is measured under `auto` in §5.7 Table B and is worth the same −1.1% … −11.0% there. It is not the
   `auto` default only because that wants a wider validation sweep than this document ran (item 03).
@@ -2566,6 +2712,7 @@ reasoned about, and each survived an adversarial attempt to rescue it.
 | `unreduced={'data'}` gradient-accumulation hoisting, with `data > 1` so the gate at `gradient_accumulation.py:77` actually fires — the one explicit-only path in MaxText that this document had never exercised             | **Traces, fires, and buys nothing.** llama2-L12, dp2×fsdp2: GA 4 `auto` 251,972 vs `explicit` 251,952 µs (−0.008%); GA 8 493,805 vs 494,242 (+0.089%). The HLO says why: both modes emit 20 all-reduces in identically-named computations, and the loop-carried ones are already `%wide.region_0.28_spmd...**.sunk**` in *both* arms. XLA sinks the per-microbatch all-reduce out of the scan on its own, so the tag is hoisting something GSPMD had already hoisted. |
 | ZeRO-1 (`shard_optimizer_over_data`) as an explicit-only win, on the strength of §6.4's "under `auto` GSPMD only papers over it with an extra collective"                                                                   | Unreachable: `types.py` makes ZeRO-1 and FSDP mutually exclusive in *both* modes, so the mismatched-layout add that would cost `auto` a collective never gets built. The quoted sentence describes why the guard exists, not a measured delta.                                                                                                                                                                                                                        |
 | Tensor parallelism as explicit's standing win (§5.2)                                                                                                                                                                        | Does not survive a fair comparison at healthy depth. llama2-L12, tp 4, flag on in both arms: `auto` 37,221 vs `explicit` 37,297 µs, **+0.204%** for explicit — a small loss, not the −0.21% of §5.2 (which was measured at L4, with the flag off in both arms).                                                                                                                                                                                                       |
+| Widening the `auto_axes` region from one dot to the whole `MlpBlock`                                                                                                                                                        | Implemented and reverted. `_dot_general_in_auto_axes` opens a region per dot, so every intermediate stays pinned at a boundary; tracing `wi` → activation → `wo` in one region leaves only the block's input and output pinned. qwen3-8b at seq 1024 goes +0.366% → +0.359%, inside rep spread. The residual is not the number of region boundaries (§5.9).                                                                                                           |
 
 A related null result worth stating positively: a systematic hunt for *any* remaining explicit-only
 cost on llama2 / mistral / qwen3 at d16 found **nothing above ~0.10% of step**. The largest positive
@@ -2612,6 +2759,16 @@ that cost time to discover:
 - The geometry above is the *shrink* used by §5.1–§5.2 and by §4's dumps. Everything from §4.8
   onward — including §5.6 — uses `base_emb_dim=2048 base_mlp_dim=8192 base_num_query_heads=8 base_num_kv_heads=8 head_dim=128` (referred to as **d16**) with `base_num_decoder_layers` varied
   per row, plus `base_moe_mlp_dim=8192` on mixtral. §5.6 writes out nothing else but `shard_mode`.
+
+- **§5.9 is the one section on different hardware:** TPU7x (Ironwood), **8 chips**, 94.7 GiB
+  HBM/device, JAX 0.11.1 — everything else in this document is a 4-chip v5p-8. It uses d16 at
+  `base_num_decoder_layers=12` and `ici_fsdp_parallelism=8`, adds `base_moe_mlp_dim=8192` to
+  *deepseek2 as well as* mixtral, and sweeps `max_target_length` ∈ {1024, 4096} × `shard_mode` ×
+  3 reps with nothing else written out. Timings there are the median of the profiled
+  `jit_train_step` **module** spans (the `XLA Modules` line) rather than the `train_step` op span;
+  the two agree to well under the 0.05% rep spread, but do not mix them within a table. Per-op
+  ledgers in §5.9 are summed over all eight cores, so their microsecond totals are 8× a
+  single-core figure and are only meaningful as A/B differences.
 
 - §4.11 additionally sets the libtpu **async-all-gather set**, and says so per table where it does.
   These go in `LIBTPU_INIT_ARGS`, *not* `XLA_FLAGS` — libtpu silently ignores them in the latter, so
@@ -2684,8 +2841,8 @@ checkpointing off, throughout.
   `Sharding` custom-call suppressed was performed. See §4.1 for the alternative layout-assignment
   reading; both imply the same MaxText-side fix, but the XLA-side attribution should be confirmed
   before filing an XLA bug.
-- **4 chips, single host.** No cross-host ICI/DCN behaviour is exercised. The collective costs here
-  are intra-slice. Conclusions about *relayout* cost should hold; conclusions about *collective
+- **4 chips, single host** (8 chips, single host for §5.9). No cross-host ICI/DCN behaviour is
+  exercised. The collective costs here are intra-slice. Conclusions about *relayout* cost should hold; conclusions about *collective
   latency* may not scale to multi-slice. In particular the reduce-scatter loss (§4.2) is
   combiner-threshold-dependent and its 2× wire-byte penalty is a 4-way-ring figure.
 - **Shrunk models, and one of them shrank into a different program.** Real parameter counts do not
