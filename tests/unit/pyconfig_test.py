@@ -49,6 +49,30 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_gdn_context_parallelism_rejects_load_balance(self):
+    """The reorder composes the GatedDeltaNet recurrence out of order.
+
+    context_parallel_load_balance defaults to true, so this has to raise rather
+    than warn: the run trains either way and the loss falls either way.
+    """
+    with self.assertRaisesRegex(ValueError, "requires context_parallel_load_balance=False"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          model_name="qwen3-next-80b-a3b",
+          ici_context_parallelism=4,
+          context_parallel_load_balance=True,
+      )
+
+  def test_gdn_context_parallelism_accepts_load_balance_off(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        model_name="qwen3-next-80b-a3b",
+        ici_context_parallelism=4,
+        context_parallel_load_balance=False,
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(config.context_parallel_load_balance)
+
   def test_managed_mldiagnostics_storage_path(self):
     # Test completely omitting the parameter (defaults to "" from base.yml)
     config_omitted = pyconfig.initialize(
@@ -216,7 +240,13 @@ class PyconfigTest(unittest.TestCase):
 
   def test_explicit_sharding_qwen3_decoder_support(self):
     """The Qwen3 decoders that have been onboarded to explicit sharding are accepted."""
-    for decoder_block in ("qwen3", "qwen3_moe", "qwen3_custom_moe"):
+    for decoder_block in (
+        "qwen3",
+        "qwen3_moe",
+        "qwen3_custom_moe",
+        "qwen3_5",
+        "qwen3_next",
+    ):
       with self.subTest(decoder_block=decoder_block):
         config = pyconfig.initialize(
             [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
@@ -226,18 +256,7 @@ class PyconfigTest(unittest.TestCase):
         )
         self.assertEqual(config.decoder_block.value, decoder_block)
 
-    # Qwen3-Next and Qwen3.5 use gated-delta-net linear attention, and the
-    # Qwen3-VL/Omni encoders are multimodal; neither is onboarded yet.
-    for decoder_block in ("qwen3_next", "qwen3_5"):
-      with self.subTest(decoder_block=decoder_block):
-        with self.assertRaisesRegex(Exception, "not supported with 'explicit' sharding"):
-          pyconfig.initialize(
-              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
-              skip_jax_distributed_system=True,
-              shard_mode="explicit",
-              decoder_block=decoder_block,
-          )
-
+    # The Qwen3-VL/Omni encoders are multimodal and are not onboarded yet.
     with self.assertRaisesRegex(Exception, "not supported with `use_multimodal`"):
       pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
@@ -248,6 +267,29 @@ class PyconfigTest(unittest.TestCase):
           use_multimodal=True,
           scan_layers=False,  # Required by the Qwen3-VL deepstack path; unrelated to sharding.
       )
+
+  def test_explicit_sharding_gated_delta_net_unsupported_combinations(self):
+    """The hybrid Qwen3 decoders reject the combinations they have not been onboarded to."""
+    for decoder_block in ("qwen3_5", "qwen3_next"):
+
+      def initialize(decoder_block=decoder_block, **kwargs):
+        return pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            shard_mode="explicit",
+            decoder_block=decoder_block,
+            **kwargs,
+        )
+
+      with self.subTest(decoder_block=decoder_block):
+        with self.assertRaisesRegex(Exception, "requires `sparse_matmul=True`"):
+          initialize(sparse_matmul=False, megablox=False)
+
+        with self.assertRaisesRegex(Exception, "does not support context parallelism"):
+          initialize(ici_context_parallelism=2)
+
+        with self.assertRaisesRegex(Exception, "does not support context parallelism"):
+          initialize(ici_context_usp_ulysses_parallelism=2)
 
   def test_explicit_sharding_mistral_decoder_support(self):
     """The Mistral-family decoders that have been onboarded to explicit sharding are accepted."""
@@ -260,6 +302,26 @@ class PyconfigTest(unittest.TestCase):
             decoder_block=decoder_block,
         )
         self.assertEqual(config.decoder_block.value, decoder_block)
+
+  def test_explicit_sharding_qwen2_decoder_support(self):
+    """The Qwen2 decoder is accepted under explicit sharding."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_mode="explicit",
+        decoder_block="qwen2",
+    )
+    self.assertEqual(config.decoder_block.value, "qwen2")
+
+  def test_explicit_sharding_kimi_k2_support(self):
+    """Kimi-K2 runs on the deepseek decoder block, so it is accepted under explicit sharding."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_mode="explicit",
+        model_name="kimi-k2-1t",
+    )
+    self.assertEqual(config.decoder_block.value, "deepseek")
 
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))

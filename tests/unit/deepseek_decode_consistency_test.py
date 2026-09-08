@@ -87,6 +87,32 @@ _DEEPSEEK = {
 _DEEPSEEK_MOE = _DEEPSEEK | {"first_num_dense_layers": 1}
 _DEEPSEEK_DENSE = _DEEPSEEK | {"first_num_dense_layers": 3}
 
+# Qwen3-Next interleaves three linear-attention (GatedDeltaNet) layers with one
+# full-attention layer, and scanned it runs those as a stacked scan nested inside
+# the block scan. Both attention kinds carry state across a decode step -- a
+# recurrent/conv state and a KV cache -- so a block that mis-threads its
+# sub-layers' state shows up here as a diverging token.
+_QWEN3_NEXT = {
+    "model_name": "qwen3-next-80b-a3b",
+    "override_model_config": True,
+    "base_num_decoder_layers": 8,  # two whole periods of inhomogeneous_layer_cycle_interval=4
+    "head_dim": 32,  # the real model's 256 would make this test needlessly slow
+    "base_moe_mlp_dim": 32,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "gdn_num_key_heads": 2,
+    "gdn_num_value_heads": 4,
+    "gdn_key_head_dim": 16,
+    "gdn_value_head_dim": 16,
+    "gdn_chunk_size": 4,
+    "sparse_matmul": True,
+    "megablox": False,
+}
+_QWEN3_NEXT_SCANNED = _QWEN3_NEXT | {"scan_layers": True}
+# 6 layers is one whole period plus a two-layer remainder, which the scanned path
+# has to apply on its own rather than drop.
+_QWEN3_NEXT_SCANNED_REMAINDER = _QWEN3_NEXT_SCANNED | {"base_num_decoder_layers": 6}
+
 
 def _make_config(**overrides):
   return pyconfig.initialize([sys.argv[0], get_test_config_path()], **(_COMMON | overrides))
@@ -193,6 +219,9 @@ class DecodeConsistencyTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("deepseek_moe", _DEEPSEEK_MOE),
       ("deepseek_dense", _DEEPSEEK_DENSE),
+      ("qwen3_next_unscanned", _QWEN3_NEXT),
+      ("qwen3_next_scanned", _QWEN3_NEXT_SCANNED),
+      ("qwen3_next_scanned_remainder", _QWEN3_NEXT_SCANNED_REMAINDER),
       ("generic", {}),
   )
   def test_greedy_decode_matches_forward_pass(self, overrides):

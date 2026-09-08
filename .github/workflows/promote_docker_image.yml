@@ -13,16 +13,38 @@
 # limitations under the License.
 
 # This workflow acts as the final gate in the CI/CD pipeline for MaxText Docker images.
-# Triggered by: Airflow DAG completion (repository_dispatch)
-# 1. Validates the result of the triggered Airflow DAG (E2E tests).
-# 2. If the DAG succeeded, it promotes the Docker images by tagging the artifact with the latest tag.
+# Triggered by:
+# 1. Airflow DAG completion (repository_dispatch):
+#    - Validates the result of the Airflow DAG (E2E tests).
+#    - Validates the result of the nightly build pipeline that produced the Docker images.
+#    - If both succeed, it promotes the Docker images by tagging the artifact with the latest tag.
+# 2. Manual workflow dispatch (workflow_dispatch):
+#    - Forcefully promotes the Docker images when Airflow E2E tests could not run (e.g. due to capacity).
 
 name: Promote MaxText Docker Image
-run-name: "Triggered by Airflow ${{ github.event.client_payload.test_type }} Tests DAG"
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' &&
+      format('Forceful promote: {0} ({1})', inputs.caller_run_id, inputs.test_type) ||
+      format('Triggered by Airflow {0} Tests DAG', github.event.client_payload.test_type) }}
 
 on:
   repository_dispatch:
     types: [airflow-dag-complete]
+  workflow_dispatch:
+    inputs:
+      caller_run_id:
+        description: 'GitHub workflow run ID of the build pipeline that produced the Docker images'
+        required: true
+        type: string
+      test_type:
+        description: 'Workflow to promote (pre_training, post_training, or all)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - pre_training
+          - post_training
 
 permissions:
   contents: read
@@ -34,6 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Report DAG result
+        if: github.event_name == 'repository_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STATE: ${{ github.event.client_payload.state }}
@@ -66,6 +89,24 @@ jobs:
             exit 1
           fi
 
+      - name: Report manual trigger
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CALLER_RUN_ID: ${{ inputs.caller_run_id }}
+          TEST_TYPE: ${{ inputs.test_type }}
+        run: |
+          echo "================================"
+          echo "Manual Promotion"
+          echo "Github Run ID: ${CALLER_RUN_ID}"
+          echo "Test Type:     ${TEST_TYPE}"
+          echo "================================"
+
+          if [ -z "$CALLER_RUN_ID" ]; then
+            echo "Error: No Github Run ID provided. Cannot promote Docker images without run ID."
+            exit 1
+          fi
+
   tag_docker_image:
     name: Promote ${{ matrix.test_type }} Docker Image
     needs: handle_result
@@ -84,13 +125,25 @@ jobs:
             nightly_image_name: maxtext_post_training_nightly
     steps:
       - name: Configure Docker
-        if: ${{ github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type }}
+        if: >-
+          ${{
+            (github.event_name == 'workflow_dispatch' &&
+              (inputs.test_type == 'all' || inputs.test_type == '' || inputs.test_type == matrix.test_type)) ||
+            (github.event_name == 'repository_dispatch' &&
+              (github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type))
+          }}
         run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
       - name: Add tags to Docker image
-        if: ${{ github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type }}
+        if: >-
+          ${{
+            (github.event_name == 'workflow_dispatch' &&
+              (inputs.test_type == 'all' || inputs.test_type == '' || inputs.test_type == matrix.test_type)) ||
+            (github.event_name == 'repository_dispatch' &&
+              (github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type))
+          }}
         shell: bash
         env:
-          CALLER_RUN_ID: ${{ github.event.client_payload.github_run_id }}
+          CALLER_RUN_ID: ${{ github.event.client_payload.github_run_id || inputs.caller_run_id }}
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           STABLE_IMAGE_NAME: ${{ matrix.stable_image_name }}
           NIGHTLY_IMAGE_NAME: ${{ matrix.nightly_image_name }}
@@ -102,12 +155,20 @@ jobs:
             gcloud container images add-tag "${img}:${CALLER_RUN_ID}" "${img}:${tag}" --quiet
           }
 
+          if [ -z "$CALLER_RUN_ID" ]; then
+            echo "Error: CALLER_RUN_ID is empty. Cannot promote Docker image without image tag."
+            exit 1
+          fi
+
+          tagged_any=false
+
           # 1. Check if stable image exists and tag it
           STABLE_IMAGE="gcr.io/${PROJECT_NAME}/${STABLE_IMAGE_NAME}"
           if gcloud container images describe "${STABLE_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
             echo "Stable image ${STABLE_IMAGE}:${CALLER_RUN_ID} exists. Tagging stable image..."
             tag_image "${STABLE_IMAGE}" "verified-e2e-${CALLER_RUN_ID}"
             tag_image "${STABLE_IMAGE}" "latest"
+            tagged_any=true
           else
             echo "Stable image ${STABLE_IMAGE}:${CALLER_RUN_ID} does not exist. Skipping stable image tagging."
           fi
@@ -117,6 +178,12 @@ jobs:
           if gcloud container images describe "${NIGHTLY_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
             echo "Nightly image ${NIGHTLY_IMAGE}:${CALLER_RUN_ID} exists. Tagging nightly image..."
             tag_image "${NIGHTLY_IMAGE}" "latest"
+            tagged_any=true
           else
             echo "Nightly image ${NIGHTLY_IMAGE}:${CALLER_RUN_ID} does not exist. Skipping nightly image tagging."
+          fi
+
+          if [ "$tagged_any" = false ]; then
+            echo "Error: Neither stable image (${STABLE_IMAGE}:${CALLER_RUN_ID}) nor nightly image (${NIGHTLY_IMAGE}:${CALLER_RUN_ID}) was found."
+            exit 1
           fi

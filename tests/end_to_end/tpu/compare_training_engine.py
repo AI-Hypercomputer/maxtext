@@ -34,6 +34,7 @@ import time
 from typing import Any
 
 from flax import nnx
+from flax import struct
 import jax
 import jax.numpy as jnp
 from maxtext.common import common_types
@@ -120,7 +121,7 @@ class TinyDecoder(nnx.Module):
     return self.proj(x)
 
 
-@dataclasses.dataclass(kw_only=True)
+@struct.dataclass(frozen=True, kw_only=True)
 class DummyPayload(abstract_engine.TrainerPayload):
   """Dummy payload for training engine parity comparisons."""
 

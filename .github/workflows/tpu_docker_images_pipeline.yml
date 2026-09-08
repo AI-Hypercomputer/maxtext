@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: ""
+      run_e2e_tests:
+        description: 'Whether to run E2E tests after building the Docker images'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -99,7 +104,7 @@ jobs:
   run_e2e_tests:
     name: Run E2E tests
     needs: build_and_push_docker_images
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_e2e_tests == true)
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
       mode: stable

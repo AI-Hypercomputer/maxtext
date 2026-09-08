@@ -233,7 +233,7 @@ def from_diloco_checkpoint_dict(
         nnx.replace_by_pure_dict(linen_state, {"optimizer": weights["optimizer"]})
       nnx_aux = inner_dict.get("nnx_aux")
       if nnx_aux:
-        nnx.replace_by_pure_dict(aux_state, nnx_aux)
+        train_state_nnx.apply_checkpoint_aux(aux_state, nnx_aux)
       inner_state = nnx.merge_state(linen_state, aux_state, ephemeral)
     else:
       inner_state = inner_dict

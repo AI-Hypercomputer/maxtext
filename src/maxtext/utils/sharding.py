@@ -209,6 +209,16 @@ def mesh_axes_for_dim(axis_names):
   return tuple(axis for axis in axis_names if axis is not None)
 
 
+def batch_mesh_axes(mesh, rules=None):
+  """Returns the mesh axes of size > 1 that the activation batch dimension is sharded over."""
+  spec = logical_to_mesh_axes(("activation_batch",), mesh, rules=rules)
+  # A rule that resolves to a rank-0 spec leaves no dimension to read, so there is nothing the
+  # batch is sharded over.
+  if spec is None or not spec.partitions:
+    return frozenset()
+  return frozenset(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
+
+
 def mesh_axes_size(mesh, axes, *, label):
   """Returns the product of mesh sizes for a set of axes."""
   size = 1
@@ -676,7 +686,12 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     raise AssertionError(f"Could not shard {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}") from e
   pspec = sharding.spec
 
-  if "data" in jax.tree.leaves(pspec):
+  # `tuple(pspec)`, not `pspec`: a PartitionSpec is a pytree *leaf*, so flattening one gives
+  # back the spec itself and this guard never fired. Its entries are what have to be walked,
+  # and they nest -- a dimension sharded over two axes is a tuple. Without this, a leaf
+  # already sharded over "data" gets a second one and `NamedSharding` rejects the result
+  # outright (`DuplicateSpecError: P(('data', 'data'), None)`).
+  if "data" in jax.tree.leaves(tuple(pspec)):
     return sharding
 
   for idx, (size, partition) in enumerate(zip(sharded_shape, pspec)):
