@@ -517,7 +517,7 @@ class NNXDecoder(nnx.Module):
     """Initializes decoder layers with pipeline parallelism."""
     config = self.config
     assert not (config.engram_layers and self.has_dense_prefix), (
-        "engram_layers + DeepSeek + pipeline_parallelism is not supported. "
+        "engram_layers + deepseek/hy3 + pipeline_parallelism is not supported. "
         "engram interleaving is currently only implemented in the non-pipeline path."
     )
 
