@@ -18,13 +18,12 @@ import abc
 import dataclasses
 import gc
 import logging
-import os
 import re
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Union
+
+from flax import nnx, traverse_util
 import jax
 import jax.numpy as jnp
-import numpy as np
-from typing import List, Union, Any, Dict, Optional, Mapping, Tuple, Iterator
-from flax import traverse_util, nnx
 from maxtext.integration.vllm.convert_utils import (
     MOE_MLP_WEIGHT_NAMES,
     _align_per_axis,
@@ -36,15 +35,12 @@ from maxtext.integration.vllm.convert_utils import (
     _jit_unstack,
     _scanned_sharding_from_per_layer,
     _sharding_summary,
-    is_pathways_environment,
     normalize_dtype,
     pad_to_tpu_lanes,
     reclaim_host_memory,
     resolve_prefuse_moe_weights,
     resolve_rollout_tp,
 )
-
-_MOE_MLP_WEIGHTS = MOE_MLP_WEIGHT_NAMES
 
 
 # ==========================================
@@ -57,19 +53,6 @@ class Operation(abc.ABC):
   def __call__(self, tensors: List[Any], **kwargs) -> Any:
     pass
 
-
-class Concatenate(Operation):
-  """Concatenates input tensors along a given dimension."""
-
-  def __init__(self, dim: int):
-    self.dim = dim
-
-  def __call__(self, tensors, **kwargs):
-    @jax.jit
-    def _f(*ts):
-      return jnp.concatenate(ts, axis=self.dim)
-
-    return _f(*tensors)
 
 
 class Transpose(Operation):
@@ -175,7 +158,7 @@ class MoEFuseGateUp(Operation):
         w1 = jnp.transpose(w1, (0, 2, 1))
         num_experts, d_inner, d_model = w0.shape
         chunk_size = d_inner // tp
-        padded_chunk_size = ((chunk_size + 127) // 128) * 128
+        padded_chunk_size = pad_to_tpu_lanes(chunk_size)
         pad_amount = padded_chunk_size - chunk_size
         gate_chunks = w0.reshape(num_experts, tp, chunk_size, d_model)
         up_chunks = w1.reshape(num_experts, tp, chunk_size, d_model)
@@ -225,12 +208,6 @@ class MoEFuseGateUpPrefused(Operation):
     fused = _fuse_all(tensors[0])
     return list(jnp.unstack(fused, axis=0))
 
-
-class Identity(Operation):
-  """Returns the input tensor unmodified."""
-
-  def __call__(self, tensors, **kwargs):
-    return tensors[0]
 
 
 # ==========================================
@@ -304,8 +281,6 @@ class WeightConverter:
       )
     self.rules = rules
     self.tp = resolve_rollout_tp(config, tp)
-    self.num_kv_heads = num_kv_heads
-    self.head_dim = head_dim
     # Read by the rollout engine to decide whether to trace the reshard
     # step that runs after conversion.
     self.debug = debug
@@ -375,8 +350,6 @@ class WeightConverter:
       out = tensors
       for op in rule.operations:
         out = op(out, tp=self.tp)
-        if not isinstance(out, list) and op != rule.operations[-1]:
-          out = [out]
 
       if isinstance(out, list) and len(out) > 1 and "{}" in rule.target_pattern:
         for i, tensor in enumerate(out):
@@ -479,8 +452,6 @@ MODEL_TO_CONVERSION_RULES = {
         ),
     ],
 }
-# Backward compatibility alias
-_MODEL_TO_CONVERSION_RULES = MODEL_TO_CONVERSION_RULES
 
 
 # ==========================================
@@ -598,13 +569,8 @@ def _group_plan(plan: List[_PlanEntry]) -> List[_PlanGroup]:
   return groups
 
 
-class WeightConverterError(Exception):
-  """Base class for all weight converter exceptions."""
-
-
-class ConversionPlanError(WeightConverterError, ValueError):
+class ConversionPlanError(ValueError):
   """Raised when the source and target trees cannot be fully reconciled."""
-
 
 
 def _is_non_weight_path(key_tuple: Tuple[Any, ...]) -> bool:
@@ -713,7 +679,6 @@ class MaxTextToMaxTextConverter:
       debug: bool = False,
       prefuse_moe_weights: Optional[bool] = None,
       target_dtype: Optional[Any] = None,
-      is_pathways: Optional[bool] = None,
   ):
     self.config = config
     self.tp = resolve_rollout_tp(config, tp)
@@ -723,10 +688,6 @@ class MaxTextToMaxTextConverter:
     self.prefuse_moe_weights = resolve_prefuse_moe_weights(config, prefuse_moe_weights)
     self.padded_base_moe_mlp_dim = getattr(config, "padded_base_moe_mlp_dim", None)
     self.target_dtype = target_dtype if target_dtype is not None else getattr(config, "weight_dtype", None)
-
-    self.is_pathways = (
-        is_pathways if is_pathways is not None else is_pathways_environment()
-    )
 
     self.cycle = int(getattr(config, "inhomogeneous_layer_cycle_interval", 1) or 1)
     self.num_decoder_layers = int(config.num_decoder_layers)
@@ -961,7 +922,7 @@ class MaxTextToMaxTextConverter:
     last_key = path.split(".")[-1]
     if isinstance(val, jax.ShapeDtypeStruct):
       unrolled_shape = list(val.shape[: self.scan_axis] + val.shape[self.scan_axis + 1 :])
-      if last_key in _MOE_MLP_WEIGHTS and self.padded_base_moe_mlp_dim is not None:
+      if last_key in MOE_MLP_WEIGHT_NAMES and self.padded_base_moe_mlp_dim is not None:
         if last_key == "wo":
           if self.padded_base_moe_mlp_dim > unrolled_shape[1]:
             unrolled_shape[1] = self.padded_base_moe_mlp_dim
@@ -970,7 +931,7 @@ class MaxTextToMaxTextConverter:
             unrolled_shape[-1] = self.padded_base_moe_mlp_dim
       return tuple(jax.ShapeDtypeStruct(tuple(unrolled_shape), val.dtype) for _ in range(val.shape[self.scan_axis]))
 
-    if last_key in _MOE_MLP_WEIGHTS and self.padded_base_moe_mlp_dim is not None:
+    if last_key in MOE_MLP_WEIGHT_NAMES and self.padded_base_moe_mlp_dim is not None:
       if last_key == "wo":
         intermediate_axis = 2
         if self.padded_base_moe_mlp_dim > val.shape[intermediate_axis]:
@@ -1036,12 +997,6 @@ class MaxTextToMaxTextConverter:
       val = _apply_dtype_cast(raw_val, tgt_dt, path)
       return [(tgt_key, val) for _, tgt_key in group.targets]
 
-    if any(idx is None for idx, _ in group.targets):
-      raise ConversionPlanError(
-          f"Plan group for {path} has op={group.op!r} but a target with no "
-          "scan index; only 'identity' targets may omit one."
-      )
-
     if group.op == "fuse_moe":
       raw_0 = src_flat[group.source_keys[0]]
       raw_1 = src_flat[group.source_keys[1]]
@@ -1067,12 +1022,6 @@ class MaxTextToMaxTextConverter:
       val = _apply_dtype_cast(src_flat[group.source_keys[0]], first_tgt.dtype, path)
       out = _align_per_axis(val, first_tgt.shape, getattr(first_tgt, "sharding", None), path)
       return [(tgt_key, out) for _, tgt_key in group.targets]
-
-    if any(idx is None for idx, _ in group.targets):
-      raise ConversionPlanError(
-          f"Plan group for {path} has op={group.op!r} but a target with no "
-          "scan index; only 'identity' targets may omit one."
-      )
 
     if group.op == "fuse_moe":
       wi_0, wi_1 = (_apply_dtype_cast(src_flat[k], first_tgt.dtype, path) for k in group.source_keys)
@@ -1177,7 +1126,7 @@ class MaxTextToMaxTextConverter:
 
       for tgt_key, out in outs:
         tgt_val = tgt_flat[tgt_key]
-        if hasattr(out, "shape") and hasattr(tgt_val, "shape") and out.shape != tgt_val.shape:
+        if out.shape != tgt_val.shape:
           raise ConversionPlanError(
               f"Shape mismatch after conversion for "
               f"{'.'.join(map(str, tgt_key))}: produced {out.shape}, "
@@ -1192,7 +1141,7 @@ class MaxTextToMaxTextConverter:
     del result
     reclaim_host_memory()
     return jax.tree_util.tree_map(
-        lambda x: nnx.Param(x) if not isinstance(x, (nnx.Param, nnx.Variable)) else x,
+        lambda x: nnx.Param(x),
         nested,
     )
 
@@ -1234,7 +1183,7 @@ class MaxTextToMaxTextConverter:
       nested = traverse_util.unflatten_dict(piece_result)
       del piece_result
       yield jax.tree_util.tree_map(
-          lambda x: nnx.Param(x) if not isinstance(x, (nnx.Param, nnx.Variable)) else x,
+          lambda x: nnx.Param(x),
           nested,
       )
 

@@ -23,7 +23,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
-import gc
 import os
 from typing import Any
 
@@ -40,6 +39,7 @@ from maxtext.configs import pyconfig
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
 from maxtext.integration.vllm.convert_utils import (
     get_host_rss_mb,
+    is_pathways_environment,
     is_verify_weights_enabled,
     reclaim_host_memory,
     resolve_prefuse_moe_weights,
@@ -418,22 +418,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._raiden_sync: Any = None
     self._last_staged_step: Optional[int] = None
     self._staged_metadata: Any = None
-    vllm_cfg = getattr(self._config, "vllm", {})
-    if isinstance(vllm_cfg, dict):
-      vllm_use_wc = vllm_cfg.get("use_weight_converter", False)
-      vllm_backend = vllm_cfg.get("rollout_backend", "maxtext")
-    else:
-      vllm_use_wc = getattr(vllm_cfg, "use_weight_converter", False)
-      vllm_backend = getattr(vllm_cfg, "rollout_backend", "maxtext")
-
     self._use_weight_converter = bool(
         getattr(self._config, "use_weight_converter", False)
-        or vllm_use_wc
         or os.environ.get("USE_WEIGHT_CONVERTER", "0").lower() in ("1", "true", "yes")
     )
     self._rollout_backend = (
-        getattr(self._config, "rollout_backend", None)
-        or vllm_backend
+        getattr(self._config, "rollout_backend", "maxtext")
         or os.environ.get("ROLLOUT_BACKEND", "maxtext")
     )
     rollout_tp = resolve_rollout_tp(self._config)
@@ -1488,7 +1478,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if staging_transport == "raiden":
       try:
-        from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+        import tunix.experimental.weight_sync.raiden_synchronizer as raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
       except ImportError as exc:
         # Fatal, not a warning: Raiden staging was explicitly requested and cannot be
         # provided. Returning empty metadata instead defers the failure to the caller --
@@ -1515,23 +1505,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
       # 1. Drain all in-flight TPU computations to ensure weights are fully updated
       self._throttler.wait_for_all()
-      reclaim_host_memory()
 
       # 2. Extract clean trainable parameters
       params_state = self._get_trainable_params_state()
 
       if self._use_weight_converter:
-        if self._weight_converter is None:
-          from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
-          rollout_tp = resolve_rollout_tp(self._config)
-          prefuse_moe = resolve_prefuse_moe_weights(self._config)
-          self._weight_converter = WeightConverter(
-              config=self._config,
-              tp=rollout_tp,
-              prefuse_moe_weights=prefuse_moe,
-              rollout_backend=self._rollout_backend,
-              debug=getattr(self._config, "weight_sync_debug", False),
-          )
         converted_state = self._weight_converter.convert(params_state)
       else:
         # UNCHANGED, deliberately out of scope: this fp32->bf16 cast is an
@@ -1563,16 +1541,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # are proxy-backed. Raiden must use FFI (weight_synchronizer_ffi) to bind
       # directly to device arrays on Pathways TPU workers without host CPU staging,
       # avoiding client host OOM and multi-minute proxy transfer timeouts.
-      backend_platform = getattr(jax.devices()[0], "platform", "").lower() if jax.devices() else ""
-      is_pathways = (backend_platform == "proxy") or (
-          "proxy" in os.environ.get("JAX_PLATFORMS", "") and bool(os.environ.get("JAX_BACKEND_TARGET"))
-      )
+      is_pathways = is_pathways_environment()
       get_ffi = getattr(raiden_synchronizer, "_get_raiden_ffi", None)
-      ffi_available = (
-          (get_ffi() is not None)
-          if get_ffi
-          else (getattr(raiden_synchronizer, "_raiden_ffi", None) is not None)
-      )
+      ffi_available = (get_ffi() is not None) if get_ffi else False
       if is_pathways and not ffi_available:
         raise RuntimeError(
             "Under Pathways (JAX_PLATFORMS=proxy), Raiden weight synchronization "
@@ -1582,7 +1553,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             "compatible tpu_raiden_jax wheel with FFI support is installed."
         )
 
-      use_raiden_ffi = os.environ.get("USE_RAIDEN_FFI", "false").lower() == "true"
+      raiden_ffi_env = os.environ.get("RAIDEN_USE_FFI")
+      if raiden_ffi_env is None:
+        raiden_ffi_env = os.environ.get("USE_RAIDEN_FFI", "false")
+      use_raiden_ffi = raiden_ffi_env.lower() in ("1", "true", "yes")
       host_stage = is_pathways and not use_raiden_ffi
 
       if self._raiden_sync is None:
@@ -1614,13 +1588,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       all_metadata = self._raiden_sync.work_unit_metadata_all()
       total_variables = sum(len(m.variables) for m in all_metadata)
 
-      reclaim_host_memory()
-
-      try:
-        rss_mb = get_host_rss_mb()
-        mem_info = f", host memory max RSS: {rss_mb:.1f} MB"
-      except Exception:  # pylint: disable=broad-exception-caught
-        mem_info = ""
+      rss_mb = get_host_rss_mb()
+      mem_info = f", host memory max RSS: {rss_mb:.1f} MB"
 
       logging.info(
           "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s%s",
@@ -1645,12 +1614,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._staged_metadata = None
     if self._raiden_sync:
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
+      if hasattr(self._raiden_sync, "release_host_arrays"):
+        self._raiden_sync.release_host_arrays()
     reclaim_host_memory()
-    try:
-      rss_mb = get_host_rss_mb()
-      logging.info("Trainer released weight sync: host memory max RSS: %.1f MB", rss_mb)
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
+    rss_mb = get_host_rss_mb()
+    logging.info("Trainer released weight sync: host memory max RSS: %.1f MB", rss_mb)
     return True
 
   def close(self) -> None:

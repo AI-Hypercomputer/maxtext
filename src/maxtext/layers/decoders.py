@@ -1233,7 +1233,12 @@ class Decoder(nn.Module):
         else:
           lyr_to_cache_idx = map_layer_names_to_indices(layer_name_to_kvcache_index)
           for lyr in range(cfg.num_decoder_layers):
-            cache_idx = lyr_to_cache_idx.get(lyr, lyr)
+            if lyr_to_cache_idx:
+              if lyr not in lyr_to_cache_idx:
+                raise ValueError(f"Decoder layer {lyr} not found in layer_name_to_kvcache_index mapping: {lyr_to_cache_idx}")
+              cache_idx = lyr_to_cache_idx[lyr]
+            else:
+              cache_idx = lyr
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
             layer_call_kwargs = {}

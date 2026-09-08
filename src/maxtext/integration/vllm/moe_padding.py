@@ -31,8 +31,6 @@ def next_power_of_two(x: int) -> int:
   """
   if x <= 0:
     raise ValueError(f"Input x must be positive, got {x}")
-  if x == 1:
-    return 1
   return 1 << (x - 1).bit_length()
 
 

@@ -48,7 +48,7 @@ from vllm.config import VllmConfig
 _HYBRID_LAYER_IMBALANCE_THRESHOLD = 1.5
 
 
-from maxtext.integration.vllm.moe_padding import compute_padded_moe_mlp_dim, next_power_of_two
+from maxtext.integration.vllm.moe_padding import compute_padded_moe_mlp_dim, TPU_V5P_SUBCORE_LANE_SIZE
 
 
 def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters:
@@ -109,7 +109,7 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   try:
     num_lanes = pltpu.get_tpu_info().num_lanes
   except Exception:
-    num_lanes = 128
+    num_lanes = TPU_V5P_SUBCORE_LANE_SIZE
   num_kv_heads = hf_config.num_key_value_heads
 
   # Number of KV heads in global attention layers (None if the field is absent or unset).

@@ -131,6 +131,20 @@ class MapLayerNamesToIndicesTest(unittest.TestCase):
     self.assertEqual(map_layer_names_to_indices({0: 0, 3: 30}), {0: 0, 3: 30})
     self.assertEqual(map_layer_names_to_indices({"0": 0, "3": 30}), {0: 0, 3: 30})
 
+  @pytest.mark.cpu_only
+  def test_unparseable_layer_name_raises_value_error(self):
+    with self.assertRaisesRegex(ValueError, "Could not parse layer index"):
+      map_layer_names_to_indices({"unknown_name_no_digits": 0})
+
+  @pytest.mark.cpu_only
+  def test_layer_collision_raises_value_error(self):
+    input_pairs = [
+        ("layer.0", 0),
+        ("model.layers.0.linear_attn", 1),
+    ]
+    with self.assertRaisesRegex(ValueError, "Layer index collision"):
+      map_layer_names_to_indices(input_pairs)
+
 
 if __name__ == "__main__":
   unittest.main()

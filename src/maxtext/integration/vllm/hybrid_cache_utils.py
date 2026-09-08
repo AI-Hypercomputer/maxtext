@@ -54,8 +54,14 @@ def map_layer_names_to_indices(
           m = re.search(r"\b(\d+)\b", k)
           if m:
             parsed_lyr = int(m.group(1))
-    if parsed_lyr is not None:
-      lyr_to_cache_idx[parsed_lyr] = int(idx)
+    if parsed_lyr is None:
+      raise ValueError(f"Could not parse layer index from layer name: {k!r}")
+    if parsed_lyr in lyr_to_cache_idx:
+      raise ValueError(
+          f"Layer index collision for layer {parsed_lyr}: already mapped to cache index "
+          f"{lyr_to_cache_idx[parsed_lyr]}, duplicate entry for {k!r} with cache index {idx}"
+      )
+    lyr_to_cache_idx[parsed_lyr] = int(idx)
   return lyr_to_cache_idx
 
 

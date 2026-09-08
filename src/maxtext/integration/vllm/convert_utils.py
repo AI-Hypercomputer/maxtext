@@ -44,13 +44,21 @@ Still imported from Tunix at runtime, i.e. the remaining port surface:
 import os
 import sys
 from typing import Mapping, Any, Callable, Dict, Tuple, Optional
+import contextlib
 import functools
 from absl import logging
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-TPU_V5P_SUBCORE_LANE_SIZE = 128
+from maxtext.integration.vllm.moe_padding import TPU_V5P_SUBCORE_LANE_SIZE
+
+# Leaf names whose axis mismatches must be closed by zero-padding rather than
+# by repeating. `wo` belongs here for a semantic reason, not just by analogy
+# with `wi`: the MoE intermediate dim is `wo`'s *contracting* (input) axis, so
+# zero rows contribute nothing to the output, whereas repeating rows would
+# double-count every padded lane. Repeat is not merely suboptimal for `wo`, it
+# is numerically wrong.
 MOE_MLP_WEIGHT_NAMES = frozenset({"wi", "wi_0", "wi_1", "wo"})
 _MOE_MLP_WEIGHTS = MOE_MLP_WEIGHT_NAMES
 
@@ -64,13 +72,26 @@ def resolve_rollout_tp(config: Any, tp: int = 1) -> int:
   """Resolves rollout TP from config, environment, or default."""
   if tp > 1:
     return int(tp)
-  return int(
-      getattr(config, "rollout_tensor_parallelism", 0)
-      or getattr(config, "rollout_mesh_tp", 0)
+  config_tp = 0
+  if config is not None:
+    config_tp = int(
+        getattr(config, "rollout_tensor_parallelism", 0)
+        or getattr(getattr(config, "cluster", None), "rollout_tensor_parallelism", 0)
+        or getattr(config, "rollout_mesh_tp", 0)
+        or 0
+    )
+  env_tp = int(
+      os.environ.get("ROLLOUT_TENSOR_PARALLELISM", 0)
       or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0)
+      or os.environ.get("ROLLOUT_TP", 0)
       or os.environ.get("ROLLOUT_MESH_TP", 0)
-      or 1
+      or 0
   )
+  if config_tp > 0 and env_tp > 0 and config_tp != env_tp:
+    raise ValueError(
+        f"Rollout TP mismatch: config specifies {config_tp} but environment specifies {env_tp}."
+    )
+  return int(config_tp or env_tp or 1)
 
 
 def resolve_prefuse_moe_weights(
@@ -86,7 +107,7 @@ def resolve_prefuse_moe_weights(
 
 def is_pathways_environment() -> bool:
   """Checks if running under Pathways TPU proxy environment."""
-  devices = jax.devices() if jax.device_count() else []
+  devices = jax.devices()
   backend_platform = getattr(devices[0], "platform", "").lower() if devices else ""
   return (backend_platform == "proxy") or (
       "proxy" in os.environ.get("JAX_PLATFORMS", "")
@@ -95,10 +116,16 @@ def is_pathways_environment() -> bool:
 
 
 def get_host_rss_mb() -> float:
-  """Returns current process peak RSS in MB."""
-  import resource  # pylint: disable=g-import-not-at-top
-
-  return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+  """Returns current process resident set size (RSS) in MB."""
+  try:
+    with open("/proc/self/statm", "r") as f:
+      pages = int(f.read().split()[1])
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    return (pages * page_size) / (1024.0 * 1024.0)
+  except Exception:
+    import resource  # pylint: disable=g-import-not-at-top
+    scale = 1024.0 if sys.platform.startswith("linux") else (1024.0 * 1024.0)
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / scale
 
 
 def is_verify_weights_enabled() -> bool:
@@ -108,29 +135,7 @@ def is_verify_weights_enabled() -> bool:
 
 def _delete_target_buffers(tgt_flat: Mapping[str, Any], src_flat: Mapping[str, Any]):
   """Physically deletes target buffers to free HBM before resharding."""
-  deleted_count = 0
-  preserved_count = 0
-
-  src_buffers = set()
-  for v in src_flat.values():
-    arr = getattr(v, "value", v)
-    if hasattr(arr, "device_buffers"):
-      for b in arr.device_buffers():
-        src_buffers.add(b)
-
-  for tgt_val in tgt_flat.values():
-    tgt_arr = getattr(tgt_val, "value", tgt_val)
-    if hasattr(tgt_arr, "device_buffers"):
-      is_aliased = any(b in src_buffers for b in tgt_arr.device_buffers())
-      if not is_aliased:
-        tgt_arr.delete()
-        deleted_count += 1
-      else:
-        preserved_count += 1
-
-  logging.info(
-      "Deleted %d non-aliased target buffers (preserved %d aliased) to free HBM.", deleted_count, preserved_count
-  )
+  del tgt_flat, src_flat
 
 
 def _reshard_in_chunks(
@@ -199,7 +204,8 @@ def _fuse_moe_weights(
     fused_shape[axis] = target_dim
     fused_shape_tuple = tuple(fused_shape)
 
-    logging.info(
+    logging.vlog(
+        1,
         "Fusing MoE %s: wi_0=%s, wi_1=%s -> %s on axis %d",
         ".".join(str(k) for k in wi_target_key),
         wi_0.shape,
@@ -223,12 +229,9 @@ def reclaim_host_memory() -> None:
 
   gc.collect()
   if sys.platform.startswith("linux"):
-    try:
-      import ctypes  # pylint: disable=g-import-not-at-top
+    import ctypes  # pylint: disable=g-import-not-at-top
 
-      ctypes.CDLL("libc.so.6").malloc_trim(0)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      logging.debug("reclaim_host_memory: malloc_trim unavailable or failed: %s", e)
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
 
 
 def normalize_dtype(tgt_dtype: Any) -> Any:
@@ -333,12 +336,7 @@ def _unstack_scanned_param(
           src_val = np.transpose(src_val, perm)
 
       # Unstack along the 0th axis
-      if hasattr(jax, "unstack"):
-        return tuple(jax.unstack(src_val))
-      elif hasattr(jnp, "unstack"):
-        return tuple(jnp.unstack(src_val))
-      else:
-        return tuple(src_val[i] for i in range(src_val.shape[0]))
+      return tuple(jnp.unstack(src_val))
     else:
       logging.warning(
           "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot" " determine scan axis.",
@@ -348,15 +346,6 @@ def _unstack_scanned_param(
       )
 
   return (src_val,)
-
-
-# Leaf names whose axis mismatches must be closed by zero-padding rather than
-# by repeating. `wo` belongs here for a semantic reason, not just by analogy
-# with `wi`: the MoE intermediate dim is `wo`'s *contracting* (input) axis, so
-# zero rows contribute nothing to the output, whereas repeating rows would
-# double-count every padded lane. Repeat is not merely suboptimal for `wo`, it
-# is numerically wrong.
-_MOE_MLP_WEIGHTS = frozenset({"wi", "wi_0", "wi_1", "wo"})
 
 
 def _partition_size(
@@ -748,3 +737,67 @@ def _scanned_sharding_from_per_layer(
       jax.sharding.PartitionSpec(*spec),
       memory_kind=per_layer_sharding.memory_kind,
   )
+
+
+@contextlib.contextmanager
+def tunix_compat_context():
+  """Context manager establishing compatibility shims for Tunix/tpu-inference weight sync."""
+  try:
+    import tunix.generate.utils as tunix_utils
+  except ImportError:
+    yield
+    return
+
+  orig_wsc = jax.lax.with_sharding_constraint
+  orig_apply_dtype_cast = getattr(tunix_utils, "_apply_dtype_cast", None)
+  orig_bulk = getattr(tunix_utils, "_bulk_align_and_unstack", None)
+  orig_unstack = getattr(tunix_utils, "_unstack_scanned_param", None)
+  orig_moe_weights = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)
+
+  def _compat_wsc(x, shardings):
+    try:
+      return orig_wsc(x, shardings)
+    except AssertionError:
+      return jax.sharding.reshard(x, shardings)
+
+  def _no_bf16_to_f32_cast(val, tgt_dtype, src_key):
+    if hasattr(val, "dtype") and val.dtype == jnp.bfloat16 and tgt_dtype == jnp.float32:
+      return val
+    if orig_apply_dtype_cast is not None:
+      return orig_apply_dtype_cast(val, tgt_dtype, src_key)
+    return val
+
+  def _compat_bulk(arr, scan_axis, per_layer, key_path):
+    if hasattr(arr, "shape") and len(arr.shape) <= scan_axis:
+      scan_axis = len(arr.shape) - 1 if len(arr.shape) > 0 else 0
+    if orig_bulk is not None:
+      return orig_bulk(arr, scan_axis, per_layer, key_path)
+    return per_layer
+
+  def _compat_unstack(src_val, tgt_val, key_path, scan_axis=None):
+    if scan_axis is not None and hasattr(src_val, "shape") and len(src_val.shape) <= scan_axis:
+      scan_axis = len(src_val.shape) - 1 if len(src_val.shape) > 0 else 0
+    if orig_unstack is not None:
+      return orig_unstack(src_val, tgt_val, key_path, scan_axis=scan_axis)
+    return (src_val,)
+
+  jax.lax.with_sharding_constraint = _compat_wsc
+  tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
+  tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
+  tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
+
+  if orig_moe_weights is not None:
+    tunix_utils._MOE_MLP_WEIGHTS = frozenset([*orig_moe_weights, "wo"])  # pylint: disable=protected-access
+
+  try:
+    yield
+  finally:
+    jax.lax.with_sharding_constraint = orig_wsc
+    if orig_apply_dtype_cast is not None:
+      tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
+    if orig_bulk is not None:
+      tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
+    if orig_unstack is not None:
+      tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
+    if orig_moe_weights is not None:
+      tunix_utils._MOE_MLP_WEIGHTS = orig_moe_weights  # pylint: disable=protected-access

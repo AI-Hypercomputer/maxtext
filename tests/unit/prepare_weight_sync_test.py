@@ -67,7 +67,7 @@ class PrepareWeightSyncTest(unittest.TestCase):
   def test_single_synchronizer_creation_and_binding(self, mock_sync_cls):
     mock_sync = mock.MagicMock()
     mock_sync.active = True
-    mock_sync.work_unit_metadata.return_value = self._make_dummy_metadata(num_vars=2)
+    mock_sync.work_unit_metadata_all.return_value = [self._make_dummy_metadata(num_vars=2)]
     mock_sync.checksums.return_value = {}
     mock_sync_cls.return_value = mock_sync
 
@@ -89,13 +89,13 @@ class PrepareWeightSyncTest(unittest.TestCase):
     self.engine._weight_converter.convert.assert_called_once()
     mock_sync.bind.assert_called_once_with(converted)
     mock_sync.d2h.assert_called_once()
-    mock_sync.work_unit_metadata.assert_called_once()
+    mock_sync.work_unit_metadata_all.assert_called_once()
 
   @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
   def test_rebind_reuses_single_sync_instance(self, mock_sync_cls):
     mock_sync = mock.MagicMock()
     mock_sync.active = True
-    mock_sync.work_unit_metadata.return_value = self._make_dummy_metadata(num_vars=2)
+    mock_sync.work_unit_metadata_all.return_value = [self._make_dummy_metadata(num_vars=2)]
     mock_sync.checksums.return_value = {}
     mock_sync_cls.return_value = mock_sync
 

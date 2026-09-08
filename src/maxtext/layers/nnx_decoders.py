@@ -2108,7 +2108,12 @@ class NNXDecoder(nnx.Module):
         lyr_to_cache_idx = map_layer_names_to_indices(layer_name_to_kvcache_index)
 
         for lyr in range(cfg.num_decoder_layers):
-          cache_idx = lyr_to_cache_idx.get(lyr, lyr)
+          if lyr_to_cache_idx:
+            if lyr not in lyr_to_cache_idx:
+              raise ValueError(f"Decoder layer {lyr} not found in layer_name_to_kvcache_index mapping: {lyr_to_cache_idx}")
+            cache_idx = lyr_to_cache_idx[lyr]
+          else:
+            cache_idx = lyr
           if self.is_deepseek:
             if lyr < cfg.first_num_dense_layers:
               layer = getattr(self, f"dense_layers_{lyr}", None)
@@ -2211,8 +2216,6 @@ class NNXDecoder(nnx.Module):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_caches["key_cache"][lyr] = kv_cache[0]
                 kv_caches["value_cache"][lyr] = kv_cache[1]
-            elif isinstance(kv_caches, dict):
-              kv_caches[cache_idx] = kv_cache
             else:
               kv_caches[cache_idx] = kv_cache
 

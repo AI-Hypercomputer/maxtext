@@ -519,7 +519,7 @@ class TargetFreeConversionTest(unittest.TestCase):
     source = _source_tree(True)
     with self.assertRaises(ValueError) as ctx:
       raiden_unscan.unscan_layers(source, num_layers=NUM_LAYERS, scan_axis=SCAN_AXIS)
-    self.assertIn("expected axis 1 to be num_layers=8", str(ctx.exception))
+    self.assertIn("expected axis 1 to be 8 (num_layers=8, cycle_interval=1)", str(ctx.exception))
 
   def test_case_1_homogeneous_target_free_unroll(self):
     cfg = _config(inhomogeneous_layer_cycle_interval=1, num_decoder_layers=4)
