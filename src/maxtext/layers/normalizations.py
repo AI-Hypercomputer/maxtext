@@ -31,15 +31,18 @@ from maxtext.utils import max_utils
 from maxtext.utils.sharding import truncate_out_sharding
 
 
-def _align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
-  """Reshards a 1-D norm scale to match the sharding of the axis it normalizes.
+def align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+  """Reshards a 1-D per-feature scale to match the sharding of the axis it scales.
 
-  The scale is stored with the `kernel_axes` layout, which is picked for the
-  usual case of normalizing over the embedding axis (`norm` -> `tensor`). A
-  per-head QK norm instead normalizes over `head_dim`, which is unsharded while
-  the neighbouring `heads` axis is the one on `tensor`. Multiplying those
-  directly under `ShardMode.EXPLICIT` would place `tensor` on two axes of the
-  result, which JAX rejects, so align the scale with the activation instead.
+  A scale is stored with whatever layout its declared axes give it, which is
+  picked for the usual case of scaling the embedding axis (`norm` -> `tensor`).
+  A per-head QK norm instead normalizes over `head_dim`, which is unsharded
+  while the neighbouring `heads` axis is the one on `tensor`; Gemma 4's router
+  scale is declared `embed` (-> `fsdp`) but multiplies an activation whose last
+  axis is `activation_embed` (-> `tensor`). Multiplying either pair directly
+  under `ShardMode.EXPLICIT` puts one mesh axis on two axes of the result, or
+  two different axes on the same one, which JAX rejects -- so align the scale
+  with the activation instead.
 
   This is a no-op whenever the two already agree, which includes every
   auto-sharding-equivalent layout for the ordinary layer norms.
@@ -120,7 +123,7 @@ class RMSNorm(nnx.Module):
     scale = jnp.asarray(scale, self.dtype)
     effective_scale = scale + self.scale_offset
     if self.shard_mode == ShardMode.EXPLICIT:
-      effective_scale = _align_scale_with_normalized_axis(effective_scale, y)
+      effective_scale = align_scale_with_normalized_axis(effective_scale, y)
     return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
 
 

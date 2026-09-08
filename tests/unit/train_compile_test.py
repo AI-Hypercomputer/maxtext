@@ -1361,6 +1361,91 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_gemma4_dense_explicit_sharding(self):
+    """AOT test for gemma4-31b at full size under explicit sharding.
+
+    The dense Gemma 4 block scans five local-sliding layers and one global layer with a
+    wider head, so this checks that both attention variants and the surrounding norms
+    agree on a layout at a scale a test cannot run.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_gemma4_dense_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=gemma4-31b",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=32",
+            "ici_tensor_parallelism=4",
+            "attention=flash",
+            "shard_mode=explicit",
+            "tokenizer_type=sentencepiece",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer_gemma4.model')}",
+        )
+    )
+
+  def test_gemma4_moe_explicit_sharding(self):
+    """AOT test for gemma4-26b at full size under explicit sharding.
+
+    Covers the Gemma 4 MoE block -- the scaled router, the unscaled gate norm and the
+    shared expert -- at FSDP 32 x expert 8.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_gemma4_moe_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=gemma4-26b",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=32",
+            "ici_expert_parallelism=8",
+            # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet.
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "shard_mode=explicit",
+            "tokenizer_type=sentencepiece",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer_gemma4.model')}",
+        )
+    )
+
+  def test_gemma4_small_explicit_sharding(self):
+    """AOT test for gemma4-e4b under explicit sharding.
+
+    The E2B/E4B block adds per-layer embeddings and KV sharing on top of gemma4, and
+    builds its stack in a Python loop rather than a scan.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_gemma4_small_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-64",
+            "compile_topology_num_slices=1",
+            "model_name=gemma4-e4b",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            # E4B has two KV heads, which is as far as the tensor axis can split them,
+            # and a 4x4x2 physical mesh is the smallest one that can carry a two-way axis.
+            "ici_fsdp_parallelism=16",
+            "ici_tensor_parallelism=2",
+            "scan_layers=False",
+            "attention=flash",
+            "shard_mode=explicit",
+            "tokenizer_type=sentencepiece",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer_gemma4.model')}",
+        )
+    )
+
   def test_kimi_k2_explicit_sharding(self):
     """AOT test for Kimi-K2 at full size under explicit sharding.
 
