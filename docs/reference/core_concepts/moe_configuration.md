@@ -113,6 +113,8 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `prefuse_moe_weights`: If enabled alongside `sparse_matmul=True`, fuses the two FFN1 grouped GEMMs (wi_0 and wi_1) into a single grouped GEMM call. Expert weights are stored in a concatenated `(num_experts, embed_dim, 2 * mlp_dim)` shape, so input activations are loaded from HBM once per forward pass instead of twice. Backend-agnostic (works with Megablox, JAX Ragged Dot, and Tokamax). When used with `attention=vllm_rpa`, the fused weight tensor is passed directly to the vLLM-TPU serving kernel without splitting.
 
+`use_batch_split_schedule` (experimental): If enabled, split batch into micro-batches to hide communications that yields performance benefits.
+
 #### TransformerEngine MoEBlock
 
 `te_moe_block`: If enabled, uses TransformerEngine's fused expert-parallel MoEBlock for routing, dispatch, grouped GEMMs, and combining expert outputs. It requires `sparse_matmul=True`, `prefuse_moe_weights=True`, and TransformerEngine JAX with expert-parallel MoE support (TE 2.19+).
@@ -123,8 +125,6 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 - `te_mxfp8`: Uses MXFP8 quantization.
 
 `te_ep_overflow_check_every_n_steps`: Sets the number of training steps between host-side checks of buffered receive-capacity overflow results when `ragged_buffer_factor` limits TransformerEngine's receive capacity. An overflowing step skips its optimizer update immediately on device. At the next check, training raises an error that reports the observed demand and configured capacity. The default is `20`.
-
-`use_batch_split_schedule` (experimental): If enabled, split batch into micro-batches to hide communications that yields performance benefits.
 
 ## 2. Sharding
 
