@@ -14,17 +14,18 @@
 
 """Specialized layers for Gemma 4."""
 
+import functools
+
 import jax
 from jax.experimental import xla_metadata
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 from typing import Optional, Any
 
-from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
+from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL, ShardMode
 from maxtext.layers import initializers
 from maxtext.layers import moe
 from maxtext.layers import nnx_scan, nnx_wrappers
@@ -33,10 +34,11 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import MlpBlock
 
 import jax.sharding
-from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.normalizations import RMSNorm, align_scale_with_normalized_axis
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 
 GEMMA4_ATTENTION_PATTERN = (
@@ -88,6 +90,7 @@ class Gemma4MoE(nnx.Module):
         num_features=self.config.emb_dim,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
+        shard_mode=self.config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -95,6 +98,7 @@ class Gemma4MoE(nnx.Module):
         num_features=self.config.emb_dim,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
+        shard_mode=self.config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -102,6 +106,7 @@ class Gemma4MoE(nnx.Module):
         num_features=self.config.emb_dim,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
+        shard_mode=self.config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -110,6 +115,7 @@ class Gemma4MoE(nnx.Module):
         epsilon=self.config.normalization_layer_epsilon,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.config.dtype,
         weight_dtype=self.config.weight_dtype,
+        shard_mode=self.config.shard_mode,
         kernel_axes=("norm",),
         with_scale=False,
         rngs=self.rngs,
@@ -126,17 +132,21 @@ class Gemma4MoE(nnx.Module):
     shared_experts = self.moe_block.shared_experts(
         inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding
     )
-    shared_experts = self.post_feedforward_layernorm_1(shared_experts)
+    shared_experts = self.post_feedforward_layernorm_1(shared_experts, out_sharding=out_sharding)
 
     # 1. Experts receive standard RMSNorm (with weight)
-    routed_inputs = self.pre_feedforward_layernorm_2(original_inputs)
+    routed_inputs = self.pre_feedforward_layernorm_2(original_inputs, out_sharding=out_sharding)
 
     # 2. Gate receives RMSNorm (without weight) * root_size * router_scale
     gate_dtype = jnp.float32 if self.config.float32_gate_logits else self.config.dtype
-    unscaled_norm = self.gate_norm(original_inputs)
+    unscaled_norm = self.gate_norm(original_inputs, out_sharding=out_sharding)
 
     root_size = self.config.emb_dim**-0.5
     router_scale = jnp.asarray(self.pre_forward_scale_2.value, gate_dtype)
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      # The router scale is declared "embed" but multiplies an activation whose last axis is
+      # "activation_embed", two different mesh axes under the default rules.
+      router_scale = align_scale_with_normalized_axis(router_scale, unscaled_norm)
     gate_inputs = unscaled_norm * root_size * router_scale
 
     # 3. Pass both to routed_moe
@@ -146,7 +156,7 @@ class Gemma4MoE(nnx.Module):
         out_sharding=out_sharding,
         forced_routed_experts=forced_routed_experts,
     )
-    routed_experts = self.post_feedforward_layernorm_2(routed_experts)
+    routed_experts = self.post_feedforward_layernorm_2(routed_experts, out_sharding=out_sharding)
 
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
 
@@ -186,10 +196,29 @@ class Gemma4DecoderLayer(nnx.Module):
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
+    if model_mode == MODEL_MODE_PREFILL:
+      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.mlp_activation_axis_names = self.activation_axis_names[:-1] + ("activation_mlp",)
+
+    # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
+    # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
+    self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+    self.mlp_intermediate_sharding = create_sharding(mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules())
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+        extra_stack_level=1,
+    )
+
     self.pre_self_attention_norm = RMSNorm(
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -258,6 +287,7 @@ class Gemma4DecoderLayer(nnx.Module):
           num_features=config.emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
@@ -268,6 +298,7 @@ class Gemma4DecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -299,6 +330,7 @@ class Gemma4DecoderLayer(nnx.Module):
           num_features=config.emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
@@ -306,11 +338,6 @@ class Gemma4DecoderLayer(nnx.Module):
       self.post_ffw_norm = None
 
     self.layer_scalar = nnx.Param(jnp.ones((1,), dtype=config.weight_dtype), sharding=(None,))
-
-    if model_mode == MODEL_MODE_PREFILL:
-      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
-    else:
-      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
   def __call__(
       self,
@@ -337,11 +364,11 @@ class Gemma4DecoderLayer(nnx.Module):
       is_scan_carry = True
     elif isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
-    lnx = self.pre_self_attention_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = self.pre_self_attention_norm(inputs, out_sharding=self.out_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
 
     # Gemma4 only applies bidirectional attention in sliding (local) layers,
     # not in full (global) attention layers.
@@ -357,39 +384,47 @@ class Gemma4DecoderLayer(nnx.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         bidirectional_mask=bidirectional_mask,
+        out_sharding=self.out_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
     if cfg.use_post_attn_norm:
-      attention_lnx = self.post_self_attention_norm(attention_lnx)
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+      attention_lnx = self.post_self_attention_norm(attention_lnx, out_sharding=self.out_sharding)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
 
     attention_lnx += inputs
     residual = attention_lnx
-    attn_output = self.pre_ffw_norm(attention_lnx)
+    attn_output = self.pre_ffw_norm(attention_lnx, out_sharding=self.out_sharding)
 
     # MLP block.
     if getattr(self.config, "num_experts", 1) > 1:
       mlp_lnx, load_balance_loss, _ = self.mlp(
           attn_output,
           original_inputs=attention_lnx,
+          intermediate_sharding=self.mlp_intermediate_sharding,
+          out_sharding=self.out_sharding,
           forced_routed_experts=forced_routed_experts,
       )
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
         self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
     else:
-      mlp_lnx = self.mlp(attn_output, deterministic=deterministic)
+      mlp_lnx = self.mlp(
+          attn_output,
+          deterministic=deterministic,
+          intermediate_sharding=self.mlp_intermediate_sharding,
+          out_sharding=self.out_sharding,
+      )
 
     if cfg.use_post_ffw_norm:
-      mlp_lnx = self.post_ffw_norm(mlp_lnx)
+      mlp_lnx = self.post_ffw_norm(mlp_lnx, out_sharding=self.out_sharding)
 
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
     layer_output = next_layer_addition
     layer_output = layer_output * jnp.asarray(self.layer_scalar.value, cfg.dtype)
 
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
     if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
@@ -459,6 +494,13 @@ class Gemma4ScannableBlock(nnx.Module):
     self.num_of_layers = num_of_layers
     self.remat_policy_fn = remat_policy_fn
     self.apply_internal_remat = apply_internal_remat
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+        extra_stack_level=1,
+    )
 
     pattern_length = len(GEMMA4_ATTENTION_PATTERN)
     if not 0 <= num_of_layers <= pattern_length:
@@ -667,7 +709,10 @@ class Gemma4ScannableBlock(nnx.Module):
       attention_metadata=None,
   ):
     cfg = self.config
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    # The per-layer constraints inside Gemma4DecoderLayer are model_mode aware; this
+    # block-level one deliberately is not, matching the axis names this code has always
+    # used so ShardMode.AUTO is unchanged.
+    inputs = self._maybe_shard_with_logical(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     # Arguments shared by every layer in the block. model_mode differentiates

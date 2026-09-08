@@ -291,6 +291,20 @@ class PyconfigTest(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "does not support context parallelism"):
           initialize(ici_context_usp_ulysses_parallelism=2)
 
+  def test_explicit_sharding_gemma4_decoder_support(self):
+    """Both Gemma 4 decoders are accepted under explicit sharding."""
+    for decoder_block in ("gemma4", "gemma4_small"):
+      with self.subTest(decoder_block=decoder_block):
+        config = pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            shard_mode="explicit",
+            decoder_block=decoder_block,
+            # gemma4_small builds its stack in a Python loop; gemma4 accepts either.
+            scan_layers=False,
+        )
+        self.assertEqual(config.decoder_block.value, decoder_block)
+
   def test_explicit_sharding_mistral_decoder_support(self):
     """The Mistral-family decoders that have been onboarded to explicit sharding are accepted."""
     for decoder_block in ("mistral", "mixtral"):
