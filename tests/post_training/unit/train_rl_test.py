@@ -1070,6 +1070,7 @@ class RLGoodputTest(unittest.TestCase):
         checkpoint_dir="/tmp/rl_ckpt",
         tensorboard_dir="/tmp/rl_tb",
         profiler="",
+        managed_mldiagnostics=False,
         steps=1,
         batch_size=1,
         num_batches=1,
@@ -1084,7 +1085,7 @@ class RLGoodputTest(unittest.TestCase):
         enable_single_controller=False,
         reward_functions_path="",
         reward_functions="",
-        rl=SimpleNamespace(use_agentic_rollout=False),
+        rl=SimpleNamespace(use_agentic_rollout=False, profiler_max_num_hosts=1),
     )
     sampler_config = SimpleNamespace(debug=SimpleNamespace(rl=False))
 
