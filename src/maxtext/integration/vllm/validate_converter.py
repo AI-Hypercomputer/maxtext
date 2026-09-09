@@ -126,6 +126,7 @@ from tunix.generate import mappings
 from tunix.generate.vllm_sampler import VllmConfig
 import pathwaysutils
 import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
+from maxtext.integration.vllm.convert_utils import tunix_compat_context
 
 # Registers MaxTextForCausalLM with tpu_inference's model registry and applies
 # patch_kv_cache_manager() (correct FP32 GDN recurrent-state cache dtype --
@@ -256,43 +257,12 @@ def _tpu_inference_compat_patches():
     tpu_kv_cache = None
     orig_get_kv_cache_shape_with_mesh = None
 
-  def _compat_wsc(x, shardings):
+  with tunix_compat_context():
     try:
-      return orig_wsc(x, shardings)
-    except AssertionError:
-      return jax.sharding.reshard(x, shardings)
-
-  def _no_bf16_to_f32_cast(val, tgt_dtype, src_key):
-    if hasattr(val, "dtype") and val.dtype == jnp.bfloat16 and tgt_dtype == jnp.float32:
-      return val
-    return orig_apply_dtype_cast(val, tgt_dtype, src_key)
-
-  def _compat_bulk(arr, scan_axis, per_layer, key_path):
-    if hasattr(arr, "shape") and len(arr.shape) <= scan_axis:
-      scan_axis = len(arr.shape) - 1 if len(arr.shape) > 0 else 0
-    return orig_bulk(arr, scan_axis, per_layer, key_path)
-
-  def _compat_unstack(src_val, tgt_val, key_path, scan_axis=None):
-    if scan_axis is not None and hasattr(src_val, "shape") and len(src_val.shape) <= scan_axis:
-      scan_axis = len(src_val.shape) - 1 if len(src_val.shape) > 0 else 0
-    res = orig_unstack(src_val, tgt_val, key_path, scan_axis=scan_axis)
-    if isinstance(res, tuple) and len(res) == 1 and hasattr(src_val, "shape") and src_val.shape == tgt_val.shape:
-      return res * 256
-    return res
-
-  jax.lax.with_sharding_constraint = _compat_wsc
-  tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
-  tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
-  tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
-  try:
-    yield
-  finally:
-    jax.lax.with_sharding_constraint = orig_wsc
-    tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
-    tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
-    tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
-    if orig_get_kv_cache_shape_with_mesh is not None and tpu_kv_cache is not None:
-      tpu_kv_cache.get_kv_cache_shape_with_mesh = orig_get_kv_cache_shape_with_mesh
+      yield
+    finally:
+      if orig_get_kv_cache_shape_with_mesh is not None and tpu_kv_cache is not None:
+        tpu_kv_cache.get_kv_cache_shape_with_mesh = orig_get_kv_cache_shape_with_mesh
 
 
 # ---------------------------------------------------------------------------

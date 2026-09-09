@@ -11,3 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from maxtext.integration.vllm.torchax_converter.base import BaseMaxTextToVLLMConverter
+from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
+from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
+from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
+
+__all__ = [
+    "BaseMaxTextToVLLMConverter",
+    "Qwen35MaxTextToVLLMConverter",
+    "Qwen3MaxTextToVLLMConverter",
+    "Gemma4MaxTextToVLLMConverter",
+]
