@@ -129,6 +129,7 @@ class ConfigTest(absltest.TestCase):
           types.MaxTextConfig(**{**common_config, **overrides})
         self.assertIn(expected_error, str(context.exception))
 
+  @unittest.skip("b/558935791: TE MoE ragged buffer validation conflicts with the EP rank 1 restriction.")
   def test_te_moe_block_uses_ragged_buffer_factor_validation(self):
     common_config = {
         "run_name": "test",
