@@ -43,7 +43,7 @@ Before starting, ensure you have:
 
 For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](build-docker).
 
-## Configure GKE cluster with Cluster Toolkit
+## Configure GKE cluster
 
 Configure access to the target cluster with `gcloud`, then configure the project, cluster, and location with `gcluster` as described in [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md):
 
