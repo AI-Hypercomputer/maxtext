@@ -61,6 +61,9 @@ class Train(parameterized.TestCase):
   ):
     """Smoke train with small config."""
     sharding_tolerance = 0.22 if ici_expert_parallelism > 1 else 2e-2
+    # V1 FP8 TGMM requires the scale span to cover its 256-wide tile.
+    # With only 128 tokens, it raises "subchannel_iters != 1" in the backward pass.
+    max_target_length = 256 if quantization == "fp8_full" and not use_gmm_v2 else 128
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
@@ -108,7 +111,7 @@ class Train(parameterized.TestCase):
         "wo_tile_drhs_embed_dim=128",
         "wo_tile_drhs_mlp_dim=128",
         # tokamax splash
-        "max_target_length=128",
+        f"max_target_length={max_target_length}",
         "attention=flash",
         "use_tokamax_splash=False",
         # quantization
