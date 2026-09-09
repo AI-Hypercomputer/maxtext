@@ -963,32 +963,28 @@ def maybe_quantize_model(model, config):
   if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      if config.pure_nnx:
-        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-        dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
-        dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
-        dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
-        # The MTP block reads the decoder targets, so the qwix forward pass needs them.
-        # The Linen path supplies them from the is_initializing() guard in Transformer.
-        dummy_targets = {}
-        if config.mtp_num_layers > 0:
-          dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
-          dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
-        model = qwix.quantize_model(
-            model,
-            quantization_provider,
-            dummy_tokens,
-            dummy_positions,
-            dummy_segment_ids,
-            enable_dropout=False,
-            **dummy_targets,
-        )
-        # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
-        # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
-        # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
-        nnx.pop(model, nnx.Intermediate)
-      else:
-        model = qwix.quantize_model(model, quantization_provider)
+      input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+      dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+      # The MTP block reads the decoder targets, so the qwix forward pass needs them.
+      dummy_targets = {}
+      if config.mtp_num_layers > 0:
+        dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
+      model = qwix.quantize_model(
+          model,
+          quantization_provider,
+          dummy_tokens,
+          dummy_positions,
+          dummy_segment_ids,
+          enable_dropout=False,
+          **dummy_targets,
+      )
+      # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
+      # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
+      # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
+      nnx.pop(model, nnx.Intermediate)
       for _, val in nnx.graph.iter_graph(model):
         if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
           del val.qwix_rngs
@@ -1106,6 +1102,7 @@ class TransformerEngineQuantization(Quantization):
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     RECIPES = {
+        "te_no_quant": lambda: None,
         "te_fp8_delayedscaling": recipe.DelayedScaling,
         "te_fp8_currentscaling": recipe.Float8CurrentScaling,
         "te_mxfp8": recipe.MXFP8BlockScaling,
@@ -1253,7 +1250,66 @@ class TransformerEngineQuantization(Quantization):
 
     return self._wrap(te_dot_general, "dot_general")
 
-  def einsum(self, dtype: DType = jnp.float32):
+  def einsum(self, *args, **kwargs):
     """Placeholder for einsum implementation in subclasses."""
     # quant.einsum is only required for MoE or for inference with KVCache.
     raise ValueError("Einsum is not yet supported for TransformerEngine quantization.")
+
+  def get_moe_block_quantizer_set(
+      self,
+      te_gmm_quantization_recipe_name: str,
+      n_token_groups: int,
+      n_expert_groups: int,
+  ):
+    """Create a TransformerEngine quantizer set for TE MoEBlock grouped GEMMs."""
+    from transformer_engine.jax.quantize import (  # pylint: disable=import-outside-toplevel
+        QuantizerFactory,
+        QuantizerSet,
+        ScalingMode,
+    )
+
+    if te_gmm_quantization_recipe_name == "te_no_quant":
+      return QuantizerFactory.create_set(scaling_mode=ScalingMode.NO_SCALING, is_2x2x=False)
+    if te_gmm_quantization_recipe_name != "te_mxfp8":
+      raise ValueError(f"Invalid TransformerEngine GMM quantization recipe name: {te_gmm_quantization_recipe_name}")
+    if n_token_groups <= 0 or n_expert_groups <= 0:
+      raise ValueError(
+          "TE MoEBlock quantizer group counts must be positive, got "
+          f"n_token_groups={n_token_groups}, n_expert_groups={n_expert_groups}."
+      )
+
+    token_quantizer_set = QuantizerFactory.create_set(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        fwd_dtype=jnp.float8_e4m3fn,
+        bwd_dtype=jnp.float8_e4m3fn,
+        is_2x2x=True,
+        n_groups=n_token_groups,
+    )
+    expert_quantizer_set = QuantizerFactory.create_set(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        fwd_dtype=jnp.float8_e4m3fn,
+        bwd_dtype=jnp.float8_e4m3fn,
+        is_2x2x=True,
+        n_groups=n_expert_groups,
+    )
+    return QuantizerSet(
+        x=token_quantizer_set.x,
+        kernel=expert_quantizer_set.kernel,
+        dgrad=token_quantizer_set.dgrad,
+    )
+
+  def get_moe_block_quantizer_sets(
+      self,
+      te_gmm_quantization_recipe_name: str,
+      n_token_groups: int,
+      n_expert_groups: int,
+  ):
+    """Create independent FC1 and FC2 quantizer sets for TE's MoE custom VJP."""
+    return tuple(
+        self.get_moe_block_quantizer_set(
+            te_gmm_quantization_recipe_name,
+            n_token_groups=n_token_groups,
+            n_expert_groups=n_expert_groups,
+        )
+        for _ in range(2)
+    )
