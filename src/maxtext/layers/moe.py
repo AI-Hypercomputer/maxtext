@@ -655,7 +655,7 @@ class RoutedMoE(nnx.Module):
               self.rngs.params(),
               (
                   self.num_experts,
-                  moe_intermediate_dim,
+                  self.intermediate_dim,
                   self.moe_expert_input_dim,
               ),
               self.weight_dtype,
@@ -690,7 +690,7 @@ class RoutedMoE(nnx.Module):
               self.rngs.params(),
               (
                   self.num_experts,
-                  moe_intermediate_dim,
+                  self.intermediate_dim,
                   self.moe_expert_input_dim,
               ),
               self.weight_dtype,
