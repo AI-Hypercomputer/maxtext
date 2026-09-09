@@ -41,39 +41,67 @@ Still imported from Tunix at runtime, i.e. the remaining port surface:
     `_bulk_align_and_unstack`; that patch goes away once the port lands.
 """
 
-import jax
-from absl import logging
 from typing import Mapping, Any, Callable, Dict, Tuple, Optional
 import functools
-import numpy as np
+from absl import logging
+import jax
 import jax.numpy as jnp
+import numpy as np
+
+# Width of the TPU vector register's lane dimension.
+DEFAULT_TPU_NUM_LANES = 128
+
+# Leaf names whose axis mismatches must be closed by zero-padding rather than
+# by repeating. `wo` belongs here for a semantic reason, not just by analogy
+# with `wi`: the MoE intermediate dim is `wo`'s *contracting* (input) axis, so
+# zero rows contribute nothing to the output, whereas repeating rows would
+# double-count every padded lane. Repeat is not merely suboptimal for `wo`, it
+# is numerically wrong.
+MOE_MLP_WEIGHTS = frozenset({"wi", "wi_0", "wi_1", "wo"})
+
+
+def pad_to_tpu_lanes(dim: int, lane_size: int = DEFAULT_TPU_NUM_LANES) -> int:
+  """Rounds dim up to the nearest multiple of lane_size."""
+  if dim <= 0:
+    return 0
+  return ((dim + lane_size - 1) // lane_size) * lane_size
+
+
+def compute_padded_moe_mlp_dim(
+    hidden_size: Optional[int],
+    moe_mlp_tp_size: int,
+    num_lanes: int = DEFAULT_TPU_NUM_LANES,
+) -> Optional[int]:
+  """Computes the padded MoE intermediate size GMM_v2 requires.
+
+  The kernel needs the per-expert MLP dimension to be a multiple of `2 * num_lanes`
+  on every tensor-parallel shard, so the smallest legal size is the next multiple of
+  `2 * num_lanes * moe_mlp_tp_size`.
+
+  Args:
+    hidden_size: Unpadded MoE intermediate size (`moe_intermediate_size`).
+    moe_mlp_tp_size: TP degree across the MLP dimension (`tp * attn_dp`).
+    num_lanes: TPU vector-register lane count. Pass the runtime-probed
+      `pltpu.get_tpu_info().num_lanes` when a TPU handle is available; the default
+      is a fallback for trainer-side and CPU-only callers.
+
+  Returns:
+    The padded size, or `hidden_size` unchanged when it is already aligned or None.
+  """
+  if hidden_size is None or moe_mlp_tp_size <= 0 or num_lanes <= 0:
+    return hidden_size
+
+  min_required = 2 * num_lanes * moe_mlp_tp_size
+  if (hidden_size // moe_mlp_tp_size) % (2 * num_lanes) != 0:
+    return ((max(hidden_size, min_required) + min_required - 1) // min_required) * min_required
+
+  return hidden_size
 
 
 def _delete_target_buffers(tgt_flat: Mapping[str, Any], src_flat: Mapping[str, Any]):
-  """Physically deletes target buffers to free HBM before resharding."""
-  deleted_count = 0
-  preserved_count = 0
-
-  src_buffers = set()
-  for v in src_flat.values():
-    arr = getattr(v, "value", v)
-    if hasattr(arr, "device_buffers"):
-      for b in arr.device_buffers():
-        src_buffers.add(b)
-
-  for tgt_val in tgt_flat.values():
-    tgt_arr = getattr(tgt_val, "value", tgt_val)
-    if hasattr(tgt_arr, "device_buffers"):
-      is_aliased = any(b in src_buffers for b in tgt_arr.device_buffers())
-      if not is_aliased:
-        tgt_arr.delete()
-        deleted_count += 1
-      else:
-        preserved_count += 1
-
-  logging.info(
-      "Deleted %d non-aliased target buffers (preserved %d aliased) to free HBM.", deleted_count, preserved_count
-  )
+  """Placeholder for deleting target buffers before resharding."""
+  # Explicit buffer deletion is a no-op; memory is managed by JAX GC and donor buffers.
+  del tgt_flat, src_flat
 
 
 def _reshard_in_chunks(
@@ -160,9 +188,29 @@ class ShapeMismatchError(ValueError):
   """Raised when source and target shapes are incompatible."""
 
 
-def _apply_dtype_cast(val: jax.Array | np.ndarray, tgt_dtype: jnp.dtype, src_key: str) -> jax.Array | np.ndarray:
+def normalize_dtype(tgt_dtype: Any) -> Any:
+  """Normalizes string or dtype representations into a standard jnp.dtype."""
+  if tgt_dtype is None:
+    return None
+  if isinstance(tgt_dtype, str):
+    if tgt_dtype in ("bfloat16", "bf16"):
+      return jnp.bfloat16
+    if tgt_dtype in ("float32", "fp32"):
+      return jnp.float32
+    return jnp.dtype(tgt_dtype)
+  return tgt_dtype
+
+
+def _apply_dtype_cast(val: Any, tgt_dtype: Any, src_key: str) -> Any:
   """Casts val to target dtype if needed, logging a warning on type mismatch."""
-  if val.dtype != tgt_dtype:
+  tgt_dtype = normalize_dtype(tgt_dtype)
+  if isinstance(val, jax.ShapeDtypeStruct):
+    if tgt_dtype is not None and val.dtype != tgt_dtype:
+      return jax.ShapeDtypeStruct(val.shape, tgt_dtype)
+    return val
+  if not hasattr(val, "dtype"):
+    return val
+  if tgt_dtype is not None and val.dtype != tgt_dtype:
     logging.log_first_n(
         logging.WARNING,
         "Type mismatch on %s: %s -> %s",
@@ -241,12 +289,7 @@ def _unstack_scanned_param(
           src_val = np.transpose(src_val, perm)
 
       # Unstack along the 0th axis
-      if hasattr(jax, "unstack"):
-        return tuple(jax.unstack(src_val))
-      elif hasattr(jnp, "unstack"):
-        return tuple(jnp.unstack(src_val))
-      else:
-        return tuple(src_val[i] for i in range(src_val.shape[0]))
+      return tuple(jnp.unstack(src_val))
     else:
       logging.warning(
           "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot" " determine scan axis.",
@@ -256,15 +299,6 @@ def _unstack_scanned_param(
       )
 
   return (src_val,)
-
-
-# Leaf names whose axis mismatches must be closed by zero-padding rather than
-# by repeating. `wo` belongs here for a semantic reason, not just by analogy
-# with `wi`: the MoE intermediate dim is `wo`'s *contracting* (input) axis, so
-# zero rows contribute nothing to the output, whereas repeating rows would
-# double-count every padded lane. Repeat is not merely suboptimal for `wo`, it
-# is numerically wrong.
-_MOE_MLP_WEIGHTS = frozenset({"wi", "wi_0", "wi_1", "wo"})
 
 
 def _partition_size(
@@ -409,6 +443,8 @@ def _align_per_axis(
   path here is bulk alignment of scanned MoE weights, where eager
   dispatch was costing tens of seconds per tensor.
   """
+  if isinstance(arr, jax.ShapeDtypeStruct):
+    return jax.ShapeDtypeStruct(tgt_shape, arr.dtype)
   if not hasattr(arr, "shape"):
     return arr
   if arr.shape == tgt_shape:
@@ -427,7 +463,7 @@ def _align_per_axis(
     return arr
 
   last_key = key_path.split(".")[-1]
-  if last_key in _MOE_MLP_WEIGHTS:
+  if last_key in MOE_MLP_WEIGHTS:
     if isinstance(tgt_sharding, jax.sharding.NamedSharding):
       mesh = tgt_sharding.mesh
       pad_specs = []
@@ -463,35 +499,38 @@ def _align_per_axis(
   return _jit_repeat_axes(arr, tuple(repeats))
 
 
-@functools.partial(jax.jit, static_argnames=("tgt_shape", "n_shards", "axis"))
+@functools.partial(jax.jit, static_argnames=("tgt_shape", "n_shards", "axis", "lane_size"))
 def _interleave_moe_weights(
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
+    lane_size: int = DEFAULT_TPU_NUM_LANES,
 ) -> jax.Array | np.ndarray:
-  """Interleaves wi_0 and wi_1 per-shard into a single tensor.
+  """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
 
-  JIT-compiled: run eagerly this is 2 reshapes + 2 `jnp.pad` + 1 concatenate +
+  JIT-compiled: run eagerly this is 2 reshapes + 2 `jnp.pad` + 1 stack/concat +
   1 reshape, and every intermediate becomes a materialized device buffer. Under
   one trace XLA fuses the pads into the concatenate's output write, so the only
   buffer allocated is the result. On a 48-layer MoE model called once per layer
   that is the difference between ~3x and ~1x the output size in live transient
   memory, plus ~5 fewer dispatches per call.
 
-  `tgt_shape`, `n_shards` and `axis` are static, so the trace is keyed on them;
+  `tgt_shape`, `n_shards`, `axis` and `lane_size` are static, so the trace is keyed on them;
   identical layers share a single compilation.
   """
   if axis is None:
     axis = len(tgt_shape) - 1
+  elif axis < 0:
+    axis = len(tgt_shape) + axis
 
   target_half_dim = tgt_shape[axis] // 2
+  target_chunk_size = target_half_dim // n_shards
 
   def _pad_and_chunk(arr):
     current_total_size = arr.shape[axis]
     chunk_size = current_total_size // n_shards
-    target_chunk_size = target_half_dim // n_shards
 
     # Safely reshape to expose per-shard chunk without assuming the last axis
     new_shape = list(arr.shape)
@@ -509,8 +548,20 @@ def _interleave_moe_weights(
   p_wi_0 = _pad_and_chunk(wi_0)
   p_wi_1 = _pad_and_chunk(wi_1)
 
-  # Interleave along the chunked dimension
-  combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+  if lane_size > 0 and target_chunk_size % lane_size == 0:
+    # Interleave in 128-lane chunks within each shard:
+    # [Gate_c0 (128), Up_c0 (128), Gate_c1 (128), Up_c1 (128), ...]
+    num_lanes = target_chunk_size // lane_size
+    shape_lanes = list(p_wi_0.shape)
+    shape_lanes[axis + 1] = num_lanes
+    shape_lanes.insert(axis + 2, lane_size)
+    p_wi_0 = p_wi_0.reshape(shape_lanes)
+    p_wi_1 = p_wi_1.reshape(shape_lanes)
+    combined = jnp.stack([p_wi_0, p_wi_1], axis=axis + 2)
+  else:
+    # Fallback when dimension is not divisible by lane_size:
+    combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+
   return combined.reshape(tgt_shape)
 
 
@@ -604,6 +655,14 @@ def _bulk_align_and_unstack(
     A tuple of `num_layers` per-layer arrays at the per-layer target shape.
   """
   per_layer_shape = per_layer_tgt_val.shape
+  # Keyed on the *source* only. An abstract target with a concrete source still has
+  # real weights to slice, and returning ShapeDtypeStructs there would silently drop
+  # them -- the target leaf is consulted for shape/sharding/dtype, never for data.
+  if isinstance(arr, jax.ShapeDtypeStruct):
+    num_layers = arr.shape[scan_axis]
+    tgt_dtype = getattr(per_layer_tgt_val, "dtype", getattr(arr, "dtype", jnp.float32))
+    return tuple(jax.ShapeDtypeStruct(per_layer_shape, tgt_dtype) for _ in range(num_layers))
+
   scanned_tgt_shape = per_layer_shape[:scan_axis] + (arr.shape[scan_axis],) + per_layer_shape[scan_axis:]
   scanned_tgt_sharding = _scanned_sharding_from_per_layer(getattr(per_layer_tgt_val, "sharding", None), scan_axis)
 
