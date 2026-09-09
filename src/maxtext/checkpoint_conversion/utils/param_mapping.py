@@ -3942,6 +3942,18 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=
       else _get(config, "n_routed_experts", 256)
   )
   num_hash_layers = _get(config, "num_hash_layers", getattr(maxtext_config, "first_num_hash_layers", 3))
+  compress_ratios = _get(config, "compress_ratios", getattr(maxtext_config, "compress_ratios", None))
+
+  def _get_compressor_type(layer_idx):
+    if compress_ratios and layer_idx < len(compress_ratios):
+      ratio = compress_ratios[layer_idx]
+    else:
+      ratio = 0 if layer_idx < 2 else (4 if layer_idx % 2 == 0 else 128)
+    if ratio == 4:
+      return "csa"
+    elif ratio > 4:
+      return "hca"
+    return None
 
   mapping = {
       "params-token_embedder-embedding": "embed.weight",
@@ -4031,7 +4043,7 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=
           f"params-decoder-layers_{i}",
           _make_unrolled_hf_key_fn(i),
           is_hash=(i < num_hash_layers),
-          compressor_type="both",
+          compressor_type=_get_compressor_type(i),
       )
   else:
     # 1. Unrolled Prefix Layers
@@ -4040,7 +4052,7 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=
           f"params-decoder-layers_{i}",
           _make_unrolled_hf_key_fn(i),
           is_hash=True,
-          compressor_type="both",
+          compressor_type=_get_compressor_type(i),
       )
 
     # 2. Scanned Blocks

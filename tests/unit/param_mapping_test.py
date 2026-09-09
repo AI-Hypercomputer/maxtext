@@ -519,6 +519,116 @@ class ParamMappingTest(unittest.TestCase):
         "model.visual.patch_embed.proj.weight",
     )
 
+  def test_deepseek_v4_mapping_unscanned(self):
+    config = {
+        "num_hidden_layers": 4,
+        "n_routed_experts": 8,
+        "num_hash_layers": 2,
+        "compress_ratios": [0, 0, 4, 128],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 8
+    maxtext_config.base_num_decoder_layers = 4
+    maxtext_config.first_num_hash_layers = 2
+    maxtext_config.compress_ratios = [0, 0, 4, 128]
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+
+    # Core embeddings and norms
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-decoder_norm-scale", mapping)
+    self.assertIn("params-decoder-logits_dense-kernel", mapping)
+
+    # Multi-collection MoE variables
+    self.assertIn("Tid2EidVar-decoder-layers_0-mlp-MoeBlock_0-tid2eid", mapping)
+    self.assertIn("MoEBiasVar-decoder-layers_2-mlp-MoeBlock_0-gate-bias", mapping)
+
+    # Layer 0 (ratio=0) should have NO compressor keys
+    self.assertNotIn("params-decoder-layers_0-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_0-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+    # Layer 2 (ratio=4) should have CSA compressor keys, NOT HCA
+    self.assertIn("params-decoder-layers_2-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_2-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+    # Layer 3 (ratio=128) should have HCA compressor keys, NOT CSA
+    self.assertIn("params-decoder-layers_3-self_attention-hca_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_3-self_attention-csa_compressor-gate_proj-kernel", mapping)
+
+  def test_deepseek_v4_mapping_scanned(self):
+    config = {
+        "num_hidden_layers": 5,
+        "n_routed_experts": 8,
+        "num_hash_layers": 3,
+        "compress_ratios": [0, 0, 4, 128, 4],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 8
+    maxtext_config.base_num_decoder_layers = 5
+    maxtext_config.first_num_hash_layers = 3
+    maxtext_config.compress_ratios = [0, 0, 4, 128, 4]
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+
+    # Prefix layer 0 has no compressor
+    self.assertNotIn("params-decoder-layers_0-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_0-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+    # Prefix layer 2 has CSA compressor
+    self.assertIn("params-decoder-layers_2-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_2-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+    # Scanned block 0 (HCA) and block 1 (CSA)
+    self.assertIn("params-decoder-scanned_blocks-layers_0-self_attention-hca_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-scanned_blocks-layers_0-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertIn("params-decoder-scanned_blocks-layers_1-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-scanned_blocks-layers_1-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+  def test_deepseek_v4_hook_fn(self):
+    config = {
+        "num_hidden_layers": 4,
+        "n_routed_experts": 8,
+        "num_hash_layers": 2,
+        "compress_ratios": [0, 0, 4, 128],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.base_num_decoder_layers = 4
+    maxtext_config.first_num_hash_layers = 2
+    hooks_to_mt = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=False, saving_to_hf=False
+    )
+    self.assertIn("params-token_embedder-embedding", hooks_to_mt)
+    self.assertIn("params-decoder-logits_dense-kernel", hooks_to_mt)
+    self.assertIn("params-decoder-layers_0-self_attention-o_a_proj-kernel", hooks_to_mt)
+
+    hooks_to_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=False, saving_to_hf=True
+    )
+    self.assertIn("params-token_embedder-embedding", hooks_to_hf)
+    self.assertIn("params-decoder-logits_dense-kernel", hooks_to_hf)
+
+  def test_detect_and_extract_checkpoint_multi_collection(self):
+    from maxtext.checkpoint_conversion.utils import utils
+
+    fake_ckpt = {
+        "params": {
+            "params": {
+                "decoder": {"decoder_norm": {"scale": np.ones((8,))}},
+            },
+            "Tid2EidVar": {
+                "decoder": {"layers_0": {"mlp": {"MoeBlock_0": {"tid2eid": np.zeros((4, 2))}}}},
+            },
+            "MoEBiasVar": {
+                "decoder": {"layers_3": {"mlp": {"MoeBlock_0": {"gate": {"bias": np.ones((4,))}}}}},
+            },
+        }
+    }
+    extracted = utils.detect_and_extract_checkpoint(fake_ckpt)
+    self.assertIn("params-decoder-decoder_norm-scale", extracted)
+    self.assertIn("Tid2EidVar-decoder-layers_0-mlp-MoeBlock_0-tid2eid", extracted)
+    self.assertIn("MoEBiasVar-decoder-layers_3-mlp-MoeBlock_0-gate-bias", extracted)
+    np.testing.assert_array_equal(extracted["params-decoder-decoder_norm-scale"], np.ones((8,)))
+    np.testing.assert_array_equal(extracted["Tid2EidVar-decoder-layers_0-mlp-MoeBlock_0-tid2eid"], np.zeros((4, 2)))
+    np.testing.assert_array_equal(extracted["MoEBiasVar-decoder-layers_3-mlp-MoeBlock_0-gate-bias"], np.ones((4,)))
+
 
 if __name__ == "__main__":
   unittest.main()
