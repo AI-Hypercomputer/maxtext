@@ -43,7 +43,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     train_micro_batch_size=16 \
     rollout_micro_batch_size=16 \
     profiler=xplane \
-    profiler_steps=2 \
+    rl.profiler_num_invocations=2 \
     base_emb_dim=2880 \
     vocab_size=201088 \
     enable_dp_attention=False \

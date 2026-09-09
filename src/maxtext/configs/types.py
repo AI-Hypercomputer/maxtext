@@ -3026,10 +3026,22 @@ class DevelopmentAndDebugging(BaseModel):
   _validate_config = field_validator("constant_bound_config", mode="before")(_clean_empty_string_for_list)
 
 
-class Profiling(BaseModel):
-  """Configuration for performance profiling."""
+class ProfilingCore(BaseModel):
+  """Profiler backend selection shared by every trainer.
+
+  The Tunix-based RL trainer (`trainers/post_train/rl/train_rl.py`) only needs
+  this field: its profiling window is expressed in role invocations via
+  `RL.profiler_start_invocation` / `RL.profiler_num_invocations` and handled by
+  tunix `RLProfileConfig`, so the step-based knobs in `Profiling` are not
+  accepted there.
+  """
 
   profiler: ProfilerType = Field(ProfilerType.NONE, description="Profiler to use ('xplane', 'nsys').")
+
+
+class Profiling(ProfilingCore):
+  """Configuration for step-window performance profiling (`common/profiler.py`)."""
+
   upload_all_profiler_results: bool = Field(False, description="Upload profiler results from all hosts.")
   skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")
   profiler_steps: int = Field(5, description="Number of steps to profile.")
@@ -3460,6 +3472,41 @@ class VLLM(BaseModel):
 class RL(BaseModel):
   """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
+  # Targeted profiling of the Tunix RL roles (tunix `RLProfileConfig`). Active
+  # only with `profiler=xplane`.
+  profiler_start_invocation: int = Field(
+      2,
+      ge=0,
+      description=(
+          "Zero-based invocation index at which tracing starts for each RL"
+          " role: `update_actor` for the actor and `generate` for the rollout"
+          " engine (tunix `RLProfileConfig.start_invocation`). This counts role"
+          " function calls, not global training steps: `update_actor` runs once"
+          " per micro-batch (mini-batch x gradient accumulation x"
+          " num_iterations per step) and eval actor passes share the actor"
+          " counter. Default 2 skips JIT compilation and warm-up."
+      ),
+  )
+  profiler_num_invocations: int = Field(
+      1,
+      ge=1,
+      description=(
+          "Number of consecutive invocations traced per role once"
+          " `profiler_start_invocation` is reached (tunix"
+          " `RLProfileConfig.num_invocations`). One session is written per"
+          " invocation as `<role>_invocation_<n>`."
+      ),
+  )
+  profiler_timeout_secs: float = Field(
+      60.0,
+      gt=0,
+      description=(
+          "Seconds to wait for tunix's background trace stop and upload thread"
+          " before starting the next trace or closing the cluster (tunix"
+          " `RLProfileConfig.timeout_secs`)."
+      ),
+  )
+
   num_generations: int = Field(2, description="Number of responses to generate per prompt (G in GRPO paper).")
   num_iterations: int = Field(1, ge=1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
@@ -3771,6 +3818,32 @@ class DerivedValues(BaseModel):
 # ----------------------------------------------------------------------------
 # Helper Functions
 # ----------------------------------------------------------------------------
+
+
+def derive_managed_mldiagnostics_dir(
+    base_output_directory: str | None,
+    run_name: str | None,
+    managed_mldiagnostics_storage_path: str | None,
+) -> str | None:
+  """Returns the managed ML Diagnostics root for a run, or None if it cannot be derived.
+
+  Layout: `<managed_mldiagnostics_storage_path or base_output_directory>/<run_name>/managed-mldiagnostics`,
+  without a trailing slash (the SDK mis-joins paths that end in one, b/454725283). The SDK appends its
+  own run identifier below this directory for profiles.
+
+  Args:
+    base_output_directory: The run's base output directory; used when no dedicated storage path is set.
+    run_name: The run name; the directory cannot be derived without it.
+    managed_mldiagnostics_storage_path: Optional dedicated storage root that takes priority over
+      `base_output_directory`.
+
+  Returns:
+    The derived directory, or None when `run_name` or both base paths are empty.
+  """
+  telemetry_base = managed_mldiagnostics_storage_path or base_output_directory
+  if telemetry_base and run_name:
+    return os.path.join(telemetry_base, run_name, "managed-mldiagnostics")
+  return None
 
 
 # Decoder blocks that support router replay (`forced_routed_experts`). All are
@@ -4533,9 +4606,11 @@ class MaxTextConfig(
       self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
-      # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
-      telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
-      self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
+      self.managed_mldiagnostics_dir = derive_managed_mldiagnostics_dir(
+          self.base_output_directory,
+          self.run_name,
+          self.managed_mldiagnostics_storage_path,
+      )
       if self.enable_mllog:
         if not self.mllog_file:
           self.mllog_file = os.path.join(output_dir, f"mllog_{self.data_shuffle_seed}.log")
@@ -6160,7 +6235,7 @@ class RLConfig(
     VisionProjector,
     AudioEncoder,
     DevelopmentAndDebugging,
-    Profiling,
+    ProfilingCore,
     AOT,
     Metrics,
     Tensorboard,
@@ -6336,6 +6411,34 @@ class RLConfig(
     else:
       tensorboard_dir = os.path.join(os.path.abspath("maxtext_output"), "tensorboard", "")
     object.__setattr__(self, "tensorboard_dir", tensorboard_dir)
+
+    # Managed ML Diagnostics: derive the run directory and fail at config time
+    # on combinations that would only surface mid-run.
+    object.__setattr__(
+        self,
+        "managed_mldiagnostics_dir",
+        derive_managed_mldiagnostics_dir(
+            self.base_output_directory,
+            self.run_name,
+            self.managed_mldiagnostics_storage_path,
+        ),
+    )
+    if self.managed_mldiagnostics:
+      if not self.managed_mldiagnostics_dir or not self.managed_mldiagnostics_dir.startswith("gs://"):
+        raise ValueError(
+            "managed_mldiagnostics=True requires a gs:// run directory: set"
+            " run_name and either managed_mldiagnostics_storage_path or"
+            " base_output_directory to a gs:// path (derived"
+            f" managed_mldiagnostics_dir={self.managed_mldiagnostics_dir!r})."
+        )
+      if self.profiler == ProfilerType.XPLANE and self.managed_mldiagnostics_on_demand_profiling:
+        raise ValueError(
+            "managed_mldiagnostics_on_demand_profiling=True cannot be combined"
+            " with profiler=xplane on the RL path: an on-demand capture during"
+            " a programmatic trace session fails with 'profile already"
+            " started'. Set managed_mldiagnostics_on_demand_profiling=False (or"
+            " profiler='')."
+        )
 
     # Slice configuration
     if not (

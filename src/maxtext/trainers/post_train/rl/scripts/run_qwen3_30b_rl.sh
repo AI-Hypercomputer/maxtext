@@ -133,8 +133,8 @@ max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
 profiler=xplane \
-skip_first_n_steps_for_profiler=5 \
-profiler_steps=2 \
+rl.profiler_start_invocation=5 \
+rl.profiler_num_invocations=2 \
 vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-30b-a3b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 

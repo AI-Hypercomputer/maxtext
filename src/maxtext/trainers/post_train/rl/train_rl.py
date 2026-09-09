@@ -70,12 +70,13 @@ adapter.register()
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
-from tunix.sft import metrics_logger, profiler
+from tunix.sft import metrics_logger
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
 
 from maxtext.common.common_types import DecoderBlockType
+from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics, mldiagnostics_available
 from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
@@ -84,7 +85,6 @@ from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
 from maxtext.utils import max_logging, max_utils, model_creation_utils
 from maxtext.utils.model_creation_utils import get_rollout_kwargs_for_parallelism
-
 
 _RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset((DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5))
 
@@ -349,6 +349,71 @@ def _kwargs_supported_by(cls: Any, **kwargs: Any) -> dict[str, Any]:
   return {k: v for k, v in kwargs.items() if k in params}
 
 
+def build_metrics_logging_options(
+    trainer_config: Any,
+) -> metrics_logger.MetricsLoggerOptions:
+  """Builds the tunix metrics logger options for the RL cluster.
+
+  Backends are listed explicitly: `MLDiagScalarBackend` when
+  `managed_mldiagnostics=true`, plus `TensorboardBackend` whenever
+  `enable_tensorboard` is set (the MaxText default). A non-empty
+  `custom_backend` list replaces tunix's default backends entirely (W&B in
+  OSS, CLU internally), so with the defaults the RL path logs to TensorBoard
+  only (and ML Diagnostics when enabled). Only when both flags are off is the
+  list empty and tunix falls back to its own defaults. `backend_kwargs` must
+  always be a dict; `None` breaks `MetricsLoggerOptions.create_backends`.
+  """
+  backends = []
+  if trainer_config.managed_mldiagnostics:
+    from tunix.rl.metrics import mldiag_backend  # pylint: disable=import-outside-toplevel
+
+    backends.append(mldiag_backend.MLDiagScalarBackend)
+  if trainer_config.enable_tensorboard:
+    backends.append(
+        functools.partial(
+            metrics_logger.TensorboardBackend,
+            log_dir=trainer_config.tensorboard_dir,
+            flush_every_n_steps=trainer_config.log_period,
+        )
+    )
+  return metrics_logger.MetricsLoggerOptions(
+      log_dir=trainer_config.tensorboard_dir,
+      flush_every_n_steps=trainer_config.log_period,
+      backend_kwargs={"custom_backend": backends},
+  )
+
+
+def build_rl_profiler_config(
+    trainer_config: Any,
+) -> rl_cluster_lib.RLProfileConfig | None:
+  """Builds the tunix targeted RL profiler config, or None when profiling is off.
+
+  Traces are written per role (`actor`, `rollout`) for the invocation window
+  `[rl.profiler_start_invocation, + rl.profiler_num_invocations)`. Where they
+  land depends on `managed_mldiagnostics`:
+
+  * false: tunix's JAX backend writes to `output_dir`, i.e. `tensorboard_dir`,
+    which is where the TensorBoard profile plugin and MaxText pretrain look.
+  * true: tunix's ML Diagnostics backend writes under the active MLRun's
+    `gcs_path` (`managed_mldiagnostics_dir`, set by `ManagedMLDiagnostics`)
+    plus the run identifier; the `RLProfileConfig` directories are ignored.
+
+  `RLProfileConfig.mldiagnostics_dir` is intentionally left empty: tunix's JAX
+  backend prefers it over `output_dir`, so forwarding the derived
+  `managed_mldiagnostics_dir` would move non-managed traces out of
+  `tensorboard_dir`, and the managed backend never reads it.
+  """
+  if trainer_config.profiler != "xplane":
+    return None
+  return rl_cluster_lib.RLProfileConfig(
+      start_invocation=trainer_config.rl.profiler_start_invocation,
+      num_invocations=trainer_config.rl.profiler_num_invocations,
+      output_dir=trainer_config.tensorboard_dir,
+      managed_mldiagnostics=trainer_config.managed_mldiagnostics,
+      timeout_secs=trainer_config.rl.profiler_timeout_secs,
+  )
+
+
 def create_rl_components(  # pylint: disable=too-many-positional-arguments
     trainer_config,
     sampler_config,
@@ -380,24 +445,11 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
       None if trainer_config.rollout_micro_batch_size == -1 else trainer_config.rollout_micro_batch_size
   )
 
-  # Setup metrics logging
-  metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=trainer_config.tensorboard_dir, flush_every_n_steps=trainer_config.log_period
-  )
-
-  profiler_options = None
-  if trainer_config.profiler == "xplane":
-    profiler_options = profiler.ProfilerOptions(
-        log_dir=trainer_config.tensorboard_dir,
-        skip_first_n_steps=trainer_config.skip_first_n_steps_for_profiler,
-        profiler_steps=trainer_config.profiler_steps,
-        # Skip setting tracer levels.
-        set_profile_options=False,
-        **_kwargs_supported_by(
-            profiler.ProfilerOptions,
-            enable_continuous_profiling=trainer_config.enable_continuous_profiling,
-        ),
-    )
+  # Setup metrics logging and targeted RL profiling. `profiler_options` stays
+  # None: tunix `RLTrainingConfig` forbids combining the SFT step profiler with
+  # `rl_profiler_config`, and only the latter traces the rollout role.
+  metrics_logging_options = build_metrics_logging_options(trainer_config)
+  rl_profiler_config = build_rl_profiler_config(trainer_config)
 
   # Parse vllm_additional_config
   rollout_additional_config = None
@@ -455,7 +507,8 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           rollout_micro_batch_size=rollout_micro_batch_size,
           max_seq_token_per_tpu=trainer_config.max_seq_token_per_tpu or None,
           metrics_logging_options=metrics_logging_options,
-          profiler_options=profiler_options,
+          profiler_options=None,
+          rl_profiler_config=rl_profiler_config,
           checkpoint_root_directory=checkpoint_dir,
           checkpointing_options=checkpointing_options,
       ),
@@ -486,7 +539,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
               "detokenize": trainer_config.stop_strings is not None,
-              "include_stop_str_in_output": trainer_config.stop_strings is not None,
+              "include_stop_str_in_output": (trainer_config.stop_strings is not None),
           },
           # AgenticGRPOLearner requires log-probabilities from the rollout engine
           # to support off-policy filtering and multi-iteration training.
@@ -659,6 +712,19 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       config_class=types.RLConfig,
   )
 
+  # Create the ML Diagnostics run before any tunix object: `RLCluster` builds
+  # `RLProfiler`, whose managed backend preflights `Xprof._ensure_initialized()`
+  # and raises if no MLRun is active. Both configs are uploaded (sampler keys
+  # that differ from the trainer's are recorded as `sampler.<key>`).
+  if trainer_config.managed_mldiagnostics:
+    if not mldiagnostics_available():
+      raise RuntimeError(
+          "managed_mldiagnostics=True but the google_cloud_mldiagnostics SDK is"
+          " not available (not installed, or MaxText is running in decoupled"
+          " mode). Install it or set managed_mldiagnostics=False."
+      )
+    ManagedMLDiagnostics(trainer_config, sampler_config=sampler_config)
+
   # Create model tokenizer first so we can plumb its pad_id into the model
   # adapter (used to synthesize segment_ids that mask pad positions from
   # attention — without this the trainer attends to pad tokens and produces
@@ -789,6 +855,110 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
     )
 
 
+_ENV_PATHWAYS_MAX_NUM_HOSTS = "PATHWAYS_MAX_NUM_HOSTS"
+# Marker attached to the installed `start_trace` wrapper (see
+# `install_pathways_multihost_profiler_patch`).
+_PATHWAYS_MULTIHOST_PATCH = object()
+
+
+def _pathways_max_num_hosts_from_env() -> int | None:
+  """Returns the operator-requested Pathways `max_num_hosts`, or None if unset.
+
+  Raises:
+    ValueError: if `PATHWAYS_MAX_NUM_HOSTS` is set but is not a positive
+      integer. Raised at startup so a typo fails before any TPU work.
+  """
+  raw = os.environ.get(_ENV_PATHWAYS_MAX_NUM_HOSTS)
+  if raw is None or not raw.strip():
+    return None
+  try:
+    value = int(raw)
+  except ValueError as e:
+    raise ValueError(f"{_ENV_PATHWAYS_MAX_NUM_HOSTS}={raw!r} must be a positive integer.") from e
+  if value <= 0:
+    raise ValueError(f"{_ENV_PATHWAYS_MAX_NUM_HOSTS}={raw!r} must be a positive integer.")
+  return value
+
+
+def _is_pathways_backend() -> bool:
+  """Returns whether JAX is talking to a Pathways proxy backend."""
+  try:
+    return bool(pathwaysutils.is_pathways_backend_used())
+  except Exception:  # pylint: disable=broad-exception-caught
+    platforms = getattr(getattr(jax, "config", None), "jax_platforms", None) or os.environ.get("JAX_PLATFORMS", "")
+    return "proxy" in str(platforms)
+
+
+def install_pathways_multihost_profiler_patch() -> None:
+  """Lets `PATHWAYS_MAX_NUM_HOSTS` select how many Pathways workers a trace covers.
+
+  `pathwaysutils.profiling.start_trace` (installed over
+  `jax.profiler.start_trace`
+  by `pathwaysutils.initialize()`) defaults to `max_num_hosts=1`, so on a
+  disaggregated topology (trainer on worker 0, vLLM sampler on worker 1) the
+  `rollout` trace never contains the sampler's TPU xplane. Tunix's
+  `RLProfileConfig` has no `max_num_hosts` knob, so this wrapper injects the
+  value of `PATHWAYS_MAX_NUM_HOSTS` into every `start_trace` call that does not
+  pass `max_num_hosts` itself.
+
+  Behavior:
+    * `PATHWAYS_MAX_NUM_HOSTS` unset: no-op; pathwaysutils' default of 1
+      (worker 0 only) stays in effect. Set e.g. `PATHWAYS_MAX_NUM_HOSTS=1000`
+      to trace every worker.
+    * Not on the Pathways proxy backend (McJAX), or the installed
+      `start_trace` does not accept `max_num_hosts`: nothing is injected.
+    * An explicit `max_num_hosts` argument from the caller always wins.
+    * Idempotent; calling this twice installs the wrapper once.
+
+  Must run after `pathwaysutils.initialize()` and before the first
+  `jax.profiler.start_trace`; tunix only calls `start_trace` lazily from the
+  profiled invocation, so installing from `main()` is early enough.
+
+  Raises:
+    ValueError: if `PATHWAYS_MAX_NUM_HOSTS` is set to a non-positive or
+      non-integer value.
+  """
+  # Identity check against a private sentinel: mock objects standing in for
+  # `start_trace` auto-create truthy attributes, which a plain truthiness test
+  # would mistake for an installed patch.
+  if getattr(jax.profiler.start_trace, "_pathways_multihost_patch", None) is _PATHWAYS_MULTIHOST_PATCH:
+    return
+
+  requested_max_num_hosts = _pathways_max_num_hosts_from_env()
+  original_start_trace = jax.profiler.start_trace
+  try:
+    params = inspect.signature(original_start_trace).parameters
+    accepts_max_num_hosts = "max_num_hosts" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+  except (ValueError, TypeError):
+    accepts_max_num_hosts = True
+
+  @functools.wraps(original_start_trace)
+  def start_trace_with_max_num_hosts(*args, **kwargs):
+    # `max_num_hosts` is the 5th positional parameter of pathwaysutils'
+    # `start_trace_patch`; only inject when the caller left it unset.
+    caller_set_it = len(args) > 4 or kwargs.get("max_num_hosts") is not None
+    if requested_max_num_hosts is not None and accepts_max_num_hosts and not caller_set_it and _is_pathways_backend():
+      kwargs["max_num_hosts"] = requested_max_num_hosts
+      max_logging.log(
+          "Pathways profiler: tracing up to"
+          f" max_num_hosts={requested_max_num_hosts} workers"
+          f" ({_ENV_PATHWAYS_MAX_NUM_HOSTS})."
+      )
+    return original_start_trace(*args, **kwargs)
+
+  setattr(
+      start_trace_with_max_num_hosts,
+      "_pathways_multihost_patch",
+      _PATHWAYS_MULTIHOST_PATCH,
+  )
+  jax.profiler.start_trace = start_trace_with_max_num_hosts
+  jax_src_profiler = getattr(getattr(jax, "_src", None), "profiler", None)
+  if jax_src_profiler is not None:
+    jax_src_profiler.start_trace = start_trace_with_max_num_hosts
+
+
 def main(argv: Sequence[str], kwargs: dict = None) -> None:
   """Main function to run RL training.
 
@@ -797,6 +967,7 @@ def main(argv: Sequence[str], kwargs: dict = None) -> None:
   """
   kwargs = kwargs or {}
   pathwaysutils.initialize()
+  install_pathways_multihost_profiler_patch()
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
   max_utils.print_system_information()
