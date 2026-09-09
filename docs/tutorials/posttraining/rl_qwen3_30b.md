@@ -99,10 +99,7 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../build_maxtext.md).
 
-### Cluster Toolkit submission
-
-For a new GKE deployment, authenticate with `gcloud` and submit the RL trainer
-using Cluster Toolkit's `--pathways` option:
+### Submit your workload
 
 ```bash
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
