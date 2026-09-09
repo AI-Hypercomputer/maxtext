@@ -16,14 +16,16 @@
 
 import abc
 import dataclasses
+import gc
 import logging
 import re
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Union
+
+from flax import nnx, traverse_util
 import jax
 import jax.numpy as jnp
-import gc
-from typing import List, Union, Any, Dict, Optional, Mapping, Tuple
-from flax import traverse_util, nnx
 from maxtext.integration.vllm.convert_utils import (
+    MOE_MLP_WEIGHT_NAMES,
     _align_per_axis,
     _apply_dtype_cast,
     _bulk_align_and_unstack,
@@ -33,6 +35,11 @@ from maxtext.integration.vllm.convert_utils import (
     _jit_unstack,
     _scanned_sharding_from_per_layer,
     _sharding_summary,
+    normalize_dtype,
+    pad_to_tpu_lanes,
+    reclaim_host_memory,
+    resolve_prefuse_moe_weights,
+    resolve_rollout_tp,
 )
 
 
@@ -46,19 +53,6 @@ class Operation(abc.ABC):
   def __call__(self, tensors: List[Any], **kwargs) -> Any:
     pass
 
-
-class Concatenate(Operation):
-  """Concatenates input tensors along a given dimension."""
-
-  def __init__(self, dim: int):
-    self.dim = dim
-
-  def __call__(self, tensors, **kwargs):
-    @jax.jit
-    def _f(*ts):
-      return jnp.concatenate(ts, axis=self.dim)
-
-    return _f(*tensors)
 
 
 class Transpose(Operation):
@@ -164,7 +158,7 @@ class MoEFuseGateUp(Operation):
         w1 = jnp.transpose(w1, (0, 2, 1))
         num_experts, d_inner, d_model = w0.shape
         chunk_size = d_inner // tp
-        padded_chunk_size = ((chunk_size + 127) // 128) * 128
+        padded_chunk_size = pad_to_tpu_lanes(chunk_size)
         pad_amount = padded_chunk_size - chunk_size
         gate_chunks = w0.reshape(num_experts, tp, chunk_size, d_model)
         up_chunks = w1.reshape(num_experts, tp, chunk_size, d_model)
@@ -198,7 +192,7 @@ class MoEFuseGateUpPrefused(Operation):
         w0 = w[:, :d_inner, :]
         w1 = w[:, d_inner:, :]
         chunk_size = d_inner // tp
-        padded_chunk_size = ((chunk_size + 127) // 128) * 128
+        padded_chunk_size = pad_to_tpu_lanes(chunk_size)
         pad_amount = padded_chunk_size - chunk_size
         gate_chunks = w0.reshape(num_experts, tp, chunk_size, d_model)
         up_chunks = w1.reshape(num_experts, tp, chunk_size, d_model)
@@ -214,12 +208,6 @@ class MoEFuseGateUpPrefused(Operation):
     fused = _fuse_all(tensors[0])
     return list(jnp.unstack(fused, axis=0))
 
-
-class Identity(Operation):
-  """Returns the input tensor unmodified."""
-
-  def __call__(self, tensors, **kwargs):
-    return tensors[0]
 
 
 # ==========================================
@@ -276,12 +264,15 @@ class WeightConverter:
       num_kv_heads: Optional[int] = None,
       head_dim: Optional[int] = None,
       config: Any = None,
-      # Defaults to MoEFusedLayout.PER_SHARD_INTERLEAVE; resolved in the body
-      # because MoEFusedLayout is defined further down this module.
+      trainer_config: Any = None,
+      rollout_backend: str = "maxtext",
       moe_fused_layout: Optional[str] = None,
       allow_unused_source_keys: Tuple[str, ...] = (),
       debug: bool = False,
+      prefuse_moe_weights: Optional[bool] = None,
+      target_dtype: Optional[Any] = None,
   ):
+    config = trainer_config if config is None else config
     if rules is not None and not rules:
       raise ValueError(
           "WeightConverter(rules=[]) would convert nothing and leave the "
@@ -289,15 +280,14 @@ class WeightConverter:
           "MaxText-to-MaxText path, or a non-empty rule list."
       )
     self.rules = rules
-    self.tp = tp
-    self.num_kv_heads = num_kv_heads
-    self.head_dim = head_dim
+    self.tp = resolve_rollout_tp(config, tp)
     # Read by the rollout engine to decide whether to trace the reshard
     # step that runs after conversion.
     self.debug = debug
+    self.rollout_backend = rollout_backend
 
     self._direct: Optional["MaxTextToMaxTextConverter"] = None
-    if rules is None:
+    if rollout_backend == "maxtext" and rules is None:
       if config is None:
         raise ValueError(
             "WeightConverter(rules=None) needs `config` to derive the "
@@ -306,22 +296,41 @@ class WeightConverter:
         )
       self._direct = MaxTextToMaxTextConverter(
           config=config,
+          tp=self.tp,
           moe_fused_layout=(moe_fused_layout or MoEFusedLayout.PER_SHARD_INTERLEAVE),
           allow_unused_source_keys=allow_unused_source_keys,
           debug=debug,
+          prefuse_moe_weights=prefuse_moe_weights,
+          target_dtype=target_dtype,
       )
       logging.info("WeightConverter: direct MaxText-to-MaxText mode (debug=%s).", debug)
     else:
+      if self.rules is None and config is not None:
+        for candidate_key in [
+            getattr(config, "model_name", ""),
+            getattr(config, "decoder_block", ""),
+            getattr(config, "model_type", ""),
+        ]:
+          if (
+              candidate_key
+              and candidate_key in MODEL_TO_CONVERSION_RULES
+              and MODEL_TO_CONVERSION_RULES[candidate_key] is not None
+          ):
+            self.rules = MODEL_TO_CONVERSION_RULES[candidate_key]
+            break
       logging.info(
           "WeightConverter: torchax rule mode (tp=%d, %d rules).",
           self.tp,
-          len(rules),
+          len(self.rules) if self.rules else 0,
       )
 
   def convert(self, src_pytree: Any, target_state: Any = None) -> Any:
     """Converts source weights pytree into target format using rules or direct converter."""
-    if self.rules is None:
+    if self.rollout_backend == "maxtext" and self.rules is None:
       return self._direct.convert(src_pytree, target_state=target_state)
+
+    if self.rules is None:
+      raise ValueError("WeightConverter in torchax mode requires conversion rules.")
 
     flat_src = traverse_util.flatten_dict(_to_pure_dict(src_pytree), sep=".")
     gc.collect()
@@ -341,8 +350,6 @@ class WeightConverter:
       out = tensors
       for op in rule.operations:
         out = op(out, tp=self.tp)
-        if not isinstance(out, list) and op != rule.operations[-1]:
-          out = [out]
 
       if isinstance(out, list) and len(out) > 1 and "{}" in rule.target_pattern:
         for i, tensor in enumerate(out):
@@ -364,6 +371,20 @@ class WeightConverter:
       logging.info("Conversion rules that did not fire: %s", unfired)
 
     return _rekey_to_target(result, target_state)
+
+  def convert_streaming(
+      self,
+      src_pytree: Any,
+      target_state: Any = None,
+      *,
+      groups_per_piece: int = 1,
+  ) -> Iterator[Dict[str, Any]]:
+    """Yields converted weight pieces incrementally in direct MaxText-to-MaxText mode."""
+    if self.rollout_backend == "maxtext" and self.rules is None:
+      return self._direct.convert_streaming(src_pytree, target_state=target_state, groups_per_piece=groups_per_piece)
+    raise NotImplementedError(
+        "convert_streaming is only supported in direct MaxText-to-MaxText mode (rollout_backend='maxtext' and rules=None)."
+    )
 
 
 # ==========================================
@@ -431,8 +452,6 @@ MODEL_TO_CONVERSION_RULES = {
         ),
     ],
 }
-# Backward compatibility alias
-_MODEL_TO_CONVERSION_RULES = MODEL_TO_CONVERSION_RULES
 
 
 # ==========================================
@@ -654,14 +673,21 @@ class MaxTextToMaxTextConverter:
   def __init__(
       self,
       config: Any,
+      tp: int = 1,
       moe_fused_layout: str = MoEFusedLayout.PER_SHARD_INTERLEAVE,
       allow_unused_source_keys: Tuple[str, ...] = (),
       debug: bool = False,
+      prefuse_moe_weights: Optional[bool] = None,
+      target_dtype: Optional[Any] = None,
   ):
     self.config = config
+    self.tp = resolve_rollout_tp(config, tp)
     self.moe_fused_layout = moe_fused_layout
     self.allow_unused_source_keys = allow_unused_source_keys
     self.debug = debug
+    self.prefuse_moe_weights = resolve_prefuse_moe_weights(config, prefuse_moe_weights)
+    self.padded_base_moe_mlp_dim = getattr(config, "padded_base_moe_mlp_dim", None)
+    self.target_dtype = target_dtype if target_dtype is not None else getattr(config, "weight_dtype", None)
 
     self.cycle = int(getattr(config, "inhomogeneous_layer_cycle_interval", 1) or 1)
     self.num_decoder_layers = int(config.num_decoder_layers)
@@ -678,13 +704,19 @@ class MaxTextToMaxTextConverter:
     self._groups: Optional[List[_PlanGroup]] = None
 
     logging.info(
-        "MaxTextToMaxTextConverter: %d layers, cycle=%d, %d scanned blocks, " "scan_axis=%d, moe_fused_layout=%s",
+        "MaxTextToMaxTextConverter: %d layers, cycle=%d, %d scanned blocks, "
+        "scan_axis=%d, moe_fused_layout=%s, prefuse_moe=%s, padded_moe_dim=%s",
         self.num_decoder_layers,
         self.cycle,
         self.num_blocks,
         self.scan_axis,
         self.moe_fused_layout,
+        self.prefuse_moe_weights,
+        self.padded_base_moe_mlp_dim,
     )
+
+  def _resolve_target_dtype(self):
+    return normalize_dtype(self.target_dtype)
 
   # -------------------------------------------------------------- #
   # Plan construction
@@ -703,6 +735,64 @@ class MaxTextToMaxTextConverter:
       ]
     # Homogeneous: a single scanned `layers` container.
     return [prefix + ("layers",) + suffix]
+
+  def _build_target_free_plan(
+      self,
+      src_flat: Mapping[Tuple[Any, ...], Any],
+  ) -> List[_PlanEntry]:
+    """Builds the conversion plan directly from source keys and config without target state."""
+    plan: List[_PlanEntry] = []
+    consumed_wi_1 = set()
+
+    for src_key in src_flat:
+      if _is_non_weight_path(src_key):
+        continue
+      if src_key in consumed_wi_1:
+        continue
+
+      if "layers" not in src_key:
+        plan.append(_PlanEntry(src_key, (src_key,), None, "identity"))
+        continue
+
+      idx = src_key.index("layers")
+      prefix = src_key[:idx]
+      rest = src_key[idx + 1 :]
+
+      if self.cycle == 1:
+        slot = 0
+        suffix = rest
+      else:
+        # Inhomogeneous hybrid cycle: ("decoder", "layers", "layer_0", "input_layernorm", "scale")
+        slot_token = rest[0]
+        if isinstance(slot_token, str) and slot_token.startswith("layer_"):
+          slot = int(slot_token[6:])
+        elif isinstance(slot_token, str) and slot_token.isdigit():
+          slot = int(slot_token)
+        elif isinstance(slot_token, int):
+          slot = slot_token
+        else:
+          raise ConversionPlanError(f"Unexpected slot token {slot_token!r} in key {src_key}")
+        suffix = rest[1:]
+
+      is_wi_0 = bool(suffix and suffix[-1] == "wi_0")
+      wi_1_key = src_key[:-1] + ("wi_1",) if is_wi_0 else None
+      fuse_moe = self.prefuse_moe_weights and is_wi_0 and (wi_1_key in src_flat)
+
+      if fuse_moe:
+        consumed_wi_1.add(wi_1_key)
+        for b in range(self.num_blocks):
+          global_idx = b * self.cycle + slot
+          tgt_key = prefix + (f"layers_{global_idx}",) + suffix[:-1] + ("wi",)
+          plan.append(_PlanEntry(tgt_key, (src_key, wi_1_key), b, "fuse_moe"))
+      elif self.prefuse_moe_weights and suffix and suffix[-1] == "wi_1" and (src_key[:-1] + ("wi_0",) in src_flat):
+        continue
+      else:
+        for b in range(self.num_blocks):
+          global_idx = b * self.cycle + slot
+          tgt_key = prefix + (f"layers_{global_idx}",) + suffix
+          plan.append(_PlanEntry(tgt_key, (src_key,), b, "slice"))
+
+    return plan
 
   def _build_plan(
       self,
@@ -764,13 +854,7 @@ class MaxTextToMaxTextConverter:
     return plan
 
   def _validate_plan(self, src_flat, tgt_flat, unmatched, consumed) -> None:
-    """Fails loudly rather than leaving rollout weights at their dummy values.
-
-    vLLM boots with `load_format="dummy"`, so a target leaf we never write
-    keeps *random* weights. That produces a quietly wrong reward curve
-    instead of an error, which is far more expensive to debug than a crash
-    at startup.
-    """
+    """Fails loudly rather than leaving rollout weights at their dummy values."""
     if unmatched:
       shown = "\n  ".join(".".join(map(str, k)) for k in sorted(unmatched)[:40])
       raise ConversionPlanError(
@@ -804,25 +888,20 @@ class MaxTextToMaxTextConverter:
   # Plan execution
   # -------------------------------------------------------------- #
   def _fuse_moe_bulk(self, wi_0, wi_1, tgt_val, key_path: str):
-    """Fuses the *scanned* gate/up kernels, returning one array per block.
-
-    `wi_0`/`wi_1` still carry `num_blocks` at `scan_axis`; `tgt_val` is a
-    single per-layer target leaf, supplying the fused shape and sharding
-    that every block in this group shares.
-    """
+    """Fuses the *scanned* gate/up kernels, returning one array per block."""
     tgt_shape = tgt_val.shape
-    # MaxText stores MoE kernels as (experts, in_dim, intermediate); the
-    # gate/up fusion always doubles the trailing intermediate axis.
     tgt_fused_axis = len(tgt_shape) - 1
-    # Same logical axis, shifted by the scan dim the trainer inserted.
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
+      n_shards = _get_n_shards(tgt_val, tgt_fused_axis)
+      if n_shards == 1 and self.tp > 1:
+        n_shards = self.tp
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,
           self.scan_axis,
-          _get_n_shards(tgt_val, tgt_fused_axis),
+          n_shards,
           tgt_shape,
           scan_fused_axis,
           tgt_fused_axis,
@@ -839,14 +918,103 @@ class MaxTextToMaxTextConverter:
 
     raise ConversionPlanError(f"Unknown moe_fused_layout: {self.moe_fused_layout!r}")
 
-  def _execute_group(self, group: _PlanGroup, src_flat, tgt_flat):
-    """Produces every target leaf in `group`. Returns (target_key, array) pairs.
+  def _slice_bulk_target_free(self, val: Any, path: str):
+    last_key = path.split(".")[-1]
+    if isinstance(val, jax.ShapeDtypeStruct):
+      unrolled_shape = list(val.shape[: self.scan_axis] + val.shape[self.scan_axis + 1 :])
+      if last_key in MOE_MLP_WEIGHT_NAMES and self.padded_base_moe_mlp_dim is not None:
+        if last_key == "wo":
+          if self.padded_base_moe_mlp_dim > unrolled_shape[1]:
+            unrolled_shape[1] = self.padded_base_moe_mlp_dim
+        elif last_key in ("wi_0", "wi_1", "wi"):
+          if self.padded_base_moe_mlp_dim > unrolled_shape[-1]:
+            unrolled_shape[-1] = self.padded_base_moe_mlp_dim
+      return tuple(jax.ShapeDtypeStruct(tuple(unrolled_shape), val.dtype) for _ in range(val.shape[self.scan_axis]))
 
-    The scanned source is cast, aligned and fused *once*; the per-layer
-    arrays are then read out of a single unstack. Every target in a group
-    shares a shape and sharding by construction, so the first one is a
-    sound stand-in for all of them.
-    """
+    if last_key in MOE_MLP_WEIGHT_NAMES and self.padded_base_moe_mlp_dim is not None:
+      if last_key == "wo":
+        intermediate_axis = 2
+        if self.padded_base_moe_mlp_dim > val.shape[intermediate_axis]:
+          pad_amount = self.padded_base_moe_mlp_dim - val.shape[intermediate_axis]
+          pad_spec = [(0, 0)] * val.ndim
+          pad_spec[intermediate_axis] = (0, pad_amount)
+          val = jnp.pad(val, pad_spec)
+      elif last_key in ("wi_0", "wi_1"):
+        intermediate_axis = len(val.shape) - 1
+        if self.padded_base_moe_mlp_dim > val.shape[intermediate_axis]:
+          pad_amount = self.padded_base_moe_mlp_dim - val.shape[intermediate_axis]
+          pad_spec = [(0, 0)] * val.ndim
+          pad_spec[intermediate_axis] = (0, pad_amount)
+          val = jnp.pad(val, pad_spec)
+
+    return _jit_unstack(val, self.scan_axis)
+
+  def _fuse_moe_bulk_target_free(self, wi_0: Any, wi_1: Any, path: str):
+    unpadded_dim = wi_0.shape[-1]
+    target_intermediate = (
+        self.padded_base_moe_mlp_dim
+        if (self.padded_base_moe_mlp_dim is not None and self.padded_base_moe_mlp_dim > unpadded_dim)
+        else unpadded_dim
+    )
+    if isinstance(wi_0, jax.ShapeDtypeStruct):
+      fused_shape = (wi_0.shape[0], wi_0.shape[2], 2 * target_intermediate)
+      return tuple(jax.ShapeDtypeStruct(fused_shape, wi_0.dtype) for _ in range(wi_0.shape[self.scan_axis]))
+
+    tgt_shape = (wi_0.shape[0], wi_0.shape[2], 2 * target_intermediate)
+    tgt_fused_axis = len(tgt_shape) - 1
+    scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
+
+    if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
+      n_shards = self.tp if self.tp > 1 else _get_n_shards(wi_0, scan_fused_axis)
+      return _fuse_and_unstack_moe(
+          wi_0,
+          wi_1,
+          self.scan_axis,
+          n_shards,
+          tgt_shape,
+          scan_fused_axis,
+          tgt_fused_axis,
+      )
+
+    if self.moe_fused_layout == MoEFusedLayout.CONCAT:
+      if target_intermediate > unpadded_dim:
+        pad_spec = [(0, 0)] * wi_0.ndim
+        pad_spec[-1] = (0, target_intermediate - unpadded_dim)
+        wi_0 = jnp.pad(wi_0, pad_spec)
+        wi_1 = jnp.pad(wi_1, pad_spec)
+      fused = jnp.concatenate([wi_0, wi_1], axis=scan_fused_axis)
+      return _jit_unstack(fused, self.scan_axis)
+
+    raise ConversionPlanError(f"Unknown moe_fused_layout: {self.moe_fused_layout!r}")
+
+  def _execute_group_target_free(self, group: _PlanGroup, src_flat):
+    path = group.source_path
+    target_dtype = self._resolve_target_dtype()
+
+    if group.op == "identity":
+      raw_val = src_flat[group.source_keys[0]]
+      tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
+      val = _apply_dtype_cast(raw_val, tgt_dt, path)
+      return [(tgt_key, val) for _, tgt_key in group.targets]
+
+    if group.op == "fuse_moe":
+      raw_0 = src_flat[group.source_keys[0]]
+      raw_1 = src_flat[group.source_keys[1]]
+      wi_0, wi_1 = (_apply_dtype_cast(raw_0, target_dtype, path), _apply_dtype_cast(raw_1, target_dtype, path))
+      self._check_scan_axis(wi_0, path)
+      per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
+      return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
+
+    # group.op == "slice"
+    raw_val = src_flat[group.source_keys[0]]
+    tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
+    val = _apply_dtype_cast(raw_val, tgt_dt, path)
+    self._check_scan_axis(val, path)
+    per_block = self._slice_bulk_target_free(val, path)
+    return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
+
+  def _execute_group(self, group: _PlanGroup, src_flat, tgt_flat):
+    """Produces every target leaf in `group`. Returns (target_key, array) pairs."""
     first_tgt = tgt_flat[group.targets[0][1]]
     path = group.source_path
 
@@ -854,12 +1022,6 @@ class MaxTextToMaxTextConverter:
       val = _apply_dtype_cast(src_flat[group.source_keys[0]], first_tgt.dtype, path)
       out = _align_per_axis(val, first_tgt.shape, getattr(first_tgt, "sharding", None), path)
       return [(tgt_key, out) for _, tgt_key in group.targets]
-
-    if any(idx is None for idx, _ in group.targets):
-      raise ConversionPlanError(
-          f"Plan group for {path} has op={group.op!r} but a target with no "
-          "scan index; only 'identity' targets may omit one."
-      )
 
     if group.op == "fuse_moe":
       wi_0, wi_1 = (_apply_dtype_cast(src_flat[k], first_tgt.dtype, path) for k in group.source_keys)
@@ -886,24 +1048,22 @@ class MaxTextToMaxTextConverter:
   def convert(self, src_pytree: Any, target_state: Any = None) -> Dict[str, Any]:
     """Returns a nested dict of rollout weights, keyed by target paths.
 
-    Pure: neither `src_pytree` nor `target_state` is mutated.
+    Pure: neither `src_pytree` nor `target_state` is mutated. Leaves are wrapped in nnx.Param.
     """
     if target_state is None:
-      raise ValueError(
-          "MaxTextToMaxTextConverter requires target_state to resolve the "
-          "rollout's parameter shapes, shardings and dtypes."
-      )
+      flat_result = {}
+      for piece in self.convert_streaming(src_pytree, target_state=None):
+        flat_result.update(traverse_util.flatten_dict(piece))
+      reclaim_host_memory()
+      return traverse_util.unflatten_dict(flat_result)
+
+    src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
+    src_flat, _ = _strip_root(src_flat, "base")
 
     # Read variable types before purifying to plain arrays loses them.
     skip_paths = _non_param_paths(target_state)
-
-    src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
     tgt_flat = traverse_util.flatten_dict(_to_pure_dict(target_state))
 
-    # The trainer wraps the model in TunixMaxTextAdapter ("base"); the
-    # rollout may nest it under one or more "model" levels. Strip both so
-    # the plan is expressed in a single coordinate system, then re-wrap.
-    src_flat, _ = _strip_root(src_flat, "base")
     tgt_flat, tgt_root = _strip_root(tgt_flat, "model")
     if tgt_root:
       depth = len(tgt_root)
@@ -930,17 +1090,13 @@ class MaxTextToMaxTextConverter:
       if self.debug:
         for k in group.source_keys:
           logging.info(
-              "weight_sync_debug: op=%s source=%s (%d targets) | src %s " "| tgt %s",
+              "weight_sync_debug: op=%s source=%s (%d targets) | src %s | tgt %s",
               group.op,
               ".".join(map(str, k)),
               len(group.targets),
               _sharding_summary(src_flat[k]),
               _sharding_summary(tgt_flat[group.targets[0][1]]),
           )
-        # JAX dispatch is asynchronous, so without a barrier a device
-        # failure surfaces at an arbitrary later point and the traceback
-        # names the wrong parameter. Pay the serialization to find out
-        # which source parameter is actually at fault.
         try:
           outs = self._execute_group(group, src_flat, tgt_flat)
           jax.block_until_ready([out for _, out in outs])
@@ -965,6 +1121,9 @@ class MaxTextToMaxTextConverter:
       else:
         outs = self._execute_group(group, src_flat, tgt_flat)
 
+      for k in group.source_keys:
+        src_flat.pop(k, None)
+
       for tgt_key, out in outs:
         tgt_val = tgt_flat[tgt_key]
         if out.shape != tgt_val.shape:
@@ -974,9 +1133,62 @@ class MaxTextToMaxTextConverter:
               f"rollout expects {tgt_val.shape}."
           )
         result[tgt_root + tgt_key] = out
+      del outs
 
+    del src_flat, tgt_flat
     gc.collect()
-    return traverse_util.unflatten_dict(result)
+    nested = traverse_util.unflatten_dict(result)
+    del result
+    reclaim_host_memory()
+    return jax.tree_util.tree_map(
+        lambda x: nnx.Param(x),
+        nested,
+    )
+
+  def convert_streaming(
+      self,
+      src_pytree: Any,
+      target_state: Any = None,
+      *,
+      groups_per_piece: int = 1,
+  ) -> Iterator[Dict[str, Any]]:
+    """Yields converted rollout weight pieces incrementally for target-free conversion.
+
+    Pure: `src_pytree` is not mutated. Each yielded piece is a nested dict of `nnx.Param`s
+    corresponding to `groups_per_piece` plan groups. Memory is freed piece-by-piece as
+    source keys are consumed.
+    """
+    if target_state is not None:
+      raise NotImplementedError("convert_streaming only supports target-free conversion (target_state=None).")
+
+    src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
+    src_flat, src_root = _strip_root(src_flat, "base")
+
+    if self._plan is None:
+      self._plan = self._build_target_free_plan(src_flat)
+      self._groups = _group_plan(self._plan)
+
+    groups_per_piece = max(1, groups_per_piece)
+    for i in range(0, len(self._groups), groups_per_piece):
+      piece_groups = self._groups[i : i + groups_per_piece]
+      piece_result: Dict[Tuple[Any, ...], Any] = {}
+      for group in piece_groups:
+        outs = self._execute_group_target_free(group, src_flat)
+        for k in group.source_keys:
+          src_flat.pop(k, None)
+        for tgt_key, out in outs:
+          piece_result[src_root + tgt_key] = out
+        del outs
+
+      nested = traverse_util.unflatten_dict(piece_result)
+      del piece_result
+      yield jax.tree_util.tree_map(
+          lambda x: nnx.Param(x),
+          nested,
+      )
+
+    del src_flat
+    reclaim_host_memory()
 
 
 def _rekey_to_target(flat_dotted: Dict[str, Any], target_state: Any) -> Dict[str, Any]:

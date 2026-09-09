@@ -89,9 +89,12 @@ class CheckpointManager:
       return 0
     try:
       metadata = self._checkpoint_manager.metadata(step)
-    except Exception as e:  # pylint: disable=broad-except
-      logging.warning("Could not read metadata for step %d, treating it as complete: %s", step, e)
+    except (FileNotFoundError, KeyError) as e:
+      logging.info("Checkpoint metadata not found for step %d: %s", step, e)
       return 0
+    except Exception as e:
+      logging.error("Failed to read metadata for step %d: %s", step, e)
+      raise
     custom_metadata = getattr(metadata, "custom_metadata", None)
     if not isinstance(custom_metadata, Mapping):
       return 0
@@ -281,7 +284,7 @@ class CheckpointManager:
       )
     except Exception as e:  # pylint: disable=broad-except
       logging.exception("Failed to restore checkpoint: %s", e)
-      return None, None, None
+      return None, checkpoint_state, None
 
     if "model_params" in restored_items:
       nnx.update(checkpoint_state.model, restored_items["model_params"])

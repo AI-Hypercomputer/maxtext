@@ -76,71 +76,8 @@ from tunix.sft import metrics_logger, profiler
 import tunix.generate.utils as tunix_utils
 
 
-@contextlib.contextmanager
-def _tpu_inference_compat_patches():
-  """Tactical compat shims for tpu_inference.
+from maxtext.integration.vllm.convert_utils import tunix_compat_context as _tpu_inference_compat_patches
 
-  tpu_inference has two call-site assumptions that no longer hold:
-    1. jax.lax.with_sharding_constraint: assumes silent reshard on mismatch,
-       but current jax asserts when all mesh axes are Explicit. Fall back to
-       jax.sharding.reshard on the AssertionError.
-    2. tunix._apply_dtype_cast: tpu_inference JaxEinsum defaults
-       param_dtype=float32 so its weights initialize as float32, but model
-       dtype is bfloat16; the cast upgraded synced bfloat16 weights to float32,
-       which then mismatched in the ragged paged attention kernel. Skip the
-       bf16->f32 upcast so synced weights stay bfloat16.
-
-  Scoped to rl_train() so the patches don't leak into other importers of this
-  module. Drop both once tpu_inference is updated upstream.
-  """
-  orig_wsc = jax.lax.with_sharding_constraint
-  orig_apply_dtype_cast = tunix_utils._apply_dtype_cast  # pylint: disable=protected-access
-  orig_bulk = tunix_utils._bulk_align_and_unstack  # pylint: disable=protected-access
-  orig_unstack = tunix_utils._unstack_scanned_param  # pylint: disable=protected-access
-
-  orig_moe_weights = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)
-
-  def _compat_wsc(x, shardings):
-    try:
-      return orig_wsc(x, shardings)
-    except AssertionError:
-      return jax.sharding.reshard(x, shardings)
-
-  def _no_bf16_to_f32_cast(val, tgt_dtype, src_key):
-    if hasattr(val, "dtype") and val.dtype == jnp.bfloat16 and tgt_dtype == jnp.float32:
-      return val
-    return orig_apply_dtype_cast(val, tgt_dtype, src_key)
-
-  def _compat_bulk(arr, scan_axis, per_layer, key_path):
-    if hasattr(arr, "shape") and len(arr.shape) <= scan_axis:
-      scan_axis = len(arr.shape) - 1 if len(arr.shape) > 0 else 0
-    return orig_bulk(arr, scan_axis, per_layer, key_path)
-
-  def _compat_unstack(src_val, tgt_val, key_path, scan_axis=None):
-    if scan_axis is not None and hasattr(src_val, "shape") and len(src_val.shape) <= scan_axis:
-      scan_axis = len(src_val.shape) - 1 if len(src_val.shape) > 0 else 0
-    res = orig_unstack(src_val, tgt_val, key_path, scan_axis=scan_axis)
-    if isinstance(res, tuple) and len(res) == 1 and hasattr(src_val, "shape") and src_val.shape == tgt_val.shape:
-      return res * 256
-    return res
-
-  jax.lax.with_sharding_constraint = _compat_wsc
-  tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
-  tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
-  tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
-
-  if orig_moe_weights is not None:
-    tunix_utils._MOE_MLP_WEIGHTS = frozenset([*orig_moe_weights, "wo"])  # pylint: disable=protected-access
-
-  try:
-    yield
-  finally:
-    jax.lax.with_sharding_constraint = orig_wsc
-    tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
-    tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
-    tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
-    if orig_moe_weights is not None:
-      tunix_utils._MOE_MLP_WEIGHTS = orig_moe_weights  # pylint: disable=protected-access
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
