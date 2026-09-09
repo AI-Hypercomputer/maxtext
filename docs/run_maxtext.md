@@ -26,11 +26,11 @@ Run MaxText on single-host NVIDIA GPUs (e.g., A3 High/Mega). Includes Docker set
 Deploy to Google Kubernetes Engine (GKE) using Cluster Toolkit's `gcluster` CLI. Package and run multi-host JAX workloads with on-the-fly container builds.
 :::
 
-:::{grid-item-card} 🏗️ At scale with XPK (GKE)
+:::{grid-item-card} 🏗️ Legacy: At scale with XPK (GKE)
 :link: run_maxtext/run_maxtext_via_xpk
 :link-type: doc
 
-Deploy to Google Kubernetes Engine (GKE) using XPK. Orchestrate large-scale training jobs on TPU or GPU clusters with simple CLI commands.
+Deprecated. Retained for older deployments only. New GKE workloads should use Cluster Toolkit instead.
 :::
 
 :::{grid-item-card} 🌐 Multi-host via Pathways
