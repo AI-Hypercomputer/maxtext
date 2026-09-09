@@ -885,10 +885,11 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
         weight_sparsity_start_step=config.weight_sparsity_start_step,
     )
 
-  if config.quantize_mtp:
-    module_path = "(decoder/.*layers.*|mtp_block/.*)"
-  else:
-    module_path = "decoder/.*layers.*"
+  # if config.quantize_mtp:
+  #   module_path = "(decoder/.*layers.*|mtp_block/.*)"
+  # else:
+  #   module_path = "decoder/.*layers.*"
+  module_path = "decoder/logits_dense.*"
 
   return [
       qwix.QtRule(
