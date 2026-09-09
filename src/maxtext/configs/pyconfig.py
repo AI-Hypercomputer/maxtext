@@ -310,7 +310,10 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
 
     if key == "tokenizer_path" and new_value is None:
       try:
-        new_value = HF_IDS[raw_keys["model_name"]]
+        model_name = raw_keys.get("model_name", "default")
+        new_value = HF_IDS[model_name]
+        if model_name != "default":
+          pydantic_kwargs["_auto_hf_tokenizer"] = True
       except KeyError:
         new_value = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2")
         max_logging.warning(
@@ -320,6 +323,9 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
         )
 
     pydantic_kwargs[key] = new_value
+
+  if pydantic_kwargs.pop("_auto_hf_tokenizer", False):
+    pydantic_kwargs["tokenizer_type"] = "huggingface"
 
   return pydantic_kwargs
 

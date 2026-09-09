@@ -136,9 +136,9 @@ jobs:
             echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
             if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
               echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
-              (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || true
+              (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build)
             else
-              (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || true
+              (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build)
             fi
           fi
           uv pip install "${maxtext_wheel}[tpu-post-train]" --resolution=lowest

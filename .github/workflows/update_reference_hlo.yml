@@ -35,7 +35,7 @@ jobs:
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
       flavor: cpu-integration
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: false
       maxtext_sha: ${{ github.sha }}
       is_update_hlo: true
