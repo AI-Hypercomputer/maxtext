@@ -24,6 +24,7 @@ pytestmark = [pytest.mark.decoupled_target]
 
 from maxtext.checkpoint_conversion.to_maxtext import _build_multi_axis_stacked_tensor
 from maxtext.checkpoint_conversion.utils import param_mapping
+from maxtext.checkpoint_conversion.utils import utils
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
 
 
@@ -606,8 +607,6 @@ class ParamMappingTest(unittest.TestCase):
     self.assertIn("params-decoder-logits_dense-kernel", hooks_to_hf)
 
   def test_detect_and_extract_checkpoint_multi_collection(self):
-    from maxtext.checkpoint_conversion.utils import utils
-
     fake_ckpt = {
         "params": {
             "params": {

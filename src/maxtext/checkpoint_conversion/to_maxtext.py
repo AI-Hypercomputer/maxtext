@@ -907,6 +907,7 @@ def main(
     jax_weights = convert_lora_to_maxtext_adapter(config, lora_weights, save_dtype)
     adapter_name = os.path.basename(os.path.normpath(hf_lora_adapter_path))
     output_directory = os.path.join(output_directory, model_name_for_path, adapter_name)
+    state_params = jax_weights
   else:
 
     if lazy_load_tensors and config.use_multimodal:
