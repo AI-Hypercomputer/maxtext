@@ -292,7 +292,9 @@ class DenseGeneralTest(unittest.TestCase):
 
     self.assertEqual(layer.kernel[...].shape, (128, 256))
     self.assertEqual(layer.kernel_scale[...].shape, (2, 4))
-    self.assertEqual(layer.scale_axes, ("embed", "mlp"))
+    # Block-compressed scale dims (2, 4) are far smaller than the kernel's (128, 256), so
+    # they're replicated rather than inheriting the kernel's mesh axes.
+    self.assertEqual(layer.scale_axes, (None, None))
 
     inputs = jnp.ones((2, in_features), dtype=jnp.bfloat16)
     outputs = layer(inputs)
@@ -308,7 +310,8 @@ class DenseGeneralTest(unittest.TestCase):
         kernel_axes=("embed", "mlp"),
         rngs=self.rngs,
     )
-    self.assertEqual(layer_block.scale_axes, ("embed", "mlp"))
+    # Block-compressed (2, 4) is replicated, not sharded on the kernel's ("embed", "mlp") axes.
+    self.assertEqual(layer_block.scale_axes, (None, None))
 
     # Test scalar scale sharding
     layer_scalar = linears.DenseGeneral(
@@ -361,6 +364,7 @@ class DenseGeneralTest(unittest.TestCase):
     scale_invalid = jnp.ones((3, 5), dtype=jnp.float32)
     with self.assertRaises(ValueError):
       linears.dequantize_weight(w, scale_invalid, compute_dtype=jnp.bfloat16)
+
 
 class MlpBlockTest(unittest.TestCase):
   """Tests for MlpBlock."""

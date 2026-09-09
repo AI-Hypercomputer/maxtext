@@ -311,10 +311,16 @@ class DenseGeneral(nnx.Module):
 
       # Phase 2: Resolve scale sharding axes to match the weight tensor's mesh partitioning
       # - Scalar scale (): cannot be sharded across mesh devices, so sharding is empty ().
-      # - Block scale grid (matching kernel rank): inherits kernel_axes for any dimension
-      #   spanning multiple blocks (> 1), ensuring the scale grid partitions synchronously
-      #   with the weight matrix under FSDP, TP, or expert parallelism.
-      # - Unpartitioned dimension (dimension size == 1): does not require sharding (None).
+      # - A scale dimension whose size equals the kernel's real dimension size (e.g. an
+      #   explicit per-channel scale) is exactly as shardable as the kernel itself, so it
+      #   inherits kernel_axes.
+      # - A scale dimension that's smaller than the kernel's real dimension (block-compressed
+      #   by block_size, e.g. embed_dim=4096 -> 32 blocks, or collapsed to 1) is always far
+      #   smaller than what the kernel's mesh axis is sized for. Inheriting kernel_axes there
+      #   would shard this tiny array along the same physical mesh axis as the (much larger)
+      #   kernel, which silently breaks once FSDP/TP degree exceeds the compressed dimension
+      #   size (e.g. 256 FSDP ways on a 32-block axis). Replicate instead: the array is cheap
+      #   enough that replication costs nothing and is always divisibility-safe.
       if scale_axes is not None:
         resolved_scale_axes = scale_axes
       elif len(resolved_scale_shape) == 0:
@@ -322,8 +328,8 @@ class DenseGeneral(nnx.Module):
       elif len(resolved_scale_shape) == len(kernel_shape):
         padded_kernel_axes = self.kernel_axes + (None,) * (len(kernel_shape) - len(self.kernel_axes))
         resolved_scale_axes = tuple(
-            ax if s_dim > 1 else None
-            for ax, s_dim in zip(padded_kernel_axes, resolved_scale_shape)
+            ax if s_dim == k_dim else None
+            for ax, s_dim, k_dim in zip(padded_kernel_axes, resolved_scale_shape, kernel_shape)
         )
       else:
         resolved_scale_axes = tuple(None for _ in resolved_scale_shape)
