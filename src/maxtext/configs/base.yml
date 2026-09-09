@@ -711,7 +711,9 @@ ici_expert_parallelism: 1
 # Enabling check_vma is recommended for improved performance. Only supported for EP / FSDP ICI parallelisms, shard_mode: "auto", use_ragged_sort: False, use_ring_of_experts: False, and use_tokamax_gmm=False.
 check_vma: False
 
-# Enable ZeRO-1 optimizer sharding over data axis
+# Enable ZeRO-1 optimizer sharding over data axis. Shards optimizer state (e.g. Adam first/second
+# moments, Muon momentum) across data-parallel replicas to eliminate replication memory overhead (~60-87.5%
+# optimizer memory reduction across data replicas). Note: Requires pure DP (fsdp_size <= 1).
 shard_optimizer_over_data: false
 
 # when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
@@ -725,13 +727,14 @@ num_slices: -1
 # Vocab Tiling Configs
 # Enables a memory-saving optimization by computing the cross-entropy loss in chunks.
 # The logits are tiled into `num_vocab_tiling` parts along the batch-sequence axis,
-# reducing peak memory usage. This is highly recommended for models with large
-# vocabularies (e.g., Gemma). Set to a value greater than 1 to enable.
+# reducing peak memory usage. Set to -1 to automatically determine optimal tiling based
+# on memory footprint, 1 for monolithic execution, or >1 for an explicit tile count.
 num_vocab_tiling: 1
 # If set to true then all gather the output head weight once before the tiled loss so the backward
 # reuses it instead of re-gathering per chunk. Faster when steps are short enough to expose
-# the gathers; holds the gathered head in memory for the backward.
-vocab_tiling_ag_once: false
+# the gathers; holds the gathered head in memory for the backward. Enabled by default to avoid
+# redundant all-gathers of output head weights across each tile in both forward and backward passes.
+vocab_tiling_ag_once: true
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding

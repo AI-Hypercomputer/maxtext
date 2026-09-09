@@ -54,6 +54,10 @@ class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
 
 logger = logging.getLogger(__name__)
 
+# Constants for automatic vocabulary tiling resolution.
+_AUTO_TILING_MAX_CHUNK_BYTES: int = 128 * 1024 * 1024  # 128 MiB
+_MAX_MONOLITHIC_VOCAB_SIZE: int = 32 * 1024  # 32k tokens (2^15) == 256 MXU systolic tiles (128 dimension)
+
 # ----------------------------------------------------------------------------
 # Reusable Enums and Type Aliases
 # ----------------------------------------------------------------------------
@@ -634,10 +638,13 @@ class LogitsAndLoss(BaseModel):
   z_loss_multiplier: float = Field(0.0, description="The multiplier for the z-loss (e.g., 1e-4). 0.0 to disable.")
   num_vocab_tiling: int = Field(
       1,
-      description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
+      description=(
+          "Enables memory-saving optimization by tiling cross-entropy loss computation. "
+          "Set to -1 for auto-resolution, 1 for monolithic execution, or >1 for explicit tile count."
+      ),
   )
   vocab_tiling_ag_once: bool = Field(
-      False,
+      True,
       description="All gather the output head weight once before the tiled loss so the backward reuses it.",
   )
 
@@ -4288,6 +4295,8 @@ class MaxTextConfig(
         raise ValueError("`training_objective='block_diffusion'` is not compatible with MTP.")
       if self.num_vocab_tiling > 1:
         raise ValueError("`training_objective='block_diffusion'` is not compatible with vocabulary tiling.")
+      if self.num_vocab_tiling == -1:
+        self.num_vocab_tiling = 1
       if self.dataset_type != "hf":
         raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'`.")
       if self.use_dpo:
@@ -4500,7 +4509,27 @@ class MaxTextConfig(
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
     if self.ulysses_context_sharding != "context_usp_ulysses":
       raise ValueError(f"Assigned ulysses_context_sharding {self.ulysses_context_sharding} is not supported.")
-    if (
+    if self.num_vocab_tiling < 1 and self.num_vocab_tiling != -1:
+      raise ValueError(
+          f"num_vocab_tiling must be a positive integer or -1 for auto-resolution, got {self.num_vocab_tiling}."
+      )
+    if self.training_objective == "block_diffusion":
+      self.num_vocab_tiling = 1
+    elif self.num_vocab_tiling == -1:
+      # Automatically resolve num_vocab_tiling based on memory footprint and vocabulary size.
+      batch_tokens = max(self.per_device_batch_size, 1) * self.max_target_length
+      dense_activation_bytes = batch_tokens * self.vocab_size * 4
+      if dense_activation_bytes <= _AUTO_TILING_MAX_CHUNK_BYTES or self.vocab_size <= _MAX_MONOLITHIC_VOCAB_SIZE:
+        self.num_vocab_tiling = 1
+      else:
+        best_tiling = 1
+        for candidate in (2, 4, 8, 16, 32, 64):
+          if batch_tokens % candidate == 0:
+            best_tiling = candidate
+            if (dense_activation_bytes // candidate) <= _AUTO_TILING_MAX_CHUNK_BYTES:
+              break
+        self.num_vocab_tiling = best_tiling
+    elif (
         self.per_device_batch_size > 0
         and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
     ):

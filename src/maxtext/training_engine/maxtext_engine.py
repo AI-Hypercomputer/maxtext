@@ -851,9 +851,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return f"the train state's pure form has no {_MODEL_STATE_KEY!r} entry"
     if not hasattr(state_pure, "raw_mapping"):
       return "this version of flax.nnx.State does not expose raw_mapping"
-    rebuilt = self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
-    if jax.tree.structure(rebuilt) != jax.tree.structure(state_pure):
-      return f"state[{_MODEL_STATE_KEY!r}] is not the model's own state"
+    try:
+      rebuilt = self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
+      if jax.tree.structure(rebuilt) != jax.tree.structure(state_pure):
+        return f"state[{_MODEL_STATE_KEY!r}] is not the model's own state"
+    except Exception as e:
+      return f"pure state reconstruction failed ({e})"
     return None
 
   def _refresh_pure_state(self) -> None:
@@ -881,6 +884,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Returns the model's `(params, rest)` pure state, from the cache when it is live."""
     if self._params_pure is not None:
       return self._params_pure, self._rest_pure
+    if not self._pure_state_warned:
+      self._refresh_pure_state()
+      if self._params_pure is not None:
+        return self._params_pure, self._rest_pure
     self._model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
     return params, rest
 
@@ -888,6 +895,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Returns the train state's pure form, from the cache when it is live."""
     if self._state_pure is not None:
       return self._state_pure
+    if not self._pure_state_warned:
+      self._refresh_pure_state()
+      if self._state_pure is not None:
+        return self._state_pure
     self._state_graphdef, state_pure = nnx.split(self._state)
     return state_pure
 
@@ -895,15 +906,21 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Folds a fwd/bwd's updated non-parameter state into the cached train state.
 
     Required, not an optimization: without it `update()` would see the *previous*
-    micro-batch's RNG counters and batch statistics. The structure is checked because
-    anything the forward pass `sow`s (`record_max_logits`, `distill_beta`, MTP) widens
-    `new_rest`, which would disagree with the shardings the kernel was compiled against.
+    micro-batch's RNG counters and batch statistics. When forward pass collections
+    widen `new_rest` (e.g. `record_max_logits`, `distill_beta`, MTP), the pure state
+    adapts so subsequent iterations remain on the fast path without re-walking the graph.
     """
     if self._params_pure is None:
       return
     if jax.tree.structure(new_rest) != jax.tree.structure(self._rest_pure):
-      self._disable_pure_state("fwd_bwd returned a wider non-parameter state than the model was split into")
-      return
+      try:
+        merged_model = nnx.merge_state(self._params_pure, new_rest)
+        self._state_pure = self._with_model_state(self._state_pure, merged_model)
+        self._rest_pure = new_rest
+        return
+      except Exception as e:
+        self._disable_pure_state(f"fwd_bwd returned an incompatible non-parameter state ({e})")
+        return
     self._rest_pure = new_rest
     self._state_pure = self._with_model_state(self._state_pure, nnx.merge_state(self._params_pure, new_rest))
 
@@ -920,9 +937,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if not isinstance(new_state_pure, nnx.State) or _MODEL_STATE_KEY not in new_state_pure:
       self._disable_pure_state("the update kernel returned a state with no model entry")
       return
-    params_pure, rest_pure = nnx.split_state(new_state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
+    try:
+      params_pure, rest_pure = nnx.split_state(new_state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
+    except Exception as e:
+      self._disable_pure_state(f"the update kernel output could not be split into state ({e})")
+      return
     if jax.tree.structure(params_pure) != jax.tree.structure(self._params_pure):
-      self._disable_pure_state("the update kernel's output does not partition into the same parameters")
+      self._invalidate_pure_state()
+      if not self._pure_state_warned:
+        self._pure_state_warned = True
+        logging.warning(_PURE_STATE_FALLBACK_WARNING, "model parameter topology dynamically mutated")
       return
     self._params_pure, self._rest_pure, self._state_pure = params_pure, rest_pure, new_state_pure
 
@@ -1772,7 +1796,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
 
-    self._model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+    params, rest = self._read_model_pure(model)
 
     # Wait for previous computations to finish before dispatching the next one to TPU.
     self._throttler.wait_for_next()
@@ -2079,6 +2103,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _get_trainable_params_state(self) -> Any:
     """Extracts pure parameter weights from the model, excluding optimizer and RNG state."""
+    if self._params_pure is not None:
+      return self._params_pure
     model = getattr(self._state, "model", None) if self._state is not None else self._model
     if isinstance(model, nnx.Module):
       return nnx.state(model, nnx.Param)
