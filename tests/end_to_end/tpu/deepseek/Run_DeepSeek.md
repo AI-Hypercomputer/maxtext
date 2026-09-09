@@ -259,6 +259,91 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     indexer_sparse_training=True
 ```
 
+## Pre-training for DeepSeek-V4
+
+DeepSeek-V4 employs a hybrid attention architecture across its layers, interleaving Sliding Window Attention (SWA), Highly Compressed Attention (HCA), and **Compressed Sparse Attention (CSA)**. The CSA layers incorporate a **Lightning Indexer** that selects top-k compressed blocks. Note that the indexer is activated only if `max_target_length // 4` > `indexer_topk`.
+
+As described in the DeepSeek-V4 technical report (Section 4.2.2), sparse attention pre-training follows a three-stage strategy: **Dense Pre-training**, **Lightning Indexer Warm-up**, and **Sparse Pre-training**.
+
+1. **Dense Pre-training Stage**
+The model is pre-trained with standard dense attention across all tokens (first 1T tokens) before attention sparsity is introduced.
+```sh
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    run_name=dsv4_dense_pretraining \
+    model_name=deepseek4-284b \
+    tokenizer_type=huggingface \
+    tokenizer_path=deepseek-ai/DeepSeek-V4-Flash \
+    per_device_batch_size=1 \
+    enable_checkpointing=false \
+    async_checkpointing=false \
+    ici_fsdp_parallelism=-1 \
+    opt_type=sgd \
+    steps=20 \
+    max_target_length=4096 \
+    attention=dot_product \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    dataset_type=synthetic \
+    # Standard dense pre-training flags
+    override_model_config=true \
+    use_indexer=false \
+    indexer_loss_scaling_factor=0.0
+```
+
+2. **Lightning Indexer Warmup Stage**
+When attention sparsity is introduced, the lightning indexer undergoes a short warmup stage via KL divergence distillation while the main model parameters remain frozen and language modeling loss is skipped.
+```sh
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    run_name=dsv4_indexer_warmup \
+    model_name=deepseek4-284b \
+    tokenizer_type=huggingface \
+    tokenizer_path=deepseek-ai/DeepSeek-V4-Flash \
+    load_parameters_path=${SCANNED_CKPT_PATH?} \
+    per_device_batch_size=1 \
+    enable_checkpointing=false \
+    async_checkpointing=false \
+    ici_fsdp_parallelism=-1 \
+    opt_type=sgd \
+    steps=20 \
+    max_target_length=4096 \
+    attention=dot_product \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    dataset_type=synthetic \
+    # Indexer training specific flags (inherits use_indexer=true from deepseek4-284b.yml)
+    indexer_sparse_training=false \
+    indexer_loss_scaling_factor=1.0 \
+    trainable_parameters_mask=['.*indexer.*']
+```
+
+3. **Sparse Pre-training Stage**
+The model trains with sparse attention for the remainder of pre-training, where core attention attends only to the top-k selected compressed blocks and the indexer continues to train jointly.
+```sh
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    run_name=dsv4_sparse_pretraining \
+    model_name=deepseek4-284b \
+    tokenizer_type=huggingface \
+    tokenizer_path=deepseek-ai/DeepSeek-V4-Flash \
+    load_parameters_path=${SCANNED_CKPT_PATH?} \
+    per_device_batch_size=1 \
+    enable_checkpointing=false \
+    async_checkpointing=false \
+    ici_fsdp_parallelism=-1 \
+    opt_type=sgd \
+    steps=20 \
+    max_target_length=4096 \
+    attention=dot_product \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    dataset_type=synthetic \
+    # Indexer training specific flags (inherits use_indexer=true from deepseek4-284b.yml)
+    indexer_sparse_training=true \
+    indexer_loss_scaling_factor=1.0
+```
+
 ## Decoding
 One example command to run decoding with V3 on v5p-256 with unscanned checkpoint for fast decoding.
 
