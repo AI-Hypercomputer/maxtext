@@ -895,6 +895,10 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
   )
+  retry_when_tokens_dropped: bool = Field(
+      False,
+      description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
@@ -3340,6 +3344,22 @@ class MaxTextConfig(
           f"Found other ICI axes enabled: {active}."
       )
 
+  def validate_retry_when_tokens_dropped(self):
+    """Validates prerequisites for the step-level dropless fallback retry."""
+    if self.retry_when_tokens_dropped:
+      if self.num_experts <= 1:
+        raise ValueError("retry_when_tokens_dropped=True requires num_experts > 1.")
+      if self.ragged_buffer_factor == -1:
+        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0 (got default -1.0).")
+      if self.ragged_buffer_factor <= 0:
+        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0.")
+      if not self.use_ring_of_experts:
+        raise ValueError("retry_when_tokens_dropped=True is currently only supported with use_ring_of_experts=True.")
+      if not self.use_ragged_sort:
+        raise ValueError("retry_when_tokens_dropped=True requires use_ragged_sort=True.")
+      if self.num_moe_emb_chunks > 0:
+        raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
+
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor is used with supported settings."""
     if self.te_moe_block:
@@ -3541,6 +3561,8 @@ class MaxTextConfig(
         _ep_disabled_flags = {
             "use_random_routing": False,
             "use_ragged_sort": False,
+            "retry_when_tokens_dropped": False,
+            "ragged_buffer_factor": -1.0,
             "use_ring_of_experts": False,
             "num_moe_emb_chunks": 0,
         }
@@ -4352,6 +4374,7 @@ class MaxTextConfig(
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
+      self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
 
     if self.enable_diloco and not self.pure_nnx:
