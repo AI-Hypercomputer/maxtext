@@ -36,6 +36,7 @@ function's pattern-block matching would silently no-op on Qwen3 trees (its
 simpler, single-axis case directly instead of adapting that function.
 """
 
+import re
 from typing import Any
 
 import jax
@@ -48,6 +49,7 @@ def unscan_layers(
     num_layers: int,
     layer_container: str = "layers",
     scan_axis: int = 1,
+    cycle_interval: int = 1,
 ) -> Any:
   """Splits `state`'s scanned `layer_container` axis into per-layer entries.
 
@@ -58,6 +60,13 @@ def unscan_layers(
       loop.
     layer_container: The pytree key holding the scanned per-layer params (MaxText's decoder body uses "layers").
     scan_axis: The axis along which layers are scanned (default 1).
+    cycle_interval: `config.inhomogeneous_layer_cycle_interval`. When > 1 the
+      trainer scans a *block* of this many heterogeneous layers (qwen3.5's
+      GDN/attention cycle is 4), so the tree carries an extra `layer_<slot>`
+      level under `layer_container` and the scan axis is
+      `num_layers // cycle_interval` repeats rather than `num_layers`. Slot `j`
+      of repeat `i` is physical layer `i * cycle_interval + j`, which is the
+      flat `layers_<n>` name the unscanned rollout model uses.
 
   Returns:
     A nested dict with `layer_container` keys replaced by `f"{layer_container}_{i}"` for each layer `i`, each holding
@@ -74,6 +83,15 @@ def unscan_layers(
     pure = state
   else:
     return state
+
+  if cycle_interval <= 0:
+    raise ValueError(f"unscan_layers: cycle_interval must be >= 1 (got {cycle_interval}).")
+
+  if cycle_interval > 1 and num_layers % cycle_interval != 0:
+    raise ValueError(
+        f"unscan_layers: num_layers ({num_layers}) must be cleanly divisible by "
+        f"cycle_interval ({cycle_interval})."
+    )
 
   flat = flatten_dict(pure)
   new_flat = {}
@@ -94,6 +112,26 @@ def unscan_layers(
     idx = key.index(layer_container)
     prefix = key[:idx]
     suffix = key[idx + 1 :]
+    # A scanned inhomogeneous block nests one `layer_<slot>` level under
+    # `layers`; the rollout has no such level, so drop it and fold the slot
+    # into the physical layer number below.
+    slot = None
+    if cycle_interval > 1:
+      m = re.fullmatch(r"layer_(\d+)", suffix[0]) if suffix else None
+      if not m:
+        prefix_str = suffix[0] if suffix else "<empty>"
+        raise ValueError(
+            f"unscan_layers: cycle_interval={cycle_interval} > 1, but key {'.'.join(key)!r} "
+            f"does not have a 'layer_<slot>' cycle prefix under {layer_container!r} "
+            f"(got {prefix_str!r})."
+        )
+      slot = int(m.group(1))
+      if slot >= cycle_interval:
+        raise ValueError(
+            f"unscan_layers: slot {slot} parsed from key {'.'.join(key)!r} "
+            f"must be less than cycle_interval {cycle_interval}."
+        )
+      suffix = suffix[1:]
     arr = getattr(value, "value", value)
 
     if arr is None or not hasattr(arr, "shape") or getattr(arr, "ndim", 0) <= scan_axis:
@@ -106,15 +144,18 @@ def unscan_layers(
       continue
     del value
 
-    if arr.shape[scan_axis] != num_layers:
+    # Each slot is scanned over the repeats of the cycle, not over all layers.
+    expected = num_layers // cycle_interval if slot is not None else num_layers
+    if arr.shape[scan_axis] != expected:
       raise ValueError(
           f"unscan_layers: {'.'.join(key)!r} has shape {arr.shape}, expected axis {scan_axis} to be"
-          f" num_layers={num_layers}."
+          f" {expected} (num_layers={num_layers}, cycle_interval={cycle_interval})."
       )
 
-    for i in range(num_layers):
+    for i in range(expected):
       sliced = jax.lax.index_in_dim(arr, i, axis=scan_axis, keepdims=False)
-      new_key = prefix + (f"{layer_container}_{i}",) + suffix
+      layer_no = i * cycle_interval + slot if slot is not None else i
+      new_key = prefix + (f"{layer_container}_{layer_no}",) + suffix
       new_flat[new_key] = sliced
     del arr
     unscanned_count += 1
