@@ -47,7 +47,6 @@ rely on the vLLM library.
 - [Build and Upload MaxText Docker Image](#build-and-upload-maxtext-docker-image)
 - [Setup Environment Variables](#setup-environment-variables)
 - [Get Your Model Checkpoint](#get-your-model-checkpoint)
-- [Submit your RL workload with Cluster Toolkit](#submit-your-rl-workload-with-cluster-toolkit)
 - [Submit your RL workload via Pathways](#submit-your-rl-workload-via-pathways)
 - [Managing Workloads](#managing-workloads)
 - [Troubleshooting](#troubleshooting)
@@ -81,7 +80,6 @@ placeholders with your actual values.
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
 export MODEL=<MODEL_NAME> # e.g. 'llama3.1-70b-Instruct' # replace with another model from src/maxtext/configs/types.py if needed
-export TOKENIZER_PATH=<TOKENIZER_PATH> # e.g. 'meta-llama/Llama-3.1-70B-Instruct'
 
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
@@ -196,7 +194,6 @@ gcluster job submit \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
   --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
-  tokenizer_path=${TOKENIZER_PATH?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?}-grpo \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
@@ -218,7 +215,6 @@ gcluster job submit \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
   --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
-  tokenizer_path=${TOKENIZER_PATH?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?}-gspo \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
