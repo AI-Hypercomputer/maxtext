@@ -102,7 +102,7 @@ For instructions on building and uploading the MaxText Docker image with post-tr
 ### Cluster Toolkit submission
 
 For a new GKE deployment, authenticate with `gcloud` and submit the RL trainer
-as a standard Cluster Toolkit JobSet:
+using Cluster Toolkit's `--pathways` option:
 
 ```bash
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
@@ -116,17 +116,6 @@ gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${CLUSTER_NAME?}
 gcluster job config set location ${ZONE?}
 
-gcluster job submit \
-  --image ${DOCKER_IMAGE?} \
-  --name ${RUN_NAME?} \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-30b-a3b-base tokenizer_path=${TOKENIZER_PATH?} load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?}"
-```
-
-Alternatively, if your environment uses Pathways orchestration, submit the workload with Cluster Toolkit's `--pathways` option:
-
-```bash
 gcluster job submit \
   --image ${DOCKER_IMAGE?} \
   --name ${RUN_NAME?} \
