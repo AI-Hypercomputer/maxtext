@@ -24,6 +24,32 @@ from maxtext.common.common_types import ShardMode
 from maxtext.utils.sharding import maybe_shard_with_name
 
 
+def should_accumulate_fractional_batch(config, is_train: bool = True) -> bool:
+  """Returns True if micro-batches should be accumulated due to fractional batch size."""
+  key = "per_device_batch_size" if is_train else "eval_per_device_batch_size"
+  return getattr(config, key, 1.0) < 1.0
+
+
+def get_num_microbatches(config, is_train: bool = True) -> int:
+  """Calculates the number of microbatches to accumulate over for train or eval."""
+  load_key = (
+      "global_batch_size_to_load"
+      if is_train
+      else "global_batch_size_to_load_eval"
+  )
+  mbs_key = (
+      "micro_batch_size_to_train_on"
+      if is_train
+      else "micro_batch_size_to_eval_on"
+  )
+  gbs_load = getattr(config, load_key, None)
+  mbs = getattr(config, mbs_key, None)
+  steps = getattr(config, "gradient_accumulation_steps", 1) if is_train else 1
+  if gbs_load and mbs and mbs > 0:
+    return max(steps, gbs_load // mbs)
+  return steps
+
+
 def gradient_accumulation_loss_and_grad(
     _loss_fn,
     config,
@@ -137,9 +163,10 @@ def gradient_accumulation_loss_and_grad(
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
     return acc_grad_and_loss, aux
 
+  num_microbatches = get_num_microbatches(config)
+
   def reshape_to_microbatch_accumulations(batch_arr):
     """Reshape global batch to microbatches, assuming batch axis is leading."""
-    num_microbatches = config.gradient_accumulation_steps
     microbatch_shape = (batch_arr.shape[0] // num_microbatches, num_microbatches) + batch_arr.shape[1:]
     reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
     return jnp.swapaxes(reshaped_batch_arr, 0, 1)
@@ -160,15 +187,15 @@ def gradient_accumulation_loss_and_grad(
     init_grad_and_loss["rest_state"] = rest  # pyrefly: ignore[unbound-name]
 
   grad_and_loss, aux = jax.lax.scan(
-      accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+      accumulate_gradient, init_grad_and_loss, data, length=num_microbatches
   )
   has_weights = grad_and_loss["total_weights"] > 0
   denominator = jnp.maximum(grad_and_loss["total_weights"], 1)
   loss = (
       grad_and_loss["loss"] / denominator
-      + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-      + grad_and_loss["indexer_loss"] / config.gradient_accumulation_steps
-      + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
+      + grad_and_loss["moe_lb_loss"] / num_microbatches
+      + grad_and_loss["indexer_loss"] / num_microbatches
+      + grad_and_loss["mtp_loss"] / num_microbatches
   )
   loss = jnp.where(has_weights, loss, 0.0)
   raw_grads = grad_and_loss["grad"]
@@ -180,7 +207,7 @@ def gradient_accumulation_loss_and_grad(
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
   divisor = (
-      config.gradient_accumulation_steps if getattr(config, "use_tunix_gradient_accumulation", False) else denominator
+      num_microbatches if getattr(config, "use_tunix_gradient_accumulation", False) else denominator
   )
   raw_grads = jax.tree_util.tree_map(
       lambda arr: jnp.where(has_weights, arr / divisor, jnp.zeros_like(arr)),
