@@ -19,6 +19,7 @@ import logging
 import jax
 import jax.numpy as jnp
 
+from maxtext.integration.vllm.moe_padding import pad_to_tpu_lanes
 from maxtext.integration.vllm.torchax_converter.base import BaseMaxTextToVLLMConverter, timer, GREEN, RESET
 
 
@@ -29,12 +30,26 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
     super().__init__(config, mesh)
     self.vllm_attn_dp = max(1, int(vllm_attn_dp or 1))
     self.vllm_use_ep = bool(vllm_use_ep)
-    assert (
-        self.vllm_tp % self.vllm_attn_dp == 0
-    ), f"rollout_tensor_parallelism={self.vllm_tp} must be divisible by attn_dp_size={self.vllm_attn_dp}"
+    if self.vllm_tp % self.vllm_attn_dp != 0:
+      raise ValueError(f"rollout_tensor_parallelism={self.vllm_tp} must be divisible by attn_dp_size={self.vllm_attn_dp}")
     # Attention (and GDN / shared-expert column) projections are sharded over
     # the per-attention-group tensor axis.
     self.attn_shards = self.vllm_tp // self.vllm_attn_dp
+
+    # Extract and validate MaxText GDN QKVZ Layout dynamically via config
+    self.gdn_num_key_heads = int(getattr(self.config, "gdn_num_key_heads", 16))
+    self.gdn_num_value_heads = int(getattr(self.config, "gdn_num_value_heads", 32))
+    self.gdn_key_head_dim = int(getattr(self.config, "gdn_key_head_dim", 128))
+    self.gdn_value_head_dim = int(getattr(self.config, "gdn_value_head_dim", 128))
+    if self.gdn_num_key_heads <= 0 or self.gdn_num_value_heads <= 0:
+      raise ValueError(
+          f"Invalid GDN head configuration: key_heads={self.gdn_num_key_heads}, value_heads={self.gdn_num_value_heads}"
+      )
+    if self.gdn_num_value_heads % self.gdn_num_key_heads != 0:
+      raise ValueError(
+          f"GDN value heads ({self.gdn_num_value_heads}) must be divisible by key heads ({self.gdn_num_key_heads})."
+      )
+    self.gdn_v_per_k = self.gdn_num_value_heads // self.gdn_num_key_heads
 
   def convert(self, model_state: dict, **kwargs):
     """Converts model_state parameters to vLLM format."""
@@ -172,12 +187,12 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
           self.vllm_state[f"{prefix}.input_layernorm.weight"] = pre_ln[rep]
           self.vllm_state[f"{prefix}.post_attention_layernorm.weight"] = post_ln[rep]
 
-          # Extract MaxText GDN QKVZ Layout dynamically via config
-          H_k = getattr(self.config, "gdn_num_key_heads", 16)
-          H_v = getattr(self.config, "gdn_num_value_heads", 32)
-          D_k = getattr(self.config, "gdn_key_head_dim", 128)
-          D_v = getattr(self.config, "gdn_value_head_dim", 128)
-          V_per_K = H_v // H_k
+          # Use pre-extracted MaxText GDN QKVZ Layout
+          H_k = self.gdn_num_key_heads
+          H_v = self.gdn_num_value_heads
+          D_k = self.gdn_key_head_dim
+          D_v = self.gdn_value_head_dim
+          V_per_K = self.gdn_v_per_k
 
           t_m = jnp.transpose(qkvz_layers[rep], (1, 0))
           block_size = D_k + D_k + V_per_K * D_v + V_per_K * D_v
@@ -264,7 +279,7 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
 
       # vLLM's TPU Grouped GEMM kernel requires 128-alignment per expert chunk
       chunk_size = d_inner // tp_size
-      padded_chunk_size = ((chunk_size + 127) // 128) * 128
+      padded_chunk_size = pad_to_tpu_lanes(chunk_size)
       pad_amount = padded_chunk_size - chunk_size
 
       w1_chunks = wi_0.reshape(num_reps, num_experts, d_model, tp_size, chunk_size)
