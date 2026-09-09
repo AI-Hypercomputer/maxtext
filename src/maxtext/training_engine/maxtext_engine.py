@@ -23,8 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
-import os
-from typing import Any
+from typing import Any, Optional
 
 from absl import logging
 from flax import nnx
@@ -36,7 +35,19 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
-from maxtext.integration.tunix.weight_mapping import raiden_unscan
+from maxtext.integration.vllm.convert_utils import (
+    get_host_rss_mb,
+    is_pathways_environment,
+    is_verify_weights_enabled,
+    reclaim_host_memory,
+)
+
+# Early import of raiden_synchronizer prevents C++ protobuf duplicate file registration
+# aborts when google_cloud_mldiagnostics or grpc is initialized.
+try:
+  from tunix.experimental.weight_sync import raiden_synchronizer
+except ImportError:
+  raiden_synchronizer = None
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
@@ -399,6 +410,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._metrics_recorder = metrics_module.MetricsRecorder()
     self._throttler = inflight_throttler.InflightThrottler(config=self._config)
     self._raiden_sync: Any = None
+    self._weight_converter: Any = None
+    self._last_staged_step: Optional[int] = None
+    self._staged_metadata: Any = None
 
   @property
   def model(self) -> Any:
@@ -831,7 +845,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._gen_model_input_fn is not None:
       return self._gen_model_input_fn(payload)
     if dataclasses.is_dataclass(payload):
-      return {k: getattr(payload, k) for k in payload.__dataclass_fields__ if getattr(payload, k) is not None}
+      return {
+          k: getattr(payload, k)
+          for k in payload.__dataclass_fields__
+          if getattr(payload, k) is not None and k != "metadata"
+      }
     return payload
 
   def _mesh_sharding(self, leaf: Any) -> jax.sharding.Sharding | None:
@@ -1420,19 +1438,29 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       Sequence of WorkUnitMetadata or synchronization endpoints.
     """
     if staging_transport == "raiden":
-      try:
-        from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
-      except ImportError as exc:
-        # Fatal, not a warning: Raiden staging was explicitly requested and cannot be
-        # provided. Returning empty metadata instead defers the failure to the caller --
-        # `WeightSyncCoordinator` eventually raises "metadata collection returned an empty
-        # side", which reports a count from another process and never mentions the missing
-        # module, leaving the real cause in this worker's log on another host.
-        raise RuntimeError(
-            "staging_transport='raiden' requires tunix.experimental.weight_sync."
-            "raiden_synchronizer, which the installed tunix does not provide. Install a"
-            " tunix build that ships it, or select a different staging_transport."
-        ) from exc
+      nonlocal_raiden_sync = raiden_synchronizer
+      if nonlocal_raiden_sync is None:
+        try:
+          from tunix.experimental.weight_sync import raiden_synchronizer as nonlocal_raiden_sync  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+        except ImportError as exc:
+          # Fatal, not a warning: Raiden staging was explicitly requested and cannot be
+          # provided. Returning empty metadata instead defers the failure to the caller --
+          # `WeightSyncCoordinator` eventually raises "metadata collection returned an empty
+          # side", which reports a count from another process and never mentions the missing
+          # module, leaving the real cause in this worker's log on another host.
+          raise RuntimeError(
+              "staging_transport='raiden' requires tunix.experimental.weight_sync."
+              "raiden_synchronizer, which the installed tunix does not provide. Install a"
+              " tunix build that ships it, or select a different staging_transport."
+          ) from exc
+
+      if self._last_staged_step == self.train_step and self._staged_metadata is not None:
+        logging.info(
+            "Trainer reusing staged weight sync for step %d (%d variables)",
+            self.train_step,
+            sum(len(m.variables) for m in self._staged_metadata),
+        )
+        return self._staged_metadata
 
       # 1. Drain all in-flight TPU computations to ensure weights are fully updated
       self._throttler.wait_for_all()
@@ -1440,40 +1468,34 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # 2. Extract clean trainable parameters
       params_state = self._get_trainable_params_state()
 
-      # 2a. The trainer keeps float32 master weights, but the rollout side
-      # (MaxTextForCausalLM under configs/inference/vllm.yml) loads/serves in
-      # bfloat16 -- Raiden's manifest preflight rejects a dtype/item_size
-      # mismatch, and binding mismatched-dtype buffers would be wrong anyway.
-      # Cast the synced copy down; the trainer's own params_state (used for
-      # the actual optimizer step) is untouched since this is a fresh tree.
-      params_state = jax.tree_util.tree_map(
-          lambda x: x.astype(jnp.bfloat16) if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) else x,
-          params_state,
-      )
+      # Use WeightConverter to unroll scanned layers, fuse MoE weights, and cast dtypes
+      if self._weight_converter is None:
+        from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
-      # 2b. The trainer runs scanned (scan_layers=True) for training speed, but
-      # the rollout side loads its MaxText model unscanned (MaxTextForCausalLM
-      # under configs/inference/vllm.yml has scan_layers=False). Raiden matches
-      # tensors by name, so unscan here -- on the trainer side only -- so the
-      # names/shapes we bind already match what the sampler reports.
-      if self._config.scan_layers:
-        params_state = raiden_unscan.unscan_layers(
-            params_state,
-            num_layers=self._config.num_decoder_layers,
-            scan_axis=self._config.param_scan_axis,
+        self._weight_converter = WeightConverter(
+            config=self._config,
+            tp=getattr(self._config, "rollout_tensor_parallelism", 1),
+            prefuse_moe_weights=getattr(self._config, "prefuse_moe_weights", None),
+            debug=getattr(self._config, "weight_sync_debug", False),
         )
+      converted_state = self._weight_converter.convert(params_state)
+      del params_state
+      reclaim_host_memory()
 
       # 3. Bind parameters to the Raiden transport. Construct the synchronizer
       # once, matching the persistent-instance-per-cycle pattern the rebind
       # optimization depends on.
       #
-      # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
-      # detection tunix's K8sJaxContext.initialize() uses), trainer params
+      # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set), trainer params
       # are proxy-backed. Raiden must use FFI (weight_synchronizer_ffi) to bind
       # directly to device arrays on Pathways TPU workers without host CPU staging,
       # avoiding client host OOM and multi-minute proxy transfer timeouts.
-      is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
-      if is_pathways and getattr(raiden_synchronizer, "_raiden_ffi", None) is None:
+      is_pathways = is_pathways_environment()
+      get_ffi = getattr(nonlocal_raiden_sync, "_get_raiden_ffi", None)
+      ffi_available = (
+          (get_ffi() is not None) if get_ffi else (getattr(nonlocal_raiden_sync, "_raiden_ffi", None) is not None)
+      )
+      if is_pathways and not ffi_available:
         raise RuntimeError(
             "Under Pathways (JAX_PLATFORMS=proxy), Raiden weight synchronization "
             "requires weight_synchronizer_ffi (from tpu_raiden_jax) to avoid client host OOM "
@@ -1483,32 +1505,44 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
 
       if self._raiden_sync is None:
-        self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
+        self._raiden_sync = nonlocal_raiden_sync.RaidenSynchronizer(
             job_name="trainer",
             worker_index=jax.process_index(),
             auto_h2d=False,
             parallelism=4,
         )
 
-      self._raiden_sync.bind(params_state)
-      del params_state
+      self._raiden_sync.bind(converted_state)
+      del converted_state
+      reclaim_host_memory()
 
       # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
       if is_pathways or self._raiden_sync.active:
         self._raiden_sync.d2h()
 
-      verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
+      verify_weights = getattr(self._config, "verify_weights", False) or is_verify_weights_enabled()
       if verify_weights:
         logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
 
-      metadata = self._raiden_sync.work_unit_metadata()
-      logging.info(
-          "Trainer prepared weight sync for step %d: registered %d variables on mesh %s",
-          self.train_step,
-          len(metadata.variables),
-          metadata.mesh_axes,
+      all_metadata = (
+          self._raiden_sync.work_unit_metadata_all()
+          if hasattr(self._raiden_sync, "work_unit_metadata_all")
+          else [self._raiden_sync.work_unit_metadata()]
       )
-      return [metadata]
+      total_variables = sum(len(m.variables) for m in all_metadata)
+      rss_mb = get_host_rss_mb()
+      mem_info = f", host memory max RSS: {rss_mb:.1f} MB" if rss_mb > 0 else ""
+      logging.info(
+          "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s%s",
+          self.train_step,
+          len(all_metadata),
+          total_variables,
+          all_metadata[0].mesh_axes if all_metadata else (),
+          mem_info,
+      )
+      self._last_staged_step = self.train_step
+      self._staged_metadata = all_metadata
+      return all_metadata
 
     # Unknown transport: raise rather than return empty metadata. A typo would otherwise
     # surface only as the coordinator's "empty side" error, with nothing logged anywhere
@@ -1517,8 +1551,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def release_weight_sync(self, **kwargs: Any) -> Any:
     """Releases staged weight buffers after transfer completion."""
+    self._last_staged_step = None
+    self._staged_metadata = None
     if self._raiden_sync:
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
+      if hasattr(self._raiden_sync, "release_host_arrays"):
+        self._raiden_sync.release_host_arrays()
+    reclaim_host_memory()
+    rss_mb = get_host_rss_mb()
+    if rss_mb > 0:
+      logging.info("Trainer released weight sync: host memory max RSS: %.1f MB", rss_mb)
     return True
 
   def close(self) -> None:
@@ -1527,6 +1569,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if hasattr(self._raiden_sync, "close"):
         self._raiden_sync.close()
       self._raiden_sync = None
+    self._last_staged_step = None
+    self._staged_metadata = None
 
     self.save_checkpoint(metadata=None, force=True)
     self._checkpoint_manager.close()

@@ -38,6 +38,7 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.configs.types import check_forced_routing_support
+from maxtext.integration.vllm.hybrid_cache_utils import map_layer_names_to_indices
 from maxtext.layers import initializers, linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
@@ -1480,6 +1481,7 @@ class NNXDecoder(nnx.Module):
             "qwen3.5-397b-a17b",
             "maxtext-omni-gemma3-qwen3",
             "cosmos3-nano-reasoner",
+            "cosmos3-super-reasoner",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1499,6 +1501,7 @@ class NNXDecoder(nnx.Module):
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
             "cosmos3-nano-reasoner",
+            "cosmos3-super-reasoner",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1722,6 +1725,8 @@ class NNXDecoder(nnx.Module):
       multimodal_input: None | MultimodalInput = None,
       forced_routed_experts: jnp.ndarray | None = None,
       decoder_input_embeddings=None,
+      layer_name_to_kvcache_index=None,
+      **kwargs,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -2102,7 +2107,17 @@ class NNXDecoder(nnx.Module):
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
+        lyr_to_cache_idx = map_layer_names_to_indices(layer_name_to_kvcache_index)
+
         for lyr in range(cfg.num_decoder_layers):
+          if lyr_to_cache_idx:
+            if lyr not in lyr_to_cache_idx:
+              raise ValueError(
+                  f"Decoder layer {lyr} not found in layer_name_to_kvcache_index mapping: {lyr_to_cache_idx}"
+              )
+            cache_idx = lyr_to_cache_idx[lyr]
+          else:
+            cache_idx = lyr
           if self.is_deepseek:
             if lyr < cfg.first_num_dense_layers:
               layer = getattr(self, f"dense_layers_{lyr}", None)
@@ -2136,9 +2151,9 @@ class NNXDecoder(nnx.Module):
               else:
                 kv_cache = None
             elif isinstance(kv_caches, dict):
-              kv_cache = kv_caches.get(lyr, None)
+              kv_cache = kv_caches.get(cache_idx, None)
             else:
-              kv_cache = kv_caches[lyr]
+              kv_cache = kv_caches[cache_idx]
           else:
             kv_cache = None
 
@@ -2206,7 +2221,7 @@ class NNXDecoder(nnx.Module):
                 kv_caches["key_cache"][lyr] = kv_cache[0]
                 kv_caches["value_cache"][lyr] = kv_cache[1]
             else:
-              kv_caches[lyr] = kv_cache
+              kv_caches[cache_idx] = kv_cache
 
           if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
             visual_embeds = deepstack_visual_embeds[lyr]

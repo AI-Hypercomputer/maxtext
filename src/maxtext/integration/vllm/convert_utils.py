@@ -41,12 +41,104 @@ Still imported from Tunix at runtime, i.e. the remaining port surface:
     `_bulk_align_and_unstack`; that patch goes away once the port lands.
 """
 
-import jax
-from absl import logging
-from typing import Mapping, Any, Callable, Dict, Tuple, Optional
+import contextlib
 import functools
-import numpy as np
+import os
+import sys
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from absl import logging
+import jax
 import jax.numpy as jnp
+import numpy as np
+
+from maxtext.integration.vllm.moe_padding import (  # pylint: disable=unused-import
+    TPU_V5P_SUBCORE_LANE_SIZE,
+    pad_to_tpu_lanes,
+)
+
+MOE_MLP_WEIGHT_NAMES = frozenset({"wi", "wi_0", "wi_1", "wo"})
+_MOE_MLP_WEIGHTS = MOE_MLP_WEIGHT_NAMES
+
+
+def resolve_rollout_tp(config: Any, tp: int = 1) -> int:
+  """Resolves rollout TP from override, config, or default."""
+  if tp > 1:
+    return int(tp)
+  config_tp = 0
+  if config is not None:
+    config_tp = int(
+        getattr(config, "rollout_tensor_parallelism", 0)
+        or getattr(getattr(config, "cluster", None), "rollout_tensor_parallelism", 0)
+        or 0
+    )
+  env_tp = int(os.environ.get("ROLLOUT_TENSOR_PARALLELISM", 0) or 0)
+  if config_tp > 0 and env_tp > 0 and config_tp != env_tp:
+    raise ValueError(f"Rollout TP mismatch: config specifies {config_tp} but environment specifies {env_tp}.")
+  return int(config_tp or env_tp or 1)
+
+
+def is_pathways_environment() -> bool:
+  """Checks if running under Pathways TPU proxy environment."""
+  devices = jax.devices()
+  backend_platform = getattr(devices[0], "platform", "").lower() if devices else ""
+  return (backend_platform == "proxy") or (
+      "proxy" in os.environ.get("JAX_PLATFORMS", "") and bool(os.environ.get("JAX_BACKEND_TARGET"))
+  )
+
+
+def is_verify_weights_enabled() -> bool:
+  """Returns whether weight verification / checksum validation is active."""
+  return os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
+
+
+def resolve_prefuse_moe_weights(config: Any, prefuse_moe_weights: Optional[bool] = None) -> bool:
+  """Resolves MoE prefuse flag from override or config."""
+  if prefuse_moe_weights is not None:
+    return bool(prefuse_moe_weights)
+  if config is not None:
+    return bool(getattr(config, "prefuse_moe_weights", False))
+  return False
+
+
+def reclaim_host_memory() -> None:
+  """Runs garbage collection and triggers libc malloc_trim to return free heap to the OS."""
+  import gc  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+  gc.collect()
+  if sys.platform.startswith("linux"):
+    try:
+      import ctypes  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+      ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+
+def get_host_rss_mb() -> float:
+  """Returns current process resident set size (RSS) in MB."""
+  try:
+    with open("/proc/self/statm", "r", encoding="utf-8") as f:
+      pages = int(f.read().split()[1])
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    return (pages * page_size) / (1024.0 * 1024.0)
+  except Exception:  # pylint: disable=broad-exception-caught
+    import resource  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    scale = 1024.0 if sys.platform.startswith("linux") else (1024.0 * 1024.0)
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / scale
+
+
+def normalize_dtype(tgt_dtype: Any) -> Any:
+  """Normalizes string or dtype representations into a standard jnp.dtype."""
+  if tgt_dtype is None:
+    return None
+  if isinstance(tgt_dtype, str):
+    if tgt_dtype in ("bfloat16", "bf16"):
+      return jnp.bfloat16
+    if tgt_dtype in ("float32", "fp32"):
+      return jnp.float32
+    return jnp.dtype(tgt_dtype)
+  return tgt_dtype
 
 
 def _delete_target_buffers(tgt_flat: Mapping[str, Any], src_flat: Mapping[str, Any]):
@@ -160,9 +252,16 @@ class ShapeMismatchError(ValueError):
   """Raised when source and target shapes are incompatible."""
 
 
-def _apply_dtype_cast(val: jax.Array | np.ndarray, tgt_dtype: jnp.dtype, src_key: str) -> jax.Array | np.ndarray:
+def _apply_dtype_cast(val: Any, tgt_dtype: Any, src_key: str) -> Any:
   """Casts val to target dtype if needed, logging a warning on type mismatch."""
-  if val.dtype != tgt_dtype:
+  tgt_dtype = normalize_dtype(tgt_dtype)
+  if isinstance(val, jax.ShapeDtypeStruct):
+    if tgt_dtype is not None and val.dtype != tgt_dtype:
+      return jax.ShapeDtypeStruct(val.shape, tgt_dtype)
+    return val
+  if not hasattr(val, "dtype"):
+    return val
+  if tgt_dtype is not None and val.dtype != tgt_dtype:
     logging.log_first_n(
         logging.WARNING,
         "Type mismatch on %s: %s -> %s",
@@ -171,7 +270,8 @@ def _apply_dtype_cast(val: jax.Array | np.ndarray, tgt_dtype: jnp.dtype, src_key
         val.dtype,
         tgt_dtype,
     )
-    return val.astype(tgt_dtype)
+    if hasattr(val, "astype"):
+      return val.astype(tgt_dtype)
   return val
 
 
@@ -409,6 +509,8 @@ def _align_per_axis(
   path here is bulk alignment of scanned MoE weights, where eager
   dispatch was costing tens of seconds per tensor.
   """
+  if isinstance(arr, jax.ShapeDtypeStruct):
+    return jax.ShapeDtypeStruct(tgt_shape, arr.dtype)
   if not hasattr(arr, "shape"):
     return arr
   if arr.shape == tgt_shape:
@@ -463,35 +565,42 @@ def _align_per_axis(
   return _jit_repeat_axes(arr, tuple(repeats))
 
 
-@functools.partial(jax.jit, static_argnames=("tgt_shape", "n_shards", "axis"))
+@functools.partial(jax.jit, static_argnames=("tgt_shape", "n_shards", "axis", "lane_size"))
 def _interleave_moe_weights(
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
+    lane_size: int = TPU_V5P_SUBCORE_LANE_SIZE,
 ) -> jax.Array | np.ndarray:
-  """Interleaves wi_0 and wi_1 per-shard into a single tensor.
+  """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
 
-  JIT-compiled: run eagerly this is 2 reshapes + 2 `jnp.pad` + 1 concatenate +
+  Under TPU GMM kernels (e.g. `gmm_v2.py`), each TP shard expects Gate and Up
+  to alternate in 128-lane chunks (`deinterleave_lane`) along the inner dimension:
+  `[Gate_c0 (128), Up_c0 (128), Gate_c1 (128), Up_c1 (128), ...]`.
+
+  JIT-compiled: run eagerly this is 2 reshapes + 2 `jnp.pad` + 1 stack/concat +
   1 reshape, and every intermediate becomes a materialized device buffer. Under
   one trace XLA fuses the pads into the concatenate's output write, so the only
   buffer allocated is the result. On a 48-layer MoE model called once per layer
   that is the difference between ~3x and ~1x the output size in live transient
   memory, plus ~5 fewer dispatches per call.
 
-  `tgt_shape`, `n_shards` and `axis` are static, so the trace is keyed on them;
+  `tgt_shape`, `n_shards`, `axis` and `lane_size` are static, so the trace is keyed on them;
   identical layers share a single compilation.
   """
   if axis is None:
     axis = len(tgt_shape) - 1
+  elif axis < 0:
+    axis = len(tgt_shape) + axis
 
   target_half_dim = tgt_shape[axis] // 2
+  target_chunk_size = target_half_dim // n_shards
 
   def _pad_and_chunk(arr):
     current_total_size = arr.shape[axis]
     chunk_size = current_total_size // n_shards
-    target_chunk_size = target_half_dim // n_shards
 
     # Safely reshape to expose per-shard chunk without assuming the last axis
     new_shape = list(arr.shape)
@@ -509,8 +618,20 @@ def _interleave_moe_weights(
   p_wi_0 = _pad_and_chunk(wi_0)
   p_wi_1 = _pad_and_chunk(wi_1)
 
-  # Interleave along the chunked dimension
-  combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+  if lane_size > 0 and target_chunk_size % lane_size == 0:
+    # Interleave in 128-lane chunks within each shard:
+    # [Gate_c0 (128), Up_c0 (128), Gate_c1 (128), Up_c1 (128), ...]
+    num_lanes = target_chunk_size // lane_size
+    shape_lanes = list(p_wi_0.shape)
+    shape_lanes[axis + 1] = num_lanes
+    shape_lanes.insert(axis + 2, lane_size)
+    p_wi_0 = p_wi_0.reshape(shape_lanes)
+    p_wi_1 = p_wi_1.reshape(shape_lanes)
+    combined = jnp.stack([p_wi_0, p_wi_1], axis=axis + 2)
+  else:
+    # Fallback when dimension is not divisible by lane_size:
+    combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+
   return combined.reshape(tgt_shape)
 
 
@@ -604,6 +725,11 @@ def _bulk_align_and_unstack(
     A tuple of `num_layers` per-layer arrays at the per-layer target shape.
   """
   per_layer_shape = per_layer_tgt_val.shape
+  if isinstance(arr, jax.ShapeDtypeStruct) or isinstance(per_layer_tgt_val, jax.ShapeDtypeStruct):
+    num_layers = arr.shape[scan_axis]
+    tgt_dtype = getattr(per_layer_tgt_val, "dtype", getattr(arr, "dtype", jnp.float32))
+    return tuple(jax.ShapeDtypeStruct(per_layer_shape, tgt_dtype) for _ in range(num_layers))
+
   scanned_tgt_shape = per_layer_shape[:scan_axis] + (arr.shape[scan_axis],) + per_layer_shape[scan_axis:]
   scanned_tgt_sharding = _scanned_sharding_from_per_layer(getattr(per_layer_tgt_val, "sharding", None), scan_axis)
 
@@ -630,3 +756,67 @@ def _scanned_sharding_from_per_layer(
       jax.sharding.PartitionSpec(*spec),
       memory_kind=per_layer_sharding.memory_kind,
   )
+
+
+@contextlib.contextmanager
+def tunix_compat_context():
+  """Context manager establishing compatibility shims for Tunix/tpu-inference weight sync."""
+  try:
+    import tunix.generate.utils as tunix_utils  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    yield
+    return
+
+  orig_wsc = jax.lax.with_sharding_constraint
+  orig_apply_dtype_cast = getattr(tunix_utils, "_apply_dtype_cast", None)
+  orig_bulk = getattr(tunix_utils, "_bulk_align_and_unstack", None)
+  orig_unstack = getattr(tunix_utils, "_unstack_scanned_param", None)
+  orig_moe_weights = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)
+
+  def _compat_wsc(x, shardings):
+    try:
+      return orig_wsc(x, shardings)
+    except AssertionError:
+      return jax.sharding.reshard(x, shardings)
+
+  def _no_bf16_to_f32_cast(val, tgt_dtype, src_key):
+    if hasattr(val, "dtype") and val.dtype == jnp.bfloat16 and tgt_dtype == jnp.float32:
+      return val
+    if orig_apply_dtype_cast is not None:
+      return orig_apply_dtype_cast(val, tgt_dtype, src_key)
+    return val
+
+  def _compat_bulk(arr, scan_axis, per_layer, key_path):
+    if hasattr(arr, "shape") and len(arr.shape) <= scan_axis:
+      scan_axis = len(arr.shape) - 1 if len(arr.shape) > 0 else 0
+    if orig_bulk is not None:
+      return orig_bulk(arr, scan_axis, per_layer, key_path)
+    return per_layer
+
+  def _compat_unstack(src_val, tgt_val, key_path, scan_axis=None):
+    if scan_axis is not None and hasattr(src_val, "shape") and len(src_val.shape) <= scan_axis:
+      scan_axis = len(src_val.shape) - 1 if len(src_val.shape) > 0 else 0
+    if orig_unstack is not None:
+      return orig_unstack(src_val, tgt_val, key_path, scan_axis=scan_axis)
+    return (src_val,)
+
+  jax.lax.with_sharding_constraint = _compat_wsc
+  tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
+  tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
+  tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
+
+  if orig_moe_weights is not None:
+    tunix_utils._MOE_MLP_WEIGHTS = frozenset([*orig_moe_weights, "wo"])  # pylint: disable=protected-access
+
+  try:
+    yield
+  finally:
+    jax.lax.with_sharding_constraint = orig_wsc
+    if orig_apply_dtype_cast is not None:
+      tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
+    if orig_bulk is not None:
+      tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
+    if orig_unstack is not None:
+      tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
+    if orig_moe_weights is not None:
+      tunix_utils._MOE_MLP_WEIGHTS = orig_moe_weights  # pylint: disable=protected-access

@@ -150,6 +150,8 @@ class TransformerLinenPure(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
       forced_routed_experts: jnp.ndarray | None = None,
+      layer_name_to_kvcache_index=None,
+      **kwargs,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -229,6 +231,7 @@ class TransformerLinenPure(nn.Module):
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
+        layer_name_to_kvcache_index=layer_name_to_kvcache_index,
     )  # pytype: disable=wrong-keyword-args
 
     # If we are initializing the model AND MTP is enabled, we must create
@@ -474,6 +477,8 @@ class Transformer(nnx.Module):
       attention_metadata: dict[str, Any] | None = None,
       forced_routed_experts: jnp.ndarray | None = None,
       decoder_input_embeddings: jax.Array | None = None,
+      layer_name_to_kvcache_index=None,
+      **kwargs,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -577,6 +582,7 @@ class Transformer(nnx.Module):
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
           forced_routed_experts=forced_routed_experts,
+          layer_name_to_kvcache_index=layer_name_to_kvcache_index,
       )  # pytype: disable=wrong-keyword-args
       if isinstance(res, tuple) and len(res) == 4:
         logits, hidden_state, kv_caches, expert_indices = res
@@ -601,6 +607,7 @@ class Transformer(nnx.Module):
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
+          layer_name_to_kvcache_index=layer_name_to_kvcache_index,
           mutable=mutable_collections,  # pyrefly: ignore[unexpected-keyword]
       )  # pytype: disable=wrong-keyword-args
       if isinstance(res, tuple) and len(res) == 4:
