@@ -117,6 +117,16 @@ class ConvertUtilsTest(unittest.TestCase):
       self.assertEqual(resolve_rollout_tp(cfg), 4)
 
   @pytest.mark.cpu_only
+  def test_resolve_rollout_tp_fallback_parallel_size_env(self):
+    # Tests that ROLLOUT_TENSOR_PARALLEL_SIZE is recognized when config defaults to -1
+    cfg = SimpleNamespace(rollout_tensor_parallelism=-1)
+    with mock.patch.dict(
+        os.environ,
+        {"ROLLOUT_TENSOR_PARALLEL_SIZE": "2", "ROLLOUT_TENSOR_PARALLELISM": ""},
+    ):
+      self.assertEqual(resolve_rollout_tp(cfg), 2)
+
+  @pytest.mark.cpu_only
   def test_get_host_rss_mb(self):
     rss = get_host_rss_mb()
     self.assertIsInstance(rss, float)

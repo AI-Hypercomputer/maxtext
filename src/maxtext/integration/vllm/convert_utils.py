@@ -66,12 +66,13 @@ def resolve_rollout_tp(config: Any, tp: int = 1) -> int:
     return int(tp)
   config_tp = 0
   if config is not None:
-    config_tp = int(
+    raw_tp = (
         getattr(config, "rollout_tensor_parallelism", 0)
         or getattr(getattr(config, "cluster", None), "rollout_tensor_parallelism", 0)
         or 0
     )
-  env_tp = int(os.environ.get("ROLLOUT_TENSOR_PARALLELISM", 0) or 0)
+    config_tp = max(0, int(raw_tp))
+  env_tp = int(os.environ.get("ROLLOUT_TENSOR_PARALLELISM", 0) or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0) or 0)
   if config_tp > 0 and env_tp > 0 and config_tp != env_tp:
     raise ValueError(f"Rollout TP mismatch: config specifies {config_tp} but environment specifies {env_tp}.")
   return int(config_tp or env_tp or 1)
