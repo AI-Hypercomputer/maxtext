@@ -18,13 +18,13 @@
 
 # Build and upload MaxText Docker images
 
-This guide covers setting up a MaxText development environment and building container images for TPU and GPU workloads. These images can be used to run MaxText on GKE clusters with TPUs or GPUs, and are also required for running MaxText through XPK.
+This guide covers setting up a MaxText development environment and building container images for TPU and GPU workloads. These images can be used to run MaxText on GKE clusters with TPUs or GPUs, and they are the image payload used by the recommended Cluster Toolkit workflow.
 
 ## Prerequisites
 
 Before starting, ensure you have the following tools installed and configured:
 
-1. Environment Prep: Install and configure all [XPK prerequisites](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites).
+1. Environment Prep: Install and configure the required Google Cloud tooling, including `gcloud`, `kubectl`, and the Cluster Toolkit CLI (`gcluster`). Legacy XPK prerequisites are retained only for older clusters.
 
 2. Docker Permissions: Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/) to run Docker without `sudo`.
 
@@ -50,14 +50,14 @@ If the `docker run hello-world` command fails with a permission denied error (e.
 
 ## Installation Modes
 
-Follow the instructions in the [Installation guide](../install_maxtext.md) to install the `maxtext[runner]` extra, which includes all necessary dependencies for building MaxText Docker images and running workloads through XPK. It automatically installs XPK, so you do not need to install it separately to manage your clusters and workloads.
+Follow the instructions in the [Installation guide](../install_maxtext.md) to install the `maxtext[runner]` extra, which includes all necessary dependencies for building MaxText Docker images and submitting GKE workloads through Cluster Toolkit. Legacy XPK installs are not required for new setups.
 
 ## Pre-built MaxText Docker images
 
 MaxText publishes pre-built container images for TPU pre-training and TPU
 post-training workloads in Google Artifact Registry. You can use these images
-directly with Google Kubernetes Engine (GKE) or XPK without building images from
-scratch.
+directly with Google Kubernetes Engine (GKE), including the Cluster Toolkit
+workflow, without building custom images from scratch.
 
 ```{note}
 Following a new MaxText release on PyPI, pre-built Docker images undergo security vulnerability scanning and open-source license compliance reviews before being made public. As a result, newly versioned Docker images may take some time to become publicly accessible in Google Artifact Registry.

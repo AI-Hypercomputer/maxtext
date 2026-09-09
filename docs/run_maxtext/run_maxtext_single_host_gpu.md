@@ -139,11 +139,12 @@ https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/gpu/a3
 ```bash
 echo "Running 1vm.sh"
 
-# Example command to invoke this script via XPK
-# python3 xpk/xpk.py workload create --cluster ${GKE_CLUSTER?} \
-# --workload ${RUN_NAME?} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
-# --device-type ${DEVICE_TYPE?} --num-slices 1 \
-# --command "bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
+# Configure access to the GKE cluster before submitting with Cluster Toolkit:
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+#   --zone ${ZONE?} --project ${PROJECT_ID?}
+# gcluster job submit --image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
+#   --name ${RUN_NAME?} --compute-type ${COMPUTE_TYPE?} --topology 1x1x1 \
+#   --command "bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
 
 # Stop execution if any command exits with error
 set -e

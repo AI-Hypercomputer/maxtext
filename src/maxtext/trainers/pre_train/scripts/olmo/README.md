@@ -15,7 +15,10 @@ global batch ≈4M tokens, peak LR 3e-4 cosine to 0.1×, 2k warmup, β=(0.9, 0.9
 
 Both scripts are env-var driven. Header comments in each enumerate required vs. optional env.
 
-## Quick start (multi-host TPU via XPK)
+## Legacy quick start (multi-host TPU via XPK)
+
+For new deployments, use the Cluster Toolkit version below. The XPK wrapper
+section is retained for existing environments.
 
 ```bash
 source ~/.hf_token.sh
@@ -42,6 +45,50 @@ STEPS_OVERRIDE=1414078 \
 `STEPS=1414078` (= 5.928T tokens at 512 × 8192/step) matches AI2's stage-1
 horizon. The wrapper passes `LIBTPU_INIT_ARGS` (Ironwood XLA flags) and the
 full MaxText perf flag set automatically — no manual override needed.
+
+## Quick start (multi-host TPU via Cluster Toolkit)
+
+```bash
+export PROJECT_ID=<your-project>
+export GKE_CLUSTER=<your-cluster>
+export ZONE=<your-zone>
+export RUN_NAME=olmo3_7b_stage1
+export BASE_OUTPUT_DIRECTORY=gs://<your-bucket>/olmo/runs
+export COMPUTE_TYPE=<cluster-toolkit-compute-type>
+export TOPOLOGY=<tpu-topology>
+export IMAGE_URI="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+
+export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json
+export OLMO_GCS_BASE=gs://<your-bucket>/
+export LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+export HF_TOKEN=<your-hf-token>
+
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --zone ${ZONE?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${ZONE?}
+
+gcluster job submit \
+  --image ${IMAGE_URI?} \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --command "INDEX_PATH=${OLMO_INDEX_PATH?} \
+GCS_BASE=${OLMO_GCS_BASE?} \
+LOCAL_MOUNT=/tmp/olmo-data \
+OUTPUT_DIR=${BASE_OUTPUT_DIRECTORY?} \
+LOAD_PARAMETERS_PATH=${LOAD_PARAMETERS_PATH?} \
+HF_TOKEN=${HF_TOKEN?} \
+MOUNT_GCSFUSE=1 \
+VENV_PATH=/__skip_venv__ \
+bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh"
+```
+
+Set the data, checkpoint, and launcher environment variables before invoking `run_olmo3_7b_stage1.sh`. For smoke testing without tokenized OLMo data, see the single-host or synthetic data section below.
+
 
 ## Quick start (single-host / smoke test)
 

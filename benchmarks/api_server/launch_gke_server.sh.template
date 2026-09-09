@@ -27,11 +27,13 @@ export DEVICE_TYPE="v5p-16"
 export PROJECT="<your-gcp-project>"
 export ZONE="<your-gcp-zone>"
 
-# -- XPK Workload Configuration --
+# -- Cluster Toolkit Workload Configuration --
 # (<YYYY-MM-DD>, <your_hugging_face_token>)
 export RUNNAME="my-server-$(date +%Y-%m-%d-%H-%M-%S)"
 export DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:<YYYY-MM-DD>"
 export HF_TOKEN="<your_hugging_face_token>" # Optional: if your tokenizer is private
+export COMPUTE_TYPE="<cluster-toolkit-compute-type>"
+export TOPOLOGY="<tpu-topology>"
 
 # -- Model Configuration --
 # IMPORTANT: Replace these with your model's details.
@@ -67,12 +69,21 @@ CMD="export HF_TOKEN=${HF_TOKEN} && \
 # 3. Launch the Workload
 # ==============================================================================
 echo "Launching workload ${RUNNAME}..."
-xpk workload create --workload "${RUNNAME}" \
-  --base-docker-image "${DOCKER_IMAGE}" \
-  --command "${CMD}" \
-  --num-slices=1  \
-  --cluster "${CLUSTER}" --device-type "${DEVICE_TYPE}" --project "${PROJECT}" --zone "${ZONE}"
+gcloud config set project "${PROJECT}"
+gcloud container clusters get-credentials "${CLUSTER}" \
+  --zone "${ZONE}" \
+  --project "${PROJECT}"
+gcluster job config set project "${PROJECT}"
+gcluster job config set cluster "${CLUSTER}"
+gcluster job config set location "${ZONE}"
+gcluster job submit \
+  --image="${DOCKER_IMAGE}" \
+  --command="${CMD}" \
+  --name="${RUNNAME}" \
+  --compute-type="${COMPUTE_TYPE}" \
+  --topology="${TOPOLOGY}"
 
 echo "Workload ${RUNNAME} created."
-echo "Use the following command to connect:"
-echo "bash benchmarks/api_server/port_forward_xpk.sh job_name=${RUNNAME} project=${PROJECT} zone=${ZONE} cluster=${CLUSTER}"
+echo "Use the following command to check pods and connect:"
+echo "kubectl get pods -l gcluster.google.com/workload=${RUNNAME}"
+echo "kubectl port-forward <server-pod-name> 8000:8000"

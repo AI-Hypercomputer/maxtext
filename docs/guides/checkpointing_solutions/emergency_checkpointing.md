@@ -11,16 +11,24 @@ Emergency checkpointing is a vital feature for large-scale, multi-slice training
 - **Ramdisk Mounted via Jobset**: Each workload pod must have a [ramdisk directory mounted by Jobset](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#update-jobset) using the Multi-Tier Checkpointing CSI driver. This provides a high-speed, in-memory storage location for checkpoints.
 - **Supported TPU types**: [v4](https://cloud.google.com/tpu/docs/v4), [v5e](https://cloud.google.com/tpu/docs/v5e), [v5p](https://cloud.google.com/tpu/docs/v5p), and [v6e](https://cloud.google.com/tpu/docs/v6e)
 
-## Cluster creation using XPK
+## Configure the GKE cluster
 
-To run workloads with Emergency Checkpointing, you need a Google Kubernetes Engine (GKE) cluster with the necessary drivers and features enabled. You can create a properly configured cluster using the **XPK** or by setting it up manually with `gcloud` commands following [Google Cloud Checkpointing Documentation](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing).
+To run workloads with Emergency Checkpointing, use a Google Kubernetes Engine (GKE) cluster with the necessary drivers and features enabled. Follow the [Google Cloud Checkpointing Documentation](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing) to configure Multi-Tier Checkpointing at the cluster level. XPK is retained only for older environments.
 
-The `xpk` script provides a streamlined way to create a GKE cluster with all the required MTC settings. The key flags used are:
+After the cluster is created and configured, authenticate `kubectl` with the matching project and location:
 
-- `--enable-mtc`: Enables the Multi-Tier Checkpointing feature.
-- `--enable-gcsfuse-csi-driver`: Installs the required GCS FUSE CSI driver.
-- `--mtc-ramdisk-size`: Allocates an in-memory ramdisk on each node for fast, local checkpoints.
-- `--mtc-gcs-bucket`: Specifies the GCS bucket. It is not utilized in emergency checkpointing, but is needed to deploy checkpointing configurations.
+```bash
+gcloud container clusters get-credentials ${CLUSTER_NAME?} \
+   --zone ${ZONE?} \
+   --project ${PROJECT_ID?}
+```
+
+The cluster-level settings that must be enabled are:
+
+- **Multi-Tier Checkpointing**: Enables the required cluster-level checkpointing feature.
+- **GCS FUSE CSI driver**: Installs the required GCS FUSE CSI driver.
+- **Ramdisk size**: Allocates an in-memory ramdisk on each node for fast, local checkpoints.
+- **GCS bucket**: Specifies the bucket used by the checkpointing configuration.
 
 ### Calculating ramdisk size per host
 
@@ -59,7 +67,7 @@ Let's walk through an example for a large model.
 
 In this scenario, you should configure each pod in that slice with a ramdisk of at least **60 GB**.
 
-### Example XPK cluster creation command
+### Cluster configuration values
 
 1. **Set up environment variables:**
    ```bash
@@ -72,29 +80,41 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
    NUM_SLICES=<number of slices>
    RAMDISK_SIZE=<ramdisk size> #example: 60000Mi
    GKE_VERSION=<gke version> #example: 1.32.3-gke.1785000
+   COMPUTE_TYPE=<Cluster Toolkit compute type>
+   TOPOLOGY=<TPU topology>
    ```
 2. **Configure gcloud:**
    ```bash
    gcloud config set project ${PROJECT_ID?}
    gcloud config set compute/zone ${ZONE?}
    ```
-3. **Clone the XPK repository:**
-   ```bash
-   git clone [https://github.com/AI-Hypercomputer/xpk.git](https://github.com/AI-Hypercomputer/xpk.git)
-   ```
-4. **Run the cluster creation command:**
-   ```bash
-   python3 xpk/xpk.py cluster create \
-   --cluster ${CLUSTER_NAME?} \
-   --cluster-cpu-machine-type=${MACHINE_TYPE?} \
-   --num-slices=${NUM_SLICES?} \
-   --tpu-type=${TPU_TYPE?} \
-   --enable-mtc \
-   --enable-gcsfuse-csi-driver \
-   --mtc-ramdisk-size=${RAMDISK_SIZE?} \
-   --mtc-gcs-bucket=${OUTPUT_PATH?} \
-   --gke-version=${GKE_VERSION?}
-   ```
+3. **Configure the cluster:** Multi-Tier Checkpointing requires the `HighScaleCheckpointing` and `GcsFuseCsiDriver` addons to be enabled on your GKE cluster.
+
+   - **For an existing cluster**, update the cluster addons:
+     ```bash
+     gcloud container clusters update ${CLUSTER_NAME?} \
+       --update-addons=HighScaleCheckpointing=ENABLED,GcsFuseCsiDriver=ENABLED \
+       --location=${ZONE?}
+     ```
+
+   - **For a new cluster**, include the addons during cluster creation:
+     ```bash
+     gcloud container clusters create ${CLUSTER_NAME?} \
+       --addons=HighScaleCheckpointing,GcsFuseCsiDriver \
+       --location=${ZONE?} \
+       --cluster-version=${GKE_VERSION?}
+     ```
+
+   - **Verify that HighScaleCheckpointing is enabled**:
+     ```bash
+     gcloud container clusters describe ${CLUSTER_NAME?} \
+       --location=${ZONE?} \
+       --format="yaml(addonsConfig.highScaleCheckpointingConfig)"
+     ```
+     The output should confirm `enabled: true`.
+
+     > **Note:** If `HighScaleCheckpointing` is not enabled, Cluster Toolkit (`gcluster job submit`) will reject the workload submission with:
+     > `Error: Multi-Tier Checkpointing (MTC) requires the HighScaleCheckpointing addon to be enabled on the target GKE cluster.`
 
 ## MaxText configuration
 
@@ -124,48 +144,60 @@ While both features aim to protect against progress loss, they operate different
 
 For maximum reliability, both features can be enabled simultaneously.
 
-## Workload creation using XPK
+## Workload submission using Cluster Toolkit
 
-The flags below would give the user access to the ramdisk in their workload:
+The Cluster Toolkit workload must mount the ramdisk so the training process can access it:
 
 | Flag                  | Description                                                                                                                                                                     |
 | :-------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--mtc-enabled`       | Enables the Multi-Tier Checkpointing feature, by mounting ramdisk to the workload pods, using csi drivers.                                                                      |
-| `--ramdisk-directory` | Specifies the mount path inside each pod where the high-speed ramdisk will be accessible. Your training application should write its local, emergency checkpoints to this path. |
+| `--gke-mtc-enabled`     | Enables the Multi-Tier Checkpointing feature for the workload pods.                                                                      |
+| `--gke-mtc-ramdisk-dir` | Specifies the mount path inside each pod where the high-speed ramdisk will be accessible.                                                   |
 
-### Example XPK workload creation command
+### Example Cluster Toolkit workload submission
 
 1. **Set up environment variables:**
 
    ```bash
-   RAMDISK_DIRECTORY=<your ramdisk directory>
-   WORKLOAD_NAME=<YOUR WORKLOAD NAME>
-   TPU_TYPE=<tpu-type>
-   NUM_SLICES=<number of slices>
    PROJECT_ID=<project-id>
-   LOCAL_CHECKPOINT_PERIOD=<>
-   CHECKPOINT_PEROID=<checkpoint_period>
+   CLUSTER_NAME=<cluster-name>
+   ZONE=<zone>
+   RAMDISK_DIRECTORY=<your ramdisk directory> # example: /tmp/ramdisk
+   WORKLOAD_NAME=<YOUR WORKLOAD NAME>
+   LOCAL_CHECKPOINT_PERIOD=10
+   CHECKPOINT_PERIOD=<checkpoint_period>
    STEPS=<steps>
    DATA_PATH=<dataset path>
    OUTPUT_PATH=<gcs bucket output path>
+   COMPUTE_TYPE=<Cluster Toolkit compute type>
+   TOPOLOGY=<TPU topology>
    ```
 
 2. **Define the Docker image:**
 
    ```bash
-   DOCKER_IMAGE=gcr.io/${PROJECT_ID}/${USER}_mtc_runner:latest
+   # Official release pre-training image (recommended)
+   DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+   # Or your custom runner image:
+   # DOCKER_IMAGE="gcr.io/${PROJECT_ID}/${USER}_mtc_runner:latest"
    ```
 
 3. **Run the workload creation command:**
 
    ```bash
-   python3 xpk/xpk.py workload create \
-   --cluster ${CLUSTER_NAME?} \
-   --docker-image ${DOCKER_IMAGE?} \
-   --workload ${WORKLOAD_NAME?} \
-   --tpu-type=${TPU_TYPE?} \
-   --num-slices=${NUM_SLICES?} \
-   --ramdisk-directory=${RAMDISK_DIRECTORY?} \
-   --mtc-enabled \
-   --command "python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PEROID?} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=/${RAMDISK_DIRECTORY?}"
+   gcloud container clusters get-credentials ${CLUSTER_NAME?} \
+     --zone ${ZONE?} \
+     --project ${PROJECT_ID?}
+
+   gcluster job config set project ${PROJECT_ID?}
+   gcluster job config set cluster ${CLUSTER_NAME?}
+   gcluster job config set location ${ZONE?}
+
+   gcluster job submit \
+     --image=${DOCKER_IMAGE?} \
+     --name=${WORKLOAD_NAME?} \
+     --compute-type=${COMPUTE_TYPE?} \
+     --topology=${TOPOLOGY?} \
+     --gke-mtc-enabled \
+     --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
+     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PERIOD?} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?}"
    ```
