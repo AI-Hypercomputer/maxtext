@@ -1376,6 +1376,8 @@ vllm_hf_overrides: {}
 vllm_additional_config: {}
 # Whether to use the streaming target-free weight converter for trainer-side conversion
 use_weight_converter: false
+# Tensor parallelism per replica for rollout (-1 for auto-determined)
+rollout_tensor_parallelism: -1
 # Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax')
 rollout_backend: "maxtext"
 # Enable debug verification and checksum logging during weight sync

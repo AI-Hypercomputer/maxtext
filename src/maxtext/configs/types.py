@@ -2742,6 +2742,10 @@ class VLLM(BaseModel):
           "the legacy transfer_state_directly / transfer_state_with_mappings paths."
       ),
   )
+  rollout_tensor_parallelism: int = Field(
+      -1,
+      description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
+  )
   rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
       "maxtext",
       description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",

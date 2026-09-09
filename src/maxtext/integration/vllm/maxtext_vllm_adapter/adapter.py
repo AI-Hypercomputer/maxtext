@@ -271,10 +271,40 @@ class MaxTextForCausalLM(nnx.Module):
         attention_metadata_picked = next(iter(attention_metadata.values()))
       attention_metadata = attention_metadata_picked
 
+    # Extract optional arguments passed positionally or via kwargs from tpu-inference.
+    inputs_embeds = kwargs.get("inputs_embeds", args[0] if len(args) > 0 else None)
+    layer_name_to_kvcache_index = kwargs.get(
+        "layer_name_to_kvcache_index",
+        kwargs.get("_layer_name_to_kv_cache", args[2] if len(args) > 2 else None),
+    )
+
+    layer_map = None
+    if layer_name_to_kvcache_index is not None:
+      try:
+        layer_map = dict(layer_name_to_kvcache_index)
+      except (ValueError, TypeError):
+        layer_map = None
+
+    def _get_layer_cache_idx(m, lyr):
+      for key in (f"layer.{lyr}", f"layers.{lyr}", str(lyr), lyr):
+        if key in m:
+          return m[key]
+      return lyr
+
+    num_layers = getattr(
+        self.maxtext_config,
+        "base_num_decoder_layers",
+        len(kv_caches) if kv_caches is not None else 0,
+    )
+
+    if layer_map and kv_caches is not None:
+      model_kv_caches = [kv_caches[_get_layer_cache_idx(layer_map, i)] for i in range(num_layers)]
+    else:
+      model_kv_caches = kv_caches
+
     # MaxText decode treats vLLM's flattened tokens as a batch with seq_len=1.
     # MRoPE positions arrive channel-first and must also move their 3 channels
     # to MaxText's trailing dimension.
-    inputs_embeds = args[0] if args else None
     if inputs_embeds is not None:
       decoder_input_embeddings = inputs_embeds[:, None, :].astype(self.maxtext_config.dtype)
       # tpu-inference passes input_ids=None with precomputed embeddings. The
@@ -287,6 +317,21 @@ class MaxTextForCausalLM(nnx.Module):
 
     input_positions = normalize_vllm_input_positions(attention_metadata.input_positions)
 
+    # Filter kwargs to only those accepted by self.model.
+    model_kwargs = dict(kwargs)
+    for extra_key in (
+        "inputs_embeds",
+        "input_positions",
+        "layer_name_to_kvcache_index",
+        "_layer_name_to_kv_cache",
+        "shared_attention_metadata",
+        "intermediate_tensors",
+        "lora_metadata",
+        "is_first_rank",
+        "is_last_rank",
+    ):
+      model_kwargs.pop(extra_key, None)
+
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
       expert_indices = None
@@ -294,21 +339,31 @@ class MaxTextForCausalLM(nnx.Module):
           decoder_input_tokens=input_ids,
           decoder_input_embeddings=decoder_input_embeddings,
           decoder_positions=input_positions,
-          kv_caches=kv_caches,
+          kv_caches=model_kv_caches,
           attention_metadata=attention_metadata,
           model_mode=self.model_mode,
-          **kwargs,
+          **model_kwargs,
       )
 
       if isinstance(res, tuple) and len(res) == 3:
-        hidden, kv_caches, expert_indices = res
+        hidden, out_kv_caches, expert_indices = res
       else:
-        hidden, kv_caches = res
+        hidden, out_kv_caches = res
+
+      if layer_map and out_kv_caches is not None and kv_caches is not None:
+        updated_kv_caches = list(kv_caches)
+        for i in range(min(num_layers, len(out_kv_caches))):
+          idx = _get_layer_cache_idx(layer_map, i)
+          if idx < len(updated_kv_caches):
+            updated_kv_caches[idx] = out_kv_caches[i]
+        updated_kv_caches = type(kv_caches)(updated_kv_caches)
+      else:
+        updated_kv_caches = out_kv_caches
 
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
       hidden = hidden.reshape((-1, hidden.shape[-1]))
 
-    return kv_caches, hidden, aux_hidden_states, expert_indices
+    return updated_kv_caches, hidden, aux_hidden_states, expert_indices
 
   def forward(self, *args, **kwargs):
     """Alias for __call__ for compatibility.
