@@ -721,9 +721,11 @@ def vision_sft_preprocessing_pipeline(
             keep_aux_fields=False,  # drop aux to match train shape
         )
     )
-  dataset = dataset.map(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
 
-  dataset = dataset.to_iter_dataset()
+  if hasattr(dataset, "to_iter_dataset"):
+    dataset = dataset.to_iter_dataset()
+
+  dataset = dataset.map(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
       dataset, config, grain_worker_count, grain_per_worker_buffer_size
   )
