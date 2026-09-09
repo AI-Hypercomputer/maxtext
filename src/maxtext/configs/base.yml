@@ -1374,6 +1374,16 @@ vllm_hf_config_path: ""
 vllm_hf_overrides: {}
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
+# Whether to use the streaming target-free weight converter for trainer-side conversion
+use_weight_converter: false
+# Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax')
+rollout_backend: "maxtext"
+# Enable debug verification and checksum logging during weight sync
+weight_sync_debug: false
+# Whether to use Raiden FFI transport for weight sync (null derives from platform)
+use_raiden_ffi: null
+# Weight load format for vLLM in converter validation
+vllm_load_format: "dummy"
 # When use_jax_splash=true, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
 

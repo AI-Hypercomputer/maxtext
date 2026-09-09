@@ -2742,6 +2742,10 @@ class VLLM(BaseModel):
           "the legacy transfer_state_directly / transfer_state_with_mappings paths."
       ),
   )
+  rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
+      "maxtext",
+      description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
+  )
   weight_sync_debug: bool = Field(
       False,
       description=(
@@ -2759,6 +2763,17 @@ class VLLM(BaseModel):
           "initial load_checkpoint and pays XLA compilation; syncs 1+ reuse those "
           "executables, so the gap between them is how much of a sync is compilation "
           "rather than data movement. Adds one barrier per sync."
+      ),
+  )
+  use_raiden_ffi: Optional[bool] = Field(
+      None,
+      description=(
+          "Whether to use Raiden FFI transport for weight sync. When None (default), "
+          "FFI is automatically enabled under Pathways proxy if weight_synchronizer_ffi "
+          "is available, and disabled otherwise. Set to False to explicitly disable FFI "
+          "and fall back to host CPU staging (e.g. for unit testing on CPU, local debugging, "
+          "or environments where libtpu FFI binary is incompatible). Set to True to require "
+          "FFI and fail fast if unavailable."
       ),
   )
   vllm_load_format: str = Field(
