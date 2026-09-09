@@ -69,6 +69,11 @@ from maxtext.models import (
     qwen3_custom,
     simple_layer,
 )
+
+try:
+  from maxtext.models import lineage_adapter
+except ImportError:
+  lineage_adapter = None
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 from maxtext.utils.sharding import create_sharding
@@ -1954,51 +1959,28 @@ class NNXDecoder(nnx.Module):
                 **common_kwargs,
             )
           else:
-            y, self.dense_layers, _ = self._apply_layers_sequentially(
-                self.dense_layers,
-                y,
-                *layer_args,
-                length=cfg.first_num_dense_layers,
-                **layer_kwargs,
-            )
-
             num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
-
-            if cfg.use_batch_split_schedule:
-              policy = self.get_remat_policy()
-              mock_params = self._build_linen_params(self.moe_layers)
-
-              if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
-                y = deepseek_batchsplit_fp8.scan_batch_split_layers(
-                    y,
-                    mock_params,
-                    decoder_positions,
-                    decoder_segment_ids,
-                    model_mode=model_mode,
-                    mesh=self.mesh,
-                    quant=self.quant,
-                    cfg=cfg,
-                    policy=policy,
-                )
-              else:
-                # bf16 code path
-                y = deepseek_batchsplit.scan_batch_split_layers(
-                    y,
-                    mock_params,
-                    decoder_positions,
-                    mesh=self.mesh,
-                    cfg=cfg,
-                    num_layers=num_moe,
-                )
-            else:
-              y, self.moe_layers, _ = self._apply_layers_sequentially(
-                  self.moe_layers,
-                  y,
-                  *layer_args,
-                  length=num_moe,
-                  **layer_kwargs,
+            if getattr(cfg, "use_lineage", False):
+              dense_params = self.dense_layers
+              moe_params = self._build_linen_params(self.moe_layers)
+              y = lineage_adapter.run_lineage_dsv3(
+                  inputs=y,
+                  dense_params=dense_params,
+                  sparse_params=moe_params,
+                  decoder_positions=decoder_positions,
+                  mesh=self.mesh,
+                  cfg=cfg,
               )
-
+            else:
+              y = self._apply_deepseek_sequential_layers(
+                  y=y,
+                  num_moe=num_moe,
+                  decoder_positions=decoder_positions,
+                  decoder_segment_ids=decoder_segment_ids,
+                  model_mode=model_mode,
+                  layer_args=layer_args,
+                  layer_kwargs=layer_kwargs,
+              )
         elif self.is_deepseek4:
           y = self._apply_deepseek4_scanned_blocks(
               y,
@@ -2279,6 +2261,65 @@ class NNXDecoder(nnx.Module):
     if expert_indices is not None:
       return logits, hidden_state, kv_caches, expert_indices
     return logits, hidden_state, kv_caches
+
+  def _apply_deepseek_sequential_layers(
+      self,
+      y,
+      num_moe,
+      decoder_positions,
+      decoder_segment_ids,
+      model_mode,
+      layer_args,
+      layer_kwargs,
+  ):
+    """Applies standard DeepSeek sequential layers (dense layers followed by MoE layers)."""
+    cfg = self.config
+    y, self.dense_layers, _ = self._apply_layers_sequentially(
+        self.dense_layers,
+        y,
+        *layer_args,
+        length=cfg.first_num_dense_layers,
+        **layer_kwargs,
+    )
+
+    if cfg.use_batch_split_schedule:
+      policy = self.get_remat_policy()
+      mock_params = self._build_linen_params(self.moe_layers)
+
+      if (
+          cfg.quantization
+          and cfg.use_qwix_quantization
+          and not cfg.use_manual_quantization
+      ):
+        return deepseek_batchsplit_fp8.scan_batch_split_layers(
+            y,
+            mock_params,
+            decoder_positions,
+            decoder_segment_ids,
+            model_mode=model_mode,
+            mesh=self.mesh,
+            quant=self.quant,
+            cfg=cfg,
+            policy=policy,
+        )
+      # bf16 code path
+      return deepseek_batchsplit.scan_batch_split_layers(
+          y,
+          mock_params,
+          decoder_positions,
+          mesh=self.mesh,
+          cfg=cfg,
+          num_layers=num_moe,
+      )
+
+    y, self.moe_layers, _ = self._apply_layers_sequentially(
+        self.moe_layers,
+        y,
+        *layer_args,
+        length=num_moe,
+        **layer_kwargs,
+    )
+    return y
 
   def _apply_deepseek4_scanned_blocks(
       self,
