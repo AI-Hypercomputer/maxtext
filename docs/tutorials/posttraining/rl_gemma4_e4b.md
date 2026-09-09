@@ -108,11 +108,7 @@ Both files are already included under `src/maxtext/examples/chat_templates/`, so
 
 For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../build_maxtext.md).
 
-### Cluster Toolkit submission
-
-For a new GKE deployment, authenticate with `gcloud` and submit the RL trainer
-using Cluster Toolkit's `--pathways` option. Use a TPU compute type and topology that
-match the target cluster:
+### Submit your workload
 
 ```bash
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
