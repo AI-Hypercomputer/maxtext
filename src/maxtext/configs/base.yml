@@ -1550,3 +1550,12 @@ elastic_backup_kind: "snapshot"
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
+
+##### Reinforcement Learning parameters
+rl:
+  # Invocation index at which to start profiling for each RL role (actor, rollout).
+  # Tracks role function calls (update_actor, generate), NOT global training steps.
+  profiler_start_step: 2
+  # Number of role invocations to profile per role once profiler_start_step is reached.
+  # Trace deactivation and GCS uploads run asynchronously with Tunix default 60s timeout.
+  profiler_num_steps: 1

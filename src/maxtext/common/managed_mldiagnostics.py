@@ -42,7 +42,7 @@ class ManagedMLDiagnostics:
 
     return cls._instance
 
-  def __init__(self, config):
+  def __init__(self, config, sampler_config=None):
     """Initializes the ManagedMLDiagnostics, ensuring this method runs only once."""
     # We need a flag to ensure __init__ only runs once,
     # as the object is returned multiple times by __new__.
@@ -52,6 +52,9 @@ class ManagedMLDiagnostics:
     if not config.managed_mldiagnostics:
       return
 
+    if mldiag is None:
+      raise RuntimeError("managed_mldiagnostics is True, but google_cloud_mldiagnostics is not" " available.")
+
     # Set up the managed mldiagnostics for profiling and metrics uploading.
     def should_log_key(key, value):
       if key in KEYS_NO_LOGGING:
@@ -59,19 +62,28 @@ class ManagedMLDiagnostics:
       try:
         # Verify the value can be serialized to json. If not, we'll skip it.
         json.dumps(value, allow_nan=False)
-      except TypeError:
+      except (TypeError, ValueError):
         return False
       return True
 
     config_dict = {key: value for key, value in config.get_keys().items() if should_log_key(key, value)}
+    if sampler_config is not None and sampler_config is not config:
+      sampler_keys = sampler_config.get_keys()
+      for key, value in sampler_keys.items():
+        if key not in config_dict or config_dict[key] != value:
+          if should_log_key(key, value):
+            config_dict[f"sampler.{key}"] = value
 
     # Create a run for the managed mldiagnostics, and upload the configuration.
     region = config.managed_mldiagnostics_region if config.managed_mldiagnostics_region else None
+    storage_path = getattr(config, "managed_mldiagnostics_dir", "") or getattr(
+        config, "managed_mldiagnostics_storage_path", ""
+    )
     mldiag.machinelearning_run(
         name=f"{config.run_name}",
         run_group=config.managed_mldiagnostics_run_group,
         configs=config_dict,
-        gcs_path=config.managed_mldiagnostics_dir,
+        gcs_path=storage_path,
         on_demand_xprof=config.managed_mldiagnostics_on_demand_profiling,
         region=region,
     )

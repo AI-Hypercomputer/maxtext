@@ -3133,6 +3133,31 @@ class VLLM(BaseModel):
 class RL(BaseModel):
   """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
+  profiler_start_step: int = Field(
+      2,
+      ge=0,
+      description=(
+          "Function invocation index at which to start profiling for each RL"
+          " role (e.g. actor update and rollout generation). Passed to Tunix"
+          " RLProfileConfig. Note: this counts role function invocations"
+          " (`update_actor` and `generate`), NOT outer global training steps."
+          " Defaults to 2 to bypass initial JIT compilation, buffer allocation,"
+          " and autotuning warmup. Requires `profiler=xplane`."
+      ),
+  )
+  profiler_num_steps: int = Field(
+      1,
+      ge=1,
+      description=(
+          "Number of consecutive function invocations to profile per role once"
+          " `profiler_start_step` is reached. Defaults to 1 to capture"
+          " steady-state execution while avoiding host memory bloat and"
+          " oversized trace files. Note: trace deactivation and GCS uploads run"
+          " asynchronously in a background daemon thread governed by Tunix"
+          " RLProfileConfig's default 60s timeout."
+      ),
+  )
+
   num_generations: int = Field(2, description="Number of responses to generate per prompt (G in GRPO paper).")
   num_iterations: int = Field(1, ge=1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
@@ -3697,6 +3722,10 @@ class MaxTextConfig(
   lora: LoRA = Field(
       default_factory=LoRA,
       description="Configuration for LoRA / QLoRA adapters.",
+  )
+  rl: RL = Field(
+      default_factory=RL,
+      description=("Configuration for RL algorithms like Group Relative Policy" " Optimization (GRPO)."),
   )
   model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
@@ -5776,8 +5805,9 @@ class RLConfig(
         self.tokenizer_type = TokenizerType.HUGGINGFACE
       else:
         raise ValueError(
-            "model_name not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
-          Please pass tokenizer_path in your command."
+            "model_name not found in HF_IDS in"
+            " maxtext/src/maxtext/utils/globals.py. Please pass tokenizer_path"
+            " in your command."
         )
 
     if self.optimizer_memory_host_offload:
