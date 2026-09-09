@@ -14,6 +14,7 @@
 
 """Tests for TunixMaxTextAdapter segment_ids synthesis (CPU-only)."""
 
+import inspect
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -22,6 +23,8 @@ import pytest
 
 import jax.numpy as jnp
 import numpy as np
+
+from tunix.rl import common as tunix_common
 
 from maxtext.integration.tunix import tunix_adapter as tunix_adapter_module
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
@@ -115,6 +118,43 @@ class TunixAdapterSegmentIdsTest(unittest.TestCase):
     adapter(input_tokens, positions, None, None, decoder_segment_ids=explicit_seg)
 
     np.testing.assert_array_equal(np.asarray(self.base.captured["decoder_segment_ids"]), np.asarray(explicit_seg))
+
+  def test_segment_ids_alias_maps_to_decoder_segment_ids(self):
+    """Tunix passes packed segment ids under the name `segment_ids`; the
+    adapter must forward them as MaxText's `decoder_segment_ids` instead of
+    synthesizing a pad mask."""
+    adapter = TunixMaxTextAdapter(base_model=self.base, pad_id=99)
+
+    input_tokens = jnp.array([[10, 11, 12, 20, 21]], dtype=jnp.int32)
+    positions = jnp.array([[0, 1, 2, 0, 1]], dtype=jnp.int32)
+    packed_seg = jnp.array([[1, 1, 1, 2, 2]], dtype=jnp.int32)
+
+    adapter(input_tokens, positions, None, None, segment_ids=packed_seg)
+
+    np.testing.assert_array_equal(np.asarray(self.base.captured["decoder_segment_ids"]), np.asarray(packed_seg))
+
+  def test_segment_ids_is_named_so_the_tunix_gate_passes(self):
+    """Tunix forwards packed segment ids only when the model's call signature
+    names `segment_ids` (tunix.rl.common.model_call_contains). Pin the name
+    itself, not just the plumbing: the gate also accepts a `**kwargs`, so a
+    later refactor could keep the forwarding tests green while every packed
+    row silently reverts to whole-row attention."""
+    params = inspect.signature(TunixMaxTextAdapter.__call__).parameters
+    self.assertIn("segment_ids", params)
+    adapter = TunixMaxTextAdapter(base_model=self.base, pad_id=99)
+    self.assertTrue(tunix_common.model_call_contains(adapter, "segment_ids"))
+
+  def test_segment_ids_alias_takes_precedence_over_decoder_segment_ids(self):
+    adapter = TunixMaxTextAdapter(base_model=self.base, pad_id=99)
+
+    input_tokens = jnp.array([[10, 11, 12, 20, 21]], dtype=jnp.int32)
+    positions = jnp.array([[0, 1, 2, 0, 1]], dtype=jnp.int32)
+    packed_seg = jnp.array([[1, 1, 1, 2, 2]], dtype=jnp.int32)
+    other_seg = jnp.array([[7, 7, 7, 7, 7]], dtype=jnp.int32)
+
+    adapter(input_tokens, positions, None, None, decoder_segment_ids=other_seg, segment_ids=packed_seg)
+
+    np.testing.assert_array_equal(np.asarray(self.base.captured["decoder_segment_ids"]), np.asarray(packed_seg))
 
   def test_forwards_forced_routed_experts(self):
     """The stub captures the kwarg but nothing asserted on it, so deleting the

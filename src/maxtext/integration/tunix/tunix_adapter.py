@@ -109,10 +109,18 @@ class TunixMaxTextAdapter(nnx.Module):
       decoder_segment_ids: Optional[Array] = None,
       output_hidden_states: bool = False,  # ignored
       forced_routed_experts: Optional[Array] = None,
+      segment_ids: Optional[Array] = None,
   ) -> Tuple[Array, None]:
     """Forward compatible with Tunix Trainers default loss.
     Returns logits, None.
+
+    `segment_ids` is the name Tunix uses for packed-sequence segment ids: it
+    forwards them only to models whose call signature has a parameter of that
+    exact name. They are MaxText's `decoder_segment_ids`; when both are given,
+    `segment_ids` wins so packed rows keep per-sequence attention isolation.
     """
+    if segment_ids is not None:
+      decoder_segment_ids = segment_ids
     if decoder_segment_ids is None and self._pad_id is not None:
       decoder_segment_ids = (input_tokens != self._pad_id).astype(jnp.int32)
     logits = self.base(
