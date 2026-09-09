@@ -234,15 +234,6 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       output = sinkhorn(intermediate, self.sinkhorn_iterations)
       return output
 
-  def mapping(self, h: Array, alpha_scale: Array, beta: Array, scale: float, eps: float = 0.0):
-    """Helper function for both pre and post mappings after matmul."""
-    # In MaxText, we match weight precision to activations before Matmul
-    beta = jnp.asarray(beta, self.dtype)
-    alpha_scale = jnp.asarray(alpha_scale, self.dtype)
-    intermediate = alpha_scale * h + beta[None, None, :]
-    output = scale * jax.nn.sigmoid(intermediate) + eps
-    return output
-
   def __call__(
       self,
       norm_fn: Callable,
@@ -306,13 +297,15 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       h_res = h_concat[..., 2 * self.k :]
 
       # 2. Pre mapping
-      pre_mapping = self.mapping(
+      # Shared with the Pallas kernel so both paths gate identically. The
+      # helper computes in float32; cast back to keep the GEMM in self.dtype.
+      pre_mapping = mhc_kernel.compute_sigmoid_gate(
           h_pre,
           self.pre_alpha_scale[...],
           self.pre_beta[...],
-          1.0,
-          eps=1e-6,
-      )
+          multiplier=1.0,
+          epsilon=1e-6,
+      ).astype(self.dtype)
       # bskd, bsk -> bsd (fused contracted GEMM)
       layer_input = jnp.einsum(
           "bsk,bskd->bsd",
@@ -354,12 +347,13 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       return output, metadata
 
     # 5. Post mapping
-    post_mapping = self.mapping(
+    post_mapping = mhc_kernel.compute_sigmoid_gate(
         h_post,
         self.post_alpha_scale[...],
         self.post_beta[...],
-        2.0,
-    )
+        multiplier=2.0,
+        epsilon=0.0,
+    ).astype(self.dtype)
     # Moving away from einsum seems to allow XLA to perform better fusions
     # bsd,bsk -> bskd
     post_out = jnp.expand_dims(layer_out, axis=2) * jnp.expand_dims(post_mapping, axis=3)
