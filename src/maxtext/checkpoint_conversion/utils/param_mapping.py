@@ -1097,10 +1097,18 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
         if is_quantized:
           mapping.update(
               {
-                  f"{prefix}-attention-attention-query-kernel_scale": f"model.language_model.layers.{i}.self_attn.q_proj.weight_scale_inv",
-                  f"{prefix}-attention-attention-key-kernel_scale": f"model.language_model.layers.{i}.self_attn.k_proj.weight_scale_inv",
-                  f"{prefix}-attention-attention-value-kernel_scale": f"model.language_model.layers.{i}.self_attn.v_proj.weight_scale_inv",
-                  f"{prefix}-attention-attention-out-kernel_scale": f"model.language_model.layers.{i}.self_attn.o_proj.weight_scale_inv",
+                  f"{prefix}-attention-attention-query-kernel_scale": (
+                      f"model.language_model.layers.{i}.self_attn.q_proj.weight_scale_inv"
+                  ),
+                  f"{prefix}-attention-attention-key-kernel_scale": (
+                      f"model.language_model.layers.{i}.self_attn.k_proj.weight_scale_inv"
+                  ),
+                  f"{prefix}-attention-attention-value-kernel_scale": (
+                      f"model.language_model.layers.{i}.self_attn.v_proj.weight_scale_inv"
+                  ),
+                  f"{prefix}-attention-attention-out-kernel_scale": (
+                      f"model.language_model.layers.{i}.self_attn.o_proj.weight_scale_inv"
+                  ),
               }
           )
       else:
@@ -1131,7 +1139,9 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
                       f"model.language_model.layers.{i}.linear_attn.in_proj_qkv.weight_scale_inv",
                       f"model.language_model.layers.{i}.linear_attn.in_proj_z.weight_scale_inv",
                   ),
-                  f"{prefix}-attention-out_proj-kernel_scale": f"model.language_model.layers.{i}.linear_attn.out_proj.weight_scale_inv",
+                  f"{prefix}-attention-out_proj-kernel_scale": (
+                      f"model.language_model.layers.{i}.linear_attn.out_proj.weight_scale_inv"
+                  ),
               }
           )
 
@@ -1165,19 +1175,22 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
                     f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for e in range(num_experts)
                 ],
                 f"{prefix}-mlp-routed_experts-wi_0_scale": [
-                    f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv" for e in range(num_experts)
+                    f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv"
+                    for e in range(num_experts)
                 ],
                 f"{prefix}-mlp-routed_experts-wi_1": [
                     f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight" for e in range(num_experts)
                 ],
                 f"{prefix}-mlp-routed_experts-wi_1_scale": [
-                    f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv" for e in range(num_experts)
+                    f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv"
+                    for e in range(num_experts)
                 ],
                 f"{prefix}-mlp-routed_experts-wo": [
                     f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight" for e in range(num_experts)
                 ],
                 f"{prefix}-mlp-routed_experts-wo_scale": [
-                    f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv" for e in range(num_experts)
+                    f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv"
+                    for e in range(num_experts)
                 ],
             }
         )
@@ -1378,7 +1391,9 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       d_v_blocks = max(1, (V_per_K * D_v) // weight_block_size)
       q_scale = t_r[:, :d_k_blocks, :].reshape(H_k * d_k_blocks, -1)
       k_scale = t_r[:, d_k_blocks : 2 * d_k_blocks, :].reshape(H_k * d_k_blocks, -1)
-      v_scale = t_r[:, 2 * d_k_blocks : 2 * d_k_blocks + d_v_blocks, :].reshape(H_v * max(1, D_v // weight_block_size), -1)
+      v_scale = t_r[:, 2 * d_k_blocks : 2 * d_k_blocks + d_v_blocks, :].reshape(
+          H_v * max(1, D_v // weight_block_size), -1
+      )
       z_scale = t_r[:, 2 * d_k_blocks + d_v_blocks :, :].reshape(H_v * max(1, D_v // weight_block_size), -1)
       qkv_scale = np.concatenate([q_scale, k_scale, v_scale], axis=0)
       return qkv_scale, z_scale
@@ -1419,21 +1434,6 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       a_r = a_m.reshape(H_k, V_per_K, -1)
       interleaved = np.concatenate([b_r, a_r], axis=1)
       return interleaved.reshape(-1, b_m.shape[-1]).T
-
-  def reshape_scale(input_tensor, target_shape=None):
-    if isinstance(input_tensor, (list, tuple)):
-      flat_elements = [np.asarray(t).ravel() for t in input_tensor]
-      concat = np.concatenate(flat_elements, axis=0)
-      if target_shape == () or target_shape is None:
-        return np.mean(concat).astype(np.float32)
-      return concat.reshape(target_shape)
-    if target_shape == () or (target_shape is not None and len(target_shape) == 0):
-      return np.mean(input_tensor).astype(np.float32)
-    if target_shape is None:
-      return input_tensor
-    if input_tensor.ndim == 2:
-      return input_tensor.transpose().reshape(target_shape)
-    return input_tensor.reshape(target_shape)
 
   is_quantized = getattr(maxtext_config, "weight_dtype", None) in (
       "float8_e4m3fn",
@@ -4467,6 +4467,7 @@ PARAM_MAPPING = {
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3.5-397b-a17b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-a3b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4523,6 +4524,7 @@ HOOK_FNS = {
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3.5-397b-a17b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-a3b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,

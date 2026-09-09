@@ -84,6 +84,7 @@ HF_IDS = {
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
     "qwen3-next-80b-a3b": "Qwen/Qwen3-Next-80B-A3B-Instruct",
     "qwen3.5-397b-a17b": "Qwen/Qwen3.5-397B-A17B",
+    "qwen3.5-397b-a17b-fp8": "Qwen/Qwen3.5-397B-A17B-FP8",
     "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
     "qwen3.5-35b-a3b-fp8": "Qwen/Qwen3.5-35B-A3B-FP8",
     "qwen3.5-35b-fp8": "Qwen/Qwen3.5-35B-A3B-FP8",

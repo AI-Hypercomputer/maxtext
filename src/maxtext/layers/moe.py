@@ -692,29 +692,34 @@ class RoutedMoE(nnx.Module):
         wi_scale_shape = (num_experts,)
         wo_scale_shape = (self.num_experts,)
 
+      # If using block-wise tiling, kernel scales are replicated for the block tile dimensions
+      # rather than sharded since it does not take significant memory.
+      wi_scale_sharding = (self.wi_kernel_axes[0],) + (None,) * (len(wi_scale_shape) - 1)
+      wo_scale_sharding = (self.wo_kernel_axes[0],) + (None,) * (len(wo_scale_shape) - 1)
+
       if self.config.prefuse_moe_weights:
         self.wi_scale = nnx.Param(
             jnp.ones(wi_scale_shape, dtype=scale_dtype),
-            sharding=self.wi_kernel_axes,
+            sharding=wi_scale_sharding,
         )
         self.wo_scale = nnx.Param(
             jnp.ones(wo_scale_shape, dtype=scale_dtype),
-            sharding=self.wo_kernel_axes,
+            sharding=wo_scale_sharding,
         )
         self.wi_0_scale = None
         self.wi_1_scale = None
       else:
         self.wi_0_scale = nnx.Param(
             jnp.ones(wi_scale_shape, dtype=scale_dtype),
-            sharding=self.wi_kernel_axes,
+            sharding=wi_scale_sharding,
         )
         self.wi_1_scale = nnx.Param(
             jnp.ones(wi_scale_shape, dtype=scale_dtype),
-            sharding=self.wi_kernel_axes,
+            sharding=wi_scale_sharding,
         )
         self.wo_scale = nnx.Param(
             jnp.ones(wo_scale_shape, dtype=scale_dtype),
-            sharding=self.wo_kernel_axes,
+            sharding=wo_scale_sharding,
         )
         self.wi_scale = None
     else:
