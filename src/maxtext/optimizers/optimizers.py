@@ -22,7 +22,13 @@ import jax.numpy as jnp
 import optax
 from optax.contrib._muon import muon
 from maxtext.common.common_types import DecoderBlockType
+from maxtext.utils import max_logging
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
+
+# Cap on how many frozen parameter paths to name in the log. Enough to confirm a
+# mask hit what was intended without printing one line per layer on a 60-layer
+# MoE model.
+_MAX_LOGGED_FROZEN_PATHS = 12
 
 
 def _get_path_mask_fn(patterns, match_returns_true=True):
@@ -63,13 +69,41 @@ def apply_trainable_parameters_mask(base_opt, config):
   if freeze_mask_fn is None:
     return base_opt
 
+  def _label_params(params):
+    """Labels every parameter array, and reports what the mask actually did.
+
+    `trainable_parameters_mask` is a whitelist, so expressing "freeze only X"
+    needs a negative pattern -- and a pattern that matches nothing freezes the
+    whole model. That failure is otherwise silent: gradients are still computed
+    and `grad_norm` looks normal, only the updates are zeroed. Log the counts
+    once so the intent is checkable against the run log.
+    """
+    labels = jax.tree_util.tree_map(
+        lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)
+    )
+    leaves = jax.tree_util.tree_flatten_with_path(labels)[0]
+    frozen = [p for p, v in leaves if v == "frozen"]
+    max_logging.log(
+        f"trainable_parameters_mask={trainable_patterns}: freezing {len(frozen)}"
+        f" of {len(leaves)} parameter arrays"
+    )
+    if not frozen:
+      max_logging.log("  WARNING: mask froze nothing -- did the pattern match everything?")
+    elif len(frozen) == len(leaves):
+      max_logging.log("  WARNING: mask froze EVERY parameter -- training is a no-op")
+    for path in frozen[:_MAX_LOGGED_FROZEN_PATHS]:
+      max_logging.log(f"  frozen: {jax.tree_util.keystr(path, simple=True, separator='/')}")
+    if len(frozen) > _MAX_LOGGED_FROZEN_PATHS:
+      max_logging.log(f"  ... and {len(frozen) - _MAX_LOGGED_FROZEN_PATHS} more")
+    return labels
+
   # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
   # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
   # massive states (momentum, variance) for the entire model before zeroing the updates.
   # By using multi_transform, only the trainable parameters get states allocated.
   return optax.multi_transform(
       {"trainable": base_opt, "frozen": optax.set_to_zero()},
-      lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
+      _label_params,
   )
 
 
