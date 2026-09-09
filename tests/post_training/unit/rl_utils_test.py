@@ -18,6 +18,7 @@ import unittest
 import pytest
 from types import SimpleNamespace
 
+from maxtext.configs import types
 from maxtext.trainers.post_train.rl import utils_rl
 
 pytestmark = [pytest.mark.post_training]
@@ -299,16 +300,28 @@ class TestExtractHashAnswer(unittest.TestCase):
 class TestGetOptimizer(unittest.TestCase):
   """Tests for utils_rl.get_optimizer."""
 
-  def _make_optimizer_config(self, gradient_clipping_threshold=0.0):
-    return SimpleNamespace(
+  def _make_optimizer_config(self, gradient_clipping_threshold=0.0, **overrides):
+    # These are the fields the shared schedule builder reads. `RLConfig` resolves
+    # `learning_rate_schedule_steps == -1` to `train_steps` and mirrors `steps`
+    # onto it, so a stand-in namespace has to do the same or it is not testing
+    # the configuration a real run sees.
+    fields = dict(
         learning_rate=1e-4,
+        lr_schedule_type=types.LearningRateScheduleType.COSINE,
+        learning_rate_final_fraction=0.1,
+        wsd_decay_steps_fraction=0.1,
+        wsd_decay_style=types.WsdDecayStyle.LINEAR,
         warmup_steps_fraction=0.1,
         gradient_clipping_threshold=gradient_clipping_threshold,
         adam_b1=0.9,
         adam_b2=0.999,
         adam_weight_decay=0.01,
         train_steps=100,
+        steps=100,
+        learning_rate_schedule_steps=100,
     )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
 
   def test_returns_optimizer_without_clipping(self):
     """get_optimizer returns an optax optimizer when gradient clipping is disabled."""
@@ -330,6 +343,39 @@ class TestGetOptimizer(unittest.TestCase):
     params = {"w": jnp.ones(3)}
     state = opt.init(params)
     self.assertIn("learning_rate", state.hyperparams)
+
+  def test_trainable_parameters_mask_freezes_the_rest(self):
+    """`trainable_parameters_mask` must apply on the RL path too.
+
+    It used to be read only by `optimizers.get_optimizer`, which RL never
+    calls, so the flag silently did nothing here: every parameter kept
+    training, including any the recipe meant to freeze (e.g. the MoE router).
+    """
+    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+
+    # No warmup, so the very first step already runs at the peak LR and a
+    # non-zero update is evidence of training rather than of the schedule.
+    config = self._make_optimizer_config(warmup_steps_fraction=0.0, trainable_parameters_mask=["keep_w"])
+    opt = utils_rl.get_optimizer(config)
+    params = {"keep_w": jnp.ones(3), "drop_w": jnp.ones(3)}
+    grads = {"keep_w": jnp.ones(3), "drop_w": jnp.ones(3)}
+    updates, _ = opt.update(grads, opt.init(params), params)
+
+    self.assertTrue(bool(jnp.all(updates["drop_w"] == 0.0)), "masked-out parameter still received an update")
+    self.assertTrue(bool(jnp.all(updates["keep_w"] != 0.0)), "whitelisted parameter received no update")
+
+  def test_no_trainable_parameters_mask_trains_everything(self):
+    """An empty mask (the default) must leave every parameter trainable."""
+    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+
+    config = self._make_optimizer_config(warmup_steps_fraction=0.0)
+    opt = utils_rl.get_optimizer(config)
+    params = {"keep_w": jnp.ones(3), "drop_w": jnp.ones(3)}
+    grads = {"keep_w": jnp.ones(3), "drop_w": jnp.ones(3)}
+    updates, _ = opt.update(grads, opt.init(params), params)
+
+    for name in params:
+      self.assertTrue(bool(jnp.all(updates[name] != 0.0)), f"{name} was frozen with no mask configured")
 
 
 class TestFormatMaxTextMessages(unittest.TestCase):

@@ -171,6 +171,60 @@ class RLLearningRateScheduleTest(unittest.TestCase):
     self.assertLessEqual(_effective_lr_at_step(opt, 20), 0.4 * peak)
     self.assertGreaterEqual(_effective_lr_at_step(opt, int(0.1 * schedule_len) + 5), 0.9 * peak)
 
+  def test_constant_learning_rate(self):
+    """A constant LR must be reachable through the shared schedule knobs.
+
+    Most RLHF recipes (and the MLPerf RL reference) train at a fixed learning
+    rate with no warmup. That is `warmup_steps_fraction=0` plus
+    `learning_rate_final_fraction=1.0`, which collapses the cosine leg to a
+    flat line. Before the schedule was shared with pretraining, RL hardcoded
+    `end_value=0.0` and there was no way to express this.
+    """
+    peak = 3e-6
+    config = _make_config(
+        learning_rate=peak,
+        warmup_steps_fraction=0.0,
+        learning_rate_final_fraction=1.0,
+        gradient_clipping_threshold=0.0,
+        num_batches=100,
+        num_epoch=1,
+        train_fraction=1.0,
+        learning_rate_schedule_steps=-1,
+    )
+    opt = utils_rl.get_optimizer(config)
+    for step in (0, 1, config.train_steps // 2, config.train_steps - 1):
+      self.assertAlmostEqual(
+          _effective_lr_at_step(opt, step),
+          peak,
+          delta=1e-9,
+          msg=f"LR drifted from the configured constant at step {step}.",
+      )
+
+  def test_learning_rate_final_fraction_is_honoured(self):
+    """The schedule must decay to `learning_rate_final_fraction * peak`.
+
+    Guards the previously hardcoded `end_value=0.0`: a run configured to hold
+    25% of peak at the end would silently have decayed all the way to zero.
+    """
+    peak = 3e-6
+    config = _make_config(
+        learning_rate=peak,
+        warmup_steps_fraction=0.0,
+        learning_rate_final_fraction=0.25,
+        gradient_clipping_threshold=0.0,
+        num_batches=100,
+        num_epoch=1,
+        train_fraction=1.0,
+        learning_rate_schedule_steps=-1,
+    )
+    opt = utils_rl.get_optimizer(config)
+    self.assertAlmostEqual(_effective_lr_at_step(opt, 0), peak, delta=1e-9)
+    self.assertAlmostEqual(
+        _effective_lr_at_step(opt, config.train_steps - 1),
+        0.25 * peak,
+        delta=1e-9,
+    )
+
   def test_validator_overwrites_minus_one_sentinel(self):
     """ROOT-CAUSE characterization (effective-value assertion).
 

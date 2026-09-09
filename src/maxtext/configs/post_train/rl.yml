@@ -132,6 +132,12 @@ eval_interval: 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 num_epoch: 1  # can potentially train for more epochs
 
 learning_rate: 3e-6
+# The RL path uses the same schedule builder as pretraining, so lr_schedule_type,
+# warmup_steps_fraction and learning_rate_final_fraction all apply here. 0.0
+# keeps the historical RL behaviour of decaying to zero (base.yml defaults to
+# 0.1). For a constant learning rate with no warmup -- what most RLHF recipes
+# assume -- set learning_rate_final_fraction=1.0 and warmup_steps_fraction=0.0.
+learning_rate_final_fraction: 0.0
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
 adam_b2: 0.99 # Exponential decay rate to track the second moment of past gradients.
 gradient_clipping_threshold: 0.1

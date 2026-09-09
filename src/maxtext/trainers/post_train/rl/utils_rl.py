@@ -30,8 +30,9 @@ from math_verify import parse
 
 from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_template_parser
 
+from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.rl.math_verify_pool import math_verify_pool, verify_math_worker
-from maxtext.utils import max_logging
+from maxtext.utils import max_logging, maxtext_utils
 
 
 EPSILON = 1e-6
@@ -587,38 +588,25 @@ def check_correctness(extracted_response: str, acceptable_answers: list[str], tm
 def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
   """Function to obtain an optax optimizer, currently we use adamw.
 
-  The LR schedule length defaults to the actual RL run length
-  (`max_train_steps` = num_batches * num_iterations * train_fraction *
-  num_epoch). RL does not use the top-level `steps` (a pretraining concept) for
-  its run length, so the schedule must track `max_train_steps`, not `steps`.
+  The schedule is the shared MaxText one
+  (`maxtext_utils.create_learning_rate_schedule`), so `lr_schedule_type`,
+  `warmup_steps_fraction` and `learning_rate_final_fraction` mean here exactly
+  what they mean in pretraining. RL recipes that want a constant learning
+  rate -- the common default in the RLHF literature -- set
+  `warmup_steps_fraction=0` together with `learning_rate_final_fraction=1.0`,
+  which degenerates the cosine leg to a flat line.
 
-  `learning_rate_schedule_steps` may be set to decouple the schedule shape from
-  the run length (e.g. to match a fixed schedule across runs with different
-  num_batches). It is honored only as a deliberate override: the config
-  validator (`MaxTextConfig.set_derived_and_validate_values`) rewrites
-  `learning_rate_schedule_steps == -1` to `steps` before this runs, so a value
-  equal to `steps` means "unset" and falls back to `max_train_steps`; only a
-  value that differs from `steps` is treated as an explicit schedule length.
+  The schedule length is `learning_rate_schedule_steps`, which `RLConfig`
+  derives from `train_steps` (= num_batches * num_iterations * train_fraction *
+  num_epoch) when it is left at -1. RL does not use the top-level `steps` for
+  its run length -- that is a pretraining concept -- so `RLConfig` also mirrors
+  `steps` onto `train_steps`. Setting `learning_rate_schedule_steps` explicitly
+  decouples the schedule shape from the run length, e.g. to match a fixed
+  schedule across runs with different num_batches; a schedule shorter than the
+  run leaves the remaining steps at learning rate 0, and one longer than the
+  run simply ends partway through.
   """
-  lr_schedule_steps = getattr(tmvp_config, "learning_rate_schedule_steps", -1)
-  config_steps = getattr(tmvp_config, "steps", -1)
-  if lr_schedule_steps is not None and lr_schedule_steps > 0 and lr_schedule_steps != config_steps:
-    # Deliberate decoupling of the schedule length from the run length.
-    schedule_steps = lr_schedule_steps
-  else:
-    schedule_steps = tmvp_config.train_steps
-  schedule = optax.schedules.warmup_cosine_decay_schedule(
-      init_value=0.0,
-      peak_value=tmvp_config.learning_rate,
-      # Linearly increase learning rate from 0. to learning_rate in the first
-      # warmup_steps_fraction × schedule_steps steps, then cosine-decay to 0
-      # over the remaining schedule_steps. When schedule_steps > tmvp_config.train_steps
-      # the run ends partway through the schedule (useful for matching a fixed
-      # GPU LR schedule across TPU runs with different num_batches).
-      warmup_steps=int(tmvp_config.warmup_steps_fraction * schedule_steps),
-      decay_steps=schedule_steps,
-      end_value=0.0,
-  )
+  schedule = maxtext_utils.create_learning_rate_schedule(tmvp_config)
 
   # TODO: @mazumdera: try optimizer offloading with adamw
   # Add gradient clipping if specified
@@ -628,14 +616,18 @@ def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
     transforms = []
     if tmvp_config.gradient_clipping_threshold > 0:
       transforms.append(optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold))
-    transforms.append(
-        optax.adamw(
-            learning_rate=learning_rate,
-            b1=tmvp_config.adam_b1,
-            b2=tmvp_config.adam_b2,
-            weight_decay=tmvp_config.adam_weight_decay,
-        )
+    adamw = optax.adamw(
+        learning_rate=learning_rate,
+        b1=tmvp_config.adam_b1,
+        b2=tmvp_config.adam_b2,
+        weight_decay=tmvp_config.adam_weight_decay,
     )
+    # Honour `trainable_parameters_mask` (e.g. to freeze the MoE router during
+    # RL). The pretraining path gets this from `optimizers.get_optimizer`,
+    # which the RL path never calls. Applied to AdamW alone rather than to the
+    # chain so clipping still sees the full gradient tree, matching
+    # `maxtext_utils.apply_gradient_clipping`.
+    transforms.append(optimizers.apply_trainable_parameters_mask(adamw, tmvp_config))
     return optax.chain(*transforms)
 
   # Wrap the entire optimizer (including gradient clipping) with

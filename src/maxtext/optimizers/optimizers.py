@@ -49,6 +49,30 @@ def get_adamw_mask(config):
   return _get_path_mask_fn(getattr(config, "adamw_mask", None), match_returns_true=False)
 
 
+def apply_trainable_parameters_mask(base_opt, config):
+  """Freeze every parameter not matched by `config.trainable_parameters_mask`.
+
+  Returns `base_opt` unchanged when the mask is empty, so callers can apply this
+  unconditionally. Wrap only the optimizer itself, not a chain that includes
+  gradient clipping: clipping must see the whole gradient tree so the global
+  norm is the same with and without freezing.
+  """
+  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
+  trainable_patterns = getattr(config, "trainable_parameters_mask", None)
+  freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
+  if freeze_mask_fn is None:
+    return base_opt
+
+  # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
+  # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
+  # massive states (momentum, variance) for the entire model before zeroing the updates.
+  # By using multi_transform, only the trainable parameters get states allocated.
+  return optax.multi_transform(
+      {"trainable": base_opt, "frozen": optax.set_to_zero()},
+      lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
+  )
+
+
 def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
   """Computes mean and unbiased std (Bessel's correction) over a rolling window."""
   valid_elements = jnp.minimum(count, interval)
@@ -236,20 +260,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
     )
 
   # If a whitelist of trainable parameters is provided, freeze everything else.
-  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
-  trainable_patterns = getattr(config, "trainable_parameters_mask", None)
-  freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
-  if freeze_mask_fn is not None:
-    # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
-    # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
-    # massive states (momentum, variance) for the entire model before zeroing the updates.
-    # By using multi_transform, only the trainable parameters get states allocated.
-    return optax.multi_transform(
-        {"trainable": base_opt, "frozen": optax.set_to_zero()},
-        lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
-    )
-
-  return base_opt
+  return apply_trainable_parameters_mask(base_opt, config)
 
 
 def adam_pax(
