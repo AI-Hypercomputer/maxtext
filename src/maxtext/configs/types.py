@@ -2708,6 +2708,10 @@ class VLLM(BaseModel):
       "maxtext",
       description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
   )
+  rollout_tensor_parallelism: int = Field(
+      -1,
+      description="Tensor parallelism per replica for rollout. If -1, defaults to 1.",
+  )
   weight_sync_debug: bool = Field(
       False,
       description=(

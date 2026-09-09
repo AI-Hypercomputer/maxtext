@@ -61,21 +61,33 @@ _MOE_MLP_WEIGHTS = MOE_MLP_WEIGHT_NAMES
 
 
 def resolve_rollout_tp(config: Any, tp: int = 1) -> int:
-  """Resolves rollout TP from override, config, or default."""
+  """Resolves rollout TP strictly from caller override, config, or default (1)."""
   if tp > 1:
     return int(tp)
-  config_tp = 0
   if config is not None:
-    raw_tp = (
-        getattr(config, "rollout_tensor_parallelism", 0)
-        or getattr(getattr(config, "cluster", None), "rollout_tensor_parallelism", 0)
-        or 0
-    )
-    config_tp = max(0, int(raw_tp))
-  env_tp = int(os.environ.get("ROLLOUT_TENSOR_PARALLELISM", 0) or os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE", 0) or 0)
-  if config_tp > 0 and env_tp > 0 and config_tp != env_tp:
-    raise ValueError(f"Rollout TP mismatch: config specifies {config_tp} but environment specifies {env_tp}.")
-  return int(config_tp or env_tp or 1)
+    raw_tp = getattr(config, "rollout_tensor_parallelism", None)
+    if raw_tp is None and isinstance(config, dict):
+      raw_tp = config.get("rollout_tensor_parallelism")
+    try:
+      if raw_tp is not None and int(raw_tp) > 0:
+        return int(raw_tp)
+    except (ValueError, TypeError):
+      pass
+
+    cluster = getattr(config, "cluster", None)
+    if cluster is None and isinstance(config, dict):
+      cluster = config.get("cluster")
+    if cluster is not None:
+      cluster_tp = getattr(cluster, "rollout_tensor_parallelism", None)
+      if cluster_tp is None and isinstance(cluster, dict):
+        cluster_tp = cluster.get("rollout_tensor_parallelism")
+      try:
+        if cluster_tp is not None and int(cluster_tp) > 0:
+          return int(cluster_tp)
+      except (ValueError, TypeError):
+        pass
+
+  return 1
 
 
 def is_pathways_environment() -> bool:
@@ -567,7 +579,7 @@ def _align_per_axis(
 
 
 @functools.partial(jax.jit, static_argnames=("tgt_shape", "n_shards", "axis", "lane_size"))
-def _interleave_moe_weights(
+def _interleave_moe_weights(  # pylint: disable=too-many-positional-arguments
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
     tgt_shape: Tuple[int, ...],
@@ -646,7 +658,7 @@ def _interleave_moe_weights(
         "tgt_fused_axis",
     ),
 )
-def _fuse_and_unstack_moe(
+def _fuse_and_unstack_moe(  # pylint: disable=too-many-positional-arguments,unused-argument
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
     scan_axis: int,

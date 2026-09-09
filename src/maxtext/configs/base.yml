@@ -1371,6 +1371,12 @@ vllm_hf_overrides: {}
 vllm_additional_config: {}
 # When use_jax_splash=true, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
+# Whether to use explicit weight converter for trainer->rollout sync
+use_weight_converter: false
+# Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax')
+rollout_backend: "maxtext"
+# Tensor parallelism for rollout models (-1 is unset, defaults to 1)
+rollout_tensor_parallelism: -1
 
 ################################## DeepSeek Manifold-Constrained Hyper Connections (mHC) ##################################
 # The number of parallel streams in Hyper Connection.

@@ -104,27 +104,62 @@ class ConvertUtilsTest(unittest.TestCase):
     np.testing.assert_array_equal(out[150:200], np.arange(150, 200))
 
   @pytest.mark.cpu_only
-  def test_resolve_rollout_tp_conflict_raises(self):
-    cfg = SimpleNamespace(cluster=SimpleNamespace(rollout_tensor_parallelism=4))
-    with mock.patch.dict(os.environ, {"ROLLOUT_TENSOR_PARALLELISM": "2"}):
-      with self.assertRaisesRegex(ValueError, "Rollout TP mismatch"):
-        resolve_rollout_tp(cfg)
+  def test_resolve_rollout_tp_from_config(self):
+    cfg = SimpleNamespace(rollout_tensor_parallelism=4)
+    self.assertEqual(resolve_rollout_tp(cfg), 4)
 
   @pytest.mark.cpu_only
-  def test_resolve_rollout_tp_success(self):
-    cfg = SimpleNamespace(cluster=SimpleNamespace(rollout_tensor_parallelism=4))
-    with mock.patch.dict(os.environ, {"ROLLOUT_TENSOR_PARALLELISM": "4"}):
-      self.assertEqual(resolve_rollout_tp(cfg), 4)
+  def test_resolve_rollout_tp_from_cluster_config(self):
+    cfg = SimpleNamespace(cluster=SimpleNamespace(rollout_tensor_parallelism=2))
+    self.assertEqual(resolve_rollout_tp(cfg), 2)
 
   @pytest.mark.cpu_only
-  def test_resolve_rollout_tp_fallback_parallel_size_env(self):
-    # Tests that ROLLOUT_TENSOR_PARALLEL_SIZE is recognized when config defaults to -1
-    cfg = SimpleNamespace(rollout_tensor_parallelism=-1)
+  def test_resolve_rollout_tp_cluster_fallback_when_unset(self):
+    cfg = SimpleNamespace(
+        rollout_tensor_parallelism=-1,
+        cluster=SimpleNamespace(rollout_tensor_parallelism=4),
+    )
+    self.assertEqual(resolve_rollout_tp(cfg), 4)
+
+  @pytest.mark.cpu_only
+  def test_resolve_rollout_tp_unset_defaults_to_one(self):
+    # Default -1 in MaxText config means unset -> defaults to 1
+    self.assertEqual(resolve_rollout_tp(SimpleNamespace(rollout_tensor_parallelism=-1)), 1)
+    self.assertEqual(resolve_rollout_tp(SimpleNamespace(rollout_tensor_parallelism=0)), 1)
+    self.assertEqual(resolve_rollout_tp(SimpleNamespace(rollout_tensor_parallelism=None)), 1)
+    self.assertEqual(resolve_rollout_tp(SimpleNamespace()), 1)
+    self.assertEqual(resolve_rollout_tp(None), 1)
+
+  @pytest.mark.cpu_only
+  def test_resolve_rollout_tp_dict_config(self):
+    self.assertEqual(resolve_rollout_tp({"rollout_tensor_parallelism": 4}), 4)
+    self.assertEqual(
+        resolve_rollout_tp({"rollout_tensor_parallelism": -1, "cluster": {"rollout_tensor_parallelism": 2}}),
+        2,
+    )
+    self.assertEqual(resolve_rollout_tp({"rollout_tensor_parallelism": 0}), 1)
+
+  @pytest.mark.cpu_only
+  def test_resolve_rollout_tp_explicit_override(self):
+    cfg = SimpleNamespace(rollout_tensor_parallelism=4)
+    self.assertEqual(resolve_rollout_tp(cfg, tp=8), 8)
+    self.assertEqual(resolve_rollout_tp(None, tp=2), 2)
+
+  @pytest.mark.cpu_only
+  def test_resolve_rollout_tp_ignores_env_vars(self):
+    # Verify environment variables have no effect whatsoever
+    cfg = SimpleNamespace(rollout_tensor_parallelism=2)
     with mock.patch.dict(
         os.environ,
-        {"ROLLOUT_TENSOR_PARALLEL_SIZE": "2", "ROLLOUT_TENSOR_PARALLELISM": ""},
+        {
+            "ROLLOUT_TENSOR_PARALLELISM": "99",
+            "ROLLOUT_TENSOR_PARALLEL_SIZE": "99",
+        },
     ):
       self.assertEqual(resolve_rollout_tp(cfg), 2)
+      cfg_unset = SimpleNamespace(rollout_tensor_parallelism=-1)
+      self.assertEqual(resolve_rollout_tp(cfg_unset), 1)
+      self.assertEqual(resolve_rollout_tp(None), 1)
 
   @pytest.mark.cpu_only
   def test_get_host_rss_mb(self):
