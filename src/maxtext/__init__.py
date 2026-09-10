@@ -20,9 +20,24 @@ while staying simple and "optimization-free" thanks to the power of Jax and the 
 
 # pylint: disable=undefined-all-variable, import-outside-toplevel
 
+from typing import TYPE_CHECKING
+
 from maxtext.version import __author__
 from maxtext.version import __description__
 from maxtext.version import __version__
+
+# Static analysis tools (such as Pylint and Pytype) statically parse ASTs without
+# executing PEP 562 __getattr__. We declare the lazy exports inside `if TYPE_CHECKING:`
+# so linters and IDEs resolve exports without eagerly importing heavy dependencies at runtime.
+if TYPE_CHECKING:
+  from collections.abc import Sequence
+  from jax.sharding import Mesh
+  from maxtext.configs import pyconfig
+  from maxtext.configs.types import MaxTextConfig
+  from maxtext.models import models
+  from maxtext.models.models import Transformer, transformer_as_linen
+  from maxtext.utils import maxtext_utils, model_creation_utils
+  from maxtext.utils.model_creation_utils import from_config, from_pretrained
 
 __all__ = [
     "__author__",
