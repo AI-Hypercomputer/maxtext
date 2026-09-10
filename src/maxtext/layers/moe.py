@@ -3607,6 +3607,10 @@ class RoutedMoE(nnx.Module):
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
+    if getattr(self.config, "record_router_similarity_metrics", False):
+      _, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
+      self.router_selections = nnx.Intermediate(top_k_indices)
+
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
 
     fused_kernel = None
