@@ -27,7 +27,7 @@ Multi-tier checkpointing stores checkpoints across multiple tiers of storage:
 
 - **GCS Checkpointing**: This involves saving the model state directly to durable storage like GCS. However, this can be slow at larger model/cluster scales, blocking training, and leading to redundant data copies.
 - **Emergency/Ramdisk Checkpointing**: While this method uses a low-latency ramdisk for checkpointing, Orbax manages the GCS save and restore operations at the workload level. As a result, saving to GCS blocks the training process during the device-to-host data transfer.
-- **Multi-tier Checkpointing (Ramdisk + GCS)**: This approach combines the speed of ramdisk, the resilience of in-cluster replication, and the durability of GCS to offer a more robust and efficient solution. With Multi-Tier Checkpointing, above blocking issue is resolved because the GCS save is handled at the service level, operating on the checkpoint already saved locally.
+- **Multi-tier Checkpointing (Ramdisk + GCS)**: This approach combines the speed of ramdisk, the resilience of in-cluster replication, and the durability of GCS to offer a more robust and efficient solution. With Multi-Tier Checkpointing, the above blocking issue is resolved because the GCS save is handled at the service level, operating on the checkpoint already saved locally.
 
 ## Assumptions
 
@@ -37,7 +37,7 @@ Multi-tier checkpointing stores checkpoints across multiple tiers of storage:
 - **Orbax Checkpointer**: The [Orbax library](https://orbax.readthedocs.io) must be used for checkpointing in your training script.
 - **Ramdisk Mounted via Jobset**: Each workload pod must have a [ramdisk directory mounted by Jobset](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#update-jobset) using the Multi-Tier Checkpointing CSI driver. This provides a high-speed, in-memory storage location for checkpoints.
 - **Supported TPU types**: [v4](https://docs.cloud.google.com/tpu/docs/v4), [v5e](https://docs.cloud.google.com/tpu/docs/v5e), [v5p](https://docs.cloud.google.com/tpu/docs/v5p), and [v6e](https://docs.cloud.google.com/tpu/docs/v6e)
-- **Cluster version**: Gke cluster version needs to be later than [1.32.3-gke.1170000](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#existing-cluster).
+- **Cluster version**: GKE cluster version needs to be later than [1.32.3-gke.1170000](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#existing-cluster).
 
 ## Configure the GKE cluster
 
@@ -53,7 +53,7 @@ gcloud container clusters get-credentials ${CLUSTER_NAME?} \
 
 The cluster-level settings that must be enabled are:
 
-| Flag                          | Description                                                              |
+| Setting                       | Description                                                              |
 | :---------------------------- | :----------------------------------------------------------------------- |
 | **Multi-Tier Checkpointing**  | Enables the required cluster-level checkpointing feature.                |
 | **GCS FUSE CSI driver**       | Installs the required GCS FUSE CSI driver.                               |
@@ -73,7 +73,7 @@ In a distributed training environment, the checkpoint is **sharded**, or split, 
 The formula is:
 **Required Ramdisk Size per Pod ≈ 2 * (Total Checkpoint Size / Number of Hosts in the Slice)**
 
-It's a good practice to add a **10-15% buffer** .
+It's a good practice to add a **10-15% buffer**.
 
 ### Example calculation
 
@@ -118,18 +118,20 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
    gcloud config set project ${PROJECT_ID?}
    gcloud config set compute/zone ${ZONE?}
    ```
-3. **Configure the cluster:** Multi-Tier Checkpointing requires the `HighScaleCheckpointing` and `GcsFuseCsiDriver` addons to be enabled on your GKE cluster.
+3. **Configure the cluster:** Multi-Tier Checkpointing requires the `HighScaleCheckpointing` and `GcsFuseCsiDriver` addons, as well as Workload Identity Federation, to be enabled on your GKE cluster.
 
-   - **For an existing cluster**, update the cluster addons:
+   - **For an existing cluster**, update the cluster addons and workload pool:
      ```bash
      gcloud container clusters update ${CLUSTER_NAME?} \
+       --workload-pool=${PROJECT_ID?}.svc.id.goog \
        --update-addons=HighScaleCheckpointing=ENABLED,GcsFuseCsiDriver=ENABLED \
        --location=${ZONE?}
      ```
 
-   - **For a new cluster**, include the addons during cluster creation:
+   - **For a new cluster**, include the addons and workload pool during cluster creation:
      ```bash
      gcloud container clusters create ${CLUSTER_NAME?} \
+       --workload-pool=${PROJECT_ID?}.svc.id.goog \
        --addons=HighScaleCheckpointing,GcsFuseCsiDriver \
        --location=${ZONE?} \
        --cluster-version=${GKE_VERSION?}
@@ -146,19 +148,31 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
      > **Note:** If `HighScaleCheckpointing` is not enabled, Cluster Toolkit (`gcluster job submit`) will reject the workload submission with:
      > `Error: Multi-Tier Checkpointing (MTC) requires the HighScaleCheckpointing addon to be enabled on the target GKE cluster.`
 
+4. **Grant access to Cloud Storage buckets:** Multi-Tier Checkpointing requires access to the Cloud Storage bucket to store checkpoints. Grant the Storage Object User (`roles/storage.objectUser`) IAM role on the bucket to the GKE checkpointing service account:
+
+   ```bash
+   PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID?} --format="value(projectNumber)")
+   GCS_BUCKET=${OUTPUT_PATH#gs://}
+   GCS_BUCKET=${GCS_BUCKET%%/*}
+
+   gcloud storage buckets add-iam-policy-binding gs://${GCS_BUCKET?} \
+     --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER?}/locations/global/workloadIdentityPools/${PROJECT_ID?}.svc.id.goog/subject/ns/gke-managed-checkpointing/sa/gke-checkpointing-multitier-node" \
+     --role="roles/storage.objectUser"
+   ```
+
 ## MaxText configuration
 
 This configuration manages a `multi-tiered checkpointing` system designed for both durability and rapid recovery.
 
-- **Local checkpointing**: Saves checkpoints much more frequently to a fast, local directory on each host (i.e. a ramdisk). If a preemption or failure occurs, the job can restore from this recent local copy almost instantly, minimizing lost work without needing to download from slower persistent storage. This feature is enabled by setting `enable_checkpointing`, `enable_multi_tier_checkpointing`, `local_checkpoint_directory`, and a non-zero `local_checkpoint_period` flags.
+- **Local checkpointing**: Saves checkpoints much more frequently to a fast, local directory on each host (i.e., a ramdisk). If a preemption or failure occurs, the job can restore from this recent local copy almost instantly, minimizing lost work without needing to download from slower persistent storage. This feature is enabled by setting `enable_checkpointing`, `enable_multi_tier_checkpointing`, `local_checkpoint_directory`, and a non-zero `local_checkpoint_period` flags.
 
-- **Backup checkpointing**: These are checkpoints saved periodically to persistent storage (i.e. GCS bucket). They ensure that you can recover your training state even after a complete job failure (repair of all nodepools). From User's perspective all restoration is from local ramdisk, its replicator service responsibility to make the checkpoints available in local storage in case of job restart. The interval for backup can be enabled by setting a non-zero `multi_tier_checkpointing_backup_interval_minutes` or `multi_tier_checkpointing_backup_interval_steps` flags (but not both).
+- **Backup checkpointing**: These are checkpoints saved periodically to persistent storage (i.e., GCS bucket). They ensure that you can recover your training state even after a complete job failure (repair of all nodepools). From the user's perspective, all restoration is from the local ramdisk; it is the replicator service's responsibility to make the checkpoints available in local storage in case of job restart. The interval for backup can be enabled by setting a non-zero `multi_tier_checkpointing_backup_interval_minutes` or `multi_tier_checkpointing_backup_interval_steps` flags (but not both).
 
 | Flag                                               | Description                                                                                                                                                                                                      | Type      | Default |
 | :------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------- | :------ |
 | `enable_checkpointing`                             | A master switch to enable (`True`) or disable (`False`) saving checkpoints during the training run.                                                                                                              | `boolean` | `True`  |
 | `enable_multi_tier_checkpointing`                  | When set to (`True`), this flag enables the multi-tier checkpointing feature on maxtext level.                                                                                                                   | `boolean` | `False` |
-| `local_checkpoint_directory`                       | The high-speed local filesystem path(i.e. ramdisk) where **Multi-tier checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the Multi-tier Checkpointing feature. | `string`  | `""`    |
+| `local_checkpoint_directory`                       | The high-speed local filesystem path (i.e., ramdisk) where **Multi-tier checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the Multi-tier Checkpointing feature. | `string`  | `""`    |
 | `local_checkpoint_period`                          | The interval, in training steps, for how often a **Multi-tier checkpoint** is saved in local ramdisks.                                                                                                           | `integer` | `0`     |
 | `multi_tier_checkpointing_backup_interval_minutes` | The interval, in minutes, for how often a **Multi-tier checkpoint** is saved to backup from local ramdisks.                                                                                                      | `integer` | `None`  |
 | `multi_tier_checkpointing_backup_interval_steps`   | The interval, in steps, for how often a **Multi-tier checkpoint** is saved to backup from local ramdisks.                                                                                                        | `integer` | `None`  |
@@ -219,7 +233,7 @@ The flags below would give the user access to the ramdisk in their workload:
      --topology=${TOPOLOGY?} \
      --gke-mtc-enabled \
      --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
-     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PERIOD?} enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?}"
+     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=${STEPS?} per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PERIOD?} enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?}"
    ```
 
 ## Deploying MTC on Pathways using Cluster Toolkit
@@ -230,6 +244,7 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
 | :-------------------------------------------------- | :-------------------------------------------------------------------------------------------------------- |
 | `--gke-mtc-enabled`                                 | Configures the MTC service and mounts the ramdisk on the workload pods.                                   |
 | `--gke-mtc-ramdisk-dir=<path>`                      | Specifies the ramdisk mount path. This must match the MaxText `local_checkpoint_directory` configuration. |
+| `--pathways-colocated-python-sidecar-image=<image>` | Specifies the container image for the Colocated Python sidecar running on workers. Required when `colocated_python_checkpointing=True`. |
 
 ### Example Cluster Toolkit workload submission
 
@@ -255,9 +270,8 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
 
    To enable elastic replica resizing, set `OPTIONAL_ELASTICITY_ARGS` to the appropriate MaxText elasticity flags and configure the corresponding workload settings. See [Elastic training](../../run_maxtext/run_maxtext_elastic_training.md) for the Cluster Toolkit recovery workflow.
 
-   ```{warning}
-   **Use compatible MaxText head and Colocated Python sidecar images.** Pathways MTC uses [Colocated Python](https://docs.jax.dev/en/latest/notebooks/colocated-python.html) for worker-local checkpoint operations. Both images must use compatible MaxText and Orbax revisions and exactly the same `jax` and `jaxlib` versions. Version skew can cause initialization or restore failures.
-   ```
+   > [!WARNING]
+   > **Use compatible MaxText head and Colocated Python sidecar images.** Pathways MTC uses [Colocated Python](https://docs.jax.dev/en/latest/notebooks/colocated-python.html) for worker-local checkpoint operations. Both images must use compatible MaxText and Orbax revisions and exactly the same `jax` and `jaxlib` versions. Version skew can cause initialization or restore failures.
 
 2. **Define the MaxText command:**
 
@@ -289,6 +303,7 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
       --topology="${TOPOLOGY}" \
       --num-slices="${NUM_SLICES}" \
       --image="${MAXTEXT_IMAGE}" \
+      --pathways-colocated-python-sidecar-image="${MAXTEXT_IMAGE}" \
       --pathways-gcs-location="${OUTPUT_PATH}" \
       --gke-mtc-enabled \
       --gke-mtc-ramdisk-dir="${RAMDISK_DIRECTORY}" \

@@ -10,6 +10,7 @@ Emergency checkpointing is a vital feature for large-scale, multi-slice training
 - **Orbax Checkpointer**: The [Orbax library](https://orbax.readthedocs.io) must be used for checkpointing in your training script.
 - **Ramdisk Mounted via Jobset**: Each workload pod must have a [ramdisk directory mounted by Jobset](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#update-jobset) using the Multi-Tier Checkpointing CSI driver. This provides a high-speed, in-memory storage location for checkpoints.
 - **Supported TPU types**: [v4](https://cloud.google.com/tpu/docs/v4), [v5e](https://cloud.google.com/tpu/docs/v5e), [v5p](https://cloud.google.com/tpu/docs/v5p), and [v6e](https://cloud.google.com/tpu/docs/v6e)
+- **Cluster version**: GKE cluster version needs to be later than [1.32.3-gke.1170000](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#existing-cluster).
 
 ## Configure the GKE cluster
 
@@ -41,9 +42,9 @@ For example, a 1 billion parameter model would require approximately **1B × 12 
 In a distributed training environment, the checkpoint is **sharded**, or split, across all the hosts in a slice. Each host is only responsible for saving its portion of the total checkpoint. Therefore, the ramdisk on a single pod only needs to be large enough for its local shard.
 
 The formula is:
-**Required Ramdisk Size per Pod ≈ 2 * ( Total Checkpoint Size / Number of Hosts in the Slice**)
+**Required Ramdisk Size per Pod ≈ 2 * (Total Checkpoint Size / Number of Hosts in the Slice)**
 
-It's a good practice to add a **10-15% buffer** .
+It's a good practice to add a **10-15% buffer**.
 
 ### Example calculation
 
@@ -88,18 +89,20 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
    gcloud config set project ${PROJECT_ID?}
    gcloud config set compute/zone ${ZONE?}
    ```
-3. **Configure the cluster:** Multi-Tier Checkpointing requires the `HighScaleCheckpointing` and `GcsFuseCsiDriver` addons to be enabled on your GKE cluster.
+3. **Configure the cluster:** Multi-Tier Checkpointing requires the `HighScaleCheckpointing` and `GcsFuseCsiDriver` addons, as well as Workload Identity Federation, to be enabled on your GKE cluster.
 
-   - **For an existing cluster**, update the cluster addons:
+   - **For an existing cluster**, update the cluster addons and workload pool:
      ```bash
      gcloud container clusters update ${CLUSTER_NAME?} \
+       --workload-pool=${PROJECT_ID?}.svc.id.goog \
        --update-addons=HighScaleCheckpointing=ENABLED,GcsFuseCsiDriver=ENABLED \
        --location=${ZONE?}
      ```
 
-   - **For a new cluster**, include the addons during cluster creation:
+   - **For a new cluster**, include the addons and workload pool during cluster creation:
      ```bash
      gcloud container clusters create ${CLUSTER_NAME?} \
+       --workload-pool=${PROJECT_ID?}.svc.id.goog \
        --addons=HighScaleCheckpointing,GcsFuseCsiDriver \
        --location=${ZONE?} \
        --cluster-version=${GKE_VERSION?}
@@ -116,20 +119,32 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
      > **Note:** If `HighScaleCheckpointing` is not enabled, Cluster Toolkit (`gcluster job submit`) will reject the workload submission with:
      > `Error: Multi-Tier Checkpointing (MTC) requires the HighScaleCheckpointing addon to be enabled on the target GKE cluster.`
 
+4. **Grant access to Cloud Storage buckets:** Multi-Tier Checkpointing requires access to the Cloud Storage bucket to store checkpoints. Grant the Storage Object User (`roles/storage.objectUser`) IAM role on the bucket to the GKE checkpointing service account:
+
+   ```bash
+   PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID?} --format="value(projectNumber)")
+   GCS_BUCKET=${OUTPUT_PATH#gs://}
+   GCS_BUCKET=${GCS_BUCKET%%/*}
+
+   gcloud storage buckets add-iam-policy-binding gs://${GCS_BUCKET?} \
+     --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER?}/locations/global/workloadIdentityPools/${PROJECT_ID?}.svc.id.goog/subject/ns/gke-managed-checkpointing/sa/gke-checkpointing-multitier-node" \
+     --role="roles/storage.objectUser"
+   ```
+
 ## MaxText configuration
 
 MaxText provides a set of configuration flags to control checkpointing options. This configuration manages a `two-tiered checkpointing` system designed for both durability and rapid recovery.
 
-- **Local Emergency Checkpoints**: It saves checkpoints much more frequently to a fast, local directory on each host (i.e. a ramdisk). If a preemption or failure occurs, the job can restore from this recent local copy, minimizing lost work without needing to download from slower persistent storage. This feature is enabled by setting `enable_checkpointing`, `enable_emergency_checkpoint`, `local_checkpoint_directory` and a non-zero `local_checkpoint_period`.
+- **Local Emergency Checkpoints**: It saves checkpoints much more frequently to a fast, local directory on each host (i.e., a ramdisk). If a preemption or failure occurs, the job can restore from this recent local copy, minimizing lost work without needing to download from slower persistent storage. This feature is enabled by setting `enable_checkpointing`, `enable_emergency_checkpoint`, `local_checkpoint_directory` and a non-zero `local_checkpoint_period`.
 
-- **Persistent Checkpoints**: These are standard checkpoints saved periodically and much more rarely to durable storage(i.e. GCS bucket). They ensure that you can recover your training state even after a complete cluster failure. This is controlled by `enable_checkpointing`, and `checkpoint_period`.
+- **Persistent Checkpoints**: These are standard checkpoints saved periodically and much more rarely to durable storage (i.e., GCS bucket). They ensure that you can recover your training state even after a complete cluster failure. This is controlled by `enable_checkpointing`, and `checkpoint_period`.
 
 | Flag                                   | Description                                                                                                                                                                                                                                                                                              | Type      | Default |
 | :------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------- | :------ |
-| `enable_checkpointing`                 | A master switch to enable (`True`) or disable (`False`) saving checkpoints during the training run.                                                                                                                                                                                                      | `boolean` | `False` |
+| `enable_checkpointing`                 | A master switch to enable (`True`) or disable (`False`) saving checkpoints during the training run.                                                                                                                                                                                                      | `boolean` | `True`  |
 | `enable_emergency_checkpoint`          | When set to (`True`), this flag enables the two-tiered emergency checkpointing feature.                                                                                                                                                                                                                  | `boolean` | `False` |
 | `async_checkpointing`                  | When set to (`True`), this flag makes checkpoint saving asynchronous. The training step is only blocked for the minimal time needed to capture the model's state, and the actual writing to storage happens in a background thread. This is highly recommended for performance. It's enabled by default. | `boolean` | `True`  |
-| `local_checkpoint_directory`           | The high-speed local filesystem path(i.e. ramdisk) where **emergency checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the emergency checkpointing feature.                                                                                           | `string`  | `""`    |
+| `local_checkpoint_directory`           | The high-speed local filesystem path (i.e., ramdisk) where **emergency checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the emergency checkpointing feature.                                                                                          | `string`  | `""`    |
 | `local_checkpoint_period`              | The interval, in training steps, for how often a **local checkpoint** is saved. This should be set to a much smaller value than `checkpoint_period` for frequent, low-overhead saves.                                                                                                                    | `integer` | `0`     |
 | `checkpoint_period`                    | The interval, in training steps, for how often a checkpoint is saved to **persistent storage**.                                                                                                                                                                                                          | `integer` | `10000` |
 | `enable_single_replica_ckpt_restoring` | If `True`, one replica reads the checkpoint from storage and then broadcasts it to all other replicas. This can significantly speed up restoration on multi-host systems by reducing redundant reads from storage.                                                                                       | `boolean` | `False` |
@@ -199,5 +214,5 @@ The Cluster Toolkit workload must mount the ramdisk so the training process can 
      --topology=${TOPOLOGY?} \
      --gke-mtc-enabled \
      --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
-     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PERIOD?} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?}"
+     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=${STEPS?} per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PERIOD?} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?}"
    ```
