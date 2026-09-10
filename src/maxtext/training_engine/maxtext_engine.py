@@ -670,7 +670,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _checkpoint_dir(self) -> str:
     """Returns the directory this engine checkpoints through; an empty string disables Orbax entirely."""
-    return self._config.checkpoint_dir
+    return getattr(self._config, "checkpoint_dir", "") or ""
 
   @property
   def model(self) -> Any:
