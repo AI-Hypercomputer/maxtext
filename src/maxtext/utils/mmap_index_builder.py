@@ -21,13 +21,13 @@ the index-building step at training initialization.
 Usage::
 
     # Single dataset
-    python tools/data_processing/mmap_index_builder.py \
+    python src/maxtext/utils/mmap_index_builder.py \
         --input /data/megatron_dataset/ \
         --output-dir /cache/indices/ \
         --seq-length 2048 --num-samples 1000000
 
     # Blending multiple datasets (concurrent build)
-    python tools/data_processing/mmap_index_builder.py blend \
+    python src/maxtext/utils/mmap_index_builder.py blend \
         --datasets '/data/ds_a,0.7;/data/ds_b,0.3' \
         --output-dir /cache/blend_indices \
         --seq-length 2048 --total-samples 1000000
@@ -37,15 +37,14 @@ import logging
 import os
 import sys
 
-# When run directly (python tools/data_processing/mmap_index_builder.py), ensure
+# When run directly (python src/maxtext/utils/mmap_index_builder.py), ensure
 # the src directory is on sys.path so the maxtext package can be resolved.
-_src_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+_src_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _src_dir not in sys.path:
   sys.path.insert(0, _src_dir)
 
 # Re-export all public symbols from the canonical location so that
-# existing ``from tools.data_processing.mmap_index_builder import ...``
-# statements continue to work without changes.
+# ``from maxtext.utils.mmap_index_builder import ...`` statements work.
 from maxtext.input_pipeline._mmap_index_utils import (  # pylint: disable=unused-import  # noqa: F401 -- public re-exports
     build_document_index,
     build_indices,

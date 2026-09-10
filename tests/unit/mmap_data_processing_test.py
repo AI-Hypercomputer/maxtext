@@ -50,7 +50,7 @@ from maxtext.input_pipeline._mmap_datasource import (
     _parse_weighted_mixture,
 )
 from tests.unit.mmap_test_utils import create_mmap_test_data
-from tools.data_processing.mmap_index_builder import convert
+from maxtext.utils.mmap_index_builder import convert
 
 pytestmark = pytest.mark.cpu_only
 

@@ -703,7 +703,7 @@ class MegatronNpyDataSource(grain.RandomAccessDataSource):
   """Grain-compatible data source that uses pre-built Megatron .npy indices.
 
   Loads ``document_index.npy``, ``sample_index.npy``, and
-  ``shuffle_index.npy`` (as produced by :func:`tools.data_processing.mmap_index_builder.convert`)
+  ``shuffle_index.npy`` (as produced by :func:`maxtext.utils.mmap_index_builder.convert`)
   together with one or more MMap ``.bin/.idx`` dataset shards to provide
   random access to pre-shuffled, fixed-length training samples.
 
