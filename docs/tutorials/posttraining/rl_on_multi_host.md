@@ -257,8 +257,8 @@ kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
   - **Retry (fresh run)**: Use a unique run name to avoid overwriting
     outputs:
     ```bash
-    export RUN_NAME=${RUN_NAME?}-retry1
     export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items
+    export RUN_NAME=${RUN_NAME?}-retry1
     ```
     Then submit the Cluster Toolkit workload. If a "workload already exists" error occurs, pick
     a new name or cancel the previous job (`gcluster job cancel ${RUN_NAME}`).
