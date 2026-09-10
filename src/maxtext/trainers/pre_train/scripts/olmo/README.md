@@ -15,7 +15,10 @@ global batch ≈4M tokens, peak LR 3e-4 cosine to 0.1×, 2k warmup, β=(0.9, 0.9
 
 Both scripts are env-var driven. Header comments in each enumerate required vs. optional env.
 
-## Quick start (multi-host TPU via XPK)
+## Legacy quick start (multi-host TPU via XPK)
+
+For new deployments, use the Cluster Toolkit version below. The XPK wrapper
+section is retained for existing environments.
 
 ```bash
 source ~/.hf_token.sh
@@ -42,6 +45,50 @@ STEPS_OVERRIDE=1414078 \
 `STEPS=1414078` (= 5.928T tokens at 512 × 8192/step) matches AI2's stage-1
 horizon. The wrapper passes `LIBTPU_INIT_ARGS` (Ironwood XLA flags) and the
 full MaxText perf flag set automatically — no manual override needed.
+
+## Quick start (multi-host TPU via Cluster Toolkit)
+
+```bash
+export PROJECT_ID=<your-project>
+export GKE_CLUSTER=<your-cluster>
+export LOCATION=<your-location>
+export RUN_NAME=olmo3_7b_stage1
+export BASE_OUTPUT_DIRECTORY=gs://<your-bucket>/olmo/runs
+export COMPUTE_TYPE=<cluster-toolkit-compute-type>
+export TOPOLOGY=<tpu-topology>
+export IMAGE_URI="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+
+export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json
+export OLMO_GCS_BASE=gs://<your-bucket>/
+export LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+export HF_TOKEN=<your-hf-token>
+
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --location ${LOCATION?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${LOCATION?}
+
+gcluster job submit \
+  --image ${IMAGE_URI?} \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --command "INDEX_PATH=${OLMO_INDEX_PATH?} \
+GCS_BASE=${OLMO_GCS_BASE?} \
+LOCAL_MOUNT=/tmp/olmo-data \
+OUTPUT_DIR=${BASE_OUTPUT_DIRECTORY?} \
+LOAD_PARAMETERS_PATH=${LOAD_PARAMETERS_PATH?} \
+HF_TOKEN=${HF_TOKEN?} \
+MOUNT_GCSFUSE=1 \
+VENV_PATH=/__skip_venv__ \
+bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh"
+```
+
+Set the data, checkpoint, and launcher environment variables before invoking `run_olmo3_7b_stage1.sh`. For smoke testing without tokenized OLMo data, see the single-host or synthetic data section below.
+
 
 ## Quick start (single-host / smoke test)
 
@@ -74,11 +121,11 @@ underlying preprocessed `.npy` tokens live under AI2's `s3://ai2-llm/` bucket
 (see the `base_dir` arg on `DataMix.build` in
 [`OLMo-core`](https://github.com/allenai/OLMo-core/blob/main/src/olmo_core/data/mixes/__init__.py));
 mirror them into your own GCS bucket with
-[`tools/data_generation/download_olmo_data_to_gcs.py`](../../../../../tools/data_generation/download_olmo_data_to_gcs.py)
+[`tools/data_generation/download_olmo_data_to_gcs.py`](../../../../../../tools/data_generation/download_olmo_data_to_gcs.py)
 (reads a manifest, pulls from AI2's source, uploads to `--gcs-dest`).
 
 **Data index.** Once the corpus is mirrored, build the index with
-[`tools/data_generation/build_olmo_npy_index.py`](../../../../../tools/data_generation/build_olmo_npy_index.py)
+[`tools/data_generation/build_olmo_npy_index.py`](../../../../../../tools/data_generation/build_olmo_npy_index.py)
 against the same manifest + sequence length, then upload the resulting JSON
 to GCS. Mount your bucket read-only via gcsfuse inside the pod — the XPK
 wrapper does this automatically (`MOUNT_GCSFUSE=1`).
@@ -115,7 +162,7 @@ same procedure works for any of them — just swap the `--revision` flag.
 2. Upload the converted checkpoint to GCS so all pods can read it:
 
    ```bash
-   gsutil -m cp -r <output>/0/items gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+   gcloud storage cp -r <output>/0/items gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
    ```
 
 3. Point the launcher at it via `LOAD_PARAMETERS_PATH`:
