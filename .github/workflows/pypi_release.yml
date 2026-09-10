@@ -127,7 +127,7 @@ jobs:
             image_name: maxtext_post_training_stable
     steps:
       - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
       - name: Add tags to Docker image
         shell: bash
         env:
@@ -136,7 +136,7 @@ jobs:
           GITHUB_RUN_ID: ${{ inputs.run_id }}
           PYPI_VERSION: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
         run: |
-          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${IMAGE_NAME}"
+          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${IMAGE_NAME}"
           gcloud container images add-tag \
             "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
             "${SOURCE_IMAGE}:${PYPI_VERSION}" \
