@@ -166,12 +166,12 @@ def split_tokens_to_targets_length(dataset, sequence_length):
 def _pad_to_batch_size(
     ds: tf.data.Dataset,
     batch_size: int,
-    num_examples: None | int = None,
+    num_examples: int = 0,
 ) -> tf.data.Dataset:
   """Pad unevenly distributed eval data in each shard with new entries to multiples of batch size."""
 
   # local_num represents the total number of examples in eval dataset,
-  if num_examples:
+  if num_examples > 0:
     local_num = num_examples
   else:
 
@@ -293,7 +293,7 @@ def preprocess_eval_dataset(
     sp_tokenizer,
     eval_global_batch_size_to_load: int,
     max_target_length: int,
-    num_examples: None | int = None,
+    num_examples: int = 0,
     is_tokenized_dataset: bool = True,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
@@ -375,6 +375,7 @@ def make_c4_mlperf_eval_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices,
+    num_examples: int = 0,
 ):
   """Make eval iterator of customized C4 dataset for mlperf training."""
   eval_col = config.eval_data_columns[0]
@@ -412,11 +413,34 @@ def make_c4_mlperf_eval_iterator(
   sp_tokenizer = get_tokenizer(
       config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos, config.hf_access_token
   )
+
+  if num_examples <= 0:
+    eval_steps = getattr(config, "eval_steps", -1)
+    eval_batch_size = getattr(config, "global_batch_size_to_load_eval", 0)
+    # When eval_steps > 0, derive total cluster-wide eval examples to avoid
+    # the slow linear scan of the entire dataset during startup
+    # (_get_num_examples).
+    if eval_steps > 0 and eval_batch_size > 0:
+      num_examples = int(eval_steps * eval_batch_size)
+
+  # Partition the total cluster-wide eval examples across all hosts.
+  # _pad_to_batch_size expects the per-host local example count rather than
+  # the cluster-wide total. Distributing examples evenly across hosts (with
+  # remainder distributed to the first remainder hosts) ensures each host
+  # calculates the correct local batch count and padding entries without
+  # linear counting.
+  local_num_examples = 0
+  if num_examples > 0:
+    host_idx = process_indices.index(jax.process_index()) if jax.process_index() in process_indices else 0
+    per_host, remainder = divmod(num_examples, len(process_indices))
+    local_num_examples = per_host + (1 if host_idx < remainder else 0)
+
   eval_ds = preprocess_eval_dataset(
       eval_ds,
       sp_tokenizer=sp_tokenizer,
       eval_global_batch_size_to_load=config.global_batch_size_to_load_eval,
       max_target_length=config.max_target_length,
+      num_examples=local_num_examples,
       is_tokenized_dataset=is_tokenized_dataset,
   )
 

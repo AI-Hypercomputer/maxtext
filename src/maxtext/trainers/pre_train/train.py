@@ -757,7 +757,8 @@ def training_loop_iteration(
   ):
     assert eval_data_iterator
     # Explicitly reset the eval iterator and counters before starting the eval loop
-    eval_data_iterator.reset()
+    if hasattr(eval_data_iterator, "reset"):
+      eval_data_iterator.reset()
     metric_logger_instance.reset_eval_metrics()
     max_logging.log(f"Starting eval after train step {step}")
 
@@ -893,7 +894,23 @@ def train_loop(config, recorder, state=None):
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
       compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)
       compiled_stats = compiled.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_stats)
+      max_utils.print_compiled_memory_stats(compiled_stats, prefix="train")
+
+  # Ahead-of-time compile the evaluation step alongside the training step to
+  # warm up the XLA executable cache and avoid JIT compilation pause on the
+  # first eval step.
+  if p_eval_step is not None and config.compiled_trainstep_file == "" and not jax.config.jax_enable_pgle:
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules_for_eval):
+      compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+      data_sharding_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+      shaped_eval_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding_eval, is_eval=True)
+      if config.enable_diloco:
+        eval_lower_args = (state, shaped_eval_batch, init_rng)
+      else:
+        eval_lower_args = (state, shaped_eval_batch)
+      compiled_eval = p_eval_step.lower(*eval_lower_args).compile(compiler_options=compiler_options)
+      compiled_eval_stats = compiled_eval.memory_analysis()
+      max_utils.print_compiled_memory_stats(compiled_eval_stats, prefix="eval")
   prof = profiler.Profiler(config, offset_step=start_step)
   metric_logger_instance = metric_logger.MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
