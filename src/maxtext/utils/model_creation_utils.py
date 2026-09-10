@@ -49,6 +49,7 @@ from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.integration.vllm.convert_utils import _partition_size
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
@@ -308,21 +309,6 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
     return new_node
 
   return jax.tree_util.tree_map_with_path(_maybe_fuse, ckpt_tree, is_leaf=_is_fusion_site)
-
-
-def _partition_size(partition, mesh):
-  """Total mesh-axis size used to shard a single tensor axis.
-
-  ``partition`` is a single PartitionSpec entry: ``None`` (unsharded), a single
-  mesh-axis name (str), or a tuple of mesh-axis names.
-  """
-  if partition is None:
-    return 1
-  names = (partition,) if isinstance(partition, str) else tuple(partition)
-  size = 1
-  for n in names:
-    size *= mesh.shape[n]
-  return size
 
 
 def _stored_shape_evenly_shardable(restore_arg, stored_shape):

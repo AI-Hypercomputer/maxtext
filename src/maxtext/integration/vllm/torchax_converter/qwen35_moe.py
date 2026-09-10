@@ -19,6 +19,7 @@ import logging
 import jax
 import jax.numpy as jnp
 
+from maxtext.integration.vllm.convert_utils import pad_to_tpu_lanes
 from maxtext.integration.vllm.torchax_converter.base import BaseMaxTextToVLLMConverter, timer, GREEN, RESET
 
 
@@ -264,7 +265,7 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
 
       # vLLM's TPU Grouped GEMM kernel requires 128-alignment per expert chunk
       chunk_size = d_inner // tp_size
-      padded_chunk_size = ((chunk_size + 127) // 128) * 128
+      padded_chunk_size = pad_to_tpu_lanes(chunk_size)
       pad_amount = padded_chunk_size - chunk_size
 
       w1_chunks = wi_0.reshape(num_reps, num_experts, d_model, tp_size, chunk_size)
