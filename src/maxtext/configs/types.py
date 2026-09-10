@@ -3576,7 +3576,6 @@ class MaxTextConfig(
             "use_random_routing": False,
             "use_ragged_sort": False,
             "retry_when_tokens_dropped": False,
-            "ragged_buffer_factor": -1.0,
             "use_ring_of_experts": False,
             "num_moe_emb_chunks": 0,
         }
