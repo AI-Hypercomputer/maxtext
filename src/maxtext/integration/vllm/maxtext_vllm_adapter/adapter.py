@@ -21,6 +21,7 @@ import jax
 from jax import numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh
+import numpy as np
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
 from maxtext.integration.vllm.hybrid_cache_utils import (
@@ -476,12 +477,13 @@ class MaxTextForCausalLM(nnx.Module):
       self,
       input_tokens: list[int],
       mm_features: list = None,
-  ) -> tuple[jax.Array, int]:
+  ) -> tuple[np.ndarray, int]:
     """Get dummy mrope input positions and delta value for text-only MaxText."""
     seq_len = len(input_tokens)
-    pos_range = jnp.arange(seq_len, dtype=jnp.int32)
+    # Use NumPy rather than JAX (jnp) to avoid triggering XLA compilations on every distinct seq_len.
+    pos_range = np.arange(seq_len, dtype=np.int32)
     # M-RoPE expects 3D position vectors (3, seq_len) and position_delta (int)
-    positions = jnp.stack([pos_range, pos_range, pos_range], axis=0)
+    positions = np.stack([pos_range, pos_range, pos_range], axis=0)
     return positions, 0
 
 

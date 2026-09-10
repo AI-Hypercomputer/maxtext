@@ -24,7 +24,9 @@ pytest.importorskip("tunix")
 
 pytestmark = pytest.mark.post_training
 
+import numpy as np
 from maxtext.inference.vllm_decode import build_chat_messages
+from maxtext.integration.vllm.maxtext_vllm_adapter.adapter import MaxTextForCausalLM
 from maxtext.integration.vllm.maxtext_vllm_adapter.multimodal import get_multimodal_handler
 
 
@@ -84,6 +86,30 @@ class MultimodalChatMessagesTest(unittest.TestCase):
             }
         ],
     )
+
+
+class MropeInputPositionsTest(unittest.TestCase):
+  """Verify get_mrope_input_positions returns correct NumPy array."""
+
+  def test_mrope_input_positions_returns_numpy_array(self):
+    model = object.__new__(MaxTextForCausalLM)
+    tokens = [10, 20, 30, 40, 50]
+    positions, delta = model.get_mrope_input_positions(tokens)
+    self.assertIsInstance(positions, np.ndarray)
+    self.assertEqual(delta, 0)
+    self.assertEqual(positions.shape, (3, 5))
+    self.assertEqual(positions.dtype, np.int32)
+    for dim in range(3):
+      np.testing.assert_array_equal(positions[dim], np.arange(5, dtype=np.int32))
+
+  def test_mrope_input_positions_varying_lengths(self):
+    model = object.__new__(MaxTextForCausalLM)
+    for length in [1, 10, 128]:
+      positions, delta = model.get_mrope_input_positions(list(range(length)))
+      self.assertEqual(positions.shape, (3, length))
+      self.assertEqual(delta, 0)
+      for dim in range(3):
+        np.testing.assert_array_equal(positions[dim], np.arange(length, dtype=np.int32))
 
 
 if __name__ == "__main__":
