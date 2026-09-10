@@ -231,6 +231,98 @@ class JaxFlashAttentionTest(unittest.TestCase):
         atol=1e-2,
     )
 
+  def test_flash_attention_block_masked_long_sequence(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 1, 8192, 8192, 32
+    block_q, block_kv = 2048, 2048
+    cap = 50.0
+    mask_value = -1.0e9
+
+    rng = np.random.default_rng(456)
+    query = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)) / np.sqrt(head_dim), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    mask_obj = splash_attention_mask.CausalMask((q_len, kv_len))
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask_obj,
+        mask_value=mask_value,
+        cap=cap,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    mask_arr = mask_obj[:, :]
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.tanh(logits / cap) * cap
+    logits = jnp.where(mask_arr[None, None, :, :], logits, mask_value)
+    expected_output = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+    expected_max_logits = jnp.max(logits, axis=-1)
+    expected_logsumexp = jax.nn.logsumexp(logits, axis=-1)
+
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected_output),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+    np.testing.assert_allclose(
+        np.asarray(stats["max_logits"]),
+        np.asarray(expected_max_logits),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+    np.testing.assert_allclose(
+        np.asarray(stats["logsumexp"]),
+        np.asarray(expected_logsumexp),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_flash_attention_block_masked_long_sequence_no_residuals(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 1, 8192, 8192, 32
+    block_q, block_kv = 2048, 2048
+    mask_value = -1.0e9
+
+    rng = np.random.default_rng(789)
+    query = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)) / np.sqrt(head_dim), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    mask_obj = splash_attention_mask.CausalMask((q_len, kv_len))
+
+    output = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask_obj,
+        mask_value=mask_value,
+        cap=None,
+        save_residuals=False,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    mask_arr = mask_obj[:, :]
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.where(mask_arr[None, None, :, :], logits, mask_value)
+    expected_output = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected_output),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
 
 class SplashLocalMaskTest(unittest.TestCase):
   """Tests for Splash local masks."""
