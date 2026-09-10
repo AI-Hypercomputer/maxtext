@@ -522,7 +522,7 @@ def _interleave_moe_weights(
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
-    lane_size: int = 0,
+    lane_size: Optional[int] = 0,
 ) -> jax.Array | np.ndarray:
   """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
 
@@ -542,6 +542,9 @@ def _interleave_moe_weights(
   `tgt_shape`, `n_shards`, `axis` and `lane_size` are static, so the trace is keyed on them;
   identical layers share a single compilation.
   """
+  if lane_size is None:
+    lane_size = 0
+
   if axis is None:
     axis = len(tgt_shape) - 1
   elif axis < 0:
