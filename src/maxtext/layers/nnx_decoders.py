@@ -29,6 +29,7 @@ from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import (
+    AttentionType,
     Config,
     DecoderBlockType,
     MODEL_MODE_AUTOREGRESSIVE,
@@ -38,7 +39,7 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.configs.types import check_forced_routing_support
-from maxtext.layers import initializers, linears, mhc, moe, normalizations, quantizations
+from maxtext.layers import attention_kda, initializers, linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -90,6 +91,7 @@ class NNXDecoderLayer(nnx.Module):
       model_mode: str,
       quant: None | Quant = None,
       name: str = "decoder_layer",
+      attention_type: AttentionType | str | None = None,
       *,
       rngs: nnx.Rngs,
   ):
@@ -100,6 +102,12 @@ class NNXDecoderLayer(nnx.Module):
 
     cfg = self.config
 
+    # Per-layer attention type override (hybrid models); defaults to the
+    # global config value.
+    self.attention_type = (
+        AttentionType(attention_type) if attention_type is not None else AttentionType(cfg.attention_type)
+    )
+
     self.pre_self_attention_norm = RMSNorm(
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,
@@ -109,34 +117,45 @@ class NNXDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    self.self_attention = Attention(
-        config=self.config,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        inputs_q_shape=(1, 1, cfg.emb_dim),
-        inputs_kv_shape=(1, 1, cfg.emb_dim),
-        mesh=mesh,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        float32_qk_product=cfg.float32_qk_product,
-        float32_logits=cfg.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
-        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
-        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
-        reshape_q=cfg.reshape_q,
-        use_mrope=cfg.use_mrope,
-        mrope_section=cfg.mrope_section,
-        share_kv_projections=cfg.share_kv_projections,
-        model_mode=model_mode,
-        rngs=rngs,
-    )
+    if self.attention_type == AttentionType.KDA:
+      # KDA is a self-contained recurrent attention layer (its own QKV/conv/
+      # gate/beta stack + tokamax Delta-Rule kernel); it carries recurrent
+      # state instead of a KV cache.
+      self.self_attention = attention_kda.KimiDeltaAttention(
+          config=self.config,
+          layer_idx=0,
+          mesh=mesh,
+          rngs=rngs,
+      )
+    else:
+      self.self_attention = Attention(
+          config=self.config,
+          num_query_heads=cfg.num_query_heads,
+          num_kv_heads=cfg.num_kv_heads,
+          head_dim=cfg.head_dim,
+          max_target_length=cfg.max_target_length,
+          max_prefill_predict_length=cfg.max_prefill_predict_length,
+          attention_kernel=cfg.attention,
+          inputs_q_shape=(1, 1, cfg.emb_dim),
+          inputs_kv_shape=(1, 1, cfg.emb_dim),
+          mesh=mesh,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          dropout_rate=cfg.dropout_rate,
+          float32_qk_product=cfg.float32_qk_product,
+          float32_logits=cfg.float32_logits,
+          quant=self.quant,
+          kv_quant=quantizations.configure_kv_quant(cfg),
+          prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
+          ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
+          compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
+          reshape_q=cfg.reshape_q,
+          use_mrope=cfg.use_mrope,
+          mrope_section=cfg.mrope_section,
+          share_kv_projections=cfg.share_kv_projections,
+          model_mode=model_mode,
+          rngs=rngs,
+      )
 
     self.mlp = linears.MlpBlock(
         in_features=cfg.emb_dim,
@@ -194,16 +213,26 @@ class NNXDecoderLayer(nnx.Module):
     lnx = self.pre_self_attention_norm(inputs)
     lnx = _maybe_shard_with_logical(lnx, logical_axis_names)
 
-    attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
-    )
+    if self.attention_type == AttentionType.KDA:
+      # KDA has no KV cache; its recurrent state is carried by the kernel.
+      attention_lnx, _ = self.self_attention(
+          lnx,
+          decoder_positions,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          decoder_segment_ids=decoder_segment_ids,
+      )
+    else:
+      attention_lnx, kv_cache = self.self_attention(
+          lnx,
+          lnx,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+      )
     attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names)
 
     mlp_lnx = self.mlp(lnx, deterministic=deterministic)
