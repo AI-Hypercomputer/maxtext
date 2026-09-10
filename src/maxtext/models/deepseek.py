@@ -249,7 +249,16 @@ class DeepSeekGenericLayer(nnx.Module):
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
 
-    if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+    if self.config.te_moe_block and moe_bias_updates is not None:
+      total_recv_tokens, recv_capacity_per_rank = moe_bias_updates
+      self.sow(nnx.Intermediate, "te_moe_total_recv_tokens", total_recv_tokens)
+      self.sow(nnx.Intermediate, "te_moe_recv_capacity_per_rank", recv_capacity_per_rank)
+      self.sow(
+          nnx.Intermediate,
+          "te_moe_capacity_overflow",
+          jnp.any(total_recv_tokens > recv_capacity_per_rank),
+      )
+    elif self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
       self.sow(nnx.Intermediate, "moe_bias_updates", moe_bias_updates)
 
     if getattr(self.config, "record_internal_nn_metrics", False):

@@ -84,7 +84,7 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ### Build and Upload MaxText Docker Image
 
-For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext.md).
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](build-docker).
 
 ### Submit your workload
 
@@ -130,8 +130,6 @@ For a complete list of collected metrics, see the [Tunix Metrics Documentation](
   - `actor_dequeue_time`: The time spent waiting for data from the rollout workers (relevant when async rollout is enabled).
 - **Performance & Efficiency Metrics:**
   - `step_time_sec`: The execution time for a single training step.
-
-## Convert Checkpoint to Hugging Face Format
 
 ## Convert Checkpoint to Hugging Face Format
 

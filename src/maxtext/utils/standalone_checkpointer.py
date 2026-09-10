@@ -31,6 +31,7 @@ import jax
 from jax import numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.common import checkpointing
+from maxtext.common import emergency_checkpointing
 from maxtext.common import train_state_nnx
 from maxtext.models import models
 from maxtext.trainers.pre_train.train import get_first_step
@@ -43,6 +44,13 @@ from maxtext.utils.model_creation_utils import from_config
 import numpy as np
 
 Transformer = models.transformer_as_linen
+
+
+def _as_abstract_leaf(leaf):
+  """Shape/dtype/sharding stand-in for a concrete leaf, as an Orbax restore target."""
+  if isinstance(leaf, jax.Array):
+    return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=leaf.sharding)
+  return leaf
 
 
 def checkpoint_loop(config, state=None):
@@ -152,9 +160,15 @@ def checkpoint_loop(config, state=None):
             os.system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
 
           restore_start = datetime.datetime.now()
-          restored_state = checkpoint_manager.restore(int(step))
-          if restored_state:
-            restored_state = restored_state.get("items", restored_state)
+          # Restore against the saved sharding, else the timing below is not a real restore.
+          abstract_state = jax.tree_util.tree_map(_as_abstract_leaf, state_to_save)
+          if isinstance(
+              checkpoint_manager,
+              (checkpointing.EmergencyCheckpointManager, checkpointing.EmergencyReplicatorCheckpointManager),
+          ):
+            restored_state = emergency_checkpointing.restore(checkpoint_manager, int(step), abstract_state)
+          else:
+            restored_state = checkpoint_manager.load_checkpointables(int(step), {"items": abstract_state})["items"]
           jax.block_until_ready(restored_state)
           restore_end = datetime.datetime.now()
           if jax.process_index() == 0:

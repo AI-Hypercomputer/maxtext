@@ -1904,6 +1904,8 @@ class GrainMmapNpyEvalConfigTest(TestCase):
         grain_data_source_max_workers=1,
         eval_data_columns=("text",),
         tokenize_eval_data=False,
+        use_sft=False,
+        use_multimodal=False,
         colocated_python_data_input=False,
         generate_padding_batch_eval=False,
     )

@@ -48,6 +48,7 @@ import contextlib
 from functools import wraps
 from typing import Any, Callable, Optional, Sequence
 
+import dataclasses
 import datasets
 import grain
 import jax
@@ -436,6 +437,18 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
 
   rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
 
+  rollout_vllm_kwargs = {
+      "hf_overrides": trainer_config.vllm_hf_overrides,
+      "enable_expert_parallel": sampler_config.enable_expert_parallel,
+      "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
+      # Ensures vLLM model initializes with correct dtype (not float32 default)
+      "dtype": trainer_config.weight_dtype.value,
+  }
+  if trainer_config.vllm_block_size is not None:
+    # Pin the KV-cache page size; left unset, the backend derives it from the
+    # engine shape, so unrelated engine changes can move it.
+    rollout_vllm_kwargs["block_size"] = trainer_config.vllm_block_size
+
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
           rl_cluster_lib.Role.ACTOR: actor_mesh,
@@ -456,6 +469,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           mini_batch_size=trainer_config.batch_size,
           train_micro_batch_size=train_micro_batch_size,
           rollout_micro_batch_size=rollout_micro_batch_size,
+          max_seq_token_per_tpu=trainer_config.max_seq_token_per_tpu or None,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
           checkpoint_root_directory=checkpoint_dir,
@@ -484,13 +498,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           rollout_vllm_async_scheduling=trainer_config.async_scheduling,
           rollout_vllm_server_mode=trainer_config.rl.use_agentic_rollout,
           rollout_vllm_reshard_chunk_size=trainer_config.rl.reshard_chunk_size,
-          rollout_vllm_kwargs={
-              "hf_overrides": trainer_config.vllm_hf_overrides,
-              "enable_expert_parallel": sampler_config.enable_expert_parallel,
-              "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
-              # Ensures vLLM model initializes with correct dtype (not float32 default)
-              "dtype": trainer_config.weight_dtype.value,
-          },
+          rollout_vllm_kwargs=rollout_vllm_kwargs,
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
               "detokenize": trainer_config.stop_strings is not None,
@@ -560,11 +568,19 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         beta=trainer_config.rl.grpo_beta,
         epsilon=trainer_config.rl.grpo_epsilon,
         loss_algo=trainer_config.rl.loss_algo,
+        loss_agg_mode=trainer_config.rl.loss_agg_mode,
         max_response_length=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
         max_concurrency=trainer_config.rl.max_concurrency,
         off_policy_steps=trainer_config.rl.off_policy_steps,
         system_prompt=trainer_config.rl.system_prompt,
         epsilon_high=trainer_config.rl.epsilon_high,
+        use_rollout_logps=trainer_config.rl.use_rollout_logps,
+        force_on_policy_ratio=trainer_config.rl.force_on_policy_ratio,
+        log_sampler_trainer_agreement=(trainer_config.rl.log_sampler_trainer_agreement),
+    )
+    max_logging.log(
+        "GRPO config resolved:\n"
+        + "\n".join(f"  {k} = {v!r}" for k, v in sorted(dataclasses.asdict(grpo_config).items()))
     )
     # Instantiate the custom MaxText chat parser
     template_config = load_data_template_from_file(trainer_config.data_template_path)

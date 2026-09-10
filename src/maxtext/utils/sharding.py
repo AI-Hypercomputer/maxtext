@@ -28,7 +28,6 @@ from maxtext.common.common_types import ShardMode
 from maxtext.configs import pyconfig
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
-import optax
 
 _LOGGED_ACTIVATION_SHARDINGS = set()
 _ACTIVATION_SHARDINGS_DUMP = []
@@ -207,6 +206,16 @@ def mesh_axes_for_dim(axis_names):
   if isinstance(axis_names, str):
     return (axis_names,)
   return tuple(axis for axis in axis_names if axis is not None)
+
+
+def batch_mesh_axes(mesh, rules=None):
+  """Returns the mesh axes of size > 1 that the activation batch dimension is sharded over."""
+  spec = logical_to_mesh_axes(("activation_batch",), mesh, rules=rules)
+  # A rule that resolves to a rank-0 spec leaves no dimension to read, so there is nothing the
+  # batch is sharded over.
+  if spec is None or not spec.partitions:
+    return frozenset()
+  return frozenset(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
 
 
 def mesh_axes_size(mesh, axes, *, label):
@@ -676,7 +685,12 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     raise AssertionError(f"Could not shard {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}") from e
   pspec = sharding.spec
 
-  if "data" in jax.tree.leaves(pspec):
+  # `tuple(pspec)`, not `pspec`: a PartitionSpec is a pytree *leaf*, so flattening one gives
+  # back the spec itself and this guard never fired. Its entries are what have to be walked,
+  # and they nest -- a dimension sharded over two axes is a tuple. Without this, a leaf
+  # already sharded over "data" gets a second one and `NamedSharding` rejects the result
+  # outright (`DuplicateSpecError: P(('data', 'data'), None)`).
+  if "data" in jax.tree.leaves(tuple(pspec)):
     return sharding
 
   for idx, (size, partition) in enumerate(zip(sharded_shape, pspec)):
@@ -712,26 +726,7 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       - updated_state_mesh_shardings: State mesh shardings with updated params field
         (unchanged if shard_optimizer_over_data is False)
   """
-  if config.pure_nnx:
-    return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
-  prev_params_shardings = state_mesh_shardings.params
-  if config.shard_optimizer_over_data:
-    if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
-      sharded_fp32_params = state_mesh_shardings.opt_state.mu
-    elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(
-        state_mesh_shardings.opt_state[0], optax.ScaleByAdamState
-    ):
-      sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
-    else:
-      raise NotImplementedError(f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}")
-    if "params" not in sharded_fp32_params.keys():  # pyrefly: ignore[missing-attribute]
-      # When quantization=fp8 is enabled the sharded_fp32_params
-      # are not wrapped in `params`. Here we wrap them back.
-      sharded_fp32_params = {"params": sharded_fp32_params}
-    state_mesh_shardings = state_mesh_shardings.replace(
-        params=dict(prev_params_shardings, **sharded_fp32_params)  # pyrefly: ignore[bad-unpacking]
-    )  # pyrefly: ignore[bad-unpacking]
-  return prev_params_shardings, state_mesh_shardings
+  return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
 
 
 def maybe_update_params_sharding_with_opt_nnx(
@@ -865,8 +860,6 @@ def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_
   """
   if not config.shard_optimizer_over_data:
     return state_mesh_shardings
-  if not config.pure_nnx:
-    return state_mesh_shardings.replace(params=params_shardings)
   # nnx.State has no .replace: shallow-copy via tree_map (preserves nested container
   # types) and overlay params_shardings under input_state.model.
   input_state = jax.tree_util.tree_map(

@@ -97,11 +97,20 @@ class QuantizationType(str, Enum):
   FP8_NANO_V2 = "fp8_nanoo"
   FP8_GPU = "fp8_gpu"
   FP8_FULL = "fp8_full"
+  TE_NO_QUANT = "te_no_quant"
   TE_FP8_DS = "te_fp8_delayedscaling"
   TE_FP8_CS = "te_fp8_currentscaling"
   TE_MXFP8 = "te_mxfp8"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
+
+
+class TEGroupedGemmQuantizationType(str, Enum):
+  """Supported quantization schemes for TE grouped GEMM in MoE layers."""
+
+  EMPTY = ""
+  TE_NO_QUANT = "te_no_quant"  # Default precision, e.g. BF16, without quantization
+  TE_MXFP8 = "te_mxfp8"
 
 
 class TeCommGemmOverlapPolicy(str, Enum):
@@ -278,6 +287,7 @@ ModelName = Literal[
     "qwen3-vl-4b",
     "qwen3-vl-30b-a3b",
     "cosmos3-nano-reasoner",
+    "cosmos3-super-reasoner",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
@@ -494,6 +504,13 @@ class Quantization(BaseModel):
   )
   quant_cfg_path: PathStr = Field("", description="Path to the configuration file for 'intmp' quantization.")
   quantize_kvcache: bool = Field(False, description="If True, quantizes the Key-Value cache.")
+  quantize_mtp: bool = Field(
+      False,
+      description=(
+          "If True, quantizes the Multi-Token Prediction (MTP) block. Only supported with"
+          " `mtp_num_layers > 0` and `quantization=fp8_full`."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -878,6 +895,10 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
   )
+  retry_when_tokens_dropped: bool = Field(
+      False,
+      description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
@@ -920,6 +941,23 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  te_moe_block: bool = Field(
+      False,
+      description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
+  )
+  te_ep_overflow_check_every_n_steps: PositiveInt = Field(
+      20,
+      description=(
+          "Number of training steps buffered between host-side TE EP receive-capacity overflow checks when "
+          "ragged_buffer_factor limits the TE receive capacity. "
+          "Overflowing steps still skip their optimizer update immediately on device."
+      ),
+  )
+  te_gmm_quantization: None | TEGroupedGemmQuantizationType = Field(
+      TEGroupedGemmQuantizationType.EMPTY,
+      description="Quantization mode for TransformerEngine grouped GEMMs.",
+  )
+
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
       description=(
@@ -2689,6 +2727,11 @@ class VLLM(BaseModel):
   async_scheduling: bool = Field(False, description="Enable asynchronous scheduling in vLLM.")
   max_num_batched_tokens: Optional[int] = Field(None, description="Max number of batched tokens in vLLM.")
   max_num_seqs: Optional[int] = Field(None, description="Max number of sequences in vLLM.")
+  vllm_block_size: Optional[int] = Field(
+      None,
+      gt=0,
+      description="KV-cache block (page) size for vLLM. None lets the backend pick it from the engine shape.",
+  )
   stop_strings: Optional[list[str]] = Field(None, description="List of stop strings for vLLM decoding.")
   vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
   vllm_hf_overrides: dict[str, Any] = Field(
@@ -2776,6 +2819,29 @@ class RL(BaseModel):
           "If None, no chunking is applied, which may lead to OOM errors if tensors are too large."
       ),
   )
+  use_rollout_logps: bool = Field(
+      True,
+      description=(
+          "Use rollout engine's logprobs as old_per_token_logps. "
+          "False selects the step-0 re-forward path (trainer recomputes them)"
+      ),
+  )
+  force_on_policy_ratio: bool = Field(
+      False,
+      description=(
+          "Pin the PPO/GRPO surrogate ratio to exactly 1.0 by using "
+          "stop_gradient(current_logp) as old_per_token_logps. Valid only for "
+          "single-iteration on-policy training (num_iterations=1)."
+      ),
+  )
+  log_sampler_trainer_agreement: bool = Field(
+      False,
+      description=(
+          "Compute an extra trainer forward pass per step to log sampler-vs-trainer "
+          "logp agreement metrics. Costs ~1 forward pass; needed because "
+          "force_on_policy_ratio otherwise leaves no trainer logps to compare."
+      ),
+  )
 
 
 class RLDataset(BaseModel):
@@ -2797,6 +2863,15 @@ class RLDataset(BaseModel):
   train_fraction: float = Field(1.0, gt=0.0, le=1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
   rollout_micro_batch_size: int = Field(-1, description="Micro batch size for rollout.")
+  max_seq_token_per_tpu: int = Field(
+      0,
+      ge=0,
+      description=(
+          "Token budget per packed training row (Tunix `max_seq_token_per_tpu`). When > 0, rollout sequences are packed "
+          "into rows of this many tokens for the actor/reference passes instead of one padded row per sequence; a maximal "
+          "sequence (max_prefill_predict_length + generation length) must fit in one row. 0 disables packing."
+      ),
+  )
   dataset_processor_path: str = Field(
       "",
       description=(
@@ -3283,7 +3358,29 @@ class MaxTextConfig(
           f"Found other ICI axes enabled: {active}."
       )
 
+  def validate_retry_when_tokens_dropped(self):
+    """Validates prerequisites for the step-level dropless fallback retry."""
+    if self.retry_when_tokens_dropped:
+      if self.num_experts <= 1:
+        raise ValueError("retry_when_tokens_dropped=True requires num_experts > 1.")
+      if self.ragged_buffer_factor == -1:
+        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0 (got default -1.0).")
+      if self.ragged_buffer_factor <= 0:
+        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0.")
+      if not self.use_ring_of_experts:
+        raise ValueError("retry_when_tokens_dropped=True is currently only supported with use_ring_of_experts=True.")
+      if not self.use_ragged_sort:
+        raise ValueError("retry_when_tokens_dropped=True requires use_ragged_sort=True.")
+      if self.num_moe_emb_chunks > 0:
+        raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
+
   def validate_ragged_buffer_factor(self):
+    """Validates that ragged_buffer_factor is used with supported settings."""
+    if self.te_moe_block:
+      if 0 < self.ragged_buffer_factor < 1.0:
+        raise ValueError("te_moe_block=True requires ragged_buffer_factor >= 1.0, or <= 0 for worst-case capacity.")
+      return
+
     if self.ragged_buffer_factor <= 0:
       return  # Not using a ragged buffer factor
 
@@ -3478,10 +3575,12 @@ class MaxTextConfig(
         _ep_disabled_flags = {
             "use_random_routing": False,
             "use_ragged_sort": False,
-            "ragged_buffer_factor": -1.0,
+            "retry_when_tokens_dropped": False,
             "use_ring_of_experts": False,
             "num_moe_emb_chunks": 0,
         }
+        if not self.te_moe_block:
+          _ep_disabled_flags["ragged_buffer_factor"] = -1.0
         for flag_name, disabled_value in _ep_disabled_flags.items():
           current = getattr(self, flag_name)
           if current != disabled_value:
@@ -4214,6 +4313,11 @@ class MaxTextConfig(
         raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
+    if self.quantize_mtp:
+      if self.mtp_num_layers <= 0:
+        raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
+      if self.quantization != "fp8_full":
+        raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
     if (
         self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
         and self.gradient_accumulation_steps > 1
@@ -4258,6 +4362,23 @@ class MaxTextConfig(
           and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
       ):
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if self.te_moe_block and not self.sparse_matmul:
+        raise ValueError("te_moe_block=True requires sparse_matmul=True.")
+      if self.te_moe_block and not self.prefuse_moe_weights:
+        raise ValueError("te_moe_block=True requires prefuse_moe_weights=True.")
+      if self.te_moe_block and self.routed_bias_update_rate > 0.0:
+        raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
+      if self.te_moe_block and self.norm_topk_prob:
+        raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
+      if self.te_moe_block and self.use_random_routing:
+        raise ValueError("te_moe_block=True does not support use_random_routing=True.")
+      if self.te_moe_block and self.decoder_block == DecoderBlockType.LLAMA4:
+        raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
+      if self.te_moe_block and not self.te_gmm_quantization:
+        raise ValueError(
+            "te_gmm_quantization must be specified when te_moe_block=True. "
+            "te_gmm_quantization=te_no_quant is supported for BF16."
+        )
       if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
         raise ValueError(
             "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
@@ -4266,6 +4387,7 @@ class MaxTextConfig(
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
+      self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
 
     if self.enable_diloco and not self.pure_nnx:
@@ -4308,6 +4430,7 @@ class MaxTextConfig(
           "qwen3.5-397b-a17b",
           "maxtext-omni-gemma3-qwen3",
           "cosmos3-nano-reasoner",
+          "cosmos3-super-reasoner",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
@@ -4336,9 +4459,12 @@ class MaxTextConfig(
           "deepseek",
           "mistral",
           "mixtral",
+          "qwen2",
           "qwen3",
           "qwen3_moe",
           "qwen3_custom_moe",
+          "qwen3_5",
+          "qwen3_next",
           "gemma",
           "gemma2",
           "gemma3",
@@ -4353,6 +4479,34 @@ class MaxTextConfig(
             "'explicit' sharding is not supported with `use_multimodal`; the vision and audio encoders "
             "have not been onboarded to explicit sharding yet."
         )
+      # Both hybrid decoders share the same GatedDeltaNet sublayers, so the same gaps.
+      if self.decoder_block in (
+          DecoderBlockType.QWEN3_5,
+          DecoderBlockType.QWEN3_NEXT,
+      ):
+        decoder_name = self.decoder_block.value
+        if not self.sparse_matmul:
+          raise ValueError(
+              f"'explicit' sharding with the '{decoder_name}' decoder requires"
+              " `sparse_matmul=True`; the dense matmul MoE path has not been"
+              " onboarded to explicit sharding yet."
+          )
+        gdn_context_parallel_size = (
+            self.ici_context_parallelism
+            * self.dcn_context_parallelism
+            * self.ici_context_usp_ulysses_parallelism
+            * self.dcn_context_usp_ulysses_parallelism
+        )
+        if gdn_context_parallel_size > 1:
+          raise ValueError(
+              f"'explicit' sharding with the '{decoder_name}' decoder does not"
+              " support context parallelism yet. The GatedDeltaNet short"
+              " convolution left-pads the sequence by `gdn_conv_kernel_dim -"
+              " 1` and slices the result back, which explicit sharding cannot"
+              " express on a sharded sequence axis. Use `shard_mode=auto` when"
+              " `ici_context_parallelism` or"
+              " `ici_context_usp_ulysses_parallelism` is set."
+          )
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
     if self.ulysses_context_sharding != "context_usp_ulysses":
@@ -5023,6 +5177,16 @@ class RLConfig(
     model_name = getattr(self, "model_name", None)
     if model_name is None:
       raise ValueError("model_name is not set. Please pass model_name in your command.")
+
+    # With sequence packing on, a maximal sequence (prompt cap + generation
+    # cap = max_target_length) must fit in one packed row. Tunix checks this
+    # too, but only in the learner, after the models are already on the
+    # accelerators; fail here, before any of that work.
+    if 0 < self.max_seq_token_per_tpu < self.max_target_length:
+      raise ValueError(
+          f"max_seq_token_per_tpu ({self.max_seq_token_per_tpu}) must be at least "
+          f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
+      )
 
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)

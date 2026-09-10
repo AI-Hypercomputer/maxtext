@@ -18,7 +18,7 @@ import functools
 import json
 import qwix.pallas as qpl
 import re
-from typing import Tuple, Sequence, Callable
+from typing import ClassVar, Tuple, Sequence, Callable
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -79,6 +79,11 @@ _TILE_SIZE = "tile_size"  # Tile size for subchannel
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""
+
+  # Whether this backend's dot_general draws RNGs at apply time, as AQT and NVFP4
+  # stochastic rounding do. False lets the Linen->NNX bridge drop its forked Rngs after
+  # init; the default makes opting out deliberate.
+  needs_apply_rngs: ClassVar[bool] = True
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
@@ -143,6 +148,10 @@ def _rhs_axis_metadata_wrapper(
 @dataclass
 class AqtQuantization:
   """Configures AQT quantization github.com/google/aqt."""
+
+  # Declared, not inherited: this class sits outside the Quantization hierarchy. AQT
+  # sets rng_type="jax.uniform" and stochastic rounding draws at apply time.
+  needs_apply_rngs: ClassVar[bool] = True
 
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
@@ -226,6 +235,9 @@ class AqtQuantization:
 class QwixQuantization:
   """Configures Qwix quantization github.com/google/qwix, for training only."""
 
+  # Declared, not inherited: this class sits outside the Quantization hierarchy.
+  needs_apply_rngs: ClassVar[bool] = True
+
   quant_mode = "train"  # needed by external call
   act_calibration_method: str = "absmax"
   weight_calibration_method: str = "absmax"
@@ -305,6 +317,9 @@ class QwixEinsum(nn.Module):
 @dataclass
 class Fp8Quantization(Quantization):
   """Configures Fp8 quantization for NVIDIA GPUs"""
+
+  # Flax's fp8 ops scale from amax history, never from make_rng at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
 
   quant_mode = "train"
   # The forward dtype, for callers that quantize an operand themselves rather than through
@@ -397,6 +412,9 @@ class Fp8Einsum(nn.Module):
 @dataclass
 class NANOOFp8Quantization(Quantization):
   """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
+
+  # Same as Fp8Quantization: nn.NANOOFp8DotGeneralOp never draws at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
 
   quant_mode = "train"
   quantize_dtype = jnp.float8_e4m3fnuz
@@ -857,6 +875,7 @@ class NANOOFp8Provider(qwix.QtProvider):
 
 
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
+  """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
   if config.weight_sparsity_n and config.weight_sparsity_m:
     sparsity_rule = sparsity.SparsityRule(
@@ -865,9 +884,15 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
         weight_sparsity_update_step=config.weight_sparsity_update_step,
         weight_sparsity_start_step=config.weight_sparsity_start_step,
     )
+
+  if config.quantize_mtp:
+    module_path = "(decoder/.*layers.*|mtp_block/.*)"
+  else:
+    module_path = "decoder/.*layers.*"
+
   return [
       qwix.QtRule(
-          module_path="decoder/.*layers.*",
+          module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
           act_qtype=jnp.float8_e4m3fn,
           bwd_qtype=jnp.float8_e5m2,
@@ -938,32 +963,28 @@ def maybe_quantize_model(model, config):
   if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      if config.pure_nnx:
-        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-        dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
-        dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
-        dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
-        # The MTP block reads the decoder targets, so the qwix forward pass needs them.
-        # The Linen path supplies them from the is_initializing() guard in Transformer.
-        dummy_targets = {}
-        if config.mtp_num_layers > 0:
-          dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
-          dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
-        model = qwix.quantize_model(
-            model,
-            quantization_provider,
-            dummy_tokens,
-            dummy_positions,
-            dummy_segment_ids,
-            enable_dropout=False,
-            **dummy_targets,
-        )
-        # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
-        # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
-        # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
-        nnx.pop(model, nnx.Intermediate)
-      else:
-        model = qwix.quantize_model(model, quantization_provider)
+      input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+      dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+      # The MTP block reads the decoder targets, so the qwix forward pass needs them.
+      dummy_targets = {}
+      if config.mtp_num_layers > 0:
+        dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
+      model = qwix.quantize_model(
+          model,
+          quantization_provider,
+          dummy_tokens,
+          dummy_positions,
+          dummy_segment_ids,
+          enable_dropout=False,
+          **dummy_targets,
+      )
+      # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
+      # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
+      # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
+      nnx.pop(model, nnx.Intermediate)
       for _, val in nnx.graph.iter_graph(model):
         if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
           del val.qwix_rngs
@@ -1081,6 +1102,7 @@ class TransformerEngineQuantization(Quantization):
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     RECIPES = {
+        "te_no_quant": lambda: None,
         "te_fp8_delayedscaling": recipe.DelayedScaling,
         "te_fp8_currentscaling": recipe.Float8CurrentScaling,
         "te_mxfp8": recipe.MXFP8BlockScaling,
@@ -1090,6 +1112,19 @@ class TransformerEngineQuantization(Quantization):
     if recipe_name not in RECIPES:
       raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")
     return RECIPES[recipe_name]()
+
+  @property
+  def needs_apply_rngs(self) -> bool:
+    """Whether this recipe draws RNGs at apply time.
+
+    Only NVFP4 does, and only while stochastic rounding is on: TE draws ``sr_rng`` for
+    the DGRAD quantizer. The other recipes take their scales from the tensors.
+    """
+    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+    if not isinstance(self._recipe, recipe.NVFP4BlockScaling):  # pytype: disable=module-attr
+      return False
+    return not self._recipe.disable_stochastic_rounding
 
   def get_block_size(self):
     """Get the block size for quantization for recipes that require blocks.
@@ -1215,7 +1250,66 @@ class TransformerEngineQuantization(Quantization):
 
     return self._wrap(te_dot_general, "dot_general")
 
-  def einsum(self, dtype: DType = jnp.float32):
+  def einsum(self, *args, **kwargs):
     """Placeholder for einsum implementation in subclasses."""
     # quant.einsum is only required for MoE or for inference with KVCache.
     raise ValueError("Einsum is not yet supported for TransformerEngine quantization.")
+
+  def get_moe_block_quantizer_set(
+      self,
+      te_gmm_quantization_recipe_name: str,
+      n_token_groups: int,
+      n_expert_groups: int,
+  ):
+    """Create a TransformerEngine quantizer set for TE MoEBlock grouped GEMMs."""
+    from transformer_engine.jax.quantize import (  # pylint: disable=import-outside-toplevel
+        QuantizerFactory,
+        QuantizerSet,
+        ScalingMode,
+    )
+
+    if te_gmm_quantization_recipe_name == "te_no_quant":
+      return QuantizerFactory.create_set(scaling_mode=ScalingMode.NO_SCALING, is_2x2x=False)
+    if te_gmm_quantization_recipe_name != "te_mxfp8":
+      raise ValueError(f"Invalid TransformerEngine GMM quantization recipe name: {te_gmm_quantization_recipe_name}")
+    if n_token_groups <= 0 or n_expert_groups <= 0:
+      raise ValueError(
+          "TE MoEBlock quantizer group counts must be positive, got "
+          f"n_token_groups={n_token_groups}, n_expert_groups={n_expert_groups}."
+      )
+
+    token_quantizer_set = QuantizerFactory.create_set(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        fwd_dtype=jnp.float8_e4m3fn,
+        bwd_dtype=jnp.float8_e4m3fn,
+        is_2x2x=True,
+        n_groups=n_token_groups,
+    )
+    expert_quantizer_set = QuantizerFactory.create_set(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        fwd_dtype=jnp.float8_e4m3fn,
+        bwd_dtype=jnp.float8_e4m3fn,
+        is_2x2x=True,
+        n_groups=n_expert_groups,
+    )
+    return QuantizerSet(
+        x=token_quantizer_set.x,
+        kernel=expert_quantizer_set.kernel,
+        dgrad=token_quantizer_set.dgrad,
+    )
+
+  def get_moe_block_quantizer_sets(
+      self,
+      te_gmm_quantization_recipe_name: str,
+      n_token_groups: int,
+      n_expert_groups: int,
+  ):
+    """Create independent FC1 and FC2 quantizer sets for TE's MoE custom VJP."""
+    return tuple(
+        self.get_moe_block_quantizer_set(
+            te_gmm_quantization_recipe_name,
+            n_token_groups=n_token_groups,
+            n_expert_groups=n_expert_groups,
+        )
+        for _ in range(2)
+    )

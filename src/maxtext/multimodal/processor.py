@@ -41,6 +41,7 @@ _MODEL_TO_BLOCKS = {
     "maxtext-omni-gemma3-qwen3": ("gemma3", "qwen3"),
     # Cosmos
     "cosmos3-nano-reasoner": ("qwen3_vl", "qwen3"),
+    "cosmos3-super-reasoner": ("qwen3_vl", "qwen3"),
 }
 
 

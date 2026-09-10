@@ -98,13 +98,13 @@ def get_functional_train_with_signature(
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"  # pyrefly: ignore[missing-attribute]
-  if config.pure_nnx:
-    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
-  else:
-    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
-  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  if getattr(config, "retry_when_tokens_dropped", False) is True:
+    donate_argnums = ()  # Preserve state so it can be replayed if an overflow occurs
+  else:
+    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
@@ -112,10 +112,7 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"  # pyrefly: ignore[missing-attribute]
-  if config.pure_nnx:
-    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch (NNX: no rng)
-  else:
-    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
@@ -145,17 +142,18 @@ def get_reorder_callable(cp_size, shard_mode, reorder_strategy=ReorderStrategy.D
   )
 
 
-def get_shaped_batch(config, batch_sharding=None):
+def get_shaped_batch(config, batch_sharding=None, is_eval=False):
   """Return the shape of the batch - this is what eval_shape would return for the
   output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
+  global_batch_size = config.global_batch_size_to_load_eval if is_eval else config.global_batch_size_to_load
   if config.enable_diloco:
     batch_shape = (
         config.num_diloco_replicas,
-        config.global_batch_size_to_load // config.num_diloco_replicas,
+        global_batch_size // config.num_diloco_replicas,
         config.max_target_length,
     )
   else:
-    batch_shape = (config.global_batch_size_to_load, config.max_target_length)
+    batch_shape = (global_batch_size, config.max_target_length)
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   # MRoPE uses (batch, seq, 3); same batch/seq axes as 1D positions so batch_sharding applies as-is.
@@ -169,6 +167,7 @@ def get_shaped_batch(config, batch_sharding=None):
     shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
     shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   if config.use_multimodal:
+    batch_size = config.micro_batch_size_to_eval_on if is_eval else config.micro_batch_size_to_train_on
     is_video = getattr(config, "video_max_grid_t", None) is not None
     if is_video:
       max_t = config.video_max_grid_t
@@ -177,16 +176,13 @@ def get_shaped_batch(config, batch_sharding=None):
       tps = config.temporal_patch_size_for_vit
       patch = config.patch_size_for_vit
       channels = config.num_channels_for_vit
-      batch_size = config.micro_batch_size_to_train_on
       video_shape = (batch_size, channels, max_t * tps, max_h * patch, max_w * patch)
       video_mask_shape = (batch_size, 1, max_t * tps, max_h * patch, max_w * patch)
       shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
       shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
       shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
     else:
-      image_shape = mm_processor.get_dummy_image_shape_for_init(
-          config.model_name, batch_size=config.micro_batch_size_to_train_on
-      )
+      image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size)
       shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
       # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
       # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
@@ -279,11 +275,7 @@ def load_compiled(config, partial_train, state, execution_devices):
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
   shaped_batch = get_shaped_batch(config)
-  if config.pure_nnx:
-    shaped_input_args = (state, shaped_batch)
-  else:
-    example_rng = jax.random.PRNGKey(0)
-    shaped_input_args = (state, shaped_batch, example_rng)
+  shaped_input_args = (state, shaped_batch)
   shaped_input_kwargs = {}
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree, execution_devices=execution_devices)
@@ -1879,51 +1871,8 @@ def get_logical_annotations(config, mesh, init_state_fn):
 
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
-  """Get a shaped abstraction of the state (including optimizer)"""
-  if config.pure_nnx:
-    return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
-
-  init_state_partial = init_state_fn
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
-
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-
-  state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
-  if is_training and config.shard_optimizer_over_data:
-    # Add data to sharding for optimizer state
-    state_mesh_shardings = state_mesh_shardings.replace(
-        opt_state=jax.tree.map_with_path(
-            functools.partial(sharding.add_data_to_sharding, mesh),
-            max_utils.unbox_logicallypartioned(abstract_state).opt_state,
-            state_mesh_shardings.opt_state,
-        )
-    )
-  if is_training and config.optimizer_memory_host_offload:
-    opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
-    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
-  if is_training and config.parameter_memory_host_offload:
-    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
-
-    def move(path, x):
-      max_logging.log(f"max_utils.py: Moving {path} to host")
-      return x.with_memory_kind(kind="pinned_host")
-
-    params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
-    state_mesh_shardings = state_mesh_shardings.replace(params=params)
-
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
-
-  unboxed_abstract_sharded_state = max_utils.unbox_logicallypartioned(abstract_sharded_state)
-  # Initialization
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return (
-      unboxed_abstract_sharded_state,
-      state_mesh_annotations,
-      state_mesh_shardings,
-  )
+  """Get a shaped abstraction of the state (including optimizer)."""
+  return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
 
 
 def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=True):

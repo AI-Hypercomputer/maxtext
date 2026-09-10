@@ -6,10 +6,10 @@ FROM $BASEIMAGE
 # Install system dependencies including C++20 compiler for vLLM
 RUN if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then \
         echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list.d/bookworm.list && \
-        apt-get update && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build curl gnupg && \
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build curl gnupg && \
         rm -rf /var/lib/apt/lists/*; \
     else \
-        apt-get update && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build curl gnupg && \
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build curl gnupg && \
         rm -rf /var/lib/apt/lists/*; \
     fi
 
@@ -22,6 +22,10 @@ RUN apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt
 
 # Set the default Python version to 3.12
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.12 1
+
+# Upgrade pip, setuptools, wheel, uv and clean up ensurepip bundled cache
+RUN python3 -m pip install --upgrade --no-cache-dir pip setuptools wheel uv && \
+    python3 -c 'import ensurepip, os, shutil; shutil.rmtree(os.path.join(os.path.dirname(ensurepip.__file__), "_bundled"), ignore_errors=True)'
 
 # Set environment variables for Google Cloud SDK, Python 3.12, and GCC 12
 ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.12:${PATH}"

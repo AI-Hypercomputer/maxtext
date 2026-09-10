@@ -24,6 +24,7 @@ import types as pytypes
 import unittest
 
 from flax import nnx
+from flax.nnx import variablelib
 import jax
 import jax.numpy as jnp
 from maxtext.layers import nnx_scan
@@ -51,6 +52,7 @@ class _Cfg:
   indexer_loss_scaling_factor: float = 0.0
   num_vocab_tiling: int = 1
   num_experts: int = 1
+  retry_when_tokens_dropped: bool = False
   routed_bias: bool = False
   routed_bias_update_rate: float = 0.0
   mtp_num_layers: int = 0
@@ -99,6 +101,17 @@ class _TinyDecoder(nnx.Module):
     del enable_dropout, decoder_target_tokens, decoder_target_mask
     h = self.embed(decoder_input_tokens)
     return self.proj(h)
+
+
+_OVERWRITE_WITH_GRADIENT = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
+
+
+class _CustomGradientModel(nnx.Module):
+  """Small model with custom state differentiated outside the optimizer."""
+
+  def __init__(self):
+    self.weight = nnx.Param(jnp.array(1.0))
+    self.custom_state = _OVERWRITE_WITH_GRADIENT(jnp.array(2.0))
 
 
 class GateLogit(nnx.Module):
@@ -166,6 +179,19 @@ class _TinyDecoderMoEBiasWithMTP(_TinyDecoderMoEBias):
     out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
     for i in range(self.num_mtp_layers):
       self.mtp_block[f"mtp_layer_{i + 1}"]()
+    return out
+
+
+class _TinyDecoderMoEOverflow(_TinyDecoder):
+  """`_TinyDecoder` with a layer that sows moe_has_overflow, like RoutedMoE.sparse_matmul."""
+
+  def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs, has_overflow: bool):
+    super().__init__(vocab_size, hidden, rngs=rngs)
+    self.has_overflow = has_overflow
+
+  def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+    out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
+    self.sow(nnx.Intermediate, "moe_has_overflow", jnp.bool_(self.has_overflow))
     return out
 
 
@@ -367,6 +393,83 @@ class TestTrainStepNNX(unittest.TestCase):
     )
     self.assertIsInstance(new_state, nnx.State)
     self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
+
+  def test_custom_state_keeps_gradient_update(self):
+    """Checks that old custom state does not overwrite its gradient update."""
+    cfg = _Cfg()
+    model = _CustomGradientModel()
+    ts = train_state_nnx.TrainStateNNX(
+        model,
+        nnx.Optimizer(model, optax.sgd(0.1), wrt=nnx.Param),
+    )
+    state_graphdef, state_pure = nnx.split(ts)
+
+    def fake_loss_fn(local_model, *_args, **_kwargs):
+      loss = local_model.weight.get_value() + 3.0 * local_model.custom_state.get_value()
+      return loss, {
+          "intermediate_outputs": {},
+          "xent_sum": loss,
+          "z_loss": jnp.array(0.0),
+          "total_weights": jnp.array(1.0),
+          "moe_lb_loss": jnp.array(0.0),
+          "indexer_loss": jnp.array(0.0),
+          "moe_bias_updates": None,
+          "mtp_moe_bias_updates": None,
+          "mtp_loss": jnp.array(0.0),
+          "batch_stats": None,
+      }
+
+    original_loss_fn = pre_train.loss_fn
+    try:
+      pre_train.loss_fn = fake_loss_fn
+      new_state, _ = pre_train.train_step(
+          state_graphdef,
+          cfg,
+          state_mesh_shardings=None,
+          params_shardings=None,
+          state=state_pure,
+          data={},
+      )
+    finally:
+      pre_train.loss_fn = original_loss_fn
+
+    # The custom gradient is 3.0. It must not be replaced by the old state (2.0).
+    np.testing.assert_allclose(np.asarray(new_state.model.custom_state.get_value()), 3.0)
+
+
+class TestMoeOverflowLoggingNNX(unittest.TestCase):
+  """Covers train_step surfacing has_moe_overflow for training_loop_iteration's log line."""
+
+  def _build_state(self, has_overflow, retry_when_tokens_dropped):
+    cfg = _Cfg(retry_when_tokens_dropped=retry_when_tokens_dropped)
+    model = _TinyDecoderMoEOverflow(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0), has_overflow=has_overflow)
+    optimizer = nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param)
+    return cfg, train_state_nnx.TrainStateNNX(model, optimizer)
+
+  def _metrics(self, has_overflow, retry_when_tokens_dropped):
+    cfg, ts = self._build_state(has_overflow, retry_when_tokens_dropped)
+    state_graphdef, state_pure = nnx.split(ts)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    _, metrics = pre_train.train_step(
+        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+    )
+    return metrics
+
+  def test_surfaces_overflow_when_flag_on(self):
+    metrics = self._metrics(has_overflow=True, retry_when_tokens_dropped=True)
+    self.assertTrue(bool(metrics["has_moe_overflow"]))
+
+  def test_no_overflow_when_flag_on(self):
+    metrics = self._metrics(has_overflow=False, retry_when_tokens_dropped=True)
+    self.assertFalse(bool(metrics["has_moe_overflow"]))
+
+  def test_key_absent_when_flag_off(self):
+    """Key must be absent (not just False) when off: an always-present key would
+
+    change every model's compiled train_step output, even non-MoE ones.
+    """
+    metrics = self._metrics(has_overflow=True, retry_when_tokens_dropped=False)
+    self.assertNotIn("has_moe_overflow", metrics)
 
 
 class TestEvalStepNNX(unittest.TestCase):
