@@ -20,8 +20,10 @@ production loss_fn uses (decoder_input_tokens, decoder_positions, ...).
 """
 
 from dataclasses import dataclass
+import datetime
 import types as pytypes
 import unittest
+from unittest import mock
 
 from flax import nnx
 from flax.nnx import variablelib
@@ -438,7 +440,7 @@ class TestTrainStepNNX(unittest.TestCase):
 
 
 class TestMoeOverflowLoggingNNX(unittest.TestCase):
-  """Covers train_step surfacing has_moe_overflow for training_loop_iteration's log line."""
+  """Covers train_step/eval_step surfacing has_moe_overflow for training_loop_iteration's retry branches."""
 
   def _build_state(self, has_overflow, retry_when_tokens_dropped):
     cfg = _Cfg(retry_when_tokens_dropped=retry_when_tokens_dropped)
@@ -455,6 +457,13 @@ class TestMoeOverflowLoggingNNX(unittest.TestCase):
     )
     return metrics
 
+  def _eval_metrics(self, has_overflow, retry_when_tokens_dropped):
+    """Runs eval_step and returns its metrics dict."""
+    cfg, ts = self._build_state(has_overflow, retry_when_tokens_dropped)
+    state_graphdef, state_pure = nnx.split(ts)
+    data = _make_data(batch=cfg.micro_batch_size_to_eval_on, vocab=cfg.vocab_size)
+    return pre_train.eval_step(state_graphdef, cfg, state_pure, data)
+
   def test_surfaces_overflow_when_flag_on(self):
     metrics = self._metrics(has_overflow=True, retry_when_tokens_dropped=True)
     self.assertTrue(bool(metrics["has_moe_overflow"]))
@@ -469,6 +478,17 @@ class TestMoeOverflowLoggingNNX(unittest.TestCase):
     change every model's compiled train_step output, even non-MoE ones.
     """
     metrics = self._metrics(has_overflow=True, retry_when_tokens_dropped=False)
+    self.assertNotIn("has_moe_overflow", metrics)
+
+  def test_eval_step_also_surfaces_overflow(self):
+    """eval_step must surface has_moe_overflow the same way train_step does -- it's what
+    training_loop_iteration's eval-retry branch checks before replaying with the dropless step.
+    """
+    metrics = self._eval_metrics(has_overflow=True, retry_when_tokens_dropped=True)
+    self.assertTrue(bool(metrics["has_moe_overflow"]))
+
+  def test_eval_step_key_absent_when_flag_off(self):
+    metrics = self._eval_metrics(has_overflow=True, retry_when_tokens_dropped=False)
     self.assertNotIn("has_moe_overflow", metrics)
 
 
@@ -647,6 +667,114 @@ class TestRecordActivationMetricsParity(unittest.TestCase):
     for key, expected in m_linen.items():
       np.testing.assert_allclose(np.asarray(m_nnx[key]), np.asarray(expected))
     np.testing.assert_allclose(np.asarray(m_nnx["activ_stdev/layer_002"]), 1.2)
+
+
+class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
+  """Covers training_loop_iteration's host-side eval-retry branch: p_eval_step_dropless is
+  invoked (and its metrics used) only when retry_when_tokens_dropped is on, a dropless eval
+  step is available, and the primary eval step reports has_moe_overflow.
+  """
+
+  _PRIMARY_LOSS = 999.0
+  _DROPLESS_LOSS = -1.0
+
+  def _run(self, retry_when_tokens_dropped, has_overflow, with_dropless):
+    """Runs training_loop_iteration with fake step fns and returns (eval loss used, dropless call count)."""
+
+    def p_train_step(state, batch, *rng_args):
+      del batch, rng_args
+      return state, {"scalar": {}, "scalars": {}}
+
+    def p_eval_step(state, batch, *rng_args):
+      del state, batch, rng_args
+      metrics = {"scalar": {"evaluation/total_loss": jnp.array(self._PRIMARY_LOSS)}}
+      if retry_when_tokens_dropped:
+        metrics["has_moe_overflow"] = jnp.bool_(has_overflow)
+      return metrics
+
+    dropless_calls = []
+
+    def p_eval_step_dropless(state, batch, *rng_args):
+      del state, batch, rng_args
+      dropless_calls.append(1)
+      return {"scalar": {"evaluation/total_loss": jnp.array(self._DROPLESS_LOSS)}}
+
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape(1), ("data",))
+    cfg = pytypes.SimpleNamespace(
+        elastic_enabled=False,
+        enable_diloco=False,
+        retry_when_tokens_dropped=retry_when_tokens_dropped,
+        logical_axis_rules_for_eval=(),
+    )
+    metric_logger_instance = mock.MagicMock()
+    data_loader = mock.MagicMock()
+    prof = mock.MagicMock()
+
+    jax_device_state = {
+        "state": "fake_state",
+        "init_rng": None,
+        "mesh": mesh,
+        "p_train_step": p_train_step,
+        "p_train_step_dropless": None,
+        "p_eval_step": p_eval_step,
+        "p_eval_step_dropless": p_eval_step_dropless if with_dropless else None,
+    }
+    python_vars = {
+        "step": 0,
+        "last_step_completion": datetime.datetime.now(),
+        "data_loader": data_loader,
+        "rampup_manager": None,
+        "recorder": None,
+        "checkpoint_manager": None,
+        "data_iterator": None,
+        "eval_data_iterator": [jnp.zeros((1,))],
+        "metric_logger_instance": metric_logger_instance,
+        "prof": prof,
+    }
+    immutable_data = {
+        "config": cfg,
+        "logical_axis_rules_for_train": (),
+        "logical_axis_rules_for_eval": (),
+        "eval_interval": 1,
+        "eval_steps": 0,
+        "start_step": -1,  # != step, so the print_mem_stats branch is skipped
+        "eval_start_step": 0,
+        "dump_hlo": False,
+        "dump_step": -1,
+        "dump_hlo_local_dir": None,
+        "dump_hlo_gcs_dir": None,
+        "dump_hlo_module_name": None,
+        "dump_hlo_delete_local_after": False,
+        "dump_hlo_upload_all": False,
+    }
+    with mock.patch.object(pre_train.sharding, "get_input_data_sharding", return_value=None):
+      pre_train.training_loop_iteration(jax_device_state, python_vars, immutable_data)
+
+    eval_call = next(
+        c for c in metric_logger_instance.buffer_and_write_metrics.call_args_list if not c.kwargs["is_training"]
+    )
+    used_loss = float(eval_call.args[0]["scalar"]["evaluation/total_loss"])
+    return used_loss, len(dropless_calls)
+
+  def test_replays_with_dropless_metrics_on_overflow(self):
+    used_loss, dropless_call_count = self._run(retry_when_tokens_dropped=True, has_overflow=True, with_dropless=True)
+    self.assertEqual(used_loss, self._DROPLESS_LOSS)
+    self.assertEqual(dropless_call_count, 1)
+
+  def test_keeps_primary_metrics_without_overflow(self):
+    used_loss, dropless_call_count = self._run(retry_when_tokens_dropped=True, has_overflow=False, with_dropless=True)
+    self.assertEqual(used_loss, self._PRIMARY_LOSS)
+    self.assertEqual(dropless_call_count, 0)
+
+  def test_keeps_primary_metrics_when_dropless_unavailable(self):
+    used_loss, dropless_call_count = self._run(retry_when_tokens_dropped=True, has_overflow=True, with_dropless=False)
+    self.assertEqual(used_loss, self._PRIMARY_LOSS)
+    self.assertEqual(dropless_call_count, 0)
+
+  def test_keeps_primary_metrics_when_flag_off(self):
+    used_loss, dropless_call_count = self._run(retry_when_tokens_dropped=False, has_overflow=True, with_dropless=True)
+    self.assertEqual(used_loss, self._PRIMARY_LOSS)
+    self.assertEqual(dropless_call_count, 0)
 
 
 if __name__ == "__main__":
