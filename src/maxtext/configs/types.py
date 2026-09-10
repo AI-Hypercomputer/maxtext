@@ -2741,11 +2741,23 @@ class VLLM(BaseModel):
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
   use_weight_converter: bool = Field(
-      False,
+      True,
       description=(
           "Use an explicit weight converter for trainer->rollout weight sync instead of "
           "the legacy transfer_state_directly / transfer_state_with_mappings paths."
       ),
+  )
+  use_raiden_ffi: Optional[bool] = Field(
+      None,
+      description="Use Raiden FFI transport for weight sync.",
+  )
+  rollout_tensor_parallelism: int = Field(
+      -1,
+      description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
+  )
+  rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
+      "maxtext",
+      description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
   )
   weight_sync_debug: bool = Field(
       False,
@@ -2765,6 +2777,16 @@ class VLLM(BaseModel):
           "executables, so the gap between them is how much of a sync is compilation "
           "rather than data movement. Adds one barrier per sync."
       ),
+  )
+  kv_tp_size: int = Field(
+      1,
+      ge=1,
+      description="Degree of tensor parallelism for KV cache / attention heads in rollout.",
+  )
+  moe_mlp_tp_size: int = Field(
+      1,
+      ge=1,
+      description="Degree of tensor parallelism for MoE MLP dimension in rollout.",
   )
   vllm_load_format: str = Field(
       "dummy",

@@ -164,7 +164,7 @@ require_env() {
 : "${DISTILL_LAYER_INDICES:=[0,1,2,3,4,5,6,7]}"
 
 # Image pinning (used by prep_image).
-: "${TUNIX_SOURCE:=git+https://github.com/google/tunix@1b0e3c5e89058d4dddf0ec68ae8be06c127f68ac}"
+: "${TUNIX_SOURCE:=git+https://github.com/google/tunix@a8d70582f1e2f1fb65973210989e0e148b5ef7ad}"
 : "${JAX_PIN:=0.10.0}"
 : "${JAXLIB_PIN:=0.10.0}"
 : "${LIBTPU_PIN:=0.0.39}"

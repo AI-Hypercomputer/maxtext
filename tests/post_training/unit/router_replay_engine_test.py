@@ -73,6 +73,7 @@ def _tiny_qwen35_kwargs(seq_len, batch_size, num_experts, top_k, **overrides):
       "max_prefill_predict_length": seq_len,
       "per_device_batch_size": float(batch_size),
       "weight_dtype": "bfloat16",
+      "inhomogeneous_layer_cycle_interval": 1,
   }
   kwargs.update(overrides)
   return kwargs
@@ -135,7 +136,7 @@ class RouterReplayEngineTest(unittest.TestCase):
     seq_len, batch_size, top_k = 16, 2, 2
 
     cfg = _init_test_cfg(
-        extra_args=["attention=flash"],
+        extra_args=["attention=dot_product"],
         **_tiny_qwen35_kwargs(
             seq_len,
             batch_size,
