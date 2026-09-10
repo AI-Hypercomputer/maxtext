@@ -16,7 +16,7 @@
 
 import sys
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock, patch
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
@@ -24,7 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maxtext.layers import linears
+from maxtext.layers import linears, quantizations
 from maxtext.configs import pyconfig
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -156,6 +156,110 @@ class DenseGeneralTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "sliced contraction is only supported when quant is None"):
       layer(inputs, slice_bounds=(0, 3))
 
+  def _capture_dispatched_kernel(self, layer, inputs):
+    """Runs `layer` and returns the kernel handed to the dot_general dispatcher."""
+    captured = {}
+
+    def _spy(dispatched_inputs, kernel, *args, **kwargs):  # pylint: disable=unused-argument
+      captured["kernel"] = kernel
+      out_features = kernel.shape[-1] if hasattr(kernel, "shape") else layer.out_features_shape[-1]
+      out_shape = dispatched_inputs.shape[:-1] + (out_features,)
+      return jnp.zeros(out_shape, dispatched_inputs.dtype)
+
+    with patch.object(linears, "_compute_dot_general_nnx", _spy):
+      layer(inputs)
+
+    return captured["kernel"]
+
+  def test_quantized_kernel_cast_to_compute_dtype(self):
+    """The kernel must reach the dispatcher at compute precision when quantizing.
+
+    MaxText's default configuration stores weights in float32 but computes in
+    bfloat16. AQT asserts that both dot_general operands share a dtype, so a
+    float32 kernel paired with bfloat16 activations is a hard error.
+    """
+    batch_size, in_features, out_features = 2, 4, 8
+
+    mock_quant = MagicMock()
+    mock_quant.quant_mode = None
+    mock_instance = mock_quant.dot_general_cls.return_value.return_value
+    mock_instance.init_with_output.return_value = (MagicMock(), {})
+    mock_instance.apply.return_value = (MagicMock(), {})
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        quant=mock_quant,
+        rngs=self.rngs,
+    )
+
+    # The stored parameter keeps weight_dtype ...
+    self.assertEqual(layer.kernel[...].dtype, jnp.float32)
+
+    inputs = jnp.ones((batch_size, in_features), jnp.bfloat16)
+    dispatched_kernel = self._capture_dispatched_kernel(layer, inputs)
+
+    # ... but it is cast down to the compute dtype before dispatch.
+    self.assertEqual(dispatched_kernel.dtype, jnp.bfloat16)
+
+  def test_fp8_kernel_not_cast_before_dispatch(self):
+    """FP8 weights stay quantized until the fused dequantization.
+
+    Casting them early would defeat weight-only quantization: the all-gather
+    would move upcast bytes and the companion scale could not be applied.
+    """
+    batch_size, in_features, out_features = 2, 4, 8
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        rngs=self.rngs,
+    )
+
+    inputs = jnp.ones((batch_size, in_features), jnp.bfloat16)
+    dispatched_kernel = self._capture_dispatched_kernel(layer, inputs)
+
+    self.assertEqual(dispatched_kernel.dtype, jnp.float8_e4m3fn)
+
+  def test_wrapped_kernel_state_does_not_raise_ellipsis_keyerror(self):
+    """Wrapped parameters (e.g. QLoRA/Qwix State) must not be indexed with Ellipsis or query .dtype."""
+    batch_size, in_features, out_features = 2, 4, 8
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        rngs=self.rngs,
+    )
+
+    dummy_state = nnx.State({"array": {"qvalue": jnp.ones((in_features, out_features))}})
+    layer.kernel = nnx.Param(dummy_state)
+
+    inputs = jnp.ones((batch_size, in_features))
+    # In real QLoRA execution, Qwix intercepts jnp.asarray to unbox the State into a QArray.
+    # We simulate that interception here in isolation.
+    with patch.object(linears.jnp, "asarray", side_effect=lambda x, dtype=None: x):
+      dispatched_kernel = self._capture_dispatched_kernel(layer, inputs)
+      self.assertEqual(dispatched_kernel, dummy_state)
+
+    # Ensure _compute_dot_general_nnx does not query .dtype on State objects
+    with patch.object(linears.lax, "dot_general", return_value=jnp.zeros((batch_size, out_features))) as mock_dg:
+      out = linears._compute_dot_general_nnx(  # pylint: disable=protected-access
+          inputs,
+          dummy_state,
+          axis=(-1,),
+          contract_ind=(0,),
+          matmul_precision="default",
+          quant_dot_general=None,
+          initializing=False,
+      )
+      self.assertEqual(out.shape, (batch_size, out_features))
+      mock_dg.assert_called_once()
+      self.assertIs(mock_dg.call_args[0][1], dummy_state)
+
   def test_slice_bounds_invalid(self):
     batch_size = 2
     in_features = 4
@@ -206,6 +310,228 @@ class DenseGeneralTest(unittest.TestCase):
 
   def test_axis_0(self):
     self._run_dense_test(0, 2, (3, 4, 8))
+
+  def test_dequantize_weight_scalar(self):
+    w = jnp.ones((4, 8), dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(0.5, dtype=jnp.float32)
+    w_dequant = linears.dequantize_weight(w, scale, compute_dtype=jnp.bfloat16)
+    self.assertEqual(w_dequant.shape, (4, 8))
+    self.assertEqual(w_dequant.dtype, jnp.bfloat16)
+    np.testing.assert_allclose(w_dequant, np.full((4, 8), 0.5, dtype=np.float32), rtol=1e-3)
+
+  def test_dequantize_weight_per_channel(self):
+    w = jnp.ones((4, 8), dtype=jnp.float8_e4m3fn)
+    scale = jnp.arange(1, 9, dtype=jnp.float32)
+    w_dequant = linears.dequantize_weight(w, scale, compute_dtype=jnp.bfloat16)
+    self.assertEqual(w_dequant.shape, (4, 8))
+    expected = np.tile(np.arange(1, 9, dtype=np.float32), (4, 1))
+    np.testing.assert_allclose(w_dequant, expected, rtol=1e-3)
+
+  def test_dequantize_weight_block_wise(self):
+    w = jnp.ones((4, 8), dtype=jnp.float8_e4m3fn)
+    scale = jnp.array([[2.0, 3.0], [4.0, 5.0]], dtype=jnp.float32)  # 2x2 blocks of size 2x4
+    w_dequant = linears.dequantize_weight(w, scale, compute_dtype=jnp.bfloat16)
+    self.assertEqual(w_dequant.shape, (4, 8))
+    expected = np.block([[np.full((2, 4), 2.0), np.full((2, 4), 3.0)], [np.full((2, 4), 4.0), np.full((2, 4), 5.0)]])
+    np.testing.assert_allclose(w_dequant, expected, rtol=1e-3)
+
+  def test_fp8_e4m3fn_dense_general(self):
+    batch_size = 2
+    in_features = 4
+    out_features = 8
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        rngs=self.rngs,
+    )
+
+    self.assertEqual(layer.kernel[...].dtype, jnp.float8_e4m3fn)
+    self.assertIsNotNone(layer.kernel_scale)
+    self.assertEqual(layer.kernel_scale[...].shape, ())
+
+    inputs = jnp.ones((batch_size, in_features), dtype=jnp.bfloat16)
+    outputs = layer(inputs)
+
+    self.assertEqual(outputs.shape, (batch_size, out_features))
+    self.assertEqual(outputs.dtype, jnp.bfloat16)
+
+  def test_fp8_e5m2_dense_general(self):
+    batch_size = 2
+    in_features = 4
+    out_features = 8
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float8_e5m2,
+        dtype=jnp.bfloat16,
+        rngs=self.rngs,
+    )
+
+    self.assertEqual(layer.kernel[...].dtype, jnp.float8_e5m2)
+    self.assertIsNotNone(layer.kernel_scale)
+
+    inputs = jnp.ones((batch_size, in_features), dtype=jnp.bfloat16)
+    outputs = layer(inputs)
+
+    self.assertEqual(outputs.shape, (batch_size, out_features))
+    self.assertEqual(outputs.dtype, jnp.bfloat16)
+
+  def test_fp8_block_wise_scale(self):
+    in_features = 128
+    out_features = 256
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        block_size=64,
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+
+    self.assertEqual(layer.kernel[...].shape, (128, 256))
+    self.assertEqual(layer.kernel_scale[...].shape, (2, 4))
+    self.assertEqual(layer.scale_axes, ("embed", "mlp"))
+
+    inputs = jnp.ones((2, in_features), dtype=jnp.bfloat16)
+    outputs = layer(inputs)
+    self.assertEqual(outputs.shape, (2, out_features))
+
+  def test_kernel_scale_sharding_inference(self):
+    # Test block scale sharding
+    layer_block = linears.DenseGeneral(
+        in_features_shape=64,
+        out_features_shape=128,
+        weight_dtype=jnp.float8_e4m3fn,
+        block_size=32,
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+    self.assertEqual(layer_block.scale_axes, ("embed", "mlp"))
+
+    # Test scalar scale sharding
+    layer_scalar = linears.DenseGeneral(
+        in_features_shape=64,
+        out_features_shape=128,
+        weight_dtype=jnp.float8_e4m3fn,
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+    self.assertEqual(layer_scalar.scale_axes, ())
+
+    # Test per-channel scale sharding
+    layer_channel = linears.DenseGeneral(
+        in_features_shape=64,
+        out_features_shape=128,
+        weight_dtype=jnp.float8_e4m3fn,
+        scale_shape=(1, 128),
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+    self.assertEqual(layer_channel.scale_axes, (None, "mlp"))
+
+  def test_fp8_slice_bounds(self):
+    in_features = 64
+    out_features = 128
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        block_size=32,
+        rngs=self.rngs,
+    )
+    inputs = jnp.ones((2, in_features), dtype=jnp.bfloat16)
+    sliced_outputs = layer(inputs, slice_bounds=(0, 32))
+    self.assertEqual(sliced_outputs.shape, (2, 32))
+    self.assertEqual(sliced_outputs.dtype, jnp.bfloat16)
+
+    full_outputs = layer(inputs)
+    np.testing.assert_allclose(sliced_outputs, full_outputs[:, :32], rtol=1e-3, atol=1e-3)
+
+  def test_dequantize_weight_block_divisibility(self):
+    w = jnp.ones((64, 128), dtype=jnp.float8_e4m3fn)
+    scale_valid = jnp.ones((2, 4), dtype=jnp.float32) * 2.0
+    dequant = linears.dequantize_weight(w, scale_valid, compute_dtype=jnp.bfloat16)
+    self.assertEqual(dequant.shape, (64, 128))
+    self.assertEqual(dequant.dtype, jnp.bfloat16)
+    np.testing.assert_allclose(dequant, 2.0, rtol=1e-3, atol=1e-3)
+
+    scale_invalid = jnp.ones((3, 5), dtype=jnp.float32)
+    with self.assertRaises(ValueError):
+      linears.dequantize_weight(w, scale_invalid, compute_dtype=jnp.bfloat16)
+
+  def test_weight_quant_config_scalar(self):
+    cfg = quantizations.WeightQuantConfig(
+        quant_type="fp8",
+        weight_dtype=jnp.float8_e4m3fn,
+        scale_dtype=jnp.float32,
+    )
+    layer = linears.DenseGeneral(
+        in_features_shape=4,
+        out_features_shape=8,
+        weight_quant=cfg,
+        dtype=jnp.bfloat16,
+        rngs=self.rngs,
+    )
+    self.assertEqual(layer.kernel[...].dtype, jnp.float8_e4m3fn)
+    self.assertIsNotNone(layer.kernel_scale)
+    self.assertEqual(layer.kernel_scale[...].shape, ())
+    self.assertEqual(layer.kernel_scale[...].dtype, jnp.float32)
+
+    inputs = jnp.ones((2, 4), dtype=jnp.bfloat16)
+    outputs = layer(inputs)
+    self.assertEqual(outputs.shape, (2, 8))
+    self.assertEqual(outputs.dtype, jnp.bfloat16)
+
+  def test_weight_quant_config_block(self):
+    cfg = quantizations.WeightQuantConfig(
+        quant_type="fp8",
+        weight_dtype=jnp.float8_e4m3fn,
+        scale_dtype=jnp.float32,
+        block_size=64,
+    )
+    layer = linears.DenseGeneral(
+        in_features_shape=128,
+        out_features_shape=256,
+        weight_quant=cfg,
+        dtype=jnp.bfloat16,
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+    self.assertEqual(layer.kernel[...].shape, (128, 256))
+    self.assertEqual(layer.kernel_scale[...].shape, (2, 4))
+    self.assertEqual(layer.scale_axes, ("embed", "mlp"))
+
+    inputs = jnp.ones((2, 128), dtype=jnp.bfloat16)
+    outputs = layer(inputs)
+    self.assertEqual(outputs.shape, (2, 256))
+
+  def test_get_weight_quant_config_helper(self):
+    # Unquantized model returns None
+    mock_bf16 = Mock(weight_dtype="bfloat16", unquantized_modules=(), weight_block_size=None)
+    self.assertIsNone(quantizations.get_weight_quant_config(mock_bf16, "q_proj"))
+
+    # FP8 model returns WeightQuantConfig
+    mock_fp8 = Mock(
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+        unquantized_modules=("token_embedder",),
+        weight_block_size=128,
+    )
+    q_cfg = quantizations.get_weight_quant_config(mock_fp8, "q_proj")
+    self.assertIsNotNone(q_cfg)
+    self.assertEqual(q_cfg.quant_type, "fp8")
+    self.assertEqual(q_cfg.weight_dtype, "float8_e4m3fn")
+    self.assertEqual(q_cfg.block_size, 128)
+
+    # Unquantized module in FP8 model returns None
+    self.assertIsNone(quantizations.get_weight_quant_config(mock_fp8, "token_embedder"))
 
 
 class MlpBlockTest(unittest.TestCase):
