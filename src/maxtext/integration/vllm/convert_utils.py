@@ -689,3 +689,19 @@ def _scanned_sharding_from_per_layer(
       jax.sharding.PartitionSpec(*spec),
       memory_kind=per_layer_sharding.memory_kind,
   )
+
+
+def resolve_rollout_tp(config: Any, tp: int = 1) -> int:
+  """Resolves rollout TP from config."""
+  if tp > 1:
+    return int(tp)
+
+  config_tp = 0
+  if config is not None:
+    config_tp = int(
+        getattr(config, "rollout_tensor_parallelism", 0)
+        or getattr(getattr(config, "cluster", None), "rollout_tensor_parallelism", 0)
+        or getattr(config, "rollout_mesh_tp", 0)
+        or 0
+    )
+  return int(config_tp or 1)
