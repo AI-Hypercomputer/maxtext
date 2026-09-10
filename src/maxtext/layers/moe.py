@@ -484,6 +484,7 @@ class RoutedMoE(nnx.Module):
       quant: Optional[quantizations.AqtQuantization] = None,
       is_hash_routing: bool = False,
       force_dropless: bool = False,
+      weight_quant: Optional[quantizations.WeightQuantConfig] = None,
   ):
     """Initializes the RoutedMoE module.
 
@@ -500,7 +501,11 @@ class RoutedMoE(nnx.Module):
       dtype: The data type for the computation.
       quant: The quantization configuration. If None, no quantization is applied.
       is_hash_routing: Whether this layer uses deterministic hash routing instead of top-K routing.
+      weight_quant: Optional WeightQuantConfig decoupling weight quantization settings.
     """
+    if weight_quant is not None:
+      weight_dtype = weight_quant.weight_dtype
+
     self.config = config
     self.force_dropless = force_dropless
     self.num_experts = num_experts
@@ -514,6 +519,7 @@ class RoutedMoE(nnx.Module):
     self.quant = quant
     self.rngs = rngs
     self.is_hash_routing = is_hash_routing
+    self.weight_quant = weight_quant
 
     # DeepSeek V4 Hash Routing
     if self.is_hash_routing:
@@ -578,7 +584,7 @@ class RoutedMoE(nnx.Module):
         mesh=self.mesh,
         model_name=self.config.model_name,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
-        weight_dtype=self.weight_dtype,
+        weight_dtype=ctypes.get_weight_dtype(self.config, "gate"),
         quant=self.quant,
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
@@ -729,6 +735,91 @@ class RoutedMoE(nnx.Module):
       )
     else:
       self.per_expert_scale = None
+
+    if not quantizations.in_serve_mode(self.quant) and ctypes.is_fp8_dtype(self.weight_dtype):
+      resolved_weight_quant = (
+          self.weight_quant
+          if self.weight_quant is not None
+          else quantizations.get_weight_quant_config(self.config, "routed_experts")
+      )
+      scale_dtype = resolved_weight_quant.scale_dtype if resolved_weight_quant is not None else jnp.float32
+      block_size = (
+          resolved_weight_quant.block_size
+          if resolved_weight_quant is not None
+          else getattr(self.config, "weight_block_size", None)
+      )
+
+      # Phase 1: Resolve scale shape based on quantization granularity
+      # - Block scaling (e.g. weight_block_size=[128, 128] or 128): expert weights with shape
+      #   (num_experts, in_dim, out_dim) are partitioned into 2D block grids per expert,
+      #   yielding a 3D scale tensor (num_experts, in_blocks, out_blocks).
+      #   For prefused weights (wi), the out_dim is doubled (moe_intermediate_dim * 2).
+      # - Per-expert / per-tensor scaling (weight_block_size is None): a 1D scale tensor
+      #   with shape (num_experts,) containing one scalar scale per expert.
+      if block_size is not None:
+        if isinstance(block_size, (list, tuple)):
+          b_in = block_size[0]
+          b_out = block_size[1] if len(block_size) > 1 else block_size[0]
+        else:
+          b_in = block_size
+          b_out = block_size
+        in_blocks = self.moe_expert_input_dim // b_in if self.moe_expert_input_dim >= b_in else self.moe_expert_input_dim
+        out_blocks = moe_intermediate_dim // b_out if moe_intermediate_dim >= b_out else moe_intermediate_dim
+        if self.config.prefuse_moe_weights:
+          fused_out_dim = moe_intermediate_dim * 2
+          fused_out_blocks = fused_out_dim // b_out if fused_out_dim >= b_out else fused_out_dim
+          wi_scale_shape = (num_experts, in_blocks, fused_out_blocks)
+          wo_scale_shape = (self.num_experts, out_blocks, in_blocks)
+        else:
+          wi_scale_shape = (num_experts, in_blocks, out_blocks)
+          wo_scale_shape = (self.num_experts, out_blocks, in_blocks)
+      else:
+        wi_scale_shape = (num_experts,)
+        wo_scale_shape = (self.num_experts,)
+
+      # Phase 2: Resolve scale mesh sharding
+      # - 3D block scale grids inherit full 3D kernel axes ("exp", "embed_moe", "mlp_moe")
+      #   to partition synchronously with the weight tensors across expert and tensor meshes.
+      # - 1D per-expert scales (num_experts,) only span the expert axis, so sharding must
+      #   use (self.wi_kernel_axes[0],) to prevent a rank mismatch with the 3D kernel axes.
+      wi_scale_sharding = self.wi_kernel_axes if block_size is not None else (self.wi_kernel_axes[0],)
+      wo_scale_sharding = self.wo_kernel_axes if block_size is not None else (self.wo_kernel_axes[0],)
+      self.wi_scale_axes = wi_scale_sharding
+      self.wo_scale_axes = wo_scale_sharding
+
+      # Phase 3: Instantiate scale parameters matching prefused or unfused weight layout
+      if self.config.prefuse_moe_weights:
+        self.wi_scale = nnx.Param(
+            jnp.ones(wi_scale_shape, dtype=scale_dtype),
+            sharding=wi_scale_sharding,
+        )
+        self.wo_scale = nnx.Param(
+            jnp.ones(wo_scale_shape, dtype=scale_dtype),
+            sharding=wo_scale_sharding,
+        )
+        self.wi_0_scale = None
+        self.wi_1_scale = None
+      else:
+        self.wi_0_scale = nnx.Param(
+            jnp.ones(wi_scale_shape, dtype=scale_dtype),
+            sharding=wi_scale_sharding,
+        )
+        self.wi_1_scale = nnx.Param(
+            jnp.ones(wi_scale_shape, dtype=scale_dtype),
+            sharding=wi_scale_sharding,
+        )
+        self.wo_scale = nnx.Param(
+            jnp.ones(wo_scale_shape, dtype=scale_dtype),
+            sharding=wo_scale_sharding,
+        )
+        self.wi_scale = None
+    else:
+      self.wi_scale = None
+      self.wi_0_scale = None
+      self.wi_1_scale = None
+      self.wo_scale = None
+      self.wi_scale_axes = None
+      self.wo_scale_axes = None
 
     # Scale the output projection ahead of time during inference for higher generation throughput.
     if (
@@ -3607,21 +3698,26 @@ class RoutedMoE(nnx.Module):
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
-    wo_kernel = jnp.asarray(self.wo[...], self.dtype)
+    wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
+    wo_kernel = quantizations.dequantize_weight(self.wo[...], wo_scale, self.dtype)
 
     fused_kernel = None
     w0_kernel = None
     w1_kernel = None
     if cfg.prefuse_moe_weights and cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
-      fused_kernel = jnp.asarray(self.wi[...], self.dtype)
+      wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
+      fused_kernel = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
     elif cfg.prefuse_moe_weights:
-      wi = jnp.asarray(self.wi[...], self.dtype)
+      wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
+      wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
       n = wi.shape[-1] // 2
       w0_kernel = wi[..., :n]
       w1_kernel = wi[..., n:]
     else:
-      w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
-      w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
+      wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
+      wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
+      w0_kernel = quantizations.dequantize_weight(self.wi_0[...], wi_0_scale, self.dtype)
+      w1_kernel = quantizations.dequantize_weight(self.wi_1[...], wi_1_scale, self.dtype)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because

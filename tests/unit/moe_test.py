@@ -33,7 +33,7 @@ from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from maxtext.layers.quantizations import configure_quantization, Fp8Quantization
+from maxtext.layers.quantizations import configure_quantization, Fp8Quantization, WeightQuantConfig
 from maxtext.utils import max_logging, maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
@@ -2243,7 +2243,7 @@ class SparseMatmulQuantizationTest(parameterized.TestCase):
       self.assertEqual(kwargs["rhs_quantize_dtype"], expected_dtype)
 
 
-def make_moe(cfg, mesh):
+def make_moe(cfg, mesh, intermediate_dim: int = 2048, weight_quant=None):
   return moe.RoutedMoE(
       config=cfg,
       num_experts=cfg.num_experts,
@@ -2251,7 +2251,10 @@ def make_moe(cfg, mesh):
       mesh=mesh,
       kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
       kernel_axes=("embed", "mlp"),
+      intermediate_dim=intermediate_dim,
+      weight_dtype=cfg.weight_dtype,
       dtype=cfg.dtype,
+      weight_quant=weight_quant,
       rngs=nnx.Rngs(params=0),
   )
 
@@ -2672,6 +2675,129 @@ class FusedMlpMoETest(unittest.TestCase):
         rtol=1e-2,
         atol=1e-2,
     )
+
+
+class RoutedMoEFp8Test(unittest.TestCase):
+  """Unit tests for RoutedMoE FP8 weight storage and dynamic dequantization scales."""
+
+  def _make_fp8_cfg(self, prefuse_moe_weights=True, weight_block_size=None):
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="fp8_moe_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        override_model_config=True,
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+        base_emb_dim=128,
+        base_mlp_dim=64,
+        base_moe_mlp_dim=64,
+        num_experts=4,
+        num_experts_per_tok=2,
+        prefuse_moe_weights=prefuse_moe_weights,
+        weight_block_size=weight_block_size,
+        megablox=False,
+        sparse_matmul=False,
+        per_device_batch_size=1,
+        max_target_length=8,
+    )
+
+  def test_fp8_prefused_per_expert_scale_init(self):
+    """Verifies 1D per-expert scale initialization and sharding when prefuse_moe_weights=True."""
+    cfg = self._make_fp8_cfg(prefuse_moe_weights=True, weight_block_size=None)
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    model = make_moe(cfg, mesh, intermediate_dim=cfg.base_moe_mlp_dim)
+
+    self.assertIsNotNone(model.wi_scale)
+    self.assertIsNotNone(model.wo_scale)
+    self.assertIsNone(model.wi_0_scale)
+    self.assertIsNone(model.wi_1_scale)
+
+    # 1D scale shape per expert
+    self.assertEqual(model.wi_scale.shape, (cfg.num_experts,))
+    self.assertEqual(model.wo_scale.shape, (cfg.num_experts,))
+    self.assertEqual(model.wi_scale.dtype, jnp.float32)
+    self.assertEqual(model.wo_scale.dtype, jnp.float32)
+
+    # Sharding must be 1D (expert axis only) to avoid rank mismatch with 3D kernel axes
+    self.assertEqual(model.wi_scale_axes, (model.wi_kernel_axes[0],))
+    self.assertEqual(model.wo_scale_axes, (model.wo_kernel_axes[0],))
+
+  def test_fp8_prefused_block_scale_init(self):
+    """Verifies 3D block-grid scale initialization and sharding when block scaling is configured."""
+    block_size = [64, 32]
+    cfg = self._make_fp8_cfg(prefuse_moe_weights=True, weight_block_size=block_size)
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    model = make_moe(cfg, mesh, intermediate_dim=cfg.base_moe_mlp_dim)
+
+    # wi has input_dim=128, fused_intermediate_dim=128 (64*2)
+    # in_blocks = 128 // 64 = 2; out_blocks = 128 // 32 = 4
+    expected_wi_shape = (cfg.num_experts, 128 // block_size[0], (cfg.base_moe_mlp_dim * 2) // block_size[1])
+    # wo has in_dim=64, out_dim=128
+    # out_blocks = 64 // 32 = 2; in_blocks = 128 // 64 = 2
+    expected_wo_shape = (cfg.num_experts, cfg.base_moe_mlp_dim // block_size[1], 128 // block_size[0])
+
+    self.assertEqual(model.wi_scale.shape, expected_wi_shape)
+    self.assertEqual(model.wo_scale.shape, expected_wo_shape)
+    self.assertEqual(model.wi_scale_axes, model.wi_kernel_axes)
+    self.assertEqual(model.wo_scale_axes, model.wo_kernel_axes)
+
+  def test_fp8_unfused_scale_init(self):
+    """Verifies scale initialization and sharding when prefuse_moe_weights=False."""
+    cfg = self._make_fp8_cfg(prefuse_moe_weights=False, weight_block_size=None)
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    model = make_moe(cfg, mesh, intermediate_dim=cfg.base_moe_mlp_dim)
+
+    self.assertIsNone(model.wi_scale)
+    self.assertIsNotNone(model.wi_0_scale)
+    self.assertIsNotNone(model.wi_1_scale)
+    self.assertIsNotNone(model.wo_scale)
+
+    self.assertEqual(model.wi_0_scale.shape, (cfg.num_experts,))
+    self.assertEqual(model.wi_1_scale.shape, (cfg.num_experts,))
+    self.assertEqual(model.wo_scale.shape, (cfg.num_experts,))
+
+    self.assertEqual(model.wi_scale_axes, (model.wi_kernel_axes[0],))
+    self.assertEqual(model.wo_scale_axes, (model.wo_kernel_axes[0],))
+
+  def test_fp8_forward_pass_dequantization(self):
+    """Verifies dynamic dequantization during MoE forward pass produces valid bfloat16 outputs."""
+    cfg = self._make_fp8_cfg(prefuse_moe_weights=True, weight_block_size=None)
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    model = make_moe(cfg, mesh, intermediate_dim=cfg.base_moe_mlp_dim)
+
+    inputs = jax.random.normal(
+        jax.random.PRNGKey(0),
+        (cfg.per_device_batch_size, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=jnp.bfloat16,
+    )
+    with jax.set_mesh(mesh):
+      out, _, _ = model(inputs)
+
+    self.assertEqual(out.shape, inputs.shape)
+    self.assertEqual(out.dtype, jnp.bfloat16)
+    self.assertTrue(np.all(np.isfinite(out)))
+
+  def test_fp8_moe_with_weight_quant_config(self):
+    """Verifies RoutedMoE initialization when explicit weight_quant is provided."""
+    cfg = self._make_fp8_cfg(prefuse_moe_weights=True, weight_block_size=None)
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    wq = WeightQuantConfig(
+        quant_type="fp8",
+        weight_dtype=jnp.float8_e4m3fn,
+        scale_dtype=jnp.float32,
+        block_size=[64, 32],
+    )
+    model = make_moe(cfg, mesh, intermediate_dim=cfg.base_moe_mlp_dim, weight_quant=wq)
+    self.assertIsNotNone(model.weight_quant)
+    self.assertEqual(model.weight_quant.block_size, [64, 32])
+    expected_wi_shape = (cfg.num_experts, 128 // 64, (cfg.base_moe_mlp_dim * 2) // 32)
+    self.assertEqual(model.wi_scale.shape, expected_wi_shape)
 
 
 if __name__ == "__main__":
