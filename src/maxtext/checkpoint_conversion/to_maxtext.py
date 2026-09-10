@@ -50,6 +50,7 @@ Example Usage:
 """
 
 import argparse
+import dataclasses
 from functools import partial
 import json
 import os
@@ -76,6 +77,10 @@ from maxtext.utils import max_logging, max_utils, maxtext_utils
 from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
+from orbax.checkpoint import v1 as ocp_v1
+from orbax.checkpoint.experimental.v1._src.handlers import pytree_handler
+from orbax.checkpoint.experimental.v1._src.serialization import numpy_leaf_handler
+from orbax.checkpoint.experimental.v1._src.serialization import registry as leaf_handler_registry
 from safetensors import safe_open
 
 try:
@@ -295,6 +300,51 @@ class LazyTensorHandler(type_handlers.NumpyHandler):
 # Register LazyTensor with the custom handler.
 # It's safe to register this globally even if eager loading is used.
 type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
+
+
+class LazyTensorLeafHandler(numpy_leaf_handler.NumpyLeafHandler):
+  """Orbax v1 leaf handler for LazyTensor.
+
+  The v0 registration above cannot serve the v1 save path. A v1 ``PyTreeHandler``
+  resolves leaves through a per-instance ``LeafHandlerRegistry`` and *derives* its
+  v0 registry from itself, so the compatibility bridge only runs v1 -> v0; a v0
+  global registration is unreachable from v1.
+
+  Like its v0 counterpart this masquerades as the standard numpy handler --
+  ``secondary_typestrs`` below writes ``np.ndarray`` as the leaf's typestr -- so
+  the checkpoint is indistinguishable from one a plain ``NumpyLeafHandler``
+  produced and restores in a standard MaxText instance.
+  """
+
+  async def serialize(self, params, serialization_context):
+    # MATERIALIZE: trigger the lazy load (__array__) explicitly before saving.
+    # This ensures the parent NumpyLeafHandler receives real np.ndarrays.
+    params = [dataclasses.replace(param, value=np.asarray(param.value)) for param in params]
+    return await super().serialize(params, serialization_context)
+
+
+class LazyTensorPyTreeHandler(pytree_handler.PyTreeHandler):
+  """``PyTreeHandler`` whose leaf registry additionally accepts ``LazyTensor``."""
+
+  def __init__(self, **kwargs):
+    if "leaf_handler_registry" not in kwargs:
+      registry = leaf_handler_registry.StandardLeafHandlerRegistry()
+      registry.add(
+          LazyTensor,
+          numpy_leaf_handler.NumpyShapeDtype,
+          LazyTensorLeafHandler,
+          override=True,
+          secondary_typestrs=["np.ndarray"],
+      )
+      kwargs["leaf_handler_registry"] = registry
+    super().__init__(**kwargs)
+
+
+def build_lazy_tensor_checkpointables_registry():
+  """Registry that saves MaxText's "items" checkpointable with LazyTensor support."""
+  registry = ocp_v1.handlers.local_registry(include_global_registry=True)
+  registry.add(LazyTensorPyTreeHandler, checkpointable_name="items")
+  return registry
 
 
 def get_maxtext_model_info(config):
@@ -1093,6 +1143,7 @@ def main(
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
       config=config,
+      checkpointables_registry=build_lazy_tensor_checkpointables_registry(),
   )
 
   print_ram_usage("Program Ends")

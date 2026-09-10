@@ -94,6 +94,7 @@ def build_context(
     colocated_python_checkpointing: bool = False,
     partial_load: bool = False,
     checkpoint_layout: ocp.options.CheckpointLayout | None = None,
+    checkpointables_registry: ocp.handlers.CheckpointableHandlerRegistry | None = None,
 ) -> ocp.Context:
   """Builds an Orbax v1 ``Context`` from MaxText checkpoint flags.
 
@@ -119,6 +120,10 @@ def build_context(
       equivalent of v0 ``partial_restore=True``).
     checkpoint_layout: On-disk layout (``ORBAX`` or ``SAFETENSORS``) for
       loading.
+    checkpointables_registry: Handler registry deciding which
+      ``CheckpointableHandler`` serves each named checkpointable. Callers whose
+      pytrees hold leaf types Orbax does not know natively pass a registry
+      carrying a handler for them; ``None`` leaves the global registry in place.
 
   Returns:
     A configured, unfrozen ``ocp_v1.Context``.
@@ -171,5 +176,8 @@ def build_context(
 
   if checkpoint_layout is not None:
     ctx.checkpoint_layout = checkpoint_layout
+
+  if checkpointables_registry is not None:
+    ctx.checkpointables.registry = checkpointables_registry
 
   return ctx
