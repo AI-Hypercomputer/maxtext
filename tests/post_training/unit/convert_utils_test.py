@@ -24,7 +24,10 @@ from maxtext.integration.vllm.convert_utils import (
     _interleave_moe_weights,
     compute_padded_moe_mlp_dim,
     DEFAULT_TPU_NUM_LANES,
+    is_verify_weights_enabled,
     pad_to_tpu_lanes,
+    resolve_prefuse_moe_weights,
+    resolve_rollout_tp,
 )
 
 pytestmark = [pytest.mark.post_training]
@@ -159,6 +162,45 @@ class ConvertUtilsTest(unittest.TestCase):
     self.assertEqual(compute_padded_moe_mlp_dim(1024, 4, lanes), 1024)
     self.assertEqual(compute_padded_moe_mlp_dim(2560, 2, lanes), 2560)
     self.assertIsNone(compute_padded_moe_mlp_dim(None, 4, lanes))
+
+  def test_is_verify_weights_enabled(self):
+    import os
+
+    orig = os.environ.get("VERIFY_WEIGHTS")
+    try:
+      os.environ["VERIFY_WEIGHTS"] = "true"
+      self.assertTrue(is_verify_weights_enabled())
+      os.environ["VERIFY_WEIGHTS"] = "false"
+      self.assertFalse(is_verify_weights_enabled())
+      os.environ.pop("VERIFY_WEIGHTS", None)
+      self.assertFalse(is_verify_weights_enabled())
+    finally:
+      if orig is not None:
+        os.environ["VERIFY_WEIGHTS"] = orig
+      else:
+        os.environ.pop("VERIFY_WEIGHTS", None)
+
+  def test_resolve_prefuse_moe_weights(self):
+    import os
+
+    self.assertTrue(resolve_prefuse_moe_weights(None, prefuse_moe_weights=True))
+    self.assertFalse(resolve_prefuse_moe_weights(None, prefuse_moe_weights=False))
+
+    class DummyConfig:
+      prefuse_moe_weights = False
+      rollout_backend = "vllm"
+
+    self.assertFalse(resolve_prefuse_moe_weights(DummyConfig()))
+
+  def test_resolve_rollout_tp(self):
+    import os
+
+    self.assertEqual(resolve_rollout_tp(None, tp=4), 4)
+
+    class DummyConfig:
+      rollout_tensor_parallelism = 2
+
+    self.assertEqual(resolve_rollout_tp(DummyConfig()), 2)
 
 
 if __name__ == "__main__":

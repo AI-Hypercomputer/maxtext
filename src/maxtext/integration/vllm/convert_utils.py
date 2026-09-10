@@ -41,8 +41,9 @@ Still imported from Tunix at runtime, i.e. the remaining port surface:
     `_bulk_align_and_unstack`; that patch goes away once the port lands.
 """
 
-from typing import Mapping, Any, Callable, Dict, Tuple, Optional
 import functools
+import os
+from typing import Mapping, Any, Callable, Dict, Tuple, Optional
 from absl import logging
 import jax
 import jax.numpy as jnp
@@ -93,7 +94,9 @@ def compute_padded_moe_mlp_dim(
 
   min_required = 2 * num_lanes * moe_mlp_tp_size
   if (hidden_size // moe_mlp_tp_size) % (2 * num_lanes) != 0:
-    return ((max(hidden_size, min_required) + min_required - 1) // min_required) * min_required
+    return (
+        (max(hidden_size, min_required) + min_required - 1) // min_required
+    ) * min_required
 
   return hidden_size
 
@@ -178,7 +181,9 @@ def _fuse_moe_weights(
         fused_shape_tuple,
         axis,
     )
-    new_src_flat[wi_target_key] = _interleave_moe_weights(wi_0, wi_1, fused_shape_tuple, n_shards, axis=axis)
+    new_src_flat[wi_target_key] = _interleave_moe_weights(
+        wi_0, wi_1, fused_shape_tuple, n_shards, axis=axis
+    )
     del wi_0, wi_1
 
   return new_src_flat
@@ -292,7 +297,8 @@ def _unstack_scanned_param(
       return tuple(jnp.unstack(src_val))
     else:
       logging.warning(
-          "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot" " determine scan axis.",
+          "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
+          " determine scan axis.",
           key_path,
           src_shape,
           tgt_shape,
@@ -330,7 +336,9 @@ def _get_n_shards(arr: jax.Array | np.ndarray, axis: int) -> int:
   """Returns the number of shards for a given axis of an array."""
   sharding = getattr(arr, "sharding", None)
   if isinstance(sharding, jax.sharding.NamedSharding):
-    return _partition_size(_spec_at_axis(sharding, axis), sharding.mesh)  # pyrefly: ignore[bad-argument-type]
+    return _partition_size(
+        _spec_at_axis(sharding, axis), sharding.mesh
+    )  # pyrefly: ignore[bad-argument-type]
   return 1
 
 
@@ -450,14 +458,18 @@ def _align_per_axis(
   if arr.shape == tgt_shape:
     return arr
   if len(arr.shape) != len(tgt_shape):
-    raise ShapeMismatchError(f"Rank mismatch for {key_path}: src={arr.shape} vs tgt={tgt_shape}")
+    raise ShapeMismatchError(
+        f"Rank mismatch for {key_path}: src={arr.shape} vs tgt={tgt_shape}"
+    )
 
   mismatches = []
   for axis, (s, t) in enumerate(zip(arr.shape, tgt_shape)):
     if s == t:
       continue
     if t < s:
-      raise ShapeMismatchError(f"Cannot shrink axis {axis} for {key_path}: src={s} -> tgt={t}")
+      raise ShapeMismatchError(
+          f"Cannot shrink axis {axis} for {key_path}: src={s} -> tgt={t}"
+      )
     mismatches.append((axis, s, t))
   if not mismatches:
     return arr
@@ -468,7 +480,9 @@ def _align_per_axis(
       mesh = tgt_sharding.mesh
       pad_specs = []
       for axis, s, t in mismatches:
-        n_shards = _partition_size(_spec_at_axis(tgt_sharding, axis), mesh)  # pyrefly: ignore[bad-argument-type]
+        n_shards = _partition_size(
+            _spec_at_axis(tgt_sharding, axis), mesh
+        )  # pyrefly: ignore[bad-argument-type]
         if t % n_shards != 0:
           raise ValueError(
               f"Target dimension {t} on axis {axis} for {key_path} is not "
@@ -499,7 +513,9 @@ def _align_per_axis(
   return _jit_repeat_axes(arr, tuple(repeats))
 
 
-@functools.partial(jax.jit, static_argnames=("tgt_shape", "n_shards", "axis", "lane_size"))
+@functools.partial(
+    jax.jit, static_argnames=("tgt_shape", "n_shards", "axis", "lane_size")
+)
 def _interleave_moe_weights(
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
@@ -667,10 +683,18 @@ def _bulk_align_and_unstack(
   if isinstance(arr, jax.ShapeDtypeStruct):
     num_layers = arr.shape[scan_axis]
     tgt_dtype = getattr(per_layer_tgt_val, "dtype", getattr(arr, "dtype", jnp.float32))
-    return tuple(jax.ShapeDtypeStruct(per_layer_shape, tgt_dtype) for _ in range(num_layers))
+    return tuple(
+        jax.ShapeDtypeStruct(per_layer_shape, tgt_dtype) for _ in range(num_layers)
+    )
 
-  scanned_tgt_shape = per_layer_shape[:scan_axis] + (arr.shape[scan_axis],) + per_layer_shape[scan_axis:]
-  scanned_tgt_sharding = _scanned_sharding_from_per_layer(getattr(per_layer_tgt_val, "sharding", None), scan_axis)
+  scanned_tgt_shape = (
+      per_layer_shape[:scan_axis]
+      + (arr.shape[scan_axis],)
+      + per_layer_shape[scan_axis:]
+  )
+  scanned_tgt_sharding = _scanned_sharding_from_per_layer(
+      getattr(per_layer_tgt_val, "sharding", None), scan_axis
+  )
 
   if arr.shape == scanned_tgt_shape:
     return _jit_unstack(arr, scan_axis)
@@ -698,16 +722,54 @@ def _scanned_sharding_from_per_layer(
 
 
 def resolve_rollout_tp(config: Any, tp: int = 1) -> int:
-  """Resolves rollout TP from config."""
+  """Resolves rollout TP from override, config, or environment."""
   if tp > 1:
     return int(tp)
 
   config_tp = 0
   if config is not None:
-    config_tp = int(
+    raw = (
         getattr(config, "rollout_tensor_parallelism", 0)
         or getattr(getattr(config, "cluster", None), "rollout_tensor_parallelism", 0)
         or getattr(config, "rollout_mesh_tp", 0)
         or 0
     )
+    if raw and int(raw) > 0:
+      config_tp = int(raw)
+
+  if not config_tp:
+    env_tp = os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE") or os.environ.get(
+        "ROLLOUT_MESH_TP"
+    )
+    if env_tp and int(env_tp) > 0:
+      config_tp = int(env_tp)
+
   return int(config_tp or 1)
+
+
+def resolve_prefuse_moe_weights(
+    config: Any, prefuse_moe_weights: Optional[bool] = None
+) -> bool:
+  """Resolves MoE prefuse flag from override, config, or environment."""
+  if prefuse_moe_weights is not None:
+    return bool(prefuse_moe_weights)
+  if "ROLLOUT_PREFUSE_MOE_WEIGHTS" in os.environ:
+    return os.environ["ROLLOUT_PREFUSE_MOE_WEIGHTS"].lower() in ("1", "true", "yes")
+  if (
+      config is not None
+      and getattr(config, "rollout_prefuse_moe_weights", None) is not None
+  ):
+    return bool(config.rollout_prefuse_moe_weights)
+  rollout_backend = getattr(config, "rollout_backend", None) or os.environ.get(
+      "ROLLOUT_BACKEND", "maxtext"
+  )
+  if rollout_backend == "maxtext":
+    return True
+  if config is not None and getattr(config, "prefuse_moe_weights", None) is not None:
+    return bool(config.prefuse_moe_weights)
+  return os.environ.get("PREFUSE_MOE_WEIGHTS", "0").lower() in ("1", "true", "yes")
+
+
+def is_verify_weights_enabled() -> bool:
+  """Returns whether weight verification / checksum validation is active."""
+  return os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
