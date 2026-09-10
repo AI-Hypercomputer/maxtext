@@ -2216,14 +2216,24 @@ class AdamW(BaseModel):
 class Muon(BaseModel):
   """Configuration specific to the Muon optimizer."""
 
+  muon_type: str = Field(
+      "optax_muon",
+      description=("Type of Muon optimizer: 'optax_muon' (or 'optax') vs 'maxtext_muon' (or 'maxtext')."),
+  )
   muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
   muon_weight_decay: float = Field(
-      0,
-      description="Strength of the weight decay regularization. This is multiplied with the learning rate.",
+      0.0,
+      description=("Strength of the weight decay regularization. This is multiplied with" " the learning rate."),
   )
   muon_consistent_rms: float | None = Field(
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
+  )
+  muon_use_all_to_all: bool = Field(
+      False,
+      description=(
+          "Whether to use all-to-all communication during Newton-Schulz" " iterations in the maxtext_muon optimizer."
+      ),
   )
 
 
