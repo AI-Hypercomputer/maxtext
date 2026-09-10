@@ -92,8 +92,6 @@ class PrepareWeightSyncTest(unittest.TestCase):
     mock_sync.d2h.assert_called_once()
     mock_sync.work_unit_metadata_all.assert_called_once()
 
-
-
   @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
   def test_rebind_reuses_single_sync_instance(self, mock_sync_cls):
     mock_sync = mock.MagicMock()

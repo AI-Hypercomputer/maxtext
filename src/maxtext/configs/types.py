@@ -2741,11 +2741,15 @@ class VLLM(BaseModel):
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
   use_weight_converter: bool = Field(
-      False,
+      True,
       description=(
           "Use an explicit weight converter for trainer->rollout weight sync instead of "
           "the legacy transfer_state_directly / transfer_state_with_mappings paths."
       ),
+  )
+  use_raiden_ffi: Optional[bool] = Field(
+      None,
+      description="Use Raiden FFI transport for weight sync.",
   )
   rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
       "maxtext",

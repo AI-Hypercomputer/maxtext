@@ -930,7 +930,11 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      n_shards = self.moe_mlp_tp_size if self.moe_mlp_tp_size > 1 else (self.tp if self.tp > 1 else _get_n_shards(tgt_val, tgt_fused_axis))
+      n_shards = (
+          self.moe_mlp_tp_size
+          if self.moe_mlp_tp_size > 1
+          else (self.tp if self.tp > 1 else _get_n_shards(tgt_val, tgt_fused_axis))
+      )
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,
@@ -955,7 +959,7 @@ class MaxTextToMaxTextConverter:
   def _slice_bulk_target_free(self, val: Any, path: str):
     """Returns target-free slices for a scanned parameter."""
     last_key = path.split(".")[-1]
-    is_kv = ("key.kernel" in path or "value.kernel" in path)
+    is_kv = "key.kernel" in path or "value.kernel" in path
     if isinstance(val, jax.ShapeDtypeStruct):
       unrolled_shape = list(val.shape[: self.scan_axis] + val.shape[self.scan_axis + 1 :])
       if last_key in MOE_MLP_WEIGHTS and self.padded_base_moe_mlp_dim is not None:
@@ -965,7 +969,11 @@ class MaxTextToMaxTextConverter:
         elif last_key in ("wi_0", "wi_1", "wi"):
           if self.padded_base_moe_mlp_dim > unrolled_shape[-1]:
             unrolled_shape[-1] = self.padded_base_moe_mlp_dim
-      if is_kv and self.kv_replication > 1 and (self.base_num_kv_heads is None or unrolled_shape[-2] == self.base_num_kv_heads):
+      if (
+          is_kv
+          and self.kv_replication > 1
+          and (self.base_num_kv_heads is None or unrolled_shape[-2] == self.base_num_kv_heads)
+      ):
         unrolled_shape[-2] = unrolled_shape[-2] * self.kv_replication
       return tuple(jax.ShapeDtypeStruct(tuple(unrolled_shape), val.dtype) for _ in range(val.shape[self.scan_axis]))
 
@@ -1007,7 +1015,11 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      n_shards = self.moe_mlp_tp_size if self.moe_mlp_tp_size > 1 else (self.tp if self.tp > 1 else _get_n_shards(wi_0, scan_fused_axis))
+      n_shards = (
+          self.moe_mlp_tp_size
+          if self.moe_mlp_tp_size > 1
+          else (self.tp if self.tp > 1 else _get_n_shards(wi_0, scan_fused_axis))
+      )
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,
@@ -1038,8 +1050,12 @@ class MaxTextToMaxTextConverter:
       raw_val = src_flat[group.source_keys[0]]
       tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
       val = _apply_dtype_cast(raw_val, tgt_dt, path)
-      is_kv = ("key.kernel" in path or "value.kernel" in path)
-      if is_kv and self.kv_replication > 1 and (self.base_num_kv_heads is None or val.shape[-2] == self.base_num_kv_heads):
+      is_kv = "key.kernel" in path or "value.kernel" in path
+      if (
+          is_kv
+          and self.kv_replication > 1
+          and (self.base_num_kv_heads is None or val.shape[-2] == self.base_num_kv_heads)
+      ):
         if isinstance(val, jax.ShapeDtypeStruct):
           new_shape = list(val.shape)
           new_shape[-2] = new_shape[-2] * self.kv_replication

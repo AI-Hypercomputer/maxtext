@@ -1825,7 +1825,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if not getattr(self._config, "enable_checkpointing", True) or not self._checkpoint_dir():
       logging.info("Checkpointing is disabled in config; skipping save_checkpoint.")
-      return False
+      return
 
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
