@@ -1658,6 +1658,14 @@ class DatasetGeneral(BaseModel):
       -1,
       description="Maximum number of segments that can be packed into a single sequence. -1 or None for no limit.",
   )
+  use_stream_chunking: bool | None = Field(
+      None,
+      description=(
+          "Whether to use continuous stream chunking (unpacked monolithic token stream with 0% padding, "
+          "monotonic positions, and uniform cross-document attention) for c4_mlperf datasets. "
+          "If None, defaults to True for pre-tokenized datasets and False for raw text."
+      ),
+  )
   num_epoch: int = Field(1, description="Number of epochs to train for.")
   expansion_factor_real_data: float = Field(-1.0, description="Factor for partial data loading on hosts.")
   reuse_example_batch: int = Field(0, description="For performance testing, repeatedly uses the same batch.")
