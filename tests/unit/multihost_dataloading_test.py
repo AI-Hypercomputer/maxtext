@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pylint: disable=missing-module-docstring, missing-function-docstring, line-too-long, g-generic-assert
+# pylint: disable=missing-module-docstring, missing-function-docstring, line-too-long, g-generic-assert, protected-access, import-outside-toplevel, super-init-not-called, missing-class-docstring
 import itertools
 import json
 
@@ -210,6 +210,152 @@ class MultihostDataloadingTest(parameterized.TestCase):
 
       # Next value should be 11 (state 10 + 1)
       self.assertEqual(val.addressable_data(0)[0], 11)
+
+  def test_singleton_object_store_cleanup_preserves_mtc_objects(self):
+    """Verifies that RemoteIterator initialization preserves MTC objects in SINGLETON_OBJECT_STORE."""
+    from jax.experimental.colocated_python.obj_backend import SINGLETON_OBJECT_STORE, _ObjectState
+
+    class MockMtcCheckpointer:
+
+      def __init__(self):
+        self.closed = False
+
+      def close(self):
+        self.closed = True
+
+    class MockRemoteIterator(multihost_dataloading.RemoteIterator):
+
+      def __init__(self):
+        self.closed = False
+
+      def close(self, dummy_array=None):
+        self.closed = True
+
+    mtc_obj = MockMtcCheckpointer()
+    old_iter = MockRemoteIterator()
+
+    with SINGLETON_OBJECT_STORE._lock:
+      SINGLETON_OBJECT_STORE._storage.clear()
+      SINGLETON_OBJECT_STORE._storage["mtc_checkpointer_uid"] = _ObjectState(is_being_initialized=False, obj=mtc_obj)
+      SINGLETON_OBJECT_STORE._storage["old_iterator_uid"] = _ObjectState(is_being_initialized=False, obj=old_iter)
+
+    def dummy_get_ds(dataloading_host_index, dataloading_host_count):
+      del dataloading_host_index, dataloading_host_count
+      return MockDataloader(1)
+
+    _ = multihost_dataloading.RemoteIterator(
+        get_ds_fn=dummy_get_ds,
+        preprocessing_fn=lambda dataset: dataset,
+        global_shape=(1, 1),
+        checkpoint_path="/tmp",
+        elastic=False,
+    )
+
+    with SINGLETON_OBJECT_STORE._lock:
+      # MTC object must still be in SINGLETON_OBJECT_STORE and not closed
+      self.assertIn("mtc_checkpointer_uid", SINGLETON_OBJECT_STORE._storage)
+      self.assertIs(SINGLETON_OBJECT_STORE._storage["mtc_checkpointer_uid"].obj, mtc_obj)
+      self.assertFalse(mtc_obj.closed)
+
+      # Old RemoteIterator must be evicted and closed
+      self.assertNotIn("old_iterator_uid", SINGLETON_OBJECT_STORE._storage)
+      self.assertTrue(old_iter.closed)
+      SINGLETON_OBJECT_STORE._storage.clear()
+
+  @mock.patch("os.path.exists", return_value=True)
+  @mock.patch("os.listdir")
+  @mock.patch("builtins.open")
+  @mock.patch("os.kill")
+  def test_orphan_cleanup_preserves_healthy_multiprocessing_processes(
+      self, mock_kill, mock_open_fn, mock_listdir, mock_exists
+  ):
+    """Verifies that orphan cleanup terminates only PPid==1 processes and preserves healthy ones."""
+    del mock_exists
+    mock_listdir.return_value = ["101", "102", "103"]
+
+    def fake_open(filepath, *args, **kwargs):
+      del args, kwargs
+      if filepath == "/proc/101/cmdline":
+        return mock.mock_open(read_data=b"python -m multiprocessing.spawn").return_value
+      elif filepath == "/proc/101/status":
+        return mock.mock_open(read_data="Name:\tpython\nPPid:\t1\n").return_value
+      elif filepath == "/proc/102/cmdline":
+        return mock.mock_open(read_data=b"python -m multiprocessing.spawn").return_value
+      elif filepath == "/proc/102/status":
+        return mock.mock_open(read_data="Name:\tpython\nPPid:\t50\n").return_value
+      elif filepath == "/proc/103/cmdline":
+        return mock.mock_open(read_data=b"/bin/bash").return_value
+      elif filepath == "/proc/103/status":
+        return mock.mock_open(read_data="Name:\tbash\nPPid:\t1\n").return_value
+      raise FileNotFoundError(filepath)
+
+    mock_open_fn.side_effect = fake_open
+
+    multihost_dataloading._cleanup_orphaned_multiprocessing_processes()
+
+    # Verify that only PID 101 (orphan) was sent kill signals
+    killed_pids = [call.args[0] for call in mock_kill.call_args_list]
+    self.assertIn(101, killed_pids)
+    self.assertNotIn(102, killed_pids)
+    self.assertNotIn(103, killed_pids)
+
+  @mock.patch("os.getpid", return_value=1)
+  @mock.patch("os.path.exists")
+  @mock.patch("os.kill")
+  def test_orphan_cleanup_skips_when_running_as_pid_1(self, mock_kill, mock_exists, mock_getpid):
+    """Verifies that orphan cleanup does not kill direct child workers when running as container PID 1."""
+    del mock_exists, mock_getpid
+    multihost_dataloading._cleanup_orphaned_multiprocessing_processes()
+    mock_kill.assert_not_called()
+
+  def test_terminate_iterator_workers_and_close(self):
+    """Verifies targeted worker termination on iterator/dataloader objects."""
+
+    class MockWorker:
+
+      def __init__(self):
+        self.terminated = False
+        self.joined = False
+
+      def terminate(self):
+        self.terminated = True
+
+      def join(self, timeout=None):
+        del timeout
+        self.joined = True
+
+    class MockPool:
+
+      def __init__(self):
+        self.terminated = False
+
+      def terminate(self):
+        self.terminated = True
+
+    class MockParent:
+
+      def __init__(self):
+        self._workers = [MockWorker(), MockWorker()]
+        self._pool = MockPool()
+
+    class MockIterWithParent:
+
+      def __init__(self):
+        self._parent = MockParent()
+        self.closed = False
+
+      def close(self):
+        self.closed = True
+
+    it = MockIterWithParent()
+    multihost_dataloading._close_iterator(it)
+    multihost_dataloading._terminate_iterator_workers(it)
+
+    self.assertTrue(it.closed)
+    for w in it._parent._workers:
+      self.assertTrue(w.terminated)
+      self.assertTrue(w.joined)
+    self.assertTrue(it._parent._pool.terminated)
 
 
 if __name__ == "__main__":
