@@ -21,36 +21,36 @@ Multi-tier checkpointing stores checkpoints across multiple tiers of storage:
 
 - **GKE Component**: A managed GKE component is involved in handling high-scale checkpointing, including controllers, daemonsets, worker discovery, and rank assignment.
 - **Local Storage**: For multi-tier checkpointing, local storage (such as ramdisk provided by a CSI ephemeral driver) is used for checkpoints, persisting across workload pod deletions.
-- **Replication Service**: A replication service in a managed GKE component replicates checkpoints in-cluster and backs up local checkpoint files to GCS at certain intervals and is responsible for fetching latest checkpoint files to nodes without local checkpoints during restoration.
+- **Replication Service**: A replication service in a managed GKE component replicates checkpoints in-cluster and backs up local checkpoint files to GCS at certain intervals and is responsible for fetching the latest checkpoint files to nodes without local checkpoints during restoration.
 
 ## Comparison with other checkpointing methods
 
 - **GCS Checkpointing**: This involves saving the model state directly to durable storage like GCS. However, this can be slow at larger model/cluster scales, blocking training, and leading to redundant data copies.
 - **Emergency/Ramdisk Checkpointing**: While this method uses a low-latency ramdisk for checkpointing, Orbax manages the GCS save and restore operations at the workload level. As a result, saving to GCS blocks the training process during the device-to-host data transfer.
-- **Multi-tier Checkpointing (Ramdisk + GCS)**: This approach combines the speed of ramdisk, the resilience of in-cluster replication, and the durability of GCS to offer a more robust and efficient solution. With Multi-Tier Checkpointing, above blocking issue is resolved because the GCS save is handled at the service level, operating on the checkpoint already saved locally.
+- **Multi-tier Checkpointing (Ramdisk + GCS)**: This approach combines the speed of ramdisk, the resilience of in-cluster replication, and the durability of GCS to offer a more robust and efficient solution. With Multi-Tier Checkpointing, the above blocking issue is resolved because the GCS save is handled at the service level, operating on the checkpoint already saved locally.
 
 ## Assumptions
 
 - **GKE Environment**: A **Google Kubernetes Engine (GKE)** cluster must be used. GCE infrastructure solutions like QueuedResources are not supported.
-- **Multi-Tier Checkpointing Enabled on GKE cluster level**: The Multi-Tier Checkpointing feature must be enabled and configured on your GKE cluster. This involves setting up the necessary CSI drivers and configurations as outlined in the [Google Cloud Checkpointing Documentation](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing).
-- **Multi-Slice Workload**: The training job must be a [multi-slice environment](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/tpu-multislice), meaning it utilizes more than one node pool.
+- **Multi-Tier Checkpointing Enabled on GKE cluster level**: The Multi-Tier Checkpointing feature must be enabled and configured on your GKE cluster. This involves setting up the necessary CSI drivers and configurations as outlined in the [Google Cloud Checkpointing Documentation](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing).
+- **Multi-Slice Workload**: The training job must be a [multi-slice environment](https://cloud.google.com/kubernetes-engine/docs/how-to/tpu-multislice), meaning it utilizes more than one node pool.
 - **Orbax Checkpointer**: The [Orbax library](https://orbax.readthedocs.io) must be used for checkpointing in your training script.
-- **Ramdisk Mounted via Jobset**: Each workload pod must have a [ramdisk directory mounted by Jobset](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#update-jobset) using the Multi-Tier Checkpointing CSI driver. This provides a high-speed, in-memory storage location for checkpoints.
-- **Supported TPU types**: [v4](https://docs.cloud.google.com/tpu/docs/v4), [v5e](https://docs.cloud.google.com/tpu/docs/v5e), [v5p](https://docs.cloud.google.com/tpu/docs/v5p), and [v6e](https://docs.cloud.google.com/tpu/docs/v6e)
-- **Cluster version**: Gke cluster version needs to be later than [1.32.3-gke.1170000](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#existing-cluster).
+- **Ramdisk Mounted via Jobset**: Each workload pod must have a [ramdisk directory mounted by Jobset](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#update-jobset) using the Multi-Tier Checkpointing CSI driver. This provides a high-speed, in-memory storage location for checkpoints.
+- **Supported TPU types**: [v4](https://cloud.google.com/tpu/docs/v4), [v5e](https://cloud.google.com/tpu/docs/v5e), [v5p](https://cloud.google.com/tpu/docs/v5p), and [v6e](https://cloud.google.com/tpu/docs/v6e)
+- **Cluster version**: GKE cluster version needs to be later than [1.32.3-gke.1170000](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#existing-cluster).
 
-## Cluster creation using XPK
+## Configure the GKE cluster
 
-To run workloads with Multi-Tier Checkpointing (MTC), you need a Google Kubernetes Engine (GKE) cluster with the necessary drivers and features enabled. You can create a properly configured cluster using the **XPK** or by setting it up manually with `gcloud` commands following [Google Cloud Checkpointing Documentation](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing).
+To run workloads with Multi-Tier Checkpointing (MTC), use a Google Kubernetes Engine (GKE) cluster with the necessary drivers and features enabled. Follow the [Google Cloud Checkpointing Documentation](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing) to configure MTC at the cluster level.
 
-The [xpk script](https://github.com/AI-Hypercomputer/xpk/blob/main/xpk.py) provides a streamlined way to create a GKE cluster with all the required MTC settings. The key flags used are:
+The cluster-level settings that must be enabled are:
 
-| Flag                          | Description                                                              |
+| Setting                       | Description                                                              |
 | :---------------------------- | :----------------------------------------------------------------------- |
-| `--enable-mtc`                | Enables the Multi-Tier Checkpointing feature.                            |
-| `--enable-gcsfuse-csi-driver` | Installs the required GCS FUSE CSI driver.                               |
-| `--mtc-ramdisk-size`          | Allocates an in-memory ramdisk on each node for fast, local checkpoints. |
-| `--mtc-gcs-bucket`            | Specifies the GCS bucket.                                                |
+| **Multi-Tier Checkpointing**  | Enables the required cluster-level checkpointing feature (`HighScaleCheckpointing` addon). |
+| **GCS FUSE CSI driver**       | Installs the required GCS FUSE CSI driver (`GcsFuseCsiDriver` addon). |
+| **Ramdisk allocation**        | Dynamically provisioned by the MTC CSI driver on each workload pod when `--gke-mtc-enabled` and `--gke-mtc-ramdisk-dir` are passed to `gcluster job submit`. |
+| **GCS bucket access**         | Grants the GKE checkpointing service account IAM permissions on your Cloud Storage bucket. |
 
 ### Calculating ramdisk size per host
 
@@ -63,9 +63,9 @@ For example, a 1 billion parameter model would require approximately **1B × 12 
 In a distributed training environment, the checkpoint is **sharded**, or split, across all the hosts in a slice. Each host is only responsible for saving its portion of the total checkpoint. Therefore, the ramdisk on a single pod only needs to be large enough for its local shard.
 
 The formula is:
-**Required Ramdisk Size per Pod ≈ 2 * (Total Checkpoint Size / Number of Hosts in the Slice)**
+**Required Ramdisk Size per Pod ≈ 2 × (Total Checkpoint Size / Number of Hosts in the Slice)**
 
-It's a good practice to add a **10-15% buffer** .
+It's a good practice to add a **10-15% buffer**.
 
 ### Example calculation
 
@@ -82,112 +82,185 @@ Let's walk through an example for a large model.
    `(Total Checkpoint Size / 32 hosts) = 26.25 GB per host`
 
 3. **Calculate Per-Host Ramdisk Size**:
-   `(Per-Host Checkpoint shard) * 2 = 52.50 GB per host`
+   `(Per-Host Checkpoint shard) × 2 = 52.50 GB per host`
 
 4. **Add a Safety Buffer (e.g., 15%)**:
    `(Per-Host Ramdisk Size) × 1.15 ≈ 60.3 GB`
 
 In this scenario, you should configure each pod in that slice with a ramdisk of at least **60 GB**.
 
-### Example XPK cluster creation command
+### Cluster configuration values
 
 1. **Set up environment variables:**
    ```bash
-   OUTPUT_PATH=<gcs bucket output path>
-   PROJECT_ID=<project id>
-   ZONE=<your zone>
-   CLUSTER_NAME=<cluster name>
-   TPU_TYPE=<tpu-type> #example: v6e-256
-   MACHINE_TYPE=<cpu machine-type>
-   NUM_SLICES=<number of slices>
-   RAMDISK_SIZE=<ramdisk size> #example: 60000Mi
-   GKE_VERSION=<gke version> #example: 1.32.3-gke.1785000
+   PROJECT_ID="<project-id>"
+   CLUSTER_LOCATION="<cluster-location>" # example: europe-west4 (region) or us-central1-a (zone)
+   BUCKET_LOCATION="<bucket-location>"   # example: europe-west4 or us-central1 (must be a region or multi-region, not a zone)
+   TPU_ZONE="<tpu-zone>"                 # example: europe-west4-a
+   CLUSTER_NAME="<cluster-name>"
+   NODE_POOL_NAME="<tpu-node-pool-name>" # example: v6e-pool
+   COMPUTE_TYPE="<tpu-machine-type>"     # example: ct6e-standard-4t
+   TOPOLOGY="<tpu-topology>"             # example: 8x16 (for 32 hosts with ct6e-standard-4t) or 4x8 (8 hosts)
+   GKE_VERSION="<gke-version>"           # example: 1.32.4-gke.1415000 (minimum for new clusters)
+   GCS_BUCKET="<gcs-bucket-name>"        # example: my-checkpoint-bucket
+   OUTPUT_PATH="gs://${GCS_BUCKET}/checkpoints"
    ```
-2. **Configure gcloud:**
+2. **Configure gcloud and Cloud Storage:**
+   Configure `gcloud` defaults and create a Cloud Storage bucket with **Hierarchical Namespace (HNS)** enabled. HNS provides fast atomic folder renames required for checkpoint finalization and GCS backups:
    ```bash
    gcloud config set project ${PROJECT_ID?}
-   gcloud config set compute/zone ${ZONE?}
+   gcloud config set compute/zone ${TPU_ZONE?}
+
+   gcloud storage buckets create gs://${GCS_BUCKET?} \
+     --location=${BUCKET_LOCATION?} \
+     --hierarchical-namespace
    ```
-3. **Clone the XPK repository:**
-   ```bash
-   git clone [https://github.com/AI-Hypercomputer/xpk.git](https://github.com/AI-Hypercomputer/xpk.git)
-   ```
-4. **Run the cluster creation command:**
-   ```bash
-   python3 xpk/xpk.py cluster create \
-   --cluster ${CLUSTER_NAME?} \
-   --cluster-cpu-machine-type=${MACHINE_TYPE?} \
-   --num-slices=${NUM_SLICES?} \
-   --tpu-type=${TPU_TYPE?} \
-   --enable-mtc \
-   --enable-gcsfuse-csi-driver \
-   --mtc-ramdisk-size=${RAMDISK_SIZE?} \
-   --mtc-gcs-bucket=${OUTPUT_PATH?} \
-   --gke-version=${GKE_VERSION?}
-   ```
+3. **Configure the cluster:** Multi-Tier Checkpointing requires the `HighScaleCheckpointing` and `GcsFuseCsiDriver` addons, as well as Workload Identity Federation, to be enabled on your GKE cluster.
+
+   - **For an existing cluster**, update the cluster workload pool and addons in two separate commands (since `--workload-pool` and `--update-addons` cannot be specified together in `gcloud`):
+     ```bash
+     # Step 1: Enable Workload Identity Federation
+     gcloud container clusters update ${CLUSTER_NAME?} \
+       --workload-pool=${PROJECT_ID?}.svc.id.goog \
+       --location=${CLUSTER_LOCATION?}
+
+     # Step 2: Enable MTC and GCS FUSE addons
+     gcloud container clusters update ${CLUSTER_NAME?} \
+       --update-addons=HighScaleCheckpointing=ENABLED,GcsFuseCsiDriver=ENABLED \
+       --location=${CLUSTER_LOCATION?}
+     ```
+
+   - **For a new cluster**, include the addons and workload pool during cluster creation:
+     ```bash
+     gcloud container clusters create ${CLUSTER_NAME?} \
+       --workload-pool=${PROJECT_ID?}.svc.id.goog \
+       --addons=HighScaleCheckpointing,GcsFuseCsiDriver \
+       --location=${CLUSTER_LOCATION?} \
+       --cluster-version=${GKE_VERSION?}
+     ```
+
+   - **Verify that HighScaleCheckpointing is enabled**:
+     ```bash
+     gcloud container clusters describe ${CLUSTER_NAME?} \
+       --location=${CLUSTER_LOCATION?} \
+       --format="yaml(addonsConfig.highScaleCheckpointingConfig)"
+     ```
+     The output should confirm `enabled: true`.
+
+     > **Note:** If `HighScaleCheckpointing` is not enabled, Cluster Toolkit (`gcluster job submit`) will reject the workload submission with:
+     > `Error: Multi-Tier Checkpointing (MTC) requires the HighScaleCheckpointing addon to be enabled on the target GKE cluster.`
+
+   - **Create the TPU node pool**: If your cluster does not already have a TPU node pool, create one with the target compute type and topology:
+     ```bash
+     gcloud container node-pools create ${NODE_POOL_NAME?} \
+       --cluster=${CLUSTER_NAME?} \
+       --location=${CLUSTER_LOCATION?} \
+       --node-locations=${TPU_ZONE?} \
+       --machine-type=${COMPUTE_TYPE?} \
+       --tpu-topology=${TOPOLOGY?}
+     ```
+
+   - **Authenticate kubectl**: Authenticate `kubectl` with the cluster credentials:
+     ```bash
+     gcloud container clusters get-credentials ${CLUSTER_NAME?} \
+       --location=${CLUSTER_LOCATION?} \
+       --project=${PROJECT_ID?}
+     ```
+
+4. **Grant access to Cloud Storage buckets:** Multi-Tier Checkpointing requires access to the Cloud Storage bucket to store checkpoints. Grant the Storage Object User (`roles/storage.objectUser`) IAM role on the bucket to both the GKE checkpointing service account and the workload service account:
+
+   - **GKE Checkpointing Service Account**: Grant `roles/storage.objectUser` on the bucket to the GKE checkpointing daemon:
+     ```bash
+     PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID?} --format="value(projectNumber)")
+     gcloud storage buckets add-iam-policy-binding gs://${GCS_BUCKET?} \
+       --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER?}/locations/global/workloadIdentityPools/${PROJECT_ID?}.svc.id.goog/subject/ns/gke-managed-checkpointing/sa/gke-checkpointing-multitier-node" \
+       --role="roles/storage.objectUser"
+     ```
+
+   - **Workload Service Account**: MaxText pods write TensorBoard metrics, configs, and training logs to `OUTPUT_PATH`. Grant `roles/storage.objectUser` to the Kubernetes service account (KSA) used by your training workload pod (e.g. `default` in namespace `default`):
+     ```bash
+     WORKLOAD_NAMESPACE="default"
+     WORKLOAD_KSA="default"
+     gcloud storage buckets add-iam-policy-binding gs://${GCS_BUCKET?} \
+       --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER?}/locations/global/workloadIdentityPools/${PROJECT_ID?}.svc.id.goog/subject/ns/${WORKLOAD_NAMESPACE?}/sa/${WORKLOAD_KSA?}" \
+       --role="roles/storage.objectUser"
+     ```
 
 ## MaxText configuration
 
 This configuration manages a `multi-tiered checkpointing` system designed for both durability and rapid recovery.
 
-- **Local checkpointing**: Saves checkpoints much more frequently to a fast, local directory on each host (i.e. a ramdisk). If a preemption or failure occurs, the job can restore from this recent local copy almost instantly, minimizing lost work without needing to download from slower persistent storage. This feature is enabled by setting `enable_checkpointing`, `enable_multi_tier_checkpointing`, `local_checkpoint_directory`, and a non-zero `local_checkpoint_period` flags.
+- **Local checkpointing**: Saves checkpoints much more frequently to a fast, local directory on each host (i.e., a ramdisk). If a preemption or failure occurs, the job can restore from this recent local copy almost instantly, minimizing lost work without needing to download from slower persistent storage. This feature is enabled by setting `enable_checkpointing`, `enable_multi_tier_checkpointing`, `local_checkpoint_directory`, and a non-zero `local_checkpoint_period` flags.
 
-- **Backup checkpointing**: These are checkpoints saved periodically to persistent storage (i.e. GCS bucket). They ensure that you can recover your training state even after a complete job failure (repair of all nodepools). From User's perspective all restoration is from local ramdisk, its replicator service responsibility to make the checkpoints available in local storage in case of job restart. The interval for backup can be enabled by setting a non-zero `multi_tier_checkpointing_backup_interval_minutes` or `multi_tier_checkpointing_backup_interval_steps` flags (but not both).
+- **Backup checkpointing**: These are checkpoints saved periodically to persistent storage (i.e., GCS bucket). They ensure that you can recover your training state even after a complete job failure (repair of all nodepools). From the user's perspective, all restoration is from the local ramdisk; it is the replicator service's responsibility to make the checkpoints available in local storage in case of job restart. The interval for backup can be enabled by setting a non-zero `multi_tier_checkpointing_backup_interval_minutes` or `multi_tier_checkpointing_backup_interval_steps` flags (but not both).
 
 | Flag                                               | Description                                                                                                                                                                                                      | Type      | Default |
 | :------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------- | :------ |
 | `enable_checkpointing`                             | A master switch to enable (`True`) or disable (`False`) saving checkpoints during the training run.                                                                                                              | `boolean` | `True`  |
 | `enable_multi_tier_checkpointing`                  | When set to (`True`), this flag enables the multi-tier checkpointing feature on maxtext level.                                                                                                                   | `boolean` | `False` |
-| `local_checkpoint_directory`                       | The high-speed local filesystem path(i.e. ramdisk) where **Multi-tier checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the Multi-tier Checkpointing feature. | `string`  | `""`    |
+| `local_checkpoint_directory`                       | The high-speed local filesystem path (i.e., ramdisk) where **Multi-tier checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the Multi-tier Checkpointing feature. | `string`  | `""`    |
 | `local_checkpoint_period`                          | The interval, in training steps, for how often a **Multi-tier checkpoint** is saved in local ramdisks.                                                                                                           | `integer` | `0`     |
 | `multi_tier_checkpointing_backup_interval_minutes` | The interval, in minutes, for how often a **Multi-tier checkpoint** is saved to backup from local ramdisks.                                                                                                      | `integer` | `None`  |
 | `multi_tier_checkpointing_backup_interval_steps`   | The interval, in steps, for how often a **Multi-tier checkpoint** is saved to backup from local ramdisks.                                                                                                        | `integer` | `None`  |
 
-### Workload creation using XPK
+### Workload submission using Cluster Toolkit
 
 The flags below would give the user access to the ramdisk in their workload:
 
 | Flag                  | Description                                                                                                                                                                     |
 | :-------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--mtc-enabled`       | Enables the Multi-Tier Checkpointing feature, by mounting ramdisk to the workload pods, using csi drivers.                                                                      |
-| `--ramdisk-directory` | Specifies the mount path inside each pod where the high-speed ramdisk will be accessible. Your training application should write its local, emergency checkpoints to this path. |
+| `--gke-mtc-enabled`     | Enables the Multi-Tier Checkpointing feature for the workload pods.                                                                      |
+| `--gke-mtc-ramdisk-dir` | Specifies the ramdisk mount path inside each workload pod.                                                                              |
 
-### Example XPK workload creation command
+### Example Cluster Toolkit workload submission
 
 1. **Set up environment variables:**
 
    ```bash
-   RAMDISK_DIRECTORY=<your ramdisk directory>
-   WORKLOAD_NAME=<YOUR WORKLOAD NAME>
-   TPU_TYPE=<tpu-type>
-   NUM_SLICES=<number of slices>
-   PROJECT_ID=<project-id>
-   LOCAL_CHECKPOINT_PERIOD=<>
-   CHECKPOINT_PEROID=<checkpoint_period>
-   STEPS=<steps>
-   DATA_PATH=<dataset path>
-   OUTPUT_PATH=<gcs bucket output path>
-   MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN=<multi_tier_checkpointing_backup_interval_minutes>
+   PROJECT_ID="<project-id>"
+   CLUSTER_NAME="<cluster-name>"
+   CLUSTER_LOCATION="<cluster-location>" # example: europe-west4 (region) or us-central1-a (zone)
+   RAMDISK_DIRECTORY="<your-ramdisk-directory>" # example: /tmp/ramdisk
+   WORKLOAD_NAME="<workload-name>"
+   NUM_SLICES=1 # number of slices (e.g. 1 for single-slice, 2+ for multi-slice)
+   LOCAL_CHECKPOINT_PERIOD=10
+   STEPS="<steps>"
+   OUTPUT_PATH="<gcs-bucket-output-path>"
+   MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN="<backup-interval-minutes>"
+   COMPUTE_TYPE="<compute-type>" # example: ct6e-standard-4t
+   TOPOLOGY="<tpu-topology>"     # example: 8x16 or 4x8
+   DATA_PATH="<dataset-path>"    # optional: only required if dataset_type is not synthetic
    ```
 
 2. **Define the Docker image:**
 
    ```bash
-   DOCKER_IMAGE=gcr.io/${PROJECT_ID}/${USER}_mtc_runner:latest
+   # Official release pre-training image (recommended)
+   DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+   # Or your custom runner image:
+   # DOCKER_IMAGE="${CLUSTER_LOCATION}-docker.pkg.dev/${PROJECT_ID}/<repo>/${USER}_mtc_runner:latest"
    ```
 
 3. **Run the workload creation command:**
 
    ```bash
-   python3 xpk/xpk.py workload create \
-   --cluster ${CLUSTER_NAME?} \
-   --docker-image ${DOCKER_IMAGE?} \
-   --workload ${WORKLOAD_NAME?} \
-   --tpu-type=${TPU_TYPE?} \
-   --num-slices=${NUM_SLICES?} \
-   --ramdisk-directory=${RAMDISK_DIRECTORY?} \
-   --mtc-enabled  \
-   --command "python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PEROID?} enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=/${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?}"
+   gcloud container clusters get-credentials ${CLUSTER_NAME?} \
+     --location=${CLUSTER_LOCATION?} \
+     --project=${PROJECT_ID?}
+
+   gcluster job config set project ${PROJECT_ID?}
+   gcluster job config set cluster ${CLUSTER_NAME?}
+   gcluster job config set location ${CLUSTER_LOCATION?}
+
+   gcluster job submit \
+     --image=${DOCKER_IMAGE?} \
+     --name=${WORKLOAD_NAME?} \
+     --compute-type=${COMPUTE_TYPE?} \
+     --topology=${TOPOLOGY?} \
+     --num-slices=${NUM_SLICES?} \
+     --gke-mtc-enabled \
+     --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
+     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=default dataset_type=synthetic steps=${STEPS?} per_device_batch_size=6 enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?} num_slices=${NUM_SLICES?}"
    ```
 
 ## Deploying MTC on Pathways using Cluster Toolkit
@@ -198,21 +271,23 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
 | :-------------------------------------------------- | :-------------------------------------------------------------------------------------------------------- |
 | `--gke-mtc-enabled`                                 | Configures the MTC service and mounts the ramdisk on the workload pods.                                   |
 | `--gke-mtc-ramdisk-dir=<path>`                      | Specifies the ramdisk mount path. This must match the MaxText `local_checkpoint_directory` configuration. |
-| `--pathways-colocated-python-sidecar-image=<image>` | Specifies the Colocated Python sidecar image used for worker-local checkpoint operations.                 |
+| `--pathways-colocated-python-sidecar-image=<image>` | Specifies the container image for the Colocated Python sidecar running on workers. Required when `colocated_python_checkpointing=True`. |
 
-### Example Cluster Toolkit workload submission
+### Example Pathways MTC workload submission
 
 1. **Set up environment variables:**
 
    ```bash
+   PROJECT_ID="<project-id>"
+   CLUSTER_NAME="<cluster-name>"
+   CLUSTER_LOCATION="<cluster-location>" # example: europe-west4 (region) or us-central1-a (zone)
    JOB_NAME="<job-name>"
-   COMPUTE_TYPE="<tpu-type>"
-   TOPOLOGY="<tpu-topology>"
+   COMPUTE_TYPE="<compute-type>" # example: ct6e-standard-4t
+   TOPOLOGY="<tpu-topology>"     # example: 4x8
    NUM_SLICES="<number-of-slices>"
    OUTPUT_PATH="gs://<bucket>"
-   MAXTEXT_IMAGE="<maxtext-head-image>"
-   COLOCATED_PYTHON_IMAGE="<maxtext-colocated-python-image>"
-   MAXTEXT_CONFIG="/deps/src/maxtext/configs/base.yml"
+   MAXTEXT_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+   MAXTEXT_CONFIG="src/maxtext/configs/base.yml"
    RAMDISK_DIRECTORY="/tmp/mtc_checkpoints"
    LOCAL_CHECKPOINT_PERIOD=10
    BACKUP_INTERVAL_MINUTES=30
@@ -220,11 +295,10 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
    OPTIONAL_ELASTICITY_ARGS=""
    ```
 
-   To enable elastic replica resizing, set `OPTIONAL_ELASTICITY_ARGS` to the appropriate MaxText elasticity flags and configure the corresponding Pathways elastic slice settings. See [Elastic training with Pathways](../../run_maxtext/run_maxtext_elastic_training.md) for configuration details.
+   To enable elastic replica resizing, set `OPTIONAL_ELASTICITY_ARGS` to the appropriate MaxText elasticity flags and configure the corresponding workload settings. See [Elastic training](../../run_maxtext/run_maxtext_elastic_training.md) for the Cluster Toolkit recovery workflow.
 
-   ```{warning}
-   **Use compatible MaxText head and Colocated Python sidecar images.** Pathways MTC uses [Colocated Python](https://docs.jax.dev/en/latest/notebooks/colocated-python.html) for worker-local checkpoint operations. Both images must use compatible MaxText and Orbax revisions and exactly the same `jax` and `jaxlib` versions. Version skew can cause initialization or restore failures.
-   ```
+   > [!WARNING]
+   > **Use compatible MaxText head and Colocated Python sidecar images.** Pathways MTC uses [Colocated Python](https://docs.jax.dev/en/latest/notebooks/colocated-python.html) for worker-local checkpoint operations. Both images must use compatible MaxText and Orbax revisions and exactly the same `jax` and `jaxlib` versions. Version skew can cause initialization or restore failures.
 
 2. **Define the MaxText command:**
 
@@ -246,16 +320,19 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
 3. **Submit the workload:**
 
    ```bash
-   ./gcluster job submit \
-     --name="${JOB_NAME}" \
-     --pathways \
-     --compute-type="${COMPUTE_TYPE}" \
-     --topology="${TOPOLOGY}" \
-     --num-slices="${NUM_SLICES}" \
-     --image="${MAXTEXT_IMAGE}" \
-     --pathways-colocated-python-sidecar-image="${COLOCATED_PYTHON_IMAGE}" \
-     --pathways-gcs-location="${OUTPUT_PATH}" \
-     --gke-mtc-enabled \
-     --gke-mtc-ramdisk-dir="${RAMDISK_DIRECTORY}" \
-     --command="${COMMAND}"
+   gcluster job submit \
+      --project="${PROJECT_ID}" \
+      --cluster="${CLUSTER_NAME}" \
+      --location="${CLUSTER_LOCATION}" \
+      --name="${JOB_NAME}" \
+      --pathways \
+      --compute-type="${COMPUTE_TYPE}" \
+      --topology="${TOPOLOGY}" \
+      --num-slices="${NUM_SLICES}" \
+      --image="${MAXTEXT_IMAGE}" \
+      --pathways-colocated-python-sidecar-image="${MAXTEXT_IMAGE}" \
+      --pathways-gcs-location="${OUTPUT_PATH}" \
+      --gke-mtc-enabled \
+      --gke-mtc-ramdisk-dir="${RAMDISK_DIRECTORY}" \
+      --command="${COMMAND}"
    ```
