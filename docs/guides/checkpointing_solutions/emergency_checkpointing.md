@@ -230,9 +230,9 @@ The Cluster Toolkit workload must mount the ramdisk so the training process can 
      --location=${CLUSTER_LOCATION?} \
      --project=${PROJECT_ID?}
 
-   gcluster set config set project ${PROJECT_ID?}
-   gcluster set config set cluster ${CLUSTER_NAME?}
-   gcluster set config set location ${CLUSTER_LOCATION?}
+   gcluster job config set project ${PROJECT_ID?}
+   gcluster job config set cluster ${CLUSTER_NAME?}
+   gcluster job config set location ${CLUSTER_LOCATION?}
 
    gcluster job submit \
      --image=${DOCKER_IMAGE?} \
