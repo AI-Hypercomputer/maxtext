@@ -767,6 +767,11 @@ eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
 default_prompt: ''
 packing: true
+# Whether to use continuous stream chunking (unpacked monolithic token stream with 0% padding,
+# monotonic positions, and uniform cross-document attention) for c4_mlperf datasets.
+# If null, defaults to true for pre-tokenized datasets (tokenize_train_data=false)
+# and false for raw text datasets.
+use_stream_chunking: null
 num_epoch: 1
 generate_padding_batch_train: false
 generate_padding_batch_eval: false
