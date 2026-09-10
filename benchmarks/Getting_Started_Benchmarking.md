@@ -1,16 +1,59 @@
-### Getting starting with benchmark running in MaxText
+### Getting started with benchmark running in MaxText
 
 Two approaches are here:
 
 1. Run a model recipe with a single CLI command. Great to replicate performance results previously measured. See https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/training/trillium for examples.
-2. Run several experiments pythonically across a sweep of parameters (cluster configuration, maxtext parameters) with XPK workloads.
+2. Run several experiments pythonically across a sweep of parameters (cluster configuration, maxtext parameters) with Cluster Toolkit workloads. Legacy XPK examples are retained below for older automation.
+
+For new GKE runs, submit each benchmark as a Cluster Toolkit JobSet. Authenticate
+to the cluster and configure `gcluster` before submitting:
+
+```shell
+export PROJECT="<your-project>"
+export CLUSTER="<your-cluster>"
+export LOCATION="<your-cluster-location>" # e.g. europe-west4 (region) or us-central1-a (zone)
+
+gcloud config set project ${PROJECT?}
+gcloud container clusters get-credentials ${CLUSTER?} \
+  --location ${LOCATION?} \
+  --project ${PROJECT?}
+gcluster job config set project ${PROJECT?}
+gcluster job config set cluster ${CLUSTER?}
+gcluster job config set location ${LOCATION?}
+```
+
+Then use the image, compute type, and topology for the target cluster:
+
+```shell
+# Cluster Toolkit: McJAX
+gcluster job submit \
+  --image <IMAGE_URI> \
+  --command "python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5" \
+  --name benchmark-mcjax \
+  --compute-type <COMPUTE_TYPE> \
+  --topology <TOPOLOGY>
+
+# Cluster Toolkit: Pathways
+gcluster job submit \
+  --image <IMAGE_URI> \
+  --name benchmark-pathways \
+  --pathways \
+  --compute-type <COMPUTE_TYPE> \
+  --topology <TOPOLOGY> \
+  --num-slices=1 \
+  --pathways-gcs-location=gs://maxtext-experiments-tpem/ \
+  --command "python3 -m benchmarks.benchmark_runner --use_pathways=true on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5"
+```
+
+The existing Python XPK runner below remains available for older benchmark
+automation, but it is not a Cluster Toolkit submission path.
 
 - **xla_flags_library.py**: A grouping of xla flags organized by purpose with details on how they can be applied to a model.
-- **maxtext_trillium_model_config.py**: A list of model definitions for Trillium. See optimized models here and how they apply xla flags. This config provides a pythonic way to run MaxText models.
+- **maxtext_trillium_model_configs.py**: A list of model definitions for Trillium. See optimized models here and how they apply xla flags. This config provides a pythonic way to run MaxText models.
 - **benchmark_runner.py**: A cli interface to running a specific model recipe, on pathways or mcjax directly or with orchestration like xpk with one command.
 
 ```shell
-# McJax with XPK
+# Legacy: McJax with XPK
 CLUSTER=my-cluster
 ZONE=my-zone
 PROJECT=my-project
@@ -18,7 +61,7 @@ python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?}
 ```
 
 ```shell
-# Pathways with XPK
+# Legacy: Pathways with XPK
 export RUNNER=us-docker.pkg.dev/path/to/maxtext_runner
 export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server
 export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server
@@ -32,7 +75,7 @@ python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?}
 python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name="test-run" --num_steps=5
 ```
 
-- **maxtext_xpk_runner.py**: A pythonic way to run xpk workloads! With the magic of for looping and python code, run several xpk workloads across a sweep of parameters including libtpu version, gke clusters, and maxtext parameters with one python script.
+- **maxtext_xpk_runner.py**: Legacy Python orchestration for XPK workloads. New benchmark submissions should use `gcluster job submit`; this runner still requires a separate implementation before it can submit Cluster Toolkit jobs directly.
 
 ```shell
 # Loop possibilities:
