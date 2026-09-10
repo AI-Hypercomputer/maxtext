@@ -130,7 +130,21 @@ gcluster job submit \
   --topology ${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=gemma4-e4b load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?} enable_single_controller=True"
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+    model_name=gemma4-e4b \
+    tokenizer_path=google/gemma-4-E4B \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    hf_access_token=${HF_TOKEN?} \
+    scan_layers=False \
+    data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json \
+    chat_template_path=maxtext/examples/chat_templates/gemma-3-27b-chat_template.json \
+    dataset_name=nvidia/OpenMathInstruct-2 \
+    chips_per_vm=4 \
+    ici_tensor_parallelism=2 \
+    rollout_tensor_parallelism=2 \
+    enable_single_controller=True"
 ```
 
 ### Monitor your workload

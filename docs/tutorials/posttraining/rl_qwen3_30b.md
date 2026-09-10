@@ -121,7 +121,18 @@ gcluster job submit \
   --topology ${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-30b-a3b-base tokenizer_path=${TOKENIZER_PATH?} load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?} enable_single_controller=True"
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+    model_name=qwen3-30b-a3b-base \
+    tokenizer_path=${TOKENIZER_PATH?} \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    hf_access_token=${HF_TOKEN?} \
+    dataset_name=nvidia/OpenMathInstruct-2 \
+    chips_per_vm=8 \
+    rollout_data_parallelism=16 \
+    rollout_tensor_parallelism=4 \
+    enable_single_controller=True"
 ```
 
 ### Monitor your workload

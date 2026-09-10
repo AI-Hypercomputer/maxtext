@@ -59,6 +59,9 @@ export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 
 # Your Hugging Face access token.
 export HF_TOKEN=<HF_TOKEN>
+
+# Tokenizer path for GPT-OSS 20B
+export TOKENIZER_PATH="unsloth/gpt-oss-20b-BF16"
 ```
 
 ## Authenticate with Hugging Face
@@ -118,7 +121,17 @@ gcluster job submit \
   --topology ${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl model_name=gpt-oss-20b load_parameters_path=${MAXTEXT_CKPT_PATH?} run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} hf_access_token=${HF_TOKEN?} enable_single_controller=True"
+  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+    model_name=gpt-oss-20b \
+    tokenizer_path=${TOKENIZER_PATH?} \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    hf_access_token=${HF_TOKEN?} \
+    chat_template_path=maxtext/examples/chat_templates/gpt_oss_rl.json \
+    chips_per_vm=4 \
+    rollout_tensor_parallelism=8 \
+    enable_single_controller=True"
 ```
 
 ### Monitor your workload
