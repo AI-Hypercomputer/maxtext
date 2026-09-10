@@ -317,11 +317,9 @@ def get_maxtext_model_info(config):
   quant = quantizations.configure_quantization(config)
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
-  # Get abstract model structure (name, shape) without materializing the weights to save memory.
-  # Extract the 'params' collection from the abstract model state. This focuses checkpoint
-  # conversion on trainable model parameters; variables outside the 'params' collection
-  # (such as non-trainable state or optimizer buffers) are not included.
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  # Get abstract model structure (name, shape) without materializing the weights to save memory
+  # Keeps all collections (e.g. 'params', 'Tid2EidVar') in the tree structure
+  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
       abstract_params_tree,
@@ -333,7 +331,7 @@ def get_maxtext_model_info(config):
   # preprocess state
   maxtext_abstract_dict = {}
   for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
-    mt_param_key = "params-" + "-".join(param_key_parts_from_path(path_tuple))
+    mt_param_key = "-".join(param_key_parts_from_path(path_tuple))
     if isinstance(abstract_leaf_value, nn.LogicallyPartitioned):
       mt_target_shape = abstract_leaf_value.value.shape
     else:
@@ -406,6 +404,7 @@ def _build_single_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
+    mt_key: str = "",
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along a single axis.
 
@@ -424,12 +423,12 @@ def _build_single_axis_stacked_tensor(
   """
   tensors_to_stack = []
 
+  axis_to_stack = 0
   if config.scan_layers:
-    # If it's a standard scanned layer, we use the configured param_scan_axis.
-    axis_to_stack = config.param_scan_axis
-  else:
-    # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
-    axis_to_stack = 0
+    is_var_collection = "MoEBiasVar" in mt_key or "Tid2EidVar" in mt_key
+    is_unscanned_moe = "MoeBlock" in mt_key and "scanned_blocks" not in mt_key
+    if not (is_var_collection or is_unscanned_moe):
+      axis_to_stack = config.param_scan_axis
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
@@ -467,6 +466,8 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
+      if key is None:
+        return apply_hook_fns(None, shape, hook)
       if isinstance(key, (list, tuple)):
         tensors = tuple(getter(k) for k in key)
         return apply_hook_fns(tensors, shape, hook)
@@ -489,6 +490,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hook_fn,
         mt_target_shape_or_shapes,
         config,
+        mt_key,
     )
   else:
     # isinstance(hf_source_keys_or_key[0], list)
@@ -905,6 +907,7 @@ def main(
     jax_weights = convert_lora_to_maxtext_adapter(config, lora_weights, save_dtype)
     adapter_name = os.path.basename(os.path.normpath(hf_lora_adapter_path))
     output_directory = os.path.join(output_directory, model_name_for_path, adapter_name)
+    state_params = jax_weights
   else:
 
     if lazy_load_tensors and config.use_multimodal:
@@ -976,6 +979,8 @@ def main(
           }
 
       def _eager_getter(key):
+        if key is None:
+          return None
         if key not in hf_state_dict_numpy:
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
         v = hf_state_dict_numpy[key]
@@ -1073,11 +1078,19 @@ def main(
     max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
     print_ram_usage("Before creating full JAX tree")
 
-    # Create final MaxText parameters tree
+    max_logging.log(f"Length of final_mt_weights: {len(final_mt_weights)}")
+    max_logging.log(f"Treedef num_leaves: {abstract_params_treedef.num_leaves}")
+    # Create final MaxText parameters tree containing all collections
     jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
     del final_mt_weights, abstract_params_treedef
 
+    state_params = jax_weights
+
   print_ram_usage("Before saving")
+  leaves = jax.tree_util.tree_leaves(state_params)
+  max_logging.log(f"Length of state_params leaves: {len(leaves)}")
+  if leaves:
+    max_logging.log(f"Type of first leaf before saving: {type(leaves[0])}")
   if lazy_load_tensors and not is_adapter_only:
     max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
   else:
@@ -1088,7 +1101,7 @@ def main(
   # and sharded across virtual devices.
   save_weights_to_checkpoint(
       output_directory,
-      jax_weights,
+      state_params,
       simulated_cpu_devices_count,
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,

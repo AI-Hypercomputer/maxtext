@@ -1369,9 +1369,28 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
     )
 
     config_arguments = {
-        "model_name": "deepseek4-tiny",
+        "model_name": "deepseek4-284b",
         "override_model_config": True,
+        "base_emb_dim": self.hidden_dim,
+        "base_num_query_heads": self.num_heads,
+        "base_num_kv_heads": 1,
+        "base_mlp_dim": self.hidden_dim,
+        "base_moe_mlp_dim": self.hidden_dim,
+        "head_dim": self.head_dim,
+        "qk_rope_head_dim": self.qk_rope_head_dim,
+        "num_experts": self.pt_config.n_routed_experts,
+        "num_experts_per_tok": self.pt_config.num_experts_per_tok,
+        "q_lora_rank": self.q_lora_rank,
+        "o_groups": self.o_groups,
+        "o_lora_rank": self.o_lora_rank,
+        "indexer_head_dim": self.head_dim,
+        "indexer_n_heads": self.num_heads,
+        "indexer_topk": 16,
+        "sliding_window_size": self.seq_len,
+        "max_position_embeddings": 4096,
         "per_device_batch_size": 1,
+        "base_num_decoder_layers": 7,
+        "attention": "dot_product",
         "matmul_precision": "highest",
         "megablox": False,
         "sparse_matmul": False,
@@ -1610,13 +1629,17 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
     self.rngs = nnx.Rngs(0)
 
     # Build MaxText config dictionary
-    argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-tiny"]
+    argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-284b"]
     config_arguments = {
         "override_model_config": True,
         "attention": "dot_product",
         "dtype": "float32",
         "weight_dtype": "float32",
         "mhc_expansion_rate": self.hc_mult,
+        "base_num_decoder_layers": 1,
+        "num_experts": 1,
+        "base_mlp_dim": self.hidden_dim,
+        "base_moe_mlp_dim": self.hidden_dim,
         "base_emb_dim": self.hidden_dim,
         "emb_dim": self.hidden_dim,
         "megablox": False,
