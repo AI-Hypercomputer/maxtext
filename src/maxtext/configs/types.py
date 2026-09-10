@@ -2747,6 +2747,10 @@ class VLLM(BaseModel):
           "the legacy transfer_state_directly / transfer_state_with_mappings paths."
       ),
   )
+  rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
+      "maxtext",
+      description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
+  )
   weight_sync_debug: bool = Field(
       False,
       description=(
@@ -2765,6 +2769,16 @@ class VLLM(BaseModel):
           "executables, so the gap between them is how much of a sync is compilation "
           "rather than data movement. Adds one barrier per sync."
       ),
+  )
+  kv_tp_size: int = Field(
+      1,
+      ge=1,
+      description="Degree of tensor parallelism for KV cache / attention heads in rollout.",
+  )
+  moe_mlp_tp_size: int = Field(
+      1,
+      ge=1,
+      description="Degree of tensor parallelism for MoE MLP dimension in rollout.",
   )
   vllm_load_format: str = Field(
       "dummy",

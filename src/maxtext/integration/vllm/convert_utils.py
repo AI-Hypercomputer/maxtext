@@ -506,7 +506,7 @@ def _interleave_moe_weights(
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
-    lane_size: int = DEFAULT_TPU_NUM_LANES,
+    lane_size: int = 0,
 ) -> jax.Array | np.ndarray:
   """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
 
@@ -516,6 +516,12 @@ def _interleave_moe_weights(
   buffer allocated is the result. On a 48-layer MoE model called once per layer
   that is the difference between ~3x and ~1x the output size in live transient
   memory, plus ~5 fewer dispatches per call.
+
+  For TPU GMM_v2 kernels (e.g. gmm_v2.py), each TP shard expects plain concatenation
+  [local_gate, local_up]. The kernel internally performs 128-lane interleaving into
+  VMEM via interleave_lane(w_gate, w_up). Therefore, lane_size defaults to 0 (plain
+  concatenation per shard). Pre-interleaving in HBM double-interleaves and corrupts
+  weights.
 
   `tgt_shape`, `n_shards`, `axis` and `lane_size` are static, so the trace is keyed on them;
   identical layers share a single compilation.
@@ -559,7 +565,7 @@ def _interleave_moe_weights(
     p_wi_1 = p_wi_1.reshape(shape_lanes)
     combined = jnp.stack([p_wi_0, p_wi_1], axis=axis + 2)
   else:
-    # Fallback when dimension is not divisible by lane_size:
+    # Concatenate wi_0 (gate) and wi_1 (up) per shard: [local_gate, local_up].
     combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
 
   return combined.reshape(tgt_shape)
