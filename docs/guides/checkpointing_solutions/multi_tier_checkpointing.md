@@ -248,9 +248,9 @@ The flags below would give the user access to the ramdisk in their workload:
      --location=${CLUSTER_LOCATION?} \
      --project=${PROJECT_ID?}
 
-   gcluster config set project ${PROJECT_ID?}
-   gcluster config set cluster ${CLUSTER_NAME?}
-   gcluster config set location ${CLUSTER_LOCATION?}
+   gcluster job config set project ${PROJECT_ID?}
+   gcluster job config set cluster ${CLUSTER_NAME?}
+   gcluster job config set location ${CLUSTER_LOCATION?}
 
    gcluster job submit \
      --image=${DOCKER_IMAGE?} \
