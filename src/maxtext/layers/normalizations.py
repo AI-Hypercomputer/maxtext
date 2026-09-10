@@ -23,7 +23,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
-from maxtext.common.common_types import Array, DType, ShardMode
+from maxtext.common.common_types import Array, DType, ShardMode, is_fp8_dtype
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import Initializer, variable_to_logically_partitioned
 from maxtext.utils import max_logging
@@ -78,7 +78,7 @@ class RMSNorm(nnx.Module):
     self.num_features = num_features
     self.epsilon = epsilon
     self.dtype = dtype
-    self.weight_dtype = weight_dtype
+    self.weight_dtype = dtype if is_fp8_dtype(weight_dtype) else weight_dtype
     self.shard_mode = shard_mode
     self.kernel_axes = kernel_axes
     self.scale_init = scale_init
@@ -87,7 +87,7 @@ class RMSNorm(nnx.Module):
     self.with_scale = with_scale
     if self.with_scale:
       self.scale = nnx.Param(
-          scale_init(rngs.params(), (num_features,), weight_dtype),
+          scale_init(rngs.params(), (num_features,), self.weight_dtype),
           out_sharding=kernel_axes,
       )
     else:
