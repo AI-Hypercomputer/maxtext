@@ -42,11 +42,11 @@ from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
 
 
-def create_training_optimizer(config, model, mesh=None):
+def create_training_optimizer(config, model):
   """Creates the optimizer and learning rate schedule."""
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
-  tx = optimizers.get_optimizer(config, learning_rate_schedule, model, mesh=mesh)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
   return learning_rate_schedule, tx
 
 
@@ -259,7 +259,7 @@ def setup_train_loop(config, recorder, devices=None):
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     # Create abstract NNX model.
     _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
-    learning_rate_schedule, tx = create_training_optimizer(config, model, mesh=mesh)
+    learning_rate_schedule, tx = create_training_optimizer(config, model)
 
     # The train state is wrapped in the TrainStateNNX module.
     def create_train_state_fn():
