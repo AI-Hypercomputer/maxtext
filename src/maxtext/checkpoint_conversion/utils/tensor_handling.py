@@ -172,8 +172,11 @@ def _build_single_axis_stacked_tensor(
     target_dtype = target_leaf.dtype if hasattr(target_leaf, "dtype") else np.float32
 
   if config.scan_layers:
-    # If it's a standard scanned layer, we use the configured param_scan_axis.
-    axis_to_stack = config.param_scan_axis
+    # If the target tensor rank exceeds param_scan_axis (e.g., multidimensional weights or 2D block scales),
+    # stack along param_scan_axis (typically axis 1 in scanned layers). For 1D tensors (e.g., per-layer scalar
+    # quantization scales like Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)), stack along axis 0
+    # because axis 1 does not exist on 1D tensors and stacking scalars along axis 0 produces the 1D vector.
+    axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
   else:
     # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
     axis_to_stack = 0
