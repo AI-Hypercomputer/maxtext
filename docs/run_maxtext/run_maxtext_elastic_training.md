@@ -54,7 +54,7 @@ Set these environment variables in your shell. Replace the placeholders with you
 ```bash
 # Google Cloud Configuration
 export PROJECT_ID=<GCP project ID>
-export ZONE=<GCP_REGION_OR_ZONE> # e.g., 'us-central1'
+export LOCATION=<GCP_REGION_OR_ZONE> # e.g., 'us-central1'
 export GKE_CLUSTER=<cluster name>
 
 # Workload Configuration
@@ -81,11 +81,11 @@ submitting the workload. When submitting with Cluster Toolkit, pass `--pathways`
 ```bash
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --zone ${ZONE?} \
+  --location ${LOCATION?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${ZONE?}
+gcluster job config set location ${LOCATION?}
 
 gcluster job submit \
   --image ${DOCKER_IMAGE?} \
@@ -160,7 +160,7 @@ To see recovery, remove a worker on one slice. Connect to the cluster and delete
 
 ```bash
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --zone ${ZONE?} --project ${PROJECT_ID?}
+  --location ${LOCATION?} --project ${PROJECT_ID?}
 
 # Pick a worker pod on one slice and remove it immediately.
 WORKER=$(kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?} \

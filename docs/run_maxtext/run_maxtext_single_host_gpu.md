@@ -123,7 +123,7 @@ Hardware: GPU
 ```
 
 ```bash
-python3 -m maxtext.trainers.pre_train.train run_name=gpu01 base_output_directory=/deps/output  \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=gpu01 base_output_directory=/deps/output  \
   dataset_type=synthetic enable_checkpointing=True steps=10 attention=cudnn_flash_te scan_layers=False \
   use_iota_embed=True hardware=gpu per_device_batch_size=12
 ```
@@ -141,9 +141,9 @@ echo "Running 1vm.sh"
 
 # Configure access to the GKE cluster before submitting with Cluster Toolkit:
 # gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-#   --zone ${ZONE?} --project ${PROJECT_ID?}
+#   --location ${LOCATION?} --project ${PROJECT_ID?}
 # gcluster job submit --image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
-#   --name ${RUN_NAME?} --compute-type ${COMPUTE_TYPE?} --topology 1x1x1 \
+#   --name ${RUN_NAME?} --compute-type ${COMPUTE_TYPE?} --num-nodes=1 \
 #   --command "bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
 
 # Stop execution if any command exits with error

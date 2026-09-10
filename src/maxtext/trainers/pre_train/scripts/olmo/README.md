@@ -51,7 +51,7 @@ full MaxText perf flag set automatically — no manual override needed.
 ```bash
 export PROJECT_ID=<your-project>
 export GKE_CLUSTER=<your-cluster>
-export ZONE=<your-zone>
+export LOCATION=<your-location>
 export RUN_NAME=olmo3_7b_stage1
 export BASE_OUTPUT_DIRECTORY=gs://<your-bucket>/olmo/runs
 export COMPUTE_TYPE=<cluster-toolkit-compute-type>
@@ -65,11 +65,11 @@ export HF_TOKEN=<your-hf-token>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --zone ${ZONE?} \
+  --location ${LOCATION?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${ZONE?}
+gcluster job config set location ${LOCATION?}
 
 gcluster job submit \
   --image ${IMAGE_URI?} \
@@ -121,11 +121,11 @@ underlying preprocessed `.npy` tokens live under AI2's `s3://ai2-llm/` bucket
 (see the `base_dir` arg on `DataMix.build` in
 [`OLMo-core`](https://github.com/allenai/OLMo-core/blob/main/src/olmo_core/data/mixes/__init__.py));
 mirror them into your own GCS bucket with
-[`tools/data_generation/download_olmo_data_to_gcs.py`](../../../../../tools/data_generation/download_olmo_data_to_gcs.py)
+[`tools/data_generation/download_olmo_data_to_gcs.py`](../../../../../../tools/data_generation/download_olmo_data_to_gcs.py)
 (reads a manifest, pulls from AI2's source, uploads to `--gcs-dest`).
 
 **Data index.** Once the corpus is mirrored, build the index with
-[`tools/data_generation/build_olmo_npy_index.py`](../../../../../tools/data_generation/build_olmo_npy_index.py)
+[`tools/data_generation/build_olmo_npy_index.py`](../../../../../../tools/data_generation/build_olmo_npy_index.py)
 against the same manifest + sequence length, then upload the resulting JSON
 to GCS. Mount your bucket read-only via gcsfuse inside the pod — the XPK
 wrapper does this automatically (`MOUNT_GCSFUSE=1`).
@@ -162,7 +162,7 @@ same procedure works for any of them — just swap the `--revision` flag.
 2. Upload the converted checkpoint to GCS so all pods can read it:
 
    ```bash
-   gsutil -m cp -r <output>/0/items gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+   gcloud storage cp -r <output>/0/items gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
    ```
 
 3. Point the launcher at it via `LOAD_PARAMETERS_PATH`:

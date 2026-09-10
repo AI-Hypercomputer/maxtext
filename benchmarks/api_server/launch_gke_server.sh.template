@@ -21,11 +21,10 @@ set -e
 # ==============================================================================
 
 # -- GKE Cluster Configuration --
-# (<your_gke_cluster>, <your_gcp_project>, <your_gcp_zone>)
+# (<your_gke_cluster>, <your_gcp_project>, <your_gcp_location>)
 export CLUSTER="<your-gke-cluster>"
-export DEVICE_TYPE="v5p-16"
 export PROJECT="<your-gcp-project>"
-export ZONE="<your-gcp-zone>"
+export LOCATION="<your-gcp-location>"
 
 # -- Cluster Toolkit Workload Configuration --
 # (<YYYY-MM-DD>, <your_hugging_face_token>)
@@ -55,7 +54,7 @@ CMD="export HF_TOKEN=${HF_TOKEN} && \
      pip install --upgrade pip && \
      pip install -r benchmarks/api_server/requirements.txt && \
      bash benchmarks/api_server/start_server.sh \
-        maxtext/configs/base.yml \
+        src/maxtext/configs/base.yml \
         model_name=\"${MODEL_NAME}\" \
         tokenizer_path=\"${TOKENIZER_PATH}\" \
         load_parameters_path=\"${LOAD_PARAMETERS_PATH}\" \
@@ -71,11 +70,11 @@ CMD="export HF_TOKEN=${HF_TOKEN} && \
 echo "Launching workload ${RUNNAME}..."
 gcloud config set project "${PROJECT}"
 gcloud container clusters get-credentials "${CLUSTER}" \
-  --zone "${ZONE}" \
+  --location "${LOCATION}" \
   --project "${PROJECT}"
 gcluster job config set project "${PROJECT}"
 gcluster job config set cluster "${CLUSTER}"
-gcluster job config set location "${ZONE}"
+gcluster job config set location "${LOCATION}"
 gcluster job submit \
   --image="${DOCKER_IMAGE}" \
   --command="${CMD}" \

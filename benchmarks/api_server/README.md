@@ -5,7 +5,7 @@ This directory contains an OpenAI-compatible API server for serving MaxText mode
 ## Table of Contents
 - [Installation](#installation)
 - [Environment Variables](#environment-variables)
-- [Launching the Server (Single-Host)](#launching-the-server-single-pod)
+- [Launching the Server (Single-Host)](#launching-the-server-single-host)
 - [Deploying on a GKE Cluster (Multi-Host)](#deploying-on-a-gke-cluster-multi-host)
 - [Interacting with the Server](#interacting-with-the-server)
 - [Benchmarking with Evaluation Frameworks](#benchmarking-with-evaluation-frameworks)
@@ -33,7 +33,7 @@ export HF_TOKEN=<your_hugging_face_token>
 
 The primary way to launch the API server is by using the `start_server.sh` script. This script ensures that the server is run from the project's root directory, which is necessary for the Python interpreter to find all the required modules.
 
-The script takes the path to a base configuration file (e.g., `maxtext/configs/base.yml`) followed by any number of model-specific configuration overrides.
+The script takes the path to a base configuration file (e.g., `src/maxtext/configs/base.yml`) followed by any number of model-specific configuration overrides.
 
 ### Benchmarking Configuration
 
@@ -56,7 +56,7 @@ Here is an example of how to launch the server with a `qwen3-30b-a3b` model, con
 # Make sure you are in the root directory of the maxtext project.
 
 bash benchmarks/api_server/start_server.sh \
-    maxtext/configs/base.yml \
+    src/maxtext/configs/base.yml \
     model_name="qwen3-30b-a3b" \
     tokenizer_path="Qwen/Qwen3-30B-A3B-Thinking-2507" \
     load_parameters_path="<path_to_your_checkpoint>" \
@@ -103,11 +103,10 @@ set -e
 # ==============================================================================
 
 # -- GKE Cluster Configuration --
-# (<your_gke_cluster>, <your_gcp_project>, <your_gcp_zone>)
+# (<your_gke_cluster>, <your_gcp_project>, <your_gcp_location>)
 export CLUSTER="<your-gke-cluster>"
-export DEVICE_TYPE="v5p-16"
 export PROJECT="<your-gcp-project>"
-export ZONE="<your-gcp-zone>"
+export LOCATION="<your-gcp-location>"
 export COMPUTE_TYPE="<cluster-toolkit-compute-type>"
 export TOPOLOGY="<tpu-topology>"
 
@@ -137,7 +136,7 @@ CMD="export HF_TOKEN=${HF_TOKEN?} && \
      pip install --upgrade pip && \
      pip install -r benchmarks/api_server/requirements.txt && \
      bash benchmarks/api_server/start_server.sh \
-        maxtext/configs/base.yml \
+        src/maxtext/configs/base.yml \
         model_name="${MODEL_NAME?}" \
         tokenizer_path="${TOKENIZER_PATH?}" \
         load_parameters_path="${LOAD_PARAMETERS_PATH?}" \
@@ -154,11 +153,11 @@ CMD="export HF_TOKEN=${HF_TOKEN?} && \
 echo "Launching workload ${RUNNAME?}..."
 gcloud config set project "${PROJECT?}"
 gcloud container clusters get-credentials "${CLUSTER?}" \
-  --zone "${ZONE?}" \
+  --location "${LOCATION?}" \
   --project "${PROJECT?}"
 gcluster job config set project "${PROJECT?}"
 gcluster job config set cluster "${CLUSTER?}"
-gcluster job config set location "${ZONE?}"
+gcluster job config set location "${LOCATION?}"
 gcluster job submit \
   --image="${DOCKER_IMAGE?}" \
   --command="${CMD?}" \
@@ -186,7 +185,7 @@ The API server only runs on the first host/worker (rank 0 on GPU) of the workloa
 
 ```bash
 gcloud container clusters get-credentials <your-gke-cluster> \
-  --zone <your-gcp-zone> \
+  --location <your-gcp-location> \
   --project <your-gcp-project>
 kubectl get pods -l gcluster.google.com/workload=<your_job_name>
 kubectl port-forward <server-pod-name> 8000:8000
@@ -206,14 +205,13 @@ The `/v1/completions` endpoint is suitable for simple prompt-response interactio
 
 ```bash
 curl -X POST http://localhost:8000/v1/completions \
--H "Content-Type: application/json" \
--d 
-    "{
+  -H "Content-Type: application/json" \
+  -d '{
     "model": "<your-model-name>",
     "prompt": "The capital of France is",
     "max_tokens": 50,
     "temperature": 0.7
-}"
+  }'
 ```
 
 #### Chat Completions API
@@ -222,17 +220,16 @@ The `/v1/chat/completions` endpoint is designed for multi-turn conversations.
 
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
--H "Content-Type: application/json" \
--d 
-    "{
+  -H "Content-Type: application/json" \
+  -d '{
     "model": "<your-model-name>",
     "messages": [
-        {"role": "system", "content": "You are a helpful assistant."}, 
-        {"role": "user", "content": "What is the largest planet in our solar system?"}
+      {"role": "system", "content": "You are a helpful assistant."}, 
+      {"role": "user", "content": "What is the largest planet in our solar system?"}
     ],
     "max_tokens": 50,
     "temperature": 0.7
-}"
+  }'
 ```
 
 Server logs will display the following information:

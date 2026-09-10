@@ -18,7 +18,7 @@
 This directory contains high performance model configurations for different generations of TPU and GPU hardware.
 
 These configurations do 3 things:
-* Sets various XLA compiler flags (see [below](/src/maxtext/configs#xla-flags-used-by-maxtext)) as `LIBTPU_INIT_ARGS` to optimize runtime performance.
+* Sets various XLA compiler flags (see [below](#xla-flags-used-by-maxtext)) as `LIBTPU_INIT_ARGS` to optimize runtime performance.
 * Runs [rto_setup.sh](https://github.com/google/maxtext/blob/main/src/dependencies/scripts/rto_setup.sh) to optimize communication protocols for network performance.
 (This only needs to be run once on each worker)
 * Runs [train.py](https://github.com/google/maxtext/blob/main/src/maxtext/trainers/pre_train/train.py) with specific hyper-parameters (batch size, etc.)
@@ -47,7 +47,7 @@ These configurations do 3 things:
 
     For new GKE deployments, configure the network and subnetwork through Cluster Toolkit. See the [Cluster Toolkit guide](../../../docs/run_maxtext/run_maxtext_via_cluster_toolkit.md).
      ```
-     gcloud container clusters get-credentials ${YOUR_CLUSTER_NAME?} --zone ${ZONE?} --project ${PROJECT?}
+     gcloud container clusters get-credentials ${YOUR_CLUSTER_NAME?} --location ${LOCATION?} --project ${PROJECT?}
      ```
 
 ### Run model config scripts on TPUs
@@ -69,10 +69,10 @@ These configurations do 3 things:
 
     Running with Cluster Toolkit on GKE:
     ```
-    gcloud container clusters get-credentials ${YOUR_CLUSTER_NAME?} --zone ${ZONE?} --project ${PROJECT?}
+    gcloud container clusters get-credentials ${YOUR_CLUSTER_NAME?} --location ${LOCATION?} --project ${PROJECT?}
     gcluster job config set project ${PROJECT?}
     gcluster job config set cluster ${YOUR_CLUSTER_NAME?}
-    gcluster job config set location ${ZONE?}
+    gcluster job config set location ${LOCATION?}
     gcluster job submit --image gcr.io/${PROJECT?}/${YOUR_IMAGE_NAME?} --name ${YOUR_RUN_NAME?} --compute-type ${COMPUTE_TYPE?} --topology ${TOPOLOGY?} --command "bash src/maxtext/configs/tpu/v5p/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH?} DATASET_PATH=${MAXTEXT_DATASET_PATH?} PLATFORM=gke"
     ```
 

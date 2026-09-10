@@ -1,4 +1,4 @@
-### Getting starting with benchmark running in MaxText
+### Getting started with benchmark running in MaxText
 
 Two approaches are here:
 
@@ -9,13 +9,17 @@ For new GKE runs, submit each benchmark as a Cluster Toolkit JobSet. Authenticat
 to the cluster and configure `gcluster` before submitting:
 
 ```shell
+export PROJECT="<your-project>"
+export CLUSTER="<your-cluster>"
+export LOCATION="<your-cluster-location>" # e.g. europe-west4 (region) or us-central1-a (zone)
+
 gcloud config set project ${PROJECT?}
 gcloud container clusters get-credentials ${CLUSTER?} \
-  --zone ${ZONE?} \
+  --location ${LOCATION?} \
   --project ${PROJECT?}
 gcluster job config set project ${PROJECT?}
 gcluster job config set cluster ${CLUSTER?}
-gcluster job config set location ${ZONE?}
+gcluster job config set location ${LOCATION?}
 ```
 
 Then use the image, compute type, and topology for the target cluster:
@@ -45,7 +49,7 @@ The existing Python XPK runner below remains available for older benchmark
 automation, but it is not a Cluster Toolkit submission path.
 
 - **xla_flags_library.py**: A grouping of xla flags organized by purpose with details on how they can be applied to a model.
-- **maxtext_trillium_model_config.py**: A list of model definitions for Trillium. See optimized models here and how they apply xla flags. This config provides a pythonic way to run MaxText models.
+- **maxtext_trillium_model_configs.py**: A list of model definitions for Trillium. See optimized models here and how they apply xla flags. This config provides a pythonic way to run MaxText models.
 - **benchmark_runner.py**: A cli interface to running a specific model recipe, on pathways or mcjax directly or with orchestration like xpk with one command.
 
 ```shell
