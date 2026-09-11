@@ -48,6 +48,7 @@ class _Config:
   mtp_num_layers: int = 0
   mtp_eval_target_module: int = 0
   use_qk_clip: bool = False
+  retry_when_tokens_dropped: bool = False
   use_tunix_gradient_accumulation: bool = False
   gradient_accumulation_steps: int = 1
   shard_mode: int = 0
