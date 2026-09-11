@@ -68,7 +68,6 @@ _COMMON = {
     "decode_sampling_strategy": "greedy",
     "enable_checkpointing": False,
     "skip_jax_distributed_system": True,
-    "pure_nnx": True,
 }
 
 _DEEPSEEK = {

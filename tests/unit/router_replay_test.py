@@ -51,9 +51,8 @@ def _init_test_cfg(extra_args=(), **kwargs):
   """pyconfig.initialize with this file's common test defaults folded in.
 
   Only pass kwargs that actually need to differ from base.yml (or from the
-  selected model's own yaml) -- e.g. omit ici_*_parallelism, enable_nnx,
-  pure_nnx, pure_nnx_decoder, sparse_matmul, dtype, and scan_layers=True,
-  which already match their base.yml defaults.
+  selected model's own yaml) -- e.g. omit ici_*_parallelism, sparse_matmul,
+  dtype, and scan_layers=True, which already match their base.yml defaults.
   """
   kwargs.setdefault("enable_checkpointing", False)
   kwargs.setdefault("log_config", False)

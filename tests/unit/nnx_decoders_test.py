@@ -1066,39 +1066,6 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
     )
 
 
-class TestQwen3NextDecoderParity(unittest.TestCase):
-  """The Linen `Decoder` and the pure-NNX `NNXDecoder` must emit the same parameter tree.
-
-  One checkpoint mapping (`QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING`) serves both
-  decoders, so a name or shape that differs between them silently breaks
-  conversion on whichever side the mapping was not written against.
-  """
-
-  def _param_tree(self, num_decoder_layers, pure_nnx_decoder):
-    """Returns {parameter key: shape} for the chosen decoder implementation."""
-    # pylint: disable=import-outside-toplevel
-    from maxtext.checkpoint_conversion.to_maxtext import get_maxtext_model_info
-
-    cfg = _make_config(
-        **{
-            **_QWEN3_NEXT_CONFIG,
-            "base_num_decoder_layers": num_decoder_layers,
-            "scan_layers": True,
-            "pure_nnx_decoder": pure_nnx_decoder,
-        }
-    )
-    model_info, _ = get_maxtext_model_info(cfg)
-    return {key: shape for key, (_, shape) in model_info.items()}
-
-  def test_decoders_agree_on_whole_periods(self):
-    self.assertEqual(self._param_tree(8, True), self._param_tree(8, False))
-
-  def test_decoders_agree_with_a_remainder(self):
-    """6 layers is one whole period plus a two-layer remainder, which both decoders
-    have to put in a `layers_remainder` block rather than spell out layer by layer."""
-    self.assertEqual(self._param_tree(6, True), self._param_tree(6, False))
-
-
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
   """Tests for Deepseek and Gemma4 specific decoder logic."""
 
