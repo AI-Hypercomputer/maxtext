@@ -68,7 +68,7 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
 # Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
-export RUN_NAME="lora-$(date +%m%d%H%M%S)"
+export RUN_NAME=<RUN_NAME>
 
 # -- Workload configuration --
 # Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
@@ -76,17 +76,17 @@ export RUN_NAME="lora-$(date +%m%d%H%M%S)"
 # gcloud config get-value project
 export PROJECT_ID=<PROJECT_ID>
 
-# The GCP location (listed as "Location" in the UI) and name of your
+# The GCP location (region or zone) and name of your
 # TPU-enabled GKE cluster. Both can be found on the
 # [Cloud Console](https://console.cloud.google.com/kubernetes/list).
-export ZONE=<ZONE> # e.g., 'us-central1'
+export LOCATION=<LOCATION> # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
 export GKE_CLUSTER=<CLUSTER_NAME>
 
 # For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
 # of your cluster:
 
 # 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} --zone ${ZONE?} --project ${PROJECT_ID?}
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${LOCATION?} --project ${PROJECT_ID?}
 
 # 2. Find your TPU type (e.g., 'v6e-256') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
@@ -163,22 +163,22 @@ Before submitting a job, configure access to the cluster with `gcloud` and `gclu
 
 ```bash
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --zone ${ZONE?} \
+  --location ${LOCATION?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${ZONE?}
+gcluster job config set location ${LOCATION?}
 ```
 
 ### Run a Fresh LoRA Fine-Tuning on Hugging Face Dataset
 
 ```bash
 gcluster job submit \
---image=${DOCKER_IMAGE?} \
---name=${RUN_NAME?} \
---compute-type=${COMPUTE_TYPE?} \
---topology=${TOPOLOGY?} \
---command="\
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="\
 python3 -m maxtext.trainers.post_train.sft.train_sft \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
@@ -217,11 +217,11 @@ If your LoRA adapter is currently in Hugging Face format, you must convert it to
 
 ```sh
 gcluster job submit \
---image=${DOCKER_IMAGE?} \
---name=${RUN_NAME?}-convert \
---compute-type=${COMPUTE_TYPE?} \
---topology=${TOPOLOGY?} \
---command="python3 -m maxtext.checkpoint_conversion.to_maxtext \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?}-convert \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="python3 -m maxtext.checkpoint_conversion.to_maxtext \
   model_name=${MODEL?} \
   hf_lora_adapter_path=${HF_LORA_ADAPTER_PATH?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?}/converted_adapter \
@@ -293,11 +293,11 @@ After completing the fine-tuning process, your LoRA weights are stored in MaxTex
 
 ```sh
 gcluster job submit \
---image=${DOCKER_IMAGE?} \
---name="${RUN_NAME?}-to-hf" \
---compute-type=${COMPUTE_TYPE?} \
---topology=${TOPOLOGY?} \
---command="python3 -m maxtext.checkpoint_conversion.to_huggingface \
+  --image=${DOCKER_IMAGE?} \
+  --name="${RUN_NAME?}-to-hf" \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name=${MODEL?} \
     lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/checkpoints/<STEPS>/model_params \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?}/hf_lora_adapter \

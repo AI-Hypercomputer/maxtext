@@ -327,29 +327,47 @@ Submit the distillation trainer directly as a Cluster Toolkit JobSet:
 ```bash
 export PROJECT_ID=<GCP_PROJECT_ID>
 export GKE_CLUSTER=<GKE_CLUSTER_NAME>
-export ZONE=<GCP_ZONE>
+export LOCATION=<GCP_LOCATION> # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
 export RUN_NAME=<DISTILL_RUN_NAME>
 export IMAGE_URI=<ARTIFACT_REGISTRY_IMAGE_URI>
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
 export TOPOLOGY=<TPU_TOPOLOGY>
 export BASE_OUTPUT_DIRECTORY=gs://<BUCKET>/distillation
+export STUDENT_CKPT_PATH=gs://<BUCKET>/<STUDENT_MODEL_PATH>/checkpoints/0/items
 export TEACHER_CKPT_PATH=gs://<BUCKET>/<TEACHER_MODEL_PATH>/checkpoints/0/items
+export TOKENIZER_PATH=meta-llama/Llama-3.1-8B
 export HF_TOKEN=<HF_TOKEN>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --zone ${ZONE?} \
+  --location ${LOCATION?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${ZONE?}
+gcluster job config set location ${LOCATION?}
 
 gcluster job submit \
   --image ${IMAGE_URI?} \
   --name ${RUN_NAME?} \
   --compute-type ${COMPUTE_TYPE?} \
   --topology ${TOPOLOGY?} \
-  --command "python3 -m maxtext.trainers.post_train.distillation.train_distill src/maxtext/configs/post_train/distillation.yml base_output_directory=${BASE_OUTPUT_DIRECTORY?} run_name=${RUN_NAME?} teacher_overrides.load_parameters_path=${TEACHER_CKPT_PATH?} hf_access_token=${HF_TOKEN?}"
+  --command="python3 -m maxtext.trainers.post_train.distillation.train_distill \
+    src/maxtext/configs/post_train/distillation.yml \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?}/online \
+    tokenizer_path=${TOKENIZER_PATH?} \
+    tokenizer_type=huggingface \
+    hf_access_token=${HF_TOKEN?} \
+    student_overrides.model_name=llama3.1-8b \
+    student_overrides.base_num_decoder_layers=24 \
+    student_overrides.load_parameters_path=${STUDENT_CKPT_PATH?} \
+    teacher_overrides.model_name=llama3.1-8b \
+    teacher_overrides.load_parameters_path=${TEACHER_CKPT_PATH?} \
+    per_device_batch_size=2 \
+    distill_alpha=0.9 \
+    distill_temperature=2.0 \
+    distill_beta=1.0 \
+    distill_layer_indices=[2,5,8,11,14,17,20,23]"
 ```
 
 #### Monitor and clean up
