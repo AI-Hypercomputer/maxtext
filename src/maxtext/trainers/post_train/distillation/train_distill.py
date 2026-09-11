@@ -40,7 +40,7 @@ from typing import Sequence, Callable, Any
 from absl import app
 from etils import epath
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 import jax
 import jax.numpy as jnp
 import optax
@@ -693,7 +693,7 @@ def train_distill(
 
   # Hardware Execution (Safe Context)
   max_logging.log("Applying logical axis rules for model initialization and training...")
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(student_config.logical_axis_rules):
+  with jax.set_mesh(mesh), logical_axis_rules(student_config.logical_axis_rules):
     # 2. Load Models
     if is_offline:
       max_logging.log("Offline Distillation: Skipping Teacher Model loading.")
