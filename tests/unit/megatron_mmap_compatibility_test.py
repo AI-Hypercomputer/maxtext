@@ -50,7 +50,7 @@ requires_megatron_core = pytest.mark.skipif(
 
 from maxtext.input_pipeline import _megatron_blending
 from maxtext.input_pipeline import _mmap_index_utils
-from tools.data_processing.mmap_index_builder import (
+from maxtext.utils.mmap_index_builder import (
     build_document_index,
     build_indices,
     build_sample_index,
@@ -871,8 +871,9 @@ class TestCLI:
         os.path.dirname(__file__),
         "..",
         "..",
-        "tools",
-        "data_processing",
+        "src",
+        "maxtext",
+        "utils",
         "mmap_index_builder.py",
     )
 

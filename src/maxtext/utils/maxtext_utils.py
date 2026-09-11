@@ -142,17 +142,18 @@ def get_reorder_callable(cp_size, shard_mode, reorder_strategy=ReorderStrategy.D
   )
 
 
-def get_shaped_batch(config, batch_sharding=None):
+def get_shaped_batch(config, batch_sharding=None, is_eval=False):
   """Return the shape of the batch - this is what eval_shape would return for the
   output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
+  global_batch_size = config.global_batch_size_to_load_eval if is_eval else config.global_batch_size_to_load
   if config.enable_diloco:
     batch_shape = (
         config.num_diloco_replicas,
-        config.global_batch_size_to_load // config.num_diloco_replicas,
+        global_batch_size // config.num_diloco_replicas,
         config.max_target_length,
     )
   else:
-    batch_shape = (config.global_batch_size_to_load, config.max_target_length)
+    batch_shape = (global_batch_size, config.max_target_length)
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   # MRoPE uses (batch, seq, 3); same batch/seq axes as 1D positions so batch_sharding applies as-is.
@@ -166,6 +167,7 @@ def get_shaped_batch(config, batch_sharding=None):
     shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
     shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   if config.use_multimodal:
+    batch_size = config.micro_batch_size_to_eval_on if is_eval else config.micro_batch_size_to_train_on
     is_video = getattr(config, "video_max_grid_t", None) is not None
     if is_video:
       max_t = config.video_max_grid_t
@@ -174,16 +176,13 @@ def get_shaped_batch(config, batch_sharding=None):
       tps = config.temporal_patch_size_for_vit
       patch = config.patch_size_for_vit
       channels = config.num_channels_for_vit
-      batch_size = config.micro_batch_size_to_train_on
       video_shape = (batch_size, channels, max_t * tps, max_h * patch, max_w * patch)
       video_mask_shape = (batch_size, 1, max_t * tps, max_h * patch, max_w * patch)
       shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
       shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
       shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
     else:
-      image_shape = mm_processor.get_dummy_image_shape_for_init(
-          config.model_name, batch_size=config.micro_batch_size_to_train_on
-      )
+      image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size)
       shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
       # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
       # Other multimodal models (Gemma, Qwen, ...) leave masks unset.

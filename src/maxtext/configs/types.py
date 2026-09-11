@@ -1658,6 +1658,14 @@ class DatasetGeneral(BaseModel):
       -1,
       description="Maximum number of segments that can be packed into a single sequence. -1 or None for no limit.",
   )
+  use_stream_chunking: bool | None = Field(
+      None,
+      description=(
+          "Whether to use continuous stream chunking (unpacked monolithic token stream with 0% padding, "
+          "monotonic positions, and uniform cross-document attention) for c4_mlperf datasets. "
+          "If None, defaults to True for pre-tokenized datasets and False for raw text."
+      ),
+  )
   num_epoch: int = Field(1, description="Number of epochs to train for.")
   expansion_factor_real_data: float = Field(-1.0, description="Factor for partial data loading on hosts.")
   reuse_example_batch: int = Field(0, description="For performance testing, repeatedly uses the same batch.")
@@ -2216,14 +2224,24 @@ class AdamW(BaseModel):
 class Muon(BaseModel):
   """Configuration specific to the Muon optimizer."""
 
+  muon_type: str = Field(
+      "optax_muon",
+      description=("Type of Muon optimizer: 'optax_muon' (or 'optax') vs 'maxtext_muon' (or 'maxtext')."),
+  )
   muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
   muon_weight_decay: float = Field(
-      0,
-      description="Strength of the weight decay regularization. This is multiplied with the learning rate.",
+      0.0,
+      description=("Strength of the weight decay regularization. This is multiplied with" " the learning rate."),
   )
   muon_consistent_rms: float | None = Field(
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
+  )
+  muon_use_all_to_all: bool = Field(
+      False,
+      description=(
+          "Whether to use all-to-all communication during Newton-Schulz" " iterations in the maxtext_muon optimizer."
+      ),
   )
 
 
@@ -2727,6 +2745,11 @@ class VLLM(BaseModel):
   async_scheduling: bool = Field(False, description="Enable asynchronous scheduling in vLLM.")
   max_num_batched_tokens: Optional[int] = Field(None, description="Max number of batched tokens in vLLM.")
   max_num_seqs: Optional[int] = Field(None, description="Max number of sequences in vLLM.")
+  vllm_block_size: Optional[int] = Field(
+      None,
+      gt=0,
+      description="KV-cache block (page) size for vLLM. None lets the backend pick it from the engine shape.",
+  )
   stop_strings: Optional[list[str]] = Field(None, description="List of stop strings for vLLM decoding.")
   vllm_additional_config: dict[str, Any] = Field(default_factory=dict, description="Additional vLLM config options.")
   vllm_hf_overrides: dict[str, Any] = Field(
@@ -2736,11 +2759,23 @@ class VLLM(BaseModel):
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
   use_weight_converter: bool = Field(
-      False,
+      True,
       description=(
           "Use an explicit weight converter for trainer->rollout weight sync instead of "
           "the legacy transfer_state_directly / transfer_state_with_mappings paths."
       ),
+  )
+  use_raiden_ffi: Optional[bool] = Field(
+      None,
+      description="Use Raiden FFI transport for weight sync.",
+  )
+  rollout_tensor_parallelism: int = Field(
+      -1,
+      description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
+  )
+  rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
+      "maxtext",
+      description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
   )
   weight_sync_debug: bool = Field(
       False,
@@ -2760,6 +2795,16 @@ class VLLM(BaseModel):
           "executables, so the gap between them is how much of a sync is compilation "
           "rather than data movement. Adds one barrier per sync."
       ),
+  )
+  kv_tp_size: int = Field(
+      1,
+      ge=1,
+      description="Degree of tensor parallelism for KV cache / attention heads in rollout.",
+  )
+  moe_mlp_tp_size: int = Field(
+      1,
+      ge=1,
+      description="Degree of tensor parallelism for MoE MLP dimension in rollout.",
   )
   vllm_load_format: str = Field(
       "dummy",
@@ -2858,6 +2903,15 @@ class RLDataset(BaseModel):
   train_fraction: float = Field(1.0, gt=0.0, le=1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
   rollout_micro_batch_size: int = Field(-1, description="Micro batch size for rollout.")
+  max_seq_token_per_tpu: int = Field(
+      0,
+      ge=0,
+      description=(
+          "Token budget per packed training row (Tunix `max_seq_token_per_tpu`). When > 0, rollout sequences are packed "
+          "into rows of this many tokens for the actor/reference passes instead of one padded row per sequence; a maximal "
+          "sequence (max_prefill_predict_length + generation length) must fit in one row. 0 disables packing."
+      ),
+  )
   dataset_processor_path: str = Field(
       "",
       description=(
@@ -3562,7 +3616,6 @@ class MaxTextConfig(
             "use_random_routing": False,
             "use_ragged_sort": False,
             "retry_when_tokens_dropped": False,
-            "ragged_buffer_factor": -1.0,
             "use_ring_of_experts": False,
             "num_moe_emb_chunks": 0,
         }
@@ -5164,6 +5217,16 @@ class RLConfig(
     model_name = getattr(self, "model_name", None)
     if model_name is None:
       raise ValueError("model_name is not set. Please pass model_name in your command.")
+
+    # With sequence packing on, a maximal sequence (prompt cap + generation
+    # cap = max_target_length) must fit in one packed row. Tunix checks this
+    # too, but only in the learner, after the models are already on the
+    # accelerators; fail here, before any of that work.
+    if 0 < self.max_seq_token_per_tpu < self.max_target_length:
+      raise ValueError(
+          f"max_seq_token_per_tpu ({self.max_seq_token_per_tpu}) must be at least "
+          f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
+      )
 
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)

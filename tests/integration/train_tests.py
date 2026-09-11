@@ -542,7 +542,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   def test_moe_nanoo_fp8_sparse_matmul(self):
-    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=nanoo_fp8"])
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=nanoo_fp8", "enable_tensorboard=False"])
 
   # int8 takes the `quant_dg` branch of the same read, which the fp8 tests never reach.
   @pytest.mark.integration_test
