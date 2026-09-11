@@ -14,30 +14,30 @@
 """Mixture of Experts (MoE) tests."""
 
 import functools
-import unittest
 from types import SimpleNamespace
+import unittest
 from unittest import mock
+from absl.testing import absltest
 from absl.testing import parameterized
-import pytest
-
 from flax import nnx
 import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
-import numpy as np
-import qwix
 from jax.sharding import Mesh, PartitionSpec as P
-from maxtext.configs import pyconfig
 from maxtext.common.common_types import Config, DType
+from maxtext.configs import pyconfig
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from maxtext.layers.quantizations import configure_quantization, Fp8Quantization
+from maxtext.layers.quantizations import Fp8Quantization, configure_quantization
 from maxtext.utils import max_logging, maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+import pytest
+import qwix
 
 
 def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
@@ -61,13 +61,15 @@ def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
     val_b = val_b.astype(jnp.float32)
 
     max_abs_diff = jnp.max(jnp.abs(val_a - val_b))
-    relative_norm_diff = jnp.linalg.norm(val_a - val_b) / jnp.linalg.norm(val_a)
+    norm_a = jnp.linalg.norm(val_a)
+    relative_norm_diff = jnp.linalg.norm(val_a - val_b) / norm_a if norm_a > 0 else max_abs_diff
 
-    log_line = f"{path}" f" | max_abs_diff: {max_abs_diff}" f" | relative_norm_diff: | {relative_norm_diff}"
+    log_line = f"{path} | max_abs_diff: {max_abs_diff} | relative_norm_diff:" f" {relative_norm_diff}"
+    print(log_line)
     log_lines.append(log_line)
-    assert (
-        relative_norm_diff < relative_norm_diff_threshold
-    ), f"relative_norm_diff exceeds {relative_norm_diff_threshold=}"
+    assert relative_norm_diff < relative_norm_diff_threshold, (
+        f"relative_norm_diff={relative_norm_diff} exceeds" f" {relative_norm_diff_threshold=} for {path=}"
+    )
   diff_summary = "\n".join(log_lines)
   return diff_summary
 
@@ -1943,6 +1945,74 @@ class RoutedMoeTest(parameterized.TestCase):
     )
     self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
 
+
+class QuantizedMoeTest(parameterized.TestCase):
+  """Tests for quantized Mixture of Experts (MoE) execution and gradients."""
+
+  def _build_and_quantize_moe_model(self, cfg: Config, mesh: Mesh):
+    """Instantiates and optionally applies Qwix FP8 quantization rules to RoutedMoE."""
+    model = moe.get_routed_moe(
+        name="MoeBlock",
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+    )
+
+    if cfg.quantization:
+      if not (cfg.quantization == "fp8_full" and cfg.use_qwix_quantization):
+        raise ValueError("Only fp8_full with qwix quantization is supported for MoE testing.")
+
+      quantization_rule = [
+          qwix.QtRule(
+              module_path=".*",
+              weight_qtype=jnp.float8_e4m3fn,
+              act_qtype=jnp.float8_e4m3fn,
+              bwd_qtype=jnp.float8_e5m2,
+              weight_calibration_method=cfg.weight_quantization_calibration_method,
+              act_calibration_method=cfg.act_quantization_calibration_method,
+              bwd_calibration_method=cfg.bwd_quantization_calibration_method,
+              op_names=("gmm", "ragged_dot"),
+          ),
+      ]
+      model = qwix.quantize_model(model, qwix.QtProvider(quantization_rule))
+
+    return model
+
+  def _run_moe_loss_and_grad(
+      self,
+      cfg: Config,
+      rng_model: jax.Array,
+      hidden_states: jax.Array,
+  ) -> dict[str, jax.Array]:
+    """Executes forward pass, loss calculation, and backward gradients for RoutedMoE."""
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    model = self._build_and_quantize_moe_model(cfg, mesh)
+
+    def loss_fn(params, x):
+      out, lb_loss, _ = model.apply({"params": params}, x)
+      loss = jnp.mean(out.astype(jnp.float32) ** 2)
+      if lb_loss is not None:
+        loss = loss + lb_loss.astype(jnp.float32)
+      return loss, out
+
+    loss_and_grad = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
+
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables = model.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      (_, output), (grads, x_grad) = loss_and_grad(variables["params"], hidden_states)
+
+    return {
+        "output": output,
+        "state_grad": x_grad,
+        "var_grad": grads,
+    }
+
   @parameterized.named_parameters(
       {
           "testcase_name": f"{base_name}_ep{ici_expert_parallelism}" + ("_qag" if shard_embed_moe_on_fsdp else ""),
@@ -1989,23 +2059,10 @@ class RoutedMoeTest(parameterized.TestCase):
       shard_embed_moe_on_fsdp: bool = False,
       **kwargs,
   ):
-    megablox = True
-    if wa_static:
-      weight_quantization_calibration_method = "fixed,-224,224"
-      act_quantization_calibration_method = "fixed,-224,224"
-    else:
-      weight_quantization_calibration_method = "absmax"
-      act_quantization_calibration_method = "absmax"
+    calib = "fixed,-224,224" if wa_static else "absmax"
+    rng_model, rng_hidden_states = jax.random.split(jax.random.PRNGKey(2345))
 
-    def _build_cfg(
-        sparse_matmul,
-        quantization,
-        megablox,
-        use_tokamax_gmm,
-        use_gmm_v2,
-        ici_expert_parallelism,
-        shard_embed_moe_on_fsdp,
-    ):
+    def _build_cfg(sparse_matmul, quant, ep, megablox=True, use_tokamax=True, use_v2=True):
       return pyconfig.initialize(
           [None, get_test_config_path()],
           run_name="gmm_grad_equivalence_test",
@@ -2016,16 +2073,16 @@ class RoutedMoeTest(parameterized.TestCase):
           per_device_batch_size=2,
           max_target_length=256,
           float32_gate_logits=True,
-          ici_expert_parallelism=ici_expert_parallelism,
+          ici_expert_parallelism=ep,
           sparse_matmul=sparse_matmul,
           megablox=megablox,
-          use_tokamax_gmm=use_tokamax_gmm,
-          use_gmm_v2=use_gmm_v2,
+          use_tokamax_gmm=use_tokamax,
+          use_gmm_v2=use_v2,
           shard_embed_moe_on_fsdp=shard_embed_moe_on_fsdp,
-          quantization=quantization,
+          quantization=quant,
           use_qwix_quantization=True,
-          weight_quantization_calibration_method=weight_quantization_calibration_method,
-          act_quantization_calibration_method=act_quantization_calibration_method,
+          weight_quantization_calibration_method=calib,
+          act_quantization_calibration_method=calib,
           bwd_quantization_calibration_method="absmax",
           wi_tile_fwd_batch_seq=128,
           wi_tile_dlhs_batch_seq=128,
@@ -2038,118 +2095,111 @@ class RoutedMoeTest(parameterized.TestCase):
           wo_tile_drhs_batch_seq=128,
       )
 
-    def _build_model(cfg, mesh):
-      model = moe.get_routed_moe(
-          name="MoeBlock",
-          config=cfg,
-          num_experts=cfg.num_experts,
-          num_experts_per_tok=cfg.num_experts_per_tok,
-          mesh=mesh,
-          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
-          kernel_axes=("embed", "mlp"),
-          intermediate_dim=cfg.mlp_dim,
-          dtype=cfg.dtype,
-      )
-
-      # quantize the model with qwix rule for gmm
-      if cfg.quantization:
-        if not (cfg.quantization == "fp8_full" and cfg.use_qwix_quantization):
-          raise ValueError("Only fp8_full with qwix quantization is supported for MoE testing.")
-
-        # Similar to `quantizations.get_fp8_full_qwix_rule_w_sparsity`
-        def get_fp8_full_qwix_rule_for_test(config: Config):
-          return [
-              qwix.QtRule(
-                  module_path=".*",
-                  weight_qtype=jnp.float8_e4m3fn,
-                  act_qtype=jnp.float8_e4m3fn,
-                  bwd_qtype=jnp.float8_e5m2,
-                  weight_calibration_method=config.weight_quantization_calibration_method,
-                  act_calibration_method=config.act_quantization_calibration_method,
-                  bwd_calibration_method=config.bwd_quantization_calibration_method,
-                  op_names=("gmm", "ragged_dot"),
-              ),
-          ]
-
-        quantization_rule = get_fp8_full_qwix_rule_for_test(cfg)
-        quantization_provider = qwix.QtProvider(quantization_rule)
-        model = qwix.quantize_model(model, quantization_provider)
-
-      return model
-
-    def _loss_and_grad(model, variables, hidden_states):
-      def loss_fn(params, x):
-        out, lb_loss, _ = model.apply({"params": params}, x)
-        loss = jnp.mean(out.astype(jnp.float32) ** 2)
-        if lb_loss is not None:
-          loss = loss + lb_loss.astype(jnp.float32)
-        return loss, out
-
-      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))(variables["params"], hidden_states)
-
-    rng = jax.random.PRNGKey(2345)
-    rng_model, rng_hidden_states = jax.random.split(rng)
-    device_count = jax.device_count()
-
     # Reference run: dense matmul, no quantization, EP=1
     cfg_ref = _build_cfg(
         sparse_matmul=False,
-        quantization="",
+        quant="",
+        ep=1,
         megablox=False,
-        use_tokamax_gmm=False,
-        use_gmm_v2=False,
-        ici_expert_parallelism=1,
-        shard_embed_moe_on_fsdp=False,
+        use_tokamax=False,
+        use_v2=False,
     )
     # Use normal distribution to generate realistic variances and negative values
     # to guarantee the quantization scale != 1.0, which catches scale-dropping bugs.
     hidden_states = jax.random.normal(
         rng_hidden_states,
-        (int(cfg_ref.per_device_batch_size) * device_count, cfg_ref.max_target_length, cfg_ref.base_emb_dim),
+        (
+            int(cfg_ref.per_device_batch_size) * jax.device_count(),
+            cfg_ref.max_target_length,
+            cfg_ref.base_emb_dim,
+        ),
         dtype=cfg_ref.dtype,
     )
-    devices_array_ref = maxtext_utils.create_device_mesh(cfg_ref)
-    mesh_ref = Mesh(devices_array_ref, cfg_ref.mesh_axes)
-    model_ref = _build_model(cfg_ref, mesh_ref)
-
-    with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
-      variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      (_, output_ref), (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+    tree_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states)
 
     # Target run: custom configuration (sparse, GMM, EP, quantization)
     cfg_tgt = _build_cfg(
         sparse_matmul=True,
-        quantization=quantization,
-        megablox=megablox,
-        use_tokamax_gmm=use_tokamax_gmm,
-        use_gmm_v2=use_gmm_v2,
-        ici_expert_parallelism=ici_expert_parallelism,
-        shard_embed_moe_on_fsdp=shard_embed_moe_on_fsdp,
+        quant=quantization,
+        ep=ici_expert_parallelism,
+        megablox=True,
+        use_tokamax=use_tokamax_gmm,
+        use_v2=use_gmm_v2,
     )
-    devices_array_tgt = maxtext_utils.create_device_mesh(cfg_tgt)
-    mesh_tgt = Mesh(devices_array_tgt, cfg_tgt.mesh_axes)
-    model_tgt = _build_model(cfg_tgt, mesh_tgt)
+    tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states)
 
-    with jax.set_mesh(mesh_tgt), nn_partitioning.axis_rules(cfg_tgt.logical_axis_rules):
-      # Re-initialize variables for the target run to ensure they are sharded correctly
-      # for the target mesh, but use the same RNG to get the same initial values.
-      variables_tgt = model_tgt.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      (_, output_tgt), (grads_tgt, x_grad_tgt) = _loss_and_grad(model_tgt, variables_tgt, hidden_states)
+    diff_summary = compare_tree(tree_ref, tree_tgt, 0.22 if quantization else 0.012)
+    max_logging.log("\n" + diff_summary)
 
-    # Compare results
-    tree_ref = {
-        "output": output_ref,
-        "state_grad": x_grad_ref,
-        "var_grad": grads_ref,
-    }
-    tree_tgt = {
-        "output": output_tgt,
-        "state_grad": x_grad_tgt,
-        "var_grad": grads_tgt,
-    }
+  @parameterized.named_parameters(
+      {
+          "testcase_name": (f"{'ragged_sort' if use_ragged_sort else 'default_sort'}"),
+          "use_ragged_sort": use_ragged_sort,
+      }
+      for use_ragged_sort in [False, True]
+  )
+  @pytest.mark.tpu_only
+  def test_moe_quantize_token_all_gather(
+      self,
+      use_ragged_sort: bool,
+  ):
+    """Tests numerical equivalence of MoeBlock with moe_quantize_token_all_gather."""
+    ep = 4
+    calib = "fixed,-224,224"
+    rng_model, rng_hidden_states = jax.random.split(jax.random.PRNGKey(42))
 
-    relative_norm_diff_threshold = 0.22 if quantization else 0.012
-    diff_summary = compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold)
+    def _build_cfg(quantize_ag: bool):
+      return pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="moe_quantize_token_all_gather_test",
+          enable_checkpointing=False,
+          model_name="mixtral-8x7b",
+          weight_dtype="float32",
+          dtype="bfloat16",
+          per_device_batch_size=1,
+          max_target_length=128,
+          float32_gate_logits=True,
+          ici_expert_parallelism=ep,
+          sparse_matmul=True,
+          megablox=False,
+          use_tokamax_gmm=True,
+          use_gmm_v2=True,
+          use_ring_of_experts=True,
+          use_ragged_sort=use_ragged_sort,
+          mlp_bias=True,
+          moe_quantize_token_all_gather=quantize_ag,
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          weight_quantization_calibration_method=calib,
+          act_quantization_calibration_method=calib,
+          bwd_quantization_calibration_method="absmax",
+          wi_tile_fwd_batch_seq=128,
+          wi_tile_dlhs_batch_seq=128,
+          wi_tile_dlhs_embed_dim=256,
+          wi_tile_drhs_batch_seq=128,
+          wo_tile_fwd_batch_seq=128,
+          wo_tile_fwd_embed_dim=256,
+          wo_tile_dlhs_batch_seq=128,
+          wo_tile_dlhs_mlp_dim=256,
+          wo_tile_drhs_batch_seq=128,
+      )
+
+    cfg_ref = _build_cfg(quantize_ag=False)
+    hidden_states = jax.random.normal(
+        rng_hidden_states,
+        (
+            cfg_ref.per_device_batch_size * jax.device_count(),
+            cfg_ref.max_target_length,
+            cfg_ref.base_emb_dim,
+        ),
+        dtype=cfg_ref.dtype,
+    )
+    tree_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states)
+
+    cfg_tgt = _build_cfg(quantize_ag=True)
+    tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states)
+
+    diff_summary = compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold=0.22)
     max_logging.log("\n" + diff_summary)
 
 
@@ -2752,4 +2802,4 @@ class FusedMlpMoETest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()
