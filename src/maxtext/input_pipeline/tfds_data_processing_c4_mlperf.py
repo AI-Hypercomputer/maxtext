@@ -166,12 +166,12 @@ def split_tokens_to_targets_length(dataset, sequence_length):
 def _pad_to_batch_size(
     ds: tf.data.Dataset,
     batch_size: int,
-    num_examples: None | int = None,
+    num_examples: int = 0,
 ) -> tf.data.Dataset:
   """Pad unevenly distributed eval data in each shard with new entries to multiples of batch size."""
 
   # local_num represents the total number of examples in eval dataset,
-  if num_examples:
+  if num_examples > 0:
     local_num = num_examples
   else:
 
@@ -249,6 +249,54 @@ def format_fn(x, eos_id: int = 1, pad_id: int = 0):
   return x
 
 
+def chunk_token_stream(dataset, feature_key="targets", sequence_length=4096, eod_id: int | None = None):
+  """Flattens a dataset of token sequences across document boundaries and chunks them.
+
+  Appends the delimiter eod_id token to each document before unbatching so that document
+  boundaries are clearly delineated in the continuous stream, preserving all valid token IDs
+  (including 0) and guaranteeing 0% padding waste.
+  """
+  if eod_id is not None:
+    eod_tensor = tf.constant([eod_id], dtype=tf.int32)
+    ds = dataset.map(
+        lambda x: tf.concat([tf.cast(x[feature_key], tf.int32), eod_tensor], axis=0),
+        num_parallel_calls=AUTOTUNE,
+    )
+  else:
+    ds = dataset.map(lambda x: tf.cast(x[feature_key], tf.int32), num_parallel_calls=AUTOTUNE)
+
+  ds = ds.unbatch()
+  ds = ds.batch(sequence_length, drop_remainder=True)
+  return ds.map(lambda tokens: {feature_key: tokens}, num_parallel_calls=AUTOTUNE)
+
+
+def format_continuous_stream_fn(x, max_target_length: int, eod_id: int = 1):
+  """Format function for continuous token stream chunks.
+
+  Sets monotonic position IDs 0..max_target_length-1, uniform 1s for segmentation
+  to allow standard causal cross-document attention, shifts targets left by 1 with
+  eod_id appended at the chunk boundary, and ensures 100% loss participation.
+  """
+  targets_raw = tf.cast(x["targets"], tf.int32)
+  inputs = targets_raw
+  targets = tf.concat([targets_raw[1:], [eod_id]], axis=0)
+
+  inputs_position = tf.range(max_target_length, dtype=tf.int32)
+  targets_position = inputs_position
+
+  inputs_segmentation = tf.ones([max_target_length], dtype=tf.int32)
+  targets_segmentation = tf.ones([max_target_length], dtype=tf.int32)
+
+  return {
+      "inputs": inputs,
+      "targets": targets,
+      "inputs_position": inputs_position,
+      "targets_position": targets_position,
+      "inputs_segmentation": inputs_segmentation,
+      "targets_segmentation": targets_segmentation,
+  }
+
+
 def preprocess_train_dataset(
     train_ds: tf.data.Dataset,
     sp_tokenizer,
@@ -257,32 +305,41 @@ def preprocess_train_dataset(
     shuffle_buffer_size: int,
     data_shuffle_seed: int,
     is_tokenized_dataset: bool = False,
+    use_stream_chunking: bool | None = None,
 ) -> tf.data.Dataset:
   """Preprocess the training dataset."""
-  if sp_tokenizer.pad_id is not None:
-    pad_id = sp_tokenizer.pad_id
-  elif sp_tokenizer.unk_id is not None:
-    pad_id = sp_tokenizer.unk_id
-  else:
-    pad_id = -1
+  pad_id = sp_tokenizer.pad_id
+  eod_id = sp_tokenizer.eos_id
 
-  # Skip tokenization/chunking for pre-tokenized data (e.g. integer 'ids'):
-  # 1. TokenizeOp expects string inputs, not integer IDs.
-  # 2. reduce_concat_tokens/split_tokens strip padding via bool-cast, dropping
-  #    valid token ID 0.
-  # 3. sequence_packing directly packs pre-tokenized documents preserving
-  #    segment boundaries.
+  if use_stream_chunking is None:
+    use_stream_chunking = is_tokenized_dataset
+
   if not is_tokenized_dataset:
     train_ds = train_ds.map(
         lambda x: TokenizeOp(tokenizer_model=sp_tokenizer, features=x, data_keys=("targets",)),
         num_parallel_calls=AUTOTUNE,
     )
+
+  if use_stream_chunking:
+    # Continuous stream chunking:
+    # 1. Shuffle documents before chunking to maximize global token diversity across contiguous windows.
+    # 2. Append eod_id to each document and flatten token streams into contiguous max_target_length chunks (0% padding).
+    # 3. Shift targets left by 1 and append the eod_id token as the final target of each chunk.
+    # 4. Set monotonic position IDs: [0, 1, ..., max_target_length - 1].
+    # 5. Uniform 1s for segmentation to allow cross-document causal attention and 100% loss participation.
+    train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
+    train_ds = chunk_token_stream(train_ds, feature_key="targets", sequence_length=max_target_length, eod_id=eod_id)
+    train_ds = train_ds.map(
+        lambda x: format_continuous_stream_fn(x, max_target_length=max_target_length, eod_id=eod_id),
+        num_parallel_calls=AUTOTUNE,
+    )
+  else:
     train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
     train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
+    train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
+    train_ds = sequence_packing.pack_dataset(train_ds, max_target_length, pad_id=pad_id)
+    train_ds = train_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
 
-  train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
-  train_ds = sequence_packing.pack_dataset(train_ds, max_target_length, pad_id=pad_id)
-  train_ds = train_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
   train_ds = train_ds.batch(train_global_batch_size_to_load // jax.process_count(), drop_remainder=True)
   train_ds = train_ds.prefetch(AUTOTUNE)
   return train_ds
@@ -293,30 +350,41 @@ def preprocess_eval_dataset(
     sp_tokenizer,
     eval_global_batch_size_to_load: int,
     max_target_length: int,
-    num_examples: None | int = None,
+    num_examples: int = 0,
     is_tokenized_dataset: bool = True,
+    use_stream_chunking: bool | None = None,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
-  # group text up to max_target_length if the dataset is not pre-tokenized/pre-processed
+  pad_id = sp_tokenizer.pad_id
+  eod_id = sp_tokenizer.eos_id
+
+  if use_stream_chunking is None:
+    use_stream_chunking = is_tokenized_dataset
+
   if not is_tokenized_dataset:
     eval_ds = eval_ds.map(
         lambda x: TokenizeOp(tokenizer_model=sp_tokenizer, features=x, data_keys=("targets",)),
         num_parallel_calls=AUTOTUNE,
     )
+
+  if use_stream_chunking:
+    # Continuous stream chunking:
+    # 1. Append eod_id to each document and flatten token streams into contiguous max_target_length chunks (0% padding).
+    # 2. Shift targets left by 1 and append the eod_id token as the final target of each chunk.
+    # 3. Set monotonic position IDs: [0, 1, ..., max_target_length - 1].
+    # 4. Uniform 1s for segmentation to allow cross-document causal attention and 100% loss participation.
+    eval_ds = chunk_token_stream(eval_ds, feature_key="targets", sequence_length=max_target_length, eod_id=eod_id)
+    eval_ds = eval_ds.map(
+        lambda x: format_continuous_stream_fn(x, max_target_length=max_target_length, eod_id=eod_id),
+        num_parallel_calls=AUTOTUNE,
+    )
+  else:
     # hardcode batch_sizes 24567 i.e. the exp size in split validation_24567exp
     #   to avoid padding tokens inserted in group text
     eval_ds = reduce_concat_tokens(eval_ds, feature_key="targets", batch_size=24567)
     eval_ds = split_tokens_to_targets_length(eval_ds, max_target_length)
-
-  if sp_tokenizer.pad_id is not None:
-    pad_id = sp_tokenizer.pad_id
-  elif sp_tokenizer.unk_id is not None:
-    pad_id = sp_tokenizer.unk_id
-  else:
-    pad_id = -1
-  eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length, pad_id=pad_id)
-
-  eval_ds = eval_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
+    eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length, pad_id=pad_id)
+    eval_ds = eval_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
 
   # ensure array split in an equal division for each device
   # pad zeros up to the same batch_size among all processes
@@ -358,6 +426,7 @@ def make_c4_mlperf_train_iterator(
   sp_tokenizer = get_tokenizer(
       config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos, config.hf_access_token
   )
+  use_stream_chunking = getattr(config, "use_stream_chunking", None)
   train_ds = preprocess_train_dataset(
       train_ds,
       sp_tokenizer=sp_tokenizer,
@@ -366,6 +435,7 @@ def make_c4_mlperf_train_iterator(
       shuffle_buffer_size=128,
       data_shuffle_seed=config.data_shuffle_seed,
       is_tokenized_dataset=is_tokenized_dataset,
+      use_stream_chunking=use_stream_chunking,
   )
   train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh)
   return train_multihost_gen
@@ -375,6 +445,7 @@ def make_c4_mlperf_eval_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices,
+    num_examples: int = 0,
 ):
   """Make eval iterator of customized C4 dataset for mlperf training."""
   eval_col = config.eval_data_columns[0]
@@ -412,12 +483,36 @@ def make_c4_mlperf_eval_iterator(
   sp_tokenizer = get_tokenizer(
       config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos, config.hf_access_token
   )
+  if num_examples <= 0:
+    eval_steps = getattr(config, "eval_steps", -1)
+    eval_batch_size = getattr(config, "global_batch_size_to_load_eval", 0)
+    # When eval_steps > 0, derive total cluster-wide eval examples to avoid
+    # the slow linear scan of the entire dataset during startup
+    # (_get_num_examples).
+    if eval_steps > 0 and eval_batch_size > 0:
+      num_examples = int(eval_steps * eval_batch_size)
+
+  # Partition the total cluster-wide eval examples across all hosts.
+  # _pad_to_batch_size expects the per-host local example count rather than
+  # the cluster-wide total. Distributing examples evenly across hosts (with
+  # remainder distributed to the first remainder hosts) ensures each host
+  # calculates the correct local batch count and padding entries without
+  # linear counting.
+  local_num_examples = 0
+  if num_examples > 0:
+    host_idx = process_indices.index(jax.process_index()) if jax.process_index() in process_indices else 0
+    per_host, remainder = divmod(num_examples, len(process_indices))
+    local_num_examples = per_host + (1 if host_idx < remainder else 0)
+
+  use_stream_chunking = getattr(config, "use_stream_chunking", None)
   eval_ds = preprocess_eval_dataset(
       eval_ds,
       sp_tokenizer=sp_tokenizer,
       eval_global_batch_size_to_load=config.global_batch_size_to_load_eval,
       max_target_length=config.max_target_length,
+      num_examples=local_num_examples,
       is_tokenized_dataset=is_tokenized_dataset,
+      use_stream_chunking=use_stream_chunking,
   )
 
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)

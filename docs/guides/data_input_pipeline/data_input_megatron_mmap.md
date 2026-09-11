@@ -131,7 +131,7 @@ cost, build a single dataset in advance. `--num-samples` must match the training
 sample count:
 
 ```sh
-python3 tools/data_processing/mmap_index_builder.py convert \
+python3 src/maxtext/utils/mmap_index_builder.py convert \
   --input /data/wiki_text_document \
   --output-dir /cache/wiki_indices \
   --seq-length 2048 \
@@ -142,7 +142,7 @@ python3 tools/data_processing/mmap_index_builder.py convert \
 The `blend` subcommand creates child index directories and the global dispatch:
 
 ```sh
-python3 tools/data_processing/mmap_index_builder.py blend \
+python3 src/maxtext/utils/mmap_index_builder.py blend \
   --datasets '/data/wiki_text_document,0.7;/data/code_text_document,0.3' \
   --output-dir /cache/wiki_code_blend \
   --seq-length 2048 \

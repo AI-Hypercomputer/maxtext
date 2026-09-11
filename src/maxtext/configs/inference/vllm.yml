@@ -15,8 +15,6 @@
 attention: "vllm_rpa"
 model_call_mode: "inference"
 
-# NNX required for vLLM integration
-enable_nnx: true
 # Avoid re-initializing JAX distributed system when using vLLM
 skip_jax_distributed_system: true
 # Scanned layers are not supported with vLLM integration

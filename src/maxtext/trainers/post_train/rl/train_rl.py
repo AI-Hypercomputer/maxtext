@@ -44,7 +44,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 """
 
 from __future__ import annotations
-import contextlib
+import functools
 from functools import wraps
 from typing import Any, Callable, Optional, Sequence
 
@@ -52,7 +52,6 @@ import dataclasses
 import datasets
 import grain
 import jax
-import jax.numpy as jnp
 import json
 import logging
 import os
@@ -68,79 +67,10 @@ from transformers import AutoTokenizer
 import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
 
 adapter.register()
-import functools
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
-import tunix.generate.utils as tunix_utils
-
-
-@contextlib.contextmanager
-def _tpu_inference_compat_patches():
-  """Tactical compat shims for tpu_inference.
-
-  tpu_inference has two call-site assumptions that no longer hold:
-    1. jax.lax.with_sharding_constraint: assumes silent reshard on mismatch,
-       but current jax asserts when all mesh axes are Explicit. Fall back to
-       jax.sharding.reshard on the AssertionError.
-    2. tunix._apply_dtype_cast: tpu_inference JaxEinsum defaults
-       param_dtype=float32 so its weights initialize as float32, but model
-       dtype is bfloat16; the cast upgraded synced bfloat16 weights to float32,
-       which then mismatched in the ragged paged attention kernel. Skip the
-       bf16->f32 upcast so synced weights stay bfloat16.
-
-  Scoped to rl_train() so the patches don't leak into other importers of this
-  module. Drop both once tpu_inference is updated upstream.
-  """
-  orig_wsc = jax.lax.with_sharding_constraint
-  orig_apply_dtype_cast = tunix_utils._apply_dtype_cast  # pylint: disable=protected-access
-  orig_bulk = tunix_utils._bulk_align_and_unstack  # pylint: disable=protected-access
-  orig_unstack = tunix_utils._unstack_scanned_param  # pylint: disable=protected-access
-
-  orig_moe_weights = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)
-
-  def _compat_wsc(x, shardings):
-    try:
-      return orig_wsc(x, shardings)
-    except AssertionError:
-      return jax.sharding.reshard(x, shardings)
-
-  def _no_bf16_to_f32_cast(val, tgt_dtype, src_key):
-    if hasattr(val, "dtype") and val.dtype == jnp.bfloat16 and tgt_dtype == jnp.float32:
-      return val
-    return orig_apply_dtype_cast(val, tgt_dtype, src_key)
-
-  def _compat_bulk(arr, scan_axis, per_layer, key_path):
-    if hasattr(arr, "shape") and len(arr.shape) <= scan_axis:
-      scan_axis = len(arr.shape) - 1 if len(arr.shape) > 0 else 0
-    return orig_bulk(arr, scan_axis, per_layer, key_path)
-
-  def _compat_unstack(src_val, tgt_val, key_path, scan_axis=None):
-    if scan_axis is not None and hasattr(src_val, "shape") and len(src_val.shape) <= scan_axis:
-      scan_axis = len(src_val.shape) - 1 if len(src_val.shape) > 0 else 0
-    res = orig_unstack(src_val, tgt_val, key_path, scan_axis=scan_axis)
-    if isinstance(res, tuple) and len(res) == 1 and hasattr(src_val, "shape") and src_val.shape == tgt_val.shape:
-      return res * 256
-    return res
-
-  jax.lax.with_sharding_constraint = _compat_wsc
-  tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
-  tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
-  tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
-
-  if orig_moe_weights is not None:
-    tunix_utils._MOE_MLP_WEIGHTS = frozenset([*orig_moe_weights, "wo"])  # pylint: disable=protected-access
-
-  try:
-    yield
-  finally:
-    jax.lax.with_sharding_constraint = orig_wsc
-    tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
-    tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
-    tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
-    if orig_moe_weights is not None:
-      tunix_utils._MOE_MLP_WEIGHTS = orig_moe_weights  # pylint: disable=protected-access
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
@@ -437,6 +367,18 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
 
   rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
 
+  rollout_vllm_kwargs = {
+      "hf_overrides": trainer_config.vllm_hf_overrides,
+      "enable_expert_parallel": sampler_config.enable_expert_parallel,
+      "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
+      # Ensures vLLM model initializes with correct dtype (not float32 default)
+      "dtype": trainer_config.weight_dtype.value,
+  }
+  if trainer_config.vllm_block_size is not None:
+    # Pin the KV-cache page size; left unset, the backend derives it from the
+    # engine shape, so unrelated engine changes can move it.
+    rollout_vllm_kwargs["block_size"] = trainer_config.vllm_block_size
+
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
           rl_cluster_lib.Role.ACTOR: actor_mesh,
@@ -457,6 +399,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           mini_batch_size=trainer_config.batch_size,
           train_micro_batch_size=train_micro_batch_size,
           rollout_micro_batch_size=rollout_micro_batch_size,
+          max_seq_token_per_tpu=trainer_config.max_seq_token_per_tpu or None,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
           checkpoint_root_directory=checkpoint_dir,
@@ -485,13 +428,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           rollout_vllm_async_scheduling=trainer_config.async_scheduling,
           rollout_vllm_server_mode=trainer_config.rl.use_agentic_rollout,
           rollout_vllm_reshard_chunk_size=trainer_config.rl.reshard_chunk_size,
-          rollout_vllm_kwargs={
-              "hf_overrides": trainer_config.vllm_hf_overrides,
-              "enable_expert_parallel": sampler_config.enable_expert_parallel,
-              "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
-              # Ensures vLLM model initializes with correct dtype (not float32 default)
-              "dtype": trainer_config.weight_dtype.value,
-          },
+          rollout_vllm_kwargs=rollout_vllm_kwargs,
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
               "detokenize": trainer_config.stop_strings is not None,
@@ -642,12 +579,11 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
-  with _tpu_inference_compat_patches():
-    _rl_train_impl(argv, kwargs)
+  _rl_train_impl(argv, kwargs)
 
 
 def _rl_train_impl(argv: Sequence[str], kwargs: dict):
-  """rl_train body — kept separate so _tpu_inference_compat_patches wraps it cleanly."""
+  """rl_train execution body."""
   trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
       argv,
       kwargs,

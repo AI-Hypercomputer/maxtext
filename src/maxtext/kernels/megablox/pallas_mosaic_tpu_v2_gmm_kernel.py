@@ -1476,6 +1476,6 @@ def gmm_v2(
       ),
       name=get_scope_name(cfgs),
       cost_estimate=get_cost_estimate(cfgs),
-      metadata=get_metadata(cfgs),
+      metadata=get_metadata(cfgs),  # pyrefly: ignore[bad-argument-type]
       input_output_aliases=input_output_aliases,
   )(group_sizes, group_offset, lhs_in, rhs_weights, partial_sum)[:, : cfgs.out_size_n]

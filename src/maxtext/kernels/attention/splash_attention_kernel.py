@@ -753,7 +753,7 @@ def flash_attention_kernel(
         q_sequence_ref,
         q_segment_ids_ref,
         kv_segment_ids_ref,
-        attn_logits_soft_cap=attn_logits_soft_cap,
+        attn_logits_soft_cap=attn_logits_soft_cap,  # pyrefly: ignore[bad-argument-type]
         k_slice=slice_k,
         # When the iteration space is shrunk (for local attention for example),
         # the kv_index program_id does not correspond to the actual coordinates
@@ -1053,7 +1053,7 @@ def _splash_attention_forward(
             grid_width=grid_width,
             bq=bq,
             bkv=bkv,
-            bkv_compute=bkv_compute,
+            bkv_compute=bkv_compute,  # pyrefly: ignore[bad-argument-type]
             head_dim_v=head_dim_v,
             q_layout=q_layout,
             k_layout=k_layout,
@@ -2494,7 +2494,7 @@ def _make_splash_attention(
   )
 
   fwd_mask_info, mask_function_fwd = process_mask_fn(
-      mask,
+      mask,  # pyrefly: ignore[bad-argument-type]
       (block_sizes.block_q, block_sizes.block_kv),
       downcast_smem_data=downcast_smem_data,
       head_shards=head_shards,
@@ -2510,8 +2510,8 @@ def _make_splash_attention(
     else:
       bq_dq, bkv_dq = block_sizes.block_q_dq, block_sizes.block_kv_dq
       dq_mask_info, mask_function_dq = process_mask_fn(
-          mask,
-          (bq_dq, bkv_dq),
+          mask,  # pyrefly: ignore[bad-argument-type]
+          (bq_dq, bkv_dq),  # pyrefly: ignore[bad-argument-type]
           downcast_smem_data=downcast_smem_data,
           head_shards=head_shards,
           q_seq_shards=q_seq_shards,
@@ -2520,8 +2520,8 @@ def _make_splash_attention(
       dq_mask_info = tree_util.tree_map(jnp.array, dq_mask_info)
     bq_dkv, bkv_dkv = block_sizes.block_q_dkv, block_sizes.block_kv_dkv
     dkv_mask_info, mask_function_dkv = process_mask_dvk_fn(
-        mask,
-        (bq_dkv, bkv_dkv),
+        mask,  # pyrefly: ignore[bad-argument-type]
+        (bq_dkv, bkv_dkv),  # pyrefly: ignore[bad-argument-type]
         downcast_smem_data=downcast_smem_data,
         head_shards=head_shards,
         q_seq_shards=q_seq_shards,

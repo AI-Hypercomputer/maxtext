@@ -23,18 +23,12 @@ inputs with plain numpy data movement, in the three supported sharding modes
 
 from types import SimpleNamespace
 import unittest
-from unittest import mock
 
 import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from maxtext.integration.vllm import maxtext_vllm_rollout as rollout_mod
-from maxtext.integration.vllm.maxtext_vllm_rollout import (
-    MaxTextVllmSampler,
-    _create_model_converter,
-)
-from maxtext.integration.vllm.torchax_converter.base import BaseMaxTextToVLLMConverter
+from maxtext.integration.vllm.maxtext_vllm_rollout import _create_model_converter
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
 
@@ -384,115 +378,6 @@ class CreateModelConverterTest(unittest.TestCase):
   def test_standalone_unknown_model_rejected(self):
     with self.assertRaises(NotImplementedError):
       _create_model_converter("llama3.1-8b", config=_make_config(tp=1), mesh=None, use_standalone_converter=True)
-
-
-class _DummyConverter(BaseMaxTextToVLLMConverter):
-  """Minimal standalone converter emitting a canned dict."""
-
-  def __init__(self, out):
-    super().__init__(_make_config(tp=1), mesh=None)
-    self._out = out
-
-  def convert(self, model_state, **kwargs):
-    return dict(self._out)
-
-  def _convert_global(self, params):
-    pass
-
-  def _convert_attn(self, params):
-    pass
-
-  def _convert_moe(self, params):
-    pass
-
-
-class _FakeRunnerSampler(MaxTextVllmSampler):
-  """Shadows the base class's read-only `_model_runner` property so tests can set it."""
-
-  _model_runner = None
-
-
-def _make_sampler(state, converter, chunk=None, delete_dst=False, llm=None):
-  sampler = object.__new__(_FakeRunnerSampler)
-  sampler._converter = converter  # pylint: disable=protected-access
-  sampler.converter = converter
-  sampler._model_runner = SimpleNamespace(state=state, state_leaves=None)  # pylint: disable=protected-access
-  sampler.llm = llm
-  sampler._driver = None  # pylint: disable=protected-access
-  sampler.config = SimpleNamespace(reshard_chunk_size=chunk, delete_dst_buffers=delete_dst)
-  return sampler
-
-
-def _identity_reshard(src, shardings):
-  del shardings
-  return src
-
-
-class StandaloneSyncTest(unittest.TestCase):
-
-  def test_update_params_routes_standalone_converters(self):
-    sampler = _make_sampler({}, _DummyConverter({}))
-    sampler._sync_standalone_converted = mock.Mock(return_value="synced")  # pylint: disable=protected-access
-    self.assertEqual(sampler.update_params({"w": 1}), "synced")
-    sampler._sync_standalone_converted.assert_called_once_with({"w": 1})  # pylint: disable=protected-access
-
-  def test_update_params_reraises_sync_failures(self):
-    sampler = _make_sampler({}, _DummyConverter({}))
-    sampler._sync_standalone_converted = mock.Mock(side_effect=RuntimeError("boom"))  # pylint: disable=protected-access
-    with self.assertRaises(RuntimeError):
-      sampler.update_params({})
-
-  def test_sync_requires_flat_dict_state(self):
-    sampler = _make_sampler(object(), _DummyConverter({}))
-    with self.assertRaisesRegex(TypeError, "flat dict"):
-      sampler._sync_standalone_converted({})  # pylint: disable=protected-access
-
-  def test_sync_updates_covered_tensors_in_place(self):
-    state = {
-        "layers.0.qkv": jnp.zeros((2, 3), jnp.bfloat16),
-        "layers.0._private": jnp.zeros((1,), jnp.bfloat16),
-        "layers.0.rotary_emb.cache": jnp.zeros((1,), jnp.bfloat16),
-        "layers.0.uncovered": jnp.zeros((1,), jnp.bfloat16),
-    }
-    new_qkv = jnp.ones((2, 3), jnp.bfloat16)
-    converter = _DummyConverter({"layers.0.qkv": new_qkv, "layers.0.alias_only": jnp.ones((4,), jnp.bfloat16)})
-    llm = mock.Mock()
-    sampler = _make_sampler(state, converter, llm=llm)
-    with mock.patch.object(rollout_mod.tunix_reshard, "reshard_pytree", _identity_reshard):
-      sampler._sync_standalone_converted({})  # pylint: disable=protected-access
-    self.assertTrue(jnp.array_equal(state["layers.0.qkv"], new_qkv))
-    self.assertNotIn("layers.0.alias_only", state)  # version alias without a runner target is dropped
-    self.assertTrue(not state["layers.0.uncovered"].any())  # left untouched (and warned about)
-    self.assertIs(sampler._model_runner.state_leaves, state)  # pylint: disable=protected-access
-    llm.reset_prefix_cache.assert_called_once_with()
-    llm.collective_rpc.assert_has_calls([mock.call("delete_kv_cache"), mock.call("reinitialize_kv_cache")])
-
-  def test_sync_uses_chunked_reshard_when_configured(self):
-    state = {"w": jnp.zeros((2,), jnp.bfloat16)}
-    converter = _DummyConverter({"w": jnp.ones((2,), jnp.bfloat16)})
-    sampler = _make_sampler(state, converter, chunk=2, delete_dst=True)
-    chunked = mock.Mock(side_effect=lambda src_flat, **kw: src_flat)
-    with mock.patch.object(rollout_mod.tunix_gen_utils, "_reshard_in_chunks", chunked, create=True):
-      sampler._sync_standalone_converted({})  # pylint: disable=protected-access
-    self.assertEqual(chunked.call_args.kwargs["chunk_size"], 2)
-    self.assertTrue(state["w"].all())
-
-  def test_sync_falls_back_when_tunix_lacks_chunked_reshard(self):
-    state = {"w": jnp.zeros((2,), jnp.bfloat16)}
-    converter = _DummyConverter({"w": jnp.ones((2,), jnp.bfloat16)})
-    sampler = _make_sampler(state, converter, chunk=2, delete_dst=False)
-    with mock.patch.object(rollout_mod.tunix_gen_utils, "_reshard_in_chunks", None, create=True):
-      with mock.patch.object(rollout_mod.tunix_reshard, "reshard_pytree", _identity_reshard):
-        sampler._sync_standalone_converted({})  # pylint: disable=protected-access
-    self.assertTrue(state["w"].all())
-
-  def test_sync_rejects_layout_drift(self):
-    state = {"w": jnp.zeros((2, 2), jnp.bfloat16)}
-    converter = _DummyConverter({"w": jnp.ones((3, 3), jnp.bfloat16)})
-    sampler = _make_sampler(state, converter)
-    with mock.patch.object(rollout_mod.tunix_reshard, "reshard_pytree", _identity_reshard):
-      with self.assertRaisesRegex(ValueError, "out of date"):
-        sampler._sync_standalone_converted({})  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":

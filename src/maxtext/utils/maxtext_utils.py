@@ -142,17 +142,18 @@ def get_reorder_callable(cp_size, shard_mode, reorder_strategy=ReorderStrategy.D
   )
 
 
-def get_shaped_batch(config, batch_sharding=None):
+def get_shaped_batch(config, batch_sharding=None, is_eval=False):
   """Return the shape of the batch - this is what eval_shape would return for the
   output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
+  global_batch_size = config.global_batch_size_to_load_eval if is_eval else config.global_batch_size_to_load
   if config.enable_diloco:
     batch_shape = (
         config.num_diloco_replicas,
-        config.global_batch_size_to_load // config.num_diloco_replicas,
+        global_batch_size // config.num_diloco_replicas,
         config.max_target_length,
     )
   else:
-    batch_shape = (config.global_batch_size_to_load, config.max_target_length)
+    batch_shape = (global_batch_size, config.max_target_length)
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   # MRoPE uses (batch, seq, 3); same batch/seq axes as 1D positions so batch_sharding applies as-is.
@@ -166,6 +167,7 @@ def get_shaped_batch(config, batch_sharding=None):
     shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
     shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   if config.use_multimodal:
+    batch_size = config.micro_batch_size_to_eval_on if is_eval else config.micro_batch_size_to_train_on
     is_video = getattr(config, "video_max_grid_t", None) is not None
     if is_video:
       max_t = config.video_max_grid_t
@@ -174,16 +176,13 @@ def get_shaped_batch(config, batch_sharding=None):
       tps = config.temporal_patch_size_for_vit
       patch = config.patch_size_for_vit
       channels = config.num_channels_for_vit
-      batch_size = config.micro_batch_size_to_train_on
       video_shape = (batch_size, channels, max_t * tps, max_h * patch, max_w * patch)
       video_mask_shape = (batch_size, 1, max_t * tps, max_h * patch, max_w * patch)
       shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
       shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
       shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
     else:
-      image_shape = mm_processor.get_dummy_image_shape_for_init(
-          config.model_name, batch_size=config.micro_batch_size_to_train_on
-      )
+      image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size)
       shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
       # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
       # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
@@ -1730,127 +1729,89 @@ def setup_initial_state(
     init_state_partial = init_state_fn
     init_state_partial.__name__ = "initialize_state"
 
-    if config.pure_nnx:
-      # Always build the concrete init state, then overlay whatever we loaded. Anything the
-      # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
-      # value, so restore doesn't depend on knowing exactly what was saved.
-      state = jax.jit(
-          lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
-      )()
-      if raw_params:
-        # Params-only load (base model weights): overlay restored weights, keep init for everything else.
-        target_model = (
-            state["model"]
-            if (isinstance(state, (nnx.State, dict)) and "model" in state)
-            else getattr(state, "model", state)
-        )
-        raw_model_params = (
-            raw_params["model"] if (isinstance(raw_params, (nnx.State, dict)) and "model" in raw_params) else raw_params
-        )
-        if hasattr(raw_model_params, "to_pure_dict"):
-          raw_model_params = raw_model_params.to_pure_dict()
-        if isinstance(raw_model_params, dict) and "params" in raw_model_params:
-          raw_model_params = raw_model_params["params"]
-        target_pure = target_model.to_pure_dict() if hasattr(target_model, "to_pure_dict") else target_model
+    # Always build the concrete init state, then overlay whatever we loaded. Anything the
+    # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
+    # value, so restore doesn't depend on knowing exactly what was saved.
+    state = jax.jit(
+        lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+        in_shardings=None,
+        out_shardings=state_mesh_shardings,
+    )()
+    if raw_params:
+      # Params-only load (base model weights): overlay restored weights, keep init for everything else.
+      target_model = (
+          state["model"]
+          if (isinstance(state, (nnx.State, dict)) and "model" in state)
+          else getattr(state, "model", state)
+      )
+      raw_model_params = (
+          raw_params["model"] if (isinstance(raw_params, (nnx.State, dict)) and "model" in raw_params) else raw_params
+      )
+      if hasattr(raw_model_params, "to_pure_dict"):
+        raw_model_params = raw_model_params.to_pure_dict()
+      if isinstance(raw_model_params, dict) and "params" in raw_model_params:
+        raw_model_params = raw_model_params["params"]
+      target_pure = target_model.to_pure_dict() if hasattr(target_model, "to_pure_dict") else target_model
 
-        def _reshard_aligned(target, raw):
-          """Aligns raw arrays with target device shardings using Flax's native flatten_dict utilities."""
-          target_flat = traverse_util.flatten_dict(target)
-          raw_flat = traverse_util.flatten_dict(raw)
+      def _reshard_aligned(target, raw):
+        """Aligns raw arrays with target device shardings using Flax's native flatten_dict utilities."""
+        target_flat = traverse_util.flatten_dict(target)
+        raw_flat = traverse_util.flatten_dict(raw)
 
-          res_flat = {}
-          for k, target_val in target_flat.items():
-            if k in raw_flat and not isinstance(raw_flat[k], jax.ShapeDtypeStruct):
-              raw_val = raw_flat[k]
-              if hasattr(target_val, "sharding") and target_val.sharding is not None:
-                res_flat[k] = jax.device_put(raw_val, target_val.sharding)
-              else:
-                res_flat[k] = raw_val
+        res_flat = {}
+        for k, target_val in target_flat.items():
+          if k in raw_flat and not isinstance(raw_flat[k], jax.ShapeDtypeStruct):
+            raw_val = raw_flat[k]
+            if hasattr(target_val, "sharding") and target_val.sharding is not None:
+              res_flat[k] = jax.device_put(raw_val, target_val.sharding)
             else:
-              res_flat[k] = target_val
-
-          return traverse_util.unflatten_dict(res_flat)
-
-        sharded_aligned = _reshard_aligned(target_pure, raw_model_params)
-        nnx.update(target_model, sharded_aligned)
-
-      if restored:
-        is_emergency = isinstance(
-            checkpoint_manager,
-            (
-                emergency_checkpoint_manager.CheckpointManager,
-                emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
-            ),
-        )
-        overlay = restored if is_emergency else restored["items"]
-        if not (config.enable_diloco and isinstance(overlay, diloco.DiLoCoTrainState)):
-          # Standard Flax NNX branch: overlay weights into the initialized TrainStateNNX.
-          overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
-
-          def _has_shape_dtype_struct(tree):
-            return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
-
-          def _merge_restored_overlay(ckpt_node, init_node):
-            """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
-            if _has_shape_dtype_struct(ckpt_node):
-              if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
-                res = {}
-                for k in init_node:
-                  if k in ckpt_node:
-                    res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
-                  else:
-                    res[k] = init_node[k]
-                return res
-              else:
-                return init_node
-            return ckpt_node
-
-          merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
-          nnx.replace_by_pure_dict(state, merged)
-        else:
-          # DiLoCo branch: The restored checkpoint for DiLoCo is already a complete DiLoCoTrainState
-          # (containing inner_state, outer_opt_state, params, step) rather than a bare parameter mapping.
-          state = overlay
-    else:
-      if restored:
-        if isinstance(
-            checkpoint_manager,
-            (
-                emergency_checkpoint_manager.CheckpointManager,
-                emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
-            ),
-        ):
-          state = restored
-        else:
-          # The update of data_iterator state happens in place, no need to assign explicitly
-          state = restored["items"]
-      else:
-        # pylint: disable=not-callable
-        state = jax.jit(
-            init_state_partial,
-            in_shardings=None,
-            out_shardings=state_mesh_shardings,
-        )()
-        if raw_params:  # If we loaded a partial state, we need to merge it.
-          sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
-          if sparsity_enabled:
-            # Sparsity-init keeps freshly initialized params for any leaf still
-            # represented as an abstract ShapeDtypeStruct in raw_params (i.e. not
-            # actually restored), and uses the restored value otherwise.
-            def _merge_params(p_raw, p_init):
-              if isinstance(p_raw, jax.ShapeDtypeStruct):
-                return p_init
-              return p_raw
-
-            merged_params = jax.tree_util.tree_map(_merge_params, raw_params, state.params)
-            state = state.replace(params=merged_params)
+              res_flat[k] = raw_val
           else:
-            state = state.replace(params=raw_params)
+            res_flat[k] = target_val
 
-  if not config.pure_nnx:
-    state = max_utils.unbox_logicallypartioned(state)
+        return traverse_util.unflatten_dict(res_flat)
+
+      sharded_aligned = _reshard_aligned(target_pure, raw_model_params)
+      nnx.update(target_model, sharded_aligned)
+
+    if restored:
+      is_emergency = isinstance(
+          checkpoint_manager,
+          (
+              emergency_checkpoint_manager.CheckpointManager,
+              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+          ),
+      )
+      overlay = restored if is_emergency else restored["items"]
+      if not (config.enable_diloco and isinstance(overlay, diloco.DiLoCoTrainState)):
+        # Standard Flax NNX branch: overlay weights into the initialized TrainStateNNX.
+        overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
+
+        def _has_shape_dtype_struct(tree):
+          return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
+
+        def _merge_restored_overlay(ckpt_node, init_node):
+          """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
+          if _has_shape_dtype_struct(ckpt_node):
+            if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
+              res = {}
+              for k in init_node:
+                if k in ckpt_node:
+                  res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
+                else:
+                  res[k] = init_node[k]
+              return res
+            else:
+              return init_node
+          return ckpt_node
+
+        merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
+        nnx.replace_by_pure_dict(state, merged)
+      else:
+        # DiLoCo branch: The restored checkpoint for DiLoCo is already a complete DiLoCoTrainState
+        # (containing inner_state, outer_opt_state, params, step) rather than a bare parameter mapping.
+        state = overlay
+
   if config.enable_diloco:
     state = diloco_utils.setup_diloco_initial_state(
         state=state,

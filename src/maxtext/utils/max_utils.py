@@ -802,10 +802,12 @@ def print_cpu_ram_stats(label: str):
     max_logging.log(f"\tRAM stats unavailable, error: {ex}")
 
 
-def print_compiled_memory_stats(compiled_stats):
+def print_compiled_memory_stats(compiled_stats, prefix: str = ""):
   """Prints a summary of the compiled memory statistics."""
   if compiled_stats is None:
     return
+
+  prefix_str = f"[{prefix}] " if prefix else ""
 
   def bytes_to_gb(num_bytes):
     return num_bytes / (1024**3)
@@ -818,12 +820,12 @@ def print_compiled_memory_stats(compiled_stats):
   total_gb = output_gb + temp_gb + argument_gb - alias_gb
 
   max_logging.log(
-      f"Total estimated memory size: {total_gb:.1f} GB, estimated output"
+      f"{prefix_str}Total estimated memory size: {total_gb:.1f} GB, estimated output"
       f" size: {output_gb:.1f} GB, estimated temp size: {temp_gb:.1f} GB, "
       f"estimated argument size: {argument_gb:.1f} GB, Estimated host temp"
       f" size: {host_temp_gb:.1f} GB."
   )
-  max_logging.log("Note that compiler could over-estimate the HBM usage.")
+  max_logging.log(f"{prefix_str}Note that compiler could over-estimate the HBM usage.")
 
 
 def print_system_information():
