@@ -347,10 +347,10 @@ gcluster job config set cluster ${GKE_CLUSTER?}
 gcluster job config set location ${LOCATION?}
 
 gcluster job submit \
-  --image ${IMAGE_URI?} \
-  --name ${RUN_NAME?} \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
+  --image=${IMAGE_URI?} \
+  --name=${RUN_NAME?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --command="python3 -m maxtext.trainers.post_train.distillation.train_distill \
     src/maxtext/configs/post_train/distillation.yml \
     run_name=${RUN_NAME?} \
