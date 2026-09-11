@@ -47,6 +47,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs import pyconfig
 from maxtext.layers import linears
+from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
@@ -714,6 +715,101 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
     self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+
+
+class TestNNXDecoderServeFp8WeightForwardPass(unittest.TestCase):
+  """End-to-end forward pass with quantization="serve_fp8_weight" (native, no-dequantize
+  FP8 compute -- see quantizations.native_fp8_dot_general / ServeFp8WeightQuantization).
+  """
+
+  # weight_block_size must evenly divide every quantized DenseGeneral's contracted
+  # dimension in _BASE_CONFIG (emb_dim=256, mlp_dim=512, and head_dim*num_heads).
+  _FP8_OVERRIDES = {
+      "weight_dtype": "float8_e4m3fn",
+      "weight_block_size": 16,
+  }
+
+  def setUp(self):
+    super().setUp()
+    self.rng = jax.random.PRNGKey(0)
+
+  def _make_token_inputs(self, cfg):
+    """Generates dummy token inputs for decoder test."""
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(self.rng, (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+    return ids, segment_ids, positions
+
+  def _build(self, cfg, mesh, rngs):
+    """Builds test decoder and shared embedding."""
+    quant = quantizations.configure_quantization(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, quant=quant, rngs=rngs)
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    return decoder, shared_embedding
+
+  def test_forward_pass_shapes_and_finite(self):
+    """A serve_fp8_weight decoder must produce correctly-shaped, finite logits."""
+    cfg = _make_config(quantization="serve_fp8_weight", **self._FP8_OVERRIDES)
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder, shared_embedding = self._build(cfg, mesh, rngs)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+
+    logits, hidden_state, *_ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(logits.shape, (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size))
+    self.assertEqual(hidden_state.shape, (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.emb_dim))
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))
+
+  def test_matches_dequantize_baseline(self):
+    """Native fp8 compute must closely match the existing dequantize-then-matmul path.
+
+    Both decoders store the same fp8-quantized weights (weight_dtype=float8_e4m3fn);
+    only the compute strategy differs (quantization="serve_fp8_weight" vs unset). State
+    is explicitly synced after construction rather than relied on via matching RNG draws.
+    """
+    baseline_cfg = _make_config(**self._FP8_OVERRIDES)
+    native_cfg = _make_config(quantization="serve_fp8_weight", **self._FP8_OVERRIDES)
+    mesh = _make_mesh(baseline_cfg)
+
+    baseline_decoder, baseline_embedding = self._build(baseline_cfg, mesh, nnx.Rngs(params=0, dropout=1))
+    native_decoder, native_embedding = self._build(native_cfg, mesh, nnx.Rngs(params=0, dropout=1))
+    nnx.update(native_decoder, nnx.state(baseline_decoder))
+    nnx.update(native_embedding, nnx.state(baseline_embedding))
+
+    ids, segment_ids, positions = self._make_token_inputs(baseline_cfg)
+    call_kwargs = {
+        "decoder_segment_ids": segment_ids,
+        "deterministic": True,
+        "model_mode": MODEL_MODE_TRAIN,
+    }
+    baseline_logits, _, *_ = baseline_decoder(baseline_embedding, ids, positions, **call_kwargs)
+    native_logits, _, *_ = native_decoder(native_embedding, ids, positions, **call_kwargs)
+
+    baseline_logits = np.asarray(baseline_logits, dtype=np.float32)
+    native_logits = np.asarray(native_logits, dtype=np.float32)
+    self.assertEqual(baseline_logits.shape, native_logits.shape)
+    relerr = float(np.max(np.abs(baseline_logits - native_logits)) / (np.max(np.abs(baseline_logits)) + 1e-12))
+    # Loose tolerance: dominated by native compute's dynamic activation-quantization
+    # noise (expected, see forward_pass_logit_checker KL-divergence validation),
+    # compounded across every quantized layer in the stack -- not driven to zero here.
+    self.assertLess(relerr, 0.1, f"serve_fp8_weight vs dequantize baseline relerr={relerr:.3e}")
 
 
 class _StatefulGemma4DecoderLayer(nnx.Module):

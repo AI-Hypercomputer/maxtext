@@ -87,6 +87,106 @@ class Quantization:
     """Placeholder for einsum implementation in subclasses."""
 
 
+def infer_scale_granularity(scale_shape: Tuple[int, ...]) -> Tuple[str, int | None]:
+  """Infers a quantization scheme from a scale array's shape alone.
+
+  Relies on checkpoints storing scale at its true minimal shape (e.g. (1, 1) for
+  per-tensor, not the original block grid uniformly filled) -- shape is the only
+  signal, so a scale that doesn't actually reflect its real granularity will be
+  misread.
+
+  Returns ("per_tensor", None), ("per_channel", axis), or ("block_wise", None).
+  """
+  nontrivial_axes = [i for i, s in enumerate(scale_shape) if s > 1]
+  if not nontrivial_axes:
+    return "per_tensor", None
+  if len(nontrivial_axes) == 1:
+    return "per_channel", nontrivial_axes[0]
+  return "block_wise", None
+
+
+def native_fp8_dot_general(
+    inputs: jnp.ndarray,
+    quantized_kernel: jnp.ndarray,
+    kernel_scale: jnp.ndarray,
+    block_size: int | Tuple[int, ...],
+    axis: Tuple[int, ...],
+    contract_ind: Tuple[int, ...],
+    compute_dtype: DType = jnp.bfloat16,
+) -> jnp.ndarray:
+  """Computes dot_general in FP8 without ever dequantizing the weight.
+
+  `kernel` is wrapped as a pre-quantized qwix.QArray with its real `kernel_scale`;
+  `inputs` is dynamically quantized to fp8. qwix.dot_general then runs both
+  operands through XLA still in fp8.
+
+  The activation's quantization granularity is inferred from kernel_scale's shape
+  (see infer_scale_granularity): a per-tensor kernel gets a per-tensor activation
+  (one global scale); a per-channel kernel (scale varies along the non-contracted
+  axis) gets a per-token activation with no block tiling; anything else (a
+  genuine block grid, e.g. real 128x128-block-quantized checkpoints) falls back
+  to per-token activation block-tiled to `block_size`, matching the kernel's own
+  blocking along the contracted axis.
+
+  Only supports a single contracted axis and no batch dims (DenseGeneral's
+  actual usage today); raises otherwise.
+  """
+  if len(axis) != 1 or len(contract_ind) != 1:
+    raise NotImplementedError(
+        "native_fp8_dot_general only supports a single contracted axis per "
+        f"operand, got axis={axis}, contract_ind={contract_ind}."
+    )
+  lhs_axis = axis[0]
+  rhs_axis = contract_ind[0]
+
+  # qwix.QArray requires scale.ndim == qvalue.ndim. DenseGeneral's own true
+  # per-tensor convention (block_size=None) stores a genuine 0-d scalar scale
+  # (linears.py: `resolved_scale_shape = ()`), which is rank-mismatched against
+  # the kernel -- reshape it to an all-1s shape of the kernel's rank first (a
+  # size-1 scalar reshapes losslessly either way); infer_scale_granularity reads
+  # the same on both, since an all-1s shape has no axes with size > 1 either way.
+  if kernel_scale.ndim != quantized_kernel.ndim:
+    kernel_scale = kernel_scale.reshape((1,) * quantized_kernel.ndim)
+
+  rhs = qwix.QArray(qvalue=quantized_kernel, scale=kernel_scale)
+  scheme, _ = infer_scale_granularity(kernel_scale.shape)
+  if scheme == "per_tensor":
+    channelwise_axes = []
+    tiled_axes = {}
+  elif scheme == "per_channel":
+    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+    tiled_axes = {}
+  else:
+    rhs_block_size = block_size[rhs_axis] if isinstance(block_size, (list, tuple)) else block_size
+    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+    tiled_axes = {lhs_axis: rhs_block_size}
+  lhs = qwix.quantize(
+      jnp.asarray(inputs, compute_dtype),
+      jnp.float8_e4m3fn,
+      channelwise_axes=channelwise_axes,
+      tiled_axes=tiled_axes,
+      calibration_method="absmax",
+  )
+  dimension_numbers = (((lhs_axis,), (rhs_axis,)), ((), ()))
+  out = qwix.dot_general(lhs, rhs, dimension_numbers, preferred_element_type=jnp.float32)
+  return out.astype(compute_dtype)
+
+
+@dataclass
+class ServeFp8WeightQuantization(Quantization):
+  """Marks a DenseGeneral as using native (no-dequantize) FP8 compute at serve time.
+
+  Unlike other Quantization subclasses, this isn't consumed through
+  dot_general_cls()/einsum() (those calibrate a scale from a full-precision
+  original); the weight is already quantized, so callers check isinstance()
+  directly and call native_fp8_dot_general above.
+  """
+
+  # Must exist (in_serve_mode()/in_convert_mode() read it unconditionally) but
+  # must never equal SERVE/CONVERT, which would skip normal param init.
+  quant_mode = None
+
+
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
   """apply tiling function"""
   del lhs, rhs
@@ -668,6 +768,10 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
+  if config.quantization == "serve_fp8_weight":
+    # Not an AQT/Qwix config; bypasses _get_quant_config entirely.
+    return ServeFp8WeightQuantization()
+
   if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
     if config.quantization == "fp8_full" and not config.use_manual_quantization:
