@@ -69,6 +69,34 @@ jax.lax.with_sharding_constraint = _compat_wsc
 jax.lax.top_k = _compat_top_k
 
 
+def _segment_ids_from_attention_mask(attention_mask: Array, input_tokens: Array) -> Array:
+  """Recovers Tunix's per-token non-pad mask from its `[B, L, L]` attention mask.
+
+  MaxText takes no precomputed mask: it derives one per layer from
+  `decoder_segment_ids` plus causality, and flash and splash take a
+  `SequenceDescriptor` built from those ids rather than a dense array. Using
+  Tunix's mask therefore means converting it, not passing it through.
+
+  Nothing is lost. `tunix/sft/utils.py:make_causal_attn_mask` builds
+  `input_mask[..., None, :] * tril`, masking the key side only, so the last query
+  row carries the full mask. Deriving the ids here rather than from `pad_id` also
+  leaves one source of truth about which tokens are padding instead of two.
+
+  Raises:
+    ValueError: If `attention_mask` is not `[B, L, L]` against `input_tokens`.
+      Shapes are static, so this raises under `jit` as well as eagerly.
+  """
+  attention_mask = jnp.asarray(attention_mask)
+  batch, seq_len = input_tokens.shape
+  if attention_mask.shape != (batch, seq_len, seq_len):
+    raise ValueError(
+        f"attention_mask has shape {attention_mask.shape}, expected {(batch, seq_len, seq_len)} "
+        f"for input_tokens of shape {input_tokens.shape}. The last query row is read as Tunix's "
+        "per-token non-pad mask, which requires that shape."
+    )
+  return attention_mask[:, -1, :].astype(jnp.int32)
+
+
 class TunixMaxTextAdapter(nnx.Module):
   """Adapter exposing Tunix Trainer call signature over a Transformer model."""
 
@@ -87,14 +115,14 @@ class TunixMaxTextAdapter(nnx.Module):
         use_standalone_mappings,
     )
     self.use_no_op_mappings = use_no_op_mappings
-    # When `pad_id` is provided AND tunix passes `decoder_segment_ids=None`,
-    # synthesize per-token segment_ids (1 for non-pad, 0 for pad). MaxText's
-    # segment-based attention mask then blocks queries at non-pad positions
-    # from attending to pad-position keys. Without this, the adapter forwards
-    # `decoder_segment_ids=None` and MaxText falls back to causal-only masking,
-    # so padded tokens get attended to as if they were real input — silently
-    # corrupting trainer log-probs on every batch. (Rollout-side vLLM does the
-    # right thing because it batches without padding via its scheduler.)
+    # Lowest-priority source of segment ids, used only when Tunix supplies
+    # neither `segment_ids` nor an `attention_mask` (`__call__` has the order).
+    # Synthesizes them per token -- 1 for non-pad, 0 for pad -- so MaxText's
+    # segment-based mask stops non-pad queries attending to pad keys. Without it
+    # the adapter forwards `decoder_segment_ids=None`, MaxText falls back to
+    # causal-only masking, and padding is attended to as real input, silently
+    # corrupting trainer log-probs on every batch. Rollout-side vLLM is
+    # unaffected: its scheduler batches without padding.
     self._pad_id = pad_id
 
   # ------------------------------------------------------------------ #
@@ -118,9 +146,14 @@ class TunixMaxTextAdapter(nnx.Module):
     forwards them only to models whose call signature has a parameter of that
     exact name. They are MaxText's `decoder_segment_ids`; when both are given,
     `segment_ids` wins so packed rows keep per-sequence attention isolation.
+
+    Three sources can supply the segment ids, in descending priority:
+    explicit segment ids, Tunix's `attention_mask`, then `pad_id` synthesis.
     """
     if segment_ids is not None:
       decoder_segment_ids = segment_ids
+    if decoder_segment_ids is None and attention_mask is not None:
+      decoder_segment_ids = _segment_ids_from_attention_mask(attention_mask, input_tokens)
     if decoder_segment_ids is None and self._pad_id is not None:
       decoder_segment_ids = (input_tokens != self._pad_id).astype(jnp.int32)
     logits = self.base(

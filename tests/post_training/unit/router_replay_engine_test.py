@@ -32,6 +32,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.models import models
+from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -41,6 +42,28 @@ import pytest
 # auto-marks it cpu_only, and the cpu/tpu post-training jobs additionally
 # filter on post_training while the unit jobs --ignore tests/post_training.
 pytestmark = [pytest.mark.post_training]
+
+
+def _rl_payload(token_ids, token_mask=None, **kwargs):
+  """An RLTrainerPayload carrying one whole model row, in its completion half.
+
+  This is the shape `SequencePackedBatchAssembler` emits: a zero-width prompt, with the
+  entire row in the completion. `PaddedBatchAssembler` splits the row across both halves
+  instead.
+  """
+  if token_mask is None:
+    token_mask = jnp.ones_like(token_ids)
+  batch = token_ids.shape[0]
+  return abstract_engine.RLTrainerPayload(
+      prompt_ids=jnp.zeros((batch, 0), dtype=token_ids.dtype),
+      prompt_mask=jnp.zeros((batch, 0), dtype=token_mask.dtype),
+      completion_ids=token_ids,
+      completion_mask=token_mask,
+      # Required by RLTrainerPayload, and unread by the router-replay adapter: it feeds
+      # MaxText's own cross-entropy loss, not a GRPO objective.
+      advantages=jnp.zeros((batch,), dtype=jnp.float32),
+      **kwargs,
+  )
 
 
 def _init_test_cfg(extra_args=(), **kwargs):
@@ -100,12 +123,12 @@ def _router_replay_cfg(**overrides):
 class RouterReplayEngineTest(unittest.TestCase):
   """Demonstrates that MaxTextTrainingEngine can accept forced router-replay
 
-  expert decisions (router replay logits) on a TrainerPayload and thread them
-  all the way through to the model's MoE layers via `train.loss_fn`.
+  expert decisions (router replay logits) on Tunix's `RLTrainerPayload` and thread
+  them all the way through to the model's MoE layers via `train.loss_fn`.
 
   This does not touch the input pipeline: the payload is constructed
   directly by the caller (e.g. an RL rollout worker), exactly like
-  `TrainerPayload` subclasses are meant to be used.
+  Tunix's batch assemblers build it.
   `router_replay_gen_model_input_fn`
   is the "last-mile adapter" (via `with_gen_model_input_fn`) that maps it into
   keyword arguments, and `make_router_replay_loss_fn` (via `with_loss_fn`) is
@@ -168,14 +191,10 @@ class RouterReplayEngineTest(unittest.TestCase):
     forced_routed_experts = forced_routed_experts.at[:, :, 1].set(3)
     forced_routed_experts = forced_routed_experts.at[:, -2:, :].set(-1)
 
-    payload = maxtext_engine.RouterReplayTrainerPayload(
-        token_ids=token_ids,
-        token_mask=token_mask,
-        forced_routed_experts=forced_routed_experts,
-    )
+    payload = _rl_payload(token_ids, token_mask, routed_experts=forced_routed_experts)
 
-    # Sanity check the adapter itself: forced_routed_experts must reach the
-    # kwargs router_replay_loss_fn is called with, unmodified.
+    # Sanity check the adapter itself: Tunix's `routed_experts` must reach the kwargs
+    # router_replay_loss_fn is called with under the model-side name, unmodified.
     adapted_batch = maxtext_engine.router_replay_gen_model_input_fn(payload)
     self.assertIn("forced_routed_experts", adapted_batch)
     self.assertTrue((adapted_batch["forced_routed_experts"] == forced_routed_experts).all())
@@ -217,11 +236,7 @@ class RouterReplayEngineTest(unittest.TestCase):
     def loss_for(first, second):
       forced = jnp.zeros((batch_size, seq_len, top_k), dtype=jnp.int32)
       forced = forced.at[:, :, 0].set(first).at[:, :, 1].set(second)
-      payload = maxtext_engine.RouterReplayTrainerPayload(
-          token_ids=token_ids,
-          token_mask=token_mask,
-          forced_routed_experts=forced,
-      )
+      payload = _rl_payload(token_ids, token_mask, routed_experts=forced)
       engine.compile(payload)
       engine.fwd_bwd(payload)
       loss = engine._cached_losses[-1]  # pylint: disable=protected-access
@@ -235,16 +250,12 @@ class RouterReplayEngineTest(unittest.TestCase):
     )
 
   def test_gen_model_input_fn_omits_forced_routed_experts_when_absent(self):
-    """When a payload doesn't set forced_routed_experts, the adapter must not
+    """A payload without routed_experts must not put a `None` in the batch.
 
-    inject a `None` value into the batch (train.loss_fn's per-key batch-size
-    decimation loop indexes every value, which would crash on None).
+    `train.loss_fn`'s per-key batch-size decimation loop indexes every value, and
+    would crash on None.
     """
-    payload = maxtext_engine.RouterReplayTrainerPayload(
-        token_ids=jnp.ones((1, 4), dtype=jnp.int32),
-        token_mask=jnp.ones((1, 4), dtype=jnp.int32),
-    )
-    batch = maxtext_engine.router_replay_gen_model_input_fn(payload)
+    batch = maxtext_engine.router_replay_gen_model_input_fn(_rl_payload(jnp.ones((1, 4), dtype=jnp.int32)))
     self.assertNotIn("forced_routed_experts", batch)
 
   def test_last_position_is_masked_out_of_the_loss(self):
@@ -256,46 +267,40 @@ class RouterReplayEngineTest(unittest.TestCase):
     seq_len = 4
     ids = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
 
-    unpadded = maxtext_engine.router_replay_gen_model_input_fn(
-        maxtext_engine.RouterReplayTrainerPayload(token_ids=ids, token_mask=jnp.ones((1, seq_len), dtype=jnp.int32))
-    )
+    unpadded = maxtext_engine.router_replay_gen_model_input_fn(_rl_payload(ids))
     # roll(-1) really does wrap token 0 into the last slot, and that slot must
     # not contribute to the loss while every earlier position still does.
     self.assertEqual(int(unpadded["targets"][0, -1]), 0)
     self.assertEqual(unpadded["targets_segmentation"].tolist(), [[1, 1, 1, 0]])
 
-    padded = maxtext_engine.router_replay_gen_model_input_fn(
-        maxtext_engine.RouterReplayTrainerPayload(token_ids=ids, token_mask=jnp.array([[1, 1, 0, 0]], dtype=jnp.int32))
-    )
+    padded = maxtext_engine.router_replay_gen_model_input_fn(_rl_payload(ids, jnp.array([[1, 1, 0, 0]], dtype=jnp.int32)))
     # Position 1 is dropped too: its roll(-1) target is ids[2], a pad token, so
     # the token_mask alone over-counts the trainable positions by one.
     self.assertEqual(padded["targets_segmentation"].tolist(), [[1, 0, 0, 0]])
 
   def test_positions_respect_left_padding(self):
-    """TrainerPayload rows are left-padded, so a plain arange would shift every
+    """Rows are left-padded, so a plain arange would shift every real token's
 
-    real token's RoPE position relative to the rollout that produced the
-    routing.
+    RoPE position relative to the rollout that produced the routing.
     """
     token_ids = jnp.array([[0, 0, 5, 6, 7]], dtype=jnp.int32)
     token_mask = jnp.array([[0, 0, 1, 1, 1]], dtype=jnp.int32)
-    batch = maxtext_engine.router_replay_gen_model_input_fn(
-        maxtext_engine.RouterReplayTrainerPayload(token_ids=token_ids, token_mask=token_mask)
-    )
+    batch = maxtext_engine.router_replay_gen_model_input_fn(_rl_payload(token_ids, token_mask))
     # The first real token must start at position 0, not at 2.
     self.assertEqual(batch["inputs_position"].tolist(), [[0, 0, 0, 1, 2]])
 
-  def test_packed_segment_boundaries_are_masked(self):
-    """roll(-1) makes the last token of a packed segment predict the first
+  def test_packed_segments_restart_positions_and_mask_their_boundaries(self):
+    """Each segment of a packed row is numbered from 0 and masked at its end.
 
-    token of the next one; that position must not contribute to the loss.
+    A packed row holds several independent sequences, so carrying the position count
+    across a seam rotates the second sequence by the length of the first. Separately,
+    roll(-1) makes the last token of a segment predict the first token of the next
+    one, which must not contribute to the loss.
     """
     token_ids = jnp.arange(6, dtype=jnp.int32)[None, :]
-    token_mask = jnp.ones((1, 6), dtype=jnp.int32)
     segment_ids = jnp.array([[1, 1, 1, 2, 2, 2]], dtype=jnp.int32)
-    batch = maxtext_engine.router_replay_gen_model_input_fn(
-        maxtext_engine.RouterReplayTrainerPayload(token_ids=token_ids, token_mask=token_mask, segment_ids=segment_ids)
-    )
+    batch = maxtext_engine.router_replay_gen_model_input_fn(_rl_payload(token_ids, segment_ids=segment_ids))
+    self.assertEqual(batch["inputs_position"].tolist(), [[0, 1, 2, 0, 1, 2]])
     # Index 2 is the last token of segment 1, index 5 is the wrap-around.
     self.assertEqual(batch["targets_segmentation"].tolist(), [[1, 1, 0, 1, 1, 0]])
 
