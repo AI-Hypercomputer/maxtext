@@ -71,6 +71,10 @@ def build_configs(args):
   common = [
       "",
       f"model_name={args.model}",
+      # The model yml pins base_num_decoder_layers (and use_mrope on qwen3.5),
+      # and pyconfig refuses a CLI override of a model-config key unless this is
+      # set. Shrinking depth is the whole point here, so allow it.
+      "override_model_config=True",
       f"base_num_decoder_layers={args.layers}",
       f"max_target_length={args.seq_len}",
       f"max_prefill_predict_length={args.seq_len}",
