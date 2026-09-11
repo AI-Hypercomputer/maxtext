@@ -353,6 +353,9 @@ def _load_tunix_full_state_from_path(
 
   has_base = False
   has_inject = False
+  # Inspect checkpoint metadata to detect adapter wrapping ('base') or injected hyperparameter states.
+  # If metadata cannot be read (e.g. absent metadata file or custom storage backend), log a warning
+  # and fall back to restoring standard unadapted model parameters and optimizer state.
   try:
     item_meta = mgr.item_metadata(step)
 
@@ -372,8 +375,11 @@ def _load_tunix_full_state_from_path(
       tree = getattr(opt_meta, "tree", opt_meta)
       if isinstance(tree, dict) and "inner_state" in tree and "count" in tree:
         has_inject = True
-  except Exception:  # pylint: disable=broad-except
-    pass
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.warning(
+        f"Could not inspect Tunix item_metadata for step {step} at {root_dir}: {e}. "
+        "Falling back to unadapted model and optimizer layout."
+    )
 
   want_params_dict = want_params.to_pure_dict() if isinstance(want_params, nnx.State) else want_params
   want_opt_dict = want_opt.to_pure_dict() if isinstance(want_opt, nnx.State) else want_opt
@@ -480,12 +486,9 @@ def _load_full_state_from_path(
     The loaded state.
   """
   if source_checkpoint_layout == "orbax":
-    try:
-      if (epath.Path(path) / "model_params").exists() and (epath.Path(path) / "optimizer_state").exists():
-        max_logging.log(f"Auto-detected Tunix checkpoint layout at {path}")
-        source_checkpoint_layout = "tunix"
-    except Exception:  # pylint: disable=broad-except
-      pass
+    if (epath.Path(path) / "model_params").exists() and (epath.Path(path) / "optimizer_state").exists():
+      max_logging.log(f"Auto-detected Tunix checkpoint layout at {path}")
+      source_checkpoint_layout = "tunix"
 
   if source_checkpoint_layout == "tunix":
     return _load_tunix_full_state_from_path(
@@ -864,13 +867,9 @@ def load_params_from_path(
   if path_obj.name == "model_params":
     is_tunix = True
     target_path = path_obj.parent
-  else:
-    try:
-      if (path_obj / "model_params").exists():
-        is_tunix = True
-        target_path = path_obj
-    except Exception:  # pylint: disable=broad-except
-      pass
+  elif (path_obj / "model_params").exists():
+    is_tunix = True
+    target_path = path_obj
 
   is_nnx = isinstance(abstract_unboxed_params, nnx.State)
   want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
@@ -910,8 +909,11 @@ def load_params_from_path(
         tree = getattr(model_meta, "tree", model_meta)
         if isinstance(tree, dict) and "base" in tree:
           has_base = True
-    except Exception:  # pylint: disable=broad-except
-      pass
+    except Exception as e:  # pylint: disable=broad-except
+      max_logging.warning(
+          f"Could not inspect Tunix item_metadata for step {step} at {root_dir}: {e}. "
+          "Assuming standard non-adapter checkpoint layout."
+      )
 
     target_want = jax.tree.map(lambda v: {"value": v}, want)
     target_params = {"base": target_want} if has_base else target_want

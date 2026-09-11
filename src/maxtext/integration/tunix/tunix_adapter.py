@@ -81,6 +81,9 @@ class TunixMaxTextAdapter(nnx.Module):
   ):
     super().__init__()
     self.base = base_model
+    # Use .get() to gracefully handle model architectures or custom test variants that
+    # are not registered in HF_MODEL_CONFIGS, defaulting to an empty config mapping
+    # rather than raising a KeyError.
     hf_config = HF_MODEL_CONFIGS.get(self.base.config.model_name)
     hf_dict = hf_config.to_dict() if hf_config is not None else {}
     self._vllm_weight_mapping = VllmWeightMapping(
