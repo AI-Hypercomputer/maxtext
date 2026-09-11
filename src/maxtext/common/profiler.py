@@ -29,6 +29,48 @@ from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
 from maxtext.utils import max_logging
 
 
+def build_profile_options(config, power_events=True):
+  """Builds `ProfileOptions` from the advanced xprof config keys.
+
+  Shared with `maxtext.training_engine.micro_step_profiler`, which windows xprof in
+  micro-steps but configures it out of the same keys. Only meaningful for the xplane
+  backend; callers on another backend should not call this.
+
+  Args:
+    config: MaxText configuration.
+    power_events: Whether to honour `profile_power_events`. Managed mldiagnostics collects
+      power telemetry itself, so the pre-train profiler passes False when it is on.
+
+  Returns:
+    `ProfileOptions`, with `advanced_configuration` set only if some key asked for it.
+  """
+  options = jax.profiler.ProfileOptions()
+  advanced_config = {}
+
+  if power_events and config.profile_power_events:
+    advanced_config.update(
+        {
+            "tpu_power_trace_level": config.xprof_tpu_power_trace_level,
+            "e2e_enable_fw_throttle_event": config.xprof_e2e_enable_fw_throttle_event,
+            "e2e_enable_fw_power_level_event": config.xprof_e2e_enable_fw_power_level_event,
+            "e2e_enable_fw_thermal_event": config.xprof_e2e_enable_fw_thermal_event,
+        }
+    )
+
+  if config.enable_tpu_profiling_options:
+    advanced_config.update(
+        {
+            "tpu_num_chips_to_profile_per_task": config.tpu_num_chips_to_profile_per_task,
+            "tpu_num_sparse_core_tiles_to_trace": config.tpu_num_sparse_core_tiles_to_trace,
+            "tpu_num_sparse_cores_to_trace": config.tpu_num_sparse_cores_to_trace,
+        }
+    )
+
+  if advanced_config:
+    options.advanced_configuration = advanced_config
+  return options
+
+
 class Profiler:
   """Activate/deactivate a profiler based on the 'profiler' config."""
 
@@ -50,30 +92,10 @@ class Profiler:
     if config.managed_mldiagnostics:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
 
-    self.profiling_options = jax.profiler.ProfileOptions()
-    advanced_config = {}
-
-    if self.mode == "xplane" and not self.managed_mldiagnostics and config.profile_power_events:
-      advanced_config.update(
-          {
-              "tpu_power_trace_level": config.xprof_tpu_power_trace_level,
-              "e2e_enable_fw_throttle_event": config.xprof_e2e_enable_fw_throttle_event,
-              "e2e_enable_fw_power_level_event": config.xprof_e2e_enable_fw_power_level_event,
-              "e2e_enable_fw_thermal_event": config.xprof_e2e_enable_fw_thermal_event,
-          }
-      )
-
-    if self.mode == "xplane" and config.enable_tpu_profiling_options:
-      advanced_config.update(
-          {
-              "tpu_num_chips_to_profile_per_task": config.tpu_num_chips_to_profile_per_task,
-              "tpu_num_sparse_core_tiles_to_trace": config.tpu_num_sparse_core_tiles_to_trace,
-              "tpu_num_sparse_cores_to_trace": config.tpu_num_sparse_cores_to_trace,
-          }
-      )
-
-    if advanced_config:
-      self.profiling_options.advanced_configuration = advanced_config
+    if self.mode == "xplane":
+      self.profiling_options = build_profile_options(config, power_events=not self.managed_mldiagnostics)
+    else:
+      self.profiling_options = jax.profiler.ProfileOptions()
 
   def maybe_activate_profiler(self, step, state):
     """Conditionally activates the profiler based on the current step.

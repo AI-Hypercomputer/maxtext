@@ -44,6 +44,7 @@ from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
 from maxtext.training_engine import inflight_throttler
 from maxtext.training_engine import metrics as metrics_module
+from maxtext.training_engine import micro_step_profiler
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -621,7 +622,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._zero1_params_shardings: Any = None
     self._gathered_params_shardings: Any = None
     self._zero1_warned = False
+    # Micro step count within the current training step. Resets on `update()`.
     self._micro_step_count = 0
+    # Every micro-batch this run has ever folded in, across optimizer steps and across
+    # restarts -- unlike `_micro_step_count`, which is the count within the step being
+    # accumulated and resets on every `update`. Checkpointed, so it keeps counting through a
+    # restart rather than restarting the count.
+    self._total_micro_steps = 0
     # Set when this run resumed from an intra-step checkpoint, cleared once the step it
     # resumed into completes and its finished state has been checkpointed.
     self._resumed_mid_step = False
@@ -642,6 +649,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._eval_metrics_recorder = metrics_module.MetricsRecorder(mode=metrics_module.Mode.EVAL)
     self._metrics_logger = metrics_module.MetricsLogger(config=self._config)
     self._throttler = inflight_throttler.InflightThrottler(config=self._config, metrics_logger=self._metrics_logger)
+    self._profiler = micro_step_profiler.MicroStepProfiler(config=self._config)
     self._raiden_sync: Any = None
     self._last_staged_step: Optional[int] = None
     self._staged_metadata: Any = None
@@ -765,6 +773,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def micro_step_count(self) -> int:
     """Returns the current micro-batch count in gradient accumulation."""
     return self._micro_step_count
+
+  @property
+  def total_micro_steps(self) -> int:
+    """Returns how many micro-batches this run has folded in over its whole lifetime.
+
+    Counts across optimizer steps and across restarts, since it is checkpointed. This is the
+    engine's measure of work done: `train_step` alone does not say how much computation went
+    into a step when packing makes the micro-batches per step vary.
+    """
+    return self._total_micro_steps
 
   @property
   def has_accumulated_grads(self) -> bool:
@@ -1616,11 +1634,30 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
 
+    Brackets the pass with the profiler window checks and a step trace annotation. The
+    annotation carries the cumulative micro-step index rather than the optimizer step, so
+    xprof's step view resolves individual micro-batches -- a profiling window rarely spans a
+    whole RL step, and one labelled step would leave the view empty.
+
     Args:
       payload: Packed micro-batch training input.
       **kwargs: Implementation-specific options, accepted for interface compatibility
         and ignored by this engine.
     """
+    micro_step = self._total_micro_steps
+    # Drain before opening the trace: this method only dispatches, so up to
+    # `max_inflight_computations` earlier micro-steps are still running on device and would
+    # otherwise open the window over work the window was not meant to capture.
+    self._profiler.maybe_activate(micro_step, drain=self._throttler.wait_for_all)
+    with jax.profiler.StepTraceAnnotation("train", step_num=micro_step):
+      self._fwd_bwd(payload, **kwargs)
+    # Block on the accumulator, not the state: it is what this micro-step just produced, and
+    # stopping the trace without waiting for it would cut the trace before the device has run
+    # the very micro-steps the window asked for.
+    self._profiler.maybe_deactivate(micro_step, block_on=self._accumulated_grads, train_step=self.train_step)
+
+  def _fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
+    """Runs the forward-backward pass itself. See `fwd_bwd`."""
     batch = self._prepare_batch(payload)
 
     model = getattr(self._state, "model", None) if self._state is not None else self._model
@@ -1643,6 +1680,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       signature = _batch_signature(dynamic_batch, static_batch)
       if not self._compiled or self._needs_recompile(signature, self._compiled_signature):
         self._compile_for_batch(dynamic_batch, static_batch)
+        # Packing changes the batch signature, so recompiles happen mid-run. One inside a
+        # profiling window dominates the trace, and the window says so when it closes.
+        self._profiler.note_compilation()
       # After any recompile, not before: reading first would hand the new kernel a pure
       # state split against the old graph.
       params, rest = self._read_model_pure(model)
@@ -1680,9 +1720,27 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_grads = acc_grads
     self._accumulated_denominator = acc_denom
     self._micro_step_count += 1
+    self._total_micro_steps += 1
 
   def update(self, **kwargs: Any) -> int:
     """Applies accumulated gradients to update NNX model weights in HBM.
+
+    Annotates the optimizer step on the trace timeline. `TraceAnnotation` rather than
+    `StepTraceAnnotation`: micro-steps own the step numbering here, and a second kind of step
+    marker would confuse xprof's step detection.
+
+    Args:
+      **kwargs: Implementation-specific options, accepted for interface compatibility
+        and ignored by this engine.
+
+    Returns:
+      The train step count after this update. Unchanged when there is nothing to apply.
+    """
+    with jax.profiler.TraceAnnotation("update", step_num=self.train_step):
+      return self._update(**kwargs)
+
+  def _update(self, **kwargs: Any) -> int:
+    """Applies the accumulated gradients. See `update`.
 
     Reuses NNX optimizer step from train.py (lines 511-535).
 
@@ -1880,6 +1938,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # The gradients are stored unreduced, so their divisor has to survive the round-trip too.
     if self._micro_step_count > 0 and self._accumulated_denominator is not None:
       custom_metadata["accumulated_denominator"] = float(self._accumulated_denominator)
+    # Saved on every checkpoint, complete or intra-step. Restoring an intra-step checkpoint
+    # does not replay the micro-batches already folded into `accumulated_grads`, so the count
+    # simply continues from here.
+    custom_metadata["total_micro_steps"] = self._total_micro_steps
 
     ckpt_saved = self._checkpoint_manager.save_checkpoint(
         step=step,
@@ -1964,11 +2026,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Checkpoint with no metadata says nothing about how far into its step it
     # got, and must not inherit the count from whatever this engine was doing before.
     self._micro_step_count = 0
+    self._total_micro_steps = 0
     restored_denominator = None
     if restored_metadata:
       self._micro_step_count = restored_metadata.get("micro_step_count", 0)
       restored_denominator = restored_metadata.get("accumulated_denominator", None)
       restored_additional_metadata = restored_metadata.get("additional_metadata", None)
+      self._total_micro_steps = restored_metadata.get("total_micro_steps", 0)
 
     if self._micro_step_count > 0:
       logging.info(
@@ -2231,6 +2295,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def close(self) -> None:
     """Closes the trainer, writes buffered metrics and final checkpoint."""
+    # First, so a run that ends mid-window still writes its profile, and so the shutdown work
+    # below does not land in the trace.
+    self._profiler.close()
+
     if self._raiden_sync:
       if hasattr(self._raiden_sync, "close"):
         self._raiden_sync.close()
