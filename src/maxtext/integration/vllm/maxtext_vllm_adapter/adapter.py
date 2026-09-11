@@ -24,6 +24,7 @@ from jax.sharding import Mesh
 import numpy as np
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
+from maxtext.integration.vllm.convert_utils import DEFAULT_TPU_NUM_LANES, compute_padded_moe_mlp_dim
 from maxtext.integration.vllm.hybrid_cache_utils import (
     build_qwen_gdn_cache_layout,
     gather_layer_kv_caches,
@@ -125,7 +126,10 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       else vllm_config.model_config.hf_config
   )
   hidden_size = getattr(hf_config, "moe_intermediate_size", None)
-  num_lanes = pltpu.get_tpu_info().num_lanes
+  try:
+    num_lanes = pltpu.get_tpu_info().num_lanes
+  except Exception:  # pylint: disable=broad-exception-caught
+    num_lanes = DEFAULT_TPU_NUM_LANES
   num_kv_heads = hf_config.num_key_value_heads
 
   # Number of KV heads in global attention layers (None if the field is absent or unset).
@@ -173,10 +177,8 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   # The GMM_v2 kernel requires the MLP dimension per expert to be at least 2x the number of TPU lanes
   # to ensure efficient execution. See the validate_inputs() method in the following file for more details:
   # https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/megablox/gmm_v2.py
-  if hidden_size is not None and (hidden_size // moe_mlp_tp_size) % (2 * num_lanes) != 0:
-    padded_hidden_size = next_power_of_two(hidden_size)
-    while (padded_hidden_size // moe_mlp_tp_size) < (2 * num_lanes):
-      padded_hidden_size = next_power_of_two(padded_hidden_size + 1)
+  padded_hidden_size = compute_padded_moe_mlp_dim(hidden_size, moe_mlp_tp_size, num_lanes)
+  if padded_hidden_size is not None and padded_hidden_size != hidden_size:
 
     # This inflates every expert weight, so it is a real memory/FLOP cost rather than a
     # cosmetic reshape: at moe_mlp_tp_size=4 a 512-wide MoE is padded to 1024 (2x the MoE
@@ -338,6 +340,21 @@ class MaxTextForCausalLM(nnx.Module):
       positions = _input_positions
     input_positions = normalize_vllm_input_positions(positions)
 
+    # Filter kwargs to only those accepted by self.model.
+    model_kwargs = dict(kwargs)
+    for extra_key in (
+        "inputs_embeds",
+        "input_positions",
+        "layer_name_to_kvcache_index",
+        "_layer_name_to_kv_cache",
+        "shared_attention_metadata",
+        "intermediate_tensors",
+        "lora_metadata",
+        "is_first_rank",
+        "is_last_rank",
+    ):
+      model_kwargs.pop(extra_key, None)
+
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
       expert_indices = None
@@ -348,7 +365,7 @@ class MaxTextForCausalLM(nnx.Module):
           kv_caches=layer_kv_caches,
           attention_metadata=attention_metadata,
           model_mode=self.model_mode,
-          **kwargs,
+          **model_kwargs,
       )
 
       if isinstance(res, tuple) and len(res) == 3:
@@ -472,6 +489,7 @@ class MaxTextForCausalLM(nnx.Module):
         if self.maxtext_config.lora.lora_restore_path:
           lora_utils.restore_lora_from_path(model, self.maxtext_config)
       self.model = nnx.data(model)
+    patch_raiden_worker_h2d()
 
   def get_mrope_input_positions(
       self,
@@ -616,3 +634,13 @@ def patch_kv_cache_manager():
 
   KVCacheManager.get_kv_cache_spec = patched_get_kv_cache_spec
   max_logging.log("Successfully applied KVCacheManager patch for hybrid GDN models.")
+
+
+def patch_raiden_worker_h2d():
+  """Monkey-patches TPUWorker.raiden_h2d and RaidenWorkerSync to apply Raiden weights to runner."""
+  try:
+    from tunix.experimental.weight_sync.raiden_synchronizer import patch_raiden_worker_sync  # pylint: disable=import-outside-toplevel
+
+    patch_raiden_worker_sync()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Skipping raiden worker sync patch: {e}")

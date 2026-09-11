@@ -23,8 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
-import os
-from typing import Any
+from typing import Any, Optional
 
 from absl import logging
 from flax import nnx
@@ -37,6 +36,11 @@ from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
+from maxtext.integration.vllm.convert_utils import (
+    is_verify_weights_enabled,
+    resolve_prefuse_moe_weights,
+    resolve_rollout_tp,
+)
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
@@ -145,6 +149,14 @@ def _batch_signature(dynamic_batch: Any, static_batch: dict[str, Any]) -> Any:
   shapes = tuple((jnp.shape(leaf), jnp.result_type(leaf)) for leaf in leaves)
   return (treedef, shapes, static_batch)
 
+
+_REPLICATED_BATCH_DIM_WARNING = (
+    "Loss input with batch dim %d does not divide mesh axis %r (size %d), so that "
+    "dimension is replicated instead of sharded: every device along the axis holds and "
+    "computes the whole micro-batch, %dx the work a sharded one would do there. Results "
+    "stay correct. If it was not deliberate -- a sequence-packed micro-batch is always "
+    "size 1 and has no alternative -- make the micro-batch a multiple of the axis size."
+)
 
 _UNCOMPARABLE_SIGNATURE_WARNING = (
     "Could not compare %s between fwd_bwd calls (%s), so the engine cannot tell whether "
@@ -557,6 +569,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_eval: Any = None
     self._compiled_eval_signature: Any = None
     self._signature_compare_warned: bool = False
+    self._replicated_batch_warned: bool = False
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     self._model = self._build_model(wrap_with_tunix_adapter, tokenizer_pad_id)
@@ -606,6 +619,28 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._metrics_logger = metrics_module.MetricsLogger(config=self._config)
     self._throttler = inflight_throttler.InflightThrottler(config=self._config, metrics_logger=self._metrics_logger)
     self._raiden_sync: Any = None
+    self._last_staged_step: Optional[int] = None
+    self._staged_metadata: Any = None
+    self._use_weight_converter = bool(self._config.use_weight_converter)
+    self._rollout_backend = self._config.rollout_backend
+    rollout_tp = resolve_rollout_tp(self._config)
+    kv_tp = self._config.kv_tp_size or rollout_tp
+    moe_tp = self._config.moe_mlp_tp_size or rollout_tp
+    prefuse_moe = resolve_prefuse_moe_weights(self._config)
+    if self._use_weight_converter:
+      from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+      self._weight_converter = WeightConverter(
+          config=self._config,
+          tp=rollout_tp,
+          kv_tp_size=kv_tp,
+          moe_mlp_tp_size=moe_tp,
+          prefuse_moe_weights=prefuse_moe,
+          rollout_backend=self._rollout_backend,
+          debug=self._config.weight_sync_debug,
+      )
+    else:
+      self._weight_converter = None
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     """Returns the model to train, adopting a mesh when this engine was given none."""
@@ -1203,7 +1238,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._gen_model_input_fn is not None:
       return self._gen_model_input_fn(payload)
     if dataclasses.is_dataclass(payload):
-      return {k: getattr(payload, k) for k in payload.__dataclass_fields__ if getattr(payload, k) is not None}
+      return {
+          k: getattr(payload, k)
+          for k in payload.__dataclass_fields__
+          if getattr(payload, k) is not None and k != "metadata"
+      }
     return payload
 
   def _mesh_sharding(self, leaf: Any) -> jax.sharding.Sharding | None:
@@ -1247,7 +1286,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     sequence-packed micro-batch, always size 1) replicates that dim instead of sharding
     it -- every device holds and computes on the same data with no cross-device split,
     which is correct (there's nothing to reduce back together afterwards) but wastes
-    compute across the axis for that micro-batch.
+    compute across the axis for that micro-batch. That is an N-fold cost, so it warns
+    once per instance rather than living only in this docstring.
     """
     data_sharding = sharding.get_input_data_sharding(self._config, self._mesh)
     data_spec = tuple(data_sharding.spec)
@@ -1257,8 +1297,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         return None
       rank = jnp.ndim(leaf)
       spec = list(data_spec[:rank])
-      if spec and spec[0] is not None and leaf.shape[0] % self._batch_axis_size(spec[0]):
-        spec[0] = None
+      if spec and spec[0] is not None:
+        axis_size = self._batch_axis_size(spec[0])
+        if leaf.shape[0] % axis_size:
+          # Warn once per instance, not per leaf: this runs under a tree_map over every
+          # loss input, and they normally share a batch dim. Silence here would leave an
+          # N-fold compute cliff visible only in a docstring.
+          if not self._replicated_batch_warned:
+            self._replicated_batch_warned = True
+            logging.warning(_REPLICATED_BATCH_DIM_WARNING, leaf.shape[0], spec[0], axis_size, axis_size)
+          spec[0] = None
       return jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(*spec))
 
     return jax.tree.map(leaf_sharding, dynamic_batch)
@@ -1774,6 +1822,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metadata: Checkpoint metadata payload from Orchestrator.
       **kwargs: Additional checkpoint saving options.
     """
+    if not self._config.enable_checkpointing or not self._checkpoint_dir():
+      logging.info("Checkpointing is disabled in config; skipping save_checkpoint.")
+      return
+
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
 
@@ -2061,54 +2113,50 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             " tunix build that ships it, or select a different staging_transport."
         ) from exc
 
+      if (
+          self._raiden_sync is not None
+          and self._last_staged_step == self.train_step
+          and self._staged_metadata is not None
+      ):
+        logging.info(
+            "Trainer reusing staged weight sync for step %d (%d variables)",
+            self.train_step,
+            sum(len(m.variables) for m in self._staged_metadata),
+        )
+        return self._staged_metadata
+
       # 1. Drain all in-flight TPU computations to ensure weights are fully updated
       self._throttler.wait_for_all()
 
       # 2. Extract clean trainable parameters
       params_state = self._get_trainable_params_state()
 
-      # 2a. The trainer keeps float32 master weights, but the rollout side
-      # (MaxTextForCausalLM under configs/inference/vllm.yml) loads/serves in
-      # bfloat16 -- Raiden's manifest preflight rejects a dtype/item_size
-      # mismatch, and binding mismatched-dtype buffers would be wrong anyway.
-      # Cast the synced copy down; the trainer's own params_state (used for
-      # the actual optimizer step) is untouched since this is a fresh tree.
-      params_state = jax.tree_util.tree_map(
-          lambda x: x.astype(jnp.bfloat16) if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) else x,
-          params_state,
-      )
-
-      # 2b. The trainer runs scanned (scan_layers=True) for training speed, but
-      # the rollout side loads its MaxText model unscanned (MaxTextForCausalLM
-      # under configs/inference/vllm.yml has scan_layers=False). Raiden matches
-      # tensors by name, so unscan here -- on the trainer side only -- so the
-      # names/shapes we bind already match what the sampler reports.
-      if self._config.scan_layers:
-        params_state = raiden_unscan.unscan_layers(
+      if self._use_weight_converter:
+        converted_state = self._weight_converter.convert(params_state)
+      else:
+        # UNCHANGED, deliberately out of scope: this fp32->bf16 cast is an
+        # on-device (HBM, not host RAM) full materialization -- a different
+        # memory pool than the host OOM this plan addresses. Candidate
+        # fast-follow: fold into unscan_layers_streaming's per-piece slicing.
+        params_state = jax.tree_util.tree_map(
+            lambda x: x.astype(jnp.bfloat16) if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) else x,
             params_state,
-            num_layers=self._config.num_decoder_layers,
-            scan_axis=self._config.param_scan_axis,
         )
+        if self._config.scan_layers:
+          converted_state = raiden_unscan.unscan_layers(
+              params_state,
+              num_layers=self._config.num_decoder_layers,
+              scan_axis=self._config.param_scan_axis,
+              cycle_interval=self._config.inhomogeneous_layer_cycle_interval,
+          )
+        else:
+          converted_state = params_state
+
+      del params_state
 
       # 3. Bind parameters to the Raiden transport. Construct the synchronizer
       # once, matching the persistent-instance-per-cycle pattern the rebind
       # optimization depends on.
-      #
-      # Under Pathways (JAX_PLATFORMS=proxy + JAX_BACKEND_TARGET set, same
-      # detection tunix's K8sJaxContext.initialize() uses), trainer params
-      # are proxy-backed. Raiden must use FFI (weight_synchronizer_ffi) to bind
-      # directly to device arrays on Pathways TPU workers without host CPU staging,
-      # avoiding client host OOM and multi-minute proxy transfer timeouts.
-      is_pathways = bool("proxy" in os.environ.get("JAX_PLATFORMS", "") and os.environ.get("JAX_BACKEND_TARGET"))
-      if is_pathways and getattr(raiden_synchronizer, "_raiden_ffi", None) is None:
-        raise RuntimeError(
-            "Under Pathways (JAX_PLATFORMS=proxy), Raiden weight synchronization "
-            "requires weight_synchronizer_ffi (from tpu_raiden_jax) to avoid client host OOM "
-            "and proxy staging timeouts. However, _raiden_ffi is not available in "
-            "tunix.experimental.weight_sync.raiden_synchronizer. Please ensure a "
-            "compatible tpu_raiden_jax wheel with FFI support is installed."
-        )
-
       if self._raiden_sync is None:
         self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
             job_name="trainer",
@@ -2117,25 +2165,30 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             parallelism=4,
         )
 
-      self._raiden_sync.bind(params_state)
-      del params_state
+      self._raiden_sync.bind(converted_state)
+      del converted_state
 
       # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
-      if is_pathways or self._raiden_sync.active:
+      if self._raiden_sync.active:
         self._raiden_sync.d2h()
 
-      verify_weights = os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
+      verify_weights = is_verify_weights_enabled()
       if verify_weights:
         logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
 
-      metadata = self._raiden_sync.work_unit_metadata()
+      all_metadata = self._raiden_sync.work_unit_metadata_all()
+      total_variables = sum(len(m.variables) for m in all_metadata)
+
       logging.info(
-          "Trainer prepared weight sync for step %d: registered %d variables on mesh %s",
+          "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s",
           self.train_step,
-          len(metadata.variables),
-          metadata.mesh_axes,
+          len(all_metadata),
+          total_variables,
+          all_metadata[0].mesh_axes if all_metadata else (),
       )
-      return [metadata]
+      self._last_staged_step = self.train_step
+      self._staged_metadata = all_metadata
+      return all_metadata
 
     # Unknown transport: raise rather than return empty metadata. A typo would otherwise
     # surface only as the coordinator's "empty side" error, with nothing logged anywhere
@@ -2144,6 +2197,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def release_weight_sync(self, **kwargs: Any) -> Any:
     """Releases staged weight buffers after transfer completion."""
+    self._last_staged_step = None
+    self._staged_metadata = None
     if self._raiden_sync:
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
     return True
@@ -2154,9 +2209,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if hasattr(self._raiden_sync, "close"):
         self._raiden_sync.close()
       self._raiden_sync = None
+    self._last_staged_step = None
+    self._staged_metadata = None
 
-    self.save_checkpoint(metadata=None, force=True)
-    self._checkpoint_manager.close()
+    if self._config.enable_checkpointing and self._checkpoint_dir() and self._checkpoint_manager:
+      self.save_checkpoint(metadata=None, force=True)
+      self._checkpoint_manager.close()
 
     # Write the metrics and cleanup metrics logger resources
     self._throttler.cleanup()
