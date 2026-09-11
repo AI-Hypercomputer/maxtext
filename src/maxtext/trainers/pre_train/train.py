@@ -79,7 +79,7 @@ from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
-from maxtext.utils.vocabulary_tiling import vocab_tiling_nnx_loss
+from maxtext.utils.vocabulary_tiling import sparse_cross_entropy_with_logits, vocab_tiling_nnx_loss
 
 
 class EncoderKwargs(TypedDict, total=False):
@@ -229,8 +229,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           target_positions,
           data["targets_segmentation"] != 0,
       )
-    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-    xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
+    xent, z_loss = sparse_cross_entropy_with_logits(logits, data["targets"], z_loss=config.z_loss_multiplier)
 
     xent = sharding.maybe_shard_with_logical(
         xent,
