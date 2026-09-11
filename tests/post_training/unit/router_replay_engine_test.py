@@ -325,6 +325,37 @@ class RouterReplayEngineTest(unittest.TestCase):
     # Index 2 is the last token of segment 1, index 5 is the wrap-around.
     self.assertEqual(batch["targets_segmentation"].tolist(), [[1, 1, 0, 1, 1, 0]])
 
+  def test_packed_action_mask_scores_each_segments_first_completion_token(self):
+    """`targets_segmentation` weights the *target*, so it is the mask shifted left by one.
+
+    The packed assembler discards `PackedRow.prompt_mask` and ships the action mask as the
+    payload's only mask (`to_rl_trainer_payload` in
+    `tunix/experimental/orchestrator/batch_assembly.py`), which is 0 over each segment's
+    prompt. Position i predicts token i+1, so the position that predicts a segment's first
+    completion token is that segment's last prompt slot. Applied unshifted, the mask zeroes
+    exactly that position and the segment trains on completion tokens 2..N.
+
+    Distinguishing the two needs `segment_ids` *and* a mask with zeros inside a segment.
+    Without `segment_ids` the fallback makes them equal (`segment_ids = token_mask`), so
+    every mask boundary is also a segment boundary and the shift is unobservable.
+    """
+    token_ids = jnp.arange(6, dtype=jnp.int32)[None, :]
+    segment_ids = jnp.array([[1, 1, 1, 2, 2, 2]], dtype=jnp.int32)
+    batch = maxtext_engine.router_replay_gen_model_input_fn(
+        _rl_payload(token_ids, jnp.array([[0, 1, 1, 0, 1, 1]], dtype=jnp.int32), segment_ids=segment_ids)
+    )
+    # Indices 0 and 3 are the prompt slots that predict tokens 1 and 4, each segment's
+    # first completion token; indices 2 and 5 are segment ends.
+    self.assertEqual(batch["targets_segmentation"].tolist(), [[1, 1, 0, 1, 1, 0]])
+
+    # The shift does not subsume the segment-boundary guard. Give segment 2 an empty prompt
+    # and index 2's shifted mask is 1, so only the guard stops the last token of segment 1
+    # from being trained to predict the first token of segment 2.
+    batch = maxtext_engine.router_replay_gen_model_input_fn(
+        _rl_payload(token_ids, jnp.array([[0, 1, 1, 1, 1, 1]], dtype=jnp.int32), segment_ids=segment_ids)
+    )
+    self.assertEqual(batch["targets_segmentation"].tolist(), [[1, 1, 0, 1, 1, 0]])
+
   def test_segment_positions_are_used_when_tunix_supplies_them(self):
     """Supplied `segment_positions` are used rather than re-derived.
 
