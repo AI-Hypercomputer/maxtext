@@ -49,7 +49,7 @@ def _rl_payload(token_ids, token_mask=None, **kwargs):
 
   This is the shape `SequencePackedBatchAssembler` emits: a zero-width prompt, with the
   entire row in the completion. `PaddedBatchAssembler` splits the row across both halves
-  instead.
+  instead, which `test_prompt_and_completion_halves_are_joined_in_order` covers on its own.
   """
   if token_mask is None:
     token_mask = jnp.ones_like(token_ids)
@@ -258,6 +258,27 @@ class RouterReplayEngineTest(unittest.TestCase):
     batch = maxtext_engine.router_replay_gen_model_input_fn(_rl_payload(jnp.ones((1, 4), dtype=jnp.int32)))
     self.assertNotIn("forced_routed_experts", batch)
 
+  def test_prompt_and_completion_halves_are_joined_in_order(self):
+    """`PaddedBatchAssembler` splits the row, so the adapter has to rebuild it.
+
+    Prompt first, completion second, masks alongside: getting the order or the mask
+    pairing wrong still yields a well-shaped batch that trains on the wrong tokens.
+    """
+    batch = maxtext_engine.router_replay_gen_model_input_fn(
+        abstract_engine.RLTrainerPayload(
+            prompt_ids=jnp.array([[0, 7, 8]], dtype=jnp.int32),
+            prompt_mask=jnp.array([[0, 1, 1]], dtype=jnp.int32),
+            completion_ids=jnp.array([[9, 4]], dtype=jnp.int32),
+            completion_mask=jnp.array([[1, 1]], dtype=jnp.int32),
+            advantages=jnp.zeros((1,), dtype=jnp.float32),
+        )
+    )
+    self.assertEqual(batch["inputs"].tolist(), [[0, 7, 8, 9, 4]])
+    # The masks have to be joined the same way: numbering restarts after the prompt's
+    # left pad and runs unbroken into the completion, which it would not do if the
+    # prompt half were assumed unpadded.
+    self.assertEqual(batch["inputs_position"].tolist(), [[0, 0, 1, 2, 3]])
+
   def test_last_position_is_masked_out_of_the_loss(self):
     """`targets` is a roll(-1) of `token_ids`, so the final position's target is
 
@@ -303,6 +324,40 @@ class RouterReplayEngineTest(unittest.TestCase):
     self.assertEqual(batch["inputs_position"].tolist(), [[0, 1, 2, 0, 1, 2]])
     # Index 2 is the last token of segment 1, index 5 is the wrap-around.
     self.assertEqual(batch["targets_segmentation"].tolist(), [[1, 1, 0, 1, 1, 0]])
+
+  def test_segment_positions_are_used_when_tunix_supplies_them(self):
+    """Supplied `segment_positions` are used rather than re-derived.
+
+    The packed assembler has already computed them, and a second derivation is free to
+    disagree with the positions the rollout actually used.
+    """
+    batch = maxtext_engine.router_replay_gen_model_input_fn(
+        _rl_payload(
+            jnp.arange(6, dtype=jnp.int32)[None, :],
+            segment_ids=jnp.array([[1, 1, 2, 2, 2, 2]], dtype=jnp.int32),
+            segment_positions=jnp.array([[0, 1, 5, 6, 7, 8]], dtype=jnp.int32),
+        )
+    )
+    self.assertEqual(batch["inputs_position"].tolist(), [[0, 1, 5, 6, 7, 8]])
+
+  def test_segment_arrays_narrower_than_the_row_are_rejected(self):
+    """A completion-width segment_ids against a non-empty prompt is rejected.
+
+    Tunix types segment_ids as [B, T] *or* [B, C], and those coincide only because the
+    packed assembler leaves the prompt zero-width. Against a real prompt, a
+    completion-width array would broadcast or truncate silently instead.
+    """
+    with self.assertRaisesRegex(ValueError, "segment_ids has width 2 but the model row is 5 wide"):
+      maxtext_engine.router_replay_gen_model_input_fn(
+          abstract_engine.RLTrainerPayload(
+              prompt_ids=jnp.zeros((1, 3), dtype=jnp.int32),
+              prompt_mask=jnp.ones((1, 3), dtype=jnp.int32),
+              completion_ids=jnp.zeros((1, 2), dtype=jnp.int32),
+              completion_mask=jnp.ones((1, 2), dtype=jnp.int32),
+              advantages=jnp.zeros((1,), dtype=jnp.float32),
+              segment_ids=jnp.ones((1, 2), dtype=jnp.int32),
+          )
+      )
 
   def test_loss_fn_factory_validates_dropout_rng(self):
     with self.assertRaisesRegex(ValueError, "dropout_rng"):
