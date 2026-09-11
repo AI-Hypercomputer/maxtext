@@ -3,7 +3,6 @@
 # Inherit MaxText defaults
 base_config: "base.yml"
 override_model_config: True
-enable_nnx: True
 enable_checkpointing: True
 
 # --- Student Specifics ---

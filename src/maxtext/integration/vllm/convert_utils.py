@@ -41,8 +41,9 @@ Still imported from Tunix at runtime, i.e. the remaining port surface:
     `_bulk_align_and_unstack`; that patch goes away once the port lands.
 """
 
-from typing import Mapping, Any, Callable, Dict, Tuple, Optional
 import functools
+import os
+from typing import Mapping, Any, Callable, Dict, Tuple, Optional
 from absl import logging
 import jax
 import jax.numpy as jnp
@@ -506,7 +507,7 @@ def _interleave_moe_weights(
     tgt_shape: Tuple[int, ...],
     n_shards: int,
     axis: Optional[int] = None,
-    lane_size: int = DEFAULT_TPU_NUM_LANES,
+    lane_size: Optional[int] = 0,
 ) -> jax.Array | np.ndarray:
   """Interleaves wi_0 and wi_1 per-shard into a single tensor matching TPU GMM layout.
 
@@ -517,9 +518,18 @@ def _interleave_moe_weights(
   that is the difference between ~3x and ~1x the output size in live transient
   memory, plus ~5 fewer dispatches per call.
 
+  For TPU GMM_v2 kernels (e.g. gmm_v2.py), each TP shard expects plain concatenation
+  [local_gate, local_up]. The kernel internally performs 128-lane interleaving into
+  VMEM via interleave_lane(w_gate, w_up). Therefore, lane_size defaults to 0 (plain
+  concatenation per shard). Pre-interleaving in HBM double-interleaves and corrupts
+  weights.
+
   `tgt_shape`, `n_shards`, `axis` and `lane_size` are static, so the trace is keyed on them;
   identical layers share a single compilation.
   """
+  if lane_size is None:
+    lane_size = 0
+
   if axis is None:
     axis = len(tgt_shape) - 1
   elif axis < 0:
@@ -559,7 +569,7 @@ def _interleave_moe_weights(
     p_wi_1 = p_wi_1.reshape(shape_lanes)
     combined = jnp.stack([p_wi_0, p_wi_1], axis=axis + 2)
   else:
-    # Fallback when dimension is not divisible by lane_size:
+    # Concatenate wi_0 (gate) and wi_1 (up) per shard: [local_gate, local_up].
     combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
 
   return combined.reshape(tgt_shape)
@@ -689,3 +699,48 @@ def _scanned_sharding_from_per_layer(
       jax.sharding.PartitionSpec(*spec),
       memory_kind=per_layer_sharding.memory_kind,
   )
+
+
+def resolve_rollout_tp(config: Any, tp: int = 1) -> int:
+  """Resolves rollout TP from override, config, or environment."""
+  if tp > 1:
+    return int(tp)
+
+  config_tp = 0
+  if config is not None:
+    raw = (
+        getattr(config, "rollout_tensor_parallelism", 0)
+        or getattr(getattr(config, "cluster", None), "rollout_tensor_parallelism", 0)
+        or getattr(config, "rollout_mesh_tp", 0)
+        or 0
+    )
+    if raw and int(raw) > 0:
+      config_tp = int(raw)
+
+  if not config_tp:
+    env_tp = os.environ.get("ROLLOUT_TENSOR_PARALLEL_SIZE") or os.environ.get("ROLLOUT_MESH_TP")
+    if env_tp and int(env_tp) > 0:
+      config_tp = int(env_tp)
+
+  return int(config_tp or 1)
+
+
+def resolve_prefuse_moe_weights(config: Any, prefuse_moe_weights: Optional[bool] = None) -> bool:
+  """Resolves MoE prefuse flag from override, config, or environment."""
+  if prefuse_moe_weights is not None:
+    return bool(prefuse_moe_weights)
+  if "ROLLOUT_PREFUSE_MOE_WEIGHTS" in os.environ:
+    return os.environ["ROLLOUT_PREFUSE_MOE_WEIGHTS"].lower() in ("1", "true", "yes")
+  if config is not None and getattr(config, "rollout_prefuse_moe_weights", None) is not None:
+    return bool(config.rollout_prefuse_moe_weights)
+  rollout_backend = getattr(config, "rollout_backend", None) or os.environ.get("ROLLOUT_BACKEND", "maxtext")
+  if rollout_backend == "maxtext":
+    return True
+  if config is not None and getattr(config, "prefuse_moe_weights", None) is not None:
+    return bool(config.prefuse_moe_weights)
+  return os.environ.get("PREFUSE_MOE_WEIGHTS", "0").lower() in ("1", "true", "yes")
+
+
+def is_verify_weights_enabled() -> bool:
+  """Returns whether weight verification / checksum validation is active."""
+  return os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
