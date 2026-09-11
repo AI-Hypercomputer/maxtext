@@ -242,5 +242,5 @@ The Cluster Toolkit workload must mount the ramdisk so the training process can 
      --num-slices=${NUM_SLICES?} \
      --gke-mtc-enabled \
      --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
-     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=default dataset_type=synthetic steps=${STEPS?} per_device_batch_size=6 checkpoint_period=${CHECKPOINT_PERIOD?} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?} num_slices=${NUM_SLICES?}"
+     --command="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=default dataset_type=synthetic steps=${STEPS?} per_device_batch_size=6 checkpoint_period=${CHECKPOINT_PERIOD?} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?} num_slices=${NUM_SLICES?}"
    ```

@@ -260,7 +260,7 @@ The flags below would give the user access to the ramdisk in their workload:
      --num-slices=${NUM_SLICES?} \
      --gke-mtc-enabled \
      --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
-     --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=default dataset_type=synthetic steps=${STEPS?} per_device_batch_size=6 enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?} num_slices=${NUM_SLICES?}"
+     --command="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=default dataset_type=synthetic steps=${STEPS?} per_device_batch_size=6 enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?} num_slices=${NUM_SLICES?}"
    ```
 
 ## Deploying MTC on Pathways using Cluster Toolkit
