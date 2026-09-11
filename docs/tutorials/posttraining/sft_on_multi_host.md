@@ -34,18 +34,27 @@ Before starting, ensure you have:
   - **Artifact Registry Writer** (`roles/artifactregistry.writer`) to upload Docker images.
   - **Storage Admin** (`roles/storage.admin`) or **Storage Object Admin** (`roles/storage.objectAdmin`) combined with **Storage Legacy Bucket Reader** (`roles/storage.legacyBucketReader`) on your GCS bucket to read/write checkpoints and logs. (Note: A bucket-level read permission like `storage.buckets.get` is required by JAX/TensorStore to verify bucket existence and metadata; using `roles/storage.objectAdmin` alone will cause a misleading "bucket not found" error).
 - A Hugging Face account with an access token for downloading models.
-- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+- Cluster Toolkit installed and configured. Follow [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md) for `gcluster` setup.
   - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-cli-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
-- A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- A GKE cluster configured for Cluster Toolkit, including healthy Kueue and JobSet components.
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Build and upload MaxText Docker image
 
 For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](build-docker).
 
-## Create GKE cluster
+## Configure GKE cluster
 
-Use a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster).
+Configure access to the target cluster with `gcloud`, then configure the project, cluster, and location with `gcluster` as described in [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md):
+
+```bash
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --location ${LOCATION?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${LOCATION?}
+```
 
 ## Environment configuration
 
@@ -71,8 +80,7 @@ export HF_TOKEN=<HF_TOKEN>
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
-# We recommend to include the model, user, and timestamp.
-# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+# Note: Workload names cannot exceed 28 characters (or 22 characters when using Pathways due to Kubernetes 63-byte coordinator label limits) and must be valid DNS labels (lowercase alphanumeric and hyphens).
 export RUN_NAME=<RUN_NAME>
 
 # -- Workload configuration --
@@ -81,22 +89,27 @@ export RUN_NAME=<RUN_NAME>
 # gcloud config get-value project
 export PROJECT_ID=<PROJECT_ID>
 
-# The GCP location (listed as "Location" in the UI) and name of your
+# The GCP location (region or zone) and name of your
 # TPU-enabled GKE cluster. Both can be found on the
 # [Cloud Console](https://console.cloud.google.com/kubernetes/list).
-export ZONE=<ZONE> # e.g., 'us-central1'
+export LOCATION=<LOCATION> # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
 export GKE_CLUSTER=<CLUSTER_NAME>
 
 # For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
 # of your cluster:
 
 # 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${LOCATION?} --project ${PROJECT_ID?}
 
 # 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
 export TPU_TYPE=<TPU_TYPE>
 export NUM_SLICES=<NUM_SLICES>
+
+# Cluster Toolkit workload placement. See the Cluster Toolkit guide for the
+# compute type and topology matching your TPU slice.
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
@@ -154,33 +167,71 @@ This section provides the command to run SFT on a GKE cluster.
 ### SFT with Multi-Controller JAX (McJAX)
 
 ```bash
-xpk workload create \
---cluster=${GKE_CLUSTER?} \
---project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload=${RUN_NAME?} \
---tpu-type=${TPU_TYPE?} \
---num-slices=${NUM_SLICES?} \
---command "python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?}  per_device_batch_size=1 steps=${STEPS?} profiler=xplane hf_path=${DATASET_NAME?} train_split=${TRAIN_SPLIT?} train_data_columns=${TRAIN_DATA_COLUMNS?}"
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="python3 -m maxtext.trainers.post_train.sft.train_sft \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    model_name=${MODEL?} \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+    hf_access_token=${HF_TOKEN?} \
+    per_device_batch_size=1 \
+    steps=${STEPS?} \
+    profiler=xplane \
+    hf_path=${DATASET_NAME?} \
+    train_split=${TRAIN_SPLIT?} \
+    train_data_columns=${TRAIN_DATA_COLUMNS?}"
 ```
 
 Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
 
 ### SFT with Pathways
 
+To submit an SFT workload with Pathways using Cluster Toolkit, use `gcluster job submit` with the `--pathways` flag:
+
 ```bash
 export USE_PATHWAYS=1
 
-xpk workload create-pathways \
---cluster=${GKE_CLUSTER?} \
---project=${PROJECT_ID?} \
---zone=${ZONE?} \
---docker-image=${DOCKER_IMAGE?} \
---workload=${RUN_NAME?} \
---tpu-type=${TPU_TYPE?} \
---num-slices=${NUM_SLICES?} \
---command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) enable_single_controller=True"
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --pathways \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --num-slices=${NUM_SLICES:-1} \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command="python3 -m maxtext.trainers.post_train.sft.train_sft \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    model_name=${MODEL?} \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+    hf_access_token=${HF_TOKEN?} \
+    per_device_batch_size=1 \
+    steps=${STEPS?} \
+    profiler=xplane \
+    checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) \
+    checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) \
+    enable_single_controller=True"
 ```
 
 Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
+
+## Monitor and clean up
+ 
+```bash
+gcluster job list
+# Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
+gcluster job logs ${RUN_NAME?} --main-only=false
+gcluster job cancel ${RUN_NAME?}
+```
+
+You can also inspect the Kubernetes resources directly:
+
+```bash
+kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+# In Pathways workloads, use the jobset-name label to select all pods (both pathways-head and worker pods):
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
+```

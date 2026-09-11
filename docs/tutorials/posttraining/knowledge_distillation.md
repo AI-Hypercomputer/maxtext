@@ -231,13 +231,13 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
 
 #### b. Install Tunix
 
-The online distillation trainer depends on Tunix. The XPK launcher script ([`scripts/run_distill_xpk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh)) contains a `prep_image` step that layers Tunix on top of the MaxText base image. For local runs, install the same pin used by the launcher — the default `TUNIX_SOURCE` in `run_distill_xpk.sh` is the source of truth. As of this writing:
+The online distillation trainer depends on Tunix. For local runs or custom images, install Tunix from GitHub:
 
 ```bash
 pip install "git+https://github.com/google/tunix@348959d18a4a09c75e58a7d49aec9d8b0eb4a8b6"
 ```
 
-> **Note:** The commit pin above will drift as the launcher is updated. Before installing, check the `TUNIX_SOURCE` default in [`run_distill_xpk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh) and use that spec. Once a Tunix PyPI release ships, this will become a versioned `google-tunix==<ver>` install.
+> **Note:** Once a Tunix PyPI release ships, this will become a versioned `google-tunix==<ver>` install.
 
 ### Configuration
 
@@ -320,49 +320,74 @@ The schedule values above are a strong default for same-size pruning recovery. S
 
 > **Note:** `distill_layer_indices` is applied to **both** student and teacher activations identically. When the two have different depths (Pattern A or a depth-pruned Pattern B), every index must be valid on the *smaller* side, and same-numbered layers are aligned across the two models. The trainer cannot map student layer *i* to teacher layer *f(i)* for arbitrary *f*. If the depths differ significantly, prefer logit-only distillation (`distill_beta=0`).
 
-#### Multi-host on GKE via XPK
+#### Cluster Toolkit multi-host submission
 
-A reference launcher is provided at `src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh`. It handles image preparation (`prep_image` layers Tunix on top of the MaxText base image), workload submission, log streaming, and an auto-resume loop for long-running jobs.
-
-Minimum environment variables:
+Submit the distillation trainer directly as a Cluster Toolkit JobSet:
 
 ```bash
-export XPK_CLUSTER=<your-gke-cluster>
-export XPK_PROJECT=<your-gcp-project>
-export XPK_ZONE=<cluster-zone>             # e.g. us-central1-a
-export XPK_DEVICE_TYPE=<tpu-type>          # e.g. tpu7x-4x4x4, v5p-128
-export XPK_BASE_OUTPUT_DIR=gs://<bucket>/distill-runs
+export PROJECT_ID=<GCP_PROJECT_ID>
+export GKE_CLUSTER=<GKE_CLUSTER_NAME>
+export LOCATION=<GCP_LOCATION> # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
+export RUN_NAME=<DISTILL_RUN_NAME>
+export IMAGE_URI=<ARTIFACT_REGISTRY_IMAGE_URI>
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
+export TOPOLOGY=<TPU_TOPOLOGY>
+export BASE_OUTPUT_DIRECTORY=gs://<BUCKET>/distillation
+export STUDENT_CKPT_PATH=gs://<BUCKET>/<STUDENT_MODEL_PATH>/checkpoints/0/items
+export TEACHER_CKPT_PATH=gs://<BUCKET>/<TEACHER_MODEL_PATH>/checkpoints/0/items
+export TOKENIZER_PATH=meta-llama/Llama-3.1-8B
+export HF_TOKEN=<HF_TOKEN>
 
-# Distillation hyperparameters (always passed; override yml values)
-export DISTILL_ALPHA=0.9
-export DISTILL_TEMPERATURE=2.0
-export DISTILL_BETA=1.0
-# Layer indices for feature loss. Every index must be valid on the smaller side
-# (student for Pattern A, both for Pattern B). Values below assume a 32-layer
-# student; adjust for other depths — see the Distillation guide's layer-index table.
-export DISTILL_LAYER_INDICES=[3,7,11,15,19,23,27,31]   # no spaces inside brackets
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --location ${LOCATION?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${LOCATION?}
+
+gcluster job submit \
+  --image=${IMAGE_URI?} \
+  --name=${RUN_NAME?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="python3 -m maxtext.trainers.post_train.distillation.train_distill \
+    src/maxtext/configs/post_train/distillation.yml \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?}/online \
+    tokenizer_path=${TOKENIZER_PATH?} \
+    tokenizer_type=huggingface \
+    hf_access_token=${HF_TOKEN?} \
+    student_overrides.model_name=llama3.1-8b \
+    student_overrides.base_num_decoder_layers=24 \
+    student_overrides.load_parameters_path=${STUDENT_CKPT_PATH?} \
+    teacher_overrides.model_name=llama3.1-8b \
+    teacher_overrides.load_parameters_path=${TEACHER_CKPT_PATH?} \
+    per_device_batch_size=2 \
+    distill_alpha=0.9 \
+    distill_temperature=2.0 \
+    distill_beta=1.0 \
+    distill_layer_indices=[2,5,8,11,14,17,20,23]"
 ```
 
-Then:
+#### Monitor and clean up
+
+Monitor the workload and stream logs with Cluster Toolkit:
 
 ```bash
-# One-time: layer Tunix on top of the MaxText base image
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh prep_image
-
-# Bake ./src into a runner image and push to gcr.io/$XPK_PROJECT/...:${USER}-distill
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh upload_runner
-
-# Submit a workload
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh submit
+# Check job status
+gcluster job list
 
 # Stream logs
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh monitor
+gcluster job logs ${RUN_NAME?}
 
-# Auto-resume on failure (uses the same workload + base output dir, so checkpoint resume works)
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh resume_until_done
+# Inspect JobSet and pods
+kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?}
+
+# Cancel workload
+gcluster job cancel ${RUN_NAME?}
 ```
-
-The script's header comment lists every supported environment variable.
 
 ### Offline top-k logits variant
 
