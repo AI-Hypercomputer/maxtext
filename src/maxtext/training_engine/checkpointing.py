@@ -55,6 +55,14 @@ class CheckpointManager:
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if checkpoint_dir:
+      # Use configured array format (e.g. use_ocdbt=False for Pathways).
+      # Build a fresh handler per item as Orbax handlers carry per-item state.
+      def _pytree_handler() -> ocp.PyTreeCheckpointHandler:
+        return ocp.PyTreeCheckpointHandler(
+            use_ocdbt=config.checkpoint_storage_use_ocdbt,
+            use_zarr3=config.checkpoint_storage_use_zarr3,
+        )
+
       self._checkpoint_manager = ocp.CheckpointManager(
           directory=checkpoint_dir,
           options=ocp.CheckpointManagerOptions(
@@ -62,6 +70,12 @@ class CheckpointManager:
               max_to_keep=config.max_num_checkpoints_to_keep,
               enable_async_checkpointing=config.async_checkpointing,
           ),
+          item_handlers={
+              "model_params": _pytree_handler(),
+              "optimizer_state": _pytree_handler(),
+              "accumulated_metrics": _pytree_handler(),
+              "accumulated_grads": _pytree_handler(),
+          },
       )
 
   def get_latest_step(self) -> int | None:
