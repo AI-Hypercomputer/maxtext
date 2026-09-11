@@ -27,11 +27,9 @@ from typing import Any, Optional
 
 from absl import logging
 from flax import nnx
-from flax import struct
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
@@ -373,64 +371,90 @@ def _to_aval(value: Any) -> Any:
   return jax.ShapeDtypeStruct(value.shape, value.dtype, sharding=getattr(value, "sharding", None))
 
 
-@struct.dataclass(frozen=True, kw_only=True)
-class RouterReplayTrainerPayload(abstract_engine.TrainerPayload):
-  """A TrainerPayload extension carrying forced router-replay expert decisions.
+def _row_and_mask(payload: abstract_engine.RLTrainerPayload) -> tuple[jax.Array, jax.Array]:
+  """Returns the `[batch, seq]` model row and its mask, prompt part then completion part.
 
-  Pairs with `router_replay_gen_model_input_fn` (via `with_gen_model_input_fn`)
-  and `make_router_replay_loss_fn` (via `with_loss_fn`) below to let a caller
-  (e.g. an RL rollout that already computed expert routing decisions) replay
-  them during the forward pass instead of letting the model's gate re-route.
-
-  Attributes:
-    token_ids: Inherited from TrainerPayload; redeclared here (rather than
-      relying only on inheritance) so static-analysis tools that can't
-      introspect tunix's `TrainerPayload` dataclass still resolve these as valid
-      constructor keyword arguments.
-    token_mask: See TrainerPayload.
-    segment_ids: See TrainerPayload.
-    forced_routed_experts: Optional `[batch, seq, top_k]` (or `[batch, seq,
-      num_layers, top_k]` for a distinct routing per layer) array of expert
-      indices to replay, overriding the model's normal top-k routing. `-1` marks
-      a padded/unused slot. See `check_forced_routing_support` in
-      `maxtext.configs.types` for which decoder_blocks accept this.
+  The two parts are not equal in size and the prompt one can be empty.
+  `RLTrainerPayload` is prompt/completion-split, and concatenating is
+  uniform across both of Tunix's assemblers rather than a special case for either:
+  `PaddedBatchAssembler` fills `[B, P]` and `[B, C]`, while `SequencePackedBatchAssembler`
+  puts the entire packed row in the completion part and leaves the prompt zero-width
+  (`to_rl_trainer_payload` in `tunix/experimental/orchestrator/batch_assembly.py`).
   """
+  parts = [jnp.asarray(payload.prompt_ids), jnp.asarray(payload.completion_ids)]
+  masks = [
+      jnp.ones_like(part) if mask is None else jnp.asarray(mask).astype(jnp.int32)
+      for part, mask in zip(parts, (payload.prompt_mask, payload.completion_mask))
+  ]
+  return jnp.concatenate(parts, axis=-1), jnp.concatenate(masks, axis=-1).astype(jnp.int32)
 
-  token_ids: ArrayLike
-  token_mask: ArrayLike
-  segment_ids: ArrayLike | None = None
-  forced_routed_experts: ArrayLike | None = None
+
+def _aligned(field: Any, name: str, width: int) -> jax.Array | None:
+  """Returns `field` as an array, or None, having checked it spans the whole model row.
+
+  Tunix documents `segment_ids` and `segment_positions` as `[B, T]` *or* `[B, C]`, and only
+  the packed assembler ever sets them -- where the prompt part is zero-width, so the two
+  widths coincide. A caller that supplies a completion-width array against a non-empty
+  prompt would otherwise have it silently broadcast or truncated against the full row.
+  """
+  if field is None:
+    return None
+  array = jnp.asarray(field)
+  if array.shape[-1] != width:
+    raise ValueError(
+        f"{name} has width {array.shape[-1]} but the model row is {width} wide. Tunix sets "
+        f"{name} only on the packed path, where `prompt_ids` is zero-width and the two agree; "
+        "a completion-width array cannot be aligned against a non-empty prompt."
+    )
+  return array
 
 
-def router_replay_gen_model_input_fn(
-    payload: RouterReplayTrainerPayload,
-) -> dict[str, Any]:
-  """Adapts a RouterReplayTrainerPayload into router_replay_loss_fn's kwargs.
+def router_replay_gen_model_input_fn(payload: abstract_engine.RLTrainerPayload) -> dict[str, Any]:
+  """Adapts Tunix's `RLTrainerPayload` into router_replay_loss_fn's kwargs.
 
   Output keys are unpacked directly as `loss_fn(model, **kwargs)` by
   `_fwd_bwd_kernel`, so they must match the loss function's parameter names --
   they are not nested inside a `data` dict.
 
   Args:
-    payload: A RouterReplayTrainerPayload (or subclass).
+    payload: A Tunix `RLTrainerPayload`. Its `routed_experts` is the routing the rollout
+      actually took; it reaches the model under the model-side name
+      `forced_routed_experts`, overriding the gate. `-1` (Tunix's `UNSET_ROUTED_EXPERT`)
+      marks a padded slot, which is the sentinel MaxText's decoder blocks already expect.
+      See `check_forced_routing_support` in `maxtext.configs.types` for which of them do.
 
   Returns:
     `inputs`, `inputs_position`, `inputs_segmentation`, `targets`,
     `targets_segmentation`, and (when present) `forced_routed_experts`.
   """
-  token_ids = jnp.asarray(payload.token_ids)
-  token_mask = jnp.asarray(payload.token_mask) if payload.token_mask is not None else jnp.ones_like(token_ids)
-  segment_ids = jnp.asarray(payload.segment_ids) if payload.segment_ids is not None else token_mask
+  token_ids, token_mask = _row_and_mask(payload)
+  width = token_ids.shape[-1]
+  segment_ids = _aligned(payload.segment_ids, "segment_ids", width)
+  segment_positions = _aligned(payload.segment_positions, "segment_positions", width)
+  if segment_ids is None:
+    segment_ids = token_mask
 
-  # TrainerPayload rows are left-padded prompt + right-padded completion, so a
-  # plain arange would give the first real token a nonzero RoPE position and
-  # shift every token relative to the rollout that produced the routing.
-  positions = jnp.maximum(jnp.cumsum(token_mask != 0, axis=-1) - 1, 0).astype(jnp.int32)
+  if segment_positions is not None:
+    positions = segment_positions.astype(jnp.int32)
+  else:
+    # Rows are left-padded prompt + right-padded completion, so a plain arange would put
+    # the first real token at a nonzero RoPE position, shifting every token away from the
+    # rollout that produced the routing. Count real tokens instead, restarting at each
+    # segment -- otherwise the second sequence in a packed row is rotated by the length of
+    # the first. `cummax` carries each segment's starting count forward to subtract off.
+    running = jnp.cumsum(token_mask != 0, axis=-1) - 1
+    starts = jnp.concatenate(
+        [jnp.ones((segment_ids.shape[0], 1), dtype=bool), segment_ids[:, 1:] != segment_ids[:, :-1]], axis=-1
+    )
+    # `lax.cummax` takes an XLA dimension number, so it rejects the `axis=-1` used
+    # everywhere else here. `jnp.cumulative_max` would canonicalize it but is not in the
+    # pinned JAX.
+    segment_start_count = jax.lax.cummax(jnp.where(starts, running, -1), axis=running.ndim - 1)
+    positions = jnp.maximum(running - segment_start_count, 0).astype(jnp.int32)
 
-  # roll(-1) wraps token 0 into the last position, which is not its real next
-  # token; mask that position out instead of training on the wrap-around. Do
-  # the same wherever a packed segment ends, since the next row belongs to a
-  # different sequence.
+  # roll(-1) wraps token 0 into the last position, which is not its real next token, so
+  # mask that position out. Same at every packed segment end: the next token there
+  # belongs to a different sequence.
   targets_segmentation = token_mask.at[:, -1].set(0)
   same_segment = segment_ids[:, :-1] == segment_ids[:, 1:]
   targets_segmentation = targets_segmentation.at[:, :-1].multiply(same_segment.astype(token_mask.dtype))
@@ -442,9 +466,9 @@ def router_replay_gen_model_input_fn(
       "targets": jnp.roll(token_ids, -1, axis=-1),
       "targets_segmentation": targets_segmentation,
   }
-  forced_routed_experts = getattr(payload, "forced_routed_experts", None)
-  if forced_routed_experts is not None:
-    kwargs["forced_routed_experts"] = jnp.asarray(forced_routed_experts)
+  routed_experts = getattr(payload, "routed_experts", None)
+  if routed_experts is not None:
+    kwargs["forced_routed_experts"] = jnp.asarray(routed_experts)
   return kwargs
 
 
@@ -518,9 +542,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         `model(input_tokens, positions=..., attention_mask=..., cache=...)` call signature and returns
         `(logits, None)`. Required when driving this engine from a Tunix loss function.
       tokenizer_pad_id: Tokenizer pad token id, forwarded to the adapter. Required when
-        `wrap_with_tunix_adapter` is True: without it the adapter passes `decoder_segment_ids=None`, MaxText
-        falls back to causal-only masking, and pad positions are attended to -- silently corrupting trainer
-        log-probs on every batch.
+        `wrap_with_tunix_adapter` is True: without it the adapter has no `segment_ids` to synthesize when
+        Tunix supplies none, MaxText falls back to causal-only masking, and pad positions are attended to --
+        silently corrupting trainer log-probs on every batch.
 
     Raises:
       TypeError: If training_config is not a pyconfig.HyperParameters instance.
@@ -537,7 +561,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if tokenizer_pad_id is None:
         raise ValueError(
             "wrap_with_tunix_adapter=True requires tokenizer_pad_id. Without it the adapter cannot build "
-            "decoder_segment_ids, so pad positions are attended to and trainer log-probs are silently wrong."
+            "segment_ids, so pad positions are attended to and trainer log-probs are silently wrong."
         )
       if mesh is None:
         raise ValueError("wrap_with_tunix_adapter=True requires a mesh; the adapter is built under it.")
@@ -1282,12 +1306,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     leaf instead takes the leading entries of that spec that its own rank can absorb, so
     the batch dimension stays sharded and everything below it is replicated.
 
-    A leaf whose batch dim doesn't evenly divide the batch axis's mesh size (e.g. a
-    sequence-packed micro-batch, always size 1) replicates that dim instead of sharding
-    it -- every device holds and computes on the same data with no cross-device split,
-    which is correct (there's nothing to reduce back together afterwards) but wastes
-    compute across the axis for that micro-batch. That is an N-fold cost, so it warns
-    once per instance rather than living only in this docstring.
+    A leaf whose batch dim doesn't evenly divide the batch axis's mesh size replicates
+    that dim instead of sharding it -- every device holds and computes on the same data
+    with no cross-device split, which is correct (there's nothing to reduce back together
+    afterwards) but wastes compute across the axis for that micro-batch. That is an N-fold
+    cost, so it warns once per instance rather than living only in this docstring.
+    Sequence packing reaches this from the distributed packer, whose row count is tunix's
+    `train_micro_batch_size` and defaults to 1; the colocated packer sizes its rows as
+    `fsdp * dp` and so shards cleanly by construction.
     """
     data_sharding = sharding.get_input_data_sharding(self._config, self._mesh)
     data_spec = tuple(data_sharding.spec)
