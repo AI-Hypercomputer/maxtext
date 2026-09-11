@@ -401,6 +401,12 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
     if not isinstance(restore_arg, ocp.ArrayRestoreArgs):
       return restore_arg
     stored_meta = _lookup_stored_meta(path)
+    # Resolve the restore dtype:
+    # 1. PRNG keys cannot be restored directly as jax.dtypes.prng_key in Orbax;
+    #    their physical on-disk storage layout is uint32.
+    # 2. If the restore argument does not specify a dtype, preserve the stored
+    #    array's dtype from checkpoint metadata if available.
+    # 3. Otherwise, fall back to MaxText's default computation precision (bfloat16).
     dtype = restore_arg.dtype
     if dtype is not None and jax.dtypes.issubdtype(dtype, jax.dtypes.prng_key):
       dtype = jnp.uint32
@@ -1010,11 +1016,8 @@ def from_pretrained(
       )
 
       load_params_path = epath.Path(config.load_parameters_path)
-      try:
-        if (load_params_path / "model_params").exists():
-          load_params_path = load_params_path / "model_params"
-      except Exception:  # pylint: disable=broad-except
-        pass
+      if (load_params_path / "model_params").exists():
+        load_params_path = load_params_path / "model_params"
 
       metadata = ckptr.metadata(load_params_path)
       if metadata is None or metadata.item_metadata is None:
