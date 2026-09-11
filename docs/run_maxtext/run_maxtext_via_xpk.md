@@ -32,7 +32,7 @@ multi-host JobSet with Cluster Toolkit:
 ```bash
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --zone ${ZONE?} \
+  --location ${ZONE?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${GKE_CLUSTER?}
