@@ -606,14 +606,12 @@ def patch_kv_cache_manager():
       self._hybrid_uniform_page_size_bytes = int(uniform_page_size_bytes)
       self.runner.cache_config.mamba_page_size_padded = int(uniform_page_size_bytes)
 
+      # set mamba and attn, needs to be compatible with tpu-inference
       self._maybe_set_compact_mamba_num_blocks_override(
-          attn_page_size_bytes,
-          int(unpadded_mamba_page_size),
-          num_attn_groups,
-          num_mamba_groups,
-          num_attn,
-          num_mamba,
-          group_size,
+          attn_page_size_bytes=attn_page_size_bytes,
+          unpadded_mamba_page_size_bytes=int(unpadded_mamba_page_size),
+          num_attn_layers=num_attn,
+          num_mamba_layers=num_mamba,
       )
 
     kv_cache_spec = original_get_kv_cache_spec(self)
