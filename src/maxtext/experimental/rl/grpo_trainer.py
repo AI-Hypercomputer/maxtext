@@ -57,7 +57,7 @@ import jax
 import jax.numpy as jnp
 from jax import random
 
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 from flax import nnx
 from flax import struct
 from flax.nnx import TrainState
@@ -136,182 +136,15 @@ class LossAux:
   total_weights: float
 
 
-def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
-  """
-  GRPO loss function for training.
-
-  This function performs the following steps:
-
-    1. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with
-         the current model (policy) and the reference model.
-    2. Compute a scalar reward for each generated completion via reward_fn.
-    3. Group the rewards (each prompt yields “G = num_generations” completions), compute the mean and std,
-       and then compute a normalized advantage.
-    4. Compute a per-token loss that is given by
-        - [min(exp(policy_logp - old_logp), clip(exp(policy_logp - old_logp), 1-e, 1+e)) * advantage - beta * kl
-        Where:
-        - `policy_logp`: The log probability of the current policy's output.
-        - `old_logp`: The log probability of the behavior policy's output
-          (i.e., the policy used to generate the samples).
-        - For on-policy training, `old_logp` is a stop-gradient of the current `policy_logp`,
-          ensuring that only the advantage term contributes to the gradients. This is because
-          the samples are generated using the current policy.
-        - For off-policy training, `old_logp` is obtained directly from the
-          `data["completions_logprobs"]`, which stores the log probabilities
-          from the behavior policy that generated the samples.
-        - `advantage`: The advantage, representing how much better a given
-          action is compared to the average action.
-        - `beta`: A hyperparameter that controls the strength of the KL divergence penalty.
-        - `kl_divergence`: The Kullback-Leibler divergence between the current
-          policy and the behavior policy.
-    5. Compute a per-token KL divergence:
-         kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
-    6. Restrict the loss calculations to the generated completion tokens.
-    7. Finally the loss is the average (over examples) of the mean per-token loss - where only tokens before the
-       first eos (according to tokenizer.eos_id) are taken into account.
-
-  Args:
-    model: A nn.Module.
-    config: The training configuration (contains hyper-parameters and reward and tokenizer objects).
-    data: A batch dict with key "prompt" containing prompts as token-ids of shape [B, L_prompt].
-    dropout_rng: a PRNGKey.
-    params: The current model parameters.
-    reference_params: The reference model parameters.
-    is_train: Boolean indicating training mode.
-
-  Returns:
-    loss: A scalar loss.
-    aux: A dictionary with auxiliary metrics.
-  """
-
-  # completions shape: [B x G, max_target_length - max_prefill_length]
-  # this includes the completion tokens + padding (upto max_target_length - max_prefill_length))
-  # data["ar_completions"] contains tokens only upto the eos, no tokens thereafter other than pad_tokens
-  prompt_with_completions = data[f"{config.train_data_columns}_completions"]
-
-  # --- (1) Compute per-token log probabilities.
-  prompt_completions_position = data[f"{config.train_data_columns}_completions_position"]
-  prompt_completions_segmentation = data[f"{config.train_data_columns}_completions_segmentation"]
-  completions_segmentation = data["ar_completions_segmentation"]
-
-  # compute_log_probs returns logits.
-  # We compute the log-probabilities for the entire generated sequence, then shift as usual.
-  rng1, rng_fwd = random.split(dropout_rng)
-  token_logps_policy, intermediate_outputs = grpo_utils.compute_log_probs(
-      model,
-      params,
-      prompt_with_completions,
-      prompt_completions_position,
-      prompt_completions_segmentation,
-      completions_segmentation,
-      config,
-      is_train=is_train,
-      rngs={"dropout": rng1, "params": rng_fwd},
-  )  # [BxG,S-1,E]
-
-  completion_target_segmentation = data["ar_completions_segmentation"][..., 1:]  # [BxG,S-1]
-  # Because of the shifting, token_logps have shape [BxG, S-1]. So, we create a mask for the valid tokens
-  # Create a mask to clear out the last token position in the ar_completions
-  # and to make sure loss is computed on non-padding tokens
-  valid_seq_mask = completion_target_segmentation != 0  # [BxG, S-1]
-
-  # --- (2) Compute a scalar reward for each generated completion via reward_fn.
-  rewards = grpo_utils.dummy_reward_len(valid_seq_mask)
-  rewards = jnp.array(rewards)  # shape [BxG]
-
-  # --- (3) Group rewards and compute normalized advantage.
-  G = config.num_generations
-  rewards_grouped = rewards.reshape(-1, G)  # shape [B, G]
-  group_mean = jnp.mean(rewards_grouped, axis=1)  # shape [B]
-  group_std = jnp.std(rewards_grouped, axis=1)  # shape [B]
-  repeated_group_mean = jnp.repeat(group_mean, G)  # shape [BxG]
-  repeated_group_std = jnp.repeat(group_std, G)  # shape [BxG]
-  advantages = (rewards - repeated_group_mean) / (repeated_group_std + EPS)  # shape [BxG]
-
-  # --- (4) Compute per-token loss.
-  # Make sure to expand advantage along the token dimension.
-  advantages_exp = advantages[:, None]  # shape [BxG, 1]
-
-  # We calculate the policy difference with old_per_token_logps for off-policy training,
-  # else, for on-policy training old_per_token_logps = stop_gradient(token_logps_policy)
-  if data["completions_logprobs"] is None:  # off-policy
-    old_per_token_logps = jax.lax.stop_gradient(token_logps_policy)
-  else:  # on-policy
-    old_per_token_logps = data["completions_logprobs"]
-
-  policy_diff = token_logps_policy - old_per_token_logps
-  coef_1 = jnp.exp(policy_diff)
-  coef_2 = jnp.clip(coef_1, 1 - config.grpo_epsilon, 1 + config.grpo_epsilon)
-  loss_tokens = -jnp.minimum(
-      coef_1 * advantages_exp,
-      coef_2 * advantages_exp,
-  )
-
-  # --- (5) Compute per-token KL divergence for each token in the generated completion, if beta != 0.
-  if config.grpo_beta != 0.0:
-    token_logps_ref, _ = grpo_utils.compute_log_probs(
-        model,
-        {"params": reference_params},
-        prompt_with_completions,
-        prompt_completions_position,
-        prompt_completions_segmentation,
-        completions_segmentation,
-        config,
-        is_train=False,
-        rngs={"dropout": rng1, "params": rng_fwd},
-    )  # [BxG,S-1,E]
-
-    token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
-
-    per_token_kl = jnp.exp(token_diff_logps_ref_policy) - (token_diff_logps_ref_policy) - 1
-    # loss is computed on non-padding tokens
-    per_token_kl = per_token_kl * valid_seq_mask
-    loss_tokens += config.grpo_beta * per_token_kl
-
-  # --- (6) Restrict the loss calculations to the generated completion tokens.
-  # Average over tokens per generated completion.
-  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / jnp.clip(jnp.sum(valid_seq_mask, axis=1), min=1)
-
-  # --- (7) Finally the loss is the average (over examples) of the mean per-token loss
-  loss = jnp.mean(loss_per_example)
-  total_weights = jnp.sum(valid_seq_mask)
-
-  moe_lb_loss = 0.0
-  if config.num_experts > 1:
-    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
-    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
-    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
-    loss += moe_lb_loss
-
-  # Compute auxiliary metrics.
-  if config.grpo_beta != 0.0:
-    avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / jnp.clip(jnp.sum(valid_seq_mask, axis=1, keepdims=True), min=1))
-  else:
-    avg_kl = None
-  avg_reward = jnp.mean(rewards)
-  avg_advantage = jnp.mean(advantages)
-  avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"] != 0, axis=1))
-  aux = LossAux(
-      total_loss=loss,
-      avg_reward=avg_reward,
-      avg_reward_std=jnp.mean(repeated_group_std),
-      avg_advantage=avg_advantage,
-      avg_kl=avg_kl,
-      completion_length=avg_completion_length,
-      moe_lb_loss=moe_lb_loss,
-      total_weights=total_weights,
-  )
-
-  return loss, aux
-
-
 def grpo_loss_fn_nnx(policy_model, config, data, dropout_rng, params, reference_model, is_train=True):
-  """GRPO loss function for the NNX path.
+  """GRPO loss function.
 
-  See `grpo_loss_fn` above for the algorithm (per-token policy ratio with
-  clipping, group-relative advantage normalization, optional KL to a frozen
-  reference). The signature mirrors the Linen `grpo_loss_fn` so callers can
-  dispatch on the same call shape. The reference forward is wrapped in
+  Computes the per-token log-probabilities of the full sequence (prompt +
+  completion) under both the current policy and a frozen reference, forms the
+  group-relative advantage (each prompt yields `num_generations` completions,
+  normalized by the group mean/std), and combines the clipped per-token policy
+  ratio with an optional KL penalty to the reference. The loss is averaged over
+  the generated completion tokens only. The reference forward is wrapped in
   `stop_gradient`, so gradients only flow into the policy.
 
   Args:
@@ -319,9 +152,8 @@ def grpo_loss_fn_nnx(policy_model, config, data, dropout_rng, params, reference_
       carried on the module itself.
     config: Training configuration object.
     data: A batch dict produced by the GRPO input pipeline.
-    dropout_rng: Unused on the NNX path; kept for signature parity with the
-      Linen `grpo_loss_fn`.
-    params: Unused on the NNX path; kept for signature parity.
+    dropout_rng: Unused; kept for call-site signature parity.
+    params: Unused; kept for call-site signature parity.
     reference_model: Frozen reference `nnx.Module` used to compute the KL
       term. Not updated by the optimizer.
     is_train: Whether to run the forward in training mode (dropout enabled).
@@ -971,7 +803,7 @@ def train_loop(config, config_inference, recorder, state=None):
               continue
         train_rng, rng = random.split(init_rng)
         example_batch = jax.device_put(example_batch, data_sharding)
-        with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+        with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules):
           state, metrics = p_train_step(state, example_batch, train_rng)
       with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
         if step != 0 and step % config.inference_rollouts == 0:
@@ -1014,7 +846,7 @@ def train_loop(config, config_inference, recorder, state=None):
         for eval_batch in eval_data_iterator:
           if 0 < config.eval_steps <= eval_step_count:
             break
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+          with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules):
             eval_metrics = p_eval_step(state, eval_batch, rng)
           eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
           last_eval_step_completion = datetime.datetime.now()

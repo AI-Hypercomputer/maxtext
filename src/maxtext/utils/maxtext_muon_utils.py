@@ -23,7 +23,7 @@ models.
 from typing import Tuple
 
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 import jax
 from maxtext.optimizers.muon import ShardedMuonDimensionNumbers as smdn
 from maxtext.utils import maxtext_utils
@@ -61,7 +61,7 @@ def get_maxtext_muon_weight_dimension_numbers(model, config=None, mesh=None, ver
   else:
     logical_rules = ()
 
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_rules):
+  with jax.set_mesh(mesh), logical_axis_rules(logical_rules):
     # Extract abstract parameters from the NNX model hierarchy
     _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
 

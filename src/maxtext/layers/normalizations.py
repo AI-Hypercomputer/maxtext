@@ -16,7 +16,6 @@
 
 from typing import Any
 
-from flax import linen as nn
 from flax import nnx
 from flax.linen import initializers as linen_initializers
 import jax
@@ -68,7 +67,7 @@ class RMSNorm(nnx.Module):
       weight_dtype: Any = jnp.float32,
       shard_mode: ShardMode = ShardMode.AUTO,
       kernel_axes: tuple[None | str, ...] = (),
-      scale_init: Initializer = nn.initializers.ones,
+      scale_init: Initializer = jax.nn.initializers.ones,
       parameter_memory_host_offload: bool = False,
       scale_offset: float = 0.0,
       with_scale: bool = True,
@@ -258,7 +257,7 @@ def rms_norm(
     weight_dtype: Any = jnp.float32,
     shard_mode: ShardMode = ShardMode.AUTO,
     kernel_axes: tuple[None | str, ...] = (),
-    scale_init: Initializer = nn.initializers.ones,
+    scale_init: Initializer = jax.nn.initializers.ones,
     name: None | str = None,
     parameter_memory_host_offload: bool = False,
     with_scale: bool = True,

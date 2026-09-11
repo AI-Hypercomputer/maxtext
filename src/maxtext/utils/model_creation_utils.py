@@ -40,6 +40,7 @@ from typing import Any, Callable, overload
 from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
+from flax.core.spmd import logical_axis_rules
 import flax.linen as nn
 from huggingface_hub import get_token
 import jax
@@ -53,7 +54,7 @@ from maxtext.integration.vllm.convert_utils import _partition_size
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
-from maxtext.utils import max_utils, maxtext_utils, maxtext_utils_nnx, sharding
+from maxtext.utils import maxtext_utils, maxtext_utils_nnx, sharding
 import numpy as np
 from orbax import checkpoint as ocp
 
@@ -559,7 +560,7 @@ def create_nnx_abstract_model(
       abstract_model: The stateful NNX model instance in an abstract state.
   """
 
-  with nn.logical_axis_rules(config.logical_axis_rules):
+  with logical_axis_rules(config.logical_axis_rules):
     _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
     # Use nnx.eval_shape + our scan-axis-aware sharding helper instead of
     # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
@@ -580,60 +581,6 @@ def create_nnx_abstract_model(
         named_sharding_state,
     )
     return _create_model, nnx.merge(graphdef, abstract_state)
-
-
-def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
-  """Creates a sharded model for hybrid NNX modules containing Linen sub-modules.
-
-  DEPRECATED: This function is a transitional utility for the Linen-to-NNX
-  migration. It should be removed once all model components are ported to
-  pure NNX modules.
-
-  This function specifically handles the complexity of "mixed" state initialization,
-  where logical sharding annotations must be resolved for both NNX native
-  Parameters and legacy Linen variables wrapped via the NNX-Linen bridge.
-  It ensures that both systems correctly respect the provided mesh and
-  logical axis rules during the abstraction/sharding planning phase.
-  """
-  _create_model_partial = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key)
-
-  with nn.logical_axis_rules(config.logical_axis_rules):
-    abstract_model = nnx.eval_shape(_create_model_partial)
-  graphdef, abstract_state = nnx.split(abstract_model)
-  specs = nnx.get_partition_spec(abstract_state)
-
-  if mesh is None:
-    mesh = abstract_model.mesh
-
-  # JIT a function that creates the model state with proper sharding from the start.
-  # By providing out_shardings, we instruct JAX to produce sharded output directly,
-  # avoiding a large intermediate allocation on a single device.
-  with nn.logical_axis_rules(config.logical_axis_rules):
-    out_shardings = nn.logical_to_mesh_sharding(specs, mesh)
-
-  @partial(jax.jit, out_shardings=out_shardings)
-  def create_sharded_state():
-    # This will be JIT-compiled. JAX knows the output sharding and can
-    # initialize the parameters directly on the target devices in a sharded way.
-    model = _create_model_partial()
-    return nnx.state(model)
-
-  with mesh:
-    # Create the model with sharded parameters.
-    with nn.logical_axis_rules(config.logical_axis_rules):
-      sharded_state = create_sharded_state()
-    model = nnx.merge(graphdef, sharded_state)
-
-    # print weights sharding info under debug sharding mode
-    if config.debug_sharding:
-      max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_shardings_params(
-          params=sharded_state,
-          params_sharding=out_shardings,
-          mesh=model.mesh,
-          logical_annotations=specs,
-      )
-    return model
 
 
 def setup_configs_and_devices(
