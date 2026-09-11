@@ -977,7 +977,21 @@ def from_pretrained(
   _, _abs_state_for_specs = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(_abs_state_for_specs)
 
-  model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
+  def initialize_for_restore(path, variable):
+    # Persistent weights are restored directly into their abstract shardings.
+    # Preserve runtime state and custom layers that intentionally use fresh values.
+    return isinstance(variable, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)) or any(
+        "custom_linear" in str(key) for key in path
+    )
+
+  if config.load_parameters_path:
+    max_logging.log("Restoring checkpoint weights from abstract sharded targets; skipping random weight initialization.")
+  model = maxtext_utils_nnx.create_nnx_sharded_model(
+      abstract_model,
+      _create_model,
+      mesh=mesh,
+      state_filter=initialize_for_restore if config.load_parameters_path else ...,
+  )
   # TODO: print debug_sharding info
 
   sharded_state = nnx.state(model)
@@ -1066,7 +1080,7 @@ def from_pretrained(
         # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
         is_nnx_checkpoint = False
         target_for_restore = jax.tree.map(
-            lambda v: v[...],
+            lambda v: v.get_value(),
             param_state,
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
@@ -1101,7 +1115,7 @@ def from_pretrained(
           # restore target preserves the QTensor's qvalue/scale sub-structure.
           inner = v.get_value() if hasattr(v, "get_value") else v[...]
           if hasattr(inner, "shape"):
-            return {"value": v[...]}
+            return {"value": inner}
           # AQT QTensor: qvalue/scale leaves come back wrapped in flax
           # `Partitioned` (a logical-axis sharding box). The on-disk save in
           # `_load_and_quantize_nnx` flushes the QTensor as plain arrays —

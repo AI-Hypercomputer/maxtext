@@ -58,6 +58,12 @@ def _is_fake_meta(x):
   return isinstance(x, _FakeArrayMetadata)
 
 
+def _restore_target_arrays(path, item=None, **kwargs):
+  """Model Orbax materialization: abstract targets must become concrete arrays."""
+  del path, kwargs
+  return jax.tree.map(lambda x: jax.device_put(np.zeros(x.shape, x.dtype), x.sharding), item)
+
+
 # Monkey-patch the module-level helper so our fake metadata is recognised.
 _orig_is_orbax = model_creation_utils._is_orbax_array_metadata  # pylint: disable=protected-access
 model_creation_utils._is_orbax_array_metadata = _is_fake_meta  # pylint: disable=protected-access
@@ -697,13 +703,10 @@ class TestCreateNnxModel(unittest.TestCase):
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_load_nnx_checkpoint(self, mock_ocp):
     """NNX-format checkpoint: restored values are wrapped under a 'value' key."""
-    # Echo back the `item` argument passed by from_pretrained to ckptr.restore.
-    # For NNX checkpoints, item IS already {leaf: {"value": array}, ...}, so
-    # returning it directly gives a correctly-structured restored dict that
-    # matches the model's own state — regardless of the exact leaf count.
+    # Materialize the abstract targets while preserving NNX value wrappers.
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_target_arrays
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -716,13 +719,10 @@ class TestCreateNnxModel(unittest.TestCase):
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_load_linen_checkpoint(self, mock_ocp):
     """Linen-format checkpoint: restored values are nested under 'params'/'params'."""
-    # Echo back the `item` argument passed by from_pretrained to ckptr.restore.
-    # For Linen checkpoints, item IS already {"params": {"params": arrays}}, so
-    # returning it directly gives a correctly-structured restored dict that
-    # matches the model's own state — regardless of the exact leaf count.
+    # Materialize the abstract targets while preserving Linen params nesting.
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_target_arrays
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -737,7 +737,7 @@ class TestCreateNnxModel(unittest.TestCase):
     """NNX checkpoint loading with customized_mlp vision projector runs _free_device_memory cleanly."""
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_target_arrays
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -795,7 +795,7 @@ class TestCreateNnxModel(unittest.TestCase):
 
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_target_arrays
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -816,7 +816,7 @@ class TestCreateNnxModel(unittest.TestCase):
 
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_target_arrays
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -998,7 +998,7 @@ class TestFromPretrainedAuth(unittest.TestCase):
 
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_target_arrays
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
     mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
@@ -1031,7 +1031,7 @@ class TestFromPretrainedAuth(unittest.TestCase):
 
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_target_arrays
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
     mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs

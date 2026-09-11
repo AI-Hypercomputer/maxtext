@@ -1277,7 +1277,55 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def LING3_HF_WEIGHTS_TO_SHAPE(config):
+  """Shapes for the text backbone of the published Ling3 VL checkpoint."""
+  cfg = config.get("text_config", config)
+  dim, heads, width = cfg["hidden_size"], cfg["num_attention_heads"], cfg["head_dim"]
+  shapes = {
+      "model.word_embeddings.weight": [cfg["vocab_size"], dim],
+      "model.norm.weight": [dim],
+      "lm_head.weight": [cfg["vocab_size"], dim],
+  }
+  for i in range(cfg["num_hidden_layers"]):
+    prefix = f"model.layers.{i}."
+    layer = {"input_layernorm.weight": [dim], "post_attention_layernorm.weight": [dim]}
+    if (i + 1) % cfg["layer_group_size"]:
+      for proj in ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj"):
+        layer[f"attention.{proj}.weight"] = [heads * width, dim]
+      layer["attention.b_proj.weight"] = [heads, dim]
+      layer["attention.o_proj.weight"] = [dim, heads * width]
+      for proj in ("q_conv1d", "k_conv1d", "v_conv1d"):
+        layer[f"attention.{proj}.weight"] = [heads * width, 1, cfg["short_conv_kernel_size"]]
+      layer.update({"attention.A_log": [heads], "attention.dt_bias": [heads * width], "attention.o_norm.weight": [width]})
+    else:
+      rank, nope, rope, value = (cfg[k] for k in ("kv_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"))
+      layer.update(
+          {
+              "attention.q_proj.weight": [heads * (nope + rope), dim],
+              "attention.kv_a_proj_with_mqa.weight": [rank + rope, dim],
+              "attention.kv_a_layernorm.weight": [rank],
+              "attention.kv_b_proj.weight": [heads * (nope + value), rank],
+              "attention.g_proj.weight": [heads, dim],
+              "attention.dense.weight": [dim, heads * value],
+          }
+      )
+    if i < cfg["first_k_dense_replace"]:
+      mlps = [("mlp", cfg["intermediate_size"])]
+    else:
+      layer["mlp.gate.weight"] = [cfg["num_experts"], dim]
+      layer["mlp.gate.expert_bias"] = [cfg["num_experts"]]
+      mlps = [("mlp.shared_experts", cfg["moe_shared_expert_intermediate_size"])]
+      mlps += [(f"mlp.experts.{e}", cfg["moe_intermediate_size"]) for e in range(cfg["num_experts"])]
+    for mlp, intermediate in mlps:
+      for proj in ("gate_proj", "up_proj"):
+        layer[f"{mlp}.{proj}.weight"] = [intermediate, dim]
+      layer[f"{mlp}.down_proj.weight"] = [dim, intermediate]
+    shapes.update({prefix + key: value for key, value in layer.items()})
+  return shapes
+
+
 HF_SHAPE = {
+    "ling3-flash-vl": LING3_HF_WEIGHTS_TO_SHAPE,
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE,

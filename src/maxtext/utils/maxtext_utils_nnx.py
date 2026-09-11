@@ -144,6 +144,8 @@ def create_nnx_sharded_model(
     init_fn: Callable,
     mesh: Mesh | None = None,
     named_sharding: nnx.State | None = None,
+    *,
+    state_filter=...,
 ) -> nnx.Module:
   """
   Create the model with the given sharding.
@@ -153,9 +155,11 @@ def create_nnx_sharded_model(
     init_fn: the model init function
     mesh: the device mesh
     named_sharding: the given sharding
+    state_filter: Variables to materialize. Other variables remain abstract,
+      with physical shardings attached, for checkpoint restore.
 
   Returns:
-    The initialized sharded model
+    The sharded model, with variables outside state_filter left abstract.
   """
   graphdef, abstract_state = nnx.split(abstract_model)
   if named_sharding is None:
@@ -166,18 +170,28 @@ def create_nnx_sharded_model(
   if mesh is None:
     mesh = abstract_model.mesh  # pyrefly: ignore[missing-attribute]
 
+  # Keep checkpoint targets abstract. Filtering the JIT outputs allows XLA to
+  # eliminate unused parameter initializers instead of allocating the full model.
+  abstract_state = jax.tree.map(
+      lambda value, placement: jax.ShapeDtypeStruct(value.shape, value.dtype, sharding=placement),
+      abstract_state,
+      named_sharding,
+  )
+  _, deferred_state = abstract_state.split(state_filter, ...)
+  named_sharding = named_sharding.filter(state_filter)
+
   # JIT a function that creates the model state with proper sharding from the start.
   # By providing out_shardings, we instruct JAX to produce sharded output directly,
   # avoiding a large intermediate allocation on a single device.
   @partial(jax.jit, out_shardings=named_sharding)
   def create_sharded_state():
     model = init_fn()
-    return jax.lax.with_sharding_constraint(nnx.state(model), named_sharding)
+    return jax.lax.with_sharding_constraint(nnx.state(model).filter(state_filter), named_sharding)
 
   # Create the model with sharded parameters.
   with jax.set_mesh(mesh):
     sharded_state = create_sharded_state()
-  return nnx.merge(graphdef, sharded_state)
+  return nnx.merge(graphdef, sharded_state, deferred_state)
 
 
 def nnx_ensure_scan_leading_axis(tree, length):

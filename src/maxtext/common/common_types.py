@@ -141,6 +141,7 @@ class DecoderBlockType(enum.Enum):
   OLMO3 = "olmo3"
   DEEPSEEK4 = "deepseek4"
   ENVY = "envy"
+  LING3 = "ling3"
 
 
 class VisionEncoderBlockType(enum.Enum):
