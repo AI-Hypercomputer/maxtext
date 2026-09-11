@@ -106,6 +106,25 @@ debug: false
 # uploaded to tensorboard.
 enable_tunix_perf_metrics: false
 
+# ====== Profiling ======
+# The training engine counts MICRO-steps (fwd_bwd calls) where pre-training counts optimizer
+# steps: it does not own the training loop, and with sequence packing one optimizer step can
+# hold hundreds of micro-batches, so a window measured in steps would produce a trace too
+# large to open. `profiler_steps` is therefore a direct control on trace size.
+# Set profiler to "xplane" to enable. tensorboard_dir must be a gs:// path under Pathways.
+profiler: ""
+# Enough micro-steps to clear the first optimizer step, whose lazy compilation and unfilled
+# inflight queue make it unrepresentative. Raise it if your steps are much longer.
+skip_first_n_steps_for_profiler: 10
+# Micro-steps to capture. `profile_cleanly` drains the device at both edges of the window, so
+# the first and last captured micro-steps carry the drain cost and are not steady state --
+# budget for more than the two of them.
+profiler_steps: 8
+# Repeats the window every N micro-steps. Must exceed profiler_steps.
+profile_periodically_period: -1
+# A window this short rarely spans an optimizer update. To capture one, set profiler_steps
+# above the micro-steps-per-step count and accept the larger trace.
+
 # ====== Training ======
 batch_size: 1
 # Increase `batch_size` and `MAX_STEPS` for better results.
