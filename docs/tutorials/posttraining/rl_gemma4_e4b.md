@@ -123,14 +123,14 @@ gcluster job config set cluster ${CLUSTER_NAME?}
 gcluster job config set location ${ZONE?}
 
 gcluster job submit \
-  --image ${DOCKER_IMAGE?} \
-  --name ${RUN_NAME?} \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
   --pathways \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+  --command="python3 -m maxtext.trainers.post_train.rl.train_rl \
     model_name=gemma4-e4b \
     tokenizer_path=google/gemma-4-E4B \
     load_parameters_path=${MAXTEXT_CKPT_PATH?} \

@@ -185,14 +185,14 @@ export TOPOLOGY=<TPU_TOPOLOGY>
 
 ```bash
 gcluster job submit \
-  --image ${DOCKER_IMAGE?} \
-  --name ${RUN_NAME?}-grpo \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?}-grpo \
   --pathways \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+  --command="python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?}-grpo \
@@ -206,14 +206,14 @@ gcluster job submit \
 
 ```bash
 gcluster job submit \
-  --image ${DOCKER_IMAGE?} \
-  --name ${RUN_NAME?}-gspo \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?}-gspo \
   --pathways \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+  --command="python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?}-gspo \
