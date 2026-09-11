@@ -1012,12 +1012,16 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # would break gradient scaling at runtime rather than at import.
     self.assertEqual(float(tunix_metric.compute()), 2.0)
 
-    # What actually arrives at fwd_bwd from GRPOAdapter.create_trainer_payloads.
+    # What actually arrives at fwd_bwd, mirroring GRPOAdapter.create_trainer_payloads
+    # field for field. The whole-row `token_ids`/`token_mask` and the separate loss mask
+    # this used to pass were removed in Tunix commit 984e6ce7 as redundant: the payload is
+    # prompt/completion-split now, and `completion_mask` is the action mask.
     rl_payload = datatypes.RLTrainerPayload(
-        token_ids=jnp.zeros((1, 4)),
-        token_mask=jnp.ones((1, 4)),
-        advantages=jnp.zeros((1,)),
-        loss_mask=jnp.ones((1, 4)),
+        prompt_ids=jnp.zeros((1, 2)),
+        prompt_mask=jnp.ones((1, 2)),
+        completion_ids=jnp.zeros((1, 4)),
+        completion_mask=jnp.ones((1, 4)),
+        advantages=jnp.zeros((1, 4)),
     )
     self.assertIsInstance(rl_payload, abstract_engine.TrainerPayload)
 
