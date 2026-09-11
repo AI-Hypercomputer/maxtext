@@ -107,7 +107,7 @@ export TOPOLOGY=<TPU_TOPOLOGY>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${CLUSTER_NAME?} \
-  --zone ${ZONE?} \
+  --location ${ZONE?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${CLUSTER_NAME?}

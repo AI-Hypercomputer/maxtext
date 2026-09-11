@@ -107,7 +107,7 @@ export TOPOLOGY=<TPU_TOPOLOGY>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${CLUSTER_NAME?} \
-  --zone ${ZONE?} \
+  --location ${ZONE?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${CLUSTER_NAME?}
@@ -129,6 +129,8 @@ gcluster job submit \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     hf_access_token=${HF_TOKEN?} \
     dataset_name=nvidia/OpenMathInstruct-2 \
+    hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet \
+    train_split=train_1M \
     chips_per_vm=8 \
     rollout_data_parallelism=16 \
     rollout_tensor_parallelism=4 \
