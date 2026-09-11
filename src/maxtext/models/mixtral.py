@@ -19,7 +19,6 @@
 
 import functools
 
-from flax import linen as nn
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
@@ -43,7 +42,6 @@ from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, mayb
 class MixtralDecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
 
-  @nn.compact
   def __init__(
       self,
       config: Config,
