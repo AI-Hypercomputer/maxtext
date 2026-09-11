@@ -143,8 +143,8 @@ echo "Running 1vm.sh"
 # gcloud container clusters get-credentials ${GKE_CLUSTER?} \
 #   --location ${LOCATION?} --project ${PROJECT_ID?}
 # gcluster job submit --image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
-#   --name ${RUN_NAME?} --compute-type ${COMPUTE_TYPE?} --num-nodes=1 \
-#   --command "bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
+#   --name=${RUN_NAME?} --compute-type=${COMPUTE_TYPE?} --num-nodes=1 \
+#   --command="bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
 
 # Stop execution if any command exits with error
 set -e

@@ -88,11 +88,11 @@ gcluster job config set cluster ${GKE_CLUSTER?}
 gcluster job config set location ${LOCATION?}
 
 gcluster job submit \
-  --image ${DOCKER_IMAGE?} \
-  --name ${RUN_NAME?} \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
   --pathways \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --num-slices=${NUM_SLICES?} \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
   --pathways-elastic-slices=1 \
