@@ -102,6 +102,7 @@ class QuantizationType(str, Enum):
   TE_MXFP8 = "te_mxfp8"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
+  SERVE_FP8_WEIGHT = "serve_fp8_weight"
 
 
 class TeCommGemmOverlapPolicy(str, Enum):
@@ -4368,6 +4369,24 @@ class MaxTextConfig(
 
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
+
+    # Validation for serve_fp8_weight (native FP8 compute without dequantization).
+    if self.quantization == QuantizationType.SERVE_FP8_WEIGHT:
+      if self.weight_dtype not in (DType.FLOAT8_E4M3FN, DType.FLOAT8_E5M2):
+        raise ValueError(
+            "quantization='serve_fp8_weight' requires weight_dtype to be an FP8 dtype "
+            f"('float8_e4m3fn' or 'float8_e5m2'), got weight_dtype={self.weight_dtype!r}."
+        )
+      if self.use_qwix_quantization:
+        raise ValueError("quantization='serve_fp8_weight' is not supported with use_qwix_quantization=True.")
+      if self.attention in ("vllm_rpa", "vllm_batched_rpa"):
+        logger.warning(
+            "quantization='serve_fp8_weight' does not yet support native FP8 compute for "
+            "the fused MoE path (attention=%r routes through "
+            "RoutedMoE.fused_moe_matmul, which will silently dequantize instead -- see "
+            "follow-up work). DenseGeneral and sparse_matmul/use_gmm_v2 still run natively.",
+            self.attention,
+        )
 
     # Validation for GMM v2
     if self.use_gmm_v2:

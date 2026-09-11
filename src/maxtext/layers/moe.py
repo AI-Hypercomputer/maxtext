@@ -347,7 +347,7 @@ class GateLogit(nnx.Module):
     else:
       self.bias = None
 
-    if quant:
+    if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
       dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
       dot_general_linen = dot_general_cls()
       quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
@@ -1560,7 +1560,7 @@ class RoutedMoE(nnx.Module):
 
     def get_quantization_dtypes():
       lhs_quantize_dtype, rhs_quantize_dtype = None, None
-      if self.quant is not None:
+      if self.quant is not None and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization):
         quant_dg = self.quant.quant_dg
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
@@ -1589,7 +1589,8 @@ class RoutedMoE(nnx.Module):
         return tuple()
 
       lhs_vma_axes = extract_vma(inputs)
-      rhs_vma_axes = extract_vma(kernel)
+      is_native_kernel = isinstance(kernel, qpl.QArray)
+      rhs_vma_axes = extract_vma(kernel.qvalue if is_native_kernel else kernel)
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
@@ -1599,7 +1600,8 @@ class RoutedMoE(nnx.Module):
       if padding_amount > 0 and partial_sum is not None:
         partial_sum = jnp.pad(partial_sum, ((0, padding_amount), (0, 0)))
       inputs = inputs.astype(self.dtype)
-      kernel = kernel.astype(self.dtype)
+      if not is_native_kernel:
+        kernel = kernel.astype(self.dtype)
       lhs_quantize_dtype, rhs_quantize_dtype = get_quantization_dtypes()
 
       # Interpret the megablox Pallas kernel only when the TARGET is NOT TPU (CPU or GPU,
@@ -2809,7 +2811,7 @@ class RoutedMoE(nnx.Module):
     ):
       return jnp.einsum
 
-    if self.quant:
+    if self.quant and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization):
       op_id = einsum_name if einsum_name is not None else "einsum"
 
       def quant_einsum(*args, **kwargs):  # pylint: disable=unused-argument
@@ -3283,8 +3285,23 @@ class RoutedMoE(nnx.Module):
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
+    # Native FP8 weights for GMM v2 via QArray.
+    native_gmm = isinstance(self.quant, quantizations.ServeFp8WeightQuantization) and cfg.sparse_matmul and cfg.use_gmm_v2
+
+    def _maybe_native_gmm_weight(kernel, scale):
+      if native_gmm and ctypes.is_fp8_dtype(kernel.dtype) and scale is not None:
+        scheme, channel_axis = quantizations.infer_scale_granularity(scale.shape[1:])
+        if scheme == "per_tensor":
+          per_expert_scale = jnp.max(scale.reshape(scale.shape[0], -1), axis=1).reshape(-1, 1, 1, 1)
+          return qpl.QArray(qvalue=kernel, scale=per_expert_scale)
+        elif scheme == "per_channel" and channel_axis == 1:
+          # gmm_v2 only natively broadcasts per-output-channel (N-axis) scales.
+          per_channel_scale = scale.reshape(scale.shape[0], 1, -1)
+          return qpl.QArray(qvalue=kernel, scale=per_channel_scale)
+      return linears.dequantize_weight(kernel, scale, self.dtype)
+
     wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
-    wo_kernel = linears.dequantize_weight(self.wo[...], wo_scale, self.dtype)
+    wo_kernel = _maybe_native_gmm_weight(self.wo[...], wo_scale)
 
     fused_kernel = None
     w0_kernel = None
@@ -3301,8 +3318,8 @@ class RoutedMoE(nnx.Module):
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
-      w0_kernel = linears.dequantize_weight(self.wi_0[...], wi_0_scale, self.dtype)
-      w1_kernel = linears.dequantize_weight(self.wi_1[...], wi_1_scale, self.dtype)
+      w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
+      w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because

@@ -16,6 +16,7 @@
 
 import functools
 import json
+import math
 import qwix.pallas as qpl
 import re
 from typing import Tuple, Sequence, Callable
@@ -85,6 +86,82 @@ class Quantization:
 
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
+
+
+def infer_scale_granularity(scale_shape: Tuple[int, ...]) -> Tuple[str, int | None]:
+  """Infers quantization scheme ('per_tensor', 'per_channel', or 'block_wise') from scale shape."""
+  nontrivial_axes = [i for i, s in enumerate(scale_shape) if s > 1]
+  if not nontrivial_axes:
+    return "per_tensor", None
+  if len(nontrivial_axes) == 1:
+    return "per_channel", nontrivial_axes[0]
+  return "block_wise", None
+
+
+def native_fp8_dot_general(
+    inputs: jnp.ndarray,
+    quantized_kernel: jnp.ndarray,
+    kernel_scale: jnp.ndarray,
+    block_size: int | Tuple[int, ...],
+    axis: Tuple[int, ...],
+    contract_ind: Tuple[int, ...],
+    compute_dtype: DType = jnp.bfloat16,
+) -> jnp.ndarray:
+  """Computes dot_general with pre-quantized FP8 weights without dequantization."""
+  if len(axis) != 1 or len(contract_ind) != 1:
+    raise NotImplementedError(
+        "native_fp8_dot_general only supports a single contracted axis per "
+        f"operand, got axis={axis}, contract_ind={contract_ind}."
+    )
+  lhs_axis = axis[0]
+  rhs_axis = contract_ind[0]
+
+  # Qwix requires scale.ndim == qvalue.ndim. Determine scheme before reshaping minimal-rank scales.
+  if kernel_scale.ndim == quantized_kernel.ndim:
+    scheme, _ = infer_scale_granularity(kernel_scale.shape)
+  elif kernel_scale.size == 1:
+    scheme = "per_tensor"
+    kernel_scale = kernel_scale.reshape((1,) * quantized_kernel.ndim)
+  else:
+    # Reshape flattened per-channel scale over output axes.
+    scheme = "per_channel"
+    out_axes_shape = tuple(d for i, d in enumerate(quantized_kernel.shape) if i != rhs_axis)
+    if kernel_scale.size != math.prod(out_axes_shape):
+      raise ValueError(
+          f"kernel_scale with shape {kernel_scale.shape} does not match the "
+          f"kernel's non-contracted output shape {out_axes_shape} (kernel "
+          f"shape {quantized_kernel.shape}, contracted axis {rhs_axis})."
+      )
+    kernel_scale = jnp.expand_dims(kernel_scale.reshape(out_axes_shape), axis=rhs_axis)
+
+  rhs = qwix.QArray(qvalue=quantized_kernel, scale=kernel_scale)
+  if scheme == "per_tensor":
+    channelwise_axes = []
+    tiled_axes = {}
+  elif scheme == "per_channel":
+    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+    tiled_axes = {}
+  else:
+    rhs_block_size = block_size[rhs_axis] if isinstance(block_size, (list, tuple)) else block_size
+    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+    tiled_axes = {lhs_axis: rhs_block_size}
+  lhs = qwix.quantize(
+      jnp.asarray(inputs, compute_dtype),
+      jnp.float8_e4m3fn,
+      channelwise_axes=channelwise_axes,
+      tiled_axes=tiled_axes,
+      calibration_method="absmax",
+  )
+  dimension_numbers = (((lhs_axis,), (rhs_axis,)), ((), ()))
+  out = qwix.dot_general(lhs, rhs, dimension_numbers, preferred_element_type=jnp.float32)
+  return out.astype(compute_dtype)
+
+
+@dataclass
+class ServeFp8WeightQuantization(Quantization):
+  """Marks a layer as using native FP8 compute without weight dequantization."""
+
+  quant_mode = None
 
 
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
@@ -668,6 +745,9 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
+  if config.quantization == "serve_fp8_weight":
+    return ServeFp8WeightQuantization()
+
   if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
     if config.quantization == "fp8_full" and not config.use_manual_quantization:
