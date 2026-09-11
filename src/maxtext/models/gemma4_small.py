@@ -162,7 +162,7 @@ class Gemma4SmallPLE(nnx.Module):
     vocab_ple = config.vocab_size_per_layer_input
 
     self.embed_tokens_per_layer = nnx.Param(
-        nn.initializers.normal(stddev=ple_dim**-0.5)(
+        jax.nn.initializers.normal(stddev=ple_dim**-0.5)(
             rngs.params(),
             (vocab_ple, num_layers * ple_dim),
             config.weight_dtype,

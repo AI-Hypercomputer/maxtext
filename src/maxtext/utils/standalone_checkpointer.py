@@ -25,7 +25,7 @@ from typing import Sequence
 
 from absl import app
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 import jax
 from jax import numpy as jnp
 from maxtext.configs import pyconfig
@@ -82,7 +82,7 @@ def checkpoint_loop(config, state=None):
 
   if config.standalone_checkpointer_start_from_checkpoint:
     unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       loaded_state, _ = checkpointing.load_state_if_possible(
           checkpoint_manager,
           None,

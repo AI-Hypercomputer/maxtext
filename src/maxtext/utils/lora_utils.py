@@ -21,7 +21,7 @@ import re
 from typing import Optional
 
 from flax import nnx, linen as nn
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 from flax.training import train_state
 import jax
 import jax.numpy as jnp
@@ -171,7 +171,7 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
 
     lora_state, _ = get_lora_abstract_state_nnx(base_abstract_state_params, lora_config)
 
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       lora_params = checkpointing.load_params_from_path(
           adapter_weights_path,
           lora_state.params,
@@ -192,7 +192,7 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
   tree shape is preserved.
 
   Args:
-    model: Linen `nn.Module` used on the Linen path; ignored on NNX.
+    model: unused on the NNX path (kept for signature parity).
     data_iterator: Data iterator passed through to `load_state_if_possible`.
     tx: Optax gradient transformation for the optimizer.
     config: Top-level MaxText config.
@@ -241,7 +241,7 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
     lora_weights_path = f"{lora_adapter_path}/0/items"
 
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       restored_lora, raw_lora_params = checkpointing.load_state_if_possible(
           checkpoint_manager,
           data_iterator,
@@ -629,7 +629,7 @@ def apply_lora_to_model(
       del val.qwix_rngs
 
   if mesh is not None:
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+    with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
       graph_def, state = nnx.split(lora_model)
 
       # We handle explicit replication for LoRA to ensure safety and efficiency.

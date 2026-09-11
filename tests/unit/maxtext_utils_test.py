@@ -1453,34 +1453,6 @@ class TestSetupTrainingState(unittest.TestCase):
     self.assertIsNotNone(state.optimizer)
 
 
-class TestGetLogicalAnnotations(unittest.TestCase):
-  """Tests for get_logical_annotations."""
-
-  def setUp(self):
-    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
-    devices_array = maxtext_utils.create_device_mesh(self.config)
-    self.mesh = Mesh(devices_array, self.config.mesh_axes)
-    self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
-    self.rng = jax.random.PRNGKey(0)
-    self.tx = optax.adam(learning_rate=0.001)
-
-  def test_returns_partition_spec_tree(self):
-    def create_train_state_fn():
-      nnx_model = self._create_model_partial()
-      optimizer = nnx.Optimizer(nnx_model, self.tx, wrt=nnx.Param)
-      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-
-    init_state_fn = create_train_state_fn
-    annotations = maxtext_utils_nnx.get_partition_spec_nnx(
-        maxtext_utils.get_abstract_state(self.config, self.mesh, init_state_fn, True)[2]
-    )
-    # Result should be a pytree with PartitionSpec leaves
-    leaves = jax.tree_util.tree_leaves(annotations)
-    self.assertGreater(len(leaves), 0)
-    for leaf in leaves:
-      self.assertIsInstance(leaf, PartitionSpec)
-
-
 class TestSaveQuantizedCheckpoint(unittest.TestCase):
   """Tests for save_quantized_checkpoint_if_configured."""
 

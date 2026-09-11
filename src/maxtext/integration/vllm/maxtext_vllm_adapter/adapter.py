@@ -16,7 +16,7 @@
 
 import os
 from flax import nnx
-import flax.linen as nn
+from flax.core.spmd import logical_axis_rules
 import jax
 from jax import numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
@@ -355,7 +355,7 @@ class MaxTextForCausalLM(nnx.Module):
     ):
       model_kwargs.pop(extra_key, None)
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
       expert_indices = None
       res = self.model(
@@ -403,7 +403,7 @@ class MaxTextForCausalLM(nnx.Module):
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model is not initialized.")
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       return self.model.token_embedder.embedding
 
   def embed_multimodal(self, **kwargs) -> list[jax.Array]:
@@ -433,7 +433,7 @@ class MaxTextForCausalLM(nnx.Module):
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model is not initialized.")
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       inputs_embeds = self.model.token_embedder(input_ids)
 
       if multimodal_embeddings is not None:
@@ -461,7 +461,7 @@ class MaxTextForCausalLM(nnx.Module):
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model is not initialized.")
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       # Reshape to (num_tokens, 1, hidden_dim) for decoder output head
       y = jnp.expand_dims(hidden_states, axis=1)
 
@@ -480,7 +480,7 @@ class MaxTextForCausalLM(nnx.Module):
     if self.model is not None:
       return
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       model = model_creation_utils.from_pretrained(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )

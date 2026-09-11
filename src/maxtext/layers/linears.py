@@ -27,7 +27,6 @@ from jax.sharding import NamedSharding, Mesh, PartitionSpec
 from jax.ad_checkpoint import checkpoint_name
 
 from flax import nnx
-import flax.linen as nn
 
 from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config
 from maxtext.common.common_types import MODEL_MODE_PREFILL
@@ -52,7 +51,7 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
     # Custom activation function used by DeepSeek V4 Top-K MoE router
     return lambda x: jnp.sqrt(jax.nn.softplus(x))
   elif isinstance(fn_or_string, str):
-    return getattr(nn, fn_or_string)
+    return getattr(jax.nn, fn_or_string)
   elif callable(fn_or_string):
     return fn_or_string
   else:

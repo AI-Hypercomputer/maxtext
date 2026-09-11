@@ -42,7 +42,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
 from flax import nnx, traverse_util
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
@@ -712,7 +712,7 @@ def training_loop_iteration(
     else:
       step_rng_args = ()
     with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_train):
+      with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_train):
         if config.retry_when_tokens_dropped and p_train_step_dropless is not None:
           candidate_state, metrics = p_train_step(state, example_batch, *step_rng_args)
           if bool(metrics.get("has_moe_overflow")):
@@ -772,7 +772,7 @@ def training_loop_iteration(
       )
       if 0 < eval_steps <= eval_step_count:
         break
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_eval):
+      with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_eval):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
       eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
       last_eval_step_completion = datetime.datetime.now()
@@ -873,7 +873,7 @@ def train_loop(config, recorder, state=None):
   # Do not enter the legacy `mesh` context manager here: the training loop calls
   # p_train_step without it, and the mismatch in jit's tracing-cache key would
   # cause train_step to be traced and compiled a second time on the first step.
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules):
     data_sharding = sharding.get_input_data_sharding(config, mesh)
     shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     if config.shard_optimizer_over_data:
@@ -900,7 +900,7 @@ def train_loop(config, recorder, state=None):
   # warm up the XLA executable cache and avoid JIT compilation pause on the
   # first eval step.
   if p_eval_step is not None and config.compiled_trainstep_file == "" and not jax.config.jax_enable_pgle:
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules_for_eval):
+    with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules_for_eval):
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
       data_sharding_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
       shaped_eval_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding_eval, is_eval=True)
