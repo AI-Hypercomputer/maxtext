@@ -401,6 +401,72 @@ class ConfigTest(absltest.TestCase):
           with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
             pyconfig.initialize(argv)
 
+  def test_compressed_attention_rejects_context_parallelism(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=compressed",
+        "compress_ratios=[0, 128]",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "Context parallelism .* is not supported with attention_type='compressed'"):
+        pyconfig.initialize(argv)
+
+  def test_compressed_attention_allows_context_parallelism_when_all_ratios_are_zero(self):
+    """A compress_ratio of 0 downgrades the layer to local sliding, so CP stays legal."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=compressed",
+        "compress_ratios=[0, 0]",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+    self.assertEqual(config.attention_type, "compressed")
+
+  def test_compressed_attention_rejects_unsupported_dq_reduction_steps(self):
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=compressed",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "requires dq_reduction_steps to be 0 or 3"):
+        pyconfig.initialize(base_args + ["dq_reduction_steps=2"])
+      # 0 (unset) and 3 both remain valid.
+      for valid in ("dq_reduction_steps=0", "dq_reduction_steps=3"):
+        with self.subTest(valid=valid):
+          pyconfig.initialize(base_args + [valid])
+
   def test_tpu_ulysses_config_validation_accepts_initial_config(self):
     argv = [
         "",

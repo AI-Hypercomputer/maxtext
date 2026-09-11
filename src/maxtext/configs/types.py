@@ -4508,6 +4508,22 @@ class MaxTextConfig(
     context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
+    if self.attention_type == AttentionType.COMPRESSED.value:
+      # `compress_ratios` is per-layer and a ratio of 0 downgrades that layer to local sliding
+      # attention (see CompressedAttention.__init__), so context parallelism stays legal when no
+      # layer is actually compressed. `compress_ratios` defaults to [] for every other model.
+      if any(ratio > 0 for ratio in self.compress_ratios) and context_parallel_size > 1:
+        raise ValueError(
+            f"Context parallelism (context_parallel_size={context_parallel_size}) is not supported with "
+            "attention_type='compressed' and a non-zero compress_ratio. Set every entry of compress_ratios "
+            "to 0, or disable context parallelism."
+        )
+      # The Tokamax Splash backward kernel only accepts dq_reduction_steps of 3 or None; 0 means
+      # "unset" here and is mapped to the kernel default downstream.
+      if self.dq_reduction_steps not in (0, 3):
+        raise ValueError(
+            f"attention_type='compressed' requires dq_reduction_steps to be 0 or 3, got {self.dq_reduction_steps}."
+        )
     context_parallel_strategy = self.context_parallel_strategy.lower()
     if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
       raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', 'ulysses', or 'usp'.")

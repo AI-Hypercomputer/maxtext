@@ -425,6 +425,38 @@ def prime_prefill_cache_state(
       cache.overlap_gate.set_value(overlap_gate_to_write)
 
 
+def compute_hca_padding(
+    q_len: int,
+    comp_len: int,
+    block_q: int = 128,
+    block_kv: int = 128,
+    kv_len: int | None = None,
+) -> tuple[int, int]:
+  """Computes (pad_q, pad_kv_total) for HCA Flash Attention.
+
+  Args:
+    q_len: Unpadded query sequence length.
+    comp_len: Number of compressed KV blocks appended after the local KV tokens.
+    block_q: Query tile size the kernel is compiled for.
+    block_kv: KV tile size the kernel is compiled for.
+    kv_len: Unpadded local KV sequence length. Defaults to `q_len`, which is the
+      self-attention case DeepSeek-V4 uses; pass it explicitly if the query and
+      KV sequences can differ.
+
+  Returns:
+    A (pad_q, pad_kv_total) tuple.
+  """
+  if kv_len is None:
+    kv_len = q_len
+  pad_q = (block_q - (q_len % block_q)) % block_q
+  total_kv_len = kv_len + comp_len
+  pad_kv_total = (block_kv - (total_kv_len % block_kv)) % block_kv
+  # Ensure padding KV columns exist whenever query padding is required
+  if pad_q > 0 and pad_kv_total == 0:
+    pad_kv_total = block_kv
+  return pad_q, pad_kv_total
+
+
 class BaseDeepseekCompressor(nnx.Module):
   """Shared base class for DeepSeek-V4 long-range attention compressors.
 
@@ -524,6 +556,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
+      attention_kernel: str = "dot_product",
   ):
     """Initializes the HCA Compressor.
 
@@ -537,6 +570,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       quant: Optional quantization scheme.
       model_mode: The operational mode (e.g., "train", "prefill").
       rngs: An optional Rngs instance for stochastic initializations or dropout.
+      attention_kernel: Attention kernel name ("flash", "dot_product").
     """
     super().__init__(
         config,
@@ -548,6 +582,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
         model_mode,
         rngs,
     )
+    self.attention_kernel = attention_kernel
 
   def __call__(
       self,
@@ -648,8 +683,17 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
           cache=cache,
       )
 
-    # Skip causal mask generation during decoding (seq_len == 1) or if no blocks were pooled
-    if seq_len == 1 or compressed_len == 0:
+    # During decoding (seq_len == 1), dot-product attention requires a zero mask
+    if seq_len == 1:
+      compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
+      return compressed_kv, compressed_mask
+
+    # Skip dense causal mask generation when using static flash attention (HCAStaticMask)
+    if self.attention_kernel == "flash":
+      return compressed_kv, None
+
+    # Dot-product fallback when no blocks were pooled
+    if compressed_len == 0:
       compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
       return compressed_kv, compressed_mask
 
@@ -1297,6 +1341,7 @@ class CompressedAttention(Attention):
           quant=self.quant,
           model_mode=self.model_mode,
           rngs=self.rngs,
+          attention_kernel=self.attention_kernel,
       )
     elif self.compress_ratio == 4:
       self.csa_compressor = DeepseekV4CSACompressor(
@@ -1582,9 +1627,14 @@ class CompressedAttention(Attention):
     # Tokamax dynamic splash tile boundary alignment. Note: Tokamax kernel inside AttentionOp additionally
     # sets inner block size as min(block_kv, key_len) during kernel invocation.
     if self.attention_kernel == "flash":
-      total_kv_len = kv.shape[1] + (compressed_kv.shape[1] if compressed_kv is not None else 0)
-      block_size = self.config.sa_block_kv
-      pad_kv_total = (block_size - (total_kv_len % block_size)) % block_size
+      comp_len = compressed_kv.shape[1] if compressed_kv is not None else 0
+      _, pad_kv_total = compute_hca_padding(
+          q_len=inputs_q.shape[1],
+          comp_len=comp_len,
+          block_q=self.config.sa_block_q,
+          block_kv=self.config.sa_block_kv,
+          kv_len=kv.shape[1],
+      )
 
       if pad_kv_total > 0:
         if compressed_kv is not None:
@@ -1608,9 +1658,9 @@ class CompressedAttention(Attention):
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
       q = q * self.query_pre_attn_scalar
 
-    # Build indexer mask explicitly for tokamax splash kernel
+    # Build indexer mask explicitly for tokamax splash kernel (CSA dynamic path)
     indexer_mask = None
-    if self.attention_kernel == "flash" and compressed_mask is not None:
+    if self.attention_kernel == "flash" and compressed_mask is not None and self.compress_ratio == 4:
       indexer_mask = self.attention_op.generate_attention_mask(
           q,
           unpadded_kv,
@@ -1640,6 +1690,8 @@ class CompressedAttention(Attention):
         cached_values=current_kv_cache,
         indexer_mask=indexer_mask,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
+        pad_kv_total=pad_kv_total,
+        compress_ratio=self.compress_ratio,
     )
 
     # Reverse RoPE on Values
