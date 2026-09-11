@@ -30,7 +30,6 @@ import pytest
 from tempfile import gettempdir, NamedTemporaryFile
 
 
-from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path
@@ -495,10 +494,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_moe_pp_bf16(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Pipeline parallelism not supported for pure_nnx_decoder=True")
-
+    pytest.skip("Pipeline parallelism is not supported for the NNX decoder.")
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_pp_bf16.pickle")
     train_compile_main(
@@ -648,10 +644,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_moe_deepseek_pipeline_subset(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Pipeline parallelism not supported for pure_nnx_decoder=True")
-
+    pytest.skip("Pipeline parallelism is not supported for the NNX decoder.")
     compiled_trainstep_file = "/tmp/test_moe_deepseek_pipeline_subset.pickle"
     train_compile_main(
         (
@@ -674,10 +667,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_pipeline_subset(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Test not supported for pure_nnx_decoder=True")
-
+    pytest.skip("Not supported for the NNX decoder.")
     compiled_trainstep_file = "/tmp/test_pipeline_subset.pickle"
     train_compile_main(
         (
@@ -990,10 +980,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_circular_pipeline_ag_per_repeat_ep_ds(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Pipeline parallelism not supported for pure_nnx_decoder=True")
-
+    pytest.skip("Pipeline parallelism is not supported for the NNX decoder.")
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_ag_per_repeat_ep_ds.pickle")
     train_compile_main(

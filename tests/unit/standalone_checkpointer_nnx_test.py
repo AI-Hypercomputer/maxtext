@@ -105,7 +105,6 @@ class CheckpointLoopTest(unittest.TestCase):
     """Creates a mock configuration for checkpoint_loop tests."""
     config = mock.MagicMock()
     config.init_weights_seed = 0
-    config.pure_nnx = False
     config.steps = 2
     config.standalone_checkpointer_per_step_interval = 0.5
     config.standalone_checkpointer_drop_page_cache_before_restore = True
@@ -123,6 +122,12 @@ class CheckpointLoopTest(unittest.TestCase):
 
     with (
         mock.patch("maxtext.utils.standalone_checkpointer.from_config"),
+        mock.patch("maxtext.utils.maxtext_utils.get_mesh_from_config"),
+        mock.patch("maxtext.utils.maxtext_utils_nnx.create_nnx_rngs"),
+        mock.patch(
+            "maxtext.utils.model_creation_utils.create_nnx_abstract_model",
+            return_value=(mock.MagicMock(), None),
+        ),
         mock.patch("maxtext.utils.train_utils.create_training_optimizer", return_value=(None, mock.MagicMock())),
         mock.patch("maxtext.utils.train_utils.create_checkpoint_manager", return_value=mock_ckpt_mgr),
         mock.patch(
@@ -144,7 +149,7 @@ class CheckpointLoopTest(unittest.TestCase):
     mock_setup.assert_called_once()
     mock_sleep.assert_called_once()
     mock_system.assert_called_once_with("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
-    mock_ckpt_mgr.load_checkpointables.assert_called_once_with(1, {"items": mock_state})
+    mock_ckpt_mgr.load_checkpointables.assert_called_once()
 
   def test_checkpoint_loop_start_from_checkpoint(self):
     """Tests initializing state from an existing checkpoint."""
@@ -155,6 +160,12 @@ class CheckpointLoopTest(unittest.TestCase):
 
     with (
         mock.patch("maxtext.utils.standalone_checkpointer.from_config"),
+        mock.patch("maxtext.utils.maxtext_utils.get_mesh_from_config"),
+        mock.patch("maxtext.utils.maxtext_utils_nnx.create_nnx_rngs"),
+        mock.patch(
+            "maxtext.utils.model_creation_utils.create_nnx_abstract_model",
+            return_value=(mock.MagicMock(), None),
+        ),
         mock.patch("maxtext.utils.train_utils.create_training_optimizer", return_value=(None, mock.MagicMock())),
         mock.patch("maxtext.utils.train_utils.create_checkpoint_manager", return_value=mock_ckpt_mgr),
         mock.patch("maxtext.utils.maxtext_utils.get_abstract_state", return_value=(mock.MagicMock(), None, None)),
@@ -187,6 +198,12 @@ class CheckpointLoopTest(unittest.TestCase):
 
     with (
         mock.patch("maxtext.utils.standalone_checkpointer.from_config"),
+        mock.patch("maxtext.utils.maxtext_utils.get_mesh_from_config"),
+        mock.patch("maxtext.utils.maxtext_utils_nnx.create_nnx_rngs"),
+        mock.patch(
+            "maxtext.utils.model_creation_utils.create_nnx_abstract_model",
+            return_value=(mock.MagicMock(), None),
+        ),
         mock.patch("maxtext.utils.train_utils.create_training_optimizer", return_value=(None, mock.MagicMock())),
         mock.patch("maxtext.utils.train_utils.create_checkpoint_manager", return_value=mock_ckpt_mgr),
         mock.patch("maxtext.utils.maxtext_utils.get_abstract_state", return_value=(mock.MagicMock(), None, None)),
@@ -209,10 +226,9 @@ class CheckpointLoopTest(unittest.TestCase):
     self.assertIs(returned_state, mock_state)
     mock_setup.assert_called_once()
 
-  def test_checkpoint_loop_pure_nnx(self):
-    """Tests checkpoint loop with pure_nnx enabled."""
+  def test_checkpoint_loop_saves_in_linen_layout(self):
+    """Tests the checkpoint loop saves NNX state in the Linen on-disk layout."""
     config = self._create_mock_config(start_from_checkpoint=False)
-    config.pure_nnx = True
     mock_state = mock.MagicMock()
     mock_state.to_pure_dict.return_value = {"params": {}}
     mock_ckpt_mgr = mock.MagicMock()

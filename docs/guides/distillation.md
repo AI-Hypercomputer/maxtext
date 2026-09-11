@@ -63,9 +63,8 @@ Student and teacher must share the same vocabulary. The trainer asserts `student
 If `distill_beta > 0`, the model `sow`s the attention `out_projection` activations at every layer so the loss can read them. This requires:
 
 - `scan_layers: True` — activations are stacked along the leading scan axis; the loss does `jnp.take(features, layer_indices, axis=0)` over that axis.
-- `enable_nnx: True` — `sow(nnx.Intermediate, ...)` is an NNX-specific call.
 
-The trainer validates both at config initialization. Logit-only runs (`distill_beta = 0`) have no such constraint.
+The trainer validates this at config initialization. Logit-only runs (`distill_beta = 0`) have no such constraint.
 
 ## Loss anatomy
 
@@ -221,7 +220,6 @@ distill_feature_loss_type: cosine
 distill_layer_indices: [3, 7, 11, 15, 19, 23, 27, 31]   # for 32-layer student
 
 scan_layers: True
-enable_nnx: True
 ```
 
 ### Logit-only baseline (cheapest; no feature extraction overhead)
@@ -258,7 +256,7 @@ The trainer logs the following to TensorBoard (configured by `tensorboard_dir`, 
 
 | Symptom                                                                             | Likely cause                                                                                           | Fix                                                                                                                           |
 | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `ValueError: a value of self.distill_beta > 0.0 requires self.scan_layers = True`   | Feature loss enabled without scanned layers.                                                           | Add `scan_layers=True enable_nnx=True` to your CLI / yml.                                                                     |
+| `ValueError: a value of self.distill_beta > 0.0 requires self.scan_layers = True`   | Feature loss enabled without scanned layers.                                                           | Add `scan_layers=True` to your CLI / yml.                                                                                     |
 | `Vocab size mismatch! Student: X, Teacher: Y`                                       | Different tokenizers.                                                                                  | Use teacher and student with the same vocab; the trainer cannot match logits across vocabularies.                             |
 | `Teacher model path is missing`                                                     | `teacher_overrides.load_parameters_path` not set in non-offline mode.                                  | Set it in `teacher_overrides` in the yml or pass via CLI.                                                                     |
 | `Features extracted from student or teacher model are None, but distill_beta > 0.0` | Model architecture doesn't sow `out_projection_activations` (e.g. uses an unsupported attention path). | Verify the attention layer in use sets `self.sow(nnx.Intermediate, "out_projection_activations", out)` (see `attentions.py`). |

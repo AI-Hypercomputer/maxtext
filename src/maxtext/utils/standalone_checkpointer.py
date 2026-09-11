@@ -19,7 +19,6 @@
 # See github.com/google/maxtext/issues/20 for more
 
 import datetime
-from functools import partial
 import os
 import time
 from typing import Sequence
@@ -33,7 +32,6 @@ from maxtext.configs import pyconfig
 from maxtext.common import checkpointing
 from maxtext.common import emergency_checkpointing
 from maxtext.common import train_state_nnx
-from maxtext.models import models
 from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
@@ -42,8 +40,6 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import train_utils
 from maxtext.utils.model_creation_utils import from_config
 import numpy as np
-
-Transformer = models.transformer_as_linen
 
 
 def _as_abstract_leaf(leaf):
@@ -61,28 +57,21 @@ def checkpoint_loop(config, state=None):
   on the configured cadence. Works on both Linen and NNX state shapes.
   """
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
-  if config.pure_nnx:
-    mesh = maxtext_utils.get_mesh_from_config(config)
-    rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
-    model = from_config(config, mesh=mesh, rngs=rngs)
-    _, tx = train_utils.create_training_optimizer(config, model)
-    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  mesh = maxtext_utils.get_mesh_from_config(config)
+  rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
+  model = from_config(config, mesh=mesh, rngs=rngs)
+  _, tx = train_utils.create_training_optimizer(config, model)
+  _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
-    def init_state_fn():
-      nnx_model = _create_model_partial()
-      wrt = (
-          getattr(nnx, "LoRAParam", nnx.Param)
-          if getattr(getattr(config, "lora", None), "enable_lora", False)
-          else nnx.Param
-      )
-      optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
-      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-
-  else:
-    model = from_config(config)
-    mesh = model.mesh
-    _, tx = train_utils.create_training_optimizer(config, model)
-    init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+  def init_state_fn():
+    nnx_model = _create_model_partial()
+    wrt = (
+        getattr(nnx, "LoRAParam", nnx.Param)
+        if getattr(getattr(config, "lora", None), "enable_lora", False)
+        else nnx.Param
+    )
+    optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
+    return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
   checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
@@ -128,7 +117,7 @@ def checkpoint_loop(config, state=None):
       start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
-      state_to_save = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict()) if config.pure_nnx else state
+      state_to_save = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
       if checkpointing.save_checkpoint(checkpoint_manager, int(step), state_to_save):
         checkpointing.wait_until_finished(checkpoint_manager)
         end_time = datetime.datetime.now()
@@ -187,8 +176,8 @@ def add_entropy_to_checkpoint(state):
     * Linen `TrainState`: `state.params` + `state.opt_state` (tuple).
     * NNX `TrainStateNNX` (Module): `state.model` is an `nnx.Module`; the
       optimizer's `opt_state` is the optax tuple of NamedTuples.
-    * NNX `nnx.State` (post-split, what `setup_training_state` returns under
-      `pure_nnx`): `state.model` and `state.optimizer.opt_state` are sub-States;
+    * NNX `nnx.State` (post-split, what `setup_training_state` returns):
+      `state.model` and `state.optimizer.opt_state` are sub-States;
       `opt_state[0].mu`/`nu` are themselves States that can be reassigned.
   """
   if hasattr(state, "model"):
