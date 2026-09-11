@@ -347,7 +347,8 @@ class GateLogit(nnx.Module):
     else:
       self.bias = None
 
-    if quant:
+    if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
+      # ServeFp8WeightQuantization doesn't implement dot_general_cls().
       dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
       dot_general_linen = dot_general_cls()
       quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
@@ -692,8 +693,7 @@ class RoutedMoE(nnx.Module):
         wi_scale_shape = (num_experts,)
         wo_scale_shape = (self.num_experts,)
 
-      # If using block-wise tiling, kernel scales are replicated for the block tile dimensions
-      # rather than sharded since it does not take significant memory.
+      # Scales are small, so replicate rather than shard the tile dims.
       wi_scale_sharding = (self.wi_kernel_axes[0],) + (None,) * (len(wi_scale_shape) - 1)
       wo_scale_sharding = (self.wo_kernel_axes[0],) + (None,) * (len(wo_scale_shape) - 1)
 
@@ -805,7 +805,6 @@ class RoutedMoE(nnx.Module):
     if self.config.use_random_routing:
       if rngs is None:
         raise ValueError("The random key cannot be None for random routing.")
-      # Reuse the 'params' RNG stream to ensure random routing
       rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
       top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
       return top_k_weights, top_k_indices
@@ -813,11 +812,8 @@ class RoutedMoE(nnx.Module):
     if self.is_hash_routing:
       if input_ids is None:
         raise ValueError("input_ids cannot be None when is_hash_routing is True")
-      # Access the static routing table
-      tid2eid_int = self.tid2eid.value
-      # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
-      tid2eid_int = tid2eid_int.astype(jnp.int32)
-      # Cast input_ids to int32 to safely index the hash routing table
+      # int32 cast: JAX zeroes gradients through integer casts.
+      tid2eid_int = self.tid2eid.value.astype(jnp.int32)
       top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     # NOTE: deepseek2 has a different pattern
@@ -1560,7 +1556,7 @@ class RoutedMoE(nnx.Module):
 
     def get_quantization_dtypes():
       lhs_quantize_dtype, rhs_quantize_dtype = None, None
-      if self.quant is not None:
+      if self.quant is not None and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization):
         quant_dg = self.quant.quant_dg
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
@@ -1589,7 +1585,9 @@ class RoutedMoE(nnx.Module):
         return tuple()
 
       lhs_vma_axes = extract_vma(inputs)
-      rhs_vma_axes = extract_vma(kernel)
+      # Pre-quantized rhs is a QArray; extract VMA from qvalue, don't cast (would dequantize).
+      is_native_kernel = isinstance(kernel, qpl.QArray)
+      rhs_vma_axes = extract_vma(kernel.qvalue if is_native_kernel else kernel)
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
@@ -1599,7 +1597,8 @@ class RoutedMoE(nnx.Module):
       if padding_amount > 0 and partial_sum is not None:
         partial_sum = jnp.pad(partial_sum, ((0, padding_amount), (0, 0)))
       inputs = inputs.astype(self.dtype)
-      kernel = kernel.astype(self.dtype)
+      if not is_native_kernel:
+        kernel = kernel.astype(self.dtype)
       lhs_quantize_dtype, rhs_quantize_dtype = get_quantization_dtypes()
 
       # Interpret the megablox Pallas kernel only when the TARGET is NOT TPU (CPU or GPU,
@@ -1639,8 +1638,7 @@ class RoutedMoE(nnx.Module):
             group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
-            # Only "fp8_full" quantizes GMM; other schemes (e.g. "fp8", "int8")
-            # do not define a GMM quantization rule.
+            # Only "fp8_full" defines a GMM quantization rule.
             use_qwix_quantization=bool(self.config.quantization == "fp8_full") and self.config.use_qwix_quantization,
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
@@ -2465,13 +2463,9 @@ class RoutedMoE(nnx.Module):
             rngs,
         )
 
-      # Chunked ring-of-experts pipeline: split the per-shard tokens along the
-      # sequence dim into `n_chunks` data-independent chunks. Each chunk runs the
-      # full route -> GMM -> combine path; with no barrier between them XLA is
-      # free to overlap chunk (c+1)'s EP all-gather and chunk (c-1)'s
-      # reduce-scatter with chunk c's GMM compute. Token routing is per-token, so
-      # the main (lm) output is identical to n_chunks=1; only the aggregate
-      # load-balance loss / bias updates are averaged across chunks.
+      # Split tokens into n_chunks and run route->GMM->combine per chunk; no
+      # barrier between chunks lets XLA overlap EP comms with GMM compute.
+      # Output matches n_chunks=1 except lb loss/bias updates, which average.
       seq_len = x.shape[1]
       chunk = seq_len // n_chunks
       outs, lb_losses, bias_updates_list = [], [], []
@@ -2479,10 +2473,7 @@ class RoutedMoE(nnx.Module):
       for c in range(n_chunks):
         sl = slice(c * chunk, (c + 1) * chunk)
         x_c = x[:, sl, :]
-        # Fence each chunk's input on the previous chunk's output to control XLA's
-        # scheduling and prevent it from interleaving/fusing the chunks -- forces
-        # sequential pipelining. Math is unchanged (the barrier is identity), so
-        # loss stays bit-exact.
+        # Forces sequential pipelining instead of XLA fusing chunks; identity op, bit-exact.
         if self.config.moe_chunk_barrier and _prev is not None:
           x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
         out_c, lb_c, bu_c = _moe_body(
@@ -2809,7 +2800,7 @@ class RoutedMoE(nnx.Module):
     ):
       return jnp.einsum
 
-    if self.quant:
+    if self.quant and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization):
       op_id = einsum_name if einsum_name is not None else "einsum"
 
       def quant_einsum(*args, **kwargs):  # pylint: disable=unused-argument
@@ -3128,10 +3119,7 @@ class RoutedMoE(nnx.Module):
 
       with jax.named_scope("wo"):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes, einsum_name=WO)(
-            "BSEH,EHM -> BSEM",
-            layer_multiply,
-            wo_kernel,
-            precision=matmul_precision,
+            "BSEH,EHM -> BSEM", layer_multiply, wo_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
           intermediate_layer = intermediate_layer + wo_bias[None, None, :, :]
@@ -3283,8 +3271,24 @@ class RoutedMoE(nnx.Module):
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
+    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
+
+    # Native (no-dequantize) fp8 only for gmm v2: its tokamax-v2 backend unwraps a
+    # QArray rhs directly. Other MoE paths can't consume a QArray -- keep this gate narrow.
+    native_gmm = isinstance(self.quant, quantizations.ServeFp8WeightQuantization) and cfg.sparse_matmul and cfg.use_gmm_v2
+
+    def _maybe_native_gmm_weight(kernel, scale):
+      if native_gmm and ctypes.is_fp8_dtype(kernel.dtype) and scale is not None:
+        # gmm_v2 only natively broadcasts per-tensor/per-channel scale, not a full 2D
+        # block grid; only per_tensor is handled here, rest falls back to dequantize.
+        scheme, _ = quantizations.infer_scale_granularity(scale.shape[1:])
+        if scheme == "per_tensor":
+          per_expert_scale = jnp.max(scale.reshape(scale.shape[0], -1), axis=1).reshape(-1, 1, 1, 1)
+          return qpl.QArray(qvalue=kernel, scale=per_expert_scale)
+      return linears.dequantize_weight(kernel, scale, self.dtype)
+
     wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
-    wo_kernel = linears.dequantize_weight(self.wo[...], wo_scale, self.dtype)
+    wo_kernel = _maybe_native_gmm_weight(self.wo[...], wo_scale)
 
     fused_kernel = None
     w0_kernel = None
@@ -3301,14 +3305,13 @@ class RoutedMoE(nnx.Module):
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
-      w0_kernel = linears.dequantize_weight(self.wi_0[...], wi_0_scale, self.dtype)
-      w1_kernel = linears.dequantize_weight(self.wi_1[...], wi_1_scale, self.dtype)
+      w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
+      w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because
     # fused_moe_func doesn't support them. Other paths (dense/sparse
     # matmul) apply them to top_k_weights in get_topk.
-    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
     if is_fused_moe_path:
       if self.per_expert_scale is not None and not (cfg.model_call_mode == "inference" and cfg.fuse_expert_scales):
         wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
