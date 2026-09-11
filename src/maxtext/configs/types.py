@@ -2216,6 +2216,12 @@ class Muon(BaseModel):
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
   )
+  muon_include_routers: bool = Field(
+      True,
+      description=(
+          "Whether to apply Muon updates to MoE router matrices. If False," " routers are optimized with AdamW."
+      ),
+  )
   muon_use_all_to_all: bool = Field(
       False,
       description=(

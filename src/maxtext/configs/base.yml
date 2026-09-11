@@ -1042,6 +1042,7 @@ muon_type: "optax_muon" # Type of Muon optimizer: "optax_muon" (or "optax") vs "
 muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
+muon_include_routers: true # Whether to apply Muon updates to MoE router matrices. If False, routers are optimized with AdamW.
 muon_use_all_to_all: false # Whether to use all-to-all communication during Newton-Schulz iterations in maxtext_muon.
 
 
