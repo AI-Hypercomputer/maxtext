@@ -1002,6 +1002,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIs(abstract_engine.LossOutput, sft_utils.LossOutput)
     self.assertIs(abstract_engine.WeightedMetric, sft_utils.WeightedMetric)
     self.assertIs(abstract_engine.TrainerPayload, datatypes.TrainerPayload)
+    self.assertIs(abstract_engine.RLTrainerPayload, datatypes.RLTrainerPayload)
 
     tunix_metric = sft_utils.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0))
     self.assertIsInstance(tunix_metric, abstract_engine.WeightedMetric)
@@ -1024,6 +1025,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         advantages=jnp.zeros((1, 4)),
     )
     self.assertIsInstance(rl_payload, abstract_engine.TrainerPayload)
+    self.assertIsInstance(rl_payload, abstract_engine.RLTrainerPayload)
 
   def test_unsupported_loss_return_raises_naming_the_type(self):
     """An unrecognised return fails loudly and says what it received."""
