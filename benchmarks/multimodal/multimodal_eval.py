@@ -150,7 +150,7 @@ def construct_prompt(
         question=parsed_dataset_example.question,
         choices=choices_text if choices_text else "N/A",
     )
-    if config.use_multimodal and "qwen3-omni" in config.model_name:
+    if config.use_multimodal and "qwen" in str(config.decoder_block).lower():
       prompt = mm_processor.reformat_prompt(
           prompt,
           image_placeholder,
@@ -180,6 +180,16 @@ def main(config, local_args):
 
   max_prefill_predict_length = getattr(config, "max_prefill_predict_length", 1024)
   max_target_length = getattr(config, "max_target_length", 2048)
+
+  # Collect possible EOS/stop token IDs across models (Gemma, Qwen, etc.)
+  eos_token_ids = {tokenizer.eos_id} if getattr(tokenizer, "eos_id", None) is not None else set()
+  if hasattr(tokenizer, "stop_tokens"):
+    eos_token_ids.update(tokenizer.stop_tokens)
+  if hasattr(tokenizer, "tokenizer"):
+    vocab = tokenizer.tokenizer.get_vocab()
+    for token in ("<end_of_turn>", "<eos>", "<|im_end|>", "<|endoftext|>"):
+      if token in vocab:
+        eos_token_ids.add(vocab[token])
 
   # Initialize counters for overall accuracy
   correct_count = 0
@@ -278,7 +288,7 @@ def main(config, local_args):
       # Generate next token
       decode_state, sampled_token = engine.generate(params, decode_state)
       sampled_tokens.append(sampled_token.get_result_at_slot(slot).tokens.item())
-      if sampled_tokens[-1] == tokenizer.eos_id:
+      if sampled_tokens[-1] in eos_token_ids:
         break
 
     correct_answer = parsed_dataset_example.answer
