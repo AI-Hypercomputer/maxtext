@@ -35,7 +35,7 @@ DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The
 
 ## Checkpoint conversion
 To get started, follow the instructions at HuggingFace ([V3](https://huggingface.co/deepseek-ai/DeepSeek-V3), [V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)) to download the model. Currently for V3, V3.1, and R1, it uses mixed precision fp8 & bf16 weights. To convert all FP8 weights to BF16, use the script [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/deepseek_dequantize.py). Once downloaded and converted to BF16:
-* run [convert_deepseek_family_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_deepseek_family_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) for training and fine-tuning. When converting a checkpoint with MTP layers (like DeepSeek-V3), be sure to add the `--enable_mtp` flag to process them correctly.
+* run [convert_deepseek_family_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_deepseek_family_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) for training and fine-tuning. When converting a checkpoint with MTP layers (like DeepSeek-V3), be sure to add the `--enable_mtp` flag to process them correctly. The conversion script maps the MTP-specific final normalization layer (`model.layers.61.shared_head.norm.weight`) to `mtp_block.mtp_layer_1.mtp_1_final_norm.scale`, while sharing the vocabulary embedding and output projection head with the base model.
 * run [convert_deepseek_family_unscanned_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_deepseek_family_unscanned_ckpt.py) to convert the checkpoint to unscanned version in Orbax for decoding.
 
 ### Checkpoint conversion for V3.2 and V4
@@ -152,6 +152,16 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 ```
 
 Fine-tuning with MTP on v5p-256
+
+DeepSeek-V3 Multi-Token Prediction (MTP) predicts additional future tokens using auxiliary transformer blocks. Each MTP block:
+1. Combines representations via dual input normalization (`embedding_norm`, `hidden_state_norm`) and linear projection (`projection`).
+2. Processes tokens through a full Transformer decoder layer (MLA + MoE).
+3. Applies a dedicated MTP final RMSNorm (`final_norm` / `shared_head.norm`) before projecting through the shared embedding output head to compute MTP loss.
+
+The total training loss combines the base model loss and scaled MTP auxiliary loss:
+```
+total_loss = main_model_loss + (mtp_loss_scaling_factor * mtp_loss)
+```
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
