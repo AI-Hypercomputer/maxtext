@@ -1,5 +1,5 @@
 <!--
- Copyright 2023–2025 Google LLC
+ Copyright 2023-2026 Google LLC
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@
 
 This guide provides a comprehensive walkthrough for running MaxText workloads on a Google Kubernetes Engine (GKE) cluster using Pathways. Pathways acts as a powerful orchestrator for large-scale JAX jobs on AI Hypercomputer infrastructure.
 
-This document assumes you have already created a Pathways GKE cluster using `xpk`. If you haven't, follow the instructions at the [Google Cloud Pathways & XPK documentation](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster#xpk).
+This document assumes you have already created a Pathways GKE cluster using Cluster Toolkit. If you haven't, follow the instructions at the [Google Cloud Pathways & Cluster Toolkit documentation](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster).
 
 We will cover two primary modes of operation:
 
@@ -31,7 +31,7 @@ We will cover two primary modes of operation:
 
 Before you can run a MaxText workload, you must complete the following setup steps.
 
-1. **Install XPK and its dependencies**. Ensure that the `xpk` command-line tool is installed. For details on installing and configuring XPK with MaxText, see [Running MaxText with XPK](run_maxtext_via_xpk.md).
+1. **Install Cluster Toolkit and its dependencies**. Ensure that `gcluster`, `gcloud`, and `kubectl` are installed. For details on installing and configuring Cluster Toolkit with MaxText, see [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md).
 
 2. **Create a GKE cluster** configured for Pathways.
 
@@ -53,19 +53,13 @@ export ZONE=<GCP location> # e.g., 'us-central1'
 export GKE_CLUSTER=<cluster name>
 
 # -- Workload Configuration --
-# An arbitrary string to identify this specific run.
-# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
-export RUN_NAME="maxtext-run-$(date +%Y%m%d-%H%M%S)"
+# Note: Workload name cannot exceed 22 characters for Pathways workloads due to Kubernetes 63-byte label limit on coordinator address (`<name>-pathways-head-0-0.<name>`).
+export RUN_NAME="pw-$(date +%m%d%H%M%S)"
 
-# For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
-# of your cluster:
-
-# 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
-
-# 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
-# kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
-export TPU_TYPE="v5p-8" # Or your desired TPU type, e.g., v5e-4
+# For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`.
+# Choose a compute type and topology supported by the target cluster (e.g. ct6e-standard-4t with 4x8, or ct5p-hightpu-4t with 4x4x4):
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
+export TOPOLOGY=<TPU_TOPOLOGY>
 export NUM_SLICES=1 # Number of TPU slices for your job
 
 # -- MaxText & Storage Configuration --
@@ -75,13 +69,10 @@ export NUM_SLICES=1 # Number of TPU slices for your job
 # [Cloud Console](https://console.cloud.google.com/storage/browser).
 export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
 
-# The Docker image you pushed in the prerequisite step
-export CLOUD_IMAGE_NAME=<image name>
-export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
-```
-
-```{note}
-If you installed `xpk` inside a Python virtual environment (`venv`), make sure to reactivate your virtual environment (e.g., `source <VENV_NAME>/bin/activate`) in any new terminal sessions before running `xpk` commands. Otherwise, you will encounter a `Command xpk not found` error.
+# Official release pre-training image (recommended)
+export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+# Or your custom runner image:
+# export DOCKER_IMAGE="<REGION>-docker.pkg.dev/${PROJECT_ID}/<REPO>/<IMAGE>:<TAG>"
 ```
 
 ## 3. Running a batch workload
@@ -90,17 +81,17 @@ A batch workload runs entirely within the GKE cluster. You submit the job defini
 
 ### Submit the batch workload
 
-Use the `xpk workload create-pathways` command to start the job.
+Use the `gcluster job submit` command with `--pathways` to start the job.
 
 ```bash
-xpk workload create-pathways \
-  --workload=${RUN_NAME?} \
-  --cluster=${GKE_CLUSTER?} \
-  --num-slices=${NUM_SLICES?} \
-  --tpu-type=${TPU_TYPE?} \
-  --project=${PROJECT_ID?} \
-  --zone=${ZONE?} \
-  --docker-image=${DOCKER_IMAGE?} \
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --pathways \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --num-slices=${NUM_SLICES:-1} \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
   --command="python3 -m maxtext.trainers.pre_train.train \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     per_device_batch_size=1 \
@@ -112,10 +103,22 @@ xpk workload create-pathways \
 
 ### Verify the workload
 
-You can check the status of your running workloads with the `xpk workload list` command.
+You can check the status of your running workloads with the `gcluster job list` command.
 
 ```bash
-xpk workload list --cluster=${GKE_CLUSTER?} --project=${PROJECT_ID?} --zone=${ZONE?}
+gcluster job list
+# Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
+gcluster job logs ${RUN_NAME?} --main-only=false
+```
+
+You can also inspect the Kubernetes resources directly:
+
+```bash
+kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+# In Pathways workloads, use the jobset-name label to select all pods (both pathways-head and worker pods):
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
+# Or view the MaxText training logs directly from the head container:
+kubectl logs -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?} -c workload-container -f
 ```
 
 ## 4. Running a headless (interactive) workload
@@ -127,14 +130,14 @@ A headless workload reserves TPUs on the cluster and sets up a controller, but t
 This command reserves the TPUs and starts the Pathways head service on the cluster. It will wait until the resources are ready.
 
 ```bash
-xpk workload create-pathways \
-  --headless \
-  --workload=${RUN_NAME?} \
-  --num-slices=${NUM_SLICES?} \
-  --tpu-type=${TPU_TYPE?} \
-  --project=${PROJECT_ID?} \
-  --zone=${ZONE?} \
-  --cluster=${GKE_CLUSTER?}
+gcluster job submit \
+  --name=${RUN_NAME?} \
+  --pathways \
+  --pathways-headless \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --num-slices=${NUM_SLICES:-1} \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?}
 ```
 
 ### Step 2: Connect to the cluster via port forwarding
@@ -145,7 +148,7 @@ This command forwards local port 29000 to the controller pod in the cluster. It 
 
 ```bash
 kubectl port-forward \
-  "$(kubectl get pods -o name | grep ${RUN_NAME?}-pathways-head)" \
+  "$(kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?} -o name | grep pathways-head)" \
   29000:29000 &> /dev/null &
 ```
 

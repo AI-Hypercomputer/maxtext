@@ -18,7 +18,17 @@
 
 # At scale with XPK
 
-This guide provides the recommended workflow for running MaxText on Google Kubernetes Engine (GKE) using the **Accelerated Processing Kit (XPK)**. For a complete reference on XPK, please see the [official XPK repository](https://github.com/AI-Hypercomputer/xpk).
+```{warning}
+This guide is kept for legacy compatibility only. The recommended path for new GKE deployments is [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). XPK is deprecated and should not be used for new cluster provisioning or workload orchestration.
+
+For a direct Cluster Toolkit command reference, see [At scale with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). The XPK commands below are retained only for existing deployments.
+```
+
+## Cluster Toolkit replacement
+
+For new deployments, please refer to [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md).
+
+This guide documents the older workflow for running MaxText on Google Kubernetes Engine (GKE) using the **Accelerated Processing Kit (XPK)**. For a complete reference on XPK, please see the [official XPK repository](https://github.com/AI-Hypercomputer/xpk).
 
 ## Overview of the workflow
 

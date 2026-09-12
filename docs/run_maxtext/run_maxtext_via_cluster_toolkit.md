@@ -84,7 +84,7 @@ First, ensure your local `kubectl` is authenticated with your target GKE cluster
 
 ```bash
 gcloud container clusters get-credentials <GKE_CLUSTER_NAME> \
-  --region <GCP_REGION_OR_ZONE> \
+  --location <GCP_ZONE> \
   --project <GCP_PROJECT_ID>
 ```
 
@@ -108,7 +108,7 @@ To verify that your GKE cluster, Kueue admission queues, and multi-host JAX ICI 
 cd /path/to/maxtext
 
 gcluster job submit \
-  --base-image us-east5-docker.pkg.dev/cloud-tpu-multipod-dev/maxtext-images/maxtext_base:latest \
+  --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4 \
   --build-context . \
   --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-multihost-smoke-test steps=5 dataset_type=synthetic model_name=default enable_checkpointing=False" \
   --name maxtext-multihost-smoke-test \
@@ -197,7 +197,7 @@ When you run `gcluster job submit` with `--build-context .`, the generated pickl
 
 ```bash
 gcluster job submit \
-  --base-image us-east5-docker.pkg.dev/cloud-tpu-multipod-dev/maxtext-images/maxtext_base:latest \
+  --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4 \
   --build-context . \
   --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-aot-test base_output_directory=gs://<MY_BUCKET>/output dataset_path=gs://<MY_DATASET>/ steps=100 per_device_batch_size=1 compiled_trainstep_file=maxtext_${TPU_TYPE}_aot.pickle" \
   --name maxtext-aot-test \
