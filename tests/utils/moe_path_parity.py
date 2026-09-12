@@ -214,6 +214,8 @@ def main():
   p.add_argument("--model", default="qwen3.5-35b-a3b")
   p.add_argument("--layers", type=int, default=8, help="multiple of 4: the model interleaves GDN layers every 4")
   p.add_argument("--seq_len", type=int, default=512)
+  p.add_argument("--batch", type=int, default=4,
+                 help="must be divisible by the data/fsdp axis (4 on a v5p-8)")
   p.add_argument("--dtype", default="bfloat16")
   p.add_argument("--float32_gate_logits", default="True")
   p.add_argument("--trainer_prefuse", default="False", help="production trainer default is False")
@@ -245,10 +247,14 @@ def main():
 
   # Deterministic pseudo-text. Real tokens would be better but are not needed:
   # the divergence is a property of the arithmetic, not the content.
+  # Batch must be divisible by the data/fsdp axis: tpu_flash_attention asserts
+  # query.shape[0] % devices_in_data_fsdp == 0 (attention_op.py:1849). With a
+  # 4-device mesh that means batch >= 4.
   key = jax.random.PRNGKey(args.seed + 1)
-  ids = jax.random.randint(key, (1, args.seq_len), 0, trainer_cfg.vocab_size, dtype=jnp.int32)
-  pos = jnp.arange(args.seq_len, dtype=jnp.int32)[None, :]
-  seg = jnp.ones((1, args.seq_len), dtype=jnp.int32)
+  ids = jax.random.randint(key, (args.batch, args.seq_len), 0, trainer_cfg.vocab_size, dtype=jnp.int32)
+  pos = jnp.broadcast_to(jnp.arange(args.seq_len, dtype=jnp.int32)[None, :], (args.batch, args.seq_len))
+  seg = jnp.ones((args.batch, args.seq_len), dtype=jnp.int32)
+  print(f"\ntokens: batch={args.batch} seq_len={args.seq_len} -> {args.batch * (args.seq_len - 1)} scored positions")
 
   def fwd(model):
     return model(decoder_input_tokens=ids, decoder_positions=pos,
