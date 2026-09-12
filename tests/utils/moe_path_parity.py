@@ -136,32 +136,20 @@ def build_configs(args):
         "model_call_mode=inference",
         "remat_policy=none",
         "use_mrope=False",
-        # Production maps rollout_fsdp onto ici_data_parallelism and relies on
-        # tpu-inference sharding within each replica (TP=4 of 128 chips). On a
-        # 4-chip host that degenerates to full replication and OOMs, so shard
-        # by tensor parallelism instead. Trainer and sampler already differ in
-        # sharding in production, so this does not introduce a difference in
-        # kind -- but it is a knob, and worth flipping if a result looks odd.
-        # Sharding, and why it is fsdp by default:
-        #  - data parallelism REPLICATES weights; on 4 chips a 35B needs ~66GB
-        #    per chip and OOMs at construction.
-        #  - tensor parallelism shards KV heads, and this model has
-        #    base_num_kv_heads=2, so TP>2 fails outright
-        #    (attentions.py:638 -- heads are atomic under TP).
-        #  - fsdp shards parameters without touching KV heads.
-        # Matching the trainer's sharding also removes a confound: the only
-        # remaining difference is the MoE/attention code path, which is the
-        # thing under test. --sampler_tp mirrors production's TP instead, but
-        # must divide num_kv_heads.
+        # Sharding on the vLLM mesh. vllm.yml:36 declares
+        #   mesh_axes: ['data','attn_dp','model','expert','attn_dp_expert','dcp','pcp']
+        # -- there is NO fsdp axis, so ici_fsdp_parallelism is silently ignored
+        # here and every axis stays 1. Of the axes that do exist:
+        #   data   replicates weights -> ~66GB/chip for a 35B on 4 chips, OOM
+        #   model  shards KV heads    -> must divide num_kv_heads, which is 2
+        #   expert shards the experts -> no KV constraint, and it is where
+        #          almost all of a 35B-A3B's parameters live
+        # so expert parallelism is the default. --sampler_tp switches to tensor
+        # parallelism instead, but must divide num_kv_heads.
         *([f"ici_tensor_parallelism={args.sampler_tp}",
-           f"ici_data_parallelism={args.devices // args.sampler_tp}",
-           f"rollout_tensor_parallelism={args.sampler_tp}",
-           f"rollout_data_parallelism={args.devices // args.sampler_tp}"]
+           f"ici_expert_parallelism={args.devices // args.sampler_tp}"]
           if args.sampler_tp > 1 else
-          [f"ici_fsdp_parallelism={args.devices}",
-           "ici_tensor_parallelism=1",
-           "rollout_tensor_parallelism=1",
-           f"rollout_data_parallelism={args.devices}"]),
+          [f"ici_expert_parallelism={args.devices}"]),
     ]
 
   trainer_cfg = pyconfig.initialize(trainer_argv, config_class=types.RLConfig)
