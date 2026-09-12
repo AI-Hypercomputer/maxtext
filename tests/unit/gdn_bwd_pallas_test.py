@@ -22,11 +22,15 @@ import jax.numpy as jnp
 import numpy as np
 
 try:
+  from maxtext.configs import types as config_types
   from maxtext.models.kernels.gdn import gdn_bwd_pallas
   from maxtext.models import qwen3
+  from maxtext.utils import maxtext_utils
 except ImportError:
+  from maxtext.src.maxtext.configs import types as config_types
   from maxtext.src.maxtext.models.kernels.gdn import gdn_bwd_pallas
   from maxtext.src.maxtext.models import qwen3
+  from maxtext.src.maxtext.utils import maxtext_utils
 
 
 class GdnBwdPallasTest(absltest.TestCase):
@@ -973,6 +977,112 @@ class GdnBwdPallasTest(absltest.TestCase):
     for g1, g2 in zip(res1, res2):
       if g1 is not None and g2 is not None:
         np.testing.assert_allclose(g1, g2, rtol=2e-2, atol=2.5e-1)
+
+  def test_gdn_custom_remat_policy_preserves_residuals(self):
+    """Verifies that GDN forward residuals are preserved under full remat policy.
+
+    When remat_policy='full', an outer jax.checkpoint normally recomputes all
+    intermediate operations. With _get_gdn_aware_remat_policy, the forward
+    Pallas kernel (_run_local_gdn_decoupled_fwd) runs exactly once and its
+    residuals (chunk_states, t_inv) are saved in memory, preventing duplicate
+    forward execution during backward autodiff.
+    """
+    batch_size = 1
+    chunk_size = 32
+    num_chunks = 2
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 64
+    head_v_dim = 64
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    key = jax.random.PRNGKey(42)
+    k1, k2, k3, k4, k5, k6, k7, k8 = jax.random.split(key, 8)
+    qkv = jax.random.normal(k1, (batch_size, seq_len, dim_size), dtype=jnp.float32)
+    b = jax.random.normal(k2, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
+    a = jax.random.normal(k3, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
+    conv_weight = jax.random.normal(k4, (conv_kernel_size, 1, dim_size), dtype=jnp.float32)
+    conv_bias = jax.random.normal(k5, (dim_size,), dtype=jnp.float32)
+    a_log = jax.random.normal(k6, (num_v_heads,), dtype=jnp.float32)
+    dt_bias = jax.random.normal(k7, (num_v_heads,), dtype=jnp.float32)
+    do = jax.random.normal(k8, (batch_size, seq_len, num_v_heads, head_v_dim), dtype=jnp.float32)
+
+    def layer_fn(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
+      out, _ = gdn_bwd_pallas.gdn_decoupled_conv1d(
+          qkv=qkv_in,
+          b=b_in,
+          a=a_in,
+          conv_weight=cw_in,
+          conv_bias=cb_in,
+          a_log=al_in,
+          dt_bias=dt_in,
+          conv_state=None,
+          recurrent_state=None,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          conv_kernel_size=conv_kernel_size,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+          compute_dtype=jnp.float32,
+      )
+      return jnp.sum(out * do)
+
+    # 1. Baseline uncheckpointed gradients
+    baseline_grads = jax.grad(layer_fn, argnums=(0, 1, 2, 3, 4, 5, 6))(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
+
+    # 2. Test with default full remat (policy=None)
+    ckpt_full_fn = jax.checkpoint(layer_fn, policy=None)
+    full_grads = jax.grad(ckpt_full_fn, argnums=(0, 1, 2, 3, 4, 5, 6))(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
+    for g_base, g_full in zip(baseline_grads, full_grads):
+      np.testing.assert_allclose(g_full, g_base, rtol=1e-4, atol=1e-4)
+
+    # 3. Test with GDN custom remat policy (saving gdn residuals and output)
+    class DummyConfig:
+      remat_policy = "custom"
+      tensors_on_device = ["decoder_layer_input", "gdn"]
+      tensors_to_offload = []
+
+    save_names, offload_names = maxtext_utils.get_save_and_offload_names(DummyConfig())
+    self.assertIn("gdn_core_attn_out", save_names)
+    self.assertIn("gdn_chunk_states", save_names)
+    self.assertIn("gdn_t_inv", save_names)
+
+    policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+        names_which_can_be_saved=save_names,
+        names_which_can_be_offloaded=offload_names,
+        offload_src="device",
+        offload_dst="pinned_host",
+    )
+    ckpt_custom_fn = jax.checkpoint(layer_fn, policy=policy)
+    custom_grads = jax.grad(ckpt_custom_fn, argnums=(0, 1, 2, 3, 4, 5, 6))(
+        qkv, b, a, conv_weight, conv_bias, a_log, dt_bias
+    )
+    for g_base, g_custom in zip(baseline_grads, custom_grads):
+      np.testing.assert_allclose(g_custom, g_base, rtol=1e-4, atol=1e-4)
+
+    # 4. Verify that the JAXPR under custom remat policy retains named residuals
+    jaxpr = jax.make_jaxpr(jax.grad(ckpt_custom_fn))(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
+    jaxpr_str = str(jaxpr)
+    self.assertIn("name=gdn_core_attn_out", jaxpr_str)
+
+  def test_gdn_granular_remat_requires_gdn_kernel(self):
+    """Verifies that setting gdn or gdn_conv to device/offload raises ValueError when use_gdn_kernel=False."""
+    cfg = object.__new__(config_types.MaxTextConfig)
+    object.__setattr__(cfg, "gdn", "device")
+    object.__setattr__(cfg, "gdn_conv", "remat")
+    object.__setattr__(cfg, "use_gdn_kernel", False)
+
+    with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
+      config_types.MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
+
+    # When use_gdn_kernel is True, the check passes
+    object.__setattr__(cfg, "use_gdn_kernel", True)
+    res = config_types.MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
+    self.assertIs(res, cfg)
 
 
 if __name__ == "__main__":
