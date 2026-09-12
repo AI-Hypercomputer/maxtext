@@ -4492,6 +4492,8 @@ class MaxTextConfig(
           "gemma",
           "gemma2",
           "gemma3",
+          "gpt3",
+          "gpt_oss",
       }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
