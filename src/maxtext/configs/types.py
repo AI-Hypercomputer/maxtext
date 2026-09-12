@@ -4280,10 +4280,38 @@ class MaxTextConfig(
         raise ValueError(
             "Loss-free load balancing is only supported for the DeepSeek, DeepSeek V4, and Hy3 decoder blocks."
         )
+      if (
+          self.routed_bias
+          and self.routed_bias_update_rate > 0.0
+          and not self.scan_layers
+          and self.decoder_block == DecoderBlockType.HY3
+      ):
+        # Unscanned decoders name their MoE layers `moe_layers_0`, `moe_layers_1`,
+        # ... individually, and `train.py`'s bias-update path assumes the single
+        # stacked `moe_layers` that scanning produces. It silently applies the
+        # last layer's update to layer 0 and leaves every other layer untouched.
+        # DeepSeek V3 has the same problem and is left as-is rather than changed
+        # under a model-onboarding PR; Hy3 is new, so nothing depends on the
+        # broken behaviour here.
+        raise ValueError(
+            "`routed_bias_update_rate > 0` requires `scan_layers=True` for the Hy3 decoder block. "
+            "With unscanned layers the router-bias update is applied to the wrong layer "
+            "instead of erroring out. Set scan_layers=True or routed_bias_update_rate=0."
+        )
       if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
         raise ValueError(
             "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
             "Please set pure_nnx=True or disable routed_bias."
+        )
+      if self.mhc_expansion_rate > 1 and self.decoder_block == DecoderBlockType.HY3:
+        # `DeepSeekGenericLayer.__init__` builds both `mhc_attention` and
+        # `mhc_mlp`, but only the attention one is applied from the shared
+        # `self_attention_with_norm_op`. Hy3 defines its own `__call__` and never
+        # reaches the MLP-side application, so mHC would cover attention only
+        # while `mhc_mlp` sits in the checkpoint unused.
+        raise ValueError(
+            "`mhc_expansion_rate > 1` is not supported for the Hy3 decoder block: mHC would be applied "
+            "to attention but not to the MLP/MoE branch. Set mhc_expansion_rate=1."
         )
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")

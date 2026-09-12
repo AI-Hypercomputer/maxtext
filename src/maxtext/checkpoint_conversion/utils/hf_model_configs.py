@@ -1184,7 +1184,6 @@ hy3_295b_config = HYV3Config(
     num_experts_per_tok=8,
     num_shared_experts=1,
     num_hidden_layers=80,
-    num_nextn_predict_layers=1,
     qk_norm=True,
     rms_norm_eps=1e-05,
     rope_parameters={"rope_theta": 11158840.0, "rope_type": "default"},
