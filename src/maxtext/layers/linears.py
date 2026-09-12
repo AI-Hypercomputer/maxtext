@@ -212,9 +212,12 @@ class DenseGeneral(nnx.Module):
       block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE MXFP8
       dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
       self(dummy_inputs, _initializing=True)
-      # Backends that never draw at apply time leave dead RNG state in the model.
-      if not quant.needs_apply_rngs:
+      # Left alone, every bridged wrapper carries its own forked Rngs, which the
+      # unrolled decoder pays for once per layer.
+      if quant.apply_rngs is quantizations.ApplyRngs.NONE:
         quant_dot_general.release_rngs()
+      elif quant.apply_rngs is quantizations.ApplyRngs.SHARED:
+        quant_dot_general.share_rngs(rngs)
     else:
       self._quant_dot_general_name = None
 
