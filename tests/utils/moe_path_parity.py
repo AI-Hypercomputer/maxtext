@@ -44,6 +44,7 @@ construction fails.
 """
 
 import argparse
+import math
 import os
 
 import jax
@@ -64,21 +65,13 @@ from maxtext.common.common_types import MODEL_MODE_TRAIN  # noqa: E402
 from flax import linen as nn  # noqa: E402
 
 
-def build_configs(args, kv_heads=None):
-  """Mirror the two pyconfig.initialize calls in train_maxtext_nb.py:894-970."""
-  cfg_dir = os.path.dirname(pyconfig.__file__)
-  base_yml = os.path.join(cfg_dir, "post_train", "rl.yml")
-  vllm_yml = os.path.join(cfg_dir, "inference", "vllm.yml")
-
-  # Shrink the model so it fits a single host, but keep everything that shapes
-  # routing: num_experts, num_experts_per_tok and norm_topk_prob stay at the
-  # real values, because expert selection is the thing under test.
-  common = [
-      "",
+def _common_argv(args):
+  """Config keys shared by both paths."""
+  return [
       f"model_name={args.model}",
       # The model yml pins base_num_decoder_layers (and use_mrope on qwen3.5),
-      # and pyconfig refuses a CLI override of a model-config key unless this is
-      # set. Shrinking depth is the whole point here, so allow it.
+      # and pyconfig refuses a CLI override of a model-config key unless this
+      # is set.
       "override_model_config=True",
       *([f"base_num_decoder_layers={args.layers}"] if args.layers else []),
       f"max_target_length={args.seq_len}",
@@ -93,68 +86,65 @@ def build_configs(args, kv_heads=None):
       "enable_dropout=False",
   ]
 
-  trainer_argv = [
-      common[0],
-      base_yml,
-      *common[1:],
+
+def build_trainer_config(args):
+  """The trainer half of train_maxtext_nb.py:914-943."""
+  base_yml = os.path.join(os.path.dirname(pyconfig.__file__), "post_train", "rl.yml")
+  return pyconfig.initialize([
+      "", base_yml, *_common_argv(args),
       "attention=flash",
       f"prefuse_moe_weights={args.trainer_prefuse}",
-      # train_maxtext_nb.py:901-908 maps its --remat_policy=decoder onto MaxText
-      # "full"; passing "decoder" through trips the assert in
-      # nnx_decoders.get_remat_policy. Remat only affects what the backward pass
-      # recomputes, and this harness is forward-only, so it cannot move the
-      # numbers either way -- it is set to match production, not because it
-      # matters.
+      # train_maxtext_nb.py:901-908 maps --remat_policy=decoder onto MaxText
+      # "full"; "decoder" itself trips the assert in get_remat_policy. Remat
+      # only governs backward recompute and this harness is forward-only, so
+      # it cannot move the numbers -- matched to production for fidelity only.
       f"remat_policy={args.remat_policy}",
       *([f"load_parameters_path={args.load_parameters_path}"] if args.load_parameters_path else []),
+      # base.yml:550 declares an fsdp axis, so the trainer can shard freely.
       f"ici_fsdp_parallelism={args.devices}",
       "ici_tensor_parallelism=1",
-  ]
+  ], config_class=types.RLConfig)
 
+
+def build_sampler_config(args, shard):
+  """The sampler half of train_maxtext_nb.py:946-970.
+
+  `shard` is how many ways the weights may be split. On the vLLM mesh that is
+  bounded by num_kv_heads -- see below -- so the caller derives it from the
+  resolved trainer config.
+  """
+  cfg_dir = os.path.dirname(pyconfig.__file__)
   if args.isolate_moe:
-    # Same attention on both sides; only the MoE flags differ. Does not hit the
-    # fused branch, but always runs.
-    sampler_argv = [
-        common[0],
-        base_yml,
-        *common[1:],
+    # Identical attention on both sides; only the MoE flags differ. Misses the
+    # fused branch (which also needs vllm_rpa) but exercises the trainer mesh,
+    # so it always runs.
+    return pyconfig.initialize([
+        "", os.path.join(cfg_dir, "post_train", "rl.yml"), *_common_argv(args),
         "attention=flash",
         "prefuse_moe_weights=True",
         "model_call_mode=inference",
         "remat_policy=none",
         f"ici_fsdp_parallelism={args.devices}",
         "ici_tensor_parallelism=1",
-    ]
-  else:
-    # The production sampler config.
-    sampler_argv = [
-        common[0],
-        vllm_yml,
-        *common[1:],
-        "attention=vllm_rpa",
-        "prefuse_moe_weights=True",
-        "model_call_mode=inference",
-        "remat_policy=none",
-        "use_mrope=False",
-        # Sharding on the vLLM mesh. vllm.yml:36 declares
-        #   mesh_axes: ['data','attn_dp','model','expert','attn_dp_expert','dcp','pcp']
-        # with NO fsdp axis, so ici_fsdp_parallelism is silently ignored here.
-        # Worse, vllm.yml:63 maps ['kv_heads', ['model','expert']] -- BOTH
-        # shardable weight axes carry KV heads, and their combined size must
-        # divide num_kv_heads. Qwen3.5-35B-A3B has just 2, so at most 2 chips'
-        # worth of sharding is legal and the remainder has to sit on `data`,
-        # which replicates. Hence the gcd below.
-        f"ici_expert_parallelism={args.shard}",
-        f"ici_data_parallelism={args.devices // args.shard}",
-    ]
+    ], config_class=types.RLConfig)
 
-  trainer_cfg = pyconfig.initialize(trainer_argv, config_class=types.RLConfig)
-  if kv_heads is None:
-    # Only the trainer config is needed to learn num_kv_heads; the caller
-    # re-invokes us with it so the sampler shard split can be derived.
-    return trainer_cfg, None
-  sampler_cfg = pyconfig.initialize(sampler_argv, config_class=types.RLConfig)
-  return trainer_cfg, sampler_cfg
+  return pyconfig.initialize([
+      "", os.path.join(cfg_dir, "inference", "vllm.yml"), *_common_argv(args),
+      "attention=vllm_rpa",
+      "prefuse_moe_weights=True",
+      "model_call_mode=inference",
+      "remat_policy=none",
+      "use_mrope=False",
+      # Sharding on the vLLM mesh, which is NOT the trainer's. vllm.yml:36:
+      #   mesh_axes: ['data','attn_dp','model','expert','attn_dp_expert','dcp','pcp']
+      # There is no fsdp axis, so ici_fsdp_parallelism is silently ignored
+      # here. And vllm.yml:63 maps ['kv_heads', ['model','expert']], so both
+      # shardable weight axes carry KV heads and their combined size must
+      # divide num_kv_heads. Whatever is left over has to sit on 'data', which
+      # replicates.
+      f"ici_expert_parallelism={shard}",
+      f"ici_data_parallelism={args.devices // shard}",
+  ], config_class=types.RLConfig)
 
 
 def copy_weights(src_state, dst_state):
@@ -207,7 +197,7 @@ def per_token_logprobs(logits, ids):
   return jnp.take_along_axis(lp[:, :-1], tgt[..., None], axis=-1)[..., 0]
 
 
-def diagnose_logits(name, logits, ids):
+def diagnose_logits(name, logits):
   """Non-finite logits poison every downstream statistic, so surface them."""
   lg = np.asarray(logits)
   bad = ~np.isfinite(lg)
@@ -275,30 +265,24 @@ def main():
                  help="'full' is what production's --remat_policy=decoder maps to; forward-only, so inert")
   p.add_argument("--isolate_moe", action="store_true")
   p.add_argument("--devices", type=int, default=None, help="defaults to jax.device_count()")
-  p.add_argument("--sampler_tp", type=int, default=None,
-                 help="1 (default) shards the sampler with fsdp, matching the trainer. Set >1 to "
-                      "mirror production TP, but it must divide num_kv_heads (2 on Qwen3.5).")
   p.add_argument("--seed", type=int, default=0)
   args = p.parse_args()
   if args.devices is None:
     args.devices = jax.device_count()
-  if args.sampler_tp is None:
-    args.sampler_tp = 1  # fsdp; see build_configs
 
   print(f"devices: {jax.device_count()} x {jax.devices()[0].device_kind}")
-  import math
-  trainer_cfg, _ = build_configs(args)
+  trainer_cfg = build_trainer_config(args)
   kv = getattr(trainer_cfg, "num_kv_heads", None) or trainer_cfg.base_num_kv_heads
-  args.shard = math.gcd(args.devices, kv)
-  print(f"num_kv_heads={kv} -> sampler shards {args.shard}-way on 'expert', "
-        f"replicates {args.devices // args.shard}-way on 'data' "
+  shard = math.gcd(args.devices, kv)
+  print(f"num_kv_heads={kv} -> sampler shards {shard}-way on 'expert' and "
+        f"replicates {args.devices // shard}-way on 'data' "
         f"(vllm.yml:63 puts kv_heads on both 'model' and 'expert')")
-  trainer_cfg, sampler_cfg = build_configs(args, kv_heads=kv)
+  sampler_cfg = build_sampler_config(args, shard)
   for name, c in (("trainer", trainer_cfg), ("sampler", sampler_cfg)):
     print(f"{name:8s} attention={c.attention:12s} prefuse_moe_weights={c.prefuse_moe_weights} "
           f"float32_gate_logits={c.float32_gate_logits} model_call_mode={getattr(c,'model_call_mode','train')}")
 
-  devices = jax.devices()
+  devices = jax.devices()[:args.devices]
   src = f"checkpoint {args.load_parameters_path}" if args.load_parameters_path else "RANDOM WEIGHTS"
   print(f"\nbuilding trainer-path model from {src} ...")
   mesh_train = maxtext_utils.get_mesh_from_config(trainer_cfg, devices)
@@ -370,8 +354,8 @@ def main():
   assert lg_train.shape == lg_samp.shape, (
       f"logit shapes differ: trainer {lg_train.shape} vs sampler {lg_samp.shape}. "
       "The two paths are not returning comparable tensors; fix that before reading any statistic.")
-  diagnose_logits("trainer", lg_train, ids)
-  diagnose_logits("sampler", lg_samp, ids)
+  diagnose_logits("trainer", lg_train)
+  diagnose_logits("sampler", lg_samp)
 
   lp_train = per_token_logprobs(lg_train, ids)
   lp_samp = per_token_logprobs(lg_samp, ids)
