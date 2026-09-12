@@ -191,11 +191,35 @@ def per_token_logprobs(logits, ids):
   return jnp.take_along_axis(lp[:, :-1], tgt[..., None], axis=-1)[..., 0]
 
 
+def diagnose_logits(name, logits, ids):
+  """Non-finite logits poison every downstream statistic, so surface them."""
+  lg = np.asarray(logits)
+  bad = ~np.isfinite(lg)
+  print(f"  {name:8s} logits shape={lg.shape} dtype={lg.dtype} "
+        f"non-finite={int(bad.sum())} ({100*bad.mean():.4f}%) "
+        f"min={np.nanmin(lg[np.isfinite(lg)]) if np.isfinite(lg).any() else float('nan'):.3f} "
+        f"max={np.nanmax(lg[np.isfinite(lg)]) if np.isfinite(lg).any() else float('nan'):.3f}")
+  if bad.any():
+    rows = np.unique(np.argwhere(bad)[:, 1])
+    print(f"           non-finite at {len(rows)} distinct positions, first 20: {rows[:20].tolist()}")
+
+
 def report(log_is, label=""):
   """Same statistics the production loss emits, so numbers are comparable."""
   a = np.asarray(log_is).ravel()
+  finite = np.isfinite(a)
+  n_bad = int((~finite).sum())
+  if n_bad:
+    pos = np.unique(np.argwhere(~np.isfinite(np.asarray(log_is)))[:, 1])
+    print(f"\n  !! {n_bad} of {a.size} positions non-finite ({100*n_bad/a.size:.3f}%), "
+          f"at {len(pos)} distinct sequence positions: {pos[:20].tolist()}")
+    print("     Statistics below are over the FINITE subset only. Understand these")
+    print("     before trusting the headline number -- a path that emits inf on some")
+    print("     positions is not merely 'noisier', it is doing something different.")
+    a = a[finite]
   geo = float(np.exp(a.mean()))
   print(f"\n===== {label} =====")
+  print(f"  scored positions used                     : {a.size}")
   print(f"  mean signed log-ratio (trainer - sampler) : {a.mean():+.6f} nats")
   print(f"  seq_geomean equivalent  exp(mean)         : {geo:.6f}")
   print(f"  token_logdiff_absmean                     : {np.abs(a).mean():.6f}")
@@ -264,9 +288,19 @@ def main():
     return out[0] if isinstance(out, tuple) else out
 
   print("\nforward pass: trainer path...")
-  lp_train = per_token_logprobs(fwd(m_train), ids)
+  lg_train = fwd(m_train)
   print("forward pass: sampler path...")
-  lp_samp = per_token_logprobs(fwd(m_samp), ids)
+  lg_samp = fwd(m_samp)
+
+  print("\nlogit diagnostics:")
+  assert lg_train.shape == lg_samp.shape, (
+      f"logit shapes differ: trainer {lg_train.shape} vs sampler {lg_samp.shape}. "
+      "The two paths are not returning comparable tensors; fix that before reading any statistic.")
+  diagnose_logits("trainer", lg_train, ids)
+  diagnose_logits("sampler", lg_samp, ids)
+
+  lp_train = per_token_logprobs(lg_train, ids)
+  lp_samp = per_token_logprobs(lg_samp, ids)
 
   report(lp_train - lp_samp,
          "MoE path divergence" + (" (isolate_moe)" if args.isolate_moe else " (production configs)"))
