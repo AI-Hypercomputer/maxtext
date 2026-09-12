@@ -59,3 +59,4 @@ num_attention_heads_for_vit: 12
 image_placeholder: "<|image|>"
 vision_output_length: 280
 num_position_embeddings_for_vit: 10240
+standardize_for_vit: false  # HF vision_config.standardize=false: no std_bias/std_scale in checkpoint (identity)
