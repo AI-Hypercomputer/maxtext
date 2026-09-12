@@ -64,7 +64,7 @@ from maxtext.common.common_types import MODEL_MODE_TRAIN  # noqa: E402
 from flax import linen as nn  # noqa: E402
 
 
-def build_configs(args):
+def build_configs(args, kv_heads=None):
   """Mirror the two pyconfig.initialize calls in train_maxtext_nb.py:894-970."""
   cfg_dir = os.path.dirname(pyconfig.__file__)
   base_yml = os.path.join(cfg_dir, "post_train", "rl.yml")
@@ -138,21 +138,21 @@ def build_configs(args):
         "use_mrope=False",
         # Sharding on the vLLM mesh. vllm.yml:36 declares
         #   mesh_axes: ['data','attn_dp','model','expert','attn_dp_expert','dcp','pcp']
-        # -- there is NO fsdp axis, so ici_fsdp_parallelism is silently ignored
-        # here and every axis stays 1. Of the axes that do exist:
-        #   data   replicates weights -> ~66GB/chip for a 35B on 4 chips, OOM
-        #   model  shards KV heads    -> must divide num_kv_heads, which is 2
-        #   expert shards the experts -> no KV constraint, and it is where
-        #          almost all of a 35B-A3B's parameters live
-        # so expert parallelism is the default. --sampler_tp switches to tensor
-        # parallelism instead, but must divide num_kv_heads.
-        *([f"ici_tensor_parallelism={args.sampler_tp}",
-           f"ici_expert_parallelism={args.devices // args.sampler_tp}"]
-          if args.sampler_tp > 1 else
-          [f"ici_expert_parallelism={args.devices}"]),
+        # with NO fsdp axis, so ici_fsdp_parallelism is silently ignored here.
+        # Worse, vllm.yml:63 maps ['kv_heads', ['model','expert']] -- BOTH
+        # shardable weight axes carry KV heads, and their combined size must
+        # divide num_kv_heads. Qwen3.5-35B-A3B has just 2, so at most 2 chips'
+        # worth of sharding is legal and the remainder has to sit on `data`,
+        # which replicates. Hence the gcd below.
+        f"ici_expert_parallelism={args.shard}",
+        f"ici_data_parallelism={args.devices // args.shard}",
     ]
 
   trainer_cfg = pyconfig.initialize(trainer_argv, config_class=types.RLConfig)
+  if kv_heads is None:
+    # Only the trainer config is needed to learn num_kv_heads; the caller
+    # re-invokes us with it so the sampler shard split can be derived.
+    return trainer_cfg, None
   sampler_cfg = pyconfig.initialize(sampler_argv, config_class=types.RLConfig)
   return trainer_cfg, sampler_cfg
 
@@ -286,7 +286,14 @@ def main():
     args.sampler_tp = 1  # fsdp; see build_configs
 
   print(f"devices: {jax.device_count()} x {jax.devices()[0].device_kind}")
-  trainer_cfg, sampler_cfg = build_configs(args)
+  import math
+  trainer_cfg, _ = build_configs(args)
+  kv = getattr(trainer_cfg, "num_kv_heads", None) or trainer_cfg.base_num_kv_heads
+  args.shard = math.gcd(args.devices, kv)
+  print(f"num_kv_heads={kv} -> sampler shards {args.shard}-way on 'expert', "
+        f"replicates {args.devices // args.shard}-way on 'data' "
+        f"(vllm.yml:63 puts kv_heads on both 'model' and 'expert')")
+  trainer_cfg, sampler_cfg = build_configs(args, kv_heads=kv)
   for name, c in (("trainer", trainer_cfg), ("sampler", sampler_cfg)):
     print(f"{name:8s} attention={c.attention:12s} prefuse_moe_weights={c.prefuse_moe_weights} "
           f"float32_gate_logits={c.float32_gate_logits} model_call_mode={getattr(c,'model_call_mode','train')}")
