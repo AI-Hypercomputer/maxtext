@@ -296,10 +296,14 @@ class RemoteIteratorWrapper:
     replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
     step_array = jnp.array(step, dtype=jnp.int32)
     step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.save_state(step_array)  # pyrefly: ignore[missing-attribute]
+    out = self.local_iterator.save_state(step_array)  # pyrefly: ignore[missing-attribute]
+    if hasattr(out, "block_until_ready"):
+      out.block_until_ready()
 
   def restore_state(self, step):
     replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
     step_array = jnp.array(step, dtype=jnp.int32)
     step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.restore_state(step_array)  # pyrefly: ignore[missing-attribute]
+    out = self.local_iterator.restore_state(step_array)  # pyrefly: ignore[missing-attribute]
+    if hasattr(out, "block_until_ready"):
+      out.block_until_ready()
