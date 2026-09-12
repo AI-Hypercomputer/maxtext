@@ -50,6 +50,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+_RANDOM_WEIGHTS = False
+
 os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
 os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
 
@@ -78,7 +80,7 @@ def build_configs(args):
       # and pyconfig refuses a CLI override of a model-config key unless this is
       # set. Shrinking depth is the whole point here, so allow it.
       "override_model_config=True",
-      f"base_num_decoder_layers={args.layers}",
+      *([f"base_num_decoder_layers={args.layers}"] if args.layers else []),
       f"max_target_length={args.seq_len}",
       f"max_prefill_predict_length={args.seq_len}",
       f"dtype={args.dtype}",
@@ -104,6 +106,7 @@ def build_configs(args):
       # numbers either way -- it is set to match production, not because it
       # matters.
       f"remat_policy={args.remat_policy}",
+      *([f"load_parameters_path={args.load_parameters_path}"] if args.load_parameters_path else []),
       "ici_fsdp_parallelism=4",
       "ici_tensor_parallelism=1",
   ]
@@ -234,12 +237,24 @@ def report(log_is, label=""):
   lo, hi = 0.999, 1.002
   print(f"  in TIS band [{lo}, {hi}]?                 : {'YES' if lo <= geo <= hi else 'NO'}")
   print("\n  production 35B reference: seq_geomean 0.856, absmean 0.229, absmax ~25.9 nats")
+  if _RANDOM_WEIGHTS:
+    print("\n  " + "!" * 68)
+    print("  RANDOM WEIGHTS: this number is NOT comparable to production.")
+    print("  Untrained logits reach ~1300, where one bfloat16 step is 8 units, so")
+    print("  log-softmax differences of ~1 nat are pure quantisation. A trained")
+    print("  model sits at logits of 15-30 where the step is ~0.06. Pass")
+    print("  --load_parameters_path to get a meaningful measurement.")
+    print("  " + "!" * 68)
 
 
 def main():
   p = argparse.ArgumentParser()
   p.add_argument("--model", default="qwen3.5-35b-a3b")
-  p.add_argument("--layers", type=int, default=8, help="multiple of 4: the model interleaves GDN layers every 4")
+  p.add_argument("--load_parameters_path", default=None,
+                 help="REQUIRED for a trustworthy number. Random weights give logits ~100x too "
+                      "large, and bf16 resolution is relative to magnitude, so quantisation "
+                      "noise swamps the path difference.")
+  p.add_argument("--layers", type=int, default=0, help="0 = use the model's real depth (required when loading a checkpoint); otherwise a multiple of 4, since GDN layers interleave every 4")
   p.add_argument("--seq_len", type=int, default=512)
   p.add_argument("--batch", type=int, default=4,
                  help="must be divisible by the data/fsdp axis (4 on a v5p-8)")
@@ -261,8 +276,15 @@ def main():
   devices = jax.devices()
   print("\nbuilding trainer-path model (random weights)...")
   mesh_train = maxtext_utils.get_mesh_from_config(trainer_cfg, devices)
-  rngs = maxtext_utils_nnx.create_nnx_rngs(trainer_cfg, rng_key=jax.random.PRNGKey(args.seed))
-  m_train = model_creation_utils.from_config(trainer_cfg, mesh=mesh_train, rngs=rngs)
+  global _RANDOM_WEIGHTS
+  _RANDOM_WEIGHTS = not args.load_parameters_path
+  if args.load_parameters_path:
+    m_train = model_creation_utils.from_pretrained(
+        trainer_cfg, mesh=mesh_train, rng_key=jax.random.PRNGKey(args.seed))
+  else:
+    print("  !! NO CHECKPOINT -- see the warning printed at the end; the result will not be usable")
+    rngs = maxtext_utils_nnx.create_nnx_rngs(trainer_cfg, rng_key=jax.random.PRNGKey(args.seed))
+    m_train = model_creation_utils.from_config(trainer_cfg, mesh=mesh_train, rngs=rngs)
 
   print("building sampler-path model...")
   mesh_samp = maxtext_utils.get_mesh_from_config(sampler_cfg, devices)
