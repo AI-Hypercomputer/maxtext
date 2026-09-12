@@ -57,6 +57,9 @@ from flax import nnx  # noqa: E402
 from maxtext.configs import pyconfig, types  # noqa: E402
 from maxtext.utils import model_creation_utils  # noqa: E402
 from maxtext.utils import maxtext_utils_nnx  # noqa: E402
+from maxtext.utils import maxtext_utils  # noqa: E402
+from maxtext.common.common_types import MODEL_MODE_TRAIN  # noqa: E402
+from flax import linen as nn  # noqa: E402
 
 
 def build_configs(args):
@@ -257,12 +260,14 @@ def main():
 
   devices = jax.devices()
   print("\nbuilding trainer-path model (random weights)...")
+  mesh_train = maxtext_utils.get_mesh_from_config(trainer_cfg, devices)
   rngs = maxtext_utils_nnx.create_nnx_rngs(trainer_cfg, rng_key=jax.random.PRNGKey(args.seed))
-  m_train = model_creation_utils.from_config(trainer_cfg, devices=devices, rngs=rngs)
+  m_train = model_creation_utils.from_config(trainer_cfg, mesh=mesh_train, rngs=rngs)
 
   print("building sampler-path model...")
+  mesh_samp = maxtext_utils.get_mesh_from_config(sampler_cfg, devices)
   rngs2 = maxtext_utils_nnx.create_nnx_rngs(sampler_cfg, rng_key=jax.random.PRNGKey(args.seed))
-  m_samp = model_creation_utils.from_config(sampler_cfg, devices=devices, rngs=rngs2)
+  m_samp = model_creation_utils.from_config(sampler_cfg, mesh=mesh_samp, rngs=rngs2)
 
   print("copying weights trainer -> sampler so the ONLY difference is the code path...")
   st_train = nnx.state(m_train, nnx.Param)
@@ -280,17 +285,30 @@ def main():
   seg = jnp.ones((args.batch, args.seq_len), dtype=jnp.int32)
   print(f"\ntokens: batch={args.batch} seq_len={args.seq_len} -> {args.batch * (args.seq_len - 1)} scored positions")
 
-  def fwd(model):
+  def fwd(model, cfg, mesh):
     out = model(decoder_input_tokens=ids, decoder_positions=pos,
                 decoder_segment_ids=seg, enable_dropout=False)
-    # model_call_mode=inference returns (logits, kv_cache); the trainer path
-    # returns bare logits.
-    return out[0] if isinstance(out, tuple) else out
+    # model_call_mode=inference returns (hidden_states, kv_cache); the trainer
+    # path returns logits directly.
+    y = out[0] if isinstance(out, tuple) else out
+    if y.shape[-1] == cfg.vocab_size:
+      return y
+    # Inference mode stops before the unembedding because vLLM applies its own
+    # logits head. Apply MaxText's (final norm + projection, decoder.py:1536) so
+    # both sides are compared in logit space. The head weights are identical --
+    # they came through the weight copy -- so this adds no divergence.
+    with mesh, nn.logical_axis_rules(cfg.logical_axis_rules):
+      return model.decoder.apply_output_head(
+          shared_embedding=model.shared_embedding,
+          y=y,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
 
   print("\nforward pass: trainer path...")
-  lg_train = fwd(m_train)
+  lg_train = fwd(m_train, trainer_cfg, mesh_train)
   print("forward pass: sampler path...")
-  lg_samp = fwd(m_samp)
+  lg_samp = fwd(m_samp, sampler_cfg, mesh_samp)
 
   print("\nlogit diagnostics:")
   assert lg_train.shape == lg_samp.shape, (
