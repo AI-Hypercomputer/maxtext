@@ -88,6 +88,35 @@ def _common_argv(args, layers=None):
   ]
 
 
+def shim_tpu_inference_envs():
+  """Backfill MoE env flags the installed tpu_inference predates.
+
+  MaxText's fused MoE path reads several tpu_inference.envs attributes
+  (moe.py:3390-3393). tpu_inference.envs defines __getattr__ to raise on
+  unknown names, so an older install fails the forward pass outright with
+  AttributeError rather than falling back.
+
+  The values below are upstream's own defaults. Nitin's JobSet does not set any
+  of these either, so defaults are also what production runs with -- this
+  restores the production behaviour rather than inventing one. It does mean the
+  local tpu_inference is not the same build as production's, which is a caveat
+  on any number this harness produces.
+  """
+  try:
+    from tpu_inference import envs as tie
+  except ImportError:
+    return
+  for name, default in (("ENABLE_RS_KERNEL", False),
+                        ("USE_GMM_FUSED_RS_KERNEL", False),
+                        ("ONEHOT_MOE_PERMUTE_THRESHOLD", 0),
+                        ("VLLM_MOE_CHUNK_SIZE", 0)):
+    try:
+      getattr(tie, name)
+    except AttributeError:
+      setattr(tie, name, default)
+      print(f"  shimmed tpu_inference.envs.{name} = {default!r} (missing in this install)")
+
+
 def build_trainer_config(args, layers=None):
   """The trainer half of train_maxtext_nb.py:914-943."""
   base_yml = os.path.join(os.path.dirname(pyconfig.__file__), "post_train", "rl.yml")
@@ -196,8 +225,15 @@ def copy_weights(src_state, dst_state):
       v, did = conform(by_name[key], want, key)
       matched += 1
       sliced += did
-    elif key.endswith("wi.value") or key.endswith("wi"):
-      w0, w1 = by_name.get(key.replace("wi", "wi_0")), by_name.get(key.replace("wi", "wi_1"))
+    elif key.endswith("['wi'].value") or key.endswith("['wi']"):
+      # jax.tree_util.keystr renders a dict key as "['wi']", so matching on a
+      # bare "wi" suffix silently never fires -- which is what left every MoE
+      # weight unmatched. Swap only the final segment.
+      suffix = "['wi'].value" if key.endswith("['wi'].value") else "['wi']"
+      stem = key[: -len(suffix)]
+      tail = ".value" if suffix.endswith(".value") else ""
+      w0 = by_name.get(f"{stem}['wi_0']{tail}")
+      w1 = by_name.get(f"{stem}['wi_1']{tail}")
       if w0 is None or w1 is None:
         missing.append(key)
         out.append(dst_val)
@@ -292,6 +328,7 @@ def main():
     args.devices = jax.device_count()
 
   print(f"devices: {jax.device_count()} x {jax.devices()[0].device_kind}")
+  shim_tpu_inference_envs()
   trainer_cfg = build_trainer_config(args, layers=args.layers)
   kv = getattr(trainer_cfg, "num_kv_heads", None) or trainer_cfg.base_num_kv_heads
   shard = math.gcd(args.devices, kv)
