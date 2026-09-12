@@ -326,6 +326,28 @@ def per_token_logprobs(logits, ids):
   return jnp.take_along_axis(lp[:, :-1], tgt[..., None], axis=-1)[..., 0]
 
 
+def per_token_logprobs_chunked(logits, ids, chunk=512):
+  """`per_token_logprobs` without the full-sequence float32 copy.
+
+  `log_softmax(logits.astype(float32))` materialises `[B, T, V]` in fp32. At the
+  trajectory-mode shapes -- T ~7k against a 248,320-token vocabulary -- that is
+  6.8 GB per device on top of the bf16 logits that already exist, and it is pure
+  transient: only one gathered value per position survives. Slicing the sequence
+  axis keeps the fp32 working set at `chunk` rows and changes no arithmetic,
+  since log_softmax reduces over the vocabulary axis only.
+  """
+  out = []
+  t_total = logits.shape[1] - 1
+  for s in range(0, t_total, chunk):
+    e = min(s + chunk, t_total)
+    lp = jax.nn.log_softmax(logits[:, s:e].astype(jnp.float32), axis=-1)
+    tgt = ids[:, s + 1:e + 1]
+    out.append(np.asarray(jax.device_get(
+        jnp.take_along_axis(lp, tgt[..., None], axis=-1)[..., 0])))
+    del lp
+  return np.concatenate(out, axis=1)
+
+
 def report(log_is, label=""):
   """Same statistics the production loss emits, so numbers are comparable."""
   a = np.asarray(log_is).ravel()
@@ -595,20 +617,32 @@ def main():
     except Exception:
       pass
 
-  def make_batch(token_ids_1d):
-    """Tile one token stream across the batch axis.
+  def make_batch(token_ids_1d, total_len):
+    """Tile one token stream across the batch axis, padded to `total_len`.
 
-    The batch dimension here is a sharding artifact, not data: `--batch` must
-    stay divisible by the data/fsdp axis (4 on a v5p-8), so a single trajectory
-    is replicated and only row 0 is read back. Wasteful in activation memory,
-    but it keeps the mesh identical to the two-forward-pass mode rather than
-    introducing a second sharding path to get wrong.
+    The batch dimension is a sharding artifact, not data: `--batch` must stay
+    divisible by the data/fsdp axis (4 on a v5p-8), so a single trajectory is
+    replicated and only row 0 is read back. Under `ici_fsdp_parallelism=4` the
+    batch axis is what shards, so each device holds one sequence and the tiling
+    costs no extra per-device memory.
+
+    Padding carries `decoder_segment_ids = 0`, which is MaxText's "not part of
+    any sequence" marker, so attention cannot read across the boundary.
+    `max_target_length` is a single config value, so scoring several rows of
+    different lengths in one model requires padding them to a common length
+    rather than rebuilding the model per row.
     """
-    t = jnp.asarray(token_ids_1d, dtype=jnp.int32)
+    t = np.asarray(token_ids_1d, dtype=np.int32)
     n = t.shape[0]
-    return (jnp.broadcast_to(t[None, :], (args.batch, n)),
-            jnp.broadcast_to(jnp.arange(n, dtype=jnp.int32)[None, :], (args.batch, n)),
-            jnp.ones((args.batch, n), dtype=jnp.int32))
+    assert n <= total_len, f"{n} tokens exceeds max_target_length {total_len}"
+    padded = np.full(total_len, PAD_ID, dtype=np.int32)
+    padded[:n] = t
+    seg = np.zeros(total_len, dtype=np.int32)
+    seg[:n] = 1
+    tile = lambda x: jnp.asarray(np.broadcast_to(x[None, :], (args.batch, total_len)))
+    return (tile(padded),
+            tile(np.arange(total_len, dtype=np.int32)),
+            tile(seg))
 
   key = jax.random.PRNGKey(args.seed + 1)
   ids = jax.random.randint(key, (args.batch, args.seq_len), 0, trainer_cfg.vocab_size, dtype=jnp.int32)
@@ -660,6 +694,66 @@ def main():
     del lg, finite, stats
     return np.asarray(lp)
 
+  if args.trajectory_csv:
+    # Trainer vs the production sampler. Only one model exists here -- the other
+    # side of the comparison is `old_logprobs`, recorded by vLLM at rollout --
+    # so this path skips the whole stage-1/stage-2 dance below.
+    #
+    # It must, for memory. The two-model flow builds the second model with
+    # `from_config` (random init, then `copy_weights`), because the comparison
+    # there demands bit-identical weights in two differently-configured models
+    # and there is no other way to guarantee that. At full depth `from_config`
+    # OOMs on a v5p-8: `_create_scanned_layers` materialises 40 layers and
+    # stacks them before any sharding constraint applies, and the moveaxis of
+    # one stacked MoE tensor asks for 5.00 GB against 4.80 GB free. Observed,
+    # not predicted. `from_pretrained` loads the *same* config sharded straight
+    # off the checkpoint and peaks at 16.1 GiB of 95.7 GiB. With one model we
+    # can just use it.
+    # Load the data first. `max_target_length` is baked into the config at
+    # build time from --seq_len (default 512); a 7k-token trajectory against a
+    # 512-token config is a shape failure, not a truncation, so the real length
+    # has to be known before the model is constructed.
+    rows_wanted = [int(x) for x in args.trajectory_rows.split(",") if x.strip()]
+    loaded = []
+    for row_idx in rows_wanted:
+      print(f"\nloading trajectory row {row_idx} from {args.trajectory_csv} ...")
+      loaded.append((row_idx, load_trajectory(
+          args.trajectory_csv, row_idx, args.trajectory_max_tokens)))
+    total_len = max(len(t[1][0]) for t in loaded)
+    total_len = int(np.ceil(total_len / 128) * 128)  # keep shapes kernel-friendly
+    args.seq_len = total_len
+    print(f"\nmax_target_length set to {total_len} from the data "
+          f"(longest requested row is {max(len(t[1][0]) for t in loaded)} tokens)")
+
+    print(f"loading {args.load_parameters_path} at full depth ...")
+    traj_cfg = build_trainer_config(args, layers=0)
+    traj_mesh = maxtext_utils.get_mesh_from_config(traj_cfg, devices)
+    m_traj = model_creation_utils.from_pretrained(
+        traj_cfg, mesh=traj_mesh, rng_key=jax.random.PRNGKey(args.seed))
+    hbm("after trajectory-mode load")
+
+    for row_idx, (t_ids, t_mask, t_lp, n_prompt, turn_id) in loaded:
+      b_ids, b_pos, b_seg = make_batch(t_ids, total_len)
+      print(f"\nforward pass over {len(t_ids)} real tokens padded to {total_len} "
+            f"(batch {args.batch}, tiled; fsdp shards it one sequence per device)...")
+      lg = fwd(m_traj, traj_cfg, traj_mesh, b_ids, b_pos, b_seg)
+      hbm("after forward, logits live")
+      lp_all = per_token_logprobs_chunked(lg, b_ids)
+      del lg
+      gc.collect()
+      # lp[t] scores token t+1, so conversation token j is lp[n_prompt + j - 1].
+      lp = lp_all[0]
+      trainer_lp = lp[n_prompt - 1:n_prompt - 1 + len(t_mask)]
+      if len(trainer_lp) != len(t_mask):
+        raise AssertionError(
+            f"alignment slice produced {len(trainer_lp)} scores for {len(t_mask)} "
+            f"conversation tokens (prompt={n_prompt}, lp={len(lp)})")
+      report_trajectory(trainer_lp - t_lp, t_mask, turn_id, t_ids,
+                        f"production sampler vs trainer -- row {row_idx}")
+    del m_traj
+    gc.collect()
+    return
+
   # ---- stage 1: load the checkpoint at full depth, purely to get weights ---
   src = f"checkpoint {args.load_parameters_path}" if args.load_parameters_path else "RANDOM WEIGHTS"
   global _RANDOM_WEIGHTS
@@ -690,28 +784,6 @@ def main():
       rngs=maxtext_utils_nnx.create_nnx_rngs(trainer_cfg, rng_key=jax.random.PRNGKey(args.seed)))
   nnx.update(m_train, copy_weights(host_params, nnx.state(m_train, nnx.Param)))
   hbm("after trainer build")
-  if args.trajectory_csv:
-    # Trainer vs the production sampler. Only the trainer path runs; the other
-    # side of the comparison is `old_logprobs`, recorded by vLLM at rollout.
-    for row_idx in [int(x) for x in args.trajectory_rows.split(",") if x.strip()]:
-      print(f"\nloading trajectory row {row_idx} from {args.trajectory_csv} ...")
-      t_ids, t_mask, t_lp, n_prompt, turn_id = load_trajectory(
-          args.trajectory_csv, row_idx, args.trajectory_max_tokens)
-      b_ids, b_pos, b_seg = make_batch(t_ids)
-      print("forward pass: trainer path over real trajectory tokens...")
-      lp = score(m_train, trainer_cfg, mesh_train, "trainer", b_ids, b_pos, b_seg)[0]
-      # lp[t] scores token t+1, so conversation token j is lp[n_prompt + j - 1].
-      trainer_lp = lp[n_prompt - 1:n_prompt - 1 + len(t_mask)]
-      if len(trainer_lp) != len(t_mask):
-        raise AssertionError(
-            f"alignment slice produced {len(trainer_lp)} scores for {len(t_mask)} "
-            f"conversation tokens (prompt={n_prompt}, lp={len(lp)})")
-      report_trajectory(trainer_lp - t_lp, t_mask, turn_id, t_ids,
-                        f"production sampler vs trainer -- row {row_idx}")
-    del m_train
-    gc.collect()
-    return
-
   print("forward pass: trainer path...")
   lp_train = score(m_train, trainer_cfg, mesh_train, "trainer")
   del m_train
