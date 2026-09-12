@@ -293,13 +293,21 @@ def main():
     y = out[0] if isinstance(out, tuple) else out
     if y.shape[-1] == cfg.vocab_size:
       return y
-    # Inference mode stops before the unembedding because vLLM applies its own
-    # logits head. Apply MaxText's (final norm + projection, decoder.py:1536) so
-    # both sides are compared in logit space. The head weights are identical --
+    # models.py:645 -- with attention in (vllm_rpa, vllm_batched_rpa) the model
+    # returns (hidden_state, kv_caches) and leaves the unembedding to vLLM.
+    # Apply MaxText's own head (final norm + projection,
+    # nnx_decoders.NNXDecoder.apply_output_head, :1536) so both sides are
+    # compared in logit space. Head weights are identical on the two models --
     # they came through the weight copy -- so this adds no divergence.
-    with mesh, nn.logical_axis_rules(cfg.logical_axis_rules):
+    # The embedding attribute is `token_embedder` on the nnx Transformer;
+    # `shared_embedding` is the Linen variant's name (models.py:564 passes
+    # shared_embedding=self.token_embedder).
+    assert hasattr(model.decoder, "apply_output_head"), (
+        "decoder has no apply_output_head -- pure_nnx_decoder is probably False, "
+        "so decoder is a ToNNX wrapper. Set pure_nnx_decoder=True.")
+    with jax.set_mesh(mesh), nn.logical_axis_rules(cfg.logical_axis_rules):
       return model.decoder.apply_output_head(
-          shared_embedding=model.shared_embedding,
+          shared_embedding=model.token_embedder,
           y=y,
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
