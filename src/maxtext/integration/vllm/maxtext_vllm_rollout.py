@@ -732,6 +732,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             server_mode_submission_threshold=rollout_config.rollout_vllm_server_mode_submission_threshold,
             server_mode_submission_timeout_s=rollout_config.rollout_vllm_server_mode_submission_timeout_s,
             return_logprobs=rollout_config.return_logprobs,
+            return_routed_experts=rollout_config.return_routed_experts,
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
             expert_parallel_size=rollout_config.expert_parallel_size,
