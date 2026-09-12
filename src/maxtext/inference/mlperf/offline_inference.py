@@ -80,6 +80,11 @@ class PrefillHelper:
     if self._type == "default":
       self._processor = PrefillProcessor(engine)
     elif self._type == "batch":
+      # TODO(zhijingli): derive this key from the run seed instead of the
+      # BatchedPrefillProcessor default. It advances per bucket either way, so
+      # no key is reused; it just always starts from PRNGKey(0). Plumbing the
+      # run seed here means adding it to OfflineInference.__init__, which no
+      # caller supplies today.
       self._batch_processor = BatchedPrefillProcessor(engine=engine, max_batch_size=16)
       self._processor = PrefillProcessor(engine)  # for fallback
     elif self._type == "dummy":
@@ -221,8 +226,13 @@ class OfflineInference:
 
   def warmup(self, max_length, warmup_samples):
     """Warmup (cache, AoT compile, batch_inference)"""
+    # `pass_rng_shape=True` makes the key a runtime input of the compiled
+    # executable. With `False`, `generate(rng=None)` is traced, the internal
+    # `self.rng` split is evaluated at trace time, and the resulting key is
+    # constant-folded into the program -- every decode step would then sample
+    # with the identical key.
     self._cached_generate, self.params, self._decode_state_executable = self.engine.aot_compile(
-        self.params, pass_rng_shape=False
+        self.params, pass_rng_shape=True
     )
 
     self.init_decode_state()
@@ -255,8 +265,9 @@ class OfflineInference:
     counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
     dummy_length = 1
 
+    # Root key for this run. It is split at each prefill and each decode step
+    # below, so no consumer ever sees it directly.
     rng = jax.random.PRNGKey(1234)
-    rng, _ = jax.random.split(rng)
 
     def prefill_done(prefill_result, ids, decode_state):
       nonlocal self
@@ -271,6 +282,7 @@ class OfflineInference:
       nonlocal self
       nonlocal dummy_length
       nonlocal counter
+      nonlocal rng
       counter.decode += 1
       if self.dummy:
         log.info("Dummy generate")
@@ -291,7 +303,10 @@ class OfflineInference:
           assert False, "no generate fn"
         result_tokens_l = []
         for i in range(10):
-          self.decode_state, result_tokens = gen_fn(self.params, self.decode_state, None)
+          # Advance the key every step; `gen_fn` is an AOT-compiled executable
+          # that takes the key as a runtime input.
+          rng, step_rng = jax.random.split(rng)
+          self.decode_state, result_tokens = gen_fn(self.params, self.decode_state, step_rng)
           result_tokens_l.append(result_tokens)
         for i in range(10):
           # result_tokens.copy_to_host_async()
@@ -352,7 +367,9 @@ class OfflineInference:
         decode()
       slot = empty_slots.pop()
 
-      # Do prefill when there are free slots
+      # Do prefill when there are free slots. Advance the key so each row
+      # prefills (and samples its first token) with an independent key.
+      rng, prefill_rng = jax.random.split(rng)
       self.prefill.process(
           self.params,
           self.decode_state,
@@ -362,7 +379,7 @@ class OfflineInference:
           row.true_length,
           self.max_prefill_length,
           prefill_done,
-          rng,
+          prefill_rng,
       )
     self.prefill.finalize(self.params, self.decode_state, prefill_done)
 

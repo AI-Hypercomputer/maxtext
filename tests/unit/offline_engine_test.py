@@ -112,6 +112,40 @@ class OfflineEngineTest(unittest.TestCase):
     for i in range(4):
       assert not jnp.array_equal(results_1[i].token_ids, results_2[i].token_ids)
 
+  def test_prng_keys_advance_during_inference(self):
+    """Every decode step and every prefill must consume a fresh PRNG key.
+
+    `InferenceWorker` and `PrefillHelper` each hold one key. That key used to be
+    handed unchanged to every `generate` call in the autoregressive loop and to
+    every prefill, so a non-greedy `decode_sampling_strategy` drew every token
+    from the same key.
+
+    The stored keys are asserted on rather than the sampled tokens: a stale key
+    changes how successive draws are *correlated*, not necessarily their values,
+    so comparing completions would not reliably detect it.
+    """
+    config = self.cfg
+    # TODO(zhijingli): add an enable_batch_prefill=True case so that
+    # BatchedPrefillProcessor.rng is covered as well.
+    inference_engine = OfflineEngine(
+        config=config, params=None, enable_batch_prefill=False, rng=jax.random.PRNGKey(0), eos_ids=[]
+    )
+    worker = inference_engine.worker
+    decode_key_before = worker.rng
+    prefill_key_before = worker.prefill_helper.rng
+
+    # rng=None, so the worker keeps advancing the key it already holds.
+    inference_engine.batch_inference([InputData(id="input_0", tokens=np.arange(128), true_length=128)])
+
+    self.assertFalse(
+        jnp.array_equal(worker.rng, decode_key_before),
+        "the decode loop did not advance its PRNG key; every step sampled from the same key",
+    )
+    self.assertFalse(
+        jnp.array_equal(worker.prefill_helper.rng, prefill_key_before),
+        "prefill did not advance its PRNG key; every prompt sampled its first token from the same key",
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

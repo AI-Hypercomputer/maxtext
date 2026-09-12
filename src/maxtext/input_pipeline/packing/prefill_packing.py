@@ -183,12 +183,15 @@ class PrefillProcessor:
 class BatchedPrefillProcessor:
   """A wrapper around the APIs used by MaxEngine to do prefill and insert, provides prefill packing feature."""
 
-  def __init__(self, engine: MaxEngine, max_batch_size: int, auto_layout_supported: bool = True):
+  def __init__(self, engine: MaxEngine, max_batch_size: int, auto_layout_supported: bool = True, rng=None):
     self.engine = engine
     self.process_batch_func = {}
     self.buckets = {}
     self.max_batch_size = max_batch_size
     self.auto_layout_supported = auto_layout_supported
+    # Advanced once per processed bucket so that packed prefills do not all
+    # sample their first token from the same key.
+    self.rng = jax.random.PRNGKey(0) if rng is None else rng
     self.jitted_process_batch = jax.jit(
         self._process_batch,
         static_argnames=("num_prompts", "padded_length", "return_prompt_logp"),
@@ -302,6 +305,8 @@ class BatchedPrefillProcessor:
     slots = zero_padded(slots, self.max_batch_size)
     offsets_jax = zero_padded(offsets, self.max_batch_size)
     lengths_jax = zero_padded(lengths, self.max_batch_size)
+    # Advance the stored key so each bucket prefills with an independent key.
+    self.rng, batch_rng = jax.random.split(self.rng)
     if not self.auto_layout_supported:
       first_tokens, decode_state = self.jitted_process_batch(
           model_params,
@@ -315,13 +320,26 @@ class BatchedPrefillProcessor:
           lengths_jax,
           decode_state,
           return_prompt_logp,
+          batch_rng,
       )
     else:
       prefill_fn = self._process_batch_compiled(
           model_params, input_padding, bucket.capacity, bucket.count, return_prompt_logp
       )
       first_tokens, decode_state = prefill_fn(
-          model_params, tok_ids, slots, pos_ids, seg_ids, offsets_jax, lengths_jax, decode_state, return_prompt_logp
+          # NOTE: an AOT-compiled function accepts ONLY its non-static
+          # arguments. `num_prompts`, `padded_length` and `return_prompt_logp`
+          # are static argnames and are already baked in by `.lower()`;
+          # passing any of them here raises a pytree-mismatch TypeError.
+          model_params,
+          tok_ids,
+          slots,
+          pos_ids,
+          seg_ids,
+          offsets_jax,
+          lengths_jax,
+          decode_state,
+          batch_rng,
       )
 
     prefill_result = []
@@ -341,9 +359,13 @@ class BatchedPrefillProcessor:
   ):
     """Ahead-of-time compilation wrapper of _process_batch()."""
 
-    if (padded_length, num_prompts) not in self.process_batch_func:
+    # The lookup key must match the key used for insertion. A 2-tuple never
+    # matches the stored 3-tuple, so the cache always missed and the executable
+    # was re-lowered and re-compiled on every call.
+    cache_key = (padded_length, num_prompts, return_prompt_logp)
+    if cache_key not in self.process_batch_func:
       log.info("compile prefill process_batch{(%d, %d)} capacity=%d", padded_length, num_prompts, capacity)
-      self.process_batch_func[(padded_length, num_prompts, return_prompt_logp)] = (
+      self.process_batch_func[cache_key] = (
           jax.jit(
               self._process_batch,
               in_shardings=(
@@ -355,6 +377,7 @@ class BatchedPrefillProcessor:
                   None,
                   None,
                   self.engine.decode_state_layouts,
+                  None,
               ),
               out_shardings=(None, self.engine.decode_state_layouts),
               static_argnames=(
@@ -376,10 +399,13 @@ class BatchedPrefillProcessor:
               jnp.full(self.max_batch_size, padded_length, dtype=int),
               self.engine.decode_state_shapes,
               return_prompt_logp,
+              # Lowered as a placeholder so the key becomes a runtime *input*
+              # of the executable rather than a constant folded into it.
+              jax.ShapeDtypeStruct((2,), jnp.uint32),
           )
           .compile(compiler_options=None)
       )
-    return self.process_batch_func[(padded_length, num_prompts, return_prompt_logp)]
+    return self.process_batch_func[cache_key]
 
   def _process_batch(  # pylint: disable=too-many-positional-arguments
       self,
@@ -394,6 +420,7 @@ class BatchedPrefillProcessor:
       true_lengths: jax.Array,
       decode_state: DecodeState,
       return_prompt_logp: bool = False,
+      rng=None,
   ) -> tuple[list[Any], DecodeState]:
     """Prefill and insert a packed request."""
 
@@ -406,6 +433,7 @@ class BatchedPrefillProcessor:
         true_lengths=true_lengths,
         num_prompts=num_prompts,
         return_prompt_logp=return_prompt_logp,
+        rng=rng,
     )
     decode_state = self.engine.insert_partial(
         prefix=prefix_state,

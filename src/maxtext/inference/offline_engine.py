@@ -168,10 +168,14 @@ class PrefillHelper:
     if prefill_type == PrefillType.DEFAULT:
       self._processor = PrefillProcessor(engine)
     elif prefill_type == PrefillType.BATCH:
+      # Give the batch processor its own key stream, independent of the one
+      # this helper uses for single prefills.
+      self.rng, batch_rng = jax.random.split(self.rng)
       self._batch_processor = BatchedPrefillProcessor(
           engine=engine,
           max_batch_size=batch_prefill_max_batch_size,
           auto_layout_supported=False,
+          rng=batch_rng,
       )
       # Keep fallback processor for edge cases
       self._processor = PrefillProcessor(engine)
@@ -224,13 +228,17 @@ class PrefillHelper:
     padded_length = len(input_tokens_padded)
     # Use default processor if configured or if input is already at max length
     if self._type == PrefillType.DEFAULT or padded_length == self.max_prefill_length:
+      # Advance the stored key so that every prefill consumes a fresh key.
+      # Reusing a single key here would correlate the sampled first token
+      # across all prompts processed by this helper.
+      self.rng, prefill_rng = jax.random.split(self.rng)
       first_token, decode_state, prompt_logp = self._jitted_single_prefill(
           model_params,
           input_tokens_padded,
           decode_slot,
           input_true_length,
           decode_state,
-          self.rng,
+          prefill_rng,
       )
       prefill_done(
           [PrefillResult(first_token, decode_slot, prompt_logp)],
@@ -379,8 +387,12 @@ class InferenceWorker:
     self.generate_fn = None
 
     start_time = time.time()
+    # Derive independent keys for each consumer. Handing the same key to the
+    # engine, the prefill helper and the decode state would correlate their
+    # randomness.
+    self.rng, engine_rng, prefill_rng, decode_state_rng = jax.random.split(self.rng, 4)
     # Initialize MaxEngine(s)
-    self.params, self.engine = self._init_engine(self.params)
+    self.params, self.engine = self._init_engine(self.params, engine_rng)
     self.tokenizer = self._init_tokenizer()
     self.decode_batch_size = self.engine.max_concurrent_decodes
     # Initialize prefill helper
@@ -389,29 +401,32 @@ class InferenceWorker:
         self.engine,
         self.prefill_lengths,
         self.batch_prefill_max_batch_size,
-        rng=self.rng,
+        rng=prefill_rng,
     )
     # Initialize decode state
     start_time_decode_state = time.time()
     self.generate_fn = self.engine.generate
-    self.decode_state = self.engine.init_decode_state(self.rng)
+    # NOTE: `rng` must be passed by keyword; `init_decode_state` accepts
+    # `*args` and would silently discard a positional key.
+    self.decode_state = self.engine.init_decode_state(rng=decode_state_rng)
 
     if self.debug:
       max_logging.log(f"time taken to initialize decode_state: {time.time() - start_time_decode_state} seconds")
     max_logging.log(f"Initialized Inference worker in {time.time() - start_time} seconds")
 
-  def _init_engine(self, params):
+  def _init_engine(self, params, rng):
     """Initialize the MaxEngine.
 
     Args:
         params: Model parameters
+        rng: PRNG key used to load/reshard parameters
 
     Returns:
         tuple of (params, engine)
     """
     start_time = time.time()
     engine = MaxEngine(self.config, self.devices)
-    params = engine.load_params(params=params, rng=self.rng)
+    params = engine.load_params(params=params, rng=rng)
     max_logging.log(f"Time taken to initialize engine: {time.time() - start_time} seconds")
     return params, engine
 
@@ -611,8 +626,11 @@ class InferenceWorker:
     """
 
     for i in range(self.min_decode_steps):
-      # Generate next tokens
-      self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(self.params, self.decode_state, self.rng)
+      # Generate next tokens. Advance the stored key every step: reusing one
+      # key across steps makes the sampled tokens deterministically correlated
+      # for any non-greedy `decode_sampling_strategy`.
+      self.rng, step_rng = jax.random.split(self.rng)
+      self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(self.params, self.decode_state, step_rng)
       if i == self.min_decode_steps - 1:
         # Block on the last token
         jax.block_until_ready(result_tokens)
@@ -667,7 +685,7 @@ class InferenceWorker:
             prompt_logp_np = np.array(prompt_logp)[:, :true_length]
 
             # Emit token directly
-            should_terminate = self.emit_token(prompt_id, int(first_token), log_prob, prompt_logp=prompt_logp_np)
+            should_terminate = self.emit_token(prompt_id, first_token.item(), log_prob, prompt_logp=prompt_logp_np)
             if should_terminate:
               newly_empty.append(slot)
 
@@ -691,7 +709,7 @@ class InferenceWorker:
           for slot, id_ in active_slots:
             log_prob_at_slot = log_prob_step[slot]
             result_tokens_at_slot = result_tokens_step[slot]
-            should_terminate = self.emit_token(id_, int(result_tokens_at_slot), log_prob_at_slot)
+            should_terminate = self.emit_token(id_, result_tokens_at_slot.item(), log_prob_at_slot)
             if should_terminate:
               newly_empty.append(slot)
               # Update decode slots

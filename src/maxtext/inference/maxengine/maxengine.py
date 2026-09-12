@@ -1050,6 +1050,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       raise ValueError("We don't know what to do with existing_prefix")
 
     if rng is None:
+      # WARNING: this function is jitted, so a `None` rng is constant-folded
+      # into the compiled program and every invocation will then sample with
+      # the *same* key. Callers should always pass an explicit, freshly split
+      # key. TODO(zhijingli): make `rng` required once external callers are migrated.
       rng = jax.random.PRNGKey(0)
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     decoder_positions = jnp.expand_dims(decoder_positions, 0)
@@ -1089,7 +1093,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
       first_generated_token = inference_utils.sampling(
           selected_logits,
-          rng,
+          jax.random.fold_in(rng, idx),
           algorithm if algorithm is not None else self.config.decode_sampling_strategy,
           topk=topk if topk is not None else self.config.decode_sampling_top_k,
           nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
