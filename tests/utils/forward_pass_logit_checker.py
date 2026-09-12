@@ -79,6 +79,7 @@ from google.cloud import storage
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
+from maxtext.inference.inference_utils import str2bool
 from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT, HF_IDS
 from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
@@ -745,7 +746,7 @@ if __name__ == "__main__":
   # golden_logits_path supports file format: json with suffix ".jsonl", and pickle with suffix ".pickle" or ".pkl"
   parser.add_argument("--golden_logits_path", type=str, required=False, default="")
   parser.add_argument("--hf_model_path", type=str, required=False, default="")
-  parser.add_argument("--run_hf_model", type=bool, required=False, default=False)
+  parser.add_argument("--run_hf_model", type=str2bool, required=False, default=False)
   parser.add_argument("--output_logits_path", type=str, required=False, default="")
   parser.add_argument("--gcs_output_logits_path", type=str, required=False, default="")
   parser.add_argument("--clip_logits_epsilon", type=float, required=False, default=None)
@@ -765,7 +766,7 @@ if __name__ == "__main__":
       help="Checkpoint format to load: 'linen' (default) or 'nnx'.",
   )
   parser.add_argument(
-      "--trust_remote_code", type=bool, required=False, default=True, help="from_pretrained: trust_remote_code"
+      "--trust_remote_code", type=str2bool, required=False, default=True, help="from_pretrained: trust_remote_code"
   )
 
   # Parse known args returns the namespace AND the list of remaining arguments
