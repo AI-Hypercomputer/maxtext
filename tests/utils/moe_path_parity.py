@@ -26,11 +26,44 @@ so the numbers are directly comparable to wandb.
 It needs no vLLM, no rollouts, no sandbox and no checkpoint. Random weights are
 fine: we are measuring a numerical path difference, not model quality.
 
+Two modes
+---------
+*Default* — two local forward passes, trainer config vs sampler config, over
+random tokens. Measures the MaxText-vs-MaxText path difference. This mode has
+already run and returned 0.000531 nats, inside the TIS band: **the MoE code
+path is not the cause.**
+
+*`--trajectory_csv`* — one trainer forward pass over the tokens a production
+rollout actually produced, diffed against the per-token log-probabilities vLLM
+recorded at the time. This compares the trainer against the *real sampler*,
+which is what the production loss gates on, and it is the only thing here that
+can see multi-turn context reassembly, paged-KV decode and prefix caching. It
+reports where the disagreements land relative to assistant-turn boundaries,
+which is the part that discriminates between the remaining hypotheses.
+
 Usage
 -----
     python3 moe_path_parity.py --layers 8 --seq_len 512
     python3 moe_path_parity.py --layers 8 --model qwen3-4b      # dense control
     python3 moe_path_parity.py --layers 8 --isolate_moe         # see below
+
+    gcloud storage cp gs://niting-storage-europe-west4/deepswe-logs/\
+qwen-35b-deepswe-v5p-256-maxtext-v6/trajectory_log_1789165722.csv .
+    python3 moe_path_parity.py --layers 0 \
+        --load_parameters_path gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/scanned/0/items \
+        --trajectory_csv trajectory_log_1789165722.csv --trajectory_rows 0,5
+
+What the trajectory mode is predicted to show, so it can fail
+-------------------------------------------------------------
+From the production metrics (`token_weight_mean` 1.000235 with
+`seq_geomean` 0.856 and `token_logdiff_absmean` 0.229), the disagreement
+decomposes into a bulk of sigma ~0.10 nats plus a one-sided negative tail of
+roughly 0.4-0.6% of scored tokens at 26+ nats -- about 32 per sequence against
+a 30-turn agent budget. **If those outliers come back clustered at offset 0-2
+of each assistant turn, the defect is in conversation reassembly. If they are
+spread uniformly within turns, it is decode-time drift. If there are none, the
+trainer scores the real tokens correctly and the defect is on the sampler
+side.** All three are informative; the mode is only useless if it will not run.
 
 `--isolate_moe` keeps attention identical on both sides and varies only the MoE
 flags. That does NOT reproduce the production sampler path (the fused branch
@@ -330,6 +363,145 @@ def report(log_is, label=""):
     print("  " + "!" * 68)
 
 
+PAD_ID = 248044  # <|endoftext|>, what the rollout left-pads prompt_tokens with
+
+
+def load_trajectory(csv_path, row_idx, max_tokens):
+  """One row of a production `trajectory_log_*.csv`, ready to score.
+
+  The two-forward-pass mode above compares MaxText against MaxText. This mode
+  compares MaxText against *the sampler that actually generated the tokens*,
+  using the per-token log-probabilities vLLM recorded at rollout time. That is
+  the quantity the production loss gates on, and nothing else in this repo
+  measures it.
+
+  Returns `(ids, mask, sampler_lp, n_prompt, turn_id)` where `ids` is the full
+  prompt+conversation stream, and `mask`/`sampler_lp`/`turn_id` are aligned to
+  the *conversation* portion only.
+
+  Three alignment details, each easy to get wrong and silently fatal:
+
+  * `prompt_tokens` is left-padded with `<|endoftext|>` to `max_prompt_length`
+    (4096 in every row observed). The padding is stripped here; leaving it in
+    would score the conversation in a context of thousands of pad tokens.
+  * The trainer's logprob at index `t` predicts token `t+1`, so conversation
+    token `j` is scored by `lp[n_prompt + j - 1]`. The prompt must therefore be
+    in the forward pass even though none of it is compared.
+  * `conversation_masks` is the loss mask: 1 on assistant-generated tokens, 0
+    on environment/tool output. Only masked-in positions are compared, exactly
+    as `grpo_loss_fn` does.
+  """
+  import ast
+  import csv
+  import sys
+
+  csv.field_size_limit(sys.maxsize)
+  with open(csv_path, newline="") as fh:
+    rows = list(csv.DictReader(fh))
+  if row_idx >= len(rows):
+    raise IndexError(f"row {row_idx} requested, CSV has {len(rows)}")
+  r = rows[row_idx]
+
+  def parse(field):
+    s = r[field].strip()
+    if not s or s == "None":
+      raise ValueError(f"row {row_idx} has no {field}; pick another row")
+    return np.asarray(ast.literal_eval(s if s.startswith("[") else "[" + s + "]"))
+
+  prompt = parse("prompt_tokens")
+  conv = parse("conversation_tokens")
+  mask = parse("conversation_masks")
+  lp = parse("old_logprobs")
+  if not (len(conv) == len(mask) == len(lp)):
+    raise ValueError(
+        f"row {row_idx} is internally inconsistent: conversation_tokens={len(conv)} "
+        f"conversation_masks={len(mask)} old_logprobs={len(lp)}. These must match; "
+        "if they do not, the misalignment IS the bug and no forward pass is needed.")
+
+  keep = int(np.argmax(prompt != PAD_ID)) if (prompt == PAD_ID).any() else 0
+  prompt = prompt[keep:]
+  if keep:
+    print(f"  stripped {keep} leading pad tokens from prompt_tokens")
+
+  if max_tokens and len(prompt) + len(conv) > max_tokens:
+    room = max_tokens - len(prompt)
+    if room < 64:
+      raise ValueError(
+          f"--trajectory_max_tokens {max_tokens} leaves only {room} tokens after a "
+          f"{len(prompt)}-token prompt; raise it or pick a shorter row")
+    conv, mask, lp = conv[:room], mask[:room], lp[:room]
+    print(f"  truncated conversation to {room} tokens to fit --trajectory_max_tokens")
+
+  # Turn index: assistant runs are maximal runs of mask==1. -1 on env tokens.
+  turn_id = np.full(len(mask), -1, dtype=np.int32)
+  on = mask > 0
+  edges = np.diff(np.concatenate([[0], on.astype(np.int8), [0]]))
+  for t, (s, e) in enumerate(zip(np.where(edges == 1)[0], np.where(edges == -1)[0])):
+    turn_id[s:e] = t
+
+  ids = np.concatenate([prompt, conv]).astype(np.int32)
+  print(f"  row {row_idx}: status={r.get('status')} reward={r.get('trajectory_reward')} "
+        f"prompt={len(prompt)} conversation={len(conv)} "
+        f"scored(masked-in)={int(on.sum())} assistant_turns={turn_id.max() + 1}")
+  return ids, mask, lp.astype(np.float64), len(prompt), turn_id
+
+
+def report_trajectory(log_is, mask, turn_id, ids, label=""):
+  """Per-token attribution of the production sampler-vs-trainer disagreement.
+
+  `report()` above answers "how big". This answers "where", which is the part
+  that discriminates between the remaining hypotheses: a defect in multi-turn
+  context reassembly fires at turn boundaries, paged-KV decode drift grows
+  within a turn, and a pure numerics floor is uniform.
+  """
+  on = np.asarray(mask) > 0
+  a = np.asarray(log_is)[on]
+  tid = np.asarray(turn_id)[on]
+  toks = np.asarray(ids)[len(ids) - len(mask):][on]
+  finite = np.isfinite(a)
+  if (~finite).sum():
+    print(f"\n  !! {int((~finite).sum())} non-finite positions excluded from the statistics")
+    a, tid, toks = a[finite], tid[finite], toks[finite]
+
+  print(f"\n===== {label} =====")
+  print(f"  scored positions (masked-in)              : {a.size}")
+  print(f"  mean signed log-ratio (trainer - sampler) : {a.mean():+.6f} nats")
+  print(f"  seq_geomean equivalent  exp(mean)         : {float(np.exp(a.mean())):.6f}")
+  print(f"  token_logdiff_absmean                     : {np.abs(a).mean():.6f}")
+  print(f"  token_logdiff_absmax                      : {np.abs(a).max():.4f}")
+  print(f"  mult_prob_error  mean(exp|d|)             : {np.exp(np.abs(a)).mean():.6g}")
+  for thr in (2, 5, 10):
+    n = int((np.abs(a) > thr).sum())
+    print(f"  tokens with |log_is| > {thr:2d} nats            : {n} "
+          f"({100 * n / a.size:.4f}%, {n / max(tid.max() + 1, 1):.2f} per turn)")
+  lo, hi = 0.999, 1.002
+  geo = float(np.exp(a.mean()))
+  print(f"  in TIS band [{lo}, {hi}]?                 : {'YES' if lo <= geo <= hi else 'NO'}")
+
+  # The discriminating view. `token_outliers_per_seq` (tunix 8cf1035e) reports
+  # the count; this reports where in the turn they land, which the metric cannot.
+  out = np.abs(a) > 10.0
+  print(f"\n  --- outlier attribution ({int(out.sum())} tokens beyond 10 nats) ---")
+  if not out.any():
+    print("  none. If production shows outliers and this pass does not, the defect is")
+    print("  in generation or in conversation reassembly, not in the trainer's scoring.")
+    return
+  first_in_turn = np.concatenate([[True], tid[1:] != tid[:-1]])
+  pos_in_turn = np.zeros(a.size, dtype=np.int64)
+  run = 0
+  for i in range(a.size):
+    run = 0 if first_in_turn[i] else run + 1
+    pos_in_turn[i] = run
+  print(f"  sign: {int((a[out] < 0).sum())} negative, {int((a[out] > 0).sum())} positive")
+  print(f"  distinct turns containing an outlier: {len(np.unique(tid[out]))} of {tid.max() + 1}")
+  hist = np.bincount(np.minimum(pos_in_turn[out], 8), minlength=9)
+  print(f"  offset from start of its assistant turn (0..7, 8+): {hist.tolist()}")
+  print("  worst 15 (turn, offset, token_id, trainer-sampler nats):")
+  for i in np.argsort(np.abs(a))[::-1][:15]:
+    print(f"    turn {int(tid[i]):3d}  offset {int(pos_in_turn[i]):5d}  "
+          f"id {int(toks[i]):6d}  {a[i]:+9.3f}")
+
+
 def main():
   p = argparse.ArgumentParser()
   p.add_argument("--model", default="qwen3.5-35b-a3b")
@@ -364,9 +536,41 @@ def main():
                       "kernel fails on this install -- but note it is then NOT the kernel "
                       "production runs.")
   p.add_argument("--seed", type=int, default=0)
+  p.add_argument("--trajectory_csv", default=None,
+                 help="Path to a production trajectory_log_*.csv. Switches the script from "
+                      "trainer-vs-sampler-config (two local forward passes) to "
+                      "trainer-vs-PRODUCTION-SAMPLER: one trainer forward pass over the real "
+                      "tokens, diffed against the per-token logprobs vLLM recorded at rollout "
+                      "time. This is the only mode that can see the defect the 35B run is "
+                      "actually failing on. Pull one with: gcloud storage cp "
+                      "gs://niting-storage-europe-west4/deepswe-logs/"
+                      "qwen-35b-deepswe-v5p-256-maxtext-v6/trajectory_log_*.csv .")
+  p.add_argument("--trajectory_rows", default="0",
+                 help="comma-separated row indices to score, one forward pass each")
+  p.add_argument("--trajectory_max_tokens", type=int, default=16384,
+                 help="truncate prompt+conversation to this length. 0 = no truncation. "
+                      "Rows run 9k-35k tokens; the shortest is usually row 0.")
+  p.add_argument("--allow_partial_depth", action="store_true",
+                 help="permit --trajectory_csv at reduced depth. Off by default because the "
+                      "comparison is against logprobs from the real 40-layer model: a sliced "
+                      "model is a DIFFERENT model, so every token disagrees and the result is "
+                      "meaningless. Only useful for shaking out plumbing.")
   args = p.parse_args()
   if args.devices is None:
     args.devices = jax.device_count()
+
+  if args.trajectory_csv:
+    if args.layers != 0 and not args.allow_partial_depth:
+      raise SystemExit(
+          f"--trajectory_csv needs --layers 0 (full depth), got {args.layers}.\n"
+          "The comparison is against log-probabilities produced by the real 40-layer\n"
+          "model. A depth-sliced model is a different model: every token disagrees,\n"
+          "the offset is enormous, and the result says nothing about the defect.\n"
+          "Pass --allow_partial_depth only to shake out plumbing.")
+    if not args.load_parameters_path:
+      raise SystemExit(
+          "--trajectory_csv needs --load_parameters_path. Random weights cannot be\n"
+          "compared against logprobs from a trained checkpoint.")
 
   print(f"devices: {jax.device_count()} x {jax.devices()[0].device_kind}")
   shim_tpu_inference_envs(args.onehot_moe_permute)
@@ -391,13 +595,28 @@ def main():
     except Exception:
       pass
 
+  def make_batch(token_ids_1d):
+    """Tile one token stream across the batch axis.
+
+    The batch dimension here is a sharding artifact, not data: `--batch` must
+    stay divisible by the data/fsdp axis (4 on a v5p-8), so a single trajectory
+    is replicated and only row 0 is read back. Wasteful in activation memory,
+    but it keeps the mesh identical to the two-forward-pass mode rather than
+    introducing a second sharding path to get wrong.
+    """
+    t = jnp.asarray(token_ids_1d, dtype=jnp.int32)
+    n = t.shape[0]
+    return (jnp.broadcast_to(t[None, :], (args.batch, n)),
+            jnp.broadcast_to(jnp.arange(n, dtype=jnp.int32)[None, :], (args.batch, n)),
+            jnp.ones((args.batch, n), dtype=jnp.int32))
+
   key = jax.random.PRNGKey(args.seed + 1)
   ids = jax.random.randint(key, (args.batch, args.seq_len), 0, trainer_cfg.vocab_size, dtype=jnp.int32)
   pos = jnp.broadcast_to(jnp.arange(args.seq_len, dtype=jnp.int32)[None, :], (args.batch, args.seq_len))
   seg = jnp.ones((args.batch, args.seq_len), dtype=jnp.int32)
   print(f"tokens: batch={args.batch} seq_len={args.seq_len} -> {args.batch * (args.seq_len - 1)} scored positions")
 
-  def fwd(model, cfg, mesh):
+  def fwd(model, cfg, mesh, ids, pos, seg):
     out = model(decoder_input_tokens=ids, decoder_positions=pos,
                 decoder_segment_ids=seg, enable_dropout=False)
     # models.py:645 -- with attention in (vllm_rpa, vllm_batched_rpa) the model
@@ -418,14 +637,14 @@ def main():
           shared_embedding=model.token_embedder, y=y,
           deterministic=True, model_mode=MODEL_MODE_TRAIN)
 
-  def score(model, cfg, mesh, name):
+  def score(model, cfg, mesh, name, ids=ids, pos=pos, seg=seg):
     """Forward pass, reduced to host-sized results before anything else runs.
 
     Only the per-token logprobs and a few scalars come back. The full logit
     tensor is batch x seq x vocab -- 2GB at 4x512x248320 -- and holding two of
     them alongside two models is what makes this not fit.
     """
-    lg = fwd(model, cfg, mesh)
+    lg = fwd(model, cfg, mesh, ids, pos, seg)
     finite = jnp.isfinite(lg)
     stats = (jnp.min(jnp.where(finite, lg, jnp.inf)),
              jnp.max(jnp.where(finite, lg, -jnp.inf)),
@@ -471,6 +690,28 @@ def main():
       rngs=maxtext_utils_nnx.create_nnx_rngs(trainer_cfg, rng_key=jax.random.PRNGKey(args.seed)))
   nnx.update(m_train, copy_weights(host_params, nnx.state(m_train, nnx.Param)))
   hbm("after trainer build")
+  if args.trajectory_csv:
+    # Trainer vs the production sampler. Only the trainer path runs; the other
+    # side of the comparison is `old_logprobs`, recorded by vLLM at rollout.
+    for row_idx in [int(x) for x in args.trajectory_rows.split(",") if x.strip()]:
+      print(f"\nloading trajectory row {row_idx} from {args.trajectory_csv} ...")
+      t_ids, t_mask, t_lp, n_prompt, turn_id = load_trajectory(
+          args.trajectory_csv, row_idx, args.trajectory_max_tokens)
+      b_ids, b_pos, b_seg = make_batch(t_ids)
+      print("forward pass: trainer path over real trajectory tokens...")
+      lp = score(m_train, trainer_cfg, mesh_train, "trainer", b_ids, b_pos, b_seg)[0]
+      # lp[t] scores token t+1, so conversation token j is lp[n_prompt + j - 1].
+      trainer_lp = lp[n_prompt - 1:n_prompt - 1 + len(t_mask)]
+      if len(trainer_lp) != len(t_mask):
+        raise AssertionError(
+            f"alignment slice produced {len(trainer_lp)} scores for {len(t_mask)} "
+            f"conversation tokens (prompt={n_prompt}, lp={len(lp)})")
+      report_trajectory(trainer_lp - t_lp, t_mask, turn_id, t_ids,
+                        f"production sampler vs trainer -- row {row_idx}")
+    del m_train
+    gc.collect()
+    return
+
   print("forward pass: trainer path...")
   lp_train = score(m_train, trainer_cfg, mesh_train, "trainer")
   del m_train
