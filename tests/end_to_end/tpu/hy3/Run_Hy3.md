@@ -104,8 +104,13 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     run_name=hy3_tiny_smoke_test
 ```
 
-### Full-Scale Pre-training (`hy3-295b` on Multi-Slice TPU v5p)
-Example training run on TPU v5p-256 / v5p-512:
+### Full-Scale Pre-training (`hy3-295b` on TPU v5p)
+
+The configuration below is the one that was actually run and verified: TPU
+v5p-64, FSDP=64, EP=1. Larger slices and `ici_expert_parallelism > 1` are
+plausible starting points but have **not** been verified for Hy3 -- treat any
+change to the parallelism below as something to re-validate.
+
 ```bash
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     model_name=hy3-295b \
@@ -114,7 +119,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     per_device_batch_size=1 \
     max_target_length=4096 \
     ici_fsdp_parallelism=64 \
-    ici_expert_parallelism=4 \
+    ici_expert_parallelism=1 \
     megablox=true \
     sparse_matmul=true \
     attention=flash \
@@ -169,6 +174,7 @@ python3 tests/utils/forward_pass_logit_checker.py \
     src/maxtext/configs/base.yml \
     --run_hf_model=True \
     --hf_model_path=/tmp/hy3-hf \
+    load_parameters_path=${CONVERTED_ORBAX_UNSCANNED_PATH} \
     model_name=hy3-295b \
     scan_layers=false \
     weight_dtype=float32 \
