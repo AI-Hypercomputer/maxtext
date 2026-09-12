@@ -1,0 +1,142 @@
+{
+  "domain_00": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.08
+  },
+  "domain_01": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.07
+  },
+  "domain_02": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.06
+  },
+  "domain_03": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.055
+  },
+  "domain_04": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.05
+  },
+  "domain_05": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.045
+  },
+  "domain_06": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.04
+  },
+  "domain_07": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.038
+  },
+  "domain_08": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.035
+  },
+  "domain_09": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.032
+  },
+  "domain_10": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.03
+  },
+  "domain_11": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.028
+  },
+  "domain_12": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.027
+  },
+  "domain_13": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.025
+  },
+  "domain_14": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.024
+  },
+  "domain_15": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.023
+  },
+  "domain_16": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.022
+  },
+  "domain_17": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.021
+  },
+  "domain_18": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.02
+  },
+  "domain_19": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.02
+  },
+  "domain_20": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.019
+  },
+  "domain_21": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.018
+  },
+  "domain_22": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.017
+  },
+  "domain_23": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.016
+  },
+  "domain_24": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.015
+  },
+  "domain_25": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.015
+  },
+  "domain_26": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.014
+  },
+  "domain_27": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.013
+  },
+  "domain_28": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.012
+  },
+  "domain_29": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.011
+  },
+  "domain_30": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.01
+  },
+  "domain_31": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.01
+  },
+  "domain_32": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.009
+  },
+  "domain_33": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.008
+  },
+  "domain_34": {
+    "path": "tests/assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-*",
+    "weight": 0.006
+  }
+}
