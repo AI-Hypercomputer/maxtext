@@ -152,6 +152,17 @@ class VllmWeightMapping:
     else:
       return {}
 
+  def preprocess_src_state(self):
+    """Returns an optional `state -> state` transform Tunix applies before the key mapping.
+
+    Mappings whose target needs tensors fused or reordered (e.g. Qwen3.5's vLLM torchax
+    target) define it; the plain nnx-target mappings do not and return None.
+    """
+    if not self.use_standalone_mappings:
+      return None
+    fn = getattr(STANDALONE_VLLM_WEIGHT_MAPPING[self.model_name], "preprocess_src_state", None)
+    return fn(self.config) if fn else None
+
   def lora_to_hf_mappings(self):
     """Dynamically generate LoRA mappings from base model weights mappings."""
     base_mappings = self.to_hf_mapping()

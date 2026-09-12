@@ -24,6 +24,7 @@ from maxtext.integration.tunix.weight_mapping.gpt_oss import GPT_OSS_VLLM_MAPPIN
 from maxtext.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
 from maxtext.integration.tunix.weight_mapping.qwen2 import QWEN2_VLLM_MAPPING
 from maxtext.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
+from maxtext.integration.tunix.weight_mapping.qwen3_5 import QWEN3_5_VLLM_MAPPING
 
 
 class StandaloneVllmWeightMapping:
@@ -34,6 +35,9 @@ class StandaloneVllmWeightMapping:
       return LLAMA3_VLLM_MAPPING
     elif name.startswith("qwen2"):
       return QWEN2_VLLM_MAPPING
+    elif name.startswith("qwen3.5"):
+      # Must precede the "qwen3" prefix check, which would otherwise swallow it.
+      return QWEN3_5_VLLM_MAPPING
     elif name.startswith("qwen3"):
       return QWEN3_VLLM_MAPPING
     elif name.startswith("gemma3"):
