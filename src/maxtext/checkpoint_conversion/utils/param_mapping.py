@@ -4251,7 +4251,78 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   return mapping
 
 
+def PHI4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Phi uses fused QKV/gate-up projections and a tied output embedding."""
+  config = {**config, "num_hidden_layers": maxtext_config.num_decoder_layers}
+  mapping = LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
+  mapping.pop("params-decoder-logits_dense-kernel")
+
+  def fused_name(name):
+    for projection in ("q_proj", "k_proj", "v_proj"):
+      name = name.replace(f"self_attn.{projection}.", "self_attn.qkv_proj.")
+    for projection in ("gate_proj", "up_proj"):
+      name = name.replace(f"mlp.{projection}.", "mlp.gate_up_proj.")
+    return name
+
+  return {
+      key: [fused_name(n) for n in value] if isinstance(value, list) else fused_name(value)
+      for key, value in mapping.items()
+  }
+
+
+def PHI4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Split/fuse Phi projections, preserving HF's partial split-half RoPE layout."""
+  head_dim = maxtext_config.head_dim
+  q_size = maxtext_config.num_query_heads * head_dim
+  kv_size = maxtext_config.num_kv_heads * head_dim
+  mlp_dim = maxtext_config.mlp_dim
+
+  def reshape_kernel(value, target_shape):
+    return value.reshape(tuple(reversed(target_shape))).T if saving_to_hf else value.T.reshape(target_shape)
+
+  def split_projection(start, size, query=False):
+    def hook(value, target_shape):
+      result = value[start : start + size].T.reshape(target_shape)
+      if query:
+        result = (result.astype(np.float32) / np.sqrt(head_dim)).astype(result.dtype)
+      return result
+
+    return hook
+
+  def fuse_qkv(values, target_shape):
+    query, key, value = values
+    query = (query.astype(np.float32) * np.sqrt(head_dim)).astype(query.dtype)
+    return np.concatenate([x.reshape(x.shape[0], -1).T for x in (query, key, value)], axis=0)
+
+  def fuse_gate_up(values, target_shape):
+    return np.concatenate([x.T for x in values], axis=0)
+
+  hooks = {}
+  prefixes = (
+      ["params-decoder-layers"]
+      if scan_layers
+      else [f"params-decoder-layers_{i}" for i in range(maxtext_config.num_decoder_layers)]
+  )
+  for prefix in prefixes:
+    qkv_keys = tuple(f"{prefix}-self_attention-{p}-kernel" for p in ("query", "key", "value"))
+    mlp_keys = tuple(f"{prefix}-mlp-wi_{i}-kernel" for i in range(2))
+    if saving_to_hf:
+      hooks[qkv_keys] = fuse_qkv
+      hooks[mlp_keys] = fuse_gate_up
+    else:
+      for key, start, size, query in zip(
+          qkv_keys, (0, q_size, q_size + kv_size), (q_size, kv_size, kv_size), (True, False, False)
+      ):
+        hooks[key] = split_projection(start, size, query)
+      for i, key in enumerate(mlp_keys):
+        hooks[key] = split_projection(i * mlp_dim, mlp_dim)
+    hooks[f"{prefix}-self_attention-out-kernel"] = reshape_kernel
+    hooks[f"{prefix}-mlp-wo-kernel"] = reshape_kernel
+  return hooks
+
+
 PARAM_MAPPING = {
+    "phi4-mini-instruct": PHI4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4308,6 +4379,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "phi4-mini-instruct": PHI4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,

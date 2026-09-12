@@ -56,6 +56,12 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 - **Variants** MoE with Hybrid Attention (35B-A3B, 397B-A17B)
 - **Notes**: GatedDeltaNet, GQA, Multimodal, MoE.
 
+### Phi
+
+- **Variant**: Phi-4-mini-instruct (3.8B)
+- **Notes**: GQA, RMSNorm, SwiGLU, tied embeddings, partial LongRoPE; scanned and unscanned HF checkpoint conversion.
+- **Guide**: [Phi-4-mini-instruct](../../guides/phi4-mini.md)
+
 ### GPT-OSS
 
 - **Variants**: 20B, 120B

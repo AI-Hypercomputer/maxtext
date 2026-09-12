@@ -181,7 +181,7 @@ def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_leng
 
 
 def validate_rope_type(rope_type: str) -> None:
-  valid_rope_types = ("default", "yarn", "llama3.1")
+  valid_rope_types = ("default", "yarn", "llama3.1", "longrope")
   if rope_type not in valid_rope_types:
     raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
 
@@ -427,6 +427,7 @@ def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
   # currently supported models
   valid_model_names = (
+      "phi4-mini-instruct",
       "default",
       "llama2-7b",
       "llama2-13b",

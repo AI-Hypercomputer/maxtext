@@ -55,6 +55,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.attention_op import AttentionOp, _resolve_attention_type
 from maxtext.layers.embeddings import (
     LLaMARotaryEmbedding,
+    LongRoPERotaryEmbedding,
     LlamaVisionRotaryEmbedding,
     Qwen3OmniMoeThinkerTextRotaryEmbedding,
     Qwen3OmniMoeVisionRotaryEmbedding,
@@ -934,6 +935,20 @@ class Attention(nnx.Module):
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
+    elif rope_type == "longrope":
+      rotary_embedding = LongRoPERotaryEmbedding(
+          min_timescale=self.config.rope_min_timescale,
+          max_timescale=self.rope_max_timescale,
+          mesh=self.mesh,
+          embedding_dims=rope_embedding_dims,
+          partial_rotary_factor=self.config.partial_rotary_factor,
+          short_factor=self.config.longrope_short_factor,
+          long_factor=self.config.longrope_long_factor,
+          original_max_position_embeddings=self.config.longrope_original_max_position_embeddings,
+          max_position_embeddings=self.config.longrope_max_position_embeddings,
+          fprop_dtype=self.dtype,
+          shard_mode=self.config.shard_mode,
+      )
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
           max_position_embeddings=self.config.max_position_embeddings,
@@ -1026,6 +1041,9 @@ class Attention(nnx.Module):
     Returns:
       The input tensor with rotary embeddings applied.
     """
+    if isinstance(self.rotary_embedding, LongRoPERotaryEmbedding):
+      max_position = (rope_kwargs or {}).get("longrope_max_position")
+      return self.rotary_embedding(inputs, inputs_positions, max_position=max_position)
     if isinstance(self.rotary_embedding, Qwen3OmniMoeVisionRotaryEmbedding):
       # For Qwen3OmniMoe vision, pass static dimensions from kwargs.
       num_frames = rope_kwargs.get("num_frames")
@@ -1277,6 +1295,11 @@ class Attention(nnx.Module):
     use_qk_norm = self.use_qk_norm and use_rope
 
     if use_rope:
+      if self.rope_type == "longrope" and decoder_segment_ids is not None and model_mode != MODEL_MODE_AUTOREGRESSIVE:
+        # Padding can extend beyond the short-context boundary even when the
+        # real prompt does not. HF selects its regime from unpadded positions.
+        rope_kwargs = dict(rope_kwargs or {})
+        rope_kwargs["longrope_max_position"] = jnp.max(jnp.where(decoder_segment_ids != 0, inputs_positions, -1))
       query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
       if not use_shared_kv:
         key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)

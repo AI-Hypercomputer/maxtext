@@ -96,6 +96,7 @@ guides/checkpointing_solutions.md
 guides/monitoring_and_debugging.md
 guides/run_python_notebook.md
 guides/model_bringup.md
+guides/phi4-mini.md
 guides/lora_model_bringup.md
 guides/distillation.md
 guides/eval_framework.md

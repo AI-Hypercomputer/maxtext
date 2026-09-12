@@ -1277,7 +1277,31 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def PHI4_HF_WEIGHTS_TO_SHAPE(config):
+  """Shapes of Phi's fused weights (the LM head is tied to embeddings)."""
+  hidden = config["hidden_size"]
+  head_dim = config.get("head_dim", hidden // config["num_attention_heads"])
+  q_size = config["num_attention_heads"] * head_dim
+  kv_size = config["num_key_value_heads"] * head_dim
+  mlp_dim = config["intermediate_size"]
+  shapes = {"model.embed_tokens.weight": [config["vocab_size"], hidden], "model.norm.weight": [hidden]}
+  for i in range(config["num_hidden_layers"]):
+    prefix = f"model.layers.{i}"
+    shapes.update(
+        {
+            f"{prefix}.self_attn.qkv_proj.weight": [q_size + 2 * kv_size, hidden],
+            f"{prefix}.self_attn.o_proj.weight": [hidden, q_size],
+            f"{prefix}.mlp.gate_up_proj.weight": [2 * mlp_dim, hidden],
+            f"{prefix}.mlp.down_proj.weight": [hidden, mlp_dim],
+            f"{prefix}.input_layernorm.weight": [hidden],
+            f"{prefix}.post_attention_layernorm.weight": [hidden],
+        }
+    )
+  return shapes
+
+
 HF_SHAPE = {
+    "phi4-mini-instruct": PHI4_HF_WEIGHTS_TO_SHAPE,
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE,

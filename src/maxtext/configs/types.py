@@ -181,6 +181,7 @@ class RopeType(str, Enum):
   DEFAULT = "default"
   LLAMA3_1 = "llama3.1"
   YARN = "yarn"
+  LONGROPE = "longrope"
 
 
 class TokenizerType(str, Enum):
@@ -225,6 +226,7 @@ class ProfilerType(str, Enum):
 # ----------------------------------------------------------------------------
 
 ModelName = Literal[
+    "phi4-mini-instruct",
     "default",
     "llama2-7b",
     "llama2-13b",
@@ -2251,6 +2253,10 @@ class Rope(BaseModel):
   """Configuration for Rotary Positional Embedding (RoPE)."""
 
   rope_type: RopeType = Field(RopeType.DEFAULT, description="The type of RoPE to use.")
+  longrope_original_max_position_embeddings: int = Field(4096, gt=1, description="Original LongRoPE context length.")
+  longrope_max_position_embeddings: int = Field(131072, gt=1, description="Extended LongRoPE context length.")
+  longrope_short_factor: list[float] = Field(default_factory=list, description="Per-frequency short-context divisors.")
+  longrope_long_factor: list[float] = Field(default_factory=list, description="Per-frequency long-context divisors.")
   rope_use_scale: bool = Field(True, description="Apply RoPE scaling for Llama3.1 style.")
   rope_min_timescale: int = Field(1, description="The minimum timescale for RoPE.")
   rope_max_timescale: int = Field(10_000, description="The maximum timescale for RoPE.")
@@ -4721,6 +4727,15 @@ class MaxTextConfig(
             "reorder because it rebuilds the causal mask from positions; a recurrence cannot. The run still trains "
             "and the loss still falls, so set this explicitly rather than relying on the failure being visible."
         )
+    elif self.rope_type == RopeType.LONGROPE:
+      rotary_dim = int(self.head_dim * self.partial_rotary_factor)
+      if not 0 < self.partial_rotary_factor <= 1 or rotary_dim <= 0 or rotary_dim % 2:
+        raise ValueError("LongRoPE requires a positive, even rotary dimension no larger than head_dim.")
+      for factors in (self.longrope_short_factor, self.longrope_long_factor):
+        if len(factors) != rotary_dim // 2 or any(not math.isfinite(x) or x <= 0 for x in factors):
+          raise ValueError("LongRoPE factors must be positive and have rotary_dim / 2 entries.")
+      if self.longrope_max_position_embeddings < self.longrope_original_max_position_embeddings:
+        raise ValueError("LongRoPE maximum context must be at least the original context.")
     else:
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")

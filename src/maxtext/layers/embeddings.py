@@ -187,7 +187,7 @@ def attend_on_embedding(
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
   return jnp.dot(
       query,
-      jnp.asarray(embedding_table, jnp.bfloat16).T,
+      jnp.asarray(embedding_table, config.dtype).T,
       preferred_element_type=attend_dtype,
       out_sharding=out_sharding,
   )
@@ -354,6 +354,42 @@ class PartialRotaryEmbedding(RotaryEmbedding):
     inputs_rot = super().__call__(inputs_rot, position)
     inputs = jnp.concatenate([inputs_rot, inputs_pass], axis=-1)
     return inputs
+
+
+class LongRoPERotaryEmbedding(PartialRotaryEmbedding):
+  """Phi LongRoPE with a partial, HF split-half rotary layout.
+
+  Select frequencies from the actual positions, including during cached decode,
+  rather than the padded sequence length or configured cache capacity.
+  """
+
+  def __init__(
+      self, *args, short_factor, long_factor, original_max_position_embeddings, max_position_embeddings, **kwargs
+  ):
+    super().__init__(*args, **kwargs)
+    if any(len(factors) != self.rotary_dim // 2 for factors in (short_factor, long_factor)):
+      raise ValueError("LongRoPE factors must have rotary_dim / 2 entries.")
+    self.short_factor = tuple(short_factor)
+    self.long_factor = tuple(long_factor)
+    self.original_max_position_embeddings = original_max_position_embeddings
+    factor = max_position_embeddings / original_max_position_embeddings
+    self.attention_factor = math.sqrt(1 + math.log(factor) / math.log(original_max_position_embeddings))
+
+  def __call__(self, inputs, position=None, max_position=None):
+    assert position is not None
+    max_position = jnp.max(position) if max_position is None else max_position
+    factors = jnp.where(
+        max_position + 1 > self.original_max_position_embeddings,
+        jnp.asarray(self.long_factor, dtype=jnp.float32),
+        jnp.asarray(self.short_factor, dtype=jnp.float32),
+    )
+    inv_freq = 1.0 / (factors * self.timescale)
+    angles = position[:, :, None, None].astype(jnp.float32) * inv_freq
+    cos = jnp.concatenate([jnp.cos(angles)] * 2, axis=-1) * self.attention_factor
+    sin = jnp.concatenate([jnp.sin(angles)] * 2, axis=-1) * self.attention_factor
+    rotated = self.apply_rotary(inputs[..., : self.rotary_dim], cos.astype(inputs.dtype), sin.astype(inputs.dtype))
+    output = jnp.concatenate([rotated, inputs[..., self.rotary_dim :]], axis=-1)
+    return output.astype(self.fprop_dtype) if self.cast_as_fprop_dtype else output
 
 
 class Gemma4PartialRotaryEmbedding(RotaryEmbedding):

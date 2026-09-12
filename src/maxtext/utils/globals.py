@@ -44,6 +44,7 @@ DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3  # Default checkpoint file siz
 
 # Mapping from MaxText model key to Hugging Face tokenizer identifiers
 HF_IDS = {
+    "phi4-mini-instruct": "microsoft/Phi-4-mini-instruct",
     "gemma2-2b": "google/gemma-2-2b",
     "gemma2-9b": "google/gemma-2-9b",
     "gemma2-27b": "google/gemma-2-27b",

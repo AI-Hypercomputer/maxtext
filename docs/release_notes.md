@@ -24,6 +24,9 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 <!-- Add new unreleased changes below this line -->
 
+- Added [Phi-4-mini-instruct](guides/phi4-mini.md) with partial LongRoPE, tied embeddings,
+  and bidirectional HF checkpoint conversion for scanned and unscanned layers.
+
 ## Releases
 
 ### v0.2.4
