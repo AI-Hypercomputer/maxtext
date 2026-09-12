@@ -304,7 +304,8 @@ def main():
           f"float32_gate_logits={c.float32_gate_logits} model_call_mode={getattr(c,'model_call_mode','train')}")
 
   devices = jax.devices()
-  print("\nbuilding trainer-path model (random weights)...")
+  src = f"checkpoint {args.load_parameters_path}" if args.load_parameters_path else "RANDOM WEIGHTS"
+  print(f"\nbuilding trainer-path model from {src} ...")
   mesh_train = maxtext_utils.get_mesh_from_config(trainer_cfg, devices)
   global _RANDOM_WEIGHTS
   _RANDOM_WEIGHTS = not args.load_parameters_path
@@ -312,7 +313,7 @@ def main():
     m_train = model_creation_utils.from_pretrained(
         trainer_cfg, mesh=mesh_train, rng_key=jax.random.PRNGKey(args.seed))
   else:
-    print("  !! NO CHECKPOINT -- see the warning printed at the end; the result will not be usable")
+    print("  !! NO CHECKPOINT -- see the warning at the end; the result will not be usable")
     rngs = maxtext_utils_nnx.create_nnx_rngs(trainer_cfg, rng_key=jax.random.PRNGKey(args.seed))
     m_train = model_creation_utils.from_config(trainer_cfg, mesh=mesh_train, rngs=rngs)
 
