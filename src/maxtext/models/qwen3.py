@@ -29,8 +29,21 @@ from jax.experimental import xla_metadata
 import jax.nn
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, AttentionType, BATCH, Config, DType, EMBED, LENGTH, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
-from maxtext.common.common_types import KV_BATCH, KV_HEAD, ShardMode
+from maxtext.common.common_types import (
+    Array,
+    AttentionType,
+    BATCH,
+    Config,
+    DType,
+    EMBED,
+    KV_BATCH,
+    KV_HEAD,
+    LENGTH,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_TRAIN,
+    ShardMode,
+    get_weight_dtype,
+)
 from maxtext.inference import kvcache
 from maxtext.kernels.attention import gdn_cp
 from maxtext.layers import attentions
@@ -538,6 +551,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     else:
       self.cache = None  # No cache for train mode or when inputs_shape not provided
 
+    block_size = getattr(cfg, "weight_block_size", None)
+
     # Submodule instantiations
     self.in_proj_qkvz = DenseGeneral(
         in_features_shape=in_features,
@@ -547,18 +562,23 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
+        block_size=block_size,
         rngs=rngs,
     )
     self.in_proj_ba = DenseGeneral(
         in_features_shape=in_features,
         out_features_shape=(self.num_v_heads * 2),
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "in_proj_ba"),
         kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         rngs=rngs,
     )
+
+    def conv_kernel_init(key, shape, dtype=jnp.float32):
+      sample_dtype = jnp.float32 if jnp.dtype(dtype).itemsize < 2 else dtype
+      return jax.nn.initializers.lecun_normal()(key, shape, sample_dtype).astype(dtype)
 
     self.conv1d = nnx.Conv(
         in_features=conv_dim,
@@ -568,7 +588,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         padding="CAUSAL",
         use_bias=False,
         dtype=cfg.dtype,
-        param_dtype=cfg.weight_dtype,
+        param_dtype=get_weight_dtype(cfg, "conv1d"),
+        kernel_init=conv_kernel_init,
         precision=cfg.matmul_precision,
         rngs=rngs,
     )
@@ -576,17 +597,19 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Initialize A_log to match torch.log(torch.uniform(0, 16))
     def a_log_init(key, shape, dtype=jnp.float32):
       # Sample from Uniform(epsilon, 16) to avoid log(0)
-      a_vals = jax.random.uniform(key, shape=shape, dtype=dtype, minval=1e-9, maxval=16.0)
-      return jnp.log(a_vals)
+      a_vals = jax.random.uniform(key, shape=shape, dtype=jnp.float32, minval=1e-9, maxval=16.0)
+      return jnp.log(a_vals).astype(dtype)
 
-    self.A_log = nnx.Param(a_log_init(rngs.params(), (self.num_v_heads,), dtype=cfg.weight_dtype))
-    self.dt_bias = nnx.Param(nnx.initializers.ones(rngs.params(), (self.num_v_heads,), dtype=cfg.weight_dtype))
+    self.A_log = nnx.Param(a_log_init(rngs.params(), (self.num_v_heads,), dtype=get_weight_dtype(cfg, "A_log")))
+    self.dt_bias = nnx.Param(
+        nnx.initializers.ones(rngs.params(), (self.num_v_heads,), dtype=get_weight_dtype(cfg, "dt_bias"))
+    )
 
     self.norm = Qwen3NextRMSNormGated(
         num_features=self.head_v_dim,  # Normalize over the head dimension (D_v)
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "norm"),
         shard_mode=cfg.shard_mode,
         rngs=rngs,
     )
@@ -598,6 +621,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         kernel_axes=("gdn_head", "embed_attn"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
+        block_size=block_size,
         rngs=rngs,
     )
 
@@ -1304,7 +1328,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           out_features_shape=1,
           use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
           dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
+          weight_dtype=get_weight_dtype(cfg, "shared_expert_gate"),
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
           matmul_precision=cfg.matmul_precision,
