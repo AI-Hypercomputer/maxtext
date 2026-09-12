@@ -721,6 +721,14 @@ class Attention(BaseModel):
           "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
       ),
   )
+  csa_qk_head_chunk_size: int = Field(
+      0,
+      ge=0,
+      description=(
+          "Chunk size over heads dimension for QK attention dot product in CSA (DeepSeek-V4).  "
+          "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
+      ),
+  )
 
 
 class MoBa(BaseModel):
@@ -4215,6 +4223,19 @@ class MaxTextConfig(
       ):
         raise ValueError(
             f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
+            f"`indexer_n_heads` ({self.indexer_n_heads})."
+        )
+    if self.csa_qk_head_chunk_size > 0:
+      if self.csa_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.csa_qk_head_chunk_size != 0:
+        raise ValueError(
+            f"`csa_qk_head_chunk_size` ({self.csa_qk_head_chunk_size}) must cleanly divide exactly into "
+            f"`num_query_heads` ({self.num_query_heads})."
+        )
+      if self.use_indexer and (
+          self.csa_qk_head_chunk_size > self.indexer_n_heads or self.indexer_n_heads % self.csa_qk_head_chunk_size != 0
+      ):
+        raise ValueError(
+            f"`csa_qk_head_chunk_size` ({self.csa_qk_head_chunk_size}) must cleanly divide exactly into "
             f"`indexer_n_heads` ({self.indexer_n_heads})."
         )
 
