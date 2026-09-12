@@ -148,73 +148,73 @@ def build_sampler_config(args, shard, layers=None):
   ], config_class=types.RLConfig)
 
 
-def slice_layers(host_params, full_layers, keep):
-  """Keep the first `keep` decoder layers of a scanned checkpoint.
-
-  With scan_layers=True every per-layer parameter is one stacked array whose
-  leading dimension is num_layers, so truncating depth is a slice. Embeddings,
-  the final norm and the output head have no such axis and pass through.
-
-  This exists because the vLLM mesh caps weight sharding at num_kv_heads (2 for
-  Qwen3.5-35B-A3B), so a full-depth sampler does not fit a 4-chip host -- while
-  random weights are not an option either, since bf16 error scales with logit
-  magnitude. Slicing keeps trained weights and a real logit range.
-  """
-  n_sliced = n_kept = 0
-
-  def _slice(x):
-    nonlocal n_sliced, n_kept
-    a = np.asarray(x)
-    if a.ndim >= 1 and a.shape[0] == full_layers:
-      n_sliced += 1
-      return a[:keep]
-    n_kept += 1
-    return a
-
-  out = jax.tree_util.tree_map(_slice, host_params)
-  print(f"  sliced {n_sliced} stacked per-layer arrays {full_layers} -> {keep}; "
-        f"{n_kept} arrays had no layer axis and were left alone")
-  return out
-
-
 def copy_weights(src_state, dst_state):
-  """Copy trainer params onto the sampler tree, fusing wi_0/wi_1 -> wi.
+  """Copy trainer params onto another model, conforming shape and layout.
 
-  moe.py stores the MoE up-projections as two arrays when prefuse is off and as
-  one concatenated array when it is on; moe.py:2148 shows the relation is
-  `wi = concatenate([wi_0, wi_1], axis=-1)`. Everything else must match by path
-  and shape, and we assert that rather than trusting it.
+  Two transformations are needed, and both are derived from the destination
+  shape rather than assumed:
+
+  fusing
+    moe.py stores the MoE up-projections as wi_0/wi_1 when prefuse is off and
+    as one concatenated `wi` when it is on; moe.py:2148 gives the relation as
+    wi = concatenate([wi_0, wi_1], axis=-1).
+
+  depth slicing
+    The checkpoint is loaded at full depth and the working models are shallower.
+    Layers are NOT stacked on a leading axis: Qwen3.5 sets
+    inhomogeneous_layer_cycle_interval=4, so four layer types are scanned
+    separately and the scan axis sits wherever param_scan_axis puts it -- e.g.
+    A_log is (32, 10) at 40 layers and (32, 2) at 8. So rather than guess where
+    the layer axis is, slice whichever axis differs from the destination and
+    require every other axis to match exactly.
   """
   src = dict(jax.tree_util.tree_flatten_with_path(src_state)[0])
   dst_leaves, dst_def = jax.tree_util.tree_flatten_with_path(dst_state)
+  by_name = {jax.tree_util.keystr(pth): v for pth, v in src.items()}
 
-  by_name = {}
-  for path, val in src.items():
-    by_name.setdefault(jax.tree_util.keystr(path), val)
+  def conform(v, want, key):
+    v = np.asarray(v)
+    if v.shape == want:
+      return v, False
+    if v.ndim != len(want):
+      raise AssertionError(f"rank mismatch at {key}: {v.shape} vs {want}")
+    bad = [i for i, (a_, b_) in enumerate(zip(v.shape, want)) if a_ != b_]
+    for i in bad:
+      if v.shape[i] < want[i]:
+        raise AssertionError(
+            f"{key}: source axis {i} is {v.shape[i]}, smaller than the required "
+            f"{want[i]} -- this is not a depth slice, something else is wrong")
+    for i in bad:
+      v = np.take(v, range(want[i]), axis=i)
+    return v, True
 
-  out, fused, matched, missing = [], 0, 0, []
-  for path, dst_val in dst_leaves:
-    key = jax.tree_util.keystr(path)
+  out, fused, sliced, matched, missing = [], 0, 0, 0, []
+  for pth, dst_val in dst_leaves:
+    key = jax.tree_util.keystr(pth)
+    want = tuple(np.asarray(dst_val).shape)
     if key in by_name:
-      v = by_name[key]
-      assert v.shape == dst_val.shape, f"shape mismatch at {key}: {v.shape} vs {dst_val.shape}"
-      out.append(v)
+      v, did = conform(by_name[key], want, key)
       matched += 1
+      sliced += did
     elif key.endswith("wi.value") or key.endswith("wi"):
-      w0 = by_name.get(key.replace("wi", "wi_0"))
-      w1 = by_name.get(key.replace("wi", "wi_1"))
-      assert w0 is not None and w1 is not None, f"cannot fuse {key}: wi_0/wi_1 not found"
-      v = jnp.concatenate([w0, w1], axis=-1)
-      assert v.shape == dst_val.shape, f"fused shape mismatch at {key}: {v.shape} vs {dst_val.shape}"
-      out.append(v)
+      w0, w1 = by_name.get(key.replace("wi", "wi_0")), by_name.get(key.replace("wi", "wi_1"))
+      if w0 is None or w1 is None:
+        missing.append(key)
+        out.append(dst_val)
+        continue
+      v, did = conform(np.concatenate([np.asarray(w0), np.asarray(w1)], axis=-1), want, key)
       fused += 1
+      sliced += did
     else:
       missing.append(key)
       out.append(dst_val)
+      continue
+    out.append(jnp.asarray(v))
 
-  print(f"  weight copy: {matched} matched, {fused} fused (wi_0+wi_1 -> wi), {len(missing)} unmatched")
+  print(f"  weight copy: {matched} matched, {fused} fused (wi_0+wi_1 -> wi), "
+        f"{sliced} depth-sliced, {len(missing)} unmatched")
   if missing:
-    print("  UNMATCHED (left at the sampler's own init -- investigate before trusting the result):")
+    print("  UNMATCHED (left at this model's own init -- do not trust the result):")
     for k in missing[:20]:
       print("    ", k)
   return jax.tree_util.tree_unflatten(dst_def, out)
@@ -384,8 +384,6 @@ def main():
   del m_full
   gc.collect()
   hbm("after staging to host")
-  if args.layers:
-    host_params = slice_layers(host_params, full_cfg.num_decoder_layers, args.layers)
 
   # ---- stage 2: trainer path at the working depth --------------------------
   print("\nbuilding trainer-path model...")
