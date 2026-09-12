@@ -152,6 +152,43 @@ class RematLocation(str, Enum):
   OFFLOAD = "offload"
 
 
+# Tensors that ``remat_policy: custom`` can pin to device or offload to host.
+#
+# Every name here must have a matching ``checkpoint_name(...)`` call in the model
+# code; a name with no matching call is silently inert. Kept as one constant
+# because two separate ``model_post_init`` hooks consume it -- MaxTextConfig's and
+# RLConfig's -- and the two hardcoded copies had drifted: RLConfig's was missing
+# "kv_proj", so under RL a ``remat_policy: custom`` run with ``kv_proj: device``
+# silently rematerialised the unified KV projection instead of keeping it.
+#
+# ``engram`` is deliberately absent: it is declared as a RematLocation field on
+# RematAndOffload, but no ``checkpoint_name(..., "engram")`` exists in the tree,
+# so listing it here would promise control the model code cannot honour.
+CUSTOM_REMAT_TENSORS: tuple[str, ...] = (
+    "decoder_layer_input",
+    "indexer_cutoff_threshold",
+    "context",
+    "mlpwi",
+    "moe_mlpwi_0",
+    "moe_mlpwi_1",
+    "moe_mlpwo",
+    "mlpwi_0",
+    "mlpwi_1",
+    "mlpwo",
+    "query_proj",
+    "key_proj",
+    "value_proj",
+    "kv_proj",
+    "query_wa_proj",
+    "kv_wa_proj",
+    "mla_kv",
+    "mla_q",
+    "qkv_proj",
+    "attention_out",
+    "out_proj",
+)
+
+
 class OptimizerType(str, Enum):
   """Supported optimizer algorithms."""
 
@@ -3970,29 +4007,7 @@ class MaxTextConfig(
 
     # G. CALCULATE/SET OTHER DERIVED VALUES, E.G. PIPELINE CONFIG
     if self.remat_policy == "custom":
-      tensors = [
-          "decoder_layer_input",
-          "indexer_cutoff_threshold",
-          "context",
-          "mlpwi",
-          "moe_mlpwi_0",
-          "moe_mlpwi_1",
-          "moe_mlpwo",
-          "mlpwi_0",
-          "mlpwi_1",
-          "mlpwo",
-          "query_proj",
-          "key_proj",
-          "value_proj",
-          "kv_proj",
-          "query_wa_proj",
-          "kv_wa_proj",
-          "mla_kv",
-          "mla_q",
-          "qkv_proj",
-          "attention_out",
-          "out_proj",
-      ]
+      tensors = CUSTOM_REMAT_TENSORS
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
@@ -5313,28 +5328,7 @@ class RLConfig(
     self.steps = getattr(self, "train_steps", getattr(self, "num_batches", 10))
 
     if self.remat_policy == "custom":
-      tensors = [
-          "decoder_layer_input",
-          "indexer_cutoff_threshold",
-          "context",
-          "mlpwi",
-          "moe_mlpwi_0",
-          "moe_mlpwi_1",
-          "moe_mlpwo",
-          "mlpwi_0",
-          "mlpwi_1",
-          "mlpwo",
-          "query_proj",
-          "key_proj",
-          "value_proj",
-          "query_wa_proj",
-          "kv_wa_proj",
-          "mla_kv",
-          "mla_q",
-          "qkv_proj",
-          "attention_out",
-          "out_proj",
-      ]
+      tensors = CUSTOM_REMAT_TENSORS
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
