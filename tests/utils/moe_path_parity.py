@@ -191,7 +191,7 @@ def build_sampler_config(args, shard, layers=None):
   return pyconfig.initialize([
       "", os.path.join(cfg_dir, "inference", "vllm.yml"), *_common_argv(args, layers),
       "attention=vllm_rpa",
-      "prefuse_moe_weights=True",
+      f"prefuse_moe_weights={args.sampler_prefuse}",
       "model_call_mode=inference",
       "remat_policy=none",
       "use_mrope=False",
@@ -352,6 +352,11 @@ def main():
                  help="'full' is what production's --remat_policy=decoder maps to; forward-only, so inert")
   p.add_argument("--isolate_moe", action="store_true")
   p.add_argument("--devices", type=int, default=None, help="defaults to jax.device_count()")
+  p.add_argument("--sampler_prefuse", default="True",
+                 help="False runs the sampler with vllm_rpa attention but MaxText's own unfused "
+                      "MoE GMM. moe.py:3469 needs BOTH prefuse and vllm_rpa to reach "
+                      "tpu_inference's fused kernel, so this isolates the attention change and "
+                      "sidesteps that kernel entirely.")
   p.add_argument("--onehot_moe_permute", type=int, default=0,
                  help="ONEHOT_MOE_PERMUTE_THRESHOLD. 0 = production default, which uses the "
                       "sc_ragged_gather SparseCore kernel. Set above batch*topk (e.g. 1000000) "
