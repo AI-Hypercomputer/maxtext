@@ -18,7 +18,8 @@ import functools
 import json
 import qwix.pallas as qpl
 import re
-from typing import ClassVar, Tuple, Sequence, Callable
+from absl import logging
+from typing import Any, Callable, ClassVar, Sequence, Tuple
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -947,6 +948,326 @@ def get_quantization_rule(config: Config):
       return None
 
 
+def get_quality_study_qwix_rules(config: Config) -> list[qwix.QtRule]:
+  """Generates separate rules for Attention Entry, Attention Exit, and MLP.
+
+  Supports microscaled FP8 (mxfp8_16 with tile_size=16) and microscaled integer
+  formats (mxint4 and mxint8 with tile_size=32), with multi-pass emulation
+  modes ('triangular', 'full_cross', 'lhs_high_precision', 'rhs_high_precision')
+  and OAS scaling for mxint4.
+  """
+  dtype_map = {
+      "E4M3": "float8_e4m3fn",
+      "E5M2": "float8_e5m2",
+      "E4M3_16": "mxfp8_16",
+      "E2M1_32": "mxfp4",
+      "MXFP8": "mxfp8_16",
+      "MXFP8_16": "mxfp8_16",
+      "MXFP4": "mxfp4",
+      "MXINT4": "mxint4",
+      "MXINT8": "mxint8",
+      "INT4": "mxint4",
+      "INT8": "mxint8",
+      "float8_e4m3fn": "float8_e4m3fn",
+      "float8_e5m2": "float8_e5m2",
+      "mxfp8_16": "mxfp8_16",
+      "mxfp4": "mxfp4",
+      "mxint4": "mxint4",
+      "mxint8": "mxint8",
+  }
+
+  tile_size_map = {
+      "mxfp8_16": 16,
+      "mxfp8": 32,
+      "mxfp4": 32,
+      "nvfp4": 16,
+      "mxint4": 32,
+      "mxint8": 32,
+  }
+
+  trial = getattr(config, "quality_study_trial", "") or ""
+  preset_mlp_lhs = None
+  preset_mlp_rhs = None
+  preset_tile_size = None
+  preset_multipass_mode = None
+
+  if trial == "fp8_1pass":
+    preset_mlp_lhs = "E4M3_16"
+    preset_mlp_rhs = "E4M3_16"
+    preset_tile_size = 16
+    preset_multipass_mode = None
+  elif trial in ("fp8_2pass", "fp8_2pass_act_higher"):
+    preset_mlp_lhs = "E4M3_16"
+    preset_mlp_rhs = "E4M3_16"
+    preset_tile_size = 16
+    preset_multipass_mode = "lhs_high_precision"
+  elif trial in ("fp8_3pass", "fp8_3pass_triangular"):
+    preset_mlp_lhs = "E4M3_16"
+    preset_mlp_rhs = "E4M3_16"
+    preset_tile_size = 16
+    preset_multipass_mode = "triangular"
+  elif trial in ("fp8_4pass", "fp8_4pass_full_cross"):
+    preset_mlp_lhs = "E4M3_16"
+    preset_mlp_rhs = "E4M3_16"
+    preset_tile_size = 16
+    preset_multipass_mode = "full_cross"
+  elif trial == "int4_1pass":
+    preset_mlp_lhs = "MXINT4"
+    preset_mlp_rhs = "MXINT4"
+    preset_tile_size = 32
+    preset_multipass_mode = None
+  elif trial in (
+      "int_2pass",
+      "int4_2pass",
+      "int4_int8_2pass",
+      "int_2pass_act_higher",
+  ):
+    preset_mlp_lhs = "MXINT8"
+    preset_mlp_rhs = "MXINT4"
+    preset_tile_size = 32
+    preset_multipass_mode = "lhs_high_precision"
+  elif trial in ("int8_3pass", "int8_3pass_triangular"):
+    preset_mlp_lhs = "MXINT8"
+    preset_mlp_rhs = "MXINT8"
+    preset_tile_size = 32
+    preset_multipass_mode = "triangular"
+  elif trial in ("int8_4pass", "int8_4pass_full_cross"):
+    preset_mlp_lhs = "MXINT8"
+    preset_mlp_rhs = "MXINT8"
+    preset_tile_size = 32
+    preset_multipass_mode = "full_cross"
+
+  def _resolve_rule_config(
+      lhs_strat: str | None,
+      rhs_strat: str | None,
+      explicit_tile_size: int | None,
+      explicit_multipass_mode: str | None,
+      fallback_lhs: str | None = None,
+      fallback_rhs: str | None = None,
+      fallback_tile_size: int | None = None,
+      fallback_mode: str | None = None,
+  ) -> tuple[str | None, str | None, int | None, dict[str, Any]]:
+    resolved_lhs = (
+        lhs_strat
+        if lhs_strat and lhs_strat != "UNQUANTIZED"
+        else fallback_lhs
+    )
+    resolved_rhs = (
+        rhs_strat
+        if rhs_strat and rhs_strat != "UNQUANTIZED"
+        else fallback_rhs
+    )
+
+    act_qtype = dtype_map.get(resolved_lhs, None)
+    weight_qtype = dtype_map.get(resolved_rhs, None)
+
+    tile_size = (
+        explicit_tile_size
+        or getattr(config, "quant_tile_size", None)
+        or fallback_tile_size
+        or tile_size_map.get(act_qtype or weight_qtype, None)
+    )
+
+    mode = (
+        explicit_multipass_mode
+        or getattr(config, "multipass_mode", None)
+        or fallback_mode
+    )
+    if mode in ("none", "None", ""):
+      mode = None
+
+    additional_qt_config: dict[str, Any] = {
+        "use_original_residuals": False,
+    }
+    if mode:
+      additional_qt_config["multipass_mode"] = mode
+
+    if act_qtype == "mxint4":
+      additional_qt_config["lhs_scale_method"] = "oas"
+    if weight_qtype == "mxint4":
+      additional_qt_config["rhs_scale_method"] = "oas"
+
+    return act_qtype, weight_qtype, tile_size, additional_qt_config
+
+  rules = []
+
+  # 1. QKV Projections (q_proj, k_proj, v_proj)
+  qkv_act, qkv_wt, qkv_tile, qkv_add = _resolve_rule_config(
+      config.fwd_qkv_lhs_quant_strategy,
+      config.fwd_qkv_rhs_quant_strategy,
+      config.fwd_qkv_tile_size,
+      config.fwd_qkv_multipass_mode,
+  )
+  qkv_add["dlhs_grad_qtype"] = dtype_map.get(
+      config.dlhs_qkv_lhs_quant_strategy, None
+  )
+  qkv_add["dlhs_residual_qtype"] = dtype_map.get(
+      config.dlhs_qkv_rhs_quant_strategy, None
+  )
+  qkv_add["drhs_grad_qtype"] = dtype_map.get(
+      config.drhs_qkv_lhs_quant_strategy, None
+  )
+  qkv_add["drhs_residual_qtype"] = dtype_map.get(
+      config.drhs_qkv_rhs_quant_strategy, None
+  )
+
+  qkv_rule = qwix.QtRule(
+      module_path=r".*self_attention/(query|key|value).*",
+      act_qtype=qkv_act,
+      weight_qtype=qkv_wt,
+      tile_size=qkv_tile,
+      additional_qt_config=qkv_add,
+  )
+  rules.append(qkv_rule)
+
+  # 2. O Projections (o_proj)
+  oproj_act, oproj_wt, oproj_tile, oproj_add = _resolve_rule_config(
+      config.fwd_oproj_lhs_quant_strategy,
+      config.fwd_oproj_rhs_quant_strategy,
+      config.fwd_oproj_tile_size,
+      config.fwd_oproj_multipass_mode,
+  )
+  oproj_add["dlhs_grad_qtype"] = dtype_map.get(
+      config.dlhs_oproj_lhs_quant_strategy, None
+  )
+  oproj_add["dlhs_residual_qtype"] = dtype_map.get(
+      config.dlhs_oproj_rhs_quant_strategy, None
+  )
+  oproj_add["drhs_grad_qtype"] = dtype_map.get(
+      config.drhs_oproj_lhs_quant_strategy, None
+  )
+  oproj_add["drhs_residual_qtype"] = dtype_map.get(
+      config.drhs_oproj_rhs_quant_strategy, None
+  )
+
+  oproj_rule = qwix.QtRule(
+      module_path=r".*self_attention/out.*",
+      act_qtype=oproj_act,
+      weight_qtype=oproj_wt,
+      tile_size=oproj_tile,
+      additional_qt_config=oproj_add,
+  )
+  rules.append(oproj_rule)
+
+  # 3. MLP / Dense Experts (megablox)
+  mlp_act, mlp_wt, mlp_tile, mlp_add = _resolve_rule_config(
+      config.fwd_mlp_lhs_quant_strategy,
+      config.fwd_mlp_rhs_quant_strategy,
+      config.fwd_mlp_tile_size,
+      config.fwd_mlp_multipass_mode,
+      fallback_lhs=preset_mlp_lhs,
+      fallback_rhs=preset_mlp_rhs,
+      fallback_tile_size=preset_tile_size,
+      fallback_mode=preset_multipass_mode,
+  )
+  mlp_add["dlhs_grad_qtype"] = dtype_map.get(
+      config.dlhs_mlp_lhs_quant_strategy, None
+  )
+  mlp_add["dlhs_residual_qtype"] = dtype_map.get(
+      config.dlhs_mlp_rhs_quant_strategy, None
+  )
+  mlp_add["drhs_grad_qtype"] = dtype_map.get(
+      config.drhs_mlp_lhs_quant_strategy, None
+  )
+  mlp_add["drhs_residual_qtype"] = dtype_map.get(
+      config.drhs_mlp_rhs_quant_strategy, None
+  )
+
+  # Multi-pass modes for forward, dlhs, and drhs
+  mlp_multipass = getattr(config, "mlp_multipass_mode", None)
+  fwd_multipass = (
+      getattr(config, "fwd_mlp_multipass_mode", None)
+      or mlp_multipass
+      or preset_multipass_mode
+  )
+  if fwd_multipass in ("none", "None", ""):
+    fwd_multipass = None
+  if fwd_multipass:
+    mlp_add["multipass_mode"] = fwd_multipass
+
+  dlhs_multipass = (
+      getattr(config, "dlhs_mlp_multipass_mode", None)
+      or mlp_multipass
+  )
+  if dlhs_multipass in ("none", "None", ""):
+    dlhs_multipass = None
+  if dlhs_multipass:
+    mlp_add["dlhs_multipass_mode"] = dlhs_multipass
+
+  drhs_multipass = (
+      getattr(config, "drhs_mlp_multipass_mode", None)
+      or mlp_multipass
+  )
+  if drhs_multipass in ("none", "None", ""):
+    drhs_multipass = None
+  if drhs_multipass:
+    mlp_add["drhs_multipass_mode"] = drhs_multipass
+
+  # Tile sizes
+  dlhs_tile = getattr(config, "dlhs_mlp_tile_size", None) or mlp_tile
+  if dlhs_tile:
+    mlp_add["dlhs_tile_size"] = dlhs_tile
+  drhs_tile = getattr(config, "drhs_mlp_tile_size", None) or mlp_tile
+  if drhs_tile:
+    mlp_add["drhs_tile_size"] = drhs_tile
+
+  # Hierarchical scaling
+  global_hierarchical = getattr(config, "mlp_hierarchical_scaling", False)
+  fwd_hierarchical = (
+      getattr(config, "fwd_mlp_hierarchical_scaling", False)
+      or global_hierarchical
+  )
+  mlp_add["lhs_hierarchical_scaling"] = (
+      getattr(config, "fwd_mlp_lhs_hierarchical_scaling", False)
+      or fwd_hierarchical
+  )
+  mlp_add["rhs_hierarchical_scaling"] = (
+      getattr(config, "fwd_mlp_rhs_hierarchical_scaling", False)
+      or fwd_hierarchical
+  )
+
+  dlhs_hierarchical = (
+      getattr(config, "dlhs_mlp_hierarchical_scaling", False)
+      or global_hierarchical
+  )
+  mlp_add["dlhs_grad_hierarchical_scaling"] = (
+      getattr(config, "dlhs_mlp_grad_hierarchical_scaling", False)
+      or dlhs_hierarchical
+  )
+  mlp_add["dlhs_residual_hierarchical_scaling"] = (
+      getattr(config, "dlhs_mlp_residual_hierarchical_scaling", False)
+      or dlhs_hierarchical
+  )
+
+  drhs_hierarchical = (
+      getattr(config, "drhs_mlp_hierarchical_scaling", False)
+      or global_hierarchical
+  )
+  mlp_add["drhs_grad_hierarchical_scaling"] = (
+      getattr(config, "drhs_mlp_grad_hierarchical_scaling", False)
+      or drhs_hierarchical
+  )
+  mlp_add["drhs_residual_hierarchical_scaling"] = (
+      getattr(config, "drhs_mlp_residual_hierarchical_scaling", False)
+      or drhs_hierarchical
+  )
+
+  mlp_rule = qwix.QtRule(
+      module_path=r".*(mlp|megablox)/(wi_0|wi_1|wo).*",
+      act_qtype=mlp_act,
+      weight_qtype=mlp_wt,
+      tile_size=mlp_tile,
+      additional_qt_config=mlp_add,
+      op_names=("dot_general", "gmm", "ragged_dot"),
+  )
+  rules.append(mlp_rule)
+
+  return rules
+
+
+get_ablation_qwix_rules = get_quality_study_qwix_rules
+
+
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
@@ -956,6 +1277,8 @@ def get_qt_provider(config):
       return NvidaFp8Provider(get_quantization_rule(config))
     case "fp8_nanoo":
       return NANOOFp8Provider(get_quantization_rule(config))
+    case "ablation_study" | "quality_study":
+      return qwix.QtProvider(get_quality_study_qwix_rules(config))
   return None
 
 

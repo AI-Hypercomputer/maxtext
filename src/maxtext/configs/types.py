@@ -103,6 +103,8 @@ class QuantizationType(str, Enum):
   TE_MXFP8 = "te_mxfp8"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
+  ABLATIONS = "ablation_study"
+  QUALITY_STUDY = "quality_study"
 
 
 class TEGroupedGemmQuantizationType(str, Enum):
@@ -551,6 +553,238 @@ class Quantization(BaseModel):
           "'disabled' disables overlap; 'mlp' overlaps MLP up/down projections; "
           "'full' also overlaps attention QKV and output projections."
       ),
+  )
+
+  # ============================================================================
+  # QKV PROJECTIONS (q_proj, k_proj, v_proj)
+  # ============================================================================
+  fwd_qkv_lhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for QKV Forward LHS (Activations).",
+  )
+  fwd_qkv_rhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for QKV Forward RHS (Weights).",
+  )
+  fwd_qkv_tile_size: int | None = Field(
+      None,
+      description="Tile size for QKV Forward microscaling.",
+  )
+  fwd_qkv_multipass_mode: str | None = Field(
+      None,
+      description="Multi-pass mode for QKV Forward matmul.",
+  )
+  fwd_qkv_use_fp8: bool = Field(
+      False,
+      description=(
+          "If True, execute forward QKV matmul using hardware FP8 MXUs."
+      ),
+  )
+
+  dlhs_qkv_lhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for QKV dlhs LHS (Gradients).",
+  )
+  dlhs_qkv_rhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for QKV dlhs RHS (Weights).",
+  )
+  dlhs_qkv_use_fp8: bool = Field(
+      False,
+      description="If True, execute QKV dlhs matmul using hardware FP8 MXUs.",
+  )
+
+  drhs_qkv_lhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for QKV drhs LHS (Activations).",
+  )
+  drhs_qkv_rhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for QKV drhs RHS (Gradients).",
+  )
+  drhs_qkv_use_fp8: bool = Field(
+      False,
+      description="If True, execute QKV drhs matmul using hardware FP8 MXUs.",
+  )
+
+  # ============================================================================
+  # O PROJECTIONS (o_proj)
+  # ============================================================================
+  fwd_oproj_lhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for O-Proj Forward LHS (Activations).",
+  )
+  fwd_oproj_rhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for O-Proj Forward RHS (Weights).",
+  )
+  fwd_oproj_tile_size: int | None = Field(
+      None,
+      description="Tile size for O-Proj Forward microscaling.",
+  )
+  fwd_oproj_multipass_mode: str | None = Field(
+      None,
+      description="Multi-pass mode for O-Proj Forward matmul.",
+  )
+  fwd_oproj_use_fp8: bool = Field(
+      False,
+      description=(
+          "If True, execute forward O-Proj matmul using hardware FP8 MXUs."
+      ),
+  )
+
+  dlhs_oproj_lhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED", description="Quantization strategy for O-Proj dlhs LHS."
+  )
+  dlhs_oproj_rhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED", description="Quantization strategy for O-Proj dlhs RHS."
+  )
+  dlhs_oproj_use_fp8: bool = Field(
+      False,
+      description=(
+          "If True, execute O-Proj dlhs matmul using hardware FP8 MXUs."
+      ),
+  )
+
+  drhs_oproj_lhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED", description="Quantization strategy for O-Proj drhs LHS."
+  )
+  drhs_oproj_rhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED", description="Quantization strategy for O-Proj drhs RHS."
+  )
+  drhs_oproj_use_fp8: bool = Field(
+      False,
+      description=(
+          "If True, execute O-Proj drhs matmul using hardware FP8 MXUs."
+      ),
+  )
+
+  # ============================================================================
+  # MLP / DENSE EXPERTS (megablox)
+  # ============================================================================
+  fwd_mlp_lhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for MLP Forward LHS (Activations).",
+  )
+  fwd_mlp_rhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED",
+      description="Quantization strategy for MLP Forward RHS (Weights).",
+  )
+  fwd_mlp_tile_size: int | None = Field(
+      None,
+      description="Tile size for MLP Forward microscaling.",
+  )
+  fwd_mlp_multipass_mode: str | None = Field(
+      None,
+      description="Multi-pass mode for MLP Forward matmul.",
+  )
+  fwd_mlp_use_fp8: bool = Field(
+      False,
+      description=(
+          "If True, execute forward MLP matmul using hardware FP8 MXUs."
+      ),
+  )
+
+  dlhs_mlp_lhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED", description="Quantization strategy for MLP dlhs LHS."
+  )
+  dlhs_mlp_rhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED", description="Quantization strategy for MLP dlhs RHS."
+  )
+  dlhs_mlp_tile_size: int | None = Field(
+      None,
+      description="Tile size for MLP dlhs microscaling.",
+  )
+  dlhs_mlp_multipass_mode: str | None = Field(
+      None,
+      description="Multi-pass mode for MLP dlhs matmul.",
+  )
+  dlhs_mlp_use_fp8: bool = Field(
+      False,
+      description="If True, execute MLP dlhs matmul using hardware FP8 MXUs.",
+  )
+
+  drhs_mlp_lhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED", description="Quantization strategy for MLP drhs LHS."
+  )
+  drhs_mlp_rhs_quant_strategy: str | None = Field(
+      "UNQUANTIZED", description="Quantization strategy for MLP drhs RHS."
+  )
+  drhs_mlp_tile_size: int | None = Field(
+      None,
+      description="Tile size for MLP drhs microscaling.",
+  )
+  drhs_mlp_multipass_mode: str | None = Field(
+      None,
+      description="Multi-pass mode for MLP drhs matmul.",
+  )
+  drhs_mlp_use_fp8: bool = Field(
+      False,
+      description="If True, execute MLP drhs matmul using hardware FP8 MXUs.",
+  )
+
+  # ============================================================================
+  # Multi-pass & Hierarchical Scaling flags
+  # ============================================================================
+  mlp_multipass_mode: str | None = Field(
+      None,
+      description="Default multi-pass mode across all MLP matmuls (fwd, dlhs, drhs).",
+  )
+  mlp_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling across all MLP matmuls.",
+  )
+  fwd_mlp_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling on forward MLP matmuls.",
+  )
+  fwd_mlp_lhs_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling on forward MLP LHS.",
+  )
+  fwd_mlp_rhs_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling on forward MLP RHS.",
+  )
+  dlhs_mlp_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling on dlhs MLP matmuls.",
+  )
+  dlhs_mlp_grad_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling on dlhs MLP gradient.",
+  )
+  dlhs_mlp_residual_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling on dlhs MLP residual.",
+  )
+  drhs_mlp_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling on drhs MLP matmuls.",
+  )
+  drhs_mlp_grad_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling on drhs MLP gradient (weight gradient).",
+  )
+  drhs_mlp_residual_hierarchical_scaling: bool = Field(
+      False,
+      description="Enable hierarchical scaling on drhs MLP residual.",
+  )
+
+  # ============================================================================
+  # Quality Study & Microscaling General Settings
+  # ============================================================================
+  quant_tile_size: int | None = Field(
+      None,
+      description="Default tile size for microscaling quantization.",
+  )
+  multipass_mode: str | None = Field(
+      None,
+      description="Default multi-pass mode for matrix multiplication.",
+  )
+  quality_study_trial: str = Field(
+      "",
+      description="Preset quality study trial name.",
   )
 
 
