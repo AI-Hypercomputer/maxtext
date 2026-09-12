@@ -343,6 +343,8 @@ class HyperParameters:
     final_dict["dtype"] = jnp.dtype(final_dict["dtype"])
     final_dict["grad_dtype"] = jnp.dtype(final_dict["grad_dtype"])
     final_dict["weight_dtype"] = jnp.dtype(final_dict["weight_dtype"])
+    final_dict["gdn_state_dtype"] = jnp.dtype(final_dict.get("gdn_state_dtype", "float32"))
+    final_dict["gdn_decay_dtype"] = jnp.dtype(final_dict.get("gdn_decay_dtype", "float32"))
     final_dict["mu_dtype"] = (
         final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
     )

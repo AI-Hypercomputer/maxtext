@@ -489,6 +489,11 @@ class DataTypes(BaseModel):
       description="If True, sets activations to float32 before the nonlinearity.",
   )
   dtype_mm: str = Field("float32", description="Data type for multimodal model's vision encoder")
+  gdn_state_dtype: DType = Field(DType.FLOAT32, description="The data type for GDN recurrent states.")
+  gdn_decay_dtype: DType = Field(
+      DType.FLOAT32,
+      description="The data type for GDN decay parameters (A_log, dt_bias).",
+  )
 
 
 class Quantization(BaseModel):
@@ -1192,6 +1197,10 @@ class Qwen3Next(BaseModel):
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+  use_gdn_kernel: bool = Field(
+      False,
+      description="Whether to use GDN Pallas kernel.",
+  )
 
 
 # ----------------------------------------------------------------------------
