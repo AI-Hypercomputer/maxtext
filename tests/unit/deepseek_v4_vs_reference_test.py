@@ -470,7 +470,7 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
         attention_dropout=0.0,
     )
 
-  def _build_maxtext_config(self, layer_type):
+  def _build_maxtext_config(self, layer_type, attention_kernel="dot_product"):
     """Builds a MaxText pyconfig for a specific layer_type."""
 
     config_arguments = {
@@ -496,6 +496,9 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
         "indexer_topk": self.pt_config.index_topk,
         "normalization_layer_epsilon": self.pt_config.rms_norm_eps,
         "use_tokamax_splash": True,
+        "attention_type": "compressed",
+        "attention": attention_kernel,
+        "use_indexer": True,
     }
 
     argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
@@ -549,7 +552,7 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
     rope_main = PTRope(self.pt_config)
     rope_compress = PTRope(self.pt_config)
 
-    mt_config = self._build_maxtext_config(layer_type)
+    mt_config = self._build_maxtext_config(layer_type, attention_kernel=attention_kernel)
 
     mesh = Mesh(mesh_utils.create_device_mesh((1,), devices=jax.devices()[:1]), axis_names=("fsdp",))
 
@@ -678,7 +681,7 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
 
       mt_q_latent = mt_attn.wq_a(x_mt)
       mt_q_residual = mt_attn.q_norm(mt_q_latent)
-      mt_top_k_indices = mt_attn.csa_compressor.indexer(x_mt, mt_q_residual, pos_mt)
+      mt_top_k_indices, _ = mt_attn.csa_compressor.indexer(x_mt, mt_q_residual, pos_mt)
       print(f"MaxText top_k_indices:\n{mt_top_k_indices[0]}")
 
       num_mismatches = np.sum(pt_top_k_indices.detach().numpy() != np.array(mt_top_k_indices))
@@ -1378,6 +1381,7 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
         "dtype": "float32",
         "weight_dtype": "float32",
         "skip_jax_distributed_system": True,
+        "attention": "dot_product",
         "use_tokamax_splash": True,
     }
     argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
