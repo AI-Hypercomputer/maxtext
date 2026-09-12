@@ -23,6 +23,7 @@ pytestmark = [pytest.mark.decoupled_target]
 
 
 from maxtext.checkpoint_conversion.to_maxtext import _build_multi_axis_stacked_tensor
+from maxtext.checkpoint_conversion.utils import hf_shape
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
 
@@ -518,6 +519,109 @@ class ParamMappingTest(unittest.TestCase):
         mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-kernel"],
         "model.visual.patch_embed.proj.weight",
     )
+
+
+class Hy3ParamMappingTest(unittest.TestCase):
+  """Static shape/mapping coverage for Hy3.
+
+  The end-to-end logit check already proves the mapping is right, but it needs
+  a real checkpoint and a TPU. These tests catch a renamed key or a dropped
+  layer group in CI instead, in both scan modes.
+  """
+
+  # 1 dense layer + 3 MoE layers, 4 routed experts -- the smallest config that
+  # still exercises the dense/MoE split and the expert stacking.
+  HF_CONFIG = {
+      "num_hidden_layers": 4,
+      "first_k_dense_replace": 1,
+      "num_experts": 4,
+      "hidden_size": 128,
+      "intermediate_size": 256,
+      "moe_intermediate_size": 64,
+      "num_attention_heads": 4,
+      "num_key_value_heads": 2,
+      "head_dim": 32,
+      "vocab_size": 1000,
+      "num_shared_experts": 1,
+  }
+
+  def _mapping(self, scan_layers):
+    return param_mapping.HY3_MAXTEXT_TO_HF_PARAM_MAPPING(self.HF_CONFIG, mock.Mock(), scan_layers=scan_layers)
+
+  def test_scanned_mapping_covers_both_layer_groups(self):
+    mapping = self._mapping(scan_layers=True)
+    # Top-level parameters.
+    self.assertEqual(mapping["params-token_embedder-embedding"], "model.embed_tokens.weight")
+    self.assertEqual(mapping["params-decoder-logits_dense-kernel"], "lm_head.weight")
+    # Scanning collapses each group into one key holding a list of HF names.
+    self.assertEqual(
+        mapping["params-decoder-dense_layers-mlp-wi_0-kernel"],
+        ["model.layers.0.mlp.gate_proj.weight"],
+    )
+    self.assertEqual(
+        mapping["params-decoder-moe_layers-Hy3MoeBlock_0-MoeBlock_0-gate-kernel"],
+        [f"model.layers.{i}.mlp.router.gate.weight" for i in (1, 2, 3)],
+    )
+
+  def test_unscanned_mapping_numbers_layers_per_group(self):
+    mapping = self._mapping(scan_layers=False)
+    # Dense layers keep the HF index; MoE layers restart at 0.
+    self.assertEqual(
+        mapping["params-decoder-dense_layers_0-self_attention-query-kernel"],
+        "model.layers.0.self_attn.q_proj.weight",
+    )
+    self.assertEqual(
+        mapping["params-decoder-moe_layers_0-self_attention-query-kernel"],
+        "model.layers.1.self_attn.q_proj.weight",
+    )
+    self.assertEqual(
+        mapping["params-decoder-moe_layers_2-Hy3MoeBlock_0-MoeBlock_0-gate-bias"],
+        "model.layers.3.mlp.expert_bias",
+    )
+
+  def test_routed_experts_stack_over_the_expert_axis(self):
+    # Experts become a list per MoE layer (unscanned) so the loader can stack them.
+    mapping = self._mapping(scan_layers=False)
+    self.assertEqual(
+        mapping["params-decoder-moe_layers_0-Hy3MoeBlock_0-MoeBlock_0-wi_0"],
+        [f"model.layers.1.mlp.experts.{e}.gate_proj.weight" for e in range(4)],
+    )
+
+  def test_hy3_specific_hf_names_are_not_deepseek_or_qwen_names(self):
+    """These three differ from the DeepSeek/Qwen conventions and were checked against the real checkpoint."""
+    mapping = self._mapping(scan_layers=False)
+    prefix = "params-decoder-moe_layers_0-Hy3MoeBlock_0"
+    self.assertEqual(mapping[f"{prefix}-MoeBlock_0-gate-kernel"], "model.layers.1.mlp.router.gate.weight")
+    self.assertEqual(mapping[f"{prefix}-MoeBlock_0-gate-bias"], "model.layers.1.mlp.expert_bias")
+    self.assertEqual(mapping[f"{prefix}-shared_experts-wi_0-kernel"], "model.layers.1.mlp.shared_mlp.gate_proj.weight")
+
+  def test_mtp_layer_is_not_mapped(self):
+    """Layer `num_hidden_layers` is the MTP layer; it is deliberately out of scope."""
+    for scan_layers in (True, False):
+      hf_names = []
+      for value in self._mapping(scan_layers).values():
+        if isinstance(value, str):
+          hf_names.append(value)
+        else:
+          for item in value:
+            hf_names.extend(item if isinstance(item, list) else [item])
+      self.assertFalse(
+          [n for n in hf_names if n.startswith("model.layers.4.")],
+          f"MTP layer should not be mapped (scan_layers={scan_layers})",
+      )
+
+  def test_shape_map_matches_the_mapping(self):
+    """Every HF name the mapping produces must have a shape entry, and vice versa."""
+    shapes = set(hf_shape.HY3_HF_WEIGHTS_TO_SHAPE(self.HF_CONFIG))
+    mapped = set()
+    for value in self._mapping(scan_layers=False).values():
+      if isinstance(value, str):
+        mapped.add(value)
+      else:
+        for item in value:
+          mapped.update(item if isinstance(item, list) else [item])
+    self.assertEqual(mapped - shapes, set(), "mapping references HF names with no shape entry")
+    self.assertEqual(shapes - mapped, set(), "shape map has HF names the mapping never produces")
 
 
 if __name__ == "__main__":
