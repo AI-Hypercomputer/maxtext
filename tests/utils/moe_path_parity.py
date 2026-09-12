@@ -44,6 +44,7 @@ construction fails.
 """
 
 import argparse
+import gc
 import math
 import os
 
@@ -197,19 +198,6 @@ def per_token_logprobs(logits, ids):
   return jnp.take_along_axis(lp[:, :-1], tgt[..., None], axis=-1)[..., 0]
 
 
-def diagnose_logits(name, logits):
-  """Non-finite logits poison every downstream statistic, so surface them."""
-  lg = np.asarray(logits)
-  bad = ~np.isfinite(lg)
-  print(f"  {name:8s} logits shape={lg.shape} dtype={lg.dtype} "
-        f"non-finite={int(bad.sum())} ({100*bad.mean():.4f}%) "
-        f"min={np.nanmin(lg[np.isfinite(lg)]) if np.isfinite(lg).any() else float('nan'):.3f} "
-        f"max={np.nanmax(lg[np.isfinite(lg)]) if np.isfinite(lg).any() else float('nan'):.3f}")
-  if bad.any():
-    rows = np.unique(np.argwhere(bad)[:, 1])
-    print(f"           non-finite at {len(rows)} distinct positions, first 20: {rows[:20].tolist()}")
-
-
 def report(log_is, label=""):
   """Same statistics the production loss emits, so numbers are comparable."""
   a = np.asarray(log_is).ravel()
@@ -283,6 +271,66 @@ def main():
           f"float32_gate_logits={c.float32_gate_logits} model_call_mode={getattr(c,'model_call_mode','train')}")
 
   devices = jax.devices()[:args.devices]
+
+  def hbm(tag):
+    try:
+      st = devices[0].memory_stats()
+      used, lim = st.get("bytes_in_use", 0) / 2**30, st.get("bytes_limit", 0) / 2**30
+      print(f"    [hbm] {tag:34s} {used:6.1f} / {lim:.1f} GiB in use on device 0")
+    except Exception:
+      pass
+
+  key = jax.random.PRNGKey(args.seed + 1)
+  ids = jax.random.randint(key, (args.batch, args.seq_len), 0, trainer_cfg.vocab_size, dtype=jnp.int32)
+  pos = jnp.broadcast_to(jnp.arange(args.seq_len, dtype=jnp.int32)[None, :], (args.batch, args.seq_len))
+  seg = jnp.ones((args.batch, args.seq_len), dtype=jnp.int32)
+  print(f"tokens: batch={args.batch} seq_len={args.seq_len} -> {args.batch * (args.seq_len - 1)} scored positions")
+
+  def fwd(model, cfg, mesh):
+    out = model(decoder_input_tokens=ids, decoder_positions=pos,
+                decoder_segment_ids=seg, enable_dropout=False)
+    # models.py:645 -- with attention in (vllm_rpa, vllm_batched_rpa) the model
+    # returns (hidden_state, kv_caches) and leaves the unembedding to vLLM. The
+    # trainer path returns logits directly.
+    y = out[0] if isinstance(out, tuple) else out
+    if y.shape[-1] == cfg.vocab_size:
+      return y
+    # Apply MaxText's own head (final norm + projection,
+    # nnx_decoders.NNXDecoder.apply_output_head, :1536) so both sides are in
+    # logit space. Head weights are identical on the two models, so this adds
+    # no divergence. The embedding attribute is `token_embedder` on the nnx
+    # Transformer (models.py:564); `shared_embedding` is the Linen name.
+    assert hasattr(model.decoder, "apply_output_head"), (
+        "decoder has no apply_output_head -- pure_nnx_decoder is probably False.")
+    with jax.set_mesh(mesh), nn.logical_axis_rules(cfg.logical_axis_rules):
+      return model.decoder.apply_output_head(
+          shared_embedding=model.token_embedder, y=y,
+          deterministic=True, model_mode=MODEL_MODE_TRAIN)
+
+  def score(model, cfg, mesh, name):
+    """Forward pass, reduced to host-sized results before anything else runs.
+
+    Only the per-token logprobs and a few scalars come back. The full logit
+    tensor is batch x seq x vocab -- 2GB at 4x512x248320 -- and holding two of
+    them alongside two models is what makes this not fit.
+    """
+    lg = fwd(model, cfg, mesh)
+    finite = jnp.isfinite(lg)
+    stats = (jnp.min(jnp.where(finite, lg, jnp.inf)),
+             jnp.max(jnp.where(finite, lg, -jnp.inf)),
+             jnp.sum(~finite))
+    lp = per_token_logprobs(lg, ids)
+    lp, (lo, hi, nbad) = jax.device_get((lp, stats))
+    print(f"  {name:8s} logits shape={lg.shape} min={float(lo):8.3f} max={float(hi):8.3f} "
+          f"non-finite={int(nbad)}")
+    if abs(float(hi)) > 100:
+      print(f"  {'':8s} !! max |logit| is {float(hi):.0f}. A trained model sits at 15-30. The")
+      print(f"  {'':8s}    checkpoint probably did not load, and bf16 quantisation at this")
+      print(f"  {'':8s}    magnitude will swamp the measurement (see the note at the end).")
+    del lg, finite, stats
+    return np.asarray(lp)
+
+  # ---- trainer path, then release it before the sampler is built -----------
   src = f"checkpoint {args.load_parameters_path}" if args.load_parameters_path else "RANDOM WEIGHTS"
   print(f"\nbuilding trainer-path model from {src} ...")
   mesh_train = maxtext_utils.get_mesh_from_config(trainer_cfg, devices)
@@ -295,70 +343,37 @@ def main():
     print("  !! NO CHECKPOINT -- see the warning at the end; the result will not be usable")
     rngs = maxtext_utils_nnx.create_nnx_rngs(trainer_cfg, rng_key=jax.random.PRNGKey(args.seed))
     m_train = model_creation_utils.from_config(trainer_cfg, mesh=mesh_train, rngs=rngs)
+  hbm("after trainer build")
+
+  print("\nforward pass: trainer path...")
+  lp_train = score(m_train, trainer_cfg, mesh_train, "trainer")
+
+  # Both models will not fit at once, so stage the weights on the host and drop
+  # the trainer before the sampler is constructed. Fusing wi_0/wi_1 -> wi here,
+  # on host, also avoids ever holding both layouts in HBM.
+  print("\nstaging trainer weights to host and releasing the device...")
+  host_params = jax.device_get(nnx.state(m_train, nnx.Param))
+  del m_train
+  gc.collect()
+  hbm("after releasing trainer")
 
   print("building sampler-path model...")
   mesh_samp = maxtext_utils.get_mesh_from_config(sampler_cfg, devices)
   rngs2 = maxtext_utils_nnx.create_nnx_rngs(sampler_cfg, rng_key=jax.random.PRNGKey(args.seed))
   m_samp = model_creation_utils.from_config(sampler_cfg, mesh=mesh_samp, rngs=rngs2)
+  hbm("after sampler build")
 
   print("copying weights trainer -> sampler so the ONLY difference is the code path...")
-  st_train = nnx.state(m_train, nnx.Param)
-  st_samp = nnx.state(m_samp, nnx.Param)
-  nnx.update(m_samp, copy_weights(st_train, st_samp))
+  nnx.update(m_samp, copy_weights(host_params, nnx.state(m_samp, nnx.Param)))
+  del host_params
+  gc.collect()
+  hbm("after weight copy")
 
-  # Deterministic pseudo-text. Real tokens would be better but are not needed:
-  # the divergence is a property of the arithmetic, not the content.
-  # Batch must be divisible by the data/fsdp axis: tpu_flash_attention asserts
-  # query.shape[0] % devices_in_data_fsdp == 0 (attention_op.py:1849). With a
-  # 4-device mesh that means batch >= 4.
-  key = jax.random.PRNGKey(args.seed + 1)
-  ids = jax.random.randint(key, (args.batch, args.seq_len), 0, trainer_cfg.vocab_size, dtype=jnp.int32)
-  pos = jnp.broadcast_to(jnp.arange(args.seq_len, dtype=jnp.int32)[None, :], (args.batch, args.seq_len))
-  seg = jnp.ones((args.batch, args.seq_len), dtype=jnp.int32)
-  print(f"\ntokens: batch={args.batch} seq_len={args.seq_len} -> {args.batch * (args.seq_len - 1)} scored positions")
+  print("\nforward pass: sampler path...")
+  lp_samp = score(m_samp, sampler_cfg, mesh_samp, "sampler")
 
-  def fwd(model, cfg, mesh):
-    out = model(decoder_input_tokens=ids, decoder_positions=pos,
-                decoder_segment_ids=seg, enable_dropout=False)
-    # model_call_mode=inference returns (hidden_states, kv_cache); the trainer
-    # path returns logits directly.
-    y = out[0] if isinstance(out, tuple) else out
-    if y.shape[-1] == cfg.vocab_size:
-      return y
-    # models.py:645 -- with attention in (vllm_rpa, vllm_batched_rpa) the model
-    # returns (hidden_state, kv_caches) and leaves the unembedding to vLLM.
-    # Apply MaxText's own head (final norm + projection,
-    # nnx_decoders.NNXDecoder.apply_output_head, :1536) so both sides are
-    # compared in logit space. Head weights are identical on the two models --
-    # they came through the weight copy -- so this adds no divergence.
-    # The embedding attribute is `token_embedder` on the nnx Transformer;
-    # `shared_embedding` is the Linen variant's name (models.py:564 passes
-    # shared_embedding=self.token_embedder).
-    assert hasattr(model.decoder, "apply_output_head"), (
-        "decoder has no apply_output_head -- pure_nnx_decoder is probably False, "
-        "so decoder is a ToNNX wrapper. Set pure_nnx_decoder=True.")
-    with jax.set_mesh(mesh), nn.logical_axis_rules(cfg.logical_axis_rules):
-      return model.decoder.apply_output_head(
-          shared_embedding=model.token_embedder,
-          y=y,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-
-  print("\nforward pass: trainer path...")
-  lg_train = fwd(m_train, trainer_cfg, mesh_train)
-  print("forward pass: sampler path...")
-  lg_samp = fwd(m_samp, sampler_cfg, mesh_samp)
-
-  print("\nlogit diagnostics:")
-  assert lg_train.shape == lg_samp.shape, (
-      f"logit shapes differ: trainer {lg_train.shape} vs sampler {lg_samp.shape}. "
-      "The two paths are not returning comparable tensors; fix that before reading any statistic.")
-  diagnose_logits("trainer", lg_train)
-  diagnose_logits("sampler", lg_samp)
-
-  lp_train = per_token_logprobs(lg_train, ids)
-  lp_samp = per_token_logprobs(lg_samp, ids)
+  assert lp_train.shape == lp_samp.shape, (
+      f"logprob shapes differ: {lp_train.shape} vs {lp_samp.shape}")
 
   report(lp_train - lp_samp,
          "MoE path divergence" + (" (isolate_moe)" if args.isolate_moe else " (production configs)"))
