@@ -107,7 +107,7 @@ def build_configs(args):
       # matters.
       f"remat_policy={args.remat_policy}",
       *([f"load_parameters_path={args.load_parameters_path}"] if args.load_parameters_path else []),
-      "ici_fsdp_parallelism=4",
+      f"ici_fsdp_parallelism={args.devices}",
       "ici_tensor_parallelism=1",
   ]
 
@@ -122,7 +122,7 @@ def build_configs(args):
         "prefuse_moe_weights=True",
         "model_call_mode=inference",
         "remat_policy=none",
-        "ici_fsdp_parallelism=4",
+        f"ici_fsdp_parallelism={args.devices}",
         "ici_tensor_parallelism=1",
     ]
   else:
@@ -136,10 +136,16 @@ def build_configs(args):
         "model_call_mode=inference",
         "remat_policy=none",
         "use_mrope=False",
-        "ici_data_parallelism=4",
-        "ici_tensor_parallelism=1",
-        "rollout_data_parallelism=4",
-        "rollout_tensor_parallelism=1",
+        # Production maps rollout_fsdp onto ici_data_parallelism and relies on
+        # tpu-inference sharding within each replica (TP=4 of 128 chips). On a
+        # 4-chip host that degenerates to full replication and OOMs, so shard
+        # by tensor parallelism instead. Trainer and sampler already differ in
+        # sharding in production, so this does not introduce a difference in
+        # kind -- but it is a knob, and worth flipping if a result looks odd.
+        f"ici_tensor_parallelism={args.sampler_tp}",
+        f"ici_data_parallelism={args.devices // args.sampler_tp}",
+        f"rollout_tensor_parallelism={args.sampler_tp}",
+        f"rollout_data_parallelism={args.devices // args.sampler_tp}",
     ]
 
   trainer_cfg = pyconfig.initialize(trainer_argv, config_class=types.RLConfig)
@@ -264,8 +270,16 @@ def main():
   p.add_argument("--remat_policy", default="full",
                  help="'full' is what production's --remat_policy=decoder maps to; forward-only, so inert")
   p.add_argument("--isolate_moe", action="store_true")
+  p.add_argument("--devices", type=int, default=None, help="defaults to jax.device_count()")
+  p.add_argument("--sampler_tp", type=int, default=None,
+                 help="tensor-parallel width for the sampler; defaults to all devices so the "
+                      "weights shard rather than replicate")
   p.add_argument("--seed", type=int, default=0)
   args = p.parse_args()
+  if args.devices is None:
+    args.devices = jax.device_count()
+  if args.sampler_tp is None:
+    args.sampler_tp = args.devices
 
   print(f"devices: {jax.device_count()} x {jax.devices()[0].device_kind}")
   trainer_cfg, sampler_cfg = build_configs(args)
