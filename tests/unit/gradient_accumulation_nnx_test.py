@@ -39,6 +39,7 @@ class _Cfg:
   debug_sharding: bool = False
   training_objective: str = "causal_lm"
   use_tunix_gradient_accumulation: bool = False
+  grad_dtype: jnp.dtype = jnp.float32
 
 
 class _TinyNNX(nnx.Module):
