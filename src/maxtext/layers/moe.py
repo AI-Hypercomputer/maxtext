@@ -878,6 +878,7 @@ class RoutedMoE(nnx.Module):
         per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
+    self.selected_experts = nnx.Intermediate(top_k_indices)
     return top_k_weights, top_k_indices
 
   def deepseek_scale_weights(self, weights):

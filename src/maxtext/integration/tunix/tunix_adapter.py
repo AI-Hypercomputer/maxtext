@@ -115,13 +115,16 @@ class TunixMaxTextAdapter(nnx.Module):
     """
     if decoder_segment_ids is None and self._pad_id is not None:
       decoder_segment_ids = (input_tokens != self._pad_id).astype(jnp.int32)
-    logits = self.base(
+    out = self.base(
         decoder_input_tokens=input_tokens,
         decoder_positions=positions,
         decoder_segment_ids=decoder_segment_ids,
         forced_routed_experts=forced_routed_experts,
     )
-    return logits, None
+    if isinstance(out, tuple):
+      logits, expert_indices = out
+      return logits, expert_indices
+    return out, None
 
   def to_hf_mappings(self):
     if self.use_no_op_mappings:

@@ -216,7 +216,7 @@ class TransformerLinenPure(nn.Module):
     if forced_routed_experts is not None:
       raise NotImplementedError(_FORCED_ROUTING_NEEDS_PURE_NNX)
 
-    logits, hidden_state, kv_caches = self.decoder(
+    decoder_out = self.decoder(
         shared_embedding=self.shared_embedding,
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
@@ -230,6 +230,11 @@ class TransformerLinenPure(nn.Module):
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
     )  # pytype: disable=wrong-keyword-args
+    if len(decoder_out) == 4:
+      logits, hidden_state, kv_caches, expert_indices = decoder_out
+    else:
+      logits, hidden_state, kv_caches = decoder_out
+      expert_indices = None
 
     # If we are initializing the model AND MTP is enabled, we must create
     # dummy target tensors. This allows Flax to trace the MTPBlock and create
@@ -267,6 +272,8 @@ class TransformerLinenPure(nn.Module):
       # In vLLM, logits are computed separately after updating the KV cache.
       return hidden_state, kv_caches
 
+    if expert_indices is not None:
+      return logits, expert_indices
     return logits
 
 

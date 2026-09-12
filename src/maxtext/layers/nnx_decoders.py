@@ -2266,12 +2266,31 @@ class NNXDecoder(nnx.Module):
           if path and str(path[-1]) == "selected_experts"
       ]
       flat_items.sort(key=lambda item: _path_sort_key(item[0]))
-      expert_indices_list = [v for _, v in flat_items]
-      if expert_indices_list:
-        # Scanned blocks already carry a leading layer axis (3D); sequential
-        # layers are 2D and need that axis added before concatenating.
-        expert_indices_list = [v if v.ndim == 3 else jnp.expand_dims(v, axis=0) for v in expert_indices_list]
-        expert_indices = jnp.concatenate(expert_indices_list, axis=0)
+
+      local_entry = next((v for p, v in flat_items if "local_layers" in [str(k) for k in p]), None)
+      global_entry = next((v for p, v in flat_items if "global_layer" in [str(k) for k in p]), None)
+      if local_entry is not None and global_entry is not None and local_entry.ndim == 5:
+        # Hierarchical scanned blocks (e.g. Qwen3.5/Qwen3-Next): local_layers has shape
+        # [num_cycles, num_local, B, T, K] and global_layer has shape [num_cycles, B, T, K].
+        num_c = local_entry.shape[0]
+        interleaved = []
+        for c in range(num_c):
+          for i in range(local_entry.shape[1]):
+            interleaved.append(local_entry[c, i])
+          interleaved.append(global_entry[c])
+        stacked = jnp.stack(interleaved, axis=0)  # [L, B, T, K]
+        expert_indices = jnp.transpose(stacked, (1, 2, 0, 3))  # [B, T, L, K]
+      else:
+        expert_indices_list = [v for _, v in flat_items]
+        if expert_indices_list:
+          # Scanned blocks already carry a leading layer axis (3D/4D); sequential
+          # layers need that axis added before concatenating.
+          expert_indices_list = [v if v.ndim >= 3 else jnp.expand_dims(v, axis=0) for v in expert_indices_list]
+          stacked = jnp.concatenate(expert_indices_list, axis=0)  # [L, B, T, K]
+          if stacked.ndim == 4:
+            expert_indices = jnp.transpose(stacked, (1, 2, 0, 3))  # [B, T, L, K]
+          else:
+            expert_indices = stacked
     except Exception:  # pylint: disable=broad-exception-caught
       expert_indices = None
 
