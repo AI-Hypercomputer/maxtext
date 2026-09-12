@@ -106,10 +106,14 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 
 ### Full-Scale Pre-training (`hy3-295b` on TPU v5p)
 
-The configuration below is the one that was actually run and verified: TPU
-v5p-64, FSDP=64, EP=1. Larger slices and `ici_expert_parallelism > 1` are
-plausible starting points but have **not** been verified for Hy3 -- treat any
-change to the parallelism below as something to re-validate.
+What has been verified for Hy3 is the **topology and parallelism** below:
+TPU v5p-64 with FSDP=64 and EP=1. Larger slices and
+`ici_expert_parallelism > 1` have **not** been verified -- treat any change to
+the parallelism as something to re-validate.
+
+The batch size, sequence length and step count below are a small starting
+configuration, not the ones from the verification run; tune them for your
+setup.
 
 ```bash
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \

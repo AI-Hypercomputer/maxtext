@@ -243,6 +243,8 @@ class Hy3VsReferenceTest(unittest.TestCase):
         num_shared_experts=cfg.shared_experts,
         router_scaling_factor=cfg.routed_scaling_factor,
         mlp_layer_types=mlp_layer_types,
+        # MaxText combines routed + shared in the model dtype, no fp32 cast.
+        enable_moe_fp32_combine=False,
         rope_parameters={"rope_type": "default", "rope_theta": float(cfg.rope_max_timescale)},
     )
     # MaxText's `attention="dot_product"` is an unfused reference kernel; match it.

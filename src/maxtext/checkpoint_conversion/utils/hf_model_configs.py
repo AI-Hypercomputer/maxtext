@@ -1176,6 +1176,10 @@ hy3_295b_config = HYV3Config(
     first_k_dense_replace=1,
     moe_router_enable_expert_bias=True,
     moe_router_use_sigmoid=True,
+    # MaxText's `RoutedAndSharedMoE` returns `routed_experts + shared_experts`
+    # in the model dtype with no fp32 cast, so an exported checkpoint must not
+    # claim the fp32-combine semantics (which is `HYV3Config`'s default).
+    enable_moe_fp32_combine=False,
     route_norm=True,
     router_scaling_factor=2.826,
     num_attention_heads=64,

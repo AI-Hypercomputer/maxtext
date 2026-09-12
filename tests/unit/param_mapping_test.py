@@ -23,6 +23,7 @@ pytestmark = [pytest.mark.decoupled_target]
 
 
 from maxtext.checkpoint_conversion.to_maxtext import _build_multi_axis_stacked_tensor
+from maxtext.checkpoint_conversion.utils import hf_model_configs
 from maxtext.checkpoint_conversion.utils import hf_shape
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
@@ -609,6 +610,18 @@ class Hy3ParamMappingTest(unittest.TestCase):
           [n for n in hf_names if n.startswith("model.layers.4.")],
           f"MTP layer should not be mapped (scan_layers={scan_layers})",
       )
+
+  def test_exported_hf_config_matches_what_maxtext_computes(self):
+    """The config written by `to_huggingface` must describe the exported weights.
+
+    Both fields have bitten this port: `num_nextn_predict_layers` advertised an
+    MTP module the mapping never fills, and `enable_moe_fp32_combine` defaults
+    to True in `HYV3Config` while MaxText's `RoutedAndSharedMoE` returns
+    `routed_experts + shared_experts` in the model dtype with no fp32 cast.
+    """
+    exported = hf_model_configs.hy3_295b_config.to_dict()
+    self.assertIs(exported["enable_moe_fp32_combine"], False)
+    self.assertNotIn("num_nextn_predict_layers", exported)
 
   def test_shape_map_matches_the_mapping(self):
     """Every HF name the mapping produces must have a shape entry, and vice versa."""
