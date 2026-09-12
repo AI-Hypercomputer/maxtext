@@ -14,6 +14,11 @@
 
 
 set -ex
+
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
 idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_NAME='gemma2-2b'
 export MODEL_VARIATION='2b'

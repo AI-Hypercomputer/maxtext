@@ -16,6 +16,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='llama3.1-70b'
 

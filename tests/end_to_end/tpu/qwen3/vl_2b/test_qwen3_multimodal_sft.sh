@@ -28,8 +28,10 @@ MULTIMODAL_UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned_mul
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 export DATASET_PATH=gs://maxtext-dataset
 
-# Step 1: Install google-jetstream
-python3 -m pip install google-jetstream@https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip --no-deps
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
 
 # Step 2: Run inference on the original checkpoint converted from Hugging Face
 python3 -m maxtext.inference.decode \
