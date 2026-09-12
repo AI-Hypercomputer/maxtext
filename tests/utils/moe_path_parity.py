@@ -257,8 +257,11 @@ def main():
   print(f"\ntokens: batch={args.batch} seq_len={args.seq_len} -> {args.batch * (args.seq_len - 1)} scored positions")
 
   def fwd(model):
-    return model(decoder_input_tokens=ids, decoder_positions=pos,
-                 decoder_segment_ids=seg, enable_dropout=False)
+    out = model(decoder_input_tokens=ids, decoder_positions=pos,
+                decoder_segment_ids=seg, enable_dropout=False)
+    # model_call_mode=inference returns (logits, kv_cache); the trainer path
+    # returns bare logits.
+    return out[0] if isinstance(out, tuple) else out
 
   print("\nforward pass: trainer path...")
   lp_train = per_token_logprobs(fwd(m_train), ids)
