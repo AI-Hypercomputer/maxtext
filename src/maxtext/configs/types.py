@@ -68,6 +68,8 @@ class DType(str, Enum):
   BFLOAT16 = "bfloat16"
   FLOAT32 = "float32"
   FLOAT16 = "float16"
+  FLOAT8_E4M3FN = "float8_e4m3fn"
+  FLOAT8_E5M2 = "float8_e5m2"
 
 
 class MatmulPrecision(str, Enum):
@@ -497,6 +499,23 @@ class Quantization(BaseModel):
   quantization: None | QuantizationType = Field(
       QuantizationType.NONE,
       description="Activates quantization for transformer layers.",
+  )
+  unquantized_modules: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of submodule names or name patterns to keep unquantized even when weight_dtype is FP8. "
+          "Weights for modules specified here will use `dtype` (e.g. bfloat16). "
+          "Accepted names include: 'token_embedder', 'logits_dense', 'gate', 'shared_expert_gate', "
+          "'conv1d', 'in_proj_ba', 'norm'."
+      ),
+  )
+  weight_block_size: None | int | list[int] = Field(
+      None,
+      description=(
+          "Block size for block-scaled quantized weights (e.g. 128 for symmetric 128x128 block scaling, "
+          "or a list/tuple like [128, 64] for asymmetric block scaling). "
+          "None for per-tensor scaling."
+      ),
   )
   replicate_quant_scale: bool = Field(
       False,
