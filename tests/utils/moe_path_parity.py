@@ -116,6 +116,32 @@ def shim_tpu_inference_envs():
       setattr(tie, name, default)
       print(f"  shimmed tpu_inference.envs.{name} = {default!r} (missing in this install)")
 
+  # MaxText also passes kwargs the installed fused_moe_func may not accept
+  # (moe.py:3367 sends moe_chunk_size, for instance). moe.py imports it inside
+  # the function, so patch it at the source module. Every such kwarg is a
+  # performance knob whose default is off, so dropping one leaves the installed
+  # build at its own default -- but it does confirm the local tpu_inference is
+  # older than production's image, which is a caveat on the result.
+  try:
+    import inspect
+    from tpu_inference.layers.common import fused_moe_gmm as fmg
+    real = fmg.fused_moe_func
+    accepted = set(inspect.signature(real).parameters)
+    if not any(p.kind is inspect.Parameter.VAR_KEYWORD
+               for p in inspect.signature(real).parameters.values()):
+      reported = set()
+
+      def _compat(*a, **kw):
+        drop = set(kw) - accepted
+        if drop and drop != reported:
+          reported.update(drop)
+          print(f"  dropped kwargs this tpu_inference does not accept: {sorted(drop)}")
+        return real(*a, **{k: v for k, v in kw.items() if k in accepted})
+
+      fmg.fused_moe_func = _compat
+  except ImportError:
+    pass
+
 
 def build_trainer_config(args, layers=None):
   """The trainer half of train_maxtext_nb.py:914-943."""
