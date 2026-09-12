@@ -94,7 +94,13 @@ def build_configs(args):
       *common[1:],
       "attention=flash",
       f"prefuse_moe_weights={args.trainer_prefuse}",
-      "remat_policy=decoder",
+      # train_maxtext_nb.py:901-908 maps its --remat_policy=decoder onto MaxText
+      # "full"; passing "decoder" through trips the assert in
+      # nnx_decoders.get_remat_policy. Remat only affects what the backward pass
+      # recomputes, and this harness is forward-only, so it cannot move the
+      # numbers either way -- it is set to match production, not because it
+      # matters.
+      f"remat_policy={args.remat_policy}",
       "ici_fsdp_parallelism=4",
       "ici_tensor_parallelism=1",
   ]
@@ -211,6 +217,8 @@ def main():
   p.add_argument("--dtype", default="bfloat16")
   p.add_argument("--float32_gate_logits", default="True")
   p.add_argument("--trainer_prefuse", default="False", help="production trainer default is False")
+  p.add_argument("--remat_policy", default="full",
+                 help="'full' is what production's --remat_policy=decoder maps to; forward-only, so inert")
   p.add_argument("--isolate_moe", action="store_true")
   p.add_argument("--seed", type=int, default=0)
   args = p.parse_args()
