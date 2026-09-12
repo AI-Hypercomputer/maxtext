@@ -2259,9 +2259,15 @@ class NNXDecoder(nnx.Module):
           key.append(int(nums[0]) if nums else str(part))
         return tuple(key)
 
+      def _extract_val(val):
+        v = val.value if hasattr(val, "value") else val
+        if isinstance(v, (tuple, list)) and len(v) > 0:
+          return v[-1]
+        return v
+
       intermediates = nnx.state(self, nnx.Intermediate)
       flat_items = [
-          (path, val.value if hasattr(val, "value") else val)
+          (path, _extract_val(val))
           for path, val in intermediates.flat_state()
           if path and str(path[-1]) == "selected_experts"
       ]

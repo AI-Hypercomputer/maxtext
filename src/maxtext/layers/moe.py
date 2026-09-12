@@ -878,7 +878,6 @@ class RoutedMoE(nnx.Module):
         per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
-    self.selected_experts = nnx.Intermediate(top_k_indices)
     return top_k_weights, top_k_indices
 
   def deepseek_scale_weights(self, weights):
@@ -3461,6 +3460,12 @@ class RoutedMoE(nnx.Module):
     gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
+
+    if forced_routed_experts is not None:
+      self.sow(nnx.Intermediate, "selected_experts", forced_routed_experts)
+    else:
+      _, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs, input_ids=input_ids)
+      self.sow(nnx.Intermediate, "selected_experts", top_k_indices)
 
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
 
