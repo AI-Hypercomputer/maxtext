@@ -1196,8 +1196,26 @@ class NNXDecoder(nnx.Module):
       new_params, new_rest = scanned_state.split(nnx.Param, ...)
       out_layers = nnx.merge(updated_graphdef[0], new_params, new_rest)
     else:
-      clean_state = nnx.filter_state(scanned_state, nnx.Not(nnx.RngState))
-      nnx.update(layers, clean_state)
+      # An nnx.Rngs stream draws fold_in(key, count) and then bumps count; the key
+      # never changes, so dropping the advanced counts would rewind every layer's
+      # stream and replay the identical dropout mask on the next call. Write them
+      # back, but only for streams that already exist on `layers`.
+      #
+      # The restriction matters because quantized einsums are bridged into NNX
+      # lazily, on first use, from inside the scanned body (see
+      # quantizations.apply_einsum_in_nnx), so their `quant_einsum_*` subtree has
+      # no counterpart on the outer module. Writing it back would attach a raw
+      # nnx.State to a brand-new attribute, which NNX treats as static and then
+      # rejects for carrying RngKey/RngCount leaves.
+      nnx.update(layers, nnx.filter_state(scanned_state, nnx.Not(nnx.RngState)))
+      known_rng_paths = {tuple(path) for path, _ in nnx.to_flat_state(nnx.state(layers, nnx.RngState))}
+      advanced_rngs = [
+          (path, value)
+          for path, value in nnx.to_flat_state(nnx.filter_state(scanned_state, nnx.RngState))
+          if tuple(path) in known_rng_paths
+      ]
+      if advanced_rngs:
+        nnx.update(layers, nnx.from_flat_state(advanced_rngs))
       out_layers = layers
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
@@ -2562,7 +2580,13 @@ class NNXDecoder(nnx.Module):
         if kv_in is not None:
           call_kwargs["kv_cache"] = kv_in
         out_y, out_kv = split_output(merged_layer(y_in, *layer_args, **call_kwargs))
-        nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
+        # Drop only the sown intermediates: returning them out of jax.checkpoint
+        # would keep those activations alive as residuals, which is exactly what
+        # the remat is here to avoid. nnx.RngState stays, because an nnx.Rngs
+        # stream draws fold_in(key, count) and then bumps count -- dropping the
+        # updated count would rewind the stream and replay the identical dropout
+        # mask on every call.
+        nnx.pop(merged_layer, nnx.Intermediate)
         return out_y, out_kv, nnx.state(merged_layer)
 
       checkpointed_block_fn = jax.checkpoint(
