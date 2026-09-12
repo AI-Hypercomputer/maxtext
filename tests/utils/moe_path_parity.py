@@ -88,7 +88,7 @@ def _common_argv(args, layers=None):
   ]
 
 
-def shim_tpu_inference_envs():
+def shim_tpu_inference_envs(onehot_threshold=0):
   """Backfill MoE env flags the installed tpu_inference predates.
 
   MaxText's fused MoE path reads several tpu_inference.envs attributes
@@ -106,6 +106,10 @@ def shim_tpu_inference_envs():
     from tpu_inference import envs as tie
   except ImportError:
     return
+  if onehot_threshold:
+    setattr(tie, "ONEHOT_MOE_PERMUTE_THRESHOLD", onehot_threshold)
+    print(f"  ONEHOT_MOE_PERMUTE_THRESHOLD = {onehot_threshold} -- taking the onehot permute "
+          f"branch, NOT the sc_ragged_gather kernel production uses")
   for name, default in (("ENABLE_RS_KERNEL", False),
                         ("USE_GMM_FUSED_RS_KERNEL", False),
                         ("ONEHOT_MOE_PERMUTE_THRESHOLD", 0),
@@ -348,13 +352,19 @@ def main():
                  help="'full' is what production's --remat_policy=decoder maps to; forward-only, so inert")
   p.add_argument("--isolate_moe", action="store_true")
   p.add_argument("--devices", type=int, default=None, help="defaults to jax.device_count()")
+  p.add_argument("--onehot_moe_permute", type=int, default=0,
+                 help="ONEHOT_MOE_PERMUTE_THRESHOLD. 0 = production default, which uses the "
+                      "sc_ragged_gather SparseCore kernel. Set above batch*topk (e.g. 1000000) "
+                      "to take the onehot permute branch instead (fused_moe_gmm.py:287) if that "
+                      "kernel fails on this install -- but note it is then NOT the kernel "
+                      "production runs.")
   p.add_argument("--seed", type=int, default=0)
   args = p.parse_args()
   if args.devices is None:
     args.devices = jax.device_count()
 
   print(f"devices: {jax.device_count()} x {jax.devices()[0].device_kind}")
-  shim_tpu_inference_envs()
+  shim_tpu_inference_envs(args.onehot_moe_permute)
   trainer_cfg = build_trainer_config(args, layers=args.layers)
   kv = getattr(trainer_cfg, "num_kv_heads", None) or trainer_cfg.base_num_kv_heads
   shard = math.gcd(args.devices, kv)
