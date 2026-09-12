@@ -142,10 +142,26 @@ def build_configs(args):
         # by tensor parallelism instead. Trainer and sampler already differ in
         # sharding in production, so this does not introduce a difference in
         # kind -- but it is a knob, and worth flipping if a result looks odd.
-        f"ici_tensor_parallelism={args.sampler_tp}",
-        f"ici_data_parallelism={args.devices // args.sampler_tp}",
-        f"rollout_tensor_parallelism={args.sampler_tp}",
-        f"rollout_data_parallelism={args.devices // args.sampler_tp}",
+        # Sharding, and why it is fsdp by default:
+        #  - data parallelism REPLICATES weights; on 4 chips a 35B needs ~66GB
+        #    per chip and OOMs at construction.
+        #  - tensor parallelism shards KV heads, and this model has
+        #    base_num_kv_heads=2, so TP>2 fails outright
+        #    (attentions.py:638 -- heads are atomic under TP).
+        #  - fsdp shards parameters without touching KV heads.
+        # Matching the trainer's sharding also removes a confound: the only
+        # remaining difference is the MoE/attention code path, which is the
+        # thing under test. --sampler_tp mirrors production's TP instead, but
+        # must divide num_kv_heads.
+        *([f"ici_tensor_parallelism={args.sampler_tp}",
+           f"ici_data_parallelism={args.devices // args.sampler_tp}",
+           f"rollout_tensor_parallelism={args.sampler_tp}",
+           f"rollout_data_parallelism={args.devices // args.sampler_tp}"]
+          if args.sampler_tp > 1 else
+          [f"ici_fsdp_parallelism={args.devices}",
+           "ici_tensor_parallelism=1",
+           "rollout_tensor_parallelism=1",
+           f"rollout_data_parallelism={args.devices}"]),
     ]
 
   trainer_cfg = pyconfig.initialize(trainer_argv, config_class=types.RLConfig)
@@ -272,14 +288,14 @@ def main():
   p.add_argument("--isolate_moe", action="store_true")
   p.add_argument("--devices", type=int, default=None, help="defaults to jax.device_count()")
   p.add_argument("--sampler_tp", type=int, default=None,
-                 help="tensor-parallel width for the sampler; defaults to all devices so the "
-                      "weights shard rather than replicate")
+                 help="1 (default) shards the sampler with fsdp, matching the trainer. Set >1 to "
+                      "mirror production TP, but it must divide num_kv_heads (2 on Qwen3.5).")
   p.add_argument("--seed", type=int, default=0)
   args = p.parse_args()
   if args.devices is None:
     args.devices = jax.device_count()
   if args.sampler_tp is None:
-    args.sampler_tp = args.devices
+    args.sampler_tp = 1  # fsdp; see build_configs
 
   print(f"devices: {jax.device_count()} x {jax.devices()[0].device_kind}")
   trainer_cfg, sampler_cfg = build_configs(args)
