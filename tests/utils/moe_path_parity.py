@@ -66,7 +66,7 @@ from maxtext.common.common_types import MODEL_MODE_TRAIN  # noqa: E402
 from flax import linen as nn  # noqa: E402
 
 
-def _common_argv(args):
+def _common_argv(args, layers=None):
   """Config keys shared by both paths."""
   return [
       f"model_name={args.model}",
@@ -74,7 +74,7 @@ def _common_argv(args):
       # and pyconfig refuses a CLI override of a model-config key unless this
       # is set.
       "override_model_config=True",
-      *([f"base_num_decoder_layers={args.layers}"] if args.layers else []),
+      *([f"base_num_decoder_layers={layers}"] if layers else []),
       f"max_target_length={args.seq_len}",
       f"max_prefill_predict_length={args.seq_len}",
       f"dtype={args.dtype}",
@@ -88,11 +88,11 @@ def _common_argv(args):
   ]
 
 
-def build_trainer_config(args):
+def build_trainer_config(args, layers=None):
   """The trainer half of train_maxtext_nb.py:914-943."""
   base_yml = os.path.join(os.path.dirname(pyconfig.__file__), "post_train", "rl.yml")
   return pyconfig.initialize([
-      "", base_yml, *_common_argv(args),
+      "", base_yml, *_common_argv(args, layers),
       "attention=flash",
       f"prefuse_moe_weights={args.trainer_prefuse}",
       # train_maxtext_nb.py:901-908 maps --remat_policy=decoder onto MaxText
@@ -107,7 +107,7 @@ def build_trainer_config(args):
   ], config_class=types.RLConfig)
 
 
-def build_sampler_config(args, shard):
+def build_sampler_config(args, shard, layers=None):
   """The sampler half of train_maxtext_nb.py:946-970.
 
   `shard` is how many ways the weights may be split. On the vLLM mesh that is
@@ -120,7 +120,7 @@ def build_sampler_config(args, shard):
     # fused branch (which also needs vllm_rpa) but exercises the trainer mesh,
     # so it always runs.
     return pyconfig.initialize([
-        "", os.path.join(cfg_dir, "post_train", "rl.yml"), *_common_argv(args),
+        "", os.path.join(cfg_dir, "post_train", "rl.yml"), *_common_argv(args, layers),
         "attention=flash",
         "prefuse_moe_weights=True",
         "model_call_mode=inference",
@@ -130,7 +130,7 @@ def build_sampler_config(args, shard):
     ], config_class=types.RLConfig)
 
   return pyconfig.initialize([
-      "", os.path.join(cfg_dir, "inference", "vllm.yml"), *_common_argv(args),
+      "", os.path.join(cfg_dir, "inference", "vllm.yml"), *_common_argv(args, layers),
       "attention=vllm_rpa",
       "prefuse_moe_weights=True",
       "model_call_mode=inference",
@@ -146,6 +146,35 @@ def build_sampler_config(args, shard):
       f"ici_expert_parallelism={shard}",
       f"ici_data_parallelism={args.devices // shard}",
   ], config_class=types.RLConfig)
+
+
+def slice_layers(host_params, full_layers, keep):
+  """Keep the first `keep` decoder layers of a scanned checkpoint.
+
+  With scan_layers=True every per-layer parameter is one stacked array whose
+  leading dimension is num_layers, so truncating depth is a slice. Embeddings,
+  the final norm and the output head have no such axis and pass through.
+
+  This exists because the vLLM mesh caps weight sharding at num_kv_heads (2 for
+  Qwen3.5-35B-A3B), so a full-depth sampler does not fit a 4-chip host -- while
+  random weights are not an option either, since bf16 error scales with logit
+  magnitude. Slicing keeps trained weights and a real logit range.
+  """
+  n_sliced = n_kept = 0
+
+  def _slice(x):
+    nonlocal n_sliced, n_kept
+    a = np.asarray(x)
+    if a.ndim >= 1 and a.shape[0] == full_layers:
+      n_sliced += 1
+      return a[:keep]
+    n_kept += 1
+    return a
+
+  out = jax.tree_util.tree_map(_slice, host_params)
+  print(f"  sliced {n_sliced} stacked per-layer arrays {full_layers} -> {keep}; "
+        f"{n_kept} arrays had no layer axis and were left alone")
+  return out
 
 
 def copy_weights(src_state, dst_state):
@@ -242,7 +271,11 @@ def main():
                  help="REQUIRED for a trustworthy number. Random weights give logits ~100x too "
                       "large, and bf16 resolution is relative to magnitude, so quantisation "
                       "noise swamps the path difference.")
-  p.add_argument("--layers", type=int, default=0, help="0 = use the model's real depth (required when loading a checkpoint); otherwise a multiple of 4, since GDN layers interleave every 4")
+  p.add_argument("--layers", type=int, default=8,
+                 help="working depth. The checkpoint is loaded at full depth and its stacked "
+                      "per-layer arrays are sliced to this many, so weights stay real while the "
+                      "model fits. Use a multiple of 4: GDN layers interleave every 4 "
+                      "(inhomogeneous_layer_cycle_interval). 0 = full depth.")
   p.add_argument("--seq_len", type=int, default=512)
   p.add_argument("--batch", type=int, default=4,
                  help="must be divisible by the data/fsdp axis (4 on a v5p-8)")
@@ -259,13 +292,13 @@ def main():
     args.devices = jax.device_count()
 
   print(f"devices: {jax.device_count()} x {jax.devices()[0].device_kind}")
-  trainer_cfg = build_trainer_config(args)
+  trainer_cfg = build_trainer_config(args, layers=args.layers)
   kv = getattr(trainer_cfg, "num_kv_heads", None) or trainer_cfg.base_num_kv_heads
   shard = math.gcd(args.devices, kv)
   print(f"num_kv_heads={kv} -> sampler shards {shard}-way on 'expert' and "
         f"replicates {args.devices // shard}-way on 'data' "
         f"(vllm.yml:63 puts kv_heads on both 'model' and 'expert')")
-  sampler_cfg = build_sampler_config(args, shard)
+  sampler_cfg = build_sampler_config(args, shard, layers=args.layers)
   for name, c in (("trainer", trainer_cfg), ("sampler", sampler_cfg)):
     print(f"{name:8s} attention={c.attention:12s} prefuse_moe_weights={c.prefuse_moe_weights} "
           f"float32_gate_logits={c.float32_gate_logits} model_call_mode={getattr(c,'model_call_mode','train')}")
@@ -330,44 +363,54 @@ def main():
     del lg, finite, stats
     return np.asarray(lp)
 
-  # ---- trainer path, then release it before the sampler is built -----------
+  # ---- stage 1: load the checkpoint at full depth, purely to get weights ---
   src = f"checkpoint {args.load_parameters_path}" if args.load_parameters_path else "RANDOM WEIGHTS"
-  print(f"\nbuilding trainer-path model from {src} ...")
-  mesh_train = maxtext_utils.get_mesh_from_config(trainer_cfg, devices)
   global _RANDOM_WEIGHTS
   _RANDOM_WEIGHTS = not args.load_parameters_path
+  full_cfg = build_trainer_config(args, layers=0)
+  print(f"\nloading {src} at full depth ({full_cfg.num_decoder_layers} layers) ...")
+  mesh_full = maxtext_utils.get_mesh_from_config(full_cfg, devices)
   if args.load_parameters_path:
-    m_train = model_creation_utils.from_pretrained(
-        trainer_cfg, mesh=mesh_train, rng_key=jax.random.PRNGKey(args.seed))
+    m_full = model_creation_utils.from_pretrained(
+        full_cfg, mesh=mesh_full, rng_key=jax.random.PRNGKey(args.seed))
   else:
     print("  !! NO CHECKPOINT -- see the warning at the end; the result will not be usable")
-    rngs = maxtext_utils_nnx.create_nnx_rngs(trainer_cfg, rng_key=jax.random.PRNGKey(args.seed))
-    m_train = model_creation_utils.from_config(trainer_cfg, mesh=mesh_train, rngs=rngs)
+    m_full = model_creation_utils.from_config(
+        full_cfg, mesh=mesh_full,
+        rngs=maxtext_utils_nnx.create_nnx_rngs(full_cfg, rng_key=jax.random.PRNGKey(args.seed)))
+  hbm("after full-depth load")
+
+  host_params = jax.device_get(nnx.state(m_full, nnx.Param))
+  del m_full
+  gc.collect()
+  hbm("after staging to host")
+  if args.layers:
+    host_params = slice_layers(host_params, full_cfg.num_decoder_layers, args.layers)
+
+  # ---- stage 2: trainer path at the working depth --------------------------
+  print("\nbuilding trainer-path model...")
+  mesh_train = maxtext_utils.get_mesh_from_config(trainer_cfg, devices)
+  m_train = model_creation_utils.from_config(
+      trainer_cfg, mesh=mesh_train,
+      rngs=maxtext_utils_nnx.create_nnx_rngs(trainer_cfg, rng_key=jax.random.PRNGKey(args.seed)))
+  nnx.update(m_train, copy_weights(host_params, nnx.state(m_train, nnx.Param)))
   hbm("after trainer build")
-
-  print("\nforward pass: trainer path...")
+  print("forward pass: trainer path...")
   lp_train = score(m_train, trainer_cfg, mesh_train, "trainer")
-
-  # Both models will not fit at once, so stage the weights on the host and drop
-  # the trainer before the sampler is constructed. Fusing wi_0/wi_1 -> wi here,
-  # on host, also avoids ever holding both layouts in HBM.
-  print("\nstaging trainer weights to host and releasing the device...")
-  host_params = jax.device_get(nnx.state(m_train, nnx.Param))
   del m_train
   gc.collect()
   hbm("after releasing trainer")
 
-  print("building sampler-path model...")
+  # ---- stage 3: sampler path ----------------------------------------------
+  print("\nbuilding sampler-path model...")
   mesh_samp = maxtext_utils.get_mesh_from_config(sampler_cfg, devices)
-  rngs2 = maxtext_utils_nnx.create_nnx_rngs(sampler_cfg, rng_key=jax.random.PRNGKey(args.seed))
-  m_samp = model_creation_utils.from_config(sampler_cfg, mesh=mesh_samp, rngs=rngs2)
-  hbm("after sampler build")
-
-  print("copying weights trainer -> sampler so the ONLY difference is the code path...")
+  m_samp = model_creation_utils.from_config(
+      sampler_cfg, mesh=mesh_samp,
+      rngs=maxtext_utils_nnx.create_nnx_rngs(sampler_cfg, rng_key=jax.random.PRNGKey(args.seed)))
   nnx.update(m_samp, copy_weights(host_params, nnx.state(m_samp, nnx.Param)))
   del host_params
   gc.collect()
-  hbm("after weight copy")
+  hbm("after sampler build")
 
   print("\nforward pass: sampler path...")
   lp_samp = score(m_samp, sampler_cfg, mesh_samp, "sampler")
