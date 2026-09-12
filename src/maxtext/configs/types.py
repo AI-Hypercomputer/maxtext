@@ -1380,6 +1380,7 @@ class HardwareAndMesh(BaseModel):
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
+  mesh_ring_axis: str = Field("", description="Logical mesh axis to lay out as a physical TPU ring; empty disables.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
