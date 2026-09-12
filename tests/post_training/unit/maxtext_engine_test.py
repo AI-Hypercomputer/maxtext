@@ -250,9 +250,14 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertEqual(recorded.shape, (1,), "one norm per update, not one per micro-batch")
     np.testing.assert_allclose(recorded[0], np.sqrt(2 * 0.25**2), rtol=1e-5)
 
+  @mock.patch("orbax.checkpoint.PyTreeCheckpointHandler")
   @mock.patch("orbax.checkpoint.CheckpointManager")
-  def test_max_text_trainer_checkpoint_manager_init(self, mock_create_mgr):
-    mock_config = self.setup_config(enable_checkpointing=True)
+  def test_max_text_trainer_checkpoint_manager_init(self, mock_create_mgr, mock_handler):
+    mock_config = self.setup_config(
+        enable_checkpointing=True,
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+    )
 
     _ = maxtext_engine.MaxTextTrainingEngine(mock_config)
     mock_create_mgr.assert_called_once_with(
@@ -262,6 +267,16 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
             max_to_keep=mock_config.max_num_checkpoints_to_keep,
             enable_async_checkpointing=mock_config.async_checkpointing,
         ),
+        item_handlers={
+            "model_params": mock_handler.return_value,
+            "optimizer_state": mock_handler.return_value,
+            "accumulated_metrics": mock_handler.return_value,
+            "accumulated_grads": mock_handler.return_value,
+        },
+    )
+    self.assertEqual(mock_handler.call_count, 4)
+    mock_handler.assert_has_calls(
+        [mock.call(use_ocdbt=False, use_zarr3=False)] * 4,
     )
 
   def test_save_checkpoint_called_after_update(self):
