@@ -3931,6 +3931,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
   """Maps MaxText parameter keys to HuggingFace parameter keys for DeepSeek V4."""
   n_layers = config["num_hidden_layers"]
   num_experts = config.get("n_routed_experts", 8)
+  num_hash_layers = config.get("num_hash_layers", getattr(maxtext_config, "first_num_hash_layers", 3))
 
   mapping = {
       "params-token_embedder-embedding": "model.embed_tokens.weight",
@@ -4007,7 +4008,8 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
         f"{mt_layer_path}-mlp-MoeBlock_0-wo": get_hf_expert_keys("w2.weight"),
     }
 
-    if (is_list and hf_layer_indices[0] >= 3) or (not is_list and hf_layer_indices >= 3):
+    first_l_idx = hf_layer_indices[0] if is_list else hf_layer_indices
+    if first_l_idx >= num_hash_layers:
       layer_map[f"{mt_layer_path}-mlp-MoeBlock_0-gate-bias"] = get_hf_key("mlp.gate.e_score_correction_bias")
 
     first_idx = hf_layer_indices[0] if is_list else hf_layer_indices
@@ -4071,12 +4073,12 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
     for i in range(n_layers):
       add_layer_mapping(f"params-decoder-layers_{i}", i)
   else:
-    for i in range(3):
+    for i in range(num_hash_layers):
       add_layer_mapping(f"params-decoder-layers_{i}", i)
-    add_layer_mapping("params-decoder-scanned_blocks-layers_0", list(range(3, n_layers, 2)))
-    add_layer_mapping("params-decoder-scanned_blocks-layers_1", list(range(4, n_layers, 2)))
+    add_layer_mapping("params-decoder-scanned_blocks-layers_0", list(range(num_hash_layers, n_layers, 2)))
+    add_layer_mapping("params-decoder-scanned_blocks-layers_1", list(range(num_hash_layers + 1, n_layers, 2)))
 
-  for i in range(3):
+  for i in range(num_hash_layers):
     mapping[f"Tid2EidVar-decoder-layers_{i}-mlp-MoeBlock_0-tid2eid"] = f"model.layers.{i}.mlp.gate.tid2eid"
 
   return mapping
@@ -4293,6 +4295,7 @@ PARAM_MAPPING = {
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-284b": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek4.1-flash": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4350,6 +4353,7 @@ HOOK_FNS = {
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-tiny": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-284b": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek4.1-flash": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
