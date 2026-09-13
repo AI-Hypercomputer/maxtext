@@ -19,8 +19,8 @@
 # Workflow:
 #   1. Convert two HF checkpoints to MaxText format for checkpoint stitching (to_maxtext)
 #   2. Stitch Vision Tower + Fresh MLP Projector + LLM Decoder (stitch_checkpoint)
-#   3. Pretrain Projector for Multimodal Alignment on ChartNet (train_sft_omni)
-#   4. Supervised Fine-Tuning Projector on ChartQA train split (train_sft_omni)
+#   3. SFT Stage 1: Projector Alignment on ChartNet (train_sft_omni)
+#   4. SFT Stage 2: Projector Task Fine-Tuning on ChartQA (train_sft_omni)
 #   5. Multimodal Quality Evaluation on ChartQA test split (eval_sft_omni)
 #
 # Usage:
@@ -167,9 +167,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# STEP 3: Pretrain / Align Vision Projector (ChartNet)
+# STEP 3: SFT Stage 1 — Projector Alignment (ChartNet)
 # ------------------------------------------------------------------------------
-echo -e "\n=== [Step 3/5] Pretraining Vision Projector (ChartNet) ==="
+echo -e "\n=== [Step 3/5] SFT Stage 1: Projector Alignment (ChartNet) ==="
 if [ -n "${PRETRAIN_STEPS}" ]; then
   python3 -m maxtext.experimental.omni_poc.train_sft_omni \
     src/maxtext/experimental/omni_poc/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml \
@@ -194,12 +194,12 @@ if [ -z "$PRETRAIN_FINAL_CKPT" ]; then
   echo "Error: Pretrain checkpoint not found in ${PRETRAIN_DIR}/${PRETRAIN_RUN_NAME}/checkpoints."
   exit 1
 fi
-echo "--> Pretrained Checkpoint: ${PRETRAIN_FINAL_CKPT}"
+echo "--> Stage 1 Alignment Checkpoint: ${PRETRAIN_FINAL_CKPT}"
 
 # ------------------------------------------------------------------------------
-# STEP 4: Supervised Fine-Tuning (ChartQA)
+# STEP 4: SFT Stage 2 — Projector Task Fine-Tuning (ChartQA)
 # ------------------------------------------------------------------------------
-echo -e "\n=== [Step 4/5] Supervised Fine-Tuning (ChartQA) ==="
+echo -e "\n=== [Step 4/5] SFT Stage 2: Projector Task Fine-Tuning (ChartQA) ==="
 if [ -n "${SFT_STEPS}" ]; then
   python3 -m maxtext.experimental.omni_poc.train_sft_omni \
     src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
