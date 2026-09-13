@@ -250,6 +250,7 @@ ModelName = Literal[
     "deepseek3.2-671b",
     "deepseek4-tiny",
     "deepseek4-284b",
+    "deepseek4.1-flash",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -4890,8 +4891,8 @@ class MaxTextConfig(
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
     for val in self.compress_ratios:
-      if val != 0 and val < 4:
-        raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
+      if val < 0:
+        raise ValueError(f"compress_ratio must be >= 0, got {val}")
 
     if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.mtp_num_layers > 0:
       raise ValueError("DeepSeek4 decoder block currently does not support MTP layers.")
