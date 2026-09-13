@@ -1960,14 +1960,14 @@ class RoutedMoeTest(parameterized.TestCase):
     shape = (6, 4)
 
     def emitted_primitives(zero_init):
-      jaxpr = jax.make_jaxpr(lambda: moe._ragged_all_to_all_output_buffer(shape, jnp.bfloat16, zero_init=zero_init))()
+      jaxpr = jax.make_jaxpr(lambda: moe._initialize_buffer(shape, jnp.bfloat16, zero_init=zero_init))()
       return [str(eqn.primitive) for eqn in jaxpr.jaxpr.eqns]
 
     # Empty buffers may read as zero, so the emitted primitive distinguishes the allocation paths.
     self.assertNotIn("empty", emitted_primitives(zero_init=True))
     self.assertIn("empty", emitted_primitives(zero_init=False))
 
-    zeroed = moe._ragged_all_to_all_output_buffer(shape, jnp.bfloat16, zero_init=True)
+    zeroed = moe._initialize_buffer(shape, jnp.bfloat16, zero_init=True)
     self.assertEqual((zeroed.shape, zeroed.dtype), (shape, jnp.bfloat16))
     np.testing.assert_array_equal(np.asarray(zeroed, dtype=np.float32), np.zeros(shape, np.float32))
 
@@ -2007,7 +2007,7 @@ class RoutedMoeTest(parameterized.TestCase):
     poisoned = weighted_unpermute(replay_combine(np.full((rows, emb), np.nan, np.float32)))
     self.assertTrue(np.isnan(poisoned[int(dropped[0]) // top_k]).all())
 
-    combined = replay_combine(moe._ragged_all_to_all_output_buffer((rows, emb), jnp.float32, zero_init=True))
+    combined = replay_combine(moe._initialize_buffer((rows, emb), jnp.float32, zero_init=True))
     np.testing.assert_array_equal(combined[dropped], 0.0)
     np.testing.assert_array_equal(weighted_unpermute(combined)[int(dropped[0]) // top_k], 0.5 * marker[3])
 

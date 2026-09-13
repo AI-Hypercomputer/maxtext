@@ -127,8 +127,8 @@ def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax
   return jnp.diff(clamped_cumsum_extended, axis=0)
 
 
-def _ragged_all_to_all_output_buffer(shape, dtype, zero_init: bool) -> jax.Array:
-  """Creates a zeroed or uninitialized ragged all-to-all output buffer."""
+def _initialize_buffer(shape, dtype, zero_init: bool) -> jax.Array:
+  """Creates a zeroed or uninitialized output buffer."""
   if zero_init:
     return jnp.zeros(shape, dtype=dtype)
   return jax.lax.empty(shape, dtype=dtype)
@@ -2657,7 +2657,7 @@ class RoutedMoE(nnx.Module):
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         if routing.sorted_selected_experts.shape[0] != original_inputs_first_dim:
           raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
-        output_shape = _ragged_all_to_all_output_buffer(
+        output_shape = _initialize_buffer(
             (
                 original_inputs_first_dim,
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
