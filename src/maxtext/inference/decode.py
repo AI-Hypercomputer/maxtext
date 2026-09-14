@@ -24,7 +24,7 @@ from absl import app
 
 from maxtext.configs import pyconfig
 from maxtext.common import profiler
-from maxtext.common.gcloud_stub import jetstream, is_decoupled
+from maxtext.common.gcloud_stub import jetstream
 from maxtext.inference.maxengine import maxengine
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
@@ -87,6 +87,14 @@ def _batch_first_result_token(first_tokens: list[Any], batch_size: int):
 
 
 def main(argv: Sequence[str]) -> None:
+  token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+  engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+  if token_params_is_stub or engine_api_is_stub:
+    raise RuntimeError(
+        "JetStream is not installed or disabled by DECOUPLE_GCLOUD=TRUE; maxtext.inference.decode requires JetStream. "
+        "Unset DECOUPLE_GCLOUD or install optional dependencies with: install_tpu_pre_train_extra_deps --with-tf"
+    )
+
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
@@ -120,13 +128,6 @@ def main(argv: Sequence[str]) -> None:
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
-  engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
-  if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
-    raise RuntimeError(
-        "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; decode requires the JetStream tokenizer. "
-        "Unset DECOUPLE_GCLOUD or install JetStream to run decode."
-    )
 
   try:
     # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.

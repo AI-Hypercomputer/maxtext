@@ -17,7 +17,10 @@
 import types
 import unittest
 import numpy as np
-import tensorflow as tf
+import pytest
+
+tf = pytest.importorskip("tensorflow")
+tfds = pytest.importorskip("tensorflow_datasets")
 
 from maxtext.input_pipeline.tfds_data_processing_c4_mlperf import (
     _pad_to_batch_size,

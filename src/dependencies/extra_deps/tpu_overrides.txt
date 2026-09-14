@@ -2,7 +2,5 @@ datasets>=4.8.5
 fsspec==2026.2.0
 gcsfs==2026.2.0
 orbax-checkpoint>=0.12.4
-tensorflow==2.20.0
-tensorflow-text==2.20.1
 markdown>=3.10.2
 xprof<=2.23.0

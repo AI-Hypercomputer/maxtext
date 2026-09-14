@@ -1,5 +1,10 @@
 #!/bin/bash
 
+
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
 CONFIG_PATH="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext}/configs/base.yml"
 if [ "${DECOUPLE_GCLOUD^^}" = "TRUE" ]; then
   CONFIG_PATH="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext}/configs/decoupled_base_test.yml"

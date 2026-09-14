@@ -12,6 +12,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=65536"
 export MODEL_NAME='qwen3.5-35b-a3b'
 export TOKENIZER_PATH='Qwen/Qwen3.5-35B-A3B'

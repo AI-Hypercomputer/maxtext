@@ -35,12 +35,8 @@ pylint
 pytest
 pytype
 sentencepiece
-seqio
 tensorboard-plugin-profile
 tensorboardx
-tensorflow-datasets
-tensorflow-text
-tensorflow
 tiktoken
 tokamax!=0.1.0
 transformers>=5.8.0
