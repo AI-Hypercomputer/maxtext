@@ -36,7 +36,7 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
 
    ```
       python3 -m maxtext.trainers.pre_train.train \
-         run_name=${USER}-tpu-job \
+         run_name=<RUN_NAME> \
          base_output_directory="gs://<GCS_BUCKET>/" \
          dataset_path="gs://<DATASET_PATH>/" \
          steps=100 \
@@ -48,7 +48,7 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
 
    ```
       python3 -m maxtext.trainers.pre_train.train \
-         run_name=${USER}-tpu-job \
+         run_name=<RUN_NAME> \
          base_output_directory="gs://<GCS_BUCKET>/" \
          dataset_path="gs://<DATASET_PATH>/" \
          steps=100 \
@@ -61,7 +61,7 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
 
    ```
       python3 -m maxtext.trainers.pre_train.train \
-         run_name=${USER}-tpu-job \
+         run_name=<RUN_NAME> \
          base_output_directory="gs://<GCS_BUCKET>/" \
          dataset_path="gs://<DATASET_PATH>/" \
          steps=100 \

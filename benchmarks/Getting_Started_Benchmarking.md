@@ -9,17 +9,17 @@ For new GKE runs, submit each benchmark as a Cluster Toolkit JobSet. Authenticat
 to the cluster and configure `gcluster` before submitting:
 
 ```bash
-export PROJECT="<PROJECT_ID>"
-export CLUSTER="<CLUSTER_NAME>"
-export LOCATION="<ZONE>" # e.g. europe-west4 (region) or us-central1-a (zone)
+export PROJECT=<PROJECT_ID>
+export CLUSTER=<CLUSTER_NAME>
+export LOCATION=<ZONE> # e.g. europe-west4 (region) or us-central1-a (zone)
 
-gcloud config set project ${PROJECT?}
-gcloud container clusters get-credentials ${CLUSTER?} \
-  --location ${LOCATION?} \
-  --project ${PROJECT?}
-gcluster job config set project ${PROJECT?}
-gcluster job config set cluster ${CLUSTER?}
-gcluster job config set location ${LOCATION?}
+gcloud config set project <PROJECT_ID>
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> \
+  --project <PROJECT_ID>
+gcluster job config set project <PROJECT_ID>
+gcluster job config set cluster <CLUSTER_NAME>
+gcluster job config set location <ZONE>
 ```
 
 Then use the image, compute type, and topology for the target cluster:
@@ -57,7 +57,7 @@ automation, but it is not a Cluster Toolkit submission path.
 CLUSTER=my-cluster
 ZONE=my-zone
 PROJECT=my-project
-python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
+python3 -m benchmarks.benchmark_runner xpk --project <PROJECT_ID> --zone <ZONE> --cluster_name <CLUSTER_NAME> --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
 ```
 
 ```shell
@@ -66,7 +66,7 @@ export RUNNER=us-docker.pkg.dev/path/to/maxtext_runner
 export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server
 export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server
 
-python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5 --pathways_server_image="${SERVER_IMAGE?}" --pathways_proxy_server_image="${PROXY_IMAGE?}" --pathways_runner_image="${RUNNER?}"
+python3 -m benchmarks.benchmark_runner xpk --project <PROJECT_ID> --zone <ZONE> --cluster_name <CLUSTER_NAME> --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5 --pathways_server_image=<SERVER_IMAGE> --pathways_proxy_server_image=<PROXY_IMAGE> --pathways_runner_image=<RUNNER_IMAGE>
 ```
 
 ```shell
