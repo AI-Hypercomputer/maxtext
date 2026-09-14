@@ -154,7 +154,7 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       dtype="bfloat16",
       tensor_parallel_size=8,
       enable_expert_parallel=True,
-      max_model_len=4096,
+      max_model_len=max(4096, SEQ_LEN + args.gen_tokens + 64),
       max_num_seqs=16,
       max_num_batched_tokens=2048,
       block_size=256,
@@ -240,10 +240,38 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       tid = int(tokens[b, i])
       logp[b, i] = d[tid].logprob if tid in d else np.nan
       top1[b, i] = max(d.items(), key=lambda kv: kv[1].logprob)[0]
-  path = os.path.join(out_dir, f"sampler_{args.sampler}_logprobs.npz")
-  np.savez(path, logp=logp, top1=top1, tokens=tokens)
-  log(f"sampler: saved {path}; mean logp={np.nanmean(logp[:, 1:]):.4f} "
+  saved = dict(logp=logp, top1=top1, tokens=tokens)
+  log(f"sampler: prompt pass done; mean logp={np.nanmean(logp[:, 1:]):.4f} "
       f"top-1 acc={np.mean(top1[:, 1:] == tokens[:, 1:]):.3f}")
+
+  if args.gen_tokens > 0:
+    # Decode path: real rollouts from the same prompts. gen_logp[b, i] is the sampler's own logprob of
+    # the token it sampled at step i -- the quantity an RL trainer would store as pi_gen for that token.
+    # No per-request seed: the JAX/TPU path rejects it ("JAX does not support per-request seed").
+    # Determinism comes from the engine-level seed=0 above.
+    gsp = SamplingParams(max_tokens=args.gen_tokens, min_tokens=args.gen_tokens, temperature=args.gen_temperature,
+                         top_p=1.0, top_k=-1, logprobs=1, ignore_eos=True)
+    log(f"sampler: generating {args.gen_tokens} tokens x {len(tokens)} prompts (temperature={args.gen_temperature})")
+    gouts = llm.generate([TokensPrompt(prompt_token_ids=[int(t) for t in row]) for row in tokens], gsp)
+    gen_ids = np.full((len(tokens), args.gen_tokens), -1, np.int32)
+    gen_logp = np.full((len(tokens), args.gen_tokens), np.nan, np.float32)
+    for b, o in enumerate(gouts):
+      c = o.outputs[0]
+      ids = list(c.token_ids)
+      n = min(len(ids), args.gen_tokens)
+      gen_ids[b, :n] = ids[:n]
+      for i in range(n):
+        d = c.logprobs[i]
+        gen_logp[b, i] = d[ids[i]].logprob if ids[i] in d else np.nan
+      if n < args.gen_tokens:
+        log(f"sampler: WARNING prompt {b} returned {n} < {args.gen_tokens} tokens")
+    saved.update(gen_ids=gen_ids, gen_logp=gen_logp)
+    log(f"sampler: generation done; mean gen logp={np.nanmean(gen_logp):.4f}")
+    del gouts
+
+  path = os.path.join(out_dir, f"sampler_{args.sampler}_logprobs.npz")
+  np.savez(path, **saved)
+  log(f"sampler: saved {path}")
 
   # Release the engine's weights and KV cache before the trainer loads its own copy of the 35B.
   del outs, llm
@@ -272,7 +300,19 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
   import maxtext.configs as maxtext_configs
 
   base_yml = os.path.join(os.path.dirname(maxtext_configs.__file__), "base.yml")
-  tokens_np = np.load(os.path.join(out_dir, "tokens.npz"))["tokens"]
+  prompt_np = np.load(os.path.join(out_dir, "tokens.npz"))["tokens"]
+
+  # If the sampler produced rollouts, teacher-force over prompt+generated so the same forward pass yields
+  # the trainer's logprob for every sampled token.
+  sa_path = os.path.join(out_dir, f"sampler_{args.sampler}_logprobs.npz")
+  gen_ids = None
+  if os.path.exists(sa_path):
+    sa = np.load(sa_path)
+    if "gen_ids" in sa.files:
+      gen_ids = sa["gen_ids"]
+  tokens_np = prompt_np if gen_ids is None else np.concatenate([prompt_np, gen_ids], axis=1).astype(np.int32)
+  seq_len = tokens_np.shape[1]
+  log(f"trainer: scoring {tokens_np.shape} ({'prompt only' if gen_ids is None else f'prompt {SEQ_LEN} + gen {gen_ids.shape[1]}'})")
 
   cfg = pyconfig.initialize(
       [sys.argv[0], base_yml, "attention=flash"],
@@ -287,8 +327,8 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       convert_checkpoint_if_possible=False,
       dtype="bfloat16",
       weight_dtype="bfloat16",
-      max_target_length=SEQ_LEN,
-      max_prefill_predict_length=SEQ_LEN,
+      max_target_length=seq_len,
+      max_prefill_predict_length=seq_len,
       per_device_batch_size=1.0,
       log_config=False,
       # Single host, and when the sampler stage ran first the vLLM engine has already brought up the JAX
@@ -317,29 +357,41 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
   log("trainer model loaded")
   gd, st = nnx.split(model)
 
+  # Gather the per-token logprob inside jit: the full [B, S, vocab] log_softmax is ~42 GB at S=8704, far
+  # too big to pull to the host, while the gathered [B, S] result is a few hundred KB.
   @jax.jit
-  def fwd(st, tokens, pos, seg):
+  def fwd_logp(st, tokens, pos, seg, nxt):
     m = nnx.merge(gd, st)
     with nn.logical_axis_rules(cfg.logical_axis_rules):
       out = m(tokens, pos, seg, enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
-    return out[0] if isinstance(out, tuple) else out
+    logits = out[0] if isinstance(out, tuple) else out
+    lp = jax.nn.log_softmax(logits.astype(jnp.float32), -1)
+    return jnp.take_along_axis(lp, nxt[..., None], -1)[..., 0], jnp.argmax(lp, -1).astype(jnp.int32)
 
+  nxt_np = np.roll(tokens_np, -1, axis=1)
   with mesh, nn.logical_axis_rules(cfg.logical_axis_rules):
     sh = NamedSharding(mesh, P(("data", "fsdp"), None))
     tokens = jax.device_put(tokens_np, sh)
-    pos = jax.device_put(np.broadcast_to(np.arange(SEQ_LEN, dtype=np.int32), (B, SEQ_LEN)), sh)
-    seg = jax.device_put(np.ones((B, SEQ_LEN), np.int32), sh)
-    logits = fwd(st, tokens, pos, seg)
-    jax.block_until_ready(logits)
+    pos = jax.device_put(np.broadcast_to(np.arange(seq_len, dtype=np.int32), (B, seq_len)), sh)
+    seg = jax.device_put(np.ones((B, seq_len), np.int32), sh)
+    nxt = jax.device_put(nxt_np, sh)
+    logp_d, top1_d = fwd_logp(st, tokens, pos, seg, nxt)
+    jax.block_until_ready(logp_d)
+  logp = np.asarray(logp_d)
+  top1 = np.asarray(top1_d)
 
-  lp = np.asarray(jax.nn.log_softmax(logits.astype(jnp.float32), -1))
-  nxt = np.roll(tokens_np, -1, axis=1)
-  logp = np.take_along_axis(lp, nxt[..., None], -1)[..., 0]
-  top1 = lp.argmax(-1)
   acc = np.mean(top1[:, :-1] == tokens_np[:, 1:])
+  saved = dict(logp=logp, top1=top1, tokens=prompt_np, full_tokens=tokens_np)
+  msg = f"mean logp={logp[:, :-1].mean():.4f} next-token top-1 acc={acc:.3f} (ckpt sanity)"
+  if gen_ids is not None:
+    # logp[:, i] scores token i+1, so the sampled token at generated index j (absolute index SEQ_LEN+j)
+    # is scored by logp[:, SEQ_LEN + j - 1].
+    gen_logp_trainer = logp[:, SEQ_LEN - 1 : seq_len - 1]
+    saved["gen_logp"] = gen_logp_trainer
+    msg += f"; mean gen logp={gen_logp_trainer.mean():.4f}"
   path = os.path.join(out_dir, "trainer_logprobs.npz")
-  np.savez(path, logp=logp, top1=top1, tokens=tokens_np)
-  log(f"trainer: saved {path}; mean logp={logp[:, :-1].mean():.4f} next-token top-1 acc={acc:.3f} (ckpt sanity)")
+  np.savez(path, **saved)
+  log(f"trainer: saved {path}; {msg}")
   return path
 
 
@@ -425,13 +477,30 @@ def stage_compare(args, out_dir):
   sa = np.load(sa_path)
   if not np.array_equal(tr["tokens"], sa["tokens"]):
     raise SystemExit("trainer and sampler ran on different tokens; delete the npz files and rerun")
-  m = compare(tr["logp"][:, :-1], sa["logp"][:, 1:])
   label = "MaxText-in-vLLM (adapter)" if args.sampler == "adapter" else "native tpu-inference"
-  print_report(f"MaxText trainer vs {label} sampler — Qwen3.5-35B-A3B bf16/bf16, full model", m)
+  head = f"MaxText trainer vs {label} sampler — Qwen3.5-35B-A3B bf16/bf16, full model"
+
+  # The trainer's logp spans prompt+generated when rollouts were run, so bound the prompt comparison by the
+  # sampler's prompt width rather than using the whole row.
+  n_prompt = sa["logp"].shape[1]
+  m = compare(tr["logp"][:, : n_prompt - 1], sa["logp"][:, 1:n_prompt])
+  print_report(f"{head} — PROMPT tokens (teacher-forced, prefill)", m)
+  out = {f"prompt_{k}": v for k, v in m.items()}
+
+  if "gen_logp" in sa.files and "gen_logp" in tr.files:
+    # Decode path. Both arrays are already indexed by generated position j, so no shift is needed:
+    # the sampler reports its logprob for the token it sampled at step j, and the trainer's teacher-forced
+    # logprob for that same token was sliced to match in stage_trainer.
+    mg = compare(tr["gen_logp"], sa["gen_logp"])
+    print_report(f"{head} — OUTPUT tokens (sampled, decode)", mg)
+    out.update({f"output_{k}": v for k, v in mg.items()})
+  else:
+    print("\n(no rollouts in these npz files; rerun with --gen-tokens N for the output-token row)")
+
   path = os.path.join(out_dir, f"parity_{args.sampler}.npz")
-  np.savez(path, **{k: v for k, v in m.items()})
+  np.savez(path, **out)
   print(f"\nsaved {path}")
-  return m
+  return out
 
 
 # ---------------------------------------------------------------- driver
@@ -451,6 +520,9 @@ def main():
   ap.add_argument("--hf-home", default=None)
   ap.add_argument("--maxtext-root", default=None)
   ap.add_argument("--ckpt", default=CKPT, help="MaxText-format checkpoint for the trainer and the adapter")
+  ap.add_argument("--gen-tokens", type=int, default=0,
+                  help="if >0, also roll out this many output tokens per prompt and compare the decode path")
+  ap.add_argument("--gen-temperature", type=float, default=1.0, help="sampling temperature for the rollouts")
   ap.add_argument("--attn-dp", type=int, default=4, help="attention DP degree inside the tp=8 mesh")
   ap.add_argument("--gpu-memory-utilization", type=float, default=0.5)
   ap.add_argument("--text-glob", default="docs/**/*.md", help="corpus glob, relative to the MaxText tree")
