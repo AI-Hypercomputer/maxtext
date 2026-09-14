@@ -1109,6 +1109,32 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_qwen3_8(self):
+    """AOT test for qwen3-8 at full width, truncated to two 4-layer [GDN x3, full-attention] cycles.
+
+    Needs expert parallelism: under pure FSDP, gathering one layer's 512 routed experts in fp32 exceeds v5p HBM.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_8.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.8-2.4t-a95b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
+            "ici_expert_parallelism=8",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+        )
+    )
+
   def test_qwen3_next_explicit_sharding(self):
     """AOT test for qwen3-next under explicit sharding, at FSDP 32 x expert 8.
 
