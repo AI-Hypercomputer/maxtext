@@ -334,6 +334,12 @@ class RunInfo(BaseModel):
   )
   debug_sharding: bool = Field(False, description="If True, print model weight sharding details.")
   base_output_directory: PathStr = Field("", description="Base directory for all outputs, typically a GCS path.")
+  enable_mllog: bool = Field(False, description="If True, enables MLPerf logging (mllog).")
+  mllog_file: None | PathStr = Field(
+      "",
+      description="Optional filename or path for mllog export in base_output_directory "
+      "(defaults to 'mllog_<data_shuffle_seed>.log').",
+  )
   sharding_strategy: None | Literal["experimental"] = Field(
       None,
       description="Experimental sharding strategy used for some inference configs.",
@@ -3568,6 +3574,20 @@ class MaxTextConfig(
           f"({self.num_kv_heads}) to be divisible by ici_context_usp_ulysses_parallelism ({usp_ulysses_size})."
       )
 
+  def validate_mllog(self):
+    """
+    Validates that MLPerf logging is only enabled for runs that can produce a compliant log.
+
+    The compliance checker requires at least one eval_accuracy event (REQ: AT_LEAST_ONE in
+    common.yaml), so a run without evaluation can never pass, and its block_start would carry a
+    negative samples_count derived from eval_interval.
+    """
+    if self.enable_mllog and self.eval_interval <= 0:
+      raise ValueError(
+          f"enable_mllog=True requires eval_interval > 0 (got {self.eval_interval}). MLPerf compliance "
+          "requires at least one eval_accuracy event, which a run without evaluation cannot emit."
+      )
+
   def validate_num_moe_emb_chunks(self):
     """
     Validates that num_moe_emb_chunks is used with supported settings.
@@ -3732,6 +3752,13 @@ class MaxTextConfig(
       # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
       telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
       self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
+      if self.enable_mllog:
+        if not self.mllog_file:
+          self.mllog_file = os.path.join(output_dir, f"mllog_{self.data_shuffle_seed}.log")
+        elif not self.mllog_file.startswith("gs://") and not os.path.isabs(self.mllog_file):
+          self.mllog_file = os.path.join(output_dir, self.mllog_file)
+      else:
+        self.mllog_file = ""
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
           None,
@@ -4471,6 +4498,7 @@ class MaxTextConfig(
       self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_mllog()
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:

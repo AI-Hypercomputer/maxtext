@@ -96,6 +96,18 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_enable_mllog_requires_eval(self):
+    """MLPerf compliance needs at least one eval_accuracy event, so eval must be on."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=-1"]
+    with self.assertRaises(pydantic.ValidationError) as context:
+      pyconfig.initialize(argv)
+    self.assertIn("enable_mllog=True requires eval_interval > 0", str(context.exception))
+
+  def test_enable_mllog_accepted_with_eval(self):
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=1"]
+    config = pyconfig.initialize(argv)
+    self.assertTrue(config.enable_mllog)
+
   def test_te_moe_block_rejects_unsupported_options_during_config_validation(self):
     common_config = {
         "run_name": "test",
