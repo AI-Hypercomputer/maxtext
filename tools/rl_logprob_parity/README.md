@@ -32,6 +32,26 @@ weights recomputed from the trainer's fp32 gate logits. Output-token replay cove
 only: the engine's `routed_experts` rows for prefill positions are zero-filled under attn_dp +
 chunked prefill, and `maxtext_score.py` maps those rows (and all prefill rows) to the trainer's own routing.
 
+## Self-contained 35B bf16 run
+`compare_trainer_sampler.py` does the whole bf16/bf16 comparison in one file — tokenize, sampler, trainer,
+compare — without the wrappers or the hard-coded host paths:
+
+```
+python compare_trainer_sampler.py --stage all --sampler adapter   # MaxText-in-vLLM sampler
+python compare_trainer_sampler.py --stage all --sampler native    # tpu-inference sampler
+```
+
+`--stage all` tokenizes, then re-execs itself once per TPU stage (each needs the whole TPU and a different
+`MODEL_IMPL_TYPE`), then compares; `--stage tokenize|sampler|trainer|compare` drives them by hand. Paths are
+autodetected and overridable with `--out-dir` / `--hf-home` / `--maxtext-root`. Both sides read the same
+`tokens.npz` and `--stage compare` refuses to score two runs whose token arrays differ — the per-row scripts
+above re-tokenize `docs/**/*.md` independently on each side, which silently compares different text if the
+tree's docs have changed since the sampler ran.
+
+It reports both the per-token `oob_ratio` and the per-sequence `is_oob_ratio` from the RL trainer's
+`seq-mask-tis` branch: `exp(masked_mean(nan_to_num(logp_trainer - logp_sampler)))` per sequence, kept when
+inside `[0.999, 1.002]`, reported as the rejected fraction.
+
 ## Running
 `run_all.sh` — steps 0-8; each step needs the whole TPU. Wrappers:
 * `run_maxtext.sh <script.py> [args]` — MaxText-side environment (conda + tpu-inference/vLLM/MaxText trees on `PYTHONPATH`).
