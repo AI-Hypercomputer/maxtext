@@ -111,8 +111,8 @@ For instructions on building and uploading the MaxText Docker image with post-tr
 ### Submit your workload
 
 ```bash
-export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
-export TOPOLOGY=<TPU_TOPOLOGY>
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${CLUSTER_NAME?} \
