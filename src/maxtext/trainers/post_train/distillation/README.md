@@ -76,7 +76,7 @@ bakes the workspace `./src` into a runner image and pushes it to GCR.
 ```bash
 export XPK_PROJECT=<PROJECT_ID>
 export XPK_BASE_IMAGE=maxtext_base_image           # local tag prep_image rebuilds
-export XPK_RUNNER_IMAGE_NAME=maxtext_base_image    # short name pushed under gcr.io/$XPK_PROJECT/
+export XPK_RUNNER_IMAGE_NAME=maxtext_base_image    # short name pushed under gcr.io/<PROJECT_ID>/
 # XPK_RUNNER_IMAGE_TAG defaults to ${USER}-distill; override (or set USER)
 # if your shell $USER produces an awkward tag, e.g. XPK_RUNNER_IMAGE_TAG=agagik-distill.
 
@@ -88,7 +88,7 @@ sudo bash src/dependencies/scripts/docker_build_dependency_image.sh \
 bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh prep_image
 
 # Bake ./src into the layered image and push to
-# gcr.io/$XPK_PROJECT/$XPK_RUNNER_IMAGE_NAME:$XPK_RUNNER_IMAGE_TAG.
+# gcr.io/<PROJECT_ID>/$XPK_RUNNER_IMAGE_NAME:$XPK_RUNNER_IMAGE_TAG.
 bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh upload_runner
 ```
 
@@ -104,11 +104,11 @@ export XPK_CLUSTER=<CLUSTER_NAME>
 export XPK_PROJECT=<PROJECT_ID>
 export XPK_ZONE=<ZONE>
 export XPK_DEVICE_TYPE=tpu7x-4x4x4
-export XPK_BASE_IMAGE=gcr.io/${XPK_PROJECT}/${XPK_RUNNER_IMAGE_NAME}:${XPK_RUNNER_IMAGE_TAG:-${USER}-distill} # slash → --docker-image auto-selected
+export XPK_BASE_IMAGE=gcr.io/<PROJECT_ID>/${XPK_RUNNER_IMAGE_NAME}:${XPK_RUNNER_IMAGE_TAG:-${USER}-distill} # slash → --docker-image auto-selected
 export XPK_BASE_OUTPUT_DIR=gs://<GCS_BUCKET>/distillation
 export XPK_RUN_NAME=<RUN_NAME>            # default: distill_run; set per experiment
                                           # to scope checkpoints + TB under
-                                          # ${XPK_BASE_OUTPUT_DIR}/${XPK_WORKLOAD}/${XPK_RUN_NAME}/
+                                          # <GCS_BUCKET>/<RUN_NAME>/<RUN_NAME>/
 
 bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh submit
 ```
@@ -129,7 +129,7 @@ kubectl logs -f ${POD} -c jax-tpu-1 | grep "Train step"
 ## 7. Resume
 
 Submit again with the **same `XPK_BASE_OUTPUT_DIR` + `XPK_WORKLOAD` + `XPK_RUN_NAME`** —
-checkpoints live at `${XPK_BASE_OUTPUT_DIR}/${XPK_WORKLOAD}/${XPK_RUN_NAME}/checkpoints/`,
+checkpoints live at `<GCS_BUCKET>/<RUN_NAME>/<RUN_NAME>/checkpoints/`,
 and `maybe_restore` picks up the latest one. All three must match the
 previous submit (the launcher writes the workload name to `~/.xpk_last_workload`).
 For auto-retry:

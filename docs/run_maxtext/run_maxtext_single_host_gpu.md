@@ -142,8 +142,8 @@ echo "Running 1vm.sh"
 # Configure access to the GKE cluster before submitting with Cluster Toolkit:
 # gcloud container clusters get-credentials <CLUSTER_NAME> \
 #   --location <ZONE> --project <PROJECT_ID>
-# gcluster job submit --image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
-#   --name=${RUN_NAME?} --compute-type=${COMPUTE_TYPE?} --num-nodes=1 \
+# gcluster job submit --image=gcr.io/supercomputer-testing/<IMAGE_NAME> \
+#   --name=<RUN_NAME> --compute-type=<COMPUTE_TYPE> --num-nodes=1 \
 #   --command="bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
 
 # Stop execution if any command exits with error
@@ -165,7 +165,7 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
-export XLA_FLAGS="--xla_dump_to=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/HLO_dumps/
+export XLA_FLAGS="--xla_dump_to=<GCS_BUCKET>/<RUN_NAME>/HLO_dumps/
 --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false
  --xla_gpu_enable_command_buffer='' --xla_gpu_enable_highest_priority_async_stream=true
  --xla_gpu_all_reduce_combine_threshold_bytes=134217728 --xla_gpu_all_gather_combine_threshold_bytes=134217728
@@ -177,7 +177,7 @@ export XLA_FLAGS="--xla_dump_to=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/HLO_dumps
 
 
 # 1 node, DATA_DP=1, ICI_FSDP=8
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama2_7b.yml run_name=${RUN_NAME?} dcn_data_parallelism=1 \
-  ici_fsdp_parallelism=8 base_output_directory=${BASE_OUTPUT_DIRECTORY?} attention=cudnn_flash_te scan_layers=False \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama2_7b.yml run_name=<RUN_NAME> dcn_data_parallelism=1 \
+  ici_fsdp_parallelism=8 base_output_directory=<GCS_BUCKET> attention=cudnn_flash_te scan_layers=False \
   use_iota_embed=True hardware=gpu
 ```

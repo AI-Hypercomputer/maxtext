@@ -99,7 +99,7 @@ export RUN_NAME=<RUN_NAME>
 # The directory containing the MaxText-compatible model checkpoint.
 # If you are converting from a Hugging Face checkpoint, see:
 # [Checkpoint Conversion Guide](../../guides/checkpointing_solutions/convert_checkpoint.md)
-export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items
+export MAXTEXT_CKPT_PATH=<GCS_BUCKET>/<RUN_NAME>/0/items
 
 # -- Workload configuration --
 # Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
@@ -117,7 +117,7 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 # of your cluster:
 
 # 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+# gcloud container clusters get-credentials <CLUSTER_NAME> --location <ZONE> --project <PROJECT_ID>
 
 # 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
@@ -125,7 +125,7 @@ export TPU_TYPE=<TPU_TYPE>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+export DOCKER_IMAGE="gcr.io/<PROJECT_ID>/<IMAGE_NAME>"
 ```
 
 ## Get Your Model Checkpoint
@@ -163,13 +163,13 @@ resume a failed workload.
 Configure `kubectl` and `gcluster` for the target cluster before submitting:
 
 ```bash
-gcloud config set project ${PROJECT_ID?}
-gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --location ${ZONE?} \
-  --project ${PROJECT_ID?}
-gcluster job config set project ${PROJECT_ID?}
-gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${ZONE?}
+gcloud config set project <PROJECT_ID>
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> \
+  --project <PROJECT_ID>
+gcluster job config set project <PROJECT_ID>
+gcluster job config set cluster <CLUSTER_NAME>
+gcluster job config set location <ZONE>
 ```
 
 Set the Cluster Toolkit placement values. `TOPOLOGY` must match the TPU slice
@@ -185,20 +185,20 @@ export TOPOLOGY=<TOPOLOGY>
 
 ```bash
 gcluster job submit \
-  --image=${DOCKER_IMAGE?} \
-  --name=${RUN_NAME?}-grpo \
+  --image=gcr.io/<PROJECT_ID>/<IMAGE_NAME> \
+  --name=<RUN_NAME>-grpo \
   --pathways \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY> \
   --num-slices=1 \
-  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --pathways-gcs-location=<GCS_BUCKET> \
   --command="python3 -m maxtext.trainers.post_train.rl.train_rl \
-  model_name=${MODEL?} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-  run_name=${RUN_NAME?}-grpo \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  model_name=<MODEL_NAME> \
+  load_parameters_path=<CKPT_PATH> \
+  run_name=<RUN_NAME>-grpo \
+  base_output_directory=<GCS_BUCKET> \
   rollout_tensor_parallelism=8 \
-  hf_access_token=${HF_TOKEN?} \
+  hf_access_token=<HF_TOKEN> \
   enable_single_controller=True"
 ```
 
@@ -206,20 +206,20 @@ gcluster job submit \
 
 ```bash
 gcluster job submit \
-  --image=${DOCKER_IMAGE?} \
-  --name=${RUN_NAME?}-gspo \
+  --image=gcr.io/<PROJECT_ID>/<IMAGE_NAME> \
+  --name=<RUN_NAME>-gspo \
   --pathways \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY> \
   --num-slices=1 \
-  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --pathways-gcs-location=<GCS_BUCKET> \
   --command="python3 -m maxtext.trainers.post_train.rl.train_rl \
-  model_name=${MODEL?} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-  run_name=${RUN_NAME?}-gspo \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  model_name=<MODEL_NAME> \
+  load_parameters_path=<CKPT_PATH> \
+  run_name=<RUN_NAME>-gspo \
+  base_output_directory=<GCS_BUCKET> \
   rollout_tensor_parallelism=8 \
-  hf_access_token=${HF_TOKEN?} \
+  hf_access_token=<HF_TOKEN> \
   loss_algo=gspo-token \
   enable_single_controller=True"
 ```
@@ -229,16 +229,16 @@ gcluster job submit \
 ```bash
 gcluster job list
 # Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
-gcluster job logs ${RUN_NAME?} --main-only=false
-gcluster job cancel ${RUN_NAME?}
+gcluster job logs <RUN_NAME> --main-only=false
+gcluster job cancel <RUN_NAME>
 ```
 
 You can also inspect the Kubernetes resources directly:
 
 ```bash
-kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+kubectl get jobset -l gcluster.google.com/workload=<RUN_NAME>
 # In Pathways workloads, use the jobset-name label to select all pods (both pathways-head and worker pods):
-kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=<RUN_NAME>
 ```
 
 ## Troubleshooting
@@ -257,13 +257,13 @@ kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
   - **Retry (fresh run)**: Use a unique run name to avoid overwriting
     outputs:
     ```bash
-    export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items
-    export RUN_NAME=${RUN_NAME?}-retry1
+    export MAXTEXT_CKPT_PATH=<GCS_BUCKET>/<RUN_NAME>/0/items
+    export RUN_NAME=<RUN_NAME>-retry1
     ```
     Then submit the Cluster Toolkit workload. If a "workload already exists" error occurs, pick
-    a new name or cancel the previous job (`gcluster job cancel ${RUN_NAME}`).
+    a new name or cancel the previous job (`gcluster job cancel <RUN_NAME>`).
   - **Resume from checkpoint**: Keep the same `RUN_NAME` and set the
-    checkpoint path: `export load_parameters_path=${MAXTEXT_CKPT_PATH?}/checkpoint-0000`. Then submit
+    checkpoint path: `export load_parameters_path=<CKPT_PATH>/checkpoint-0000`. Then submit
     the workload again.
   - **Tip**: Verify the checkpoint exists in GCS with read access before
     resuming.

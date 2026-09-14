@@ -61,18 +61,18 @@ export TPU_VM_NAME=<TPU_VM_NAME>
 export DISK_NAME=<DISK_NAME>  # e.g., my-hyperdisk
 export DISK_SIZE=<DISK_SIZE>  # e.g., 500GB
 
-gcloud compute disks create ${DISK_NAME?} \
-  --size=${DISK_SIZE?} \
+gcloud compute disks create <DISK_NAME> \
+  --size=<DISK_SIZE> \
   --type=hyperdisk-balanced \
-  --zone=${ZONE?}
+  --zone=<ZONE>
 ```
 
 Then, attach the disk to your TPU VM:
 
 ```bash
-gcloud compute instances attach-disk ${TPU_VM_NAME?} \
-  --disk=${DISK_NAME?} \
-  --zone=${ZONE?}
+gcloud compute instances attach-disk <TPU_VM_NAME> \
+  --disk=<DISK_NAME> \
+  --zone=<ZONE>
 ```
 
 Inside the TPU VM, format and mount the disk (if not already mounted):
@@ -88,8 +88,8 @@ Update the BASE_OUTPUT_DIRECTORY to point to the mounted disk and create the dir
 
 ```bash
 export BASE_NAME=<BASE_DIRECTORY>  # e.g., knowledge-distillation
-export BASE_OUTPUT_DIRECTORY=/mnt/hyperdisk/${BASE_NAME?}
-mkdir -p ${BASE_OUTPUT_DIRECTORY?}
+export BASE_OUTPUT_DIRECTORY=/mnt/hyperdisk/<BASE_DIRECTORY>
+mkdir -p <GCS_BUCKET>
 ```
 
 > **Note:** This tutorial uses a mounted Hyperdisk for performance and reproducibility, because writing large model files and many small I/O operations directly to `gs://` can be significantly slower.
@@ -101,8 +101,8 @@ For the teacher model, we will use **vLLM** to run inference. vLLM can load Hugg
 You can simply download the model from Hugging Face to your local directory:
 
 ```bash
-huggingface-cli login --token ${HF_TOKEN?}
-huggingface-cli download Qwen/Qwen3-32B --repo-type model --local-dir ${BASE_OUTPUT_DIRECTORY?}/qwen3-32b
+huggingface-cli login --token <HF_TOKEN>
+huggingface-cli download Qwen/Qwen3-32B --repo-type model --local-dir <GCS_BUCKET>/qwen3-32b
 ```
 
 ### Obtain and prepare the student model
@@ -121,13 +121,13 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 ```bash
 # Set the checkpoint directory
-export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/llama3.1-8b-ckpt
+export MAXTEXT_CKPT_PATH=<GCS_BUCKET>/llama3.1-8b-ckpt
 
 # Convert to MaxText format
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=llama3.1-8b \
-    hf_access_token=${HF_TOKEN?} \
-    base_output_directory=${MAXTEXT_CKPT_PATH?} \
+    hf_access_token=<HF_TOKEN> \
+    base_output_directory=<CKPT_PATH> \
     scan_layers=True skip_jax_distributed_system=True
 ```
 
@@ -138,18 +138,18 @@ Use the provided script `generate_distillation_data_vllm.py` to generate the dat
 Run the generation script:
 
 ```bash
-export OUTPUT_DATASET=${BASE_OUTPUT_DIRECTORY?}/datasets/distillation_data.parquet
+export OUTPUT_DATASET=<GCS_BUCKET>/datasets/distillation_data.parquet
 
 python3 -m tools.data_generation.generate_distillation_data_vllm \
   --dataset-path HuggingFaceH4/ultrachat_200k \
   --data-split train_sft \
   --data-columns messages \
-  --hf-access-token ${HF_TOKEN?} \
-  --teacher-model ${BASE_OUTPUT_DIRECTORY?}/qwen3-32b \
+  --hf-access-token <HF_TOKEN> \
+  --teacher-model <GCS_BUCKET>/qwen3-32b \
   --use-chat-template \
   --num-prompts 5120 \
   --num-generations 2 \
-  --output-file ${OUTPUT_DATASET?}
+  --output-file <DATASET_PATH>
 
 ```
 
@@ -163,8 +163,8 @@ The checkpoint from the student model's fine-tuning (on the teacher-generated da
 
 ```bash
 # Get the latest checkpoint for fine-tuned student model
-CHECKPOINTS_PATH=${BASE_OUTPUT_DIRECTORY?}/distillation/qwen3-32b-distill-llama3.1-8b/${RUN_NAME?}/checkpoints
-checkpoints=$(ls ${CHECKPOINTS_PATH?})
+CHECKPOINTS_PATH=<GCS_BUCKET>/distillation/qwen3-32b-distill-llama3.1-8b/<RUN_NAME>/checkpoints
+checkpoints=$(ls <CKPT_PATH>)
 integer_dirs=()
 for dir in $checkpoints; do
   dir_name=$(basename "$dir")
@@ -174,24 +174,24 @@ for dir in $checkpoints; do
 done
 sorted_dirs=($(printf '%s\n' "${integer_dirs[@]}" | sort -n))
 largest_dir="${sorted_dirs[-1]}"
-FINE_TUNED_MODEL_CKPT_PATH=${CHECKPOINTS_PATH?}/${largest_dir}/model_params
+FINE_TUNED_MODEL_CKPT_PATH=<CKPT_PATH>/${largest_dir}/model_params
 
 # Fine-tune student model on original dataset
 python3 -m maxtext.trainers.post_train.sft.train_sft \
-  run_name=${RUN_NAME?}_stage2 \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?}/distillation/qwen3-32b-distill-llama3.1-8b \
+  run_name=<RUN_NAME>_stage2 \
+  base_output_directory=<GCS_BUCKET>/distillation/qwen3-32b-distill-llama3.1-8b \
   tokenizer_path=meta-llama/Llama-3.1-8B-Instruct tokenizer_type=huggingface \
   dataset_type=hf \
   hf_path='HuggingFaceH4/ultrachat_200k' \
   train_split='train_sft' \
   train_data_columns=['messages'] \
-  load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH?} \
+  load_parameters_path=<CKPT_PATH> \
   model_name=llama3.1-8b \
   per_device_batch_size=2 \
   steps=200 \
   ici_expert_parallelism=-1 ici_fsdp_parallelism=4 \
   max_target_length=2048 \
-  hf_access_token=${HF_TOKEN?} \
+  hf_access_token=<HF_TOKEN> \
   profiler=xplane
 ```
 
@@ -215,15 +215,15 @@ Online distillation runs the teacher inside MaxText (not vLLM), so both checkpoi
 # Student
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=llama3.1-8b \
-    hf_access_token=${HF_TOKEN?} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY?}/llama3.1-8b-ckpt \
+    hf_access_token=<HF_TOKEN> \
+    base_output_directory=<GCS_BUCKET>/llama3.1-8b-ckpt \
     scan_layers=True skip_jax_distributed_system=True
 
 # Teacher (example: same family, larger)
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=llama3.1-70b \
-    hf_access_token=${HF_TOKEN?} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY?}/llama3.1-70b-ckpt \
+    hf_access_token=<HF_TOKEN> \
+    base_output_directory=<GCS_BUCKET>/llama3.1-70b-ckpt \
     scan_layers=True skip_jax_distributed_system=True
 ```
 
@@ -294,15 +294,15 @@ The example below demonstrates **Pattern B** (pruning recovery): the student is 
 ```bash
 python3 -m maxtext.trainers.post_train.distillation.train_distill \
   src/maxtext/configs/post_train/distillation.yml \
-  run_name=${RUN_NAME?} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?}/distillation/online \
+  run_name=<RUN_NAME> \
+  base_output_directory=<GCS_BUCKET>/distillation/online \
   tokenizer_path=meta-llama/Llama-3.1-8B tokenizer_type=huggingface \
-  hf_access_token=${HF_TOKEN?} \
+  hf_access_token=<HF_TOKEN> \
   student_overrides.model_name=llama3.1-8b \
   student_overrides.base_num_decoder_layers=24 \
-  student_overrides.load_parameters_path=${BASE_OUTPUT_DIRECTORY?}/pruned-llama3.1-8b-24L/0/items \
+  student_overrides.load_parameters_path=<GCS_BUCKET>/pruned-llama3.1-8b-24L/0/items \
   teacher_overrides.model_name=llama3.1-8b \
-  teacher_overrides.load_parameters_path=${BASE_OUTPUT_DIRECTORY?}/llama3.1-8b-ckpt/0/items \
+  teacher_overrides.load_parameters_path=<GCS_BUCKET>/llama3.1-8b-ckpt/0/items \
   per_device_batch_size=2 \
   gradient_accumulation_steps=8 \
   ici_fsdp_parallelism=4 \
@@ -338,31 +338,31 @@ export TEACHER_CKPT_PATH=gs://<GCS_BUCKET>/<TEACHER_MODEL_PATH>/checkpoints/0/it
 export TOKENIZER_PATH=meta-llama/Llama-3.1-8B
 export HF_TOKEN=<HF_TOKEN>
 
-gcloud config set project ${PROJECT_ID?}
-gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --location ${LOCATION?} \
-  --project ${PROJECT_ID?}
-gcluster job config set project ${PROJECT_ID?}
-gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${LOCATION?}
+gcloud config set project <PROJECT_ID>
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> \
+  --project <PROJECT_ID>
+gcluster job config set project <PROJECT_ID>
+gcluster job config set cluster <CLUSTER_NAME>
+gcluster job config set location <ZONE>
 
 gcluster job submit \
-  --image=${IMAGE_URI?} \
-  --name=${RUN_NAME?} \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
+  --image=gcr.io/<PROJECT_ID>/<IMAGE_NAME> \
+  --name=<RUN_NAME> \
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY> \
   --command="python3 -m maxtext.trainers.post_train.distillation.train_distill \
     src/maxtext/configs/post_train/distillation.yml \
-    run_name=${RUN_NAME?} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY?}/online \
-    tokenizer_path=${TOKENIZER_PATH?} \
+    run_name=<RUN_NAME> \
+    base_output_directory=<GCS_BUCKET>/online \
+    tokenizer_path=<TOKENIZER_PATH> \
     tokenizer_type=huggingface \
-    hf_access_token=${HF_TOKEN?} \
+    hf_access_token=<HF_TOKEN> \
     student_overrides.model_name=llama3.1-8b \
     student_overrides.base_num_decoder_layers=24 \
-    student_overrides.load_parameters_path=${STUDENT_CKPT_PATH?} \
+    student_overrides.load_parameters_path=<STUDENT_MODEL_PATH> \
     teacher_overrides.model_name=llama3.1-8b \
-    teacher_overrides.load_parameters_path=${TEACHER_CKPT_PATH?} \
+    teacher_overrides.load_parameters_path=<TEACHER_MODEL_PATH> \
     per_device_batch_size=2 \
     distill_alpha=0.9 \
     distill_temperature=2.0 \
@@ -379,14 +379,14 @@ Monitor the workload and stream logs with Cluster Toolkit:
 gcluster job list
 
 # Stream logs
-gcluster job logs ${RUN_NAME?}
+gcluster job logs <RUN_NAME>
 
 # Inspect JobSet and pods
-kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
-kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?}
+kubectl get jobset -l gcluster.google.com/workload=<RUN_NAME>
+kubectl get pods -l gcluster.google.com/workload=<RUN_NAME>
 
 # Cancel workload
-gcluster job cancel ${RUN_NAME?}
+gcluster job cancel <RUN_NAME>
 ```
 
 ### Offline top-k logits variant

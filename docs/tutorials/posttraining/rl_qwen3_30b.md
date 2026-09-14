@@ -55,7 +55,7 @@ export RUN_NAME=<RUN_NAME>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+export DOCKER_IMAGE="gcr.io/<PROJECT_ID>/<IMAGE_NAME>"
 
 # Your Hugging Face access token.
 export HF_TOKEN=<HF_TOKEN>
@@ -105,29 +105,29 @@ For instructions on building and uploading the MaxText Docker image with post-tr
 export COMPUTE_TYPE=<COMPUTE_TYPE>
 export TOPOLOGY=<TOPOLOGY>
 
-gcloud config set project ${PROJECT_ID?}
-gcloud container clusters get-credentials ${CLUSTER_NAME?} \
-  --location ${ZONE?} \
-  --project ${PROJECT_ID?}
-gcluster job config set project ${PROJECT_ID?}
-gcluster job config set cluster ${CLUSTER_NAME?}
-gcluster job config set location ${ZONE?}
+gcloud config set project <PROJECT_ID>
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> \
+  --project <PROJECT_ID>
+gcluster job config set project <PROJECT_ID>
+gcluster job config set cluster <CLUSTER_NAME>
+gcluster job config set location <ZONE>
 
 gcluster job submit \
-  --image=${DOCKER_IMAGE?} \
-  --name=${RUN_NAME?} \
+  --image=gcr.io/<PROJECT_ID>/<IMAGE_NAME> \
+  --name=<RUN_NAME> \
   --pathways \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY> \
   --num-slices=1 \
-  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --pathways-gcs-location=<GCS_BUCKET> \
   --command="python3 -m maxtext.trainers.post_train.rl.train_rl \
     model_name=qwen3-30b-a3b-base \
-    tokenizer_path=${TOKENIZER_PATH?} \
-    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-    run_name=${RUN_NAME?} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-    hf_access_token=${HF_TOKEN?} \
+    tokenizer_path=<TOKENIZER_PATH> \
+    load_parameters_path=<CKPT_PATH> \
+    run_name=<RUN_NAME> \
+    base_output_directory=<GCS_BUCKET> \
+    hf_access_token=<HF_TOKEN> \
     dataset_name=nvidia/OpenMathInstruct-2 \
     hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet \
     train_split=train_1M \
@@ -146,16 +146,16 @@ To monitor your job's progress, you can use `gcluster` or `kubectl` to check the
 gcluster job list
 
 # Stream logs with Cluster Toolkit (specify --main-only=false for Pathways workloads)
-gcluster job logs ${RUN_NAME?} --main-only=false
+gcluster job logs <RUN_NAME> --main-only=false
 
 # Alternatively, check JobSet status with kubectl
-kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+kubectl get jobset -l gcluster.google.com/workload=<RUN_NAME>
 
 # List pods (use jobset-name to list both head and worker pods in Pathways)
-kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=<RUN_NAME>
 
 # Stream logs with kubectl
-kubectl logs -f -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?} --all-containers=true
+kubectl logs -f -l jobset.sigs.k8s.io/jobset-name=<RUN_NAME> --all-containers=true
 ```
 
 Alternatively, `gcluster job submit` provides a link to the Google Cloud Console to view your workload logs. Follow the link to view logs and monitor your workload's progress in the Cloud Console.

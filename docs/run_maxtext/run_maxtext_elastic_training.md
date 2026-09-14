@@ -79,28 +79,28 @@ submitting the workload. When submitting with Cluster Toolkit, pass `--pathways`
 `--pathways-max-slice-restarts` to enable elastic training orchestration.
 
 ```bash
-gcloud config set project ${PROJECT_ID?}
-gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --location ${LOCATION?} \
-  --project ${PROJECT_ID?}
-gcluster job config set project ${PROJECT_ID?}
-gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${LOCATION?}
+gcloud config set project <PROJECT_ID>
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> \
+  --project <PROJECT_ID>
+gcluster job config set project <PROJECT_ID>
+gcluster job config set cluster <CLUSTER_NAME>
+gcluster job config set location <ZONE>
 
 gcluster job submit \
-  --image=${DOCKER_IMAGE?} \
-  --name=${RUN_NAME?} \
+  --image=us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
+  --name=<RUN_NAME> \
   --pathways \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
-  --num-slices=${NUM_SLICES?} \
-  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY> \
+  --num-slices=<NUM_SLICES> \
+  --pathways-gcs-location=<GCS_BUCKET> \
   --pathways-elastic-slices=1 \
   --pathways-max-slice-restarts=10 \
   --command="python3 -m maxtext.trainers.pre_train.train \
     src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-    run_name=${RUN_NAME?} \
+    base_output_directory=<GCS_BUCKET> \
+    run_name=<RUN_NAME> \
     model_name=qwen3-0.6b \
     dataset_type=synthetic \
     per_device_batch_size=1 \
@@ -138,9 +138,9 @@ List the workload and follow its logs through the Cloud Console (**Kubernetes En
 ```bash
 gcluster job list
 # Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
-gcluster job logs ${RUN_NAME?} --main-only=false
-kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
-kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
+gcluster job logs <RUN_NAME> --main-only=false
+kubectl get jobset -l gcluster.google.com/workload=<RUN_NAME>
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=<RUN_NAME>
 ```
 
 After XLA compilation (a couple of minutes) you should see elastic training enabled and a steady stream of steps:
@@ -159,13 +159,13 @@ Let it run until the step counter passes the first checkpoint (here, step ~130, 
 To see recovery, remove a worker on one slice. Connect to the cluster and delete a worker pod immediately (`--grace-period=0 --force`), so it does not drain gracefully. This mimics an abrupt hardware failure rather than a clean shutdown:
 
 ```bash
-gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --location ${LOCATION?} --project ${PROJECT_ID?}
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> --project <PROJECT_ID>
 
 # Pick a worker pod on one slice and remove it immediately.
-WORKER=$(kubectl get pods -l gcluster.google.com/workload=${RUN_NAME?} \
+WORKER=$(kubectl get pods -l gcluster.google.com/workload=<RUN_NAME> \
   -o name | grep worker | head -1)
-kubectl delete ${WORKER?} --grace-period=0 --force
+kubectl delete <POD_NAME> --grace-period=0 --force
 ```
 
 ```{warning}
@@ -191,13 +191,13 @@ The step counter dropping (for example `150 -> 101`) is the rewind to the last c
 Delete the workload to stop the meter. TPU slices are expensive, so don't skip this.
 
 ```bash
-kubectl delete jobset ${RUN_NAME?}
+kubectl delete jobset <RUN_NAME>
 ```
 
 You can also cancel the workload through Cluster Toolkit:
 
 ```bash
-gcluster job cancel ${RUN_NAME?}
+gcluster job cancel <RUN_NAME>
 ```
 
 If you created the cluster only for this demo, delete it separately with your

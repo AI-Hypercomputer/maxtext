@@ -63,25 +63,25 @@ export OLMO_GCS_BASE=gs://<GCS_BUCKET>/
 export LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
 export HF_TOKEN=<HF_TOKEN>
 
-gcloud config set project ${PROJECT_ID?}
-gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --location ${LOCATION?} \
-  --project ${PROJECT_ID?}
-gcluster job config set project ${PROJECT_ID?}
-gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${LOCATION?}
+gcloud config set project <PROJECT_ID>
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> \
+  --project <PROJECT_ID>
+gcluster job config set project <PROJECT_ID>
+gcluster job config set cluster <CLUSTER_NAME>
+gcluster job config set location <ZONE>
 
 gcluster job submit \
-  --image=${IMAGE_URI?} \
-  --name=${RUN_NAME?} \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
-  --command="INDEX_PATH=${OLMO_INDEX_PATH?} \
-GCS_BASE=${OLMO_GCS_BASE?} \
+  --image=us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
+  --name=<RUN_NAME> \
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY> \
+  --command="INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json \
+GCS_BASE=gs://<GCS_BUCKET>/ \
 LOCAL_MOUNT=/tmp/olmo-data \
-OUTPUT_DIR=${BASE_OUTPUT_DIRECTORY?} \
-LOAD_PARAMETERS_PATH=${LOAD_PARAMETERS_PATH?} \
-HF_TOKEN=${HF_TOKEN?} \
+OUTPUT_DIR=<GCS_BUCKET> \
+LOAD_PARAMETERS_PATH=<CKPT_PATH> \
+HF_TOKEN=<HF_TOKEN> \
 MOUNT_GCSFUSE=1 \
 VENV_PATH=/__skip_venv__ \
 bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh"
@@ -93,7 +93,7 @@ Set the data, checkpoint, and launcher environment variables before invoking `ru
 ## Quick start (single-host / smoke test)
 
 ```bash
-source $MAXTEXT_ROOT/maxtext_venv/bin/activate
+source <MAXTEXT_ROOT>/maxtext_venv/bin/activate
 
 INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json \
 GCS_BASE=gs://<GCS_BUCKET>/ \
@@ -197,16 +197,16 @@ bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
 sudo bash src/dependencies/scripts/docker_build_dependency_image.sh \
   MODE=stable WORKFLOW=pre-training
 sudo bash src/dependencies/scripts/docker_upload_runner.sh \
-  CLOUD_IMAGE_NAME=maxtext-olmo3 PROJECT=$XPK_PROJECT
+  CLOUD_IMAGE_NAME=maxtext-olmo3 PROJECT=<PROJECT_ID>
 ```
 
 Override the resulting image with `XPK_DOCKER_IMAGE` (defaults to
-`gcr.io/${XPK_PROJECT}/maxtext-olmo3:latest`).
+`gcr.io/<PROJECT_ID>/maxtext-olmo3:latest`).
 
 ## Resume
 
 Keep `XPK_RUN_NAME` and `XPK_BASE_OUTPUT_DIR` stable across submissions.
-Orbax picks up the latest checkpoint under `${OUTPUT_DIR}/${RUN_NAME}/checkpoints/`;
+Orbax picks up the latest checkpoint under `<GCS_BUCKET>/<RUN_NAME>/checkpoints/`;
 the OLMo grain sampler resumes its data position via stateless
 `initial_step = step × per-host-batch` (no Grain-iterator-state in the
 checkpoint).
