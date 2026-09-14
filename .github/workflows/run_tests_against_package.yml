@@ -44,6 +44,10 @@ on:
       is_scheduled_run:
         required: true
         type: boolean
+      is_pull_request:
+        required: false
+        type: boolean
+        default: false
       xla_python_client_mem_fraction:
         required: true
         type: string
@@ -172,6 +176,12 @@ jobs:
           }
           trap cleanup_tpu_locks TERM INT
 
+          # Avoid dubious ownership warnings/errors and ensure base branch reference is available for git diff
+          git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" 2>/dev/null || true
+          if [ "${INPUTS_IS_PULL_REQUEST}" == "true" ]; then
+            git fetch --depth=1 origin main:refs/remotes/origin/main 2>/dev/null || true
+          fi
+
           # Determine environment and entry directory
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.
@@ -191,6 +201,12 @@ jobs:
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
+          elif [ "${INPUTS_IS_PULL_REQUEST}" == "true" ] && [[ "${INPUTS_FLAVOR}" =~ ^tpu7x- ]]; then
+            if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
+              FINAL_PYTEST_MARKER="newly_added"
+            else
+              FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and newly_added"
+            fi
           else
             if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
               FINAL_PYTEST_MARKER="not scheduled_only or newly_added"
@@ -270,6 +286,7 @@ jobs:
 
         env:
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
+          INPUTS_IS_PULL_REQUEST: ${{ inputs.is_pull_request }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
           INPUTS_FLAVOR: ${{ inputs.flavor }}
