@@ -124,7 +124,7 @@ gcluster job submit \
 
   The elastic training configuration parameters (`elastic_enabled`, `elastic_timeout_seconds`,
   and `elastic_max_retries`) require MaxText 0.2.4 or later (or the official pre-training image
-  `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4`).
+  `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest`).
 ```
 
 ```{warning}
