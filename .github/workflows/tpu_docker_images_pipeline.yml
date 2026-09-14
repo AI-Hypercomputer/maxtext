@@ -33,9 +33,33 @@ on:
         required: false
         type: boolean
         default: false
+      mode:
+        description: 'build-all (default) or fast-rebuild (overlay new code on source image with identical deps)'
+        required: true
+        default: 'build-all'
+        type: choice
+        options:
+          - build-all
+          - fast-rebuild
+      source_run_id:
+        description: 'Source image run ID (required for fast-rebuild). Find in Actions tab → previous pipeline run → run ID in URL.'
+        required: false
+        type: string
+        default: ''
+      allow_dependency_drift:
+        description: 'Allow fast-rebuild even if dependency files changed between source and current commit (not recommended)'
+        required: false
+        type: boolean
+        default: false
+
+run-name: >-
+  ${{ inputs.mode == 'fast-rebuild'
+      && format('Fast-rebuild from run {0}', inputs.source_run_id)
+      || 'TPU Docker Images Pipeline' }}
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build_maxtext_package:
@@ -78,6 +102,9 @@ jobs:
       dockerfile: maxtext_tpu_dependencies.Dockerfile
       maxtext_sha: ${{ needs.build_maxtext_package.outputs.maxtext_sha }}
       include_test_assets: true
+      fast_rebuild: ${{ inputs.mode == 'fast-rebuild' }}
+      source_run_id: ${{ inputs.source_run_id }}
+      allow_dependency_drift: ${{ inputs.allow_dependency_drift }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
