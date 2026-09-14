@@ -683,6 +683,67 @@ class TestReorderSequence(unittest.TestCase):
                 msg=f"Failed for cp_size={cp_size}, to_contiguous={to_contiguous}, shape={shape}, seq_dim={seq_dim}",
             )
 
+  def test_reorder_gradient_parity(self):
+    """Verifies backward gradient autodiff through reorder_sequence is non-nan and bit-exact."""
+    key = random.key(42)
+
+    # Sweep configurations
+    cp_sizes = [2, 4, 8]
+    to_contiguous_options = [False, True]
+
+    # Test cases: (shape, seq_dim)
+    test_cases = [
+        ((64,), 0),  # 1D
+        ((2, 128, 4, 8), 1),  # 4D (standard B, S, H, D)
+        ((256, 2, 4, 8), 0),  # 4D (S, B, H, D)
+        ((2, 4, 8, 128), -1),  # Negative seq_dim (last dimension)
+        ((2, 128, 4, 8), -3),  # Negative seq_dim (-3 corresponding to S)
+    ]
+
+    for cp_size in cp_sizes:
+      for to_contiguous in to_contiguous_options:
+        for shape, seq_dim in test_cases:
+          with self.subTest(
+              cp_size=cp_size,
+              to_contiguous=to_contiguous,
+              shape=shape,
+              seq_dim=seq_dim,
+          ):
+            key, subkey = random.split(key)
+            x = random.normal(subkey, shape, dtype=jnp.float32)
+            config = f"cp_size={cp_size}, to_contiguous={to_contiguous}, shape={shape}, seq_dim={seq_dim}"
+
+            # The sweep parameters are bound as default arguments so that each closure
+            # captures the current iteration's values instead of the loop variables.
+            def loss_fn_ref(t, cp_size=cp_size, seq_dim=seq_dim, to_contiguous=to_contiguous):
+              return jnp.sum(
+                  self._old_reorder_sequence(t, cp_size=cp_size, seq_dim=seq_dim, to_contiguous=to_contiguous) ** 2
+              )
+
+            def loss_fn_opt(t, cp_size=cp_size, seq_dim=seq_dim, to_contiguous=to_contiguous):
+              return jnp.sum(
+                  max_utils.reorder_sequence(t, cp_size=cp_size, seq_dim=seq_dim, to_contiguous=to_contiguous) ** 2
+              )
+
+            grad_ref = jax.grad(loss_fn_ref)(x)
+            grad_opt = jax.grad(loss_fn_opt)(x)
+
+            # Assert gradients are non-nan and finite
+            self.assertFalse(
+                jnp.any(jnp.isnan(grad_opt)),
+                msg=f"NaN detected in gradients for {config}",
+            )
+            self.assertFalse(
+                jnp.any(jnp.isinf(grad_opt)),
+                msg=f"Inf detected in gradients for {config}",
+            )
+
+            # Assert bit-exact mathematical gradient parity
+            self.assertTrue(
+                jnp.allclose(grad_ref, grad_opt, rtol=1e-5, atol=1e-6),
+                msg=f"Gradient parity mismatch for {config}",
+            )
+
   def test_reorder_roundtrip(self):
     # If we reorder to load-balanced (to_contiguous=False) and then restore (to_contiguous=True),
     # we should get back the exact original tensor. Also tests negative seq_dim.
