@@ -165,8 +165,14 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       limit_mm_per_prompt={"image": 0, "video": 0},
       disable_log_stats=True,
       kv_cache_dtype="bfloat16",
+      reasoning_parser="qwen3",
       seed=0,
   )
+  # The rest of the serving config has no offline equivalent: --enable-auto-tool-choice,
+  # --tool-call-parser=qwen3_coder and --default-chat-template-kwargs are OpenAI-server frontend options
+  # (vllm/entrypoints/openai/cli_args.py), not EngineArgs, so LLM() rejects them. They only shape how
+  # generated text is parsed into API responses; this path feeds pre-tokenized ids via TokensPrompt and
+  # reads prompt_logprobs, so no chat template, tool parser or reasoning parser ever runs.
   sharding = (
       {"sharding_strategy": {"enable_dp_attention": True, "attn_dp_size": args.attn_dp}}
       if args.attn_dp > 1
@@ -219,7 +225,10 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
 
     runner.get_mrope_input_positions_fn = _text_mrope
 
-  sp = SamplingParams(max_tokens=1, temperature=0.0, prompt_logprobs=1)
+  # top_k=-1 disables top-k truncation (vLLM normalizes -1 to 0, "consider all tokens"). None of these
+  # reach the measurement: prompt_logprobs is a plain log_softmax over the full vocab, and the single
+  # generated token is discarded. They are set so the engine matches the serving config.
+  sp = SamplingParams(max_tokens=1, temperature=0.0, top_k=-1, top_p=1.0, prompt_logprobs=1)
   outs = llm.generate([TokensPrompt(prompt_token_ids=[int(t) for t in row]) for row in tokens], sp)
 
   logp = np.full(tokens.shape, np.nan, np.float32)
