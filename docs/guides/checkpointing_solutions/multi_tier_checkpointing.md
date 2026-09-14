@@ -281,7 +281,7 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
    PROJECT_ID="<PROJECT_ID>"
    CLUSTER_NAME="<CLUSTER_NAME>"
    CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
-   JOB_NAME="maxtext-pw-$(date +%m%d%H%M%S)"
+   JOB_NAME="<RUN_NAME>"
    COMPUTE_TYPE="<compute-type>" # example: ct6e-standard-4t
    TOPOLOGY="<tpu-topology>"     # example: 4x8
    NUM_SLICES="<NUM_SLICES>"
