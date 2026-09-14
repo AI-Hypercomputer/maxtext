@@ -42,7 +42,7 @@ This repository includes a shell script, `tests/end_to_end/tpu/test_grpo.sh`, th
 *   **Example Command:**
 
 ```bash
-HF_TOKEN=${HF_TOKEN} \
+HF_TOKEN=<HF_TOKEN> \
 MODEL=llama3.3-70b \
 TOKENIZER=meta-llama/Llama-3.3-70B-Instruct \
 NUM_SAMPLERS=8 \
