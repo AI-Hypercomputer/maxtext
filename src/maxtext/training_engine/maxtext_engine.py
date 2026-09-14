@@ -1260,7 +1260,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def _prepare_batch(self, payload: Any) -> Any:
     """Maps a payload to the inputs the loss function is called with."""
     if self._gen_model_input_fn is not None:
+      if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
+        payload = dataclasses.replace(payload, metadata={})
       return self._gen_model_input_fn(payload)
+
     if dataclasses.is_dataclass(payload):
       return {
           k: getattr(payload, k)
