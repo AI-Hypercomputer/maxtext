@@ -32,38 +32,23 @@ class Train(parameterized.TestCase):
   Similar to `train_using_ragged_dot_smoke_train.py`
   """
 
-  @parameterized.named_parameters(
-      {
-          "testcase_name": f"{base_name}_ep{ici_expert_parallelism}",
-          "quantization": quantization,
-          "use_gmm_v2": use_gmm_v2,
-          "use_gmm_v2_heuristic_tiling": use_gmm_v2_heuristic_tiling,
-          "ici_expert_parallelism": ici_expert_parallelism,
-      }
-      for base_name, quantization, use_gmm_v2, use_gmm_v2_heuristic_tiling, ici_expert_parallelism in [
-          ("tokamax_v1_bf16", "", False, False, 1),
-          ("tokamax_v1_fp8", "fp8", False, False, 1),  # not quantize gmm
-          ("tokamax_v1_fp8_full", "fp8_full", False, False, 1),  # quantize gmm
-          ("tokamax_v2_bf16", "", True, False, 1),
-          ("tokamax_v2_bf16_heuristic", "", True, True, 1),
-          ("tokamax_v2_fp8_full", "fp8_full", True, False, 1),
-          ("tokamax_v2_bf16", "", True, False, 2),
-          ("tokamax_v2_fp8_full", "fp8_full", True, False, 2),
-      ]
-  )
-  @pytest.mark.tpu_only
-  def test_smoke_train(
+  def _run_smoke_train(
       self,
-      quantization: str,
-      use_gmm_v2: bool,
-      use_gmm_v2_heuristic_tiling: bool,
-      ici_expert_parallelism: int,
+      *,
+      quantization: str = "",
+      use_gmm_v2: bool = False,
+      use_gmm_v2_heuristic_tiling: bool = False,
+      ici_expert_parallelism: int = 1,
+      use_ring_of_experts: bool = False,
+      moe_quantize_token_all_gather: bool = False,
+      max_target_length: int | None = None,
   ):
     """Smoke train with small config."""
     sharding_tolerance = 0.22 if ici_expert_parallelism > 1 else 2e-2
-    # V1 FP8 TGMM requires the scale span to cover its 256-wide tile.
-    # With only 128 tokens, it raises "subchannel_iters != 1" in the backward pass.
-    max_target_length = 256 if quantization == "fp8_full" and not use_gmm_v2 else 128
+    if max_target_length is None:
+      # V1 FP8 TGMM requires the scale span to cover its 256-wide tile.
+      # With only 128 tokens, it raises "subchannel_iters != 1" in the backward pass.
+      max_target_length = 256 if quantization == "fp8_full" and not use_gmm_v2 else 128
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
@@ -91,6 +76,7 @@ class Train(parameterized.TestCase):
         "use_tokamax_gmm=True",
         f"use_gmm_v2={use_gmm_v2}",
         f"use_gmm_v2_heuristic_tiling={use_gmm_v2_heuristic_tiling}",
+        f"use_ring_of_experts={use_ring_of_experts}",
         # tile sizes
         "wi_tile_fwd_batch_seq=128",
         "wi_tile_fwd_embed_dim=128",
@@ -116,6 +102,7 @@ class Train(parameterized.TestCase):
         "use_tokamax_splash=False",
         # quantization
         f"quantization={quantization}",
+        f"moe_quantize_token_all_gather={moe_quantize_token_all_gather}",
         "use_qwix_quantization=True",
         "weight_quantization_calibration_method=fixed,-224,224",
         "act_quantization_calibration_method=fixed,-224,224",
@@ -131,6 +118,78 @@ class Train(parameterized.TestCase):
         f"metrics_file={os.path.join(outputs_dir, 'metrics.json')}",
     ]
     train_main(args)
+
+  @parameterized.named_parameters(
+      {"testcase_name": "bf16", "quantization": ""},
+      {"testcase_name": "fp8", "quantization": "fp8"},  # not quantize gmm
+      {"testcase_name": "fp8_full", "quantization": "fp8_full"},  # quantize gmm
+  )
+  @pytest.mark.tpu_only
+  def test_tokamax_v1(self, quantization: str):
+    self._run_smoke_train(use_gmm_v2=False, quantization=quantization)
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "bf16_ep1",
+          "quantization": "",
+          "ici_expert_parallelism": 1,
+      },
+      {
+          "testcase_name": "bf16_heuristic_ep1",
+          "quantization": "",
+          "ici_expert_parallelism": 1,
+          "use_gmm_v2_heuristic_tiling": True,
+      },
+      {
+          "testcase_name": "fp8_full_ep1",
+          "quantization": "fp8_full",
+          "ici_expert_parallelism": 1,
+      },
+      {
+          "testcase_name": "bf16_ep2",
+          "quantization": "",
+          "ici_expert_parallelism": 2,
+      },
+      {
+          "testcase_name": "fp8_full_ep2",
+          "quantization": "fp8_full",
+          "ici_expert_parallelism": 2,
+      },
+  )
+  @pytest.mark.tpu_only
+  def test_tokamax_v2(
+      self,
+      quantization: str,
+      ici_expert_parallelism: int,
+      use_gmm_v2_heuristic_tiling: bool = False,
+  ):
+    self._run_smoke_train(
+        use_gmm_v2=True,
+        quantization=quantization,
+        ici_expert_parallelism=ici_expert_parallelism,
+        use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
+    )
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "fp8_tag_ep2",
+          "quantization": "fp8_full",
+          "ici_expert_parallelism": 2,
+      },
+  )
+  @pytest.mark.tpu_only
+  def test_tokamax_v2_quantize_token_all_gather(
+      self,
+      quantization: str,
+      ici_expert_parallelism: int,
+  ):
+    self._run_smoke_train(
+        use_gmm_v2=True,
+        quantization=quantization,
+        ici_expert_parallelism=ici_expert_parallelism,
+        use_ring_of_experts=True,
+        moe_quantize_token_all_gather=True,
+    )
 
 
 if __name__ == "__main__":
