@@ -3,9 +3,11 @@
 
 Four stages, in order:
   1. tokenize  (CPU)  real text -> HF tokenizer -> [B, S] token ids, saved once and reused by both sides
-  2. sampler   (TPU)  real vLLM engine prompt_logprobs; --sampler adapter (MaxText-in-vLLM) or native (tpu-inference)
-  3. trainer   (TPU)  MaxText nnx model, MODEL_MODE_TRAIN, full-model teacher-forced logprobs
-  4. compare   (CPU)  per-token band stats + per-sequence seq-mask-tis is_oob_ratio
+  2. sampler   (TPU)  real vLLM engine: prompt_logprobs, then --gen-tokens rollouts recording each sampled
+                      token's logprob; --sampler adapter (MaxText-in-vLLM) or native (tpu-inference)
+  3. trainer   (TPU)  MaxText nnx model, MODEL_MODE_TRAIN, teacher-forced over prompt+generated in one pass
+  4. compare   (CPU)  per-token band stats + per-sequence seq-mask-tis is_oob_ratio, reported separately for
+                      PROMPT (prefill) and OUTPUT (decode) tokens
 
 All four stages run in one process. The TPU env (MODEL_IMPL_TYPE, LIBTPU_INIT_ARGS, the serving flags) is set
 once up front, before jax/vllm are imported, and is the same for both TPU stages; the sampler's engine is
@@ -16,7 +18,8 @@ Unlike the per-row scripts in this directory, both sides read their tokens from 
 trainer must never re-tokenize independently, or the two sides score different text.
 
 Usage:
-    python compare_trainer_sampler.py --stage all --sampler adapter
+    python compare_trainer_sampler.py                                                   # all stages, 8192 rollouts
+    python compare_trainer_sampler.py --gen-tokens 0                                    # prompt tokens only
     python compare_trainer_sampler.py --stage compare --out-dir /path/to/existing/npz   # re-score saved runs
 
 Paths default to autodetection (see resolve_paths) and can be overridden with --out-dir / --hf-home /
@@ -520,8 +523,8 @@ def main():
   ap.add_argument("--hf-home", default=None)
   ap.add_argument("--maxtext-root", default=None)
   ap.add_argument("--ckpt", default=CKPT, help="MaxText-format checkpoint for the trainer and the adapter")
-  ap.add_argument("--gen-tokens", type=int, default=0,
-                  help="if >0, also roll out this many output tokens per prompt and compare the decode path")
+  ap.add_argument("--gen-tokens", type=int, default=8192,
+                  help="output tokens to roll out per prompt for the decode-path comparison; 0 = prompt only")
   ap.add_argument("--gen-temperature", type=float, default=1.0, help="sampling temperature for the rollouts")
   ap.add_argument("--attn-dp", type=int, default=4, help="attention DP degree inside the tp=8 mesh")
   ap.add_argument("--gpu-memory-utilization", type=float, default=0.5)
