@@ -73,7 +73,7 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 # Or your custom runner image:
 # export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-# export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+# export DOCKER_IMAGE="gcr.io/<PROJECT_ID>/<IMAGE_NAME>"
 ```
 
 ## 3. Running a batch workload
@@ -85,30 +85,30 @@ A batch workload runs entirely within the GKE cluster. You submit the job defini
 Configure your cluster credentials and use the `gcluster job submit` command with `--pathways` to start the job.
 
 ```bash
-gcloud config set project ${PROJECT_ID?}
-gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --location ${ZONE?} \
-  --project ${PROJECT_ID?}
-gcluster job config set project ${PROJECT_ID?}
-gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${ZONE?}
+gcloud config set project <PROJECT_ID>
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> \
+  --project <PROJECT_ID>
+gcluster job config set project <PROJECT_ID>
+gcluster job config set cluster <CLUSTER_NAME>
+gcluster job config set location <ZONE>
 
 gcluster job submit \
-  --image=${DOCKER_IMAGE?} \
-  --name=${RUN_NAME?} \
+  --image=us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
+  --name=<RUN_NAME> \
   --pathways \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
-  --num-slices=${NUM_SLICES?} \
-  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY> \
+  --num-slices=<NUM_SLICES> \
+  --pathways-gcs-location=<GCS_BUCKET> \
   --command="python3 -m maxtext.trainers.pre_train.train \
     src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    base_output_directory=<GCS_BUCKET> \
     per_device_batch_size=1 \
     enable_checkpointing=false \
     dataset_type=synthetic \
     enable_single_controller=True \
-    run_name=${RUN_NAME?}-pathways-batch"
+    run_name=<RUN_NAME>-pathways-batch"
 ```
 
 ### Verify the workload
@@ -118,17 +118,17 @@ You can check the status of your running workloads with the `gcluster job list` 
 ```bash
 gcluster job list
 # Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
-gcluster job logs ${RUN_NAME?} --main-only=false
+gcluster job logs <RUN_NAME> --main-only=false
 ```
 
 You can also inspect the Kubernetes resources directly:
 
 ```bash
-kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+kubectl get jobset -l gcluster.google.com/workload=<RUN_NAME>
 # In Pathways workloads, use the jobset-name label to select all pods (both pathways-head and worker pods):
-kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=<RUN_NAME>
 # Or view the MaxText training logs directly from the head container:
-kubectl logs -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?} -c workload-container -f
+kubectl logs -l jobset.sigs.k8s.io/jobset-name=<RUN_NAME> -c workload-container -f
 ```
 
 ## 4. Running a headless (interactive) workload
@@ -141,13 +141,13 @@ This command reserves the TPUs and starts the Pathways head service on the clust
 
 ```bash
 gcluster job submit \
-  --name=${RUN_NAME?} \
+  --name=<RUN_NAME> \
   --pathways \
   --pathways-headless \
-  --compute-type=${COMPUTE_TYPE?} \
-  --topology=${TOPOLOGY?} \
-  --num-slices=${NUM_SLICES?} \
-  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?}
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY> \
+  --num-slices=<NUM_SLICES> \
+  --pathways-gcs-location=<GCS_BUCKET>
 ```
 
 ### Step 2: Connect to the cluster via port forwarding
@@ -158,7 +158,7 @@ This command forwards local port 29000 to the controller pod in the cluster. It 
 
 ```bash
 kubectl port-forward \
-  "$(kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?} -o name | grep pathways-head)" \
+  "$(kubectl get pods -l jobset.sigs.k8s.io/jobset-name=<RUN_NAME> -o name | grep pathways-head)" \
   29000:29000 &> /dev/null &
 ```
 
@@ -174,12 +174,12 @@ export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 # Run the training script
 python3 -m maxtext.trainers.pre_train.train \
   src/maxtext/configs/base.yml \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  base_output_directory=<GCS_BUCKET> \
   per_device_batch_size=1 \
   enable_checkpointing=false \
   dataset_type=synthetic \
   enable_single_controller=True \
-  run_name=${RUN_NAME?}-pathways-headless
+  run_name=<RUN_NAME>-pathways-headless
 ```
 
 The output streams directly to your terminal, just as if you were running on a local accelerator.
@@ -192,7 +192,7 @@ The output streams directly to your terminal, just as if you were running on a l
   - Ensure you have successfully pushed the image to your project's Artifact Registry.
   - Check that your GKE cluster has permissions to pull from the registry.
 - **`kubectl port-forward` fails**:
-  - Confirm that the pod from Step 1 is running (`kubectl get pods`). The name should match `${RUN_NAME?}-pathways-head-0`.
+  - Confirm that the pod from Step 1 is running (`kubectl get pods`). The name should match `<RUN_NAME>-pathways-head-0`.
   - Ensure you are authenticated with `kubectl` and have the correct context set for your GKE cluster.
 - Make sure you import `pathwaysutils` package and call `pathwaysutils.initialize()` in your script when running the workload.
 

@@ -133,7 +133,7 @@ To upload to Artifact Registry, provide the **full path** of the target image (i
 export CLOUD_IMAGE_NAME=<LOCATION>-docker.pkg.dev/<PROJECT_ID>/<REPOSITORY_NAME>/<IMAGE_NAME>
 
 # 2. Upload the image (must be run inside your activated venv)
-upload_maxtext_docker_image CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
+upload_maxtext_docker_image CLOUD_IMAGE_NAME=<IMAGE_NAME>
 ```
 
 ### Option 2: Upload to Container Registry (GCR)
@@ -145,14 +145,14 @@ If you provide just a simple image name, the script will default to uploading to
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
 
 # 2. Upload the image (must be run inside your activated venv)
-upload_maxtext_docker_image CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
+upload_maxtext_docker_image CLOUD_IMAGE_NAME=<IMAGE_NAME>
 ```
 
 ````{important}
 **Virtual Environment Reminder:** The `upload_maxtext_docker_image` command is a console script installed inside your virtual environment. If you open a new terminal session to upload the image, you **must re-activate your virtual environment** first:
 
 ```bash
-source ${VENV_NAME?}/bin/activate
+source <VENV_NAME>/bin/activate
 ```
 
 If you get a `command not found: upload_maxtext_docker_image` error, it means your virtual environment is not activated.

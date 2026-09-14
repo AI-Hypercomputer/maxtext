@@ -18,7 +18,7 @@
 This directory contains high performance model configurations for different generations of TPU and GPU hardware.
 
 These configurations do 3 things:
-* Sets various XLA compiler flags (see [below](/src/maxtext/configs#xla-flags-used-by-maxtext)) as `LIBTPU_INIT_ARGS` to optimize runtime performance.
+* Sets various XLA compiler flags (see [below](#xla-flags-used-by-maxtext)) as `LIBTPU_INIT_ARGS` to optimize runtime performance.
 * Runs [rto_setup.sh](https://github.com/google/maxtext/blob/main/src/dependencies/scripts/rto_setup.sh) to optimize communication protocols for network performance.
 (This only needs to be run once on each worker)
 * Runs [train.py](https://github.com/google/maxtext/blob/main/src/maxtext/trainers/pre_train/train.py) with specific hyper-parameters (batch size, etc.)
@@ -31,47 +31,49 @@ These configurations do 3 things:
 
      Create a network with an MTU of 8896 bytes and set up firewall rules. (Creating a network requires `compute.networks.create` permission in your project)
      ```
-     gcloud compute networks create mtu9k --mtu=8896 --project=${PROJECT?} --subnet-mode=auto --bgp-routing-mode=regional
+     gcloud compute networks create mtu9k --mtu=8896 --project=<PROJECT_ID> --subnet-mode=auto --bgp-routing-mode=regional
      ```
      ```
-     gcloud compute firewall-rules create mtu9kfw --network mtu9k --allow tcp,icmp,udp --project=${PROJECT?}
+     gcloud compute firewall-rules create mtu9kfw --network mtu9k --allow tcp,icmp,udp --project=<PROJECT_ID>
      ```
 
      When you create your TPUs, you need to indicate they should be part of this network.
 
      Here is an example of a queued-resources request on GCE using the `--network` flag (`--network=mtu9k`).
      ```
-     gcloud alpha compute tpus queued-resources create ${QR_ID?} --node-prefix=${TPU_NAME?} --node-count=${NUM_SLICES?} --accelerator_type=${ACCELERATOR_TYPE?} --runtime_version=${RUNTIME_VERSION?} --network=mtu9k --project=${PROJECT?} --zone=${ZONE?}
+     gcloud alpha compute tpus queued-resources create <QR_ID> --node-prefix=<TPU_NAME> --node-count=<NUM_SLICES> --accelerator_type=<TPU_TYPE> --runtime_version=<RUNTIME_VERSION> --network=mtu9k --project=<PROJECT_ID> --zone=<ZONE>
      ```
      Note: If you want to use only one slice, you need to replace node-prefix with node-id, and remove node-count.
 
-     Here is an example of creating a GKE cluster with XPK using the `--network` and `--subnetwork` flags (`--network=mtu9k --subnetwork=mtu9k`).
+    For new GKE deployments, configure the network and subnetwork through Cluster Toolkit. See the [Cluster Toolkit guide](../../../docs/run_maxtext/run_maxtext_via_cluster_toolkit.md).
      ```
-     export CLUSTER_ARGUMENTS="--network=mtu9k --subnetwork=mtu9k"
-
-     python3 xpk/xpk.py cluster create --cluster ${YOUR_CLUSTER_NAME?} --tpu-type ${ACCELERATOR_TYPE?} --num-slices ${NUM_SLICES?} --custom-cluster-arguments="${CLUSTER_ARGUMENTS?}"
+     gcloud container clusters get-credentials <CLUSTER_NAME> --location <ZONE> --project <PROJECT_ID>
      ```
 
 ### Run model config scripts on TPUs
-1. You can run these model configs on the GCE platform using `multihost_runner.py` or `multihost_job.py`, or on the GKE platform using [XPK](https://github.com/google/xpk). Take a look at the [getting_started](https://github.com/google/maxtext/tree/main/getting_started) directory for directions on how to set up your TPUs and use these tools.
+1. You can run these model configs on the GCE platform using `multihost_runner.py` or `multihost_job.py`, or on GKE using Cluster Toolkit's `gcluster job submit`. See the [Cluster Toolkit guide](../../../docs/run_maxtext/run_maxtext_via_cluster_toolkit.md) for setup instructions.
 
 2. Here are some example commands to run the model configs:
 
     Running with `multihost_runner.py` on GCE:
     ```
-    python3 multihost_runner.py --TPU_PREFIX=${TPU_PREFIX?} --COMMAND="bash setup.sh && bash src/maxtext/configs/tpu/v5p/128b.sh RUN_NAME=${YOUR_RUN_NAME?} OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH?} DATASET_PATH=${MAXTEXT_DATASET_PATH?} PLATFORM=gce"
+    python3 multihost_runner.py --TPU_PREFIX=<TPU_NAME> --COMMAND="bash setup.sh && bash src/maxtext/configs/tpu/v5p/128b.sh RUN_NAME=<RUN_NAME> OUTPUT_PATH=<GCS_BUCKET> DATASET_PATH=<DATASET_PATH> PLATFORM=gce"
     ```
 
     Running with `multihost_job.py` on GCE:
     ```
-    python3 multihost_job.py --NUM_SLICES=${NUM_SLICES?} --TPU_TYPE=${ACCELERATOR_TYPE?} --VERSION=${RUNTIME_VERSION?} --RUN_NAME=${RUN_NAME?} --BUCKET_NAME=${GCS_BUCKET_NAME?} --COMMAND="bash setup.sh && bash src/maxtext/configs/tpu/v5p/128b.sh RUN_NAME=${YOUR_RUN_NAME?} OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH?} DATASET_PATH=${MAXTEXT_DATASET_PATH?} PLATFORM=gce"
+    python3 multihost_job.py --NUM_SLICES=<NUM_SLICES> --TPU_TYPE=<TPU_TYPE> --VERSION=<RUNTIME_VERSION> --RUN_NAME=<RUN_NAME> --BUCKET_NAME=<GCS_BUCKET> --COMMAND="bash setup.sh && bash src/maxtext/configs/tpu/v5p/128b.sh RUN_NAME=<RUN_NAME> OUTPUT_PATH=<GCS_BUCKET> DATASET_PATH=<DATASET_PATH> PLATFORM=gce"
 
     # Add --CQR_EXTRA_ARGS="--network=mtu9k" to the command if you would like to use the custom MTU network.
     ```
 
-    Running with `XPK` on GKE:
+    Running with Cluster Toolkit on GKE:
     ```
-    xpk workload create --cluster ${YOUR_CLUSTER_NAME?} --docker-image gcr.io/${PROJECT?}/${YOUR_IMAGE_NAME?} --workload ${YOUR_RUN_NAME?} --tpu-type=${ACCELERATOR_TYPE?} --num-slices=${NUM_SLICES?} --command "bash src/maxtext/configs/tpu/v5p/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH?} DATASET_PATH=${MAXTEXT_DATASET_PATH?} PLATFORM=gke"
+    gcloud container clusters get-credentials <CLUSTER_NAME> --location <ZONE> --project <PROJECT_ID>
+    gcluster job config set project <PROJECT_ID>
+    gcluster job config set cluster <CLUSTER_NAME>
+    gcluster job config set location <ZONE>
+    gcluster job submit --image gcr.io/<PROJECT_ID>/<IMAGE_NAME> --name <RUN_NAME> --compute-type <COMPUTE_TYPE> --topology <TOPOLOGY> --command "bash src/maxtext/configs/tpu/v5p/128b.sh OUTPUT_PATH=<GCS_BUCKET> DATASET_PATH=<DATASET_PATH> PLATFORM=gke"
     ```
 
     Note: When running these scripts, be sure to specify the `PLATFORM` flag with the correct platform you are running on `"gce"` or `"gke"`.
