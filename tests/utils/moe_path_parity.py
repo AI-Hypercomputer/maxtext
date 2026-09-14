@@ -221,6 +221,28 @@ def build_sampler_config(args, shard, layers=None):
         "ici_tensor_parallelism=1",
     ], config_class=types.RLConfig)
 
+  # The production sampler does NOT run the same MoE shape as the trainer.
+  # `maxtext_vllm_adapter/adapter.py:184` injects `padded_base_moe_mlp_dim` on
+  # the vLLM path only, and `moe.py:627` then uses it in place of
+  # `intermediate_dim` when sizing the expert weights. On the 35B this is a 2x
+  # inflation, logged by production at WARNING on every run:
+  #
+  #   Padding moe_intermediate_size from 512 to 1024 to match MLP MoE
+  #   requirements (moe_mlp_tp_size=4, 2*num_lanes=256).
+  #
+  # This harness builds its configs through `pyconfig.initialize` directly and
+  # never goes through the adapter, so before this flag both sides were 512 wide
+  # and the padding was silently excluded from the comparison. That is why the
+  # harness reported 0.000531 nats against production's 0.155: it was measuring
+  # two unpadded models, not the pair production actually runs.
+  #
+  # Read the value out of the container log's warning line rather than trusting
+  # the default -- it depends on `moe_mlp_tp_size`, which is a function of the
+  # deployment's sharding, not of the model.
+  pad = []
+  if args.sampler_padded_moe_mlp_dim:
+    pad = [f"padded_base_moe_mlp_dim={args.sampler_padded_moe_mlp_dim}"]
+
   return pyconfig.initialize([
       "", os.path.join(cfg_dir, "inference", "vllm.yml"), *_common_argv(args, layers),
       "attention=vllm_rpa",
@@ -228,6 +250,7 @@ def build_sampler_config(args, shard, layers=None):
       "model_call_mode=inference",
       "remat_policy=none",
       "use_mrope=False",
+      *pad,
       # Sharding on the vLLM mesh, which is NOT the trainer's. vllm.yml:36:
       #   mesh_axes: ['data','attn_dp','model','expert','attn_dp_expert','dcp','pcp']
       # There is no fsdp axis, so ici_fsdp_parallelism is silently ignored
@@ -267,27 +290,46 @@ def copy_weights(src_state, dst_state):
   def conform(v, want, key):
     v = np.asarray(v)
     if v.shape == want:
-      return v, False
+      return v, False, False
     if v.ndim != len(want):
       raise AssertionError(f"rank mismatch at {key}: {v.shape} vs {want}")
     bad = [i for i, (a_, b_) in enumerate(zip(v.shape, want)) if a_ != b_]
+    padded = False
     for i in bad:
       if v.shape[i] < want[i]:
-        raise AssertionError(
-            f"{key}: source axis {i} is {v.shape[i]}, smaller than the required "
-            f"{want[i]} -- this is not a depth slice, something else is wrong")
+        # The sampler's MoE is wider than the checkpoint when
+        # padded_base_moe_mlp_dim is set: production inflates the expert
+        # up-projections from 512 to 1024 on the vLLM path only. Zero is the
+        # only fill that leaves the padding numerically inert -- SiLU(0) = 0 and
+        # the gated branch multiplies, so zero-filled channels contribute
+        # nothing downstream, and `wo` is unpadded (MaxText 450a65581) so it
+        # never reads them.
+        #
+        # ASSUMPTION, and the main caveat on any result from this path: that
+        # production also writes zeros there. If it instead leaves the padded
+        # region at its init values, production's sampler is computing with
+        # garbage in those channels and this harness will NOT reproduce it. A
+        # near-zero divergence here therefore means "padding is inert when
+        # zero-filled", not "padding is innocent" -- the follow-up is to dump
+        # what the production weight loader actually leaves in [512:1024].
+        pad = [(0, 0)] * v.ndim
+        pad[i] = (0, want[i] - v.shape[i])
+        v = np.pad(v, pad)
+        padded = True
     for i in bad:
-      v = np.take(v, range(want[i]), axis=i)
-    return v, True
+      if v.shape[i] > want[i]:
+        v = np.take(v, range(want[i]), axis=i)
+    return v, True, padded
 
-  out, fused, sliced, matched, missing = [], 0, 0, 0, []
+  out, fused, sliced, matched, missing, padded_n = [], 0, 0, 0, [], 0
   for pth, dst_val in dst_leaves:
     key = jax.tree_util.keystr(pth)
     want = tuple(np.asarray(dst_val).shape)
     if key in by_name:
-      v, did = conform(by_name[key], want, key)
+      v, did, pad = conform(by_name[key], want, key)
       matched += 1
       sliced += did
+      padded_n += pad
     elif key.endswith("['wi'].value") or key.endswith("['wi']"):
       # jax.tree_util.keystr renders a dict key as "['wi']", so matching on a
       # bare "wi" suffix silently never fires -- which is what left every MoE
@@ -301,9 +343,10 @@ def copy_weights(src_state, dst_state):
         missing.append(key)
         out.append(dst_val)
         continue
-      v, did = conform(np.concatenate([np.asarray(w0), np.asarray(w1)], axis=-1), want, key)
+      v, did, pad = conform(np.concatenate([np.asarray(w0), np.asarray(w1)], axis=-1), want, key)
       fused += 1
       sliced += did
+      padded_n += pad
     else:
       missing.append(key)
       out.append(dst_val)
@@ -311,7 +354,8 @@ def copy_weights(src_state, dst_state):
     out.append(jnp.asarray(v))
 
   print(f"  weight copy: {matched} matched, {fused} fused (wi_0+wi_1 -> wi), "
-        f"{sliced} depth-sliced, {len(missing)} unmatched")
+        f"{sliced} reshaped, {padded_n} zero-padded (MoE width), "
+        f"{len(missing)} unmatched")
   if missing:
     print("  UNMATCHED (left at this model's own init -- do not trust the result):")
     for k in missing[:20]:
@@ -557,6 +601,14 @@ def main():
                       "to take the onehot permute branch instead (fused_moe_gmm.py:287) if that "
                       "kernel fails on this install -- but note it is then NOT the kernel "
                       "production runs.")
+  p.add_argument("--sampler_padded_moe_mlp_dim", type=int, default=1024,
+                 help="padded_base_moe_mlp_dim for the SAMPLER config only, mirroring what "
+                      "maxtext_vllm_adapter injects in production. 1024 is what the 35B logs "
+                      "on a v5p-256 at moe_mlp_tp_size=4 ('Padding moe_intermediate_size from "
+                      "512 to 1024'); confirm against the container log before trusting it, "
+                      "since it depends on the deployment's sharding. 0 disables the padding "
+                      "and reproduces the pre-Sep-14 harness behaviour, which measured two "
+                      "unpadded models and so could not see this asymmetry at all.")
   p.add_argument("--seed", type=int, default=0)
   p.add_argument("--trajectory_csv", default=None,
                  help="Path to a production trajectory_log_*.csv. Switches the script from "
@@ -605,7 +657,13 @@ def main():
   sampler_cfg = build_sampler_config(args, shard, layers=args.layers)
   for name, c in (("trainer", trainer_cfg), ("sampler", sampler_cfg)):
     print(f"{name:8s} attention={c.attention:12s} prefuse_moe_weights={c.prefuse_moe_weights} "
-          f"float32_gate_logits={c.float32_gate_logits} model_call_mode={getattr(c,'model_call_mode','train')}")
+          f"float32_gate_logits={c.float32_gate_logits} model_call_mode={getattr(c,'model_call_mode','train')} "
+          f"padded_base_moe_mlp_dim={getattr(c, 'padded_base_moe_mlp_dim', None)}")
+  if getattr(sampler_cfg, "padded_base_moe_mlp_dim", None) == getattr(
+      trainer_cfg, "padded_base_moe_mlp_dim", None):
+    print("  NOTE: both sides have the same MoE width, so this run does NOT reproduce\n"
+          "        production's padded-sampler asymmetry. Pass --sampler_padded_moe_mlp_dim\n"
+          "        with the value from the container log to test it.")
 
   devices = jax.devices()[:args.devices]
 
