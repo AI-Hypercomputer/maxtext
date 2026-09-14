@@ -28,21 +28,21 @@ Then use the image, compute type, and topology for the target cluster:
 # Cluster Toolkit: McJAX
 gcluster job submit \
   --image=<IMAGE_NAME> \
-  --command="python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5" \
-  --name=benchmark-mcjax \
+  --command="python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=<RUN_NAME> --num_steps=5" \
+  --name=<RUN_NAME> \
   --compute-type=<COMPUTE_TYPE> \
   --topology=<TOPOLOGY>
 
 # Cluster Toolkit: Pathways
 gcluster job submit \
   --image=<IMAGE_NAME> \
-  --name=benchmark-pathways \
+  --name=<RUN_NAME> \
   --pathways \
   --compute-type=<COMPUTE_TYPE> \
   --topology=<TOPOLOGY> \
   --num-slices=1 \
   --pathways-gcs-location=gs://maxtext-experiments-tpem/ \
-  --command="python3 -m benchmarks.benchmark_runner --use_pathways=true on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5"
+  --command="python3 -m benchmarks.benchmark_runner --use_pathways=true on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=<RUN_NAME> --num_steps=5"
 ```
 
 The existing Python XPK runner below remains available for older benchmark
