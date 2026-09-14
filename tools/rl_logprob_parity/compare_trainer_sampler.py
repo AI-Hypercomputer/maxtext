@@ -37,7 +37,8 @@ import numpy as np
 MODEL_HF = "Qwen/Qwen3.5-35B-A3B"
 MODEL_MAXTEXT = "qwen3.5-35b-a3b"
 CKPT = "gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/unscanned/0/items"
-B, SEQ_LEN = 8, 512
+# SEQ_LEN / --gen-tokens mirror the RL job's max_prompt_length and max_response_length.
+B, SEQ_LEN = 8, 4096
 # TIS acceptance band; matches truncated_importance_sampling_ratio_min / _ratio in the RL trainer.
 RATIO_MIN, RATIO_MAX = 0.999, 1.002
 
@@ -156,7 +157,8 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       model=MODEL_HF,
       dtype="bfloat16",
       tensor_parallel_size=8,
-      enable_expert_parallel=True,
+      # EP off: the RL job's rollout mesh (fsdp=32, tp=4) sets no expert parallelism.
+      enable_expert_parallel=False,
       max_model_len=max(4096, SEQ_LEN + args.gen_tokens + 64),
       max_num_seqs=16,
       max_num_batched_tokens=2048,
@@ -387,9 +389,11 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
   saved = dict(logp=logp, top1=top1, tokens=prompt_np, full_tokens=tokens_np)
   msg = f"mean logp={logp[:, :-1].mean():.4f} next-token top-1 acc={acc:.3f} (ckpt sanity)"
   if gen_ids is not None:
-    # logp[:, i] scores token i+1, so the sampled token at generated index j (absolute index SEQ_LEN+j)
-    # is scored by logp[:, SEQ_LEN + j - 1].
-    gen_logp_trainer = logp[:, SEQ_LEN - 1 : seq_len - 1]
+    # logp[:, i] scores token i+1, so the sampled token at generated index j (absolute index n_prompt+j)
+    # is scored by logp[:, n_prompt + j - 1]. Take n_prompt from the array, not the SEQ_LEN constant, so a
+    # tokens.npz written at a different prompt length cannot silently mis-slice.
+    n_prompt = prompt_np.shape[1]
+    gen_logp_trainer = logp[:, n_prompt - 1 : seq_len - 1]
     saved["gen_logp"] = gen_logp_trainer
     msg += f"; mean gen logp={gen_logp_trainer.mean():.4f}"
   path = os.path.join(out_dir, "trainer_logprobs.npz")
@@ -523,7 +527,7 @@ def main():
   ap.add_argument("--hf-home", default=None)
   ap.add_argument("--maxtext-root", default=None)
   ap.add_argument("--ckpt", default=CKPT, help="MaxText-format checkpoint for the trainer and the adapter")
-  ap.add_argument("--gen-tokens", type=int, default=8192,
+  ap.add_argument("--gen-tokens", type=int, default=61440,
                   help="output tokens to roll out per prompt for the decode-path comparison; 0 = prompt only")
   ap.add_argument("--gen-temperature", type=float, default=1.0, help="sampling temperature for the rollouts")
   ap.add_argument("--attn-dp", type=int, default=4, help="attention DP degree inside the tp=8 mesh")
