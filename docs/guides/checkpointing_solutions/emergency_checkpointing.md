@@ -66,16 +66,16 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
 
 1. **Set up environment variables:**
    ```bash
-   PROJECT_ID="<project-id>"
-   CLUSTER_LOCATION="<cluster-location>" # example: europe-west4 (region) or us-central1-a (zone)
+   PROJECT_ID="<PROJECT_ID>"
+   CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
    BUCKET_LOCATION="<bucket-location>"   # example: europe-west4 or us-central1 (must be a region or multi-region, not a zone)
-   TPU_ZONE="<tpu-zone>"                 # example: europe-west4-a
-   CLUSTER_NAME="<cluster-name>"
+   TPU_ZONE="<ZONE>"                     # example: europe-west4-a
+   CLUSTER_NAME="<CLUSTER_NAME>"
    NODE_POOL_NAME="<tpu-node-pool-name>" # example: v6e-pool
    COMPUTE_TYPE="<tpu-machine-type>"     # example: ct6e-standard-4t
    TOPOLOGY="<tpu-topology>"             # example: 8x16 (for 32 hosts with ct6e-standard-4t) or 4x8 (8 hosts)
    GKE_VERSION="<gke-version>"           # example: 1.32.4-gke.1415000 (minimum for new clusters)
-   GCS_BUCKET="<gcs-bucket-name>"        # example: my-checkpoint-bucket
+   GCS_BUCKET="<GCS_BUCKET>"             # example: my-checkpoint-bucket
    OUTPUT_PATH="gs://${GCS_BUCKET}/checkpoints"
    ```
 2. **Configure gcloud and Cloud Storage:**
@@ -199,26 +199,26 @@ The Cluster Toolkit workload must mount the ramdisk so the training process can 
 1. **Set up environment variables:**
 
    ```bash
-   PROJECT_ID="<project-id>"
-   CLUSTER_NAME="<cluster-name>"
-   CLUSTER_LOCATION="<cluster-location>" # example: europe-west4 (region) or us-central1-a (zone)
+   PROJECT_ID="<PROJECT_ID>"
+   CLUSTER_NAME="<CLUSTER_NAME>"
+   CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
    RAMDISK_DIRECTORY="<your-ramdisk-directory>" # example: /tmp/ramdisk
-   WORKLOAD_NAME="<workload-name>"
+   WORKLOAD_NAME="<RUN_NAME>"
    NUM_SLICES=1 # number of slices
    LOCAL_CHECKPOINT_PERIOD=10
    CHECKPOINT_PERIOD="<checkpoint-period>"
-   STEPS="<steps>"
-   OUTPUT_PATH="<gcs-bucket-output-path>"
+   STEPS="<STEPS>"
+   OUTPUT_PATH="<GCS_BUCKET>"
    COMPUTE_TYPE="<compute-type>" # example: ct6e-standard-4t
    TOPOLOGY="<tpu-topology>"     # example: 8x16 or 4x8
-   DATA_PATH="<dataset-path>"    # optional: only required if dataset_type is not synthetic
+   DATA_PATH="<DATASET_PATH>"    # optional: only required if dataset_type is not synthetic
    ```
 
 2. **Define the Docker image:**
 
    ```bash
    # Official release pre-training image (recommended)
-   DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+   DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
    # Or your custom runner image:
    # DOCKER_IMAGE="${CLUSTER_LOCATION}-docker.pkg.dev/${PROJECT_ID}/<repo>/${USER}_mtc_runner:latest"
    ```
