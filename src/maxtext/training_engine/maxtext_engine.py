@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
+import functools
 from typing import Any, Optional
 
 from absl import logging
@@ -44,6 +45,7 @@ from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
 from maxtext.training_engine import inflight_throttler
 from maxtext.training_engine import metrics as metrics_module
+from maxtext.training_engine import profiler as profiler_module
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -523,6 +525,37 @@ def make_router_replay_loss_fn(
   return router_replay_loss_fn
 
 
+def _profiled_step(name: str, opens_profile: bool = False, closes_profile: bool = False) -> Callable[..., Any]:
+  """Wraps a step method in a `step_num`-tagged trace region, and drives the profiler around it.
+
+  Args:
+    name: Region name, as shown in the trace viewer.
+    opens_profile: Whether this method may start a profile. True for the step's first call.
+    closes_profile: Whether this method may stop one. True for the call that ends the step.
+  """
+
+  # pylint: disable=protected-access
+  def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(method)
+    def wrapper(self, *args: Any, **kwargs: Any) -> Any:
+      if opens_profile:
+        self._profiler().maybe_activate(
+            self.train_step, blocking_object=self._read_state_pure() if self._state is not None else None
+        )
+      step = self.train_step
+      with jax.profiler.StepTraceAnnotation(name, step_num=step):
+        result = method(self, *args, **kwargs)
+      if closes_profile:
+        self._profiler().maybe_deactivate(
+            step, blocking_object=self._read_state_pure() if self._state is not None else None
+        )
+      return result
+
+    return wrapper
+
+  return decorator
+
+
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   """Concrete trainer wrapping MaxText single-step SPMD execution for NNX models."""
 
@@ -642,6 +675,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._eval_metrics_recorder = metrics_module.MetricsRecorder(mode=metrics_module.Mode.EVAL)
     self._metrics_logger = metrics_module.MetricsLogger(config=self._config)
     self._throttler = inflight_throttler.InflightThrottler(config=self._config, metrics_logger=self._metrics_logger)
+    self._profiler_instance: profiler_module.Profiler | None = None
     self._raiden_sync: Any = None
     self._last_staged_step: Optional[int] = None
     self._staged_metadata: Any = None
@@ -694,6 +728,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def _checkpoint_dir(self) -> str:
     """Returns the directory this engine checkpoints through; an empty string disables Orbax entirely."""
     return self._config.checkpoint_dir
+
+  def _profiler(self) -> profiler_module.Profiler:
+    """Returns this engine's profiler, building it against the step the run starts from.
+
+    Built lazily, on the first step rather than in `__init__`: `restore_checkpoint` runs
+    after the constructor and rewinds `train_step` to the restored step, so anchoring the
+    window here is what makes a resumed run profile the steps it goes on to run instead of
+    steps that are already behind it.
+    """
+    if self._profiler_instance is None:
+      self._profiler_instance = profiler_module.Profiler(self._config, offset_step=self.train_step)
+    return self._profiler_instance
 
   @property
   def model(self) -> Any:
@@ -1616,6 +1662,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           "update": self._jitted_kernels["update"].lower(state_aval, grads_aval, denominator_aval, mean_loss_aval),
       }
 
+  @_profiled_step("fwd_bwd", opens_profile=True)
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
 
@@ -1684,6 +1731,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_denominator = acc_denom
     self._micro_step_count += 1
 
+  @_profiled_step("update", closes_profile=True)
   def update(self, **kwargs: Any) -> int:
     """Applies accumulated gradients to update NNX model weights in HBM.
 
@@ -2234,6 +2282,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def close(self) -> None:
     """Closes the trainer, writes buffered metrics and final checkpoint."""
+    if self._profiler_instance is not None:
+      self._profiler_instance.close(blocking_object=self._read_state_pure() if self._state is not None else None)
+
     if self._raiden_sync:
       if hasattr(self._raiden_sync, "close"):
         self._raiden_sync.close()
