@@ -23,17 +23,17 @@ section is retained for existing environments.
 ```bash
 source ~/.hf_token.sh
 
-export XPK_CLUSTER=<your-cluster>
-export XPK_PROJECT=<your-project>
-export XPK_ZONE=<your-zone>
+export XPK_CLUSTER=<CLUSTER_NAME>
+export XPK_PROJECT=<PROJECT_ID>
+export XPK_ZONE=<ZONE>
 export XPK_DEVICE_TYPE=tpu7x-4x8x8       # or tpu7x-4x4x4 for a smoke run
 export XPK_TOTAL_DEVICES=512             # set to match device-type * 2 (Ironwood has 2 JAX devices/chip)
-export XPK_BASE_OUTPUT_DIR=gs://<your-bucket>/olmo/runs
+export XPK_BASE_OUTPUT_DIR=gs://<GCS_BUCKET>/olmo/runs
 export XPK_RUN_NAME=olmo3_7b_stage1
 
 export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json
-export OLMO_GCS_BASE=gs://<your-bucket>/
-export LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+export OLMO_GCS_BASE=gs://<GCS_BUCKET>/
+export LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
 
 bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
 bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh monitor
@@ -54,8 +54,8 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 export LOCATION=<ZONE>
 export RUN_NAME=<RUN_NAME>
 export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/olmo/runs
-export COMPUTE_TYPE=<cluster-toolkit-compute-type>
-export TOPOLOGY=<tpu-topology>
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
+export TOPOLOGY=<TPU_TOPOLOGY>
 export IMAGE_URI="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 
 export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json
@@ -156,13 +156,13 @@ same procedure works for any of them — just swap the `--revision` flag.
    ```
 
    The script writes an Orbax checkpoint under
-   `<output>/<run_name>/0/items/` (default `<output>` is `/tmp/maxtext`;
+   `<OUTPUT>/<RUN_NAME>/0/items/` (default `<OUTPUT>` is `/tmp/maxtext`;
    override with `--base_output_directory=...`).
 
 2. Upload the converted checkpoint to GCS so all pods can read it:
 
    ```bash
-   gcloud storage cp -r <output>/0/items gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
+   gcloud storage cp -r <OUTPUT>/0/items gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
    ```
 
 3. Point the launcher at it via `LOAD_PARAMETERS_PATH`:

@@ -21,25 +21,25 @@ set -e
 # ==============================================================================
 
 # -- GKE Cluster Configuration --
-# (<your_gke_cluster>, <your_gcp_project>, <your_gcp_location>)
-export CLUSTER="<your-gke-cluster>"
-export PROJECT="<your-gcp-project>"
-export LOCATION="<your-gcp-location>"
+# (<CLUSTER_NAME>, <PROJECT_ID>, <ZONE>)
+export CLUSTER="<CLUSTER_NAME>"
+export PROJECT="<PROJECT_ID>"
+export LOCATION="<ZONE>"
 
 # -- Cluster Toolkit Workload Configuration --
-# (<YYYY-MM-DD>, <your_hugging_face_token>)
-export RUNNAME="my-server-$(date +%Y-%m-%d-%H-%M-%S)"
-export DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:<YYYY-MM-DD>"
-export HF_TOKEN="<your_hugging_face_token>" # Optional: if your tokenizer is private
-export COMPUTE_TYPE="<cluster-toolkit-compute-type>"
-export TOPOLOGY="<tpu-topology>"
+# (<RUN_NAME>, <HF_TOKEN>)
+export RUNNAME="<RUN_NAME>"
+export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
+export HF_TOKEN="<HF_TOKEN>" # Optional: if your tokenizer is private
+export COMPUTE_TYPE="<CLUSTER_TOOLKIT_COMPUTE_TYPE>"
+export TOPOLOGY="<TPU_TOPOLOGY>"
 
 # -- Model Configuration --
 # IMPORTANT: Replace these with your model's details.
-# (<your_model_name>, <path_or_name_to_your_tokenizer>, <path_to_your_checkpoint>)
+# (<MODEL_NAME>, <TOKENIZER_PATH>, <CKPT_PATH>)
 export MODEL_NAME="qwen3-30b-a3b"
 export TOKENIZER_PATH="Qwen/Qwen3-30B-A3B-Thinking-2507"
-export LOAD_PARAMETERS_PATH="<path_to_your_checkpoint>"
+export LOAD_PARAMETERS_PATH="<CKPT_PATH>"
 export PER_DEVICE_BATCH_SIZE=4
 # Parallelism settings should match the number of chips on your device.
 # For a v5p-16 (8 chips), the product of parallelism values should be 8.
@@ -85,4 +85,4 @@ gcluster job submit \
 echo "Workload ${RUNNAME} created."
 echo "Use the following command to check pods and connect:"
 echo "kubectl get pods -l gcluster.google.com/workload=${RUNNAME}"
-echo "kubectl port-forward <server-pod-name> 8000:8000"
+echo "kubectl port-forward <POD_NAME> 8000:8000"

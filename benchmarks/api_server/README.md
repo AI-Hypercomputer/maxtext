@@ -26,7 +26,7 @@ Before launching the server, you may need to set the following environment varia
 - `HF_TOKEN`: Your Hugging Face access token. This is required if the model's tokenizer is hosted on the Hugging Face Hub and is not public.
 
 ```bash
-export HF_TOKEN=<your_hugging_face_token>
+export HF_TOKEN=<HF_TOKEN>
 ```
 
 ## Launching the Server (Single-Host)
@@ -107,18 +107,18 @@ set -e
 export CLUSTER="<CLUSTER_NAME>"
 export PROJECT="<PROJECT_ID>"
 export LOCATION="<ZONE>"
-export COMPUTE_TYPE="<cluster-toolkit-compute-type>"
-export TOPOLOGY="<tpu-topology>"
+export COMPUTE_TYPE="<CLUSTER_TOOLKIT_COMPUTE_TYPE>"
+export TOPOLOGY="<TPU_TOPOLOGY>"
 
 # -- Cluster Toolkit Workload Configuration --
-# (<RUN_NAME>, <YYYY-MM-DD>, <HF_TOKEN>)
+# (<RUN_NAME>, <HF_TOKEN>)
 export RUNNAME="<RUN_NAME>"
-export DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:<YYYY-MM-DD>"
+export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 export HF_TOKEN="<HF_TOKEN>" # Optional: if your tokenizer is private
 
 # -- Model Configuration --
 # IMPORTANT: Replace these with your model's details.
-# (<MODEL_NAME>, <path_or_name_to_your_tokenizer>, <CKPT_PATH>)
+# (<MODEL_NAME>, <TOKENIZER_PATH>, <CKPT_PATH>)
 export MODEL_NAME="qwen3-30b-a3b"
 export TOKENIZER_PATH="Qwen/Qwen3-30B-A3B-Thinking-2507"
 export LOAD_PARAMETERS_PATH="<CKPT_PATH>"
@@ -292,7 +292,7 @@ To maximize throughput, set the `batch_size` in your evaluation command to match
 ```bash
 python -m eval.eval \
     --model local-completions \
-    --model_args "pretrained=<path_or_name_to_your_tokenizer>,base_url=http://localhost:8000/v1/completions,tokenizer_backend=huggingface,tokenizer=<path_or_name_to_your_tokenizer>,model=<MODEL_NAME>,max_length=<MAX_TARGET_LENGTH>" \
+    --model_args "pretrained=<TOKENIZER_PATH>,base_url=http://localhost:8000/v1/completions,tokenizer_backend=huggingface,tokenizer=<TOKENIZER_PATH>,model=<MODEL_NAME>,max_length=<MAX_TARGET_LENGTH>" \
     --tasks mmlu \
     --batch_size <per_device_batch_size * number of devices> \
     --output_path logs
@@ -312,7 +312,7 @@ The chat API does not support batched requests directly. Instead, the evaluation
 ```bash
 python -m eval.eval \
     --model local-chat-completions \
-    --model_args "num_concurrent=16,pretrained=<path_or_name_to_your_tokenizer>,base_url=http://localhost:8000/v1/chat/completions,tokenizer_backend=huggingface,tokenizer=<path_or_name_to_your_tokenizer>,model=<MODEL_NAME>,max_length=<MAX_TARGET_LENGTH>" \
+    --model_args "num_concurrent=16,pretrained=<TOKENIZER_PATH>,base_url=http://localhost:8000/v1/chat/completions,tokenizer_backend=huggingface,tokenizer=<TOKENIZER_PATH>,model=<MODEL_NAME>,max_length=<MAX_TARGET_LENGTH>" \
     --tasks AIME25 \
     --batch_size 1 \
     --output_path logs \
