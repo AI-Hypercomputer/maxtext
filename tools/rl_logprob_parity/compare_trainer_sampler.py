@@ -186,9 +186,6 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
         "attention": "vllm_rpa",
         "allow_split_physical_axes": True,
         "scan_layers": False,
-        "enable_nnx": True,
-        "pure_nnx": True,
-        "pure_nnx_decoder": True,
         "prefuse_moe_weights": True,
         "enable_dp_attention": args.attn_dp > 1,
         "log_config": False,
@@ -285,9 +282,9 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       max_prefill_predict_length=SEQ_LEN,
       per_device_batch_size=1.0,
       log_config=False,
-      enable_nnx=True,
-      pure_nnx=True,
-      pure_nnx_decoder=True,
+      # Single host, and when the sampler stage ran first the vLLM engine has already brought up the JAX
+      # backend in this process -- jax.distributed.initialize() would then fail outright.
+      skip_jax_distributed_system=True,
       enable_checkpointing=True,
       async_checkpointing=False,
       float32_logits=True,
