@@ -51,7 +51,7 @@ export ZONE=<ZONE> # e.g., 'us-central1' or 'us-central1-a'
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
-export RUN_NAME="rl-qwen3-$(date +%Y%m%d-%H%M%S)"
+export RUN_NAME="maxtext-pw-$(date +%m%d%H%M%S)"
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
