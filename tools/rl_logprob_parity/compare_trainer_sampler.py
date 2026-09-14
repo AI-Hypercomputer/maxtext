@@ -7,9 +7,10 @@ Four stages, in order:
   3. trainer   (TPU)  MaxText nnx model, MODEL_MODE_TRAIN, full-model teacher-forced logprobs
   4. compare   (CPU)  per-token band stats + per-sequence seq-mask-tis is_oob_ratio
 
-Stages 2 and 3 each need the whole TPU and conflicting process-level env (MODEL_IMPL_TYPE, LIBTPU_INIT_ARGS),
-so `--stage all` re-execs this file as a subprocess per TPU stage and then compares in-process. Run a single
-stage with `--stage sampler|trainer|compare` to drive them by hand.
+All four stages run in one process. The TPU env (MODEL_IMPL_TYPE, LIBTPU_INIT_ARGS, the serving flags) is set
+once up front, before jax/vllm are imported, and is the same for both TPU stages; the sampler's engine is
+released before the trainer loads so only one set of 35B weights is resident at a time. If HBM is still tight,
+run `--stage sampler` and `--stage trainer` as separate invocations — they hand off through the npz files.
 
 Unlike the per-row scripts in this directory, both sides read their tokens from the same tokens.npz: the
 trainer must never re-tokenize independently, or the two sides score different text.
@@ -22,9 +23,9 @@ Paths default to autodetection (see resolve_paths) and can be overridden with --
 --maxtext-root or the env vars OUT_DIR / HF_HOME / MAXTEXT_ROOT.
 """
 import argparse
+import gc
 import glob
 import os
-import subprocess
 import sys
 import time
 
@@ -67,7 +68,12 @@ def resolve_paths(args):
 
 
 def set_tpu_env(hf_home, maxtext_root, sampler):
-  """Must run before jax/libtpu/vllm are imported anywhere in the process."""
+  """Set the process-level TPU env. Call once, before jax/libtpu/vllm are imported anywhere in the process.
+
+  The sampler and trainer stages share this env unchanged -- MODEL_IMPL_TYPE selects which vLLM model
+  implementation the engine builds, and the trainer neither reads it nor is affected by it -- which is why
+  both can run in a single process.
+  """
   os.environ.setdefault("HF_HOME", hf_home)
   os.environ.setdefault("HF_HUB_OFFLINE", "1")
   os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
@@ -138,7 +144,6 @@ def stage_tokenize(args, hf_home, maxtext_root, out_dir):
 
 def stage_sampler(args, hf_home, maxtext_root, out_dir):
   """Real vLLM engine, prompt_logprobs on the shared tokens. logp[b, i] = logprob of token i given tokens[:i]."""
-  set_tpu_env(hf_home, maxtext_root, args.sampler)
   import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401  pylint: disable=unused-import
   import tpu_inference  # noqa: F401  pylint: disable=unused-import
   from vllm import LLM, SamplingParams, TokensPrompt
@@ -233,6 +238,11 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
   np.savez(path, logp=logp, top1=top1, tokens=tokens)
   log(f"sampler: saved {path}; mean logp={np.nanmean(logp[:, 1:]):.4f} "
       f"top-1 acc={np.mean(top1[:, 1:] == tokens[:, 1:]):.3f}")
+
+  # Release the engine's weights and KV cache before the trainer loads its own copy of the 35B.
+  del outs, llm
+  gc.collect()
+  log("sampler: engine released")
   return path
 
 
@@ -242,7 +252,6 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
 def stage_trainer(args, hf_home, maxtext_root, out_dir):
   """MaxText nnx model in MODEL_MODE_TRAIN, teacher-forced over the same tokens.
   logp[b, i] = logprob of token i+1 given tokens[:i+1], i.e. shifted one left of the sampler's indexing."""
-  set_tpu_env(hf_home, maxtext_root, args.sampler)
   import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401  pylint: disable=unused-import
   import tpu_inference  # noqa: F401  pylint: disable=unused-import
   import jax
@@ -424,7 +433,8 @@ def stage_compare(args, out_dir):
 
 def main():
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-  ap.add_argument("--stage", default="all", choices=["all", "tokenize", "sampler", "trainer", "compare"])
+  ap.add_argument("--stage", default="all", choices=["all", "tokenize", "sampler", "trainer", "compare"],
+                  help="all = every stage in this process; the rest hand off through npz files in --out-dir")
   ap.add_argument("--sampler", default="adapter", choices=["adapter", "native"],
                   help="adapter = MaxText-in-vLLM (MODEL_IMPL_TYPE=flax_nnx); native = tpu-inference torchax path")
   ap.add_argument("--out-dir", default=None)
@@ -446,37 +456,25 @@ def main():
   if args.stage == "compare":
     stage_compare(args, out_dir)
     return
+
+  # Everything below touches the TPU. Set the shared env once, before jax/vllm are imported.
+  if args.stage != "tokenize":
+    set_tpu_env(hf_home, maxtext_root, args.sampler)
+
+  stage_tokenize(args, hf_home, maxtext_root, out_dir)
   if args.stage == "tokenize":
-    stage_tokenize(args, hf_home, maxtext_root, out_dir)
-    return
-  if args.stage == "sampler":
-    stage_tokenize(args, hf_home, maxtext_root, out_dir)
-    stage_sampler(args, hf_home, maxtext_root, out_dir)
-    return
-  if args.stage == "trainer":
-    stage_tokenize(args, hf_home, maxtext_root, out_dir)
-    stage_trainer(args, hf_home, maxtext_root, out_dir)
     return
 
-  # stage == all: tokenize here, then one fresh process per TPU stage (each needs the whole TPU and a
-  # different MODEL_IMPL_TYPE), then compare in this process.
-  stage_tokenize(args, hf_home, maxtext_root, out_dir)
-  common = [
-      sys.executable, os.path.abspath(__file__),
-      "--sampler", args.sampler,
-      "--out-dir", out_dir,
-      "--hf-home", hf_home,
-      "--maxtext-root", maxtext_root,
-      "--ckpt", args.ckpt,
-      "--attn-dp", str(args.attn_dp),
-      "--gpu-memory-utilization", str(args.gpu_memory_utilization),
-  ]
-  for st in ("sampler", "trainer"):
-    log(f"=== subprocess: --stage {st} ===")
-    rc = subprocess.call(common + ["--stage", st])
-    if rc != 0:
-      raise SystemExit(f"stage {st} failed with exit code {rc}")
-  stage_compare(args, out_dir)
+  # The sampler runs first and frees its engine, so the trainer's weights are the only 35B resident
+  # when it loads. Both stages share one process and one TPU init.
+  if args.stage in ("all", "sampler"):
+    log("=== stage: sampler ===")
+    stage_sampler(args, hf_home, maxtext_root, out_dir)
+  if args.stage in ("all", "trainer"):
+    log("=== stage: trainer ===")
+    stage_trainer(args, hf_home, maxtext_root, out_dir)
+  if args.stage == "all":
+    stage_compare(args, out_dir)
 
 
 if __name__ == "__main__":
