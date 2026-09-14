@@ -108,8 +108,8 @@ export NUM_SLICES=<NUM_SLICES>
 
 # Cluster Toolkit workload placement. See the Cluster Toolkit guide for the
 # compute type and topology matching your TPU slice.
-export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
-export TOPOLOGY=<TPU_TOPOLOGY>
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
