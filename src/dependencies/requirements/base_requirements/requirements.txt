@@ -39,7 +39,7 @@ tensorboard-plugin-profile
 tensorboardx
 tiktoken
 tokamax!=0.1.0
-transformers>=5.8.0
+transformers>=5.14.1
 uvloop
 qwix>=0.1.6
 coverage
