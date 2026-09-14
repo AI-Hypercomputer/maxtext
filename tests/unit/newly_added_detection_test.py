@@ -62,6 +62,15 @@ def test_build_diff_commands_honours_non_main_base():
   ]
 
 
+def test_build_diff_commands_never_contains_twodot_ranges():
+  for base in ["main", "origin/main", "release/v1"]:
+    cmds = _build_diff_commands(base)
+    for cmd in cmds:
+      range_arg = cmd[-1]
+      assert "..." in range_arg, f"Range arg {range_arg} must use three-dot merge-base syntax"
+      assert ".." not in range_arg.replace("...", ""), f"Range arg {range_arg} contains two-dot syntax"
+
+
 # --- parse_changed_line_map --------------------------------------------------
 
 
