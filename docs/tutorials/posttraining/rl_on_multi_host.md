@@ -94,7 +94,7 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
 # Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
-export RUN_NAME="maxtext-pw-$(date +%m%d%H%M%S)"
+export RUN_NAME=<RUN_NAME>
 
 # The directory containing the MaxText-compatible model checkpoint.
 # If you are converting from a Hugging Face checkpoint, see:
