@@ -73,7 +73,7 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
    export CLUSTER_NAME="<CLUSTER_NAME>"
    export NODE_POOL_NAME="<TPU_NODE_POOL_NAME>" # example: v6e-pool
    export COMPUTE_TYPE="<TPU_MACHINE_TYPE>"     # example: ct6e-standard-4t
-   export TOPOLOGY="<TPU_TOPOLOGY>"             # example: 8x16 (for 32 hosts with ct6e-standard-4t) or 4x8 (8 hosts)
+   export TOPOLOGY="<TOPOLOGY>"             # example: 8x16 (for 32 hosts with ct6e-standard-4t) or 4x8 (8 hosts)
    export GKE_VERSION="<GKE_VERSION>"           # example: 1.32.4-gke.1415000 (minimum for new clusters)
    export GCS_BUCKET="<GCS_BUCKET>"             # example: my-checkpoint-bucket
    export OUTPUT_PATH="gs://${GCS_BUCKET}/checkpoints"
@@ -209,8 +209,8 @@ The Cluster Toolkit workload must mount the ramdisk so the training process can 
    export CHECKPOINT_PERIOD="<CHECKPOINT_PERIOD>"
    export STEPS="<STEPS>"
    export OUTPUT_PATH="<GCS_BUCKET>"
-   export COMPUTE_TYPE="<CLUSTER_TOOLKIT_COMPUTE_TYPE>" # example: ct6e-standard-4t
-   export TOPOLOGY="<TPU_TOPOLOGY>"     # example: 8x16 or 4x8
+   export COMPUTE_TYPE="<COMPUTE_TYPE>" # example: ct6e-standard-4t
+   export TOPOLOGY="<TOPOLOGY>"     # example: 8x16 or 4x8
    export DATA_PATH="<DATASET_PATH>"    # optional: only required if dataset_type is not synthetic
    ```
 
