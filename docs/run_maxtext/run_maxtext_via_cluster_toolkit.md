@@ -83,17 +83,17 @@ ______________________________________________________________________
 First, ensure your local `kubectl` is authenticated with your target GKE cluster:
 
 ```bash
-gcloud container clusters get-credentials <GKE_CLUSTER_NAME> \
-  --location <GCP_ZONE> \
-  --project <GCP_PROJECT_ID>
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> \
+  --project <PROJECT_ID>
 ```
 
 Next, configure your default Google Cloud project, target GKE cluster name, and cluster location in `gcluster`:
 
 ```bash
-gcluster job config set project <GCP_PROJECT_ID>
-gcluster job config set cluster <GKE_CLUSTER_NAME>
-gcluster job config set location <GCP_REGION_OR_ZONE> # e.g., europe-west4 or us-east5-a
+gcluster job config set project <PROJECT_ID>
+gcluster job config set cluster <CLUSTER_NAME>
+gcluster job config set location <ZONE> # e.g., europe-west4 or us-east5-a
 ```
 
 When `gcluster` runs, it inspects your GKE cluster and verifies that **Kueue** and **JobSet** custom resource definitions and webhooks are healthy. If Kueue is missing on your cluster, `gcluster` can prompt to install it automatically.
@@ -108,7 +108,7 @@ To verify that your GKE cluster, Kueue admission queues, and multi-host JAX ICI 
 cd /path/to/maxtext
 
 gcluster job submit \
-  --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4 \
+  --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
   --build-context . \
   --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-multihost-smoke-test steps=5 dataset_type=synthetic model_name=default enable_checkpointing=False" \
   --name maxtext-multihost-smoke-test \
@@ -145,7 +145,7 @@ Navigate to the root directory of your local MaxText repository and submit the j
 
 Passing `--build-context .` packages your local MaxText source directory on top of a lightweight base image (`--base-image`) and builds/pushes the container image on-the-fly. This allows you to test local code modifications rapidly without manually building a Docker container image.
 
-*(Note: If you already have a fully pre-built custom container image containing your code pushed to Artifact Registry, you can specify `--image <FULL_IMAGE_URI>` directly instead of `--base-image` and `--build-context`.)*
+*(Note: If you already have a fully pre-built custom container image containing your code pushed to Artifact Registry, you can specify `--image <IMAGE_NAME>` directly instead of `--base-image` and `--build-context`.)*
 
 ```bash
 cd /path/to/maxtext
@@ -153,7 +153,7 @@ cd /path/to/maxtext
 gcluster job submit \
   --base-image us-east5-docker.pkg.dev/cloud-tpu-multipod-dev/maxtext-images/maxtext_base:latest \
   --build-context . \
-  --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-test base_output_directory=gs://<MY_BUCKET>/output dataset_path=gs://<MY_DATASET>/ steps=100" \
+  --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-test base_output_directory=gs://<GCS_BUCKET>/output dataset_path=gs://<DATASET_PATH>/ steps=100" \
   --name maxtext-test \
   --compute-type ct5p-hightpu-4t \
   --topology 4x4x4
@@ -178,7 +178,7 @@ Note that running `train_compile.py` locally requires a Python environment with 
 Run `train_compile.py` locally to create the compiled artifact for the target TPU topology:
 
 ```bash
-export TPU_TYPE="your-tpu-type" # e.g. "v5p-128"
+export TPU_TYPE="<TPU_TYPE>" # e.g. "v5p-128"
 export NUM_SLICES=1
 export PER_DEVICE_BATCH_SIZE=1
 
@@ -197,9 +197,9 @@ When you run `gcluster job submit` with `--build-context .`, the generated pickl
 
 ```bash
 gcluster job submit \
-  --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4 \
+  --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
   --build-context . \
-  --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-aot-test base_output_directory=gs://<MY_BUCKET>/output dataset_path=gs://<MY_DATASET>/ steps=100 per_device_batch_size=1 compiled_trainstep_file=maxtext_${TPU_TYPE}_aot.pickle" \
+  --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-aot-test base_output_directory=gs://<GCS_BUCKET>/output dataset_path=gs://<DATASET_PATH>/ steps=100 per_device_batch_size=1 compiled_trainstep_file=maxtext_${TPU_TYPE}_aot.pickle" \
   --name maxtext-aot-test \
   --compute-type ct5p-hightpu-4t \
   --topology 4x4x4
@@ -222,7 +222,7 @@ gcluster job list
 List all pods belonging to your submitted workload:
 
 ```bash
-kubectl get pods -l gcluster.google.com/workload=<JOB_NAME>
+kubectl get pods -l gcluster.google.com/workload=<RUN_NAME>
 ```
 
 ### View Workload Logs
@@ -230,9 +230,9 @@ kubectl get pods -l gcluster.google.com/workload=<JOB_NAME>
 Stream logs from the leader container using `gcluster` or `kubectl`:
 
 ```bash
-gcluster job logs <JOB_NAME>
+gcluster job logs <RUN_NAME>
 # Or using kubectl:
-kubectl logs -f -l gcluster.google.com/workload=<JOB_NAME>,jobset.sigs.k8s.io/job-index=0
+kubectl logs -f -l gcluster.google.com/workload=<RUN_NAME>,jobset.sigs.k8s.io/job-index=0
 ```
 
 Or use the Google Cloud Console Logs Explorer link printed by `gcluster job submit`.
@@ -242,11 +242,11 @@ Or use the Google Cloud Console Logs Explorer link printed by `gcluster job subm
 To terminate a running workload or clean up completed JobSet resources:
 
 ```bash
-gcluster job cancel <JOB_NAME>
+gcluster job cancel <RUN_NAME>
 ```
 
 Or delete the Kubernetes JobSet directly:
 
 ```bash
-kubectl delete jobset <JOB_NAME>
+kubectl delete jobset <RUN_NAME>
 ```

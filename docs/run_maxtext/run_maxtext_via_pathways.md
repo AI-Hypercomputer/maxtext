@@ -44,17 +44,17 @@ The following commands use placeholder variables. Before running them, set these
 ```bash
 # -- Google Cloud Configuration --
 # Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
-export PROJECT_ID=<GCP project ID>
+export PROJECT_ID=<PROJECT_ID>
 
 # The GCP location (listed as "Location" in the UI) and name of your
 # TPU-enabled GKE cluster. Both can be found on the
 # [Cloud Console](https://console.cloud.google.com/kubernetes/list).
-export ZONE=<GCP location> # e.g., 'us-central1'
-export GKE_CLUSTER=<cluster name>
+export ZONE=<ZONE> # e.g., 'us-central1'
+export GKE_CLUSTER=<CLUSTER_NAME>
 
 # -- Workload Configuration --
 # Note: Workload name cannot exceed 22 characters for Pathways workloads due to Kubernetes 63-byte label limit on coordinator address (`<name>-pathways-head-0-0.<name>`).
-export RUN_NAME="pw-$(date +%m%d%H%M%S)"
+export RUN_NAME="maxtext-pw-$(date +%m%d%H%M%S)"
 
 # For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`.
 # Choose a compute type and topology supported by the target cluster (e.g. ct6e-standard-4t with 4x8, or ct5p-hightpu-4t with 4x4x4):
@@ -67,10 +67,10 @@ export NUM_SLICES=1 # Number of TPU slices for your job
 # region as your TPUs to minimize latency and costs.
 # You can list your buckets and their locations in the
 # [Cloud Console](https://console.cloud.google.com/storage/browser).
-export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # Official release pre-training image (recommended)
-export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 # Or your custom runner image:
 # export DOCKER_IMAGE="<REGION>-docker.pkg.dev/${PROJECT_ID}/<REPO>/<IMAGE>:<TAG>"
 ```
