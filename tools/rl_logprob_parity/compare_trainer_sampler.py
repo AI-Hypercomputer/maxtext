@@ -428,8 +428,12 @@ def stage_compare(args, out_dir):
 # ---------------------------------------------------------------- driver
 
 
+class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+  """Keep the module docstring's line breaks and still show each flag's default."""
+
+
 def main():
-  ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+  ap = argparse.ArgumentParser(description=__doc__, formatter_class=_HelpFormatter)
   ap.add_argument("--stage", default="all", choices=["all", "tokenize", "sampler", "trainer", "compare"],
                   help="all = every stage in this process; the rest hand off through npz files in --out-dir")
   ap.add_argument("--sampler", default="adapter", choices=["adapter", "native"],
