@@ -110,8 +110,8 @@ cd /path/to/maxtext
 gcluster job submit \
   --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
   --build-context . \
-  --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-multihost-smoke-test steps=5 dataset_type=synthetic model_name=default enable_checkpointing=False" \
-  --name maxtext-multihost-smoke-test \
+  --command "python3 -m maxtext.trainers.pre_train.train run_name=<RUN_NAME> steps=5 dataset_type=synthetic model_name=default enable_checkpointing=False" \
+  --name <RUN_NAME> \
   --compute-type ct5p-hightpu-4t \
   --topology 4x4x4
 ```
@@ -153,8 +153,8 @@ cd /path/to/maxtext
 gcluster job submit \
   --base-image us-east5-docker.pkg.dev/cloud-tpu-multipod-dev/maxtext-images/maxtext_base:latest \
   --build-context . \
-  --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-test base_output_directory=gs://<GCS_BUCKET>/output dataset_path=gs://<DATASET_PATH>/ steps=100" \
-  --name maxtext-test \
+  --command "python3 -m maxtext.trainers.pre_train.train run_name=<RUN_NAME> base_output_directory=gs://<GCS_BUCKET>/output dataset_path=gs://<DATASET_PATH>/ steps=100" \
+  --name <RUN_NAME> \
   --compute-type ct5p-hightpu-4t \
   --topology 4x4x4
 ```
@@ -199,8 +199,8 @@ When you run `gcluster job submit` with `--build-context .`, the generated pickl
 gcluster job submit \
   --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
   --build-context . \
-  --command "python3 -m maxtext.trainers.pre_train.train run_name=maxtext-aot-test base_output_directory=gs://<GCS_BUCKET>/output dataset_path=gs://<DATASET_PATH>/ steps=100 per_device_batch_size=1 compiled_trainstep_file=maxtext_${TPU_TYPE}_aot.pickle" \
-  --name maxtext-aot-test \
+  --command "python3 -m maxtext.trainers.pre_train.train run_name=<RUN_NAME> base_output_directory=gs://<GCS_BUCKET>/output dataset_path=gs://<DATASET_PATH>/ steps=100 per_device_batch_size=1 compiled_trainstep_file=maxtext_${TPU_TYPE}_aot.pickle" \
+  --name <RUN_NAME> \
   --compute-type ct5p-hightpu-4t \
   --topology 4x4x4
 ```
