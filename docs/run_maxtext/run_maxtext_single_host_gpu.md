@@ -140,8 +140,8 @@ https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/gpu/a3
 echo "Running 1vm.sh"
 
 # Configure access to the GKE cluster before submitting with Cluster Toolkit:
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-#   --location ${LOCATION?} --project ${PROJECT_ID?}
+# gcloud container clusters get-credentials <CLUSTER_NAME> \
+#   --location <ZONE> --project <PROJECT_ID>
 # gcluster job submit --image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
 #   --name=${RUN_NAME?} --compute-type=${COMPUTE_TYPE?} --num-nodes=1 \
 #   --command="bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
@@ -153,7 +153,7 @@ set -e
 # region as your GPUs to minimize latency and costs.
 # You can list your buckets and their locations in the
 # [Cloud Console](https://console.cloud.google.com/storage/browser).
-export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
 # Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).

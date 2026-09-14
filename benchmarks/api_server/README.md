@@ -59,7 +59,7 @@ bash benchmarks/api_server/start_server.sh \
     src/maxtext/configs/base.yml \
     model_name="qwen3-30b-a3b" \
     tokenizer_path="Qwen/Qwen3-30B-A3B-Thinking-2507" \
-    load_parameters_path="<path_to_your_checkpoint>" \
+    load_parameters_path="<CKPT_PATH>" \
     per_device_batch_size=4 \
     ici_tensor_parallelism=4 \
     max_prefill_predict_length=1024 \
@@ -92,7 +92,7 @@ Create a new bash script (e.g., `launch_gke_server.sh`) to hold your configurati
 
 For your convenience, the script below is also available as a template file at `benchmarks/api_server/launch_gke_server.sh.template`.
 
-Inside this script, you will define the server's startup command and your cluster configuration. Before running the script, define the placeholders at the top of the file. Placeholders are enclosed in angle brackets (e.g., `<your_gcp_project>`).
+Inside this script, you will define the server's startup command and your cluster configuration. Before running the script, define the placeholders at the top of the file. Placeholders are enclosed in angle brackets (e.g., `<PROJECT_ID>`).
 
 ```bash
 #!/bin/bash
@@ -103,25 +103,25 @@ set -e
 # ==============================================================================
 
 # -- GKE Cluster Configuration --
-# (<your_gke_cluster>, <your_gcp_project>, <your_gcp_location>)
-export CLUSTER="<your-gke-cluster>"
-export PROJECT="<your-gcp-project>"
-export LOCATION="<your-gcp-location>"
+# (<CLUSTER_NAME>, <PROJECT_ID>, <ZONE>)
+export CLUSTER="<CLUSTER_NAME>"
+export PROJECT="<PROJECT_ID>"
+export LOCATION="<ZONE>"
 export COMPUTE_TYPE="<cluster-toolkit-compute-type>"
 export TOPOLOGY="<tpu-topology>"
 
 # -- Cluster Toolkit Workload Configuration --
-# (<YYYY-MM-DD>, <your_hugging_face_token>)
+# (<YYYY-MM-DD>, <HF_TOKEN>)
 export RUNNAME="my-server-$(date +%Y-%m-%d-%H-%M-%S)"
 export DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:<YYYY-MM-DD>"
-export HF_TOKEN="<your_hugging_face_token>" # Optional: if your tokenizer is private
+export HF_TOKEN="<HF_TOKEN>" # Optional: if your tokenizer is private
 
 # -- Model Configuration --
 # IMPORTANT: Replace these with your model's details.
-# (<your_model_name>, <path_or_name_to_your_tokenizer>, <path_to_your_checkpoint>)
+# (<MODEL_NAME>, <path_or_name_to_your_tokenizer>, <CKPT_PATH>)
 export MODEL_NAME="qwen3-30b-a3b"
 export TOKENIZER_PATH="Qwen/Qwen3-30B-A3B-Thinking-2507"
-export LOAD_PARAMETERS_PATH="<path_to_your_checkpoint>"
+export LOAD_PARAMETERS_PATH="<CKPT_PATH>"
 export PER_DEVICE_BATCH_SIZE=4
 # Parallelism settings should match the number of chips on your device.
 # For a v5p-16 (8 chips), the product of parallelism values should be 8.
@@ -184,14 +184,14 @@ chmod +x launch_gke_server.sh
 The API server only runs on the first host/worker (rank 0 on GPU) of the workload. To connect to it, authenticate with `gcloud` and use `kubectl port-forward`.
 
 ```bash
-gcloud container clusters get-credentials <your-gke-cluster> \
-  --location <your-gcp-location> \
-  --project <your-gcp-project>
-kubectl get pods -l gcluster.google.com/workload=<your_job_name>
-kubectl port-forward <server-pod-name> 8000:8000
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --location <ZONE> \
+  --project <PROJECT_ID>
+kubectl get pods -l gcluster.google.com/workload=<RUN_NAME>
+kubectl port-forward <POD_NAME> 8000:8000
 ```
 
-Select the first worker pod from the output above and run `kubectl port-forward <server-pod-name> 8000:8000`. Your server is now accessible at `http://localhost:8000`.
+Select the first worker pod from the output above and run `kubectl port-forward <POD_NAME> 8000:8000`. Your server is now accessible at `http://localhost:8000`.
 
 ## Interacting with the Server
 
@@ -207,7 +207,7 @@ The `/v1/completions` endpoint is suitable for simple prompt-response interactio
 curl -X POST http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "<your-model-name>",
+    "model": "<MODEL_NAME>",
     "prompt": "The capital of France is",
     "max_tokens": 50,
     "temperature": 0.7
@@ -222,7 +222,7 @@ The `/v1/chat/completions` endpoint is designed for multi-turn conversations.
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "<your-model-name>",
+    "model": "<MODEL_NAME>",
     "messages": [
       {"role": "system", "content": "You are a helpful assistant."}, 
       {"role": "user", "content": "What is the largest planet in our solar system?"}
@@ -253,7 +253,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-needed")
 
 completion = client.chat.completions.create(
-  model="<your-model-name>",
+  model="<MODEL_NAME>",
   messages=[
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "What is the largest planet in our solar system?"}
@@ -292,7 +292,7 @@ To maximize throughput, set the `batch_size` in your evaluation command to match
 ```bash
 python -m eval.eval \
     --model local-completions \
-    --model_args "pretrained=<path_or_name_to_your_tokenizer>,base_url=http://localhost:8000/v1/completions,tokenizer_backend=huggingface,tokenizer=<path_or_name_to_your_tokenizer>,model=<your_model_name>,max_length=<your_max_target_length>" \
+    --model_args "pretrained=<path_or_name_to_your_tokenizer>,base_url=http://localhost:8000/v1/completions,tokenizer_backend=huggingface,tokenizer=<path_or_name_to_your_tokenizer>,model=<MODEL_NAME>,max_length=<MAX_TARGET_LENGTH>" \
     --tasks mmlu \
     --batch_size <per_device_batch_size * number of devices> \
     --output_path logs
@@ -312,12 +312,12 @@ The chat API does not support batched requests directly. Instead, the evaluation
 ```bash
 python -m eval.eval \
     --model local-chat-completions \
-    --model_args "num_concurrent=16,pretrained=<path_or_name_to_your_tokenizer>,base_url=http://localhost:8000/v1/chat/completions,tokenizer_backend=huggingface,tokenizer=<path_or_name_to_your_tokenizer>,model=<your_model_name>,max_length=<your_max_target_length>" \
+    --model_args "num_concurrent=16,pretrained=<path_or_name_to_your_tokenizer>,base_url=http://localhost:8000/v1/chat/completions,tokenizer_backend=huggingface,tokenizer=<path_or_name_to_your_tokenizer>,model=<MODEL_NAME>,max_length=<MAX_TARGET_LENGTH>" \
     --tasks AIME25 \
     --batch_size 1 \
     --output_path logs \
     --apply_chat_template \
-    --gen_kwargs "temperature=0.6,top_p=0.95,top_k=20,max_tokens=<your_max_target_length>,max_gen_toks=<your_max_target_length>"
+    --gen_kwargs "temperature=0.6,top_p=0.95,top_k=20,max_tokens=<MAX_TARGET_LENGTH>,max_gen_toks=<MAX_TARGET_LENGTH>"
 ```
 The valid arguments for `--gen_kwargs` are `temperature`, `top_p`, `top_k`, `stop`, `seed`, `max_tokens` and `max_gen_toks`. The `max_gen_toks` argument is used by some tasks in evaluation harness to control the maximum number of tokens to generate. We suggest pass `max_tokens` and `max_gen_toks` with the same value at the same time.
 

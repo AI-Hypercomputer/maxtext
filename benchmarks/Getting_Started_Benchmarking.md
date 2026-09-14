@@ -8,10 +8,10 @@ Two approaches are here:
 For new GKE runs, submit each benchmark as a Cluster Toolkit JobSet. Authenticate
 to the cluster and configure `gcluster` before submitting:
 
-```shell
-export PROJECT="<your-project>"
-export CLUSTER="<your-cluster>"
-export LOCATION="<your-cluster-location>" # e.g. europe-west4 (region) or us-central1-a (zone)
+```bash
+export PROJECT="<PROJECT_ID>"
+export CLUSTER="<CLUSTER_NAME>"
+export LOCATION="<ZONE>" # e.g. europe-west4 (region) or us-central1-a (zone)
 
 gcloud config set project ${PROJECT?}
 gcloud container clusters get-credentials ${CLUSTER?} \
@@ -24,10 +24,10 @@ gcluster job config set location ${LOCATION?}
 
 Then use the image, compute type, and topology for the target cluster:
 
-```shell
+```bash
 # Cluster Toolkit: McJAX
 gcluster job submit \
-  --image=<IMAGE_URI> \
+  --image=<IMAGE_NAME> \
   --command="python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5" \
   --name=benchmark-mcjax \
   --compute-type=<COMPUTE_TYPE> \
@@ -35,7 +35,7 @@ gcluster job submit \
 
 # Cluster Toolkit: Pathways
 gcluster job submit \
-  --image=<IMAGE_URI> \
+  --image=<IMAGE_NAME> \
   --name=benchmark-pathways \
   --pathways \
   --compute-type=<COMPUTE_TYPE> \

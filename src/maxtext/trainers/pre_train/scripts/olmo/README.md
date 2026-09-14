@@ -49,19 +49,19 @@ full MaxText perf flag set automatically — no manual override needed.
 ## Quick start (multi-host TPU via Cluster Toolkit)
 
 ```bash
-export PROJECT_ID=<your-project>
-export GKE_CLUSTER=<your-cluster>
-export LOCATION=<your-location>
+export PROJECT_ID=<PROJECT_ID>
+export GKE_CLUSTER=<CLUSTER_NAME>
+export LOCATION=<ZONE>
 export RUN_NAME=olmo3_7b_stage1
-export BASE_OUTPUT_DIRECTORY=gs://<your-bucket>/olmo/runs
+export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/olmo/runs
 export COMPUTE_TYPE=<cluster-toolkit-compute-type>
 export TOPOLOGY=<tpu-topology>
-export IMAGE_URI="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+export IMAGE_URI="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 
 export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json
-export OLMO_GCS_BASE=gs://<your-bucket>/
-export LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
-export HF_TOKEN=<your-hf-token>
+export OLMO_GCS_BASE=gs://<GCS_BUCKET>/
+export LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
+export HF_TOKEN=<HF_TOKEN>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
@@ -72,11 +72,11 @@ gcluster job config set cluster ${GKE_CLUSTER?}
 gcluster job config set location ${LOCATION?}
 
 gcluster job submit \
-  --image ${IMAGE_URI?} \
-  --name ${RUN_NAME?} \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
-  --command "INDEX_PATH=${OLMO_INDEX_PATH?} \
+  --image=${IMAGE_URI?} \
+  --name=${RUN_NAME?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="INDEX_PATH=${OLMO_INDEX_PATH?} \
 GCS_BASE=${OLMO_GCS_BASE?} \
 LOCAL_MOUNT=/tmp/olmo-data \
 OUTPUT_DIR=${BASE_OUTPUT_DIRECTORY?} \
@@ -96,10 +96,10 @@ Set the data, checkpoint, and launcher environment variables before invoking `ru
 source $MAXTEXT_ROOT/maxtext_venv/bin/activate
 
 INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json \
-GCS_BASE=gs://<your-bucket>/ \
+GCS_BASE=gs://<GCS_BUCKET>/ \
 LOCAL_MOUNT=/tmp/olmo-data \
-OUTPUT_DIR=gs://<your-bucket>/olmo/runs \
-LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items \
+OUTPUT_DIR=gs://<GCS_BUCKET>/olmo/runs \
+LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items \
 HF_SECRETS=~/.hf_token.sh \
 RUN_NAME=olmo3_7b_stage1 \
 STEPS=50 WARMUP_STEPS=10 CHECKPOINT_PERIOD=50 \
@@ -148,7 +148,7 @@ same procedure works for any of them — just swap the `--revision` flag.
    peak ~26 GB RAM; needs `huggingface_hub` auth via `HF_TOKEN`):
 
    ```bash
-   export HF_TOKEN=...
+   export HF_TOKEN=<HF_TOKEN>
    python -m maxtext.checkpoint_conversion.to_maxtext \
      model_name=olmo3-7b-pt scan_layers=True \
      --revision=stage1-step0 \
@@ -162,13 +162,13 @@ same procedure works for any of them — just swap the `--revision` flag.
 2. Upload the converted checkpoint to GCS so all pods can read it:
 
    ```bash
-   gcloud storage cp -r <output>/0/items gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+   gcloud storage cp -r <output>/0/items gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
    ```
 
 3. Point the launcher at it via `LOAD_PARAMETERS_PATH`:
 
    ```bash
-   export LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+   export LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
    bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
    ```
 

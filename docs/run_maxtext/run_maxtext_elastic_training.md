@@ -53,13 +53,13 @@ Set these environment variables in your shell. Replace the placeholders with you
 
 ```bash
 # Google Cloud Configuration
-export PROJECT_ID=<GCP project ID>
-export LOCATION=<GCP_REGION_OR_ZONE> # e.g., 'us-central1'
-export GKE_CLUSTER=<cluster name>
+export PROJECT_ID=<PROJECT_ID>
+export LOCATION=<ZONE> # e.g., 'us-central1'
+export GKE_CLUSTER=<CLUSTER_NAME>
 
 # Workload Configuration
-# Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
-export RUN_NAME="elastic-$(date +%m%d%H%M%S)"
+# Note: Workload names cannot exceed 22 characters for Pathways workloads and must be valid DNS labels (lowercase alphanumeric and hyphens).
+export RUN_NAME="maxtext-pw-$(date +%m%d%H%M%S)"
 
 # Hardware & Slice Configuration
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE> # e.g., 'ct5lp-hightpu-4t' for v5e
@@ -67,8 +67,8 @@ export TOPOLOGY=<TPU_TOPOLOGY>                     # e.g., '4x4' (16 chips)
 export NUM_SLICES=3                                # total slices in the run
 
 # MaxText & Storage Configuration
-export BASE_OUTPUT_DIRECTORY=<gcs bucket path>     # e.g., gs://my-bucket/maxtext-runs
-export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET>          # e.g., gs://my-bucket/maxtext-runs
+export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 ```
 
 ## 3. Launch the elastic workload
