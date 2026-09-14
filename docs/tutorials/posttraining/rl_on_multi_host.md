@@ -48,7 +48,7 @@ rely on the vLLM library.
 - [Setup Environment Variables](#setup-environment-variables)
 - [Get Your Model Checkpoint](#get-your-model-checkpoint)
 - [Submit your RL workload via Pathways](#submit-your-rl-workload-via-pathways)
-- [Managing Workloads](#managing-workloads)
+- [Monitor and clean up](#monitor-and-clean-up)
 - [Troubleshooting](#troubleshooting)
 
 ## Prerequisites
