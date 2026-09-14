@@ -93,26 +93,26 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
 
 1. **Set up environment variables:**
    ```bash
-   export PROJECT_ID="<PROJECT_ID>"
-   export CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
-   export BUCKET_LOCATION="<BUCKET_LOCATION>"   # example: europe-west4 or us-central1 (must be a region or multi-region, not a zone)
-   export TPU_ZONE="<ZONE>"                     # example: europe-west4-a
-   export CLUSTER_NAME="<CLUSTER_NAME>"
-   export NODE_POOL_NAME="<TPU_NODE_POOL_NAME>" # example: v6e-pool
-   export COMPUTE_TYPE="<TPU_MACHINE_TYPE>"     # example: ct6e-standard-4t
-   export TOPOLOGY="<TOPOLOGY>"             # example: 8x16 (for 32 hosts with ct6e-standard-4t) or 4x8 (8 hosts)
-   export GKE_VERSION="<GKE_VERSION>"           # example: 1.32.4-gke.1415000 (minimum for new clusters)
-   export GCS_BUCKET="<GCS_BUCKET>"             # example: my-checkpoint-bucket
-   export OUTPUT_PATH="gs://${GCS_BUCKET}/checkpoints"
+   export PROJECT_ID=<PROJECT_ID>
+   export CLUSTER_LOCATION=<ZONE> # example: europe-west4 (region) or us-central1-a (zone)
+   export BUCKET_LOCATION=<BUCKET_LOCATION>   # example: europe-west4 or us-central1 (must be a region or multi-region, not a zone)
+   export TPU_ZONE=<ZONE>                     # example: europe-west4-a
+   export CLUSTER_NAME=<CLUSTER_NAME>
+   export NODE_POOL_NAME=<TPU_NODE_POOL_NAME> # example: v6e-pool
+   export COMPUTE_TYPE=<TPU_MACHINE_TYPE>     # example: ct6e-standard-4t
+   export TOPOLOGY=<TOPOLOGY>             # example: 8x16 (for 32 hosts with ct6e-standard-4t) or 4x8 (8 hosts)
+   export GKE_VERSION=<GKE_VERSION>           # example: 1.32.4-gke.1415000 (minimum for new clusters)
+   export GCS_BUCKET=<GCS_BUCKET>             # example: my-checkpoint-bucket
+   export OUTPUT_PATH="gs://<GCS_BUCKET>/checkpoints"
    ```
 2. **Configure gcloud and Cloud Storage:**
    Configure `gcloud` defaults and create a Cloud Storage bucket with **Hierarchical Namespace (HNS)** enabled. HNS provides fast atomic folder renames required for checkpoint finalization and GCS backups:
    ```bash
-   gcloud config set project ${PROJECT_ID?}
-   gcloud config set compute/zone ${TPU_ZONE?}
+   gcloud config set project <PROJECT_ID>
+   gcloud config set compute/zone <ZONE>
 
-   gcloud storage buckets create gs://${GCS_BUCKET?} \
-     --location=${BUCKET_LOCATION?} \
+   gcloud storage buckets create gs://<GCS_BUCKET> \
+     --location=<BUCKET_LOCATION> \
      --hierarchical-namespace
    ```
 3. **Configure the cluster:** Multi-Tier Checkpointing requires the `HighScaleCheckpointing` and `GcsFuseCsiDriver` addons, as well as Workload Identity Federation, to be enabled on your GKE cluster.
@@ -120,29 +120,29 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
    - **For an existing cluster**, update the cluster workload pool and addons in two separate commands (since `--workload-pool` and `--update-addons` cannot be specified together in `gcloud`):
      ```bash
      # Step 1: Enable Workload Identity Federation
-     gcloud container clusters update ${CLUSTER_NAME?} \
-       --workload-pool=${PROJECT_ID?}.svc.id.goog \
-       --location=${CLUSTER_LOCATION?}
+     gcloud container clusters update <CLUSTER_NAME> \
+       --workload-pool=<PROJECT_ID>.svc.id.goog \
+       --location=<ZONE>
 
      # Step 2: Enable MTC and GCS FUSE addons
-     gcloud container clusters update ${CLUSTER_NAME?} \
+     gcloud container clusters update <CLUSTER_NAME> \
        --update-addons=HighScaleCheckpointing=ENABLED,GcsFuseCsiDriver=ENABLED \
-       --location=${CLUSTER_LOCATION?}
+       --location=<ZONE>
      ```
 
    - **For a new cluster**, include the addons and workload pool during cluster creation:
      ```bash
-     gcloud container clusters create ${CLUSTER_NAME?} \
-       --workload-pool=${PROJECT_ID?}.svc.id.goog \
+     gcloud container clusters create <CLUSTER_NAME> \
+       --workload-pool=<PROJECT_ID>.svc.id.goog \
        --addons=HighScaleCheckpointing,GcsFuseCsiDriver \
-       --location=${CLUSTER_LOCATION?} \
-       --cluster-version=${GKE_VERSION?}
+       --location=<ZONE> \
+       --cluster-version=<GKE_VERSION>
      ```
 
    - **Verify that HighScaleCheckpointing is enabled**:
      ```bash
-     gcloud container clusters describe ${CLUSTER_NAME?} \
-       --location=${CLUSTER_LOCATION?} \
+     gcloud container clusters describe <CLUSTER_NAME> \
+       --location=<ZONE> \
        --format="yaml(addonsConfig.highScaleCheckpointingConfig)"
      ```
      The output should confirm `enabled: true`.
@@ -152,28 +152,28 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
 
    - **Create the TPU node pool**: If your cluster does not already have a TPU node pool, create one with the target compute type and topology:
      ```bash
-     gcloud container node-pools create ${NODE_POOL_NAME?} \
-       --cluster=${CLUSTER_NAME?} \
-       --location=${CLUSTER_LOCATION?} \
-       --node-locations=${TPU_ZONE?} \
-       --machine-type=${COMPUTE_TYPE?} \
-       --tpu-topology=${TOPOLOGY?}
+     gcloud container node-pools create <TPU_NODE_POOL_NAME> \
+       --cluster=<CLUSTER_NAME> \
+       --location=<ZONE> \
+       --node-locations=<ZONE> \
+       --machine-type=<COMPUTE_TYPE> \
+       --tpu-topology=<TOPOLOGY>
      ```
 
    - **Authenticate kubectl**: Authenticate `kubectl` with the cluster credentials:
      ```bash
-     gcloud container clusters get-credentials ${CLUSTER_NAME?} \
-       --location=${CLUSTER_LOCATION?} \
-       --project=${PROJECT_ID?}
+     gcloud container clusters get-credentials <CLUSTER_NAME> \
+       --location=<ZONE> \
+       --project=<PROJECT_ID>
      ```
 
 4. **Grant access to Cloud Storage buckets:** Multi-Tier Checkpointing requires access to the Cloud Storage bucket to store checkpoints. Grant the Storage Object User (`roles/storage.objectUser`) IAM role on the bucket to both the GKE checkpointing service account and the workload service account:
 
    - **GKE Checkpointing Service Account**: Grant `roles/storage.objectUser` on the bucket to the GKE checkpointing daemon:
      ```bash
-     PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID?} --format="value(projectNumber)")
-     gcloud storage buckets add-iam-policy-binding gs://${GCS_BUCKET?} \
-       --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER?}/locations/global/workloadIdentityPools/${PROJECT_ID?}.svc.id.goog/subject/ns/gke-managed-checkpointing/sa/gke-checkpointing-multitier-node" \
+     PROJECT_NUMBER=$(gcloud projects describe <PROJECT_ID> --format="value(projectNumber)")
+     gcloud storage buckets add-iam-policy-binding gs://<GCS_BUCKET> \
+       --member="principal://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<PROJECT_ID>.svc.id.goog/subject/ns/gke-managed-checkpointing/sa/gke-checkpointing-multitier-node" \
        --role="roles/storage.objectUser"
      ```
 
@@ -181,8 +181,8 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
      ```bash
      WORKLOAD_NAMESPACE="default"
      WORKLOAD_KSA="default"
-     gcloud storage buckets add-iam-policy-binding gs://${GCS_BUCKET?} \
-       --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER?}/locations/global/workloadIdentityPools/${PROJECT_ID?}.svc.id.goog/subject/ns/${WORKLOAD_NAMESPACE?}/sa/${WORKLOAD_KSA?}" \
+     gcloud storage buckets add-iam-policy-binding gs://<GCS_BUCKET> \
+       --member="principal://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<PROJECT_ID>.svc.id.goog/subject/ns/default/sa/default" \
        --role="roles/storage.objectUser"
      ```
 
@@ -217,19 +217,19 @@ The flags below would give the user access to the ramdisk in their workload:
 1. **Set up environment variables:**
 
    ```bash
-   export PROJECT_ID="<PROJECT_ID>"
-   export CLUSTER_NAME="<CLUSTER_NAME>"
-   export CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
-   export RAMDISK_DIRECTORY="<RAMDISK_DIRECTORY>" # example: /tmp/ramdisk
-   export WORKLOAD_NAME="<RUN_NAME>"
+   export PROJECT_ID=<PROJECT_ID>
+   export CLUSTER_NAME=<CLUSTER_NAME>
+   export CLUSTER_LOCATION=<ZONE> # example: europe-west4 (region) or us-central1-a (zone)
+   export RAMDISK_DIRECTORY=<RAMDISK_DIRECTORY> # example: /tmp/ramdisk
+   export WORKLOAD_NAME=<RUN_NAME>
    export NUM_SLICES=1 # number of slices (e.g. 1 for single-slice, 2+ for multi-slice)
    export LOCAL_CHECKPOINT_PERIOD=10
-   export STEPS="<STEPS>"
-   export OUTPUT_PATH="<GCS_BUCKET>"
-   export MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN="<BACKUP_INTERVAL_MINUTES>"
-   export COMPUTE_TYPE="<COMPUTE_TYPE>" # example: ct6e-standard-4t
-   export TOPOLOGY="<TOPOLOGY>"     # example: 8x16 or 4x8
-   export DATA_PATH="<DATASET_PATH>"    # optional: only required if dataset_type is not synthetic
+   export STEPS=<STEPS>
+   export OUTPUT_PATH=<GCS_BUCKET>
+   export MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN=<BACKUP_INTERVAL_MINUTES>
+   export COMPUTE_TYPE=<COMPUTE_TYPE> # example: ct6e-standard-4t
+   export TOPOLOGY=<TOPOLOGY>     # example: 8x16 or 4x8
+   export DATA_PATH=<DATASET_PATH>    # optional: only required if dataset_type is not synthetic
    ```
 
 2. **Define the Docker image:**
@@ -238,29 +238,29 @@ The flags below would give the user access to the ramdisk in their workload:
    # Official release pre-training image (recommended)
    export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
    # Or your custom runner image:
-   # export DOCKER_IMAGE="${CLUSTER_LOCATION}-docker.pkg.dev/${PROJECT_ID}/<REPO>/${USER}_mtc_runner:latest"
+   # export DOCKER_IMAGE="<ZONE>-docker.pkg.dev/<PROJECT_ID>/<REPO>/<IMAGE_NAME>"
    ```
 
 3. **Run the workload creation command:**
 
    ```bash
-   gcloud container clusters get-credentials ${CLUSTER_NAME?} \
-     --location=${CLUSTER_LOCATION?} \
-     --project=${PROJECT_ID?}
+   gcloud container clusters get-credentials <CLUSTER_NAME> \
+     --location=<ZONE> \
+     --project=<PROJECT_ID>
 
-   gcluster job config set project ${PROJECT_ID?}
-   gcluster job config set cluster ${CLUSTER_NAME?}
-   gcluster job config set location ${CLUSTER_LOCATION?}
+   gcluster job config set project <PROJECT_ID>
+   gcluster job config set cluster <CLUSTER_NAME>
+   gcluster job config set location <ZONE>
 
    gcluster job submit \
-     --image=${DOCKER_IMAGE?} \
-     --name=${WORKLOAD_NAME?} \
-     --compute-type=${COMPUTE_TYPE?} \
-     --topology=${TOPOLOGY?} \
-     --num-slices=${NUM_SLICES?} \
+     --image=us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
+     --name=<RUN_NAME> \
+     --compute-type=<COMPUTE_TYPE> \
+     --topology=<TOPOLOGY> \
+     --num-slices=<NUM_SLICES> \
      --gke-mtc-enabled \
-     --gke-mtc-ramdisk-dir=${RAMDISK_DIRECTORY?} \
-     --command="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=default dataset_type=synthetic steps=${STEPS?} per_device_batch_size=6 enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?} num_slices=${NUM_SLICES?}"
+     --gke-mtc-ramdisk-dir=<RAMDISK_DIRECTORY> \
+     --command="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=<RUN_NAME> base_output_directory=<GCS_BUCKET> model_name=default dataset_type=synthetic steps=<STEPS> per_device_batch_size=6 enable_multi_tier_checkpointing=True local_checkpoint_period=<LOCAL_CHECKPOINT_PERIOD> local_checkpoint_directory=<RAMDISK_DIRECTORY> multi_tier_checkpointing_backup_interval_minutes=<BACKUP_INTERVAL_MINUTES> num_slices=<NUM_SLICES>"
    ```
 
 ## Deploying MTC on Pathways using Cluster Toolkit
@@ -278,20 +278,20 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
 1. **Set up environment variables:**
 
    ```bash
-   export PROJECT_ID="<PROJECT_ID>"
-   export CLUSTER_NAME="<CLUSTER_NAME>"
-   export CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
-   export JOB_NAME="<RUN_NAME>"
-   export COMPUTE_TYPE="<COMPUTE_TYPE>" # example: ct6e-standard-4t
-   export TOPOLOGY="<TOPOLOGY>"     # example: 4x8
-   export NUM_SLICES="<NUM_SLICES>"
+   export PROJECT_ID=<PROJECT_ID>
+   export CLUSTER_NAME=<CLUSTER_NAME>
+   export CLUSTER_LOCATION=<ZONE> # example: europe-west4 (region) or us-central1-a (zone)
+   export JOB_NAME=<RUN_NAME>
+   export COMPUTE_TYPE=<COMPUTE_TYPE> # example: ct6e-standard-4t
+   export TOPOLOGY=<TOPOLOGY>     # example: 4x8
+   export NUM_SLICES=<NUM_SLICES>
    export OUTPUT_PATH="gs://<GCS_BUCKET>"
    export MAXTEXT_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
    export MAXTEXT_CONFIG="src/maxtext/configs/base.yml"
    export RAMDISK_DIRECTORY="/tmp/mtc_checkpoints"
    export LOCAL_CHECKPOINT_PERIOD=10
    export BACKUP_INTERVAL_MINUTES=30
-   export TRAINING_ARGS="<TRAINING_ARGS>"
+   export TRAINING_ARGS=<TRAINING_ARGS>
    export OPTIONAL_ELASTICITY_ARGS=""
    ```
 
@@ -300,39 +300,22 @@ To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit wi
    > [!WARNING]
    > **Use compatible MaxText head and Colocated Python sidecar images.** Pathways MTC uses [Colocated Python](https://docs.jax.dev/en/latest/notebooks/colocated-python.html) for worker-local checkpoint operations. Both images must use compatible MaxText and Orbax revisions and exactly the same `jax` and `jaxlib` versions. Version skew can cause initialization or restore failures.
 
-2. **Define the MaxText command:**
-
-   ```bash
-   COMMAND="python3 -m maxtext.trainers.pre_train.train ${MAXTEXT_CONFIG} \
-   ${TRAINING_ARGS} \
-   run_name=${JOB_NAME} \
-   base_output_directory=${OUTPUT_PATH} \
-   num_slices=${NUM_SLICES} \
-   enable_single_controller=True \
-   enable_multi_tier_checkpointing=True \
-   colocated_python_checkpointing=True \
-   local_checkpoint_directory=${RAMDISK_DIRECTORY} \
-   local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD} \
-   multi_tier_checkpointing_backup_interval_minutes=${BACKUP_INTERVAL_MINUTES} \
-   ${OPTIONAL_ELASTICITY_ARGS}"
-   ```
-
-3. **Submit the workload:**
+2. **Submit the workload:**
 
    ```bash
    gcluster job submit \
-      --project="${PROJECT_ID}" \
-      --cluster="${CLUSTER_NAME}" \
-      --location="${CLUSTER_LOCATION}" \
-      --name="${JOB_NAME}" \
+      --project=<PROJECT_ID> \
+      --cluster=<CLUSTER_NAME> \
+      --location=<ZONE> \
+      --name=<RUN_NAME> \
       --pathways \
-      --compute-type="${COMPUTE_TYPE}" \
-      --topology="${TOPOLOGY}" \
-      --num-slices="${NUM_SLICES}" \
-      --image="${MAXTEXT_IMAGE}" \
-      --pathways-colocated-python-sidecar-image="${MAXTEXT_IMAGE}" \
-      --pathways-gcs-location="${OUTPUT_PATH}" \
+      --compute-type=<COMPUTE_TYPE> \
+      --topology=<TOPOLOGY> \
+      --num-slices=<NUM_SLICES> \
+      --image="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest" \
+      --pathways-colocated-python-sidecar-image="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest" \
+      --pathways-gcs-location=<GCS_BUCKET> \
       --gke-mtc-enabled \
-      --gke-mtc-ramdisk-dir="${RAMDISK_DIRECTORY}" \
-      --command="${COMMAND}"
+      --gke-mtc-ramdisk-dir=<RAMDISK_DIRECTORY> \
+      --command="python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml <TRAINING_ARGS> run_name=<RUN_NAME> base_output_directory=<GCS_BUCKET> num_slices=<NUM_SLICES> enable_single_controller=True enable_multi_tier_checkpointing=True colocated_python_checkpointing=True local_checkpoint_directory=<RAMDISK_DIRECTORY> local_checkpoint_period=<LOCAL_CHECKPOINT_PERIOD> multi_tier_checkpointing_backup_interval_minutes=<BACKUP_INTERVAL_MINUTES> <OPTIONAL_ELASTICITY_ARGS>"
    ```
