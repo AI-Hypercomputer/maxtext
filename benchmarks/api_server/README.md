@@ -107,8 +107,8 @@ set -e
 export CLUSTER="<CLUSTER_NAME>"
 export PROJECT="<PROJECT_ID>"
 export LOCATION="<ZONE>"
-export COMPUTE_TYPE="<CLUSTER_TOOLKIT_COMPUTE_TYPE>"
-export TOPOLOGY="<TPU_TOPOLOGY>"
+export COMPUTE_TYPE="<COMPUTE_TYPE>"
+export TOPOLOGY="<TOPOLOGY>"
 
 # -- Cluster Toolkit Workload Configuration --
 # (<RUN_NAME>, <HF_TOKEN>)

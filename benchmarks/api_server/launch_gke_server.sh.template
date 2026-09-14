@@ -31,8 +31,8 @@ export LOCATION="<ZONE>"
 export RUNNAME="<RUN_NAME>"
 export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 export HF_TOKEN="<HF_TOKEN>" # Optional: if your tokenizer is private
-export COMPUTE_TYPE="<CLUSTER_TOOLKIT_COMPUTE_TYPE>"
-export TOPOLOGY="<TPU_TOPOLOGY>"
+export COMPUTE_TYPE="<COMPUTE_TYPE>"
+export TOPOLOGY="<TOPOLOGY>"
 
 # -- Model Configuration --
 # IMPORTANT: Replace these with your model's details.
