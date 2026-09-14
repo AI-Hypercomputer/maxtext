@@ -41,8 +41,8 @@ The following recipe demonstrates the process of offline distillation using **Qw
 #### a. Setup environment variables
 
 ```bash
-export HF_TOKEN=<your-hf-token> # e.g., hf_BA6...
-export RUN_NAME=<your-run-name> # e.g., distill-20260115
+export HF_TOKEN=<HF_TOKEN> # e.g., hf_BA6...
+export RUN_NAME=<RUN_NAME> # e.g., distill-20260115
 ```
 
 #### b. Install dependencies
@@ -56,7 +56,7 @@ To store large models and datasets, attach a Hyperdisk to your TPU VM. Refer to 
 First, create a Hyperdisk:
 
 ```bash
-export ZONE=<your-tpu-zone>  # e.g., us-central1-a
+export ZONE=<ZONE>  # e.g., us-central1-a
 export TPU_VM_NAME=<your-tpu-vm-name>
 export DISK_NAME=<your-disk-name>  # e.g., my-hyperdisk
 export DISK_SIZE=<disk-size>  # e.g., 500GB
@@ -325,16 +325,16 @@ The schedule values above are a strong default for same-size pruning recovery. S
 Submit the distillation trainer directly as a Cluster Toolkit JobSet:
 
 ```bash
-export PROJECT_ID=<GCP_PROJECT_ID>
-export GKE_CLUSTER=<GKE_CLUSTER_NAME>
-export LOCATION=<GCP_LOCATION> # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
-export RUN_NAME=<DISTILL_RUN_NAME>
-export IMAGE_URI=<ARTIFACT_REGISTRY_IMAGE_URI>
+export PROJECT_ID=<PROJECT_ID>
+export GKE_CLUSTER=<CLUSTER_NAME>
+export LOCATION=<ZONE> # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
+export RUN_NAME=<RUN_NAME>
+export IMAGE_URI=<IMAGE_NAME>
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
 export TOPOLOGY=<TPU_TOPOLOGY>
-export BASE_OUTPUT_DIRECTORY=gs://<BUCKET>/distillation
-export STUDENT_CKPT_PATH=gs://<BUCKET>/<STUDENT_MODEL_PATH>/checkpoints/0/items
-export TEACHER_CKPT_PATH=gs://<BUCKET>/<TEACHER_MODEL_PATH>/checkpoints/0/items
+export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/distillation
+export STUDENT_CKPT_PATH=gs://<GCS_BUCKET>/<STUDENT_MODEL_PATH>/checkpoints/0/items
+export TEACHER_CKPT_PATH=gs://<GCS_BUCKET>/<TEACHER_MODEL_PATH>/checkpoints/0/items
 export TOKENIZER_PATH=meta-llama/Llama-3.1-8B
 export HF_TOKEN=<HF_TOKEN>
 

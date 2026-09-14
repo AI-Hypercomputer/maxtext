@@ -79,7 +79,7 @@ export PROJECT_ID=<PROJECT_ID>
 # The GCP location (region or zone) and name of your
 # TPU-enabled GKE cluster. Both can be found on the
 # [Cloud Console](https://console.cloud.google.com/kubernetes/list).
-export LOCATION=<LOCATION> # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
+export LOCATION=<ZONE> # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
 export GKE_CLUSTER=<CLUSTER_NAME>
 
 # For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
