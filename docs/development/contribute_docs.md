@@ -67,3 +67,25 @@ The latest version of the MaxText documentation, tracking the main branch of
 development, is automatically deployed to
 [https://maxtext.readthedocs.io/en/latest](https://maxtext.readthedocs.io/en/latest)
 on any successful merge to the main branch.
+
+## Using the `documentation-style` skill for reviews
+
+You can use the `documentation-style` Gemini skill to review documentation pages according to the
+[Google Developer Documentation Style Guide](https://developers.google.com/style) and specific MaxText guidance.
+
+The skill will **not** run automatically. To use it, you can activate the Gemini CLI from the MaxText repo and run
+something like:
+
+```
+/documentation-style review <file>.md
+```
+
+The skill will suggest changes that help with consistency, formatting and other general guidance, including docstrings.
+For example:
+
+```
+/documentation-style review docstring in src/maxtext/checkpoint_conversion/to_huggingface.py:main
+```
+
+See the [SKILL.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/.gemini/skills/documentation-style/SKILL.md)
+file for more details on the `documentation-style` skill and its usage.
