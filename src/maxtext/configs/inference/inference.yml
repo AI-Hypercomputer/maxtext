@@ -3,8 +3,8 @@ base_config: "base.yml"
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_heads', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['activation_kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['activation_length', ['context_autoregressive']],
                       ['activation_length', ['context_autoregressive']],
                       ['activation_q_length', ['context_autoregressive']],
