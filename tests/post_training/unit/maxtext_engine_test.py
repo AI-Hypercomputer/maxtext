@@ -66,6 +66,7 @@ class DummyStatefulNNXModel(nnx.Module):
 class DummyPayload(abstract_engine.TrainerPayload):
   token_ids: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
   token_mask: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
+  metadata: dict[str, Any] = struct.field(pytree_node=False, default_factory=dict)
 
 
 class MaxTextTrainingEngineTest(absltest.TestCase):
@@ -801,6 +802,94 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertTrue(seen["is_train"])
     # The payload's fields are auto-extracted into the positional `data`.
     self.assertIn("token_ids", seen["data"])
+    self.assertNotIn("metadata", seen["data"])
+
+  def test_prepare_batch_clears_metadata_on_dataclass(self):
+    """Payload metadata is cleared to {} on dataclasses so gen_model_input_fn receives empty metadata."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload(metadata={"request_id": 12345, "step": 1})
+
+    # With gen_model_input_fn: receives payload with metadata replaced by {}
+    received_payload = []
+    t.with_gen_model_input_fn(lambda p: received_payload.append(p) or {"tokens": p.token_ids})
+    t._prepare_batch(payload)
+    self.assertEqual(len(received_payload), 1)
+    self.assertEqual(received_payload[0].metadata, {})
+
+    # Without gen_model_input_fn: returns dict without metadata
+    t_no_gen = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    prepared = t_no_gen._prepare_batch(payload)
+    self.assertIsInstance(prepared, dict)
+    self.assertNotIn("metadata", prepared)
+
+    # RLTrainerPayload from Tunix with non-empty metadata is also cleared
+    rl_payload = datatypes.RLTrainerPayload(
+        prompt_ids=jnp.zeros((1, 4)),
+        prompt_mask=jnp.ones((1, 4)),
+        completion_ids=jnp.zeros((1, 4)),
+        completion_mask=jnp.ones((1, 4)),
+        advantages=jnp.zeros((1,)),
+        metadata={"client_id": "worker-0"},
+    )
+    received_rl_payload = []
+    t.with_gen_model_input_fn(lambda p: received_rl_payload.append(p) or {"tokens": p.completion_ids})
+    t._prepare_batch(rl_payload)
+    self.assertEqual(len(received_rl_payload), 1)
+    self.assertEqual(received_rl_payload[0].metadata, {})
+
+    # Dataclass without a dataclass field for metadata (e.g. property) is not replaced
+    @dataclasses.dataclass
+    class _PayloadWithPropertyMetadata:
+      tokens: jax.Array
+
+      @property
+      def metadata(self):
+        return {"property": True}
+
+    prop_payload = _PayloadWithPropertyMetadata(tokens=jnp.ones((2, 2)))
+    prepared_prop = t_no_gen._prepare_batch(prop_payload)
+    self.assertIn("tokens", prepared_prop)
+
+  def test_prepare_batch_prevents_recompilation_on_metadata_change(self):
+    """Payload metadata changes must not alter the Treedef or trigger recompilation."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(lambda model, **kwargs: (abstract_engine.WeightedMetric(jnp.array(1.0), jnp.array(1.0)), {}))
+    # Mirrors tunix algorithm_adapter._algo_model_input which passes the payload through.
+    t.with_gen_model_input_fn(lambda payload: {"train_example": payload})
+
+    payload1 = datatypes.RLTrainerPayload(
+        prompt_ids=jnp.zeros((1, 4)),
+        prompt_mask=jnp.ones((1, 4)),
+        completion_ids=jnp.zeros((1, 4)),
+        completion_mask=jnp.ones((1, 4)),
+        advantages=jnp.zeros((1,)),
+        metadata={"step": 0, "request_id": 100},
+    )
+    payload2 = datatypes.RLTrainerPayload(
+        prompt_ids=jnp.zeros((1, 4)),
+        prompt_mask=jnp.ones((1, 4)),
+        completion_ids=jnp.zeros((1, 4)),
+        completion_mask=jnp.ones((1, 4)),
+        advantages=jnp.zeros((1,)),
+        metadata={"step": 1, "request_id": 101},
+    )
+
+    with mock.patch.object(t, "_compile_for_batch", wraps=t._compile_for_batch) as mock_compile:
+      t.compile(payload1)
+      self.assertEqual(mock_compile.call_count, 1)
+      t.fwd_bwd(payload2)
+      self.assertEqual(mock_compile.call_count, 1)
+
+    dummy1 = DummyPayload(token_ids=jnp.ones((2, 2)), metadata={"step": 0})
+    dummy2 = DummyPayload(token_ids=jnp.ones((2, 2)), metadata={"step": 1})
+    t_dummy = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t_dummy.with_loss_fn(lambda model, **kwargs: (abstract_engine.WeightedMetric(jnp.array(1.0), jnp.array(1.0)), {}))
+    t_dummy.with_gen_model_input_fn(lambda payload: {"train_example": payload})
+    with mock.patch.object(t_dummy, "_compile_for_batch", wraps=t_dummy._compile_for_batch) as mock_dummy_compile:
+      t_dummy.compile(dummy1)
+      self.assertEqual(mock_dummy_compile.call_count, 1)
+      t_dummy.fwd_bwd(dummy2)
+      self.assertEqual(mock_dummy_compile.call_count, 1)
 
   def test_gen_model_input_fn_returning_a_non_dict_raises(self):
     """The adapter's contract is a dict of kwargs; anything else fails clearly."""
