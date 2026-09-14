@@ -92,8 +92,8 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
 export TPU_TYPE=<TPU_TYPE>
 export NUM_SLICES=<NUM_SLICES>
-export COMPUTE_TYPE=<COMPUTE_TYPE>
-export TOPOLOGY=<TOPOLOGY>
+export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
+export TOPOLOGY=<TPU_TOPOLOGY>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
