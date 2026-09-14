@@ -18,9 +18,20 @@ Unlike the per-row scripts in this directory, both sides read their tokens from 
 trainer must never re-tokenize independently, or the two sides score different text.
 
 Usage:
-    python compare_trainer_sampler.py                                                   # all stages, 8192 rollouts
+    # Real r2e-gym prompts from an RL rollout trace (32 x 32768) plus 8192 sampled tokens. ~8.5 min on
+    # 8 x v7x. --trainer-micro-batch/--trainer-tp are required at this length: one 40960-token forward
+    # over all 32 rows does not fit, and TP shards the vocab dimension of the logits.
+    python compare_trainer_sampler.py \
+        --prompts-file tools/rl_logprob_parity/r2e_prompts_32.jsonl \
+        --prompt-len 32768 --gen-tokens 8192 \
+        --trainer-micro-batch 4 --trainer-tp 2 --gpu-memory-utilization 0.7 \
+        --out-dir /path/to/out
+
+    python compare_trainer_sampler.py                                                   # synthetic corpus
     python compare_trainer_sampler.py --gen-tokens 0                                    # prompt tokens only
     python compare_trainer_sampler.py --stage compare --out-dir /path/to/existing/npz   # re-score saved runs
+
+With --gen-tokens > 0 the sampler also writes the rollouts as text to generations_<sampler>.jsonl.
 
 Paths default to autodetection (see resolve_paths) and can be overridden with --out-dir / --hf-home /
 --maxtext-root or the env vars OUT_DIR / HF_HOME / MAXTEXT_ROOT.
@@ -28,6 +39,7 @@ Paths default to autodetection (see resolve_paths) and can be overridden with --
 import argparse
 import gc
 import glob
+import json
 import os
 import sys
 import time
@@ -126,6 +138,28 @@ def stage_tokenize(args, hf_home, maxtext_root, out_dir):
   from transformers import AutoTokenizer
 
   tok = AutoTokenizer.from_pretrained(MODEL_HF)
+
+  if args.prompts_file:
+    # One real prompt per JSONL line ({"text": ...}); each becomes one row, truncated to SEQ_LEN. Rows stay
+    # uniform width so no padding or attention masking is needed -- supply prompts that are long enough.
+    rows, short = [], []
+    for ln in open(args.prompts_file, encoding="utf-8"):
+      ln = ln.strip()
+      if not ln:
+        continue
+      rec = json.loads(ln)
+      ids = tok(rec["text"], add_special_tokens=False)["input_ids"]
+      if len(ids) < SEQ_LEN:
+        short.append(len(ids))
+      rows.append(ids[:SEQ_LEN])
+    if short:
+      raise SystemExit(f"{len(short)} prompt(s) shorter than SEQ_LEN={SEQ_LEN}: {short[:5]}")
+    tokens = np.array(rows, dtype=np.int32)
+    np.savez(path, tokens=tokens, n_files=np.int32(len(rows)), n_corpus_tokens=np.int32(tokens.size))
+    log(f"tokens: {tokens.shape} from {len(rows)} prompts in {args.prompts_file} -> {path}")
+    log(f"tokens: first = {tok.decode(tokens[0, :12])!r}")
+    return path
+
   if args.text_file:
     files = [args.text_file]
   else:
@@ -248,6 +282,10 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
   saved = dict(logp=logp, top1=top1, tokens=tokens)
   log(f"sampler: prompt pass done; mean logp={np.nanmean(logp[:, 1:]):.4f} "
       f"top-1 acc={np.mean(top1[:, 1:] == tokens[:, 1:]):.3f}")
+  path = os.path.join(out_dir, f"sampler_{args.sampler}_logprobs.npz")
+  # Checkpoint before the rollouts: generation is by far the longest phase, and losing a completed prompt
+  # pass to a crash partway through decode costs the whole prefill again.
+  np.savez(path, **saved)
 
   if args.gen_tokens > 0:
     # Decode path: real rollouts from the same prompts. gen_logp[b, i] is the sampler's own logprob of
@@ -272,6 +310,22 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
         log(f"sampler: WARNING prompt {b} returned {n} < {args.gen_tokens} tokens")
     saved.update(gen_ids=gen_ids, gen_logp=gen_logp)
     log(f"sampler: generation done; mean gen logp={np.nanmean(gen_logp):.4f}")
+
+    # Dump the rollouts as text too -- the npz only has ids, and the text is what you actually read when
+    # judging whether the model is producing sane agent output.
+    gen_tok = llm.get_tokenizer()
+    gen_path = os.path.join(out_dir, f"generations_{args.sampler}.jsonl")
+    with open(gen_path, "w", encoding="utf-8") as fh:
+      for b in range(len(tokens)):
+        ids = [int(t) for t in gen_ids[b] if t >= 0]
+        fh.write(json.dumps({
+            "row": b,
+            "n_tokens": len(ids),
+            "mean_logp": float(np.nanmean(gen_logp[b])),
+            "prompt_tail": gen_tok.decode([int(t) for t in tokens[b, -200:]]),
+            "text": gen_tok.decode(ids),
+        }, ensure_ascii=False) + "\n")
+    log(f"sampler: wrote rollout text to {gen_path}")
     del gouts
 
   path = os.path.join(out_dir, f"sampler_{args.sampler}_logprobs.npz")
@@ -334,7 +388,12 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       weight_dtype="bfloat16",
       max_target_length=seq_len,
       max_prefill_predict_length=seq_len,
-      per_device_batch_size=1.0,
+      # The forward pass runs one micro-batch at a time, so the global batch MaxText sizes activations for
+      # is the micro-batch, not the full row count.
+      per_device_batch_size=(args.trainer_micro_batch or tokens_np.shape[0]) / len(jax.devices()),
+      # TP shards the vocab dimension, which is what makes the [micro, seq_len, 248320] logits fit.
+      ici_tensor_parallelism=args.trainer_tp,
+      allow_split_physical_axes=True,
       log_config=False,
       # Single host, and when the sampler stage ran first the vLLM engine has already brought up the JAX
       # backend in this process -- jax.distributed.initialize() would then fail outright.
@@ -362,28 +421,42 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
   log("trainer model loaded")
   gd, st = nnx.split(model)
 
-  # Gather the per-token logprob inside jit: the full [B, S, vocab] log_softmax is ~42 GB at S=8704, far
-  # too big to pull to the host, while the gathered [B, S] result is a few hundred KB.
+  # Never materialize a [B, S, vocab] float32 array: at B=8, S=40960, vocab=248320 that is ~325 GB.
+  # logprob(target) = logit(target) - logsumexp(logits), which reduces the vocab axis away and leaves
+  # only [B, S] behind. argmax runs on the bf16 logits directly.
   @jax.jit
   def fwd_logp(st, tokens, pos, seg, nxt):
     m = nnx.merge(gd, st)
     with nn.logical_axis_rules(cfg.logical_axis_rules):
       out = m(tokens, pos, seg, enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
     logits = out[0] if isinstance(out, tuple) else out
-    lp = jax.nn.log_softmax(logits.astype(jnp.float32), -1)
-    return jnp.take_along_axis(lp, nxt[..., None], -1)[..., 0], jnp.argmax(lp, -1).astype(jnp.int32)
+    tgt = jnp.take_along_axis(logits, nxt[..., None], -1)[..., 0].astype(jnp.float32)
+    lse = jax.nn.logsumexp(logits.astype(jnp.float32), axis=-1)
+    return tgt - lse, jnp.argmax(logits, -1).astype(jnp.int32)
 
   nxt_np = np.roll(tokens_np, -1, axis=1)
+  n_rows = tokens_np.shape[0]
+  micro = args.trainer_micro_batch or n_rows
+  if n_rows % micro:
+    raise SystemExit(f"--trainer-micro-batch {micro} does not divide {n_rows} rows")
+  log(f"trainer: {n_rows} rows in chunks of {micro} (seq_len={seq_len})")
+  logp_parts, top1_parts = [], []
   with mesh, nn.logical_axis_rules(cfg.logical_axis_rules):
     sh = NamedSharding(mesh, P(("data", "fsdp"), None))
-    tokens = jax.device_put(tokens_np, sh)
-    pos = jax.device_put(np.broadcast_to(np.arange(seq_len, dtype=np.int32), (B, seq_len)), sh)
-    seg = jax.device_put(np.ones((B, seq_len), np.int32), sh)
-    nxt = jax.device_put(nxt_np, sh)
-    logp_d, top1_d = fwd_logp(st, tokens, pos, seg, nxt)
-    jax.block_until_ready(logp_d)
-  logp = np.asarray(logp_d)
-  top1 = np.asarray(top1_d)
+    pos_np = np.broadcast_to(np.arange(seq_len, dtype=np.int32), (micro, seq_len))
+    seg_np = np.ones((micro, seq_len), np.int32)
+    for i in range(0, n_rows, micro):
+      tokens = jax.device_put(tokens_np[i : i + micro], sh)
+      nxt = jax.device_put(nxt_np[i : i + micro], sh)
+      pos = jax.device_put(pos_np, sh)
+      seg = jax.device_put(seg_np, sh)
+      lp_d, t1_d = fwd_logp(st, tokens, pos, seg, nxt)
+      jax.block_until_ready(lp_d)
+      logp_parts.append(np.asarray(lp_d))
+      top1_parts.append(np.asarray(t1_d))
+      log(f"trainer: rows {i}-{i + micro - 1} done")
+  logp = np.concatenate(logp_parts, axis=0)
+  top1 = np.concatenate(top1_parts, axis=0)
 
   acc = np.mean(top1[:, :-1] == tokens_np[:, 1:])
   saved = dict(logp=logp, top1=top1, tokens=prompt_np, full_tokens=tokens_np)
@@ -518,6 +591,7 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescrip
 
 
 def main():
+  global SEQ_LEN  # pylint: disable=global-statement  (--prompt-len rebinds it for every stage)
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=_HelpFormatter)
   ap.add_argument("--stage", default="all", choices=["all", "tokenize", "sampler", "trainer", "compare"],
                   help="all = every stage in this process; the rest hand off through npz files in --out-dir")
@@ -532,10 +606,20 @@ def main():
   ap.add_argument("--gen-temperature", type=float, default=1.0, help="sampling temperature for the rollouts")
   ap.add_argument("--attn-dp", type=int, default=4, help="attention DP degree inside the tp=8 mesh")
   ap.add_argument("--gpu-memory-utilization", type=float, default=0.5)
+  ap.add_argument("--prompt-len", type=int, default=SEQ_LEN,
+                  help="prompt tokens per row; overrides the SEQ_LEN default")
+  ap.add_argument("--prompts-file", default=None,
+                  help="JSONL of real prompts, one {\"text\": ...} per line; each becomes one row truncated "
+                       "to SEQ_LEN. Overrides --text-glob/--text-file and sets the batch size.")
+  ap.add_argument("--trainer-micro-batch", type=int, default=0,
+                  help="rows per trainer forward pass; 0 = all at once. Must divide the row count")
+  ap.add_argument("--trainer-tp", type=int, default=1,
+                  help="tensor parallelism for the trainer mesh; the rest of the devices go to FSDP")
   ap.add_argument("--text-glob", default="docs/**/*.md", help="corpus glob, relative to the MaxText tree")
   ap.add_argument("--text-file", default=None, help="single text file, overrides --text-glob")
   ap.add_argument("--retokenize", action="store_true", help="rebuild tokens.npz even if it exists")
   args = ap.parse_args()
+  SEQ_LEN = args.prompt_len
 
   maxtext_root, hf_home, out_dir = resolve_paths(args)
   log(f"maxtext_root={maxtext_root}")
