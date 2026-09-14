@@ -30,16 +30,16 @@ gcluster job submit \
   --image=<IMAGE_NAME> \
   --command="python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=<RUN_NAME> --num_steps=5" \
   --name=<RUN_NAME> \
-  --compute-type=<COMPUTE_TYPE> \
-  --topology=<TOPOLOGY>
+  --compute-type=<CLUSTER_TOOLKIT_COMPUTE_TYPE> \
+  --topology=<TPU_TOPOLOGY>
 
 # Cluster Toolkit: Pathways
 gcluster job submit \
   --image=<IMAGE_NAME> \
   --name=<RUN_NAME> \
   --pathways \
-  --compute-type=<COMPUTE_TYPE> \
-  --topology=<TOPOLOGY> \
+  --compute-type=<CLUSTER_TOOLKIT_COMPUTE_TYPE> \
+  --topology=<TPU_TOPOLOGY> \
   --num-slices=1 \
   --pathways-gcs-location=gs://maxtext-experiments-tpem/ \
   --command="python3 -m benchmarks.benchmark_runner --use_pathways=true on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=<RUN_NAME> --num_steps=5"

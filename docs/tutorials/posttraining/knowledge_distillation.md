@@ -57,9 +57,9 @@ First, create a Hyperdisk:
 
 ```bash
 export ZONE=<ZONE>  # e.g., us-central1-a
-export TPU_VM_NAME=<your-tpu-vm-name>
-export DISK_NAME=<your-disk-name>  # e.g., my-hyperdisk
-export DISK_SIZE=<disk-size>  # e.g., 500GB
+export TPU_VM_NAME=<TPU_VM_NAME>
+export DISK_NAME=<DISK_NAME>  # e.g., my-hyperdisk
+export DISK_SIZE=<DISK_SIZE>  # e.g., 500GB
 
 gcloud compute disks create ${DISK_NAME?} \
   --size=${DISK_SIZE?} \
@@ -87,7 +87,7 @@ sudo mount /dev/sdb /mnt/hyperdisk
 Update the BASE_OUTPUT_DIRECTORY to point to the mounted disk and create the directory:
 
 ```bash
-export BASE_NAME=<your-base-directory>  # e.g., knowledge-distillation
+export BASE_NAME=<BASE_DIRECTORY>  # e.g., knowledge-distillation
 export BASE_OUTPUT_DIRECTORY=/mnt/hyperdisk/${BASE_NAME?}
 mkdir -p ${BASE_OUTPUT_DIRECTORY?}
 ```
