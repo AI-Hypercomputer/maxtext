@@ -36,11 +36,11 @@ HBM — ≥ v5p-16 in practice; a v5p-8 only fits with bf16 weights or a
 shrunken student (see below):
 
 ```bash
-source <your-venv>/bin/activate
+source <VENV_NAME>/bin/activate
 PYTHONPATH=$PWD/src python -m maxtext.trainers.post_train.distillation.train_distill \
   src/maxtext/configs/post_train/distillation.yml \
   run_name=local_smoke \
-  base_output_directory=gs://<bucket>/distill_smoke \
+  base_output_directory=gs://<GCS_BUCKET>/distill_smoke \
   steps=5
 ```
 
@@ -57,8 +57,8 @@ pip install git+https://github.com/AI-Hypercomputer/xpk.git
 
 # Kubeconfig (use --dns-endpoint; IP endpoints are often stale).
 # Use --zone for zonal clusters, --region for regional ones.
-gcloud container clusters get-credentials <cluster> \
-  --zone=<zone> --project=<project> --dns-endpoint
+gcloud container clusters get-credentials <CLUSTER_NAME> \
+  --zone=<ZONE> --project=<PROJECT_ID> --dns-endpoint
 
 # Verify RBAC in the default namespace:
 kubectl auth can-i create roles --namespace=default   # must print: yes
@@ -74,7 +74,7 @@ The flow is: build the MaxText base → `prep_image` rebuilds `$XPK_BASE_IMAGE`
 bakes the workspace `./src` into a runner image and pushes it to GCR.
 
 ```bash
-export XPK_PROJECT=<your-project>
+export XPK_PROJECT=<PROJECT_ID>
 export XPK_BASE_IMAGE=maxtext_base_image           # local tag prep_image rebuilds
 export XPK_RUNNER_IMAGE_NAME=maxtext_base_image    # short name pushed under gcr.io/$XPK_PROJECT/
 # XPK_RUNNER_IMAGE_TAG defaults to ${USER}-distill; override (or set USER)
@@ -100,13 +100,13 @@ layout and xpk's crane-overlay fallback.
 ## 5. Submit
 
 ```bash
-export XPK_CLUSTER=<cluster>
-export XPK_PROJECT=<project>
-export XPK_ZONE=<zone>
+export XPK_CLUSTER=<CLUSTER_NAME>
+export XPK_PROJECT=<PROJECT_ID>
+export XPK_ZONE=<ZONE>
 export XPK_DEVICE_TYPE=tpu7x-4x4x4
 export XPK_BASE_IMAGE=gcr.io/${XPK_PROJECT}/${XPK_RUNNER_IMAGE_NAME}:${XPK_RUNNER_IMAGE_TAG:-${USER}-distill} # slash → --docker-image auto-selected
-export XPK_BASE_OUTPUT_DIR=gs://<bucket>/distillation
-export XPK_RUN_NAME=<experiment>          # default: distill_run; set per experiment
+export XPK_BASE_OUTPUT_DIR=gs://<GCS_BUCKET>/distillation
+export XPK_RUN_NAME=<RUN_NAME>            # default: distill_run; set per experiment
                                           # to scope checkpoints + TB under
                                           # ${XPK_BASE_OUTPUT_DIR}/${XPK_WORKLOAD}/${XPK_RUN_NAME}/
 

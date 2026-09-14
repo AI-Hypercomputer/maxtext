@@ -51,7 +51,7 @@ export ZONE=<ZONE> # e.g., 'us-central1' or 'us-central1-a'
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
-export RUN_NAME="rl-qwen3-$(date +%Y%m%d-%H%M%S)"
+export RUN_NAME=<RUN_NAME>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
@@ -107,21 +107,21 @@ export TOPOLOGY=<TPU_TOPOLOGY>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${CLUSTER_NAME?} \
-  --zone ${ZONE?} \
+  --location ${ZONE?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${CLUSTER_NAME?}
 gcluster job config set location ${ZONE?}
 
 gcluster job submit \
-  --image ${DOCKER_IMAGE?} \
-  --name ${RUN_NAME?} \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
   --pathways \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+  --command="python3 -m maxtext.trainers.post_train.rl.train_rl \
     model_name=qwen3-30b-a3b-base \
     tokenizer_path=${TOKENIZER_PATH?} \
     load_parameters_path=${MAXTEXT_CKPT_PATH?} \
@@ -129,6 +129,8 @@ gcluster job submit \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     hf_access_token=${HF_TOKEN?} \
     dataset_name=nvidia/OpenMathInstruct-2 \
+    hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet \
+    train_split=train_1M \
     chips_per_vm=8 \
     rollout_data_parallelism=16 \
     rollout_tensor_parallelism=4 \

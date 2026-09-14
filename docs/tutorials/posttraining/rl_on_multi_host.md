@@ -94,7 +94,7 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
 # Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
-export RUN_NAME="rl-$(date +%m%d%H%M%S)"
+export RUN_NAME=<RUN_NAME>
 
 # The directory containing the MaxText-compatible model checkpoint.
 # If you are converting from a Hugging Face checkpoint, see:
@@ -117,7 +117,7 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 # of your cluster:
 
 # 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} --zone ${ZONE?} --project ${PROJECT_ID?}
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
 
 # 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
@@ -165,7 +165,7 @@ Configure `kubectl` and `gcluster` for the target cluster before submitting:
 ```bash
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --zone ${ZONE?} \
+  --location ${ZONE?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${GKE_CLUSTER?}
@@ -185,14 +185,14 @@ export TOPOLOGY=<TPU_TOPOLOGY>
 
 ```bash
 gcluster job submit \
-  --image ${DOCKER_IMAGE?} \
-  --name ${RUN_NAME?}-grpo \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?}-grpo \
   --pathways \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+  --command="python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?}-grpo \
@@ -206,14 +206,14 @@ gcluster job submit \
 
 ```bash
 gcluster job submit \
-  --image ${DOCKER_IMAGE?} \
-  --name ${RUN_NAME?}-gspo \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?}-gspo \
   --pathways \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command "python3 -m maxtext.trainers.post_train.rl.train_rl \
+  --command="python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?}-gspo \
@@ -257,8 +257,8 @@ kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
   - **Retry (fresh run)**: Use a unique run name to avoid overwriting
     outputs:
     ```bash
-    export RUN_NAME=${RUN_NAME?}-retry1
     export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items
+    export RUN_NAME=${RUN_NAME?}-retry1
     ```
     Then submit the Cluster Toolkit workload. If a "workload already exists" error occurs, pick
     a new name or cancel the previous job (`gcluster job cancel ${RUN_NAME}`).

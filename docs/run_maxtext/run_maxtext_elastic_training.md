@@ -53,13 +53,13 @@ Set these environment variables in your shell. Replace the placeholders with you
 
 ```bash
 # Google Cloud Configuration
-export PROJECT_ID=<GCP project ID>
-export LOCATION=<GCP_REGION_OR_ZONE> # e.g., 'us-central1'
-export GKE_CLUSTER=<cluster name>
+export PROJECT_ID=<PROJECT_ID>
+export LOCATION=<ZONE> # e.g., 'us-central1'
+export GKE_CLUSTER=<CLUSTER_NAME>
 
 # Workload Configuration
 # Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
-export RUN_NAME="elastic-$(date +%m%d%H%M%S)"
+export RUN_NAME=<RUN_NAME>
 
 # Hardware & Slice Configuration
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE> # e.g., 'ct5lp-hightpu-4t' for v5e
@@ -67,8 +67,8 @@ export TOPOLOGY=<TPU_TOPOLOGY>                     # e.g., '4x4' (16 chips)
 export NUM_SLICES=3                                # total slices in the run
 
 # MaxText & Storage Configuration
-export BASE_OUTPUT_DIRECTORY=<gcs bucket path>     # e.g., gs://my-bucket/maxtext-runs
-export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4"
+export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET>          # e.g., gs://my-bucket/maxtext-runs
+export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 ```
 
 ## 3. Launch the elastic workload
@@ -88,11 +88,11 @@ gcluster job config set cluster ${GKE_CLUSTER?}
 gcluster job config set location ${LOCATION?}
 
 gcluster job submit \
-  --image ${DOCKER_IMAGE?} \
-  --name ${RUN_NAME?} \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
   --pathways \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --num-slices=${NUM_SLICES?} \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
   --pathways-elastic-slices=1 \
@@ -124,7 +124,7 @@ gcluster job submit \
 
   The elastic training configuration parameters (`elastic_enabled`, `elastic_timeout_seconds`,
   and `elastic_max_retries`) require MaxText 0.2.4 or later (or the official pre-training image
-  `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4`).
+  `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest`).
 ```
 
 ```{warning}

@@ -8,10 +8,10 @@ Two approaches are here:
 For new GKE runs, submit each benchmark as a Cluster Toolkit JobSet. Authenticate
 to the cluster and configure `gcluster` before submitting:
 
-```shell
-export PROJECT="<your-project>"
-export CLUSTER="<your-cluster>"
-export LOCATION="<your-cluster-location>" # e.g. europe-west4 (region) or us-central1-a (zone)
+```bash
+export PROJECT="<PROJECT_ID>"
+export CLUSTER="<CLUSTER_NAME>"
+export LOCATION="<ZONE>" # e.g. europe-west4 (region) or us-central1-a (zone)
 
 gcloud config set project ${PROJECT?}
 gcloud container clusters get-credentials ${CLUSTER?} \
@@ -24,25 +24,25 @@ gcluster job config set location ${LOCATION?}
 
 Then use the image, compute type, and topology for the target cluster:
 
-```shell
+```bash
 # Cluster Toolkit: McJAX
 gcluster job submit \
-  --image <IMAGE_URI> \
-  --command "python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5" \
-  --name benchmark-mcjax \
-  --compute-type <COMPUTE_TYPE> \
-  --topology <TOPOLOGY>
+  --image=<IMAGE_NAME> \
+  --command="python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=<RUN_NAME> --num_steps=5" \
+  --name=<RUN_NAME> \
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY>
 
 # Cluster Toolkit: Pathways
 gcluster job submit \
-  --image <IMAGE_URI> \
-  --name benchmark-pathways \
+  --image=<IMAGE_NAME> \
+  --name=<RUN_NAME> \
   --pathways \
-  --compute-type <COMPUTE_TYPE> \
-  --topology <TOPOLOGY> \
+  --compute-type=<COMPUTE_TYPE> \
+  --topology=<TOPOLOGY> \
   --num-slices=1 \
   --pathways-gcs-location=gs://maxtext-experiments-tpem/ \
-  --command "python3 -m benchmarks.benchmark_runner --use_pathways=true on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=test-run --num_steps=5"
+  --command="python3 -m benchmarks.benchmark_runner --use_pathways=true on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name=<RUN_NAME> --num_steps=5"
 ```
 
 The existing Python XPK runner below remains available for older benchmark

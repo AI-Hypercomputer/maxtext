@@ -41,8 +41,8 @@ The following recipe demonstrates the process of offline distillation using **Qw
 #### a. Setup environment variables
 
 ```bash
-export HF_TOKEN=<your-hf-token> # e.g., hf_BA6...
-export RUN_NAME=<your-run-name> # e.g., distill-20260115
+export HF_TOKEN=<HF_TOKEN> # e.g., hf_BA6...
+export RUN_NAME=<RUN_NAME> # e.g., distill-20260115
 ```
 
 #### b. Install dependencies
@@ -56,7 +56,7 @@ To store large models and datasets, attach a Hyperdisk to your TPU VM. Refer to 
 First, create a Hyperdisk:
 
 ```bash
-export ZONE=<your-tpu-zone>  # e.g., us-central1-a
+export ZONE=<ZONE>  # e.g., us-central1-a
 export TPU_VM_NAME=<your-tpu-vm-name>
 export DISK_NAME=<your-disk-name>  # e.g., my-hyperdisk
 export DISK_SIZE=<disk-size>  # e.g., 500GB
@@ -248,7 +248,7 @@ Key knobs (see the [Distillation guide](../../guides/distillation.md) for the fu
 ```yaml
 distill_alpha: 0.5             # weight on KL(teacher||student)
 distill_temperature: 1.0
-distill_beta: 0.0              # >0 enables feature distillation; requires scan_layers=True, enable_nnx=True
+distill_beta: 0.0              # >0 enables feature distillation; requires scan_layers=True
 distill_layer_indices: None
 ```
 
@@ -312,7 +312,7 @@ python3 -m maxtext.trainers.post_train.distillation.train_distill \
   distill_temperature=2.0 \
   distill_beta=1.0 distill_beta_end=0.1 distill_beta_schedule=cosine \
   distill_layer_indices=[2,5,8,11,14,17,20,23] \
-  scan_layers=True enable_nnx=True \
+  scan_layers=True \
   profiler=xplane
 ```
 
@@ -325,31 +325,49 @@ The schedule values above are a strong default for same-size pruning recovery. S
 Submit the distillation trainer directly as a Cluster Toolkit JobSet:
 
 ```bash
-export PROJECT_ID=<GCP_PROJECT_ID>
-export GKE_CLUSTER=<GKE_CLUSTER_NAME>
-export ZONE=<GCP_ZONE>
-export RUN_NAME=<DISTILL_RUN_NAME>
-export IMAGE_URI=<ARTIFACT_REGISTRY_IMAGE_URI>
+export PROJECT_ID=<PROJECT_ID>
+export GKE_CLUSTER=<CLUSTER_NAME>
+export LOCATION=<ZONE> # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
+export RUN_NAME=<RUN_NAME>
+export IMAGE_URI=<IMAGE_NAME>
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
 export TOPOLOGY=<TPU_TOPOLOGY>
-export BASE_OUTPUT_DIRECTORY=gs://<BUCKET>/distillation
-export TEACHER_CKPT_PATH=gs://<BUCKET>/<TEACHER_MODEL_PATH>/checkpoints/0/items
+export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/distillation
+export STUDENT_CKPT_PATH=gs://<GCS_BUCKET>/<STUDENT_MODEL_PATH>/checkpoints/0/items
+export TEACHER_CKPT_PATH=gs://<GCS_BUCKET>/<TEACHER_MODEL_PATH>/checkpoints/0/items
+export TOKENIZER_PATH=meta-llama/Llama-3.1-8B
 export HF_TOKEN=<HF_TOKEN>
 
 gcloud config set project ${PROJECT_ID?}
 gcloud container clusters get-credentials ${GKE_CLUSTER?} \
-  --zone ${ZONE?} \
+  --location ${LOCATION?} \
   --project ${PROJECT_ID?}
 gcluster job config set project ${PROJECT_ID?}
 gcluster job config set cluster ${GKE_CLUSTER?}
-gcluster job config set location ${ZONE?}
+gcluster job config set location ${LOCATION?}
 
 gcluster job submit \
-  --image ${IMAGE_URI?} \
-  --name ${RUN_NAME?} \
-  --compute-type ${COMPUTE_TYPE?} \
-  --topology ${TOPOLOGY?} \
-  --command "python3 -m maxtext.trainers.post_train.distillation.train_distill src/maxtext/configs/post_train/distillation.yml base_output_directory=${BASE_OUTPUT_DIRECTORY?} run_name=${RUN_NAME?} teacher_overrides.load_parameters_path=${TEACHER_CKPT_PATH?} hf_access_token=${HF_TOKEN?}"
+  --image=${IMAGE_URI?} \
+  --name=${RUN_NAME?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="python3 -m maxtext.trainers.post_train.distillation.train_distill \
+    src/maxtext/configs/post_train/distillation.yml \
+    run_name=${RUN_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?}/online \
+    tokenizer_path=${TOKENIZER_PATH?} \
+    tokenizer_type=huggingface \
+    hf_access_token=${HF_TOKEN?} \
+    student_overrides.model_name=llama3.1-8b \
+    student_overrides.base_num_decoder_layers=24 \
+    student_overrides.load_parameters_path=${STUDENT_CKPT_PATH?} \
+    teacher_overrides.model_name=llama3.1-8b \
+    teacher_overrides.load_parameters_path=${TEACHER_CKPT_PATH?} \
+    per_device_batch_size=2 \
+    distill_alpha=0.9 \
+    distill_temperature=2.0 \
+    distill_beta=1.0 \
+    distill_layer_indices=[2,5,8,11,14,17,20,23]"
 ```
 
 #### Monitor and clean up
