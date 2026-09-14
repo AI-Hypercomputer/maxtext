@@ -292,24 +292,39 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
     # the token it sampled at step i -- the quantity an RL trainer would store as pi_gen for that token.
     # No per-request seed: the JAX/TPU path rejects it ("JAX does not support per-request seed").
     # Determinism comes from the engine-level seed=0 above.
-    gsp = SamplingParams(max_tokens=args.gen_tokens, min_tokens=args.gen_tokens, temperature=args.gen_temperature,
-                         top_p=1.0, top_k=-1, logprobs=1, ignore_eos=True)
+    if args.stop_at_eos:
+      # Let each rollout end at EOS, as it would in the RL loop. Rows then have different lengths; the
+      # tail of each row is padded and its logprob left NaN, so compare()'s token mask drops it. Padding
+      # sits after the real tokens and attention is causal, so it cannot affect the scored positions.
+      gsp = SamplingParams(max_tokens=args.gen_tokens, temperature=args.gen_temperature,
+                           top_p=1.0, top_k=-1, logprobs=1)
+    else:
+      gsp = SamplingParams(max_tokens=args.gen_tokens, min_tokens=args.gen_tokens,
+                           temperature=args.gen_temperature, top_p=1.0, top_k=-1, logprobs=1,
+                           ignore_eos=True)
     log(f"sampler: generating {args.gen_tokens} tokens x {len(tokens)} prompts (temperature={args.gen_temperature})")
     gouts = llm.generate([TokensPrompt(prompt_token_ids=[int(t) for t in row]) for row in tokens], gsp)
-    gen_ids = np.full((len(tokens), args.gen_tokens), -1, np.int32)
+    # Pad short rows with EOS so the trainer gets a rectangular batch; their logprobs stay NaN and are
+    # masked out of every statistic.
+    pad_id = llm.get_tokenizer().eos_token_id or 0
+    gen_ids = np.full((len(tokens), args.gen_tokens), pad_id, np.int32)
     gen_logp = np.full((len(tokens), args.gen_tokens), np.nan, np.float32)
+    gen_lens = np.zeros(len(tokens), np.int32)
     for b, o in enumerate(gouts):
       c = o.outputs[0]
       ids = list(c.token_ids)
       n = min(len(ids), args.gen_tokens)
       gen_ids[b, :n] = ids[:n]
+      gen_lens[b] = n
       for i in range(n):
         d = c.logprobs[i]
         gen_logp[b, i] = d[ids[i]].logprob if ids[i] in d else np.nan
-      if n < args.gen_tokens:
+      if n < args.gen_tokens and not args.stop_at_eos:
         log(f"sampler: WARNING prompt {b} returned {n} < {args.gen_tokens} tokens")
-    saved.update(gen_ids=gen_ids, gen_logp=gen_logp)
-    log(f"sampler: generation done; mean gen logp={np.nanmean(gen_logp):.4f}")
+    saved.update(gen_ids=gen_ids, gen_logp=gen_logp, gen_lens=gen_lens)
+    log(f"sampler: generation done; mean gen logp={np.nanmean(gen_logp):.4f}; "
+        f"lengths min {gen_lens.min()} med {int(np.median(gen_lens))} max {gen_lens.max()} "
+        f"(hit cap: {(gen_lens >= args.gen_tokens).sum()}/{len(gen_lens)})")
 
     # Dump the rollouts as text too -- the npz only has ids, and the text is what you actually read when
     # judging whether the model is producing sane agent output.
@@ -317,7 +332,7 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
     gen_path = os.path.join(out_dir, f"generations_{args.sampler}.jsonl")
     with open(gen_path, "w", encoding="utf-8") as fh:
       for b in range(len(tokens)):
-        ids = [int(t) for t in gen_ids[b] if t >= 0]
+        ids = [int(t) for t in gen_ids[b, : gen_lens[b]]]
         fh.write(json.dumps({
             "row": b,
             "n_tokens": len(ids),
@@ -604,6 +619,9 @@ def main():
   ap.add_argument("--gen-tokens", type=int, default=61440,
                   help="output tokens to roll out per prompt for the decode-path comparison; 0 = prompt only")
   ap.add_argument("--gen-temperature", type=float, default=1.0, help="sampling temperature for the rollouts")
+  ap.add_argument("--stop-at-eos", action="store_true",
+                  help="let rollouts end at EOS (--gen-tokens becomes a cap) instead of forcing the full "
+                       "length with ignore_eos; short rows are padded and their logprobs masked out")
   ap.add_argument("--attn-dp", type=int, default=4, help="attention DP degree inside the tp=8 mesh")
   ap.add_argument("--gpu-memory-utilization", type=float, default=0.5)
   ap.add_argument("--prompt-len", type=int, default=SEQ_LEN,
