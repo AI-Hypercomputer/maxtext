@@ -115,6 +115,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         "tensorboard_dir": self.create_tempdir().full_path,
         "skip_jax_distributed_system": True,
         "enable_checkpointing": enable_checkpointing,
+        "profiler_steps": 0,
     }
     if enable_checkpointing:
       overrides.update(
