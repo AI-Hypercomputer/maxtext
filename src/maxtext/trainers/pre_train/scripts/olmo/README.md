@@ -52,7 +52,7 @@ full MaxText perf flag set automatically — no manual override needed.
 export PROJECT_ID=<PROJECT_ID>
 export GKE_CLUSTER=<CLUSTER_NAME>
 export LOCATION=<ZONE>
-export RUN_NAME=olmo3_7b_stage1
+export RUN_NAME=<RUN_NAME>
 export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/olmo/runs
 export COMPUTE_TYPE=<cluster-toolkit-compute-type>
 export TOPOLOGY=<tpu-topology>
@@ -101,7 +101,7 @@ LOCAL_MOUNT=/tmp/olmo-data \
 OUTPUT_DIR=gs://<GCS_BUCKET>/olmo/runs \
 LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items \
 HF_SECRETS=~/.hf_token.sh \
-RUN_NAME=olmo3_7b_stage1 \
+RUN_NAME=<RUN_NAME> \
 STEPS=50 WARMUP_STEPS=10 CHECKPOINT_PERIOD=50 \
 bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh
 ```

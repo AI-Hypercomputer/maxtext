@@ -157,7 +157,7 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
 # Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
-export RUN_NAME="llama-2-1vm-$(date +%Y-%m-%d-%H-%M)"
+export RUN_NAME=<RUN_NAME>
 
 # Set environment variables
 for ARGUMENT in "$@"; do

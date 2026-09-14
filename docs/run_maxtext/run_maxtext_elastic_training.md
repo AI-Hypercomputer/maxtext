@@ -58,8 +58,8 @@ export LOCATION=<ZONE> # e.g., 'us-central1'
 export GKE_CLUSTER=<CLUSTER_NAME>
 
 # Workload Configuration
-# Note: Workload names cannot exceed 22 characters for Pathways workloads and must be valid DNS labels (lowercase alphanumeric and hyphens).
-export RUN_NAME="maxtext-pw-$(date +%m%d%H%M%S)"
+# Note: Workload names cannot exceed 28 characters and must be valid DNS labels (lowercase alphanumeric and hyphens).
+export RUN_NAME=<RUN_NAME>
 
 # Hardware & Slice Configuration
 export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE> # e.g., 'ct5lp-hightpu-4t' for v5e

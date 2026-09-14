@@ -111,8 +111,8 @@ export COMPUTE_TYPE="<cluster-toolkit-compute-type>"
 export TOPOLOGY="<tpu-topology>"
 
 # -- Cluster Toolkit Workload Configuration --
-# (<YYYY-MM-DD>, <HF_TOKEN>)
-export RUNNAME="my-server-$(date +%Y-%m-%d-%H-%M-%S)"
+# (<RUN_NAME>, <YYYY-MM-DD>, <HF_TOKEN>)
+export RUNNAME="<RUN_NAME>"
 export DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:<YYYY-MM-DD>"
 export HF_TOKEN="<HF_TOKEN>" # Optional: if your tokenizer is private
 
