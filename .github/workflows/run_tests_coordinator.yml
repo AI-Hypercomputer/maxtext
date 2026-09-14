@@ -41,6 +41,10 @@ on:
         required: false
         type: boolean
         default: false
+      is_pull_request:
+        required: false
+        type: boolean
+        default: false
       maxtext_sha:
         description: 'Git SHA to checkout if MaxText is not pre-installed'
         required: false
@@ -100,7 +104,16 @@ jobs:
         env:
           FLAVOR: ${{ inputs.flavor }}
           BASELINE_DOWNLOADED: ${{ steps.download-baseline.outputs.downloaded }}
+          IS_PULL_REQUEST: ${{ inputs.is_pull_request }}
         run: |
+          if [ "${IS_PULL_REQUEST}" = "true" ] && [[ "${FLAVOR}" == tpu7x-* ]]; then
+            # A pull request runs only its newly added tests on TPU7X (a handful at most).
+            # Splitting them across workers would occupy extra scarce runners just to collect nothing.
+            echo "Pull request run on ${FLAVOR}: using a single worker."
+            echo "total_workers=1" >> "$GITHUB_OUTPUT"
+            echo "worker_groups=[1]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${BASELINE_DOWNLOADED}" = "true" ]; then
             CALC_OUTPUT=$(python3 tools/dev/calculate_workers.py --flavor "$FLAVOR" --baseline per_test_baseline.json)
             python3 tools/dev/convert_durations.py per_test_baseline.json .test_durations --flavor "$FLAVOR"
@@ -252,6 +265,7 @@ jobs:
       # Metadata
       base_image: ${{ inputs.base_image }}
       is_scheduled_run: ${{ inputs.is_scheduled_run }}
+      is_pull_request: ${{ inputs.is_pull_request }}
       maxtext_installed: ${{ inputs.maxtext_installed }}
       worker_group: ${{ matrix.worker_group }}
       total_workers: ${{ fromJSON(needs.setup-parameters.outputs.total_workers) }}

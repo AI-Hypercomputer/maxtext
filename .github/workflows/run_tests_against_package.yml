@@ -44,6 +44,10 @@ on:
       is_scheduled_run:
         required: true
         type: boolean
+      is_pull_request:
+        required: false
+        type: boolean
+        default: false
       xla_python_client_mem_fraction:
         required: true
         type: string
@@ -172,6 +176,13 @@ jobs:
           }
           trap cleanup_tpu_locks TERM INT
 
+          # tests/conftest.py runs git inside this container to mark newly added tests; the checkout
+          # may be owned by another UID, which git otherwise rejects as "dubious ownership".
+          # Do not fetch with --depth here: it makes the clone shallow and breaks the three-dot
+          # merge-base diff once main has moved. The checkout has full history (fetch-depth: 0)
+          # and newly_added_detection fetches origin/<base> itself under GITHUB_ACTIONS.
+          git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" 2>/dev/null || true
+
           # Determine environment and entry directory
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.
@@ -191,12 +202,31 @@ jobs:
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
+          elif [ "${INPUTS_IS_PULL_REQUEST}" == "true" ] && [[ "${INPUTS_FLAVOR}" =~ ^tpu7x- ]]; then
+            if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
+              FINAL_PYTEST_MARKER="newly_added"
+            else
+              FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and newly_added"
+            fi
           else
             if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
               FINAL_PYTEST_MARKER="not scheduled_only or newly_added"
             else
               FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and (not scheduled_only or newly_added)"
             fi
+          fi
+          if [ "${INPUTS_IS_PULL_REQUEST}" == "true" ] && [[ "${INPUTS_FLAVOR}" =~ ^tpu7x- ]]; then
+            # This job only runs when analyze_code_changes found changed tests. If detection finds
+            # none from inside the container, git state here is broken (shallow clone, missing base
+            # ref, dubious ownership): fail loudly instead of collecting 0 tests and passing on
+            # pytest exit code 5.
+            if ! CHANGED_TESTS=$(python3 tests/utils/newly_added_detection.py --base "${GITHUB_BASE_REF:-main}") || [ -z "${CHANGED_TESTS}" ]; then
+              echo "::error::newly_added detection found no changed tests inside the container, but analyze_code_changes did. Git state in the container is broken."
+              exit 1
+            fi
+            echo "Newly added or modified tests eligible for ${INPUTS_FLAVOR} (marker: ${FINAL_PYTEST_MARKER}):"
+            # shellcheck disable=SC2001
+            echo "${CHANGED_TESTS}" | sed 's/^/  - /'
           fi
           # TODO: Use package data for testing and remove the env vars
           MAXTEXT_REPO_ROOT=$(pwd)
@@ -270,6 +300,7 @@ jobs:
 
         env:
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
+          INPUTS_IS_PULL_REQUEST: ${{ inputs.is_pull_request }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
           INPUTS_FLAVOR: ${{ inputs.flavor }}
