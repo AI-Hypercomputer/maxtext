@@ -54,8 +54,8 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 export LOCATION=<ZONE>
 export RUN_NAME=<RUN_NAME>
 export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/olmo/runs
-export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
-export TOPOLOGY=<TPU_TOPOLOGY>
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
 export IMAGE_URI="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 
 export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json

@@ -177,8 +177,8 @@ available on the cluster; for example, verify the supported topology before
 using a four-slice v6e cluster.
 
 ```bash
-export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
-export TOPOLOGY=<TPU_TOPOLOGY>
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
 ```
 
 ### Submit GRPO workload

@@ -62,9 +62,9 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 export RUN_NAME=<RUN_NAME>
 
 # Hardware & Slice Configuration
-export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE> # e.g., 'ct5lp-hightpu-4t' for v5e
-export TOPOLOGY=<TPU_TOPOLOGY>                     # e.g., '4x4' (16 chips)
-export NUM_SLICES=3                                # total slices in the run
+export COMPUTE_TYPE=<COMPUTE_TYPE> # e.g., 'ct5lp-hightpu-4t' for v5e
+export TOPOLOGY=<TOPOLOGY>                     # e.g., '4x4' (16 chips)
+export NUM_SLICES=<NUM_SLICES>                 # total slices in the run (e.g., 3)
 
 # MaxText & Storage Configuration
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET>          # e.g., gs://my-bucket/maxtext-runs

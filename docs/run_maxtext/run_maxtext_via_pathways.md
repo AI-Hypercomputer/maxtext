@@ -58,9 +58,9 @@ export RUN_NAME="maxtext-pw-$(date +%m%d%H%M%S)"
 
 # For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`.
 # Choose a compute type and topology supported by the target cluster (e.g. ct6e-standard-4t with 4x8, or ct5p-hightpu-4t with 4x4x4):
-export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE>
-export TOPOLOGY=<TPU_TOPOLOGY>
-export NUM_SLICES=1 # Number of TPU slices for your job
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
+export NUM_SLICES=<NUM_SLICES> # Number of TPU slices for your job (e.g., 1)
 
 # -- MaxText & Storage Configuration --
 # Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
@@ -72,7 +72,8 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 # Official release pre-training image (recommended)
 export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
 # Or your custom runner image:
-# export DOCKER_IMAGE="<REGION>-docker.pkg.dev/${PROJECT_ID}/<REPO>/<IMAGE>:<TAG>"
+# export CLOUD_IMAGE_NAME=<IMAGE_NAME>
+# export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 ```
 
 ## 3. Running a batch workload
@@ -81,18 +82,27 @@ A batch workload runs entirely within the GKE cluster. You submit the job defini
 
 ### Submit the batch workload
 
-Use the `gcluster job submit` command with `--pathways` to start the job.
+Configure your cluster credentials and use the `gcluster job submit` command with `--pathways` to start the job.
 
 ```bash
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --location ${ZONE?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${ZONE?}
+
 gcluster job submit \
   --image=${DOCKER_IMAGE?} \
   --name=${RUN_NAME?} \
   --pathways \
   --compute-type=${COMPUTE_TYPE?} \
   --topology=${TOPOLOGY?} \
-  --num-slices=${NUM_SLICES:-1} \
+  --num-slices=${NUM_SLICES?} \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
   --command="python3 -m maxtext.trainers.pre_train.train \
+    src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     per_device_batch_size=1 \
     enable_checkpointing=false \
@@ -136,7 +146,7 @@ gcluster job submit \
   --pathways-headless \
   --compute-type=${COMPUTE_TYPE?} \
   --topology=${TOPOLOGY?} \
-  --num-slices=${NUM_SLICES:-1} \
+  --num-slices=${NUM_SLICES?} \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?}
 ```
 
@@ -163,6 +173,7 @@ export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 
 # Run the training script
 python3 -m maxtext.trainers.pre_train.train \
+  src/maxtext/configs/base.yml \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   per_device_batch_size=1 \
   enable_checkpointing=false \
