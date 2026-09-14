@@ -7,7 +7,7 @@ This directory contains code and documentation for **GRPO**, a reinforcement lea
 *   **GRPO (Group Relative Policy Optimization):** A policy optimization algorithm that uses reinforcement learning principles to improve the quality of a language model's responses based on a provided reward signal.
 *   **FSDP (Fully Sharded Data Parallelism):** A technique for distributing model parameters across multiple devices during training, allowing for efficient training of large models.
 *   **DP (Data Parallelism):** A technique for distributing data across multiple devices during inference, allowing for efficient inference of large models.
-*   **Sharding:** For more information on sharding, refer to [getting_started/Sharding.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/getting_started/Sharding.md)
+*   **Sharding:** For more information on sharding, refer to [docs/guides/optimization/sharding.md](https://maxtext.readthedocs.io/en/latest/guides/optimization/sharding.html)
 *   **[Pathways](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro):** A system that allows to orchestrate computations across multiple TPU slices, enabling training and inference on very large TPU topologies.
 *   **inference_rollouts:** This is a config parameter to control the frequency in training steps to reshard and copy training parameters to the inference mesh. Must be an integer between 1 and `steps` (total number of training steps).
 

@@ -140,7 +140,7 @@ for the full data-pipeline reference.
 This puts MaxText at exactly the same weights as the PyTorch reference, so
 the loss curve can be overlaid against AI2's published WandB curve. AI2
 also publishes intermediate checkpoints at every 1000-step boundary on the
-[`allenai/Olmo-3-1025-7B`](https://huggingface.co/allenai/Olmo-3-1025-7B/refs)
+[`allenai/Olmo-3-1025-7B`](https://huggingface.co/allenai/Olmo-3-1025-7B)
 HF repo (`stage1-step0`, `stage1-step1000`, …, `stage1-step1413814`); the
 same procedure works for any of them — just swap the `--revision` flag.
 
