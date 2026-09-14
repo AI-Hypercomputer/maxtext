@@ -83,6 +83,7 @@ BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 if [ "$EVENT_NAME" != "pull_request" ]; then
   echo "Not a pull request (event: $EVENT_NAME), running all tests and notebooks"
   set_test_flags "true" "true"
+  emit_flag "has_new_tests" "true"
   exit 0
 fi
 
@@ -98,8 +99,24 @@ echo "$CHANGED_FILES"
 if [ -z "$CHANGED_FILES" ]; then
   echo "No files detected or diff failed. Running everything as a fail-safe."
   set_test_flags "true" "true"
+  emit_flag "has_new_tests" "true"
   exit 0
 fi
+
+# Check if PR added or modified any tests
+git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" 2>/dev/null || true
+HAS_NEW_TESTS=$(python3 -c '
+import sys
+from tests.utils.newly_added_detection import get_changed_tests
+try:
+  changed = get_changed_tests("'"$BASE_REF"'")
+  print("true" if len(changed) > 0 else "false")
+except Exception as e:
+  sys.stderr.write(f"Warning: get_changed_tests failed: {e}\n")
+  print("true")
+' 2>/dev/null || echo "true")
+echo "Detected has_new_tests=${HAS_NEW_TESTS}"
+emit_flag "has_new_tests" "$HAS_NEW_TESTS"
 
 # Disable all tests by default
 set_test_flags "false" "false"
