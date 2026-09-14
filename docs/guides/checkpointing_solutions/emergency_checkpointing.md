@@ -66,17 +66,17 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
 
 1. **Set up environment variables:**
    ```bash
-   PROJECT_ID="<PROJECT_ID>"
-   CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
-   BUCKET_LOCATION="<bucket-location>"   # example: europe-west4 or us-central1 (must be a region or multi-region, not a zone)
-   TPU_ZONE="<ZONE>"                     # example: europe-west4-a
-   CLUSTER_NAME="<CLUSTER_NAME>"
-   NODE_POOL_NAME="<tpu-node-pool-name>" # example: v6e-pool
-   COMPUTE_TYPE="<tpu-machine-type>"     # example: ct6e-standard-4t
-   TOPOLOGY="<tpu-topology>"             # example: 8x16 (for 32 hosts with ct6e-standard-4t) or 4x8 (8 hosts)
-   GKE_VERSION="<gke-version>"           # example: 1.32.4-gke.1415000 (minimum for new clusters)
-   GCS_BUCKET="<GCS_BUCKET>"             # example: my-checkpoint-bucket
-   OUTPUT_PATH="gs://${GCS_BUCKET}/checkpoints"
+   export PROJECT_ID="<PROJECT_ID>"
+   export CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
+   export BUCKET_LOCATION="<BUCKET_LOCATION>"   # example: europe-west4 or us-central1 (must be a region or multi-region, not a zone)
+   export TPU_ZONE="<ZONE>"                     # example: europe-west4-a
+   export CLUSTER_NAME="<CLUSTER_NAME>"
+   export NODE_POOL_NAME="<TPU_NODE_POOL_NAME>" # example: v6e-pool
+   export COMPUTE_TYPE="<TPU_MACHINE_TYPE>"     # example: ct6e-standard-4t
+   export TOPOLOGY="<TPU_TOPOLOGY>"             # example: 8x16 (for 32 hosts with ct6e-standard-4t) or 4x8 (8 hosts)
+   export GKE_VERSION="<GKE_VERSION>"           # example: 1.32.4-gke.1415000 (minimum for new clusters)
+   export GCS_BUCKET="<GCS_BUCKET>"             # example: my-checkpoint-bucket
+   export OUTPUT_PATH="gs://${GCS_BUCKET}/checkpoints"
    ```
 2. **Configure gcloud and Cloud Storage:**
    Configure `gcloud` defaults and create a Cloud Storage bucket with **Hierarchical Namespace (HNS)** enabled. HNS provides fast atomic folder renames required for checkpoint finalization:
@@ -199,28 +199,28 @@ The Cluster Toolkit workload must mount the ramdisk so the training process can 
 1. **Set up environment variables:**
 
    ```bash
-   PROJECT_ID="<PROJECT_ID>"
-   CLUSTER_NAME="<CLUSTER_NAME>"
-   CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
-   RAMDISK_DIRECTORY="<your-ramdisk-directory>" # example: /tmp/ramdisk
-   WORKLOAD_NAME="<RUN_NAME>"
-   NUM_SLICES=1 # number of slices
-   LOCAL_CHECKPOINT_PERIOD=10
-   CHECKPOINT_PERIOD="<checkpoint-period>"
-   STEPS="<STEPS>"
-   OUTPUT_PATH="<GCS_BUCKET>"
-   COMPUTE_TYPE="<compute-type>" # example: ct6e-standard-4t
-   TOPOLOGY="<tpu-topology>"     # example: 8x16 or 4x8
-   DATA_PATH="<DATASET_PATH>"    # optional: only required if dataset_type is not synthetic
+   export PROJECT_ID="<PROJECT_ID>"
+   export CLUSTER_NAME="<CLUSTER_NAME>"
+   export CLUSTER_LOCATION="<ZONE>" # example: europe-west4 (region) or us-central1-a (zone)
+   export RAMDISK_DIRECTORY="<RAMDISK_DIRECTORY>" # example: /tmp/ramdisk
+   export WORKLOAD_NAME="<RUN_NAME>"
+   export NUM_SLICES=1 # number of slices
+   export LOCAL_CHECKPOINT_PERIOD=10
+   export CHECKPOINT_PERIOD="<CHECKPOINT_PERIOD>"
+   export STEPS="<STEPS>"
+   export OUTPUT_PATH="<GCS_BUCKET>"
+   export COMPUTE_TYPE="<CLUSTER_TOOLKIT_COMPUTE_TYPE>" # example: ct6e-standard-4t
+   export TOPOLOGY="<TPU_TOPOLOGY>"     # example: 8x16 or 4x8
+   export DATA_PATH="<DATASET_PATH>"    # optional: only required if dataset_type is not synthetic
    ```
 
 2. **Define the Docker image:**
 
    ```bash
    # Official release pre-training image (recommended)
-   DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
+   export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
    # Or your custom runner image:
-   # DOCKER_IMAGE="${CLUSTER_LOCATION}-docker.pkg.dev/${PROJECT_ID}/<repo>/${USER}_mtc_runner:latest"
+   # export DOCKER_IMAGE="${CLUSTER_LOCATION}-docker.pkg.dev/${PROJECT_ID}/<REPO>/${USER}_mtc_runner:latest"
    ```
 
 3. **Run the workload creation command:**
