@@ -59,6 +59,8 @@ jobs:
       run_posttrain_tests: ${{ steps.check.outputs.run_posttrain_tests }}
       run_pathways_tests: ${{ steps.check.outputs.run_pathways_tests }}
       run_gpu_tests: ${{ steps.check.outputs.run_gpu_tests }}
+      # true when the PR touched a test in a file that mentions tpu_only (see analyze_code_changes.sh),
+      # and always true for non-PR events. Gates the tpu7x-tests job.
       has_new_tests: ${{ steps.check.outputs.has_new_tests }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -158,7 +160,6 @@ jobs:
         flavor: [tpu-unit, tpu-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      is_pull_request: ${{ github.event_name == 'pull_request' }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
@@ -177,7 +178,6 @@ jobs:
         flavor: [tpu-post-training-unit, tpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      is_pull_request: ${{ github.event_name == 'pull_request' }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
@@ -186,11 +186,15 @@ jobs:
   tpu7x-tests:
     name: TPU7X Tests
     needs: [gate_test_run, analyze_code_changes]
+    # TPU7X runners are scarce. A pull request runs this job only when it touched a test that
+    # can run on TPU (has_new_tests), and then only the touched tests: is_pull_request switches
+    # run_tests_against_package.yml to `-m "<flavor marker> and newly_added"` and
+    # run_tests_coordinator.yml to a single worker. Every other event (schedule,
+    # workflow_dispatch, release via workflow_call) runs the full suite.
     if: |
       always() &&
       needs.gate_test_run.result == 'success' &&
-      (github.event_name != 'pull_request' || needs.analyze_code_changes.outputs.has_new_tests == 'true') &&
-      (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      (github.event_name != 'pull_request' || needs.analyze_code_changes.outputs.has_new_tests == 'true')
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -217,7 +221,6 @@ jobs:
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
       flavor: ${{ matrix.flavor }}
-      is_pull_request: ${{ github.event_name == 'pull_request' }}
       base_image: maxtext-unit-test-cuda12:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
@@ -236,7 +239,6 @@ jobs:
         flavor: [cpu-unit, cpu-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      is_pull_request: ${{ github.event_name == 'pull_request' }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
@@ -255,7 +257,6 @@ jobs:
         flavor: [cpu-post-training-unit, cpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      is_pull_request: ${{ github.event_name == 'pull_request' }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
