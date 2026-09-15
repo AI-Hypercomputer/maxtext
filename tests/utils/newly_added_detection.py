@@ -30,11 +30,13 @@ untouched test that merely sits above newly added code.
 The module doubles as a command-line tool for CI jobs that cannot import the ``tests``
 package (``tests/__init__.py`` imports packages a bare runner does not have)::
 
-    python3 tests/utils/newly_added_detection.py --base main
+    python3 tests/utils/newly_added_detection.py --base main [--source-regex tpu_only]
 
 It prints one ``path::test_name`` line per changed test and exits 0, or exits 2 when no
 diff against the base could be computed, so callers can tell "nothing changed" from
-"detection is broken".
+"detection is broken". ``--source-regex`` keeps only tests whose file mentions the
+pattern; CI uses ``tpu_only`` because ``tests/conftest.py`` marks every test without a
+hardware marker ``cpu_only``, which the TPU flavors exclude.
 
 Only the Python standard library is used, since this runs on a bare CI runner where
 MaxText is not necessarily importable.
@@ -204,13 +206,17 @@ def diff_against_base(base):
   return None
 
 
-def changed_tests_from_diff(diff_text):
+def changed_tests_from_diff(diff_text, source_regex=None):
   """Return ``(file_path, test_name)`` for every test the diff added or modified.
 
   Args:
     diff_text: Raw ``git diff --unified=0`` output. Test sources are read from the
       current working directory, which must be the repository root.
+    source_regex: Optional regular expression. When given, tests are only reported from
+      files whose full source matches it. This is a coarse stand-in for pytest marker
+      selection on runners that cannot collect tests, e.g. ``"tpu_only"``.
   """
+  pattern = re.compile(source_regex) if source_regex else None
   changed = set()
   for path, touched_lines in parse_changed_line_map(diff_text).items():
     if not _is_test_file(path):
@@ -219,6 +225,8 @@ def changed_tests_from_diff(diff_text):
       with open(path, "r", encoding="utf-8") as handle:
         source = handle.read()
     except OSError:
+      continue
+    if pattern is not None and pattern.search(source) is None:
       continue
     for name in touched_test_names(source, touched_lines):
       changed.add((path, name))
@@ -254,6 +262,11 @@ def main(argv=None):
       default=None,
       help="Base ref to diff against (default: $GITHUB_BASE_REF, then main).",
   )
+  parser.add_argument(
+      "--source-regex",
+      default=None,
+      help="Only report tests from files whose source matches this regular expression (e.g. tpu_only).",
+  )
   args = parser.parse_args(argv)
   base = _resolve_base(args.base)
   diff_text = diff_against_base(base)
@@ -263,7 +276,7 @@ def main(argv=None):
         file=sys.stderr,
     )
     return 2
-  for path, name in sorted(changed_tests_from_diff(diff_text)):
+  for path, name in sorted(changed_tests_from_diff(diff_text, args.source_regex)):
     print(f"{path}::{name}")
   return 0
 

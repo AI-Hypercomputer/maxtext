@@ -279,3 +279,31 @@ def test_script_runs_without_the_tests_package(pr_repo):
   )
   assert result.returncode == 0, result.stderr
   assert result.stdout.splitlines() == ["tests/unit/sample_test.py::test_new"]
+
+
+def test_changed_tests_from_diff_source_regex_keeps_only_matching_files(tmp_path, monkeypatch):
+  monkeypatch.chdir(tmp_path)
+  unit_dir = tmp_path / "tests" / "unit"
+  unit_dir.mkdir(parents=True)
+  (unit_dir / "tpu_test.py").write_text(
+      "import pytest\n\n@pytest.mark.tpu_only\ndef test_on_tpu():\n  assert True\n", encoding="utf-8"
+  )
+  (unit_dir / "cpu_test.py").write_text("def test_on_cpu():\n  assert True\n", encoding="utf-8")
+  diff = "+++ b/tests/unit/tpu_test.py\n@@ -0,0 +1,5 @@\n+++ b/tests/unit/cpu_test.py\n@@ -0,0 +1,2 @@\n"
+  assert changed_tests_from_diff(diff) == {
+      ("tests/unit/tpu_test.py", "test_on_tpu"),
+      ("tests/unit/cpu_test.py", "test_on_cpu"),
+  }
+  assert changed_tests_from_diff(diff, source_regex="tpu_only") == {("tests/unit/tpu_test.py", "test_on_tpu")}
+
+
+def test_script_source_regex_flag_filters_output(pr_repo):
+  result = subprocess.run(
+      [sys.executable, "-I", _SCRIPT, "--base", "main", "--source-regex", "marker_that_no_file_mentions"],
+      cwd=pr_repo,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == ""

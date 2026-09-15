@@ -103,22 +103,27 @@ if [ -z "$CHANGED_FILES" ]; then
   exit 0
 fi
 
-# Check whether the PR added or modified any tests. The detector runs as a script, not via
-# `python3 -c "from tests.utils..."`: importing the package executes tests/__init__.py, which
-# needs packages that are not installed on this bare runner. The script only needs the
-# standard library and exits 2 when it could not compute a diff.
-CHANGED_TESTS=$(python3 tests/utils/newly_added_detection.py --base "$BASE_REF") && DETECT_RC=0 || DETECT_RC=$?
+# Check whether the PR added or modified a test that can run on TPU7X. The detector runs as
+# a script, not via `python3 -c "from tests.utils..."`: importing the package executes
+# tests/__init__.py, which needs packages that are not installed on this bare runner. The
+# script only needs the standard library and exits 2 when it could not compute a diff.
+#
+# Only tests marked tpu_only can be selected by the tpu7x flavors: tests/conftest.py
+# auto-marks every test without a hardware marker as cpu_only, which the tpu7x marker
+# expression excludes. A touched test file that never mentions tpu_only therefore cannot
+# contribute a test to the TPU7X pull-request run, so the job is skipped for it.
+CHANGED_TPU_TESTS=$(python3 tests/utils/newly_added_detection.py --base "$BASE_REF" --source-regex tpu_only) && DETECT_RC=0 || DETECT_RC=$?
 if [ "$DETECT_RC" -ne 0 ]; then
   echo "Warning: newly_added detection failed (exit ${DETECT_RC}); enabling TPU7X tests as a fail-safe."
   HAS_NEW_TESTS="true"
-elif [ -n "$CHANGED_TESTS" ]; then
-  echo "PR added or modified these tests:"
+elif [ -n "$CHANGED_TPU_TESTS" ]; then
+  echo "PR added or modified these tests in files that mention tpu_only:"
   while IFS= read -r changed_test; do
     echo "  - $changed_test"
-  done <<< "$CHANGED_TESTS"
+  done <<< "$CHANGED_TPU_TESTS"
   HAS_NEW_TESTS="true"
 else
-  echo "PR did not add or modify any tests."
+  echo "PR did not add or modify any test that can run on TPU7X."
   HAS_NEW_TESTS="false"
 fi
 echo "Detected has_new_tests=${HAS_NEW_TESTS}"
