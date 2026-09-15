@@ -184,6 +184,35 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     overrides["padded_base_moe_mlp_dim"] = padded_hidden_size
 
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
+
+  # This is the config the vLLM-side model is actually built from, and it is
+  # NOT the `sampler_config` an RL entrypoint constructs -- that object only
+  # supplies the rollout device mesh. Anything set there and absent from
+  # `additional_config["maxtext_config"]` is silently dropped here, which has
+  # already cost one wrong diagnosis (`use_mrope=False` was set on
+  # `sampler_config` and never reached this function, so the sampler kept the
+  # model yml's `use_mrope: true`). Log the keys that decide the numerics so a
+  # trainer/sampler mismatch is visible in the run log instead of having to be
+  # inferred from source months later. Deliberately not gated on `log_config`:
+  # RL entrypoints set that False and that is exactly why nobody could see this.
+  # getattr with a default throughout: this is diagnostics, and a renamed key
+  # must not take a serving run down at startup.
+  _numerics_keys = (
+      "model_name", "dtype", "weight_dtype", "attention", "use_mrope",
+      "logits_dot_in_fp32", "float32_logits", "float32_qk_product",
+      "float32_gate_logits", "float32_weight_sum", "matmul_precision",
+      "scan_layers", "prefuse_moe_weights", "padded_base_moe_mlp_dim",
+      "base_num_kv_heads", "use_qk_norm_in_gdn", "capacity_factor",
+      "sparse_matmul", "megablox", "normalization_layer_epsilon",
+      "max_target_length", "remat_policy", "dropout_rate", "model_call_mode",
+  )
+  max_logging.log(
+      "[maxtext-vllm-adapter] resolved SAMPLER config: "
+      + " ".join(
+          f"{k}={getattr(maxtext_config, k, '<absent>')}" for k in _numerics_keys
+      )
+      + f" overrides_from_additional_config={sorted(overrides)}"
+  )
   return maxtext_config
 
 
