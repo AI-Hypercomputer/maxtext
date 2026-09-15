@@ -100,3 +100,6 @@ def __getattr__(name: str):
       return module_dict[name]
     case _:
       raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
+# CI verification: touch a source file without touching tests.
