@@ -687,9 +687,9 @@ class RoutedMoE(nnx.Module):
       # During aqt convert state we delete kernel weight from params to save
       # memory. Instead they are retrieved from the tensors stored in the 'aqt'
       # collection.
-      self.wi_0 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
-      self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
-      self.wo = jnp.zeros((num_experts, intermediate_dim, self.moe_expert_input_dim))
+      self.wi_0 = jnp.zeros((num_experts, self.moe_expert_input_dim, moe_intermediate_dim))
+      self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, moe_intermediate_dim))
+      self.wo = jnp.zeros((num_experts, moe_intermediate_dim, self.moe_expert_input_dim))
     elif self.config.prefuse_moe_weights:
       self.wi = nnx.Param(
           self.kernel_init(
