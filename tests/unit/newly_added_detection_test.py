@@ -29,6 +29,7 @@ from tests.utils.newly_added_detection import get_changed_tests
 from tests.utils.newly_added_detection import main
 from tests.utils.newly_added_detection import parse_changed_line_map
 from tests.utils.newly_added_detection import touched_test_names
+from tests.utils.newly_added_detection import touched_tests
 
 _SCRIPT = newly_added_detection.__file__
 
@@ -281,25 +282,87 @@ def test_script_runs_without_the_tests_package(pr_repo):
   assert result.stdout.splitlines() == ["tests/unit/sample_test.py::test_new"]
 
 
-def test_changed_tests_from_diff_source_regex_keeps_only_matching_files(tmp_path, monkeypatch):
+# --- markers -----------------------------------------------------------------
+
+_MARKED_SOURCE = textwrap.dedent(
+    """\
+    import pytest
+
+    pytestmark = [pytest.mark.integration_test, pytest.mark.tpu_backend("arg")]
+
+
+    @pytest.mark.tpu_only
+    class TestOnTpu:
+
+      def test_inherits_class_marker(self):
+        assert True
+
+      @pytest.mark.skip_on_tpu7x
+      def test_skipped_on_tpu7x(self):
+        assert True
+
+
+    @pytest.mark.tpu_only
+    @pytest.mark.parametrize("x", [1])
+    def test_function_marker(x):
+      assert x
+
+
+    def test_unmarked():
+      assert True
+    """
+)
+_ALL_LINES = set(range(1, 40))
+
+
+def test_touched_tests_collects_markers_from_module_class_and_function():
+  found = touched_tests(_MARKED_SOURCE, _ALL_LINES)
+  assert found["test_inherits_class_marker"] == {"integration_test", "tpu_backend", "tpu_only"}
+  assert found["test_skipped_on_tpu7x"] == {"integration_test", "tpu_backend", "tpu_only", "skip_on_tpu7x"}
+  assert found["test_function_marker"] == {"integration_test", "tpu_backend", "tpu_only", "parametrize"}
+  assert found["test_unmarked"] == {"integration_test", "tpu_backend"}
+
+
+def test_touched_tests_ignores_non_pytest_decorators():
+  source = "from unittest import mock\n\n\n@mock.patch('os.getcwd')\ndef test_patched(_):\n  assert True\n"
+  assert touched_tests(source, {5}) == {"test_patched": frozenset()}
+
+
+def test_changed_tests_from_diff_marker_filters_match_the_tpu7x_rule(tmp_path, monkeypatch):
   monkeypatch.chdir(tmp_path)
   unit_dir = tmp_path / "tests" / "unit"
   unit_dir.mkdir(parents=True)
-  (unit_dir / "tpu_test.py").write_text(
-      "import pytest\n\n@pytest.mark.tpu_only\ndef test_on_tpu():\n  assert True\n", encoding="utf-8"
-  )
-  (unit_dir / "cpu_test.py").write_text("def test_on_cpu():\n  assert True\n", encoding="utf-8")
-  diff = "+++ b/tests/unit/tpu_test.py\n@@ -0,0 +1,5 @@\n+++ b/tests/unit/cpu_test.py\n@@ -0,0 +1,2 @@\n"
+  (unit_dir / "marked_test.py").write_text(_MARKED_SOURCE, encoding="utf-8")
+  diff = "+++ b/tests/unit/marked_test.py\n@@ -0,0 +1,30 @@\n"
+  path = "tests/unit/marked_test.py"
   assert changed_tests_from_diff(diff) == {
-      ("tests/unit/tpu_test.py", "test_on_tpu"),
-      ("tests/unit/cpu_test.py", "test_on_cpu"),
+      (path, "test_inherits_class_marker"),
+      (path, "test_skipped_on_tpu7x"),
+      (path, "test_function_marker"),
+      (path, "test_unmarked"),
   }
-  assert changed_tests_from_diff(diff, source_regex="tpu_only") == {("tests/unit/tpu_test.py", "test_on_tpu")}
+  # The CI rule: runnable on TPU7X = carries tpu_only and not skip_on_tpu7x.
+  assert changed_tests_from_diff(diff, require_marker="tpu_only", exclude_marker="skip_on_tpu7x") == {
+      (path, "test_inherits_class_marker"),
+      (path, "test_function_marker"),
+  }
+  assert changed_tests_from_diff(diff, require_marker="gpu_only") == set()
 
 
-def test_script_source_regex_flag_filters_output(pr_repo):
+def test_script_marker_flags_filter_output(pr_repo):
+  # pr_repo's test_new carries no markers, so requiring tpu_only yields nothing but still exits 0.
   result = subprocess.run(
-      [sys.executable, "-I", _SCRIPT, "--base", "main", "--source-regex", "marker_that_no_file_mentions"],
+      [
+          sys.executable,
+          "-I",
+          _SCRIPT,
+          "--base",
+          "main",
+          "--require-marker",
+          "tpu_only",
+          "--exclude-marker",
+          "skip_on_tpu7x",
+      ],
       cwd=pr_repo,
       capture_output=True,
       text=True,

@@ -108,16 +108,18 @@ fi
 # tests/__init__.py, which needs packages that are not installed on this bare runner. The
 # script only needs the standard library and exits 2 when it could not compute a diff.
 #
-# Only tests marked tpu_only can be selected by the tpu7x flavors: tests/conftest.py
-# auto-marks every test without a hardware marker as cpu_only, which the tpu7x marker
-# expression excludes. A touched test file that never mentions tpu_only therefore cannot
-# contribute a test to the TPU7X pull-request run, so the job is skipped for it.
-CHANGED_TPU_TESTS=$(python3 tests/utils/newly_added_detection.py --base "$BASE_REF" --source-regex tpu_only) && DETECT_RC=0 || DETECT_RC=$?
+# "Runnable on TPU7X" means: the scheduled tpu7x-* flavors would collect the test and not
+# skip it. Only tpu_only tests qualify, because tests/conftest.py auto-marks every test
+# without a hardware marker as cpu_only, which the tpu7x marker expressions exclude; and
+# skip_on_tpu7x tests are skipped at runtime on TPU7X hardware. Markers are read from the
+# test function, its class and the module's pytestmark, the same inheritance pytest uses.
+CHANGED_TPU_TESTS=$(python3 tests/utils/newly_added_detection.py --base "$BASE_REF" \
+  --require-marker tpu_only --exclude-marker skip_on_tpu7x) && DETECT_RC=0 || DETECT_RC=$?
 if [ "$DETECT_RC" -ne 0 ]; then
   echo "Warning: newly_added detection failed (exit ${DETECT_RC}); enabling TPU7X tests as a fail-safe."
   HAS_NEW_TESTS="true"
 elif [ -n "$CHANGED_TPU_TESTS" ]; then
-  echo "PR added or modified these tests in files that mention tpu_only:"
+  echo "PR added or modified these tests that can run on TPU7X (tpu_only, not skip_on_tpu7x):"
   while IFS= read -r changed_test; do
     echo "  - $changed_test"
   done <<< "$CHANGED_TPU_TESTS"

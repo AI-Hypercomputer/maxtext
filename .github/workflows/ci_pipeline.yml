@@ -59,8 +59,8 @@ jobs:
       run_posttrain_tests: ${{ steps.check.outputs.run_posttrain_tests }}
       run_pathways_tests: ${{ steps.check.outputs.run_pathways_tests }}
       run_gpu_tests: ${{ steps.check.outputs.run_gpu_tests }}
-      # true when the PR touched a test in a file that mentions tpu_only (see analyze_code_changes.sh),
-      # and always true for non-PR events. Gates the tpu7x-tests job.
+      # true when the PR touched a test that can run on TPU7X: marked tpu_only and not
+      # skip_on_tpu7x (see analyze_code_changes.sh). Always true for non-PR events. Gates tpu7x-tests.
       has_new_tests: ${{ steps.check.outputs.has_new_tests }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

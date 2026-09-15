@@ -30,13 +30,17 @@ untouched test that merely sits above newly added code.
 The module doubles as a command-line tool for CI jobs that cannot import the ``tests``
 package (``tests/__init__.py`` imports packages a bare runner does not have)::
 
-    python3 tests/utils/newly_added_detection.py --base main [--source-regex tpu_only]
+    python3 tests/utils/newly_added_detection.py --base main \
+        [--require-marker tpu_only] [--exclude-marker skip_on_tpu7x]
 
 It prints one ``path::test_name`` line per changed test and exits 0, or exits 2 when no
 diff against the base could be computed, so callers can tell "nothing changed" from
-"detection is broken". ``--source-regex`` keeps only tests whose file mentions the
-pattern; CI uses ``tpu_only`` because ``tests/conftest.py`` marks every test without a
-hardware marker ``cpu_only``, which the TPU flavors exclude.
+"detection is broken". The marker flags filter by the ``pytest.mark.*`` decorators a test
+carries (on the function, its class, or the module's ``pytestmark``). CI asks for
+``tpu_only`` and not ``skip_on_tpu7x``: that is the set the scheduled TPU7X flavors
+collect and do not skip, because ``tests/conftest.py`` marks every test without a
+hardware marker ``cpu_only`` (excluded by the TPU flavors) and skips ``skip_on_tpu7x``
+tests at runtime on TPU7X hardware.
 
 Only the Python standard library is used, since this runs on a bare CI runner where
 MaxText is not necessarily importable.
@@ -101,21 +105,62 @@ def parse_changed_line_map(diff_text):
   return line_map
 
 
+def _marker_names(decorator_list):
+  """Return the pytest marker names applied by a decorator list.
+
+  Recognises ``@pytest.mark.<name>`` and ``@pytest.mark.<name>(...)``. Any other
+  decorator (``@mock.patch`` and the like) is ignored.
+  """
+  names = set()
+  for dec in decorator_list:
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Attribute)
+        and target.value.attr == "mark"
+        and isinstance(target.value.value, ast.Name)
+        and target.value.value.id == "pytest"
+    ):
+      names.add(target.attr)
+  return names
+
+
+def _module_markers(tree):
+  """Return the marker names from a module-level ``pytestmark = ...`` assignment.
+
+  Accepts a single marker or a list/tuple of markers, the two forms pytest documents.
+  """
+  names = set()
+  for node in tree.body:
+    if not isinstance(node, ast.Assign):
+      continue
+    if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets):
+      continue
+    value = node.value
+    elements = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+    names |= _marker_names(elements)
+  return names
+
+
 def _iter_test_defs(tree):
-  """Yield ``(name, start_line, end_line)`` for every test function in an AST.
+  """Yield ``(name, start_line, end_line, markers)`` for every test function in an AST.
 
   Covers module-level test functions and methods declared directly inside a class,
   which is what pytest collects. The span starts at the first decorator (if any) so
-  decorator-only edits are attributed to the test they decorate.
+  decorator-only edits are attributed to the test they decorate. ``markers`` is the
+  set of pytest marker names the test carries, from its own decorators, its class's
+  decorators and the module's ``pytestmark``, mirroring how pytest inherits markers.
   """
   def_types = (ast.FunctionDef, ast.AsyncFunctionDef)
+  module_marks = _module_markers(tree)
   for node in tree.body:
     if isinstance(node, def_types) and node.name.startswith("test_"):
-      yield node.name, _span_start(node), node.end_lineno
+      yield node.name, _span_start(node), node.end_lineno, module_marks | _marker_names(node.decorator_list)
     elif isinstance(node, ast.ClassDef):
+      class_marks = module_marks | _marker_names(node.decorator_list)
       for sub in node.body:
         if isinstance(sub, def_types) and sub.name.startswith("test_"):
-          yield sub.name, _span_start(sub), sub.end_lineno
+          yield sub.name, _span_start(sub), sub.end_lineno, class_marks | _marker_names(sub.decorator_list)
 
 
 def _span_start(node):
@@ -126,29 +171,34 @@ def _span_start(node):
   return start
 
 
-def touched_test_names(source, touched_lines):
-  """Return the names of test functions in ``source`` whose span includes a changed line.
+def touched_tests(source, touched_lines):
+  """Map each test in ``source`` whose span includes a changed line to its marker names.
 
   Args:
     source: The new file's Python source.
     touched_lines: Set of changed new-file line numbers for that file.
 
   Returns:
-    A set of test function names. Empty if ``touched_lines`` is empty or ``source`` does
-    not parse (pytest collection surfaces a syntax error on its own, so raising here would
-    only hide it).
+    ``{test_name: frozenset_of_marker_names}``. Empty if ``touched_lines`` is empty or
+    ``source`` does not parse (pytest collection surfaces a syntax error on its own, so
+    raising here would only hide it).
   """
   if not touched_lines:
-    return set()
+    return {}
   try:
     tree = ast.parse(source)
   except SyntaxError:
-    return set()
-  found = set()
-  for name, start, end in _iter_test_defs(tree):
+    return {}
+  found = {}
+  for name, start, end, markers in _iter_test_defs(tree):
     if any(start <= line <= end for line in touched_lines):
-      found.add(name)
+      found[name] = frozenset(markers)
   return found
+
+
+def touched_test_names(source, touched_lines):
+  """Return the names of test functions in ``source`` whose span includes a changed line."""
+  return set(touched_tests(source, touched_lines))
 
 
 def _build_diff_commands(base):
@@ -206,17 +256,16 @@ def diff_against_base(base):
   return None
 
 
-def changed_tests_from_diff(diff_text, source_regex=None):
+def changed_tests_from_diff(diff_text, require_marker=None, exclude_marker=None):
   """Return ``(file_path, test_name)`` for every test the diff added or modified.
 
   Args:
     diff_text: Raw ``git diff --unified=0`` output. Test sources are read from the
       current working directory, which must be the repository root.
-    source_regex: Optional regular expression. When given, tests are only reported from
-      files whose full source matches it. This is a coarse stand-in for pytest marker
-      selection on runners that cannot collect tests, e.g. ``"tpu_only"``.
+    require_marker: Optional pytest marker name. When given, only tests carrying it (on
+      the function, its class or the module's ``pytestmark``) are reported.
+    exclude_marker: Optional pytest marker name. Tests carrying it are dropped.
   """
-  pattern = re.compile(source_regex) if source_regex else None
   changed = set()
   for path, touched_lines in parse_changed_line_map(diff_text).items():
     if not _is_test_file(path):
@@ -226,9 +275,11 @@ def changed_tests_from_diff(diff_text, source_regex=None):
         source = handle.read()
     except OSError:
       continue
-    if pattern is not None and pattern.search(source) is None:
-      continue
-    for name in touched_test_names(source, touched_lines):
+    for name, markers in touched_tests(source, touched_lines).items():
+      if require_marker is not None and require_marker not in markers:
+        continue
+      if exclude_marker is not None and exclude_marker in markers:
+        continue
       changed.add((path, name))
   return changed
 
@@ -263,9 +314,14 @@ def main(argv=None):
       help="Base ref to diff against (default: $GITHUB_BASE_REF, then main).",
   )
   parser.add_argument(
-      "--source-regex",
+      "--require-marker",
       default=None,
-      help="Only report tests from files whose source matches this regular expression (e.g. tpu_only).",
+      help="Only report tests carrying this pytest marker (e.g. tpu_only).",
+  )
+  parser.add_argument(
+      "--exclude-marker",
+      default=None,
+      help="Drop tests carrying this pytest marker (e.g. skip_on_tpu7x).",
   )
   args = parser.parse_args(argv)
   base = _resolve_base(args.base)
@@ -276,7 +332,7 @@ def main(argv=None):
         file=sys.stderr,
     )
     return 2
-  for path, name in sorted(changed_tests_from_diff(diff_text, args.source_regex)):
+  for path, name in sorted(changed_tests_from_diff(diff_text, args.require_marker, args.exclude_marker)):
     print(f"{path}::{name}")
   return 0
 
