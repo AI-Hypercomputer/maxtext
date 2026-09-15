@@ -29,6 +29,7 @@ from flax import struct
 from flax.training import train_state
 import jax
 from jax.experimental import multihost_utils
+import jax.numpy as jnp
 from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.common import checkpoint_context
 from maxtext.common import emergency_checkpointing
@@ -42,6 +43,7 @@ from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_logging
+import orbax.checkpoint as orbax_cp
 from orbax.checkpoint import v1 as ocp
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
@@ -277,6 +279,182 @@ def _resolve_conversion_fn(checkpoint_conversion_fn):
   return fn
 
 
+def _drop_adapter_level(tree):
+  if isinstance(tree, dict):
+    if set(tree) == {"base"}:
+      return _drop_adapter_level(tree["base"])
+    return {k: _drop_adapter_level(v) for k, v in tree.items()}
+  elif isinstance(tree, (list, tuple)):
+    if hasattr(tree, "_fields"):  # namedtuple
+      return type(tree)(*[_drop_adapter_level(v) for v in tree])
+    return type(tree)([_drop_adapter_level(v) for v in tree])
+  return tree
+
+
+def _drop_inject_hyperparams(opt_state):
+  if isinstance(opt_state, dict) and {"count", "hyperparams", "hyperparams_states", "inner_state"}.issubset(
+      opt_state.keys()
+  ):
+    return opt_state["inner_state"]
+  return opt_state
+
+
+def _add_adapter_level(tree):
+  if isinstance(tree, dict):
+    return {"base": tree}
+  elif isinstance(tree, (list, tuple)):
+    if hasattr(tree, "_fields"):  # namedtuple
+      return type(tree)(*[_add_adapter_level(v) for v in tree])
+    return type(tree)([_add_adapter_level(v) for v in tree])
+  return tree
+
+
+def _load_tunix_full_state_from_path(
+    path,
+    abstract_unboxed_pre_state,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt,
+    use_zarr3,
+    maxtext_config=None,
+):
+  """Load and convert a full Tunix post-training checkpoint into MaxText pre-train state."""
+  is_nnx = isinstance(abstract_unboxed_pre_state, (nnx.State, train_state_nnx.TrainStateNNX))
+  if is_nnx:
+    want_params = nnx.split_state(abstract_unboxed_pre_state.model, nnx.Param, ...)[0].to_pure_dict()
+    want_opt = abstract_unboxed_pre_state.optimizer
+  else:
+    want_params = abstract_unboxed_pre_state.params
+    want_opt = abstract_unboxed_pre_state.opt_state
+
+  path_obj = epath.Path(path)
+
+  # For CheckpointManager, path should point to the root dir, and step should be the folder name.
+  step_str = path_obj.name
+  root_dir = path_obj.parent
+  step = int(step_str) if step_str.isdigit() else 0
+
+  item_handlers = {
+      "model_params": orbax_cp.PyTreeCheckpointHandler(
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
+      ),
+      "optimizer_state": orbax_cp.PyTreeCheckpointHandler(
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
+      ),
+  }
+
+  mgr = orbax_cp.CheckpointManager(
+      root_dir,
+      item_names=("model_params", "optimizer_state"),
+      item_handlers=item_handlers,
+  )
+
+  has_base = False
+  has_inject = False
+  # Inspect checkpoint metadata to detect adapter wrapping ('base') or injected hyperparameter states.
+  # If metadata cannot be read (e.g. absent metadata file or custom storage backend), log a warning
+  # and fall back to restoring standard unadapted model parameters and optimizer state.
+  try:
+    item_meta = mgr.item_metadata(step)
+
+    if hasattr(item_meta, "get"):
+      model_meta = item_meta.get("model_params")
+      opt_meta = item_meta.get("optimizer_state")
+    else:
+      model_meta = getattr(item_meta, "model_params", None)
+      opt_meta = getattr(item_meta, "optimizer_state", None)
+
+    if model_meta is not None:
+      tree = getattr(model_meta, "tree", model_meta)
+      if isinstance(tree, dict) and "base" in tree:
+        has_base = True
+
+    if opt_meta is not None:
+      tree = getattr(opt_meta, "tree", opt_meta)
+      if isinstance(tree, dict) and "inner_state" in tree and "count" in tree:
+        has_inject = True
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.warning(
+        f"Could not inspect Tunix item_metadata for step {step} at {root_dir}: {e}. "
+        "Falling back to unadapted model and optimizer layout."
+    )
+
+  want_params_dict = want_params.to_pure_dict() if isinstance(want_params, nnx.State) else want_params
+  want_opt_dict = want_opt.to_pure_dict() if isinstance(want_opt, nnx.State) else want_opt
+
+  wrapped_params = jax.tree.map(lambda v: {"value": v}, want_params_dict)
+  wrapped_opt_base = jax.tree.map(lambda v: {"value": v}, want_opt_dict)
+
+  target_params = {"base": wrapped_params} if has_base else wrapped_params
+  target_opt_base = _add_adapter_level(wrapped_opt_base) if has_base else wrapped_opt_base
+
+  if has_inject:
+    target_opt = {
+        "count": {"value": jnp.zeros((), dtype=jnp.int32)},
+        "hyperparams": {},
+        "hyperparams_states": {},
+        "inner_state": target_opt_base,
+    }
+  else:
+    target_opt = target_opt_base
+
+  restored = mgr.restore(
+      step,
+      args=orbax_cp.args.Composite(
+          model_params=orbax_cp.args.PyTreeRestore(
+              item=target_params,
+              restore_args=orbax_cp.checkpoint_utils.construct_restore_args(target_params),
+              partial_restore=True,
+          ),
+          optimizer_state=orbax_cp.args.PyTreeRestore(
+              item=target_opt,
+              restore_args=orbax_cp.checkpoint_utils.construct_restore_args(target_opt),
+              partial_restore=True,
+          ),
+      ),
+  )
+
+  restored_params = restored["model_params"]
+  restored_opt = restored["optimizer_state"]
+
+  if has_base:
+    restored_params = _drop_adapter_level(restored_params)
+    restored_opt = _drop_adapter_level(restored_opt)
+
+  if has_inject:
+    restored_opt = _drop_inject_hyperparams(restored_opt)
+
+  restored_params = train_state_nnx._strip_rng_state(restored_params)  # pylint: disable=protected-access
+  restored_params = jax.tree.map(
+      lambda v: v["value"] if isinstance(v, dict) and "value" in v else v,
+      restored_params,
+      is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+  )
+  restored_opt = jax.tree.map(
+      lambda v: v["value"] if isinstance(v, dict) and "value" in v else v,
+      restored_opt,
+      is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+  )
+
+  _raise_on_weight_mismatch(want_params, restored_params, config=maxtext_config)
+
+  if is_nnx:
+    if isinstance(abstract_unboxed_pre_state, nnx.State):
+      linen_state, aux_state, ephemeral = train_state_nnx.split_for_checkpoint(abstract_unboxed_pre_state)
+      nnx.replace_by_pure_dict(linen_state, {"model": restored_params, "optimizer": restored_opt})
+      return nnx.merge_state(linen_state, aux_state, ephemeral)
+    nnx.replace_by_pure_dict(abstract_unboxed_pre_state, {"model": restored_params, "optimizer": restored_opt})
+    return abstract_unboxed_pre_state
+  else:
+    return abstract_unboxed_pre_state.replace(
+        params=restored_params,
+        opt_state=restored_opt,
+    )
+
+
 def _load_full_state_from_path(
     path,
     abstract_unboxed_pre_state,
@@ -308,6 +486,21 @@ def _load_full_state_from_path(
   Returns:
     The loaded state.
   """
+  if source_checkpoint_layout == "orbax":
+    if (epath.Path(path) / "model_params").exists() and (epath.Path(path) / "optimizer_state").exists():
+      max_logging.log(f"Auto-detected Tunix checkpoint layout at {path}")
+      source_checkpoint_layout = "tunix"
+
+  if source_checkpoint_layout == "tunix":
+    return _load_tunix_full_state_from_path(
+        path,
+        abstract_unboxed_pre_state,
+        checkpoint_storage_concurrent_gb,
+        use_ocdbt,
+        use_zarr3,
+        maxtext_config,
+    )
+
   if source_checkpoint_layout == "orbax":
     # Checkpoints are stored in the Linen on-disk layout; reshape to NNX.
     if isinstance(abstract_unboxed_pre_state, nnx.State):
@@ -668,6 +861,92 @@ def load_params_from_path(
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
 
+  # Check if Tunix Layout (either pointing to step dir or model_params dir)
+  is_tunix = False
+  path_obj = epath.Path(load_parameters_from_path)
+  target_path = path_obj
+  if path_obj.name == "model_params":
+    is_tunix = True
+    target_path = path_obj.parent
+  elif (path_obj / "model_params").exists():
+    is_tunix = True
+    target_path = path_obj
+
+  is_nnx = isinstance(abstract_unboxed_params, nnx.State)
+  want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
+
+  if is_tunix:
+    max_logging.log(f"Detected Tunix layout for parameters at {target_path}")
+
+    # Use CheckpointManager instead of Checkpointer to handle v1 multi-item directories
+    step_str = target_path.name
+    root_dir = target_path.parent
+
+    step = int(step_str) if step_str.isdigit() else 0
+
+    item_handlers = {
+        "model_params": orbax_cp.PyTreeCheckpointHandler(
+            restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+            use_ocdbt=use_ocdbt,
+            use_zarr3=use_zarr3,
+        )
+    }
+
+    mgr = orbax_cp.CheckpointManager(
+        root_dir,
+        item_names=("model_params",),
+        item_handlers=item_handlers,
+    )
+
+    has_base = False
+    try:
+      item_meta = mgr.item_metadata(step)
+      if hasattr(item_meta, "get"):
+        model_meta = item_meta.get("model_params")
+      else:
+        model_meta = getattr(item_meta, "model_params", None)
+
+      if model_meta is not None:
+        tree = getattr(model_meta, "tree", model_meta)
+        if isinstance(tree, dict) and "base" in tree:
+          has_base = True
+    except Exception as e:  # pylint: disable=broad-except
+      max_logging.warning(
+          f"Could not inspect Tunix item_metadata for step {step} at {root_dir}: {e}. "
+          "Assuming standard non-adapter checkpoint layout."
+      )
+
+    target_want = jax.tree.map(lambda v: {"value": v}, want)
+    target_params = {"base": target_want} if has_base else target_want
+
+    restored = mgr.restore(
+        step,
+        args=orbax_cp.args.Composite(
+            model_params=orbax_cp.args.PyTreeRestore(
+                item=target_params,
+                restore_args=orbax_cp.checkpoint_utils.construct_restore_args(target_params),
+                partial_restore=True,
+            )
+        ),
+    )
+    restored_weights = restored["model_params"]
+
+    if has_base:
+      restored_weights = _drop_adapter_level(restored_weights)
+
+    restored_weights = train_state_nnx._strip_rng_state(restored_weights)  # pylint: disable=protected-access
+    restored_weights = jax.tree.map(
+        lambda v: v["value"] if isinstance(v, dict) and "value" in v else v,
+        restored_weights,
+        is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+    )
+
+    _raise_on_weight_mismatch(want, restored_weights)
+    if is_nnx:
+      nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
+      return abstract_unboxed_params
+    return restored_weights
+
   # Orbax v1 refuses to read an item subdirectory directly; normalize the documented
   # ".../<step>/items" form to its checkpoint root and load it by name below.
   path = epath.Path(_normalize_checkpoint_root(load_parameters_from_path))
@@ -675,8 +954,6 @@ def load_params_from_path(
   # On disk the weights live at `params/params/...`: an outer key naming the item, and Flax's
   # `params` collection inside it. A Linen TrainState.params is that collection; an NNX params
   # state sits one level below it (bare weights), so wrap it going in and unwrap it coming out.
-  is_nnx = isinstance(abstract_unboxed_params, nnx.State)
-  want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
 
   # Determine the restore key based on the leaf directory name to support native and custom SFT
   restore_key = os.path.basename(str(load_parameters_from_path).rstrip("/"))
