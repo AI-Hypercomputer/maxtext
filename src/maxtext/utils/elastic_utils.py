@@ -15,7 +15,6 @@
 """Utility functions for Elastic Training."""
 
 from collections import Counter
-import functools
 from types import SimpleNamespace
 
 import jax
@@ -233,12 +232,20 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
   ensure_elastic_manager_initialized(config)
   assert elastic_manager is not None
 
-  cleanup_partial = functools.partial(clean_up_checkpoints, config.checkpoint_dir)
+  def cleanup_iterators_and_checkpoints():
+    # pylint: disable=import-outside-toplevel, broad-exception-caught
+    try:
+      from maxtext.input_pipeline.multihost_dataloading import cleanup_all_iterators
+
+      cleanup_all_iterators()
+    except Exception as e:
+      max_logging.log(f"Failed to cleanup iterators during elastic scale up: {e}")
+    clean_up_checkpoints(config.checkpoint_dir)
 
   if callback_fn is None:
-    effective_callback = cleanup_partial
+    effective_callback = cleanup_iterators_and_checkpoints
   else:
-    effective_callback = chain_callbacks(cleanup_partial, callback_fn)
+    effective_callback = chain_callbacks(cleanup_iterators_and_checkpoints, callback_fn)
 
   return elastic_manager.elastic_retry(
       max_retries=config.elastic_max_retries,
@@ -278,6 +285,13 @@ def maybe_elastic_scale_up(config, checkpoint_manager):
       else:
         checkpoint_manager.wait_until_finished()
     max_logging.log("Checkpoint save completed. Interrupting")
+    # pylint: disable=import-outside-toplevel, broad-exception-caught
+    try:
+      from maxtext.input_pipeline.multihost_dataloading import cleanup_all_iterators
+
+      cleanup_all_iterators()
+    except Exception as e:
+      max_logging.log(f"Error in maybe_elastic_scale_up cleanup: {e}")
     raise manager.ScaleUpSignalError()
 
 
