@@ -24,6 +24,7 @@ import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
+import ml_dtypes
 import numpy as np
 import qwix
 from jax.sharding import Mesh, PartitionSpec as P
@@ -2215,6 +2216,87 @@ class FusedMoeTPUTest(unittest.TestCase):
     )
     self.assertIsNone(lb_loss)
     self.assertIsNone(bias_updates)
+
+
+def _quantize_moe_weight_blockwise(rng, shape, block_size):
+  """Absmax-quantizes synthetic (E, K, N) MoE weight per (block_size, block_size) tile."""
+  e, k, n = shape
+  kb, nb = k // block_size, n // block_size
+  w = rng.uniform(-1.0, 1.0, size=shape).astype(np.float32)
+  w_blocks = w.reshape(e, kb, block_size, nb, block_size)
+  scale = np.max(np.abs(w_blocks), axis=(2, 4)) / 448.0
+  scale = np.where(scale == 0, 1.0, scale)
+  scale_full = np.repeat(np.repeat(scale, block_size, axis=1), block_size, axis=2)
+  w_q = np.clip(np.round(w / scale_full), -448.0, 448.0).astype(ml_dtypes.float8_e4m3fn)
+  return w_q, scale.astype(np.float32)
+
+
+@pytest.mark.tpu_only
+@pytest.mark.post_training
+class SparseMoeNativeGmmPerChannelAxisTest(unittest.TestCase):
+  """Tests that K-axis per-channel scales fall back to dequantize in RoutedMoE."""
+
+  def test_k_axis_only_scale_falls_back_to_dequantize(self):
+    block_size = 128
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_native_gmm_k_axis_scale",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        weight_dtype="float8_e4m3fn",
+        weight_block_size=block_size,
+        quantization="serve_fp8_weight",
+        sparse_matmul=True,
+        use_gmm_v2=True,
+        use_tokamax_gmm=True,
+        megablox=True,
+        ici_expert_parallelism=jax.device_count(),
+        log_config=False,
+        max_target_length=16,
+        per_device_batch_size=1,
+    )
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    model = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=cfg.dtype,
+        weight_dtype=jnp.float8_e4m3fn,
+        quant=configure_quantization(cfg),
+        rngs=nnx.Rngs(params=0),
+    )
+
+    e, embed, moe_mlp = model.num_experts, model.moe_expert_input_dim, model.intermediate_dim
+    rng = np.random.default_rng(5)
+    wi_0_q, wi_0_scale_full = _quantize_moe_weight_blockwise(rng, (e, embed, moe_mlp), block_size)
+    wi_1_q, wi_1_scale_full = _quantize_moe_weight_blockwise(rng, (e, embed, moe_mlp), block_size)
+    wo_q, wo_scale_full = _quantize_moe_weight_blockwise(rng, (e, moe_mlp, embed), block_size)
+    # Collapse block-wise grid to K-axis per-channel scale (channel_axis == 0).
+    model.wi_0[...] = jnp.asarray(wi_0_q)
+    model.wi_0_scale[...] = jnp.asarray(np.max(wi_0_scale_full, axis=2, keepdims=True))
+    model.wi_1[...] = jnp.asarray(wi_1_q)
+    model.wi_1_scale[...] = jnp.asarray(np.max(wi_1_scale_full, axis=2, keepdims=True))
+    model.wo[...] = jnp.asarray(wo_q)
+    model.wo_scale[...] = jnp.asarray(np.max(wo_scale_full, axis=2, keepdims=True))
+
+    inputs = jax.random.normal(jax.random.PRNGKey(11), (1, 16, embed), dtype=jnp.bfloat16)
+    native_quant = model.quant
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      native_out, _, _ = model(inputs)
+      model.quant = None  # native_gmm requires isinstance(self.quant, ServeFp8WeightQuantization)
+      dequant_out, _, _ = model(inputs)
+    model.quant = native_quant
+
+    native_np = np.array(native_out, dtype=np.float32)
+    dequant_np = np.array(dequant_out, dtype=np.float32)
+    self.assertTrue(np.all(np.isfinite(native_np)))
+    # Output should match since K-axis scale falls back to dequantize.
+    np.testing.assert_allclose(native_np, dequant_np, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize(
