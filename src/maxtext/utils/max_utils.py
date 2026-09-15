@@ -905,9 +905,11 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
     # Reshape squashes the [cp_size, 2] pair dimensions back into [2*cp_size]: [2*cp_size, b, group_size, h, d]
     permuted = stacked.reshape(2 * cp_size, *swapped.shape[1:])
   else:
-    # Strided slice extracts every other chunk natively: each [cp_size, b, group_size, h, d]
-    first_half = swapped[0::2, ...]
-    second_half_reversed = swapped[1::2, ...]
+    # Reshape into [cp_size, 2, ...] to extract interleaved chunks contiguously
+    # without strided slicing (which causes XLA backward adjoint interior padding).
+    reshaped_swapped = swapped.reshape(cp_size, 2, *swapped.shape[1:])
+    first_half = reshaped_swapped[:, 0, ...]
+    second_half_reversed = reshaped_swapped[:, 1, ...]
     second_half = second_half_reversed[::-1, ...]
     # Concatenate along axis 0: [2*cp_size, b, group_size, h, d]
     permuted = jnp.concatenate([first_half, second_half], axis=0)

@@ -651,6 +651,8 @@ def eval_step(model, config, state, data, dropout_rng=None):
           "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
       },
   }
+  if config.retry_when_tokens_dropped:
+    metrics["has_moe_overflow"] = aux.get("has_moe_overflow", False)
 
   return metrics
 
@@ -668,6 +670,7 @@ def training_loop_iteration(
   p_train_step = jax_device_state["p_train_step"]
   p_train_step_dropless = jax_device_state.get("p_train_step_dropless", None)
   p_eval_step = jax_device_state["p_eval_step"]
+  p_eval_step_dropless = jax_device_state.get("p_eval_step_dropless", None)
 
   # Unpack python_vars
   step = python_vars["step"]
@@ -774,6 +777,16 @@ def training_loop_iteration(
         break
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_eval):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
+        if (
+            config.retry_when_tokens_dropped
+            and p_eval_step_dropless is not None
+            and bool(eval_metrics.get("has_moe_overflow"))
+        ):
+          max_logging.log(
+              f"Eval step {eval_step_count}: MoE ragged buffer overflow detected! "
+              f"Replaying eval step with dropless buffer..."
+          )
+          eval_metrics = p_eval_step_dropless(state, eval_batch, *step_rng_args)
       eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
       last_eval_step_completion = datetime.datetime.now()
       metric_logger_instance.buffer_and_write_metrics(
@@ -857,16 +870,17 @@ def train_loop(config, recorder, state=None):
   )
 
   p_train_step_dropless = None
+  p_eval_step_dropless = None
   if jit_model_dropless is not None:
-    p_train_step_dropless, _ = train_utils.jit_train_and_eval_step(
+    p_train_step_dropless, p_eval_step_dropless = train_utils.jit_train_and_eval_step(
         config,
         jit_model_dropless,
         mesh,
         state,
         state_mesh_shardings,
         train_step,
-        eval_step=None,
-        eval_data_iterator=None,
+        eval_step=eval_step,
+        eval_data_iterator=eval_data_iterator,
         params_shardings=params_shardings,
     )
 
@@ -932,6 +946,7 @@ def train_loop(config, recorder, state=None):
       "p_train_step": p_train_step,
       "p_train_step_dropless": p_train_step_dropless,
       "p_eval_step": p_eval_step,
+      "p_eval_step_dropless": p_eval_step_dropless,
       "model": model,
   }
 

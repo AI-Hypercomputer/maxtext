@@ -1,4 +1,18 @@
-# TFDS pipeline
+# TFDS pipeline (Deprecated)
+
+```{warning}
+The TFDS input pipeline (`dataset_type=tfds`) is **deprecated**. We recommend migrating to the [Grain pipeline](data_input_grain.md) with `dataset_type=grain` and `grain_file_type=tfrecord`. You can keep the same TFRecord dataset paths.
+```
+
+````{note}
+TensorFlow and TensorFlow Datasets (TFDS) are optional dependencies in MaxText. If you need to use the legacy TFDS pipeline, install the optional dependencies by running:
+
+```bash
+install_tpu_pre_train_extra_deps --with-tf
+# or for GPU:
+# install_cuda12_pre_train_extra_deps --with-tf
+```
+````
 
 1. Download the Allenai C4 dataset in TFRecord format to a Cloud Storage bucket. For information about cost, see [this discussion](https://github.com/allenai/allennlp/discussions/5056)
 

@@ -21,7 +21,11 @@ import os
 import pytest
 
 from maxtext.inference.decode import main as decode_main
-from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.common.gcloud_stub import is_decoupled, jetstream
+
+config_lib, _, _, _, _ = jetstream()
+if getattr(config_lib, "_IS_STUB", False):
+  pytest.skip("JetStream is not installed (stubbed)", allow_module_level=True)
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.utils.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
