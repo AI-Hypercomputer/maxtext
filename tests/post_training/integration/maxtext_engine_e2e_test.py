@@ -45,7 +45,7 @@ try:
 except ImportError:
   _RAIDEN_AVAILABLE = False
 
-pytestmark = [pytest.mark.post_training]
+pytestmark = [pytest.mark.post_training, pytest.mark.integration_test]
 
 
 class DummyNNXModel(nnx.Module):
@@ -121,11 +121,10 @@ class TrainingLoopRunner:
     return history
 
 
-@pytest.mark.integration_test
 class MaxTextTrainingEngineE2ETest(absltest.TestCase):
   """End-to-end MaxText training engine test."""
 
-  def setup_config(self, enable_checkpointing: bool = False, **kwargs):
+  def setup_config(self):
     """Sets up a MaxText config via pyconfig.initialize."""
     overrides = {
         "model_name": "llama3.1-8b",
@@ -139,27 +138,23 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
         "enable_tensorboard": False,
         "tensorboard_dir": self.create_tempdir().full_path,
         "skip_jax_distributed_system": True,
-        "enable_checkpointing": enable_checkpointing,
+        "enable_checkpointing": True,
+        "checkpoint_dir": self.create_tempdir().full_path,
+        "checkpoint_period": 2,
+        "max_num_checkpoints_to_keep": 5,
+        "async_checkpointing": True,
         # Disable scan_layers to prevent prepare_weight_sync from trying to unscan layers on DummyNNXModel
         "scan_layers": False,
+        "skip_first_n_steps_for_profiler": 1,
+        "profiler_steps": 2,
     }
-    if enable_checkpointing:
-      overrides.update(
-          {
-              "checkpoint_dir": self.create_tempdir().full_path,
-              "checkpoint_period": 2,
-              "max_num_checkpoints_to_keep": 5,
-              "async_checkpointing": True,
-          }
-      )
-    overrides.update(kwargs)
     return pyconfig.initialize([None, get_test_config_path()], **overrides)
 
   @mock.patch.object(maxtext_engine.train_utils, "create_training_optimizer")
   @mock.patch.object(maxtext_engine.checkpointing, "CheckpointManager")
   @mock.patch.object(maxtext_engine.model_creation_utils, "from_pretrained")
   def test_e2e_training_loop_exercises_all_trainer_apis(self, mock_from_pretrained, mock_ckpt_mgr, mock_create_opt):
-    mock_config = self.setup_config(enable_checkpointing=True)
+    mock_config = self.setup_config()
     dummy_mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(mock_config), mock_config.mesh_axes)
     dummy_model = DummyNNXModel()
     # This test constructs the engine without a mesh, and `from_pretrained` returns
@@ -196,17 +191,27 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
       while True:
         yield DummyPayload()
 
-    history = runner.run(
-        train_dataloader=payload_generator(),
-        eval_dataloader=payload_generator(),
-        num_minibatches=4,
-        dummy_compile_payload=DummyPayload(),
-    )
+    with (
+        mock.patch("jax.profiler.start_trace") as mock_start_trace,
+        mock.patch("jax.profiler.stop_trace") as mock_stop_trace,
+        mock.patch("jax.profiler.StepTraceAnnotation") as mock_annotation,
+    ):
+      history = runner.run(
+          train_dataloader=payload_generator(),
+          eval_dataloader=payload_generator(),
+          num_minibatches=4,
+          dummy_compile_payload=DummyPayload(),
+      )
 
     self.assertLen(history, 4)
     for metrics_buf in history:
       self.assertIsInstance(metrics_buf, abstract_engine.MetricsBuffer)
     self.assertEqual(trainer_instance.train_step, 4)
+
+    mock_start_trace.assert_called_once()
+    mock_stop_trace.assert_called_once()
+    regions = [(call.args[0], call.kwargs["step_num"]) for call in mock_annotation.call_args_list]
+    self.assertEqual(regions, [(name, step) for step in range(4) for name in ("fwd_bwd", "fwd_bwd", "update")])
 
 
 if __name__ == "__main__":
