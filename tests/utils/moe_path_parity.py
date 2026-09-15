@@ -33,6 +33,24 @@ random tokens. Measures the MaxText-vs-MaxText path difference. This mode has
 already run and returned 0.000531 nats, inside the TIS band: **the MoE code
 path is not the cause.**
 
+  READ THIS BEFORE CITING 0.000531. This mode is far blinder than it looks, and
+  the number covers the MoE weight layout and the config plumbing and very
+  little else.
+
+  * It calls `model(...)` with no `model_mode`, so `Transformer.__call__`
+    defaults to MODEL_MODE_TRAIN (models.py:143). `attentions.py:1332` gates the
+    vLLM branch on `model_mode != MODEL_MODE_TRAIN`, so on the "sampler" side
+    `attention=vllm_rpa` silently falls through to `apply_attention_dot`
+    (attention_op.py:1523). **The ragged-paged-attention kernel never runs**, so
+    nothing here sees RPA v3's bf16 online-softmax accumulators.
+  * It passes no `kv_cache` and no `attention_metadata`, so `use_paged_state` is
+    False (qwen3.py:661-668) and **all 30 GatedDeltaNet layers run MaxText's own
+    bf16 kernel on both sides**. tpu-inference's f32 GDN kernel never runs
+    either.
+
+  So this mode cannot see attention, GDN, paged KV, prefix caching or decode.
+  Use `--trajectory_csv` for anything that touches those.
+
 *`--trajectory_csv`* — one trainer forward pass over the tokens a production
 rollout actually produced, diffed against the per-token log-probabilities vLLM
 recorded at the time. This compares the trainer against the *real sampler*,
@@ -53,27 +71,69 @@ qwen-35b-deepswe-v5p-256-maxtext-v6/trajectory_log_1789165722.csv .
         --load_parameters_path gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/scanned/0/items \
         --trajectory_csv trajectory_log_1789165722.csv --trajectory_rows 0,5
 
-What the trajectory mode is predicted to show, so it can fail
--------------------------------------------------------------
-From the production metrics (`token_weight_mean` 1.000235 with
-`seq_geomean` 0.856 and `token_logdiff_absmean` 0.229), the disagreement
-decomposes into a bulk of sigma ~0.10 nats plus a one-sided negative tail of
-roughly 0.4-0.6% of scored tokens at 26+ nats -- about 32 per sequence against
-a 30-turn agent budget. **If those outliers come back clustered at offset 0-2
-of each assistant turn, the defect is in conversation reassembly. If they are
-spread uniformly within turns, it is decode-time drift. If there are none, the
-trainer scores the real tokens correctly and the defect is on the sampler
-side.** All three are informative; the mode is only useless if it will not run.
+What the trajectory mode predicted, and what it measured
+--------------------------------------------------------
+The prediction, from the production metrics (`token_weight_mean` 1.000235,
+`seq_geomean` 0.856, `token_logdiff_absmean` 0.229), was a bulk of sigma ~0.10
+nats plus a one-sided negative tail of 0.4-0.6% of scored tokens at 26+ nats --
+about 32 per sequence against a 30-turn agent budget -- and that the defect was
+in the trainer's scoring of the real token stream.
+
+**Measured (Sep 15, rows 0-2 of trajectory_log_1789165722.csv, full depth,
+real checkpoint):**
+
+    row 0  mean signed -0.052252  seq_geomean 0.949090  absmean 0.115  absmax 6.01
+    row 1  mean signed -0.037470  seq_geomean 0.963223  absmean 0.091  absmax 5.30
+    row 2  mean signed -0.016897  seq_geomean 0.983245  absmean 0.069  absmax 4.13
+    production, same run       :  seq_geomean 0.856     absmean 0.229  absmax >=32.5
+
+**Zero tokens beyond 10 nats in any row.** So on identical inputs -- the same
+token stream, the same recorded `old_logprobs` -- a clean single-host trainer
+reproduces only ~23% of production's centre offset and none of its outlier
+tail. The bulk of the production defect is in the production trainer's own
+forward pass, not in the data and not in the sampler's recorded numbers.
+
+The per-turn table this mode prints is flat in turn index (row 0: first half
+-0.067 -> second half -0.029), which rules out mechanisms that accumulate with
+conversation length.
+
+A/Bs run against that baseline, all single-variable, all on the same three rows:
+
+    --trajectory_pad_mode production   -0.0523 -> -0.0653   (row 0; 25% worse)
+    --trajectory_repair_eot            -0.0523 -> -0.0487   (7%, ~0% on rows 1-2)
+    MAXTEXT_GDN_F32=1 (gate+core f32)  -0.0523 -> -0.0520   (~0%)
+    logits_dot_in_fp32=true (trainer)  -0.0523 -> -0.0512   (~2%)
+
+For reference, the rest of the ladder on the same v5p-8: a real vLLM prefill
+through the adapter scores -0.00018 (7/8 sequences in band) and a real vLLM
+decode scores -0.00206 (2/8 in band). The step that costs 18x is going from a
+synthetic single-turn generation to a real 30-turn agentic trajectory.
 
 `--isolate_moe` keeps attention identical on both sides and varies only the MoE
 flags. That does NOT reproduce the production sampler path (the fused branch
 requires vllm_rpa attention), but it runs without any vLLM machinery, so it is
 the fallback if the vllm_rpa path will not execute standalone.
 
-NOTE: this was written against the maxtext tree without being executed. Expect
-to iterate on the two `pyconfig.initialize` argument lists in particular --
-they mirror `train_maxtext_nb.py` lines 894-970, so diff against that file if
-construction fails.
+Running it on a v5p-8
+---------------------
+Use a jax >= 0.11 environment: MaxText imports
+`jax.experimental.xla_metadata.must_fuse_call`, which does not exist on 0.10.
+Keep `--trajectory_max_tokens` at or below 13312 -- the `[batch, seq, 248320]`
+float32 logits are what bound this, and they already sit at 90 of 95.7 GiB per
+chip at 13312 with the default `--batch 4`. 16384 OOMs.
+
+Two shape constraints that are easy to trip:
+  * the padded length must be a multiple of 512, not 128, or splash attention
+    raises `q_block_size=512 should divide q_seq_len=...`;
+  * `--batch` must stay divisible by the data/fsdp axis (4 on a v5p-8).
+
+`--trainer_tp 2 --trainer_fsdp 2` mirrors production's mesh
+(`fsdp: 64, tensor: 2`, zf0hn8pe_output.log:3775) but currently fails in
+`qwen3.py:1364` with
+`add got incompatible shapes: (4, S, 1024), (4, S, 2048)` -- the routed-expert
+output comes back at emb_dim/tensor while the shared-expert output is full
+width. Production does not hit this on its 128-device mesh; the combine is not
+tensor-parallel-clean here.
 """
 
 import argparse
@@ -194,8 +254,17 @@ def build_trainer_config(args, layers=None):
       f"remat_policy={args.remat_policy}",
       *([f"load_parameters_path={args.load_parameters_path}"] if args.load_parameters_path else []),
       # base.yml:550 declares an fsdp axis, so the trainer can shard freely.
-      f"ici_fsdp_parallelism={args.devices}",
-      "ici_tensor_parallelism=1",
+      # Production's trainer mesh is NOT fsdp-only. zf0hn8pe_output.log:3775:
+      #   Mesh('data': 1, 'fsdp': 64, 'tensor': 2, 'expert': 1, ...)
+      # and post_train/rl.yml maps 'norm', 'activation_embed' and 'vocab' onto
+      # the 'tensor' axis, so with tensor=2 the decoder norm reduction, the
+      # unembedding contraction and the MoE MLP are all split across devices
+      # and reduced through a different (bf16-typed) tree. A single-host
+      # fsdp-only run cannot see that.
+      *([kv for kv in args.extra_trainer_argv.split(",") if kv.strip()]
+        if getattr(args, "extra_trainer_argv", "") else []),
+      f"ici_fsdp_parallelism={args.trainer_fsdp or args.devices}",
+      f"ici_tensor_parallelism={args.trainer_tp}",
   ], config_class=types.RLConfig)
 
 
@@ -432,7 +501,8 @@ def report(log_is, label=""):
 PAD_ID = 248044  # <|endoftext|>, what the rollout left-pads prompt_tokens with
 
 
-def load_trajectory(csv_path, row_idx, max_tokens):
+def load_trajectory(csv_path, row_idx, max_tokens, keep_prompt_padding=False,
+                    repair_eot=False, eot_id=248046):
   """One row of a production `trajectory_log_*.csv`, ready to score.
 
   The two-forward-pass mode above compares MaxText against MaxText. This mode
@@ -484,10 +554,20 @@ def load_trajectory(csv_path, row_idx, max_tokens):
         f"conversation_masks={len(mask)} old_logprobs={len(lp)}. These must match; "
         "if they do not, the misalignment IS the bug and no forward pass is needed.")
 
-  keep = int(np.argmax(prompt != PAD_ID)) if (prompt == PAD_ID).any() else 0
-  prompt = prompt[keep:]
-  if keep:
-    print(f"  stripped {keep} leading pad tokens from prompt_tokens")
+  if keep_prompt_padding:
+    # Production does NOT strip this. `agentic_grpo_learner.py:719-726` left-pads
+    # every prompt to `max_prompt_length` (4096) with `pad_id` and right-pads
+    # every completion to `max_response_length`, then `common.process_ids`
+    # (`tunix/rl/common.py:291-307`) rebuilds positions and segment ids from a
+    # `tokens != pad_id` mask. Reproducing that is the only way to tell whether
+    # the padded forward pass scores the same as the clean one.
+    print(f"  keeping {int((prompt == PAD_ID).sum())} leading pad tokens "
+          f"(production padding emulation)")
+  else:
+    keep = int(np.argmax(prompt != PAD_ID)) if (prompt == PAD_ID).any() else 0
+    prompt = prompt[keep:]
+    if keep:
+      print(f"  stripped {keep} leading pad tokens from prompt_tokens")
 
   if max_tokens and len(prompt) + len(conv) > max_tokens:
     room = max_tokens - len(prompt)
@@ -497,6 +577,36 @@ def load_trajectory(csv_path, row_idx, max_tokens):
           f"{len(prompt)}-token prompt; raise it or pick a shorter row")
     conv, mask, lp = conv[:room], mask[:room], lp[:room]
     print(f"  truncated conversation to {room} tokens to fit --trajectory_max_tokens")
+
+  if repair_eot:
+    # Production sets rollout_vllm_sampling_kwargs["stop"] = ["</function>", ...]
+    # (train_maxtext_nb.py:1229-1235). A stop *string* ends the generation before
+    # the model ever emits <|im_end|>, so `rollout_output.tokens[0]` -- which is
+    # what the trainer's conversation stream is built from
+    # (trajectory_collect_engine.py:664-668, and Qwen has no
+    # `update_assistant_end_tokens` override) -- has no terminator.
+    #
+    # The SAMPLER's prompt for the next turn does have one:
+    # `QwenChatTemplateParser._parse_assistant` returns
+    # `assistant_token + content + eot_token` unconditionally (parser.py:140-141),
+    # and every turn's prompt is a full re-render of the message list
+    # (agentic_rl_learner.py:437-442).
+    #
+    # So the two engines condition on streams that differ by one <|im_end|> per
+    # assistant turn. This reinserts it -- mask 0, logprob 0, so the set of
+    # scored tokens is unchanged -- which makes the trainer's context match what
+    # the sampler actually saw. vllm_sampler.py:447-453 records that this exact
+    # omission "produced 30+ nat sampler-trainer logp diffs" once before.
+    on_ = mask > 0
+    ed = np.diff(np.concatenate([[0], on_.astype(np.int8), [0]]))
+    ends = np.where(ed == -1)[0]
+    ins = [int(e) for e in ends if conv[e - 1] != eot_id]
+    if ins:
+      conv = np.insert(conv, ins, eot_id)
+      mask = np.insert(mask, ins, 0)
+      lp = np.insert(lp, ins, 0.0)
+    print(f"  repaired {len(ins)} of {len(ends)} assistant turns with a missing "
+          f"<|im_end|> ({eot_id})")
 
   # Turn index: assistant runs are maximal runs of mask==1. -1 on env tokens.
   turn_id = np.full(len(mask), -1, dtype=np.int32)
@@ -543,6 +653,35 @@ def report_trajectory(log_is, mask, turn_id, ids, label=""):
   lo, hi = 0.999, 1.002
   geo = float(np.exp(a.mean()))
   print(f"  in TIS band [{lo}, {hi}]?                 : {'YES' if lo <= geo <= hi else 'NO'}")
+
+  # Per-turn trend. If the sampler and the trainer condition on different
+  # contexts -- tunix rebuilds the sampler's prompt from the whole message list
+  # every turn (`agentic_rl_learner.py:437-441`) while the trainer's stream is
+  # the incremental concatenation -- the gap between them GROWS with turn index,
+  # because each turn adds more re-rendered history. A per-token numerics floor
+  # is flat in turn index instead. This is the cheapest discriminator available.
+  nt = int(tid.max()) + 1
+  print(f"\n  --- mean signed log-ratio by assistant turn ({nt} turns) ---")
+  rows = []
+  for t in range(nt):
+    sel = tid == t
+    if not sel.any():
+      continue
+    rows.append((t, int(sel.sum()), float(a[sel].mean()), float(np.abs(a[sel]).mean())))
+  print(f"  {'turn':>4} {'n':>6} {'mean_signed':>12} {'absmean':>10}")
+  for t, n, m, am in rows:
+    if t < 3 or t % 5 == 0 or t == nt - 1:
+      print(f"  {t:>4} {n:>6} {m:>+12.5f} {am:>10.5f}")
+  if len(rows) >= 6:
+    h = len(rows) // 2
+    first = np.average([r[2] for r in rows[:h]], weights=[r[1] for r in rows[:h]])
+    last = np.average([r[2] for r in rows[h:]], weights=[r[1] for r in rows[h:]])
+    ts = np.array([r[0] for r in rows], dtype=np.float64)
+    ms = np.array([r[2] for r in rows], dtype=np.float64)
+    slope = np.polyfit(ts, ms, 1)[0]
+    print(f"  first half {first:+.5f} -> second half {last:+.5f}   "
+          f"(ratio {last / first if first else float('nan'):.2f}x)")
+    print(f"  OLS slope over turn index: {slope:+.6f} nats/turn")
 
   # The discriminating view. `token_outliers_per_seq` (tunix 8cf1035e) reports
   # the count; this reports where in the turn they land, which the metric cannot.
@@ -624,6 +763,27 @@ def main():
   p.add_argument("--trajectory_max_tokens", type=int, default=16384,
                  help="truncate prompt+conversation to this length. 0 = no truncation. "
                       "Rows run 9k-35k tokens; the shortest is usually row 0.")
+  p.add_argument("--extra_trainer_argv", default="",
+                 help="Comma-separated extra pyconfig overrides for the TRAINER config only, "
+                      "e.g. 'logits_dot_in_fp32=true'. Applied before the sharding flags.")
+  p.add_argument("--trainer_tp", type=int, default=1,
+                 help="ici_tensor_parallelism for the trainer config. Production used 2 "
+                      "(zf0hn8pe_output.log:3775).")
+  p.add_argument("--trainer_fsdp", type=int, default=0,
+                 help="ici_fsdp_parallelism for the trainer; 0 = all devices. Set "
+                      "--trainer_fsdp 2 --trainer_tp 2 on a v5p-8 to mirror production's split.")
+  p.add_argument("--trajectory_repair_eot", action="store_true",
+                 help="Reinsert the <|im_end|> that the `stop=[\"</function>\"]` sampling "
+                      "config prevents vLLM from emitting, so the trainer's context matches "
+                      "the one the sampler re-rendered for the next turn. Inserted with "
+                      "mask 0 / logprob 0, so the scored token set is unchanged.")
+  p.add_argument("--eot_id", type=int, default=248046, help="<|im_end|> for Qwen3.5")
+  p.add_argument("--trajectory_pad_mode", default="stripped",
+                 choices=["stripped", "production"],
+                 help="stripped: drop the prompt's left padding and use arange positions "
+                      "(the clean measurement). production: keep the 4096-wide left-padded "
+                      "prompt and derive positions/segment_ids from the non-pad mask, which "
+                      "is exactly what the production trainer feeds the model.")
   p.add_argument("--allow_partial_depth", action="store_true",
                  help="permit --trajectory_csv at reduced depth. Off by default because the "
                       "comparison is against logprobs from the real 40-layer model: a sliced "
@@ -695,9 +855,18 @@ def main():
     assert n <= total_len, f"{n} tokens exceeds max_target_length {total_len}"
     padded = np.full(total_len, PAD_ID, dtype=np.int32)
     padded[:n] = t
+    tile = lambda x: jnp.asarray(np.broadcast_to(x[None, :], (args.batch, total_len)))
+    if args.trajectory_pad_mode == "production":
+      # tunix/rl/common.py:291-307 verbatim: the mask is `tokens != pad_id` over
+      # the whole [left-padded prompt | right-padded completion] buffer,
+      # positions are cumsum(mask)-1, and segment_ids IS that 0/1 mask.
+      mask = (padded != PAD_ID)
+      cum = np.cumsum(mask)
+      pos = (cum - (cum >= 1)).astype(np.int32)
+      seg = mask.astype(np.int32)
+      return tile(padded), tile(pos), tile(seg)
     seg = np.zeros(total_len, dtype=np.int32)
     seg[:n] = 1
-    tile = lambda x: jnp.asarray(np.broadcast_to(x[None, :], (args.batch, total_len)))
     return (tile(padded),
             tile(np.arange(total_len, dtype=np.int32)),
             tile(seg))
@@ -776,9 +945,14 @@ def main():
     for row_idx in rows_wanted:
       print(f"\nloading trajectory row {row_idx} from {args.trajectory_csv} ...")
       loaded.append((row_idx, load_trajectory(
-          args.trajectory_csv, row_idx, args.trajectory_max_tokens)))
+          args.trajectory_csv, row_idx, args.trajectory_max_tokens,
+          keep_prompt_padding=(args.trajectory_pad_mode == "production"),
+          repair_eot=args.trajectory_repair_eot, eot_id=args.eot_id)))
     total_len = max(len(t[1][0]) for t in loaded)
-    total_len = int(np.ceil(total_len / 128) * 128)  # keep shapes kernel-friendly
+    # splash attention (attention=flash) requires q_block_size=512 to divide the
+    # padded length, not merely 128; a 13,184-token row raised
+    # "q_block_size=512 should divide q_seq_len=13184".
+    total_len = int(np.ceil(total_len / 512) * 512)
     args.seq_len = total_len
     print(f"\nmax_target_length set to {total_len} from the data "
           f"(longest requested row is {max(len(t[1][0]) for t in loaded)} tokens)")
