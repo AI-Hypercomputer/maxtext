@@ -181,8 +181,13 @@ def stage_tokenize(args, hf_home, maxtext_root, out_dir):
 
 
 def stage_sampler(args, hf_home, maxtext_root, out_dir):
-  """Real vLLM engine, prompt_logprobs on the shared tokens. logp[b, i] = logprob of token i given tokens[:i]."""
-  import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401  pylint: disable=unused-import
+  try:
+    import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401  pylint: disable=unused-import
+  except ImportError:
+    try:
+      import tpu_sync.frameworks.jax._tpu_raiden_jax  # noqa: F401  pylint: disable=unused-import
+    except ImportError:
+      pass
   import tpu_inference  # noqa: F401  pylint: disable=unused-import
   from vllm import LLM, SamplingParams, TokensPrompt
 
@@ -242,6 +247,8 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
         "float32_logits": True,
         "float32_gate_logits": True,
         "float32_weight_sum": True,
+        "logits_dot_in_fp32": getattr(args, "logits_dot_in_fp32", False),
+        "cast_logits_to_fp32": True,
     }
     kw["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
     kw["additional_config"] = {"maxtext_config": mt_cfg, **({"sharding": sharding} if sharding else {})}
@@ -360,7 +367,13 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
 def stage_trainer(args, hf_home, maxtext_root, out_dir):
   """MaxText nnx model in MODEL_MODE_TRAIN, teacher-forced over the same tokens.
   logp[b, i] = logprob of token i+1 given tokens[:i+1], i.e. shifted one left of the sampler's indexing."""
-  import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401  pylint: disable=unused-import
+  try:
+    import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401  pylint: disable=unused-import
+  except ImportError:
+    try:
+      import tpu_sync.frameworks.jax._tpu_raiden_jax  # noqa: F401  pylint: disable=unused-import
+    except ImportError:
+      pass
   import tpu_inference  # noqa: F401  pylint: disable=unused-import
   import jax
   import jax.numpy as jnp
@@ -418,6 +431,8 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       float32_logits=True,
       float32_gate_logits=True,
       float32_weight_sum=True,
+      logits_dot_in_fp32=getattr(args, "logits_dot_in_fp32", False),
+      cast_logits_to_fp32=True,
       use_tokamax_splash=True,
       sa_use_base2_exp=False,
       sa_fuse_reciprocal=True,
@@ -438,7 +453,7 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
 
   # Never materialize a [B, S, vocab] float32 array: at B=8, S=40960, vocab=248320 that is ~325 GB.
   # logprob(target) = logit(target) - logsumexp(logits), which reduces the vocab axis away and leaves
-  # only [B, S] behind. argmax runs on the bf16 logits directly.
+  # only [B, S] behind. argmax runs on the logits directly.
   @jax.jit
   def fwd_logp(st, tokens, pos, seg, nxt):
     m = nnx.merge(gd, st)
@@ -447,7 +462,8 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
     logits = out[0] if isinstance(out, tuple) else out
     tgt = jnp.take_along_axis(logits, nxt[..., None], -1)[..., 0].astype(jnp.float32)
     lse = jax.nn.logsumexp(logits.astype(jnp.float32), axis=-1)
-    return tgt - lse, jnp.argmax(logits, -1).astype(jnp.int32)
+    logp = jnp.minimum(tgt - lse, 0.0)
+    return logp, jnp.argmax(logits, -1).astype(jnp.int32)
 
   nxt_np = np.roll(tokens_np, -1, axis=1)
   n_rows = tokens_np.shape[0]
@@ -520,14 +536,22 @@ def compare(prev_logprobs, generation_logprobs, token_mask=None, sample_mask=Non
   # per-token
   r_tok = np.exp(log_is_ratio)
   in_tok = ((r_tok >= RATIO_MIN) & (r_tok <= RATIO_MAX)).astype(np.float64)
+  in_tok_1pct = ((r_tok >= 0.99) & (r_tok <= 1.01)).astype(np.float64)
+  in_tok_5pct = ((r_tok >= 0.95) & (r_tok <= 1.05)).astype(np.float64)
   tok_oob = masked_mean(1.0 - in_tok, token_mask)
+  tok_1pct = masked_mean(in_tok_1pct, token_mask)
+  tok_5pct = masked_mean(in_tok_5pct, token_mask)
   d = np.abs(log_is_ratio)[token_mask > 0]
 
   # per-sequence (seq-mask-tis)
   seq_log_is_ratio_mean = masked_mean(log_is_ratio, token_mask, axis=-1)
   seq_geomean_is_ratio = np.exp(seq_log_is_ratio_mean)
   seq_kept_mask = ((seq_geomean_is_ratio >= RATIO_MIN) & (seq_geomean_is_ratio <= RATIO_MAX)).astype(np.float64)
+  seq_in_1pct_mask = ((seq_geomean_is_ratio >= 0.99) & (seq_geomean_is_ratio <= 1.01)).astype(np.float64)
+  seq_in_5pct_mask = ((seq_geomean_is_ratio >= 0.95) & (seq_geomean_is_ratio <= 1.05)).astype(np.float64)
   seq_oob = masked_mean(1.0 - seq_kept_mask, sample_mask, global_normalization_factor=global_valid_seqs)
+  seq_1pct = masked_mean(seq_in_1pct_mask, sample_mask, global_normalization_factor=global_valid_seqs)
+  seq_5pct = masked_mean(seq_in_5pct_mask, sample_mask, global_normalization_factor=global_valid_seqs)
 
   return dict(
       n_tokens=int(token_mask.sum()),
@@ -535,13 +559,20 @@ def compare(prev_logprobs, generation_logprobs, token_mask=None, sample_mask=Non
       n_nonfinite=int((~np.isfinite(raw)).sum()),
       token_oob_ratio=float(tok_oob),
       token_in_band=float(1.0 - tok_oob),
+      token_in_1pct=float(tok_1pct),
+      token_in_5pct=float(tok_5pct),
       abs_d_median=float(np.median(d)),
       abs_d_p99=float(np.percentile(d, 99)),
       abs_d_max=float(d.max()),
       seq_log_is_ratio_mean=seq_log_is_ratio_mean,
       seq_geomean_is_ratio=seq_geomean_is_ratio,
       seq_kept_mask=seq_kept_mask,
+      seq_in_1pct_mask=seq_in_1pct_mask,
+      seq_in_5pct_mask=seq_in_5pct_mask,
       is_oob_ratio=float(seq_oob),
+      seq_in_band=float(1.0 - seq_oob),
+      seq_in_1pct=float(seq_1pct),
+      seq_in_5pct=float(seq_5pct),
   )
 
 
@@ -549,14 +580,17 @@ def print_report(name, m):
   print(f"\n### {name}")
   print(f"  tokens={m['n_tokens']}  seqs={m['n_seqs']}  nonfinite(zeroed)={m['n_nonfinite']}  "
         f"band=[{RATIO_MIN}, {RATIO_MAX}]")
-  print(f"  per-token : oob {m['token_oob_ratio']:.2%}  in-band {m['token_in_band']:.2%}   "
+  print(f"  per-token : oob {m['token_oob_ratio']:.2%}  in-band [{RATIO_MIN}, {RATIO_MAX}] {m['token_in_band']:.2%}  "
+        f"in ±1% {m.get('token_in_1pct', 0.0):.2%}  in ±5% {m.get('token_in_5pct', 0.0):.2%}   "
         f"|dlogp| med {m['abs_d_median']:.4f} / p99 {m['abs_d_p99']:.3f} / max {m['abs_d_max']:.2f}")
   print(f"  {'seq':>4} {'seq_log_is_ratio_mean':>22} {'seq_geomean_is_ratio':>21} {'kept':>5}")
   for b in range(m["n_seqs"]):
     print(f"  {b:>4} {m['seq_log_is_ratio_mean'][b]:>22.6e} "
           f"{m['seq_geomean_is_ratio'][b]:>21.6f} {int(m['seq_kept_mask'][b]):>5}")
   print(f"  kept {int(m['seq_kept_mask'].sum())}/{m['n_seqs']}")
-  print(f"  >>> is_oob_ratio (seq-mask-tis) = {m['is_oob_ratio']:.4f} ({m['is_oob_ratio']:.2%})")
+  print(f"  >>> is_oob_ratio (seq-mask-tis) = {m['is_oob_ratio']:.4f} ({m['is_oob_ratio']:.2%})  "
+        f"seq in-band={m.get('seq_in_band', 1.0 - m['is_oob_ratio']):.2%}  "
+        f"seq in ±1%={m.get('seq_in_1pct', 0.0):.2%}  seq in ±5%={m.get('seq_in_5pct', 0.0):.2%}")
   print(f"      oob_ratio    (per-token)   = {m['token_oob_ratio']:.4f} ({m['token_oob_ratio']:.2%})")
 
 
@@ -633,6 +667,8 @@ def main():
                   help="rows per trainer forward pass; 0 = all at once. Must divide the row count")
   ap.add_argument("--trainer-tp", type=int, default=1,
                   help="tensor parallelism for the trainer mesh; the rest of the devices go to FSDP")
+  ap.add_argument("--logits-dot-in-fp32", action="store_true",
+                  help="compute LM head vocabulary projection in FP32 to eliminate BF16 quantization noise")
   ap.add_argument("--text-glob", default="docs/**/*.md", help="corpus glob, relative to the MaxText tree")
   ap.add_argument("--text-file", default=None, help="single text file, overrides --text-glob")
   ap.add_argument("--retokenize", action="store_true", help="rebuild tokens.npz even if it exists")
