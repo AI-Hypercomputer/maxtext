@@ -21,8 +21,8 @@
 #
 # Behavior & Logic Flow:
 #   1. Non-PR Events: If not a pull request, enables all test suites and notebooks.
-#   2. Empty Diff / Error: If no files are detected or diff fails, runs everything 
-#      as a fail-safe.
+#   2. Empty Diff / Error: If no files are detected or diff fails, runs all core 
+#      test suites (excluding expensive notebook tests) as a fail-safe.
 #   3. Default State: All individual test and notebook flags are initialized to 'false'.
 #   4. File Evaluation Loop: Iterates through each changed file:
 #      - Evaluates against specific domain rules (notebook workflows, pathways, 
@@ -86,18 +86,32 @@ if [ "$EVENT_NAME" != "pull_request" ]; then
   exit 0
 fi
 
-if ! git rev-parse --verify "origin/$BASE_REF" > /dev/null 2>&1; then
-  git fetch origin "$BASE_REF" 2>/dev/null || true
+DIFF_TARGET="origin/$BASE_REF"
+if ! git rev-parse --verify "$DIFF_TARGET" > /dev/null 2>&1; then
+  git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" 2>/dev/null || git fetch origin "$BASE_REF" 2>/dev/null || true
+fi
+if ! git rev-parse --verify "$DIFF_TARGET" > /dev/null 2>&1; then
+  if git rev-parse --verify "FETCH_HEAD" > /dev/null 2>&1; then
+    DIFF_TARGET="FETCH_HEAD"
+  fi
 fi
 
-CHANGED_FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD" 2>/dev/null || true)
+DIFF_ERROR=""
+if ! CHANGED_FILES=$(git diff --name-only "${DIFF_TARGET}...HEAD" 2>&1); then
+  DIFF_ERROR="$CHANGED_FILES"
+  CHANGED_FILES=""
+fi
 
-echo "Changed files against origin/${BASE_REF}:"
+if [[ -n "$DIFF_ERROR" ]]; then
+  echo "Warning: git diff encountered an error: $DIFF_ERROR"
+fi
+
+echo "Changed files against ${DIFF_TARGET}:"
 echo "$CHANGED_FILES"
 
 if [ -z "$CHANGED_FILES" ]; then
-  echo "No files detected or diff failed. Running everything as a fail-safe."
-  set_test_flags "true" "true"
+  echo "No files detected or diff failed. Running core test suites (excluding notebooks) as a fail-safe."
+  set_test_flags "true" "false"
   exit 0
 fi
 
