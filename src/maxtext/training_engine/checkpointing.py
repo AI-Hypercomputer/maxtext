@@ -61,13 +61,9 @@ def _maybe_register_pathways_persistence() -> None:
     from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib  # pylint: disable=g-import-not-at-top
     from orbax.checkpoint._src.serialization import type_handler_registry  # pylint: disable=g-import-not-at-top
 
-    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
-        use_colocated_python=False,
-        use_persistence_array_handler=True,
-    )
     ocp_pathways.register_type_handlers(
         use_single_replica_array_handler=False,
-        checkpointing_impl=checkpointing_impl,
+        checkpointing_impl=ocp_pathways.CheckpointingImpl.PERSISTENCE,
         # Preserve array metadata store required for pytrees with typed PRNG keys.
         array_metadata_store=array_metadata_store_lib.Store(),
     )
