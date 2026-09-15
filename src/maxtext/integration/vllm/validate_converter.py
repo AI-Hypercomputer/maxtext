@@ -926,11 +926,10 @@ def validate_converter(argv) -> None:
   sampler = MaxTextVllmSampler(
       tokenizer=tokenizer,
       config=vllm_config,
-      converter=converter,
       direct_maxtext_sync=direct_maxtext_sync,
-      scan_axis=getattr(trainer_config, "param_scan_axis", 1),
-      layer_pattern_length=getattr(trainer_config, "inhomogeneous_layer_cycle_interval", None),
+      model_name=trainer_config.model_name,
   )
+  sampler.converter = converter
   golden_llm_state = sampler.transformer_state
   # Captured before any sync so a post-sync structural change (which will
   # otherwise surface only as an opaque PyTreeDef mismatch during generation)

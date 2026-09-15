@@ -52,6 +52,12 @@ import jax
 # of MaxText's identically-named class, so the annotation described a type that
 # never appeared.
 #
+# `RLTrainerPayload` is re-exported alongside it because `TrainerPayload` is now an empty
+# base -- the arrays live on the subclasses, so anything reading a payload must name this
+# one. It is prompt/completion-split, not whole-row. Do not add a whole-row class here to
+# avoid the concatenation: that is the duplicate-class problem described above, and it
+# drifts the moment Tunix changes a field.
+#
 # WeightedMetric must come from `tunix.sft.utils`, NOT from
 # `tunix.experimental.metrics.metrics` -- the latter declares a same-named class
 # whose `compute()` and `compute_scale()` raise NotImplementedError.
@@ -60,6 +66,7 @@ import jax
 # keeps pylint from reporting them as unused imports. Do not use the redundant-alias
 # form (`X as X`) instead: MaxText's pylint config does not recognise that convention
 # and reports `C0414 useless-import-alias` for every one of them.
+from tunix.experimental.common.datatypes import RLTrainerPayload
 from tunix.experimental.common.datatypes import TrainerPayload
 from tunix.sft.utils import LossOutput
 from tunix.sft.utils import WeightedMetric
@@ -68,6 +75,7 @@ __all__ = [
     "AbstractTrainingEngine",
     "LossOutput",
     "MetricsBuffer",
+    "RLTrainerPayload",
     "TrainerPayload",
     "TrainingConfig",
     "WeightedMetric",

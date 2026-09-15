@@ -721,6 +721,14 @@ class Attention(BaseModel):
           "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
       ),
   )
+  csa_qk_head_chunk_size: int = Field(
+      0,
+      ge=0,
+      description=(
+          "Chunk size over heads dimension for QK attention dot product in CSA (DeepSeek-V4).  "
+          "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
+      ),
+  )
 
 
 class MoBa(BaseModel):
@@ -764,9 +772,9 @@ class CompressedAttention(BaseModel):
 
 
 class AttentionIndexer(BaseModel):
-  """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
+  """Configuration for DeepSeek Sparse Attention (DSA): MLA or Compressed Attention with indexer."""
 
-  use_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
+  use_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA or Compressed Attention.")
   indexer_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
   indexer_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
   indexer_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
@@ -957,6 +965,17 @@ class MoEGeneral(BaseModel):
       TEGroupedGemmQuantizationType.EMPTY,
       description="Quantization mode for TransformerEngine grouped GEMMs.",
   )
+  moe_quantize_token_all_gather: bool = Field(
+      False,
+      description=(
+          "Whether to quantize token activations before the All-Gather across EP"
+          " shards in Ring of Experts, reducing inter-chip token traffic"
+          " proportionally to the quantized width (2x for FP8 vs BF16)."
+          " Pipeline: quantize token -> EP all-gather -> sort -> GMM, so tokens"
+          " stay quantized end to end. Requires use_ring_of_experts=True,"
+          " use_gmm_v2=True, and quantization with fixed act calibration."
+      ),
+  )
 
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
@@ -1011,6 +1030,18 @@ class MoEGeneral(BaseModel):
       description="Bytes-accessed cost estimate override for the ragged gather reduce kernel. "
       "-1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate.",
   )
+  moe_pin_sparse_core_all_gathers: bool = Field(
+      False,
+      description="Pin FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",
+  )
+  moe_fsdp_all_gather_sparse_core_id: int = Field(
+      0,
+      description="SparseCore ID to pin MoE FSDP all-gathers to when moe_pin_sparse_core_all_gathers is True.",
+  )
+  moe_ep_all_gather_sparse_core_id: int = Field(
+      1,
+      description="SparseCore ID to pin MoE EP all-gathers to when moe_pin_sparse_core_all_gathers is True.",
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   moe_fsdp_use_two_stage_all_gather: bool = Field(
@@ -1062,6 +1093,11 @@ class MoEGeneral(BaseModel):
   @model_validator(mode="after")
   def validate_moe_sharding_strategy(self) -> "MoEGeneral":
     """Ensure that only one MoE FSDP sharding strategy is active at a time."""
+    if self.moe_pin_sparse_core_all_gathers and self.moe_fsdp_use_two_stage_all_gather:
+      raise ValueError(
+          "SparseCore pinning for MoE all-gathers (`moe_pin_sparse_core_all_gathers=True`) "
+          "is not supported with `moe_fsdp_use_two_stage_all_gather=True`."
+      )
     active_sharding_flags = sum([self.shard_exp_on_fsdp, self.use_2d_fsdp_sharding, self.shard_embed_moe_on_fsdp])
     if active_sharding_flags > 1:
       raise ValueError(
@@ -2215,6 +2251,12 @@ class Muon(BaseModel):
   muon_consistent_rms: float | None = Field(
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
+  )
+  muon_include_routers: bool = Field(
+      True,
+      description=(
+          "Whether to apply Muon updates to MoE router matrices. If False," " routers are optimized with AdamW."
+      ),
   )
   muon_use_all_to_all: bool = Field(
       False,
@@ -3537,6 +3579,32 @@ class MaxTextConfig(
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
         )
 
+  def validate_moe_quantize_token_all_gather(self):
+    """Validates that moe_quantize_token_all_gather is used with supported settings."""
+    if self.moe_quantize_token_all_gather:
+      if not self.sparse_matmul:
+        raise ValueError("moe_quantize_token_all_gather=True requires sparse_matmul=True.")
+      # Token quantized AG is implemented in Ring of Experts (roe_ag_and_route);
+      # standard EP uses ragged all-to-all where no token all-gather occurs.
+      if not self.use_ring_of_experts:
+        raise ValueError("moe_quantize_token_all_gather=True requires use_ring_of_experts=True.")
+      # Only Tokamax GMM v2 accepts QArray lhs (unwraps .qvalue and rescales
+      # output with .scale); other backends crash or drop activation scales.
+      if not self.use_gmm_v2:
+        raise ValueError("moe_quantize_token_all_gather=True requires use_gmm_v2=True.")
+      # Embedding chunking slices along the contracting dimension and re-executes
+      # routing collectives per chunk; not supported with token quantization.
+      if self.num_moe_emb_chunks > 0:
+        raise ValueError("moe_quantize_token_all_gather=True does not support num_moe_emb_chunks > 0.")
+      # Static/fixed scaling ensures uniform dequantization bounds across all
+      # gathered token slices without cross-shard dynamic scale synchronization.
+      if self.quantization == "" or not self.act_quantization_calibration_method.lower().startswith("fixed"):
+        raise ValueError(
+            "moe_quantize_token_all_gather=True requires quantization to be"
+            " specified and act_quantization_calibration_method to be fixed"
+            " (static scaling mode)."
+        )
+
   @staticmethod
   def _load_mesh_config_from_yaml(rule_value: str) -> dict:
     """Helper to load and parse custom mesh YAML configurations."""
@@ -4211,12 +4279,26 @@ class MaxTextConfig(
             f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
             f"`indexer_n_heads` ({self.indexer_n_heads})."
         )
+    if self.csa_qk_head_chunk_size > 0:
+      if self.csa_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.csa_qk_head_chunk_size != 0:
+        raise ValueError(
+            f"`csa_qk_head_chunk_size` ({self.csa_qk_head_chunk_size}) must cleanly divide exactly into "
+            f"`num_query_heads` ({self.num_query_heads})."
+        )
+      if self.use_indexer and (
+          self.csa_qk_head_chunk_size > self.indexer_n_heads or self.indexer_n_heads % self.csa_qk_head_chunk_size != 0
+      ):
+        raise ValueError(
+            f"`csa_qk_head_chunk_size` ({self.csa_qk_head_chunk_size}) must cleanly divide exactly into "
+            f"`indexer_n_heads` ({self.indexer_n_heads})."
+        )
 
     if self.use_indexer:
-      if self.attention_type != AttentionType.MLA.value:
+      if self.attention_type not in (AttentionType.MLA.value, AttentionType.COMPRESSED.value):
         raise ValueError(
-            f"`use_indexer=True` requires `attention_type='{AttentionType.MLA.value}'`, since only the "
-            "MLA indexer produces this mask."
+            f"`use_indexer=True` requires `attention_type='{AttentionType.MLA.value}'` or "
+            f"`attention_type='{AttentionType.COMPRESSED.value}'`, since only MLA and "
+            "Compressed Attention indexers produce this mask."
         )
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
@@ -4224,23 +4306,36 @@ class MaxTextConfig(
       supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
       if not (supports_dot_product or supports_flash_splash):
         raise ValueError(
-            "Sparse indexer is only supported with dot_product attention or flash attention with tokamax splash."
+            f"Sparse indexer with {self.attention_type} is only supported with dot_product attention or flash "
+            "attention with tokamax splash."
         )
-      if (
-          self.attention == "flash"
-          and self.context_parallel_strategy == "all_gather"
-          and self.ici_context_parallelism * self.dcn_context_parallelism > 1
-          and self.attention_sink
-      ):
-        raise ValueError(
-            "Sparse indexer with all-gather context parallelism for flash attention does not support attention sinks."
-        )
-      if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
-        raise ValueError(
-            f"`indexer_topk` ({self.indexer_topk}) must be < `max_target_length` ({self.max_target_length}) "
-            "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
-            "short-circuits to select all tokens and no indexer loss is produced."
-        )
+      if self.attention_type == AttentionType.MLA.value:
+        if (
+            self.attention == "flash"
+            and self.context_parallel_strategy == "all_gather"
+            and self.ici_context_parallelism * self.dcn_context_parallelism > 1
+            and self.attention_sink
+        ):
+          raise ValueError(
+              "Sparse indexer with all-gather context parallelism for flash attention does not support attention sinks."
+          )
+        if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
+          raise ValueError(
+              f"`indexer_topk` ({self.indexer_topk}) must be < `max_target_length` ({self.max_target_length}) "
+              "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
+              "short-circuits to select all tokens and no indexer loss is produced."
+          )
+      elif self.attention_type == AttentionType.COMPRESSED.value:
+        # DeepSeek-V4 CSA natively uses a compression rate of 4 for the indexer blocks.
+        compress_rate = 4
+        max_blocks = self.max_target_length // compress_rate
+        if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= max_blocks:
+          raise ValueError(
+              f"`indexer_topk` ({self.indexer_topk}) must be < total compressed blocks ({max_blocks}) "
+              f"(max_target_length={self.max_target_length} // compress_rate={compress_rate}) "
+              "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
+              "short-circuits to select all compressed blocks and no indexer loss is produced."
+          )
     if not self.use_indexer and self.indexer_cutoff_threshold != RematLocation.REMAT:
       raise ValueError(
           f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
@@ -4375,6 +4470,7 @@ class MaxTextConfig(
       self.validate_ragged_buffer_factor()
       self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
+    self.validate_moe_quantize_token_all_gather()
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:
@@ -4502,6 +4598,22 @@ class MaxTextConfig(
     context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
+    if self.attention_type == AttentionType.COMPRESSED.value:
+      # `compress_ratios` is per-layer and a ratio of 0 downgrades that layer to local sliding
+      # attention (see CompressedAttention.__init__), so context parallelism stays legal when no
+      # layer is actually compressed. `compress_ratios` defaults to [] for every other model.
+      if any(ratio > 0 for ratio in self.compress_ratios) and context_parallel_size > 1:
+        raise ValueError(
+            f"Context parallelism (context_parallel_size={context_parallel_size}) is not supported with "
+            "attention_type='compressed' and a non-zero compress_ratio. Set every entry of compress_ratios "
+            "to 0, or disable context parallelism."
+        )
+      # The Tokamax Splash backward kernel only accepts dq_reduction_steps of 3 or None; 0 means
+      # "unset" here and is mapped to the kernel default downstream.
+      if self.dq_reduction_steps not in (0, 3):
+        raise ValueError(
+            f"attention_type='compressed' requires dq_reduction_steps to be 0 or 3, got {self.dq_reduction_steps}."
+        )
     context_parallel_strategy = self.context_parallel_strategy.lower()
     if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
       raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', 'ulysses', or 'usp'.")
