@@ -180,6 +180,108 @@ def stage_tokenize(args, hf_home, maxtext_root, out_dir):
 # ---------------------------------------------------------------- 2. sampler
 
 
+def sync_weights_from_trainer(args, out_dir, runner):
+  """Push trainer parameters into the live engine the way a Tunix RL step does.
+
+  For a MaxText source and a MaxText destination Tunix never uses the HF key mappings:
+  `vllm_sampler.update_params` falls through to `transfer_state_directly` when no mapping is configured,
+  and the mapping path (`transfer_state_with_mappings`) targets native vLLM/tpu-inference models. The
+  Qwen3 standalone mapping could not do this job anyway -- it has no expert entries at all, so all 256
+  experts per layer would be left untransferred.
+
+  Returns the fraction of destination leaves whose backing array object was replaced. A value-preserving
+  sync still swaps the buffers, so 0.0 means the write never landed and the "synced" run would silently
+  be a plain checkpoint load.
+  """
+  import gc
+
+  import jax
+  from flax import nnx
+  from tunix.generate import utils as gen_utils
+  from tunix.rl import reshard
+
+  from maxtext.common.common_types import MODEL_MODE_TRAIN
+  from maxtext.configs import pyconfig
+  from maxtext.utils import model_creation_utils
+  import maxtext.configs as maxtext_configs
+
+  dst_model = getattr(runner.model, "model", None)
+  if dst_model is None:
+    raise SystemExit(f"--weight-sync: no MaxText model on {type(runner.model).__name__}")
+
+  def leaf_ids(model):
+    _, st = nnx.split(model)
+    return [id(getattr(leaf, "value", leaf)) for _, leaf in st.flat_state()]
+
+  before = leaf_ids(dst_model)
+
+  base_yml = os.path.join(os.path.dirname(maxtext_configs.__file__), "base.yml")
+  cfg = pyconfig.initialize(
+      [sys.argv[0], base_yml, "attention=flash"],
+      model_name=MODEL_MAXTEXT,
+      load_parameters_path=args.ckpt,
+      tokenizer_path=MODEL_HF,
+      run_name="rl_logprob_parity_sync",
+      base_output_directory=os.path.join(out_dir, "maxtext_run"),
+      scan_layers=False,
+      checkpoint_storage_use_ocdbt=True,
+      checkpoint_storage_use_zarr3=True,
+      convert_checkpoint_if_possible=False,
+      dtype="bfloat16",
+      weight_dtype="bfloat16",
+      # Weights only: this model is never run forward, so keep its activation sizing trivial.
+      max_target_length=4096,
+      max_prefill_predict_length=4096,
+      per_device_batch_size=1 / len(jax.devices()),
+      # The source mesh is the *trainer's*, which need not match the sampler's: a real RL job trains
+      # under FSDP+TP and rolls out under EP, and transfer_state_directly reshards across the two.
+      # MaxText fills the remaining devices into fsdp, so tp=4 on 8 chips gives fsdp=2 x tp=4.
+      ici_tensor_parallelism=args.trainer_tp,
+      ici_expert_parallelism=args.sync_src_ep if args.sync_src_ep is not None else args.ep,
+      allow_split_physical_axes=True,
+      **({"base_num_kv_heads": args.trainer_kv_heads, "override_model_config": True}
+         if args.trainer_kv_heads else {}),
+      log_config=False,
+      skip_jax_distributed_system=True,
+      enable_checkpointing=True,
+      async_checkpointing=False,
+      float32_logits=True,
+      float32_gate_logits=True,
+      float32_weight_sum=True,
+      logits_dot_in_fp32=args.logits_dot_fp32,
+      sparse_matmul=True,
+      megablox=True,
+  )
+  log("weight-sync: loading trainer params")
+  src_model, _ = model_creation_utils.from_pretrained(cfg, devices=jax.devices(), model_mode=MODEL_MODE_TRAIN)
+  _, src_state = nnx.split(src_model)
+  _, dst_state = nnx.split(dst_model)
+
+  log("weight-sync: transfer_state_directly(trainer -> sampler)")
+  gen_utils.transfer_state_directly(
+      src_state=src_state,
+      dst_state=dst_state,
+      reshard_fn=reshard.reshard_pytree,
+      delete_dst_buffers=False,
+  )
+  # nnx.split hands back a detached State, so the writes above have to be merged back into the live
+  # module or the engine keeps serving its checkpoint-loaded weights.
+  nnx.update(dst_model, dst_state)
+  del src_model, src_state, dst_state
+  gc.collect()
+
+  after = leaf_ids(dst_model)
+  replaced = sum(1 for a, b in zip(before, after) if a != b) / max(len(before), 1)
+  log(f"weight-sync: {replaced:.1%} of destination buffers replaced")
+  if replaced == 0.0:
+    raise SystemExit("--weight-sync: transfer did not modify the engine's weights; aborting so the run "
+                     "is not mislabelled as synced")
+  # Mirror tunix's post-sync bookkeeping: the runner caches flattened state leaves.
+  if hasattr(runner, "state"):
+    runner.state_leaves = tuple(jax.tree_util.tree_leaves(runner.state))
+  return replaced
+
+
 def stage_sampler(args, hf_home, maxtext_root, out_dir):
   """Real vLLM engine, prompt_logprobs on the shared tokens. logp[b, i] = logprob of token i given tokens[:i]."""
   import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401  pylint: disable=unused-import
@@ -191,8 +293,7 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       model=MODEL_HF,
       dtype="bfloat16",
       tensor_parallel_size=8,
-      # EP off: the RL job's rollout mesh (fsdp=32, tp=4) sets no expert parallelism.
-      enable_expert_parallel=False,
+      enable_expert_parallel=args.ep > 1,
       max_model_len=max(4096, SEQ_LEN + args.gen_tokens + 64),
       max_num_seqs=16,
       max_num_batched_tokens=2048,
@@ -212,13 +313,23 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
   # (vllm/entrypoints/openai/cli_args.py), not EngineArgs, so LLM() rejects them. They only shape how
   # generated text is parsed into API responses; this path feeds pre-tokenized ids via TokensPrompt and
   # reads prompt_logprobs, so no chat template, tool parser or reasoning parser ever runs.
-  sharding = (
-      {"sharding_strategy": {"enable_dp_attention": True, "attn_dp_size": args.attn_dp}}
-      if args.attn_dp > 1
-      else None
-  )
+  # Expert parallelism only reaches the JAX mesh through sharding_strategy; --enable-expert-parallel
+  # alone leaves the experts unsharded (adapter.py warns about exactly that). Sharding the MoE over
+  # experts instead of over the MLP dimension also drops moe_mlp_tp_size to tensor_parallelism * attn_dp,
+  # which is what decides whether GMM_v2 forces the 512 -> 2048 pad on every expert weight.
+  if args.ep > 1:
+    sharding = {"sharding_strategy": {
+        "expert_parallelism": args.ep,
+        "tensor_parallelism": args.sharding_tp,
+        "enable_dp_attention": True,
+    }}
+  elif args.attn_dp > 1:
+    sharding = {"sharding_strategy": {"enable_dp_attention": True, "attn_dp_size": args.attn_dp}}
+  else:
+    sharding = None
   if args.sampler == "adapter":
-    # MaxText-in-vLLM: MoE runs TP-8 on this path (EP is not reachable through the adapter).
+    # MaxText-in-vLLM. Without --ep the MoE is sharded over the MLP dimension at TP-8, which makes
+    # GMM_v2 pad moe_intermediate_size 512 -> 2048 and inflates every expert weight 4x.
     sys.path.insert(0, os.path.join(maxtext_root, "src", "maxtext", "integration", "vllm"))
     import maxtext_vllm_adapter
 
@@ -232,7 +343,7 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
         "allow_split_physical_axes": True,
         "scan_layers": False,
         "prefuse_moe_weights": True,
-        "enable_dp_attention": args.attn_dp > 1,
+        "enable_dp_attention": args.ep > 1 or args.attn_dp > 1,
         "log_config": False,
         "enable_checkpointing": True,
         "async_checkpointing": False,
@@ -242,6 +353,10 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
         "float32_logits": True,
         "float32_gate_logits": True,
         "float32_weight_sum": True,
+        # lm_head in fp32. Default is False, so the hidden @ embedding projection runs in bf16 and only the
+        # result is cast up -- leaving a roughly constant absolute error in the logits, and hence in the
+        # logprobs, that does not shrink as the distribution sharpens.
+        "logits_dot_in_fp32": args.logits_dot_fp32,
     }
     kw["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
     kw["additional_config"] = {"maxtext_config": mt_cfg, **({"sharding": sharding} if sharding else {})}
@@ -263,6 +378,9 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       return np.stack([pos, pos, pos]), 0
 
     runner.get_mrope_input_positions_fn = _text_mrope
+
+    if args.weight_sync:
+      sync_weights_from_trainer(args, out_dir, runner)
 
   # top_k=-1 disables top-k truncation (vLLM normalizes -1 to 0, "consider all tokens"). None of these
   # reach the measurement: prompt_logprobs is a plain log_softmax over the full vocab, and the single
@@ -408,7 +526,15 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       per_device_batch_size=(args.trainer_micro_batch or tokens_np.shape[0]) / len(jax.devices()),
       # TP shards the vocab dimension, which is what makes the [micro, seq_len, 248320] logits fit.
       ici_tensor_parallelism=args.trainer_tp,
+      # Mirror the sampler's expert sharding so both sides shard the MoE the same way. With the MoE on
+      # the expert axis the trainer also avoids the GMM_v2 MLP-dimension padding.
+      ici_expert_parallelism=args.ep,
       allow_split_physical_axes=True,
+      # Attention heads are atomic under TP, so TP above num_kv_heads (2 here) needs the KV heads
+      # replicated up first. The adapter already does this on the sampler side (base_num_kv_heads =
+      # tp * ep), so padding here moves the trainer toward the sampler's layout, not away from it.
+      **({"base_num_kv_heads": args.trainer_kv_heads, "override_model_config": True}
+         if args.trainer_kv_heads else {}),
       log_config=False,
       # Single host, and when the sampler stage ran first the vLLM engine has already brought up the JAX
       # backend in this process -- jax.distributed.initialize() would then fail outright.
@@ -418,6 +544,7 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       float32_logits=True,
       float32_gate_logits=True,
       float32_weight_sum=True,
+      logits_dot_in_fp32=args.logits_dot_fp32,  # lm_head in fp32; must match the sampler setting
       use_tokamax_splash=True,
       sa_use_base2_exp=False,
       sa_fuse_reciprocal=True,
@@ -619,10 +746,24 @@ def main():
   ap.add_argument("--gen-tokens", type=int, default=61440,
                   help="output tokens to roll out per prompt for the decode-path comparison; 0 = prompt only")
   ap.add_argument("--gen-temperature", type=float, default=1.0, help="sampling temperature for the rollouts")
+  ap.add_argument("--logits-dot-fp32", action="store_true",
+                  help="run the lm_head projection in fp32 (logits_dot_in_fp32) on BOTH trainer and sampler")
   ap.add_argument("--stop-at-eos", action="store_true",
                   help="let rollouts end at EOS (--gen-tokens becomes a cap) instead of forcing the full "
                        "length with ignore_eos; short rows are padded and their logprobs masked out")
   ap.add_argument("--attn-dp", type=int, default=4, help="attention DP degree inside the tp=8 mesh")
+  ap.add_argument("--ep", type=int, default=1,
+                  help="expert parallelism on both sides (8 matches the production rollout config); "
+                       "takes precedence over --attn-dp and removes the GMM_v2 MoE padding")
+  ap.add_argument("--sharding-tp", type=int, default=1,
+                  help="sharding_strategy.tensor_parallelism for the sampler when --ep > 1")
+  ap.add_argument("--sync-src-ep", type=int, default=None,
+                  help="expert parallelism of the --weight-sync source model; defaults to --ep. Set 1 to "
+                       "sync from an FSDP+TP trainer into an EP sampler, as a real RL job does")
+  ap.add_argument("--weight-sync", action="store_true",
+                  help="before sampling, load the trainer model and push its params into the engine with "
+                       "tunix transfer_state_directly, instead of letting the sampler load the checkpoint "
+                       "itself -- this is what a real Tunix RL step does every iteration")
   ap.add_argument("--gpu-memory-utilization", type=float, default=0.5)
   ap.add_argument("--prompt-len", type=int, default=SEQ_LEN,
                   help="prompt tokens per row; overrides the SEQ_LEN default")
@@ -631,6 +772,9 @@ def main():
                        "to SEQ_LEN. Overrides --text-glob/--text-file and sets the batch size.")
   ap.add_argument("--trainer-micro-batch", type=int, default=0,
                   help="rows per trainer forward pass; 0 = all at once. Must divide the row count")
+  ap.add_argument("--trainer-kv-heads", type=int, default=0,
+                  help="replicate the trainer's KV heads up to this count; needed for --trainer-tp above "
+                       "the model's num_kv_heads (2 for Qwen3.5-35B-A3B)")
   ap.add_argument("--trainer-tp", type=int, default=1,
                   help="tensor parallelism for the trainer mesh; the rest of the devices go to FSDP")
   ap.add_argument("--text-glob", default="docs/**/*.md", help="corpus glob, relative to the MaxText tree")
