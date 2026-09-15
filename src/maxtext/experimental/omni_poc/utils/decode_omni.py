@@ -131,7 +131,6 @@ def load_omni_config(yaml_path, checkpoint_path):
       "vision_model_name",
       "llm_model_name",
       "base_config",
-      "model_name",
       # Batch and parallelism keys overridden for single-sample decoding
       "per_device_batch_size",
       "eval_per_device_batch_size",
@@ -156,8 +155,7 @@ def load_omni_config(yaml_path, checkpoint_path):
       skip_jax_distributed_system=True,
       log_config=False,
   )
-  # Explicitly set model_name and single-sample batch sizes on the frozen config
-  object.__setattr__(config, "model_name", "maxtext-omni-gemma3-qwen3")
+  # Explicitly set single-sample batch sizes on the frozen config
   object.__setattr__(config, "micro_batch_size_to_train_on", 1)
   object.__setattr__(config, "global_batch_size_to_train_on", 1)
   object.__setattr__(config, "per_device_batch_size", per_dev_bs)

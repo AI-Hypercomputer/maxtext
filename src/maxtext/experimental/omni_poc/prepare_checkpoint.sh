@@ -23,6 +23,8 @@ fi
 BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY%/}"
 
 if [ -n "$HF_TOKEN" ]; then
+  export HF_TOKEN
+  export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
   if command -v hf &> /dev/null; then
     echo "Logging into Hugging Face using hf..."
     hf auth login --token "$HF_TOKEN"
@@ -36,10 +38,7 @@ fi
 
 # Configuration & Paths
 VISION_MAXTEXT_MODEL="gemma3-4b"
-VISION_HF_REPO="google/gemma-3-4b-it"
-
 LLM_MAXTEXT_MODEL="qwen3-4b"
-LLM_HF_REPO="Qwen/Qwen3-4B"
 
 # Automatically find maxtext package directory
 MAXTEXT_PKG_DIR=$(python3 -c "import os, maxtext; print(os.path.dirname(maxtext.__file__))")
@@ -69,11 +68,12 @@ path_exists() {
 # Step 1: Download & Convert Vision Model from Hugging Face -> MaxText
 echo "============================================================"
 if ! path_exists "$VISION_ITEMS_PATH"; then
-  echo "Converting Vision Model (${VISION_MAXTEXT_MODEL}) from Hugging Face (${VISION_HF_REPO})..."
+  echo "Converting Vision Model (${VISION_MAXTEXT_MODEL})..."
   python3 -m maxtext.checkpoint_conversion.to_maxtext \
     "${MAXTEXT_PKG_DIR}/configs/base.yml" \
     "model_name=${VISION_MAXTEXT_MODEL}" \
     "base_output_directory=${VISION_CKPT_DIR}" \
+    "hf_access_token=${HF_TOKEN}" \
     "use_multimodal=True" \
     "scan_layers=True" \
     "skip_jax_distributed_system=True" \
@@ -89,11 +89,12 @@ fi
 # Step 2: Download & Convert Language Model from Hugging Face -> MaxText
 echo "============================================================"
 if ! path_exists "$LLM_ITEMS_PATH"; then
-  echo "Converting Language Model (${LLM_MAXTEXT_MODEL}) from Hugging Face (${LLM_HF_REPO})..."
+  echo "Converting Language Model (${LLM_MAXTEXT_MODEL})..."
   python3 -m maxtext.checkpoint_conversion.to_maxtext \
     "${MAXTEXT_PKG_DIR}/configs/base.yml" \
     "model_name=${LLM_MAXTEXT_MODEL}" \
     "base_output_directory=${LLM_CKPT_DIR}" \
+    "hf_access_token=${HF_TOKEN}" \
     "scan_layers=True" \
     "skip_jax_distributed_system=True" \
     "--eager_load_method=transformers" \
@@ -110,6 +111,7 @@ echo "============================================================"
 echo "Stitching Vision and LLM subtrees into unified Omni checkpoint..."
 python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
   "$OMNI_CONFIG_PATH" \
+  "hf_access_token=${HF_TOKEN}" \
   "vision_load_path=${VISION_ITEMS_PATH}" \
   "llm_load_path=${LLM_ITEMS_PATH}" \
   "stitched_output_path=${STITCHED_ITEMS_PATH}"
