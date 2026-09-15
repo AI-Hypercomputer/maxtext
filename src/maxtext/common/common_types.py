@@ -137,6 +137,7 @@ class AttentionType(enum.Enum):
   LOCAL_SLIDING = "local_sliding"
   CHUNK = "chunk"
   MLA = "mla"
+  KDA = "kda"  # Kimi Delta Attention: recurrent Delta-Rule attention, tokamax Pallas kernel
   COMPRESSED = "compressed"
   FULL = "full"
   BLOCK_DIFFUSION = "block_diffusion"
