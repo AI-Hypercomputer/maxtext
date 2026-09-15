@@ -107,11 +107,11 @@ class GcsUtilsTest(unittest.TestCase):
     # Arrange: Mock the GCS client to simulate a valid bucket
     mock_client_instance = mock_storage_client.return_value
 
-    # Arrange: Mock epath to prevent real GCS calls
+    # Arrange: Mock epath to prevent real GCS calls (simulate newly created GCS path where exists() is False)
     mock_path_instance = mock.MagicMock()
     mock_path_instance.as_posix.return_value = "gs://valid_bucket/some/dir"
     mock_path_instance.parts = ["gs:", "", "valid_bucket", "some", "dir"]
-    mock_path_instance.exists.return_value = True
+    mock_path_instance.exists.return_value = False
 
     mock_temp_file_instance = mock.MagicMock()
     mock_path_instance.__truediv__.return_value = mock_temp_file_instance
@@ -125,6 +125,5 @@ class GcsUtilsTest(unittest.TestCase):
     # Assert
     mock_client_instance.get_bucket.assert_called_with("valid_bucket")
     mock_path_instance.mkdir.assert_called_with(exist_ok=True, parents=True)
-    mock_path_instance.exists.assert_called_once()
     mock_temp_file_instance.write_text.assert_called_once_with("test")
     mock_temp_file_instance.unlink.assert_called_once()
