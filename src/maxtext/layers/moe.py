@@ -363,7 +363,7 @@ class Tid2EidVar(nnx.Variable):
   """Custom variable to hold tid2eid without trainable param overhead."""
 
 
-class MoEBiasVar(nnx.Variable):
+class MoEBiasVar(nnx.Param):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
 
 
@@ -445,7 +445,7 @@ class GateLogit(nnx.Module):
       if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
         # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
         self.bias = MoEBiasVar(
-            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            default_bias_init(rngs.params(), bias_shape, jnp.float32),
             out_sharding=bias_axes,
         )
       else:
@@ -514,8 +514,12 @@ class GateLogit(nnx.Module):
       pre_bias_logits = output
 
     if self.use_bias:
-      bias = jnp.asarray(self.bias[...], self.dtype)
-      output += bias
+      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+        bias = jnp.asarray(self.bias[...], jnp.float32)
+        output = output.astype(jnp.float32) + bias
+      else:
+        bias = jnp.asarray(self.bias[...], self.dtype)
+        output += bias
     return output, pre_bias_logits
 
 

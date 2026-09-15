@@ -321,7 +321,20 @@ def get_maxtext_model_info(config):
   # Extract the 'params' collection from the abstract model state. This focuses checkpoint
   # conversion on trainable model parameters; variables outside the 'params' collection
   # (such as non-trainable state or optimizer buffers) are not included.
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  def _deep_merge_dicts(d1, d2):
+    res = dict(d1)
+    for k, v in d2.items():
+      if k in res and isinstance(res[k], dict) and isinstance(v, dict):
+        res[k] = _deep_merge_dicts(res[k], v)
+      else:
+        res[k] = v
+    return res
+
+  abstract_collections = maxtext_utils.get_abstract_param(maxtext_model_flax, config)
+  abstract_params_tree = abstract_collections.get("params", {})
+  for col_name in ["MoEBiasVar", "Tid2EidVar"]:
+    if col_name in abstract_collections:
+      abstract_params_tree = _deep_merge_dicts(abstract_params_tree, abstract_collections[col_name])
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
       abstract_params_tree,
@@ -467,6 +480,8 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
+      if key is None:
+        return apply_hook_fns(None, shape, hook)
       if isinstance(key, (list, tuple)):
         tensors = tuple(getter(k) for k in key)
         return apply_hook_fns(tensors, shape, hook)
@@ -578,10 +593,15 @@ def _get_maxtext_weight(
     # to load the tensor later (the `load_fn`, shape, dtype).
     # The actual data will only be loaded when Orbax calls `__array__`
     # on this object during the saving process.
+    tensor_save_dtype = save_dtype
+    if (isinstance(mt_param_key_or_keys, str) and "gate-bias" in mt_param_key_or_keys) or (
+        isinstance(mt_param_key_or_keys, tuple) and any("gate-bias" in k for k in mt_param_key_or_keys)
+    ):
+      tensor_save_dtype = "float32"
     final_mt_tensor_numpy = LazyTensor(
         load_fn,
         mt_target_shape_or_shapes,
-        save_dtype,
+        tensor_save_dtype,
         name=mt_param_key_or_keys,
     )
     if not is_composite_mt_key:
@@ -603,7 +623,7 @@ def _get_maxtext_weight(
         final_mt_weights[mt_target_idx] = LazyTensor(
             slicing_load_fn,
             mt_target_shape_or_shapes[i],
-            save_dtype,
+            tensor_save_dtype,
             name=mt_param_key_or_keys[i],
         )
 
@@ -979,6 +999,8 @@ def main(
         if key not in hf_state_dict_numpy:
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
         v = hf_state_dict_numpy[key]
+        if "e_score_correction_bias" in key:
+          return v.to(torch.float32).numpy()
         # target dtype is "float32"
         if save_dtype == DType.FLOAT32:
           return v.to(torch.float32).numpy()
