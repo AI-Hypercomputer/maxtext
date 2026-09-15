@@ -37,7 +37,7 @@ Before starting, ensure you have:
 - A Hugging Face account with an access token for downloading models.
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
 - Cluster Toolkit installed and configured. Follow [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md) for `gcluster` setup.
-- A GKE cluster configured for Cluster Toolkit, including healthy Kueue and JobSet components.
+- A GKE cluster configured for Cluster Toolkit, including healthy Kueue and JobSet components (see [Cluster Toolkit documentation](https://cloud.google.com/cluster-toolkit/docs/overview)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Build and upload MaxText Docker image
@@ -86,7 +86,7 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 # of your cluster:
 
 # 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials <CLUSTER_NAME> --location <ZONE> --project <PROJECT_ID>
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${LOCATION?} --project ${PROJECT_ID?}
 
 # 2. Find your TPU type (e.g., 'v6e-256') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
@@ -97,7 +97,7 @@ export TOPOLOGY=<TOPOLOGY>
 
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-export DOCKER_IMAGE="gcr.io/<PROJECT_ID>/<IMAGE_NAME>"
+export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 
 # -- Fine-Tuning configuration --
 export STEPS=<STEPS> # e.g., 1000
@@ -112,6 +112,7 @@ export DATASET_NAME=<DATASET_NAME> # e.g., openai/gsm8k
 export TRAIN_SPLIT=<TRAIN_SPLIT> # e.g., train
 export HF_DATA_DIR=<DATASET_PATH> # e.g., main
 export TRAIN_DATA_COLUMNS=<DATA_COLUMNS> # e.g., ['question','answer']
+export CHAT_TEMPLATE_PATH=<CHAT_TEMPLATE_PATH> # e.g., src/maxtext/examples/chat_templates/gemma_chat.json
 
 # -- LoRA Conversion configuration (Optional) --
 export HF_LORA_ADAPTER_PATH=<HF_LORA_ADAPTER_PATH> # e.g., 'username/adapter-name'
@@ -162,46 +163,46 @@ This section provides the command to run LoRA Fine-Tuning on a GKE cluster.
 Before submitting a job, configure access to the cluster with `gcloud` and `gcluster`:
 
 ```bash
-gcloud container clusters get-credentials <CLUSTER_NAME> \
-  --location <ZONE> \
-  --project <PROJECT_ID>
-gcluster job config set project <PROJECT_ID>
-gcluster job config set cluster <CLUSTER_NAME>
-gcluster job config set location <ZONE>
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --location ${LOCATION?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${LOCATION?}
 ```
 
 ### Run a Fresh LoRA Fine-Tuning on Hugging Face Dataset
 
 ```bash
 gcluster job submit \
-  --image=gcr.io/<PROJECT_ID>/<IMAGE_NAME> \
-  --name=<RUN_NAME> \
-  --compute-type=<COMPUTE_TYPE> \
-  --topology=<TOPOLOGY> \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --command="\
 python3 -m maxtext.trainers.post_train.sft.train_sft \
-  run_name=<RUN_NAME> \
-  base_output_directory=<GCS_BUCKET> \
-  model_name=<MODEL_NAME> \
-  load_parameters_path=<CKPT_PATH> \
-  hf_access_token=<HF_TOKEN> \
-  hf_path=<DATASET_NAME> \
-  train_split=<TRAIN_SPLIT> \
-  hf_data_dir=<DATASET_PATH> \
-  train_data_columns=<DATA_COLUMNS> \
-  steps=<STEPS> \
-  per_device_batch_size=<BATCH_SIZE_PER_DEVICE> \
-  max_target_length=<MAX_TARGET_LENGTH> \
-  learning_rate=<LEARNING_RATE> \
-  chat_template_path=<TEMPLATE_PATH> \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  hf_access_token=${HF_TOKEN?} \
+  hf_path=${DATASET_NAME?} \
+  train_split=${TRAIN_SPLIT?} \
+  hf_data_dir=${HF_DATA_DIR?} \
+  train_data_columns=${TRAIN_DATA_COLUMNS?} \
+  steps=${STEPS?} \
+  per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
+  max_target_length=${MAX_TARGET_LENGTH?} \
+  learning_rate=${LEARNING_RATE?} \
+  chat_template_path=${CHAT_TEMPLATE_PATH?} \
   lora.enable_lora=True \
-  lora.lora_rank=<LORA_RANK> \
-  lora.lora_alpha=<LORA_ALPHA> \
+  lora.lora_rank=${LORA_RANK?} \
+  lora.lora_alpha=${LORA_ALPHA?} \
   checkpoint_storage_use_zarr3=False \
   checkpoint_storage_use_ocdbt=False"
 ```
 
-Once the fine-tuning is completed, you can access your model checkpoints at `<GCS_BUCKET>/<RUN_NAME>/checkpoints`.
+Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
 
 ### (Optional) Resume from a previous LoRA checkpoint
 
@@ -215,15 +216,15 @@ If your LoRA adapter is currently in Hugging Face format, you must convert it to
 
 ```sh
 gcluster job submit \
-  --image=gcr.io/<PROJECT_ID>/<IMAGE_NAME> \
-  --name=<RUN_NAME>-convert \
-  --compute-type=<COMPUTE_TYPE> \
-  --topology=<TOPOLOGY> \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?}-convert \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --command="python3 -m maxtext.checkpoint_conversion.to_maxtext \
-  model_name=<MODEL_NAME> \
-  hf_lora_adapter_path=<HF_LORA_ADAPTER_PATH> \
-  base_output_directory=<GCS_BUCKET>/converted_adapter \
-  hf_access_token=<HF_TOKEN> \
+  model_name=${MODEL?} \
+  hf_lora_adapter_path=${HF_LORA_ADAPTER_PATH?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?}/converted_adapter \
+  hf_access_token=${HF_TOKEN?} \
   hardware=cpu \
   skip_jax_distributed_system=True"
 ```
@@ -247,39 +248,39 @@ Execute the following command to begin training:
 
 ```bash
 gcluster job submit \
-  --image=gcr.io/<PROJECT_ID>/<IMAGE_NAME> \
-  --name=<RUN_NAME> \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
   --pathways \
-  --compute-type=<COMPUTE_TYPE> \
-  --topology=<TOPOLOGY> \
-  --num-slices=<NUM_SLICES> \
-  --pathways-gcs-location=<GCS_BUCKET> \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --num-slices=${NUM_SLICES:-1} \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
   --command="\
 python3 -m maxtext.trainers.post_train.sft.train_sft \
-  run_name=<RUN_NAME> \
-  base_output_directory=<GCS_BUCKET> \
-  model_name=<MODEL_NAME> \
-  load_parameters_path=<CKPT_PATH> \
-  hf_access_token=<HF_TOKEN> \
-  hf_path=<DATASET_NAME> \
-  train_split=<TRAIN_SPLIT> \
-  hf_data_dir=<DATASET_PATH> \
-  train_data_columns=<DATA_COLUMNS> \
-  steps=<STEPS> \
-  per_device_batch_size=<BATCH_SIZE_PER_DEVICE> \
-  max_target_length=<MAX_TARGET_LENGTH> \
-  lora.lora_restore_path=<LORA_RESTORE_PATH> \
-  learning_rate=<LEARNING_RATE> \
-  chat_template_path=<TEMPLATE_PATH> \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  hf_access_token=${HF_TOKEN?} \
+  hf_path=${DATASET_NAME?} \
+  train_split=${TRAIN_SPLIT?} \
+  hf_data_dir=${HF_DATA_DIR?} \
+  train_data_columns=${TRAIN_DATA_COLUMNS?} \
+  steps=${STEPS?} \
+  per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
+  max_target_length=${MAX_TARGET_LENGTH?} \
+  lora.lora_restore_path=${LORA_RESTORE_PATH?} \
+  learning_rate=${LEARNING_RATE?} \
+  chat_template_path=${CHAT_TEMPLATE_PATH?} \
   lora.enable_lora=True \
-  lora.lora_rank=<LORA_RANK> \
-  lora.lora_alpha=<LORA_ALPHA> \
+  lora.lora_rank=${LORA_RANK?} \
+  lora.lora_alpha=${LORA_ALPHA?} \
   checkpoint_storage_use_zarr3=False \
   checkpoint_storage_use_ocdbt=False \
   enable_single_controller=True"
 ```
 
-Your fine-tuned model checkpoints will be saved here: `<GCS_BUCKET>/<RUN_NAME>/checkpoints`.
+Your fine-tuned model checkpoints will be saved here: `$BASE_OUTPUT_DIRECTORY/$RUN_NAME/checkpoints`.
 
 ## (Optional) Convert Fine-tuned LoRA to Hugging Face Format
 
@@ -289,15 +290,15 @@ After completing the fine-tuning process, your LoRA weights are stored in MaxTex
 
 ```sh
 gcluster job submit \
-  --image=gcr.io/<PROJECT_ID>/<IMAGE_NAME> \
-  --name="<RUN_NAME>-to-hf" \
-  --compute-type=<COMPUTE_TYPE> \
-  --topology=<TOPOLOGY> \
+  --image=${DOCKER_IMAGE?} \
+  --name="${RUN_NAME?}-to-hf" \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
   --command="python3 -m maxtext.checkpoint_conversion.to_huggingface \
-    model_name=<MODEL_NAME> \
-    lora.lora_restore_path=<GCS_BUCKET>/<RUN_NAME>/checkpoints/<STEPS>/model_params \
-    base_output_directory=<GCS_BUCKET>/hf_lora_adapter \
-    hf_access_token=<HF_TOKEN>"
+    model_name=${MODEL?} \
+    lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/checkpoints/<STEPS>/model_params \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?}/hf_lora_adapter \
+    hf_access_token=${HF_TOKEN?}"
 ```
 
 - `lora.lora_restore_path`: Point this to the specific checkpoint directory (e.g., `.../checkpoints/1000/items`) that you want to export.
