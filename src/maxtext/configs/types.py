@@ -444,6 +444,12 @@ class OrbaxStorage(BaseModel):
       True, description="Whether to use Zarr3 with OCDbT. Requires use_ocdbt=True."
   )
   checkpoint_storage_concurrent_gb: int = Field(96, description="Concurrent GB for I/O operations during checkpointing.")
+  # Concurrent GB limit for device->host staging during checkpoint saves.
+  # When set, bounds in-flight bytes staged from accelerator to host RAM per handler.
+  # None restores the Orbax upstream default (unbounded).
+  checkpoint_storage_device_host_concurrent_gb: int | None = Field(
+      8, description="Concurrent GB for device->host staging during checkpoint save. None = unbounded."
+  )
 
 
 class EmergencyCheckpointing(BaseModel):
