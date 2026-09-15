@@ -30,7 +30,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Callable
 import dataclasses
-from typing import Any
+from typing import Any, ContextManager
 
 import flax.struct
 import jax
@@ -196,6 +196,27 @@ class AbstractTrainingEngine(abc.ABC):
     Args:
       payload: Packed micro-batch payload for evaluation.
       **kwargs: Additional evaluation keyword arguments.
+    """
+
+  @abc.abstractmethod
+  def model_scope(self, *args: Any, **kwargs: Any) -> ContextManager[tuple[Any, tuple[Any, ...], dict[str, Any]]]:
+    """Read-only, scoped access to the live model under the engine's placement.
+
+    Yields `(model, args, kwargs)`, where the inputs have been committed to the
+    shardings this engine would use for a step. The caller owns the computation --
+    including any `jax.jit` -- and must not mutate the model.
+
+    Everything the caller traces must happen inside the `with` block.
+    Implementations may hold a mesh or logical-axis-rule context open for its
+    duration, and `jax.jit` is lazy: a call traced after the block exits sees an
+    empty rule set and gets partitioned by guesswork.
+
+    Args:
+      *args: Positional inputs to place before yielding.
+      **kwargs: Keyword inputs to place before yielding.
+
+    Returns:
+      A context manager yielding `(model, placed_args, placed_kwargs)`.
     """
 
   @abc.abstractmethod

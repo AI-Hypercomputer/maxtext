@@ -198,6 +198,12 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
   def update(self, **kwargs: Any) -> int:
     raise self._cannot_run("update")
 
+  # Not a `@contextlib.contextmanager`: a generator would defer this to
+  # `__enter__`, and the caller deserves the error where it called,
+  # not one `with` later.
+  def model_scope(self, *args: Any, **kwargs: Any) -> Any:
+    raise self._cannot_run("model_scope")
+
   def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
     raise self._cannot_run("save_checkpoint")
 
