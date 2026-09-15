@@ -62,9 +62,9 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 export RUN_NAME=<RUN_NAME>
 
 # Hardware & Slice Configuration
-export COMPUTE_TYPE=<CLUSTER_TOOLKIT_COMPUTE_TYPE> # e.g., 'ct5lp-hightpu-4t' for v5e
-export TOPOLOGY=<TPU_TOPOLOGY>                     # e.g., '4x4' (16 chips)
-export NUM_SLICES=3                                # total slices in the run
+export COMPUTE_TYPE=<COMPUTE_TYPE> # e.g., 'ct5lp-hightpu-4t' for v5e
+export TOPOLOGY=<TOPOLOGY>         # e.g., '4x4' (16 chips)
+export NUM_SLICES=<NUM_SLICES>     # total slices in the run
 
 # MaxText & Storage Configuration
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET>          # e.g., gs://my-bucket/maxtext-runs
@@ -98,7 +98,6 @@ gcluster job submit \
   --pathways-elastic-slices=1 \
   --pathways-max-slice-restarts=10 \
   --command="python3 -m maxtext.trainers.pre_train.train \
-    src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     run_name=${RUN_NAME?} \
     model_name=qwen3-0.6b \

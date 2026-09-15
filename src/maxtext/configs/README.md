@@ -73,7 +73,7 @@ These configurations do 3 things:
     gcluster job config set project ${PROJECT?}
     gcluster job config set cluster ${YOUR_CLUSTER_NAME?}
     gcluster job config set location ${LOCATION?}
-    gcluster job submit --image gcr.io/${PROJECT?}/${YOUR_IMAGE_NAME?} --name ${YOUR_RUN_NAME?} --compute-type ${COMPUTE_TYPE?} --topology ${TOPOLOGY?} --command "bash src/maxtext/configs/tpu/v5p/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH?} DATASET_PATH=${MAXTEXT_DATASET_PATH?} PLATFORM=gke"
+    gcluster job submit --image=gcr.io/${PROJECT?}/${YOUR_IMAGE_NAME?} --name=${YOUR_RUN_NAME?} --compute-type=${COMPUTE_TYPE?} --topology=${TOPOLOGY?} --command="bash src/maxtext/configs/tpu/v5p/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH?} DATASET_PATH=${MAXTEXT_DATASET_PATH?} PLATFORM=gke"
     ```
 
     Note: When running these scripts, be sure to specify the `PLATFORM` flag with the correct platform you are running on `"gce"` or `"gke"`.

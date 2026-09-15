@@ -59,7 +59,7 @@ bash benchmarks/api_server/start_server.sh \
     src/maxtext/configs/base.yml \
     model_name="qwen3-30b-a3b" \
     tokenizer_path="Qwen/Qwen3-30B-A3B-Thinking-2507" \
-    load_parameters_path=<CKPT_PATH> \
+    load_parameters_path="<CKPT_PATH>" \
     per_device_batch_size=4 \
     ici_tensor_parallelism=4 \
     max_prefill_predict_length=1024 \
@@ -129,26 +129,45 @@ export ICI_TENSOR_PARALLELISM=4
 export ICI_EXPERT_PARALLELISM=2
 
 # ==============================================================================
-# 2. Launch the Workload
+# 2. Define the Command to Run on the Cluster
 # ==============================================================================
-echo "Launching workload <RUN_NAME>..."
-gcloud config set project <PROJECT_ID>
-gcloud container clusters get-credentials <CLUSTER_NAME> \
-  --location <ZONE> \
-  --project <PROJECT_ID>
-gcluster job config set project <PROJECT_ID>
-gcluster job config set cluster <CLUSTER_NAME>
-gcluster job config set location <ZONE>
-gcluster job submit \
-  --image="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest" \
-  --command="export HF_TOKEN=<HF_TOKEN> && pip install --upgrade pip && pip install -r benchmarks/api_server/requirements.txt && bash benchmarks/api_server/start_server.sh src/maxtext/configs/base.yml model_name=<MODEL_NAME> tokenizer_path=<TOKENIZER_PATH> load_parameters_path=<CKPT_PATH> per_device_batch_size=<BATCH_SIZE_PER_DEVICE> ici_tensor_parallelism=4 ici_expert_parallelism=2 tokenizer_type=huggingface return_log_prob=True" \
-  --name=<RUN_NAME> \
-  --compute-type=<COMPUTE_TYPE> \
-  --topology=<TOPOLOGY>
+# This command installs dependencies and then starts the server.
+CMD="export HF_TOKEN=${HF_TOKEN?} && \
+     pip install --upgrade pip && \
+     pip install -r benchmarks/api_server/requirements.txt && \
+     bash benchmarks/api_server/start_server.sh \
+        src/maxtext/configs/base.yml \
+        model_name="${MODEL_NAME?}" \
+        tokenizer_path="${TOKENIZER_PATH?}" \
+        load_parameters_path="${LOAD_PARAMETERS_PATH?}" \
+        per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
+        ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM?} \
+        ici_expert_parallelism=${ICI_EXPERT_PARALLELISM?} \
+        tokenizer_type=\"huggingface\" \
+        return_log_prob=True"
 
-echo "Workload <RUN_NAME> created."
+
+# ==============================================================================
+# 3. Launch the Workload
+# ==============================================================================
+echo "Launching workload ${RUNNAME?}..."
+gcloud config set project "${PROJECT?}"
+gcloud container clusters get-credentials "${CLUSTER?}" \
+  --location "${LOCATION?}" \
+  --project "${PROJECT?}"
+gcluster job config set project "${PROJECT?}"
+gcluster job config set cluster "${CLUSTER?}"
+gcluster job config set location "${LOCATION?}"
+gcluster job submit \
+  --image="${DOCKER_IMAGE?}" \
+  --command="${CMD?}" \
+  --name="${RUNNAME?}" \
+  --compute-type="${COMPUTE_TYPE?}" \
+  --topology="${TOPOLOGY?}"
+
+echo "Workload ${RUNNAME?} created."
 echo "Use the following command to connect:"
-echo "kubectl get pods -l gcluster.google.com/workload=<RUN_NAME>"
+echo "kubectl get pods -l gcluster.google.com/workload=${RUNNAME?}"
 ```
 
 ### 2. Launch the Workload
@@ -165,10 +184,10 @@ chmod +x launch_gke_server.sh
 The API server only runs on the first host/worker (rank 0 on GPU) of the workload. To connect to it, authenticate with `gcloud` and use `kubectl port-forward`.
 
 ```bash
-gcloud container clusters get-credentials <CLUSTER_NAME> \
-  --location <ZONE> \
-  --project <PROJECT_ID>
-kubectl get pods -l gcluster.google.com/workload=<RUN_NAME>
+gcloud container clusters get-credentials ${CLUSTER?} \
+  --location ${LOCATION?} \
+  --project ${PROJECT?}
+kubectl get pods -l gcluster.google.com/workload=${RUNNAME?}
 kubectl port-forward <POD_NAME> 8000:8000
 ```
 
@@ -234,7 +253,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-needed")
 
 completion = client.chat.completions.create(
-  model=<MODEL_NAME>,
+  model="<MODEL_NAME>",
   messages=[
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "What is the largest planet in our solar system?"}
