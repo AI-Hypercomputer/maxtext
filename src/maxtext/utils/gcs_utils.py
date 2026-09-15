@@ -291,7 +291,8 @@ def mkdir_and_check_permissions(path: str | epath.Path) -> epath.Path:
   if isinstance(path, str):
     path = epath.Path(path)
 
-  if path.as_posix().startswith("gs://"):
+  is_gcs = path.as_posix().startswith("gs://")
+  if is_gcs:
     if len(path.parts) < 3:
       raise ValueError(f"Invalid GCS path (missing bucket name): '{path}'")
     bucket_name = path.parts[2]
@@ -301,7 +302,7 @@ def mkdir_and_check_permissions(path: str | epath.Path) -> epath.Path:
     except Exception as e:
       raise FileNotFoundError(f"GCS bucket 'gs://{bucket_name}' not found or accessible.") from e
   path.mkdir(exist_ok=True, parents=True)
-  if not path.exists():
+  if not is_gcs and not path.exists():
     raise PermissionError(f"Failed to create the directory '{path}'. Please check that you have write access.")
 
   # Verify write permissions by creating and deleting a temporary file.
