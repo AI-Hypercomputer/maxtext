@@ -689,7 +689,7 @@ class RoutedMoE(nnx.Module):
       # collection.
       self.wi_0 = jnp.zeros((num_experts, self.moe_expert_input_dim, moe_intermediate_dim))
       self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, moe_intermediate_dim))
-      self.wo = jnp.zeros((num_experts, moe_intermediate_dim, self.moe_expert_input_dim))
+      self.wo = jnp.zeros((num_experts, self.intermediate_dim, self.moe_expert_input_dim))
     elif self.config.prefuse_moe_weights:
       self.wi = nnx.Param(
           self.kernel_init(
@@ -706,7 +706,7 @@ class RoutedMoE(nnx.Module):
               self.rngs.params(),
               (
                   self.num_experts,
-                  moe_intermediate_dim,
+                  self.intermediate_dim,
                   self.moe_expert_input_dim,
               ),
               self.weight_dtype,
@@ -741,7 +741,7 @@ class RoutedMoE(nnx.Module):
               self.rngs.params(),
               (
                   self.num_experts,
-                  moe_intermediate_dim,
+                  self.intermediate_dim,
                   self.moe_expert_input_dim,
               ),
               self.weight_dtype,
