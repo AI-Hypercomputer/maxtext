@@ -471,12 +471,17 @@ class MaxTextVllmSampler(VllmSampler):
       config: VllmConfig,
       direct_maxtext_sync: bool = False,
       model_name: Optional[str] = None,
+      scan_axis: int = 1,
+      layer_pattern_length: Optional[int] = None,
   ):
     super().__init__(tokenizer=tokenizer, config=config)
     self._direct_maxtext_sync = direct_maxtext_sync
     engine_kwargs = getattr(config, "engine_kwargs", {}) or {}
     self._model_name = model_name or getattr(config, "model", "") or engine_kwargs.get("model", "") or ""
     self._is_gemma = "gemma" in str(self._model_name).lower()
+    self._is_qwen = "qwen" in str(self._model_name).lower()
+    self._scan_axis = scan_axis
+    self._layer_pattern_length = layer_pattern_length
 
   def update_params(
       self,
@@ -484,8 +489,17 @@ class MaxTextVllmSampler(VllmSampler):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
-    if self._direct_maxtext_sync and self._is_gemma:
-      updated_weights = unroll_gemma_scanned_weights(updated_weights)
+    if self._direct_maxtext_sync:
+      if self._is_qwen:
+        updated_weights = unroll_qwen_scanned_weights(
+            updated_weights,
+            scan_axis=self._scan_axis,
+            pattern_length=self._layer_pattern_length,
+        )
+      if self._is_gemma:
+        updated_weights = unroll_gemma_scanned_weights(updated_weights)
+      if filter_types is None:
+        validate_direct_sync_layer_coverage(updated_weights, self.transformer_state)
     try:
       return super().update_params(updated_weights, filter_types)
     except BaseException:
@@ -609,6 +623,8 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         ),
         direct_maxtext_sync=direct_maxtext_sync,
         model_name=getattr(maxtext_config, "model_name", ""),
+        scan_axis=getattr(maxtext_config, "param_scan_axis", 1),
+        layer_pattern_length=getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", None),
     )
 
     # Counts every weight sync, including the initial one below. See
