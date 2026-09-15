@@ -580,7 +580,79 @@ class DistillationMetricsTest(unittest.TestCase):
     loss_huge_pad = run(1e6)
     np.testing.assert_allclose(loss_zero_pad, loss_huge_pad, rtol=1e-5, atol=1e-6)
 
-  # --- 8. compute_eval_loss returns (sum, count) ------------------------
+  def test_router_similarity_metrics(self):
+    """Verifies Top-1 and Top-K router similarity metrics ignore pad tokens and are per-layer."""
+    vocab_size, batch_size, seq_len, num_experts = 4, 1, 3, 4
+    targets = jnp.array([[1, 2, 0]], dtype=jnp.int32)
+    labels = _one_hot_labels(targets, vocab_size, pad_id=0)
+
+    # L, B, T, K
+    # Pad token is at T=2.
+    s_router = jnp.array(
+        [
+            # Layer 0:
+            [
+                [[0, 1], [2, 3], [0, 0]],  # Student
+            ],
+            # Layer 1:
+            [
+                [[1, 2], [3, 0], [0, 0]],
+            ],
+        ]
+    )
+
+    t_router = jnp.array(
+        [
+            # Layer 0:
+            [
+                [[0, 1], [3, 2], [1, 1]],  # Teacher: exact match token 0. Top-K match token 1.
+            ],
+            # Layer 1:
+            [
+                [[0, 2], [1, 2], [2, 2]],  # Teacher: Top-K partial match token 0. Zero match token 1.
+            ],
+        ]
+    )
+
+    s_logits = jnp.zeros((batch_size, seq_len, vocab_size), dtype=jnp.float32)
+    s_out = distillation_utils.DistillationForwardOutput(logits=s_logits, router_selections=s_router)
+    t_out = distillation_utils.DistillationForwardOutput(logits=s_logits, router_selections=t_router)
+
+    strategy = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=lambda *_a, **_k: None,
+        teacher_forward_fn=lambda *_a, **_k: None,
+        pad_id=0,
+        temperature=1.0,
+        alpha=0.5,
+        vocab_size=vocab_size,
+        max_steps=1,
+        num_experts=num_experts,
+        record_router_similarity_metrics=True,
+    )
+
+    _, m = strategy.compute_loss(s_out, t_out, labels, step=None)
+
+    # Valid tokens: 2
+
+    # Layer 0:
+    # Token 0: [0, 1] vs [0, 1] -> Top1 match (1), Top-K match (2/2 = 1)
+    # Token 1: [2, 3] vs [3, 2] -> Top1 mismatch (0), Top-K match (2/2 = 1)
+    # Token 2 is pad
+    l0_top1_expected = 1.0 / 2.0
+    l0_topk_expected = 2.0 / 2.0
+
+    np.testing.assert_allclose(_mean(m["distill/layer_0_router_similarity_top1"]), l0_top1_expected)
+    np.testing.assert_allclose(_mean(m["distill/layer_0_router_similarity_top2"]), l0_topk_expected)
+
+    # Layer 1:
+    # Token 0: [1, 2] vs [0, 2] -> Top1 mismatch (0), Top-K partial match (1/2 = 0.5)
+    # Token 1: [3, 0] vs [1, 2] -> Top1 mismatch (0), Top-K mismatch (0/2 = 0)
+    # Token 2 is pad
+    l1_top1_expected = 0.0 / 2.0
+    l1_topk_expected = 0.5 / 2.0
+
+    np.testing.assert_allclose(_mean(m["distill/layer_1_router_similarity_top1"]), l1_top1_expected)
+    np.testing.assert_allclose(_mean(m["distill/layer_1_router_similarity_top2"]), l1_topk_expected)
 
   def test_compute_eval_loss_returns_sum_count_pair(self):
     vocab_size = 4
