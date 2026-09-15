@@ -273,9 +273,11 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     if use_kernel:
       fwd_block_size = getattr(self.config, "mhc_pallas_kernel_fwd_block_size", 256)
       bwd_block_size = getattr(self.config, "mhc_pallas_kernel_bwd_block_size", 128)
+      bwd_feature_block_size = getattr(self.config, "mhc_pallas_kernel_bwd_feature_block_size", 1024)
       kernel_config = mhc_kernel.MhcKernelConfig(
           block_size=fwd_block_size,
           bwd_block_size=bwd_block_size,
+          bwd_feature_block_size=bwd_feature_block_size,
           rms_epsilon=self.config.normalization_layer_epsilon,
       )
       weights = self._get_mhc_weights()
@@ -338,9 +340,11 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     if use_kernel:
       fwd_block_size = getattr(self.config, "mhc_pallas_kernel_fwd_block_size", 256)
       bwd_block_size = getattr(self.config, "mhc_pallas_kernel_bwd_block_size", 128)
+      bwd_feature_block_size = getattr(self.config, "mhc_pallas_kernel_bwd_feature_block_size", 1024)
       kernel_config = mhc_kernel.MhcKernelConfig(
           block_size=fwd_block_size,
           bwd_block_size=bwd_block_size,
+          bwd_feature_block_size=bwd_feature_block_size,
       )
       output = mhc_kernel.post(
           layer_out,

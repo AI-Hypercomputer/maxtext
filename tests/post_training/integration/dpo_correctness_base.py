@@ -202,9 +202,6 @@ class DPOCorrectnessTestBase(parameterized.TestCase):
         "per_device_batch_size=1",
         f"max_target_length={max_target_length}",
         "skip_jax_distributed_system=True",
-        "enable_nnx=True",
-        "pure_nnx=True",
-        "pure_nnx_decoder=False",
         "remat_policy=full",
         "log_config=0",
         # Tiny architecture specifications.

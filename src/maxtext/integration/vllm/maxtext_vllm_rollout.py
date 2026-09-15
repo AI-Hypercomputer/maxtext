@@ -32,25 +32,56 @@ import time
 import traceback
 from typing import Any, Optional, Tuple
 
-import jax
-import jax.numpy as jnp
 from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
-
+import jax
+import jax.numpy as jnp
+from maxtext.integration.vllm.convert_utils import MOE_MLP_WEIGHTS, _sharding_summary
+from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
+from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
+from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
+from maxtext.integration.vllm.weight_converter import (
+    MODEL_TO_CONVERSION_RULES,
+    WeightConverter,
+)
 from tunix.generate import mappings
+from tunix.generate import utils as tunix_utils
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
-
-from maxtext.integration.vllm.convert_utils import _sharding_summary
-from maxtext.integration.vllm.weight_converter import (
-    WeightConverter,
-    MODEL_TO_CONVERSION_RULES,
-)
-from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 
 # Sentinel distinguishing "this model has no entry" from "this model has an
 # entry whose value is None", which means direct-sync-only.
 _NO_RULE_TABLE = object()
+
+
+def _patch_tunix_moe_weight_keys() -> None:
+  """Adds the MoE keys missing from Tunix's zero-pad branch (currently `wo`).
+
+  `tunix.generate.utils._align_per_axis` zero-pads MoE MLP weights and repeats
+  everything else, but its key set omits `wo`. A `wo` whose intermediate dim the
+  rollout padded for GMM_v2 (`padded_base_moe_mlp_dim`) then takes the repeat
+  branch and raises ShapeMismatchError: gemma4-26b 704 -> 1024, qwen3-30b-a3b
+  768 -> 1024. MaxText's own copy of that set is correct, so mirror it onto
+  Tunix; drop this once the pinned google-tunix carries the fix.
+  """
+  tunix_keys = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)  # pylint: disable=protected-access
+  if tunix_keys is None:
+    # Renamed or removed upstream, which most likely means the fix landed.
+    logging.warning("tunix.generate.utils._MOE_MLP_WEIGHTS is absent; skipping the MoE `wo` zero-pad patch.")
+    return
+
+  missing = set(MOE_MLP_WEIGHTS) - set(tunix_keys)
+  if not missing:
+    return
+
+  tunix_utils._MOE_MLP_WEIGHTS = frozenset(set(tunix_keys) | set(MOE_MLP_WEIGHTS))  # pylint: disable=protected-access
+  logging.info(
+      "Patched tunix _MOE_MLP_WEIGHTS with %s so padded MoE weights are zero-padded instead of repeated.",
+      sorted(missing),
+  )
+
+
+_patch_tunix_moe_weight_keys()
 
 
 def _rule_table_for(model_name: str):
@@ -59,12 +90,8 @@ def _rule_table_for(model_name: str):
   Returns `None` for models supported only on the direct path, and
   `_NO_RULE_TABLE` for models this converter does not handle at all.
   """
-  if model_name.startswith("qwen3.5-"):
-    return MODEL_TO_CONVERSION_RULES["qwen35_moe"]
   if model_name == "qwen3-0.6b":
     return MODEL_TO_CONVERSION_RULES["qwen3"]
-  if model_name.startswith("qwen3-"):
-    return MODEL_TO_CONVERSION_RULES["qwen3_moe"]
   return _NO_RULE_TABLE
 
 
@@ -74,14 +101,29 @@ def _create_model_converter(
     mesh: jax.sharding.Mesh,
     use_hf_mapping: bool = False,
     use_weight_converter: bool = False,
+    use_standalone_converter: bool = False,
+    sharding_hints: Optional[dict] = None,
     debug: bool = False,
 ):
   """Instantiate the converter for a MaxText model name."""
   tp = config.rollout_tensor_parallelism
-  if not use_hf_mapping and not use_weight_converter:
-    # Default MaxText-to-MaxText sync uses legacy transfer_state_directly unless explicitly opted in
+  if use_standalone_converter:
+    # Standalone torchax converters emit the tpu-inference runner's internal
+    # layout keyed by its state names; MaxTextVllmSampler syncs them with
+    # `_sync_standalone_converted`. Requires vLLM to run its *native* model
+    # (no MaxTextForCausalLM overrides).
+    if model_name.startswith("qwen3.5"):
+      return Qwen35MaxTextToVLLMConverter(
+          config=config,
+          mesh=mesh,
+          vllm_attn_dp=sharding_hints.get("attn_dp_size", 1) if sharding_hints else 1,
+          vllm_use_ep=sharding_hints.get("enable_expert_parallel", False) if sharding_hints else False,
+      )
     if model_name.startswith("gemma4"):
       return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+    raise NotImplementedError(f"use_standalone_converter: no standalone torchax converter for {model_name}")
+  if not use_hf_mapping and not use_weight_converter:
+    # Default MaxText-to-MaxText sync uses direct transfer_state_directly with unroll
     return None
 
   rule_table = _rule_table_for(model_name)
@@ -101,6 +143,10 @@ def _create_model_converter(
 
   if model_name.startswith("gemma4"):
     return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+  if model_name.startswith("qwen3.5"):
+    return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
+  if model_name.startswith("qwen3-30"):
+    return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
 
   # For all other models, return None to fallback to transfer_state_with_mappings()
 
@@ -186,6 +232,69 @@ def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_block
       if key_tuple[i] == name and isinstance(key_tuple[i + 1], str) and key_tuple[i + 1].startswith("layers_"):
         return i, name
   return -1, None
+
+
+def validate_direct_sync_layer_coverage(source, target) -> int:
+  """Fail if an unrolled source would leave MaxText target layers untouched.
+
+  Tunix intentionally intersects direct-sync trees. For heterogeneous Qwen
+  scans, a schema error can therefore skip every transformer layer without an
+  exception. This check runs on the initial full-parameter load and requires
+  every unscanned target-layer parameter path to exist in the source.
+  """
+
+  def to_pure_params(state):
+    if hasattr(state, "filter") and hasattr(state, "to_pure_dict"):
+      return state.filter(nnx.Param).to_pure_dict()
+    if hasattr(state, "to_pure_dict"):
+      return state.to_pure_dict()
+    if hasattr(state, "to_dict"):
+      return state.to_dict()
+    return state
+
+  def unwrap(state, wrapper):
+    while isinstance(state, dict) and wrapper in state:
+      state = state[wrapper]
+    return state
+
+  source = unwrap(to_pure_params(source), "base")
+  target = unwrap(to_pure_params(target), "model")
+  if not isinstance(source, dict) or not isinstance(target, dict):
+    return 0
+
+  source_flat = flatten_dict(source)
+  target_flat = flatten_dict(target)
+
+  def is_unscanned_layer_path(path):
+    return any(isinstance(part, str) and re.fullmatch(r"layers_\d+", part) for part in path)
+
+  source_layer_keys = {key for key in source_flat if is_unscanned_layer_path(key)}
+  target_layer_keys = {key for key in target_flat if is_unscanned_layer_path(key)}
+
+  def source_covers(target_key):
+    if target_key in source_layer_keys:
+      return True
+    # Tunix fuses split training weights into the inference-only prefused
+    # parameter before transfer. Treat the pair as coverage for target `wi`.
+    if target_key and target_key[-1] == "wi":
+      prefix = target_key[:-1]
+      return prefix + ("wi_0",) in source_layer_keys and prefix + ("wi_1",) in source_layer_keys
+    return False
+
+  missing = {key for key in target_layer_keys if not source_covers(key)}
+  if not target_layer_keys or missing:
+    examples = [".".join(map(str, key)) for key in sorted(missing)[:5]]
+    raise ValueError(
+        "Direct MaxText weight sync would leave rollout transformer parameters at random initialization: "
+        f"matched {len(target_layer_keys) - len(missing)}/{len(target_layer_keys)} target layer parameters; "
+        f"missing examples: {examples}"
+    )
+
+  logging.info(
+      "MaxTextVllmSampler: verified direct-sync coverage for all %d rollout layer parameters.",
+      len(target_layer_keys),
+  )
+  return len(target_layer_keys)
 
 
 def _find_qwen_scanned_layer_idx(key_tuple):
@@ -278,69 +387,6 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
   return unflatten_dict(new_flat_w)
 
 
-def validate_direct_sync_layer_coverage(source, target) -> int:
-  """Fail if an unrolled source would leave MaxText target layers untouched.
-
-  Tunix intentionally intersects direct-sync trees. For heterogeneous Qwen
-  scans, a schema error can therefore skip every transformer layer without an
-  exception. This check runs on the initial full-parameter load and requires
-  every unscanned target-layer parameter path to exist in the source.
-  """
-
-  def to_pure_params(state):
-    if hasattr(state, "filter") and hasattr(state, "to_pure_dict"):
-      return state.filter(nnx.Param).to_pure_dict()
-    if hasattr(state, "to_pure_dict"):
-      return state.to_pure_dict()
-    if hasattr(state, "to_dict"):
-      return state.to_dict()
-    return state
-
-  def unwrap(state, wrapper):
-    while isinstance(state, dict) and wrapper in state:
-      state = state[wrapper]
-    return state
-
-  source = unwrap(to_pure_params(source), "base")
-  target = unwrap(to_pure_params(target), "model")
-  if not isinstance(source, dict) or not isinstance(target, dict):
-    return 0
-
-  source_flat = flatten_dict(source)
-  target_flat = flatten_dict(target)
-
-  def is_unscanned_layer_path(path):
-    return any(isinstance(part, str) and re.fullmatch(r"layers_\d+", part) for part in path)
-
-  source_layer_keys = {key for key in source_flat if is_unscanned_layer_path(key)}
-  target_layer_keys = {key for key in target_flat if is_unscanned_layer_path(key)}
-
-  def source_covers(target_key):
-    if target_key in source_layer_keys:
-      return True
-    # Tunix fuses split training weights into the inference-only prefused
-    # parameter before transfer. Treat the pair as coverage for target `wi`.
-    if target_key and target_key[-1] == "wi":
-      prefix = target_key[:-1]
-      return prefix + ("wi_0",) in source_layer_keys and prefix + ("wi_1",) in source_layer_keys
-    return False
-
-  missing = {key for key in target_layer_keys if not source_covers(key)}
-  if not target_layer_keys or missing:
-    examples = [".".join(map(str, key)) for key in sorted(missing)[:5]]
-    raise ValueError(
-        "Direct MaxText weight sync would leave rollout transformer parameters at random initialization: "
-        f"matched {len(target_layer_keys) - len(missing)}/{len(target_layer_keys)} target layer parameters; "
-        f"missing examples: {examples}"
-    )
-
-  logging.info(
-      "MaxTextVllmSampler: verified direct-sync coverage for all %d rollout layer parameters.",
-      len(target_layer_keys),
-  )
-  return len(target_layer_keys)
-
-
 def unroll_gemma_scanned_weights(weights):
   """Workaround for tunix unstacking bug with Gemma 3/4 scanned blocks.
 
@@ -421,7 +467,8 @@ def unroll_gemma_scanned_weights(weights):
     else:
       new_flat_w[k] = v
 
-  assert unrolled_count > 0, "MaxTextVllmSampler: Detected scanned structure, but failed to unroll any layers!"
+  if unrolled_count <= 0:
+    raise ValueError("MaxTextVllmSampler: Detected scanned structure, but failed to unroll any layers!")
 
   logging.info(
       "MaxTextVllmSampler: Successfully unrolled %d scanned tensor components into vLLM-compatible nnx.List format.",
@@ -430,30 +477,37 @@ def unroll_gemma_scanned_weights(weights):
   return unflatten_dict(new_flat_w)
 
 
+def _log_and_flush_traceback(msg: str) -> None:
+  """Logs an error with formatted traceback and flushes all logging handlers."""
+  logging.error("%s:\n%s", msg, traceback.format_exc())
+  for handler in logging.getLogger().handlers:
+    try:
+      handler.flush()
+    except Exception:  # pylint: disable=broad-except
+      pass
+
+
 class MaxTextVllmSampler(VllmSampler):
-  """VllmSampler that hands MaxText weights to a converter before the sync.
+  """VllmSampler that applies scanned-weight pre-unrolls for direct MaxText sync.
 
   The weight-sync implementation itself lives in `VllmSampler.update_params`
   (Tunix), which owns the KV-cache teardown/rebuild and the `state_leaves`
   refresh that vLLM needs to actually observe new weights. This subclass only
-  supplies the converter and applies scanned-weight pre-unrolls for the
-  legacy / direct-sync paths.
+  applies scanned-weight pre-unrolls for the legacy / direct-sync paths.
   """
 
   def __init__(
       self,
       tokenizer: Any,
       config: VllmConfig,
-      converter: Any = None,
       direct_maxtext_sync: bool = False,
-      scan_axis: int = 1,
-      layer_pattern_length: Optional[int] = None,
+      model_name: Optional[str] = None,
   ):
     super().__init__(tokenizer=tokenizer, config=config)
-    self._converter = converter
     self._direct_maxtext_sync = direct_maxtext_sync
-    self._scan_axis = scan_axis
-    self._layer_pattern_length = layer_pattern_length
+    engine_kwargs = getattr(config, "engine_kwargs", {}) or {}
+    self._model_name = model_name or getattr(config, "model", "") or engine_kwargs.get("model", "") or ""
+    self._is_gemma = "gemma" in str(self._model_name).lower()
 
   def update_params(
       self,
@@ -461,14 +515,8 @@ class MaxTextVllmSampler(VllmSampler):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
-    if self._converter is None:
-      if self._direct_maxtext_sync:
-        updated_weights = unroll_qwen_scanned_weights(
-            updated_weights,
-            scan_axis=self._scan_axis,
-            pattern_length=self._layer_pattern_length,
-        )
-        updated_weights = unroll_gemma_scanned_weights(updated_weights)
+    if self._direct_maxtext_sync and self._is_gemma:
+      updated_weights = unroll_gemma_scanned_weights(updated_weights)
     try:
       return super().update_params(updated_weights, filter_types)
     except BaseException:
@@ -476,12 +524,7 @@ class MaxTextVllmSampler(VllmSampler):
       # down, and the teardown races the normal exception propagation -- the
       # Python traceback is routinely truncated or lost entirely in the worker
       # logs. Force it out before re-raising.
-      logging.error("MaxTextVllmSampler.update_params failed:\n%s", traceback.format_exc())
-      for handler in logging.getLogger().handlers:
-        try:
-          handler.flush()
-        except Exception:  # pylint: disable=broad-except
-          pass
+      _log_and_flush_traceback("MaxTextVllmSampler.update_params failed")
       raise
 
 
@@ -536,22 +579,10 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     # fact indirectly and got it wrong when either field was reformatted.
     use_hf = "maxtext_config" not in vllm_additional_config and not uses_maxtext_vllm_adapter(maxtext_config)
     direct_maxtext_sync = not use_hf
-    use_weight_converter = bool(
-        getattr(maxtext_config, "use_weight_converter", False)
-        or vllm_additional_config.get("use_weight_converter", False)
-    )
-    # Accepted from either spelling, matching use_weight_converter above, so a
+    # Accepted from either spelling, matching MaxTextEngine, so a
     # debug run can be triggered by editing the same JSON blob.
     self._weight_sync_debug = bool(
         getattr(maxtext_config, "weight_sync_debug", False) or vllm_additional_config.get("weight_sync_debug", False)
-    )
-    converter = _create_model_converter(
-        maxtext_config.model_name,
-        config=maxtext_config,
-        mesh=mesh,
-        use_hf_mapping=use_hf,
-        use_weight_converter=use_weight_converter,
-        debug=self._weight_sync_debug,
     )
 
     mapping_config = mappings.MappingConfig.build(
@@ -607,10 +638,8 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             additional_config=rollout_additional_config,
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
         ),
-        converter=converter,
         direct_maxtext_sync=direct_maxtext_sync,
-        scan_axis=getattr(maxtext_config, "param_scan_axis", 1),
-        layer_pattern_length=getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", None),
+        model_name=getattr(maxtext_config, "model_name", ""),
     )
 
     # Counts every weight sync, including the initial one below. See

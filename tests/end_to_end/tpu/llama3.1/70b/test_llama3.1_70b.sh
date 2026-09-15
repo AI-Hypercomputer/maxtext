@@ -16,6 +16,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='llama3.1-70b'
 
@@ -54,6 +59,8 @@ fi
 # Note that scanned checkpoint helps with efficient training
 python3 -m maxtext.trainers.pre_train.train \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/train \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH} tokenizer_type="huggingface" \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     per_device_batch_size=1 run_name=${run_id} \

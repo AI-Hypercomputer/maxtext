@@ -26,6 +26,7 @@ Requires a TPU and read access to the public checkpoint bucket.
 """
 
 import dataclasses
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -36,6 +37,7 @@ import pytest
 
 from maxtext.configs import pyconfig
 from maxtext.training_engine import maxtext_engine
+from maxtext.training_engine import metrics as metrics_module
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 
@@ -90,6 +92,10 @@ def _config(**overrides) -> pyconfig.HyperParameters:
       "learning_rate=1e-4",
       "micro_batch_size_to_train_on=2",
       "max_target_length=64",
+      # The KL assertion compares log-probs from two code paths -- tunix's
+      # compute_per_token_logps and the engine's sharded forward -- which at bf16 disagree by
+      # ~2e-2 near -12.6, and low_var_kl squares that into a KL of ~1e-4. fp32 fixes it.
+      "matmul_precision=highest",
   ]
   argv.extend(f"{k}={v}" for k, v in overrides.items())
   return pyconfig.initialize(argv)
@@ -165,12 +171,44 @@ def _param_leaves(model) -> list[jax.Array]:
   return jax.tree.leaves(nnx.to_pure_dict(nnx.state(model, nnx.Param)))
 
 
+def _grpo_model_input(algo_config: _GrpoConfig):
+  """Returns grpo_loss_fn's keyword arguments for a payload.
+
+  Tunix's loss is used directly, with no adapter closure. Setting this as the engine's
+  `gen_model_input_fn` tells it to invoke the loss Tunix's way, `loss_fn(model, **inputs)`,
+  and the dict below is already exactly grpo_loss_fn's keyword arguments -- which is what
+  the orchestrator's own `_grpo_model_input` produces in the real pipeline.
+  """
+  return lambda payload: {
+      "train_example": payload,
+      "algo_config": algo_config,
+      "pad_id": _PAD_ID,
+      "eos_id": _EOS_ID,
+  }
+
+
+def _mean(metric) -> float:
+  """Reduces a WeightedMetric to one number the way `process_metrics` does.
+
+  `WeightedMetric.compute()` is elementwise -- `unreduced_sum * compute_scale()` -- so a
+  buffer holding several micro-batches returns one value per micro-batch, not their mean.
+  """
+  return float(np.mean(np.asarray(metric.compute())))
+
+
 class MaxTextEngineGrpoLossTest(absltest.TestCase):
   """The engine driven by Tunix's own GRPO loss, not a stand-in."""
 
   def test_grpo_loss_drives_a_training_step(self):
     cfg = _config()
     mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    # The batch must divide data x fsdp, which only the mesh knows. A batch those devices
+    # cannot split is padded by XLA into all-zero sequences that mask themselves out of
+    # attention, returning NaN on the pad token's embedding row under a finite loss. Splash
+    # asserts on this ratio ("Batch dimension should be shardable"); dot_product does not.
+    batch = int(mesh.shape["data"] * mesh.shape["fsdp"])
+    if cfg.micro_batch_size_to_train_on != batch:
+      cfg = _config(micro_batch_size_to_train_on=batch)
     algo_config = _GrpoConfig()
 
     engine = maxtext_engine.MaxTextTrainingEngine(
@@ -183,21 +221,12 @@ class MaxTextEngineGrpoLossTest(absltest.TestCase):
     )
     self.assertEqual(type(engine.model).__name__, "TunixMaxTextAdapter")
 
-    # Tunix's loss is used directly, with no adapter closure. Setting a gen_model_input_fn
-    # tells the engine to invoke the loss Tunix's way, `loss_fn(model, **inputs)`, and the
-    # dict below is already exactly grpo_loss_fn's keyword arguments -- which is what the
-    # orchestrator's own `_grpo_model_input` produces in the real pipeline.
     returned = engine.with_loss_fn(algo_core.grpo_loss_fn, has_aux=True).with_gen_model_input_fn(
-        lambda payload: {
-            "train_example": payload,
-            "algo_config": algo_config,
-            "pad_id": _PAD_ID,
-            "eos_id": _EOS_ID,
-        }
+        _grpo_model_input(algo_config)
     )
     self.assertIs(returned, engine)
 
-    payload = _train_example(engine.model, algo_config)
+    payload = _train_example(engine.model, algo_config, batch=batch)
     before = _param_leaves(engine.model)
 
     engine.fwd_bwd(payload)
@@ -232,6 +261,67 @@ class MaxTextEngineGrpoLossTest(absltest.TestCase):
     self.assertIn("kl_loss", buf.weighted_metrics)
     self.assertIn("learning_rate", buf.scalar_metrics)
     self.assertNotIn("learning_rate", buf.weighted_metrics)
+
+  def test_eval_step_matches_fwd_bwd_and_leaves_training_untouched(self):
+    """`eval_step` against the real GRPO loss."""
+    cfg = _config()
+    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    engine = maxtext_engine.MaxTextTrainingEngine(
+        cfg,
+        mesh=mesh,
+        # grpo_loss_fn calls the model with Tunix's signature, so the adapter wrap is needed
+        # for the loss itself, not only for weight sync.
+        wrap_with_tunix_adapter=True,
+        tokenizer_pad_id=_PAD_ID,
+    )
+
+    algo_config = _GrpoConfig()
+
+    engine.with_loss_fn(algo_core.grpo_loss_fn, has_aux=True).with_gen_model_input_fn(_grpo_model_input(algo_config))
+
+    payload = _train_example(engine.model, algo_config)
+
+    # Open a training step. This is also the reference forward pass eval is compared against.
+    engine.fwd_bwd(payload)
+    train_loss_metric = engine.get_metrics(clear_cache=False).weighted_metrics["loss"]
+    train_loss = _mean(train_loss_metric)
+    per_call_entries = train_loss_metric.unreduced_sum.size
+
+    before = _param_leaves(engine.model)
+    micro_steps_before = engine.micro_step_count
+    self.assertEqual(engine.train_step, 0)
+
+    with mock.patch.object(engine._metrics_logger, "write_metrics") as write_metrics:  # pylint: disable=protected-access
+      with engine.eval_context():
+        engine.eval_step(payload)
+        engine.eval_step(payload)
+
+    for a, b in zip(_param_leaves(engine.model), before):
+      self.assertTrue(jnp.array_equal(a, b), "eval_step mutated a model parameter")
+    self.assertEqual(engine.train_step, 0)
+    self.assertEqual(engine.micro_step_count, micro_steps_before)
+
+    # Eval must not reach the train recorder
+    train_buf = engine.get_metrics(clear_cache=False)
+    self.assertEqual(train_buf.weighted_metrics["loss"].unreduced_sum.size, per_call_entries)
+    self.assertEqual(train_buf.mode, metrics_module.Mode.TRAIN)
+
+    # Leaving the context writes the metrics once
+    self.assertEqual(write_metrics.call_count, 1)
+    eval_buf = write_metrics.call_args.args[0]
+    self.assertEqual(write_metrics.call_args.kwargs["mode"], metrics_module.Mode.EVAL)
+    self.assertEqual(eval_buf.mode, metrics_module.Mode.EVAL)
+    self.assertEqual(eval_buf.id, 0)
+
+    # Both micro-batches accumulated into that single buffer.
+    eval_loss_metric = eval_buf.weighted_metrics["loss"]
+    self.assertEqual(eval_loss_metric.unreduced_sum.size, 2 * per_call_entries)
+
+    eval_loss = _mean(eval_loss_metric)
+    self.assertAlmostEqual(eval_loss, train_loss, places=4)
+
+    # Eval never records a learning rate
+    self.assertNotIn("learning_rate", eval_buf.scalar_metrics)
 
 
 if __name__ == "__main__":

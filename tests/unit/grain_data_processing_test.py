@@ -24,6 +24,7 @@ import numpy as np
 
 import jax
 import pytest
+from unittest.mock import patch
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
@@ -33,6 +34,27 @@ from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
+
+
+class TestTfdsTfrecordPathFallback:
+  """Tests TFrecord path construction without reading a dataset."""
+
+  def test_construct_tfds_tfrecord_path(self):
+    with patch.object(grain_data_processing.max_logging, "log") as log:
+      assert (
+          grain_data_processing.construct_tfds_tfrecord_path("  gs://maxtext-dataset/  ", "c4/en:3.0.1", "train")
+          == "gs://maxtext-dataset/c4/en/3.0.1/*-train.tfrecord-*"
+      )
+      log.assert_called_once_with(
+          "Automatically constructed Grain TFRecord path from TFDS configuration: "
+          "gs://maxtext-dataset/c4/en/3.0.1/*-train.tfrecord-*"
+      )
+
+  def test_missing_derived_path_reports_pattern(self, tmp_path):
+    pattern = str(tmp_path / "c4/en/3.0.1/*-train.tfrecord-*")
+
+    with pytest.raises(FileNotFoundError, match=r"No files found matching pattern: .*\*-train\.tfrecord-\*"):
+      grain_data_processing.find_data_files(pattern)
 
 
 class GrainBaseProcessingTest:
@@ -570,6 +592,16 @@ class GrainTFRecordProcessingTest(_GrainTFRecordSetup, GrainDeterminismMixin, Gr
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
+
+  def test_config_accepts_tfds_tfrecord_fallback(self):
+    config = self._make_config(
+        grain_train_files="",
+        dataset_path="gs://maxtext-dataset",
+        dataset_name="c4/en:3.0.1",
+        train_split="train",
+        eval_interval=0,
+    )
+    self.assertEqual(config.grain_train_files, "")
 
 
 class GrainTFRecordPreTokenizedProcessingTest(_GrainTFRecordSetup, GrainBaseProcessingTest, unittest.TestCase):

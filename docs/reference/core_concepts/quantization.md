@@ -186,3 +186,56 @@ For this specific case, we derived our training duration from the MLPerf 405B be
 ### Performance Sensitivity
 
 Please note that the FP8 benefits are highly sensitive to model parameters, the efficiency of the BF16 baseline, and hardware utilization; consequently, results will vary when this recipe is applied to other models. Any variance in these factors shifts the ratio of compute-bound to memory-bound operations, directly altering the potential gains.
+
+## Quantized Weight All-Gather (Weight QAG) for GMM
+
+In MoE models, expert weights represent a substantial memory and communication footprint under Fully Sharded Data Parallelism (FSDP). When expert weights are sharded across FSDP ranks, MaxText supports **Quantized Weight All-Gather (Weight QAG)** to quantize weights before gathering them across the FSDP mesh axis and passing to the Grouped Matrix Multiplication (GMM) kernel, reducing inter-chip weight communication volume proportionally to the quantized width (2x for FP8 weights gathered in place of BF16).
+
+```
+quantize weights -> FSDP all-gather -> GMM
+```
+
+### Mechanism
+
+1. **Pre-Gather Quantization**: Each FSDP shard quantizes its local weight slice from the model dtype (e.g. BF16) to the quantized dtype (e.g. FP8).
+2. **FSDP All-Gather**: Gathers the quantized byte payloads across the FSDP axis, shrinking communication volume by the compression ratio compared to gathering in the model dtype.
+3. **GMM Forward**: The gathered quantized weights are consumed directly by the grouped GEMM kernel without re-quantization.
+4. **Backward Pass**: In the backward pass, gradients w.r.t. weights (`drhs`) are computed and reduce-scattered back across the FSDP ranks.
+
+### Usage & Requirements
+
+Weight QAG is triggered when an MoE FSDP sharding strategy is combined with quantization.
+
+Requirements:
+
+- Either `shard_embed_moe_on_fsdp=True` or `shard_exp_on_fsdp=True`. See [MoE Configuration](moe_configuration.md).
+- `quantization` must be specified (e.g. `fp8_full`).
+- Static weight calibration: `weight_quantization_calibration_method` starting with `fixed` (ensures uniform scale factors across shards without collective synchronization).
+
+## Token Quantized All-Gather Pipeline for MoE Ring of Experts
+
+In Expert Parallelism (EP) sharding and Ring of Experts (`use_ring_of_experts=True`), MaxText provides the option to quantize token activations prior to the All-Gather across the EP mesh axis, reducing inter-chip communication volume proportionally to the quantized width (2x for FP8 activations gathered in place of BF16).
+
+Along with quantized token all-gather, MaxText defines the entire **quantized token execution pipeline** to reduce re-quantization overhead:
+
+```
+quantize token -> EP all-gather -> sort -> GMM
+```
+
+### Quantization Pipeline
+
+1. **Quantize Token**: Activations are quantized from the model dtype (e.g. BF16) to the quantized dtype (e.g. FP8).
+2. **EP All-Gather**: Gathers the quantized byte payloads across the EP mesh axis, shrinking inter-chip bandwidth by the compression ratio.
+3. **Sort**: Token sorting (default or ragged sort) operates directly on the raw quantized payloads without dequantizing to float.
+4. **GMM**: Tokamax GMM v2 computes directly on the quantized activations and weights, and scales accumulated outputs back to model dtype.
+5. **Backward TGMM**: Receives cached pre-quantized activations directly from the forward pass, avoiding re-quantization.
+
+### Usage & Requirements
+
+Flag: `moe_quantize_token_all_gather=true`
+
+Requirements:
+
+- `use_ring_of_experts=True`: Inherent architectural requirements.
+- `use_gmm_v2=True`: Tokamax GMM v2 grouped GEMM backend.
+- Static calibration for activations: e.g. `act_quantization_calibration_method="fixed,-224,224"` (dynamic calibration is for future work).

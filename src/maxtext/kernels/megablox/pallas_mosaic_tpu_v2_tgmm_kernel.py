@@ -786,7 +786,7 @@ def tgmm_v2(
       cost_estimate=get_cost_estimate(cfgs),
       # the metadata here is for profiling, debugging, and cost modeling.
       # It does not affect the kernel's computation.
-      metadata=gmm_v2.get_metadata(cfgs),
+      metadata=gmm_v2.get_metadata(cfgs),  # pyrefly: ignore[bad-argument-type]
       input_output_aliases=input_output_aliases,
   )(group_sizes, group_offset, lhs, rhs, partial_sum)[:, : dims.size_k, : dims.size_n]
 

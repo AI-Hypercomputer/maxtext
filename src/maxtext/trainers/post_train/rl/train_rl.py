@@ -44,14 +44,14 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 """
 
 from __future__ import annotations
-import contextlib
+import functools
 from functools import wraps
 from typing import Any, Callable, Optional, Sequence
 
+import dataclasses
 import datasets
 import grain
 import jax
-import jax.numpy as jnp
 import json
 import logging
 import os
@@ -67,79 +67,10 @@ from transformers import AutoTokenizer
 import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
 
 adapter.register()
-import functools
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
-import tunix.generate.utils as tunix_utils
-
-
-@contextlib.contextmanager
-def _tpu_inference_compat_patches():
-  """Tactical compat shims for tpu_inference.
-
-  tpu_inference has two call-site assumptions that no longer hold:
-    1. jax.lax.with_sharding_constraint: assumes silent reshard on mismatch,
-       but current jax asserts when all mesh axes are Explicit. Fall back to
-       jax.sharding.reshard on the AssertionError.
-    2. tunix._apply_dtype_cast: tpu_inference JaxEinsum defaults
-       param_dtype=float32 so its weights initialize as float32, but model
-       dtype is bfloat16; the cast upgraded synced bfloat16 weights to float32,
-       which then mismatched in the ragged paged attention kernel. Skip the
-       bf16->f32 upcast so synced weights stay bfloat16.
-
-  Scoped to rl_train() so the patches don't leak into other importers of this
-  module. Drop both once tpu_inference is updated upstream.
-  """
-  orig_wsc = jax.lax.with_sharding_constraint
-  orig_apply_dtype_cast = tunix_utils._apply_dtype_cast  # pylint: disable=protected-access
-  orig_bulk = tunix_utils._bulk_align_and_unstack  # pylint: disable=protected-access
-  orig_unstack = tunix_utils._unstack_scanned_param  # pylint: disable=protected-access
-
-  orig_moe_weights = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)
-
-  def _compat_wsc(x, shardings):
-    try:
-      return orig_wsc(x, shardings)
-    except AssertionError:
-      return jax.sharding.reshard(x, shardings)
-
-  def _no_bf16_to_f32_cast(val, tgt_dtype, src_key):
-    if hasattr(val, "dtype") and val.dtype == jnp.bfloat16 and tgt_dtype == jnp.float32:
-      return val
-    return orig_apply_dtype_cast(val, tgt_dtype, src_key)
-
-  def _compat_bulk(arr, scan_axis, per_layer, key_path):
-    if hasattr(arr, "shape") and len(arr.shape) <= scan_axis:
-      scan_axis = len(arr.shape) - 1 if len(arr.shape) > 0 else 0
-    return orig_bulk(arr, scan_axis, per_layer, key_path)
-
-  def _compat_unstack(src_val, tgt_val, key_path, scan_axis=None):
-    if scan_axis is not None and hasattr(src_val, "shape") and len(src_val.shape) <= scan_axis:
-      scan_axis = len(src_val.shape) - 1 if len(src_val.shape) > 0 else 0
-    res = orig_unstack(src_val, tgt_val, key_path, scan_axis=scan_axis)
-    if isinstance(res, tuple) and len(res) == 1 and hasattr(src_val, "shape") and src_val.shape == tgt_val.shape:
-      return res * 256
-    return res
-
-  jax.lax.with_sharding_constraint = _compat_wsc
-  tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
-  tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
-  tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
-
-  if orig_moe_weights is not None:
-    tunix_utils._MOE_MLP_WEIGHTS = frozenset([*orig_moe_weights, "wo"])  # pylint: disable=protected-access
-
-  try:
-    yield
-  finally:
-    jax.lax.with_sharding_constraint = orig_wsc
-    tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
-    tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
-    tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
-    if orig_moe_weights is not None:
-      tunix_utils._MOE_MLP_WEIGHTS = orig_moe_weights  # pylint: disable=protected-access
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
@@ -152,6 +83,7 @@ from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
 from maxtext.utils import max_logging, max_utils, model_creation_utils
+from maxtext.utils.model_creation_utils import get_rollout_kwargs_for_parallelism
 
 
 _RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset((DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5))
@@ -196,66 +128,6 @@ def get_dataset(
     max_logging.log(f"Loaded Hugging Face dataset {dataset_name} with split {split}. Size: {len(data)}")
 
   return data
-
-
-def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
-  """Get rollout kwargs for vLLM rollout when using data parallelism."""
-  dp = sampler_config.rollout_data_parallelism
-  tp = sampler_config.rollout_tensor_parallelism
-  ep = sampler_config.rollout_expert_parallelism
-
-  # -1 means "auto-derive from the other two". At most one can be -1.
-  num_auto = sum(1 for x in [tp, dp, ep] if x == -1)
-  if num_auto > 1:
-    raise ValueError(
-        "At most one of rollout_tensor_parallelism, rollout_data_parallelism, "
-        "rollout_expert_parallelism can be -1 (auto-derived).\n"
-        f"Currently resolved values:\n"
-        f"  - rollout_tensor_parallelism = {tp}\n"
-        f"  - rollout_data_parallelism = {dp}\n"
-        f"  - rollout_expert_parallelism = {ep}\n\n"
-        "To fix this, you must explicitly define at least two of these parameters in your command line arguments.\n"
-        "For example, try adding 'rollout_tensor_parallelism=4' to your command."
-    )
-
-  if dp == -1:
-    if num_sampler_devices % (tp * ep) != 0:
-      raise ValueError(
-          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
-          f"rollout_tensor_parallelism({tp}) * rollout_expert_parallelism({ep}) "
-          f"when rollout_data_parallelism is -1."
-      )
-    dp = num_sampler_devices // tp // ep
-  elif tp == -1:
-    if num_sampler_devices % (dp * ep) != 0:
-      raise ValueError(
-          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
-          f"rollout_data_parallelism({dp}) * rollout_expert_parallelism({ep}) "
-          f"when rollout_tensor_parallelism is -1."
-      )
-    tp = num_sampler_devices // dp // ep
-  elif ep == -1:
-    if num_sampler_devices % (tp * dp) != 0:
-      raise ValueError(
-          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
-          f"rollout_tensor_parallelism({tp}) * rollout_data_parallelism({dp}) "
-          f"when rollout_expert_parallelism is -1."
-      )
-    ep = num_sampler_devices // tp // dp
-  elif tp * dp * ep != num_sampler_devices:
-    raise ValueError(
-        f"rollout_tensor_parallelism({tp}) * "
-        f"rollout_data_parallelism({dp}) * "
-        f"rollout_expert_parallelism({ep}) "
-        f"!= len(sampler_devices)({num_sampler_devices})"
-    )
-
-  rollout_kwargs = {}
-  rollout_kwargs["tensor_parallel_size"] = tp
-  rollout_kwargs["data_parallel_size"] = dp
-  rollout_kwargs["expert_parallel_size"] = ep
-
-  return rollout_kwargs
 
 
 def prepare_train_and_eval_dataset(
@@ -497,6 +369,18 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
 
   rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
 
+  rollout_vllm_kwargs = {
+      "hf_overrides": trainer_config.vllm_hf_overrides,
+      "enable_expert_parallel": sampler_config.enable_expert_parallel,
+      "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
+      # Ensures vLLM model initializes with correct dtype (not float32 default)
+      "dtype": trainer_config.weight_dtype.value,
+  }
+  if trainer_config.vllm_block_size is not None:
+    # Pin the KV-cache page size; left unset, the backend derives it from the
+    # engine shape, so unrelated engine changes can move it.
+    rollout_vllm_kwargs["block_size"] = trainer_config.vllm_block_size
+
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
           rl_cluster_lib.Role.ACTOR: actor_mesh,
@@ -517,6 +401,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           mini_batch_size=trainer_config.batch_size,
           train_micro_batch_size=train_micro_batch_size,
           rollout_micro_batch_size=rollout_micro_batch_size,
+          max_seq_token_per_tpu=trainer_config.max_seq_token_per_tpu or None,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
           checkpoint_root_directory=checkpoint_dir,
@@ -545,13 +430,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           rollout_vllm_async_scheduling=trainer_config.async_scheduling,
           rollout_vllm_server_mode=trainer_config.rl.use_agentic_rollout,
           rollout_vllm_reshard_chunk_size=trainer_config.rl.reshard_chunk_size,
-          rollout_vllm_kwargs={
-              "hf_overrides": trainer_config.vllm_hf_overrides,
-              "enable_expert_parallel": sampler_config.enable_expert_parallel,
-              "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
-              # Ensures vLLM model initializes with correct dtype (not float32 default)
-              "dtype": trainer_config.weight_dtype.value,
-          },
+          rollout_vllm_kwargs=rollout_vllm_kwargs,
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
               "detokenize": trainer_config.stop_strings is not None,
@@ -621,11 +500,19 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         beta=trainer_config.rl.grpo_beta,
         epsilon=trainer_config.rl.grpo_epsilon,
         loss_algo=trainer_config.rl.loss_algo,
+        loss_agg_mode=trainer_config.rl.loss_agg_mode,
         max_response_length=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
         max_concurrency=trainer_config.rl.max_concurrency,
         off_policy_steps=trainer_config.rl.off_policy_steps,
         system_prompt=trainer_config.rl.system_prompt,
         epsilon_high=trainer_config.rl.epsilon_high,
+        use_rollout_logps=trainer_config.rl.use_rollout_logps,
+        force_on_policy_ratio=trainer_config.rl.force_on_policy_ratio,
+        log_sampler_trainer_agreement=(trainer_config.rl.log_sampler_trainer_agreement),
+    )
+    max_logging.log(
+        "GRPO config resolved:\n"
+        + "\n".join(f"  {k} = {v!r}" for k, v in sorted(dataclasses.asdict(grpo_config).items()))
     )
     # Instantiate the custom MaxText chat parser
     template_config = load_data_template_from_file(trainer_config.data_template_path)
@@ -694,12 +581,11 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
-  with _tpu_inference_compat_patches():
-    _rl_train_impl(argv, kwargs)
+  _rl_train_impl(argv, kwargs)
 
 
 def _rl_train_impl(argv: Sequence[str], kwargs: dict):
-  """rl_train body — kept separate so _tpu_inference_compat_patches wraps it cleanly."""
+  """rl_train execution body."""
   trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
       argv,
       kwargs,

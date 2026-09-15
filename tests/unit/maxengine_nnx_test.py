@@ -41,9 +41,6 @@ class SetEngineVarsNNXTest(unittest.TestCase):
         "max_target_length": 8,
         "per_device_batch_size": 1,
         "enable_checkpointing": False,
-        "pure_nnx": True,
-        "enable_nnx": True,
-        "pure_nnx_decoder": True,
     } | kwargs
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **init_kwargs)
 

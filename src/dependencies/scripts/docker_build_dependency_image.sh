@@ -66,6 +66,9 @@ fi
 if [[ -z ${INCLUDE_TEST_ASSETS} ]]; then
   export INCLUDE_TEST_ASSETS=false
 fi
+if [[ -z ${TF} ]]; then
+  export TF=false
+fi
 
 # Create docker build arguments array
 docker_build_args=(
@@ -75,6 +78,7 @@ docker_build_args=(
   "JAX_VERSION=${JAX_VERSION}"
   "PACKAGE_DIR=${PACKAGE_DIR}"
   "INCLUDE_TEST_ASSETS=${INCLUDE_TEST_ASSETS}"
+  "TF=${TF}"
 )
 
 run_docker_build() {

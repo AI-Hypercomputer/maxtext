@@ -2,6 +2,11 @@
 
 # Example run: bash tests/end_to_end/tpu/test_decode_save_quantized_ckpt.sh -m llama2-70b -r 070924 -n
 
+
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
 dry_run=false
 model='llama2-7b'
 run_name="test_quant_ckpt"

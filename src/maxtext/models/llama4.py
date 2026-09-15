@@ -253,17 +253,6 @@ class Llama4MultiModalProjector(nnx.Module):
     return hidden_states
 
 
-def llama4multimodalprojector_as_linen(config: Config, mesh: Mesh):
-  return nnx_wrappers.to_linen(
-      Llama4MultiModalProjector,
-      config=config,
-      mesh=mesh,
-      name="Llama4MultiModalProjector_0",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-
-
 def determine_is_nope_layer(layer_id: int, nope_layer_interval: int) -> bool:
   """
   Determines whether the given layer at `layer_id` should use RoPE or not (NoPE).
@@ -812,14 +801,3 @@ class Llama4VisionModel(nnx.Module):
     hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
 
     return hidden_states
-
-
-def llama4visionmodel_as_linen(config: Config, mesh: Mesh) -> nn.Module:
-  return nnx_wrappers.to_linen(
-      Llama4VisionModel,
-      config=config,
-      mesh=mesh,
-      name="Llama4VisionModel_0",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )

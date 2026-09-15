@@ -38,7 +38,7 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.configs.types import check_forced_routing_support
-from maxtext.layers import initializers, linears, mhc, moe, normalizations, quantizations
+from maxtext.layers import linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -480,6 +480,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
+    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -572,7 +573,7 @@ class NNXDecoder(nnx.Module):
         self.layers_outside_pipeline = self._create_scanned_layers(
             base_cls,
             length=remaining_layers,
-            metadata_axis_name="layers",
+            metadata_axis_name="layers_outside_pipeline",
             rngs=rngs,
         )
       else:
@@ -590,6 +591,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
+    elif self.is_qwen3_next:
+      self._init_scanned_qwen3_next(rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -759,6 +762,48 @@ class NNXDecoder(nnx.Module):
         **rem_layer_kwargs,
         rngs=rngs,
     )
+
+  def _init_scanned_qwen3_next(self, rngs, mesh):
+    """Initializes scanned Qwen3-Next blocks with per-layer (rather than per-block) remat.
+
+    Mirrors _init_scanned_gemma4: each block covers one period of the hybrid
+    attention pattern and rematerializes its own sub-layers, so the outer apply
+    skips block-level remat. Layers past the last whole period go into a short
+    remainder block, named the same as the Linen `Decoder`'s so both decoders
+    keep producing the same parameter tree.
+    """
+    config = self.config
+    block_length = config.inhomogeneous_layer_cycle_interval
+    scan_length = config.num_decoder_layers // block_length
+    num_remaining_layers = config.num_decoder_layers % block_length
+    policy = self.get_remat_policy()
+    if scan_length > 0:
+      self.layers = self._create_scanned_layers(
+          qwen3.Qwen3NextScannableBlock,
+          length=scan_length,
+          metadata_axis_name="layers",
+          rngs=rngs,
+          num_of_layers=block_length,
+          remat_policy_fn=policy,
+          apply_internal_remat=True,
+      )
+    if num_remaining_layers > 0:
+      # The remainder starts on a period boundary, so it holds only the leading
+      # linear-attention layers of a period -- the full-attention layer is last.
+      self.layers_remainder = qwen3.Qwen3NextScannableBlock(
+          config=config,
+          mesh=mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          num_of_layers=num_remaining_layers,
+          layer_idx_offset=scan_length * block_length,
+          remat_policy_fn=policy,
+          # _apply_remainder_block already wraps the call in jax.checkpoint, and
+          # the remainder is shorter than one period and runs once, so there is
+          # nothing to gain from a second, finer remat boundary inside it.
+          apply_internal_remat=False,
+          rngs=rngs,
+      )
 
   def _init_scanned_generic(self, decoder_block_classes, rngs):
     """Initializes scanned generic decoder layers."""
@@ -1048,9 +1093,7 @@ class NNXDecoder(nnx.Module):
         current_params, current_state, kv_cache_layer = scanned_vars
         forced_routed_experts_layer = None
       elif use_forced_routing:
-        current_params, current_state, forced_routed_experts_layer = (
-            scanned_vars
-        )
+        current_params, current_state, forced_routed_experts_layer = scanned_vars
         kv_cache_layer = None
       else:
         current_params, current_state = scanned_vars
@@ -1138,9 +1181,7 @@ class NNXDecoder(nnx.Module):
         scan_xs = (params, state, forced_routed_experts_scanned)
       else:
         scan_xs = (params, state)
-      final_carry, scanned_state = jax.lax.scan(
-          layer_fn_wrapped, x_in, scan_xs, unroll=unroll
-      )
+      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, scan_xs, unroll=unroll)
       returned_kv_stacked = None
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
@@ -1227,14 +1268,15 @@ class NNXDecoder(nnx.Module):
     """Get remat policy for jax.checkpoint."""
     policy = None
     cfg = self.config
-    if cfg.remat_policy and cfg.remat_policy != "none":
-      if cfg.remat_policy in {"minimal_with_context", "minimal_flash"}:
-        if cfg.remat_policy == "minimal_flash":
+    remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+    if remat_policy and remat_policy != "none":
+      if remat_policy in {"minimal_with_context", "minimal_flash"}:
+        if remat_policy == "minimal_flash":
           max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
         policy = self.minimal_policy(with_context=True)
-      elif cfg.remat_policy == "minimal":
+      elif remat_policy == "minimal":
         policy = self.minimal_policy()
-      elif cfg.remat_policy == "minimal_with_quantization":
+      elif remat_policy == "minimal_with_quantization":
         if cfg.scan_layers:
           warnings.warn(
               "Scan layers can introduce overhead to checkpointed values that in some configurations is slower"
@@ -1243,7 +1285,7 @@ class NNXDecoder(nnx.Module):
               "beneficial for performance."
           )
         policy = self.minimal_policy(with_context=False, with_quantization=True)
-      elif cfg.remat_policy == "minimal_with_context_and_quantization":
+      elif remat_policy == "minimal_with_context_and_quantization":
         if cfg.scan_layers:
           warnings.warn(
               "Scan layers can introduce overhead to checkpointed values that in some configurations is slower"
@@ -1252,7 +1294,7 @@ class NNXDecoder(nnx.Module):
               "beneficial for performance."
           )
         policy = self.minimal_policy(with_context=True, with_quantization=True)
-      elif cfg.remat_policy == "save_dot_with_context_except_mlp":
+      elif remat_policy == "save_dot_with_context_except_mlp":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
             "value_proj",
@@ -1262,7 +1304,7 @@ class NNXDecoder(nnx.Module):
             "context",
             "out_proj",
         )
-      elif cfg.remat_policy == "save_dot_except_mlpwi":
+      elif remat_policy == "save_dot_except_mlpwi":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
             "value_proj",
@@ -1272,7 +1314,7 @@ class NNXDecoder(nnx.Module):
             "out_proj",
             "mlpwo",
         )
-      elif cfg.remat_policy == "save_dot_except_mlp":
+      elif remat_policy == "save_dot_except_mlp":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
             "value_proj",
@@ -1281,7 +1323,7 @@ class NNXDecoder(nnx.Module):
             "qkv_proj",
             "out_proj",
         )
-      elif cfg.remat_policy == "save_qkv_proj":
+      elif remat_policy == "save_qkv_proj":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
             "value_proj",
@@ -1289,7 +1331,7 @@ class NNXDecoder(nnx.Module):
             "kv_proj",
             "qkv_proj",
         )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
+      elif remat_policy == "qkv_proj_offloaded":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
             names_which_can_be_offloaded=[
@@ -1301,7 +1343,7 @@ class NNXDecoder(nnx.Module):
             offload_src="device",
             offload_dst="pinned_host",
         )
-      elif cfg.remat_policy == "minimal_offloaded":
+      elif remat_policy == "minimal_offloaded":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
             names_which_can_be_offloaded=[
@@ -1319,17 +1361,17 @@ class NNXDecoder(nnx.Module):
             offload_src="device",
             offload_dst="pinned_host",
         )
-      elif cfg.remat_policy == "custom":
+      elif remat_policy == "custom":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=cfg.tensors_on_device,
             names_which_can_be_offloaded=cfg.tensors_to_offload,
             offload_src="device",
             offload_dst="pinned_host",
         )
-      elif cfg.remat_policy == "save_out_proj":
+      elif remat_policy == "save_out_proj":
         policy = jax.checkpoint_policies.save_only_these_names("out_proj")
       else:
-        assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
+        assert remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
     return policy
 
@@ -1393,14 +1435,24 @@ class NNXDecoder(nnx.Module):
       deterministic,
       model_mode,
       multimodal_input=None,
+      decoder_input_embeddings=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
+
     cfg = self.config
 
-    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    # vLLM passes token IDs for text-only requests, but passes complete, premerged
+    # text and multimodal embeddings for multimodal requests. The latter enter
+    # through `decoder_input_embeddings` to avoid embedding and merging them again.
+    y = (
+        decoder_input_embeddings
+        if decoder_input_embeddings is not None
+        else shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    )
 
-    # Merge the image embeddings with the text embeddings for multimodal models
-    if multimodal_input is not None:
+    # Precomputed embeddings are complete (including any multimodal replacements),
+    # so only merge modality embeddings when token embeddings were created here.
+    if decoder_input_embeddings is None and multimodal_input is not None:
       image_embeddings = multimodal_input.image_embeddings
       bidirectional_mask = multimodal_input.bidirectional_mask
       image_masks = multimodal_input.image_masks
@@ -1428,6 +1480,8 @@ class NNXDecoder(nnx.Module):
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
             "maxtext-omni-gemma3-qwen3",
+            "cosmos3-nano-reasoner",
+            "cosmos3-super-reasoner",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1446,6 +1500,8 @@ class NNXDecoder(nnx.Module):
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
+            "cosmos3-nano-reasoner",
+            "cosmos3-super-reasoner",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1478,19 +1534,31 @@ class NNXDecoder(nnx.Module):
 
     return y
 
-  def apply_output_head(self, shared_embedding, y, deterministic, model_mode):
-    """Applies final normalization and projects hidden states to logits."""
+  def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True):
+    """Applies final normalization and projects hidden states to logits.
+
+    Args:
+      shared_embedding: Shared token embedding layer for tied logit projection.
+      y: Input hidden state tensor to project to logits.
+      deterministic: Whether dropout is disabled.
+      model_mode: Operational mode (e.g. MODEL_MODE_TRAIN, MODEL_MODE_PREFILL).
+      normalize_y: If True (default), applies the main decoder final normalization
+        (decoder_norm) before projecting to logits. Set to False when called from
+        Multi-Token Prediction (MTP), which applies its own dedicated final norm
+        (mtp_k_final_norm) to avoid double normalization.
+    """
 
     cfg = self.config
-    if cfg.shard_mode == ShardMode.EXPLICIT:
-      norm_out_sharding = create_sharding(
-          self.mesh,
-          ("activation_batch", "activation_length", "activation_embed"),
-      )
-    else:
-      norm_out_sharding = None
+    if normalize_y:
+      if cfg.shard_mode == ShardMode.EXPLICIT:
+        norm_out_sharding = create_sharding(
+            self.mesh,
+            ("activation_batch", "activation_length", "activation_embed"),
+        )
+      else:
+        norm_out_sharding = None
 
-    y = self.decoder_norm(y, out_sharding=norm_out_sharding)
+      y = self.decoder_norm(y, out_sharding=norm_out_sharding)
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
     if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE}:
@@ -1668,6 +1736,7 @@ class NNXDecoder(nnx.Module):
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
       multimodal_input: None | MultimodalInput = None,
       forced_routed_experts: jnp.ndarray | None = None,
+      decoder_input_embeddings=None,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -1709,6 +1778,7 @@ class NNXDecoder(nnx.Module):
         deterministic,
         model_mode,
         multimodal_input=multimodal_input,
+        decoder_input_embeddings=decoder_input_embeddings,
     )
 
     mhc_reduce = None
@@ -1966,6 +2036,13 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
+        elif self.is_qwen3_next:
+          y = self._apply_qwen3_next_scanned_blocks(
+              y,
+              layer_args,
+              layer_kwargs,
+              kv_caches=kv_caches,
+          )
         else:
           cycle_interval = cfg.inhomogeneous_layer_cycle_interval
           scan_length = int(cfg.num_decoder_layers / cycle_interval)
@@ -1980,13 +2057,11 @@ class NNXDecoder(nnx.Module):
               )
             # Only the per-layer slices may reach the layers from here on.
             layer_kwargs.pop("forced_routed_experts", None)
-            forced_routed_experts_scanned = (
-                reshape_forced_routed_experts_for_scan(
-                    forced_routed_experts,
-                    num_layers=cfg.num_decoder_layers,
-                    scan_length=scan_length,
-                    layers_per_cycle=cycle_interval,
-                )
+            forced_routed_experts_scanned = reshape_forced_routed_experts_for_scan(
+                forced_routed_experts,
+                num_layers=cfg.num_decoder_layers,
+                scan_length=scan_length,
+                layers_per_cycle=cycle_interval,
             )
             if cfg.decoder_block == DecoderBlockType.MIXTRAL:
               # Mixtral has no ScannableBlock: one scan iteration is one layer,
@@ -1997,9 +2072,7 @@ class NNXDecoder(nnx.Module):
                     " inhomogeneous_layer_cycle_interval == 1; got"
                     f" {cycle_interval}."
                 )
-              forced_routed_experts_scanned = jnp.squeeze(
-                  forced_routed_experts_scanned, axis=1
-              )
+              forced_routed_experts_scanned = jnp.squeeze(forced_routed_experts_scanned, axis=1)
           if kv_caches is not None:
             # Pass the kv_caches list directly to avoid copying in jnp.stack,
             # which breaks vLLM PagedAttention in-place memory updates.
@@ -2033,9 +2106,7 @@ class NNXDecoder(nnx.Module):
                 state_in,
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
-          out_y, out_kv = merged_layer(
-              y_in, *layer_args, kv_cache=kv_in, **valid_kwargs
-          )
+          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
           state_out = nnx.state(merged_layer)
 
           if dynamic_graph_init:
@@ -2105,10 +2176,7 @@ class NNXDecoder(nnx.Module):
                   f" top_k] (4D, per-layer); got ndim={routed_experts.ndim}"
                   f" with shape {routed_experts.shape}."
               )
-            if (
-                routed_experts.ndim == 4
-                and routed_experts.shape[2] != cfg.num_decoder_layers
-            ):
+            if routed_experts.ndim == 4 and routed_experts.shape[2] != cfg.num_decoder_layers:
               # jnp clamps an out-of-range static index, so a short layer axis
               # would silently replay the last slice on every later layer.
               raise ValueError(
@@ -2118,19 +2186,13 @@ class NNXDecoder(nnx.Module):
                   f" {routed_experts.shape}."
               )
             current_kwargs["forced_routed_experts"] = (
-                routed_experts[:, :, lyr, :]
-                if routed_experts.ndim == 4
-                else routed_experts
+                routed_experts[:, :, lyr, :] if routed_experts.ndim == 4 else routed_experts
             )
 
           if cfg.remat_policy != "none":
-            y, kv_cache, new_state, new_graphdef = checkpointed_fn(
-                graphdef, state, y, kv_cache, current_kwargs
-            )
+            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
           else:
-            y, kv_cache, new_state, new_graphdef = pure_layer_fn(
-                graphdef, state, y, kv_cache, current_kwargs
-            )
+            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
 
           if dynamic_graph_init:
             new_layer = nnx.merge(new_graphdef, new_state)
@@ -2346,6 +2408,53 @@ class NNXDecoder(nnx.Module):
 
     return y
 
+  def _apply_qwen3_next_scanned_blocks(self, y, layer_args, layer_kwargs, kv_caches=None):
+    """Applies the Qwen3-Next scanned blocks.
+
+    Qwen3NextScannableBlock rematerializes its own sub-layers (a scan over the
+    linear-attention layers plus a trip-count-one scan over the full-attention
+    layer), so block-level remat is skipped here to avoid rematerializing twice.
+    This holds for the external-KV-cache path too, hence the regrouping below
+    rather than falling back to the generic (block-rematerialized) branch.
+
+    External (vLLM) caches arrive as a flat list with one entry per decoder
+    layer, but the scan runs over blocks, so they are grouped into per-block
+    tuples before the scan and written back to the flat list afterwards, as in
+    _apply_gemma4_scanned_blocks.
+
+    Layers past the last whole block are applied afterwards, in a short
+    remainder block, so a layer count that is not a multiple of the cycle keeps
+    all its layers.
+    """
+    cfg = self.config
+    block_length = cfg.inhomogeneous_layer_cycle_interval
+    scan_length = cfg.num_decoder_layers // block_length
+    if scan_length > 0:
+      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
+      y, self.layers, _ = self._apply_layers_sequentially(
+          self.layers,
+          y,
+          *layer_args,
+          length=scan_length,
+          kv_caches_stacked=grouped_kv_caches,
+          skip_block_remat=True,
+          **layer_kwargs,
+      )
+      maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, block_length, stacked=False)
+
+    num_remaining_layers = cfg.num_decoder_layers % block_length
+    if num_remaining_layers > 0:
+      y = self._apply_remainder_block(
+          self.layers_remainder,
+          y,
+          layer_args,
+          layer_kwargs,
+          kv_caches=kv_caches,
+          start_idx=scan_length * block_length,
+          num_remaining_layers=num_remaining_layers,
+      )
+    return y
+
   def _apply_gemma4_scanned_blocks(
       self,
       y,
@@ -2388,52 +2497,87 @@ class NNXDecoder(nnx.Module):
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
     if num_remaining_layers > 0:
-      policy = self.get_remat_policy()
-      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+      y = self._apply_remainder_block(
+          self.layers_remainder,
+          y,
+          layer_args,
+          layer_kwargs,
+          kv_caches=kv_caches,
+          start_idx=scan_length * attention_pattern_length,
+          num_remaining_layers=num_remaining_layers,
+      )
 
-      remainder_kv = None
-      if kv_caches is not None:
-        start_idx = scan_length * attention_pattern_length
-        remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+    return y
 
-      if cfg.use_qwix_quantization or cfg.lora.lora_weight_qtype:
+  def _apply_remainder_block(
+      self,
+      block,
+      y,
+      layer_args,
+      layer_kwargs,
+      kv_caches,
+      start_idx,
+      num_remaining_layers,
+  ):
+    """Applies the trailing scannable block holding the layers left over by the main scan.
+
+    The outer scan runs over whole blocks, so `num_decoder_layers %
+    block_length` layers are left over. They live in a single short block,
+    applied here behind one block-level remat boundary. The main scan skips
+    block-level remat, because there its blocks rematerialize their own
+    sub-layers; this one runs once, so a coarse boundary costs nothing.
+
+    Args:
+      block: The remainder block module; updated in place with its new state.
+      y: Input activations.
+      layer_args: Positional arguments forwarded to the block.
+      layer_kwargs: Keyword arguments forwarded to the block.
+      kv_caches: Flat per-layer external cache list, mutated in place, or None.
+      start_idx: Index of the first remainder layer in `kv_caches`.
+      num_remaining_layers: How many layers the remainder block covers.
+
+    Returns:
+      The output activations.
+    """
+    cfg = self.config
+    remainder_kv = None
+    if kv_caches is not None:
+      remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+
+    def split_output(out_res):
+      if isinstance(out_res, tuple):
+        return out_res[0], (out_res[1] if len(out_res) > 1 else None)
+      return out_res, None
+
+    if cfg.use_qwix_quantization or cfg.lora.lora_weight_qtype:
+      call_kwargs = dict(layer_kwargs)
+      if remainder_kv is not None:
+        call_kwargs["kv_cache"] = remainder_kv
+      y, updated_remainder_kv = split_output(block(y, *layer_args, **call_kwargs))
+    else:
+
+      def pure_block_fn(graphdef, state_in, y_in, kv_in):
+        merged_layer = nnx.merge(graphdef, state_in)
         call_kwargs = dict(layer_kwargs)
-        if remainder_kv is not None:
-          call_kwargs["kv_cache"] = remainder_kv
-        out_res = self.layers_remainder(y, *layer_args, **call_kwargs)
-        if isinstance(out_res, tuple):
-          y = out_res[0]
-          updated_remainder_kv = out_res[1] if len(out_res) > 1 else None
-        else:
-          y = out_res
-          updated_remainder_kv = None
-      else:
+        if kv_in is not None:
+          call_kwargs["kv_cache"] = kv_in
+        out_y, out_kv = split_output(merged_layer(y_in, *layer_args, **call_kwargs))
+        nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
+        return out_y, out_kv, nnx.state(merged_layer)
 
-        def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
-          merged_layer = nnx.merge(graphdef, state_in)
-          call_kwargs = dict(layer_kwargs)
-          if kv_in is not None:
-            call_kwargs["kv_cache"] = kv_in
-          out_res = merged_layer(y_in, *layer_args, **call_kwargs)
-          if isinstance(out_res, tuple):
-            out_y = out_res[0]
-            out_kv = out_res[1] if len(out_res) > 1 else None
-          else:
-            out_y = out_res
-            out_kv = None
-          nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
-          return out_y, out_kv, nnx.state(merged_layer)
+      checkpointed_block_fn = jax.checkpoint(
+          pure_block_fn,
+          policy=self.get_remat_policy(),
+          prevent_cse=maxtext_utils.should_prevent_cse_in_remat(cfg),
+      )
 
-        checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
+      graphdef, state = nnx.split(block)
+      y, updated_remainder_kv, new_state = checkpointed_block_fn(graphdef, state, y, remainder_kv)
+      nnx.update(block, new_state)
 
-        graphdef, state = nnx.split(self.layers_remainder)
-        y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
-        nnx.update(self.layers_remainder, new_state)
-
-      if kv_caches is not None and updated_remainder_kv is not None:
-        start_idx = scan_length * attention_pattern_length
-        for offset, updated_item in enumerate(updated_remainder_kv):
-          kv_caches[start_idx + offset] = updated_item
+    if kv_caches is not None and updated_remainder_kv is not None:
+      for offset, updated_item in enumerate(updated_remainder_kv):
+        kv_caches[start_idx + offset] = updated_item
 
     return y
 
@@ -2593,25 +2737,3 @@ class NNXDecoder(nnx.Module):
           _add(m)
 
     return layers
-
-
-def decoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-    rngs: nnx.Rngs,
-    model_mode: str,
-    quant: None | Quant = None,
-):
-  """Creates a Decoder module"""
-  module = nnx_wrappers.to_linen(
-      NNXDecoder,
-      config=config,
-      mesh=mesh,
-      model_mode=model_mode,
-      rngs=rngs,
-      quant=quant,
-      name="decoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module

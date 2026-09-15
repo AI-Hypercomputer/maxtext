@@ -19,11 +19,12 @@ from etils import epath
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.common import checkpoint_context
 from maxtext.common import train_state_nnx
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco.utils.nnx_state_utils import replace_nnx_model_params
 import optax
-import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 
 
 # pylint: disable=too-many-positional-arguments
@@ -37,17 +38,24 @@ def restore_diloco_checkpoint(
 ) -> Any:
   """Restores a DiLoCo checkpoint into a DiLoCoTrainState."""
   diloco_abstract = to_diloco_checkpoint_dict(abstract_nnx_state, config=config)
-  ckptr = ocp.Checkpointer(
-      ocp.PyTreeCheckpointHandler(
-          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
-          save_concurrent_gb=checkpoint_storage_concurrent_gb,
-          use_ocdbt=use_ocdbt,
-          use_zarr3=use_zarr3,
-      )
+  # Orbax v1 refuses to read an item subdirectory directly (the step root carries the
+  # checkpoint indicator); normalize the documented ".../<step>/items" form to its root
+  # and load the checkpointable by name below. A v0-written flat pytree dir has no
+  # "items" child and is read directly.
+  root = epath.Path(str(path).rstrip("/"))
+  if root.name == "items":
+    root = root.parent
+  context = checkpoint_context.build_context(
+      use_ocdbt=use_ocdbt,
+      use_zarr3=use_zarr3,
+      checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+      partial_load=True,
   )
-  restore_args = ocp.checkpoint_utils.construct_restore_args(diloco_abstract)
-  restored = ocp.args.PyTreeRestore(item=diloco_abstract, restore_args=restore_args, partial_restore=True)
-  restored = ckptr.restore(epath.Path(path), args=restored)
+  with context:
+    checkpointable_name = "items" if (root / "items").exists() else None
+    restored = ocp.load(
+        root, diloco_abstract, checkpointable_name=checkpointable_name
+    )  # pyrefly: ignore[bad-argument-type]
   return from_diloco_checkpoint_dict(restored, abstract_nnx_state, config=config)
 
 
@@ -225,7 +233,7 @@ def from_diloco_checkpoint_dict(
         nnx.replace_by_pure_dict(linen_state, {"optimizer": weights["optimizer"]})
       nnx_aux = inner_dict.get("nnx_aux")
       if nnx_aux:
-        nnx.replace_by_pure_dict(aux_state, nnx_aux)
+        train_state_nnx.apply_checkpoint_aux(aux_state, nnx_aux)
       inner_state = nnx.merge_state(linen_state, aux_state, ephemeral)
     else:
       inner_state = inner_dict

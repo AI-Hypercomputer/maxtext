@@ -64,13 +64,20 @@ jobs:
         run: |
           IAP_TOKEN=$(gcloud auth print-access-token)
           PAYLOAD=$(python3 -c 'import json, os
+          from datetime import datetime, timezone
+          run_id = os.environ["RUN_ID"]
+          repo = os.environ["GITHUB_REPO"]
+          now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
           print(json.dumps({
+              "dag_run_id": f"auto_gha__{run_id}__{now}",
+              "note": f"Automated E2E TPU test suite triggered by GitHub Actions.\n\nWorkflow Run: https://github.com/{repo}/actions/runs/{run_id}",
               "conf": {
                   "build_mode": os.environ["BUILD_MODE"],
                   "commit_sha": os.environ["COMMIT_SHA"],
-                  "github_run_id": os.environ["RUN_ID"],
-                  "github_repo": os.environ["GITHUB_REPO"],
+                  "github_run_id": run_id,
+                  "github_repo": repo,
                   "github_token": os.environ["GITHUB_TOKEN"],
+                  "is_automated": True,
               }
           }))')
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \

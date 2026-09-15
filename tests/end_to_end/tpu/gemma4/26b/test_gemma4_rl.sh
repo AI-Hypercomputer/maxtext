@@ -30,13 +30,13 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.85 \
+    hbm_utilization_vllm=0.75 \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True \
     scan_layers=false \
     enable_single_controller=${use_pathways} \
     prefuse_moe_weights=True \
-    ici_tensor_parallelism=2
+    ici_tensor_parallelism=4
 
 # Step 2: Run RL on the converted checkpoint
 python3 -m maxtext.trainers.post_train.rl.train_rl \
@@ -67,10 +67,10 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.85 \
+    hbm_utilization_vllm=0.75 \
     prompt='Suggest some famous landmarks in London.' \
     use_chat_template=True \
     scan_layers=false \
     enable_single_controller=${use_pathways} \
     prefuse_moe_weights=True \
-    ici_tensor_parallelism=2
+    ici_tensor_parallelism=4

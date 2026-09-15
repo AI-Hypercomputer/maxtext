@@ -24,6 +24,7 @@ numbers for a specific model. Example:
   python3 -m maxtext.utils.muon_utils qwen3-4b True
 """
 
+import collections.abc
 import os
 import sys
 from typing import Optional, Tuple
@@ -33,8 +34,6 @@ from flax import nnx
 import jax
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from maxtext.layers import quantizations
-from maxtext.models import models
 from maxtext.utils import maxtext_utils, model_creation_utils
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 
@@ -44,124 +43,172 @@ def _is_path_contain_any(tuples, path):
   return any(x in path for x in tuples)
 
 
-def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
-  """
-  Determines Muon dimension numbers based on the parameter's hierarchical path.
+# Parameters excluded from Muon updates (e.g. 1D norms, embeddings, scalars)
+EXCLUDED_SUBSTRINGS = (
+    "scale",
+    "embedding",
+    "logits_dense",
+    "post_beta",
+    "pre_beta",
+    "res_beta",
+    "hc_base",
+    "sinks",
+    "tid2eid",
+    "A_log",
+    "dt_bias",
+    "conv1d",
+    "shared_expert_gate",
+)
 
-  This function defines the mapping from a parameter's logical path within the model
-  to its corresponding MuonDimensionNumbers (mdn). The strategy is applied in
-  a specific order to handle general cases and then more specific ones, allowing
-  for fall-through logic in nested structures.
+EXCLUDED_EXACT_SEGMENTS = {
+    "bias",
+}
+
+# Attention module identifiers and tensor projection names that require
+# head-aware (3D/4D) dimension specifications.
+ATTENTION_BLOCK_NAMES = (
+    "self_attention",
+    "full_attention",
+    "attention",
+    "self_attn",
+    "attn",
+    "attention_mla",
+    "GptOssAttention",
+)
+
+ATTENTION_QKV_NAMES = (
+    "query",
+    "key",
+    "value",
+    "wq_b",
+    "wkv_b",
+    "wkv",
+)
+
+ATTENTION_OUT_NAMES = ("out",)
+
+MOE_BLOCK_NAMES = (
+    "MoeBlock_0",
+    "moe_block",
+    "routed_experts",
+    "GptOssMlp",
+    "routed_moe",
+)
+
+
+def transform_logic(
+    path: Tuple[str, ...],
+    shape: Optional[Tuple[int, ...]] = None,
+    include_routers: bool = True,
+) -> Optional[mdn]:
+  """Determines Muon dimension numbers based on parameter path and shape.
+
+  This function maps a parameter's hierarchical path within the model
+  to its corresponding MuonDimensionNumbers (mdn) specifying the reduction
+  and output axes for 2D matrix orthogonalization.
+
+  In MaxText, layer scanning places the layer scan axis at index 1
+  (`param_scan_axis = 1`), resulting in shapes:
+    - Standard weights / MLPs: [in_features, num_layers, out_features]
+    - Attention QKV: [in_features, num_layers, num_heads, head_dim]
+    - Attention Out: [num_heads, num_layers, head_dim, out_features]
+    - MoE routed experts: [num_experts, num_layers, in_features, out_features]
+    - Grouped linear (o_a_proj): [o_groups, num_layers, in_features_per_group, out_features_per_group]
 
   Strategy:
-  1. Exclusions: Parameters not suitable for Muon (e.g., scalars, embeddings,
-     unembedding) are explicitly returned as `None`.
-  2. Special Weights:
-     2.1 MoE Block Specific Weights
-     2.2 Self-Attention Specific Weights
-  3. Standard Weights: Default mapping for most other 3D weight shapes.
+    1. Exclusions: Non-matrix, 1D, scalar, embedding, or state-space parameters
+       are excluded (returns None) and optimized via AdamW.
+    2. MoE Routed Experts: [num_experts, ..., in_features, out_features]
+       map to reduction axis (-2,) and output axis (-1,).
+       Note: gate.kernel is [in_features, (num_layers), num_experts] and uses standard (0,) and (-1,).
+    3. Grouped Linear: [n_groups, ..., in_features_per_group, out_features_per_group]
+       maps to reduction axis (-2,) and output axis (-1,).
+    4. Head-expanded Attention: QKV and Output projections with 3D/4D shapes
+       map to head-aware reduction and output axes:
+       - QKV: reduction (0,), output (-2, -1)
+       - Out (unflattened): reduction (0, -2), output (-1,)
+    5. Standard Weights: Default 2D matrix mapping (0,) and (-1,) for MLPs,
+       GDN, shared experts, MHC alpha projections, and dense projections.
 
   Args:
-    path: A tuple of strings representing the hierarchical path of the parameter.
+    path: Tuple of strings representing the parameter's hierarchical path.
+    shape: Optional shape tuple of the parameter tensor.
+    include_routers: Whether to apply Muon updates to MoE router matrices. If
+      False, router weights return None and are optimized with AdamW.
 
   Returns:
-    An instance of `MuonDimensionNumbers` if a specific mapping is found,
-    `None` for excluded parameters, or a default `mdn` for standard weights.
+    An instance of `optax.contrib.MuonDimensionNumbers` if a valid mapping is
+    found, or `None` if the parameter is excluded from Muon updates.
   """
+  # Exclude 1D / scalar parameters
+  if shape is not None and len(shape) < 2:
+    return None
 
-  # 1 Exclude parameters not suitable for Muon (scalar, embeddings, unembedding)
-  # "embedding": embedding
-  # "logits_dense": output embedding
-  # "tid2eid": lookup table in hash routing moe
-  # "scale": scalar, common module
-  # "sinks": scalar, attention sink
-  # "bias": scalar, common module
-  # "hc_base": scalar, in mhc head
-  # "post_beta", "pre_beta", "res_beta": scalar, in mhc
-  # "A_log": scalar / 1D per head, in gdn linear attention
-  # "conv1d": depthwise 1D convolution
-  # "shared_expert_gate": scalar projection (output_dim = 1)
+  # Exclude non-matrix parameters, embeddings, biases, and normalization
   if any(
-      any(
-          x in segment
-          for x in (
-              "scale",
-              "embedding",
-              "logits_dense",
-              "post_beta",
-              "pre_beta",
-              "res_beta",
-              "hc_base",
-              "sinks",
-              "tid2eid",
-              "A_log",
-              "conv1d",
-              "shared_expert_gate",
-          )
-      )
+      segment in EXCLUDED_EXACT_SEGMENTS
       or (segment.endswith("bias") and segment != "position_bias")
+      or any(x in segment for x in EXCLUDED_SUBSTRINGS)
       for segment in path
   ):
     return None
 
-  # 2 Special weights
-  # 2.1 Special weights: MoE, [0, L, -2, -1]
-  # L (optional) stands for layer when scan_layers=True
-  if _is_path_contain_any(("MoeBlock_0", "routed_experts", "moe_block", "GptOssMlp"), path):
-    # exclude gate
-    if _is_path_contain_any(("wi", "wi_0", "wi_1", "wo"), path):
+  # MoE routed expert weights: [num_experts, (num_layers), in_features, out_features]
+  if _is_path_contain_any(MOE_BLOCK_NAMES, path) and not _is_path_contain_any(("shared_experts", "shared_expert"), path):
+    if _is_path_contain_any(("wi", "wi_0", "wi_1", "wo", "gate_up_proj"), path):
       return mdn((-2,), (-1,))
+    # MoE router weights (e.g. gate.kernel): [in_features, (num_layers), num_experts]
+    if _is_path_contain_any(("gate", "router"), path):
+      return mdn((0,), (-1,)) if include_routers else None
 
-  # 2.2 Special weights: Self attention / Attention
-  elif _is_path_contain_any(("self_attention", "GptOssAttention", "attention"), path):
-    # Attention output projection: [0, L, -2, -1]
-    # For standard attention (e.g. self_attention, GptOssAttention), out projection reduces over (0, -2).
-    # Note: Qwen3-Next full attention flattens heads into a 2D projection, so it uses standard weights mdn((0,), (-1,)).
-    if "out" in path and _is_path_contain_any(("self_attention", "GptOssAttention"), path):
-      return mdn((0, -2), (-1,))
-    # Block-diagonal grouped linear layer: [n_groups, L, in_features_per_group, out_features_per_group]
-    elif "o_a_proj" in path:
-      return mdn((-2,), (-1,))
-    # Attention qkv projection: [0, L, -2, -1]
-    # MLA, exclude wq_a / wkv_a
-    elif _is_path_contain_any(("query", "key", "value", "wq_b", "wkv_b", "wkv"), path):
+  # Block-diagonal grouped linear layer (e.g. DeepSeek-V4 attention output projection):
+  # [n_groups, (num_layers), in_features_per_group, out_features_per_group] -> reduce (-2,), output (-1,)
+  if "o_a_proj" in path:
+    return mdn((-2,), (-1,))
+
+  # Head-expanded attention projections (3D unscanned or 4D scanned)
+  if _is_path_contain_any(ATTENTION_BLOCK_NAMES, path) and (shape is None or len(shape) > 2):
+    if _is_path_contain_any(ATTENTION_QKV_NAMES, path):
+      # [in_features, (num_layers), num_heads, head_dim] -> reduce (0,), output (-2, -1)
       return mdn((0,), (-2, -1))
+    if _is_path_contain_any(ATTENTION_OUT_NAMES, path):
+      # Standard attention out projection: [num_heads, (num_layers), head_dim, out_features] -> reduce (0, -2), output (-1,)
+      # Note: Qwen3-Next flattens heads into a 2D projection (in_features = num_heads * head_dim),
+      # so its out projection is a standard 2D matrix [in_features, (num_layers), out_features] -> reduce (0,), output (-1,)
+      if _is_path_contain_any(("self_attention", "GptOssAttention"), path) or (shape is not None and len(shape) == 4):
+        return mdn((0, -2), (-1,))
 
-  # 3 Standard weights, [0, L, -1]
+  # Standard 2D matrix weights (dense MLPs, shared experts, GDN, MHC alpha, dense projections, router weights)
+  # [in_features, (num_layers), out_features] -> reduce (0,), output (-1,)
   return mdn((0,), (-1,))
 
 
-def get_transform_tree(tree, path=()):
-  """Extraction utility via recursion."""
-  if isinstance(tree, dict):
-    return {k: get_transform_tree(v, path + (k,)) for k, v in tree.items()}
+def get_transform_tree(tree, path=(), include_routers: bool = True):
+  """Recursively extracts `MuonDimensionNumbers` for Linen abstract parameters."""
+  if isinstance(tree, (dict, collections.abc.Mapping)) or hasattr(tree, "items"):
+    return {k: get_transform_tree(v, path=path + (k,), include_routers=include_routers) for k, v in tree.items()}
   else:
-    return transform_logic(path)
+    val = getattr(tree, "value", tree)
+    val_shape = getattr(val, "shape", None)
+    return transform_logic(path, shape=val_shape, include_routers=include_routers)
 
 
-def get_muon_weight_dimension_numbers(model, config, verbose=False):
-  """Extract muon dimension number from model structure."""
+def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
+  """Extracts a matching pytree of `MuonDimensionNumbers` from a model."""
+  include_routers = getattr(config, "muon_include_routers", True) if config is not None else True
+  _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
 
-  if isinstance(model, nnx.Module):
-    _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
+  def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], leaf):
+    # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
+    path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
+    val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
+    val_shape = getattr(val, "shape", None)
+    return transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
 
-    def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], leaf):
-      # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
-      path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
-      return transform_logic(path_strings)
-
-    # NNX abstract_param is an nnx.State (not Linen's dict of LogicallyPartitioned leaves);
-    # tree_map_with_path round-trips that structure so each Param.value holds the mdn result.
-    muon_weight_dimension_numbers = jax.tree_util.tree_map_with_path(
-        apply_transform_nnx, nnx.to_pure_dict(abstract_param)
-    )
-    muon_weight_dimension_numbers = nnx.State(muon_weight_dimension_numbers)
-
-  else:  # Linen
-    # quickly get param structure without materialization
-    abstract_param = maxtext_utils.get_abstract_param(model, config)
-    # get muon dimension number from param
-    muon_weight_dimension_numbers = get_transform_tree(abstract_param)
+  # tree_map_with_path handles NNX's PyTree structure; result is an nnx.State with the
+  # same structure, where each Param's value holds the mdn result.
+  muon_weight_dimension_numbers = jax.tree_util.tree_map_with_path(apply_transform_nnx, nnx.to_pure_dict(abstract_param))
+  muon_weight_dimension_numbers = nnx.State(muon_weight_dimension_numbers)
 
   if verbose:
     _print_structure_debug(abstract_param, muon_weight_dimension_numbers)
@@ -193,7 +240,7 @@ def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):
   print("\nIs this reasonable?")
 
 
-def get_model_mdn(model_name, scan_layers=True, verbose=False, pure_nnx=False):
+def get_model_mdn(model_name, scan_layers=True, verbose=False, include_routers=True):
   """Initializes a model and retrieves its Muon dimension numbers.
 
   This function sets up the configuration for a given model, initializes the
@@ -205,6 +252,7 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False, pure_nnx=False):
     scan_layers: Whether to use layer scanning in the model configuration.
     verbose: If True, prints detailed debugging information about the model
       structure and Muon dimension numbers.
+    include_routers: Whether to apply Muon updates to MoE router matrices.
 
   Returns:
     A tree structure containing the Muon dimension numbers for the model's
@@ -217,36 +265,24 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False, pure_nnx=False):
       f"model_name={model_name}",
       f"scan_layers={scan_layers}",
       "attention=dot_product",
-      f"pure_nnx={pure_nnx}",
+      f"muon_include_routers={include_routers}",
       "skip_jax_distributed_system=True",
   ]
-  if not pure_nnx:
-    argv.extend(
-        [
-            "enable_nnx=False",
-            "pure_nnx_decoder=False",
-        ]
-    )
   config = pyconfig.initialize(argv)
   # Setup model
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
-  quant = quantizations.configure_quantization(config)
-  if pure_nnx:
-    _, model = model_creation_utils.create_nnx_abstract_model(config, mesh)
-  else:
-    model = models.transformer_as_linen(config, mesh=mesh, quant=quant)
+  _, model = model_creation_utils.create_nnx_abstract_model(config, mesh)
   # Get dimension number
   muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config, verbose=verbose)
-  if pure_nnx:
-    muon_weight_dimension_numbers = {"params": nnx.to_pure_dict(muon_weight_dimension_numbers)}
-  return muon_weight_dimension_numbers
+  return {"params": nnx.to_pure_dict(muon_weight_dimension_numbers)}
 
 
 if __name__ == "__main__":
-  if len(sys.argv) != 3:
-    print("Usage: python3 -m maxtext.utils.muon_utils <model_name> <scan_layers:True/False>")
+  if len(sys.argv) not in (3, 4):
+    print("Usage: python3 -m maxtext.utils.muon_utils <model_name> <scan_layers:True/False> [include_routers:True/False]")
     sys.exit(1)
   model_name_arg = sys.argv[1]
   scan_layers_arg = sys.argv[2].lower() == "true"
-  get_model_mdn(model_name_arg, scan_layers_arg, verbose=True, pure_nnx=False)
+  include_routers_arg = sys.argv[3].lower() == "true" if len(sys.argv) == 4 else True
+  get_model_mdn(model_name_arg, scan_layers_arg, verbose=True, include_routers=include_routers_arg)

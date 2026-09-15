@@ -140,13 +140,11 @@ class Gemma4MoE(nnx.Module):
     gate_inputs = unscaled_norm * root_size * router_scale
 
     # 3. Pass both to routed_moe
-    routed_experts, load_balance_loss, moe_bias_updates = (
-        self.moe_block.routed_moe(
-            routed_inputs,
-            gate_inputs=gate_inputs,
-            out_sharding=out_sharding,
-            forced_routed_experts=forced_routed_experts,
-        )
+    routed_experts, load_balance_loss, moe_bias_updates = self.moe_block.routed_moe(
+        routed_inputs,
+        gate_inputs=gate_inputs,
+        out_sharding=out_sharding,
+        forced_routed_experts=forced_routed_experts,
     )
     routed_experts = self.post_feedforward_layernorm_2(routed_experts)
 

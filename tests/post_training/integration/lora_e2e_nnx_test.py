@@ -34,7 +34,6 @@ def _tiny_lora_pyconfig(run_name, checkpoint_dir, **overrides):
       "enable_checkpointing": True,
       "dataset_type": "synthetic",
       "model_name": "default",
-      "pure_nnx": True,
       "per_device_batch_size": 1.0,
       "base_emb_dim": 8,
       "base_num_query_heads": 4,

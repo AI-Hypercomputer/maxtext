@@ -231,6 +231,14 @@ class ToNNX(Module):
     """A shortcut of calling `nnx.bridge.lazy_init()` upon this module."""
     return lazy_init(self, *args, **kwargs)
 
+  def release_rngs(self):
+    """Drops the forked ``Rngs`` so it stops being part of the model state.
+
+    Safe only after the wrapped module is initialized, and only if it never calls
+    ``make_rng`` at apply time.
+    """
+    self.to_nnx__rngs = None
+
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)

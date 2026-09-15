@@ -23,6 +23,14 @@ import numpy as np
 from maxtext.input_pipeline.input_pipeline_utils import BlockDiffusionCorruption, compute_file_sharding, PadOrTrimToMaxLength
 from maxtext.multimodal import utils as mm_utils
 
+import pytest
+
+from maxtext.input_pipeline import input_pipeline_utils
+from maxtext.input_pipeline.input_pipeline_utils import (
+    MegatronSplitInputsTargets,
+    megatron_min_segment_length,
+)
+
 
 class BlockDiffusionPaddingTest(unittest.TestCase):
   """Checks that tokenizer padding never becomes diffusion supervision."""
@@ -201,6 +209,155 @@ class ComputeFileShardingUndersizedCaseTest(unittest.TestCase):
     # 2 files, 3 hosts: file 1 has only one reader (host 1) → no row split needed
     _, _, row_shard = compute_file_sharding(2, host_index=1, host_count=3)
     self.assertIsNone(row_shard)
+
+
+class GenerateDocSegmentIdsTest(unittest.TestCase):
+  """Direct tests for mmap EOD-aware segmentation."""
+
+  def test_reset_attention_mask_keeps_eod_in_previous_segment(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(eod_id=99, reset_attention_mask=True)
+    result = transform.map({"inputs": np.array([10, 99, 20, 21, 99, 30], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 2, 2, 2, 3], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 0, 1, 2, 0], dtype=np.int32))
+
+  def test_no_attention_reset_can_mask_eod_loss(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(
+        eod_id=99,
+        reset_attention_mask=False,
+        eod_mask_loss=True,
+    )
+    result = transform.map({"targets": np.array([10, 99, 20, 99], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["targets_segmentation"], np.array([1, 0, 1, 0], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets_position"], np.array([0, 1, 2, 3], dtype=np.int32))
+
+  def test_short_eod_segments_are_merged(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(
+        eod_id=99,
+        reset_attention_mask=True,
+        min_segment_length=3,
+    )
+    result = transform.map({"inputs": np.array([10, 99, 20, 99, 30, 31, 32], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 1, 1, 2, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2, 3, 0, 1, 2], dtype=np.int32))
+
+  def test_empty_columns_get_empty_annotations(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(eod_id=99)
+    result = transform.map({"inputs": np.array([], dtype=np.int32)})
+
+    self.assertEqual(result["inputs_segmentation"].shape, (0,))
+    self.assertEqual(result["inputs_position"].shape, (0,))
+
+
+class MegatronSplitInputsTargetsTest(unittest.TestCase):
+  """Direct tests for mmap_npy L+1 sample splitting."""
+
+  def test_split_preserves_final_real_target_and_positions(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(eod_id=99)
+    result = transform.map({"text": np.array([10, 99, 20, 21, 99, 30], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs"], np.array([10, 99, 20, 21, 99], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets"], np.array([99, 20, 21, 99, 30], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 2, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets_segmentation"], np.ones(5, dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 0, 1, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets_position"], result["inputs_position"])
+
+  def test_eod_mask_loss_masks_by_input_token(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(eod_id=99, eod_mask_loss=True)
+    result = transform.map({"text": np.array([10, 99, 20, 99, 30], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["targets_segmentation"], np.array([1, 0, 1, 0], dtype=np.int32))
+
+  def test_no_attnmask_dataset_id_disables_reset_for_that_sample(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(
+        eod_id=99,
+        reset_attention_mask=True,
+        no_attnmask_dataset_ids={7},
+    )
+    result = transform.map({"text": np.array([10, 99, 20, 30], dtype=np.int32), "dataset_id": np.int32(7)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.ones(3, dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2], dtype=np.int32))
+
+  def test_short_segments_are_merged_after_split(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(
+        eod_id=99,
+        reset_attention_mask=True,
+        min_segment_length=3,
+    )
+    result = transform.map({"text": np.array([10, 99, 20, 99, 30, 31, 32, 40], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 1, 1, 2, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2, 3, 0, 1, 2], dtype=np.int32))
+
+
+def _cfg(reset_attention_mask: bool, divisor: int, max_target_length: int = 4096):
+  return SimpleNamespace(
+      reset_attention_mask=reset_attention_mask,
+      packing_max_segments_per_sample=divisor,
+      max_target_length=max_target_length,
+  )
+
+
+class TestMegatronMinSegmentLength:
+  """``megatron_min_segment_length`` returns ``max_target_length // divisor`` only when merging is active."""
+
+  def test_default_divisor_matches_prior_hardcoded_25(self):
+    # Prior behavior used a hardcoded 25; the default config value preserves that.
+    cfg = _cfg(reset_attention_mask=True, divisor=25, max_target_length=4096)
+    assert megatron_min_segment_length(cfg) == 4096 // 25
+
+  @pytest.mark.parametrize(
+      "divisor,max_target_length,expected",
+      [
+          (50, 4096, 4096 // 50),
+          (10, 8192, 8192 // 10),
+          (1, 4096, 4096),
+          (100, 4097, 4097 // 100),  # integer division (truncates)
+      ],
+  )
+  def test_custom_divisor(self, divisor, max_target_length, expected):
+    cfg = _cfg(reset_attention_mask=True, divisor=divisor, max_target_length=max_target_length)
+    assert megatron_min_segment_length(cfg) == expected
+
+  @pytest.mark.parametrize("divisor", [0, -1, -25])
+  def test_non_positive_divisor_disables_merging(self, divisor):
+    cfg = _cfg(reset_attention_mask=True, divisor=divisor)
+    assert megatron_min_segment_length(cfg) == 0
+
+  @pytest.mark.parametrize("divisor", [0, 25, 50])
+  def test_reset_attention_mask_false_returns_zero(self, divisor):
+    # reset_attention_mask=False short-circuits regardless of divisor.
+    cfg = _cfg(reset_attention_mask=False, divisor=divisor)
+    assert megatron_min_segment_length(cfg) == 0
+
+
+class MegatronSplitDatasetIdTest(unittest.TestCase):
+
+  def _element(self, with_id=True):
+    el = {"text": np.arange(9, dtype=np.int32)}  # seq_len = 8 after split
+    if with_id:
+      el["dataset_id"] = np.int32(3)
+    return el
+
+  def test_emits_per_token_dataset_id_when_enabled(self):
+    t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=True)
+    result = t.map(self._element())
+    self.assertIn("dataset_id", result)
+    self.assertEqual(result["dataset_id"].shape, (8,))
+    self.assertTrue(np.all(result["dataset_id"] == 3))
+    self.assertEqual(result["dataset_id"].dtype, np.int32)
+
+  def test_omits_dataset_id_when_disabled(self):
+    t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=False)
+    self.assertNotIn("dataset_id", t.map(self._element()))
+
+  def test_omits_when_element_has_no_dataset_id(self):
+    t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=True)
+    self.assertNotIn("dataset_id", t.map(self._element(with_id=False)))
 
 
 class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):

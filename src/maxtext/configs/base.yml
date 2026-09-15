@@ -87,7 +87,9 @@ checkpoint_storage_use_zarr3: true
 # default concurrent gb for PytreeCheckpointHandler is 96GB
 checkpoint_storage_concurrent_gb: 96
 
-# Bool flag for enabling Orbax v1.
+# TODO: b/529622681 - Remove deprecated settings.
+# DEPRECATED: Orbax v1 is now always used for checkpointing; this flag is
+# ignored and will be removed in a future release.
 enable_orbax_v1: false
 # function for processing loaded checkpoint dict into a format maxtext can understand. (for other formats, i.e. safetensors)
 checkpoint_conversion_fn: none
@@ -148,6 +150,7 @@ quantize_kvcache: false # set to true to quantize kv cache values, defaults to f
 #   - "dkv" is expected with better accuracy but degraded computation
 kv_quant_axis: "heads_and_dkv"
 kv_quant_dtype: "int8"
+quantize_mtp: false # set to true to quantize mtp layers when quantization is enabled. requires mtp_num_layers > 0 and quantization=fp8_full.
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
 # saves params quantized on fly at following path
 save_quantized_params_path: ""
@@ -202,7 +205,8 @@ logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embed
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
-mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the Indexer across the unsharded local heads dimension natively.
+mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the MLA Indexer (DeepSeek-V3 / DeepSeek-V3.2) across the unsharded local heads dimension natively.
+csa_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the CSA Indexer (DeepSeek-V4) across the unsharded local heads dimension natively.
 float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
 float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
 
@@ -231,12 +235,21 @@ ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer
 # When set to 1.0 this buffer if set to the size assuming perfectly balanced. If the routing dictates
 # a size larger than this then tokens are dropped.
 # In general if ragged_buffer_factor > 0, the ragged_buffer_size is balanced_size * ragged_buffer_factor.
+retry_when_tokens_dropped: false # retry the entire train step with worst-case ragged buffer size if tokens would otherwise be dropped.
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
+te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE layers
+te_ep_overflow_check_every_n_steps: 20 # host check interval for TE EP overflow when ragged_buffer_factor limits receive capacity
+te_gmm_quantization: "" # quantization mode for TE GMM matmuls; available options are te_no_quant and te_mxfp8; must be specified when te_moe_block is true
+# Whether to quantize token activations before the All-Gather across EP shards in Ring of Experts, reducing
+# inter-chip token traffic proportionally to the quantized width (2x for FP8 vs BF16).
+# Pipeline: quantize token -> EP all-gather -> sort -> GMM, so tokens stay quantized end to end.
+# Requires use_ring_of_experts=true, use_gmm_v2=true, and quantization with fixed act calibration.
+moe_quantize_token_all_gather: false
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).
@@ -255,6 +268,10 @@ ragged_gather_cost_estimate_flops: -1 # -1 means auto-compute, any > 0 value ove
 ragged_gather_reduce_cost_estimate_flops: -1 # -1 means auto-compute, any > 0 value overrides the flop cost estimate for the ragged gather reduce kernel
 ragged_gather_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather kernel
 ragged_gather_reduce_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather reduce kernel
+# Pin MoE FSDP and EP all-gathers to dedicated SparseCores using compute_on
+moe_pin_sparse_core_all_gathers: false
+moe_fsdp_all_gather_sparse_core_id: 0
+moe_ep_all_gather_sparse_core_id: 1
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs
@@ -760,6 +777,11 @@ eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
 default_prompt: ''
 packing: true
+# Whether to use continuous stream chunking (unpacked monolithic token stream with 0% padding,
+# monotonic positions, and uniform cross-document attention) for c4_mlperf datasets.
+# If null, defaults to true for pre-tokenized datasets (tokenize_train_data=false)
+# and false for raw text datasets.
+use_stream_chunking: null
 num_epoch: 1
 generate_padding_batch_train: false
 generate_padding_batch_eval: false
@@ -792,7 +814,7 @@ sft_train_on_completion_only: false
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
-dataset_type: tfds
+dataset_type: synthetic
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.1.0'
@@ -812,12 +834,13 @@ hf_access_token: ''
 # Path to grain data files. Can be a single pattern or multiple patterns with weights.
 # For multiple patterns, use semicolon (;) to separate and comma (,) to specify weights.
 # Example: "path/to/data1.array_record*,0.3;path/to/data2.array_record*,0.7"
-# Note: When using multiple files (separated by ';'), only ArrayRecord format is supported.
+# Semicolon mixtures are supported by ArrayRecord and Megatron mmap/mmap_npy;
+# see their guides because the mixture and ordering semantics differ by format.
 # For more details, see https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md
 grain_train_files: ''
 grain_eval_files: ''
-grain_train_mixture_config_path: '' # Path to a JSON file specifying the mixture weights for Grain training data.
-grain_file_type: 'arrayrecord' # arrayrecord or parquet
+grain_train_mixture_config_path: '' # ArrayRecord-only JSON mixture configuration.
+grain_file_type: 'arrayrecord' # arrayrecord, tfrecord, parquet, mmap, or mmap_npy
 grain_packing_type: 'first_fit' # 'first_fit', 'best_fit' or 'concat_then_split'. See details of the corresponding module in https://google-grain.readthedocs.io/en/latest/grain.experimental.html
 grain_worker_count: 1 # Set to -1 to enable auto-tuning: automatically determines optimal worker count. See https://google-grain.readthedocs.io/en/latest/_autosummary/grain.experimental.pick_performance_config.html
 grain_per_worker_buffer_size: 1
@@ -839,6 +862,15 @@ grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mix
 grain_index_storage_option: null
 grain_shuffle_buffer_size: 100 # shuffle buffer when using sequential access formats such as Parquet, TFRecord.
 grain_use_elastic_iterator: false # For elastic training, set to this true and packing=false
+# Megatron-LM indexed datasets (grain_file_type=mmap or mmap_npy).
+mmap_eod_id: 0 # must match the EOD token written during Megatron preprocessing
+blend_cache_dir: '' # optional runtime cache for multi-dataset mmap_npy global blend indices
+blend_index_dir: '' # optional prebuilt dataset_index.npy / dataset_sample_index.npy directory
+reset_attention_mask: true # reset attention and positions after EOD
+eod_mask_loss: false # exclude positions whose input token is EOD from loss when true
+packing_max_segments_per_sample: 25 # short-segment divisor; <=0 retains every EOD attention boundary
+mmap_split_sentences: false # must match whether preprocessing used --split-sentences
+mmap_npy_split: '' # mmap_npy only; train uses split 0 and eval uses split 1
 # for using pathways
 colocated_python_data_input: false  # experimental feature, under testing
 
@@ -1017,9 +1049,12 @@ mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inher
 # https://github.com/google-deepmind/optax/blob/main/optax/contrib/_muon.py
 # "mu_dtype", "adam_eps" are shared by AdamW
 # "nesterov", "weight_decay_mask", "adaptive" use default
+muon_type: "optax_muon" # Type of Muon optimizer: "optax_muon" (or "optax") vs "maxtext_muon" (or "maxtext")
 muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
+muon_include_routers: true # Whether to apply Muon updates to MoE router matrices. If False, routers are optimized with AdamW.
+muon_use_all_to_all: false # Whether to use all-to-all communication during Newton-Schulz iterations in maxtext_muon.
 
 
 # Use iota operator in Embed
@@ -1323,11 +1358,6 @@ position_id_per_seconds: 25
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
 
-# NNX
-enable_nnx: true
-pure_nnx_decoder: true
-pure_nnx: true
-
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
 gdn_conv_kernel_dim: 4
@@ -1358,6 +1388,22 @@ vllm_hf_config_path: ""
 vllm_hf_overrides: {}
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
+# Whether to use the streaming target-free weight converter for trainer-side conversion
+use_weight_converter: true
+# Tensor parallelism per replica for rollout (-1 for auto-determined)
+rollout_tensor_parallelism: -1
+# Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax')
+rollout_backend: "maxtext"
+# Degree of tensor parallelism for KV cache / attention heads in rollout
+kv_tp_size: 1
+# Degree of tensor parallelism for MoE MLP dimension in rollout
+moe_mlp_tp_size: 1
+# Enable debug verification and checksum logging during weight sync
+weight_sync_debug: false
+# Whether to use Raiden FFI transport for weight sync (null derives from platform)
+use_raiden_ffi: null
+# Weight load format for vLLM in converter validation
+vllm_load_format: "dummy"
 # When use_jax_splash=true, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
 
@@ -1384,6 +1430,8 @@ mhc_pallas_kernel_fwd_block_size: 256
 # TPU v7x if we go higher. For TPU v6 (Trillium), there is more VMEM, so 256
 # works and provides better results.
 mhc_pallas_kernel_bwd_block_size: 128
+# Feature block size for backward pass of MHC Pallas kernel.
+mhc_pallas_kernel_bwd_feature_block_size: 1024
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.

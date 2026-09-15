@@ -49,6 +49,7 @@ from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.integration.vllm.convert_utils import _partition_size
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
@@ -179,6 +180,9 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
         "If the checkpoint was saved with scan_layers=True (stacked layers), convert it to "
         "unscanned format before loading with vLLM (vllm.yml sets scan_layers=False)."
     )
+  if len(ckpt_shape) == 2 and ckpt_shape == model_shape[::-1]:
+    return jax.device_put(jnp.transpose(ckpt_arr), model_arr.sharding)
+
   axes = _normalize_logical_axes(logical_axes)
   if axes is None or len(axes) != len(model_shape):
     axes = (None,) * len(model_shape)
@@ -308,21 +312,6 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
     return new_node
 
   return jax.tree_util.tree_map_with_path(_maybe_fuse, ckpt_tree, is_leaf=_is_fusion_site)
-
-
-def _partition_size(partition, mesh):
-  """Total mesh-axis size used to shard a single tensor axis.
-
-  ``partition`` is a single PartitionSpec entry: ``None`` (unsharded), a single
-  mesh-axis name (str), or a tuple of mesh-axis names.
-  """
-  if partition is None:
-    return 1
-  names = (partition,) if isinstance(partition, str) else tuple(partition)
-  size = 1
-  for n in names:
-    size *= mesh.shape[n]
-  return size
 
 
 def _stored_shape_evenly_shardable(restore_arg, stored_shape):
@@ -750,6 +739,66 @@ def setup_configs_and_devices(
   return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
+def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
+  """Get rollout kwargs for vLLM rollout when using data parallelism."""
+  dp = sampler_config.rollout_data_parallelism
+  tp = sampler_config.rollout_tensor_parallelism
+  ep = sampler_config.rollout_expert_parallelism
+
+  # -1 means "auto-derive from the other two". At most one can be -1.
+  num_auto = sum(1 for x in [tp, dp, ep] if x == -1)
+  if num_auto > 1:
+    raise ValueError(
+        "At most one of rollout_tensor_parallelism, rollout_data_parallelism, "
+        "rollout_expert_parallelism can be -1 (auto-derived).\n"
+        f"Currently resolved values:\n"
+        f"  - rollout_tensor_parallelism = {tp}\n"
+        f"  - rollout_data_parallelism = {dp}\n"
+        f"  - rollout_expert_parallelism = {ep}\n\n"
+        "To fix this, you must explicitly define at least two of these parameters in your command line arguments.\n"
+        "For example, try adding 'rollout_tensor_parallelism=4' to your command."
+    )
+
+  if dp == -1:
+    if num_sampler_devices % (tp * ep) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_tensor_parallelism({tp}) * rollout_expert_parallelism({ep}) "
+          f"when rollout_data_parallelism is -1."
+      )
+    dp = num_sampler_devices // tp // ep
+  elif tp == -1:
+    if num_sampler_devices % (dp * ep) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_data_parallelism({dp}) * rollout_expert_parallelism({ep}) "
+          f"when rollout_tensor_parallelism is -1."
+      )
+    tp = num_sampler_devices // dp // ep
+  elif ep == -1:
+    if num_sampler_devices % (tp * dp) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_tensor_parallelism({tp}) * rollout_data_parallelism({dp}) "
+          f"when rollout_expert_parallelism is -1."
+      )
+    ep = num_sampler_devices // tp // dp
+  elif tp * dp * ep != num_sampler_devices:
+    raise ValueError(
+        f"rollout_tensor_parallelism({tp}) * "
+        f"rollout_data_parallelism({dp}) * "
+        f"rollout_expert_parallelism({ep}) "
+        f"!= len(sampler_devices)({num_sampler_devices})"
+    )
+
+  rollout_kwargs = {}
+  rollout_kwargs["tensor_parallel_size"] = tp
+  rollout_kwargs["data_parallel_size"] = dp
+  rollout_kwargs["expert_parallel_size"] = ep
+
+  return rollout_kwargs
+
+
 def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices, tokenizer_pad_id=None):
   """Create reference and actor models and their respective meshes.
   This API is particularly useful for Reinforcement Learning (RL) where we need 2 models (wrapped in TunixMaxTextAdapter
@@ -928,11 +977,8 @@ def from_pretrained(
   _, _abs_state_for_specs = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(_abs_state_for_specs)
 
-  if config.pure_nnx:
-    model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
-    # TODO: print debug_sharding info
-  else:
-    model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
+  model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
+  # TODO: print debug_sharding info
 
   sharded_state = nnx.state(model)
 

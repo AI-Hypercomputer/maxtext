@@ -80,6 +80,8 @@ An example of how to run this script can be found below:
 
 In the command above we pass in the `vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}'` argument. This argument tells vLLM to use the MaxText implementation of the target model architecture.
 
+For Qwen3-VL multimodal decode, vLLM supplies the image processor, scheduling, and sampling, while MaxText runs the vision encoder and language model. New model families plug in through `MultimodalHandler`: a handler may register a processor supplied by vLLM or a vLLM-compatible processor implemented in MaxText when the model is not yet supported upstream. Modality encoding remains in MaxText in either case.
+
 # Online Inference
 
 We can also run online inference (an inference server) running a MaxText model by using the [`vllm serve`](https://docs.vllm.ai/en/stable/cli/serve/) API. In order to invoke this with a MaxText model, we provide the following additional arguments:

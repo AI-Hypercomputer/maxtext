@@ -120,6 +120,8 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && unset XLA_FLAGS && export LIBTPU
              run_name=${RUNNAME} \
              save_config_to_gcs=true \
              base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+             dataset_type=grain \
+             grain_file_type=tfrecord \
              dataset_path=${DATASET_PATH} \
              dataset_name='c4/en:3.0.1' \
              eval_dataset_name='c4/en:3.0.1' \
@@ -130,7 +132,6 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && unset XLA_FLAGS && export LIBTPU
              max_target_length=${MAX_TARGET_LENGTH} \
              enable_diloco=true \
              enable_streaming_diloco=true \
-             pure_nnx=true \
              num_diloco_fragments=${DILOCO_NUM_FRAGMENTS} \
              use_sequential_layers=${DILOCO_USE_SEQUENTIAL_LAYERS} \
              num_communication_overlapping_steps=${DILOCO_NUM_COMM_OVERLAP_STEPS} \

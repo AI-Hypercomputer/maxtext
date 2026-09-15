@@ -103,6 +103,7 @@ class TestMHC(parameterized.TestCase):
       use_mhc_pallas_kernel=False,
       mhc_pallas_kernel_fwd_block_size=None,
       mhc_pallas_kernel_bwd_block_size=None,
+      mhc_pallas_kernel_bwd_feature_block_size=None,
       dim=16,
       sequence_length=7,
       per_device_batch_size=None,
@@ -141,6 +142,8 @@ class TestMHC(parameterized.TestCase):
       kwargs["mhc_pallas_kernel_fwd_block_size"] = mhc_pallas_kernel_fwd_block_size
     if mhc_pallas_kernel_bwd_block_size is not None:
       kwargs["mhc_pallas_kernel_bwd_block_size"] = mhc_pallas_kernel_bwd_block_size
+    if mhc_pallas_kernel_bwd_feature_block_size is not None:
+      kwargs["mhc_pallas_kernel_bwd_feature_block_size"] = mhc_pallas_kernel_bwd_feature_block_size
     if dtype is not None:
       kwargs["dtype"] = dtype
       kwargs["weight_dtype"] = dtype
@@ -453,12 +456,14 @@ class TestMHC(parameterized.TestCase):
           self.assertIsNotNone(config_pre)
           self.assertEqual(config_pre.block_size, 256)
           self.assertEqual(config_pre.bwd_block_size, 128)
+          self.assertEqual(config_pre.bwd_feature_block_size, 1024)
 
           _, kwargs_post = mock_post.call_args
           config_post = kwargs_post.get("config")
           self.assertIsNotNone(config_post)
           self.assertEqual(config_post.block_size, 256)
           self.assertEqual(config_post.bwd_block_size, 128)
+          self.assertEqual(config_post.bwd_feature_block_size, 1024)
         else:
           mock_pre.assert_not_called()
           mock_post.assert_not_called()
@@ -473,6 +478,7 @@ class TestMHC(parameterized.TestCase):
         use_mhc_pallas_kernel=True,
         mhc_pallas_kernel_fwd_block_size=128,
         mhc_pallas_kernel_bwd_block_size=64,
+        mhc_pallas_kernel_bwd_feature_block_size=512,
         dim=128,
         sequence_length=128,
         per_device_batch_size=1,
@@ -526,12 +532,14 @@ class TestMHC(parameterized.TestCase):
         self.assertIsNotNone(config_pre)
         self.assertEqual(config_pre.block_size, 128)
         self.assertEqual(config_pre.bwd_block_size, 64)
+        self.assertEqual(config_pre.bwd_feature_block_size, 512)
 
         _, kwargs_post = mock_post.call_args
         config_post = kwargs_post.get("config")
         self.assertIsNotNone(config_post)
         self.assertEqual(config_post.block_size, 128)
         self.assertEqual(config_post.bwd_block_size, 64)
+        self.assertEqual(config_post.bwd_feature_block_size, 512)
 
         self.assertEqual(output.shape, self.x.shape)
 
@@ -588,6 +596,7 @@ class TestMHC(parameterized.TestCase):
           use_mhc_pallas_kernel=True,
           mhc_pallas_kernel_fwd_block_size=128,
           mhc_pallas_kernel_bwd_block_size=64,
+          mhc_pallas_kernel_bwd_feature_block_size=256,
           dim=128,
           sequence_length=128,
           per_device_batch_size=1,

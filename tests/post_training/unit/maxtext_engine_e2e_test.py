@@ -16,11 +16,13 @@
 
 from collections.abc import Iterator
 import dataclasses
+import importlib
 from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
+from flax import struct
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
@@ -32,6 +34,17 @@ import optax
 import pytest
 
 # training_engine imports tunix, so these tests need the post-training dependency bundle.
+# The engine's default staging transport is Raiden, whose synchronizer ships with the
+# RL tunix build and not with stock tunix. Probe once, the same way the engine does, so
+# this loop exercises the real staging path where Raiden exists and the documented
+# failure where it does not -- rather than passing or failing on which tunix happens to
+# be installed.
+try:
+  importlib.import_module("tunix.experimental.weight_sync.raiden_synchronizer")
+  _RAIDEN_AVAILABLE = True
+except ImportError:
+  _RAIDEN_AVAILABLE = False
+
 pytestmark = [pytest.mark.post_training]
 
 
@@ -42,7 +55,7 @@ class DummyNNXModel(nnx.Module):
     self.weights = nnx.Param(jnp.array([1.0, 2.0]))
 
 
-@dataclasses.dataclass(kw_only=True)
+@struct.dataclass(frozen=True, kw_only=True)
 class DummyPayload(abstract_engine.TrainerPayload):
   """Dummy payload for testing."""
 
@@ -96,7 +109,13 @@ class TrainingLoopRunner:
       step_metrics = self.trainer.get_metrics(clear_cache=True)
       history.append(step_metrics)
 
-      _ = self.trainer.prepare_weight_sync()
+      if _RAIDEN_AVAILABLE:
+        _ = self.trainer.prepare_weight_sync()
+      else:
+        # Without the transport the engine must raise rather than hand back empty
+        # metadata, which would fail later and far from the cause.
+        with pytest.raises(RuntimeError, match="raiden_synchronizer"):
+          self.trainer.prepare_weight_sync()
 
     self.trainer.close()
     return history
@@ -121,6 +140,8 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
         "tensorboard_dir": self.create_tempdir().full_path,
         "skip_jax_distributed_system": True,
         "enable_checkpointing": enable_checkpointing,
+        # Disable scan_layers to prevent prepare_weight_sync from trying to unscan layers on DummyNNXModel
+        "scan_layers": False,
     }
     if enable_checkpointing:
       overrides.update(

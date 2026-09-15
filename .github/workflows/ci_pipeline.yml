@@ -115,7 +115,7 @@ jobs:
     with:
       device_type: tpu
       device_name: v6e-8
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       cloud_runner: linux-x86-ct6e-180-8tpu
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
     secrets:
@@ -157,7 +157,7 @@ jobs:
         flavor: [tpu-unit, tpu-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
@@ -175,7 +175,7 @@ jobs:
         flavor: [tpu-post-training-unit, tpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
@@ -193,7 +193,7 @@ jobs:
         flavor: [tpu7x-unit, tpu7x-integration, tpu7x-post-training-unit]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
@@ -229,7 +229,7 @@ jobs:
         flavor: [cpu-unit, cpu-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
@@ -247,7 +247,7 @@ jobs:
         flavor: [cpu-post-training-unit, cpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
@@ -266,7 +266,7 @@ jobs:
     with:
       device_type: tpu
       device_name: v6e-4
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test and not post_training'
       pytest_addopts: '--ignore=tests/post_training'
@@ -291,7 +291,7 @@ jobs:
     with:
       device_type: tpu
       device_name: v6e-4
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test and not post_training'
       pytest_addopts: '--ignore=tests/post_training --ignore=tests/integration/hlo_diff_test.py'

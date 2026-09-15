@@ -14,21 +14,56 @@
 
 """Integration tests for sharded Muon optimizer."""
 
+import os
+import subprocess
+import sys
+import unittest
+
 from absl.testing import parameterized
 import chex
 import jax
 import jax.numpy as jnp
-
-jax.config.update("jax_num_cpu_devices", 8)
-
-import numpy as np
-from optax.contrib import _muon as optax_muon
-
 from maxtext.optimizers import muon as _muon
 from maxtext.optimizers import reshape_utils
+import numpy as np
+from optax.contrib import _muon as optax_muon
+import pytest
+
+_REQUIRED_CPU_DEVICES = 8
+
+pytestmark = pytest.mark.cpu_only
+
+
+@pytest.mark.cpu_only
+def test_sharded_muon_on_cpu_mesh():
+  """Runs the Muon sharding tests in a subprocess with forced 8 CPU devices."""
+  env = os.environ.copy()
+  env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + f" --xla_force_host_platform_device_count={_REQUIRED_CPU_DEVICES}"
+  env["JAX_PLATFORMS"] = "cpu"
+  result = subprocess.run(
+      [sys.executable, __file__],
+      env=env,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+  assert "MUON_SHARDING_TESTS_PASSED" in result.stdout
 
 
 class MuonShardingTest(parameterized.TestCase):
+  __test__ = False
+
+  def setUp(self):
+    super().setUp()
+    try:
+      cpu_devices = jax.devices("cpu")
+    except (RuntimeError, ValueError):
+      self.skipTest(f"MuonShardingTest requires {_REQUIRED_CPU_DEVICES} CPU devices; CPU" " backend unavailable.")
+    if len(cpu_devices) < _REQUIRED_CPU_DEVICES:
+      self.skipTest(
+          f"MuonShardingTest requires {_REQUIRED_CPU_DEVICES} CPU devices;" " executed via test_sharded_muon_on_cpu_mesh."
+      )
 
   @parameterized.parameters(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Auto)
   def test_sharded_scale_by_muon_matches_optax_contrib(self, axis_type):
@@ -49,7 +84,7 @@ class MuonShardingTest(parameterized.TestCase):
     params = {"w": w}
     grads = {"w": g}
 
-    local_dim_nums = {"w": _muon.MuonDimensionNumbers(reduction_axis=1, output_axis=2, sharding=sharding)}
+    local_dim_nums = {"w": _muon.ShardedMuonDimensionNumbers(reduction_axis=1, output_axis=2, sharding=sharding)}
     optax_dim_nums = {"w": optax_muon.MuonDimensionNumbers(reduction_axis=1, output_axis=2)}
 
     local_transform = _muon.scale_by_muon(
@@ -90,7 +125,7 @@ class MuonShardingTest(parameterized.TestCase):
     grads = {"w": g}
 
     local_transform = _muon.scale_by_muon(
-        weight_dimension_numbers={"w": _muon.MuonDimensionNumbers(sharding=sharding)},
+        weight_dimension_numbers={"w": _muon.ShardedMuonDimensionNumbers(sharding=sharding)},
     )
     local_state = local_transform.init(params)
     local_updates, _ = local_transform.update(grads, local_state, params)
@@ -121,7 +156,7 @@ class MuonShardingTest(parameterized.TestCase):
     params = {"w": w}
     grads = {"w": g}
 
-    dim_num = _muon.MuonDimensionNumbers(reduction_axis=1, output_axis=2, sharding=sharding)
+    dim_num = _muon.ShardedMuonDimensionNumbers(reduction_axis=1, output_axis=2, sharding=sharding)
     optax_dim_num = optax_muon.MuonDimensionNumbers(reduction_axis=1, output_axis=2)
 
     local_transform = _muon.scale_by_muon(
@@ -161,7 +196,7 @@ class MuonShardingTest(parameterized.TestCase):
     params = {"w": w}
     grads = {"w": g}
 
-    dim_num = _muon.MuonDimensionNumbers(reduction_axis=1, output_axis=2, sharding=sharding)
+    dim_num = _muon.ShardedMuonDimensionNumbers(reduction_axis=1, output_axis=2, sharding=sharding)
     optax_dim_num = optax_muon.MuonDimensionNumbers(reduction_axis=1, output_axis=2)
 
     local_transform = _muon.scale_by_muon(
@@ -202,7 +237,7 @@ class MuonShardingTest(parameterized.TestCase):
     params = {"w": w}
     grads = {"w": g}
 
-    dim_num = _muon.MuonDimensionNumbers(reduction_axis=1, output_axis=2, sharding=sharding)
+    dim_num = _muon.ShardedMuonDimensionNumbers(reduction_axis=1, output_axis=2, sharding=sharding)
     optax_dim_num = optax_muon.MuonDimensionNumbers(reduction_axis=1, output_axis=2)
 
     local_transform = _muon.scale_by_muon(
@@ -244,7 +279,7 @@ class MuonShardingTest(parameterized.TestCase):
     params = {"w": w}
     grads = {"w": g}
 
-    dim_num = _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3, sharding=sharding)
+    dim_num = _muon.ShardedMuonDimensionNumbers(reduction_axis=2, output_axis=3, sharding=sharding)
     optax_dim_num = optax_muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3)
 
     local_transform = _muon.scale_by_muon(
@@ -284,7 +319,7 @@ class MuonShardingTest(parameterized.TestCase):
     params = {"w": w}
     grads = {"w": g}
 
-    dim_num = _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3, sharding=sharding)
+    dim_num = _muon.ShardedMuonDimensionNumbers(reduction_axis=2, output_axis=3, sharding=sharding)
     optax_dim_num = optax_muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3)
 
     local_transform = _muon.scale_by_muon(
@@ -318,7 +353,7 @@ class MuonShardingTest(parameterized.TestCase):
     params = {"w": w}
 
     transform = _muon.scale_by_muon(
-        weight_dimension_numbers={"w": _muon.MuonDimensionNumbers(sharding=sharding)},
+        weight_dimension_numbers={"w": _muon.ShardedMuonDimensionNumbers(sharding=sharding)},
     )
     state = transform.init(params)
     with self.assertRaisesRegex(ValueError, "Mixed mesh axis types"):
@@ -572,7 +607,7 @@ class MuonShardingTest(parameterized.TestCase):
     grads = {"w": w}
     params = {"w": w}
 
-    dim_nums = {"w": _muon.MuonDimensionNumbers(reduction_axis=-2, output_axis=-1, sharding=sharding)}
+    dim_nums = {"w": _muon.ShardedMuonDimensionNumbers(reduction_axis=-2, output_axis=-1, sharding=sharding)}
     opt = _muon.muon(learning_rate=1e-3, muon_weight_dimension_numbers=dim_nums)
     state = opt.init(params)
 
@@ -587,4 +622,9 @@ class MuonShardingTest(parameterized.TestCase):
 
 
 if __name__ == "__main__":
-  parameterized.absltest.main()
+  suite = unittest.defaultTestLoader.loadTestsFromTestCase(MuonShardingTest)
+  runner = unittest.TextTestRunner(verbosity=2)
+  res = runner.run(suite)
+  if not res.wasSuccessful():
+    sys.exit(1)
+  print("MUON_SHARDING_TESTS_PASSED")
