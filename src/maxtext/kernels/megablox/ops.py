@@ -47,7 +47,7 @@ def gmm(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
+    preferred_element_type: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
     tiling: tuple[int, int, int, int, int, int, int, int, int] = (
         128,
         128,
@@ -144,7 +144,7 @@ def _gmm_fwd(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
+    preferred_element_type: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
     tiling: tuple[int, int, int, int, int, int, int, int, int] = (
         128,
         128,
