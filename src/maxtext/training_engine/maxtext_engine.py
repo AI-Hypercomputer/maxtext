@@ -452,10 +452,19 @@ def router_replay_gen_model_input_fn(payload: abstract_engine.RLTrainerPayload) 
     segment_start_count = jax.lax.cummax(jnp.where(starts, running, -1), axis=running.ndim - 1)
     positions = jnp.maximum(running - segment_start_count, 0).astype(jnp.int32)
 
+  # `targets` is a roll(-1), so position i predicts token i+1 and the weight at i is the
+  # mask of that *target*: token_mask shifted left by one. Applied unshifted, a packed
+  # segment's last prompt slot -- the position that predicts its first completion token --
+  # carries the prompt's 0, so that token is never scored and the segment trains on
+  # completion tokens 2..N. The shifted and unshifted forms agree wherever segment_ids fell
+  # back to token_mask, which is why only a payload supplying both can tell them apart.
+  # TODO(mazumdera): on the padded path token_mask spans the prompt, so the prompt is
+  # scored. Whether router replay intends that is undocumented.
+  targets_segmentation = jnp.roll(token_mask, -1, axis=-1)
   # roll(-1) wraps token 0 into the last position, which is not its real next token, so
   # mask that position out. Same at every packed segment end: the next token there
   # belongs to a different sequence.
-  targets_segmentation = token_mask.at[:, -1].set(0)
+  targets_segmentation = targets_segmentation.at[:, -1].set(0)
   same_segment = segment_ids[:, :-1] == segment_ids[:, 1:]
   targets_segmentation = targets_segmentation.at[:, :-1].multiply(same_segment.astype(token_mask.dtype))
 
