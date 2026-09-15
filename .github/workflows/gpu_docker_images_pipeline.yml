@@ -23,11 +23,10 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
-      image_suffix:
-        description: 'An image suffix can be provided to add to the image name'
-        required: false
+      repository_name:
+        description: 'Name of the Docker repository to push images to.'
+        required: true
         type: string
-        default: ""
 
 permissions:
   contents: read
@@ -58,7 +57,8 @@ jobs:
             image_name: maxtext_gpu_jax_nightly
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+      image_name: ${{ matrix.image_name }}
+      repository_name: ${{ inputs.repository_name }}
       device: gpu
       build_mode: ${{ matrix.build_mode }}
       workflow: ${{ matrix.workflow }}
@@ -81,7 +81,8 @@ jobs:
             additional_image_to_tag: maxtext_gpu_jax_nightly
     uses: ./.github/workflows/run_ci_tests.yml
     with:
-      image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+      image_name: ${{ matrix.image_name }}
+      repository_name: ${{ inputs.repository_name }}
       image_tag: ${{ github.run_id }}
       device: gpu
       workflow: ${{ matrix.workflow }}
@@ -89,7 +90,7 @@ jobs:
   notify_failure:
     name: Notify failed build
     needs: [build_and_push_docker_images, run_ci_tests]
-    if: ${{ failure() && inputs.image_suffix == '' }}
+    if: ${{ failure() && inputs.repository_name == 'maxtext-images' }}
     runs-on: ubuntu-latest
     permissions:
       issues: write

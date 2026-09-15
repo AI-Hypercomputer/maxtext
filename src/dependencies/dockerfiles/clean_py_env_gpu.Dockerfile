@@ -4,17 +4,13 @@
 # image is designed to have a clean Python environment with just pip
 # and uv installed.
 #
-# Build a docker image by running:
-# `docker build --build-arg DEVICE=cuda12 -t <docker_image_name>:<tag> -f clean_py_env_gpu.Dockerfile .`
-# Or
-# `docker build --build-arg PYTHON_VERSION=3.11 --build-arg DEVICE=cuda12 -t <docker_image_name>:<tag> -f clean_py_env_gpu.Dockerfile .`
-#
-# How to upload the image to Google Container Registry (GCR):
-# e.g., DEVICE=cuda12 and PYTHON_VERSION=3.12
-#.  gcloud init
-#   gcloud auth configure-docker
-#   docker tag <docker_image_name>:<tag> gcr.io/tpu-prod-env-multipod/maxtext-unit-test-cuda12:py312
-#   docker push gcr.io/tpu-prod-env-multipod/maxtext-unit-test-cuda12:py312
+# Usage:
+#   docker build --build-arg DEVICE=cuda12 -t maxtext-unit-test-cuda12:py312 -f src/dependencies/dockerfiles/clean_py_env_gpu.Dockerfile .
+#   gcloud auth login
+#   gcloud config set project tpu-prod-env-multipod
+#   gcloud auth configure-docker us-docker.pkg.dev
+#   docker tag maxtext-unit-test-cuda12:py312 us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext-unit-test-cuda12:py312
+#   docker push us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext-unit-test-cuda12:py312
 
 # Default to Python 3.12.
 ARG PYTHON_VERSION=3.12
