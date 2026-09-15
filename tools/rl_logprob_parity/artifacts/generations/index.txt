@@ -1,0 +1,34 @@
+generations from compare_trainer_sampler.py --gen-tokens 8192 (32 r2e prompts)
+
+row00.txt  logp=-0.2857  chars= 30,192  k, v in im_frame.info.items():
+row01.txt  logp=-0.1450  chars= 31,998  **Fix strategy**:
+row02.txt  logp=-0.3226  chars= 33,333  security_risk>
+row03.txt  logp=-0.1483  chars= 26,363  b in data_n)}")
+row04.txt  logp=-0.1464  chars= 32,093  <|im_end|>
+row05.txt  logp=-0.1630  chars= 30,651  issue reproduction script mentioned 1 unique color requested 2
+row06.txt  logp=-0.2688  chars= 24,963  issue says:
+row07.txt  logp=-0.3019  chars= 30,684  saved image mode: RGB
+row08.txt  logp=-0.2089  chars= 35,739  logic for1
+row09.txt  logp=-0.1340  chars= 30,362  raises 234567:
+row10.txt  logp=-0.2303  chars= 31,726  ()
+row11.txt  logp=-0.2103  chars= 33,001  ]]]))
+row12.txt  logp=-0.2201  chars= 29,815  img.save(buffer, format="tiff", resolution=123.45)
+row13.txt  logp=-0.1303  chars= 29,326  . In `/testbed/PIL/TiffImagePlugin.py`, line 1362 correctly gets the t
+row14.txt  logp=-0.2063  chars= 35,404  p merge.py", line 868, in _maybe_add_join_keys
+row15.txt  logp=-0.1981  chars= 29,760  ["comment"] = comment
+row16.txt  logp=-0.2467  chars= 30,542  # Create a new GIF image with a long comment
+row17.txt  logp=-0.1702  chars= 29,415  最终
+row18.txt  logp=-0.2087  chars= 30,311  The existing frame processing logic should handle frames of different 
+row19.txt  logp=-0.2384  chars= 28,226  <|im_end|>
+row20.txt  logp=-0.0793  chars= 24,632  <parameter=command>
+row21.txt  logp=-0.1606  chars= 27,882  butiker
+row22.txt  logp=-0.2038  chars= 37,873  code in description
+row23.txt  logp=-0.2452  chars= 33,437  LOW
+row24.txt  logp=-0.1260  chars= 30,761  </parameter>
+row25.txt  logp=-0.2413  chars= 24,816  <parameter=command>
+row26.txt  logp=-0.2051  chars= 30,677  08
+row27.txt  logp=-0.1654  chars= 29,506  both returned: (0, 0, 100, 100)
+row28.txt  logp=-0.1119  chars= 29,835  8 bytes for the entryence
+row29.txt  logp=-0.1511  chars= 35,521  () + 2.0,
+row30.txt  logp=-0.3331  chars= 33,953  't set `ws_connection = None` in `WebSocketHandler.close()`, or ensure
+row31.txt  logp=-0.2813  chars= 31,578  parameter>
