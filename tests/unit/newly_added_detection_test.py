@@ -14,12 +14,23 @@
 
 """Unit tests for the line-range test-change detector in ``newly_added_detection``."""
 
+import subprocess
+import sys
 import textwrap
 
+import pytest
+
+from tests.utils import newly_added_detection
 from tests.utils.newly_added_detection import _build_diff_commands
 from tests.utils.newly_added_detection import _is_test_file
+from tests.utils.newly_added_detection import changed_tests_from_diff
+from tests.utils.newly_added_detection import diff_against_base
+from tests.utils.newly_added_detection import get_changed_tests
+from tests.utils.newly_added_detection import main
 from tests.utils.newly_added_detection import parse_changed_line_map
 from tests.utils.newly_added_detection import touched_test_names
+
+_SCRIPT = newly_added_detection.__file__
 
 
 # --- _is_test_file -----------------------------------------------------------
@@ -197,3 +208,74 @@ def test_insertion_after_untouched_test_does_not_flag_it():
   )
   # test_old spans lines 1-2; test_new spans lines 5-6. The added lines are 5-6.
   assert touched_test_names(source, {5, 6}) == {"test_new"}
+
+
+# --- diff_against_base / get_changed_tests / CLI -----------------------------
+
+
+def _git(repo, *args):
+  """Run git in ``repo`` with a fixed identity so commits work on a bare CI runner."""
+  subprocess.run(
+      ["git", "-c", "user.name=ci", "-c", "user.email=ci@example.com", "-c", "commit.gpgsign=false", *args],
+      cwd=repo,
+      check=True,
+      capture_output=True,
+  )
+
+
+@pytest.fixture(name="pr_repo")
+def pr_repo_fixture(tmp_path):
+  """A repo whose ``main`` holds one test file and whose HEAD (branch ``feature``) adds a test to it."""
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  _git(repo, "init", "-q")
+  _git(repo, "checkout", "-q", "-b", "main")
+  test_file = repo / "tests" / "unit" / "sample_test.py"
+  test_file.parent.mkdir(parents=True)
+  test_file.write_text("def test_old():\n  assert True\n", encoding="utf-8")
+  _git(repo, "add", ".")
+  _git(repo, "commit", "-q", "-m", "base")
+  _git(repo, "checkout", "-q", "-b", "feature")
+  test_file.write_text("def test_old():\n  assert True\n\n\ndef test_new():\n  assert True\n", encoding="utf-8")
+  _git(repo, "commit", "-q", "-am", "add test_new")
+  return repo
+
+
+def test_get_changed_tests_reports_only_the_touched_test(pr_repo, monkeypatch):
+  monkeypatch.chdir(pr_repo)
+  # There is no origin remote, so detection falls through to the local ``main...HEAD`` range.
+  assert get_changed_tests("main") == {("tests/unit/sample_test.py", "test_new")}
+
+
+def test_changed_tests_from_diff_reads_sources_relative_to_cwd(pr_repo, monkeypatch):
+  monkeypatch.chdir(pr_repo)
+  diff = "+++ b/tests/unit/sample_test.py\n@@ -2,0 +3,4 @@\n"
+  assert changed_tests_from_diff(diff) == {("tests/unit/sample_test.py", "test_new")}
+
+
+def test_diff_against_base_returns_none_outside_a_git_work_tree(tmp_path, monkeypatch):
+  monkeypatch.chdir(tmp_path)
+  assert diff_against_base("main") is None
+
+
+def test_main_returns_two_and_explains_when_diff_is_unavailable(tmp_path, monkeypatch, capsys):
+  monkeypatch.chdir(tmp_path)
+  assert main(["--base", "main"]) == 2
+  captured = capsys.readouterr()
+  assert captured.out == ""
+  assert "cannot diff" in captured.err
+
+
+def test_script_runs_without_the_tests_package(pr_repo):
+  # `-I` (isolated mode) keeps the script directory, cwd and PYTHONPATH out of sys.path, so this
+  # passes only if the script needs nothing but the standard library. analyze_code_changes.sh
+  # depends on that: it runs on a bare runner where importing the ``tests`` package fails.
+  result = subprocess.run(
+      [sys.executable, "-I", _SCRIPT, "--base", "main"],
+      cwd=pr_repo,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  assert result.returncode == 0, result.stderr
+  assert result.stdout.splitlines() == ["tests/unit/sample_test.py::test_new"]

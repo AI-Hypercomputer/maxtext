@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Detect the tests a PR adds or modifies, for scheduled_only pre-submit verification.
+"""Detect the tests a PR adds or modifies, for scheduled_only and TPU7X pre-submit verification.
 
 The pre-submit CI runs ``pytest -m "<marker> and (not scheduled_only or newly_added)"``.
 This module supplies the ``newly_added`` set: the tests a pull request touched, so that a
 newly added or modified ``scheduled_only`` test runs at least once before merge instead of
-being silently skipped until the nightly scheduled pipeline.
+being silently skipped until the nightly scheduled pipeline. On TPU7X runners a pull
+request runs ``pytest -m "<marker> and newly_added"`` instead, so only the touched tests
+occupy that scarce hardware.
 
 Detection maps changed *line numbers* (from ``git diff --unified=0``) onto each test's
 line span (from an ``ast`` parse of the new file). A test counts as changed only when a
@@ -25,14 +27,25 @@ changed line lands inside its own span. This avoids trusting git's hunk-header f
 name, which points at the function *preceding* an insertion and would otherwise flag an
 untouched test that merely sits above newly added code.
 
+The module doubles as a command-line tool for CI jobs that cannot import the ``tests``
+package (``tests/__init__.py`` imports packages a bare runner does not have)::
+
+    python3 tests/utils/newly_added_detection.py --base main
+
+It prints one ``path::test_name`` line per changed test and exits 0, or exits 2 when no
+diff against the base could be computed, so callers can tell "nothing changed" from
+"detection is broken".
+
 Only the Python standard library is used, since this runs on a bare CI runner where
 MaxText is not necessarily importable.
 """
 
+import argparse
 import ast
 import os
 import re
 import subprocess
+import sys
 
 # Matches pytest.ini's ``python_files = *_test.py *_tests.py``.
 _TEST_SUFFIXES = ("_test.py", "_tests.py")
@@ -153,18 +166,19 @@ def _build_diff_commands(base):
   ]
 
 
-def get_changed_tests(base_ref=None):
-  """Return ``(file_path, test_name)`` for every test the PR added or modified.
+def _resolve_base(base_ref=None):
+  """Return the base ref to diff against: ``base_ref``, else ``$GITHUB_BASE_REF``, else ``main``."""
+  return base_ref or os.environ.get("GITHUB_BASE_REF") or "main"
 
-  Args:
-    base_ref: Base git ref to diff against. Defaults to the ``GITHUB_BASE_REF``
-      environment variable, then ``"main"``.
 
-  Returns:
-    A set of ``(file_path, test_name)`` tuples, or an empty set when not in a git work
-    tree or when the diff cannot be computed.
+def diff_against_base(base):
+  """Return ``git diff --unified=0`` text against the merge-base with ``base``, or None.
+
+  None means no diff could be computed: the working directory is not inside a git work
+  tree, or neither ``origin/<base>`` nor ``<base>`` resolves to a ref that shares history
+  with HEAD. Callers that gate CI on the result must treat None as "unknown", never as
+  "nothing changed".
   """
-  base = base_ref or os.environ.get("GITHUB_BASE_REF") or "main"
   try:
     inside = subprocess.run(
         ["git", "rev-parse", "--is-inside-work-tree"],
@@ -172,7 +186,7 @@ def get_changed_tests(base_ref=None):
         check=False,
     )
     if inside.returncode != 0:
-      return set()
+      return None
     if os.environ.get("GITHUB_ACTIONS") == "true":
       subprocess.run(
           ["git", "fetch", "origin", f"{base}:refs/remotes/origin/{base}"],
@@ -180,18 +194,23 @@ def get_changed_tests(base_ref=None):
           stderr=subprocess.DEVNULL,
           check=False,
       )
-    diff_text = None
     for command in _build_diff_commands(base):
       try:
-        diff_text = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
-        break
+        return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
       except Exception:  # pylint: disable=broad-exception-caught
         continue
-    if diff_text is None:
-      return set()
   except Exception:  # pylint: disable=broad-exception-caught
-    return set()
+    pass
+  return None
 
+
+def changed_tests_from_diff(diff_text):
+  """Return ``(file_path, test_name)`` for every test the diff added or modified.
+
+  Args:
+    diff_text: Raw ``git diff --unified=0`` output. Test sources are read from the
+      current working directory, which must be the repository root.
+  """
   changed = set()
   for path, touched_lines in parse_changed_line_map(diff_text).items():
     if not _is_test_file(path):
@@ -204,3 +223,50 @@ def get_changed_tests(base_ref=None):
     for name in touched_test_names(source, touched_lines):
       changed.add((path, name))
   return changed
+
+
+def get_changed_tests(base_ref=None):
+  """Return ``(file_path, test_name)`` for every test the PR added or modified.
+
+  Args:
+    base_ref: Base git ref to diff against. Defaults to the ``GITHUB_BASE_REF``
+      environment variable, then ``"main"``.
+
+  Returns:
+    A set of ``(file_path, test_name)`` tuples, or an empty set when not in a git work
+    tree or when the diff cannot be computed.
+  """
+  diff_text = diff_against_base(_resolve_base(base_ref))
+  if diff_text is None:
+    return set()
+  return changed_tests_from_diff(diff_text)
+
+
+def main(argv=None):
+  """Command-line entry point: print one ``path::test_name`` line per changed test.
+
+  Returns 0 when a diff was computed (the output may be empty) and 2 when it was not, so a
+  CI gate can tell "no changed tests" apart from "detection is broken".
+  """
+  parser = argparse.ArgumentParser(description="List the tests a branch added or modified relative to a base ref.")
+  parser.add_argument(
+      "--base",
+      default=None,
+      help="Base ref to diff against (default: $GITHUB_BASE_REF, then main).",
+  )
+  args = parser.parse_args(argv)
+  base = _resolve_base(args.base)
+  diff_text = diff_against_base(base)
+  if diff_text is None:
+    print(
+        f"newly_added_detection: cannot diff against origin/{base} or {base} (cwd: {os.getcwd()})",
+        file=sys.stderr,
+    )
+    return 2
+  for path, name in sorted(changed_tests_from_diff(diff_text)):
+    print(f"{path}::{name}")
+  return 0
+
+
+if __name__ == "__main__":
+  sys.exit(main())
