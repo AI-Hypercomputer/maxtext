@@ -297,13 +297,19 @@ def is_oom(argv: Sequence[str]) -> bool:
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  os.environ["LIBTPU_INIT_ARGS"] = (
-      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  )
   print("Starting train_compile.py...", flush=True)
 
   # Parse and validate configuration
   config = pyconfig.initialize(argv)
+  if config.internal_compile:
+    if "--xla_tpu_spmd_rng_bit_generator_unsafe" not in config.compile_xla_flags:
+      config.get_keys()[
+          "compile_xla_flags"
+      ] = f"{config.compile_xla_flags} --xla_tpu_spmd_rng_bit_generator_unsafe=true".strip()
+  else:
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
   validate_config(config)
 
   # Create target mesh
@@ -402,7 +408,23 @@ def main(argv: Sequence[str]) -> None:
     print("Successfully saved compiled object as" f" {config.compiled_trainstep_file}")
   print("Finished train_compile.py successfully!", flush=True)
   print(f"Cost analysis: {compiled.cost_analysis()}")
-  print(f"Memory analysis: {compiled.memory_analysis()}")
+  compiled_stats = compiled.memory_analysis()
+  print(f"Memory analysis: {compiled_stats}")
+  if compiled_stats is not None:
+    output_gb = compiled_stats.output_size_in_bytes / (1024**3)
+    temp_gb = compiled_stats.temp_size_in_bytes / (1024**3)
+    argument_gb = compiled_stats.argument_size_in_bytes / (1024**3)
+    alias_gb = compiled_stats.alias_size_in_bytes / (1024**3)
+    host_temp_gb = compiled_stats.host_temp_size_in_bytes / (1024**3)
+    total_gb = output_gb + temp_gb + argument_gb - alias_gb
+    print(
+        f"Total estimated memory size: {total_gb:.1f} GB, estimated output"
+        f" size: {output_gb:.1f} GB, estimated temp size: {temp_gb:.1f} GB,"
+        f" estimated argument size: {argument_gb:.1f} GB, Estimated host temp"
+        f" size: {host_temp_gb:.1f} GB.",
+        flush=True,
+    )
+  max_utils.print_compiled_memory_stats(compiled_stats)
 
   # Dump HLO if requested
   if config.dump_hlo:
