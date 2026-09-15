@@ -30,8 +30,6 @@ from maxtext.utils.sharding import (
     FSDP_MESH_AXES,
 )
 from maxtext.common.common_types import ShardMode
-from maxtext.utils import max_utils
-
 
 # Submodule names whose params are used by logits_from_hidden_states_for_vocab_tiling:
 # the final norm, the LM-head dense, and the embedding table when logits are tied.
@@ -54,6 +52,78 @@ def _is_output_head_param_path(path, _value):
 
   keys = [_name(k) for k in path]
   return any(k in keys for k in _OUTPUT_HEAD_PATH_KEYS)
+
+
+@jax.custom_vjp
+def sparse_cross_entropy_with_logits(
+    logits: jnp.ndarray,
+    labels: jnp.ndarray,
+    z_loss: float = 0.0,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Computes cross entropy loss with sparse integer labels.
+
+  Avoids allocating large [batch_size * seq_len, vocab_size] one-hot float arrays in HBM.
+  Mathematically identical to cross_entropy_with_logits(logits, jax.nn.one_hot(labels, V), z_loss).
+  """
+  logits_sum = jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
+  safe_labels = jnp.clip(labels, 0, logits.shape[-1] - 1)
+  target_logits = jnp.take_along_axis(logits, jnp.expand_dims(safe_labels, -1), axis=-1).squeeze(-1)
+  log_z = jnp.squeeze(logits_sum, axis=-1)
+  loss = log_z - target_logits
+  total_z_loss = z_loss * jax.lax.square(log_z)
+  loss += total_z_loss
+  return loss, total_z_loss
+
+
+def _sparse_cross_entropy_with_logits_fwd(
+    logits: jnp.ndarray,
+    labels: jnp.ndarray,
+    z_loss: float = 0.0,
+):
+  """Forward pass for sparse cross-entropy with logits."""
+  max_logit = logits.max(axis=-1, keepdims=True)
+  shifted = logits - max_logit
+  exp_shifted = jnp.exp(shifted)
+  sum_exp = jnp.sum(exp_shifted, axis=-1, keepdims=True)
+  log_z = jnp.squeeze(jnp.log(sum_exp) + max_logit, axis=-1)
+
+  safe_labels = jnp.clip(labels, 0, logits.shape[-1] - 1)
+  target_logits = jnp.take_along_axis(logits, jnp.expand_dims(safe_labels, -1), axis=-1).squeeze(-1)
+  loss = log_z - target_logits
+  total_z_loss = z_loss * jax.lax.square(log_z)
+  loss += total_z_loss
+
+  return (loss, total_z_loss), (
+      logits,
+      safe_labels,
+      z_loss,
+      exp_shifted,
+      sum_exp,
+      log_z,
+  )
+
+
+def _sparse_cross_entropy_with_logits_bwd(res, g):
+  """Backward pass for sparse cross-entropy with logits."""
+  g = g[0]
+  logits, safe_labels, z_loss, exp_shifted, sum_exp, log_z = res
+  scale = jnp.expand_dims(1 + 2 * z_loss * log_z, -1)
+  probs = exp_shifted / sum_exp
+  deriv = scale * probs
+  one_hot = jax.nn.one_hot(safe_labels, logits.shape[-1], dtype=deriv.dtype)
+  deriv = deriv - one_hot
+  g_logits = jnp.expand_dims(g, axis=-1) * deriv
+  return (
+      jnp.asarray(g_logits, logits.dtype),
+      None,
+      None,
+  )
+
+
+sparse_cross_entropy_with_logits.defvjp(
+    _sparse_cross_entropy_with_logits_fwd,
+    _sparse_cross_entropy_with_logits_bwd,
+)
 
 
 def vocab_tiling_linen_loss(
@@ -168,9 +238,8 @@ def vocab_tiling_linen_loss(
           method="logits_from_hidden_states_for_vocab_tiling",
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
-      one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
-      chunk_xent, chunk_z_loss = max_utils.cross_entropy_with_logits(
-          chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier
+      chunk_xent, chunk_z_loss = sparse_cross_entropy_with_logits(
+          chunk_logits, label_chunk, z_loss=config.z_loss_multiplier
       )
 
       masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
@@ -213,8 +282,7 @@ def vocab_tiling_linen_loss(
           method="logits_from_hidden_states_for_vocab_tiling",
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
-      one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
-      xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier)
+      xent, _ = sparse_cross_entropy_with_logits(chunk_logits, input_label_chunk, z_loss=config.z_loss_multiplier)
       return jnp.sum(xent * (input_segmentation_chunk != 0))
 
     def _bwd_scan_body(grad_params_acc, chunk_data):
@@ -234,7 +302,7 @@ def vocab_tiling_linen_loss(
       _, vjp_fn = jax.vjp(loss_fn_for_vjp, gathered_params, hidden_chunk)
 
       # 1.0 since total_loss is sum of all individual chunked loss
-      (grad_params_update, grad_hidden_chunk) = vjp_fn(1.0)
+      grad_params_update, grad_hidden_chunk = vjp_fn(1.0)
       grad_hidden_chunk = _maybe_shard_with_name(grad_hidden_chunk, chunked_hidden_spec)
 
       grad_params_acc = jax.tree_util.tree_map(
@@ -397,9 +465,8 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
       segmentation_chunk = _maybe_shard_with_name(segmentation_chunk, chunked_data_spec)
 
       chunk_logits = _logits_for_chunk(chunk_head_params, chunk_other_params, chunk_rest, hidden_chunk)
-      one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
-      chunk_xent, chunk_z_loss = max_utils.cross_entropy_with_logits(
-          chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier
+      chunk_xent, chunk_z_loss = sparse_cross_entropy_with_logits(
+          chunk_logits, label_chunk, z_loss=config.z_loss_multiplier
       )
 
       masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
@@ -444,8 +511,7 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
 
     def _single_chunk_loss_fn(input_head_params, input_hidden_chunk, input_label_chunk, input_segmentation_chunk):
       chunk_logits = _logits_for_chunk(input_head_params, chunk_other_params, chunk_rest, input_hidden_chunk)
-      one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
-      xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier)
+      xent, _ = sparse_cross_entropy_with_logits(chunk_logits, input_label_chunk, z_loss=config.z_loss_multiplier)
       return jnp.sum(xent * (input_segmentation_chunk != 0))
 
     def _bwd_scan_body(grad_head_acc, chunk_data):
@@ -457,7 +523,7 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
       # pylint: disable=unnecessary-lambda-assignment
       loss_fn_for_vjp = lambda p, h: _single_chunk_loss_fn(p, h, label_chunk, segmentation_chunk)
       _, vjp_fn = jax.vjp(loss_fn_for_vjp, chunk_head_params, hidden_chunk)
-      (grad_head_update, grad_hidden_chunk) = vjp_fn(1.0)
+      grad_head_update, grad_hidden_chunk = vjp_fn(1.0)
       grad_hidden_chunk = _maybe_shard_with_name(grad_hidden_chunk, chunked_hidden_spec)
 
       grad_head_acc = jax.tree_util.tree_map(lambda acc, update: acc + update, grad_head_acc, grad_head_update)
