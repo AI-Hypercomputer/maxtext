@@ -83,6 +83,7 @@ BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 if [ "$EVENT_NAME" != "pull_request" ]; then
   echo "Not a pull request (event: $EVENT_NAME), running all tests and notebooks"
   set_test_flags "true" "true"
+  emit_flag "has_new_tests" "true"
   exit 0
 fi
 
@@ -98,8 +99,37 @@ echo "$CHANGED_FILES"
 if [ -z "$CHANGED_FILES" ]; then
   echo "No files detected or diff failed. Running everything as a fail-safe."
   set_test_flags "true" "true"
+  emit_flag "has_new_tests" "true"
   exit 0
 fi
+
+# Check whether the PR added or modified a test that can run on TPU7X. The detector runs as
+# a script, not via `python3 -c "from tests.utils..."`: importing the package executes
+# tests/__init__.py, which needs packages that are not installed on this bare runner. The
+# script only needs the standard library and exits 2 when it could not compute a diff.
+#
+# "Runnable on TPU7X" means: the scheduled tpu7x-* flavors would collect the test and not
+# skip it. Only tpu_only tests qualify, because tests/conftest.py auto-marks every test
+# without a hardware marker as cpu_only, which the tpu7x marker expressions exclude; and
+# skip_on_tpu7x tests are skipped at runtime on TPU7X hardware. Markers are read from the
+# test function, its class and the module's pytestmark, the same inheritance pytest uses.
+CHANGED_TPU_TESTS=$(python3 tests/utils/newly_added_detection.py --base "$BASE_REF" \
+  --require-marker tpu_only --exclude-marker skip_on_tpu7x) && DETECT_RC=0 || DETECT_RC=$?
+if [ "$DETECT_RC" -ne 0 ]; then
+  echo "Warning: newly_added detection failed (exit ${DETECT_RC}); enabling TPU7X tests as a fail-safe."
+  HAS_NEW_TESTS="true"
+elif [ -n "$CHANGED_TPU_TESTS" ]; then
+  echo "PR added or modified these tests that can run on TPU7X (tpu_only, not skip_on_tpu7x):"
+  while IFS= read -r changed_test; do
+    echo "  - $changed_test"
+  done <<< "$CHANGED_TPU_TESTS"
+  HAS_NEW_TESTS="true"
+else
+  echo "PR did not add or modify any test that can run on TPU7X."
+  HAS_NEW_TESTS="false"
+fi
+echo "Detected has_new_tests=${HAS_NEW_TESTS}"
+emit_flag "has_new_tests" "$HAS_NEW_TESTS"
 
 # Disable all tests by default
 set_test_flags "false" "false"
