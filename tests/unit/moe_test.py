@@ -80,6 +80,22 @@ def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
   return diff_summary
 
 
+def _skip_unless_te_single_local_device(test):
+  """Skips when TransformerEngine is missing or one process drives several GPUs.
+
+  TE grouped GEMM v1 copies group_sizes D2H inside the FFI. Under a
+  single-process multi-device shard_map that host sync hangs, so these tests
+  require one local device (or a one-GPU-per-rank launch).
+  """
+  pytest.importorskip("transformer_engine.jax.dense")
+  if jax.local_device_count() > 1:
+    test.skipTest(
+        f"TE grouped GEMM needs one local device per process, got {jax.local_device_count()}; "
+        "rerun with ROCR_VISIBLE_DEVICES=0 / HIP_VISIBLE_DEVICES=0, or use "
+        "tests/unit/run_multiprocess_te_grouped_gemm.sh for expert parallelism."
+    )
+
+
 def assert_moe_close(actual, expected, dtype):
   """Asserts that the actual and expected MoE outputs are close."""
   assert np.isfinite(actual).all(), "Actual output contains NaNs or Infs!"
@@ -764,6 +780,129 @@ class RoutedMoeTest(parameterized.TestCase):
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
     assert_moe_close(actual_output, expected_output, cfg.dtype)
+
+  @pytest.mark.gpu_only
+  def test_te_grouped_gemm(self):
+    """TransformerEngine grouped_dense matches dense MoE and ragged_dot.
+
+    Mixtral-style routing (8 experts, top-2, SwiGLU, no expert bias) rather than
+    GPT-OSS. TE v1 copies group_sizes D2H inside its FFI, so this requires one
+    local device; shrink Mixtral dims so the case stays a unit test on GPU.
+    """
+    _skip_unless_te_single_local_device(self)
+
+    def _build_cfg(use_te_grouped_gemm, run_name):
+      return pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=run_name,
+          enable_checkpointing=False,
+          model_name="mixtral-8x7b",
+          hardware="gpu",
+          override_model_config=True,
+          dtype="bfloat16",
+          megablox=False,
+          sparse_matmul=True,
+          use_te_grouped_gemm=use_te_grouped_gemm,
+          per_device_batch_size=2,
+          max_target_length=64,
+          base_emb_dim=256,
+          base_mlp_dim=256,
+          base_moe_mlp_dim=256,
+          float32_gate_logits=True,
+          skip_jax_distributed_system=True,
+      )
+
+    cfg_te = _build_cfg(True, "moe_block_te_grouped_gemm_test")
+    cfg_ragged = _build_cfg(False, "moe_block_te_grouped_gemm_ragged_ref")
+
+    rng = jax.random.PRNGKey(1234)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg_te.per_device_batch_size) * device_count, cfg_te.max_target_length, cfg_te.base_emb_dim),
+        dtype=cfg_te.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg_te)
+    mesh = Mesh(devices_array, cfg_te.mesh_axes)
+
+    # Forward against the same dense per-expert loop used by test_ragged_dot / test_megablox.
+    with nn_partitioning.axis_rules(cfg_te.logical_axis_rules):
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg_te, mesh)
+      actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg_te, mesh)
+    assert_moe_close(actual_output, expected_output, cfg_te.dtype)
+
+    def make_model(cfg):
+      return moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+    def loss_and_grad(model, stacked_vars, x):
+      def loss_fn(params, hidden):
+        out, lb_loss, _ = model.apply({"params": params}, hidden)
+        loss = jnp.mean(out.astype(jnp.float32) ** 2)
+        if lb_loss is not None:
+          loss = loss + lb_loss.astype(jnp.float32)
+        return loss, out
+
+      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))(stacked_vars["params"], x)
+
+    model_ragged = make_model(cfg_ragged)
+    model_te = make_model(cfg_te)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_te.logical_axis_rules):
+      stacked = model_ragged.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      (_, out_ragged), (grads_ragged, dx_ragged) = loss_and_grad(model_ragged, stacked, hidden_states)
+      (_, out_te), (grads_te, dx_te) = loss_and_grad(model_te, stacked, hidden_states)
+
+    # Isolates the GEMM: same sparse MoE, TE vs jax.lax.ragged_dot. GPU bf16 is looser than
+    # the TPU megablox vs dense threshold in test_gmm_grad_equivalence.
+    diff_summary = compare_tree(
+        {"output": out_ragged, "state_grad": dx_ragged, "var_grad": grads_ragged},
+        {"output": out_te, "state_grad": dx_te, "var_grad": grads_te},
+        relative_norm_diff_threshold=5e-2,
+    )
+    max_logging.log("\n" + diff_summary)
+
+  @pytest.mark.gpu_only
+  def test_te_grouped_dense_zeros_leftover_rows(self):
+    """MaxText passes true group sizes; TE must zero rows past sum(group_sizes).
+
+    EP=1 forbids ragged_buffer_factor, so the full MoE path cannot allocate a
+    padded buffer in this single-process test. The leftover contract is the
+    same FFI MaxText calls: sum(group_sizes) < M must be zeros, not NaNs.
+    """
+    _skip_unless_te_single_local_device(self)
+    from transformer_engine.jax.dense import grouped_dense
+
+    batch, hidden, out, num_groups = 32, 64, 32, 4
+    group_sizes = jnp.array([8, 6, 4, 2], dtype=jnp.int32)
+    self.assertLess(int(group_sizes.sum()), batch)
+    keys = jax.random.split(jax.random.PRNGKey(0), 3)
+    inputs = jax.random.normal(keys[0], (batch, hidden), dtype=jnp.bfloat16)
+    inputs = inputs.at[int(group_sizes.sum()) :].set(jnp.nan)
+    kernel = jax.random.normal(keys[1], (num_groups, hidden, out), dtype=jnp.bfloat16)
+    bias = jax.random.normal(keys[2], (num_groups, out), dtype=jnp.bfloat16)
+
+    def loss_fn(x, w, b):
+      y = grouped_dense(x, w, group_sizes, contracting_dims=((1,), (1,)), bias=b)
+      return jnp.sum(y.astype(jnp.float32)), y
+
+    (loss, output), grads = jax.value_and_grad(loss_fn, argnums=(0, 1, 2), has_aux=True)(inputs, kernel, bias)
+    leftover = output[int(group_sizes.sum()) :].astype(jnp.float32)
+    self.assertTrue(bool(jnp.isfinite(loss)))
+    self.assertFalse(bool(jnp.isnan(leftover).any()))
+    self.assertEqual(float(jnp.max(jnp.abs(leftover))), 0.0)
+    for name, grad in zip(("dx", "dw", "db"), grads):
+      self.assertTrue(bool(jnp.isfinite(grad.astype(jnp.float32)).all()), msg=f"{name} has NaN/Inf")
 
   @pytest.mark.tpu_only
   def test_dense(self):
@@ -1952,6 +2091,269 @@ class RoutedMoeTest(parameterized.TestCase):
         local_batch, ep_degree, global_experts, num_experts_per_tok, ragged_buffer_factor
     )
     self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
+
+
+@jax.jit
+def _te_gmm_diff_metrics(actual, expected):
+  """Reduce a tensor pair to replicated scalars so sharded arrays work too."""
+  a = actual.astype(jnp.float32)
+  b = expected.astype(jnp.float32)
+  diff = a - b
+  return (
+      jnp.linalg.norm(diff) / (jnp.linalg.norm(b) + 1e-6),
+      jnp.max(jnp.abs(diff)),
+      jnp.all(jnp.isfinite(a)),
+      jnp.all(jnp.isfinite(b)),
+  )
+
+
+def _assert_te_bf16_close(name, actual, expected, relative_norm_threshold=5e-2):
+  """Compare TE vs ragged_dot tensors using relative L2 (bf16-tolerant)."""
+  rel_norm, max_diff, actual_finite, expected_finite = _te_gmm_diff_metrics(actual, expected)
+  assert bool(actual_finite), f"{name}: TE tensor has NaN/Inf"
+  assert bool(expected_finite), f"{name}: reference tensor has NaN/Inf"
+  rel_norm = float(rel_norm)
+  assert rel_norm < relative_norm_threshold, (
+      f"{name}: relative L2 {rel_norm:.4g} >= {relative_norm_threshold} " f"(max_abs_diff={float(max_diff):.4g})"
+  )
+
+
+@pytest.mark.gpu_only
+class TeGroupedGemmTest(unittest.TestCase):
+  """TransformerEngine grouped_dense vs jax.lax.ragged_dot on Mixtral-style MoE.
+
+  Covers paths that are not GPT-OSS-specific: mlp_bias, EP>1, ragged-sort, and
+  mixed-dtype wo activations. EP>1 cases need one process per GPU; see
+  tests/unit/run_multiprocess_te_grouped_gemm.sh.
+  """
+
+  def _te_cfg(self, use_te_grouped_gemm, expert_parallelism, mlp_bias=False, **overrides):
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name=f"moe_te_gmm_ep{expert_parallelism}_{int(use_te_grouped_gemm)}_{int(mlp_bias)}",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        hardware="gpu",
+        override_model_config=True,
+        dtype="bfloat16",
+        megablox=False,
+        sparse_matmul=True,
+        use_te_grouped_gemm=use_te_grouped_gemm,
+        ici_expert_parallelism=expert_parallelism,
+        skip_jax_distributed_system=True,
+        per_device_batch_size=2,
+        max_target_length=16,
+        base_emb_dim=64,
+        base_mlp_dim=64,
+        base_moe_mlp_dim=64,
+        mlp_bias=mlp_bias,
+        float32_gate_logits=True,
+        **overrides,
+    )
+
+  def _run_te_vs_ragged_dot(self, expert_parallelism, mlp_bias=False, **overrides):
+    _skip_unless_te_single_local_device(self)
+    if jax.device_count() < expert_parallelism:
+      self.skipTest(f"EP={expert_parallelism} needs >= {expert_parallelism} devices, got {jax.device_count()}")
+
+    seq_len = 16
+    batch_size = max(4, jax.device_count())
+    cfg_ref = self._te_cfg(False, expert_parallelism, mlp_bias, **overrides)
+    cfg_te = self._te_cfg(True, expert_parallelism, mlp_bias, **overrides)
+    devices_array = maxtext_utils.create_device_mesh(cfg_ref)
+    mesh = Mesh(devices_array, cfg_ref.mesh_axes)
+
+    def make_model(cfg):
+      return moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+    model_ref = make_model(cfg_ref)
+    model_te = make_model(cfg_te)
+    hidden = jax.random.normal(
+        jax.random.PRNGKey(42),
+        (batch_size, seq_len, cfg_ref.base_emb_dim),
+        dtype=jnp.bfloat16,
+    )
+
+    def make_value_and_grads(model):
+      def _loss(x, variables):
+        out, *_ = model.apply(variables, x)
+        return jnp.sum(out.astype(jnp.float32)), out
+
+      return jax.jit(jax.value_and_grad(_loss, argnums=(0, 1), has_aux=True))
+
+    def _unwrap(x):
+      while hasattr(x, "value"):
+        x = x.value
+      return x
+
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+      variables = model_ref.init({"params": jax.random.PRNGKey(0)}, hidden)
+      (loss_ref, out_ref), (dx_ref, dvars_ref) = make_value_and_grads(model_ref)(hidden, variables)
+      (loss_te, out_te), (dx_te, dvars_te) = make_value_and_grads(model_te)(hidden, variables)
+
+    _assert_te_bf16_close("forward", out_te, out_ref)
+    _assert_te_bf16_close("loss", loss_te, loss_ref)
+    _assert_te_bf16_close("dinput", dx_te, dx_ref)
+    params_ref = dvars_ref.get("params", dvars_ref.get("moe_variables"))
+    params_te = dvars_te.get("params", dvars_te.get("moe_variables"))
+    keys = ["wi_0", "wi_1", "wo"]
+    if mlp_bias:
+      keys.extend(["wi_0_bias", "wi_1_bias", "wo_bias"])
+    for key in keys:
+      _assert_te_bf16_close(f"d{key}", _unwrap(params_te[key]), _unwrap(params_ref[key]))
+
+  def test_mlp_bias(self):
+    """Bias is added after GEMM, same as tokamax/megablox/ragged_dot."""
+    self._run_te_vs_ragged_dot(1, mlp_bias=True)
+
+  def test_ep2(self):
+    """Forward and backward match ragged_dot with EP=2.
+
+    Only runs when a process sees exactly one device out of two or more
+    globally, i.e. under a multi-process launch.
+    """
+    self._run_te_vs_ragged_dot(2)
+
+  def test_ep_all_devices(self):
+    """Forward and backward match ragged_dot with EP spanning every device."""
+    if jax.device_count() < 2:
+      self.skipTest(f"EP over all devices needs >= 2 devices, got {jax.device_count()}")
+    self._run_te_vs_ragged_dot(jax.device_count())
+
+  def test_ragged_sort(self):
+    """ring_ragged_unsort can hand wo a float32 cotangent against bf16 experts."""
+    if jax.device_count() < 2:
+      self.skipTest(f"use_ragged_sort needs EP > 1, got {jax.device_count()} devices")
+    self._run_te_vs_ragged_dot(
+        jax.device_count(),
+        use_ring_of_experts=True,
+        use_ragged_sort=True,
+        capacity_factor=3.0,
+        ragged_buffer_factor=3.0,
+    )
+
+  def test_f32_wo_activations(self):
+    """wo GMM must accept f32 activations against bf16 expert weights."""
+    _skip_unless_te_single_local_device(self)
+    orig = moe.RoutedMoE.apply_ffn_activation
+
+    def f32_glu(self, layer_w0, layer_w1):
+      return orig(self, layer_w0, layer_w1).astype(jnp.float32)
+
+    cfg = self._te_cfg(True, 1)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    x = jax.random.normal(
+        jax.random.PRNGKey(42),
+        (max(4, jax.device_count()), 16, cfg.base_emb_dim),
+        dtype=jnp.bfloat16,
+    )
+
+    with mock.patch.object(moe.RoutedMoE, "apply_ffn_activation", f32_glu):
+      model = moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+      def _loss(hidden, variables):
+        out, *_ = model.apply(variables, hidden)
+        return jnp.sum(out.astype(jnp.float32))
+
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        variables = model.init({"params": jax.random.PRNGKey(0)}, x)
+        loss, _ = jax.jit(jax.value_and_grad(_loss, argnums=0))(x, variables)
+    self.assertTrue(np.isfinite(np.asarray(loss, dtype=np.float32)))
+
+
+@pytest.mark.gpu_only
+class TeGroupedGemmConfigTest(unittest.TestCase):
+  """Config validation for use_te_grouped_gemm."""
+
+  def test_requires_sparse_matmul(self):
+    """The TE backend is unreachable from the dense path, so it must not be silently ignored."""
+    with self.assertRaisesRegex(ValueError, "use_te_grouped_gemm=True requires sparse_matmul=True"):
+      pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="te_gmm_dense_conflict",
+          enable_checkpointing=False,
+          model_name="default",
+          megablox=False,
+          use_te_grouped_gemm=True,
+          sparse_matmul=False,
+      )
+
+  def test_incompatible_with_megablox(self):
+    with self.assertRaisesRegex(ValueError, "use_te_grouped_gemm=True is not compatible with megablox"):
+      pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="te_gmm_megablox_conflict",
+          enable_checkpointing=False,
+          model_name="default",
+          megablox=True,
+          use_tokamax_gmm=False,
+          use_te_grouped_gemm=True,
+          sparse_matmul=True,
+      )
+
+  def test_incompatible_with_tokamax(self):
+    with self.assertRaisesRegex(ValueError, "use_te_grouped_gemm=True is not compatible with use_tokamax_gmm"):
+      pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="te_gmm_tokamax_conflict",
+          enable_checkpointing=False,
+          model_name="default",
+          hardware="tpu",
+          megablox=False,
+          use_tokamax_gmm=True,
+          use_te_grouped_gemm=True,
+          sparse_matmul=True,
+      )
+
+  def test_incompatible_with_quantization(self):
+    with self.assertRaisesRegex(ValueError, "use_te_grouped_gemm=True does not support quantization"):
+      pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="te_gmm_quant_conflict",
+          enable_checkpointing=False,
+          model_name="default",
+          megablox=False,
+          use_te_grouped_gemm=True,
+          sparse_matmul=True,
+          quantization="fp8",
+          use_qwix_quantization=True,
+      )
+
+  def test_requires_single_local_device(self):
+    """TE v1 D2H of group_sizes deadlocks if one process drives several GPUs."""
+    if jax.local_device_count() <= 1:
+      self.skipTest("needs >1 local device to exercise the deadlock guard")
+    with self.assertRaisesRegex(ValueError, "one local device per process"):
+      pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="te_gmm_multi_local_device",
+          enable_checkpointing=False,
+          model_name="default",
+          megablox=False,
+          use_te_grouped_gemm=True,
+          sparse_matmul=True,
+      )
 
 
 class QuantizedMoeTest(parameterized.TestCase):

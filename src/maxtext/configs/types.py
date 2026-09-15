@@ -1275,6 +1275,16 @@ class MoEKernels(BaseModel):
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
   )
 
+  use_te_grouped_gemm: bool = Field(
+      False,
+      description=(
+          "Whether to use TransformerEngine grouped_dense for sparse MoE grouped GEMM on GPU. "
+          "Incompatible with megablox and use_tokamax_gmm; quantization is not supported yet. "
+          "Requires one local device per process: TE v1 copies group_sizes D2H and deadlocks "
+          "in single-process multi-device shard_map."
+      ),
+  )
+
   use_gmm_v2_heuristic_tiling: bool = Field(
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
@@ -3582,6 +3592,44 @@ class MaxTextConfig(
           "  2. Ragged sort with ring of experts (use_ring_of_experts=True AND use_ragged_sort=True)"
       )
 
+  def _validate_te_grouped_gemm(self):
+    """Validates that use_te_grouped_gemm is not combined with unsupported backends."""
+    if not self.use_te_grouped_gemm:
+      return
+    if not self.sparse_matmul:
+      raise ValueError(
+          "use_te_grouped_gemm=True requires sparse_matmul=True; the TransformerEngine "
+          "grouped GEMM backend is only reachable from the sparse MoE path, so it would "
+          "otherwise be silently ignored. Note that some GPU model configs "
+          "(e.g. gpu/models/gpt-oss-20b.yml) set sparse_matmul=false."
+      )
+    if self.megablox:
+      raise ValueError(
+          "use_te_grouped_gemm=True is not compatible with megablox=True. "
+          "Set megablox=False to use the TransformerEngine grouped GEMM backend."
+      )
+    if self.use_tokamax_gmm:
+      raise ValueError(
+          "use_te_grouped_gemm=True is not compatible with use_tokamax_gmm=True. "
+          "Disable Tokamax GMM to use the TransformerEngine grouped GEMM backend."
+      )
+    if self.quantization:
+      raise ValueError(
+          "use_te_grouped_gemm=True does not support quantization yet "
+          f"(got quantization={self.quantization!r}). Set quantization=''."
+      )
+    # TE v1 grouped GEMM copies group_sizes D2H and stream-syncs inside the FFI.
+    # Under a single-process multi-device shard_map that host thread never
+    # reaches the collective rendezvous, so the job hangs instead of failing.
+    # Same constraint as te_comm_gemm_overlap: one local device per process.
+    if jax.local_device_count() > 1:
+      raise ValueError(
+          "use_te_grouped_gemm=True requires one local device per process "
+          f"(got jax.local_device_count()={jax.local_device_count()}). "
+          "Launch with one GPU per rank (e.g. SLURM_STEP_GPUS / gpu_per_device_run.sh); "
+          "do not pass several devices to a single process."
+      )
+
   def _validate_te_comm_gemm_overlap(self):
     """Validates that te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
     te_has_distributed_env = jax.local_device_count() == 1 and jax.distributed.is_initialized()
@@ -5117,6 +5165,8 @@ class MaxTextConfig(
         raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
+
+    self._validate_te_grouped_gemm()
 
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
