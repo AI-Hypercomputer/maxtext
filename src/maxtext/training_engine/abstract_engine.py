@@ -199,6 +199,24 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
+  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Read-only.
+
+    Runs a forward pass with the trainer model and caller-supplied function.
+
+    The trainer owns model access and shards `args`/`kwargs` on its data axis;
+    `fn` owns the computation and must not mutate the model.
+
+    Args:
+      fn: Called as `fn(model, *args, **kwargs)`.
+      *args: Positional arguments forwarded to `fn` after sharding.
+      **kwargs: Keyword arguments forwarded to `fn` after sharding.
+
+    Returns:
+      Whatever `fn` returns.
+    """
+
+  @abc.abstractmethod
   def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
     """Forces the trainer to serialize its state (model + optimizer).
 
