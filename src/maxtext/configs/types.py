@@ -2753,6 +2753,14 @@ class RLCluster(BaseModel):
   use_pathways_reshard: bool = Field(
       True, description="Legacy experimental GRPO: use Pathways resharding to move policy params to the sampler."
   )
+  gc_collect_after_weight_sync: bool = Field(
+      True,
+      description=(
+          "Run a full host gc.collect() after every trainer->sampler weight sync "
+          "(tunix ClusterConfig.gc_collect_after_weight_sync). Disable on colocated setups where the "
+          "collection is a pure stall on the training step."
+      ),
+  )
 
 
 class VLLM(BaseModel):
@@ -2984,6 +2992,17 @@ class RLReward(BaseModel):
   math_verify_num_procs: int | None = Field(
       None,
       description=("Max worker processes for the math_verify pool. None ⇒ " "min(batch_size, cpu_count())."),
+  )
+  reward_num_workers: int = Field(
+      0,
+      description=(
+          "Worker processes tunix uses to evaluate the reward functions over the batch "
+          "(GrpoConfig.reward_num_workers). 0 = serial (default), -1 = one worker per CPU."
+      ),
+  )
+  reward_worker_timeout_seconds: float = Field(
+      180.0,
+      description="Seconds to wait for one reward-function chunk in a worker before falling back to the parent process.",
   )
   reward_functions_path: str = Field(
       "",

@@ -14,6 +14,7 @@
 
 """Unit tests for train_rl.py."""
 
+import dataclasses
 import unittest
 from unittest import mock
 import grain
@@ -63,6 +64,41 @@ class TrainRLTest(unittest.TestCase):
     config = types.RLConfig(model_name="gemma4-26b", max_seq_token_per_tpu=12288, vllm_block_size=128)
     self.assertEqual(config.max_seq_token_per_tpu, 12288)
     self.assertEqual(config.vllm_block_size, 128)
+
+  def test_rl_config_tunix_knob_defaults(self):
+    """The forwarded tunix knobs default to tunix's own defaults."""
+    config = types.RLConfig(model_name="gemma4-26b")
+
+    self.assertTrue(config.gc_collect_after_weight_sync)
+    self.assertEqual(config.reward_num_workers, 0)
+    self.assertEqual(config.reward_worker_timeout_seconds, 180.0)
+
+    config = types.RLConfig(
+        model_name="gemma4-26b",
+        gc_collect_after_weight_sync=False,
+        reward_num_workers=-1,
+        reward_worker_timeout_seconds=30.0,
+    )
+    self.assertFalse(config.gc_collect_after_weight_sync)
+    self.assertEqual(config.reward_num_workers, -1)
+    self.assertEqual(config.reward_worker_timeout_seconds, 30.0)
+
+  def test_kwargs_supported_by_keeps_declared_fields_only(self):
+    """Knobs the installed tunix does not declare are dropped, with a log line."""
+
+    @dataclasses.dataclass
+    class FakeTunixConfig:
+      known: int = 0
+
+    with mock.patch.object(train_rl.max_logging, "log") as mock_log:
+      kept = train_rl._kwargs_supported_by(FakeTunixConfig, known=1, unknown=2)
+    self.assertEqual(kept, {"known": 1})
+    self.assertIn("unknown", mock_log.call_args.args[0])
+
+    with mock.patch.object(train_rl.max_logging, "log") as mock_log:
+      kept = train_rl._kwargs_supported_by(FakeTunixConfig, known=3)
+    self.assertEqual(kept, {"known": 3})
+    mock_log.assert_not_called()
 
   def test_rl_config_packing_budget_must_fit_a_maximal_sequence(self):
     """A packed row must hold prompt cap + generation cap (= max_target_length)."""

@@ -304,6 +304,19 @@ def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
   ]
 
 
+def _kwargs_supported_by(cls: Any, **kwargs: Any) -> dict[str, Any]:
+  """Keeps only the kwargs that the installed tunix `cls` declares.
+
+  Lets MaxText forward newer tunix knobs while still running against an older
+  pinned tunix that does not know them; dropped settings are logged.
+  """
+  names = {f.name for f in dataclasses.fields(cls)}
+  dropped = sorted(k for k in kwargs if k not in names)
+  if dropped:
+    max_logging.log(f"Installed tunix {cls.__name__} does not support {dropped}; those settings are ignored.")
+  return {k: v for k, v in kwargs.items() if k in names}
+
+
 def create_rl_components(  # pylint: disable=too-many-positional-arguments
     trainer_config,
     sampler_config,
@@ -392,6 +405,10 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
       },
       rollout_engine=rl_rollout_engine,
       offload_to_cpu=False,
+      **_kwargs_supported_by(
+          rl_cluster_lib.ClusterConfig,
+          gc_collect_after_weight_sync=trainer_config.gc_collect_after_weight_sync,
+      ),
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
           eval_every_n_steps=trainer_config.eval_interval,
@@ -507,6 +524,11 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         use_rollout_logps=trainer_config.rl.use_rollout_logps,
         force_on_policy_ratio=trainer_config.rl.force_on_policy_ratio,
         log_sampler_trainer_agreement=(trainer_config.rl.log_sampler_trainer_agreement),
+        **_kwargs_supported_by(
+            AgenticGrpoConfig,
+            reward_num_workers=trainer_config.reward_num_workers,
+            reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
+        ),
     )
     max_logging.log(
         "GRPO config resolved:\n"
@@ -537,6 +559,11 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         epsilon=trainer_config.rl.grpo_epsilon,
         loss_algo=trainer_config.rl.loss_algo,
         loss_agg_mode=trainer_config.rl.loss_agg_mode,
+        **_kwargs_supported_by(
+            GrpoConfig,
+            reward_num_workers=trainer_config.reward_num_workers,
+            reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
+        ),
     )
     rl_trainer = GrpoLearner(
         rl_cluster=rl_cluster,
