@@ -50,6 +50,25 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_gdn_granular_remat_requires_gdn_kernel(self):
+    with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          gdn="device",
+          use_gdn_kernel=False,
+      )
+
+  def test_gdn_granular_remat_accepts_gdn_kernel(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        gdn="device",
+        use_gdn_kernel=True,
+    )
+    self.assertEqual(config.gdn, "device")
+    self.assertTrue(config.use_gdn_kernel)
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 
