@@ -75,7 +75,7 @@ def _maybe_register_pathways_persistence() -> None:
     handler = type_handler_registry.get_type_handler(jax.Array)
     handler_name = type(handler).__name__
     store = getattr(handler, "_array_metadata_store", None)
-    if handler_name == "CloudPathwaysArrayHandler":
+    if handler_name in ("CloudPathwaysArrayHandler", "PathwaysPersistenceArrayHandler"):
       if store is None:
         logging.error(
             "Registered %s but array metadata store is None; saving may fail on typed PRNG keys.",
@@ -89,10 +89,10 @@ def _maybe_register_pathways_persistence() -> None:
         )
     else:
       logging.warning(
-          "Pathways persistence registration fell back: jax.Array is handled by %s, not CloudPathwaysArrayHandler.",
+          "Pathways persistence registration fell back: jax.Array is handled by %s, not a persistence handler.",
           handler_name,
       )
-  except NotImplementedError as e:
+  except (ImportError, AttributeError, ModuleNotFoundError, NotImplementedError) as e:
     logging.warning(
         "Pathways persistence requested but unavailable on this backend (%s). Falling back to host-staged checkpointing.",
         e,
