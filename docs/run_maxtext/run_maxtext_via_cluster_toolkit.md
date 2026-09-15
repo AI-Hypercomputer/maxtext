@@ -110,7 +110,7 @@ cd /path/to/maxtext
 gcluster job submit \
   --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
   --build-context . \
-  --command "python3 -m maxtext.trainers.pre_train.train run_name=<RUN_NAME> steps=5 dataset_type=synthetic model_name=default enable_checkpointing=False" \
+  --command "python3 -m maxtext.trainers.pre_train.train steps=5 dataset_type=synthetic model_name=default enable_checkpointing=False" \
   --name <RUN_NAME> \
   --compute-type ct5p-hightpu-4t \
   --topology 4x4x4
