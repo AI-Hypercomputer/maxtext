@@ -314,18 +314,18 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
   @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
-  @mock.patch("orbax.checkpoint.pathways.CheckpointingImpl.from_options")
-  def test_maybe_register_pathways_persistence(self, mock_impl_from_options, mock_register_type_handlers):
+  def test_maybe_register_pathways_persistence(self, mock_register_type_handlers):
+    import orbax.checkpoint.pathways as ocp_pathways
     from maxtext.training_engine import checkpointing as checkpointing_module
 
     checkpointing_module._PATHWAYS_PERSISTENCE_REGISTERED = False
     checkpointing_module._maybe_register_pathways_persistence()
 
-    mock_impl_from_options.assert_called_once_with(
-        use_colocated_python=False,
-        use_persistence_array_handler=True,
-    )
     mock_register_type_handlers.assert_called_once()
+    self.assertEqual(
+        mock_register_type_handlers.call_args.kwargs["checkpointing_impl"],
+        ocp_pathways.CheckpointingImpl.PERSISTENCE,
+    )
 
   def test_save_checkpoint_called_after_update(self):
     mock_config = self.setup_config(enable_checkpointing=True)
