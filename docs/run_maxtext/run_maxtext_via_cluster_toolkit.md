@@ -183,23 +183,23 @@ export NUM_SLICES=1
 export PER_DEVICE_BATCH_SIZE=1
 
 python3 -m maxtext.trainers.pre_train.train_compile \
-  compile_topology=<TPU_TYPE> \
-  compile_topology_num_slices=<NUM_SLICES> \
-  compiled_trainstep_file=maxtext_<TPU_TYPE>_aot.pickle \
-  per_device_batch_size=<BATCH_SIZE_PER_DEVICE>
+  compile_topology=${TPU_TYPE?} \
+  compile_topology_num_slices=${NUM_SLICES?} \
+  compiled_trainstep_file=maxtext_${TPU_TYPE?}_aot.pickle \
+  per_device_batch_size=${PER_DEVICE_BATCH_SIZE?}
 ```
 
-This creates `maxtext_<TPU_TYPE>_aot.pickle` in your MaxText repository root directory.
+This creates `maxtext_${TPU_TYPE?}_aot.pickle` in your MaxText repository root directory.
 
 ### Step 2: Submit the workload referencing the AOT artifact
 
-When you run `gcluster job submit` with `--build-context .`, the generated pickle file is automatically packaged into the container image. Pass `compiled_trainstep_file=maxtext_<TPU_TYPE>_aot.pickle` to tell MaxText to load the pre-compiled step:
+When you run `gcluster job submit` with `--build-context .`, the generated pickle file is automatically packaged into the container image. Pass `compiled_trainstep_file=maxtext_${TPU_TYPE?}_aot.pickle` to tell MaxText to load the pre-compiled step:
 
 ```bash
 gcluster job submit \
   --base-image us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest \
   --build-context . \
-  --command "python3 -m maxtext.trainers.pre_train.train run_name=<RUN_NAME> base_output_directory=gs://<GCS_BUCKET>/output dataset_path=gs://<DATASET_PATH>/ steps=100 per_device_batch_size=1 compiled_trainstep_file=maxtext_<TPU_TYPE>_aot.pickle" \
+  --command "python3 -m maxtext.trainers.pre_train.train run_name=<RUN_NAME> base_output_directory=gs://<GCS_BUCKET>/output dataset_path=gs://<DATASET_PATH>/ steps=100 per_device_batch_size=1 compiled_trainstep_file=maxtext_${TPU_TYPE?}_aot.pickle" \
   --name <RUN_NAME> \
   --compute-type ct5p-hightpu-4t \
   --topology 4x4x4
