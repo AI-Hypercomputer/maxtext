@@ -25,12 +25,12 @@ import enum
 import numpy as np
 
 import jax
-
 from maxtext.utils.globals import EPS
 from maxtext.common.gcloud_stub import mldiagnostics_modules
 from maxtext.common.gcloud_stub import workload_monitor
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
 from maxtext.utils import exceptions
+from maxtext.utils import mllog_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -93,13 +93,14 @@ class MetricLogger:
   Logger for saving metrics to a local file, GCS and TensorBoard.
   """
 
-  def __init__(self, config, learning_rate_schedule):
+  def __init__(self, config, learning_rate_schedule, start_step=0):
     self.writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name, config.enable_tensorboard)
     self.config = config
     self.metadata = {}
     self.running_gcs_metrics = [] if config.gcs_metrics else None
     self.performance_metric_queue = self.get_performance_metric_queue(config)
     self.learning_rate_schedule = learning_rate_schedule
+    self.start_step = start_step
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     # self.buffered_metrics is a polymorphic deferred-write queue. Entries are one of:
     #   ("train", train_step, metrics, step_time_delta)
@@ -419,6 +420,12 @@ class MetricLogger:
       self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
       self.buffered_metrics.append(("train", step, metrics, step_time_delta))
       if self._pending_eval_step_count > 0:
+        # _finalize_eval_metrics emits eval_stop, which itself emits run_stop when the run
+        # converges or exhausts its step budget. Flush this step first so its tracked_stats
+        # stays ahead of run_stop, as in the reference log. The 6.0 checker does not enforce
+        # this, but the flush is free here: an eval loop just ran, so this step's device work
+        # has long since completed.
+        self._flush_one_buffered_entry(self.buffered_metrics.pop(0))
         self._finalize_eval_metrics(step)
     else:
       self._pending_eval_step_count += 1
@@ -428,8 +435,17 @@ class MetricLogger:
     """Dispatches a single buffered entry to the writer."""
     kind = entry[0]
     if kind == "train":
-      _, step, metrics, _ = entry
+      _, step, metrics, step_time_delta = entry
       self.write_metrics(metrics, step)
+      # tracked_stats calls .item() on learning/loss. Deferring it to here means the step it
+      # belongs to has already completed, so the materialization does not block the train loop.
+      mllog_utils.tracked_stats(
+          self.config,
+          step + 1,
+          step_time_delta.total_seconds(),
+          metrics["scalar"]["learning/loss"],
+          start_step=self.start_step,
+      )
     elif kind == "eval":
       _, eval_step, raw_metrics, step_time_delta = entry
       # _accumulate_eval_metrics calls float() that materialize the metrics, deferred to here
@@ -493,6 +509,7 @@ class MetricLogger:
 
     self.write_metrics(self.cumulative_eval_metrics, train_step, metric_type="eval")
     self._pending_eval_step_count = 0
+    mllog_utils.eval_stop(self.config, train_step + 1, eval_loss, self.start_step)
     if self.config.target_eval_loss and eval_loss <= self.config.target_eval_loss:
       raise exceptions.StopTraining(f"Target loss {self.config.target_eval_loss=} is achieved.")
 
@@ -507,4 +524,5 @@ class MetricLogger:
       self._flush_one_buffered_entry(entry)
     self.buffered_metrics = []
 
+    mllog_utils.sync_log(force=True)
     max_utils.close_summary_writer(self.writer)

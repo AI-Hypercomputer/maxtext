@@ -78,6 +78,7 @@ from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
+from maxtext.utils import mllog_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_nnx_loss
 
@@ -740,6 +741,8 @@ def training_loop_iteration(
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
 
+  completed_step = step + 1
+
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
@@ -763,10 +766,12 @@ def training_loop_iteration(
     if hasattr(eval_data_iterator, "reset"):
       eval_data_iterator.reset()
     metric_logger_instance.reset_eval_metrics()
+    mllog_utils.eval_start(config, completed_step, start_step=start_step)
     max_logging.log(f"Starting eval after train step {step}")
 
     eval_step_count = 0
     last_eval_step_completion = datetime.datetime.now()
+    eval_loop_start = last_eval_step_completion
     # pylint: disable=not-callable
     for eval_batch in eval_data_iterator:
       # Shard input eval data
@@ -793,6 +798,8 @@ def training_loop_iteration(
           eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
       )
       eval_step_count += 1
+
+    mllog_utils.validation_time(completed_step, (datetime.datetime.now() - eval_loop_start).total_seconds())
 
   prof.maybe_deactivate_profiler(step, state)
 
@@ -926,7 +933,9 @@ def train_loop(config, recorder, state=None):
       compiled_eval_stats = compiled_eval.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_eval_stats, prefix="eval")
   prof = profiler.Profiler(config, offset_step=start_step)
-  metric_logger_instance = metric_logger.MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
+  metric_logger_instance = metric_logger.MetricLogger(
+      config=config, learning_rate_schedule=learning_rate_schedule, start_step=start_step
+  )
 
   # Write train config params, num model params, and XLA flags to tensorboard
   if config.enable_diloco:
@@ -989,6 +998,11 @@ def train_loop(config, recorder, state=None):
   try:
     python_vars["last_step_completion"] = datetime.datetime.now()
 
+    mllog_utils.init_print(config)
+    mllog_utils.init_stop()
+    mllog_utils.run_start()
+    mllog_utils.block_start(config, start_step)
+
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
       step = python_vars["step"]
@@ -1047,9 +1061,15 @@ def train_loop(config, recorder, state=None):
     max_logging.log(f"Training stopped: {str(e)}")
     _job_completed_gracefully = True
   finally:
+    # Flush before run_stop: the last buffered step still owes a tracked_stats event, and the
+    # reference log ends at run_stop. Not enforced by the 6.0 compliance checker.
+    metric_logger_instance.flush_metrics_and_cleanup()
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
-    metric_logger_instance.flush_metrics_and_cleanup()
+      samples_count = (python_vars["step"] - immutable_data["start_step"]) * config.global_batch_size_to_train_on
+      # Only reached when eval never hit target_eval_loss; a converged run already
+      # logged RUN_STOP with status "success" from eval_stop.
+      mllog_utils.run_stop(status="aborted", current_epoch_num=samples_count, step=python_vars["step"])
     train_utils.maybe_cleanup_dcn_throttling(config)
 
   return state
@@ -1083,6 +1103,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
     max_utils.bootstrap_transformer_engine_cgemm(config)
 
   # Create the Goodput recorder
+  mllog_utils.init_start(config)
   recorder = create_goodput_recorder(config)
 
   return config, recorder
