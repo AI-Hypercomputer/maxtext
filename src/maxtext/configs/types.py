@@ -1030,6 +1030,18 @@ class MoEGeneral(BaseModel):
       description="Bytes-accessed cost estimate override for the ragged gather reduce kernel. "
       "-1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate.",
   )
+  moe_pin_sparse_core_all_gathers: bool = Field(
+      False,
+      description="Pin FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",
+  )
+  moe_fsdp_all_gather_sparse_core_id: int = Field(
+      0,
+      description="SparseCore ID to pin MoE FSDP all-gathers to when moe_pin_sparse_core_all_gathers is True.",
+  )
+  moe_ep_all_gather_sparse_core_id: int = Field(
+      1,
+      description="SparseCore ID to pin MoE EP all-gathers to when moe_pin_sparse_core_all_gathers is True.",
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   moe_fsdp_use_two_stage_all_gather: bool = Field(
@@ -1081,6 +1093,11 @@ class MoEGeneral(BaseModel):
   @model_validator(mode="after")
   def validate_moe_sharding_strategy(self) -> "MoEGeneral":
     """Ensure that only one MoE FSDP sharding strategy is active at a time."""
+    if self.moe_pin_sparse_core_all_gathers and self.moe_fsdp_use_two_stage_all_gather:
+      raise ValueError(
+          "SparseCore pinning for MoE all-gathers (`moe_pin_sparse_core_all_gathers=True`) "
+          "is not supported with `moe_fsdp_use_two_stage_all_gather=True`."
+      )
     active_sharding_flags = sum([self.shard_exp_on_fsdp, self.use_2d_fsdp_sharding, self.shard_embed_moe_on_fsdp])
     if active_sharding_flags > 1:
       raise ValueError(

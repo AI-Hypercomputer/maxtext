@@ -27,6 +27,7 @@ from flax import nnx
 from flax import struct
 import jax
 from jax import ad_checkpoint as adc
+from jax.experimental.compute_on import compute_on
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
@@ -1961,6 +1962,7 @@ class RoutedMoE(nnx.Module):
         x: jax.Array,
         axis_name: str,
         calibration_method: str,
+        all_gather_fn=jax.lax.all_gather,
     ) -> qpl.QArray:
       """Quantizes tokens to act_qtype (e.g., FP8) before All-Gather across EP shards in Ring of Experts."""
       # Static calibration guarantees uniform dequantization bounds across all EP shards
@@ -1983,7 +1985,7 @@ class RoutedMoE(nnx.Module):
           calibration_method=calibration_method,
       )
       # All-gather quantized byte payloads to reduce inter-chip communication volume.
-      x_gathered_qval = jax.lax.all_gather(x_input.qvalue, axis_name=axis_name, tiled=True)
+      x_gathered_qval = all_gather_fn(x_input.qvalue)
       return dataclasses.replace(x_input, qvalue=x_gathered_qval)
 
     def roe_ag_and_route(
@@ -1997,27 +1999,41 @@ class RoutedMoE(nnx.Module):
         forced_routed_experts=None,
         force_dropless=False,
     ):
-      # The ring-of-experts strategy first duplicates the inputs to all
-      # expert shards, and then routes within each shard.
+      if self.config.moe_pin_sparse_core_all_gathers:
+
+        @functools.partial(
+            compute_on,
+            compute_type="tpu_sparsecore",
+            out_memory_spaces=jax.memory.Space.Device,
+            compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
+        )
+        def _ep_all_gather(z):
+          return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+
+      else:
+
+        def _ep_all_gather(z):
+          return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
 
       # Duplicate token inputs across all expert shards.
       if self.config.moe_quantize_token_all_gather:
         # If enabled, tokens are quantized to FP8 before all-gather to minimize bandwidth.
+        # Quantization runs on TensorCore/Device memory; the all-gather collective itself is pinned.
         x = quantize_and_all_gather_tokens(
             x,
             axis_name=self._expert_parallelism_name,
             calibration_method=self.config.act_quantization_calibration_method,
+            all_gather_fn=_ep_all_gather,
         )
       else:
-        x = jax.lax.all_gather(x, axis_name=self._expert_parallelism_name, tiled=True)
+        x = _ep_all_gather(x)
 
       # Duplicate routing inputs across all expert shards. Routing evaluates
       # the full gathered batch; logits, pre_bias_logits, and
       # forced_routed_experts must follow the identical all-gather so expert
-      # assignments align across shards. Coalesced into a single collective.
+      # assignments align across shards.
       logits, pre_bias_logits, forced_routed_experts = tuple(
-          jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True) if z is not None else None
-          for z in (logits, pre_bias_logits, forced_routed_experts)
+          _ep_all_gather(z) if z is not None else None for z in (logits, pre_bias_logits, forced_routed_experts)
       )
 
       # "Route" tokens within each shard.
@@ -2784,6 +2800,8 @@ class RoutedMoE(nnx.Module):
       out, lb_loss, bias_updates, has_overflow = _route_and_compute(force_dropless=force_dropless)
       return out, lb_loss, bias_updates, has_overflow
 
+    # Note: SparseCore pinning (`moe_pin_sparse_core_all_gathers`) is currently not supported
+    # with `moe_fsdp_use_two_stage_all_gather` (enforced via validation in types.py).
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
       w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp"))
@@ -2828,15 +2846,39 @@ class RoutedMoE(nnx.Module):
           logical_axes=gate_logits_logical_axes,
       )
 
-    w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
-    w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
-    wo_kernel = self._maybe_shard_with_pspec(wo_kernel, wo_pspec)
+    if self.config.moe_pin_sparse_core_all_gathers:
+
+      def _fsdp_all_gather(w, pspec):
+        if w is None or pspec is None:
+          return w
+
+        @functools.partial(
+            compute_on,
+            compute_type="tpu_sparsecore",
+            out_memory_spaces=jax.memory.Space.Device,
+            compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_fsdp_all_gather_sparse_core_id]}},
+        )
+        def _reshard_fn(x):
+          return self._maybe_shard_with_pspec(x, pspec)
+
+        return _reshard_fn(w)
+
+    else:
+
+      def _fsdp_all_gather(w, pspec):
+        if w is None or pspec is None:
+          return w
+        return self._maybe_shard_with_pspec(w, pspec)
+
+    w0_kernel = _fsdp_all_gather(w0_kernel, w0_pspec)
+    w1_kernel = _fsdp_all_gather(w1_kernel, w1_pspec)
+    wo_kernel = _fsdp_all_gather(wo_kernel, wo_pspec)
     if w0_bias is not None:
-      w0_bias = self._maybe_shard_with_pspec(w0_bias, w0_bias_pspec)
+      w0_bias = _fsdp_all_gather(w0_bias, w0_bias_pspec)
     if w1_bias is not None:
-      w1_bias = self._maybe_shard_with_pspec(w1_bias, w1_bias_pspec)
+      w1_bias = _fsdp_all_gather(w1_bias, w1_bias_pspec)
     if wo_bias is not None:
-      wo_bias = self._maybe_shard_with_pspec(wo_bias, wo_bias_pspec)
+      wo_bias = _fsdp_all_gather(wo_bias, wo_bias_pspec)
 
     output, lb_loss, bias_updates, has_overflow = sparse_matmul_route_and_compute(
         inputs,

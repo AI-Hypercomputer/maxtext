@@ -2816,5 +2816,83 @@ class FusedMlpMoETest(unittest.TestCase):
     )
 
 
+class MoePinSparseCoreAllGathersTest(unittest.TestCase):
+  """Tests for moe_pin_sparse_core_all_gathers config and model construction."""
+
+  def test_config_moe_pin_sparse_core_all_gathers(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="test_moe_pin_sc",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        moe_pin_sparse_core_all_gathers=True,
+        moe_fsdp_all_gather_sparse_core_id=0,
+        moe_ep_all_gather_sparse_core_id=1,
+    )
+    self.assertTrue(cfg.moe_pin_sparse_core_all_gathers)
+    self.assertEqual(cfg.moe_fsdp_all_gather_sparse_core_id, 0)
+    self.assertEqual(cfg.moe_ep_all_gather_sparse_core_id, 1)
+
+  def test_moe_pin_sparse_core_with_two_stage_all_gather_raises(self):
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="test_moe_pin_sc_two_stage_error",
+          enable_checkpointing=False,
+          model_name="mixtral-8x7b",
+          moe_pin_sparse_core_all_gathers=True,
+          moe_fsdp_use_two_stage_all_gather=True,
+      )
+
+  def test_moe_model_init_with_pin_sparse_core(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="test_moe_pin_sc_model",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=True,
+        megablox=True,
+        moe_pin_sparse_core_all_gathers=True,
+        moe_fsdp_all_gather_sparse_core_id=0,
+        moe_ep_all_gather_sparse_core_id=1,
+        per_device_batch_size=1,
+        max_target_length=16,
+    )
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    model = make_moe(cfg, mesh)
+    self.assertTrue(model.config.moe_pin_sparse_core_all_gathers)
+
+  def test_moe_pin_sparse_core_with_quantize_token_all_gather_init(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="test_moe_pin_sc_quant_model",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=True,
+        megablox=False,
+        use_tokamax_gmm=True,
+        use_gmm_v2=True,
+        use_ring_of_experts=True,
+        quantization="fp8_full",
+        use_qwix_quantization=True,
+        weight_quantization_calibration_method="fixed,-224,224",
+        act_quantization_calibration_method="fixed,-224,224",
+        moe_pin_sparse_core_all_gathers=True,
+        moe_quantize_token_all_gather=True,
+        moe_fsdp_all_gather_sparse_core_id=0,
+        moe_ep_all_gather_sparse_core_id=1,
+        per_device_batch_size=1,
+        max_target_length=16,
+    )
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    model = make_moe(cfg, mesh)
+    self.assertTrue(model.config.moe_pin_sparse_core_all_gathers)
+    self.assertTrue(model.config.moe_quantize_token_all_gather)
+
+
 if __name__ == "__main__":
   absltest.main()
