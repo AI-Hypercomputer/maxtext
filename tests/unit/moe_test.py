@@ -540,6 +540,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
           model_name="qwen3.5-35b-a3b",
           check_vma=False,
           moe_fsdp_use_two_stage_all_gather=False,
+          moe_pin_sparse_core_all_gathers=False,
       ),
       mesh=SimpleNamespace(shape={"fsdp": 32, "expert": expert_parallelism}),
       rngs=object(),
@@ -2864,6 +2865,9 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
     model = make_moe(cfg, mesh)
     self.assertTrue(model.config.moe_pin_sparse_core_all_gathers)
 
+  # `use_ring_of_experts` (required by `moe_quantize_token_all_gather`) is only a
+  # valid config when the EP rank is > 1, so this test needs a multi-device mesh.
+  @pytest.mark.tpu_only
   def test_moe_pin_sparse_core_with_quantize_token_all_gather_init(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -2875,6 +2879,7 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
         megablox=False,
         use_tokamax_gmm=True,
         use_gmm_v2=True,
+        ici_expert_parallelism=4,
         use_ring_of_experts=True,
         quantization="fp8_full",
         use_qwix_quantization=True,
