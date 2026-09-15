@@ -103,18 +103,24 @@ if [ -z "$CHANGED_FILES" ]; then
   exit 0
 fi
 
-# Check if PR added or modified any tests
-git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" 2>/dev/null || true
-HAS_NEW_TESTS=$(python3 -c '
-import sys
-from tests.utils.newly_added_detection import get_changed_tests
-try:
-  changed = get_changed_tests("'"$BASE_REF"'")
-  print("true" if len(changed) > 0 else "false")
-except Exception as e:
-  sys.stderr.write(f"Warning: get_changed_tests failed: {e}\n")
-  print("true")
-' 2>/dev/null || echo "true")
+# Check whether the PR added or modified any tests. The detector runs as a script, not via
+# `python3 -c "from tests.utils..."`: importing the package executes tests/__init__.py, which
+# needs packages that are not installed on this bare runner. The script only needs the
+# standard library and exits 2 when it could not compute a diff.
+CHANGED_TESTS=$(python3 tests/utils/newly_added_detection.py --base "$BASE_REF") && DETECT_RC=0 || DETECT_RC=$?
+if [ "$DETECT_RC" -ne 0 ]; then
+  echo "Warning: newly_added detection failed (exit ${DETECT_RC}); enabling TPU7X tests as a fail-safe."
+  HAS_NEW_TESTS="true"
+elif [ -n "$CHANGED_TESTS" ]; then
+  echo "PR added or modified these tests:"
+  while IFS= read -r changed_test; do
+    echo "  - $changed_test"
+  done <<< "$CHANGED_TESTS"
+  HAS_NEW_TESTS="true"
+else
+  echo "PR did not add or modify any tests."
+  HAS_NEW_TESTS="false"
+fi
 echo "Detected has_new_tests=${HAS_NEW_TESTS}"
 emit_flag "has_new_tests" "$HAS_NEW_TESTS"
 
