@@ -321,6 +321,64 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(_GrainArrayRecordSetup, Gr
     self.config = self._make_config(grain_train_mixture_config_path=self.mixture_config_path)
 
 
+class GrainArrayRecordProcessingWithMixtureConfigAndElasticIteratorTest(
+    _GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase
+):
+  """Test grain data processing with mixture config and elastic iterator enabled."""
+
+  def setUp(self):
+    super().setUp()
+    temp_dir = tempfile.gettempdir()
+    decoupled = is_decoupled()
+
+    if decoupled:
+      dataset_root = get_test_dataset_path()
+      mixture_config = {
+          "ds1": {
+              "path": os.path.join(
+                  dataset_root,
+                  "c4",
+                  "en",
+                  "3.0.1",
+                  "c4-train.array_record-*",
+              ),
+              "weight": 0.3,
+          },
+          "ds2": {
+              "path": os.path.join(
+                  dataset_root,
+                  "c4",
+                  "en",
+                  "3.0.1",
+                  "c4-train.array_record-*",
+              ),
+              "weight": 0.7,
+          },
+      }
+    else:
+      mixture_config = {
+          "ds1": {
+              "path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0000*",
+              "weight": 0.3,
+          },
+          "ds2": {
+              "path": f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record-0001*",
+              "weight": 0.7,
+          },
+      }
+    self.mixture_config_path = os.path.join(temp_dir, "mixture_config_elastic.json")
+    with open(self.mixture_config_path, "w", encoding="utf-8") as f:
+      json.dump(mixture_config, f)
+
+    self.config = self._make_config(
+        grain_train_mixture_config_path=self.mixture_config_path,
+        grain_use_elastic_iterator=True,
+        packing=False,
+        use_truncation=True,
+    )
+
+
+
 # TODO(aireenmei): Migrate this test to XLML
 @pytest.mark.skip(reason="Flaky test")
 class GrainArrayRecordAutoTuneTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
