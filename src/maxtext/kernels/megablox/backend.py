@@ -30,6 +30,17 @@ import jax.numpy as jnp
 import qwix.pallas as qpl
 
 
+def _make_out_shape(shape, dtype, varying_axes):
+  """Builds ShapeDtypeStruct compatible across JAX versions."""
+  if hasattr(jax.sharding, "ManualAxisType"):
+    return jax.ShapeDtypeStruct(
+        shape,
+        dtype,
+        manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes)),
+    )
+  return jax.ShapeDtypeStruct(shape, dtype, vma=frozenset(varying_axes))
+
+
 def _validate_args(
     *,
     lhs: jnp.ndarray,
@@ -524,9 +535,7 @@ def gmm(
   }
   call_gmm = qpl.pallas_call(
       kernel,
-      out_shape=jax.ShapeDtypeStruct(
-          (m, n), preferred_element_type, manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes))
-      ),
+      out_shape=_make_out_shape((m, n), preferred_element_type, varying_axes),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=[
@@ -783,10 +792,10 @@ def tgmm(
   }
   call_gmm = qpl.pallas_call(
       kernel,
-      out_shape=jax.ShapeDtypeStruct(
+      out_shape=_make_out_shape(
           (num_actual_groups, k, n),
           preferred_element_type,
-          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes)),
+          varying_axes,
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
