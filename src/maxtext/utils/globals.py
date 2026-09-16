@@ -83,6 +83,8 @@ HF_IDS = {
     "gpt-oss-120b": "unsloth/gpt-oss-120b-BF16",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
     "qwen3-next-80b-a3b": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "ling3-flash-vl": "inclusionAI/Ling-3.0-flash-VL",
+    "ling3-flash": "inclusionAI/Ling-3.0-flash",
     "qwen3.5-397b-a17b": "Qwen/Qwen3.5-397B-A17B",
     "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
     "mixtral-8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
