@@ -332,9 +332,10 @@ export RUN_NAME=<RUN_NAME>
 export IMAGE_URI=<IMAGE_NAME>
 export COMPUTE_TYPE=<COMPUTE_TYPE>
 export TOPOLOGY=<TOPOLOGY>
-export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/distillation
-export STUDENT_CKPT_PATH=gs://<GCS_BUCKET>/<STUDENT_MODEL_PATH>/checkpoints/0/items
-export TEACHER_CKPT_PATH=gs://<GCS_BUCKET>/<TEACHER_MODEL_PATH>/checkpoints/0/items
+export GCS_BUCKET=<GCS_BUCKET>
+export BASE_OUTPUT_DIRECTORY=gs://${GCS_BUCKET?}/distillation
+export STUDENT_CKPT_PATH=gs://${GCS_BUCKET?}/<STUDENT_MODEL_PATH>/checkpoints/0/items
+export TEACHER_CKPT_PATH=gs://${GCS_BUCKET?}/<TEACHER_MODEL_PATH>/checkpoints/0/items
 export TOKENIZER_PATH=meta-llama/Llama-3.1-8B
 export HF_TOKEN=<HF_TOKEN>
 

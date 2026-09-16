@@ -296,7 +296,7 @@ gcluster job submit \
   --topology=${TOPOLOGY?} \
   --command="python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name=${MODEL?} \
-    lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/checkpoints/<STEPS>/model_params \
+    lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/checkpoints/${STEPS?}/model_params \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?}/hf_lora_adapter \
     hf_access_token=${HF_TOKEN?}"
 ```
