@@ -184,6 +184,14 @@ decoder_block: "llama2" # which style of decoderblock to use.
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 weight_dtype: "float32"
+# List of module names or patterns to keep unquantized even when weight_dtype is FP8.
+# For any module included here, its weights will be instantiated using `dtype` (e.g. bfloat16).
+# Accepted module names include: 'token_embedder', 'logits_dense', 'gate' (MoE router),
+# 'shared_expert_gate', 'conv1d', 'in_proj_ba', 'norm'.
+unquantized_modules: []
+# Block size for block-scaled quantized weights (e.g. 128 for symmetric 128x128 block scaling,
+# or a list/tuple like [128, 64] for asymmetric block scaling). Set to null for per-tensor scaling.
+weight_block_size: null
 global_parameter_scale: 1
 base_emb_dim: 2048
 base_num_query_heads: 16
@@ -205,7 +213,8 @@ logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embed
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
-mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the Indexer across the unsharded local heads dimension natively.
+mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the MLA Indexer (DeepSeek-V3 / DeepSeek-V3.2) across the unsharded local heads dimension natively.
+csa_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the CSA Indexer (DeepSeek-V4) across the unsharded local heads dimension natively.
 float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
 float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
 
@@ -244,6 +253,11 @@ use_ring_of_experts: false # whether to use ring of experts for sparse matmul ex
 te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE layers
 te_ep_overflow_check_every_n_steps: 20 # host check interval for TE EP overflow when ragged_buffer_factor limits receive capacity
 te_gmm_quantization: "" # quantization mode for TE GMM matmuls; available options are te_no_quant and te_mxfp8; must be specified when te_moe_block is true
+# Whether to quantize token activations before the All-Gather across EP shards in Ring of Experts, reducing
+# inter-chip token traffic proportionally to the quantized width (2x for FP8 vs BF16).
+# Pipeline: quantize token -> EP all-gather -> sort -> GMM, so tokens stay quantized end to end.
+# Requires use_ring_of_experts=true, use_gmm_v2=true, and quantization with fixed act calibration.
+moe_quantize_token_all_gather: false
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).
@@ -262,6 +276,10 @@ ragged_gather_cost_estimate_flops: -1 # -1 means auto-compute, any > 0 value ove
 ragged_gather_reduce_cost_estimate_flops: -1 # -1 means auto-compute, any > 0 value overrides the flop cost estimate for the ragged gather reduce kernel
 ragged_gather_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather kernel
 ragged_gather_reduce_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather reduce kernel
+# Pin MoE FSDP and EP all-gathers to dedicated SparseCores using compute_on
+moe_pin_sparse_core_all_gathers: false
+moe_fsdp_all_gather_sparse_core_id: 0
+moe_ep_all_gather_sparse_core_id: 1
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs
@@ -1042,6 +1060,7 @@ muon_type: "optax_muon" # Type of Muon optimizer: "optax_muon" (or "optax") vs "
 muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
+muon_include_routers: true # Whether to apply Muon updates to MoE router matrices. If False, routers are optimized with AdamW.
 muon_use_all_to_all: false # Whether to use all-to-all communication during Newton-Schulz iterations in maxtext_muon.
 
 

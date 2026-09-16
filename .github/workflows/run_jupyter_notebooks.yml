@@ -109,7 +109,7 @@ jobs:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     timeout-minutes: 90
     container:
-      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
+      image: us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         VLLM_TARGET_DEVICE: "tpu"
         UV_TORCH_BACKEND: "cpu"

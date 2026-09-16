@@ -53,6 +53,8 @@ This is the easiest way to get started with the latest stable version.
      ```bash
      uv pip install maxtext[tpu]=={{version}} --resolution=lowest
      install_tpu_pre_train_extra_deps
+     # Pass --with-tf to install optional TensorFlow/TFDS and JetStream dependencies if needed:
+     # install_tpu_pre_train_extra_deps --with-tf
      ```
 
    - **Option 2:** Install `maxtext[cuda12]`, used for pre-training and decoding
@@ -61,6 +63,8 @@ This is the easiest way to get started with the latest stable version.
      ```bash
      uv pip install maxtext[cuda12]=={{version}} --resolution=lowest
      install_cuda12_pre_train_extra_deps
+     # Pass --with-tf to install optional TensorFlow/TFDS and JetStream dependencies if needed:
+     # install_cuda12_pre_train_extra_deps --with-tf
      ```
 
    - **Option 3:** Install `maxtext[tpu-post-train]`, used for post-training on
@@ -130,6 +134,8 @@ environment to avoid dependency conflicts.
      ```bash
      uv pip install -e .[tpu] --resolution=lowest
      install_tpu_pre_train_extra_deps
+     # Pass --with-tf to install optional TensorFlow/TFDS and JetStream dependencies if needed:
+     # install_tpu_pre_train_extra_deps --with-tf
      ```
 
    - **Option 2:** Install `.[cuda12]`
@@ -137,6 +143,8 @@ environment to avoid dependency conflicts.
      ```bash
      uv pip install -e .[cuda12] --resolution=lowest
      install_cuda12_pre_train_extra_deps
+     # Pass --with-tf to install optional TensorFlow/TFDS and JetStream dependencies if needed:
+     # install_cuda12_pre_train_extra_deps --with-tf
      ```
 
    - **Option 3:** Install `.[tpu-post-train]`

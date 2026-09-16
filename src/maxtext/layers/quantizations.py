@@ -31,6 +31,7 @@ import qwix
 from qwix._src.core import numerics
 from qwix._src.core import dot_general_qt
 from qwix._src.core import sparsity
+from qwix._src import interception as qwix_interception
 
 import jax
 import jax.numpy as jnp
@@ -64,8 +65,9 @@ except (NameError, AttributeError):
 from maxtext.layers import nnx_wrappers
 
 from maxtext.configs.types import TeCommGemmOverlapPolicy
-from maxtext.common.common_types import DType, Config
+from maxtext.common.common_types import Array, DType, Config, is_fp8_dtype, get_weight_dtype
 from maxtext.inference.kvcache import KVQuant
+from maxtext.utils import max_logging
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -74,6 +76,72 @@ _A_BITS = "a_bits"  # Number of bits used to represent activations
 _W_SCALE = "w_scale"  # Clipping scale for weights
 _A_SCALE = "a_scale"  # Clipping scale for activations
 _TILE_SIZE = "tile_size"  # Tile size for subchannel
+
+
+@dataclass(frozen=True)
+class WeightQuantConfig:
+  """Configuration for weight-only quantization and dynamic dequantization."""
+
+  quant_type: str = "none"
+  weight_dtype: DType = jnp.float8_e4m3fn
+  scale_dtype: DType = jnp.float32
+  block_size: int | tuple[int, ...] | None = None
+
+
+def get_weight_quant_config(config: Config, module_name: str) -> WeightQuantConfig | None:
+  """Constructs a WeightQuantConfig for module_name if quantized, else returns None."""
+  if not is_fp8_dtype(config.weight_dtype):
+    return None
+  resolved_weight_dtype = get_weight_dtype(config, module_name)
+  if not is_fp8_dtype(resolved_weight_dtype):
+    return None
+  return WeightQuantConfig(
+      quant_type="fp8",
+      weight_dtype=resolved_weight_dtype,
+      scale_dtype=jnp.float32,
+      block_size=getattr(config, "weight_block_size", None),
+  )
+
+
+def dequantize_weight(
+    w: Array,
+    scale: Array | None,
+    compute_dtype: DType = jnp.bfloat16,
+) -> Array:
+  """Dequantizes weight tensor `w` dynamically to `compute_dtype` using `scale`.
+
+  Supports:
+    1. No scale (scale is None): casts w to compute_dtype.
+    2. Per-tensor scalar scale: scalar broadcast multiplication.
+    3. Block-wise scale: 2D/3D block broadcast multiplication.
+    4. General broadcastable scale: standard JAX broadcasting.
+  """
+  if scale is None:
+    return w.astype(compute_dtype)
+
+  w_c = w.astype(compute_dtype)
+  scale_c = jnp.asarray(scale, compute_dtype)
+
+  # Per-tensor scalar scale or matching shape
+  if scale_c.ndim == 0 or scale_c.shape == w.shape:
+    return w_c * scale_c
+
+  # Block-wise scale (e.g. 2D for Dense, 3D for MoE)
+  if scale_c.ndim == w.ndim and any(s > 1 and s != d for s, d in zip(scale_c.shape, w.shape)):
+    if not all(d % s == 0 for d, s in zip(w.shape, scale_c.shape)):
+      raise ValueError(
+          f"Block scaling requires weight dimensions {w.shape} to be divisible by scale dimensions {scale_c.shape}."
+      )
+    interleaved_shape = tuple(dim for s, w_d in zip(scale_c.shape, w.shape) for dim in (s, w_d // s))
+    scale_shape = tuple(dim for s in scale_c.shape for dim in (s, 1))
+    return (w_c.reshape(interleaved_shape) * scale_c.reshape(scale_shape)).reshape(w.shape)
+
+  # Leading-dimension scale (e.g. per-expert (num_experts,) on (num_experts, in_dim, out_dim))
+  if scale_c.ndim < w.ndim and w.shape[: scale_c.ndim] == scale_c.shape:
+    scale_c = scale_c.reshape(scale_c.shape + (1,) * (w.ndim - scale_c.ndim))
+
+  # Standard JAX broadcasting handles per-channel or broadcastable shapes
+  return w_c * scale_c
 
 
 @dataclass
@@ -989,6 +1057,74 @@ def maybe_quantize_model(model, config):
         if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
           del val.qwix_rngs
   return model
+
+
+# Quantized weight dtypes that tpu-inference's fused MoE kernel (gmm_v2) takes with
+# per-block scales and dequantizes in-kernel. Any other qtype keeps the expert weights
+# unquantized on the fused path.
+FUSED_MOE_KERNEL_WEIGHT_QTYPES = (jnp.dtype(jnp.float8_e4m3fn), jnp.dtype(jnp.int8))
+
+
+def get_fused_moe_rule() -> qwix.QuantizationRule | None:
+  """Returns the qwix rule that governs the fused MoE grouped matmul, if any.
+
+  The fused kernel is the same grouped matmul that MaxText's own megablox / ragged_dot
+  paths implement, so it takes its rule from the "gmm" op exactly like they do. Rules
+  that only list "dot_general" (the plain fp8 / int8 recipes) leave the experts
+  unquantized on every MoE path, including this one.
+  """
+  return qpl.get_current_rule("gmm")
+
+
+def quantize_weight_for_fused_moe(
+    kernel: jax.Array, rule: qwix.QuantizationRule | None
+) -> tuple[jax.Array, jax.Array | None]:
+  """Quantizes an [E, K, N] expert weight for tpu-inference's fused MoE kernel.
+
+  The kernel contracts over K, dequantizes after the matmul with scales laid out as
+  [E, num_blocks, 1, N] (blocks along K), and quantizes the activations itself with a
+  32-bit accumulator. Scale granularity follows the qwix rule: channelwise over (E, N),
+  plus blockwise along K when the rule sets tile_size.
+
+  Returns the (possibly unchanged) weight and its scale, or None when the rule does not
+  ask for a weight dtype the kernel supports.
+  """
+
+  weight_qtype = getattr(rule, "weight_qtype", None) if rule is not None else None
+  if weight_qtype is None:
+    return kernel, None
+  qtype = jnp.dtype(weight_qtype)
+  if qtype not in FUSED_MOE_KERNEL_WEIGHT_QTYPES:
+    max_logging.log(f"fused MoE kernel does not take {qtype} weights; keeping expert weights in {kernel.dtype}.")
+    return kernel, None
+  if kernel.ndim != 3:
+    raise ValueError(f"fused MoE expert weights must be [E, K, N], got {kernel.shape}")
+
+  tile_size = getattr(rule, "tile_size", None)
+  tiled_axes = {1: tile_size} if tile_size else {}
+  cal_method = getattr(rule, "weight_calibration_method", None)
+  quant_kwargs = {"calibration_method": cal_method} if cal_method is not None else {}
+
+  quantized = qpl.quantize(
+      kernel,
+      qtype,
+      channelwise_axes=(0, 2),
+      tiled_axes=tiled_axes,
+      scale_dtype=jnp.float32,
+      **quant_kwargs,
+  )
+  scale = jnp.expand_dims(quantized.scale, axis=2)
+  return quantized.qvalue, scale
+
+
+def without_qwix_interception(fn: Callable) -> Callable:
+  """Returns `fn` wrapped so that qwix's op interception is off while it runs.
+
+  For ops that do their own quantization (tpu-inference's fused MoE), the qwix rule is
+  applied once up front to their inputs and the op itself is opaque to qwix: neither
+  the routing math around the kernel nor anything traced inside it gets rewritten.
+  """
+  return qwix_interception.disable_interceptions(fn)
 
 
 def _cast_reduced_from(arr, reduced_arr):

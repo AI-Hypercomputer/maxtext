@@ -66,6 +66,7 @@ class DummyStatefulNNXModel(nnx.Module):
 class DummyPayload(abstract_engine.TrainerPayload):
   token_ids: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
   token_mask: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
+  metadata: dict[str, Any] = struct.field(pytree_node=False, default_factory=dict)
 
 
 class MaxTextTrainingEngineTest(absltest.TestCase):
@@ -250,9 +251,14 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertEqual(recorded.shape, (1,), "one norm per update, not one per micro-batch")
     np.testing.assert_allclose(recorded[0], np.sqrt(2 * 0.25**2), rtol=1e-5)
 
+  @mock.patch("orbax.checkpoint.PyTreeCheckpointHandler")
   @mock.patch("orbax.checkpoint.CheckpointManager")
-  def test_max_text_trainer_checkpoint_manager_init(self, mock_create_mgr):
-    mock_config = self.setup_config(enable_checkpointing=True)
+  def test_max_text_trainer_checkpoint_manager_init(self, mock_create_mgr, mock_handler):
+    mock_config = self.setup_config(
+        enable_checkpointing=True,
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+    )
 
     _ = maxtext_engine.MaxTextTrainingEngine(mock_config)
     mock_create_mgr.assert_called_once_with(
@@ -262,6 +268,16 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
             max_to_keep=mock_config.max_num_checkpoints_to_keep,
             enable_async_checkpointing=mock_config.async_checkpointing,
         ),
+        item_handlers={
+            "model_params": mock_handler.return_value,
+            "optimizer_state": mock_handler.return_value,
+            "accumulated_metrics": mock_handler.return_value,
+            "accumulated_grads": mock_handler.return_value,
+        },
+    )
+    self.assertEqual(mock_handler.call_count, 4)
+    mock_handler.assert_has_calls(
+        [mock.call(use_ocdbt=False, use_zarr3=False)] * 4,
     )
 
   def test_save_checkpoint_called_after_update(self):
@@ -786,6 +802,94 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertTrue(seen["is_train"])
     # The payload's fields are auto-extracted into the positional `data`.
     self.assertIn("token_ids", seen["data"])
+    self.assertNotIn("metadata", seen["data"])
+
+  def test_prepare_batch_clears_metadata_on_dataclass(self):
+    """Payload metadata is cleared to {} on dataclasses so gen_model_input_fn receives empty metadata."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload(metadata={"request_id": 12345, "step": 1})
+
+    # With gen_model_input_fn: receives payload with metadata replaced by {}
+    received_payload = []
+    t.with_gen_model_input_fn(lambda p: received_payload.append(p) or {"tokens": p.token_ids})
+    t._prepare_batch(payload)
+    self.assertEqual(len(received_payload), 1)
+    self.assertEqual(received_payload[0].metadata, {})
+
+    # Without gen_model_input_fn: returns dict without metadata
+    t_no_gen = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    prepared = t_no_gen._prepare_batch(payload)
+    self.assertIsInstance(prepared, dict)
+    self.assertNotIn("metadata", prepared)
+
+    # RLTrainerPayload from Tunix with non-empty metadata is also cleared
+    rl_payload = datatypes.RLTrainerPayload(
+        prompt_ids=jnp.zeros((1, 4)),
+        prompt_mask=jnp.ones((1, 4)),
+        completion_ids=jnp.zeros((1, 4)),
+        completion_mask=jnp.ones((1, 4)),
+        advantages=jnp.zeros((1,)),
+        metadata={"client_id": "worker-0"},
+    )
+    received_rl_payload = []
+    t.with_gen_model_input_fn(lambda p: received_rl_payload.append(p) or {"tokens": p.completion_ids})
+    t._prepare_batch(rl_payload)
+    self.assertEqual(len(received_rl_payload), 1)
+    self.assertEqual(received_rl_payload[0].metadata, {})
+
+    # Dataclass without a dataclass field for metadata (e.g. property) is not replaced
+    @dataclasses.dataclass
+    class _PayloadWithPropertyMetadata:
+      tokens: jax.Array
+
+      @property
+      def metadata(self):
+        return {"property": True}
+
+    prop_payload = _PayloadWithPropertyMetadata(tokens=jnp.ones((2, 2)))
+    prepared_prop = t_no_gen._prepare_batch(prop_payload)
+    self.assertIn("tokens", prepared_prop)
+
+  def test_prepare_batch_prevents_recompilation_on_metadata_change(self):
+    """Payload metadata changes must not alter the Treedef or trigger recompilation."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(lambda model, **kwargs: (abstract_engine.WeightedMetric(jnp.array(1.0), jnp.array(1.0)), {}))
+    # Mirrors tunix algorithm_adapter._algo_model_input which passes the payload through.
+    t.with_gen_model_input_fn(lambda payload: {"train_example": payload})
+
+    payload1 = datatypes.RLTrainerPayload(
+        prompt_ids=jnp.zeros((1, 4)),
+        prompt_mask=jnp.ones((1, 4)),
+        completion_ids=jnp.zeros((1, 4)),
+        completion_mask=jnp.ones((1, 4)),
+        advantages=jnp.zeros((1,)),
+        metadata={"step": 0, "request_id": 100},
+    )
+    payload2 = datatypes.RLTrainerPayload(
+        prompt_ids=jnp.zeros((1, 4)),
+        prompt_mask=jnp.ones((1, 4)),
+        completion_ids=jnp.zeros((1, 4)),
+        completion_mask=jnp.ones((1, 4)),
+        advantages=jnp.zeros((1,)),
+        metadata={"step": 1, "request_id": 101},
+    )
+
+    with mock.patch.object(t, "_compile_for_batch", wraps=t._compile_for_batch) as mock_compile:
+      t.compile(payload1)
+      self.assertEqual(mock_compile.call_count, 1)
+      t.fwd_bwd(payload2)
+      self.assertEqual(mock_compile.call_count, 1)
+
+    dummy1 = DummyPayload(token_ids=jnp.ones((2, 2)), metadata={"step": 0})
+    dummy2 = DummyPayload(token_ids=jnp.ones((2, 2)), metadata={"step": 1})
+    t_dummy = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t_dummy.with_loss_fn(lambda model, **kwargs: (abstract_engine.WeightedMetric(jnp.array(1.0), jnp.array(1.0)), {}))
+    t_dummy.with_gen_model_input_fn(lambda payload: {"train_example": payload})
+    with mock.patch.object(t_dummy, "_compile_for_batch", wraps=t_dummy._compile_for_batch) as mock_dummy_compile:
+      t_dummy.compile(dummy1)
+      self.assertEqual(mock_dummy_compile.call_count, 1)
+      t_dummy.fwd_bwd(dummy2)
+      self.assertEqual(mock_dummy_compile.call_count, 1)
 
   def test_gen_model_input_fn_returning_a_non_dict_raises(self):
     """The adapter's contract is a dict of kwargs; anything else fails clearly."""
@@ -1002,6 +1106,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIs(abstract_engine.LossOutput, sft_utils.LossOutput)
     self.assertIs(abstract_engine.WeightedMetric, sft_utils.WeightedMetric)
     self.assertIs(abstract_engine.TrainerPayload, datatypes.TrainerPayload)
+    self.assertIs(abstract_engine.RLTrainerPayload, datatypes.RLTrainerPayload)
 
     tunix_metric = sft_utils.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0))
     self.assertIsInstance(tunix_metric, abstract_engine.WeightedMetric)
@@ -1021,6 +1126,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         advantages=jnp.zeros((1,)),
     )
     self.assertIsInstance(rl_payload, abstract_engine.TrainerPayload)
+    self.assertIsInstance(rl_payload, abstract_engine.RLTrainerPayload)
 
   def test_unsupported_loss_return_raises_naming_the_type(self):
     """An unrecognised return fails loudly and says what it received."""

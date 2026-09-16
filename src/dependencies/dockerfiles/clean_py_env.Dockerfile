@@ -4,17 +4,13 @@
 # image is designed to have a clean Python environment with just pip
 # and uv installed.
 #
-# Build a docker image by running:
-# `docker build --build-arg DEVICE=tpu -t <docker_image_name>:<tag> -f clean_py_env.Dockerfile .`
-# Or
-# `docker build --build-arg PYTHON_VERSION=3.11 --build-arg DEVICE=tpu -t <docker_image_name>:<tag> -f clean_py_env.Dockerfile .`
-#
-# How to upload the image to Google Container Registry (GCR):
-# e.g., DEVICE=tpu and PYTHON_VERSION=3.12
-#.  gcloud init
-#   gcloud auth configure-docker
-#   docker tag <docker_image_name>:<tag> gcr.io/tpu-prod-env-multipod/maxtext-unit-test-tpu:py312-bookworm
-#   docker push gcr.io/tpu-prod-env-multipod/maxtext-unit-test-tpu:py312-bookworm
+# Usage:
+#   docker build --build-arg DEVICE=tpu -t maxtext-unit-test-tpu:py312-bookworm -f src/dependencies/dockerfiles/clean_py_env.Dockerfile .
+#   gcloud auth login
+#   gcloud config set project tpu-prod-env-multipod
+#   gcloud auth configure-docker us-docker.pkg.dev
+#   docker tag maxtext-unit-test-tpu:py312-bookworm us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext-unit-test-tpu:py312-bookworm
+#   docker push us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext-unit-test-tpu:py312-bookworm
 
 # Default to Python 3.12. This ARG must be declared before FROM.
 ARG PYTHON_VERSION=3.12
