@@ -58,7 +58,7 @@ jobs:
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
-      repository_name: ${{ inputs.repository_name }}
+      repository_name: ${{ inputs.repository_name || 'maxtext-images' }}
       device: gpu
       build_mode: ${{ matrix.build_mode }}
       workflow: ${{ matrix.workflow }}
