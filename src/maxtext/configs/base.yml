@@ -86,6 +86,8 @@ checkpoint_storage_use_zarr3: true
 # larger models requires higher concurrent GB for I/O
 # default concurrent gb for PytreeCheckpointHandler is 96GB
 checkpoint_storage_concurrent_gb: 96
+# max concurrent GB allowed to be transferred from device to host memory at once when saving (None = unbounded)
+checkpoint_storage_device_host_concurrent_gb: 8
 
 # TODO: b/529622681 - Remove deprecated settings.
 # DEPRECATED: Orbax v1 is now always used for checkpointing; this flag is

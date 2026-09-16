@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping
 import dataclasses
+import os
 from typing import Any, List
 
 from absl import logging
@@ -39,6 +40,64 @@ class CheckpointState:
   micro_step_count: int = 0
 
 
+_PATHWAYS_PERSISTENCE_REGISTERED = False
+
+
+def _maybe_register_pathways_persistence() -> None:
+  """Registers Orbax Pathways persistence array handler, if applicable.
+
+  When ENABLE_PATHWAYS_PERSISTENCE=1, delegates checkpoint saving directly
+  from TPU workers to storage (GCS), bypassing host RAM staging.
+  """
+  global _PATHWAYS_PERSISTENCE_REGISTERED
+  if _PATHWAYS_PERSISTENCE_REGISTERED:
+    return
+  if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
+    return
+
+  _PATHWAYS_PERSISTENCE_REGISTERED = True
+  try:
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    import orbax.checkpoint.pathways as ocp_pathways
+    from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib
+    from orbax.checkpoint._src.serialization import type_handler_registry
+
+    # pylint: enable=g-import-not-at-top,import-outside-toplevel
+
+    ocp_pathways.register_type_handlers(
+        use_single_replica_array_handler=False,
+        checkpointing_impl=ocp_pathways.CheckpointingImpl.PERSISTENCE,
+        # Preserve array metadata store required for pytrees with typed PRNG keys.
+        array_metadata_store=array_metadata_store_lib.Store(),
+    )
+
+    handler = type_handler_registry.get_type_handler(jax.Array)
+    handler_name = type(handler).__name__
+    store = getattr(handler, "_array_metadata_store", None)
+    if handler_name in ("CloudPathwaysArrayHandler", "PathwaysPersistenceArrayHandler"):
+      if store is None:
+        logging.error(
+            "Registered %s but array metadata store is None; saving may fail on typed PRNG keys.",
+            handler_name,
+        )
+      else:
+        logging.info(
+            "Registered Pathways persistence array handler (%s, store=%s); TPUs will write directly to storage.",
+            handler_name,
+            type(store).__name__,
+        )
+    else:
+      logging.warning(
+          "Pathways persistence registration fell back: jax.Array is handled by %s, not a persistence handler.",
+          handler_name,
+      )
+  except (ImportError, AttributeError, ModuleNotFoundError, NotImplementedError) as e:
+    logging.warning(
+        "Pathways persistence requested but unavailable on this backend (%s). Falling back to host-staged checkpointing.",
+        e,
+    )
+
+
 class CheckpointManager:
   """CheckpointManager wrapper for MaxText training engine."""
 
@@ -55,12 +114,15 @@ class CheckpointManager:
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if checkpoint_dir:
+      _maybe_register_pathways_persistence()
+
       # Use configured array format (e.g. use_ocdbt=False for Pathways).
       # Build a fresh handler per item as Orbax handlers carry per-item state.
       def _pytree_handler() -> ocp.PyTreeCheckpointHandler:
         return ocp.PyTreeCheckpointHandler(
             use_ocdbt=config.checkpoint_storage_use_ocdbt,
             use_zarr3=config.checkpoint_storage_use_zarr3,
+            save_device_host_concurrent_gb=config.checkpoint_storage_device_host_concurrent_gb,
         )
 
       self._checkpoint_manager = ocp.CheckpointManager(
