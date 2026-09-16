@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Converts Qwen3-30B HuggingFace checkpoint to MaxText format and validates logit correctness.
+# Converts Qwen3.5-35B HuggingFace checkpoint to MaxText format and validates logit correctness.
 
 # The flow of this script is as follows:
 # 1. Install PyTorch (CPU) required for checkpoint conversion.
@@ -10,7 +10,7 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_qwen3_to_mt.sh $RUN_ID
+# bash test_qwen3.5_to_mt.sh $RUN_ID
 
 set -ex
 

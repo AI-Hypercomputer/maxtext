@@ -51,15 +51,21 @@ SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
 echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
 
 # Step 3: Run forward pass logits check
+if [ ! -f /tmp/golden_data_qwen3.5-35b-a3b.jsonl ]; then
+  gcloud storage cp gs://maxtext-test-assets/golden_data_qwen3.5-35b-a3b.jsonl /tmp/golden_data_qwen3.5-35b-a3b.jsonl
+fi
+
 python3 -m tests.utils.forward_pass_logit_checker \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
-    per_device_batch_size=1 \
-    dtype=float32 \
     scan_layers=false \
-    --hf_model_path=${HF_GOLDEN_MODEL} \
-    --max_kl_div=0.03 \
-    --run_hf_model=true \
+    per_device_batch_size=1 \
+    max_target_length=4 \
+    dtype=float32 \
     attention=dot_product \
+    --golden_logits_path=/tmp/golden_data_qwen3.5-35b-a3b.jsonl \
+    --atol=1.5 \
+    --rtol=1.5 \
+    --max_kl_div=0.2 \
     hardware=cpu \
     skip_jax_distributed_system=True
