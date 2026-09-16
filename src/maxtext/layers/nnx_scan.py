@@ -50,7 +50,9 @@ def create_scanned_layers(
   _, (stacked_params, stacked_rest) = jax.lax.scan(scan_body, None, rngs_state)
 
   if param_scan_axis != 0:
-    stacked_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), stacked_params)
+    stacked_params = jax.tree.map(
+        lambda x: jnp.moveaxis(x, 0, param_scan_axis) if x.ndim > param_scan_axis else x, stacked_params
+    )
 
   def add_scan_metadata(state, axis):
     def update_leaf(leaf):

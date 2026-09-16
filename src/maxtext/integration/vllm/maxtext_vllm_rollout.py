@@ -36,7 +36,7 @@ from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 import jax
 import jax.numpy as jnp
-from maxtext.integration.vllm.convert_utils import _sharding_summary
+from maxtext.integration.vllm.convert_utils import MOE_MLP_WEIGHTS, _sharding_summary
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
@@ -45,12 +45,43 @@ from maxtext.integration.vllm.weight_converter import (
     WeightConverter,
 )
 from tunix.generate import mappings
+from tunix.generate import utils as tunix_utils
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
 
 # Sentinel distinguishing "this model has no entry" from "this model has an
 # entry whose value is None", which means direct-sync-only.
 _NO_RULE_TABLE = object()
+
+
+def _patch_tunix_moe_weight_keys() -> None:
+  """Adds the MoE keys missing from Tunix's zero-pad branch (currently `wo`).
+
+  `tunix.generate.utils._align_per_axis` zero-pads MoE MLP weights and repeats
+  everything else, but its key set omits `wo`. A `wo` whose intermediate dim the
+  rollout padded for GMM_v2 (`padded_base_moe_mlp_dim`) then takes the repeat
+  branch and raises ShapeMismatchError: gemma4-26b 704 -> 1024, qwen3-30b-a3b
+  768 -> 1024. MaxText's own copy of that set is correct, so mirror it onto
+  Tunix; drop this once the pinned google-tunix carries the fix.
+  """
+  tunix_keys = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)  # pylint: disable=protected-access
+  if tunix_keys is None:
+    # Renamed or removed upstream, which most likely means the fix landed.
+    logging.warning("tunix.generate.utils._MOE_MLP_WEIGHTS is absent; skipping the MoE `wo` zero-pad patch.")
+    return
+
+  missing = set(MOE_MLP_WEIGHTS) - set(tunix_keys)
+  if not missing:
+    return
+
+  tunix_utils._MOE_MLP_WEIGHTS = frozenset(set(tunix_keys) | set(MOE_MLP_WEIGHTS))  # pylint: disable=protected-access
+  logging.info(
+      "Patched tunix _MOE_MLP_WEIGHTS with %s so padded MoE weights are zero-padded instead of repeated.",
+      sorted(missing),
+  )
+
+
+_patch_tunix_moe_weight_keys()
 
 
 def _rule_table_for(model_name: str):

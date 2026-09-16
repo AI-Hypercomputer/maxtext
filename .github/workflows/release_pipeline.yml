@@ -122,6 +122,7 @@ jobs:
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
+      repository_name: maxtext-images
       device: ${{ matrix.device }}
       build_mode: stable
       workflow: ${{ matrix.workflow }}
@@ -149,6 +150,7 @@ jobs:
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
+      repository_name: maxtext-images
       device: ${{ matrix.device }}
       build_mode: stable
       workflow: ${{ matrix.workflow }}
@@ -208,14 +210,14 @@ jobs:
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
       - name: Poll for verified Docker images
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           check_tag() {
-            gcloud container images describe "gcr.io/${PROJECT_NAME}/$1" >/dev/null 2>&1
+            gcloud container images describe "us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/$1" >/dev/null 2>&1
           }
 
           echo "Waiting for pre-training and post-training tests to complete..."
