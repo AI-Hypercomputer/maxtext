@@ -14,10 +14,46 @@
 
 """Model-specific helpers shared by MaxText's vLLM adapter."""
 
+import inspect
 import math
 from typing import Any
 
 import jax.numpy as jnp
+
+from maxtext.utils import max_logging
+
+
+def call_with_supported_kwargs(func: Any, **kwargs) -> Any:
+  """Calls ``func`` with only the keyword arguments its signature accepts.
+
+  Private tpu-inference helpers change signatures between revisions, and the
+  MaxText adapter has to work against whichever revision the runtime image
+  installs. Rather than pinning one argument list, the caller supplies every
+  value it can compute and this helper forwards the subset the installed
+  callable declares. Callables that accept ``**kwargs`` get everything.
+
+  Args:
+    func: The callable to invoke.
+    **kwargs: Candidate keyword arguments.
+
+  Returns:
+    Whatever ``func`` returns.
+  """
+  try:
+    parameters = inspect.signature(func).parameters
+  except (TypeError, ValueError):
+    # C-implemented callables may not expose a signature; pass everything and
+    # let the callable complain if it disagrees.
+    return func(**kwargs)
+
+  if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+    return func(**kwargs)
+
+  supported = {name: value for name, value in kwargs.items() if name in parameters}
+  dropped = sorted(set(kwargs) - set(supported))
+  if dropped:
+    max_logging.log(f"{getattr(func, '__name__', repr(func))} does not accept {dropped}; omitting them.")
+  return func(**supported)
 
 
 def normalize_vllm_input_positions(input_positions: Any):
