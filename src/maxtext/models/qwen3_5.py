@@ -22,7 +22,7 @@ from typing import Any, cast
 from flax import nnx
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, Config, ShardMode
+from maxtext.common.common_types import Array, Config, ShardMode, get_weight_dtype
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
@@ -165,7 +165,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "norm"),
         shard_mode=cfg.shard_mode,
         rngs=rngs,
     )
@@ -195,7 +195,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "norm"),
         shard_mode=cfg.shard_mode,
         rngs=rngs,
     )

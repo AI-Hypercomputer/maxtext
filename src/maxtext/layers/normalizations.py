@@ -117,10 +117,17 @@ class RMSNorm(nnx.Module):
       max_logging.log("normalizations.py: Moving scale parameter to device")
       scale = jax.device_put(scale, max_utils.device_space())
 
-    scale = jnp.asarray(scale, self.dtype)
-    effective_scale = scale + self.scale_offset
+    scale_fp32 = jnp.asarray(scale, jnp.float32)
+    effective_scale = scale_fp32 + self.scale_offset
     if self.shard_mode == ShardMode.EXPLICIT:
       effective_scale = _align_scale_with_normalized_axis(effective_scale, y)
+
+    if self.scale_offset != 0.0:
+      normed_fp32 = x * lax.rsqrt(mean2 + self.epsilon)
+      y = jnp.einsum("...k,k->...k", normed_fp32, effective_scale, out_sharding=out_sharding)
+      return jnp.asarray(y, self.dtype)
+
+    effective_scale = jnp.asarray(effective_scale, self.dtype)
     return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
 
 
@@ -157,17 +164,13 @@ def Qwen3NextRMSNorm(
     *,
     rngs: nnx.Rngs,
 ):
-  """
-  Used for input and post attention layernorms
-  in Qwen3NextDecoderLayer.
+  """Used for input and post attention layernorms in Qwen3NextDecoderLayer.
 
   This normalization layer is specific to Qwen3-Next. Key characteristics:
-  1.  The learnable scale parameter `scale` is initialized to ZEROS.
-  2.  The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
-      This matches the PyTorch implementation of Qwen3NextRMSNorm.
-
+  1. The learnable scale parameter `scale` is initialized to ZEROS.
+  2. The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
+     This matches the PyTorch implementation of Qwen3NextRMSNorm.
   """
-
   return nnx.data(
       RMSNorm(
           num_features=num_features,
@@ -217,7 +220,7 @@ class Qwen3NextRMSNormGated(nnx.Module):
         RMSNorm(
             num_features=num_features,
             epsilon=self.epsilon,
-            dtype=dtype,
+            dtype=jnp.float32,
             weight_dtype=weight_dtype,
             shard_mode=shard_mode,
             scale_init=nnx.initializers.ones,
