@@ -473,6 +473,9 @@ def main(config, test_args):  # pylint: disable=W0621
             rngs={"aqt": init_rng},
         )
 
+      # Only batch element 0 is compared; slice before the allgather so the
+      # full [batch, seq, vocab] logits are never materialized per host.
+      full_train_logits = full_train_logits[:1]
       full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits, tiled=True)
       # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
       if full_train_logits.ndim == 4:
