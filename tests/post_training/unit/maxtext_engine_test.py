@@ -1504,6 +1504,63 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertEqual(shardings["a"].spec[0], "data")
     self.assertFalse(t._replicated_batch_warned)  # pylint: disable=protected-access
 
+  def test_fwd_only_runs_against_the_live_model_and_mutates_no_training_state(self):
+    """A read-only pass gets the engine's live model and leaves the in-flight step alone."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    t.fwd_bwd(DummyPayload())
+    grads_before = jax.tree.map(jnp.copy, t._accumulated_grads)  # pylint: disable=protected-access
+    micro_steps_before = t._micro_step_count  # pylint: disable=protected-access
+    train_step_before = t.train_step
+
+    seen = {}
+
+    def score(model, tokens, *, pad_id):
+      seen["model"] = model
+      seen["tokens"] = tokens
+      seen["pad_id"] = pad_id
+      return jnp.sum(tokens)
+
+    out = t.fwd_only(score, np.ones((2, 4), np.int32), pad_id=0)
+
+    # The model comes off the train state, which is what `fwd_bwd` differentiates -- not
+    # `self._model`, which a restore or the `state` setter can leave behind.
+    self.assertIs(seen["model"], t.state.model)
+    # Python scalars must survive as scalars: callees take them as `static_argnames`, and
+    # a device array there is unhashable.
+    self.assertIsInstance(seen["pad_id"], int)
+    self.assertEqual(float(out), 8.0)
+
+    # Nothing about the in-flight training step moved.
+    self.assertEqual(t._micro_step_count, micro_steps_before)  # pylint: disable=protected-access
+    self.assertEqual(t.train_step, train_step_before)
+    jax.tree.map(np.testing.assert_array_equal, grads_before, t._accumulated_grads)  # pylint: disable=protected-access
+
+  def test_fwd_only_places_arrays_where_a_compiled_step_would(self):
+    """Inputs land on the engine's own batch shardings, per leaf rank."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    # Zero-width: the empty prompt half of a sequence-packed row. There is nothing to
+    # split, so it must be passed through rather than made into a degenerate global array.
+    empty_prompt = np.zeros((2, 0), np.int32)
+    seen = {}
+
+    def score(model, tokens, prompt, mask=None):
+      del model
+      seen.update(tokens=tokens, prompt=prompt, mask=mask)
+
+    with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
+      t.fwd_only(score, np.ones((2, 4), np.int32), empty_prompt, mask=np.ones((2,), np.int32))
+
+    self.assertEqual(seen["tokens"].sharding.spec, jax.sharding.PartitionSpec("data", None))
+    # A rank-1 leaf absorbs only the leading entry of the `[batch, sequence]` spec.
+    self.assertEqual(seen["mask"].sharding.spec, jax.sharding.PartitionSpec("data"))
+    self.assertIs(seen["prompt"], empty_prompt)
+
 
 if __name__ == "__main__":
   absltest.main()
