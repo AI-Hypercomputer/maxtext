@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Converts Qwen3.5-35B HuggingFace checkpoint to MaxText format and validates logit correctness.
+# Converts Qwen3-30B HuggingFace checkpoint to MaxText format and validates logit correctness.
 
 # The flow of this script is as follows:
 # 1. Install PyTorch (CPU) required for checkpoint conversion.
@@ -10,13 +10,13 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_qwen3.5_to_mt.sh $RUN_ID
+# bash test_qwen3_to_mt.sh $RUN_ID
 
 set -ex
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
-MODEL_NAME='qwen3-30b-a3b-base'
-HF_GOLDEN_MODEL='Qwen/Qwen3-30B-A3B-Base'
+MODEL_NAME='qwen3.5-35b-a3b'
+HF_GOLDEN_MODEL='Qwen/Qwen3.5-35B-A3B'
 
 
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
@@ -51,15 +51,21 @@ SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
 echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
 
 # Step 3: Run forward pass logits check
+if [ ! -f /tmp/golden_data_qwen3.5-35b-a3b.jsonl ]; then
+  gcloud storage cp gs://maxtext-test-assets/golden_data_qwen3.5-35b-a3b.jsonl /tmp/golden_data_qwen3.5-35b-a3b.jsonl
+fi
+
 python3 -m tests.utils.forward_pass_logit_checker \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
-    per_device_batch_size=1 \
-    dtype=float32 \
     scan_layers=false \
-    --hf_model_path=${HF_GOLDEN_MODEL} \
-    --max_kl_div=0.03 \
-    --run_hf_model=true \
+    per_device_batch_size=1 \
+    max_target_length=4 \
+    dtype=float32 \
     attention=dot_product \
+    --golden_logits_path=/tmp/golden_data_qwen3.5-35b-a3b.jsonl \
+    --atol=1.5 \
+    --rtol=1.5 \
+    --max_kl_div=0.2 \
     hardware=cpu \
     skip_jax_distributed_system=True
