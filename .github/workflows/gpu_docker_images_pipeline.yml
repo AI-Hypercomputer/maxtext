@@ -24,9 +24,10 @@ on:
   workflow_dispatch:
     inputs:
       repository_name:
-        description: 'Name of the Docker repository to push images to.'
-        required: true
+        description: 'Name of the Artifact Registry repository to push images to.'
+        required: false
         type: string
+        default: "maxtext-images"
 
 permissions:
   contents: read
@@ -58,7 +59,10 @@ jobs:
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
-      repository_name: ${{ inputs.repository_name }}
+      # `inputs` is empty on `schedule` events (workflow_dispatch defaults are
+      # not applied), so fall back explicitly to avoid an empty path segment in
+      # the Artifact Registry image tag.
+      repository_name: ${{ inputs.repository_name || 'maxtext-images' }}
       device: gpu
       build_mode: ${{ matrix.build_mode }}
       workflow: ${{ matrix.workflow }}
@@ -82,7 +86,7 @@ jobs:
     uses: ./.github/workflows/run_ci_tests.yml
     with:
       image_name: ${{ matrix.image_name }}
-      repository_name: ${{ inputs.repository_name }}
+      repository_name: ${{ inputs.repository_name || 'maxtext-images' }}
       image_tag: ${{ github.run_id }}
       device: gpu
       workflow: ${{ matrix.workflow }}
@@ -90,7 +94,7 @@ jobs:
   notify_failure:
     name: Notify failed build
     needs: [build_and_push_docker_images, run_ci_tests]
-    if: ${{ failure() && inputs.repository_name == 'maxtext-images' }}
+    if: ${{ failure() && (inputs.repository_name || 'maxtext-images') == 'maxtext-images' }}
     runs-on: ubuntu-latest
     permissions:
       issues: write

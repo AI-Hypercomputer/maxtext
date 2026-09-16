@@ -59,6 +59,26 @@ jobs:
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
+      - name: Validate image tag components
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+        run: |
+          # An empty component silently produces an invalid reference such as
+          # `us-docker.pkg.dev/<project>//<image>:<tag>`, which only surfaces
+          # minutes later when `docker buildx build` rejects the tag.
+          missing=()
+          [[ -n "$PROJECT_NAME" ]] || missing+=("vars.PROJECT_NAME")
+          [[ -n "$REPOSITORY_NAME" ]] || missing+=("inputs.repository_name")
+          [[ -n "$IMAGE_NAME" ]] || missing+=("inputs.image_name")
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Empty image tag component(s): ${missing[*]}"
+            exit 1
+          fi
+          echo "Image tag: us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${IMAGE_NAME}"
+
       - name: Check if build should run
         id: check
         shell: bash
