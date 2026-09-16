@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 from absl import logging
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 import jax
 import jax.numpy as jnp
 from maxtext.common import common_types
@@ -829,7 +829,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._mesh is None:
       yield
       return
-    with jax.set_mesh(self._mesh), nn_partitioning.axis_rules(self._config.logical_axis_rules):
+    with jax.set_mesh(self._mesh), logical_axis_rules(self._config.logical_axis_rules):
       yield
 
   def _invalidate_pure_state(self) -> None:

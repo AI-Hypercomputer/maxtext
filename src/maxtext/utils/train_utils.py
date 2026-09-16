@@ -22,7 +22,7 @@ import functools
 import orbax.checkpoint.pathways as ocp_pathways
 
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 
 from maxtext.common import checkpointing
 from maxtext.common import emergency_checkpointing
@@ -348,7 +348,7 @@ def setup_train_loop(config, recorder, devices=None):
       # pyrefly: ignore[bad-argument-type]
       lora_utils.restore_lora_from_path(target_model_state, config)
       _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       # We only need the graphdef here; it's merged with state below. Avoid
       # nnx.get_abstract_model: it eagerly builds a NamedSharding for every variable
       # under jax.set_mesh(mesh) and rejects any logical name missing from
@@ -363,12 +363,12 @@ def setup_train_loop(config, recorder, devices=None):
       else:
         state_mesh_shardings_params = state_mesh_shardings.params
     else:
-      with nn_partitioning.axis_rules(config.logical_axis_rules):
+      with logical_axis_rules(config.logical_axis_rules):
         _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
         _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
 
     if config.enable_diloco:
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+      with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules):
         outer_params_sharding = (
             state_mesh_shardings_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
             if isinstance(state_mesh_shardings_params, nnx.State)
