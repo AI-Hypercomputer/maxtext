@@ -81,6 +81,67 @@ def _apply_mapdataset_transforms(
   return dataset
 
 
+def _mix_and_finalize(
+    dataset_list,
+    weights,
+    shuffle,
+    shuffle_seed,
+    num_epoch,
+    dataloading_host_index,
+    dataloading_host_count,
+    grain_num_threads,
+    grain_prefetch_buffer_size,
+    elastic=False,
+):
+  """Shuffle, repeat, shard, and mix a list of component MapDatasets.
+
+  Sharding is applied to each component *before* `grain.MapDataset.mix` and the
+  mixture is converted to an IterDataset exactly once. Both details matter:
+
+  1. Correctness. `grain.MapDataset.mix` selects the source dataset for a given
+     index with `_dataset_and_key_of_next_element`, a deterministic exact
+     apportionment function whose output is periodic in `index % P`, where
+     `P = sum(p_i) / gcd(p_i)` over the integer-scaled proportions. Slicing the
+     *mixed* dataset with `[host_index::host_count]` makes host `h` visit only
+     pattern phases congruent to `h` modulo `gcd(host_count, P)`, i.e. only
+     `P / gcd(host_count, P)` of the `P` phases. Whenever `gcd(host_count, P)`
+     exceeds 1 each host is starved of domains, and when `P` divides
+     `host_count` the split is fully degenerate (two equally weighted domains
+     across two hosts give each host exactly one domain). The aggregate mixture
+     across hosts still looks correct, so this fails silently. Sharding each
+     component first sidesteps the aliasing entirely: every host runs its own
+     local mixture over all domains at the configured weights, while the
+     component-wise slices keep the data disjoint across hosts.
+
+  2. Performance. Slicing and mixing MapDatasets is pure index arithmetic and
+     allocates no threads or buffers, so calling `to_iter_dataset()` once on the
+     mixture creates a single reader thread pool per worker process rather than
+     one per component (1xW instead of DxW).
+
+  When `elastic` is True the unsharded, unconverted mixture is returned because
+  `ElasticIterator` shards, batches, and converts internally.
+  """
+  total_weight = sum(weights)
+  weights = [weight / total_weight for weight in weights]
+
+  for d, _ in enumerate(dataset_list):
+    if shuffle:
+      dataset_list[d] = dataset_list[d].shuffle(seed=shuffle_seed)
+    dataset_list[d] = dataset_list[d].repeat(num_epoch)
+
+  if elastic:
+    return grain.MapDataset.mix(dataset_list, weights)
+
+  dataset_list = [ds[dataloading_host_index::dataloading_host_count] for ds in dataset_list]
+  dataset = grain.MapDataset.mix(dataset_list, weights)
+  return dataset.to_iter_dataset(
+      read_options=grain.ReadOptions(
+          num_threads=grain_num_threads,
+          prefetch_buffer_size=grain_prefetch_buffer_size,
+      )
+  )
+
+
 def get_datasets(
     data_file_pattern,
     data_file_type,
@@ -105,7 +166,8 @@ def get_datasets(
       source = grain.ArrayRecordDataSource(files)
       return grain.MapDataset.source(source)
 
-    # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
+    # Handle mixture config with named datasets. Note that the names are currently
+    # informational only: components are mixed positionally by weight.
     if mixture_config_path:
       with open(mixture_config_path, "r", encoding="utf-8") as f:
         mixture_config = json.load(f)
@@ -117,33 +179,22 @@ def get_datasets(
       dataset_list = list(executor.map(create_dataset_from_pattern, paths))
       executor.shutdown(wait=True)
 
-      for d, _ in enumerate(dataset_list):
-        if shuffle:
-          dataset_list[d] = dataset_list[d].shuffle(seed=shuffle_seed)
-        dataset_list[d] = dataset_list[d].repeat(num_epoch)
-
-      # Normalize weights
-      total_weight = sum(weights)
-      weights = [weight / total_weight for weight in weights]
-
-      # Mix at the MapDataset level so only 1 thread pool is used and single iterator state is preserved
-      dataset = grain.MapDataset.mix(dataset_list, weights)
-      if elastic:
-        return dataset
-      dataset = dataset[dataloading_host_index::dataloading_host_count]
-      dataset = dataset.to_iter_dataset(
-          read_options=grain.ReadOptions(
-              num_threads=grain_num_threads,
-              prefetch_buffer_size=grain_prefetch_buffer_size,
-          )
+      return _mix_and_finalize(
+          dataset_list,
+          weights,
+          shuffle,
+          shuffle_seed,
+          num_epoch,
+          dataloading_host_index,
+          dataloading_host_count,
+          grain_num_threads,
+          grain_prefetch_buffer_size,
+          elastic=elastic,
       )
-      return dataset
     elif ";" in data_file_pattern:
       data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
       assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
       weights = [float(weight) for weight in weights]
-      total_weight = sum(weights)
-      weights = [weight / total_weight for weight in weights]
 
       # Parallelize file finding (globbing), data source creation, and dataset wrapping
       # File finding and source creation are I/O-bound operations that release the GIL
@@ -151,23 +202,18 @@ def get_datasets(
       dataset_list = list(executor.map(create_dataset_from_pattern, data_file_patterns))
       executor.shutdown(wait=True)
 
-      for d, _ in enumerate(dataset_list):
-        if shuffle:
-          dataset_list[d] = dataset_list[d].shuffle(seed=shuffle_seed)
-        dataset_list[d] = dataset_list[d].repeat(num_epoch)
-
-      # Mix at the MapDataset level so only 1 thread pool is used and single iterator state is preserved
-      dataset = grain.MapDataset.mix(dataset_list, weights)
-      if elastic:
-        return dataset
-      dataset = dataset[dataloading_host_index::dataloading_host_count]
-      dataset = dataset.to_iter_dataset(
-          read_options=grain.ReadOptions(
-              num_threads=grain_num_threads,
-              prefetch_buffer_size=grain_prefetch_buffer_size,
-          )
+      return _mix_and_finalize(
+          dataset_list,
+          weights,
+          shuffle,
+          shuffle_seed,
+          num_epoch,
+          dataloading_host_index,
+          dataloading_host_count,
+          grain_num_threads,
+          grain_prefetch_buffer_size,
+          elastic=elastic,
       )
-      return dataset
     else:
       # Single pattern case - no need for parallelization
       dataset = create_dataset_from_pattern(data_file_pattern)
@@ -403,18 +449,60 @@ def _get_pipeline_fn(config):
   return pretrain_preprocessing_pipeline
 
 
+def validate_mixture_elastic_compatibility(config, shard_count: int):
+  """Verifies that ElasticIterator's strided sharding does not alias with MapDataset.mix's period.
+
+  `MapDataset.mix` selects source datasets with a deterministic periodic pattern with
+  period P = sum(p_i) / gcd(p_i). `ElasticIterator` takes an unsharded MapDataset and
+  slices it with [shard_index::shard_count]. If gcd(shard_count, P) > 1, each shard only
+  ever visits a subset of pattern phases, causing severe domain starvation or skew.
+  """
+  weights = None
+  if getattr(config, "grain_train_mixture_config_path", None):
+    with open(config.grain_train_mixture_config_path, "r", encoding="utf-8") as f:
+      mix_cfg = json.load(f)
+    weights = [float(v["weight"]) for v in mix_cfg.values()]
+  elif ";" in getattr(config, "grain_train_files", "") or "":
+    weights = [float(p.split(",")[1]) for p in config.grain_train_files.split(";")]
+
+  if not weights or len(weights) <= 1 or shard_count <= 1:
+    return
+
+  min_w = min(weights)
+  if min_w <= 0:
+    return
+  scale_factor = 100 / min_w
+  p_int = [int(w * scale_factor) for w in weights]
+  g = math.gcd(*p_int)
+  period = sum(p_int) // g
+
+  common_factor = math.gcd(shard_count, period)
+  if common_factor > 1:
+    raise ValueError(
+        f"`grain_use_elastic_iterator=True` cannot be safely used with this dataset mixture on "
+        f"{shard_count} shards. PyGrain's MapDataset.mix uses a deterministic pattern with period {period}, "
+        f"which shares a common factor {common_factor} with shard_count={shard_count}. "
+        f"This causes strided slicing inside ElasticIterator to starve shards of domains "
+        f"(each shard would only visit {period // common_factor} of the {period} phases). "
+        f"To resolve: adjust mixture weights or shard count so that gcd(period, shard_count) == 1, "
+        f"or use standard sharding with `grain_use_elastic_iterator=False`."
+    )
+
+
 def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None):
   """Applies preprocessing_fn then wraps the result with ElasticIterator.
 
   When shard_index/shard_count are None, defaults to jax.process_index()/jax.process_count().
   """
+  effective_shard_count = shard_count if shard_count is not None else jax.process_count()
+  validate_mixture_elastic_compatibility(config, effective_shard_count)
   ds = preprocessing_fn(dataset=dataset)
   return ElasticIterator(
       ds,
       global_batch_size=config.global_batch_size_to_load,
       shard_options=grain.ShardOptions(
           shard_index=shard_index if shard_index is not None else jax.process_index(),
-          shard_count=shard_count if shard_count is not None else jax.process_count(),
+          shard_count=effective_shard_count,
       ),
       read_options=grain.ReadOptions(
           num_threads=config.grain_num_threads,

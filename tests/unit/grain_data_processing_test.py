@@ -16,6 +16,7 @@
 
 import sys
 import os.path
+import collections
 import tempfile
 import unittest
 import json
@@ -23,6 +24,7 @@ import numpy as np
 
 import jax
 import pytest
+import grain.python as grain
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
@@ -317,7 +319,6 @@ class GrainArrayRecordProcessingWithMixtureConfigAndElasticIteratorTest(
     )
 
 
-
 # TODO(aireenmei): Migrate this test to XLML
 @pytest.mark.skip(reason="Flaky test")
 class GrainArrayRecordAutoTuneTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
@@ -608,6 +609,155 @@ class GrainTFRecordPreTokenizedProcessingTest(_GrainTFRecordSetup, GrainBaseProc
         train_data_columns=["ids"],
         packing=False,
     )
+
+
+class MixtureHostShardingTest(unittest.TestCase):
+  """Every dataloading host must see all mixture domains at the configured weights.
+
+  `grain.MapDataset.mix` picks the source for an index with a deterministic
+  apportionment pattern that is periodic in `index % P`, where
+  `P = sum(p_i) / gcd(p_i)`. Sharding the *mixed* dataset with
+  `[host_index::host_count]` therefore restricts host `h` to the pattern phases
+  congruent to `h` modulo `gcd(host_count, P)`, which starves hosts of domains
+  whenever that gcd exceeds 1 (and gives each host exactly one domain when `P`
+  divides `host_count`). Components must be sharded *before* mixing instead.
+
+  These cases are chosen so that `gcd(host_count, P) > 1`; they pass trivially
+  for coprime combinations such as 35 domains over 64 hosts.
+  """
+
+  DOMAIN_STRIDE = 1_000_000
+
+  def _components(self, num_domains, per_domain=2048):
+    """Domain d yields integers whose `value // DOMAIN_STRIDE` is d."""
+    return [grain.MapDataset.source([d * self.DOMAIN_STRIDE + i for i in range(per_domain)]) for d in range(num_domains)]
+
+  def _host_domain_counts(self, num_domains, weights, host_index, host_count, take):
+    dataset = grain_data_processing._mix_and_finalize(  # pylint: disable=protected-access
+        self._components(num_domains),
+        list(weights),
+        shuffle=False,
+        shuffle_seed=0,
+        num_epoch=None,
+        dataloading_host_index=host_index,
+        dataloading_host_count=host_count,
+        grain_num_threads=1,
+        grain_prefetch_buffer_size=1,
+    )
+    counts = collections.Counter()
+    for i, element in enumerate(dataset):
+      if i >= take:
+        break
+      counts[element // self.DOMAIN_STRIDE] += 1
+    return counts
+
+  def test_every_host_sees_every_domain(self):
+    # (num_domains, host_count) pairs where the mix period aliases with the stride.
+    for num_domains, host_count in ((2, 2), (3, 3), (4, 2), (4, 4), (8, 8), (2, 8)):
+      weights = [1.0 / num_domains] * num_domains
+      for host_index in range(host_count):
+        with self.subTest(num_domains=num_domains, host_count=host_count, host_index=host_index):
+          counts = self._host_domain_counts(num_domains, weights, host_index, host_count, take=400)
+          self.assertEqual(
+              set(counts),
+              set(range(num_domains)),
+              f"host {host_index}/{host_count} saw domains {sorted(counts)} "
+              f"but expected all {num_domains}; mixture is sharded per-host incorrectly",
+          )
+
+  def test_host_domain_proportions_match_weights(self):
+    num_domains, host_count, take = 4, 4, 2000
+    weights = [0.1, 0.2, 0.3, 0.4]
+    for host_index in range(host_count):
+      with self.subTest(host_index=host_index):
+        counts = self._host_domain_counts(num_domains, weights, host_index, host_count, take=take)
+        total = sum(counts.values())
+        for domain, expected in enumerate(weights):
+          observed = counts[domain] / total
+          self.assertAlmostEqual(
+              observed,
+              expected,
+              delta=0.02,
+              msg=f"host {host_index} domain {domain}: observed {observed:.3f} vs expected {expected:.3f}",
+          )
+
+  def test_hosts_receive_disjoint_elements(self):
+    """Sharding before the mix must still partition the data across hosts."""
+    num_domains, host_count, take = 4, 4, 500
+    weights = [1.0 / num_domains] * num_domains
+    seen = []
+    for host_index in range(host_count):
+      dataset = grain_data_processing._mix_and_finalize(  # pylint: disable=protected-access
+          self._components(num_domains),
+          list(weights),
+          shuffle=False,
+          shuffle_seed=0,
+          num_epoch=1,
+          dataloading_host_index=host_index,
+          dataloading_host_count=host_count,
+          grain_num_threads=1,
+          grain_prefetch_buffer_size=1,
+      )
+      elements = set()
+      for i, element in enumerate(dataset):
+        if i >= take:
+          break
+        elements.add(element)
+      seen.append(elements)
+
+    for a in range(host_count):
+      for b in range(a + 1, host_count):
+        self.assertEqual(
+            seen[a] & seen[b],
+            set(),
+            f"hosts {a} and {b} received overlapping elements",
+        )
+
+  def test_elastic_returns_unsharded_mapdataset(self):
+    """ElasticIterator shards internally, so the mixture must be returned unsharded."""
+    dataset = grain_data_processing._mix_and_finalize(  # pylint: disable=protected-access
+        self._components(4),
+        [0.25] * 4,
+        shuffle=False,
+        shuffle_seed=0,
+        num_epoch=None,
+        dataloading_host_index=0,
+        dataloading_host_count=4,
+        grain_num_threads=1,
+        grain_prefetch_buffer_size=1,
+        elastic=True,
+    )
+    self.assertIsInstance(dataset, grain.MapDataset)
+    counts = collections.Counter(dataset[i] // self.DOMAIN_STRIDE for i in range(400))
+    self.assertEqual(set(counts), {0, 1, 2, 3})
+
+  def test_validate_mixture_elastic_compatibility(self):
+    """Verify that ElasticIterator validation rejects aliased shard counts and accepts coprime ones."""
+    # 2 equal domains: period P = 2
+    mock_config_2_domains = type(
+        "Config", (), {"grain_train_files": "file1,0.5;file2,0.5", "grain_train_mixture_config_path": None}
+    )()
+    # shard_count=1 is safe
+    grain_data_processing.validate_mixture_elastic_compatibility(mock_config_2_domains, shard_count=1)
+    # shard_count=3 is safe (gcd(2, 3) == 1)
+    grain_data_processing.validate_mixture_elastic_compatibility(mock_config_2_domains, shard_count=3)
+    # shard_count=2 aliases (gcd(2, 2) == 2) -> raises ValueError
+    with self.assertRaises(ValueError):
+      grain_data_processing.validate_mixture_elastic_compatibility(mock_config_2_domains, shard_count=2)
+    # shard_count=64 aliases (gcd(2, 64) == 2) -> raises ValueError
+    with self.assertRaises(ValueError):
+      grain_data_processing.validate_mixture_elastic_compatibility(mock_config_2_domains, shard_count=64)
+
+    # 35 equal domains: period P = 35
+    patterns = ";".join([f"file{i},1.0" for i in range(35)])
+    mock_config_35_domains = type(
+        "Config", (), {"grain_train_files": patterns, "grain_train_mixture_config_path": None}
+    )()
+    # shard_count=64 is safe (gcd(35, 64) == 1) -> passes
+    grain_data_processing.validate_mixture_elastic_compatibility(mock_config_35_domains, shard_count=64)
+    # shard_count=35 aliases (gcd(35, 35) == 35) -> raises ValueError
+    with self.assertRaises(ValueError):
+      grain_data_processing.validate_mixture_elastic_compatibility(mock_config_35_domains, shard_count=35)
 
 
 if __name__ == "__main__":
