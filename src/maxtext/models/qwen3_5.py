@@ -86,10 +86,16 @@ class Qwen3_5ScannableBlock(nnx.Module):
       model_mode: str,
       previous_chunk=None,
       slot: None | int = None,
+      kv_cache: None | tuple[Any, ...] = None,
+      attention_metadata: None | dict[str, Any] = None,
       forced_routed_experts: jnp.ndarray | None = None,
-  ) -> tuple[Array, None]:
+  ) -> tuple[Array, None | tuple[Any, ...]]:
     cfg = self.config
     x = carry
+    # Inference with externally-managed (vLLM) caches hands this block one
+    # entry per sub-layer of the cycle; the decoder groups the flat per-layer
+    # list before the scan and ungroups the returned tuple afterwards.
+    updated_kv_caches = []
 
     for i in range(cfg.inhomogeneous_layer_cycle_interval):
       layer = getattr(self, f"layer_{i}")
@@ -97,7 +103,8 @@ class Qwen3_5ScannableBlock(nnx.Module):
       # [inhomogeneous_layer_cycle_interval, batch, seq, top_k]: one slice per
       # sub-layer in this cycle (see nnx_decoders.py's scan wiring).
       layer_forced_routed_experts = forced_routed_experts[i] if forced_routed_experts is not None else None
-      x, _ = layer(
+      layer_kv_cache = kv_cache[i] if (kv_cache is not None and i < len(kv_cache)) else None
+      x, new_kv_cache = layer(
           x,
           decoder_segment_ids,
           decoder_positions,
@@ -105,10 +112,15 @@ class Qwen3_5ScannableBlock(nnx.Module):
           model_mode,
           previous_chunk,
           slot,
+          kv_cache=layer_kv_cache,
+          attention_metadata=attention_metadata,
           forced_routed_experts=layer_forced_routed_experts,
       )
+      updated_kv_caches.append(new_kv_cache)
 
-    return x, None
+    if kv_cache is None:
+      return x, None
+    return x, tuple(updated_kv_caches)
 
 
 class Qwen3_5DecoderLayer(nnx.Module):

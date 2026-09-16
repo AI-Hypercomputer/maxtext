@@ -485,6 +485,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+    self.is_qwen3_5 = self.config.decoder_block == DecoderBlockType.QWEN3_5
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -2081,14 +2082,30 @@ class NNXDecoder(nnx.Module):
             # Pass the kv_caches list directly to avoid copying in jnp.stack,
             # which breaks vLLM PagedAttention in-place memory updates.
             # The _apply_layers_sequentially function will handle it by statically unrolling.
+            #
+            # Qwen3.5 is the exception: one scan step is a Qwen3_5ScannableBlock
+            # spanning `cycle_interval` decoder layers, while vLLM hands us one
+            # cache per layer. Group them per block before the scan and write the
+            # returned per-block tuples back afterwards, as
+            # _apply_qwen3_next_scanned_blocks does for Qwen3-Next.
+            group_blocks = self.is_qwen3_5 and cycle_interval > 1
+            grouped_kv_caches = (
+                maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, cycle_interval, stack=False)
+                if group_blocks
+                else kv_caches
+            )
             y, self.layers, _ = self._apply_layers_sequentially(
                 self.layers,
                 y,
                 *layer_args,
                 length=scan_length,
-                kv_caches_stacked=kv_caches,
+                kv_caches_stacked=grouped_kv_caches,
                 **layer_kwargs,
             )
+            if group_blocks:
+              maxtext_utils.update_kv_caches_after_scan(
+                  kv_caches, grouped_kv_caches, scan_length, cycle_interval, stacked=False
+              )
             # kv_caches list is updated in-place inside _apply_layers_sequentially
           else:
             y, self.layers, _ = self._apply_layers_sequentially(
