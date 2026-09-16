@@ -4250,8 +4250,12 @@ class MaxTextConfig(
           "Set `grain_train_mixture_config_path` to empty and use a single "
           "`grain_train_files` pattern (no ';' separator)."
       )
-    if (self.load_parameters_path or self.load_full_state_path) and not self.enable_checkpointing:
-      raise ValueError("You must set enable_checkpointing=True to load a checkpoint.")
+    # Only a full-state resume needs the CheckpointManager, which `enable_checkpointing`
+    # gates. `load_parameters_path` is a warm start: it restores through its own
+    # `ocp.Checkpointer` in `model_creation_utils.from_pretrained`, before the manager is
+    # ever consulted, so it stays legal with saving turned off.
+    if self.load_full_state_path and not self.enable_checkpointing:
+      raise ValueError("You must set enable_checkpointing=True to resume from load_full_state_path.")
     if self.enable_multi_tier_checkpointing:
       if not self.local_checkpoint_directory:
         raise ValueError("`local_checkpoint_directory` must be set for multi-tier checkpointing.")
