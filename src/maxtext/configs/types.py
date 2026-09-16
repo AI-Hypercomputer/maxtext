@@ -1081,6 +1081,15 @@ class MoEGeneral(BaseModel):
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
   )
+  moe_spread_experts_over_fsdp: str = Field(
+      "never",
+      description="Shard the MoE weights' expert dimension over the fsdp mesh axis in addition to "
+      "the expert axis (exp -> [expert, fsdp]), releasing the MoE embed dimension from fsdp so the "
+      "two never claim the same mesh axis. Unlike shard_exp_on_fsdp this composes with "
+      "expert/tensor parallelism. 'auto': apply whenever the model is MoE, fsdp > 1, and "
+      "num_experts is divisible by ici_expert_parallelism * ici_fsdp_parallelism; 'always': apply "
+      "and error if indivisible; 'never': keep base rules.",
+  )
   shard_embed_moe_on_fsdp: bool = Field(
       False,
       description="Keep embed_moe sharded so we can manually QAG it over FSDP.",

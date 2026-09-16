@@ -185,6 +185,66 @@ def _apply_rules(base_rules, new_rules, config):
   return _merge_logical_axis_rules(base_rules, new_rules)
 
 
+def _maybe_spread_moe_experts_over_fsdp(raw_keys):
+  """Rewrites logical_axis_rules so MoE expert weights shard over [expert, fsdp].
+
+  Under base rules, running an MoE model with fsdp > 1 either replicates the expert
+  stack across the fsdp shards (embed-dim sharding only, OOM at scale) or resolves
+  two logical axes of the same tensor onto the fsdp mesh axis (duplicate-axis
+  sharding error). Spreading the expert dimension over [expert, fsdp] and releasing
+  the MoE embed dimension from fsdp avoids both. Controlled by
+  moe_spread_experts_over_fsdp ('never' | 'auto' | 'always'); see base.yml.
+  """
+  mode = str(raw_keys.get("moe_spread_experts_over_fsdp", "never")).lower()
+  if mode not in ("auto", "always"):
+    if mode != "never":
+      raise ValueError(f"moe_spread_experts_over_fsdp must be 'never', 'auto' or 'always', got {mode!r}")
+    return
+  num_experts = int(raw_keys.get("num_experts") or 1)
+  fsdp = int(raw_keys.get("ici_fsdp_parallelism") or 1)
+  ep = int(raw_keys.get("ici_expert_parallelism") or 1)
+  if num_experts <= 1 or fsdp == 1:
+    return  # not MoE, or spread is identical to base rules (trivial fsdp axis)
+  # fsdp == -1 (auto-fill) resolves only at mesh creation; divisibility can't be
+  # checked here, so 'auto' declines and 'always' proceeds on the user's word.
+  if fsdp > 0 and num_experts % (max(ep, 1) * fsdp) != 0:
+    msg = (
+        f"moe_spread_experts_over_fsdp: num_experts={num_experts} is not divisible by "
+        f"ici_expert_parallelism*ici_fsdp_parallelism={max(ep, 1) * fsdp}"
+    )
+    if mode == "always":
+      raise ValueError(msg)
+    logger.warning("%s — keeping base rules", msg)
+    return
+  if fsdp < 0 and mode == "auto":
+    logger.warning(
+        "moe_spread_experts_over_fsdp='auto': ici_fsdp_parallelism=-1 (auto-fill) makes the "
+        "num_experts divisibility check impossible at config time — keeping base rules. "
+        "Set the fsdp degree explicitly or use 'always'."
+    )
+    return
+
+  def _axes(v):
+    return [v] if isinstance(v, str) else list(v)
+
+  rules = []
+  for rule in raw_keys.get("logical_axis_rules") or []:
+    name, axes = rule[0], _axes(rule[1])
+    if name == "exp" and "fsdp" not in axes:
+      axes = axes + ["fsdp"]
+    elif name == "embed_moe" and "fsdp" in axes:
+      axes = [a for a in axes if a != "fsdp"]
+    rules.append((name, tuple(axes)))
+  raw_keys["logical_axis_rules"] = tuple(rules)
+  logger.info(
+      "moe_spread_experts_over_fsdp: sharding MoE expert dim over [expert, fsdp] and releasing "
+      "the MoE embed dim from fsdp (num_experts=%d, ep=%d, fsdp=%d)",
+      num_experts,
+      ep,
+      fsdp,
+  )
+
+
 def _load_config(config_name: str) -> omegaconf.DictConfig:
   """Loads a YAML file and its base_configs recursively using OmegaConf."""
   cfg = omegaconf.OmegaConf.load(config_name)
@@ -557,6 +617,8 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
         raw_keys_dict[k] = parser(new_proposal)
       except (ValueError, KeyError) as e:
         raise ValueError(f"Couldn't parse value from ENV '{new_proposal}' for key '{k}'") from e
+
+  _maybe_spread_moe_experts_over_fsdp(raw_keys_dict)
 
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict, config_class=config_class)
 
