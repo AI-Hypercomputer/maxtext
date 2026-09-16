@@ -1,0 +1,4 @@
+{
+  "SYSTEM_PROMPT": "Solve the problem step by step. After your reasoning, place only the final numerical answer between {solution_start_token} and {solution_end_token}.",
+  "TEMPLATE": "{system_prompt}\n\n{question}"
+}
