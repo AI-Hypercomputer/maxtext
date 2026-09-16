@@ -289,9 +289,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   @mock.patch("orbax.checkpoint.PyTreeCheckpointHandler")
   @mock.patch("orbax.checkpoint.CheckpointManager")
-  def test_max_text_trainer_checkpoint_manager_init_custom_device_host_concurrent_gb(
-      self, mock_create_mgr, mock_handler
-  ):
+  def test_max_text_trainer_checkpoint_manager_init_custom_device_host_concurrent_gb(self, mock_create_mgr, mock_handler):
     mock_config = self.setup_config(
         enable_checkpointing=True,
         checkpoint_storage_use_ocdbt=True,
@@ -315,8 +313,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
   @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
   @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
   def test_maybe_register_pathways_persistence(self, mock_register_type_handlers):
-    import orbax.checkpoint.pathways as ocp_pathways
-    from maxtext.training_engine import checkpointing as checkpointing_module
+    import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=import-outside-toplevel
+    from maxtext.training_engine import checkpointing as checkpointing_module  # pylint: disable=import-outside-toplevel
 
     checkpointing_module._PATHWAYS_PERSISTENCE_REGISTERED = False
     checkpointing_module._maybe_register_pathways_persistence()

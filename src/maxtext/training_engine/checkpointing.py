@@ -57,9 +57,12 @@ def _maybe_register_pathways_persistence() -> None:
 
   _PATHWAYS_PERSISTENCE_REGISTERED = True
   try:
-    import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=g-import-not-at-top
-    from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib  # pylint: disable=g-import-not-at-top
-    from orbax.checkpoint._src.serialization import type_handler_registry  # pylint: disable=g-import-not-at-top
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    import orbax.checkpoint.pathways as ocp_pathways
+    from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib
+    from orbax.checkpoint._src.serialization import type_handler_registry
+
+    # pylint: enable=g-import-not-at-top,import-outside-toplevel
 
     ocp_pathways.register_type_handlers(
         use_single_replica_array_handler=False,
@@ -112,6 +115,7 @@ class CheckpointManager:
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if checkpoint_dir:
       _maybe_register_pathways_persistence()
+
       # Use configured array format (e.g. use_ocdbt=False for Pathways).
       # Build a fresh handler per item as Orbax handlers carry per-item state.
       def _pytree_handler() -> ocp.PyTreeCheckpointHandler:
