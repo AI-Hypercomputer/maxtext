@@ -124,9 +124,8 @@ export GKE_CLUSTER=<CLUSTER_NAME>
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
 export TPU_TYPE=<TPU_TYPE>
 
-# The Docker image you pushed in the prerequisite step
-export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+# The Docker image you pushed in the previous step
+export DOCKER_IMAGE=<IMAGE_NAME>
 ```
 
 ## Get Your Model Checkpoint

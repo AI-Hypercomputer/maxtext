@@ -69,6 +69,8 @@ export NUM_SLICES=<NUM_SLICES>                 # total slices in the run (e.g., 
 # MaxText & Storage Configuration
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET>          # e.g., gs://my-bucket/maxtext-runs
 export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
+# Or your custom Docker image you pushed in the prerequisite step
+# export DOCKER_IMAGE=<IMAGE_NAME>
 ```
 
 ## 3. Launch the elastic workload

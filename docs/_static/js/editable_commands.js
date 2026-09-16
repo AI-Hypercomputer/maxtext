@@ -36,7 +36,9 @@ document.addEventListener('DOMContentLoaded', () => {
     "<TPU_TYPE>",
     "<TRAIN_SPLIT>",
     "<VENV_NAME>",
-    "<ZONE>"
+    "<ZONE>",
+    "<REPOSITORY_NAME>",
+    "<LOCATION>"
   ];
 
   codeBlocks.forEach(block => {
