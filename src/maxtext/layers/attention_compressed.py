@@ -1383,14 +1383,36 @@ class CompressedAttention(Attention):
         rngs=self.rngs,
     )
 
-    # Override the base rotary embedding with the correct theta for this layer.
-    # CSA / HCA layers use compressed_rope_max_timescale (160000).
-    # Sliding window prefix layers use rope_max_timescale (10000).
-    rope_theta = self.config.compressed_rope_max_timescale if self.compress_ratio > 0 else self.config.rope_max_timescale
+    # Override the base rotary embedding with the correct theta and scaling for this layer.
+    # CSA / HCA layers use compressed_rope_max_timescale (160000) and YaRN RoPE.
+    # Sliding window prefix layers use rope_max_timescale (10000) and default RoPE.
+    is_compressed = self.compress_ratio > 0
+    rope_theta = (
+        self.config.compressed_rope_max_timescale
+        if is_compressed
+        else self.config.rope_max_timescale
+    )
+    rope_type = (
+        "yarn"
+        if (
+            is_compressed
+            and getattr(self.config, "rope_type", "default") == "yarn"
+        )
+        else "default"
+    )
     self.rotary_embedding = DeepSeekV4RotaryEmbedding(
         head_dim=self.config.head_dim,
-        partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
+        partial_rotary_factor=self.config.qk_rope_head_dim
+        / self.config.head_dim,
         rope_theta=rope_theta,
+        rope_type=rope_type,
+        rope_factor=getattr(self.config, "rope_factor", 16.0),
+        beta_fast=getattr(self.config, "beta_fast", 32.0),
+        beta_slow=getattr(self.config, "beta_slow", 1.0),
+        original_max_position_embeddings=getattr(
+            self.config, "original_max_position_embeddings", 65536
+        ),
+        truncate=getattr(self.config, "rope_truncate", True),
         fprop_dtype=self.dtype,
     )
 

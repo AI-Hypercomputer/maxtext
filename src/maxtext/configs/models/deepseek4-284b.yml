@@ -69,7 +69,10 @@ o_lora_rank: 1024
 sliding_window_size: 128
 
 # --- RoPE ---
-rope_type: "default"
+rope_type: "yarn"
+rope_factor: 16
+beta_fast: 32
+beta_slow: 1
 rope_max_timescale: 10000                  # Main RoPE theta
 compressed_rope_max_timescale: 160000      # Compressed RoPE theta
 max_position_embeddings: 1048576
