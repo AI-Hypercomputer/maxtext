@@ -2892,6 +2892,8 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
         moe_quantize_token_all_gather=True,
         moe_fsdp_all_gather_sparse_core_id=0,
         moe_ep_all_gather_sparse_core_id=1,
+        ici_fsdp_parallelism=1,
+        ici_expert_parallelism=-1,
         per_device_batch_size=1,
         max_target_length=16,
     )
