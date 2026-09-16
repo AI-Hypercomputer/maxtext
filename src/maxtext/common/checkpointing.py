@@ -982,9 +982,12 @@ def load_params_from_path(
 
     collection_leaves = collections.defaultdict(dict)
     for path_tuple, leaf in nnx.to_flat_state(abstract_unboxed_params):
-      type_ = leaf.type if isinstance(leaf, nnx.Variable) else type(leaf)
-      col = variablelib.variable_name_from_type(type_, allow_register=True)
-      val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
+      if isinstance(leaf, nnx.Variable):
+        col = variablelib.variable_name_from_type(leaf.type, allow_register=True)
+        val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
+      else:
+        col = "params"
+        val = leaf
       collection_leaves[col][tuple(path_tuple)] = val
 
     params_collection = {col: nnx.traversals.unflatten_mapping(d) for col, d in collection_leaves.items()}
@@ -1073,7 +1076,9 @@ def load_params_from_path(
   elif is_nnx:
     restored_weights = {}
     if isinstance(restored_collection, dict):
-      for col_key, col_val in restored_collection.items():
+      # Process "params" first so custom collection weights always overwrite stale legacy copies.
+      for col_key in sorted(restored_collection, key=lambda k: (k != "params", k)):
+        col_val = restored_collection[col_key]
         if isinstance(col_val, dict):
           restored_weights = _deep_merge_dicts(restored_weights, col_val)
         else:
