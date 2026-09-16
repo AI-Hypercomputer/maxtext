@@ -1771,14 +1771,24 @@ class RoutedMoE(nnx.Module):
       return output
 
     def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
+      if isinstance(group_sizes, tokamax.RaggedDotGroupSizes):
+        return group_sizes
       if self.config.quantization and self.config.use_qwix_quantization:
         return group_sizes
       elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
         return group_sizes
       else:
+        # representative_value must be a per-group sequence, not a token count.
+        num_groups = group_sizes.shape[0]
+        if num_groups == 0:
+          return tokamax.RaggedDotGroupSizes(group_sizes, ())
+        total_tokens = inputs.shape[0]
+        base = total_tokens // num_groups
+        rem = total_tokens % num_groups
+        repr_sizes = (base + 1,) * rem + (base,) * (num_groups - rem)
         return tokamax.RaggedDotGroupSizes(
             group_sizes,
-            inputs.shape[0],
+            repr_sizes,
         )
 
     def get_quantization_dtypes():
