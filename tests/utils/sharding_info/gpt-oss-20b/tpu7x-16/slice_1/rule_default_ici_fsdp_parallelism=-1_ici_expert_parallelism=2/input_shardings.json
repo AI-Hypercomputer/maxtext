@@ -1,6 +1,12 @@
 {
   "Activation Sharding Dump": [
     {
+      "Unknown: bfloat16[192,2048,2880]": {
+        "logic_axes": "('activation_batch', 'activation_norm_length', 'activation_embed')",
+        "PartitionSpec": "P(('fsdp', 'expert'), None, None)"
+      }
+    },
+    {
       "attentions/inputs_q: bfloat16[192,2048,2880]": {
         "logic_axes": "('activation_batch_attn', 'activation_input_length_attn', 'activation_embed_attn')",
         "PartitionSpec": "P(('fsdp', 'expert'), None, None)"
