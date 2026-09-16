@@ -37,6 +37,7 @@ from flax import nnx
 from flax import struct
 import jax
 import jax.numpy as jnp
+import jax.profiler
 from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
@@ -766,25 +767,46 @@ def benchmark_gradient_accumulation_performance(
     m_steps: int = 5,
     n_iterations: int = 10,
     cfg: pyconfig.HyperParameters | None = None,
+    profile: bool = True,
+    profile_dir: str | None = None,
 ) -> None:
-  """Benchmarks wall-clock throughput between baseline lax.scan gradient accumulation and MaxTextTrainingEngine."""
+  """Benchmarks wall-clock throughput between baseline lax.scan gradient accumulation and MaxTextTrainingEngine, with separate XProf/JAX profiles."""
   if cfg is None:
     cfg = setup_config(
         "llama3.1-8b",
         gradient_accumulation_steps=m_steps,
         use_tunix_gradient_accumulation=True,
     )
+  object.__setattr__(cfg, "use_tunix_gradient_accumulation", True)
+
+  if profile_dir is None:
+    if getattr(cfg, "tensorboard_dir", None):
+      base_profile_dir = os.path.join(cfg.tensorboard_dir, "profiles")
+    elif getattr(cfg, "base_output_directory", None):
+      base_profile_dir = os.path.join(
+          cfg.base_output_directory,
+          getattr(cfg, "run_name", "benchmark"),
+          "profiles",
+      )
+    elif os.environ.get("MAXTEXT_PROFILE_DIR"):
+      base_profile_dir = os.environ["MAXTEXT_PROFILE_DIR"]
+    else:
+      base_profile_dir = f"/tmp/maxtext_profiles/benchmark_ga_{time.strftime('%Y%m%d_%H%M%S')}"
   else:
-    assert (
-        cfg.use_tunix_gradient_accumulation
-    ), "Gradient accumulation performance benchmarking requires cfg.use_tunix_gradient_accumulation=True"
+    base_profile_dir = profile_dir
+
+  baseline_profile_dir = os.path.join(base_profile_dir, "baseline") if profile else None
+  engine_profile_dir = os.path.join(base_profile_dir, "fwd_bwd_engine") if profile else None
 
   print(
       "\n=== [BENCHMARK] Initializing Gradient Accumulation Hardware"
       f" Benchmarks (M={m_steps} micro-steps/cycle, N={n_iterations}"
-      " cycles) ===",
+      f" cycles, profiling={'ENABLED' if profile else 'DISABLED'}) ===",
       flush=True,
   )
+  if profile:
+    print(f" * Baseline profile target: {baseline_profile_dir}", flush=True)
+    print(f" * Engine profile target:   {engine_profile_dir}", flush=True)
 
   with verification_harness(cfg, compiled=True) as ctx:
     p_train_step = None
@@ -817,7 +839,7 @@ def benchmark_gradient_accumulation_performance(
       combined_data[k_key] = combined_arr
 
     print(
-        "--- [Warm-Up] Compiling XLA execution graphs and populating HBM" " cache... ---",
+        "--- [Warm-Up] Compiling XLA execution graphs and populating HBM cache... ---",
         flush=True,
     )
     ctx.engine.compile(payloads[0])
@@ -845,20 +867,38 @@ def benchmark_gradient_accumulation_performance(
         f" (M={m_steps}) via compiled jax.lax.scan... ---",
         flush=True,
     )
+    if profile and baseline_profile_dir:
+      if not baseline_profile_dir.startswith("gs://"):
+        os.makedirs(baseline_profile_dir, exist_ok=True)
+      print(f"Starting profiler trace: {baseline_profile_dir}", flush=True)
+      jax.profiler.start_trace(baseline_profile_dir)
+
     t0 = time.perf_counter()
-    for _ in range(n_iterations):
-      state_pure, _, p_train_step = execute_baseline_step(
-          cfg,
-          ctx.ts_baseline,
-          ctx.state_graphdef,
-          state_pure,
-          ctx.state_shardings,
-          ctx.params_shardings,
-          combined_data,
-          compiled=True,
-          p_train_step=p_train_step,
-      )
-    jax.block_until_ready(state_pure)
+    try:
+      for iter_idx in range(n_iterations):
+        with jax.profiler.StepTraceAnnotation(
+            "baseline_cycle", step_num=iter_idx
+        ):
+          state_pure, _, p_train_step = execute_baseline_step(
+              cfg,
+              ctx.ts_baseline,
+              ctx.state_graphdef,
+              state_pure,
+              ctx.state_shardings,
+              ctx.params_shardings,
+              combined_data,
+              compiled=True,
+              p_train_step=p_train_step,
+          )
+      jax.block_until_ready(state_pure)
+    finally:
+      if profile and baseline_profile_dir:
+        jax.profiler.stop_trace()
+        print(
+            f"✓ Baseline profiler trace captured: {baseline_profile_dir}",
+            flush=True,
+        )
+
     baseline_duration = time.perf_counter() - t0
     baseline_ms_per_step = (baseline_duration / n_iterations) * 1000.0
     print(
@@ -873,12 +913,32 @@ def benchmark_gradient_accumulation_performance(
         f" (M={m_steps}) via MaxTextTrainingEngine fwd_bwd loop... ---",
         flush=True,
     )
+    if profile and engine_profile_dir:
+      if not engine_profile_dir.startswith("gs://"):
+        os.makedirs(engine_profile_dir, exist_ok=True)
+      print(f"Starting profiler trace: {engine_profile_dir}", flush=True)
+      jax.profiler.start_trace(engine_profile_dir)
+
     t1 = time.perf_counter()
-    for _ in range(n_iterations):
-      for p in payloads:
-        ctx.engine.fwd_bwd(p)
-      ctx.engine.update()
-    jax.block_until_ready(ctx.engine.state)
+    try:
+      for iter_idx in range(n_iterations):
+        with jax.profiler.StepTraceAnnotation(
+            "engine_cycle", step_num=iter_idx
+        ):
+          for mb_idx, p in enumerate(payloads):
+            with jax.profiler.TraceAnnotation(f"fwd_bwd_microstep_{mb_idx}"):
+              ctx.engine.fwd_bwd(p)
+          with jax.profiler.TraceAnnotation("engine_update"):
+            ctx.engine.update()
+      jax.block_until_ready(ctx.engine.state)
+    finally:
+      if profile and engine_profile_dir:
+        jax.profiler.stop_trace()
+        print(
+            f"✓ Engine fwd_bwd profiler trace captured: {engine_profile_dir}",
+            flush=True,
+        )
+
     engine_duration = time.perf_counter() - t1
     engine_ms_per_step = (engine_duration / n_iterations) * 1000.0
     print(
@@ -895,21 +955,30 @@ def benchmark_gradient_accumulation_performance(
         flush=True,
     )
     print(
-        "=== [BENCHMARK SUMMARY] Gradient Accumulation Architecture" " Throughput ===",
+        "=== [BENCHMARK SUMMARY] Gradient Accumulation Architecture Throughput ===",
         flush=True,
     )
     print(
-        f" * Baseline jax.lax.scan (M={m_steps}):   {baseline_ms_per_step:8.2f}" " ms/cycle",
+        f" * Baseline jax.lax.scan (M={m_steps}):   {baseline_ms_per_step:8.2f} ms/cycle",
         flush=True,
     )
     print(
-        f" * MaxTextTrainingEngine (M={m_steps}):   {engine_ms_per_step:8.2f}" " ms/cycle",
+        f" * MaxTextTrainingEngine (M={m_steps}):   {engine_ms_per_step:8.2f} ms/cycle",
         flush=True,
     )
     print(
-        f" * Hardware Execution Overhead:      {pct_overhead:+8.2f}%" f" ({delta_ms:+6.2f} ms/cycle)",
+        f" * Hardware Execution Overhead:      {pct_overhead:+8.2f}% ({delta_ms:+6.2f} ms/cycle)",
         flush=True,
     )
+    if profile:
+      print(
+          f" * Baseline Profile Location:        {baseline_profile_dir}",
+          flush=True,
+      )
+      print(
+          f" * Engine Profile Location:          {engine_profile_dir}",
+          flush=True,
+      )
     print(
         "==========================================================================",
         flush=True,
@@ -923,10 +992,26 @@ def run_all_verifications(cli_overrides: list[str] | None = None) -> None:
   overrides = []
   has_target_length = False
   test_suite = "all"
+  profile = True
+  profile_dir = None
+  m_steps_bench = 5
+  n_iterations_bench = 10
   for arg in raw_overrides:
     clean_arg = arg[2:] if arg.startswith("--") else arg
     if clean_arg.startswith("test_suite=") or clean_arg.startswith("target_step="):
       test_suite = str(clean_arg.split("=", 1)[1]).strip().lower()
+      continue
+    if clean_arg.startswith("profile_dir="):
+      profile_dir = clean_arg.split("=", 1)[1]
+      continue
+    if clean_arg.startswith("profile="):
+      profile = clean_arg.split("=", 1)[1].lower() in ("true", "1", "yes")
+      continue
+    if clean_arg.startswith("m_steps="):
+      m_steps_bench = int(clean_arg.split("=", 1)[1])
+      continue
+    if clean_arg.startswith("n_iterations="):
+      n_iterations_bench = int(clean_arg.split("=", 1)[1])
       continue
     if clean_arg.startswith("model_name="):
       model_name = clean_arg.split("=", 1)[1]
@@ -961,7 +1046,7 @@ def run_all_verifications(cli_overrides: list[str] | None = None) -> None:
 
   if model_name == "default":
     print(
-        "=== Running Training Engine Parity Verification Suite (Eager" " Mode) ===",
+        "=== Running Training Engine Parity Verification Suite (Eager Mode) ===",
         flush=True,
     )
     if test_suite in ("all", "eager_all", "eager", "1"):
@@ -982,7 +1067,7 @@ def run_all_verifications(cli_overrides: list[str] | None = None) -> None:
       )
       verify_auxiliary_metrics_and_telemetry_parity(cfg=cfg_aux, compiled=False)
       print(
-          "✓ verify_auxiliary_metrics_and_telemetry_parity (Eager) passed" " successfully.",
+          "✓ verify_auxiliary_metrics_and_telemetry_parity (Eager) passed successfully.",
           flush=True,
       )
 
@@ -994,7 +1079,7 @@ def run_all_verifications(cli_overrides: list[str] | None = None) -> None:
         "gradient_accumulation",
     ):
       print(
-          "\n[3/6] Verifying multi-microbatch gradient accumulation parity" " (Eager)...",
+          "\n[3/6] Verifying multi-microbatch gradient accumulation parity (Eager)...",
           flush=True,
       )
       verify_gradient_accumulation_parity(m_steps=5, cfg=cfg_ga, compiled=False)
@@ -1011,12 +1096,13 @@ def run_all_verifications(cli_overrides: list[str] | None = None) -> None:
     )
 
   print(
-      "\n=== Running Training Engine Parity Verification Suite (JIT Compiled" f" Mode, test_suite={test_suite}) ===",
+      "\n=== Running Training Engine Parity Verification Suite (JIT Compiled Mode, test_suite="
+      f"{test_suite}) ===",
       flush=True,
   )
   if test_suite in ("all", "jit_all", "jit_train_step", "4", "train_step"):
     print(
-        "\n[4/6] Verifying standalone train_step vs engine parity (JIT" " Compiled)...",
+        "\n[4/6] Verifying standalone train_step vs engine parity (JIT Compiled)...",
         flush=True,
     )
     verify_parity_with_train_py(cfg=cfg_base, compiled=True)
@@ -1034,12 +1120,12 @@ def run_all_verifications(cli_overrides: list[str] | None = None) -> None:
       "telemetry",
   ):
     print(
-        "\n[5/6] Verifying auxiliary metrics and telemetry parity (JIT" " Compiled)...",
+        "\n[5/6] Verifying auxiliary metrics and telemetry parity (JIT Compiled)...",
         flush=True,
     )
     verify_auxiliary_metrics_and_telemetry_parity(cfg=cfg_aux, compiled=True)
     print(
-        "✓ verify_auxiliary_metrics_and_telemetry_parity (JIT Compiled) passed" " successfully.",
+        "✓ verify_auxiliary_metrics_and_telemetry_parity (JIT Compiled) passed successfully.",
         flush=True,
     )
 
@@ -1052,28 +1138,34 @@ def run_all_verifications(cli_overrides: list[str] | None = None) -> None:
       "ga",
   ):
     print(
-        "\n[6/6] Verifying multi-microbatch gradient accumulation parity (JIT" " Compiled)...",
+        "\n[6/6] Verifying multi-microbatch gradient accumulation parity (JIT Compiled)...",
         flush=True,
     )
     verify_gradient_accumulation_parity(m_steps=5, cfg=cfg_ga, compiled=True)
     print(
-        "✓ verify_gradient_accumulation_parity (JIT Compiled) passed" " successfully.",
+        "✓ verify_gradient_accumulation_parity (JIT Compiled) passed successfully.",
         flush=True,
     )
 
   if test_suite in ("benchmark", "benchmark_ga", "perf_ga", "perf"):
     print(
-        "\n[BENCHMARK] Executing gradient accumulation hardware throughput" " comparison...",
+        "\n[BENCHMARK] Executing gradient accumulation hardware throughput comparison...",
         flush=True,
     )
-    benchmark_gradient_accumulation_performance(m_steps=5, n_iterations=10, cfg=cfg_ga)
+    benchmark_gradient_accumulation_performance(
+        m_steps=m_steps_bench,
+        n_iterations=n_iterations_bench,
+        cfg=cfg_ga,
+        profile=profile,
+        profile_dir=profile_dir,
+    )
     print(
         "✓ benchmark_gradient_accumulation_performance completed successfully.",
         flush=True,
     )
 
   print(
-      f"\n=== Verification target (test_suite={test_suite}) PASSED" " cleanly! ===",
+      f"\n=== Verification target (test_suite={test_suite}) PASSED cleanly! ===",
       flush=True,
   )
 
