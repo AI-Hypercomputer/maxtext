@@ -1070,7 +1070,9 @@ def recover(
               config.load_parameters_path,
               config.load_full_state_path,
               config.checkpoint_storage_concurrent_gb,
-              state,
+              # NNX states are only mapped from the Linen checkpoint layout when passed as an nnx.State. Given the
+              # TrainStateNNX module, the partial restore matches no checkpoint keys and returns `state` unchanged.
+              state if isinstance(model, nn.Module) else nnx.state(state),
               config.enable_single_replica_ckpt_restoring,
               config.dataset_type,
               use_ocdbt=config.checkpoint_storage_use_ocdbt,
