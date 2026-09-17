@@ -14,6 +14,9 @@ ENV MAXTEXT_REPO_ROOT=/deps
 # Set the working directory in the container
 WORKDIR /deps
 
+# Install GDN v3 Tokamax commit
+RUN pip install --no-deps --no-cache-dir --force-reinstall git+https://github.com/openxla/tokamax.git@b626dd8b54d708047788cf2ec538cba63a4e3739
+
 # Copy assets separately
 COPY ${PACKAGE_DIR}/maxtext/assets/ "${MAXTEXT_ASSETS_ROOT}"
 

@@ -238,7 +238,7 @@ def post_fwd(
   return output.reshape(batch, sequence, streams, embedding)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(0, 2))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
 def _pre_op(
     config: common.MhcKernelConfig,
     x: jax.Array,
@@ -258,7 +258,7 @@ def _pre_op_fwd(
 ):
   """Custom-VJP forward rule for the pre-branch operation."""
   primals_out, saved = pre_fwd(x, weights, permutations, config)
-  return primals_out, (saved, (x, weights))
+  return primals_out, (saved, (x, permutations, weights))
 
 
 _pre_op.defvjp(_pre_op_fwd, mhc_kernels_bwd.pre_op_bwd)

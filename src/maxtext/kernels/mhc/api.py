@@ -60,8 +60,8 @@ def pre(
   Args:
     x: Input streams of shape `(batch, sequence, streams, embedding)`.
     weights: Structured `MhcWeights` container with all layer parameters.
-    permutations: All permutation matrices of shape
-      `(num_permutations, streams, streams)`.
+    permutations: All permutation matrices of shape `(num_permutations, streams,
+      streams)`.
     config: Structured `MhcKernelConfig` tuning and compiler configuration.
     implementation: Preferred implementation (`"mosaic"` or `"mosaic_tpu"`).
 
@@ -95,8 +95,8 @@ def post(
   """Runs the post-gate and residual stream mixing.
 
   Args:
-    layer_output: Output from the wrapped branch of shape
-      `(batch, sequence, embedding)`.
+    layer_output: Output from the wrapped branch of shape `(batch, sequence,
+      embedding)`.
     context: Opaque `MhcContext` returned by `pre`.
     config: Structured `MhcKernelConfig` tuning and compiler configuration.
 
@@ -104,7 +104,9 @@ def post(
     Mixed output streams of shape `(batch, sequence, streams, embedding)`.
   """
   if context.implementation not in ("mosaic", "mosaic_tpu"):
-    raise ValueError(f"Unsupported implementation in MhcContext: '{context.implementation}'")
+    raise ValueError(
+        f"Unsupported implementation in MhcContext: '{context.implementation}'"
+    )
   kernel_context = (context.x, context.h_post, context.residual)
   return mhc_kernels_fwd.post(
       layer_output,

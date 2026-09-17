@@ -484,7 +484,15 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
-    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+    self.is_qwen3_next_with_dense = (
+        self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+        and self.config.first_num_dense_layers > 0
+        and self.config.scan_layers
+    )
+    self.is_qwen3_next = (
+        self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+        and not self.is_qwen3_next_with_dense
+    )
     self.is_qwen3_5 = self.config.decoder_block == DecoderBlockType.QWEN3_5
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
@@ -598,6 +606,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
     elif self.is_qwen3_next:
       self._init_scanned_qwen3_next(rngs, mesh)
+    elif self.is_qwen3_next_with_dense:
+      self._init_scanned_qwen3_next_with_dense(rngs)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -699,6 +709,73 @@ class NNXDecoder(nnx.Module):
     )
     num_moe = config.num_decoder_layers - config.first_num_dense_layers
     self.moe_layers = self._create_scanned_layers(moe_cls, length=num_moe, metadata_axis_name="moe_layers", rngs=rngs)
+
+  def _init_scanned_qwen3_next_with_dense(self, rngs):
+    """Initializes scanned Qwen3-Next layers with a `first_num_dense_layers` dense prefix.
+
+    Splits the stack into three pieces: an unscanned dense prefix (real global
+    `layer_idx`, forced full attention), a scanned middle of uniform
+    `Qwen3NextScannableBlock` repeats, and — since `num_decoder_layers -
+    first_num_dense_layers` need not be a multiple of
+    `inhomogeneous_layer_cycle_interval`
+    — an unscanned remainder tail, mirroring `_init_scanned_gemma3`'s
+    scan+remainder
+    split. `layer_idx_offset` keeps the attention-type cycle globally correct
+    across
+    all three pieces despite the dense prefix breaking its natural period.
+    """
+    config = self.config
+    n_dense = config.first_num_dense_layers
+    cycle = config.inhomogeneous_layer_cycle_interval
+    remaining = config.num_decoder_layers - n_dense
+    scan_length = remaining // cycle
+    num_remaining = remaining % cycle
+
+    self.dense_layers = self._create_scanned_layers(
+        qwen3.Qwen3NextDecoderLayer,
+        length=n_dense,
+        metadata_axis_name="dense_layers",
+        rngs=rngs,
+        layer_idx=0,
+        is_dense_layer=True,
+    )
+
+    policy = self.get_remat_policy()
+    layer_kwargs = {
+        "num_of_layers": cycle,
+        "layer_idx_offset": n_dense,
+        "remat_policy_fn": policy,
+        "apply_internal_remat": True,
+    }
+    rem_layer_kwargs = {
+        "num_of_layers": num_remaining,
+        "layer_idx_offset": n_dense + scan_length * cycle,
+        "remat_policy_fn": policy,
+        "apply_internal_remat": True,
+    }
+
+    if scan_length > 0:
+      self.layers = self._create_scanned_layers(
+          qwen3.Qwen3NextScannableBlock,
+          length=scan_length,
+          metadata_axis_name="layers",
+          rngs=rngs,
+          **layer_kwargs,
+      )
+    else:
+      self.layers = nnx.List([])
+
+    if num_remaining > 0:
+      self.layers_remainder = qwen3.Qwen3NextScannableBlock(
+          config=config,
+          mesh=self.mesh,
+          model_mode=self.model_mode,
+          quant=self.quant,
+          rngs=rngs,
+          **rem_layer_kwargs,
+      )
+    else:
+      self.layers_remainder = None
 
   def _init_scanned_gemma3(self, decoder_block_classes, rngs, mesh):
     """Initializes scanned Gemma3 layers."""
@@ -2054,6 +2131,12 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
+        elif self.is_qwen3_next_with_dense:
+          y = self._apply_qwen3_next_dense_scanned_blocks(
+              y,
+              layer_args,
+              layer_kwargs,
+          )
         else:
           cycle_interval = cfg.inhomogeneous_layer_cycle_interval
           scan_length = int(cfg.num_decoder_layers / cycle_interval)
@@ -2608,6 +2691,51 @@ class NNXDecoder(nnx.Module):
 
     return y
 
+  def _apply_qwen3_next_dense_scanned_blocks(
+      self,
+      y,
+      layer_args,
+      layer_kwargs,
+  ):
+    """Applies Qwen3-Next's dense prefix, scanned middle, and remainder tail (see
+
+    `_init_scanned_qwen3_next_with_dense`), mirroring
+    `_apply_gemma3_scanned_blocks`.
+    """
+    cfg = self.config
+    n_dense = cfg.first_num_dense_layers
+    if n_dense > 0:
+      y, self.dense_layers, _ = self._apply_layers_sequentially(
+          self.dense_layers,
+          y,
+          *layer_args,
+          length=n_dense,
+          metadata_axis_name="dense_layers",
+      )
+
+    remaining = cfg.num_decoder_layers - n_dense
+    cycle = cfg.inhomogeneous_layer_cycle_interval
+    scan_length = remaining // cycle
+    if scan_length > 0:
+      y, self.layers, _ = self._apply_layers_sequentially(
+          self.layers,
+          y,
+          *layer_args,
+          length=scan_length,
+          **layer_kwargs,
+      )
+
+    num_remaining = remaining % cycle
+    if num_remaining > 0:
+      out = self.layers_remainder(
+          y,
+          *layer_args,
+          **layer_kwargs,
+      )
+      y = out[0] if isinstance(out, tuple) else out
+
+    return y
+
   def _apply_gemma4_small_layers(
       self,
       y,
@@ -2748,6 +2876,7 @@ class NNXDecoder(nnx.Module):
       if hasattr(self, "pipeline_module"):
         _add(getattr(self.pipeline_module, "layers", None))
 
+      _append_scanned("dense_layers")
       _append_scanned("scanned_blocks")  # Gemma 4
       _append_scanned("layers")
       _append_unscanned("layers")

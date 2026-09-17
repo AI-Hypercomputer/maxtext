@@ -18,7 +18,6 @@
 import re
 import jax
 import jax.numpy as jnp
-
 import optax
 from optax.contrib._muon import muon as optax_muon
 from maxtext.common.common_types import DecoderBlockType
@@ -201,7 +200,7 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
       ns_steps = 10
     else:
       ns_coeffs = (3.4445, -4.7750, 2.0315)
-      ns_steps = 5
+      ns_steps = getattr(config, "muon_ns_steps", 5)
 
     muon_kwargs = {
         # Shared parameters: "nesterov" uses default
@@ -226,7 +225,7 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
           config, "muon_use_all_to_all", False
       ), "all-to-all communication in muon is only supported with maxtext_muon, not optax_muon."
       if model is not None:
-        muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config)
+        muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config, mesh=mesh)
       else:
         raise ValueError("Please specify model to extract muon dimension number.")
       muon_kwargs = muon_kwargs | {"muon_weight_dimension_numbers": muon_weight_dimension_numbers}

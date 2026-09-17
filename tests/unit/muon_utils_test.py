@@ -21,13 +21,13 @@ import io
 import unittest
 from unittest import mock
 
-import jax
-import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
-from optax.contrib._muon import MuonDimensionNumbers as mdn
-
+import jax
+import jax.numpy as jnp
+from maxtext.optimizers.muon import MuonDimensionNumbers as mdn
 from maxtext.utils import muon_utils
+import numpy as np
 
 
 class TestIsPathContainAny(unittest.TestCase):
@@ -472,6 +472,29 @@ class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
     result_false = muon_utils.get_muon_weight_dimension_numbers(self.model, config=cfg_false)
     self.assertIsNone(result_false["MoeBlock_0"]["gate"]["kernel"])
     self.assertEqual(result_false["MoeBlock_0"]["wi_0"], mdn((-2,), (-1,)))
+
+  def test_nnx_model_with_logical_axis_rules(self):
+    """Verifies that config.logical_axis_rules is active within get_muon_weight_dimension_numbers."""
+    config = mock.MagicMock()
+    config.logical_axis_rules = (("embed", "fsdp"), ("mlp", "tensor"))
+    result = muon_utils.get_muon_weight_dimension_numbers(
+        self.model, config=config
+    )
+    self.assertEqual(result["w_standard"], mdn((0,), (-1,)))
+    self.assertEqual(result["self_attention"]["out"], mdn((0, -2), (-1,)))
+    self.assertIsNone(result["scale"])
+
+  def test_nnx_model_with_mesh_populates_named_sharding(self):
+    """Verifies that NamedSharding is properly attached to MuonDimensionNumbers when mesh is present."""
+    devices = np.array(jax.devices()[:1]).reshape((1, 1))
+    mesh = jax.sharding.Mesh(devices, ("data", "model"))
+    result = muon_utils.get_muon_weight_dimension_numbers(
+        self.model, config=None, mesh=mesh
+    )
+    self.assertIsNotNone(result["w_standard"].sharding)
+    self.assertIsInstance(
+        result["w_standard"].sharding, jax.sharding.NamedSharding
+    )
 
   def test_nnx_verbose_path_executes_print_debug(self):
     """verbose=True should also execute _print_structure_debug without raising."""
