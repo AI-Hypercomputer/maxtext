@@ -16,8 +16,8 @@
 # using dense chart analytical summaries (Chart-to-Text).
 #
 # Example command to run pretraining on TPU VM:
-# python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-#   src/maxtext/experimental/omni_poc/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml
+# python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+#   src/maxtext/experimental/omni_pipeline/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml
 
 # Inherit model architecture (Gemma 3 4B Vision Tower + Qwen 3 4B Decoder + Custom MLP Connector)
 base_config: "../maxtext-omni-gemma3-qwen3.yml"

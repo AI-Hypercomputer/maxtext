@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import unittest
 import numpy as np
 
-from maxtext.experimental.omni_poc.utils import processor_maxtext_omni as omni_processor
+from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni as omni_processor
 
 
 class TestProcessorMaxtextOmni(unittest.TestCase):

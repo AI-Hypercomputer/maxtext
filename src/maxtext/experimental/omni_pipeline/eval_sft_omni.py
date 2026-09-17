@@ -20,8 +20,8 @@ providing Omni-specific defaults and CLI.
 Usage:
   export HF_TOKEN="<YOUR_HF_TOKEN>"
 
-  python3 -m maxtext.experimental.omni_poc.eval_sft_omni \\
-    src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \\
+  python3 -m maxtext.experimental.omni_pipeline.eval_sft_omni \\
+    src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \\
     load_parameters_path=gs://YOUR_BUCKET/path/to/checkpoint/items \\
     base_output_directory=gs://YOUR_BUCKET/eval_output \\
     run_name=eval_run \\
@@ -72,7 +72,7 @@ def main(argv: Sequence[str]) -> None:
         os.path.join(
             MAXTEXT_PKG_DIR,
             "experimental",
-            "omni_poc",
+            "omni_pipeline",
             "configs",
             "sft-maxtext-omni-gemma3-qwen3.yml",
         ),
