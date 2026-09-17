@@ -354,10 +354,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         forward. Same output as serve mode (absmax calibration), slower.
     """
 
-    # Safely create the concrete PREFILL model once, avoiding OOM risks:
-    # create_nnx_sharded_model builds the model with a jitted out_shardings so params
-    # are produced already sharded, avoiding a single-device allocation of the full
-    # model.
+    # Only the non-Param/non-Cache state is retained from PREFILL construction.
+    # Exclude discarded weights/cache from JIT outputs so their initializers are
+    # eliminated before compilation; checkpoint loading supplies the parameters.
+    max_logging.log("Initializing PREFILL runtime state only; skipping discarded parameters and caches.")
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
       _, full_abs = nnx.split(self.model)
       full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
@@ -366,6 +366,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           self._create_model_fn,  # pyrefly: ignore[bad-argument-type]
           mesh=self._mesh,
           named_sharding=full_sharding,  # pyrefly: ignore[bad-argument-type]
+          state_filter=nnx.Not(nnx.Any(nnx.Param, nnx.Cache)),
       )
       graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       self.graphdef = graphdef
@@ -1309,7 +1310,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
-      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
+      if path_key in _DEEPSEEK_V4_CACHE_KEYS or self.config.model_name == "ling3-flash-vl":
         # Copy these states by explicitly overwriting the target slots matching current request id
         for slot in slots:
           full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
@@ -1430,7 +1431,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
-      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
+      if path_key in _DEEPSEEK_V4_CACHE_KEYS or self.config.model_name == "ling3-flash-vl":
         # Copy these states by explicitly overwriting the target slot matching current request id
         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
 
@@ -1568,7 +1569,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
-      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
+      if path_key in _DEEPSEEK_V4_CACHE_KEYS or self.config.model_name == "ling3-flash-vl":
         # Direct batch slot index overwrite for fixed-size metadata trackers
         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
 
@@ -1723,7 +1724,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:  # pyrefly: ignore[missing-attribute]
       return token_utils.SentencePieceTokenizer(metadata)
     elif metadata.tokenizer_type == TokenizerType.huggingface:  # pyrefly: ignore[missing-attribute]
-      tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
+      from maxtext.inference.huggingface_tokenizer import HuggingFaceTokenizer
+
+      tokenizer_model = HuggingFaceTokenizer(metadata)
       if tokenizer_model.tokenizer.pad_token_id is None:
         if tokenizer_model.tokenizer.unk_token_id is not None:
           tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id

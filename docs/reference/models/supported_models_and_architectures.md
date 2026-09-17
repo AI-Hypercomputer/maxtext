@@ -66,6 +66,18 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 - **Variants**: K2 (1T), K2-Thinking (1T), K2.5 (text), K2.6 (text)
 - **Notes**: DeepSeek V3 architecture; MuonClip optimizer
 
+### Ling
+
+- **Variant**: Ling-3.0-flash-VL, text backbone only.
+- **Architecture**: Five Kimi Delta Attention layers followed by gated MLA;
+  two initial dense MLPs, then grouped MoE routing over 512 experts (top 8).
+- **Validation**: The six-layer prefix passes FP32 logits checks in scanned and
+  unscanned formats and 16-token cached decoding. Full-model validation is
+  pending; full-model configuration uses unscanned layers. Scanned mode currently
+  supports only one six-layer cycle.
+- **Tests**: [Layer parity](../../../tests/unit/ling3_layers_test.py) and
+  [expert sharding and checkpoint restore](../../../tests/unit/ling3_sharding_test.py).
+
 ## Parallelism building blocks
 
 MaxText supports a wide range of parallelism strategies for scaling training and inference across TPUs and GPUs:

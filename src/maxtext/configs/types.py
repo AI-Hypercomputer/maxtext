@@ -313,6 +313,8 @@ ModelName = Literal[
     "envy-switch-base",
     "envy-switch-large",
     "envy-switch-xxl",
+    "ling3-flash-vl",
+    "ling3-flash",
 ]
 
 
@@ -4831,6 +4833,7 @@ class MaxTextConfig(
     if self.decoder_block in (
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
+        DecoderBlockType.LING3,
     ):
       if int(self.gdn_num_value_heads) % int(self.gdn_num_key_heads) != 0:
         raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")

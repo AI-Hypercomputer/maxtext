@@ -47,6 +47,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.pipeline import create_nnx_pipeline
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
+    ling3,
     deepseek,
     deepseek4,
     deepseek_batchsplit,
@@ -877,6 +878,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.LING3,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1242,6 +1244,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
+        DecoderBlockType.LING3: get_scannable(ling3.Ling3DecoderLayer, ling3.Ling3ScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1404,6 +1407,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
+        DecoderBlockType.LING3,
     }:
       return functools.partial(
           RMSNorm,

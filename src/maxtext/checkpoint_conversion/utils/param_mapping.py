@@ -4450,7 +4450,77 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   return mapping
 
 
+def LING3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Text backbone only; source names are those of the VL safetensors release."""
+  cfg = config.get("text_config", config)
+  count = maxtext_config.num_decoder_layers
+  if scan_layers and count != cfg["layer_group_size"]:
+    raise ValueError("Ling3 scanned conversion requires exactly one six-layer cycle.")
+  mapping = {
+      "params-token_embedder-embedding": "model.word_embeddings.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+  for i in range(count):
+    prefix = f"params-decoder-layers-layer_{i}" if scan_layers else f"params-decoder-layers_{i}"
+    specs = {
+        "input_layernorm-scale": "input_layernorm.weight",
+        "post_attention_layernorm-scale": "post_attention_layernorm.weight",
+    }
+    if (i + 1) % cfg["layer_group_size"]:
+      for proj in ("q_proj", "k_proj", "v_proj", "f_proj", "b_proj", "g_proj", "o_proj"):
+        specs[f"attention-{proj}-kernel"] = f"attention.{proj}.weight"
+      for proj in ("q_conv1d", "k_conv1d", "v_conv1d"):
+        specs[f"attention-{proj}-conv-kernel"] = f"attention.{proj}.weight"
+      specs.update(
+          {
+              "attention-A_log": "attention.A_log",
+              "attention-dt_bias": "attention.dt_bias",
+              "attention-o_norm-scale": "attention.o_norm.weight",
+          }
+      )
+    else:
+      for proj in ("q_proj", "kv_a_proj_with_mqa", "kv_b_proj", "g_proj", "dense"):
+        specs[f"attention-{proj}-kernel"] = f"attention.{proj}.weight"
+      specs["attention-kv_a_layernorm-scale"] = "attention.kv_a_layernorm.weight"
+    for mt, hf in (("wi_0", "gate_proj"), ("wi_1", "up_proj"), ("wo", "down_proj")):
+      if i < cfg["first_k_dense_replace"]:
+        specs[f"mlp-{mt}-kernel"] = f"mlp.{hf}.weight"
+      else:
+        specs[f"mlp-shared_{mt}-kernel"] = f"mlp.shared_experts.{hf}.weight"
+        experts = [f"model.layers.{i}.mlp.experts.{e}.{hf}.weight" for e in range(maxtext_config.num_experts)]
+        mapping[f"{prefix}-mlp-{mt}"] = [[key] for key in experts] if scan_layers else experts
+    if i >= cfg["first_k_dense_replace"]:
+      specs["mlp-gate-kernel"] = "mlp.gate.weight"
+      specs["mlp-expert_bias"] = "mlp.gate.expert_bias"
+    for mt, hf in specs.items():
+      key = f"model.layers.{i}.{hf}"
+      mapping[f"{prefix}-{mt}"] = [key] if scan_layers else key
+  return mapping
+
+
+def LING3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Transpose linear weights, reverse convolution axes, and reshape decay vectors."""
+
+  def linear(x, target_shape):
+    return x.reshape(tuple(reversed(target_shape))).T if saving_to_hf else x.T.reshape(target_shape)
+
+  def conv(x, target_shape):
+    return x.transpose(2, 1, 0).reshape(target_shape)
+
+  def reshape(x, target_shape):
+    return x.reshape(target_shape)
+
+  mapping = LING3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
+  return {
+      key: conv if "-conv-kernel" in key else reshape if key.endswith(("-A_log", "-dt_bias")) else linear
+      for key in mapping
+      if key.endswith(("-kernel", "-wi_0", "-wi_1", "-wo", "-A_log", "-dt_bias"))
+  }
+
+
 PARAM_MAPPING = {
+    "ling3-flash-vl": LING3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4510,6 +4580,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "ling3-flash-vl": LING3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
