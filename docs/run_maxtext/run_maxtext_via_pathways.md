@@ -71,9 +71,8 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # Official release pre-training image (recommended)
 export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
-# Or your custom runner image:
-# export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-# export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+# Or your custom Docker image you pushed in the prerequisite step
+# export DOCKER_IMAGE=<IMAGE_NAME>
 ```
 
 ## 3. Running a batch workload
