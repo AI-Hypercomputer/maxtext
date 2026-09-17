@@ -684,24 +684,8 @@ def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
 
 def eval_step(model, config, state, data, dropout_rng=None):
   """eval_step no backprop and new state compared with train_step."""
-<<<<<<< HEAD
   del dropout_rng  # unused for NNX (kept for jit signature parity)
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-  loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
-=======
-  if isinstance(model, nn.Module):
-    sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
-    eval_params = state.params["params"] if sparsity_enabled else state.params
-    eval_model = model
-    eval_rng = dropout_rng
-    sparsity_state = state.params.get("batch_stats", {})
-  else:
-    state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-    eval_model = state.model
-    eval_params = None
-    eval_rng = None
-    sparsity_state = None
->>>>>>> 298c2af99 (Train & Eval on all samples when pdbs < 1)
 
   def single_eval_fn(d):
     return loss_fn(
