@@ -205,26 +205,29 @@ def _maybe_spread_moe_experts_over_fsdp(raw_keys):
   ep = int(raw_keys.get("ici_expert_parallelism") or 1)
   if num_experts <= 1 or fsdp == 1:
     return  # not MoE, or spread is identical to base rules (trivial fsdp axis)
-  # fsdp == -1 (auto-fill) resolves only at mesh creation; divisibility can't be
+  # fsdp == -1 or ep == -1 (auto-fill) resolves only at mesh creation; divisibility can't be
   # checked here, so 'auto' declines and 'always' proceeds on the user's word.
-  if fsdp > 0 and num_experts % (max(ep, 1) * fsdp) != 0:
+  if (fsdp < 0 or ep < 0) and mode == "auto":
+    logger.warning(
+        "moe_spread_experts_over_fsdp='auto': ici_fsdp_parallelism or "
+        "ici_expert_parallelism is -1 (auto-fill), making the num_experts "
+        "divisibility check impossible at config time — keeping base rules. "
+        "Set the parallelism degrees explicitly or use 'always'."
+    )
+    return
+  if fsdp > 0 and ep > 0 and num_experts % (ep * fsdp) != 0:
     msg = (
         f"moe_spread_experts_over_fsdp: num_experts={num_experts} is not divisible by "
-        f"ici_expert_parallelism*ici_fsdp_parallelism={max(ep, 1) * fsdp}"
+        f"ici_expert_parallelism*ici_fsdp_parallelism={ep * fsdp}"
     )
     if mode == "always":
       raise ValueError(msg)
     logger.warning("%s — keeping base rules", msg)
     return
-  if fsdp < 0 and mode == "auto":
-    logger.warning(
-        "moe_spread_experts_over_fsdp='auto': ici_fsdp_parallelism=-1 (auto-fill) makes the "
-        "num_experts divisibility check impossible at config time — keeping base rules. "
-        "Set the fsdp degree explicitly or use 'always'."
-    )
-    return
 
   def _axes(v):
+    if v is None:
+      return []
     return [v] if isinstance(v, str) else list(v)
 
   rules = []
