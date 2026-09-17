@@ -356,6 +356,36 @@ class RouterReplayEngineTest(unittest.TestCase):
     )
     self.assertEqual(batch["targets_segmentation"].tolist(), [[1, 1, 0, 1, 1, 0]])
 
+  def test_positions_restart_at_zero_when_a_segment_starts_padded(self):
+    """A segment's position count is the real tokens *before* its start, not up to it.
+
+    The pre-segment total is read off the running count at the segment's first index. An
+    inclusive count has not yet incremented there when that slot is padding, so the
+    subtraction comes out one short and every position in the segment is one too high.
+    Left-padding a prompt inside a packed row is exactly that case, and it is the case the
+    derivation exists for.
+
+    The error is a constant offset within a segment, so attention is unaffected -- RoPE
+    scores depend on `pos_i - pos_j` and cross-segment attention is masked -- but each
+    token's rotated hidden state is not, and reproducing the rollout's hidden states is
+    what router replay is for.
+    """
+    token_ids = jnp.arange(6, dtype=jnp.int32)[None, :]
+    segment_ids = jnp.array([[1, 1, 1, 2, 2, 2]], dtype=jnp.int32)
+    token_mask = jnp.array([[0, 1, 1, 0, 1, 1]], dtype=jnp.int32)
+    batch = maxtext_engine.router_replay_gen_model_input_fn(_rl_payload(token_ids, token_mask, segment_ids=segment_ids))
+    # Indices 0 and 3 are padding; the real tokens after them start each segment at 0.
+    positions = batch["inputs_position"].tolist()[0]
+    self.assertEqual([positions[1], positions[2]], [0, 1])
+    self.assertEqual([positions[4], positions[5]], [0, 1])
+
+    # Two padded slots before a segment's first real token, which the one-short
+    # subtraction would leave at 1 rather than 0.
+    token_mask = jnp.array([[0, 0, 1, 0, 0, 1]], dtype=jnp.int32)
+    batch = maxtext_engine.router_replay_gen_model_input_fn(_rl_payload(token_ids, token_mask, segment_ids=segment_ids))
+    positions = batch["inputs_position"].tolist()[0]
+    self.assertEqual([positions[2], positions[5]], [0, 0])
+
   def test_segment_positions_are_used_when_tunix_supplies_them(self):
     """Supplied `segment_positions` are used rather than re-derived.
 
