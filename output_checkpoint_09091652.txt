@@ -1,0 +1,85 @@
+/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/torch/cuda/__init__.py:64: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[transformers] DeepseekV32Config got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] DeepseekV4Config got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+2026-09-09 16:52:10.235051: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+2026-09-09 16:52:10.235450: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-09 16:52:10.274962: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-09-09 16:52:11.204721: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-09 16:52:11.205540: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+WARNING:absl:Type handler registry overriding type "<class '__main__.LazyTensor'>" collision on np.ndarray
+WARNING:maxtext.configs.pyconfig:WARNING: Passing 'hf_access_token' via command-line arguments is deprecated and insecure because it makes your token visible in 'ps' and shell history. Please set the 'HF_TOKEN' environment variable instead.
+INFO:absl:Skipping jax distributed system due to skip_jax_distributed_system=True flag.
+I0909 16:52:12.488291  456483 pjrt_client.cc:579] PjRt-IFRT device count: total=16, addressable=16
+I0909 16:52:12.488364  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+I0909 16:52:12.488369  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=1)
+I0909 16:52:12.488372  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=2)
+I0909 16:52:12.488374  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=3)
+I0909 16:52:12.488379  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=4)
+I0909 16:52:12.488382  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=5)
+I0909 16:52:12.488385  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=6)
+I0909 16:52:12.488388  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=7)
+I0909 16:52:12.488391  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=8)
+I0909 16:52:12.488393  456483 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=9)
+I0909 16:52:12.488396  456483 pjrt_client.cc:586] ... (omitted) ...
+INFO:absl:System Information: Jax Version: 0.11.1
+INFO:absl:System Information: Jaxlib Version: 0.11.1
+INFO:absl:System Information: Jax Backend: cpu
+INFO:absl:Lazy loading DISABLED. Loading full HuggingFace model: facebook/DiT-XL-2-256...
+INFO:absl:Eager load with Torch backend, torch.load
+Fetching 8 files:   0%|          | 0/8 [00:00<?, ?it/s]Fetching 8 files: 100%|██████████| 8/8 [00:00<00:00, 2521.37it/s]
+INFO:absl:Loading /dev/shm/hf_cache/hub/models--facebook--DiT-XL-2-256/snapshots/eab87f77abd5aef071a632f08807fbaab0b704d0/transformer/diffusion_pytorch_model.bin
+INFO:absl:Loading /dev/shm/hf_cache/hub/models--facebook--DiT-XL-2-256/snapshots/eab87f77abd5aef071a632f08807fbaab0b704d0/vae/diffusion_pytorch_model.bin
+INFO:absl:HuggingFace model loaded. dtypes: {torch.float32}
+INFO:absl:[After full HF model load] RAM Usage: 22.12/1417.33 GB (1.6%)
+INFO:absl:Parameter mappings and hooks obtained.
+INFO:absl:Num_devices: 16, shape (1, 1, 1, 16, 1, 1, 1, 1, 1, 1, 1, 1)
+INFO:absl:Initializing MaxText DiT abstract model...
+INFO:absl:MaxText abstract model and state initialized.
+INFO:absl:Starting weight transformation...
+Transforming weights:   0%|          | 0/544 [00:00<?, ?param/s, RAM: 22.1/1417.3GB (1.6%)]INFO:absl:maxtext param: params-patch_embed-kernel
+INFO:absl:maxtext param: params-patch_embed-bias
+INFO:absl:maxtext param: params-pos_embed
+INFO:absl:maxtext param: params-timestep_embedder-linear1-kernel
+INFO:absl:maxtext param: params-timestep_embedder-linear1-bias
+INFO:absl:maxtext param: params-timestep_embedder-linear2-kernel
+INFO:absl:maxtext param: params-timestep_embedder-linear2-bias
+INFO:absl:maxtext param: params-label_embedder-embedding-embedding
+INFO:absl:maxtext param: params-final_layer-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-final_layer-adaLN_modulation-bias
+INFO:absl:maxtext param: params-final_layer-linear-kernel
+INFO:absl:maxtext param: params-final_layer-linear-bias
+INFO:absl:maxtext param: params-blocks_0-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_0-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_0-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_0-attn-query-bias
+Transforming weights:   3%|▎         | 15/544 [00:00<00:00, 760.54param/s, RAM: 22.1/1417.3GB (1.6%)]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/checkpoint_conversion/to_maxtext.py", line 1218, in <module>
+    main(
+    ~~~~^
+        args=model_args,
+        ^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+        simulated_cpu_devices_count=local_args.simulated_cpu_devices_count,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/checkpoint_conversion/to_maxtext.py", line 1091, in main
+    _get_maxtext_weight(
+    ~~~~~~~~~~~~~~~~~~~^
+        load_fn,
+        ^^^^^^^^
+    ...<5 lines>...
+        lazy_load_tensors,
+        ^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/checkpoint_conversion/to_maxtext.py", line 585, in _get_maxtext_weight
+    raise ValueError(
+    ...<2 lines>...
+    )
+ValueError: Shape mismatch for params-blocks_0-attn-query-bias: Expected (16, 72), got (1152,)

@@ -1884,8 +1884,21 @@ qwen3_vl_30b_a3b_dict = {
 qwen3_vl_30b_a3b_config = PTConfig(**qwen3_vl_30b_a3b_dict)
 
 
+dit_xl_2_256_dict = {
+    "hidden_size": 1152,
+    "num_attention_heads": 16,
+    "num_hidden_layers": 28,
+    "patch_size": 2,
+    "in_channels": 4,
+    "out_channels": 4,
+    "vocab_size": 1000,
+}
+dit_xl_2_256_config = PTConfig(**dit_xl_2_256_dict)
+
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
+    "dit-xl-2-256": dit_xl_2_256_config,
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
     "gemma2-27b": gemma2_27b_config,

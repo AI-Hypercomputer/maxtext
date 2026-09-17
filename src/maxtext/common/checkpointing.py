@@ -487,7 +487,7 @@ def load_state_if_possible(
     checkpoint_storage_concurrent_gb: int,
     abstract_unboxed_pre_state: train_state.TrainState | nnx.State,
     enable_single_replica_ckpt_restoring: bool | None = False,
-    dataset_type: str | None = "tfds",
+    dataset_type: str | None = "synthetic",
     step: int = -1,  # -1 means latest
     use_ocdbt=True,
     use_zarr3=True,

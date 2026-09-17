@@ -1,0 +1,4 @@
+import inspect
+from diffusers.models.embeddings import get_1d_sincos_pos_embed_from_grid
+
+print(inspect.getsource(get_1d_sincos_pos_embed_from_grid))

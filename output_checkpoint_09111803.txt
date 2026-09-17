@@ -1,0 +1,1580 @@
+/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/torch/cuda/__init__.py:64: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[transformers] DeepseekV32Config got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] DeepseekV4Config got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+2026-09-11 18:03:27.771403: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+2026-09-11 18:03:27.771753: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-11 18:03:27.811704: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-09-11 18:03:28.768783: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-11 18:03:28.769579: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+WARNING:absl:Type handler registry overriding type "<class '__main__.LazyTensor'>" collision on np.ndarray
+WARNING:maxtext.configs.pyconfig:WARNING: Passing 'hf_access_token' via command-line arguments is deprecated and insecure because it makes your token visible in 'ps' and shell history. Please set the 'HF_TOKEN' environment variable instead.
+INFO:absl:Skipping jax distributed system due to skip_jax_distributed_system=True flag.
+I0911 18:03:30.041694  174808 pjrt_client.cc:579] PjRt-IFRT device count: total=16, addressable=16
+I0911 18:03:30.041747  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+I0911 18:03:30.041750  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=1)
+I0911 18:03:30.041751  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=2)
+I0911 18:03:30.041753  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=3)
+I0911 18:03:30.041754  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=4)
+I0911 18:03:30.041756  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=5)
+I0911 18:03:30.041757  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=6)
+I0911 18:03:30.041759  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=7)
+I0911 18:03:30.041760  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=8)
+I0911 18:03:30.041762  174808 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=9)
+I0911 18:03:30.041763  174808 pjrt_client.cc:586] ... (omitted) ...
+INFO:absl:System Information: Jax Version: 0.11.1
+INFO:absl:System Information: Jaxlib Version: 0.11.1
+INFO:absl:System Information: Jax Backend: cpu
+INFO:absl:Lazy loading DISABLED. Loading full HuggingFace model: facebook/DiT-XL-2-256...
+INFO:absl:Eager load with Torch backend, torch.load
+Fetching 8 files:   0%|          | 0/8 [00:00<?, ?it/s]Fetching 8 files: 100%|██████████| 8/8 [00:00<00:00, 1846.90it/s]
+INFO:absl:Loading /home/liyinn_google_com/.cache/huggingface/hub/models--facebook--DiT-XL-2-256/snapshots/eab87f77abd5aef071a632f08807fbaab0b704d0/transformer/diffusion_pytorch_model.bin
+INFO:absl:Loading /home/liyinn_google_com/.cache/huggingface/hub/models--facebook--DiT-XL-2-256/snapshots/eab87f77abd5aef071a632f08807fbaab0b704d0/vae/diffusion_pytorch_model.bin
+INFO:absl:HuggingFace model loaded. dtypes: {torch.float32}
+INFO:absl:[After full HF model load] RAM Usage: 25.86/1417.33 GB (1.8%)
+INFO:absl:Parameter mappings and hooks obtained.
+INFO:absl:Num_devices: 16, shape (1, 1, 1, 16, 1, 1, 1, 1, 1, 1, 1, 1)
+INFO:absl:Initializing MaxText DiT abstract model...
+INFO:absl:MaxText abstract model and state initialized.
+INFO:absl:Starting weight transformation...
+Transforming weights:   0%|          | 0/544 [00:00<?, ?param/s, RAM: 25.9/1417.3GB (1.8%)]INFO:absl:maxtext param: params-patch_embed-kernel
+INFO:absl:maxtext param: params-patch_embed-bias
+INFO:absl:maxtext param: params-pos_embed
+INFO:absl:maxtext param: params-timestep_embedder-linear1-kernel
+INFO:absl:maxtext param: params-timestep_embedder-linear1-bias
+INFO:absl:maxtext param: params-timestep_embedder-linear2-kernel
+INFO:absl:maxtext param: params-timestep_embedder-linear2-bias
+INFO:absl:maxtext param: params-label_embedder-embedding-embedding
+INFO:absl:maxtext param: params-final_layer-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-final_layer-adaLN_modulation-bias
+INFO:absl:maxtext param: params-final_layer-linear-kernel
+INFO:absl:maxtext param: params-final_layer-linear-bias
+INFO:absl:maxtext param: params-blocks_0-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_0-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_0-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_0-attn-query-bias
+DEBUG: apply_hook_fns calling flatten_and_transpose_conv on weight shape (1152, 4, 2, 2), target_shape (16, 1152)
+DEBUG: apply_hook_fns returned shape (16, 1152)
+DEBUG: apply_hook_fns calling generate_sincos_2d on weight shape (1152, 4, 2, 2), target_shape (1, 256, 1152)
+DEBUG: apply_hook_fns returned shape (1, 256, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 256), target_shape (256, 1152)
+DEBUG: apply_hook_fns returned shape (256, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 1152), target_shape (1152, 1152)
+DEBUG: apply_hook_fns returned shape (1152, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (2304, 1152), target_shape (1152, 2304)
+DEBUG: apply_hook_fns returned shape (1152, 2304)
+DEBUG: apply_hook_fns calling transpose on weight shape (32, 1152), target_shape (1152, 32)
+DEBUG: apply_hook_fns returned shape (1152, 32)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_0-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_0-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_0-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_0-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_0-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_0-attn-out-bias
+INFO:absl:maxtext param: params-blocks_0-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_0-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_0-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_0-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_1-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_1-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_1-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_1-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_0-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_1-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_1-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_1-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_1-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_1-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_1-attn-out-bias
+INFO:absl:maxtext param: params-blocks_1-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_1-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_1-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_1-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_2-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_2-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_2-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_2-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_1-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_2-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_2-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_2-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_2-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_2-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_2-attn-out-bias
+INFO:absl:maxtext param: params-blocks_2-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_2-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_2-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_2-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_3-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_3-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_3-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_3-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_2-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_3-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_3-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_3-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_3-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_3-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_3-attn-out-bias
+INFO:absl:maxtext param: params-blocks_3-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_3-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_3-mlp-wo-kernel
+Transforming weights:  12%|█▏        | 67/544 [00:00<00:00, 651.24param/s, RAM: 26.1/1417.3GB (1.8%)]INFO:absl:maxtext param: params-blocks_3-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_4-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_4-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_4-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_4-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_3-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_4-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_4-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_4-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_4-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_4-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_4-attn-out-bias
+INFO:absl:maxtext param: params-blocks_4-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_4-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_4-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_4-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_5-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_5-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_5-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_5-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_4-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_5-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_5-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_5-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_5-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_5-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_5-attn-out-bias
+INFO:absl:maxtext param: params-blocks_5-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_5-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_5-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_5-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_6-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_6-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_6-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_6-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_5-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_6-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_6-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_6-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_6-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_6-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_6-attn-out-bias
+INFO:absl:maxtext param: params-blocks_6-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_6-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_6-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_6-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_7-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_7-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_7-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_7-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_6-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_7-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_7-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_7-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_7-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_7-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_7-attn-out-bias
+INFO:absl:maxtext param: params-blocks_7-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_7-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_7-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_7-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_8-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_8-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_8-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_8-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_7-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_8-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_8-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_8-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_8-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_8-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_8-attn-out-bias
+Transforming weights:  25%|██▍       | 134/544 [00:00<00:00, 645.81param/s, RAM: 26.3/1417.3GB (1.9%)]INFO:absl:maxtext param: params-blocks_8-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_8-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_8-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_8-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_9-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_9-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_9-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_9-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_8-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_9-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_9-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_9-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_9-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_9-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_9-attn-out-bias
+INFO:absl:maxtext param: params-blocks_9-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_9-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_9-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_9-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_10-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_10-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_10-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_10-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_9-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_10-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_10-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_10-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_10-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_10-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_10-attn-out-bias
+INFO:absl:maxtext param: params-blocks_10-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_10-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_10-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_10-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_11-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_11-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_11-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_11-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_10-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_11-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_11-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_11-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_11-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_11-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_11-attn-out-bias
+INFO:absl:maxtext param: params-blocks_11-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_11-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_11-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_11-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_12-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_12-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_12-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_12-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_11-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_12-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_12-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_12-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_12-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_12-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_12-attn-out-bias
+INFO:absl:maxtext param: params-blocks_12-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_12-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_12-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_12-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_13-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_13-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_13-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_13-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_12-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_13-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_13-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_13-attn-value-kernel
+Transforming weights:  37%|███▋      | 201/544 [00:00<00:00, 622.42param/s, RAM: 26.5/1417.3GB (1.9%)]INFO:absl:maxtext param: params-blocks_13-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_13-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_13-attn-out-bias
+INFO:absl:maxtext param: params-blocks_13-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_13-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_13-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_13-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_14-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_14-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_14-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_14-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_13-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_14-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_14-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_14-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_14-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_14-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_14-attn-out-bias
+INFO:absl:maxtext param: params-blocks_14-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_14-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_14-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_14-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_15-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_15-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_15-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_15-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_14-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_15-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_15-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_15-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_15-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_15-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_15-attn-out-bias
+INFO:absl:maxtext param: params-blocks_15-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_15-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_15-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_15-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_16-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_16-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_16-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_16-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_15-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_16-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_16-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_16-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_16-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_16-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_16-attn-out-bias
+INFO:absl:maxtext param: params-blocks_16-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_16-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_16-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_16-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_17-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_17-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_17-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_17-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_16-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_17-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_17-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_17-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_17-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_17-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_17-attn-out-bias
+INFO:absl:maxtext param: params-blocks_17-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_17-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_17-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_17-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_18-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_18-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_18-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_18-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_17-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+Transforming weights:  49%|████▉     | 268/544 [00:00<00:00, 617.04param/s, RAM: 26.7/1417.3GB (1.9%)]INFO:absl:maxtext param: params-blocks_18-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_18-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_18-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_18-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_18-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_18-attn-out-bias
+INFO:absl:maxtext param: params-blocks_18-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_18-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_18-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_18-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_19-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_19-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_19-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_19-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_18-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_19-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_19-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_19-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_19-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_19-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_19-attn-out-bias
+INFO:absl:maxtext param: params-blocks_19-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_19-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_19-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_19-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_20-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_20-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_20-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_20-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_19-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_20-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_20-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_20-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_20-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_20-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_20-attn-out-bias
+INFO:absl:maxtext param: params-blocks_20-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_20-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_20-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_20-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_21-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_21-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_21-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_21-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_20-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_21-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_21-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_21-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_21-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_21-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_21-attn-out-bias
+INFO:absl:maxtext param: params-blocks_21-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_21-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_21-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_21-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_22-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_22-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_22-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_22-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_21-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_22-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_22-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_22-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_22-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_22-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_22-attn-out-bias
+INFO:absl:maxtext param: params-blocks_22-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_22-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_22-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_22-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_23-adaLN_modulation-kernel
+Transforming weights:  62%|██████▏   | 335/544 [00:00<00:00, 613.07param/s, RAM: 26.9/1417.3GB (1.9%)]INFO:absl:maxtext param: params-blocks_23-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_23-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_23-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_22-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_23-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_23-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_23-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_23-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_23-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_23-attn-out-bias
+INFO:absl:maxtext param: params-blocks_23-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_23-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_23-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_23-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_24-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_24-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_24-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_24-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_23-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_24-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_24-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_24-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_24-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_24-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_24-attn-out-bias
+INFO:absl:maxtext param: params-blocks_24-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_24-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_24-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_24-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_25-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_25-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_25-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_25-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_24-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_25-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_25-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_25-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_25-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_25-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_25-attn-out-bias
+INFO:absl:maxtext param: params-blocks_25-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_25-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_25-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_25-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_26-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_26-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_26-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_26-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_25-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_26-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_26-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_26-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_26-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_26-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_26-attn-out-bias
+INFO:absl:maxtext param: params-blocks_26-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_26-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_26-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_26-mlp-wo-bias
+INFO:absl:maxtext param: params-blocks_27-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_27-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_27-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_27-attn-query-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_26-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling transpose on weight shape (6912, 1152), target_shape (1152, 6912)
+DEBUG: apply_hook_fns returned shape (1152, 6912)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_27-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_27-attn-key-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_27-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_27-attn-value-bias
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (1152, 16, 72)
+DEBUG: apply_hook_fns returned shape (1152, 16, 72)
+DEBUG: apply_hook_fns calling reshape_bias on weight shape (1152,), target_shape (16, 72)
+DEBUG: reshape_bias called with x shape (1152,), target_shape (16, 72)
+INFO:absl:maxtext param: params-blocks_27-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_27-attn-out-bias
+INFO:absl:maxtext param: params-blocks_27-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_27-mlp-wi-bias
+INFO:absl:maxtext param: params-blocks_27-mlp-wo-kernel
+Transforming weights:  74%|███████▍  | 403/544 [00:00<00:00, 621.73param/s, RAM: 27.1/1417.3GB (1.9%)]INFO:absl:maxtext param: params-blocks_27-mlp-wo-bias
+INFO:absl:maxtext param: params-vae_decoder-post_quant_conv-kernel
+INFO:absl:maxtext param: params-vae_decoder-post_quant_conv-bias
+INFO:absl:maxtext param: params-vae_decoder-conv_in-kernel
+INFO:absl:maxtext param: params-vae_decoder-conv_in-bias
+INFO:absl:maxtext param: params-vae_decoder-conv_out-kernel
+INFO:absl:maxtext param: params-vae_decoder-conv_out-bias
+INFO:absl:maxtext param: params-vae_decoder-norm_out-scale
+INFO:absl:maxtext param: params-vae_decoder-norm_out-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-q-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-q-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-k-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-k-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-v-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-v-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-proj_out-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-proj_out-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-norm-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-norm-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_3-conv-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_3-conv-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_7-conv-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_7-conv-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-nin_shortcut-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-nin_shortcut-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_11-conv-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_11-conv-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-nin_shortcut-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-nin_shortcut-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-norm2-bias
+Transforming weights: 100%|██████████| 544/544 [00:00<00:00, 783.78param/s, RAM: 27.2/1417.3GB (1.9%)]
+INFO:absl:Weight transformation preparation complete.
+INFO:absl:Elapse for transform: 0.01 min
+INFO:absl:[Before creating full JAX tree] RAM Usage: 27.22/1417.33 GB (1.9%)
+INFO:absl:Converting NNX State to pure dict to strip 'value' wrappers.
+INFO:absl:[Before saving] RAM Usage: 27.22/1417.33 GB (1.9%)
+INFO:absl:Starting checkpoint save...
+INFO:absl:Shard weights across 16 devices
+INFO:absl:Note: Axis 0 sharding is the default and will not be logged individually.
+DEBUG: apply_hook_fns returned shape (16, 72)
+DEBUG: apply_hook_fns calling reshape_kernel on weight shape (1152, 1152), target_shape (16, 72, 1152)
+DEBUG: apply_hook_fns returned shape (16, 72, 1152)
+DEBUG: calling load_fn for params-blocks_27-mlp-wi-kernel
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: load_fn returned shape (1152, 4608)
+DEBUG: expected shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (4608, 1152), target_shape (1152, 4608)
+DEBUG: apply_hook_fns returned shape (1152, 4608)
+DEBUG: apply_hook_fns calling transpose on weight shape (1152, 4608), target_shape (4608, 1152)
+DEBUG: apply_hook_fns returned shape (4608, 1152)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (4, 4, 1, 1), target_shape (1, 1, 4, 4)
+DEBUG: apply_hook_fns returned shape (1, 1, 4, 4)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 4, 3, 3), target_shape (3, 3, 4, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 4, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (3, 128, 3, 3), target_shape (3, 3, 128, 3)
+DEBUG: apply_hook_fns returned shape (3, 3, 128, 3)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling transpose on weight shape (512, 512), target_shape (512, 512)
+DEBUG: apply_hook_fns returned shape (512, 512)
+DEBUG: apply_hook_fns calling transpose on weight shape (512, 512), target_shape (512, 512)
+DEBUG: apply_hook_fns returned shape (512, 512)
+DEBUG: apply_hook_fns calling transpose on weight shape (512, 512), target_shape (512, 512)
+DEBUG: apply_hook_fns returned shape (512, 512)
+DEBUG: apply_hook_fns calling transpose on weight shape (512, 512), target_shape (512, 512)
+DEBUG: apply_hook_fns returned shape (512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (512, 512, 3, 3), target_shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 512)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (256, 512, 3, 3), target_shape (3, 3, 512, 256)
+DEBUG: apply_hook_fns returned shape (3, 3, 512, 256)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (256, 256, 3, 3), target_shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns returned shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (256, 512, 1, 1), target_shape (1, 1, 512, 256)
+DEBUG: apply_hook_fns returned shape (1, 1, 512, 256)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (256, 256, 3, 3), target_shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns returned shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (256, 256, 3, 3), target_shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns returned shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (256, 256, 3, 3), target_shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns returned shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (256, 256, 3, 3), target_shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns returned shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (256, 256, 3, 3), target_shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns returned shape (3, 3, 256, 256)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (128, 256, 3, 3), target_shape (3, 3, 256, 128)
+DEBUG: apply_hook_fns returned shape (3, 3, 256, 128)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (128, 128, 3, 3), target_shape (3, 3, 128, 128)
+DEBUG: apply_hook_fns returned shape (3, 3, 128, 128)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (128, 256, 1, 1), target_shape (1, 1, 256, 128)
+DEBUG: apply_hook_fns returned shape (1, 1, 256, 128)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (128, 128, 3, 3), target_shape (3, 3, 128, 128)
+DEBUG: apply_hook_fns returned shape (3, 3, 128, 128)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (128, 128, 3, 3), target_shape (3, 3, 128, 128)
+DEBUG: apply_hook_fns returned shape (3, 3, 128, 128)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (128, 128, 3, 3), target_shape (3, 3, 128, 128)
+DEBUG: apply_hook_fns returned shape (3, 3, 128, 128)
+DEBUG: apply_hook_fns calling conv_transpose on weight shape (128, 128, 3, 3), target_shape (3, 3, 128, 128)
+DEBUG: apply_hook_fns returned shape (3, 3, 128, 128)
+  0%|          | 0/544 [00:00<?, ?it/s]  0%|          | 1/544 [00:00<03:44,  2.42it/s]  0%|          | 2/544 [00:00<03:39,  2.47it/s]  1%|          | 3/544 [00:01<03:35,  2.52it/s]  1%|          | 4/544 [00:01<03:32,  2.55it/s]  1%|          | 5/544 [00:01<03:30,  2.56it/s]  1%|          | 6/544 [00:02<03:29,  2.57it/s]  1%|▏         | 7/544 [00:02<03:27,  2.58it/s]  1%|▏         | 8/544 [00:03<03:27,  2.59it/s]  2%|▏         | 9/544 [00:03<03:26,  2.59it/s]  2%|▏         | 10/544 [00:03<03:26,  2.59it/s]  2%|▏         | 11/544 [00:04<03:25,  2.59it/s]  2%|▏         | 12/544 [00:04<03:26,  2.58it/s]  2%|▏         | 13/544 [00:05<03:25,  2.59it/s]  3%|▎         | 14/544 [00:05<03:25,  2.58it/s]  3%|▎         | 15/544 [00:05<03:24,  2.59it/s]  3%|▎         | 16/544 [00:06<03:25,  2.57it/s]  3%|▎         | 17/544 [00:06<03:23,  2.59it/s]  3%|▎         | 18/544 [00:06<03:23,  2.59it/s]  3%|▎         | 19/544 [00:07<03:22,  2.59it/s]  4%|▎         | 20/544 [00:07<03:21,  2.59it/s]  4%|▍         | 21/544 [00:08<03:21,  2.60it/s]  4%|▍         | 22/544 [00:08<03:21,  2.59it/s]  4%|▍         | 23/544 [00:08<03:20,  2.59it/s]  4%|▍         | 24/544 [00:09<03:20,  2.59it/s]  5%|▍         | 25/544 [00:09<03:20,  2.59it/s]  5%|▍         | 26/544 [00:10<03:24,  2.53it/s]  5%|▍         | 27/544 [00:10<03:25,  2.52it/s]  5%|▌         | 28/544 [00:10<03:23,  2.53it/s]  5%|▌         | 29/544 [00:11<03:21,  2.55it/s]  6%|▌         | 30/544 [00:11<03:24,  2.51it/s]  6%|▌         | 31/544 [00:12<03:23,  2.52it/s]  6%|▌         | 32/544 [00:12<03:21,  2.54it/s]  6%|▌         | 33/544 [00:12<03:20,  2.55it/s]  6%|▋         | 34/544 [00:13<03:18,  2.57it/s]  6%|▋         | 35/544 [00:13<03:17,  2.58it/s]  7%|▋         | 36/544 [00:14<03:16,  2.58it/s]  7%|▋         | 37/544 [00:14<03:15,  2.59it/s]  7%|▋         | 38/544 [00:14<03:15,  2.59it/s]  7%|▋         | 39/544 [00:15<03:14,  2.59it/s]  7%|▋         | 40/544 [00:15<03:15,  2.58it/s]  8%|▊         | 41/544 [00:15<03:14,  2.59it/s]  8%|▊         | 42/544 [00:16<03:14,  2.58it/s]  8%|▊         | 43/544 [00:16<03:13,  2.59it/s]  8%|▊         | 44/544 [00:17<03:14,  2.57it/s]  8%|▊         | 45/544 [00:17<03:13,  2.58it/s]  8%|▊         | 46/544 [00:17<03:14,  2.56it/s]  9%|▊         | 47/544 [00:18<03:14,  2.55it/s]  9%|▉         | 48/544 [00:18<03:16,  2.53it/s]  9%|▉         | 49/544 [00:19<03:14,  2.54it/s]  9%|▉         | 50/544 [00:19<03:13,  2.55it/s]  9%|▉         | 51/544 [00:19<03:11,  2.57it/s] 10%|▉         | 52/544 [00:20<03:11,  2.58it/s] 10%|▉         | 53/544 [00:20<03:10,  2.58it/s] 10%|▉         | 54/544 [00:21<03:10,  2.57it/s] 10%|█         | 55/544 [00:21<03:09,  2.58it/s] 10%|█         | 56/544 [00:21<03:09,  2.58it/s] 10%|█         | 57/544 [00:22<03:08,  2.58it/s] 11%|█         | 58/544 [00:22<03:09,  2.56it/s] 11%|█         | 59/544 [00:22<03:08,  2.58it/s] 11%|█         | 60/544 [00:23<03:07,  2.58it/s] 11%|█         | 61/544 [00:23<03:06,  2.59it/s] 11%|█▏        | 62/544 [00:24<03:06,  2.59it/s] 12%|█▏        | 63/544 [00:24<03:05,  2.59it/s] 12%|█▏        | 64/544 [00:24<03:04,  2.60it/s] 12%|█▏        | 65/544 [00:25<03:04,  2.60it/s] 12%|█▏        | 66/544 [00:25<03:04,  2.60it/s] 12%|█▏        | 67/544 [00:26<03:03,  2.60it/s] 12%|█▎        | 68/544 [00:26<03:04,  2.58it/s] 13%|█▎        | 69/544 [00:26<03:03,  2.59it/s] 13%|█▎        | 70/544 [00:27<03:03,  2.58it/s] 13%|█▎        | 71/544 [00:27<03:02,  2.59it/s] 13%|█▎        | 72/544 [00:27<03:03,  2.58it/s] 13%|█▎        | 73/544 [00:28<03:02,  2.58it/s] 14%|█▎        | 74/544 [00:28<03:01,  2.59it/s] 14%|█▍        | 75/544 [00:29<03:01,  2.59it/s] 14%|█▍        | 76/544 [00:29<03:00,  2.59it/s] 14%|█▍        | 77/544 [00:29<02:59,  2.60it/s] 14%|█▍        | 78/544 [00:30<02:59,  2.60it/s] 15%|█▍        | 79/544 [00:30<02:59,  2.60it/s] 15%|█▍        | 80/544 [00:31<02:58,  2.59it/s] 15%|█▍        | 81/544 [00:31<03:02,  2.54it/s] 15%|█▌        | 82/544 [00:31<03:01,  2.54it/s] 15%|█▌        | 83/544 [00:32<03:00,  2.55it/s] 15%|█▌        | 84/544 [00:32<02:59,  2.56it/s] 16%|█▌        | 85/544 [00:33<02:58,  2.57it/s] 16%|█▌        | 86/544 [00:33<02:58,  2.57it/s] 16%|█▌        | 87/544 [00:33<02:57,  2.58it/s] 16%|█▌        | 88/544 [00:34<02:56,  2.58it/s] 16%|█▋        | 89/544 [00:34<02:56,  2.59it/s] 17%|█▋        | 90/544 [00:34<02:55,  2.59it/s] 17%|█▋        | 91/544 [00:35<02:54,  2.59it/s] 17%|█▋        | 92/544 [00:35<02:54,  2.59it/s] 17%|█▋        | 93/544 [00:36<02:53,  2.60it/s] 17%|█▋        | 94/544 [00:36<02:53,  2.60it/s] 17%|█▋        | 95/544 [00:36<02:52,  2.60it/s] 18%|█▊        | 96/544 [00:37<02:53,  2.59it/s] 18%|█▊        | 97/544 [00:37<02:52,  2.59it/s] 18%|█▊        | 98/544 [00:38<02:52,  2.58it/s] 18%|█▊        | 99/544 [00:38<02:51,  2.59it/s] 18%|█▊        | 100/544 [00:38<02:52,  2.57it/s] 19%|█▊        | 101/544 [00:39<02:51,  2.58it/s] 19%|█▉        | 102/544 [00:39<02:52,  2.56it/s] 19%|█▉        | 103/544 [00:40<02:52,  2.56it/s] 19%|█▉        | 104/544 [00:40<02:51,  2.56it/s] 19%|█▉        | 105/544 [00:40<02:50,  2.57it/s] 19%|█▉        | 106/544 [00:41<02:49,  2.58it/s] 20%|█▉        | 107/544 [00:41<02:49,  2.58it/s] 20%|█▉        | 108/544 [00:41<02:51,  2.54it/s] 20%|██        | 109/544 [00:42<02:51,  2.54it/s] 20%|██        | 110/544 [00:42<02:50,  2.55it/s] 20%|██        | 111/544 [00:43<02:49,  2.55it/s] 21%|██        | 112/544 [00:43<02:48,  2.56it/s] 21%|██        | 113/544 [00:43<02:47,  2.57it/s] 21%|██        | 114/544 [00:44<02:47,  2.56it/s] 21%|██        | 115/544 [00:44<02:46,  2.57it/s] 21%|██▏       | 116/544 [00:45<02:46,  2.58it/s] 22%|██▏       | 117/544 [00:45<02:44,  2.59it/s] 22%|██▏       | 118/544 [00:45<02:44,  2.59it/s] 22%|██▏       | 119/544 [00:46<02:44,  2.58it/s] 22%|██▏       | 120/544 [00:46<02:44,  2.57it/s] 22%|██▏       | 121/544 [00:47<02:44,  2.58it/s] 22%|██▏       | 122/544 [00:47<02:43,  2.59it/s] 23%|██▎       | 123/544 [00:47<02:42,  2.59it/s] 23%|██▎       | 124/544 [00:48<02:42,  2.58it/s] 23%|██▎       | 125/544 [00:48<02:41,  2.59it/s] 23%|██▎       | 126/544 [00:48<02:41,  2.58it/s] 23%|██▎       | 127/544 [00:49<02:41,  2.58it/s] 24%|██▎       | 128/544 [00:49<02:42,  2.56it/s] 24%|██▎       | 129/544 [00:50<02:41,  2.57it/s] 24%|██▍       | 130/544 [00:50<02:40,  2.58it/s] 24%|██▍       | 131/544 [00:50<02:39,  2.58it/s] 24%|██▍       | 132/544 [00:51<02:39,  2.59it/s] 24%|██▍       | 133/544 [00:51<02:40,  2.57it/s] 25%|██▍       | 134/544 [00:52<02:39,  2.57it/s] 25%|██▍       | 135/544 [00:52<02:38,  2.58it/s] 25%|██▌       | 136/544 [00:52<02:38,  2.57it/s] 25%|██▌       | 137/544 [00:53<02:37,  2.58it/s] 25%|██▌       | 138/544 [00:53<02:37,  2.57it/s] 26%|██▌       | 139/544 [00:53<02:36,  2.58it/s] 26%|██▌       | 140/544 [00:54<02:36,  2.58it/s] 26%|██▌       | 141/544 [00:54<02:35,  2.59it/s] 26%|██▌       | 142/544 [00:55<02:36,  2.57it/s] 26%|██▋       | 143/544 [00:55<02:35,  2.58it/s] 26%|██▋       | 144/544 [00:55<02:34,  2.58it/s] 27%|██▋       | 145/544 [00:56<02:34,  2.58it/s] 27%|██▋       | 146/544 [00:56<02:33,  2.58it/s] 27%|██▋       | 147/544 [00:57<02:33,  2.59it/s] 27%|██▋       | 148/544 [00:57<02:32,  2.59it/s] 27%|██▋       | 149/544 [00:57<02:32,  2.59it/s] 28%|██▊       | 150/544 [00:58<02:32,  2.59it/s] 28%|██▊       | 151/544 [00:58<02:31,  2.59it/s] 28%|██▊       | 152/544 [00:59<02:32,  2.58it/s] 28%|██▊       | 153/544 [00:59<02:31,  2.58it/s] 28%|██▊       | 154/544 [00:59<02:31,  2.58it/s] 28%|██▊       | 155/544 [01:00<02:30,  2.58it/s] 29%|██▊       | 156/544 [01:00<02:31,  2.57it/s] 29%|██▉       | 157/544 [01:00<02:30,  2.57it/s] 29%|██▉       | 158/544 [01:01<02:29,  2.58it/s] 29%|██▉       | 159/544 [01:01<02:28,  2.58it/s] 29%|██▉       | 160/544 [01:02<02:28,  2.58it/s] 30%|██▉       | 161/544 [01:02<02:27,  2.59it/s] 30%|██▉       | 162/544 [01:02<02:27,  2.59it/s] 30%|██▉       | 163/544 [01:03<02:27,  2.59it/s] 30%|███       | 164/544 [01:03<02:26,  2.59it/s] 30%|███       | 165/544 [01:04<02:26,  2.59it/s] 31%|███       | 166/544 [01:04<02:26,  2.58it/s] 31%|███       | 167/544 [01:04<02:25,  2.59it/s] 31%|███       | 168/544 [01:05<02:25,  2.58it/s] 31%|███       | 169/544 [01:05<02:24,  2.59it/s] 31%|███▏      | 170/544 [01:05<02:25,  2.57it/s] 31%|███▏      | 171/544 [01:06<02:24,  2.58it/s] 32%|███▏      | 172/544 [01:06<02:23,  2.58it/s] 32%|███▏      | 173/544 [01:07<02:23,  2.59it/s] 32%|███▏      | 174/544 [01:07<02:22,  2.59it/s] 32%|███▏      | 175/544 [01:07<02:22,  2.59it/s] 32%|███▏      | 176/544 [01:12<10:21,  1.69s/it] 33%|███▎      | 177/544 [01:13<07:58,  1.30s/it] 33%|███▎      | 178/544 [01:13<06:16,  1.03s/it] 33%|███▎      | 179/544 [01:13<05:04,  1.20it/s] 33%|███▎      | 180/544 [01:14<04:15,  1.42it/s] 33%|███▎      | 181/544 [01:14<03:40,  1.64it/s] 33%|███▎      | 182/544 [01:14<03:16,  1.84it/s] 34%|███▎      | 183/544 [01:19<09:44,  1.62s/it] 34%|███▍      | 184/544 [01:20<08:29,  1.42s/it] 34%|███▍      | 185/544 [01:20<06:36,  1.11s/it] 34%|███▍      | 186/544 [01:20<05:18,  1.12it/s] 34%|███▍      | 187/544 [01:21<04:23,  1.35it/s] 35%|███▍      | 188/544 [01:21<03:45,  1.58it/s] 35%|███▍      | 189/544 [01:21<03:18,  1.79it/s] 35%|███▍      | 190/544 [01:22<02:59,  1.97it/s] 35%|███▌      | 191/544 [01:22<02:45,  2.13it/s] 35%|███▌      | 192/544 [01:23<02:36,  2.25it/s] 35%|███▌      | 193/544 [01:23<02:29,  2.34it/s] 36%|███▌      | 194/544 [01:23<02:25,  2.40it/s] 36%|███▌      | 195/544 [01:24<02:21,  2.46it/s] 36%|███▌      | 196/544 [01:24<02:19,  2.49it/s] 36%|███▌      | 197/544 [01:25<02:17,  2.52it/s] 36%|███▋      | 198/544 [01:25<02:17,  2.52it/s] 37%|███▋      | 199/544 [01:25<02:15,  2.54it/s] 37%|███▋      | 200/544 [01:26<02:14,  2.55it/s] 37%|███▋      | 201/544 [01:26<02:13,  2.57it/s] 37%|███▋      | 202/544 [01:27<02:12,  2.57it/s] 37%|███▋      | 203/544 [01:27<02:12,  2.58it/s] 38%|███▊      | 204/544 [01:27<02:11,  2.58it/s] 38%|███▊      | 205/544 [01:28<02:10,  2.59it/s] 38%|███▊      | 206/544 [01:28<02:10,  2.59it/s] 38%|███▊      | 207/544 [01:28<02:10,  2.59it/s] 38%|███▊      | 208/544 [01:29<02:10,  2.57it/s] 38%|███▊      | 209/544 [01:29<02:09,  2.58it/s] 39%|███▊      | 210/544 [01:30<02:09,  2.57it/s] 39%|███▉      | 211/544 [01:30<02:08,  2.58it/s] 39%|███▉      | 212/544 [01:30<02:09,  2.57it/s] 39%|███▉      | 213/544 [01:31<02:08,  2.58it/s] 39%|███▉      | 214/544 [01:31<02:07,  2.58it/s] 40%|███▉      | 215/544 [01:32<02:07,  2.59it/s] 40%|███▉      | 216/544 [01:32<02:06,  2.59it/s] 40%|███▉      | 217/544 [01:32<02:06,  2.59it/s] 40%|████      | 218/544 [01:33<02:05,  2.59it/s] 40%|████      | 219/544 [01:33<02:05,  2.60it/s] 40%|████      | 220/544 [01:33<02:04,  2.59it/s] 41%|████      | 221/544 [01:34<02:04,  2.60it/s] 41%|████      | 222/544 [01:34<02:04,  2.58it/s] 41%|████      | 223/544 [01:37<05:32,  1.03s/it] 41%|████      | 224/544 [01:37<04:29,  1.19it/s] 41%|████▏     | 225/544 [01:38<03:44,  1.42it/s] 42%|████▏     | 226/544 [01:38<03:14,  1.63it/s] 42%|████▏     | 227/544 [01:38<02:52,  1.84it/s] 42%|████▏     | 228/544 [01:41<05:59,  1.14s/it] 42%|████▏     | 229/544 [01:41<04:47,  1.10it/s] 42%|████▏     | 230/544 [01:42<03:56,  1.33it/s] 42%|████▏     | 231/544 [01:42<03:21,  1.55it/s] 43%|████▎     | 232/544 [01:42<02:56,  1.77it/s] 43%|████▎     | 233/544 [01:43<02:39,  1.95it/s] 43%|████▎     | 234/544 [01:43<02:27,  2.11it/s] 43%|████▎     | 235/544 [01:44<02:18,  2.24it/s] 43%|████▎     | 236/544 [01:44<02:12,  2.32it/s] 44%|████▎     | 237/544 [01:44<02:08,  2.40it/s] 44%|████▍     | 238/544 [01:45<02:05,  2.44it/s] 44%|████▍     | 239/544 [01:45<02:02,  2.48it/s] 44%|████▍     | 240/544 [01:46<02:01,  2.50it/s] 44%|████▍     | 241/544 [01:46<01:59,  2.53it/s] 44%|████▍     | 242/544 [01:46<01:59,  2.52it/s] 45%|████▍     | 243/544 [01:47<01:58,  2.54it/s] 45%|████▍     | 244/544 [01:47<01:57,  2.55it/s] 45%|████▌     | 245/544 [01:47<01:56,  2.56it/s] 45%|████▌     | 246/544 [01:48<01:55,  2.57it/s] 45%|████▌     | 247/544 [01:48<01:55,  2.58it/s] 46%|████▌     | 248/544 [01:49<01:54,  2.58it/s] 46%|████▌     | 249/544 [01:49<01:56,  2.53it/s] 46%|████▌     | 250/544 [01:49<01:56,  2.53it/s] 46%|████▌     | 251/544 [01:50<01:54,  2.55it/s] 46%|████▋     | 252/544 [01:50<01:54,  2.56it/s] 47%|████▋     | 253/544 [01:51<01:53,  2.56it/s] 47%|████▋     | 254/544 [01:51<01:53,  2.55it/s] 47%|████▋     | 255/544 [01:51<01:52,  2.57it/s] 47%|████▋     | 256/544 [01:52<01:52,  2.57it/s] 47%|████▋     | 257/544 [01:52<01:51,  2.58it/s] 47%|████▋     | 258/544 [01:53<01:50,  2.58it/s] 48%|████▊     | 259/544 [01:53<01:50,  2.59it/s] 48%|████▊     | 260/544 [01:53<01:49,  2.59it/s] 48%|████▊     | 261/544 [01:54<01:49,  2.59it/s] 48%|████▊     | 262/544 [01:54<01:48,  2.59it/s] 48%|████▊     | 263/544 [01:54<01:48,  2.59it/s] 49%|████▊     | 264/544 [01:55<01:48,  2.58it/s] 49%|████▊     | 265/544 [01:55<01:47,  2.58it/s] 49%|████▉     | 266/544 [01:56<01:47,  2.58it/s] 49%|████▉     | 267/544 [01:56<01:47,  2.58it/s] 49%|████▉     | 268/544 [01:56<01:47,  2.57it/s] 49%|████▉     | 269/544 [02:01<07:46,  1.69s/it] 50%|████▉     | 270/544 [02:02<05:56,  1.30s/it] 50%|████▉     | 271/544 [02:02<04:40,  1.03s/it] 50%|█████     | 272/544 [02:02<03:47,  1.20it/s] 50%|█████     | 273/544 [02:03<03:09,  1.43it/s] 50%|█████     | 274/544 [02:03<02:44,  1.65it/s] 51%|█████     | 275/544 [02:03<02:25,  1.85it/s] 51%|█████     | 276/544 [02:08<07:54,  1.77s/it] 51%|█████     | 277/544 [02:09<06:03,  1.36s/it] 51%|█████     | 278/544 [02:09<04:44,  1.07s/it] 51%|█████▏    | 279/544 [02:09<03:49,  1.16it/s] 51%|█████▏    | 280/544 [02:10<03:10,  1.38it/s] 52%|█████▏    | 281/544 [02:10<02:43,  1.61it/s] 52%|█████▏    | 282/544 [02:10<02:25,  1.80it/s] 52%|█████▏    | 283/544 [02:11<02:11,  1.98it/s] 52%|█████▏    | 284/544 [02:11<02:01,  2.13it/s] 52%|█████▏    | 285/544 [02:12<01:55,  2.25it/s] 53%|█████▎    | 286/544 [02:12<01:50,  2.34it/s] 53%|█████▎    | 287/544 [02:12<01:46,  2.41it/s] 53%|█████▎    | 288/544 [02:13<01:44,  2.46it/s] 53%|█████▎    | 289/544 [02:13<01:42,  2.50it/s] 53%|█████▎    | 290/544 [02:14<01:40,  2.52it/s] 53%|█████▎    | 291/544 [02:14<01:39,  2.54it/s] 54%|█████▎    | 292/544 [02:14<01:39,  2.54it/s] 54%|█████▍    | 293/544 [02:15<01:38,  2.56it/s] 54%|█████▍    | 294/544 [02:15<01:37,  2.56it/s] 54%|█████▍    | 295/544 [02:16<01:36,  2.57it/s] 54%|█████▍    | 296/544 [02:16<01:36,  2.56it/s] 55%|█████▍    | 297/544 [02:16<01:36,  2.57it/s] 55%|█████▍    | 298/544 [02:17<01:35,  2.57it/s] 55%|█████▍    | 299/544 [02:17<01:35,  2.58it/s] 55%|█████▌    | 300/544 [02:17<01:34,  2.58it/s] 55%|█████▌    | 301/544 [02:18<01:34,  2.58it/s] 56%|█████▌    | 302/544 [02:18<01:33,  2.58it/s] 56%|█████▌    | 303/544 [02:19<01:33,  2.58it/s] 56%|█████▌    | 304/544 [02:19<01:32,  2.59it/s] 56%|█████▌    | 305/544 [02:19<01:32,  2.59it/s] 56%|█████▋    | 306/544 [02:20<01:32,  2.58it/s] 56%|█████▋    | 307/544 [02:20<01:31,  2.58it/s] 57%|█████▋    | 308/544 [02:21<01:31,  2.58it/s] 57%|█████▋    | 309/544 [02:21<01:31,  2.58it/s] 57%|█████▋    | 310/544 [02:21<01:31,  2.57it/s] 57%|█████▋    | 311/544 [02:22<01:30,  2.57it/s] 57%|█████▋    | 312/544 [02:22<01:30,  2.57it/s] 58%|█████▊    | 313/544 [02:22<01:29,  2.58it/s] 58%|█████▊    | 314/544 [02:23<01:29,  2.58it/s] 58%|█████▊    | 315/544 [02:23<01:28,  2.59it/s] 58%|█████▊    | 316/544 [02:24<01:28,  2.59it/s] 58%|█████▊    | 317/544 [02:24<01:27,  2.59it/s] 58%|█████▊    | 318/544 [02:24<01:27,  2.59it/s] 59%|█████▊    | 319/544 [02:25<01:26,  2.59it/s] 59%|█████▉    | 320/544 [02:25<01:26,  2.58it/s] 59%|█████▉    | 321/544 [02:30<06:14,  1.68s/it] 59%|█████▉    | 322/544 [02:30<04:48,  1.30s/it] 59%|█████▉    | 323/544 [02:31<03:46,  1.03s/it] 60%|█████▉    | 324/544 [02:31<03:03,  1.20it/s] 60%|█████▉    | 325/544 [02:31<02:33,  1.43it/s] 60%|█████▉    | 326/544 [02:32<02:12,  1.65it/s] 60%|██████    | 327/544 [02:32<01:57,  1.85it/s] 60%|██████    | 328/544 [02:33<01:46,  2.03it/s] 60%|██████    | 329/544 [02:33<01:39,  2.17it/s] 61%|██████    | 330/544 [02:33<01:34,  2.28it/s] 61%|██████    | 331/544 [02:38<05:29,  1.55s/it] 61%|██████    | 332/544 [02:38<04:48,  1.36s/it] 61%|██████    | 333/544 [02:39<03:45,  1.07s/it] 61%|██████▏   | 334/544 [02:39<03:01,  1.15it/s] 62%|██████▏   | 335/544 [02:40<02:30,  1.39it/s] 62%|██████▏   | 336/544 [02:40<02:09,  1.61it/s] 62%|██████▏   | 337/544 [02:40<01:53,  1.82it/s] 62%|██████▏   | 338/544 [02:41<01:43,  1.99it/s] 62%|██████▏   | 339/544 [02:41<01:35,  2.14it/s] 62%|██████▎   | 340/544 [02:42<01:30,  2.26it/s] 63%|██████▎   | 341/544 [02:42<01:26,  2.35it/s] 63%|██████▎   | 342/544 [02:42<01:23,  2.41it/s] 63%|██████▎   | 343/544 [02:43<01:21,  2.47it/s] 63%|██████▎   | 344/544 [02:43<01:19,  2.50it/s] 63%|██████▎   | 345/544 [02:43<01:18,  2.53it/s] 64%|██████▎   | 346/544 [02:44<01:17,  2.55it/s] 64%|██████▍   | 347/544 [02:44<01:16,  2.56it/s] 64%|██████▍   | 348/544 [02:45<01:16,  2.56it/s] 64%|██████▍   | 349/544 [02:45<01:15,  2.57it/s] 64%|██████▍   | 350/544 [02:45<01:15,  2.57it/s] 65%|██████▍   | 351/544 [02:46<01:14,  2.58it/s] 65%|██████▍   | 352/544 [02:46<01:14,  2.56it/s] 65%|██████▍   | 353/544 [02:47<01:14,  2.57it/s] 65%|██████▌   | 354/544 [02:47<01:13,  2.57it/s] 65%|██████▌   | 355/544 [02:47<01:13,  2.58it/s] 65%|██████▌   | 356/544 [02:48<01:12,  2.58it/s] 66%|██████▌   | 357/544 [02:48<01:12,  2.58it/s] 66%|██████▌   | 358/544 [02:49<01:13,  2.52it/s] 66%|██████▌   | 359/544 [02:49<01:12,  2.55it/s] 66%|██████▌   | 360/544 [02:49<01:11,  2.56it/s] 66%|██████▋   | 361/544 [02:50<01:11,  2.57it/s] 67%|██████▋   | 362/544 [02:50<01:10,  2.57it/s] 67%|██████▋   | 363/544 [02:50<01:10,  2.57it/s] 67%|██████▋   | 364/544 [02:51<01:10,  2.56it/s] 67%|██████▋   | 365/544 [02:51<01:09,  2.57it/s] 67%|██████▋   | 366/544 [02:52<01:09,  2.56it/s] 67%|██████▋   | 367/544 [02:52<01:08,  2.57it/s] 68%|██████▊   | 368/544 [02:52<01:08,  2.58it/s] 68%|██████▊   | 369/544 [02:53<01:07,  2.58it/s] 68%|██████▊   | 370/544 [02:53<01:07,  2.58it/s] 68%|██████▊   | 371/544 [02:54<01:06,  2.59it/s] 68%|██████▊   | 372/544 [02:54<01:06,  2.59it/s] 69%|██████▊   | 373/544 [02:54<01:06,  2.59it/s] 69%|██████▉   | 374/544 [02:55<01:05,  2.59it/s] 69%|██████▉   | 375/544 [02:55<01:05,  2.59it/s] 69%|██████▉   | 376/544 [02:56<01:05,  2.57it/s] 69%|██████▉   | 377/544 [02:56<01:04,  2.58it/s] 69%|██████▉   | 378/544 [02:56<01:04,  2.57it/s] 70%|██████▉   | 379/544 [02:57<01:04,  2.57it/s] 70%|██████▉   | 380/544 [02:57<01:03,  2.56it/s] 70%|███████   | 381/544 [02:57<01:03,  2.57it/s] 70%|███████   | 382/544 [02:58<01:03,  2.57it/s] 70%|███████   | 383/544 [02:58<01:02,  2.57it/s] 71%|███████   | 384/544 [02:59<01:02,  2.58it/s] 71%|███████   | 385/544 [02:59<01:01,  2.58it/s] 71%|███████   | 386/544 [02:59<01:01,  2.56it/s] 71%|███████   | 387/544 [03:00<01:26,  1.81it/s] 71%|███████▏  | 388/544 [03:01<01:18,  1.98it/s] 72%|███████▏  | 389/544 [03:01<01:12,  2.13it/s] 72%|███████▏  | 390/544 [03:02<01:33,  1.64it/s] 72%|███████▏  | 391/544 [03:02<01:23,  1.84it/s] 72%|███████▏  | 392/544 [03:03<01:15,  2.01it/s] 72%|███████▏  | 393/544 [03:03<01:10,  2.15it/s] 72%|███████▏  | 394/544 [03:04<01:06,  2.26it/s] 73%|███████▎  | 395/544 [03:04<01:03,  2.35it/s] 73%|███████▎  | 396/544 [03:04<01:01,  2.42it/s]INFO:absl:Sharding axis 1. Tensor shape (1001, 1152)
+ 73%|███████▎  | 397/544 [03:05<00:59,  2.46it/s] 73%|███████▎  | 398/544 [03:05<00:58,  2.50it/s] 73%|███████▎  | 399/544 [03:06<00:57,  2.52it/s]INFO:absl:Sharding axis 1. Tensor shape (1, 256, 1152)
+ 74%|███████▎  | 400/544 [03:06<00:56,  2.54it/s] 74%|███████▎  | 401/544 [03:06<00:56,  2.55it/s] 74%|███████▍  | 402/544 [03:07<00:55,  2.56it/s] 74%|███████▍  | 403/544 [03:07<00:54,  2.57it/s] 74%|███████▍  | 404/544 [03:08<00:54,  2.57it/s] 74%|███████▍  | 405/544 [03:08<00:53,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 4, 512)
+ 75%|███████▍  | 406/544 [03:08<00:53,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3,)
+ 75%|███████▍  | 407/544 [03:09<00:53,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 3)
+ 75%|███████▌  | 408/544 [03:09<00:52,  2.58it/s] 75%|███████▌  | 409/544 [03:09<00:52,  2.58it/s] 75%|███████▌  | 410/544 [03:10<00:51,  2.58it/s] 76%|███████▌  | 411/544 [03:10<00:51,  2.58it/s] 76%|███████▌  | 412/544 [03:11<00:51,  2.58it/s] 76%|███████▌  | 413/544 [03:11<00:50,  2.59it/s] 76%|███████▌  | 414/544 [03:11<00:50,  2.58it/s] 76%|███████▋  | 415/544 [03:12<00:49,  2.59it/s] 76%|███████▋  | 416/544 [03:12<00:49,  2.58it/s] 77%|███████▋  | 417/544 [03:13<00:49,  2.58it/s] 77%|███████▋  | 418/544 [03:13<00:48,  2.59it/s] 77%|███████▋  | 419/544 [03:13<00:48,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 77%|███████▋  | 420/544 [03:14<00:49,  2.50it/s] 77%|███████▋  | 421/544 [03:14<00:48,  2.52it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 78%|███████▊  | 422/544 [03:15<00:49,  2.46it/s] 78%|███████▊  | 423/544 [03:15<00:48,  2.50it/s] 78%|███████▊  | 424/544 [03:15<00:47,  2.52it/s] 78%|███████▊  | 425/544 [03:16<00:46,  2.54it/s] 78%|███████▊  | 426/544 [03:16<00:46,  2.56it/s] 78%|███████▊  | 427/544 [03:16<00:45,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 79%|███████▊  | 428/544 [03:17<00:46,  2.48it/s] 79%|███████▉  | 429/544 [03:17<00:45,  2.51it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 79%|███████▉  | 430/544 [03:18<00:46,  2.46it/s] 79%|███████▉  | 431/544 [03:18<00:45,  2.50it/s] 79%|███████▉  | 432/544 [03:19<00:44,  2.52it/s] 80%|███████▉  | 433/544 [03:19<00:43,  2.54it/s] 80%|███████▉  | 434/544 [03:19<00:42,  2.56it/s] 80%|███████▉  | 435/544 [03:20<00:42,  2.57it/s] 80%|████████  | 436/544 [03:20<00:41,  2.58it/s]INFO:absl:Not sharding. Tensor shape (4,)
+ 80%|████████  | 437/544 [03:20<00:41,  2.57it/s]INFO:absl:Not sharding. Tensor shape (1, 1, 4, 4)
+ 81%|████████  | 438/544 [03:21<00:42,  2.52it/s] 81%|████████  | 439/544 [03:21<00:41,  2.54it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 81%|████████  | 440/544 [03:22<00:42,  2.47it/s] 81%|████████  | 441/544 [03:22<00:41,  2.51it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 81%|████████▏ | 442/544 [03:22<00:41,  2.44it/s] 81%|████████▏ | 443/544 [03:23<00:40,  2.48it/s] 82%|████████▏ | 444/544 [03:23<00:39,  2.51it/s] 82%|████████▏ | 445/544 [03:24<00:39,  2.53it/s] 82%|████████▏ | 446/544 [03:24<00:38,  2.54it/s] 82%|████████▏ | 447/544 [03:24<00:37,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 82%|████████▏ | 448/544 [03:25<00:38,  2.48it/s] 83%|████████▎ | 449/544 [03:25<00:37,  2.51it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 83%|████████▎ | 450/544 [03:26<00:38,  2.43it/s] 83%|████████▎ | 451/544 [03:26<00:37,  2.47it/s] 83%|████████▎ | 452/544 [03:26<00:36,  2.50it/s] 83%|████████▎ | 453/544 [03:27<00:36,  2.53it/s] 83%|████████▎ | 454/544 [03:27<00:35,  2.54it/s] 84%|████████▎ | 455/544 [03:28<00:34,  2.55it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 84%|████████▍ | 456/544 [03:28<00:35,  2.48it/s] 84%|████████▍ | 457/544 [03:28<00:34,  2.51it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 84%|████████▍ | 458/544 [03:29<00:35,  2.45it/s] 84%|████████▍ | 459/544 [03:29<00:34,  2.49it/s] 85%|████████▍ | 460/544 [03:30<00:33,  2.52it/s] 85%|████████▍ | 461/544 [03:30<00:32,  2.54it/s] 85%|████████▍ | 462/544 [03:30<00:32,  2.55it/s] 85%|████████▌ | 463/544 [03:31<00:31,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 85%|████████▌ | 464/544 [03:31<00:32,  2.48it/s] 85%|████████▌ | 465/544 [03:32<00:31,  2.52it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 86%|████████▌ | 466/544 [03:32<00:31,  2.44it/s] 86%|████████▌ | 467/544 [03:32<00:31,  2.48it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 86%|████████▌ | 468/544 [03:33<00:31,  2.43it/s] 86%|████████▌ | 469/544 [03:33<00:30,  2.48it/s] 86%|████████▋ | 470/544 [03:34<00:29,  2.51it/s] 87%|████████▋ | 471/544 [03:34<00:28,  2.53it/s] 87%|████████▋ | 472/544 [03:34<00:28,  2.55it/s] 87%|████████▋ | 473/544 [03:35<00:27,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 87%|████████▋ | 474/544 [03:35<00:28,  2.48it/s] 87%|████████▋ | 475/544 [03:36<00:27,  2.51it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 88%|████████▊ | 476/544 [03:36<00:27,  2.46it/s] 88%|████████▊ | 477/544 [03:36<00:26,  2.49it/s] 88%|████████▊ | 478/544 [03:37<00:26,  2.52it/s] 88%|████████▊ | 479/544 [03:37<00:25,  2.54it/s] 88%|████████▊ | 480/544 [03:38<00:25,  2.55it/s] 88%|████████▊ | 481/544 [03:38<00:24,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 89%|████████▊ | 482/544 [03:38<00:25,  2.48it/s] 89%|████████▉ | 483/544 [03:39<00:24,  2.51it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 89%|████████▉ | 484/544 [03:39<00:24,  2.45it/s] 89%|████████▉ | 485/544 [03:40<00:23,  2.49it/s] 89%|████████▉ | 486/544 [03:40<00:23,  2.51it/s] 90%|████████▉ | 487/544 [03:40<00:22,  2.54it/s] 90%|████████▉ | 488/544 [03:41<00:21,  2.55it/s] 90%|████████▉ | 489/544 [03:41<00:21,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 90%|█████████ | 490/544 [03:42<00:21,  2.49it/s] 90%|█████████ | 491/544 [03:42<00:21,  2.51it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 256)
+ 90%|█████████ | 492/544 [03:42<00:20,  2.50it/s] 91%|█████████ | 493/544 [03:43<00:20,  2.52it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 91%|█████████ | 494/544 [03:43<00:19,  2.52it/s] 91%|█████████ | 495/544 [03:44<00:19,  2.53it/s]INFO:absl:Not sharding. Tensor shape (1, 1, 512, 256)
+ 91%|█████████ | 496/544 [03:44<00:18,  2.55it/s] 91%|█████████▏| 497/544 [03:44<00:18,  2.56it/s] 92%|█████████▏| 498/544 [03:45<00:17,  2.57it/s] 92%|█████████▏| 499/544 [03:45<00:17,  2.58it/s] 92%|█████████▏| 500/544 [03:46<00:17,  2.58it/s] 92%|█████████▏| 501/544 [03:46<00:16,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 92%|█████████▏| 502/544 [03:46<00:16,  2.56it/s] 92%|█████████▏| 503/544 [03:47<00:15,  2.57it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 93%|█████████▎| 504/544 [03:47<00:15,  2.54it/s] 93%|█████████▎| 505/544 [03:47<00:15,  2.56it/s] 93%|█████████▎| 506/544 [03:48<00:14,  2.56it/s] 93%|█████████▎| 507/544 [03:48<00:14,  2.57it/s] 93%|█████████▎| 508/544 [03:49<00:13,  2.58it/s] 94%|█████████▎| 509/544 [03:49<00:13,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 94%|█████████▍| 510/544 [03:49<00:13,  2.55it/s] 94%|█████████▍| 511/544 [03:50<00:12,  2.57it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 94%|█████████▍| 512/544 [03:50<00:12,  2.55it/s] 94%|█████████▍| 513/544 [03:51<00:12,  2.56it/s] 94%|█████████▍| 514/544 [03:51<00:11,  2.57it/s] 95%|█████████▍| 515/544 [03:51<00:11,  2.57it/s] 95%|█████████▍| 516/544 [03:52<00:10,  2.58it/s] 95%|█████████▌| 517/544 [03:52<00:10,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 95%|█████████▌| 518/544 [03:53<00:10,  2.55it/s] 95%|█████████▌| 519/544 [03:53<00:09,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 128)
+ 96%|█████████▌| 520/544 [03:53<00:09,  2.56it/s] 96%|█████████▌| 521/544 [03:54<00:08,  2.57it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 96%|█████████▌| 522/544 [03:54<00:08,  2.57it/s] 96%|█████████▌| 523/544 [03:54<00:08,  2.57it/s]INFO:absl:Not sharding. Tensor shape (1, 1, 256, 128)
+ 96%|█████████▋| 524/544 [03:55<00:07,  2.57it/s] 97%|█████████▋| 525/544 [03:55<00:07,  2.57it/s] 97%|█████████▋| 526/544 [03:56<00:06,  2.58it/s] 97%|█████████▋| 527/544 [03:56<00:06,  2.58it/s] 97%|█████████▋| 528/544 [03:56<00:06,  2.58it/s] 97%|█████████▋| 529/544 [03:57<00:05,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 97%|█████████▋| 530/544 [03:57<00:05,  2.57it/s] 98%|█████████▊| 531/544 [03:58<00:05,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 98%|█████████▊| 532/544 [03:58<00:04,  2.57it/s] 98%|█████████▊| 533/544 [03:58<00:04,  2.57it/s] 98%|█████████▊| 534/544 [03:59<00:03,  2.58it/s] 98%|█████████▊| 535/544 [03:59<00:03,  2.58it/s] 99%|█████████▊| 536/544 [04:00<00:03,  2.58it/s] 99%|█████████▊| 537/544 [04:00<00:02,  2.59it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 99%|█████████▉| 538/544 [04:00<00:02,  2.58it/s] 99%|█████████▉| 539/544 [04:01<00:01,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 99%|█████████▉| 540/544 [04:01<00:01,  2.58it/s] 99%|█████████▉| 541/544 [04:01<00:01,  2.58it/s]100%|█████████▉| 542/544 [04:02<00:00,  2.58it/s]100%|█████████▉| 543/544 [04:02<00:00,  2.58it/s]100%|██████████| 544/544 [04:03<00:00,  2.58it/s]100%|██████████| 544/544 [04:03<00:00,  2.24it/s]
+INFO:absl:Elapse for checkpoint sharding: 4.06 min
+INFO:absl:Creating checkpointer with ocdbt=False and zarr3=False
+INFO:absl:[thread=MainThread] Failed to get flag value for EXPERIMENTAL_ORBAX_USE_DISTRIBUTED_PROCESS_ID.
+INFO:absl:[process=0][thread=MainThread] CheckpointManager init: checkpointers=None, item_names=None, item_handlers=None, handler_registry=None
+INFO:absl:Initialized registry DefaultCheckpointHandlerRegistry({('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonSaveArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x74173f5ad010>, ('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonRestoreArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x74173f5ad010>}).
+INFO:absl:orbax-checkpoint version: 0.12.4
+INFO:absl:[process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x741742a07b00> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+INFO:absl:Found 0 checkpoint steps in /tmp/output/dit-xl-2-256/09111803
+INFO:absl:[process=0][thread=MainThread] CheckpointManager created,  primary_host=0, CheckpointManagerOptions=CheckpointManagerOptions(save_interval_steps=1, max_to_keep=None, keep_time_interval=None, keep_period=None, best_fn=None, best_mode='max', keep_checkpoints_without_metrics=True, step_prefix=None, step_format_fixed_length=None, step_name_format=None, create=True, cleanup_tmp_directories=False, save_on_steps=frozenset(), single_host_load_and_broadcast=False, todelete_subdir=None, todelete_full_path=None, enable_background_delete=False, num_deletion_threads=None, read_only=False, enable_async_checkpointing=True, async_options=AsyncOptions(timeout_secs=1200, barrier_sync_fn=None, post_finalization_callback=None, create_directories_asynchronously=True), multiprocessing_options=MultiprocessingOptions(primary_host=0, active_processes=None, barrier_sync_key_prefix=None), should_save_fn=None, file_options=FileOptions(path_permission_mode=None), atomicity_options=AtomicityOptions(mode=<AtomicityMode.AUTO: 'auto'>, allow_legacy_atomic_rename=False), save_root_metadata=True, temporary_path_class=None, save_decision_policy=FixedIntervalPolicy(interval=1), preservation_policy=LatestN(n=10), prevent_write_metrics=True, enable_should_save_is_saving_in_progress_check=True, enable_per_process_directory_creation=False, lightweight_initialize=False), root_directory=/tmp/output/dit-xl-2-256/09111803: <orbax.checkpoint.checkpoint_manager.CheckpointManager object at 0x74173f5acad0>
+INFO:absl:Checkpoint manager created!
+INFO:absl:Waiting for step 0 to finish before checkpoint...
+INFO:absl:Waited 0.0020046234130859375 seconds for step 0 to finish before starting checkpointing.
+INFO:absl:Created BasePyTreeCheckpointHandler: use_ocdbt=False, use_zarr3=False, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x741741d9f610>, enable_pinned_host_transfer=False, save_concurrent_bytes: 96000000000 (89.4 GiB), restore_concurrent_bytes: 96000000000 (89.4 GiB)
+INFO:absl:Created BasePyTreeCheckpointHandler: use_ocdbt=False, use_zarr3=False, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x741741d9f610>, enable_pinned_host_transfer=False, save_concurrent_bytes: 96000000000 (89.4 GiB), restore_concurrent_bytes: 96000000000 (89.4 GiB)
+INFO:absl:Initialized registry DefaultCheckpointHandlerRegistry({('items', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler)}).
+INFO:absl:[process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x741742a040e0> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+INFO:absl:[process=0][thread=MainThread][wait_until_finished] No Save Finalize thread to wait for. Returning.
+INFO:absl:[process=0] Saving checkpoint at step 0
+INFO:absl:[process=0] [async] Started save checkpoint @ /tmp/output/dit-xl-2-256/09111803/0.
+INFO:absl:Using ThreadSafeKeyValueSignalingClient
+INFO:absl:Creating tmp directory /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp
+INFO:absl:[process=0][thread=MainThread] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 0.001336s
+INFO:absl:Scheduling D2H of 544 prioritized jax.Array.
+INFO:absl:Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+INFO:absl:Wrote Metadata={'item_handlers': None, 'metrics': {}, 'performance_metrics': {}, 'init_timestamp_nsecs': 1789150057939677266, 'commit_timestamp_nsecs': None, 'custom_metadata': {}}, json={"item_handlers": null, "metrics": {}, "performance_metrics": {}, "init_timestamp_nsecs": 1789150057939677266, "commit_timestamp_nsecs": null, "custom_metadata": {}} to /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp/_CHECKPOINT_METADATA
+INFO:absl:Creating tmp directory /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp/items.orbax-checkpoint-tmp
+INFO:absl:[process=0][thread=MainThread] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 3.071341s
+INFO:absl:MemoryRegulated: Peak usage: 0.000000 GiB
+INFO:absl:[process=0] /jax/orbax/write/blocking_gbytes_per_sec: 443.560 MiB/s (total size: 1.4 GiB) (time elapsed: 3.117196559906006 s) (global)
+INFO:absl:[process=0][thread=MainThread] Initiated Pytree async_save. Time taken: 3.117451s (batch_requests_ready=0.013979s, total_serialization_initiated=3.091313s, others=0.012158s)
+INFO:absl:[process=0][thread=MainThread] Initiated CompositeCheckpointHandler.async_save. Time taken: 3.121670s (all_items=0.000012s, per_item={'items': '0.00001240'}, temp_paths=3.121657)
+INFO:absl:[process=0] [async] Finished blocking save in 3.13 seconds. Continuing save @ /tmp/output/dit-xl-2-256/09111803/0.
+INFO:absl:[process=0][thread=async_save] Background save thread started. Deadline for this save operation is 2026-09-11 18:27:41.051022
+INFO:absl:[process=0][thread=MainThread][step=0] Starting CheckpointManager Save Finalize thread=save_finalize
+INFO:absl:[process=0][thread=save_finalize] Waiting for background save thread=async_save.
+INFO:absl:{'step': 0, 'event_type': 'save', 'directory': '/tmp/output/dit-xl-2-256/09111803', 'reached_preemption': False, 'preemption_received_at': None, 'synchronous': False, 'wait_for_prev_start_time': 1789150057.9198976, 'wait_for_prev_duration_secs': 2.6226043701171875e-05, 'time_between_consecutive_saves_sec': None, 'checkpointer_blocking_start_time': 1789150057.9200366, 'checkpointer_blocking_duration_secs': 3.1323554515838623, 'get_old_steps_start_time': 1789150061.0524218, 'get_old_steps_duration_secs': 2.6702880859375e-05, 'checkpoint_manager_blocking_start_time': 1789150057.9198296, 'checkpoint_manager_blocking_duration_secs': 3.133502721786499}
+INFO:absl:[process=0][thread=array_type_handler] Wrote 544 array_metadata.ArrayMetadata to /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp/items.orbax-checkpoint-tmp/array_metadatas/process_0
+INFO:absl:[process=0][thread=Thread-10 (_run_loop)][step=0][wait_until_finished] Waiting for Save Finalize thread (save_finalize) to complete.
+INFO:absl:[process=0] /jax/orbax/write/worker/io/requested throughput: 53.616 MiB/s (total gbytes: 1.4 GiB) (time elapsed: 25.788395166397095 s) (per-host)
+INFO:absl:[process=0] Raw /jax/orbax/write/worker/io/raw throughput: 42.189 MiB/s (total gbytes: 1.1 GiB) (time elapsed: 25.788395166397095 s) (per-host)
+INFO:absl:[process=0] Write ratio (raw/logical): 0.787 (1.1 GiB / 1.4 GiB)
+INFO:absl:[process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 25.778033s (commit=25.762959s, array_metadata_write=0.015074s)
+INFO:absl:[process=0] /jax/orbax/write/gbytes_per_sec: 47.847 MiB/s (total size: 1.4 GiB) (time elapsed: 28.897748470306396 s) (global)
+WARNING:absl:[process=0][thread=Thread-8 (_target_setting_result)] Skipping merge of OCDBT checkpoints: No per-process OCDBT checkpoint subdirs found in /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp/items.orbax-checkpoint-tmp, 
+INFO:absl:[process=0][thread=Thread-8 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+INFO:absl:[process=0][thread=Thread-8 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.002270s. use_zarr3=False, enable_post_merge_validation=True, directory=/tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp/items.orbax-checkpoint-tmp
+INFO:absl:[process=0][thread=async_save] 3 Handler Commit operations completed. Time taken: 25.773534s.
+INFO:absl:Read Metadata={'item_handlers': None, 'metrics': {}, 'performance_metrics': {}, 'init_timestamp_nsecs': 1789150057939677266, 'commit_timestamp_nsecs': None, 'custom_metadata': {}} from /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp/_CHECKPOINT_METADATA
+INFO:absl:Renaming /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp/items.orbax-checkpoint-tmp to /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp/items
+INFO:absl:Updated Metadata={'item_handlers': {'items': 'orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler'}, 'metrics': {}, 'performance_metrics': {}, 'init_timestamp_nsecs': 1789150057939677266, 'commit_timestamp_nsecs': None, 'custom_metadata': {'scan_layers': False}} to /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp/_CHECKPOINT_METADATA
+INFO:absl:Renaming /tmp/output/dit-xl-2-256/09111803/0.orbax-checkpoint-tmp to /tmp/output/dit-xl-2-256/09111803/0
+INFO:absl:[process=0][thread=async_save] Finished saving checkpoint (finalized tmp dir) to `/tmp/output/dit-xl-2-256/09111803/0`.
+INFO:absl:[process=0] [async] Finished save (blocking + background) in 28.91 seconds @ /tmp/output/dit-xl-2-256/09111803/0
+INFO:absl:[process=0][thread=async_save] Background save thread done. Time taken: 25.777329s.
+INFO:absl:[process=0][thread=save_finalize] Done with waiting for background save thread=async_save.
+INFO:absl:[process=0][thread=save_finalize] No errors found in background save thread=async_save.
+INFO:absl:Queuing deletion of steps: [].
+INFO:absl:[process=0][thread=save_finalize][step=0] CheckpointManager Save Finalize is syncing with other hosts...
+INFO:absl:[process=0][thread=save_finalize][step=0] CheckpointManager Save Finalize is done on all hosts.
+INFO:absl:[process=0][thread=Thread-10 (_run_loop)][step=0][wait_until_finished] Done waiting for Save Finalize thread (save_finalize) running at step=0.
+INFO:absl:AsyncRunner: Shutting down (wait=True)...
+INFO:absl:AsyncRunner: No active tasks to wait for.
+INFO:absl:AsyncRunner: Stopped.
+INFO:absl:saved a checkpoint at step 0
+INFO:absl:[process=0][thread=MainThread][wait_until_finished] No Save Finalize thread to wait for. Returning.
+INFO:absl:Elapse for checkpoint save: 0.48 min
+INFO:absl:[Program Ends] RAM Usage: 30.05/1417.33 GB (2.1%)
+INFO:absl:Conversion complete. Checkpoint saved to /tmp/output/dit-xl-2-256/09111803/
+INFO:absl:Overall Elapse: 4.62 min
+INFO:absl:Peak Memory: 6.60 GB

@@ -1,0 +1,111 @@
+/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/torch/cuda/__init__.py:64: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[transformers] DeepseekV32Config got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] DeepseekV4Config got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+2026-09-10 09:49:58.939746: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+2026-09-10 09:49:58.940102: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-10 09:49:58.973844: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-09-10 09:50:00.023978: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-10 09:50:00.024803: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+2026-09-10 09:50:00.444189: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+W0910 09:50:00.520339 131687497754688 pyconfig.py:441] WARNING: Passing 'hf_access_token' via command-line arguments is deprecated and insecure because it makes your token visible in 'ps' and shell history. Please set the 'HF_TOKEN' environment variable instead.
+W0910 09:50:00.547889 131687497754688 pyconfig.py:111] base_output_directory is not provided; Using local directory called maxtext_output
+I0910 09:50:00.604394 131687497754688 max_utils.py:297] Attempting to initialize the jax distributed system for TPU backend...
+I0910 09:50:00.605686 131687497754688 connectionpool.py:241] Starting new HTTP connection (1): metadata.google.internal:80
+I0910 09:50:00.606853 131687497754688 connectionpool.py:544] http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/attributes/agent-worker-number HTTP/1.1" 200 1
+I0910 09:50:00.607118 131687497754688 cloud_tpu_cluster.py:191] Gce Tpu Cluster detected for Jax Distributed System
+I0910 09:50:00.607159 131687497754688 cluster.py:72] Initializing distributed JAX environment via GceTpuCluster
+I0910 09:50:00.607635 131687497754688 connectionpool.py:241] Starting new HTTP connection (1): metadata.google.internal:80
+I0910 09:50:00.608211 131687497754688 connectionpool.py:544] http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/attributes/tpu-env HTTP/1.1" 200 1930
+I0910 09:50:00.608841 131687497754688 connectionpool.py:241] Starting new HTTP connection (1): metadata.google.internal:80
+I0910 09:50:00.609402 131687497754688 connectionpool.py:544] http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/attributes/worker-network-endpoints HTTP/1.1" 200 27
+I0910 09:50:00.609563 131687497754688 cloud_tpu_cluster.py:109] TPU Cluster using coordinator address: 10.202.0.15
+I0910 09:50:00.609609 131687497754688 cloud_tpu_cluster.py:125] Found coordinator with address 10.202.0.15
+I0910 09:50:00.609916 131687497754688 connectionpool.py:241] Starting new HTTP connection (1): metadata.google.internal:80
+I0910 09:50:00.610439 131687497754688 connectionpool.py:544] http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/attributes/worker-network-endpoints HTTP/1.1" 200 27
+I0910 09:50:00.610857 131687497754688 connectionpool.py:241] Starting new HTTP connection (1): metadata.google.internal:80
+I0910 09:50:00.611473 131687497754688 connectionpool.py:544] http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/attributes/tpu-env HTTP/1.1" 200 1930
+I0910 09:50:00.611721 131687497754688 cloud_tpu_cluster.py:140] Total process count of 1 = 1 processes per slice and 1 slices
+I0910 09:50:00.612029 131687497754688 connectionpool.py:241] Starting new HTTP connection (1): metadata.google.internal:80
+I0910 09:50:00.612587 131687497754688 connectionpool.py:544] http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/attributes/agent-worker-number HTTP/1.1" 200 1
+I0910 09:50:00.612998 131687497754688 connectionpool.py:241] Starting new HTTP connection (1): metadata.google.internal:80
+I0910 09:50:00.613519 131687497754688 connectionpool.py:544] http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/attributes/tpu-env HTTP/1.1" 200 1930
+I0910 09:50:00.614019 131687497754688 connectionpool.py:241] Starting new HTTP connection (1): metadata.google.internal:80
+I0910 09:50:00.614530 131687497754688 connectionpool.py:544] http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/attributes/worker-network-endpoints HTTP/1.1" 200 27
+I0910 09:50:00.614677 131687497754688 cloud_tpu_cluster.py:149] Process ID of 0 generated by within-slice id 0 and slice id 0
+I0910 09:50:00.614740 131687497754688 distributed.py:149] Starting JAX distributed service on [::]:8482
+I0910 09:50:00.614810  710015 grpc_credentials.cc:38] gRPC insecure server credentials are used.
+I0910 09:50:00.616698 131687497754688 distributed.py:172] Connecting to JAX distributed service on 10.202.0.15:8482
+I0910 09:50:00.619383 131687497754688 max_utils.py:314] Jax distributed system initialized on TPUs!
+I0910 09:50:00.620105 131687497754688 xla_bridge.py:470] No jax_plugins namespace packages available
+I0910 09:50:00.628633 131687497754688 xla_bridge.py:909] Initializing backend 'tpu'
+W0910 09:50:00.667669 131687497754688 types.py:3726] JAX device system not available for config validation. Assuming 1 device.
+I0910 09:50:00.667889 131687497754688 xla_bridge.py:909] Initializing backend 'tpu'
+E0910 09:50:00.676829 131687497754688 pyconfig.py:385] ================================================================================
+E0910 09:50:00.676942 131687497754688 pyconfig.py:386] MAXTEXT CONFIG ERROR: Unable to initialize backend 'tpu': ABORTED: The TPU is already in use by process with pid 708259. Not attempting to load libtpu.so in this process. (set JAX_PLATFORMS='' to automatically choose an available backend)
+E0910 09:50:00.676976 131687497754688 pyconfig.py:387] ================================================================================
+Traceback (most recent call last):
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/jax/_src/xla_bridge.py", line 826, in backends
+    backend = _init_backend(platform)
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/jax/_src/xla_bridge.py", line 910, in _init_backend
+    backend = registration.factory()
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/jax/_src/xla_bridge.py", line 235, in tpu_client_timer_callback
+    client = make_tpu_client(
+        get_tpu_library_path(),
+        _options_from_jax_configs("tpu"))
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/jax/_src/xla_bridge.py", line 209, in make_tpu_client
+    _jax.initialize_pjrt_plugin('tpu')
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+jax.errors.JaxRuntimeError: ABORTED: The TPU is already in use by process with pid 708259. Not attempting to load libtpu.so in this process.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/inference/sampler_v2.py", line 182, in <module>
+    app.run(main)
+    ~~~~~~~^^^^^^
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/absl/app.py", line 410, in run
+    _run_main(main, args)
+    ~~~~~~~~~^^^^^^^^^^^^
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/absl/app.py", line 355, in _run_main
+    sys.exit(main(argv))
+             ~~~~^^^^^^
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/inference/sampler_v2.py", line 31, in main
+    config = pyconfig.initialize(argv)
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/configs/pyconfig.py", line 412, in initialize
+    _handle_config_exception(e)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/configs/pyconfig.py", line 400, in _handle_config_exception
+    raise e
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/configs/pyconfig.py", line 406, in initialize
+    pydantic_config = _initialize_pydantic(argv, config_class=config_class, **kwargs)
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/configs/pyconfig.py", line 576, in _initialize_pydantic
+    pydantic_config = config_class(**pydantic_kwargs)
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/pydantic/main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/configs/types.py", line 3734, in set_derived_and_validate_values
+    self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
+                      ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/utils/max_utils.py", line 423, in get_num_slices
+    return len(elastic_utils.live_slice_indices(config))
+               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/utils/elastic_utils.py", line 176, in live_slice_indices
+    return {getattr(d, "slice_index", 0) for d in live_devices(config) if d is not None}
+                                                  ~~~~~~~~~~~~^^^^^^^^
+  File "/home/liyinn_google_com/workspace/dit/src/maxtext/utils/elastic_utils.py", line 171, in live_devices
+    return jax.devices()
+           ~~~~~~~~~~~^^
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/jax/_src/xla_bridge.py", line 1024, in devices
+    return get_backend(backend).devices()
+           ~~~~~~~~~~~^^^^^^^^^
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/jax/_src/xla_bridge.py", line 958, in get_backend
+    return _get_backend_uncached(platform)
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/jax/_src/xla_bridge.py", line 937, in _get_backend_uncached
+    bs = backends()
+  File "/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/jax/_src/xla_bridge.py", line 842, in backends
+    raise RuntimeError(err_msg)
+RuntimeError: Unable to initialize backend 'tpu': ABORTED: The TPU is already in use by process with pid 708259. Not attempting to load libtpu.so in this process. (set JAX_PLATFORMS='' to automatically choose an available backend)
+Initializing config...

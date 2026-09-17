@@ -68,7 +68,17 @@ from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns
-from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
+from maxtext.checkpoint_conversion.utils.utils import (
+    MemoryMonitorTqdm,
+    load_hf_dict_from_transformers,
+    load_hf_dict_from_safetensors,
+    load_hf_dict_from_diffusers,
+    param_key_parts_from_path,
+    print_peak_memory,
+    print_ram_usage,
+    save_weights_to_checkpoint,
+    validate_and_filter_param_map_keys,
+)
 from maxtext.inference.inference_utils import str2bool
 from maxtext.layers import quantizations
 from maxtext.models import models
@@ -313,15 +323,25 @@ def get_maxtext_model_info(config):
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
-  max_logging.log("Initializing MaxText abstract model...")
-  quant = quantizations.configure_quantization(config)
-  maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  if config.decoder_block.value == 'dit':
+    from maxtext.models.dit import DiT
+    from flax import nnx
+    max_logging.log("Initializing MaxText DiT abstract model...")
+    def init_dit():
+        return DiT(config, mesh, rngs=nnx.Rngs(0))
+    abs_model = nnx.eval_shape(init_dit)
+    # Filter by nnx.Param to get only parameters
+    _, abstract_params_tree, _ = nnx.split(abs_model, nnx.Param, ...)
+  else:
+    max_logging.log("Initializing MaxText abstract model...")
+    quant = quantizations.configure_quantization(config)
+    maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
-  # Get abstract model structure (name, shape) without materializing the weights to save memory.
-  # Extract the 'params' collection from the abstract model state. This focuses checkpoint
-  # conversion on trainable model parameters; variables outside the 'params' collection
-  # (such as non-trainable state or optimizer buffers) are not included.
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+    # Get abstract model structure (name, shape) without materializing the weights to save memory.
+    # Extract the 'params' collection from the abstract model state. This focuses checkpoint
+    # conversion on trainable model parameters; variables outside the 'params' collection
+    # (such as non-trainable state or optimizer buffers) are not included.
+    abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
       abstract_params_tree,
@@ -960,6 +980,9 @@ def main(
         # For safe_open, loaded dtype is the same as original safetensor
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/model.safetensors.index.json
         hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, token=hf_token, revision=revision, framework="pt")
+      elif eager_load_method == "torch":
+        max_logging.log("Eager load with Torch backend, torch.load")
+        hf_state_dict_numpy = load_hf_dict_from_diffusers(model_id, token=hf_token, revision=revision)
       else:
         raise NotImplementedError
 
@@ -1063,6 +1086,12 @@ def main(
           mt_param_key_or_keys,
       )
 
+      if not lazy_load_tensors and "mlp-wi-kernel" in str(mt_param_key_or_keys):
+          print(f"DEBUG: calling load_fn for {mt_param_key_or_keys}")
+          arr = load_fn()
+          print(f"DEBUG: load_fn returned shape {arr.shape}")
+          print(f"DEBUG: expected shape {mt_target_shape_or_shapes}")
+
       # Step 3: Load hf keys and convert to maxtext keys
       # based on tensor load mode (lazy, eager) and MaxText key form (`atomic_mt_key` or `composite_mt_key`)
       _get_maxtext_weight(
@@ -1082,6 +1111,9 @@ def main(
 
     # Create final MaxText parameters tree
     jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
+    if hasattr(jax_weights, "to_pure_dict"):
+      max_logging.log("Converting NNX State to pure dict to strip 'value' wrappers.")
+      jax_weights = jax_weights.to_pure_dict()
     del final_mt_weights, abstract_params_treedef
 
   print_ram_usage("Before saving")
@@ -1136,8 +1168,8 @@ if __name__ == "__main__":
       type=str,
       required=False,
       default="safetensors",
-      choices=["transformers", "safetensors"],
-      help="Backend to use for eager loading: `transformers_class.from_pretrained` or `safetensors.safe_open` with pt",
+      choices=["transformers", "safetensors", "torch"],
+      help="Backend to use for eager loading: `transformers_class.from_pretrained`, `safetensors.safe_open` with pt, or `torch.load`",
   )
   # If not specified, default to maxtext.utils.globals.HF_IDS[model_name]
   parser.add_argument(

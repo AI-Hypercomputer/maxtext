@@ -1,0 +1,13 @@
+# DiT-XL-2-256 Config
+
+base_emb_dim: 1152
+base_num_query_heads: 16
+base_num_decoder_layers: 28
+vocab_size: 1000 # Number of classes
+patch_size_for_vit: 2
+num_channels_for_vit: 4 # Latent channels
+out_channels_for_vit: 8 # Output channels (e.g. mean + var)
+max_target_length: 256 # 16x16 tokens
+
+# These might be needed if we try to use standard pipelines
+decoder_block: "dit" 

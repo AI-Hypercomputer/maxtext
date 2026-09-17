@@ -794,7 +794,7 @@ sft_train_on_completion_only: false
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
-dataset_type: tfds
+dataset_type: synthetic
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.1.0'
@@ -1249,6 +1249,7 @@ interleave_moe_layer_step: 1
 temperature_tuning: false
 
 # Multimodal flags
+# TODO(lydhr): Refactor this flag name to use_multimodal_processor later to avoid confusion with generative multimodal tasks (e.g. DiT).
 use_multimodal: false
 use_audio: false
 freeze_vision_encoder_params: true

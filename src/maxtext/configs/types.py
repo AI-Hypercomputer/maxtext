@@ -297,6 +297,7 @@ ModelName = Literal[
     "envy-switch-base",
     "envy-switch-large",
     "envy-switch-xxl",
+    "dit-xl-2-256",
 ]
 
 
@@ -1592,7 +1593,7 @@ class Tokenizer(BaseModel):
 class DatasetGeneral(BaseModel):
   """General configuration for dataset and data loading."""
 
-  dataset_type: DatasetType = Field(DatasetType.TFDS, description="The type of the data loading pipeline.")
+  dataset_type: DatasetType = Field(DatasetType.SYNTHETIC, description="The type of the data loading pipeline.")
   per_device_batch_size: int | float = Field(12, description="The batch size per device.")
   eval_per_device_batch_size: int | float = Field(
       0.0,
@@ -2550,6 +2551,10 @@ class VisionTower(BaseModel):
   num_channels_for_vit: int = Field(
       3,
       description="Number of input channels for the Vision Transformer (e.g., 3 for RGB).",
+  )
+  out_channels_for_vit: int = Field(
+      3,
+      description="Number of output channels for the Vision Transformer.",
   )
   tile_size_for_vit: int = Field(336, description="Tile size for the Vision Transformer.")
   patch_size_for_vit: int = Field(14, description="Patch size for the Vision Transformer.")

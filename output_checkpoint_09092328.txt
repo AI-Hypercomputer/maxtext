@@ -1,0 +1,538 @@
+/home/liyinn_google_com/anaconda3/envs/maxtext/lib/python3.13/site-packages/torch/cuda/__init__.py:64: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[transformers] DeepseekV32Config got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] DeepseekV4Config got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+2026-09-09 23:29:01.829436: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+2026-09-09 23:29:01.829839: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-09 23:29:01.866305: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-09-09 23:29:02.799271: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-09-09 23:29:02.800083: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+WARNING:absl:Type handler registry overriding type "<class '__main__.LazyTensor'>" collision on np.ndarray
+WARNING:maxtext.configs.pyconfig:WARNING: Passing 'hf_access_token' via command-line arguments is deprecated and insecure because it makes your token visible in 'ps' and shell history. Please set the 'HF_TOKEN' environment variable instead.
+INFO:absl:Skipping jax distributed system due to skip_jax_distributed_system=True flag.
+I0909 23:29:04.098103  435693 pjrt_client.cc:579] PjRt-IFRT device count: total=16, addressable=16
+I0909 23:29:04.098152  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+I0909 23:29:04.098156  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=1)
+I0909 23:29:04.098161  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=2)
+I0909 23:29:04.098165  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=3)
+I0909 23:29:04.098167  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=4)
+I0909 23:29:04.098170  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=5)
+I0909 23:29:04.098172  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=6)
+I0909 23:29:04.098175  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=7)
+I0909 23:29:04.098177  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=8)
+I0909 23:29:04.098181  435693 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=9)
+I0909 23:29:04.098184  435693 pjrt_client.cc:586] ... (omitted) ...
+INFO:absl:System Information: Jax Version: 0.11.1
+INFO:absl:System Information: Jaxlib Version: 0.11.1
+INFO:absl:System Information: Jax Backend: cpu
+INFO:absl:Lazy loading DISABLED. Loading full HuggingFace model: facebook/DiT-XL-2-256...
+INFO:absl:Eager load with Torch backend, torch.load
+Fetching 8 files:   0%|          | 0/8 [00:00<?, ?it/s]Fetching 8 files: 100%|██████████| 8/8 [00:00<00:00, 2274.41it/s]
+INFO:absl:Loading /home/liyinn_google_com/.cache/huggingface/hub/models--facebook--DiT-XL-2-256/snapshots/eab87f77abd5aef071a632f08807fbaab0b704d0/transformer/diffusion_pytorch_model.bin
+INFO:absl:Loading /home/liyinn_google_com/.cache/huggingface/hub/models--facebook--DiT-XL-2-256/snapshots/eab87f77abd5aef071a632f08807fbaab0b704d0/vae/diffusion_pytorch_model.bin
+INFO:absl:HuggingFace model loaded. dtypes: {torch.float32}
+INFO:absl:[After full HF model load] RAM Usage: 27.13/1417.33 GB (1.9%)
+INFO:absl:Parameter mappings and hooks obtained.
+INFO:absl:Num_devices: 16, shape (1, 1, 1, 16, 1, 1, 1, 1, 1, 1, 1, 1)
+INFO:absl:Initializing MaxText DiT abstract model...
+INFO:absl:MaxText abstract model and state initialized.
+INFO:absl:Starting weight transformation...
+INFO:absl:Warning: extra keys in param_map are skipped: {'params-blocks_23-mlp-wo-bias', 'params-blocks_17-mlp-wi-bias', 'params-blocks_3-attn-query-bias', 'params-blocks_27-attn-value-bias', 'params-blocks_24-attn-out-bias', 'params-blocks_18-mlp-wi-bias', 'params-blocks_21-mlp-wo-bias', 'params-blocks_23-attn-key-bias', 'params-blocks_4-attn-out-bias', 'params-blocks_1-mlp-wi-bias', 'params-blocks_20-attn-out-bias', 'params-blocks_6-attn-value-bias', 'params-blocks_10-attn-key-bias', 'params-blocks_10-attn-value-bias', 'params-blocks_23-attn-query-bias', 'params-blocks_20-attn-query-bias', 'params-blocks_8-attn-value-bias', 'params-blocks_20-attn-key-bias', 'params-blocks_7-attn-out-bias', 'params-blocks_16-mlp-wi-bias', 'params-blocks_17-attn-query-bias', 'params-blocks_8-attn-out-bias', 'params-blocks_16-mlp-wo-bias', 'params-blocks_10-attn-out-bias', 'params-blocks_9-attn-value-bias', 'params-blocks_11-mlp-wo-bias', 'params-blocks_12-attn-value-bias', 'params-blocks_13-mlp-wo-bias', 'params-blocks_27-attn-out-bias', 'params-blocks_26-attn-key-bias', 'params-blocks_26-mlp-wo-bias', 'params-blocks_12-mlp-wo-bias', 'params-blocks_4-mlp-wi-bias', 'params-blocks_22-attn-query-bias', 'params-blocks_9-attn-query-bias', 'params-blocks_23-attn-out-bias', 'params-blocks_14-mlp-wi-bias', 'params-blocks_13-attn-query-bias', 'params-blocks_18-attn-out-bias', 'params-blocks_6-attn-query-bias', 'params-blocks_5-attn-key-bias', 'params-blocks_19-attn-key-bias', 'params-blocks_7-attn-value-bias', 'params-blocks_17-attn-key-bias', 'params-blocks_7-mlp-wi-bias', 'params-blocks_5-attn-query-bias', 'params-blocks_27-attn-key-bias', 'params-blocks_14-attn-out-bias', 'params-blocks_15-attn-key-bias', 'params-blocks_20-mlp-wo-bias', 'params-blocks_27-attn-query-bias', 'params-blocks_21-attn-value-bias', 'params-blocks_21-attn-key-bias', 'params-blocks_6-mlp-wi-bias', 'params-blocks_11-attn-key-bias', 'params-blocks_2-attn-key-bias', 'params-blocks_21-mlp-wi-bias', 'params-blocks_18-mlp-wo-bias', 'params-blocks_14-attn-value-bias', 'params-blocks_7-mlp-wo-bias', 'params-blocks_12-attn-out-bias', 'params-blocks_14-mlp-wo-bias', 'params-blocks_7-attn-key-bias', 'params-blocks_13-attn-out-bias', 'params-blocks_0-attn-key-bias', 'params-blocks_4-attn-value-bias', 'params-blocks_26-attn-out-bias', 'params-blocks_18-attn-query-bias', 'params-blocks_3-attn-value-bias', 'params-blocks_16-attn-value-bias', 'params-blocks_12-mlp-wi-bias', 'params-blocks_20-attn-value-bias', 'params-blocks_4-attn-key-bias', 'params-blocks_2-attn-out-bias', 'params-blocks_2-attn-value-bias', 'params-blocks_3-attn-key-bias', 'params-blocks_21-attn-out-bias', 'params-blocks_0-mlp-wo-bias', 'params-blocks_25-attn-query-bias', 'params-blocks_24-attn-value-bias', 'params-blocks_0-attn-query-bias', 'params-blocks_15-attn-query-bias', 'params-blocks_1-attn-out-bias', 'params-blocks_14-attn-query-bias', 'params-blocks_24-mlp-wi-bias', 'params-blocks_6-attn-out-bias', 'params-blocks_1-attn-key-bias', 'params-blocks_11-attn-value-bias', 'params-blocks_13-attn-value-bias', 'params-blocks_25-mlp-wo-bias', 'params-blocks_25-attn-key-bias', 'params-blocks_0-mlp-wi-bias', 'params-blocks_17-attn-out-bias', 'params-blocks_12-attn-key-bias', 'params-blocks_5-attn-value-bias', 'params-blocks_11-attn-out-bias', 'params-blocks_1-mlp-wo-bias', 'params-blocks_11-attn-query-bias', 'params-blocks_17-mlp-wo-bias', 'params-blocks_0-attn-out-bias', 'params-blocks_1-attn-value-bias', 'params-blocks_10-attn-query-bias', 'params-blocks_27-mlp-wo-bias', 'params-blocks_26-mlp-wi-bias', 'params-blocks_2-mlp-wo-bias', 'params-blocks_6-mlp-wo-bias', 'params-blocks_21-attn-query-bias', 'params-blocks_10-mlp-wi-bias', 'params-blocks_24-attn-query-bias', 'params-blocks_16-attn-out-bias', 'params-blocks_5-mlp-wi-bias', 'params-blocks_18-attn-key-bias', 'params-blocks_11-mlp-wi-bias', 'params-blocks_23-mlp-wi-bias', 'params-blocks_3-mlp-wo-bias', 'params-blocks_16-attn-key-bias', 'params-blocks_19-mlp-wi-bias', 'params-blocks_25-attn-value-bias', 'params-blocks_4-mlp-wo-bias', 'params-blocks_22-mlp-wo-bias', 'params-blocks_4-attn-query-bias', 'params-blocks_16-attn-query-bias', 'params-blocks_24-mlp-wo-bias', 'params-blocks_25-attn-out-bias', 'params-blocks_15-attn-out-bias', 'params-blocks_8-attn-key-bias', 'params-blocks_13-mlp-wi-bias', 'params-blocks_9-attn-out-bias', 'params-blocks_2-attn-query-bias', 'params-blocks_8-attn-query-bias', 'params-blocks_22-attn-key-bias', 'params-blocks_22-attn-out-bias', 'params-blocks_8-mlp-wo-bias', 'params-blocks_15-mlp-wi-bias', 'params-blocks_14-attn-key-bias', 'params-blocks_3-attn-out-bias', 'params-blocks_5-attn-out-bias', 'params-blocks_15-mlp-wo-bias', 'params-blocks_5-mlp-wo-bias', 'params-blocks_18-attn-value-bias', 'params-blocks_9-mlp-wi-bias', 'params-blocks_26-attn-query-bias', 'params-blocks_25-mlp-wi-bias', 'params-blocks_19-attn-out-bias', 'params-blocks_19-attn-value-bias', 'params-blocks_19-attn-query-bias', 'params-blocks_15-attn-value-bias', 'params-blocks_12-attn-query-bias', 'params-blocks_6-attn-key-bias', 'params-blocks_2-mlp-wi-bias', 'params-blocks_7-attn-query-bias', 'params-blocks_22-mlp-wi-bias', 'params-blocks_9-attn-key-bias', 'params-blocks_20-mlp-wi-bias', 'params-blocks_22-attn-value-bias', 'params-blocks_13-attn-key-bias', 'params-blocks_19-mlp-wo-bias', 'params-blocks_1-attn-query-bias', 'params-blocks_3-mlp-wi-bias', 'params-blocks_9-mlp-wo-bias', 'params-blocks_24-attn-key-bias', 'params-blocks_10-mlp-wo-bias', 'params-blocks_27-mlp-wi-bias', 'params-blocks_26-attn-value-bias', 'params-blocks_23-attn-value-bias', 'params-blocks_8-mlp-wi-bias', 'params-blocks_0-attn-value-bias', 'params-blocks_17-attn-value-bias'}
+Transforming weights:   0%|          | 0/376 [00:00<?, ?param/s, RAM: 27.1/1417.3GB (1.9%)]INFO:absl:maxtext param: params-patch_embed-kernel
+INFO:absl:maxtext param: params-patch_embed-bias
+INFO:absl:maxtext param: params-pos_embed
+INFO:absl:maxtext param: params-timestep_embedder-linear1-kernel
+INFO:absl:maxtext param: params-timestep_embedder-linear1-bias
+INFO:absl:maxtext param: params-timestep_embedder-linear2-kernel
+INFO:absl:maxtext param: params-timestep_embedder-linear2-bias
+INFO:absl:maxtext param: params-label_embedder-embedding-embedding
+INFO:absl:maxtext param: params-final_layer-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-final_layer-adaLN_modulation-bias
+INFO:absl:maxtext param: params-final_layer-linear-kernel
+INFO:absl:maxtext param: params-final_layer-linear-bias
+INFO:absl:maxtext param: params-blocks_0-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_0-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_0-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_0-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_0-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_0-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_0-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_0-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_1-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_1-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_1-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_1-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_1-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_1-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_1-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_1-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_2-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_2-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_2-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_2-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_2-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_2-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_2-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_2-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_3-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_3-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_3-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_3-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_3-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_3-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_3-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_3-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_4-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_4-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_4-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_4-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_4-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_4-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_4-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_4-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_5-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_5-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_5-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_5-attn-key-kernel
+Transforming weights:  15%|█▍        | 56/376 [00:00<00:00, 551.52param/s, RAM: 27.4/1417.3GB (1.9%)]INFO:absl:maxtext param: params-blocks_5-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_5-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_5-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_5-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_6-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_6-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_6-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_6-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_6-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_6-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_6-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_6-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_7-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_7-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_7-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_7-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_7-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_7-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_7-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_7-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_8-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_8-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_8-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_8-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_8-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_8-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_8-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_8-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_9-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_9-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_9-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_9-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_9-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_9-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_9-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_9-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_10-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_10-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_10-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_10-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_10-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_10-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_10-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_10-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_11-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_11-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_11-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_11-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_11-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_11-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_11-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_11-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_12-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_12-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_12-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_12-attn-key-kernel
+Transforming weights:  30%|██▉       | 112/376 [00:00<00:00, 508.52param/s, RAM: 27.7/1417.3GB (2.0%)]INFO:absl:maxtext param: params-blocks_12-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_12-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_12-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_12-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_13-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_13-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_13-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_13-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_13-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_13-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_13-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_13-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_14-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_14-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_14-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_14-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_14-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_14-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_14-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_14-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_15-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_15-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_15-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_15-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_15-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_15-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_15-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_15-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_16-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_16-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_16-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_16-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_16-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_16-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_16-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_16-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_17-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_17-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_17-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_17-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_17-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_17-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_17-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_17-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_18-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_18-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_18-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_18-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_18-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_18-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_18-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_18-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_19-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_19-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_19-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_19-attn-key-kernel
+Transforming weights:  45%|████▍     | 168/376 [00:00<00:00, 494.70param/s, RAM: 28.0/1417.3GB (2.0%)]INFO:absl:maxtext param: params-blocks_19-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_19-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_19-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_19-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_20-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_20-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_20-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_20-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_20-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_20-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_20-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_20-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_21-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_21-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_21-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_21-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_21-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_21-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_21-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_21-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_22-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_22-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_22-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_22-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_22-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_22-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_22-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_22-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_23-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_23-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_23-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_23-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_23-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_23-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_23-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_23-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_24-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_24-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_24-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_24-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_24-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_24-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_24-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_24-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_25-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_25-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_25-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_25-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_25-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_25-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_25-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_25-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_26-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_26-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_26-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_26-attn-key-kernel
+Transforming weights:  60%|█████▉    | 224/376 [00:00<00:00, 486.01param/s, RAM: 28.4/1417.3GB (2.0%)]INFO:absl:maxtext param: params-blocks_26-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_26-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_26-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_26-mlp-wo-kernel
+INFO:absl:maxtext param: params-blocks_27-adaLN_modulation-kernel
+INFO:absl:maxtext param: params-blocks_27-adaLN_modulation-bias
+INFO:absl:maxtext param: params-blocks_27-attn-query-kernel
+INFO:absl:maxtext param: params-blocks_27-attn-key-kernel
+INFO:absl:maxtext param: params-blocks_27-attn-value-kernel
+INFO:absl:maxtext param: params-blocks_27-attn-out-kernel
+INFO:absl:maxtext param: params-blocks_27-mlp-wi-kernel
+INFO:absl:maxtext param: params-blocks_27-mlp-wo-kernel
+INFO:absl:maxtext param: params-vae_decoder-post_quant_conv-kernel
+INFO:absl:maxtext param: params-vae_decoder-post_quant_conv-bias
+INFO:absl:maxtext param: params-vae_decoder-conv_in-kernel
+INFO:absl:maxtext param: params-vae_decoder-conv_in-bias
+INFO:absl:maxtext param: params-vae_decoder-conv_out-kernel
+INFO:absl:maxtext param: params-vae_decoder-conv_out-bias
+INFO:absl:maxtext param: params-vae_decoder-norm_out-scale
+INFO:absl:maxtext param: params-vae_decoder-norm_out-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet1-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-resnet2-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-q-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-q-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-k-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-k-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-v-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-v-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-proj_out-kernel
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-proj_out-bias
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-norm-scale
+INFO:absl:maxtext param: params-vae_decoder-mid-attn-norm-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_0-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_1-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_2-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_3-conv-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_3-conv-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_4-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_5-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_6-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_7-conv-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_7-conv-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-nin_shortcut-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_8-nin_shortcut-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_9-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_10-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_11-conv-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_11-conv-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-nin_shortcut-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_12-nin_shortcut-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_13-norm2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-conv1-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-conv1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-conv2-kernel
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-conv2-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-norm1-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-norm1-bias
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-norm2-scale
+INFO:absl:maxtext param: params-vae_decoder-up_blocks_14-norm2-bias
+Transforming weights: 100%|██████████| 376/376 [00:00<00:00, 704.96param/s, RAM: 28.5/1417.3GB (2.0%)]
+INFO:absl:Weight transformation preparation complete.
+INFO:absl:Elapse for transform: 0.01 min
+INFO:absl:[Before creating full JAX tree] RAM Usage: 28.52/1417.33 GB (2.0%)
+INFO:absl:Converting NNX State to pure dict to strip 'value' wrappers.
+INFO:absl:[Before saving] RAM Usage: 28.52/1417.33 GB (2.0%)
+INFO:absl:Starting checkpoint save...
+INFO:absl:Shard weights across 16 devices
+INFO:absl:Note: Axis 0 sharding is the default and will not be logged individually.
+  0%|          | 0/376 [00:00<?, ?it/s]  0%|          | 1/376 [00:00<02:46,  2.25it/s]  1%|          | 2/376 [00:00<02:34,  2.43it/s]  1%|          | 3/376 [00:01<02:29,  2.50it/s]  1%|          | 4/376 [00:01<02:27,  2.52it/s]  1%|▏         | 5/376 [00:02<02:26,  2.53it/s]  2%|▏         | 6/376 [00:02<02:27,  2.51it/s]  2%|▏         | 7/376 [00:02<02:26,  2.51it/s]  2%|▏         | 8/376 [00:03<02:26,  2.51it/s]  2%|▏         | 9/376 [00:03<02:25,  2.52it/s]  3%|▎         | 10/376 [00:03<02:24,  2.53it/s]  3%|▎         | 11/376 [00:04<02:23,  2.54it/s]  3%|▎         | 12/376 [00:04<02:22,  2.55it/s]  3%|▎         | 13/376 [00:05<02:21,  2.56it/s]  4%|▎         | 14/376 [00:05<02:22,  2.54it/s]  4%|▍         | 15/376 [00:05<02:23,  2.52it/s]  4%|▍         | 16/376 [00:06<02:22,  2.52it/s]  5%|▍         | 17/376 [00:06<02:21,  2.54it/s]  5%|▍         | 18/376 [00:07<02:20,  2.55it/s]  5%|▌         | 19/376 [00:07<02:20,  2.55it/s]  5%|▌         | 20/376 [00:07<02:19,  2.55it/s]  6%|▌         | 21/376 [00:08<02:18,  2.56it/s]  6%|▌         | 22/376 [00:08<02:17,  2.57it/s]  6%|▌         | 23/376 [00:09<02:17,  2.57it/s]  6%|▋         | 24/376 [00:09<02:16,  2.57it/s]  7%|▋         | 25/376 [00:09<02:16,  2.58it/s]  7%|▋         | 26/376 [00:10<02:15,  2.58it/s]  7%|▋         | 27/376 [00:10<02:15,  2.58it/s]  7%|▋         | 28/376 [00:11<02:14,  2.58it/s]  8%|▊         | 29/376 [00:11<02:14,  2.58it/s]  8%|▊         | 30/376 [00:11<02:13,  2.59it/s]  8%|▊         | 31/376 [00:12<02:13,  2.59it/s]  9%|▊         | 32/376 [00:12<02:12,  2.59it/s]  9%|▉         | 33/376 [00:12<02:11,  2.61it/s]  9%|▉         | 34/376 [00:13<02:11,  2.60it/s]  9%|▉         | 35/376 [00:13<02:10,  2.62it/s] 10%|▉         | 36/376 [00:14<02:09,  2.62it/s] 10%|▉         | 37/376 [00:14<02:09,  2.62it/s] 10%|█         | 38/376 [00:14<02:08,  2.62it/s] 10%|█         | 39/376 [00:15<02:08,  2.62it/s] 11%|█         | 40/376 [00:15<02:08,  2.61it/s] 11%|█         | 41/376 [00:15<02:07,  2.62it/s] 11%|█         | 42/376 [00:16<02:07,  2.61it/s] 11%|█▏        | 43/376 [00:16<02:07,  2.61it/s] 12%|█▏        | 44/376 [00:17<02:06,  2.62it/s] 12%|█▏        | 45/376 [00:17<02:06,  2.62it/s] 12%|█▏        | 46/376 [00:17<02:05,  2.63it/s] 12%|█▎        | 47/376 [00:18<02:05,  2.62it/s] 13%|█▎        | 48/376 [00:18<02:05,  2.62it/s] 13%|█▎        | 49/376 [00:19<02:04,  2.62it/s] 13%|█▎        | 50/376 [00:19<02:04,  2.62it/s] 14%|█▎        | 51/376 [00:19<02:03,  2.62it/s] 14%|█▍        | 52/376 [00:20<02:03,  2.63it/s] 14%|█▍        | 53/376 [00:20<02:02,  2.63it/s] 14%|█▍        | 54/376 [00:20<02:02,  2.63it/s] 15%|█▍        | 55/376 [00:21<02:02,  2.62it/s] 15%|█▍        | 56/376 [00:21<02:02,  2.61it/s] 15%|█▌        | 57/376 [00:22<02:01,  2.63it/s] 15%|█▌        | 58/376 [00:22<02:01,  2.62it/s] 16%|█▌        | 59/376 [00:22<02:00,  2.63it/s] 16%|█▌        | 60/376 [00:23<02:00,  2.62it/s] 16%|█▌        | 61/376 [00:23<01:59,  2.63it/s] 16%|█▋        | 62/376 [00:23<01:59,  2.63it/s] 17%|█▋        | 63/376 [00:24<01:59,  2.62it/s] 17%|█▋        | 64/376 [00:24<01:59,  2.62it/s] 17%|█▋        | 65/376 [00:25<01:58,  2.62it/s] 18%|█▊        | 66/376 [00:25<01:58,  2.62it/s] 18%|█▊        | 67/376 [00:25<01:58,  2.62it/s] 18%|█▊        | 68/376 [00:26<01:57,  2.62it/s] 18%|█▊        | 69/376 [00:26<01:57,  2.62it/s] 19%|█▊        | 70/376 [00:27<01:56,  2.63it/s] 19%|█▉        | 71/376 [00:27<01:56,  2.62it/s] 19%|█▉        | 72/376 [00:27<01:56,  2.62it/s] 19%|█▉        | 73/376 [00:28<01:55,  2.62it/s] 20%|█▉        | 74/376 [00:28<01:55,  2.61it/s] 20%|█▉        | 75/376 [00:28<01:54,  2.62it/s] 20%|██        | 76/376 [00:29<01:54,  2.62it/s] 20%|██        | 77/376 [00:29<01:53,  2.63it/s] 21%|██        | 78/376 [00:30<01:53,  2.62it/s] 21%|██        | 79/376 [00:30<01:53,  2.62it/s] 21%|██▏       | 80/376 [00:30<01:53,  2.61it/s] 22%|██▏       | 81/376 [00:31<01:52,  2.62it/s] 22%|██▏       | 82/376 [00:31<01:52,  2.61it/s] 22%|██▏       | 83/376 [00:32<01:51,  2.62it/s] 22%|██▏       | 84/376 [00:32<01:51,  2.62it/s] 23%|██▎       | 85/376 [00:32<01:50,  2.63it/s] 23%|██▎       | 86/376 [00:33<01:50,  2.63it/s] 23%|██▎       | 87/376 [00:33<01:50,  2.62it/s] 23%|██▎       | 88/376 [00:33<01:50,  2.62it/s] 24%|██▎       | 89/376 [00:34<01:49,  2.62it/s] 24%|██▍       | 90/376 [00:34<01:49,  2.61it/s] 24%|██▍       | 91/376 [00:35<01:48,  2.62it/s] 24%|██▍       | 92/376 [00:35<01:48,  2.62it/s] 25%|██▍       | 93/376 [00:35<01:47,  2.63it/s] 25%|██▌       | 94/376 [00:36<01:47,  2.63it/s] 25%|██▌       | 95/376 [00:36<01:47,  2.62it/s] 26%|██▌       | 96/376 [00:36<01:47,  2.61it/s] 26%|██▌       | 97/376 [00:37<01:46,  2.62it/s] 26%|██▌       | 98/376 [00:37<01:46,  2.61it/s] 26%|██▋       | 99/376 [00:38<01:45,  2.62it/s] 27%|██▋       | 100/376 [00:38<01:45,  2.62it/s] 27%|██▋       | 101/376 [00:38<01:44,  2.62it/s] 27%|██▋       | 102/376 [00:39<01:44,  2.62it/s] 27%|██▋       | 103/376 [00:39<01:44,  2.62it/s] 28%|██▊       | 104/376 [00:40<01:44,  2.61it/s] 28%|██▊       | 105/376 [00:40<01:43,  2.62it/s] 28%|██▊       | 106/376 [00:40<01:43,  2.61it/s] 28%|██▊       | 107/376 [00:41<01:43,  2.61it/s] 29%|██▊       | 108/376 [00:41<01:42,  2.62it/s] 29%|██▉       | 109/376 [00:41<01:41,  2.62it/s] 29%|██▉       | 110/376 [00:42<01:41,  2.62it/s] 30%|██▉       | 111/376 [00:42<01:41,  2.62it/s] 30%|██▉       | 112/376 [00:43<01:41,  2.61it/s] 30%|███       | 113/376 [00:43<01:40,  2.62it/s] 30%|███       | 114/376 [00:43<01:40,  2.61it/s] 31%|███       | 115/376 [00:44<01:39,  2.62it/s] 31%|███       | 116/376 [00:44<01:39,  2.62it/s] 31%|███       | 117/376 [00:44<01:38,  2.63it/s] 31%|███▏      | 118/376 [00:45<01:38,  2.62it/s] 32%|███▏      | 119/376 [00:45<01:38,  2.62it/s] 32%|███▏      | 120/376 [00:46<01:37,  2.61it/s] 32%|███▏      | 121/376 [00:46<01:37,  2.62it/s] 32%|███▏      | 122/376 [00:46<01:37,  2.61it/s] 33%|███▎      | 123/376 [00:47<01:36,  2.61it/s] 33%|███▎      | 124/376 [00:47<01:36,  2.62it/s] 33%|███▎      | 125/376 [00:48<01:35,  2.62it/s] 34%|███▎      | 126/376 [00:48<01:35,  2.62it/s] 34%|███▍      | 127/376 [00:48<01:35,  2.61it/s] 34%|███▍      | 128/376 [00:49<01:35,  2.61it/s] 34%|███▍      | 129/376 [00:49<01:34,  2.62it/s] 35%|███▍      | 130/376 [00:49<01:34,  2.61it/s] 35%|███▍      | 131/376 [00:50<01:33,  2.62it/s] 35%|███▌      | 132/376 [00:50<01:33,  2.62it/s] 35%|███▌      | 133/376 [00:51<01:32,  2.62it/s] 36%|███▌      | 134/376 [00:51<01:32,  2.62it/s] 36%|███▌      | 135/376 [00:51<01:32,  2.62it/s] 36%|███▌      | 136/376 [00:52<01:31,  2.61it/s] 36%|███▋      | 137/376 [00:52<01:31,  2.62it/s] 37%|███▋      | 138/376 [00:53<01:31,  2.61it/s] 37%|███▋      | 139/376 [00:53<01:30,  2.61it/s] 37%|███▋      | 140/376 [00:53<01:30,  2.62it/s] 38%|███▊      | 141/376 [00:54<01:29,  2.61it/s] 38%|███▊      | 142/376 [00:54<01:29,  2.62it/s] 38%|███▊      | 143/376 [00:54<01:29,  2.61it/s] 38%|███▊      | 144/376 [00:55<01:28,  2.61it/s] 39%|███▊      | 145/376 [00:55<01:28,  2.62it/s] 39%|███▉      | 146/376 [00:56<01:28,  2.61it/s] 39%|███▉      | 147/376 [00:56<01:27,  2.62it/s] 39%|███▉      | 148/376 [00:56<01:27,  2.62it/s] 40%|███▉      | 149/376 [00:57<01:26,  2.62it/s] 40%|███▉      | 150/376 [00:57<01:26,  2.62it/s] 40%|████      | 151/376 [00:57<01:26,  2.61it/s] 40%|████      | 152/376 [00:58<01:25,  2.61it/s] 41%|████      | 153/376 [00:58<01:25,  2.61it/s] 41%|████      | 154/376 [00:59<01:25,  2.61it/s] 41%|████      | 155/376 [01:03<06:17,  1.71s/it] 41%|████▏     | 156/376 [01:04<04:48,  1.31s/it] 42%|████▏     | 157/376 [01:04<03:46,  1.03s/it] 42%|████▏     | 158/376 [01:05<03:02,  1.20it/s] 42%|████▏     | 159/376 [01:05<02:32,  1.43it/s] 43%|████▎     | 160/376 [01:05<02:10,  1.65it/s] 43%|████▎     | 161/376 [01:06<01:55,  1.86it/s] 43%|████▎     | 162/376 [01:06<01:45,  2.03it/s] 43%|████▎     | 163/376 [01:07<01:37,  2.17it/s] 44%|████▎     | 164/376 [01:07<01:32,  2.29it/s] 44%|████▍     | 165/376 [01:07<01:28,  2.38it/s] 44%|████▍     | 166/376 [01:08<01:25,  2.45it/s] 44%|████▍     | 167/376 [01:08<01:23,  2.49it/s] 45%|████▍     | 168/376 [01:08<01:22,  2.52it/s] 45%|████▍     | 169/376 [01:09<01:20,  2.56it/s] 45%|████▌     | 170/376 [01:09<01:20,  2.57it/s] 45%|████▌     | 171/376 [01:10<01:19,  2.59it/s] 46%|████▌     | 172/376 [01:10<01:18,  2.60it/s] 46%|████▌     | 173/376 [01:10<01:17,  2.61it/s] 46%|████▋     | 174/376 [01:11<01:17,  2.61it/s] 47%|████▋     | 175/376 [01:11<01:17,  2.61it/s] 47%|████▋     | 176/376 [01:11<01:16,  2.61it/s] 47%|████▋     | 177/376 [01:12<01:16,  2.61it/s] 47%|████▋     | 178/376 [01:12<01:16,  2.60it/s] 48%|████▊     | 179/376 [01:13<01:15,  2.61it/s] 48%|████▊     | 180/376 [01:13<01:14,  2.61it/s] 48%|████▊     | 181/376 [01:13<01:14,  2.61it/s] 48%|████▊     | 182/376 [01:14<01:14,  2.62it/s] 49%|████▊     | 183/376 [01:14<01:13,  2.61it/s] 49%|████▉     | 184/376 [01:15<01:14,  2.59it/s] 49%|████▉     | 185/376 [01:15<01:13,  2.61it/s] 49%|████▉     | 186/376 [01:15<01:13,  2.60it/s] 50%|████▉     | 187/376 [01:16<01:14,  2.53it/s] 50%|█████     | 188/376 [01:16<01:13,  2.56it/s] 50%|█████     | 189/376 [01:17<01:13,  2.54it/s] 51%|█████     | 190/376 [01:17<01:12,  2.56it/s] 51%|█████     | 191/376 [01:17<01:12,  2.57it/s] 51%|█████     | 192/376 [01:18<01:11,  2.57it/s] 51%|█████▏    | 193/376 [01:18<01:12,  2.51it/s] 52%|█████▏    | 194/376 [01:18<01:11,  2.53it/s] 52%|█████▏    | 195/376 [01:19<01:10,  2.56it/s] 52%|█████▏    | 196/376 [01:19<01:10,  2.56it/s] 52%|█████▏    | 197/376 [01:20<01:09,  2.57it/s] 53%|█████▎    | 198/376 [01:20<01:09,  2.56it/s] 53%|█████▎    | 199/376 [01:20<01:10,  2.53it/s] 53%|█████▎    | 200/376 [01:21<01:11,  2.47it/s] 53%|█████▎    | 201/376 [01:21<01:11,  2.46it/s] 54%|█████▎    | 202/376 [01:22<01:10,  2.45it/s] 54%|█████▍    | 203/376 [01:22<01:10,  2.44it/s] 54%|█████▍    | 204/376 [01:23<01:10,  2.44it/s] 55%|█████▍    | 205/376 [01:23<01:10,  2.42it/s] 55%|█████▍    | 206/376 [01:23<01:09,  2.43it/s] 55%|█████▌    | 207/376 [01:24<01:09,  2.43it/s] 55%|█████▌    | 208/376 [01:24<01:09,  2.42it/s] 56%|█████▌    | 209/376 [01:25<01:08,  2.43it/s] 56%|█████▌    | 210/376 [01:25<01:08,  2.43it/s] 56%|█████▌    | 211/376 [01:25<01:07,  2.43it/s] 56%|█████▋    | 212/376 [01:26<01:07,  2.42it/s] 57%|█████▋    | 213/376 [01:26<01:07,  2.43it/s] 57%|█████▋    | 214/376 [01:27<01:06,  2.43it/s] 57%|█████▋    | 215/376 [01:27<01:05,  2.47it/s] 57%|█████▋    | 216/376 [01:27<01:04,  2.49it/s] 58%|█████▊    | 217/376 [01:28<01:03,  2.51it/s] 58%|█████▊    | 218/376 [01:28<01:02,  2.52it/s] 58%|█████▊    | 219/376 [01:29<01:01,  2.53it/s] 59%|█████▊    | 220/376 [01:29<01:02,  2.50it/s] 59%|█████▉    | 221/376 [01:29<01:02,  2.49it/s] 59%|█████▉    | 222/376 [01:30<01:01,  2.52it/s] 59%|█████▉    | 223/376 [01:30<01:00,  2.53it/s] 60%|█████▉    | 224/376 [01:31<00:59,  2.55it/s] 60%|█████▉    | 225/376 [01:31<00:58,  2.57it/s] 60%|██████    | 226/376 [01:31<00:58,  2.58it/s] 60%|██████    | 227/376 [01:32<00:57,  2.59it/s] 61%|██████    | 228/376 [01:32<00:56,  2.60it/s]INFO:absl:Sharding axis 1. Tensor shape (1001, 1152)
+ 61%|██████    | 229/376 [01:32<00:56,  2.60it/s] 61%|██████    | 230/376 [01:33<00:55,  2.61it/s] 61%|██████▏   | 231/376 [01:33<00:55,  2.62it/s]INFO:absl:Sharding axis 1. Tensor shape (1, 256, 1152)
+ 62%|██████▏   | 232/376 [01:34<00:54,  2.62it/s] 62%|██████▏   | 233/376 [01:34<00:54,  2.62it/s] 62%|██████▏   | 234/376 [01:34<00:54,  2.62it/s] 62%|██████▎   | 235/376 [01:35<00:53,  2.62it/s] 63%|██████▎   | 236/376 [01:35<00:53,  2.62it/s] 63%|██████▎   | 237/376 [01:36<00:53,  2.62it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 4, 512)
+ 63%|██████▎   | 238/376 [01:36<00:52,  2.63it/s]INFO:absl:Not sharding. Tensor shape (3,)
+ 64%|██████▎   | 239/376 [01:36<00:52,  2.63it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 3)
+ 64%|██████▍   | 240/376 [01:37<00:51,  2.63it/s] 64%|██████▍   | 241/376 [01:37<00:51,  2.63it/s] 64%|██████▍   | 242/376 [01:37<00:50,  2.63it/s] 65%|██████▍   | 243/376 [01:38<00:50,  2.63it/s] 65%|██████▍   | 244/376 [01:38<00:50,  2.63it/s] 65%|██████▌   | 245/376 [01:39<00:49,  2.63it/s] 65%|██████▌   | 246/376 [01:39<00:49,  2.63it/s] 66%|██████▌   | 247/376 [01:39<00:49,  2.63it/s] 66%|██████▌   | 248/376 [01:40<00:48,  2.63it/s] 66%|██████▌   | 249/376 [01:40<00:48,  2.62it/s] 66%|██████▋   | 250/376 [01:40<00:48,  2.61it/s] 67%|██████▋   | 251/376 [01:41<00:47,  2.62it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 67%|██████▋   | 252/376 [01:41<00:48,  2.55it/s] 67%|██████▋   | 253/376 [01:42<00:47,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 68%|██████▊   | 254/376 [01:42<00:48,  2.49it/s] 68%|██████▊   | 255/376 [01:42<00:47,  2.52it/s] 68%|██████▊   | 256/376 [01:43<00:47,  2.55it/s] 68%|██████▊   | 257/376 [01:43<00:46,  2.56it/s] 69%|██████▊   | 258/376 [01:44<00:45,  2.58it/s] 69%|██████▉   | 259/376 [01:44<00:45,  2.59it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 69%|██████▉   | 260/376 [01:44<00:45,  2.53it/s] 69%|██████▉   | 261/376 [01:45<00:44,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 70%|██████▉   | 262/376 [01:45<00:45,  2.51it/s] 70%|██████▉   | 263/376 [01:46<00:44,  2.55it/s] 70%|███████   | 264/376 [01:46<00:43,  2.58it/s] 70%|███████   | 265/376 [01:46<00:42,  2.60it/s] 71%|███████   | 266/376 [01:47<00:42,  2.61it/s] 71%|███████   | 267/376 [01:47<00:41,  2.62it/s] 71%|███████▏  | 268/376 [01:47<00:41,  2.63it/s]INFO:absl:Not sharding. Tensor shape (4,)
+ 72%|███████▏  | 269/376 [01:48<00:40,  2.63it/s]INFO:absl:Not sharding. Tensor shape (1, 1, 4, 4)
+ 72%|███████▏  | 270/376 [01:48<00:40,  2.64it/s] 72%|███████▏  | 271/376 [01:49<00:39,  2.64it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 72%|███████▏  | 272/376 [01:49<00:40,  2.56it/s] 73%|███████▎  | 273/376 [01:49<00:39,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 73%|███████▎  | 274/376 [01:50<00:40,  2.52it/s] 73%|███████▎  | 275/376 [01:50<00:39,  2.56it/s] 73%|███████▎  | 276/376 [01:51<00:38,  2.58it/s] 74%|███████▎  | 277/376 [01:51<00:38,  2.60it/s] 74%|███████▍  | 278/376 [01:51<00:37,  2.61it/s] 74%|███████▍  | 279/376 [01:52<00:36,  2.62it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 74%|███████▍  | 280/376 [01:52<00:37,  2.54it/s] 75%|███████▍  | 281/376 [01:53<00:37,  2.57it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 75%|███████▌  | 282/376 [01:53<00:37,  2.50it/s] 75%|███████▌  | 283/376 [01:53<00:36,  2.55it/s] 76%|███████▌  | 284/376 [01:54<00:35,  2.57it/s] 76%|███████▌  | 285/376 [01:54<00:35,  2.60it/s] 76%|███████▌  | 286/376 [01:54<00:34,  2.60it/s] 76%|███████▋  | 287/376 [01:55<00:33,  2.62it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 77%|███████▋  | 288/376 [01:55<00:34,  2.54it/s] 77%|███████▋  | 289/376 [01:56<00:33,  2.57it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 77%|███████▋  | 290/376 [01:56<00:34,  2.51it/s] 77%|███████▋  | 291/376 [01:56<00:33,  2.55it/s] 78%|███████▊  | 292/376 [01:57<00:32,  2.57it/s] 78%|███████▊  | 293/376 [01:57<00:31,  2.60it/s] 78%|███████▊  | 294/376 [01:58<00:31,  2.61it/s] 78%|███████▊  | 295/376 [01:58<00:30,  2.62it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 79%|███████▊  | 296/376 [01:58<00:31,  2.55it/s] 79%|███████▉  | 297/376 [01:59<00:30,  2.57it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 79%|███████▉  | 298/376 [01:59<00:31,  2.51it/s] 80%|███████▉  | 299/376 [02:00<00:30,  2.55it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 80%|███████▉  | 300/376 [02:00<00:30,  2.50it/s] 80%|████████  | 301/376 [02:00<00:29,  2.53it/s] 80%|████████  | 302/376 [02:01<00:28,  2.57it/s] 81%|████████  | 303/376 [02:01<00:28,  2.59it/s] 81%|████████  | 304/376 [02:01<00:27,  2.61it/s] 81%|████████  | 305/376 [02:02<00:27,  2.61it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 81%|████████▏ | 306/376 [02:02<00:27,  2.54it/s] 82%|████████▏ | 307/376 [02:03<00:26,  2.57it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 82%|████████▏ | 308/376 [02:03<00:27,  2.50it/s] 82%|████████▏ | 309/376 [02:03<00:26,  2.54it/s] 82%|████████▏ | 310/376 [02:04<00:25,  2.57it/s] 83%|████████▎ | 311/376 [02:04<00:25,  2.59it/s] 83%|████████▎ | 312/376 [02:05<00:24,  2.61it/s] 83%|████████▎ | 313/376 [02:05<00:24,  2.62it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 84%|████████▎ | 314/376 [02:05<00:24,  2.54it/s] 84%|████████▍ | 315/376 [02:06<00:24,  2.51it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 84%|████████▍ | 316/376 [02:06<00:24,  2.47it/s] 84%|████████▍ | 317/376 [02:07<00:23,  2.53it/s] 85%|████████▍ | 318/376 [02:07<00:22,  2.56it/s] 85%|████████▍ | 319/376 [02:07<00:22,  2.58it/s] 85%|████████▌ | 320/376 [02:08<00:21,  2.60it/s] 85%|████████▌ | 321/376 [02:08<00:21,  2.60it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 512)
+ 86%|████████▌ | 322/376 [02:09<00:21,  2.53it/s] 86%|████████▌ | 323/376 [02:09<00:20,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 512, 256)
+ 86%|████████▌ | 324/376 [02:09<00:20,  2.54it/s] 86%|████████▋ | 325/376 [02:10<00:19,  2.58it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 87%|████████▋ | 326/376 [02:10<00:19,  2.57it/s] 87%|████████▋ | 327/376 [02:10<00:18,  2.59it/s]INFO:absl:Not sharding. Tensor shape (1, 1, 512, 256)
+ 87%|████████▋ | 328/376 [02:11<00:18,  2.60it/s] 88%|████████▊ | 329/376 [02:11<00:17,  2.61it/s] 88%|████████▊ | 330/376 [02:12<00:17,  2.62it/s] 88%|████████▊ | 331/376 [02:12<00:17,  2.63it/s] 88%|████████▊ | 332/376 [02:12<00:16,  2.63it/s] 89%|████████▊ | 333/376 [02:13<00:16,  2.63it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 89%|████████▉ | 334/376 [02:13<00:16,  2.61it/s] 89%|████████▉ | 335/376 [02:14<00:15,  2.57it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 89%|████████▉ | 336/376 [02:14<00:15,  2.55it/s] 90%|████████▉ | 337/376 [02:14<00:15,  2.58it/s] 90%|████████▉ | 338/376 [02:15<00:14,  2.60it/s] 90%|█████████ | 339/376 [02:15<00:14,  2.61it/s] 90%|█████████ | 340/376 [02:15<00:13,  2.62it/s] 91%|█████████ | 341/376 [02:16<00:13,  2.63it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 91%|█████████ | 342/376 [02:16<00:13,  2.60it/s] 91%|█████████ | 343/376 [02:17<00:12,  2.61it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 91%|█████████▏| 344/376 [02:17<00:12,  2.60it/s] 92%|█████████▏| 345/376 [02:17<00:11,  2.61it/s] 92%|█████████▏| 346/376 [02:18<00:11,  2.62it/s] 92%|█████████▏| 347/376 [02:18<00:11,  2.62it/s] 93%|█████████▎| 348/376 [02:19<00:10,  2.63it/s] 93%|█████████▎| 349/376 [02:19<00:10,  2.63it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 256)
+ 93%|█████████▎| 350/376 [02:19<00:09,  2.61it/s] 93%|█████████▎| 351/376 [02:20<00:09,  2.62it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 256, 128)
+ 94%|█████████▎| 352/376 [02:20<00:09,  2.61it/s] 94%|█████████▍| 353/376 [02:20<00:08,  2.62it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 94%|█████████▍| 354/376 [02:21<00:08,  2.62it/s] 94%|█████████▍| 355/376 [02:21<00:07,  2.63it/s]INFO:absl:Not sharding. Tensor shape (1, 1, 256, 128)
+ 95%|█████████▍| 356/376 [02:22<00:07,  2.63it/s] 95%|█████████▍| 357/376 [02:22<00:10,  1.86it/s] 95%|█████████▌| 358/376 [02:27<00:29,  1.62s/it] 95%|█████████▌| 359/376 [02:27<00:21,  1.24s/it] 96%|█████████▌| 360/376 [02:27<00:15,  1.02it/s] 96%|█████████▌| 361/376 [02:28<00:12,  1.25it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 96%|█████████▋| 362/376 [02:28<00:09,  1.48it/s] 97%|█████████▋| 363/376 [02:29<00:07,  1.70it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 97%|█████████▋| 364/376 [02:29<00:06,  1.90it/s] 97%|█████████▋| 365/376 [02:29<00:05,  2.08it/s] 97%|█████████▋| 366/376 [02:30<00:04,  2.22it/s] 98%|█████████▊| 367/376 [02:30<00:03,  2.33it/s] 98%|█████████▊| 368/376 [02:30<00:03,  2.42it/s] 98%|█████████▊| 369/376 [02:31<00:02,  2.48it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 98%|█████████▊| 370/376 [02:31<00:02,  2.52it/s] 99%|█████████▊| 371/376 [02:32<00:01,  2.56it/s]INFO:absl:Not sharding. Tensor shape (3, 3, 128, 128)
+ 99%|█████████▉| 372/376 [02:32<00:01,  2.57it/s] 99%|█████████▉| 373/376 [02:32<00:01,  2.60it/s] 99%|█████████▉| 374/376 [02:33<00:00,  2.61it/s]100%|█████████▉| 375/376 [02:33<00:00,  2.62it/s]100%|██████████| 376/376 [02:33<00:00,  2.63it/s]100%|██████████| 376/376 [02:33<00:00,  2.44it/s]
+INFO:absl:Elapse for checkpoint sharding: 2.57 min
+INFO:absl:Creating checkpointer with ocdbt=False and zarr3=False
+INFO:absl:[thread=MainThread] Failed to get flag value for EXPERIMENTAL_ORBAX_USE_DISTRIBUTED_PROCESS_ID.
+INFO:absl:[process=0][thread=MainThread] CheckpointManager init: checkpointers=None, item_names=None, item_handlers=None, handler_registry=None
+INFO:absl:Initialized registry DefaultCheckpointHandlerRegistry({('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonSaveArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7487faad6cf0>, ('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonRestoreArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7487faad6cf0>}).
+INFO:absl:orbax-checkpoint version: 0.12.4
+INFO:absl:[process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7487fae080e0> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+INFO:absl:Found 0 checkpoint steps in gs://ly-maxtext/output/dit-xl-2-256/09092328
+INFO:absl:[process=0][thread=MainThread] CheckpointManager created,  primary_host=0, CheckpointManagerOptions=CheckpointManagerOptions(save_interval_steps=1, max_to_keep=None, keep_time_interval=None, keep_period=None, best_fn=None, best_mode='max', keep_checkpoints_without_metrics=True, step_prefix=None, step_format_fixed_length=None, step_name_format=None, create=True, cleanup_tmp_directories=False, save_on_steps=frozenset(), single_host_load_and_broadcast=False, todelete_subdir=None, todelete_full_path=None, enable_background_delete=False, num_deletion_threads=None, read_only=False, enable_async_checkpointing=True, async_options=AsyncOptions(timeout_secs=1200, barrier_sync_fn=None, post_finalization_callback=None, create_directories_asynchronously=True), multiprocessing_options=MultiprocessingOptions(primary_host=0, active_processes=None, barrier_sync_key_prefix=None), should_save_fn=None, file_options=FileOptions(path_permission_mode=None), atomicity_options=AtomicityOptions(mode=<AtomicityMode.AUTO: 'auto'>, allow_legacy_atomic_rename=False), save_root_metadata=True, temporary_path_class=None, save_decision_policy=FixedIntervalPolicy(interval=1), preservation_policy=LatestN(n=10), prevent_write_metrics=True, enable_should_save_is_saving_in_progress_check=True, enable_per_process_directory_creation=False, lightweight_initialize=False), root_directory=gs://ly-maxtext/output/dit-xl-2-256/09092328: <orbax.checkpoint.checkpoint_manager.CheckpointManager object at 0x7487faad67b0>
+INFO:absl:Checkpoint manager created!
+INFO:absl:Waiting for step 0 to finish before checkpoint...
+INFO:absl:Waited 0.0014209747314453125 seconds for step 0 to finish before starting checkpointing.
+INFO:absl:Created BasePyTreeCheckpointHandler: use_ocdbt=False, use_zarr3=False, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7487f9767390>, enable_pinned_host_transfer=False, save_concurrent_bytes: 96000000000 (89.4 GiB), restore_concurrent_bytes: 96000000000 (89.4 GiB)
+INFO:absl:Created BasePyTreeCheckpointHandler: use_ocdbt=False, use_zarr3=False, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7487f9767390>, enable_pinned_host_transfer=False, save_concurrent_bytes: 96000000000 (89.4 GiB), restore_concurrent_bytes: 96000000000 (89.4 GiB)
+INFO:absl:Initialized registry DefaultCheckpointHandlerRegistry({('items', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler)}).
+INFO:absl:[process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7487fae0b240> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+INFO:absl:[process=0][thread=MainThread][wait_until_finished] No Save Finalize thread to wait for. Returning.
+INFO:absl:[process=0] Saving checkpoint at step 0
+INFO:absl:[process=0] [async] Started save checkpoint @ gs://ly-maxtext/output/dit-xl-2-256/09092328/0.
+INFO:absl:Using ThreadSafeKeyValueSignalingClient
+INFO:absl:[process=0][thread=MainThread] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 0.000837s
+INFO:absl:Scheduling D2H of 376 prioritized jax.Array.
+INFO:absl:Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+INFO:absl:Creating tmp directory gs://ly-maxtext/output/dit-xl-2-256/09092328/0
+INFO:absl:Creating tmp directory gs://ly-maxtext/output/dit-xl-2-256/09092328/0/items
+INFO:absl:Wrote Metadata={'item_handlers': None, 'metrics': {}, 'performance_metrics': {}, 'init_timestamp_nsecs': 1788996703010064724, 'commit_timestamp_nsecs': None, 'custom_metadata': {}}, json={"item_handlers": null, "metrics": {}, "performance_metrics": {}, "init_timestamp_nsecs": 1788996703010064724, "commit_timestamp_nsecs": null, "custom_metadata": {}} to gs://ly-maxtext/output/dit-xl-2-256/09092328/0/_CHECKPOINT_METADATA
+I0909 23:31:43.307096  440124 google_auth_provider.cc:181] Running on GCE, using service account 770040921623-compute@developer.gserviceaccount.com
+INFO:absl:[process=0][thread=MainThread] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 3.111580s
+INFO:absl:MemoryRegulated: Peak usage: 0.000000 GiB
+INFO:absl:[process=0] /jax/orbax/write/blocking_gbytes_per_sec: 438.959 MiB/s (total size: 1.3 GiB) (time elapsed: 3.1486105918884277 s) (global)
+INFO:absl:[process=0][thread=MainThread] Initiated Pytree async_save. Time taken: 3.148882s (batch_requests_ready=0.010222s, total_serialization_initiated=3.123246s, others=0.015414s)
+INFO:absl:[process=0][thread=MainThread] Initiated CompositeCheckpointHandler.async_save. Time taken: 3.152194s (all_items=0.000015s, per_item={'items': '0.00001454'}, temp_paths=3.152180)
+INFO:absl:[process=0] [async] Finished blocking save in 3.21 seconds. Continuing save @ gs://ly-maxtext/output/dit-xl-2-256/09092328/0.
+INFO:absl:[process=0][thread=async_save] Background save thread started. Deadline for this save operation is 2026-09-09 23:51:45.772143
+INFO:absl:[process=0][thread=MainThread][step=0] Starting CheckpointManager Save Finalize thread=save_finalize
+INFO:absl:[process=0][thread=save_finalize] Waiting for background save thread=async_save.
+INFO:absl:{'step': 0, 'event_type': 'save', 'directory': 'gs://ly-maxtext/output/dit-xl-2-256/09092328', 'reached_preemption': False, 'preemption_received_at': None, 'synchronous': False, 'wait_for_prev_start_time': 1788996702.561624, 'wait_for_prev_duration_secs': 2.9802322387695312e-05, 'time_between_consecutive_saves_sec': None, 'checkpointer_blocking_start_time': 1788996702.561794, 'checkpointer_blocking_duration_secs': 3.2105519771575928, 'get_old_steps_start_time': 1788996705.7723718, 'get_old_steps_duration_secs': 2.3126602172851562e-05, 'checkpoint_manager_blocking_start_time': 1788996702.5615575, 'checkpoint_manager_blocking_duration_secs': 3.2111387252807617}
+INFO:absl:[process=0][thread=Thread-12 (_run_loop)][step=0][wait_until_finished] Waiting for Save Finalize thread (save_finalize) to complete.
+INFO:absl:[process=0][thread=array_type_handler] Wrote 376 array_metadata.ArrayMetadata to gs://ly-maxtext/output/dit-xl-2-256/09092328/0/items/array_metadatas/process_0
+INFO:absl:[process=0] /jax/orbax/write/worker/io/requested throughput: 125.121 MiB/s (total gbytes: 1.3 GiB) (time elapsed: 11.046218872070312 s) (per-host)
+INFO:absl:[process=0] Raw /jax/orbax/write/worker/io/raw throughput: 98.446 MiB/s (total gbytes: 1.1 GiB) (time elapsed: 11.046218872070312 s) (per-host)
+INFO:absl:[process=0] Write ratio (raw/logical): 0.787 (1.1 GiB / 1.3 GiB)
+INFO:absl:[process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 11.302625s (commit=11.030718s, array_metadata_write=0.271907s)
+INFO:absl:[process=0] /jax/orbax/write/gbytes_per_sec: 95.628 MiB/s (total size: 1.3 GiB) (time elapsed: 14.45294451713562 s) (global)
+WARNING:absl:[process=0][thread=Thread-10 (_target_setting_result)] Skipping merge of OCDBT checkpoints: No per-process OCDBT checkpoint subdirs found in gs://ly-maxtext/output/dit-xl-2-256/09092328/0/items, 
+INFO:absl:[process=0][thread=Thread-10 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+INFO:absl:[process=0][thread=Thread-10 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.444982s. use_zarr3=False, enable_post_merge_validation=True, directory=gs://ly-maxtext/output/dit-xl-2-256/09092328/0/items
+INFO:absl:[process=0][thread=async_save] 3 Handler Commit operations completed. Time taken: 11.748906s.
+INFO:absl:Read Metadata={'item_handlers': None, 'metrics': {}, 'performance_metrics': {}, 'init_timestamp_nsecs': 1788996703010064724, 'commit_timestamp_nsecs': None, 'custom_metadata': {}} from gs://ly-maxtext/output/dit-xl-2-256/09092328/0/_CHECKPOINT_METADATA
+INFO:absl:Finalizing gs://ly-maxtext/output/dit-xl-2-256/09092328/0/items
+INFO:absl:Finalizing gs://ly-maxtext/output/dit-xl-2-256/09092328/0
+INFO:absl:Updated Metadata={'item_handlers': {'items': 'orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler'}, 'metrics': {}, 'performance_metrics': {}, 'init_timestamp_nsecs': 1788996703010064724, 'commit_timestamp_nsecs': None, 'custom_metadata': {'scan_layers': False}} to gs://ly-maxtext/output/dit-xl-2-256/09092328/0/_CHECKPOINT_METADATA
+INFO:absl:[process=0][thread=async_save] Finished saving checkpoint (finalized tmp dir) to `gs://ly-maxtext/output/dit-xl-2-256/09092328/0`.
+INFO:absl:[process=0] [async] Finished save (blocking + background) in 15.73 seconds @ gs://ly-maxtext/output/dit-xl-2-256/09092328/0
+INFO:absl:[process=0][thread=async_save] Background save thread done. Time taken: 12.515206s.
+INFO:absl:[process=0][thread=save_finalize] Done with waiting for background save thread=async_save.
+INFO:absl:[process=0][thread=save_finalize] No errors found in background save thread=async_save.
+INFO:absl:Queuing deletion of steps: [].
+INFO:absl:[process=0][thread=save_finalize][step=0] CheckpointManager Save Finalize is syncing with other hosts...
+INFO:absl:[process=0][thread=save_finalize][step=0] CheckpointManager Save Finalize is done on all hosts.
+INFO:absl:[process=0][thread=Thread-12 (_run_loop)][step=0][wait_until_finished] Done waiting for Save Finalize thread (save_finalize) running at step=0.
+INFO:absl:AsyncRunner: Shutting down (wait=True)...
+INFO:absl:AsyncRunner: No active tasks to wait for.
+INFO:absl:AsyncRunner: Stopped.
+INFO:absl:saved a checkpoint at step 0
+INFO:absl:[process=0][thread=MainThread][wait_until_finished] No Save Finalize thread to wait for. Returning.
+INFO:absl:Elapse for checkpoint save: 0.27 min
+INFO:absl:[Program Ends] RAM Usage: 24.27/1417.33 GB (1.7%)
+INFO:absl:Conversion complete. Checkpoint saved to gs://ly-maxtext/output/dit-xl-2-256/09092328/
+INFO:absl:Overall Elapse: 2.91 min
+INFO:absl:Peak Memory: 6.67 GB

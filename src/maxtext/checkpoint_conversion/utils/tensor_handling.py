@@ -29,7 +29,12 @@ def apply_hook_fns(weight, target_shape, hook_fns):
     hook_fns = [hook_fns]
   # Apply a list of hooks, be careful of order
   for hook_fn in hook_fns:
+    if hasattr(hook_fn, '__name__'):
+        print(f"DEBUG: apply_hook_fns calling {hook_fn.__name__} on weight shape {weight.shape}, target_shape {target_shape}")
+    else:
+        print(f"DEBUG: apply_hook_fns calling {type(hook_fn)} on weight shape {weight.shape}, target_shape {target_shape}")
     weight = hook_fn(weight, target_shape)
+    print(f"DEBUG: apply_hook_fns returned shape {weight.shape}")
   return weight
 
 

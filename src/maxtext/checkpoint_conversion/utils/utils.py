@@ -148,7 +148,12 @@ def apply_hook_fns(weight, target_shape, hook_fns):
     hook_fns = [hook_fns]
   # Apply a list of hooks, be careful of order
   for hook_fn in hook_fns:
+    if hasattr(hook_fn, '__name__'):
+        print(f"DEBUG: apply_hook_fns (utils) calling {hook_fn.__name__} on weight shape {weight.shape}, target_shape {target_shape}")
+    else:
+        print(f"DEBUG: apply_hook_fns (utils) calling {type(hook_fn)} on weight shape {weight.shape}, target_shape {target_shape}")
     weight = hook_fn(weight, target_shape)
+    print(f"DEBUG: apply_hook_fns (utils) returned shape {weight.shape}")
   return weight
 
 
@@ -1159,6 +1164,50 @@ def load_hf_dict_from_safetensors(model_id_or_path, token, revision, framework="
       for key in f.keys():
         hf_state_dict[key] = f.get_tensor(key)
   return hf_state_dict
+
+
+def load_hf_dict_from_diffusers(model_id_or_path, token, revision):
+  """Loads HF dictionary from diffusers format (.bin files), handling subdirectories."""
+  import torch
+  import pathlib
+  
+  if os.path.isdir(model_id_or_path):
+    local_path = model_id_or_path
+  else:
+    local_path = snapshot_download(
+        repo_id=model_id_or_path,
+        token=token,
+        revision=revision,
+    )
+  
+  merged_state_dict = {}
+  
+  # Load Transformer
+  transformer_file = os.path.join(local_path, "transformer", "diffusion_pytorch_model.bin")
+  if os.path.exists(transformer_file):
+      max_logging.log(f"Loading {transformer_file}")
+      transformer_dict = torch.load(transformer_file, map_location='cpu')
+      for k, v in transformer_dict.items():
+          merged_state_dict[f"transformer.{k}"] = v
+  
+  # Load VAE
+  vae_file = os.path.join(local_path, "vae", "diffusion_pytorch_model.bin")
+  if os.path.exists(vae_file):
+      max_logging.log(f"Loading {vae_file}")
+      vae_dict = torch.load(vae_file, map_location='cpu')
+      for k, v in vae_dict.items():
+          merged_state_dict[f"vae.{k}"] = v
+          
+  if not merged_state_dict:
+      # Fallback to look for any .bin files if specific ones are not found
+      ckpt_paths = sorted(pathlib.Path(local_path).rglob("*.bin"))
+      if not ckpt_paths:
+          raise ValueError(f"No .bin files found in {local_path}")
+      
+      max_logging.log(f"Loading {ckpt_paths[0]}")
+      return torch.load(ckpt_paths[0], map_location='cpu')
+
+  return merged_state_dict
 
 
 def shard_jax_weights(jax_weights, device_count, mem_info):

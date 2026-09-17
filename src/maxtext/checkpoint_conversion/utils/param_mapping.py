@@ -171,6 +171,250 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
   return mapping
 
 
+def DIT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping between MaxText and HuggingFace DiT weight paths."""
+  Ndec = maxtext_config.base_num_decoder_layers
+  
+  mapping = {
+      "params-patch_embed-kernel": "transformer.pos_embed.proj.weight",
+      "params-patch_embed-bias": "transformer.pos_embed.proj.bias",
+      
+      "params-pos_embed": "transformer.pos_embed.proj.weight", # Trigger key for custom hook
+      
+      "params-timestep_embedder-linear1-kernel": "transformer.transformer_blocks.0.norm1.emb.timestep_embedder.linear_1.weight",
+      "params-timestep_embedder-linear1-bias": "transformer.transformer_blocks.0.norm1.emb.timestep_embedder.linear_1.bias",
+      "params-timestep_embedder-linear2-kernel": "transformer.transformer_blocks.0.norm1.emb.timestep_embedder.linear_2.weight",
+      "params-timestep_embedder-linear2-bias": "transformer.transformer_blocks.0.norm1.emb.timestep_embedder.linear_2.bias",
+      
+      "params-label_embedder-embedding-embedding": "transformer.transformer_blocks.0.norm1.emb.class_embedder.embedding_table.weight",
+      
+      "params-final_layer-adaLN_modulation-kernel": "transformer.proj_out_1.weight",
+      "params-final_layer-adaLN_modulation-bias": "transformer.proj_out_1.bias",
+      "params-final_layer-linear-kernel": "transformer.proj_out_2.weight",
+      "params-final_layer-linear-bias": "transformer.proj_out_2.bias",
+  }
+  
+  for i in range(Ndec):
+      prefix = f"params-blocks_{i}"
+      hf_prefix = f"transformer.transformer_blocks.{i}"
+      
+      mapping.update({
+          f"{prefix}-adaLN_modulation-kernel": f"{hf_prefix}.norm1.linear.weight",
+          f"{prefix}-adaLN_modulation-bias": f"{hf_prefix}.norm1.linear.bias",
+          
+          f"{prefix}-attn-query-kernel": f"{hf_prefix}.attn1.to_q.weight",
+          f"{prefix}-attn-query-bias": f"{hf_prefix}.attn1.to_q.bias",
+          f"{prefix}-attn-key-kernel": f"{hf_prefix}.attn1.to_k.weight",
+          f"{prefix}-attn-key-bias": f"{hf_prefix}.attn1.to_k.bias",
+          f"{prefix}-attn-value-kernel": f"{hf_prefix}.attn1.to_v.weight",
+          f"{prefix}-attn-value-bias": f"{hf_prefix}.attn1.to_v.bias",
+          f"{prefix}-attn-out-kernel": f"{hf_prefix}.attn1.to_out.0.weight",
+          f"{prefix}-attn-out-bias": f"{hf_prefix}.attn1.to_out.0.bias",
+          
+          f"{prefix}-mlp-wi-kernel": f"{hf_prefix}.ff.net.0.proj.weight",
+          f"{prefix}-mlp-wi-bias": f"{hf_prefix}.ff.net.0.proj.bias",
+          f"{prefix}-mlp-wo-kernel": f"{hf_prefix}.ff.net.2.weight",
+          f"{prefix}-mlp-wo-bias": f"{hf_prefix}.ff.net.2.bias",
+      })
+      
+  # VAE Mappings
+  vae_prefix = "params-vae_decoder"
+  hf_vae_prefix = "vae.decoder"
+  
+  mapping.update({
+      f"{vae_prefix}-post_quant_conv-kernel": "vae.post_quant_conv.weight",
+      f"{vae_prefix}-post_quant_conv-bias": "vae.post_quant_conv.bias",
+      f"{vae_prefix}-conv_in-kernel": f"{hf_vae_prefix}.conv_in.weight",
+      f"{vae_prefix}-conv_in-bias": f"{hf_vae_prefix}.conv_in.bias",
+      f"{vae_prefix}-conv_out-kernel": f"{hf_vae_prefix}.conv_out.weight",
+      f"{vae_prefix}-conv_out-bias": f"{hf_vae_prefix}.conv_out.bias",
+      f"{vae_prefix}-norm_out-scale": f"{hf_vae_prefix}.conv_norm_out.weight",
+      f"{vae_prefix}-norm_out-bias": f"{hf_vae_prefix}.conv_norm_out.bias",
+      
+      # Mid Block
+      f"{vae_prefix}-mid-resnet1-conv1-kernel": f"{hf_vae_prefix}.mid_block.resnets.0.conv1.weight",
+      f"{vae_prefix}-mid-resnet1-conv1-bias": f"{hf_vae_prefix}.mid_block.resnets.0.conv1.bias",
+      f"{vae_prefix}-mid-resnet1-conv2-kernel": f"{hf_vae_prefix}.mid_block.resnets.0.conv2.weight",
+      f"{vae_prefix}-mid-resnet1-conv2-bias": f"{hf_vae_prefix}.mid_block.resnets.0.conv2.bias",
+      f"{vae_prefix}-mid-resnet1-norm1-scale": f"{hf_vae_prefix}.mid_block.resnets.0.norm1.weight",
+      f"{vae_prefix}-mid-resnet1-norm1-bias": f"{hf_vae_prefix}.mid_block.resnets.0.norm1.bias",
+      f"{vae_prefix}-mid-resnet1-norm2-scale": f"{hf_vae_prefix}.mid_block.resnets.0.norm2.weight",
+      f"{vae_prefix}-mid-resnet1-norm2-bias": f"{hf_vae_prefix}.mid_block.resnets.0.norm2.bias",
+      
+      f"{vae_prefix}-mid-resnet2-conv1-kernel": f"{hf_vae_prefix}.mid_block.resnets.1.conv1.weight",
+      f"{vae_prefix}-mid-resnet2-conv1-bias": f"{hf_vae_prefix}.mid_block.resnets.1.conv1.bias",
+      f"{vae_prefix}-mid-resnet2-conv2-kernel": f"{hf_vae_prefix}.mid_block.resnets.1.conv2.weight",
+      f"{vae_prefix}-mid-resnet2-conv2-bias": f"{hf_vae_prefix}.mid_block.resnets.1.conv2.bias",
+      f"{vae_prefix}-mid-resnet2-norm1-scale": f"{hf_vae_prefix}.mid_block.resnets.1.norm1.weight",
+      f"{vae_prefix}-mid-resnet2-norm1-bias": f"{hf_vae_prefix}.mid_block.resnets.1.norm1.bias",
+      f"{vae_prefix}-mid-resnet2-norm2-scale": f"{hf_vae_prefix}.mid_block.resnets.1.norm2.weight",
+      f"{vae_prefix}-mid-resnet2-norm2-bias": f"{hf_vae_prefix}.mid_block.resnets.1.norm2.bias",
+      
+      f"{vae_prefix}-mid-attn-q-kernel": f"{hf_vae_prefix}.mid_block.attentions.0.query.weight",
+      f"{vae_prefix}-mid-attn-q-bias": f"{hf_vae_prefix}.mid_block.attentions.0.query.bias",
+      f"{vae_prefix}-mid-attn-k-kernel": f"{hf_vae_prefix}.mid_block.attentions.0.key.weight",
+      f"{vae_prefix}-mid-attn-k-bias": f"{hf_vae_prefix}.mid_block.attentions.0.key.bias",
+      f"{vae_prefix}-mid-attn-v-kernel": f"{hf_vae_prefix}.mid_block.attentions.0.value.weight",
+      f"{vae_prefix}-mid-attn-v-bias": f"{hf_vae_prefix}.mid_block.attentions.0.value.bias",
+      f"{vae_prefix}-mid-attn-proj_out-kernel": f"{hf_vae_prefix}.mid_block.attentions.0.proj_attn.weight",
+      f"{vae_prefix}-mid-attn-proj_out-bias": f"{hf_vae_prefix}.mid_block.attentions.0.proj_attn.bias",
+      f"{vae_prefix}-mid-attn-norm-scale": f"{hf_vae_prefix}.mid_block.attentions.0.group_norm.weight",
+      f"{vae_prefix}-mid-attn-norm-bias": f"{hf_vae_prefix}.mid_block.attentions.0.group_norm.bias",
+  })
+  
+  # Up Blocks
+  block_out_channels = (512, 512, 256, 128)
+  current_channels = block_out_channels[0]
+  
+  for i, out_c in enumerate(block_out_channels):
+      for j in range(3): # layers_per_block=3
+          flat_idx = 4 * i + j
+          nnx_prefix = f"{vae_prefix}-up_blocks_{flat_idx}"
+          hf_up_prefix = f"{hf_vae_prefix}.up_blocks.{i}.resnets.{j}"
+          
+          mapping.update({
+              f"{nnx_prefix}-conv1-kernel": f"{hf_up_prefix}.conv1.weight",
+              f"{nnx_prefix}-conv1-bias": f"{hf_up_prefix}.conv1.bias",
+              f"{nnx_prefix}-conv2-kernel": f"{hf_up_prefix}.conv2.weight",
+              f"{nnx_prefix}-conv2-bias": f"{hf_up_prefix}.conv2.bias",
+              f"{nnx_prefix}-norm1-scale": f"{hf_up_prefix}.norm1.weight",
+              f"{nnx_prefix}-norm1-bias": f"{hf_up_prefix}.norm1.bias",
+              f"{nnx_prefix}-norm2-scale": f"{hf_up_prefix}.norm2.weight",
+              f"{nnx_prefix}-norm2-bias": f"{hf_up_prefix}.norm2.bias",
+          })
+          
+          if current_channels != out_c:
+              mapping.update({
+                  f"{nnx_prefix}-nin_shortcut-kernel": f"{hf_up_prefix}.conv_shortcut.weight",
+                  f"{nnx_prefix}-nin_shortcut-bias": f"{hf_up_prefix}.conv_shortcut.bias",
+              })
+          current_channels = out_c
+          
+      if i < 3:
+          flat_idx = 4 * i + 3
+          nnx_prefix = f"{vae_prefix}-up_blocks_{flat_idx}"
+          hf_up_prefix = f"{hf_vae_prefix}.up_blocks.{i}.upsamplers.0"
+          
+          mapping.update({
+              f"{nnx_prefix}-conv-kernel": f"{hf_up_prefix}.conv.weight",
+              f"{nnx_prefix}-conv-bias": f"{hf_up_prefix}.conv.bias",
+          })
+          
+  return mapping
+
+
+def DIT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for DiT."""
+  
+  hidden_size = config["hidden_size"]
+  
+  def flatten_and_transpose_conv(x, target_shape):
+    if saving_to_hf:
+      raise NotImplementedError("MaxText to HF for DiT conv kernel not implemented")
+    else:
+      # x shape: [out, in, H, W]
+      x_flat = x.reshape(x.shape[0], -1) # [out, 16]
+      return x_flat.T # [16, out]
+
+  def transpose(x, target_shape):
+    return x.T
+
+  def reshape_kernel(x, target_shape):
+    return x.T.reshape(target_shape)
+
+  def reshape_bias(x, target_shape):
+    print(f"DEBUG: reshape_bias called with x shape {x.shape}, target_shape {target_shape}", flush=True)
+    return x.reshape(target_shape)
+
+
+
+  def generate_sincos_2d(x, target_shape):
+    import math
+    seq_len = target_shape[1]
+    hidden_size = target_shape[2]
+    h = int(math.sqrt(seq_len))
+    w = h
+    assert h * w == seq_len, f"seq_len {seq_len} must be a perfect square"
+    
+    y_grid, x_grid = np.mgrid[:h, :w]
+    width = hidden_size
+    omega = np.arange(width // 4) / (width / 4.0)
+    omega = 1.0 / (10000.0**omega)
+    
+    y = np.einsum("m,d->md", y_grid.flatten(), omega)
+    x = np.einsum("m,d->md", x_grid.flatten(), omega)
+    pe = np.concatenate([np.sin(x), np.cos(x), np.sin(y), np.cos(y)], axis=1)
+    
+    return np.asarray(pe, dtype=x.dtype)[None, :, :]
+
+  def conv_transpose(x, target_shape):
+    if saving_to_hf:
+      return x.transpose(3, 2, 0, 1)
+    else:
+      return x.transpose(2, 3, 1, 0)
+
+  hooks = {
+      "params-patch_embed-kernel": flatten_and_transpose_conv,
+      "params-pos_embed": generate_sincos_2d,
+      "params-timestep_embedder-linear1-kernel": transpose,
+      "params-timestep_embedder-linear2-kernel": transpose,
+      "params-final_layer-adaLN_modulation-kernel": transpose,
+      "params-final_layer-linear-kernel": transpose,
+  }
+  
+  vae_prefix = "params-vae_decoder"
+  
+  hooks.update({
+      f"{vae_prefix}-post_quant_conv-kernel": conv_transpose,
+      f"{vae_prefix}-conv_in-kernel": conv_transpose,
+      f"{vae_prefix}-conv_out-kernel": conv_transpose,
+      f"{vae_prefix}-mid-resnet1-conv1-kernel": conv_transpose,
+      f"{vae_prefix}-mid-resnet1-conv2-kernel": conv_transpose,
+      f"{vae_prefix}-mid-resnet2-conv1-kernel": conv_transpose,
+      f"{vae_prefix}-mid-resnet2-conv2-kernel": conv_transpose,
+      
+      f"{vae_prefix}-mid-attn-q-kernel": transpose,
+      f"{vae_prefix}-mid-attn-k-kernel": transpose,
+      f"{vae_prefix}-mid-attn-v-kernel": transpose,
+      f"{vae_prefix}-mid-attn-proj_out-kernel": transpose,
+  })
+  
+  for i in range(4):
+      for j in range(3):
+          flat_idx = 4 * i + j
+          nnx_prefix = f"{vae_prefix}-up_blocks_{flat_idx}"
+          hooks.update({
+              f"{nnx_prefix}-conv1-kernel": conv_transpose,
+              f"{nnx_prefix}-conv2-kernel": conv_transpose,
+              f"{nnx_prefix}-nin_shortcut-kernel": conv_transpose,
+          })
+      if i < 3:
+          flat_idx = 4 * i + 3
+          nnx_prefix = f"{vae_prefix}-up_blocks_{flat_idx}"
+          hooks.update({
+              f"{nnx_prefix}-conv-kernel": conv_transpose,
+          })
+
+  Ndec = maxtext_config.base_num_decoder_layers
+  for i in range(Ndec):
+      prefix = f"params-blocks_{i}"
+      hooks.update({
+          f"{prefix}-adaLN_modulation-kernel": transpose,
+          f"{prefix}-attn-query-kernel": reshape_kernel,
+          f"{prefix}-attn-query-bias": reshape_bias,
+          f"{prefix}-attn-key-kernel": reshape_kernel,
+          f"{prefix}-attn-key-bias": reshape_bias,
+          f"{prefix}-attn-value-kernel": reshape_kernel,
+          f"{prefix}-attn-value-bias": reshape_bias,
+          f"{prefix}-attn-out-kernel": reshape_kernel,
+          f"{prefix}-mlp-wi-kernel": transpose,
+          f"{prefix}-mlp-wo-kernel": transpose,
+      })
+
+  return hooks
+
+
+
 def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Hook functions for Gemma3 parameter conversion.
 
@@ -4218,6 +4462,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
 
 
 PARAM_MAPPING = {
+    "dit-xl-2-256": DIT_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4272,6 +4517,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "dit-xl-2-256": DIT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,

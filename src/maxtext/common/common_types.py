@@ -118,6 +118,8 @@ class DecoderBlockType(enum.Enum):
   OLMO3 = "olmo3"
   DEEPSEEK4 = "deepseek4"
   ENVY = "envy"
+  DIT = "dit"
+
 
 
 class VisionEncoderBlockType(enum.Enum):
@@ -130,6 +132,7 @@ class VisionEncoderBlockType(enum.Enum):
   GEMMA4 = "gemma4"
   QWEN3_5 = "qwen3_5"
   QWEN3_VL = "qwen3_vl"
+  VAE = "vae"
 
 
 class AttentionType(enum.Enum):
@@ -140,6 +143,7 @@ class AttentionType(enum.Enum):
   COMPRESSED = "compressed"
   FULL = "full"
   BLOCK_DIFFUSION = "block_diffusion"
+  LATENT_DIFFUSION = "latent_diffusion"
 
 
 class ShardMode(enum.Enum):
