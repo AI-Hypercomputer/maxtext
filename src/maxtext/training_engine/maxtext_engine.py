@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
+import functools
 from typing import Any, Optional
 
 from absl import logging
@@ -44,6 +45,7 @@ from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
 from maxtext.training_engine import inflight_throttler
 from maxtext.training_engine import metrics as metrics_module
+from maxtext.training_engine import micro_step_profiler as profiler_module
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -523,6 +525,47 @@ def make_router_replay_loss_fn(
   return router_replay_loss_fn
 
 
+def _profiled_step(name: str, control_profile: bool = False) -> Callable[..., Any]:
+  """Decorator factory to instrument an instance method with a trace and profiler controls.
+
+  Args:
+      name: The label used for the `jax.profiler.StepTraceAnnotation`.
+      control_profile: If True, calls `self._profiler.maybe_activate` and `self._profiler.maybe_deactivate`
+          to activate and deactivate the profiling.
+
+  Returns:
+      A decorator that wraps an instance method to inject profiling and trace annotations.
+  """
+
+  # pylint: disable=protected-access
+  def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(method)
+    def wrapper(self, *args: Any, **kwargs: Any) -> Any:
+      step_to_profile = self.total_micro_steps
+      current_micro_step_count = self.micro_step_count
+      if control_profile:
+        self._profiler.maybe_activate(
+            step_to_profile,
+            current_micro_step_count,
+            self.train_step,
+            blocking_object=self._state,
+        )
+      with jax.profiler.StepTraceAnnotation(name, step_num=self.train_step):
+        result = method(self, *args, **kwargs)
+      if control_profile:
+        self._profiler.maybe_deactivate(
+            step_to_profile,
+            current_micro_step_count,
+            self.train_step,
+            blocking_object=self._state,
+        )
+      return result
+
+    return wrapper
+
+  return decorator
+
+
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   """Concrete trainer wrapping MaxText single-step SPMD execution for NNX models."""
 
@@ -621,7 +664,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._zero1_params_shardings: Any = None
     self._gathered_params_shardings: Any = None
     self._zero1_warned = False
+    # Micro step count within the current training step. Resets on `update()`.
     self._micro_step_count = 0
+    # Every micro step this run has ever folded in across optimizer steps.
+    self._total_micro_steps = 0
     # Set when this run resumed from an intra-step checkpoint, cleared once the step it
     # resumed into completes and its finished state has been checkpointed.
     self._resumed_mid_step = False
@@ -642,6 +688,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._eval_metrics_recorder = metrics_module.MetricsRecorder(mode=metrics_module.Mode.EVAL)
     self._metrics_logger = metrics_module.MetricsLogger(config=self._config)
     self._throttler = inflight_throttler.InflightThrottler(config=self._config, metrics_logger=self._metrics_logger)
+    self._profiler = profiler_module.MicroStepProfiler(self._config)
     self._raiden_sync: Any = None
     self._last_staged_step: Optional[int] = None
     self._staged_metadata: Any = None
@@ -694,6 +741,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def _checkpoint_dir(self) -> str:
     """Returns the directory this engine checkpoints through; an empty string disables Orbax entirely."""
     return self._config.checkpoint_dir
+
+  @property
+  def total_micro_steps(self) -> int:
+    """Returns how many micro steps this run has folded in over its whole lifetime."""
+    return self._total_micro_steps
 
   @property
   def model(self) -> Any:
@@ -1357,13 +1409,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     state_pure = self._read_state_pure()
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
 
-    def first_kernel(params, rest, dynamic):
+    def fwd_bwd(params, rest, dynamic):
       batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
       return self._fwd_bwd_kernel(params, rest, batch)
 
-    def accum_kernel(params, rest, dynamic, acc_grads, acc_denom):
+    def fwd_bwd_accum(params, rest, dynamic, acc_grads, acc_denom):
       batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
       return self._fwd_bwd_kernel(params, rest, batch, acc_grads, acc_denom)
+
+    def update(state_pure, accumulated_grads, accumulated_denominator, mean_loss):
+      return self._update_kernel(state_pure, accumulated_grads, accumulated_denominator, mean_loss)
 
     if self._mesh is not None:
       replicated = jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec())
@@ -1425,12 +1480,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # donated: JAX matches donations by shard-shape, not position, so it would alias the
     # weights into the gradient output.
     self._compiled_fwd_bwd = jax.jit(
-        first_kernel,
+        fwd_bwd,
         in_shardings=first_in_shardings,
         out_shardings=fwd_bwd_out_shardings,
     )
     self._compiled_fwd_bwd_accum = jax.jit(
-        accum_kernel,
+        fwd_bwd_accum,
         in_shardings=accum_in_shardings,
         out_shardings=fwd_bwd_out_shardings,
         donate_argnums=(3, 4),
@@ -1443,7 +1498,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # return. The gradients are not -- every parameter-shaped output is already claimed by
     # the incoming state, so JAX would only warn.
     self._compiled_update = jax.jit(
-        self._update_kernel,
+        update,
         in_shardings=update_in_shardings,
         out_shardings=update_out_shardings,
         donate_argnums=(0,),
@@ -1616,6 +1671,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           "update": self._jitted_kernels["update"].lower(state_aval, grads_aval, denominator_aval, mean_loss_aval),
       }
 
+  @_profiled_step("fwd_bwd", control_profile=True)
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
 
@@ -1683,7 +1739,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_grads = acc_grads
     self._accumulated_denominator = acc_denom
     self._micro_step_count += 1
+    self._total_micro_steps += 1
 
+  @_profiled_step("update")
   def update(self, **kwargs: Any) -> int:
     """Applies accumulated gradients to update NNX model weights in HBM.
 
@@ -2234,6 +2292,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def close(self) -> None:
     """Closes the trainer, writes buffered metrics and final checkpoint."""
+    if self._profiler is not None:
+      self._profiler.close(blocking_object=self._read_state_pure() if self._state is not None else None)
+
     if self._raiden_sync:
       if hasattr(self._raiden_sync, "close"):
         self._raiden_sync.close()

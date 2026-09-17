@@ -132,6 +132,7 @@ def _config(**overrides) -> pyconfig.HyperParameters:
       "warmup_steps_fraction=0.0",
       "learning_rate_final_fraction=1.0",
       "gradient_accumulation_steps=1",
+      "profiler_steps=0",
   ]
   argv.extend(f"{key}={value}" for key, value in overrides.items())
   return pyconfig.initialize(argv)
@@ -508,6 +509,7 @@ class Qwen3TopologyTest(absltest.TestCase):
             "max_target_length=512",
             "attention=flash",
             "enable_checkpointing=false",
+            "profiler_steps=0",
         ]
     )
 
@@ -636,10 +638,10 @@ class CompileHelpersTest(absltest.TestCase):
     argv = maxtext_engine_compile.with_engine_hlo_dump_defaults(
         ["", "base.yml", "dump_hlo=true", "dump_hlo_module_name=first"]
     )
-
+    defaults = maxtext_engine_compile.HLO_DUMP_DEFAULTS
     self.assertIn("dump_hlo_module_name=first", argv)
-    self.assertNotIn("dump_hlo_module_name=kernel", argv)
-    self.assertIn("dump_hlo_local_module_name=jit_.*kernel", argv)
+    self.assertNotIn(f"dump_hlo_module_name={defaults['dump_hlo_module_name']}", argv)
+    self.assertIn(f"dump_hlo_local_module_name={defaults['dump_hlo_local_module_name']}", argv)
 
 
 _SUITE = (EngineAotParityTest, AbstractMaxTextEngineTest)

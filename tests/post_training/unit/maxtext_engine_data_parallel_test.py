@@ -162,6 +162,7 @@ def _config(**overrides) -> pyconfig.HyperParameters:
       "warmup_steps_fraction=0.0",
       "learning_rate_final_fraction=1.0",
       "gradient_accumulation_steps=1",
+      "profiler_steps=0",
   ]
   argv.extend(f"{k}={v}" for k, v in overrides.items())
   return pyconfig.initialize(argv)
