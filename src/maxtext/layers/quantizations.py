@@ -892,7 +892,19 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   else:
     module_path = "decoder/.*layers.*"
 
-  return [
+  rules = []
+  if not config.quantize_moe_gate:
+    rules.append(
+        qwix.QtRule(
+            module_path=r".*/gate$",
+            weight_qtype=None,
+            act_qtype=None,
+            bwd_qtype=None,
+            op_names=("dot_general",),
+        )
+    )
+
+  rules.append(
       qwix.QtRule(
           module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
@@ -903,8 +915,9 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
           bwd_calibration_method=config.bwd_quantization_calibration_method,
           additional_qt_config={"sparsity_rule": sparsity_rule},
           op_names=("dot_general", "gmm", "ragged_dot"),
-      ),
-  ]
+      )
+  )
+  return rules
 
 
 def get_quantization_rule(config: Config):

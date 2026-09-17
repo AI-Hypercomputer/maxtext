@@ -738,5 +738,35 @@ class LhsScaleTest(unittest.TestCase):
     self.assertIsNone(scale)
 
 
+class QuantizeMoeGateRuleTest(unittest.TestCase):
+  """Tests for moe gate quantization rule filtering."""
+
+  @pytest.mark.tpu_backend
+  def test_fp8_full_moe_gate_quantized_by_default(self):
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        quantization="fp8_full",
+        quantize_moe_gate=True,
+    )
+    rules = quantizations.get_quantization_rule(config)
+    self.assertEqual(len(rules), 1)
+    self.assertEqual(rules[0].module_path, "decoder/.*layers.*")
+    self.assertEqual(rules[0].weight_qtype, jnp.float8_e4m3fn)
+
+  @pytest.mark.tpu_backend
+  def test_fp8_full_moe_gate_unquantized_rule_prepended(self):
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        quantization="fp8_full",
+        quantize_moe_gate=False,
+    )
+    rules = quantizations.get_quantization_rule(config)
+    self.assertEqual(len(rules), 2)
+    self.assertEqual(rules[0].module_path, r".*/gate$")
+    self.assertIsNone(rules[0].weight_qtype)
+    self.assertEqual(rules[1].module_path, "decoder/.*layers.*")
+    self.assertEqual(rules[1].weight_qtype, jnp.float8_e4m3fn)
+
+
 if __name__ == "__main__":
   unittest.main()
