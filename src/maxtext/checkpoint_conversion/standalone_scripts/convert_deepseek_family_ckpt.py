@@ -178,7 +178,7 @@ MODEL_PARAMS_DICT = {
 # The MTP block in MaxText will reuse the main embedding and output head.
 MTP_KEYS_TO_SKIP = [
     "model.layers.61.embed_tokens.weight",
-    "model.layers.61.shared_head.norm.weight",
+    # "model.layers.61.shared_head.norm.weight",
     "model.layers.61.shared_head.head.weight",
 ]
 
@@ -267,6 +267,8 @@ def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_ma
             f"model.layers.{layer_idx}.enorm.weight": "mtp_block.mtp_layer_1.mtp_1_embedding_norm.scale",
             f"model.layers.{layer_idx}.hnorm.weight": "mtp_block.mtp_layer_1.mtp_1_hidden_state_norm.scale",
             f"model.layers.{layer_idx}.eh_proj.weight": "mtp_block.mtp_layer_1.mtp_1_projection.kernel",
+            # add this
+            f"model.layers.{layer_idx}.shared_head.norm.weight": "mtp_block.mtp_layer_1.mtp_1_norm.kernel"
         }
     )
     for expert_idx in range(num_experts):
