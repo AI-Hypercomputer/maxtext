@@ -775,53 +775,71 @@ assert train._TF_AVAILABLE is False
 
 
   def test_calculate_global_batch_sizes_unified(self):
-    """Verify calculate_global_batch_sizes works identically for train and eval."""
-    from maxtext.configs.pyconfig_deprecated import (
-        calculate_global_batch_sizes,
-        calculate_training_batch_sizes,
-        calculate_eval_batch_sizes,
-    )
-    # Both aliases point to the unified function
-    self.assertIs(calculate_training_batch_sizes, calculate_global_batch_sizes)
-    self.assertIs(calculate_eval_batch_sizes, calculate_global_batch_sizes)
-
+    """Verify batch size calculations work consistently for train and eval via pyconfig."""
     # Case 1: pdbs < 1.0 (0.25 on 4 devices, grad_accum=1)
-    g_load, g_batch, m_batch = calculate_global_batch_sizes(
-        0.25, -1, 4, gradient_accumulation_steps=1
+    config_case1 = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        per_device_batch_size=0.25,
+        compile_topology="v5e-4",
+        compile_topology_num_slices=1,
+        gradient_accumulation_steps=1,
     )
-    self.assertEqual(g_load, 4)
-    self.assertEqual(g_batch, 4)
-    self.assertEqual(m_batch, 1)
+    self.assertEqual(config_case1.global_batch_size_to_load, 4)
+    self.assertEqual(config_case1.global_batch_size_to_train_on, 4)
+    self.assertEqual(config_case1.micro_batch_size_to_train_on, 1)
 
     # Case 2: pdbs < 1.0 with gradient accumulation steps = 2
-    g_load, g_batch, m_batch = calculate_global_batch_sizes(
-        0.25, -1, 4, gradient_accumulation_steps=2
+    config_case2 = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        per_device_batch_size=0.25,
+        compile_topology="v5e-4",
+        compile_topology_num_slices=1,
+        gradient_accumulation_steps=2,
     )
-    self.assertEqual(g_load, 8)
-    self.assertEqual(g_batch, 8)
-    self.assertEqual(m_batch, 1)
+    self.assertEqual(config_case2.global_batch_size_to_load, 8)
+    self.assertEqual(config_case2.global_batch_size_to_train_on, 8)
+    self.assertEqual(config_case2.micro_batch_size_to_train_on, 1)
 
     # Case 3: pdbs >= 1.0 (2.0 on 4 devices, grad_accum=2)
-    g_load, g_batch, m_batch = calculate_global_batch_sizes(
-        2.0, -1, 4, gradient_accumulation_steps=2
+    config_case3 = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        per_device_batch_size=2.0,
+        compile_topology="v5e-4",
+        compile_topology_num_slices=1,
+        gradient_accumulation_steps=2,
     )
-    self.assertEqual(g_load, 16)
-    self.assertEqual(g_batch, 16)
-    self.assertEqual(m_batch, 8)
+    self.assertEqual(config_case3.global_batch_size_to_load, 16)
+    self.assertEqual(config_case3.global_batch_size_to_train_on, 16)
+    self.assertEqual(config_case3.micro_batch_size_to_train_on, 8)
 
-    # Case 4: Eval batch size calculation (grad_accum_steps defaults to 1)
-    g_load_eval, g_eval, m_eval = calculate_eval_batch_sizes(0.5, -1, 4)
-    self.assertEqual(g_load_eval, 4)
-    self.assertEqual(g_eval, 4)
-    self.assertEqual(m_eval, 2)
-
-    # Case 5: expansion_factor > 1 (e.g. expansion_factor = 2)
-    g_load_exp, g_exp, m_exp = calculate_global_batch_sizes(
-        1.0, 2, 4, gradient_accumulation_steps=1
+    # Case 4: Eval batch size calculation (eval_pdbs=0.5 on 4 devices)
+    config_case4 = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        eval_per_device_batch_size=0.5,
+        compile_topology="v5e-4",
+        compile_topology_num_slices=1,
     )
-    self.assertEqual(g_exp, 4)
-    self.assertEqual(g_load_exp, 8)
-    self.assertEqual(m_exp, 4)
+    self.assertEqual(config_case4.global_batch_size_to_load_eval, 4)
+    self.assertEqual(config_case4.global_batch_size_to_eval_on, 4)
+    self.assertEqual(config_case4.micro_batch_size_to_eval_on, 2)
+
+    # Case 5: expansion_factor > 1 (e.g. expansion_factor_real_data = 2)
+    config_case5 = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        per_device_batch_size=1.0,
+        compile_topology="v5e-4",
+        compile_topology_num_slices=1,
+        gradient_accumulation_steps=1,
+        expansion_factor_real_data=2,
+    )
+    self.assertEqual(config_case5.global_batch_size_to_train_on, 4)
+    self.assertEqual(config_case5.global_batch_size_to_load, 8)
+    self.assertEqual(config_case5.micro_batch_size_to_train_on, 4)
 
   def test_fractional_per_device_batch_size_calculations(self):
     """When per_device_batch_size < 1, all loaded samples are trained on via GA."""
@@ -830,7 +848,8 @@ assert train._TF_AVAILABLE is False
         skip_jax_distributed_system=True,
         per_device_batch_size=0.25,
         eval_per_device_batch_size=0.5,
-        num_target_devices=4,
+        compile_topology="v5e-4",
+        compile_topology_num_slices=1,
         gradient_accumulation_steps=1,
     )
     # Training: pdbs=0.25 on 4 devices -> micro=1, load=4, train_on=4
