@@ -948,3 +948,13 @@ def cancel_checkpoint_manager(checkpoint_manager):
 
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.log(f"Warning: error during immediate checkpoint manager cancellation: {e}")
+
+  # 3. Reload the cached steps from storage. Orbax caches a step when its save starts and drops it only when
+  # wait_until_finished() reports the failure, which the detached finalize thread can no longer do. A save that
+  # failed after cancellation would otherwise stay latest_step() and block should_save().
+  if hasattr(checkpoint_manager, "reload"):
+    try:
+      checkpoint_manager.reload()
+      max_logging.log(f"Reloaded finalized checkpoint steps, latest step: {latest_step(checkpoint_manager)}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.log(f"Warning: failed to reload checkpoint steps after cancellation: {e}")
