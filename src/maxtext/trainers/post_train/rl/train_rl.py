@@ -45,7 +45,6 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 
 from __future__ import annotations
 import functools
-from functools import wraps
 import inspect
 from typing import Any, Callable, Optional, Sequence
 
@@ -295,7 +294,9 @@ def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
   custom_rewards_names = getattr(trainer_config, "reward_functions", "") or ""
   if custom_rewards_path and custom_rewards_names:
     names = [n.strip() for n in custom_rewards_names.split(",") if n.strip()]
-    reward_fns = [make_reward_fn(utils_rl.load_custom_callable(custom_rewards_path, n)) for n in names]
+    reward_fns = [
+        make_reward_fn(utils_rl.load_custom_callable(custom_rewards_path, n, importable_by_workers=True)) for n in names
+    ]
     max_logging.log(f"reward_fns: using {len(reward_fns)} custom reward function(s) {names} from {custom_rewards_path}")
     return reward_fns
   return [
@@ -303,6 +304,28 @@ def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
       make_reward_fn(utils_rl.match_format_approximately),
       make_reward_fn(utils_rl.check_numbers),
   ]
+
+
+class _RewardFn:
+  """Binds `tmvp_config` to a reward function while staying picklable.
+
+  tunix's reward worker pool (`GrpoConfig.reward_num_workers`) pickles the
+  reward callable into every worker task. A nested closure cannot be pickled,
+  so wrapping the reward fns in one silently forces tunix's serial fallback
+  ("Reward fn ... failed in worker processes (PicklingError...)"). Instances
+  of this class pickle by reference to the module-level `fn` plus the config.
+  A class rather than `functools.partial` so the wrapper keeps the underlying
+  fn's `__name__` (via `update_wrapper`), which tunix's reward manager uses
+  for its logs and per-fn bookkeeping.
+  """
+
+  def __init__(self, fn: Callable, tmvp_config: Any):
+    functools.update_wrapper(self, fn)
+    self.fn = fn
+    self.tmvp_config = tmvp_config
+
+  def __call__(self, **kwargs: Any) -> Any:
+    return self.fn(tmvp_config=self.tmvp_config, **kwargs)
 
 
 def _kwargs_supported_by(cls: Any, **kwargs: Any) -> dict[str, Any]:
@@ -492,12 +515,9 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
   )
 
   def make_reward_fn(fn):
-    # pragma: no cover
-    @wraps(fn)
-    def _reward_fn(**kwargs):
-      return fn(tmvp_config=trainer_config, **kwargs)
-
-    return _reward_fn
+    # A picklable wrapper (not a closure) so tunix's reward worker pool can
+    # ship the reward fns to its workers when `reward_num_workers` is set.
+    return _RewardFn(fn, trainer_config)
 
   # Optional user-provided reward functions: when `reward_functions_path` and
   # `reward_functions` are both set the built-in stack is replaced entirely by
@@ -533,6 +553,11 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         use_rollout_logps=trainer_config.rl.use_rollout_logps,
         force_on_policy_ratio=trainer_config.rl.force_on_policy_ratio,
         log_sampler_trainer_agreement=(trainer_config.rl.log_sampler_trainer_agreement),
+        **_kwargs_supported_by(
+            AgenticGrpoConfig,
+            reward_num_workers=trainer_config.reward_num_workers,
+            reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
+        ),
     )
     max_logging.log(
         "GRPO config resolved:\n"
@@ -563,6 +588,11 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         epsilon=trainer_config.rl.grpo_epsilon,
         loss_algo=trainer_config.rl.loss_algo,
         loss_agg_mode=trainer_config.rl.loss_agg_mode,
+        **_kwargs_supported_by(
+            GrpoConfig,
+            reward_num_workers=trainer_config.reward_num_workers,
+            reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
+        ),
     )
     max_logging.log(
         "GRPO config resolved:\n"

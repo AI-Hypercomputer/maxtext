@@ -15,18 +15,34 @@
 """Unit tests for train_rl.py."""
 
 import dataclasses
+import inspect
+import json
+import multiprocessing
+import os
+import pickle
+import sys
+import tempfile
+import time
 import unittest
 from unittest import mock
 import grain
+import numpy as np
 import pytest
 from types import SimpleNamespace
 import jax
 
 from maxtext.trainers.post_train.rl import train_rl
+from maxtext.trainers.post_train.rl import utils_rl
 
 pytestmark = [pytest.mark.post_training]
 from maxtext.configs import types
 from maxtext.utils import model_creation_utils
+
+
+def _echo_reward(prompts, completions, tmvp_config=None, **kwargs):
+  """Module-level reward fn for the pickling tests (pickles by reference)."""
+  del prompts, tmvp_config, kwargs
+  return [1.0] * len(completions)
 
 
 def _get_mock_devices(devices_per_slice, num_slices=1):
@@ -76,6 +92,202 @@ class TrainRLTest(unittest.TestCase):
         gc_collect_after_weight_sync=False,
     )
     self.assertFalse(config.gc_collect_after_weight_sync)
+
+  def test_rl_config_reward_worker_defaults(self):
+    """The reward worker knobs default to tunix's own defaults."""
+    config = types.RLConfig(model_name="gemma4-26b")
+
+    self.assertEqual(config.reward_num_workers, 0)
+    self.assertEqual(config.reward_worker_timeout_seconds, 180.0)
+
+    config = types.RLConfig(
+        model_name="gemma4-26b",
+        reward_num_workers=-1,
+        reward_worker_timeout_seconds=30.0,
+    )
+    self.assertEqual(config.reward_num_workers, -1)
+    self.assertEqual(config.reward_worker_timeout_seconds, 30.0)
+
+  def test_reward_fn_wrapper_is_picklable(self):
+    """The reward wrapper must pickle so tunix's worker pool can ship it."""
+    # pylint: disable=protected-access  # the tests target the internal wrapper
+    wrapped = train_rl._RewardFn(_echo_reward, SimpleNamespace(tag="cfg"))
+
+    clone = pickle.loads(pickle.dumps(wrapped))
+
+    self.assertEqual(clone(prompts=["p"], completions=["c"]), [1.0])
+    self.assertEqual(clone.__name__, "_echo_reward")
+    self.assertEqual(clone.tmvp_config.tag, "cfg")
+
+    # The production config must pickle too, or the pool falls back to serial.
+    production = train_rl._RewardFn(_echo_reward, types.RLConfig(model_name="gemma4-26b"))
+    clone = pickle.loads(pickle.dumps(production))
+    self.assertEqual(clone(prompts=["p"], completions=["c"]), [1.0])
+
+  def _write_user_rewards(self, file_name):
+    """Writes a two-function user reward file into a temp dir cleaned up (with its import state) after the test."""
+    tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+    self.addCleanup(tmp.cleanup)
+    module_name = os.path.splitext(file_name)[0]
+    previous = sys.modules.get(module_name)
+
+    def _restore_imports():
+      if previous is None:
+        sys.modules.pop(module_name, None)
+      else:
+        sys.modules[module_name] = previous
+      if tmp.name in sys.path:
+        sys.path.remove(tmp.name)
+
+    self.addCleanup(_restore_imports)
+    path = os.path.join(tmp.name, file_name)
+    with open(path, "w", encoding="utf-8") as f:
+      f.write(
+          "def my_reward(prompts, completions, tmvp_config=None, **kwargs):\n  return [2.0] * len(completions)\n\n\n"
+          "def my_other_reward(prompts, completions, tmvp_config=None, **kwargs):\n  return [3.0] * len(completions)\n"
+      )
+    return path
+
+  def test_custom_reward_fns_from_file_run_in_a_forkserver_worker(self):
+    """Callables from load_custom_callable must work inside tunix's reward workers.
+
+    tunix starts its workers from a fork server: they are fresh interpreters
+    that do not inherit the parent's sys.modules, so an in-process pickle
+    round trip proves nothing. Ship the functions to a real fork-server worker:
+    it has to import the user module by name. A module name the worker cannot
+    import kills the worker on unpickling and the caller only finds out when
+    its timeout expires.
+    """
+    path = self._write_user_rewards("maxtext_test_user_rewards.py")
+    # Both from the same file, like a `reward_functions` list: the second load must not invalidate the first.
+    fns = [
+        utils_rl.load_custom_callable(path, name, importable_by_workers=True) for name in ("my_reward", "my_other_reward")
+    ]
+    wrapped = [train_rl._RewardFn(fn, SimpleNamespace()) for fn in fns]  # pylint: disable=protected-access
+
+    with multiprocessing.get_context("forkserver").Pool(1) as pool:
+      jobs = [pool.apply_async(w, kwds={"prompts": ["p"], "completions": ["c"]}) for w in wrapped]
+      results = [job.get(timeout=300) for job in jobs]
+
+    self.assertEqual(results, [[2.0], [3.0]])
+    self.assertEqual([w.__name__ for w in wrapped], ["my_reward", "my_other_reward"])
+
+  def test_custom_reward_fn_runs_in_worker_when_its_directory_is_on_sys_path(self):
+    """The common launch case: cwd holds the reward file and `python -m` put cwd on sys.path.
+
+    find_spec then resolves the module name to the user's own file. That must
+    not count as a name conflict, or every such launch silently loses worker
+    parallelism for its custom reward fns.
+    """
+    path = self._write_user_rewards("maxtext_test_cwd_rewards.py")
+    sys.path.insert(0, os.path.dirname(path))
+
+    fn = utils_rl.load_custom_callable(path, "my_reward", importable_by_workers=True)
+    wrapped = train_rl._RewardFn(fn, SimpleNamespace())  # pylint: disable=protected-access
+
+    self.assertEqual(fn.__module__, "maxtext_test_cwd_rewards")
+    with multiprocessing.get_context("forkserver").Pool(1) as pool:
+      result = pool.apply_async(wrapped, kwds={"prompts": ["p"], "completions": ["c"]}).get(timeout=300)
+    self.assertEqual(result, [2.0])
+
+  def test_custom_callable_never_shadows_an_existing_module(self):
+    """A user file named like a real module loads privately and leaves that module alone."""
+    path = self._write_user_rewards("json.py")
+    real_json = sys.modules["json"]
+
+    fn = utils_rl.load_custom_callable(path, "my_reward", importable_by_workers=True)
+
+    self.assertEqual(fn(prompts=["p"], completions=["c"]), [2.0])
+    self.assertIs(sys.modules["json"], real_json)
+    self.assertNotIn(os.path.dirname(path), sys.path)
+    # Not importable by name, so it must fail to pickle in the parent -- tunix then falls back to the parent
+    # process immediately instead of losing a worker and waiting out the timeout.
+    with self.assertRaises((pickle.PicklingError, AttributeError)):
+      pickle.dumps(fn)
+
+  def test_reward_fn_wrapper_engages_tunix_worker_pool(self):
+    """reward_num_workers must actually run the wrapper in tunix's workers.
+
+    A closure wrapper raises PicklingError inside the pool and tunix silently
+    falls back to serial parent-process evaluation forever; the fallback set
+    staying empty proves the pool really evaluated the fn.
+    """
+    # pylint: disable=protected-access,import-outside-toplevel
+    try:
+      from tunix.rl import reward_manager
+      from tunix.rl.grpo.grpo_learner import GrpoConfig
+    except ImportError:
+      self.skipTest("tunix reward_manager is not available")
+    if "reward_num_workers" not in inspect.signature(GrpoConfig).parameters:
+      self.skipTest("installed tunix predates reward_num_workers")
+
+    grpo_config = GrpoConfig(num_generations=2, num_iterations=1, beta=0.0, epsilon=0.2, reward_num_workers=2)
+    wrapped = train_rl._RewardFn(_echo_reward, SimpleNamespace())
+    manager = reward_manager.SequenceRewardManager([wrapped], grpo_config)
+    try:
+      out = manager._compute_rewards(["p"] * 4, ["c"] * 4)
+      self.assertEqual(list(np.asarray(out["rewards"]).ravel()), [1.0] * 4)
+      self.assertEqual(manager._parent_only_fns, set())
+    finally:
+      manager.close()
+
+  def test_check_numbers_falls_back_to_the_parent_process(self):
+    """Pins that the built-in check_numbers is NOT parallelized by reward_num_workers.
+
+    check_numbers grades through math_verify_pool, which builds its own process
+    pool. Pool workers are daemonic and may not have children, so inside a
+    tunix reward worker that raises immediately; tunix then evaluates
+    check_numbers in the parent (where math_verify_pool still parallelizes the
+    grading) for the rest of the run. The fallback has to be immediate and the
+    scores correct. If math_verify_pool learns to grade inline inside a worker,
+    update this test.
+    """
+    # pylint: disable=protected-access,import-outside-toplevel
+    try:
+      from tunix.rl import reward_manager
+      from tunix.rl.grpo.grpo_learner import GrpoConfig
+    except ImportError:
+      self.skipTest("tunix reward_manager is not available")
+    if "reward_num_workers" not in inspect.signature(GrpoConfig).parameters:
+      self.skipTest("installed tunix predates reward_num_workers")
+
+    config = SimpleNamespace(
+        reasoning_start_token="<reasoning>",
+        reasoning_end_token="</reasoning>",
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+        reward_exact_answer=3.0,
+        reward_white_space_format_match=1.5,
+        reward_ratio_guess_to_answer_high=1.0,
+        reward_ratio_guess_to_answer_low=0.5,
+        penalty_incorrect_format=-0.5,
+        penalty_incorrect_answer=-0.5,
+        dataset_name="test",
+        debug=False,
+    )
+    grpo_config = GrpoConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        epsilon=0.2,
+        reward_num_workers=2,
+        reward_worker_timeout_seconds=300.0,
+    )
+    wrapped = [train_rl._RewardFn(fn, config) for fn in (_echo_reward, utils_rl.check_numbers)]
+    manager = reward_manager.SequenceRewardManager(wrapped, grpo_config)
+    # "1/2" vs "0.5" is not a string match, so grading has to go through math_verify_pool.
+    completions = ["<reasoning>r</reasoning><answer>1/2</answer>"] * 4
+    try:
+      start = time.monotonic()
+      out = manager._compute_rewards(["p"] * 4, completions, answer=[json.dumps(["0.5"])] * 4, question=["q"] * 4)
+      elapsed = time.monotonic() - start
+    finally:
+      manager.close()
+
+    self.assertEqual(manager._parent_only_fns, {"check_numbers"})
+    self.assertLess(elapsed, 200.0, "the fallback must not wait for reward_worker_timeout_seconds")
+    # Summed over the two fns: _echo_reward from the workers plus a correct math_verify grade from the parent.
+    self.assertEqual(list(np.asarray(out["rewards"]).ravel()), [1.0 + config.reward_exact_answer] * 4)
 
   def test_kwargs_supported_by_keeps_declared_fields_only(self):
     """Knobs the installed tunix does not declare are dropped, with a log line."""
@@ -630,14 +842,14 @@ class TrainRLTest(unittest.TestCase):
     )
     loaded = {"reward_a": object(), "reward_b": object()}
     with mock.patch.object(
-        train_rl.utils_rl, "load_custom_callable", side_effect=lambda path, name: loaded[name]
+        train_rl.utils_rl, "load_custom_callable", side_effect=lambda path, name, **kwargs: loaded[name]
     ) as mock_load:
       reward_fns = train_rl.build_reward_fns(trainer_config, make_reward_fn=lambda fn: fn)
     self.assertEqual(reward_fns, [loaded["reward_a"], loaded["reward_b"]])
     mock_load.assert_has_calls(
         [
-            mock.call("/tmp/my_rewards.py", "reward_a"),
-            mock.call("/tmp/my_rewards.py", "reward_b"),
+            mock.call("/tmp/my_rewards.py", "reward_a", importable_by_workers=True),
+            mock.call("/tmp/my_rewards.py", "reward_b", importable_by_workers=True),
         ]
     )
 

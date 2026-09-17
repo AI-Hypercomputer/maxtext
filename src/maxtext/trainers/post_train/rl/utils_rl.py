@@ -19,6 +19,7 @@ import itertools
 import json
 import os
 import re
+import sys
 import uuid
 from typing import Any, Callable, Optional
 from etils import epath
@@ -905,21 +906,86 @@ def install_training_hooks(
     max_logging.warning(f"[intermediate-eval] install failed: {e!r}")
 
 
-def load_custom_callable(module_path: str, function_name: str) -> Callable:
+def _exec_user_module(module_name: str, module_path: str, register: bool = False):
+  """Executes the file at `module_path` as module `module_name`, optionally registered in `sys.modules`."""
+  spec = importlib.util.spec_from_file_location(module_name, module_path)
+  if spec is None or spec.loader is None:
+    raise ValueError(f"Cannot import {module_path!r}: not a valid python file")
+  module = importlib.util.module_from_spec(spec)
+  if register:
+    sys.modules[module_name] = module
+  try:
+    spec.loader.exec_module(module)
+  except BaseException:
+    if register:
+      sys.modules.pop(module_name, None)
+    raise
+  return module
+
+
+def _module_name_is_free(module_name: str, module_path: str) -> bool:
+  """True if registering the file at `module_path` as `module_name` cannot shadow another module."""
+  if not module_name.isidentifier() or module_name in sys.modules:
+    return False
+  try:
+    spec = importlib.util.find_spec(module_name)
+  except (ImportError, ValueError):
+    return False
+  # A spec that points at this very file is not a conflict: the file's directory is already on sys.path, which is
+  # the common case when the trainer is launched from the directory holding it (`python -m` puts cwd first).
+  return spec is None or os.path.abspath(spec.origin or "") == module_path
+
+
+def _load_worker_importable_module(module_path: str, function_name: str):
+  """Loads a user file so that worker processes can import it by name; see `load_custom_callable`."""
+  module_path = os.path.abspath(module_path)
+  module_name = os.path.splitext(os.path.basename(module_path))[0]
+  loaded = sys.modules.get(module_name)
+  if loaded is not None and os.path.abspath(getattr(loaded, "__file__", None) or "") == module_path:
+    # Several functions from one file (e.g. a list of reward fns): a second copy of the module would replace the
+    # first in sys.modules and make the functions loaded earlier unpicklable.
+    return loaded
+  if not _module_name_is_free(module_name, module_path):
+    max_logging.warning(
+        f"{module_path!r} is loaded as a private module because the name {module_name!r} is taken or is not a valid"
+        " module name; its functions cannot be pickled into reward worker processes and will be evaluated in the"
+        " parent process. Rename the file to parallelize them."
+    )
+    return _exec_user_module(f"_user_module_{function_name}", module_path)
+  module = _exec_user_module(module_name, module_path, register=True)
+  directory = os.path.dirname(module_path)
+  if directory not in sys.path:
+    sys.path.append(directory)
+  return module
+
+
+def load_custom_callable(module_path: str, function_name: str, importable_by_workers: bool = False) -> Callable:
   """Load a callable from a user-provided Python file via importlib.
 
   `module_path` is an absolute or relative filesystem path to a `.py` file.
   The file is loaded as a fresh module (not added to sys.path) and the
   named attribute is returned. Used to plug in user-defined `process_data`
   (for custom datasets) and reward functions without editing maxtext.
+
+  `importable_by_workers` is for callables that get pickled into worker
+  processes, i.e. reward fns under tunix's `reward_num_workers`. Those workers
+  come from a fork server: they are fresh interpreters that do not inherit
+  this process's `sys.modules`, so pickle-by-reference only works if a worker
+  can import the module by name. With the flag set, the file is loaded under
+  its own name (`/path/my_rewards.py` -> `my_rewards`), registered in
+  `sys.modules`, and its directory is appended to `sys.path`, which
+  multiprocessing hands to the workers. That is only done when it cannot
+  shadow anything: the file name must be a valid identifier and no other
+  module of that name may be loaded or importable. Otherwise the file is
+  loaded privately as without the flag; such a callable does not pickle, which
+  tunix detects immediately and handles by evaluating it in the parent process.
   """
   if not os.path.isfile(module_path):
     raise ValueError(f"Cannot import {module_path!r}: file does not exist")
-  spec = importlib.util.spec_from_file_location(f"_user_module_{function_name}", module_path)
-  if spec is None or spec.loader is None:
-    raise ValueError(f"Cannot import {module_path!r}: not a valid python file")
-  module = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(module)
+  if importable_by_workers:
+    module = _load_worker_importable_module(module_path, function_name)
+  else:
+    module = _exec_user_module(f"_user_module_{function_name}", module_path)
   fn = getattr(module, function_name, None)
   if fn is None:
     raise ValueError(f"{module_path!r} does not define a function named {function_name!r}")
