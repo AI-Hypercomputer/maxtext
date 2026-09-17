@@ -231,7 +231,9 @@ class LoraUtilsTest(unittest.TestCase):
     cfg1 = lora_utils._load_lora_module_configs()
     cfg2 = lora_utils._load_lora_module_configs()
     self.assertIs(cfg1, cfg2)
-    cache_info = lora_utils._load_lora_module_configs.cache_info()
+    # pylint incorrectly models functools.lru_cache's cache_info() as taking the wrapped
+    # function's signature, so it reports E1121 for this zero-argument call.
+    cache_info = lora_utils._load_lora_module_configs.cache_info()  # pylint: disable=too-many-function-args
     self.assertGreaterEqual(cache_info.hits, 1)
     self.assertEqual(cache_info.currsize, 1)
 
