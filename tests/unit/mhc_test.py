@@ -147,7 +147,9 @@ class TestMHC(parameterized.TestCase):
     """Sets up the common configurations and modules for MHC testing."""
     self.dim = dim
     if per_device_batch_size is None:
-      per_device_batch_size = jax.device_count()
+      per_device_batch_size = 1
+    # Global batch, so it divides the fsdp axis MlpBlock shards activations on.
+    self.batch_size = per_device_batch_size * jax.device_count()
     kwargs = {
         "run_name": f"test_mhc_k{rate}",
         "enable_checkpointing": False,
@@ -193,7 +195,7 @@ class TestMHC(parameterized.TestCase):
     self.x = jax.random.normal(
         jax.random.PRNGKey(0),
         (
-            self.config.per_device_batch_size,
+            self.batch_size,
             self.config.max_target_length,
             self.config.mhc_expansion_rate,
             self.config.emb_dim,
@@ -271,7 +273,7 @@ class TestMHC(parameterized.TestCase):
   def test_attention_layer_output_shape(self, rate):
     self._setup_mhc(rate)
     inputs_shape = (
-        self.config.per_device_batch_size,
+        self.batch_size,
         self.config.max_target_length,
         self.config.emb_dim,
     )
@@ -398,7 +400,6 @@ class TestMHC(parameterized.TestCase):
         run_name="test_mhc_lite_gated",
         enable_checkpointing=False,
         model_name="deepseek-custom",
-        per_device_batch_size=4,
         max_target_length=7,
         max_prefill_predict_length=7,
         attention="dot_product",
@@ -444,7 +445,6 @@ class TestMHC(parameterized.TestCase):
         use_mhc_pallas_kernel=use_mhc_pallas_kernel,
         dim=128,
         sequence_length=256,
-        per_device_batch_size=1,
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -486,7 +486,6 @@ class TestMHC(parameterized.TestCase):
         "enable_mhc_lite": True,
         "dim": 128,
         "sequence_length": 256,
-        "per_device_batch_size": 1,
         "dtype": "bfloat16",
     }
 
@@ -570,7 +569,6 @@ class TestMHC(parameterized.TestCase):
         mhc_pallas_kernel_bwd_feature_block_size=512,
         dim=128,
         sequence_length=128,
-        per_device_batch_size=1,
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -632,7 +630,6 @@ class TestMHC(parameterized.TestCase):
         use_mhc_pallas_kernel=False,
         dim=128,
         sequence_length=128,
-        per_device_batch_size=1,
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -658,7 +655,6 @@ class TestMHC(parameterized.TestCase):
           mhc_pallas_kernel_bwd_feature_block_size=256,
           dim=128,
           sequence_length=128,
-          per_device_batch_size=1,
           dtype="bfloat16",
       )
       module_kernel = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
