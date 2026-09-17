@@ -43,6 +43,9 @@ from flax.core.meta import Partitioned
 import flax.linen as nn
 from huggingface_hub import get_token
 import jax
+import subprocess
+from safetensors import safe_open
+from jax.sharding import NamedSharding, PartitionSpec
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common import checkpointing
@@ -1262,6 +1265,48 @@ def from_pretrained(
 
         checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
         nnx.update(model, checkpoint)
+
+        tid2eid_sideload_path = getattr(config, "tid2eid_sideload_path", "")
+        first_num_hash_layers = getattr(config, "first_num_hash_layers", 0)
+        if tid2eid_sideload_path and first_num_hash_layers > 0:
+          max_logging.log(f"Downloading Tid2EidVar safetensors from {tid2eid_sideload_path}...")
+          local_sideload_path = "/tmp/deepseek_tid2eid.safetensors"
+          subprocess.run(["gcloud", "storage", "cp", tid2eid_sideload_path, local_sideload_path], check=True)
+          assigned_count = 0
+          with safe_open(local_sideload_path, framework="np", device="cpu") as f:
+            for layer_idx in range(first_num_hash_layers):
+              safetensors_key = f"layers_{layer_idx}"
+              if safetensors_key in f.keys():
+                arr = f.get_tensor(safetensors_key)
+                arr_np = arr.astype(np.float32)
+                sharding = NamedSharding(mesh, PartitionSpec())
+                arr_sharded = jax.make_array_from_callback(arr_np.shape, sharding, lambda idx: arr_np[idx])
+                layer = getattr(model.decoder, f"layers_{layer_idx}", None)
+                moe_block = getattr(getattr(layer, "mlp", None), "MoeBlock_0", None)
+                if moe_block is not None and getattr(moe_block, "tid2eid", None) is not None:
+                  moe_block.tid2eid.value = arr_sharded
+                  assigned_count += 1
+          if assigned_count != first_num_hash_layers:
+            raise ValueError(
+                f"Tid2EidVar sideload error: expected {first_num_hash_layers} layer assignments, got {assigned_count}"
+            )
+
+        # Zero-sum or out-of-range expert IDs indicate an uninitialized or corrupted routing table.
+        for layer_idx in range(first_num_hash_layers):
+          layer = getattr(model.decoder, f"layers_{layer_idx}", None)
+          moe_block = getattr(getattr(layer, "mlp", None), "MoeBlock_0", None)
+          tid_var = getattr(moe_block, "tid2eid", None)
+          if tid_var is None or tid_var.value.sum() == 0:
+            raise ValueError(
+                f"Hash-routing layer {layer_idx} has a missing or zero-initialized tid2eid table."
+            )
+          lo, hi = int(tid_var.value.min()), int(tid_var.value.max())
+          if not (0 <= lo and hi < config.num_experts):
+            raise ValueError(
+                f"Tid2EidVar layer {layer_idx}: ids out of range [{lo}, {hi}] for num_experts={config.num_experts}"
+            )
+          max_logging.log(f"tid2eid verified for layer {layer_idx}: sum={tid_var.value.sum()} lo={lo} hi={hi}")
+
       else:
         raise ValueError(
             f"Checkpoint restore from '{config.load_parameters_path}' yielded no parameters. "

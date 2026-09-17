@@ -1216,6 +1216,7 @@ class DeepSeekMoE(BaseModel):
       "and originally implemented to support the GPT-OSS model architecture",
   )
   n_routing_groups: int = Field(-1, description="Number of groups for routing, disabled by default.")
+  tid2eid_sideload_path: str = Field("", description="Path to side-loaded token ID to expert ID mapping for fixed MoE routing.")
   first_num_hash_layers: int = Field(
       0,
       description="Number of hash routing layers, used in DeepSeek V4 (0 means disabled).",

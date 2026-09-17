@@ -77,3 +77,4 @@ rope_max_timescale: 10000                  # Main RoPE theta
 compressed_rope_max_timescale: 160000      # Compressed RoPE theta
 max_position_embeddings: 1048576
 original_max_position_embeddings: 65536
+tid2eid_sideload_path: "gs://yaoyuchen-dev/deepseek4-284b-tid2eid.safetensors"
