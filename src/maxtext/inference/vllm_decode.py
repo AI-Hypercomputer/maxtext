@@ -186,11 +186,27 @@ def decode_with_vllm(config: Config) -> None:
   top_p = config.decode_sampling_nucleus_p if config.decode_sampling_nucleus_p > 0 else 1.0
   top_k = config.decode_sampling_top_k if config.decode_sampling_top_k > 0 else -1
 
+  stop_token_ids = []
+  if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
+    if isinstance(tokenizer.eos_token_id, int):
+      stop_token_ids.append(tokenizer.eos_token_id)
+    elif isinstance(tokenizer.eos_token_id, list):
+      stop_token_ids.extend(tokenizer.eos_token_id)
+
+  eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
+  if eot_id is not None and eot_id != tokenizer.unk_token_id:
+    stop_token_ids.append(eot_id)
+
+  eom_id = tokenizer.convert_tokens_to_ids("<|eom_id|>")
+  if eom_id is not None and eom_id != tokenizer.unk_token_id:
+    stop_token_ids.append(eom_id)
+
   sampling_params = SamplingParams(
       temperature=config.decode_sampling_temperature,
       max_tokens=max_tokens_to_generate,
       top_k=top_k,
       top_p=top_p,
+      stop_token_ids=stop_token_ids if stop_token_ids else None,
   )
 
   prof = profiler.Profiler(config)

@@ -216,6 +216,10 @@ class VllmWeightMapping:
     generic_key = re.sub(r"\.dense_layers\.", ".layers.", generic_key)
     # 'base.decoder.moe_layers.mlp....' -> 'base.decoder.layers.mlp....'
     generic_key = re.sub(r"\.moe_layers\.", ".layers.", generic_key)
+    # '...layers.mlp.experts.wi_0' -> '...layers.moe_block.wi_0'
+    generic_key = re.sub(r"\.mlp\.experts\.", ".moe_block.", generic_key)
+    # '...layers.mlp.gate.kernel' -> '...layers.moe_block.gate.kernel'
+    generic_key = re.sub(r"\.mlp\.gate\.", ".moe_block.gate.", generic_key)
     # '...layers.DeepSeekMoeBlock_0.MoeBlock_0.wi_0' -> '...layers.moe_block.wi_0'
     generic_key = re.sub(r"DeepSeekMoeBlock_0\.MoeBlock_0\.", "moe_block.", generic_key)
     # Handle shared experts
