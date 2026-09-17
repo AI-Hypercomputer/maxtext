@@ -14,6 +14,7 @@
 
 """Unit tests for train_rl.py."""
 
+import dataclasses
 import unittest
 from unittest import mock
 import grain
@@ -63,6 +64,62 @@ class TrainRLTest(unittest.TestCase):
     config = types.RLConfig(model_name="gemma4-26b", max_seq_token_per_tpu=12288, vllm_block_size=128)
     self.assertEqual(config.max_seq_token_per_tpu, 12288)
     self.assertEqual(config.vllm_block_size, 128)
+
+  def test_rl_config_tunix_knob_defaults(self):
+    """The forwarded tunix knobs default to tunix's own defaults."""
+    config = types.RLConfig(model_name="gemma4-26b")
+
+    self.assertTrue(config.gc_collect_after_weight_sync)
+
+    config = types.RLConfig(
+        model_name="gemma4-26b",
+        gc_collect_after_weight_sync=False,
+    )
+    self.assertFalse(config.gc_collect_after_weight_sync)
+
+  def test_kwargs_supported_by_keeps_declared_fields_only(self):
+    """Knobs the installed tunix does not declare are dropped, with a log line."""
+    # pylint: disable=protected-access  # the test targets the internal filter helper
+
+    @dataclasses.dataclass
+    class FakeTunixConfig:
+      known: int = 0
+
+    with mock.patch.object(train_rl.max_logging, "log") as mock_log:
+      kept = train_rl._kwargs_supported_by(FakeTunixConfig, known=1, unknown=2)
+    self.assertEqual(kept, {"known": 1})
+    self.assertIn("unknown", mock_log.call_args.args[0])
+
+    with mock.patch.object(train_rl.max_logging, "log") as mock_log:
+      kept = train_rl._kwargs_supported_by(FakeTunixConfig, known=3)
+    self.assertEqual(kept, {"known": 3})
+    mock_log.assert_not_called()
+
+    class PlainTunixConfig:
+
+      def __init__(self, known=0):
+        self.known = known
+
+    self.assertEqual(train_rl._kwargs_supported_by(PlainTunixConfig, known=4, unknown=5), {"known": 4})
+
+  def test_kwargs_supported_by_passes_everything_to_var_keyword_and_opaque_classes(self):
+    """A cls taking **kwargs, or with no inspectable signature, gets all kwargs."""
+    # pylint: disable=protected-access  # the test targets the internal filter helper
+
+    class VarKeywordConfig:
+
+      def __init__(self, known=0, **kwargs):
+        self.known = known
+        self.extra = kwargs
+
+    with mock.patch.object(train_rl.max_logging, "log") as mock_log:
+      kept = train_rl._kwargs_supported_by(VarKeywordConfig, known=1, unknown=2)
+    self.assertEqual(kept, {"known": 1, "unknown": 2})
+    mock_log.assert_not_called()
+
+    # `type` has no inspectable constructor signature; the filter cannot know
+    # what it accepts, so it must pass everything through.
+    self.assertEqual(train_rl._kwargs_supported_by(type, unknown=3), {"unknown": 3})
 
   def test_rl_config_packing_budget_must_fit_a_maximal_sequence(self):
     """A packed row must hold prompt cap + generation cap (= max_target_length)."""
