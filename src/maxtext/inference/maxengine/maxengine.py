@@ -33,7 +33,7 @@ else:
 
 from flax import nnx
 from flax import struct
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
@@ -141,7 +141,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE, quant_mode_str=nnx_quant_mode_str
     )
     self._nnx_quant_mode_str = nnx_quant_mode_str
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       abstract_model = nnx.eval_shape(_create_model)
       abstract_model_ar = nnx.eval_shape(_create_model_ar)
     self.model = abstract_model
@@ -358,7 +358,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     # create_nnx_sharded_model builds the model with a jitted out_shardings so params
     # are produced already sharded, avoiding a single-device allocation of the full
     # model.
-    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with logical_axis_rules(self.config.logical_axis_rules):
       _, full_abs = nnx.split(self.model)
       full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
       concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
@@ -377,7 +377,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       # self.model is abstract (built via nnx.eval_shape), so its leaves carry logical
       # axis metadata but no physical .sharding. Resolve logical to physical here so
       # device_put actually reshards instead of being a no-op.
-      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      with logical_axis_rules(self.config.logical_axis_rules):
         target_shardings = sharding.nnx_construct_named_sharding(params_abs, self._mesh)
         params_state = jax.device_put(params, target_shardings)
       self._nnx_rest_state = rest_state
@@ -689,7 +689,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     nnx_cache = (
         existing_prefix.cache if existing_prefix is not None else self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL)
     )
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with self._mesh, logical_axis_rules(self.config.logical_axis_rules):
       flat_logits, new_cache_dict = self._nnx_run_model(
           params=input_params,
           cache_dict=nnx_cache,
@@ -933,7 +933,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     rng, new_rng = jax.random.split(rng)  # pyrefly: ignore[bad-argument-type]
     # Prefill is batch=1 (one prompt); multi-sampling only draws several first
     # tokens from the shared logits below. Mirror the _prefill_jit NNX branch.
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with self._mesh, logical_axis_rules(self.config.logical_axis_rules):
       flat_logits, new_cache_dict = self._nnx_run_model(
           params=params,
           cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
@@ -1057,7 +1057,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     rng, _ = jax.random.split(rng)
     # Packed prompts run as a single batch=1 prefill; the packed positions and
     # segment ids keep the prompts separated. Mirror the _prefill_jit NNX branch.
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with self._mesh, logical_axis_rules(self.config.logical_axis_rules):
       flat_logits, new_cache_dict = self._nnx_run_model(
           params=params,
           cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
@@ -1215,7 +1215,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)  # pyrefly: ignore[bad-argument-type]
     # run one step generation
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with self._mesh, logical_axis_rules(self.config.logical_axis_rules):
       out_logits, new_cache_dict = self._nnx_run_model(
           params=params,
           cache_dict=decode_state["cache"],

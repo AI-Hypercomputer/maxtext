@@ -72,7 +72,7 @@ jobs:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     timeout-minutes: 90
     container:
-      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
+      image: us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
@@ -130,13 +130,30 @@ jobs:
               with urllib.request.urlopen(url) as r:
                   return json.load(r)["token"]
 
+          # These images used to be pulled as ":latest", which is rebuilt daily. The
+          # 2026-09-12 build regressed the XLA TPU compiler. Pin to the last build
+          # verified green (2026-09-11) so these tests are not red on unrelated PRs.
+          #
+          # Pinned by digest rather than by the 20260911-jax_* tags because tags are
+          # mutable. All nine jax_* tags for a given date resolve to the same digest.
+          # TODO: restore ":latest" once the compiler regression is fixed upstream.
+          PATHWAYS_IMAGES = {
+              "cloud-tpu-v2-images/pathways/server": "sha256:6fb1399d265fc4532805bfb04d6f44a596b3111e30c7f2e4d9fafe98adf7456b",
+              "cloud-tpu-v2-images/pathways/proxy_server": "sha256:57781f09427eb2f1863672c04b239ed5fce41e05e598da4c071880ce3eef51d5",
+          }
+
           def extract_image_layers(repo):
               token = get_token(repo)
               headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.docker.distribution.manifest.v2+json"}
-              manifest_url = f"https://us-docker.pkg.dev/v2/{repo}/manifests/latest"
+              ref = PATHWAYS_IMAGES[repo]
+              manifest_url = f"https://us-docker.pkg.dev/v2/{repo}/manifests/{ref}"
               req = urllib.request.Request(manifest_url, headers=headers)
               with urllib.request.urlopen(req) as r:
                   manifest = json.load(r)
+                  # Record what was actually pulled. While pinned these two match, which
+                  # is the proof the pin took effect; once it is lifted this is the only
+                  # trace of which daily build a given run used.
+                  print(f"  {repo} @ {ref} -> {r.headers.get('Docker-Content-Digest')}", flush=True)
 
               for layer in manifest.get("layers", []):
                   digest = layer["digest"]
@@ -288,3 +305,88 @@ jobs:
           .venv/bin/python3 -m pytest ${PYTEST_ADDOPTS} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0 ${SPLIT_ARGS} &
           PYTEST_PID=$!
           wait "$PYTEST_PID"
+      - name: Collect Pathways daemon logs
+        if: failure()
+        shell: bash
+        run: |
+          # The Pathways daemons log via glog to files under /tmp, not to stdout, so a
+          # crash currently surfaces only as a terminated IFRT proxy connection with no
+          # cause, and the container is torn down before anyone can look.
+          shopt -s nullglob
+          mkdir -p /tmp/pathways-logs
+
+          # INFO is skipped: hundreds of MB, and adds nothing the rest does not have.
+          # -L stages the real file rather than the severity symlink.
+          logs=(/tmp/*sanitized*.log.{FATAL,ERROR,WARNING}.* /tmp/pathways_*.log)
+          if [ "${#logs[@]}" -gt 0 ]; then
+            cp -Lp "${logs[@]}" /tmp/pathways-logs/
+            # This repository is public: drop the build path and host from the header.
+            sed -i \
+              -e 's#/google/src/cloud/[^ ]*#[redacted-build-path]#g' \
+              -e 's#[A-Za-z0-9_.-]*@[A-Za-z0-9_.-]*\.prod\.google\.com#[redacted-build-host]#g' \
+              /tmp/pathways-logs/*
+          fi
+
+          ls -l /tmp/pathways-logs/
+      - name: Dump Pathways daemon logs
+        if: failure()
+        shell: bash
+        run: |
+          shopt -s nullglob
+
+          stderr_logs=(
+            /tmp/pathways-logs/pathways_rm.log
+            /tmp/pathways-logs/pathways_worker.log
+            /tmp/pathways-logs/pathways_proxy.log
+          )
+
+          echo "::group::Pathways runtime build and daemon pids"
+          grep -m1 -h "Build label:" "${stderr_logs[@]}" 2>/dev/null \
+            || echo "(build label not found)"
+          # glog file names end in the pid, so this maps each log below to a daemon.
+          for f in "${stderr_logs[@]}"; do
+            [ -e "$f" ] || continue
+            pid=$(sed -n 's/.*Process id \([0-9]*\).*/\1/p' "$f" | head -1 || true)
+            echo "$(basename "$f" .log) -> pid ${pid:-unknown}"
+          done
+          echo "::endgroup::"
+
+          # Ignore the <binary>.FATAL symlink: the resource manager and the worker are
+          # the same binary, so the worker's later crash overwrites it and hides the
+          # original failure.
+          fatal_files=(/tmp/pathways-logs/*.log.FATAL.*)
+          if [ "${#fatal_files[@]}" -eq 0 ]; then
+            echo "No Pathways FATAL log found. If a daemon died anyway it was killed by a"
+            echo "signal (e.g. OOM) rather than failing a CHECK."
+          else
+            # Sort on the YYYYMMDD-HHMMSS.<pid> glog embeds in the name: the whole name
+            # would group by binary, and the sed above has reset every mtime.
+            mapfile -t fatals < <(
+              for f in "${fatal_files[@]}"; do
+                printf '%s\t%s\n' "${f##*.log.FATAL.}" "$f"
+              done | sort | cut -f2-
+            )
+            echo "Found ${#fatals[@]} FATAL log(s), oldest first. The FIRST one is the root"
+            echo "cause; the later ones are the other daemons losing their peer."
+            for f in "${fatals[@]}"; do
+              echo "::group::FATAL $(basename "$f")"
+              cat "$f"
+              echo "::endgroup::"
+            done
+          fi
+
+          for f in /tmp/pathways-logs/*.log.ERROR.* "${stderr_logs[@]}"; do
+            [ -e "$f" ] || continue
+            echo "::group::tail $(basename "$f")"
+            tail -n 200 "$f"
+            echo "::endgroup::"
+          done
+      - name: Upload Pathways daemon logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pathways-logs-${{ inputs.device_name }}-${{ !contains(inputs.pytest_marker, 'not integration_test') && 'integration' || 'unit' }}-${{ inputs.worker_group }}
+          path: /tmp/pathways-logs
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: true

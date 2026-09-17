@@ -19,8 +19,8 @@ import functools
 import os
 from typing import Sequence
 
-from flax import linen as nn, nnx, traverse_util
-from flax.linen import partitioning as nn_partitioning
+from flax import nnx, traverse_util
+from flax.core.spmd import logical_axis_rules as axis_rules
 from flax.training.train_state import TrainState
 import jax
 from jax.experimental import mesh_utils
@@ -31,8 +31,6 @@ from maxtext.common import checkpointing
 from maxtext.common.common_types import (
     AttentionType,
     DecoderBlockType,
-    MODEL_MODE_AUTOREGRESSIVE,
-    MODEL_MODE_PREFILL,
     ReorderStrategy,
     ShardMode,
 )
@@ -1599,7 +1597,7 @@ def init_initial_state(model, tx, config, is_training, key):
 
 def get_abstract_param(model, config):
   """Get abstract model structure (name, shape) without materializing the weights to save memory"""
-  with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with model.mesh, axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
     input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
 
@@ -1647,7 +1645,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(config, mesh, init_state_fn, False)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
           config.load_parameters_path,
           unboxed_abstract_state.params,
@@ -1705,7 +1703,7 @@ def setup_initial_state(
   )
 
   # Initialization
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
@@ -1823,15 +1821,6 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 
-def get_logical_annotations(config, mesh, init_state_fn):
-  init_state_partial = init_state_fn
-
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
-    logical_annotations = nn.get_partition_spec(abstract_state)
-  return logical_annotations
-
-
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)."""
   return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
@@ -1865,7 +1854,7 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
   """
   assert nnx_init_trainstate_fn is not None, "get_abstract_state_nnx: init function must be given."
 
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
     # Use nnx.eval_shape + nnx.split instead of nnx.get_abstract_model, so we can apply
     # nnx_construct_named_sharding which correctly inserts the stacked-layers
     # axis into the partition spec. nnx.get_abstract_model uses get_var_pspec internally
@@ -1963,69 +1952,6 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh):
-  """Get a shaped abstraction of the state (including optimizer)"""
-
-  def init_kv_cache(model, config):
-    input_shape = (
-        config.micro_batch_size_to_train_on,
-        config.max_prefill_predict_length,
-    )
-    image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
-    )
-    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
-        model_mode=MODEL_MODE_PREFILL,
-        slot=0,
-    )
-    return model_vars["cache"]
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
-
-
-def get_kv_cache_annotations(model, config, rng, mesh):
-  """Get a shaped abstraction of the state (including optimizer)"""
-
-  def init_kv_cache(model, config):
-    input_shape = (config.micro_batch_size_to_train_on, 1)
-    image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
-    )
-    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        slot=0,
-    )
-    return model_vars["cache"]
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
-
-
 def _nnx_cache_partition_specs(abstract_model, config, mesh):
   """Per-leaf PartitionSpec tree for the abstract model's nnx.Cache vars.
 
@@ -2035,7 +1961,7 @@ def _nnx_cache_partition_specs(abstract_model, config, mesh):
   _, cache_state, _ = nnx.split(abstract_model, nnx.Cache, ...)
   # nnx_construct_named_sharding reads logical axis rules from the
   # active flax partitioning context, so wrap.
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
     named_state = sharding.nnx_construct_named_sharding(cache_state, mesh)
   return jax.tree.map(lambda s: s.spec, named_state.to_pure_dict())
 

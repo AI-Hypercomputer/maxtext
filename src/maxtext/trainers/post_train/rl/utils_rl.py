@@ -494,6 +494,37 @@ def check_numbers(
   return scores
 
 
+_BOXED_PREFIX = "\\boxed"
+
+
+_BRACE_REGEX = re.compile(r"[{}]")
+
+
+def _last_balanced_boxed(content: str) -> str | None:
+  """Returns the content of the `\\boxed{...}` whose closing brace comes last.
+
+  Single-pass stack scan over the braces only (`re.finditer` skips the
+  non-brace characters in C), linear in the length of the response. The scan
+  it replaces did the same walk in a per-character Python loop and tested
+  `content[:op].endswith("\\boxed")` on every `}`, copying the prefix each
+  time, which is quadratic in the brace count (about 1.5 s per batch of 2048
+  completions on the reward path for brace-heavy completions). Semantics are
+  unchanged: the box that closes last wins and boxes that never close are
+  ignored.
+  """
+  best: str | None = None
+  stack: list[int] = []
+  for m in _BRACE_REGEX.finditer(content):
+    i = m.start()
+    if content[i] == "{":
+      stack.append(i)
+    elif stack:
+      op = stack.pop()
+      if op >= len(_BOXED_PREFIX) and content.startswith(_BOXED_PREFIX, op - len(_BOXED_PREFIX)):
+        best = content[op + 1 : i].strip()
+  return best
+
+
 def extract_answer(response: str, tmvp_config: Any) -> str:
   """Extract the final numeric answer from the model's response.
 
@@ -522,19 +553,9 @@ def extract_answer(response: str, tmvp_config: Any) -> str:
   answer_tag_regex = get_answer_fallback_regex(tmvp_config)
   answer_matches = answer_tag_regex.findall(response)
   content = answer_matches[-1] if answer_matches else response
-  boxed_matches: list[str] = []
-  stack: list[int] = []
-  for i, ch in enumerate(content):
-    if ch == "{":
-      stack.append(i)
-    elif ch == "}":
-      if not stack:
-        continue
-      op = stack.pop()
-      if content[:op].endswith(r"\boxed"):
-        boxed_matches.append(content[op + 1 : i].strip())
-  if boxed_matches:
-    return boxed_matches[-1]
+  boxed_answer = _last_balanced_boxed(content)
+  if boxed_answer is not None:
+    return boxed_answer
   m = re.search(r"\\boxed\s*\{?\s*([a-zA-Z0-9\.,\-]+)\s*\}?", content)
   if m:
     return m.group(1).strip()

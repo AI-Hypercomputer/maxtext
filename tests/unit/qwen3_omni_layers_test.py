@@ -36,7 +36,7 @@ from maxtext.layers.embeddings import (
     Qwen3OmniMoeVisionPosEmbedInterpolate as JaxQwen3OmniMoeVisionPosEmbedInterpolate,
     Qwen3OmniMoeVisionRotaryEmbedding as JaxQwen3OmniMoeVisionRotaryEmbedding,
 )
-from maxtext.layers.decoders import deepstack_process
+from maxtext.layers.nnx_decoders import deepstack_process
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.multimodal.processor_qwen3_omni import (
     get_video_second_per_grid,

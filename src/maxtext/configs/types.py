@@ -68,6 +68,8 @@ class DType(str, Enum):
   BFLOAT16 = "bfloat16"
   FLOAT32 = "float32"
   FLOAT16 = "float16"
+  FLOAT8_E4M3FN = "float8_e4m3fn"
+  FLOAT8_E5M2 = "float8_e5m2"
 
 
 class MatmulPrecision(str, Enum):
@@ -292,7 +294,10 @@ ModelName = Literal[
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-35b-a3b",
+    "qwen3.5-35b-a3b-fp8",
+    "qwen3.5-35b-fp8",
     "qwen3.5-397b-a17b",
+    "qwen3.5-397b-a17b-fp8",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -439,6 +444,12 @@ class OrbaxStorage(BaseModel):
       True, description="Whether to use Zarr3 with OCDbT. Requires use_ocdbt=True."
   )
   checkpoint_storage_concurrent_gb: int = Field(96, description="Concurrent GB for I/O operations during checkpointing.")
+  # Concurrent GB limit for device->host staging during checkpoint saves.
+  # When set, bounds in-flight bytes staged from accelerator to host RAM per handler.
+  # None restores the Orbax upstream default (unbounded).
+  checkpoint_storage_device_host_concurrent_gb: int | None = Field(
+      8, description="Concurrent GB for device->host staging during checkpoint save. None = unbounded."
+  )
 
 
 class EmergencyCheckpointing(BaseModel):
@@ -497,6 +508,23 @@ class Quantization(BaseModel):
   quantization: None | QuantizationType = Field(
       QuantizationType.NONE,
       description="Activates quantization for transformer layers.",
+  )
+  unquantized_modules: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of submodule names or name patterns to keep unquantized even when weight_dtype is FP8. "
+          "Weights for modules specified here will use `dtype` (e.g. bfloat16). "
+          "Accepted names include: 'token_embedder', 'logits_dense', 'gate', 'shared_expert_gate', "
+          "'conv1d', 'in_proj_ba', 'norm'."
+      ),
+  )
+  weight_block_size: None | int | list[int] = Field(
+      None,
+      description=(
+          "Block size for block-scaled quantized weights (e.g. 128 for symmetric 128x128 block scaling, "
+          "or a list/tuple like [128, 64] for asymmetric block scaling). "
+          "None for per-tensor scaling."
+      ),
   )
   replicate_quant_scale: bool = Field(
       False,
@@ -768,6 +796,10 @@ class CompressedAttention(BaseModel):
   )
   compressed_rope_max_timescale: int = Field(
       160000, description="If positive, used for Compressed Sparse/Heavy Attention."
+  )
+  use_csa_streamindex_kernel: bool = Field(
+      False,
+      description="Whether to use Pallas TPU kernel for CSA StreamIndex score computation.",
   )
 
 
@@ -2753,6 +2785,16 @@ class RLCluster(BaseModel):
   use_pathways_reshard: bool = Field(
       True, description="Legacy experimental GRPO: use Pathways resharding to move policy params to the sampler."
   )
+  gc_collect_after_weight_sync: bool = Field(
+      True,
+      description=(
+          "Run a full host gc.collect() after every trainer->sampler weight sync "
+          "(tunix ClusterConfig.gc_collect_after_weight_sync). Each sync leaves another copy of the weights on "
+          "HBM until Python's garbage collector releases it; with this disabled the copies accumulate and the "
+          "run can OOM over time. The collection costs about one second per step on a colocated setup, so "
+          "disable it only when there is enough HBM headroom."
+      ),
+  )
 
 
 class VLLM(BaseModel):
@@ -4222,8 +4264,12 @@ class MaxTextConfig(
           "Set `grain_train_mixture_config_path` to empty and use a single "
           "`grain_train_files` pattern (no ';' separator)."
       )
-    if (self.load_parameters_path or self.load_full_state_path) and not self.enable_checkpointing:
-      raise ValueError("You must set enable_checkpointing=True to load a checkpoint.")
+    # Only a full-state resume needs the CheckpointManager, which `enable_checkpointing`
+    # gates. `load_parameters_path` is a warm start: it restores through its own
+    # `ocp.Checkpointer` in `model_creation_utils.from_pretrained`, before the manager is
+    # ever consulted, so it stays legal with saving turned off.
+    if self.load_full_state_path and not self.enable_checkpointing:
+      raise ValueError("You must set enable_checkpointing=True to resume from load_full_state_path.")
     if self.enable_multi_tier_checkpointing:
       if not self.local_checkpoint_directory:
         raise ValueError("`local_checkpoint_directory` must be set for multi-tier checkpointing.")

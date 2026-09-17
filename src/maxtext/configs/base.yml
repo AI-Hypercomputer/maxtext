@@ -86,6 +86,8 @@ checkpoint_storage_use_zarr3: true
 # larger models requires higher concurrent GB for I/O
 # default concurrent gb for PytreeCheckpointHandler is 96GB
 checkpoint_storage_concurrent_gb: 96
+# max concurrent GB allowed to be transferred from device to host memory at once when saving (None = unbounded)
+checkpoint_storage_device_host_concurrent_gb: 8
 
 # TODO: b/529622681 - Remove deprecated settings.
 # DEPRECATED: Orbax v1 is now always used for checkpointing; this flag is
@@ -184,6 +186,14 @@ decoder_block: "llama2" # which style of decoderblock to use.
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 weight_dtype: "float32"
+# List of module names or patterns to keep unquantized even when weight_dtype is FP8.
+# For any module included here, its weights will be instantiated using `dtype` (e.g. bfloat16).
+# Accepted module names include: 'token_embedder', 'logits_dense', 'gate' (MoE router),
+# 'shared_expert_gate', 'conv1d', 'in_proj_ba', 'norm'.
+unquantized_modules: []
+# Block size for block-scaled quantized weights (e.g. 128 for symmetric 128x128 block scaling,
+# or a list/tuple like [128, 64] for asymmetric block scaling). Set to null for per-tensor scaling.
+weight_block_size: null
 global_parameter_scale: 1
 base_emb_dim: 2048
 base_num_query_heads: 16
@@ -490,6 +500,7 @@ o_lora_rank: 0 # Output LoRA rank for Compressed Attention.
 o_groups: 0 # Output groups for Compressed Attention.
 compress_ratios: [] # Per-layer compression ratios (0, 4, 128, etc).
 compressed_rope_max_timescale: 160_000 # If positive, used for Compressed Sparse/Heavy Attention.
+use_csa_streamindex_kernel: false # Whether to use Pallas TPU kernel for CSA StreamIndex score computation.
 
 # QK-Clip (Muon Clip) Configuration
 use_qk_clip: false  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)

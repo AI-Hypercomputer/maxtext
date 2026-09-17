@@ -206,6 +206,14 @@ penalty_incorrect_answer: 0.0
 reward_functions_path: ''
 reward_functions: ''
 
+# ====== Tunix runtime knobs ======
+# Run a full host gc.collect() after each trainer->sampler weight sync
+# (tunix ClusterConfig.gc_collect_after_weight_sync; effective once the tunix pin declares it).
+# Each sync leaves another copy of the weights on HBM until Python's garbage collector releases it;
+# with this disabled the copies accumulate and the run can OOM over time. The collection costs about
+# one second per step on a colocated setup, so disable it only when there is enough HBM headroom.
+gc_collect_after_weight_sync: true
+
 # ====== Configuration for math_verify Pool ======
 # Global timeout (seconds) for math_verify calls across all examples in a batch
 math_verify_timeout: 120

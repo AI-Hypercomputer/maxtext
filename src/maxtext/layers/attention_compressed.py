@@ -16,6 +16,8 @@
 
 
 import enum
+import functools
+import math
 from typing import Any, Optional, Tuple
 
 import jax
@@ -47,6 +49,7 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference.kvcache import KVQuant
 from maxtext.inference import kvcache
 from maxtext.utils.globals import EPS
+from maxtext.kernels.attention import csa_streamindex
 
 
 class CSAPoolingConfig(enum.IntEnum):
@@ -478,7 +481,7 @@ class BaseDeepseekCompressor(nnx.Module):
       compress_ratio: int,
       rotary_embedding: Any,
       proj_multiplier: int,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
@@ -554,7 +557,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
@@ -728,9 +731,10 @@ class DeepseekV4Indexer(nnx.Module):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       rngs: Optional[nnx.Rngs] = None,
+      mesh: Optional[Mesh] = None,
   ):
     """Initializes the Indexer for CSA.
 
@@ -741,9 +745,12 @@ class DeepseekV4Indexer(nnx.Module):
       kernel_init: Weight initializer for the indexer projections.
       quant: Optional quantization scheme.
       rngs: Optional random state initialization.
+      mesh: Device mesh. Required to shard the StreamIndex Pallas kernel; without
+        it the kernel runs unsharded and GSPMD all-gathers its operands.
     """
     self.config = config
     self.compress_rate = compress_ratio
+    self.mesh = mesh
     self.index_n_heads = config.indexer_n_heads
     self.index_head_dim = config.indexer_head_dim
     self.index_topk = config.indexer_topk
@@ -820,6 +827,64 @@ class DeepseekV4Indexer(nnx.Module):
     )
 
     self.rotary_emb = rotary_embedding
+
+  def _streamindex_scores_sharded(self, q: Array, compressed: Array, weights: Array) -> Array:
+    """Runs the StreamIndex Pallas kernel under a batch-only `shard_map`.
+
+    A bare `pallas_call` lowers to an opaque `tpu_custom_call` that GSPMD cannot
+    partition, so it conservatively all-gathers every operand to full global
+    shape on each device — reconstructing the whole `[B, H, S, D]` query and
+    defeating the memory saving the kernel exists to provide. `shard_map` makes
+    the partitioning explicit and removes those collectives.
+
+    Only the batch dimension is sharded. Context/sequence parallelism is not
+    supported: `compressed` would have to be replicated across the context axis
+    (causality means late query rows need every earlier compressed block), which
+    is a separate change.
+
+    Args:
+      q: `[B, H, S, D]`.
+      compressed: `[B, W, D]`.
+      weights: `[B, S, H]`.
+
+    Returns:
+      Index scores, `[B, S, W]`.
+    """
+    batch_size = q.shape[0]
+
+    batch_axes = tuple(
+        axis for axis in ("data", "fsdp", "fsdp_transpose", "expert") if self.mesh is not None and axis in self.mesh.shape
+    )
+    num_batch_shards = math.prod(self.mesh.shape[a] for a in batch_axes) if batch_axes else 1
+
+    if self.mesh is None or num_batch_shards == 1:
+      return csa_streamindex.csa_streamindex_score(q, compressed, weights, self.softmax_scale)
+
+    if batch_size % num_batch_shards != 0:
+      raise ValueError(
+          f"CSA StreamIndex kernel requires batch_size ({batch_size}) to be divisible by the "
+          f"number of batch shards ({num_batch_shards}) across mesh axes {batch_axes}. "
+          "Adjust the batch size or disable use_csa_streamindex_kernel."
+      )
+
+    q_pspec = jax.sharding.PartitionSpec(batch_axes, None, None, None)
+    # `compressed`, `weights` and the output are all 3D and batch-sharded alike.
+    pspec_3d = jax.sharding.PartitionSpec(batch_axes, None, None)
+
+    # check_vma=False is required, not defensive: `pallas_call` builds its
+    # `out_shape` from a plain `jax.ShapeDtypeStruct`, which carries no
+    # `manual_axis_type`, and check_vma=True rejects that outright.
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(q_pspec, pspec_3d, pspec_3d),
+        out_specs=pspec_3d,
+        check_vma=False,
+    )
+    def _sharded(local_q, local_compressed, local_weights):
+      return csa_streamindex.csa_streamindex_score(local_q, local_compressed, local_weights, self.softmax_scale)
+
+    return _sharded(q, compressed, weights)
 
   def __call__(
       self,
@@ -930,11 +995,19 @@ class DeepseekV4Indexer(nnx.Module):
     q = self.q_proj(q_latent).reshape((batch_size, seq_len, self.index_n_heads, self.index_head_dim))
     q = jnp.transpose(q, (0, 2, 1, 3))
     q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
-
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
 
+    # The Pallas kernel is a training-only path. AR decode arrives with
+    # seq_len==1 and prefill with cache-derived `compressed`; neither shape
+    # suits the kernel's fixed grid. It takes precedence over
+    # `csa_qk_head_chunk_size`: the kernel keeps the forward intermediate in
+    # VMEM instead of chunking it, and chunks its own backward.
+    use_kernel = self.config.use_csa_streamindex_kernel and model_mode == MODEL_MODE_TRAIN
     head_chunk_size = getattr(self.config, "csa_qk_head_chunk_size", 0)
-    if head_chunk_size > 0:
+
+    if use_kernel:
+      index_scores = self._streamindex_scores_sharded(q, compressed, weights)
+    elif head_chunk_size > 0:
       # Student chunks indexer heads (indexer_n_heads); teacher path
       # in calculate_csa_indexer_loss chunks query heads (num_query_heads).
       num_chunks = self.index_n_heads // head_chunk_size
@@ -964,24 +1037,26 @@ class DeepseekV4Indexer(nnx.Module):
       init_score = jnp.zeros((batch_size, seq_len, compressed_len), dtype=jnp.float32)
       index_scores, _ = jax.lax.scan(jax.checkpoint(scan_body_indexer), init_score, {"q": q_h, "w": w_h})
     else:
-      scores = jnp.einsum(
-          "bhsd, bwd -> bhsw",
-          q.astype(jnp.float32),
-          compressed.astype(jnp.float32),
+      index_scores = csa_streamindex.csa_indexer_scores_jax(
+          q,
+          compressed,
+          weights,
+          softmax_scale=self.softmax_scale,
           precision=self.config.matmul_precision,
       )
-      scores = jax.nn.relu(scores) * self.softmax_scale
-      index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights, precision=self.config.matmul_precision)
 
     k = min(self.index_topk, compressed_len)
 
-    # --- ONLY RUN MATHEMATICAL CAUSAL MASK IN PREFILL/TRAIN ---
+    # `future_mask` is supplied by the AR path (derived from cache validity).
+    # In prefill/train it is None and is derived from positions here.
     if future_mask is None:
       usable_len = compressed_len * self.compress_rate
       block_positions = position_ids[:, : usable_len : self.compress_rate]
       future_mask = (block_positions[:, None, :] + self.compress_rate) > (position_ids[:, :, None] + 1)
 
-    # Apply the mask to the scores
+    # Masking is always applied here, never inside the kernel: the kernel cannot
+    # see `position_ids` and would have to synthesize them from grid indices,
+    # which breaks for packed sequences where positions reset mid-sequence.
     index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
     combined_invalid = future_mask
@@ -1016,10 +1091,11 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
+      mesh: Optional[Mesh] = None,
   ):
     """Initializes the CSA Compressor.
 
@@ -1052,6 +1128,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
         kernel_init=kernel_init,
         quant=quant,
         rngs=rngs,
+        mesh=mesh,
     )
 
   def __call__(
@@ -1414,6 +1491,7 @@ class CompressedAttention(Attention):
           quant=self.quant,
           model_mode=self.model_mode,
           rngs=self.rngs,
+          mesh=self.mesh,
       )
 
     # Set softmax scaling. DeepSeek-V4 natively uses standard scaling.

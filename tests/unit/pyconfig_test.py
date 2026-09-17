@@ -73,6 +73,41 @@ class PyconfigTest(unittest.TestCase):
     )
     self.assertFalse(config.context_parallel_load_balance)
 
+  def test_load_parameters_path_allowed_without_checkpointing(self):
+    """A warm start does not go through the CheckpointManager.
+
+    `load_parameters_path` is restored by its own `ocp.Checkpointer` inside
+    `model_creation_utils.from_pretrained`, so it must stay legal to warm start
+    from a checkpoint while never writing one back.
+    """
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        load_parameters_path="gs://some-bucket/some-run/0/items",
+        enable_checkpointing=False,
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(config.enable_checkpointing)
+    self.assertEqual(config.load_parameters_path, "gs://some-bucket/some-run/0/items")
+
+  def test_load_full_state_path_still_requires_checkpointing(self):
+    """A full-state resume does read through the CheckpointManager."""
+    with self.assertRaisesRegex(ValueError, "enable_checkpointing=True to resume from load_full_state_path"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          load_full_state_path="gs://some-bucket/some-run/0/items",
+          enable_checkpointing=False,
+      )
+
+  def test_load_parameters_path_allowed_with_checkpointing(self):
+    """The pre-existing combination keeps working."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        load_parameters_path="gs://some-bucket/some-run/0/items",
+        enable_checkpointing=True,
+        skip_jax_distributed_system=True,
+    )
+    self.assertTrue(config.enable_checkpointing)
+
   def test_managed_mldiagnostics_storage_path(self):
     # Test completely omitting the parameter (defaults to "" from base.yml)
     config_omitted = pyconfig.initialize(
