@@ -864,6 +864,15 @@ def recover(
       del python_vars[key]
 
   def _safe_replace(state_obj, pure_dict):
+    """Replaces the entries of an NNX state that the restored values also hold.
+
+    Entries missing from the restored values keep their initialized value, and list indices that come back as
+    strings are matched against the integer keys of the state.
+
+    Args:
+      state_obj: The nnx.State to update in place.
+      pure_dict: A pure dict of restored values, or anything else to leave the state untouched.
+    """
     if not isinstance(pure_dict, dict):
       return
     current_flat = dict(nnx.statelib.to_flat_state(state_obj))
@@ -880,7 +889,16 @@ def recover(
       nnx.replace_by_pure_dict(state_obj, traverse_util.unflatten_dict(filtered_pure))
 
   def _restore_from_snapshot(snapshot_mgr, model, state):
-    """Restores the latest in-memory snapshot onto `state`; returns (restored_state, restored_step)."""
+    """Restores the latest in-memory snapshot onto the given train state.
+
+    Args:
+      snapshot_mgr: The snapshotter holding the in-memory snapshots.
+      model: The Linen module, or the NNX graphdef of the train state.
+      state: The freshly initialized train state to restore onto.
+
+    Returns:
+      A tuple of the restored train state and the step to resume training at.
+    """
     if isinstance(model, nn.Module):
       abstract_dict = {
           "step": state.step,
@@ -918,10 +936,21 @@ def recover(
       _safe_replace(opt_state, merged["optimizer"])
       nnx.update(state.optimizer, opt_state)
       restored_state = state
-    return restored_state, snapshot_mgr.latest.step
+    # A train-loop snapshot holds the state after its step's update. Resume from the restored step counter,
+    # because resuming at the snapshot's own step would run that step a second time.
+    return restored_state, get_first_step(model, restored_state)
 
   def _restore_from_checkpoint(checkpoint_manager, model, state):
-    """Restores the latest persistent checkpoint onto `state`; returns (restored_state, restored_step)."""
+    """Restores the latest persistent checkpoint onto the given train state.
+
+    Args:
+      checkpoint_manager: The CheckpointManager of this run.
+      model: The Linen module, or the NNX graphdef of the train state.
+      state: The freshly initialized train state to restore onto.
+
+    Returns:
+      A tuple of the restored train state and the step to resume training at.
+    """
     _logger.info("Restoring from persistent checkpoint...")
     restored, _ = checkpointing.load_state_if_possible(
         checkpoint_manager,
@@ -929,8 +958,8 @@ def recover(
         config.load_parameters_path,
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
-        # NNX states are only mapped from the Linen checkpoint layout when passed as an nnx.State. Given the
-        # TrainStateNNX module, the partial restore matches no checkpoint keys and returns `state` unchanged.
+        # load_state_if_possible maps the checkpoint onto an NNX state only when it is given an nnx.State.
+        # Passing the TrainStateNNX module matches no checkpoint keys, so nothing would be restored.
         state if isinstance(model, nn.Module) else nnx.state(state),
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
@@ -1108,8 +1137,8 @@ def recover(
             checkpointing.latest_step(existing_checkpoint_manager) if existing_checkpoint_manager is not None else None
         )
         restored = None
-        # Snapshots are skipped while a persistent save is in flight, so the latest finalized checkpoint can be far
-        # ahead of the snapshot. Prefer it then, keeping the snapshot as the fallback.
+        # Snapshots are skipped while a persistent save is in flight, so the newest finalized checkpoint can be
+        # far ahead of the latest snapshot. Restore it in that case and keep the snapshot as the fallback.
         if snapshot_step is not None and checkpoint_step is not None and checkpoint_step > snapshot_step:
           _logger.info(
               "Persistent checkpoint at step %d is newer than the in-memory snapshot at step %d.",

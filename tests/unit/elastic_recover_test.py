@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for how `pre_train.train.recover` restores the train state after a slice failure.
+"""Unit tests for how pre_train.train.recover() restores the train state after a slice failure.
 
 Pathways, mesh setup and compilation are mocked out. Persistent checkpoints are real Orbax checkpoints of a tiny NNX
 TrainState, saved and restored through MaxText's checkpointing code.
@@ -52,7 +52,7 @@ class _FakeSnapshotter:
   def __init__(self, *, replica_axis_index=0):
     self.replica_axis_index = replica_axis_index
     self._lock = threading.Lock()
-    self._latest_snapshot = None  # (pure state dict or the exception load() raises, step)
+    self._latest_snapshot = None  # A (value, step) pair, where value is a pure state dict or an error to raise.
 
   @property
   def latest(self):
@@ -70,7 +70,7 @@ class _FakeSnapshotter:
 
 
 class RecoverTest(absltest.TestCase):
-  """Tests for the state recover() restores from the in-memory snapshot or the persistent checkpoint."""
+  """Tests for what recover() restores after a slice failure, and which step it resumes at."""
 
   def setUp(self):
     """Mocks slice discovery, train loop setup and recompilation around recover()'s restore logic."""
@@ -109,7 +109,7 @@ class RecoverTest(absltest.TestCase):
     self.enter_context(mock.patch.object(pre_train.train_utils, "jit_train_and_eval_step", return_value=(None, None)))
     self.enter_context(mock.patch.object(pre_train, "recreate_dataloaders", return_value=(None, None, None)))
 
-    # Real checkpoint restores, except for the errors a test queues up for the first calls.
+    # Restore real checkpoints, except for the errors a test queues up for the first calls.
     self.load_errors = []
     load_state_if_possible = checkpointing.load_state_if_possible
 
@@ -123,7 +123,7 @@ class RecoverTest(absltest.TestCase):
     )
 
   def _save_checkpoint(self, step, state):
-    """Saves `state` as a persistent checkpoint the way the train loop does."""
+    """Saves the given train state as a persistent checkpoint, the way the train loop does."""
     save_config = types.SimpleNamespace(
         pure_nnx=True,
         enable_diloco=False,
@@ -138,7 +138,16 @@ class RecoverTest(absltest.TestCase):
     checkpointing.save_checkpoint(self.checkpoint_manager, step, state, save_config, force=True)
 
   def _recover(self, snapshot, snapshot_step, load_errors=()):
-    """Runs recover() with the given latest snapshot; returns (resume step, restored state)."""
+    """Runs recover() with the given snapshot as the latest one.
+
+    Args:
+      snapshot: The train state the snapshotter returns, or None when no snapshot was taken.
+      snapshot_step: The step the snapshot was taken at.
+      load_errors: Errors to raise from the first calls to load_state_if_possible.
+
+    Returns:
+      A tuple of the step recover() resumes at and the train state it restored.
+    """
     snapshotter = _FakeSnapshotter()
     if snapshot is not None:
       if isinstance(snapshot, train_state_nnx.TrainStateNNX):
@@ -200,7 +209,18 @@ class RecoverTest(absltest.TestCase):
 
     self.load_checkpoint.assert_not_called()
     self.assertEqual(_FakeSnapshotter.loaded_steps, [1815])
-    self.assertEqual(step, 1815)
+    self.assertEqual(step, 1816)  # The snapshot at step 1815 was taken after that step's update.
+    np.testing.assert_array_equal(_kernel(state), _kernel(snapshot))
+
+  def test_restores_startup_snapshot_at_its_own_step(self):
+    # The startup snapshot is taken before its step runs, e.g. right after restoring checkpoint 1600.
+    snapshot = _make_state(seed=1, step=1601)
+    self._save_checkpoint(1600, _make_state(seed=2, step=1601))
+
+    step, state = self._recover(snapshot, 1601)
+
+    self.load_checkpoint.assert_not_called()
+    self.assertEqual(step, 1601)
     np.testing.assert_array_equal(_kernel(state), _kernel(snapshot))
 
   def test_falls_back_to_snapshot_when_newer_checkpoint_fails(self):
@@ -208,10 +228,11 @@ class RecoverTest(absltest.TestCase):
     self._save_checkpoint(1820, _make_state(seed=2, step=1821))
     incomplete = ValueError("Found incomplete checkpoint at gs://bucket/checkpoints/1820.")
 
-    _, state = self._recover(snapshot, 1615, load_errors=[incomplete])
+    step, state = self._recover(snapshot, 1615, load_errors=[incomplete])
 
     self.load_checkpoint.assert_called_once()
     self.assertEqual(_FakeSnapshotter.loaded_steps, [1615])
+    self.assertEqual(step, 1616)
     np.testing.assert_array_equal(_kernel(state), _kernel(snapshot))
 
   def test_falls_back_to_checkpoint_when_snapshot_fails(self):
