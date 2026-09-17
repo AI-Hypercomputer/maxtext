@@ -1,0 +1,86 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Stage 2 Config: Pretraining / Aligning Omni-Gemma3-Qwen3-14B custom MLP projector
+# on ChartNet (CSV Table Grounding) on TPU v4-128 (128 devices) for 3 Epochs.
+
+base_config: "maxtext-omni-gemma3-qwen3-14b.yml"
+
+use_sft: true
+use_tunix_gradient_accumulation: false
+use_multimodal: true
+sft_train_on_completion_only: true
+packing: false
+freeze_vision_encoder_params: true
+
+# Pretrain ONLY the custom MLP projector to align Gemma 3 vision features with Qwen 3 14B text space
+trainable_parameters_mask: ["custom_linear"]
+
+# Learning rate and schedule for projector alignment on 128 devices
+learning_rate: 3.e-4
+lr_schedule_type: 'cosine'
+warmup_steps_fraction: 0.05
+learning_rate_final_fraction: 0.1
+adamw_mask: ['.*norm.*', '.*bias.*']
+gradient_clipping_threshold: 1.0
+
+# -------------- HF pipeline (ibm-granite/ChartNet - pre-sharded parquet) --------------
+dataset_type: hf
+tokenizer_type: "huggingface"
+tokenizer_path: "Qwen/Qwen3-14B"
+hf_path: 'parquet'
+hf_train_files: '/dev/shm/chartnet_sharded/train-*'
+hf_eval_files: '/dev/shm/chartnet_sharded/test-*'
+train_split: 'train'
+hf_eval_split: 'train'
+
+# In-process data loading
+grain_worker_count: 0
+
+# Image & Text columns: ['prompt', 'csv']
+train_image_column: 'image'
+eval_image_column: 'image'
+train_data_columns: ['prompt', 'csv']
+eval_data_columns: ['prompt', 'csv']
+default_prompt: "Extract the data table from this chart in CSV format."
+
+# Checkpoint paths (can be overridden via CLI in orchestration script)
+load_parameters_path: ""
+base_output_directory: ""
+run_name: "omni_14b_stage2_csv"
+
+# Training schedule for 3 full epochs on v4-128:
+# 92,643 examples * 3 epochs / (128 chips * 1 per_device_batch_size = 128 global batch size) = 2,172 steps
+per_device_batch_size: 1
+num_epoch: 3
+steps: 2172
+checkpoint_period: 200
+log_period: 1
+save_checkpoint_on_completion: true
+async_checkpointing: true
+
+# Evaluation settings (evaluates 1 batch = 128 test samples periodically without exhausting shards)
+eval_interval: 200
+eval_steps: 1
+
+# Parallelism settings for 14B on TPU v4-128
+ici_fsdp_parallelism: -1
+ici_tensor_parallelism: 4
+
+# Sequence length & attention settings
+max_prefill_predict_length: 1024
+max_target_length: 2048
+max_num_images_per_example: 1
+scan_layers: true
+attention: "dot_product"

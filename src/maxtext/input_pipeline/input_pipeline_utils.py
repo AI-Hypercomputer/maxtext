@@ -126,10 +126,13 @@ def reformat_prompt(
 
 def reformat_response(example, column, model_name):
   """reformat response for multimodal SFT"""
-  val = example[column]
-  if not val:
-    raise ValueError(f"Response column '{column}' cannot be empty or None: {val}")
-  response = val[0] if isinstance(val, (list, tuple)) else val
+  val = example.get(column)
+  if val is None or (isinstance(val, str) and not str(val).strip()):
+    response = "N/A"
+  elif isinstance(val, (list, tuple)):
+    response = val[0] if val and val[0] else "N/A"
+  else:
+    response = str(val)
 
   example[column] = mm_processor.reformat_response(response, model_name)
   return example

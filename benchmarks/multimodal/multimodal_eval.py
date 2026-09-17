@@ -181,6 +181,14 @@ def main(config, local_args):
   max_prefill_predict_length = getattr(config, "max_prefill_predict_length", 1024)
   max_target_length = getattr(config, "max_target_length", 2048)
 
+  # Collect all possible EOS/stop token IDs (e.g. Gemma's <end_of_turn>, Qwen's <|im_end|>, etc.)
+  eos_token_ids = {tokenizer.eos_id}
+  if hasattr(tokenizer, "tokenizer"):
+    for special_tok in ("<end_of_turn>", "<eos>", "<|im_end|>", "<|endoftext|>"):
+      tid = tokenizer.tokenizer.convert_tokens_to_ids(special_tok)
+      if tid is not None and tid != getattr(tokenizer.tokenizer, "unk_token_id", None):
+        eos_token_ids.add(tid)
+
   # Initialize counters for overall accuracy
   correct_count = 0
   total_count = 0
@@ -278,7 +286,7 @@ def main(config, local_args):
       # Generate next token
       decode_state, sampled_token = engine.generate(params, decode_state)
       sampled_tokens.append(sampled_token.get_result_at_slot(slot).tokens.item())
-      if sampled_tokens[-1] == tokenizer.eos_id:
+      if sampled_tokens[-1] in eos_token_ids:
         break
 
     correct_answer = parsed_dataset_example.answer

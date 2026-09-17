@@ -28,7 +28,10 @@ import numpy as np
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 from math_verify import parse
 
-from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_template_parser
+try:
+  from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_template_parser
+except (ImportError, ModuleNotFoundError):
+  agentic_chat_template_parser = None
 
 from maxtext.trainers.post_train.rl.math_verify_pool import math_verify_pool, verify_math_worker
 from maxtext.utils import max_logging
@@ -811,32 +814,38 @@ def get_correctness_metrics(
   }
 
 
-class MaxTextChatParser(agentic_chat_template_parser.DefaultChatTemplateParser):
-  """
-  Custom Chat Parser for MaxText that intercepts message lists dynamically
-  during agentic rollouts and injects the necessary system templates and
-  special tokens using the shared helper.
-  """
+if agentic_chat_template_parser is not None:
 
-  def __init__(self, model_tokenizer: Any, template_config: dict[str, Any], tmvp_config: Any) -> None:
-    super().__init__(model_tokenizer)
-    self.template_config = template_config
-    self.tmvp_config = tmvp_config
+  class MaxTextChatParser(agentic_chat_template_parser.DefaultChatTemplateParser):
+    """Custom Chat Parser for MaxText that intercepts message lists dynamically during agentic rollouts and injects the necessary system templates and special tokens using the shared helper."""
 
-  def parse(
-      self,
-      messages: list[dict[str, str]],
-      add_generation_prompt: bool = False,
-      is_first_msg: bool = False,
-  ) -> str:
-    """Overrides the default parse method to apply MaxText-specific formatting to the messages."""
-    # Apply MaxText specific formatting to the messages
-    formatted_messages = format_maxtext_messages(messages, self.template_config, self.tmvp_config)
+    def __init__(self, model_tokenizer: Any, template_config: dict[str, Any], tmvp_config: Any) -> None:
+      super().__init__(model_tokenizer)
+      self.template_config = template_config
+      self.tmvp_config = tmvp_config
 
-    # Delegate to Tunix default parser to apply the tokenizer's chat template
-    return super().parse(
-        messages=formatted_messages, add_generation_prompt=add_generation_prompt, is_first_msg=is_first_msg
-    )
+    def parse(
+        self,
+        messages: list[dict[str, str]],
+        add_generation_prompt: bool = False,
+        is_first_msg: bool = False,
+    ) -> str:
+      """Overrides the default parse method to apply MaxText-specific formatting to the messages."""
+      # Apply MaxText specific formatting to the messages
+      formatted_messages = format_maxtext_messages(messages, self.template_config, self.tmvp_config)
+
+      # Delegate to Tunix default parser to apply the tokenizer's chat template
+      return super().parse(
+          messages=formatted_messages, add_generation_prompt=add_generation_prompt, is_first_msg=is_first_msg
+      )
+
+else:
+
+  class MaxTextChatParser:  # type: ignore[no-redef]
+    """Fallback MaxTextChatParser when tunix is not installed."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+      raise ImportError("tunix is required to use MaxTextChatParser.")
 
 
 def install_training_hooks(

@@ -1,0 +1,340 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="100%" height="100%" style="background:#ffffff; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Filter for subtle card shadow -->
+    <filter id="cardShadow" x="-3%" y="-2%" width="106%" height="108%" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#64748b" flood-opacity="0.10"/>
+    </filter>
+
+    <!-- Arrow Marker -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#94a3b8"/>
+    </marker>
+    
+    <marker id="arrow-active" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#0284c7"/>
+    </marker>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1280" height="720" fill="#ffffff" />
+
+  <!-- Subtle Background Grid Pattern -->
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#f1f5f9" stroke-width="1"/>
+  </pattern>
+  <rect width="1280" height="720" fill="url(#grid)" />
+
+  <!-- HEADER -->
+  <g transform="translate(50, 45)">
+    <text x="0" y="0" font-size="24" font-weight="800" fill="#0f172a" letter-spacing="-0.3">
+      MaxText-Omni Pipeline
+    </text>
+    <text x="0" y="24" font-size="13" font-weight="500" fill="#64748b">
+      End-to-end workflow: checkpoint conversion → checkpoint stitching → pretraining → training → evaluation
+    </text>
+  </g>
+
+  <!-- ==================== STAGE 1: CONVERT ==================== -->
+  <g transform="translate(50, 105)">
+    <!-- Uniform Board Container Card -->
+    <rect width="215" height="500" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" filter="url(#cardShadow)"/>
+    
+    <!-- Uniform Board Header -->
+    <rect width="215" height="42" rx="14" fill="#f1f5f9"/>
+    <rect y="28" width="215" height="14" fill="#f1f5f9"/>
+    <circle cx="24" cy="21" r="11" fill="#e2e8f0"/>
+    <text x="24" y="25" font-size="12" font-weight="700" fill="#1e293b" text-anchor="middle">1</text>
+    <text x="44" y="25" font-size="13" font-weight="700" fill="#0f172a">Weight Conversion</text>
+    <line x1="0" y1="42" x2="215" y2="42" stroke="#e2e8f0" stroke-width="1"/>
+
+    <g transform="translate(15, 55)">
+      <!-- Donor A: Gemma 3 -->
+      <g transform="translate(0, 5)">
+        <rect width="185" height="86" rx="9" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.2"/>
+        <rect x="8" y="7" width="68" height="17" rx="4" fill="#0284c7"/>
+        <text x="42" y="19" font-size="9.5" font-weight="700" fill="#ffffff" text-anchor="middle">DONOR A</text>
+        <text x="10" y="41" font-size="13.5" font-weight="700" fill="#0369a1">Gemma 3 (4B)</text>
+        <text x="10" y="57" font-size="10.5" fill="#475569">27-Layer ViT Encoder</text>
+        <text x="10" y="72" font-size="10" fill="#64748b">Dim: 1152d</text>
+      </g>
+
+      <!-- Donor B: Qwen 3 (Directly below Gemma 3 without arrow or to_maxtext) -->
+      <g transform="translate(0, 102)">
+        <rect width="185" height="86" rx="9" fill="#eef2ff" stroke="#6366f1" stroke-width="1.2"/>
+        <rect x="8" y="7" width="68" height="17" rx="4" fill="#4f46e5"/>
+        <text x="42" y="19" font-size="9.5" font-weight="700" fill="#ffffff" text-anchor="middle">DONOR B</text>
+        <text x="10" y="41" font-size="13.5" font-weight="700" fill="#3730a3">Qwen 3 (4B)</text>
+        <text x="10" y="57" font-size="10.5" fill="#475569">36-Layer LLM Decoder</text>
+        <text x="10" y="72" font-size="10" fill="#64748b">Dim: 2560d</text>
+      </g>
+
+      <!-- Arrow Down to Converted Weights -->
+      <path d="M 92 198 L 92 226" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <text x="100" y="216" font-size="10" fill="#64748b" font-family="monospace">to_maxtext</text>
+
+      <!-- Converted Outputs -->
+      <g transform="translate(0, 236)">
+        <rect width="185" height="175" rx="9" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+        <text x="12" y="24" font-size="11" font-weight="700" fill="#1e293b">MaxText Format Weights</text>
+        
+        <circle cx="20" cy="52" r="4" fill="#0284c7"/>
+        <text x="32" y="56" font-size="11" fill="#0369a1" font-weight="600" font-family="monospace">vision_encoder</text>
+        <text x="32" y="72" font-size="9" fill="#64748b">gs://.../gemma3-4b/0/items</text>
+
+        <line x1="12" y1="92" x2="173" y2="92" stroke="#e2e8f0" stroke-width="1"/>
+
+        <circle cx="20" cy="116" r="4" fill="#4f46e5"/>
+        <text x="32" y="120" font-size="11" fill="#3730a3" font-weight="600" font-family="monospace">decoder</text>
+        <text x="32" y="136" font-size="9" fill="#64748b">gs://.../qwen3-4b/0/items</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Connect Stage 1 -> Stage 2 (Aligned at y=420) -->
+  <path d="M 265 420 L 290 420" stroke="#0284c7" stroke-width="2" marker-end="url(#arrow-active)"/>
+
+  <!-- ==================== STAGE 2: STITCH ==================== -->
+  <g transform="translate(295, 105)">
+    <!-- Uniform Board Container Card -->
+    <rect width="215" height="500" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" filter="url(#cardShadow)"/>
+    
+    <!-- Uniform Board Header -->
+    <rect width="215" height="42" rx="14" fill="#f1f5f9"/>
+    <rect y="28" width="215" height="14" fill="#f1f5f9"/>
+    <circle cx="24" cy="21" r="11" fill="#e2e8f0"/>
+    <text x="24" y="25" font-size="12" font-weight="700" fill="#1e293b" text-anchor="middle">2</text>
+    <text x="44" y="25" font-size="13" font-weight="700" fill="#0f172a">Checkpoint Stitching</text>
+    <line x1="0" y1="42" x2="215" y2="42" stroke="#e2e8f0" stroke-width="1"/>
+
+    <g transform="translate(15, 55)">
+      <!-- Operation script badge -->
+      <rect width="185" height="24" rx="5" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+      <text x="92" y="16" font-size="10" font-weight="600" fill="#334155" text-anchor="middle" font-family="monospace">stitch_checkpoint.py</text>
+
+      <!-- Subtree 1: Vision -->
+      <g transform="translate(0, 34)">
+        <rect width="185" height="66" rx="8" fill="#f0f9ff" stroke="#0284c7" stroke-width="1"/>
+        <text x="12" y="20" font-size="11" font-weight="700" fill="#0369a1">Vision Tower (Gemma 3)</text>
+        <text x="12" y="37" font-size="10" fill="#64748b">Subtree: params/vision_encoder</text>
+        <rect x="12" y="44" width="58" height="15" rx="3" fill="#0284c7"/>
+        <text x="41" y="55" font-size="9" font-weight="700" fill="#ffffff" text-anchor="middle">FROZEN</text>
+      </g>
+
+      <!-- Subtree 2: Projector (NEW) -->
+      <g transform="translate(0, 110)">
+        <rect width="185" height="82" rx="8" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+        <text x="12" y="20" font-size="11" font-weight="700" fill="#b45309">+ Custom MLP Projector</text>
+        <text x="12" y="37" font-size="10" font-weight="600" fill="#92400e">3-Layer GELU (1152→4096→2560)</text>
+        <text x="12" y="52" font-size="9.5" fill="#78350f">Random Init • ~12.5M params</text>
+        <rect x="12" y="59" width="72" height="16" rx="3" fill="#d97706"/>
+        <text x="48" y="71" font-size="9" font-weight="700" fill="#ffffff" text-anchor="middle">TRAINABLE</text>
+      </g>
+
+      <!-- Subtree 3: Decoder -->
+      <g transform="translate(0, 202)">
+        <rect width="185" height="66" rx="8" fill="#eef2ff" stroke="#6366f1" stroke-width="1"/>
+        <text x="12" y="20" font-size="11" font-weight="700" fill="#3730a3">LLM Decoder (Qwen 3)</text>
+        <text x="12" y="37" font-size="10" fill="#64748b">Subtree: params/decoder</text>
+        <rect x="12" y="44" width="58" height="15" rx="3" fill="#4f46e5"/>
+        <text x="41" y="55" font-size="9" font-weight="700" fill="#ffffff" text-anchor="middle">FROZEN</text>
+      </g>
+
+      <!-- Arrow Down to Stitched Checkpoint -->
+      <path d="M 92 278 L 92 304" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- Stitched Checkpoint (Compact, no bullet points/descriptions) -->
+      <g transform="translate(0, 312)">
+        <rect width="185" height="70" rx="9" fill="#f8fafc" stroke="#0284c7" stroke-width="1.2" stroke-dasharray="3 3"/>
+        <text x="12" y="30" font-size="12" font-weight="700" fill="#0369a1">Stitched Checkpoint</text>
+        <text x="12" y="50" font-size="9.5" fill="#64748b" font-family="monospace">0/items (omni_stitched)</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Connect Stage 2 -> Stage 3 (Aligned at y=420) -->
+  <path d="M 510 420 L 535 420" stroke="#0284c7" stroke-width="2" marker-end="url(#arrow-active)"/>
+
+  <!-- ==================== STAGE 3: PRETRAINING ==================== -->
+  <g transform="translate(540, 105)">
+    <!-- Uniform Board Container Card -->
+    <rect width="215" height="500" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" filter="url(#cardShadow)"/>
+    
+    <!-- Uniform Board Header -->
+    <rect width="215" height="42" rx="14" fill="#f1f5f9"/>
+    <rect y="28" width="215" height="14" fill="#f1f5f9"/>
+    <circle cx="24" cy="21" r="11" fill="#e2e8f0"/>
+    <text x="24" y="25" font-size="12" font-weight="700" fill="#1e293b" text-anchor="middle">3</text>
+    <text x="44" y="25" font-size="13" font-weight="700" fill="#0f172a">Stage 1: Pretrain</text>
+    <line x1="0" y1="42" x2="215" y2="42" stroke="#e2e8f0" stroke-width="1"/>
+
+    <g transform="translate(15, 55)">
+      <!-- Dataset Badge: ChartNet CSV Reconstruction -->
+      <g transform="translate(0, 15)">
+        <rect width="185" height="74" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1"/>
+        <rect x="8" y="8" width="60" height="16" rx="3" fill="#10b981"/>
+        <text x="38" y="20" font-size="9" font-weight="700" fill="#ffffff" text-anchor="middle">DATASET</text>
+        <text x="10" y="42" font-size="11.5" font-weight="700" fill="#065f46">ChartNet CSV Reconstruction</text>
+        <text x="10" y="58" font-size="10" fill="#047857">1.7M chart tables • 1 Epoch</text>
+      </g>
+
+      <!-- Arrow Down -->
+      <path d="M 92 98 L 92 126" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- Training Block with 3 bullets -->
+      <g transform="translate(0, 135)">
+        <rect width="185" height="116" rx="8" fill="#f0fdf4" stroke="#10b981" stroke-width="1.2"/>
+        <text x="12" y="24" font-size="12" font-weight="700" fill="#065f46">train_sft_omni.py</text>
+
+        <circle cx="20" cy="50" r="3.5" fill="#10b981"/>
+        <text x="30" y="54" font-size="10.5" fill="#334155">Freeze ViT &amp; LLM backbones</text>
+
+        <circle cx="20" cy="72" r="3.5" fill="#f59e0b"/>
+        <text x="30" y="76" font-size="10.5" font-weight="600" fill="#b45309">Train MLP projector</text>
+
+        <circle cx="20" cy="94" r="3.5" fill="#10b981"/>
+        <text x="30" y="98" font-size="10.5" fill="#334155">Multi-host TPU clusters</text>
+      </g>
+
+      <!-- Arrow Down -->
+      <path d="M 92 260 L 92 298" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- Pretrain Checkpoint (Compact, no bullet points/descriptions) -->
+      <g transform="translate(0, 312)">
+        <rect width="185" height="70" rx="9" fill="#f8fafc" stroke="#10b981" stroke-width="1.2" stroke-dasharray="3 3"/>
+        <text x="12" y="30" font-size="12" font-weight="700" fill="#065f46">Pretrain Checkpoint</text>
+        <text x="12" y="50" font-size="9.5" fill="#047857" font-family="monospace">stage1_chartnet/items</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Connect Stage 3 -> Stage 4 (Aligned at y=420) -->
+  <path d="M 755 420 L 780 420" stroke="#0284c7" stroke-width="2" marker-end="url(#arrow-active)"/>
+
+  <!-- ==================== STAGE 4: SFT ==================== -->
+  <g transform="translate(785, 105)">
+    <!-- Uniform Board Container Card -->
+    <rect width="215" height="500" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" filter="url(#cardShadow)"/>
+    
+    <!-- Uniform Board Header -->
+    <rect width="215" height="42" rx="14" fill="#f1f5f9"/>
+    <rect y="28" width="215" height="14" fill="#f1f5f9"/>
+    <circle cx="24" cy="21" r="11" fill="#e2e8f0"/>
+    <text x="24" y="25" font-size="12" font-weight="700" fill="#1e293b" text-anchor="middle">4</text>
+    <text x="44" y="25" font-size="13" font-weight="700" fill="#0f172a">Stage 2: ChartQA SFT</text>
+    <line x1="0" y1="42" x2="215" y2="42" stroke="#e2e8f0" stroke-width="1"/>
+
+    <g transform="translate(15, 55)">
+      <!-- Dataset Badge: ChartQA -->
+      <g transform="translate(0, 15)">
+        <rect width="185" height="74" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1"/>
+        <rect x="8" y="8" width="60" height="16" rx="3" fill="#10b981"/>
+        <text x="38" y="20" font-size="9" font-weight="700" fill="#ffffff" text-anchor="middle">DATASET</text>
+        <text x="10" y="42" font-size="13" font-weight="700" fill="#065f46">ChartQA</text>
+        <text x="10" y="58" font-size="10" fill="#047857">28.3k VQA pairs • 5 epochs</text>
+      </g>
+
+      <!-- Arrow Down -->
+      <path d="M 92 98 L 92 126" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- Training Block with 3 bullets -->
+      <g transform="translate(0, 135)">
+        <rect width="185" height="116" rx="8" fill="#f0fdf4" stroke="#10b981" stroke-width="1.2"/>
+        <text x="12" y="24" font-size="12" font-weight="700" fill="#065f46">train_sft_omni.py</text>
+
+        <circle cx="20" cy="50" r="3.5" fill="#10b981"/>
+        <text x="30" y="54" font-size="10.5" fill="#334155">Freeze ViT &amp; LLM backbones</text>
+
+        <circle cx="20" cy="72" r="3.5" fill="#f59e0b"/>
+        <text x="30" y="76" font-size="10.5" font-weight="600" fill="#b45309">Train MLP projector</text>
+
+        <circle cx="20" cy="94" r="3.5" fill="#10b981"/>
+        <text x="30" y="98" font-size="10.5" fill="#334155">Multi-host TPU clusters</text>
+      </g>
+
+      <!-- Arrow Down -->
+      <path d="M 92 260 L 92 298" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- SFT Checkpoint (Compact, no bullet points/descriptions) -->
+      <g transform="translate(0, 312)">
+        <rect width="185" height="70" rx="9" fill="#f8fafc" stroke="#10b981" stroke-width="1.2" stroke-dasharray="3 3"/>
+        <text x="12" y="30" font-size="12" font-weight="700" fill="#065f46">SFT Checkpoint</text>
+        <text x="12" y="50" font-size="9.5" fill="#047857" font-family="monospace">stage2_chartqa_sft/items</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Connect Stage 4 -> Stage 5 (Aligned at y=420) -->
+  <path d="M 1000 420 L 1025 420" stroke="#0284c7" stroke-width="2" marker-end="url(#arrow-active)"/>
+
+  <!-- ==================== STAGE 5: EVAL & SERVE ==================== -->
+  <g transform="translate(1030, 105)">
+    <!-- Uniform Board Container Card -->
+    <rect width="200" height="500" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" filter="url(#cardShadow)"/>
+    
+    <!-- Uniform Board Header -->
+    <rect width="200" height="42" rx="14" fill="#f1f5f9"/>
+    <rect y="28" width="200" height="14" fill="#f1f5f9"/>
+    <circle cx="24" cy="21" r="11" fill="#e2e8f0"/>
+    <text x="24" y="25" font-size="12" font-weight="700" fill="#1e293b" text-anchor="middle">5</text>
+    <text x="44" y="25" font-size="13" font-weight="700" fill="#0f172a">Evaluation &amp; Decode</text>
+    <line x1="0" y1="42" x2="200" y2="42" stroke="#e2e8f0" stroke-width="1"/>
+
+    <g transform="translate(15, 60)">
+      <!-- Eval Card (Removed relaxed accuracy and human & aug subsets) -->
+      <rect width="170" height="135" rx="8" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.2"/>
+      <rect x="8" y="8" width="72" height="18" rx="4" fill="#ec4899"/>
+      <text x="44" y="21" font-size="9.5" font-weight="700" fill="#ffffff" text-anchor="middle">BENCHMARK</text>
+      <text x="10" y="46" font-size="13" font-weight="700" fill="#9d174d">eval_sft_omni.py</text>
+      
+      <circle cx="16" cy="72" r="3" fill="#ec4899"/>
+      <text x="26" y="76" font-size="10.5" fill="#334155">ChartQA Test Split</text>
+
+      <line x1="10" y1="92" x2="160" y2="92" stroke="#fbcfe8" stroke-width="0.8"/>
+      <text x="10" y="110" font-size="9" fill="#64748b">Outputs: predictions.jsonl,</text>
+      <text x="10" y="123" font-size="9" fill="#9d174d" font-weight="600">metrics.json (Accuracy %)</text>
+    </g>
+
+    <g transform="translate(15, 235)">
+      <!-- Interactive Inference Card -->
+      <rect width="170" height="185" rx="8" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.2"/>
+      <rect x="8" y="8" width="80" height="18" rx="4" fill="#0284c7"/>
+      <text x="48" y="21" font-size="9.5" font-weight="700" fill="#ffffff" text-anchor="middle">INTERACTIVE</text>
+      <text x="10" y="46" font-size="13" font-weight="700" fill="#0369a1">decode_omni.py</text>
+      
+      <text x="10" y="70" font-size="10.5" fill="#334155">Single-Image Demo:</text>
+      
+      <rect x="8" y="82" width="154" height="42" rx="4" fill="#ffffff" stroke="#bae6fd"/>
+      <text x="14" y="98" font-size="9" fill="#0284c7" font-family="monospace">--image=chart.png</text>
+      <text x="14" y="114" font-size="9" fill="#64748b" font-family="monospace">--prompt="What..."</text>
+
+      <circle cx="16" cy="144" r="3" fill="#0284c7"/>
+      <text x="26" y="148" font-size="10" fill="#334155">Direct autoregressive</text>
+      <circle cx="16" cy="162" r="3" fill="#0284c7"/>
+      <text x="26" y="166" font-size="10" fill="#334155">greedy/sample decoding</text>
+    </g>
+  </g>
+
+  <!-- ==================== FOOTER / LEGEND ==================== -->
+  <g transform="translate(50, 630)">
+    <rect width="1180" height="52" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+    
+    <text x="20" y="31" font-size="12" font-weight="700" fill="#475569">ARCHITECTURE &amp; TRAINING LEGEND:</text>
+
+    <!-- Legend Item 1 -->
+    <rect x="250" y="20" width="12" height="12" rx="3" fill="#0284c7"/>
+    <text x="270" y="31" font-size="11" fill="#1e293b">Frozen Vision Tower (Gemma 3 ViT)</text>
+
+    <!-- Legend Item 2 -->
+    <rect x="495" y="20" width="12" height="12" rx="3" fill="#f59e0b"/>
+    <text x="515" y="31" font-size="11" fill="#1e293b">Trainable Custom MLP Projector</text>
+
+    <!-- Legend Item 3 -->
+    <rect x="715" y="20" width="12" height="12" rx="3" fill="#6366f1"/>
+    <text x="735" y="31" font-size="11" fill="#1e293b">Frozen Language Decoder (Qwen 3 LLM)</text>
+
+    <!-- Legend Item 4 -->
+    <rect x="990" y="20" width="12" height="12" rx="3" fill="#10b981"/>
+    <text x="1010" y="31" font-size="11" fill="#1e293b">Dataset &amp; Pipelines</text>
+  </g>
+
+</svg>

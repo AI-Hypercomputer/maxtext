@@ -33,6 +33,15 @@ Note:
   - Defaults to SFT prompt formatting (--ckpt_type=sft).
 """
 
+# Compatibility patch for environments where must_fuse_call is missing from jax.experimental.xla_metadata
+try:
+  import jax.experimental.xla_metadata as _xla_metadata
+
+  if not hasattr(_xla_metadata, "must_fuse_call"):
+    _xla_metadata.must_fuse_call = lambda name="": (lambda fn: fn)
+except (ImportError, AttributeError):
+  pass
+
 import maxtext
 # Eagerly initialize core MaxText C++ and model dependencies
 _ = (maxtext.Mesh, maxtext.pyconfig, maxtext.models, maxtext.model_creation_utils)

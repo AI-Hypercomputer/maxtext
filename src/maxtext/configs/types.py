@@ -2588,6 +2588,10 @@ class VisionProjector(BaseModel):
   )
   vision_connector_activation: str = Field("gelu", description="Activation function for custom vision projector.")
   vision_connector_use_bias: bool = Field(True, description="Whether to use bias in custom vision projector.")
+  use_vision_connector_norm: bool = Field(
+      False,
+      description="Whether to use normalization (e.g. Gemma 3 RMSNorm) before projection in custom vision projector.",
+  )
 
 
 class AudioEncoder(BaseModel):

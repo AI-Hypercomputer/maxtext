@@ -22,6 +22,7 @@ from maxtext.common.common_types import Config, VisionEncoderBlockType
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import initializers
 from maxtext.layers import linears
+from maxtext.layers import normalizations
 
 
 class VisionEncoder(nnx.Module):
@@ -176,6 +177,21 @@ class MultimodalMLPProjector(nnx.Module):
     }
     self.activation = activations.get(self.activation_name.lower(), jax.nn.gelu)
 
+    # Gemma 3 style RMSNorm for soft vision embeddings before projection.
+    # Normalizes visual embeddings before MLP dense layers (mirroring Gemma 3's mm_soft_embedding_norm).
+    self.use_norm = getattr(config, "use_vision_connector_norm", False)
+    if self.use_norm:
+      self.custom_linear_norm = normalizations.RMSNorm(
+          num_features=in_features,
+          epsilon=getattr(config, "normalization_layer_epsilon", 1e-6),
+          dtype=config.dtype_mm,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("norm",),
+          rngs=rngs,
+      )
+    else:
+      self.custom_linear_norm = None
+
     current_in = in_features * self.tokens_per_block
     for i in range(self.num_layers):
       current_out = out_features if i == self.num_layers - 1 else self.hidden_size
@@ -197,6 +213,9 @@ class MultimodalMLPProjector(nnx.Module):
       current_in = current_out
 
   def __call__(self, x: jax.Array) -> jax.Array:
+    if self.custom_linear_norm is not None:
+      x = self.custom_linear_norm(x)
+
     # for qwen3 models, concatenate tokens per block (e.g. 2x2 spatial patches) along feature dimension
     if self.tokens_per_block > 1 and x.ndim == 3 and x.shape[1] % self.tokens_per_block == 0:
       batch_size, seq_len, in_dim = x.shape
