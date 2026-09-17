@@ -180,7 +180,19 @@ class RecoverTest(absltest.TestCase):
     pre_train.recover(jax_device_state, python_vars, {"config": config})
     return python_vars["step"], jax_device_state["state"]
 
-  def test_restores_snapshot(self):
+  def test_restores_checkpoint_that_is_newer_than_snapshot(self):
+    snapshot = _make_state(seed=1, step=1616)
+    checkpoint = _make_state(seed=2, step=1801)
+    self._save_checkpoint(1800, checkpoint)
+
+    step, state = self._recover(snapshot, 1615)
+
+    self.load_checkpoint.assert_called_once()
+    self.assertEqual(_FakeSnapshotter.loaded_steps, [])
+    self.assertEqual(step, 1801)
+    np.testing.assert_array_equal(_kernel(state), _kernel(checkpoint))
+
+  def test_restores_snapshot_that_is_not_older_than_checkpoint(self):
     snapshot = _make_state(seed=1, step=1816)
     self._save_checkpoint(1800, _make_state(seed=2, step=1801))
 
@@ -191,13 +203,38 @@ class RecoverTest(absltest.TestCase):
     self.assertEqual(step, 1815)
     np.testing.assert_array_equal(_kernel(state), _kernel(snapshot))
 
-  def test_restores_checkpoint_when_snapshot_fails(self):
+  def test_falls_back_to_snapshot_when_newer_checkpoint_fails(self):
+    snapshot = _make_state(seed=1, step=1616)
+    self._save_checkpoint(1820, _make_state(seed=2, step=1821))
+    incomplete = ValueError("Found incomplete checkpoint at gs://bucket/checkpoints/1820.")
+
+    _, state = self._recover(snapshot, 1615, load_errors=[incomplete])
+
+    self.load_checkpoint.assert_called_once()
+    self.assertEqual(_FakeSnapshotter.loaded_steps, [1615])
+    np.testing.assert_array_equal(_kernel(state), _kernel(snapshot))
+
+  def test_falls_back_to_checkpoint_when_snapshot_fails(self):
     checkpoint = _make_state(seed=2, step=1801)
     self._save_checkpoint(1800, checkpoint)
 
     step, state = self._recover(RuntimeError("No active replicas found."), 1815)
 
     self.load_checkpoint.assert_called_once()
+    self.assertEqual(step, 1801)
+    np.testing.assert_array_equal(_kernel(state), _kernel(checkpoint))
+
+  def test_retries_recovery_when_slice_goes_down_during_checkpoint_restore(self):
+    snapshot = _make_state(seed=1, step=1616)
+    checkpoint = _make_state(seed=2, step=1801)
+    self._save_checkpoint(1800, checkpoint)
+    slice_down = jax.errors.JaxRuntimeError("DATA_LOSS: lost connection to a worker")
+
+    step, state = self._recover(snapshot, 1615, load_errors=[slice_down])
+
+    self.assertEqual(self.wait_for_slices.call_count, 2)
+    self.assertEqual(self.load_checkpoint.call_count, 2)
+    self.assertEqual(_FakeSnapshotter.loaded_steps, [])
     self.assertEqual(step, 1801)
     np.testing.assert_array_equal(_kernel(state), _kernel(checkpoint))
 
