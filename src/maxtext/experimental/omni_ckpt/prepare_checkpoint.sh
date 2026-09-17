@@ -155,7 +155,7 @@ echo -e "\n=== [3/3] Stitching Omni Checkpoint (${VISION_MAXTEXT_MODEL} + ${LLM_
 if ! path_exists "${STITCHED_ITEMS_PATH}"; then
   (
     cd "${MAXTEXT_ROOT}"
-    python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+    python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
       "${OMNI_CONFIG_PATH}" \
       "hf_access_token=${HF_TOKEN}" \
       "tokenizer_path=${LLM_HF_REPO}" \

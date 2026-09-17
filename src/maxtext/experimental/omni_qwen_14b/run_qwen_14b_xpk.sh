@@ -43,7 +43,7 @@ stitch_checkpoints() {
   echo ">>> Output Path:   ${STITCHED_CKPT}"
   echo "=================================================================="
 
-  JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+  JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
     "${SCRIPT_DIR}/maxtext-omni-qwen3vl-qwen3-14b.yml" \
     "vision_load_path=${VISION_SOURCE_CKPT}" \
     "llm_load_path=${LLM_SOURCE_CKPT}" \
@@ -74,7 +74,7 @@ pretrain_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b/pretrain-omni-qwen3vl-qwen3-14b-chartnet-xpk-128-csv.yml load_parameters_path=${STITCHED_CKPT}"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b/pretrain-omni-qwen3vl-qwen3-14b-chartnet-xpk-128-csv.yml load_parameters_path=${STITCHED_CKPT}"
   )
 
   echo ""
@@ -111,7 +111,7 @@ sft_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b/sft-omni-qwen3vl-qwen3-14b-xpk-128.yml load_parameters_path=${input_ckpt}"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b/sft-omni-qwen3vl-qwen3-14b-xpk-128.yml load_parameters_path=${input_ckpt}"
   )
 
   echo ""
@@ -146,7 +146,7 @@ pipeline_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && echo '=== Stage 1: Pretrain ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b/pretrain-omni-qwen3vl-qwen3-14b-chartnet-xpk-128-csv.yml load_parameters_path=${STITCHED_CKPT} && echo '=== Stage 2: SFT ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b/sft-omni-qwen3vl-qwen3-14b-xpk-128.yml load_parameters_path=${GCS_BUCKET}/omni-qwen3vl-qwen3-14b/multimodal/pretrain_chartnet_xpk/omni_qwen3vl_14b_pretrain_chartnet_xpk_128_csv/checkpoints/2100/items"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && echo '=== Stage 1: Pretrain ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b/pretrain-omni-qwen3vl-qwen3-14b-chartnet-xpk-128-csv.yml load_parameters_path=${STITCHED_CKPT} && echo '=== Stage 2: SFT ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b/sft-omni-qwen3vl-qwen3-14b-xpk-128.yml load_parameters_path=${GCS_BUCKET}/omni-qwen3vl-qwen3-14b/multimodal/pretrain_chartnet_xpk/omni_qwen3vl_14b_pretrain_chartnet_xpk_128_csv/checkpoints/2100/items"
   )
 
   echo ""

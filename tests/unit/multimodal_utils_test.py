@@ -534,7 +534,7 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
     )
     self.assertEqual(mm_processor.get_image_offsets(omni_config, None), 255)
 
-    from maxtext.experimental.omni_poc.utils import processor_maxtext_omni
+    from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni
 
     qwen_image_pad = processor_maxtext_omni.DECODER_SPECIAL_TOKENS["qwen3"]["image_pad"]
     tokens = [1, qwen_image_pad, 2]

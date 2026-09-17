@@ -143,7 +143,7 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
   decoder_block = _get_decoder_block(config)
 
   if "maxtext-omni" in getattr(config, "model_name", ""):
-    from maxtext.experimental.omni_poc.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
+    from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
 
     return processor_maxtext_omni.get_image_offsets_omni(vision_block, decoder_block, processor_output)
   elif vision_block in ["gemma3"]:
@@ -230,7 +230,7 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
   decoder_block = _get_decoder_block(config)
 
   if "maxtext-omni" in getattr(config, "model_name", ""):
-    from maxtext.experimental.omni_poc.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
+    from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
 
     return processor_maxtext_omni.add_extra_tokens_for_omni(
         tokens, vision_block, decoder_block, processor_output=processor_output
@@ -312,7 +312,7 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
   decoder_block = _get_decoder_block(config)
 
   if "maxtext-omni" in getattr(config, "model_name", ""):
-    from maxtext.experimental.omni_poc.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
+    from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = processor_maxtext_omni.get_bidirectional_mask_vision_omni(
         vision_block, decoder_block, decoder_input_tokens

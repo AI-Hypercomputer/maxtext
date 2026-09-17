@@ -301,7 +301,7 @@ stitch_ckpt() {
     fi
     (
       cd "${MAXTEXT_ROOT}"
-      python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+      python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
         "${OMNI_CONFIG_PATH}" \
         "hf_access_token=${HF_TOKEN}" \
         "tokenizer_path=${LLM_HF_REPO}" \
@@ -364,7 +364,7 @@ stage1_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTNET_DATASET_DIR} /dev/shm/ && python3 -m maxtext.experimental.omni_poc.train_sft_omni ${STAGE1_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${STAGE1_OUTPUT_DIR} run_name=${STAGE1_RUN_NAME} num_epoch=${STAGE1_EPOCHS} steps=${STAGE1_STEPS} eval_interval=-1 eval_steps=0 checkpoint_period=${STAGE1_CKPT_PERIOD} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
+      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTNET_DATASET_DIR} /dev/shm/ && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni ${STAGE1_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${STAGE1_OUTPUT_DIR} run_name=${STAGE1_RUN_NAME} num_epoch=${STAGE1_EPOCHS} steps=${STAGE1_STEPS} eval_interval=-1 eval_steps=0 checkpoint_period=${STAGE1_CKPT_PERIOD} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
   )
 }
 
@@ -452,7 +452,7 @@ stage2_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTQA_DATASET_DIR} /dev/shm/ && python3 -m maxtext.experimental.omni_poc.train_sft_omni ${STAGE2_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${output_dir} run_name=${run_name} steps=${STAGE2_STEPS} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
+      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTQA_DATASET_DIR} /dev/shm/ && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni ${STAGE2_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${output_dir} run_name=${run_name} steps=${STAGE2_STEPS} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
   )
 }
 
@@ -509,7 +509,7 @@ stage1_6ep_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTNET_6EP_DATASET_DIR} /dev/shm/ && python3 -m maxtext.experimental.omni_poc.train_sft_omni ${STAGE1_6EP_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${STAGE1_6EP_OUTPUT_DIR} run_name=${STAGE1_6EP_RUN_NAME} num_epoch=${STAGE1_6EP_EPOCHS} steps=${STAGE1_6EP_STEPS} eval_interval=-1 eval_steps=0 checkpoint_period=${STAGE1_6EP_CKPT_PERIOD} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
+      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTNET_6EP_DATASET_DIR} /dev/shm/ && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni ${STAGE1_6EP_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${STAGE1_6EP_OUTPUT_DIR} run_name=${STAGE1_6EP_RUN_NAME} num_epoch=${STAGE1_6EP_EPOCHS} steps=${STAGE1_6EP_STEPS} eval_interval=-1 eval_steps=0 checkpoint_period=${STAGE1_6EP_CKPT_PERIOD} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
   )
 }
 
@@ -597,7 +597,7 @@ stage2_mlp_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTQA_DATASET_DIR} /dev/shm/ && python3 -m maxtext.experimental.omni_poc.train_sft_omni ${STAGE2_MLP_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${output_dir} run_name=${run_name} steps=${STAGE2_MLP_STEPS} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
+      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTQA_DATASET_DIR} /dev/shm/ && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni ${STAGE2_MLP_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${output_dir} run_name=${run_name} steps=${STAGE2_MLP_STEPS} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
   )
 }
 
@@ -657,7 +657,7 @@ pipeline_mlp_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTNET_6EP_DATASET_DIR} /dev/shm/ && gcloud storage cp -r ${CHARTQA_DATASET_DIR} /dev/shm/ && echo '=== Stage 1: ChartNet CSV 6-Epoch (${STAGE1_6EP_STEPS} steps, No Eval) ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni ${STAGE1_6EP_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${STAGE1_6EP_OUTPUT_DIR} run_name=${STAGE1_6EP_RUN_NAME} num_epoch=${STAGE1_6EP_EPOCHS} steps=${STAGE1_6EP_STEPS} eval_interval=-1 eval_steps=0 checkpoint_period=${STAGE1_6EP_CKPT_PERIOD} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0 && echo '=== Stage 2: ChartQA Visual QA SFT MLP (${STAGE2_MLP_STEPS} steps) ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni ${STAGE2_MLP_CONFIG} load_parameters_path=${STAGE1_6EP_FINAL_CKPT} base_output_directory=${STAGE2_MLP_6EP_OUTPUT_DIR} run_name=${STAGE2_MLP_6EP_RUN_NAME} steps=${STAGE2_MLP_STEPS} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
+      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTNET_6EP_DATASET_DIR} /dev/shm/ && gcloud storage cp -r ${CHARTQA_DATASET_DIR} /dev/shm/ && echo '=== Stage 1: ChartNet CSV 6-Epoch (${STAGE1_6EP_STEPS} steps, No Eval) ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni ${STAGE1_6EP_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${STAGE1_6EP_OUTPUT_DIR} run_name=${STAGE1_6EP_RUN_NAME} num_epoch=${STAGE1_6EP_EPOCHS} steps=${STAGE1_6EP_STEPS} eval_interval=-1 eval_steps=0 checkpoint_period=${STAGE1_6EP_CKPT_PERIOD} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0 && echo '=== Stage 2: ChartQA Visual QA SFT MLP (${STAGE2_MLP_STEPS} steps) ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni ${STAGE2_MLP_CONFIG} load_parameters_path=${STAGE1_6EP_FINAL_CKPT} base_output_directory=${STAGE2_MLP_6EP_OUTPUT_DIR} run_name=${STAGE2_MLP_6EP_RUN_NAME} steps=${STAGE2_MLP_STEPS} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
   )
 }
 
@@ -708,7 +708,7 @@ pipeline_core_mlp_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTNET_DATASET_DIR} /dev/shm/ && gcloud storage cp -r ${CHARTQA_DATASET_DIR} /dev/shm/ && echo '=== Stage 1: ChartNet Core CSV 2-Epoch (${STAGE1_STEPS} steps, No Eval) ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni ${STAGE1_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${STAGE1_OUTPUT_DIR} run_name=${STAGE1_RUN_NAME} num_epoch=${STAGE1_EPOCHS} steps=${STAGE1_STEPS} eval_interval=-1 eval_steps=0 checkpoint_period=${STAGE1_CKPT_PERIOD} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0 && echo '=== Stage 2: ChartQA Visual QA SFT MLP (${STAGE2_MLP_STEPS} steps) ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni ${STAGE2_MLP_CONFIG} load_parameters_path=${STAGE1_FINAL_CKPT} base_output_directory=${STAGE2_MLP_OUTPUT_DIR} run_name=${STAGE2_MLP_RUN_NAME} steps=${STAGE2_MLP_STEPS} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
+      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && gcloud storage cp -r ${CHARTNET_DATASET_DIR} /dev/shm/ && gcloud storage cp -r ${CHARTQA_DATASET_DIR} /dev/shm/ && echo '=== Stage 1: ChartNet Core CSV 2-Epoch (${STAGE1_STEPS} steps, No Eval) ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni ${STAGE1_CONFIG} load_parameters_path=${input_ckpt} base_output_directory=${STAGE1_OUTPUT_DIR} run_name=${STAGE1_RUN_NAME} num_epoch=${STAGE1_EPOCHS} steps=${STAGE1_STEPS} eval_interval=-1 eval_steps=0 checkpoint_period=${STAGE1_CKPT_PERIOD} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0 && echo '=== Stage 2: ChartQA Visual QA SFT MLP (${STAGE2_MLP_STEPS} steps) ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni ${STAGE2_MLP_CONFIG} load_parameters_path=${STAGE1_FINAL_CKPT} base_output_directory=${STAGE2_MLP_OUTPUT_DIR} run_name=${STAGE2_MLP_RUN_NAME} steps=${STAGE2_MLP_STEPS} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} scan_layers=${SCAN_LAYERS} grain_worker_count=0"
   )
 }
 
@@ -761,7 +761,7 @@ eval_sft() {
   echo ">>> Scan Layers:     ${SCAN_LAYERS}"
   echo "=================================================================="
 
-  MEGASCALE_NUM_SLICES=1 HF_TOKEN="${HF_TOKEN}" HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}" python3 -m maxtext.experimental.omni_poc.eval_sft_omni \
+  MEGASCALE_NUM_SLICES=1 HF_TOKEN="${HF_TOKEN}" HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}" python3 -m maxtext.experimental.omni_pipeline.eval_sft_omni \
     "${eval_config}" \
     "load_parameters_path=${ckpt_path}" \
     "base_output_directory=${eval_dir}" \
@@ -846,7 +846,7 @@ eval_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && python3 -m maxtext.experimental.omni_poc.eval_sft_omni ${eval_config} load_parameters_path=${ckpt_path} base_output_directory=${eval_dir} run_name=eval_${step_tag} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} hf_path=HuggingFaceM4/ChartQA scan_layers=${SCAN_LAYERS} --ckpt_type=sft --num_examples=${num_examples} --hf_eval_split=test --tmp_results_file=omni_norm_eval_${step_tag}.csv"
+      --command "export MEGASCALE_NUM_SLICES=${XPK_NUM_SLICES} && export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN} && python3 -m pip install --no-cache-dir -U 'orbax-checkpoint>=0.12.4' && python3 -m maxtext.experimental.omni_pipeline.eval_sft_omni ${eval_config} load_parameters_path=${ckpt_path} base_output_directory=${eval_dir} run_name=eval_${step_tag} tokenizer_path=${LLM_HF_REPO} hf_access_token=${HF_TOKEN} hf_path=HuggingFaceM4/ChartQA scan_layers=${SCAN_LAYERS} --ckpt_type=sft --num_examples=${num_examples} --hf_eval_split=test --tmp_results_file=omni_norm_eval_${step_tag}.csv"
   )
 }
 

@@ -104,7 +104,7 @@ echo ">>> Step 3/3: Stitching Vision and LLM into unified Omni 32B checkpoint...
 echo "============================================================"
 (
   cd "${MAXTEXT_ROOT}"
-  python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+  python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
     "${OMNI_CONFIG_PATH}" \
     "hf_access_token=${HF_TOKEN}" \
     "vision_load_path=${VISION_ITEMS_PATH}" \
