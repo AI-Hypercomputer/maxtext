@@ -18,8 +18,8 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-
 from maxtext.layers import normalizations
+
 from .runtime_utils import invert_triangular_matrix
 
 
@@ -247,12 +247,14 @@ def pure_jax_decoupled_conv1d_gdn(
     compute_dtype: jnp.dtype = jnp.float32,
 ) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
   """Pure-JAX composite of Conv1D + GDN used during backward pass autodiff."""
-  del conv_state
   batch, seq_len, _ = qkv.shape
   key_dim = num_k_heads * head_k_dim
 
   # Conv1D in FP32
-  conv_input = jnp.pad(qkv.astype(jnp.float32), ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
+  if conv_state is not None:
+    conv_input = jnp.concatenate([conv_state.astype(jnp.float32), qkv.astype(jnp.float32)], axis=1)
+  else:
+    conv_input = jnp.pad(qkv.astype(jnp.float32), ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
   if conv_weight.ndim == 3:
     conv_weight_3d = conv_weight.astype(jnp.float32)
   else:
@@ -278,8 +280,13 @@ def pure_jax_decoupled_conv1d_gdn(
     repeats = num_v_heads // num_k_heads
     query = jnp.repeat(query, repeats, axis=2)
     key = jnp.repeat(key, repeats, axis=2)
-  from maxtext.models import qwen3  # pylint: disable=import-outside-toplevel
+  from maxtext.models import qwen3  # pylint: disable=import-outside-toplevel,g-import-not-at-top
 
+  init_rs = (
+      recurrent_state.astype(jnp.float32)
+      if recurrent_state is not None
+      else jnp.zeros((batch, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
+  )
   core_attn_out, next_recurrent_state = qwen3.jax_chunk_gated_delta_rule(
       query=query,
       key=key,
@@ -287,16 +294,12 @@ def pure_jax_decoupled_conv1d_gdn(
       g=g,
       beta=beta,
       chunk_size=chunk_size,
-      initial_state=(recurrent_state.astype(jnp.float32) if recurrent_state is not None else None),
+      initial_state=init_rs,
       use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-      compute_dtype=jnp.float32,
+      compute_dtype=compute_dtype,
   )
 
-  next_conv_state = (
-      qkv[:, -(conv_kernel_size - 1) :, :]
-      if seq_len >= conv_kernel_size - 1
-      else jnp.zeros((batch, conv_kernel_size - 1, qkv.shape[-1]), dtype=qkv.dtype)
-  )
+  next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :].astype(qkv.dtype)
   if next_recurrent_state is None:
     next_recurrent_state = jnp.zeros((batch, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
 
@@ -316,6 +319,7 @@ def _compute_forward_conv_and_states(
     dt_bias: jax.Array,
     recurrent_state: Optional[jax.Array],
     *,
+    conv_state: Optional[jax.Array] = None,
     num_k_heads: int,
     num_v_heads: int,
     head_k_dim: int,
@@ -332,7 +336,10 @@ def _compute_forward_conv_and_states(
   num_chunks = seq_len // chunk_size
 
   # Conv1D in FP32
-  conv_input = jnp.pad(qkv.astype(jnp.float32), ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
+  if conv_state is not None:
+    conv_input = jnp.concatenate([conv_state.astype(jnp.float32), qkv.astype(jnp.float32)], axis=1)
+  else:
+    conv_input = jnp.pad(qkv.astype(jnp.float32), ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
   if conv_weight.ndim == 3:
     conv_weight_3d = conv_weight.astype(jnp.float32)
   else:

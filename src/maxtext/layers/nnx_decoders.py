@@ -1367,9 +1367,10 @@ class NNXDecoder(nnx.Module):
             offload_dst="pinned_host",
         )
       elif remat_policy == "custom":
+        save_names, offload_names = maxtext_utils.get_save_and_offload_names(cfg)
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=cfg.tensors_to_offload,
+            names_which_can_be_saved=save_names,
+            names_which_can_be_offloaded=offload_names,
             offload_src="device",
             offload_dst="pinned_host",
         )

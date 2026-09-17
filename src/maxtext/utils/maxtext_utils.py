@@ -223,13 +223,16 @@ def _expand_gdn_remat_names(names: list[str]) -> list[str]:
             "gdn_core_attn_out",
             "gdn_chunk_states",
             "gdn_t_inv",
+            "gdn_m_local",
+            "gdn_conv_state",
+            "gdn_recurrent_state",
             "gdn_qkv",
             "gdn_b",
             "gdn_a",
         ]
     )
   if "gdn_conv" in names:
-    expanded.extend(["gdn_conv_out", "gdn_fwd_conv"])
+    expanded.extend(["gdn_conv_out", "gdn_fwd_conv", "gdn_conv_state"])
   return expanded
 
 

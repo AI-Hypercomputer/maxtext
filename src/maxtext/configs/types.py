@@ -1267,6 +1267,10 @@ class Qwen3Next(BaseModel):
       False,
       description="Whether to use GDN Pallas kernel.",
   )
+  gdn_cp_mode: str = Field(
+      "auto",
+      description="GDN context parallelism mode ('auto', 'seq', or 'head').",
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -4691,7 +4695,7 @@ class MaxTextConfig(
             * self.ici_context_usp_ulysses_parallelism
             * self.dcn_context_usp_ulysses_parallelism
         )
-        if gdn_context_parallel_size > 1:
+        if gdn_context_parallel_size > 1 and not self.use_gdn_kernel:
           raise ValueError(
               f"'explicit' sharding with the '{decoder_name}' decoder does not"
               " support context parallelism yet. The GatedDeltaNet short"

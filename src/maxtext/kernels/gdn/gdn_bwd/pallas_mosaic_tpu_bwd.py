@@ -16,12 +16,13 @@
 
 import dataclasses
 import functools
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
+
 from .bwd_memory_ref import make_bwd_block_specs
 from .runtime_utils import ensure_cpu_interpret_registered
 
@@ -58,6 +59,7 @@ class GDNBackwardConfig:
   num_v_heads: int
   kq_head_dim: int
   v_head_dim: int
+  num_chunks: int = 1
   vmem_limit_mb: Optional[int] = None
   use_qk_norm_in_gdn: bool = False
 
@@ -71,25 +73,53 @@ class GDNBackwardConfig:
 
 
 def _bwd_gdn_pipeline_body(
-    qkv_conv_ref: Any,
-    b_ref: Any,
-    a_ref: Any,
-    do_ref: Any,
-    chunk_states_ref: Any,
-    t_inv_ref: Any,
-    a_log_ref: Any,
-    dt_bias_ref: Any,
-    reset_ref: Any,
-    dy_conv_ref: Any,
-    d_b_ref: Any,
-    d_a_ref: Any,
-    d_a_log_ref: Any,
-    d_dt_bias_ref: Any,
-    d_state_scr: Any,
-    *,
+    *refs: Any,
     cfg: GDNBackwardConfig,
+    has_dht: bool = False,
+    has_dh0: bool = False,
 ) -> None:
   """Inner kernel executed per (batch, group, chunk) by emit_pipeline with manual GDN backward."""
+  # pylint: disable=unbalanced-tuple-unpacking
+  if len(refs) == 17:
+    has_dht = True
+    has_dh0 = True
+  idx = 0
+  (
+      qkv_conv_ref,
+      b_ref,
+      a_ref,
+      do_ref,
+      chunk_states_ref,
+      t_inv_ref,
+      a_log_ref,
+      dt_bias_ref,
+      reset_ref,
+  ) = refs[
+      idx : idx + 9
+  ]  # pylint: disable=unbalanced-tuple-unpacking
+  idx += 9
+  if has_dht:
+    dht_ref = refs[idx]
+    idx += 1
+  else:
+    dht_ref = None
+  (
+      dy_conv_ref,
+      d_b_ref,
+      d_a_ref,
+      d_a_log_ref,
+      d_dt_bias_ref,
+  ) = refs[
+      idx : idx + 5
+  ]  # pylint: disable=unbalanced-tuple-unpacking
+  idx += 5
+  if has_dh0:
+    dh0_ref = refs[idx]
+    idx += 1
+  else:
+    dh0_ref = None
+  d_state_scr = refs[idx]
+
   c = pl.program_id(2)
   chunk_size = cfg.chunk_size
   num_kq_heads = cfg.num_kq_heads
@@ -104,7 +134,10 @@ def _bwd_gdn_pipeline_body(
 
   @pl.when(c == 0)
   def _init():
-    d_state_scr[...] = jnp.zeros((num_v_heads, kq_head_dim, v_head_dim), dtype=jnp.float32)
+    if has_dht and dht_ref is not None:
+      d_state_scr[...] = dht_ref[0, ...].astype(jnp.float32)
+    else:
+      d_state_scr[...] = jnp.zeros_like(d_state_scr)
 
   is_reset = reset_ref[...][0, 0] > 0.5
   d_state = jnp.where(is_reset, 0.0, d_state_scr[...])
@@ -320,6 +353,12 @@ def _bwd_gdn_pipeline_body(
 
   d_state_scr[...] = d_state_prev.astype(d_state_scr.dtype)
 
+  if has_dh0 and dh0_ref is not None:
+
+    @pl.when(c == cfg.num_chunks - 1)
+    def _store_dh0():
+      dh0_ref[0, ...] = d_state_prev.astype(dh0_ref.dtype)
+
 
 def _pallas_gdn_bwd_kernel_single_group(
     qkv_conv: jax.Array,
@@ -333,9 +372,11 @@ def _pallas_gdn_bwd_kernel_single_group(
     *,
     cfg: GDNBackwardConfig,
     segment_ids: Optional[jax.Array] = None,
+    d_recurrent_state: Optional[jax.Array] = None,
+    return_dh0: bool = False,
     interpret: bool | pltpu.InterpretParams | None = None,
     name: str = "gdn_bwd_kernel",
-) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+):
   """Executes single head-group Pallas emit_pipeline kernel (delegates to pallas_gdn_bwd_kernel)."""
   return pallas_gdn_bwd_kernel(
       qkv_conv=qkv_conv,
@@ -354,6 +395,8 @@ def _pallas_gdn_bwd_kernel_single_group(
       vmem_limit_mb=cfg.vmem_limit_mb,
       head_tile=cfg.num_v_heads,
       segment_ids=segment_ids,
+      d_recurrent_state=d_recurrent_state,
+      return_dh0=return_dh0,
       interpret=interpret,
       name=name,
   )
@@ -377,18 +420,15 @@ def pallas_gdn_bwd_kernel(
     vmem_limit_mb: Optional[int] = None,
     head_tile: Optional[int] = None,
     segment_ids: Optional[jax.Array] = None,
+    d_recurrent_state: Optional[jax.Array] = None,
+    return_dh0: bool = False,
     interpret: bool | pltpu.InterpretParams | None = None,
     name: str = "gdn_bwd_kernel",
-) -> Tuple[
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-]:
+):
   """Executes the Pallas reverse-chunk GDNv3 backward kernel using emit_pipeline.
 
-  Dispatches a single kernel call with 3D grid=(batch_size, num_groups, num_chunks).
+  Dispatches a single kernel call with 3D grid=(batch_size, num_groups,
+  num_chunks).
   """
   if interpret is None and jax.default_backend() == "cpu":
     interpret = True
@@ -403,7 +443,15 @@ def pallas_gdn_bwd_kernel(
   num_kq_heads = (dim_size - num_v_heads * v_head_dim) // (kq_head_dim * 2)
   repeats = num_v_heads // num_kq_heads
 
-  target_tile = 32 if head_tile is None else head_tile
+  has_dht = d_recurrent_state is not None
+  has_dh0 = bool(return_dh0)
+  if head_tile is not None:
+    target_tile = head_tile
+  elif (has_dht or has_dh0) and jnp.dtype(qkv_conv.dtype) == jnp.float32:
+    target_tile = 16
+  else:
+    target_tile = 32
+
   max_possible = min(num_v_heads, target_tile)
   tile_v_heads = None
   for candidate in range(max_possible, 0, -1):
@@ -430,6 +478,7 @@ def pallas_gdn_bwd_kernel(
       num_v_heads=tile_v_heads,
       kq_head_dim=kq_head_dim,
       v_head_dim=v_head_dim,
+      num_chunks=num_chunks,
       vmem_limit_mb=vmem_limit_mb,
       use_qk_norm_in_gdn=use_qk_norm_in_gdn,
   )
@@ -448,25 +497,60 @@ def pallas_gdn_bwd_kernel(
   # 2. Prepare b and a into (B, G, C, chunk_size, padded_tile_v_heads)
   b_5d = b.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_v_heads).transpose((0, 3, 1, 2, 4))
   if padded_tile_v_heads > tile_v_heads:
-    b_5d = jnp.pad(b_5d, ((0, 0), (0, 0), (0, 0), (0, 0), (0, padded_tile_v_heads - tile_v_heads)))
+    b_5d = jnp.pad(
+        b_5d,
+        (
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, padded_tile_v_heads - tile_v_heads),
+        ),
+    )
 
   a_5d = a.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_v_heads).transpose((0, 3, 1, 2, 4))
   if padded_tile_v_heads > tile_v_heads:
-    a_5d = jnp.pad(a_5d, ((0, 0), (0, 0), (0, 0), (0, 0), (0, padded_tile_v_heads - tile_v_heads)))
+    a_5d = jnp.pad(
+        a_5d,
+        (
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, padded_tile_v_heads - tile_v_heads),
+        ),
+    )
 
   # 3. Prepare do into (B, G, C, chunk_size, tile_v_heads, v_head_dim)
-  do_6d = do.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_v_heads, cfg.v_head_dim).transpose(
-      (0, 3, 1, 2, 4, 5)
-  )
+  do_6d = do.reshape(
+      batch_size,
+      num_chunks,
+      chunk_size,
+      num_groups,
+      tile_v_heads,
+      cfg.v_head_dim,
+  ).transpose((0, 3, 1, 2, 4, 5))
 
   # 4. Prepare chunk_states into (B, G, C, tile_v_heads, kq_head_dim, v_head_dim)
   chunk_states_6d = chunk_states.reshape(
-      batch_size, num_chunks, num_groups, tile_v_heads, cfg.kq_head_dim, cfg.v_head_dim
+      batch_size,
+      num_chunks,
+      num_groups,
+      tile_v_heads,
+      cfg.kq_head_dim,
+      cfg.v_head_dim,
   ).swapaxes(1, 2)
 
   # 5. Prepare t_inv into (B, G, C, tile_v_heads, chunk_size, chunk_size)
   t_inv_6d = (
-      t_inv.reshape(batch_size, num_chunks, num_groups, tile_v_heads, chunk_size, chunk_size)
+      t_inv.reshape(
+          batch_size,
+          num_chunks,
+          num_groups,
+          tile_v_heads,
+          chunk_size,
+          chunk_size,
+      )
       .swapaxes(1, 2)
       .astype(jnp.float32)
   )
@@ -475,12 +559,18 @@ def pallas_gdn_bwd_kernel(
   a_log_2d = a_log.reshape(num_groups, tile_v_heads)
   if padded_tile_v_heads > tile_v_heads:
     a_log_2d = jnp.pad(a_log_2d, ((0, 0), (0, padded_tile_v_heads - tile_v_heads)))
-  a_log_4d = jnp.broadcast_to(a_log_2d[None, :, None, :], (batch_size, num_groups, 1, padded_tile_v_heads))
+  a_log_4d = jnp.broadcast_to(
+      a_log_2d[None, :, None, :],
+      (batch_size, num_groups, 1, padded_tile_v_heads),
+  )
 
   dt_bias_2d = dt_bias.reshape(num_groups, tile_v_heads)
   if padded_tile_v_heads > tile_v_heads:
     dt_bias_2d = jnp.pad(dt_bias_2d, ((0, 0), (0, padded_tile_v_heads - tile_v_heads)))
-  dt_bias_4d = jnp.broadcast_to(dt_bias_2d[None, :, None, :], (batch_size, num_groups, 1, padded_tile_v_heads))
+  dt_bias_4d = jnp.broadcast_to(
+      dt_bias_2d[None, :, None, :],
+      (batch_size, num_groups, 1, padded_tile_v_heads),
+  )
 
   # 7. Prepare reset_hbm into (B, G, C, 1, 128)
   if segment_ids is not None and num_chunks > 1:
@@ -496,6 +586,32 @@ def pallas_gdn_bwd_kernel(
     reset_hbm = jnp.zeros((batch_size, num_chunks, 1, 128), dtype=jnp.float32)
   reset_hbm_5d = jnp.broadcast_to(reset_hbm[:, None, :, :, :], (batch_size, num_groups, num_chunks, 1, 128))
 
+  in_args = [
+      qkv_conv_5d,
+      b_5d,
+      a_5d,
+      do_6d,
+      chunk_states_6d,
+      t_inv_6d,
+      a_log_4d,
+      dt_bias_4d,
+      reset_hbm_5d,
+  ]
+  if has_dht:
+    dht_6d = (
+        d_recurrent_state.astype(jnp.float32)
+        .reshape(
+            batch_size,
+            1,
+            num_groups,
+            tile_v_heads,
+            cfg.kq_head_dim,
+            cfg.v_head_dim,
+        )
+        .swapaxes(1, 2)
+    )
+    in_args.append(dht_6d)
+
   in_specs, out_specs, num_in, num_out = make_bwd_block_specs(
       num_chunks=num_chunks,
       chunk_size=chunk_size,
@@ -504,9 +620,11 @@ def pallas_gdn_bwd_kernel(
       kq_head_dim=cfg.kq_head_dim,
       v_head_dim=cfg.v_head_dim,
       padded_num_v_heads=padded_tile_v_heads,
+      has_dht=has_dht,
+      has_dh0=has_dh0,
   )
 
-  out_shapes = (
+  out_shapes_list = [
       jax.ShapeDtypeStruct(
           (batch_size, num_groups, num_chunks, chunk_size, group_dim_size),
           qkv_conv.dtype,
@@ -521,11 +639,28 @@ def pallas_gdn_bwd_kernel(
           (batch_size, num_groups, num_chunks, 1, padded_tile_v_heads),
           dt_bias_4d.dtype,
       ),
-  )
+  ]
+  if has_dh0:
+    out_shapes_list.append(
+        jax.ShapeDtypeStruct(
+            (
+                batch_size,
+                num_groups,
+                1,
+                tile_v_heads,
+                cfg.kq_head_dim,
+                cfg.v_head_dim,
+            ),
+            jnp.float32,
+        )
+    )
+  out_shapes = tuple(out_shapes_list)
 
   body = functools.partial(
       _bwd_gdn_pipeline_body,
       cfg=cfg,
+      has_dht=has_dht,
+      has_dh0=has_dh0,
   )
 
   def outer(*refs):
@@ -543,13 +678,7 @@ def pallas_gdn_bwd_kernel(
     vmem_limit_bytes = int(0.85 * tpu_info.vmem_capacity_bytes)
 
   hbm = pltpu.MemorySpace.HBM
-  (
-      dy_conv_chunks,
-      d_b_chunks,
-      d_a_chunks,
-      d_a_log_chunks,
-      d_dt_bias_chunks,
-  ) = pl.pallas_call(
+  pallas_out = pl.pallas_call(
       outer,
       grid=(),
       out_shape=out_shapes,
@@ -564,17 +693,26 @@ def pallas_gdn_bwd_kernel(
       ),
       interpret=interpret,
       name=name,
-  )(
-      qkv_conv_5d,
-      b_5d,
-      a_5d,
-      do_6d,
-      chunk_states_6d,
-      t_inv_6d,
-      a_log_4d,
-      dt_bias_4d,
-      reset_hbm_5d,
-  )
+  )(*in_args)
+
+  if has_dh0:
+    (
+        dy_conv_chunks,
+        d_b_chunks,
+        d_a_chunks,
+        d_a_log_chunks,
+        d_dt_bias_chunks,
+        dh0_6d,
+    ) = pallas_out
+  else:
+    (
+        dy_conv_chunks,
+        d_b_chunks,
+        d_a_chunks,
+        d_a_log_chunks,
+        d_dt_bias_chunks,
+    ) = pallas_out
+    dh0_6d = None
 
   # Reconstruct dy_conv: (B, G, C, S, group_dim_size) -> (B, seq_len, dim_size)
   dq_5d = dy_conv_chunks[..., :tile_q_size]
@@ -598,6 +736,17 @@ def pallas_gdn_bwd_kernel(
   d_dt_bias_reduced = (
       jnp.sum(d_dt_bias_chunks[..., 0, :tile_v_heads], axis=(0, 2)).reshape(num_v_heads).astype(dt_bias.dtype)
   )
+
+  if return_dh0:
+    dh0_flat = dh0_6d[:, :, 0, ...].reshape(batch_size, num_v_heads, cfg.kq_head_dim, cfg.v_head_dim)
+    return (
+        dy_conv_flat,
+        d_b_flat,
+        d_a_flat,
+        d_a_log_reduced,
+        d_dt_bias_reduced,
+        dh0_flat,
+    )
 
   return (
       dy_conv_flat,
