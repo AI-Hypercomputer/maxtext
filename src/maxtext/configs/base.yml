@@ -322,6 +322,17 @@ moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
+# Spread the MoE weights' expert dimension over the fsdp mesh axis IN ADDITION to the expert
+# axis (exp -> [expert, fsdp]), and release the MoE embed dimension from fsdp so no tensor
+# claims the same mesh axis twice. Unlike shard_exp_on_fsdp (which requires
+# ici_expert_parallelism = ici_tensor_parallelism = 1), this composes with expert/tensor
+# parallelism. Under base rules, fsdp > 1 on an MoE model either replicates the expert stack
+# (OOM at scale) or collides logical axes that both resolve to fsdp.
+#   'auto'   - apply whenever the model is MoE, fsdp > 1, and num_experts is divisible by
+#              ici_expert_parallelism * ici_fsdp_parallelism
+#   'always' - apply, and fail loudly if the divisibility requirement does not hold
+#   'never'  - keep base rules (default; preserves existing behavior)
+moe_spread_experts_over_fsdp: 'never'
 # Keep embed_moe sharded so we can manually QAG it over FSDP.
 # Requires quantization to be specified and weight_quantization_calibration_method to be fixed (static scaling mode).
 shard_embed_moe_on_fsdp: false

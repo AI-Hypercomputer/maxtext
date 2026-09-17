@@ -773,6 +773,196 @@ assert train._TF_AVAILABLE is False
           f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
       )
 
+  def test_moe_spread_experts_over_fsdp_never_mode(self):
+    """Test that 'never' mode leaves logical_axis_rules unchanged."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "never",
+        "num_experts": 8,
+        "ici_fsdp_parallelism": 2,
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    original_rules = raw_keys["logical_axis_rules"]
+    pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+    self.assertEqual(raw_keys["logical_axis_rules"], original_rules)
+
+  def test_moe_spread_experts_over_fsdp_auto_mode_applies(self):
+    """Test 'auto' mode applies transformation when divisibility is satisfied."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "auto",
+        "num_experts": 8,
+        "ici_fsdp_parallelism": 2,
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+    # exp should have fsdp added, embed_moe should have fsdp removed
+    rules = raw_keys["logical_axis_rules"]
+    exp_rule = next(r for r in rules if r[0] == "exp")
+    embed_moe_rule = next(r for r in rules if r[0] == "embed_moe")
+    self.assertIn("fsdp", exp_rule[1])
+    self.assertNotIn("fsdp", embed_moe_rule[1])
+
+  def test_moe_spread_experts_over_fsdp_auto_mode_skips_non_moe(self):
+    """Test 'auto' mode skips transformation for non-MoE models."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "auto",
+        "num_experts": 1,  # Non-MoE
+        "ici_fsdp_parallelism": 2,
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    original_rules = raw_keys["logical_axis_rules"]
+    pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+    self.assertEqual(raw_keys["logical_axis_rules"], original_rules)
+
+  def test_moe_spread_experts_over_fsdp_auto_mode_skips_no_fsdp(self):
+    """Test 'auto' mode skips transformation when fsdp is 1."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "auto",
+        "num_experts": 8,
+        "ici_fsdp_parallelism": 1,  # No FSDP
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    original_rules = raw_keys["logical_axis_rules"]
+    pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+    self.assertEqual(raw_keys["logical_axis_rules"], original_rules)
+
+  def test_moe_spread_experts_over_fsdp_divisibility_check_auto(self):
+    """Test 'auto' mode warns on divisibility failure."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "auto",
+        "num_experts": 7,  # Not divisible by 2
+        "ici_fsdp_parallelism": 2,
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    original_rules = raw_keys["logical_axis_rules"]
+    pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+    # Should not apply transformation, keeps original rules
+    self.assertEqual(raw_keys["logical_axis_rules"], original_rules)
+
+  def test_moe_spread_experts_over_fsdp_divisibility_check_always(self):
+    """Test 'always' mode raises on divisibility failure."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "always",
+        "num_experts": 7,  # Not divisible by 2
+        "ici_fsdp_parallelism": 2,
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    with self.assertRaisesRegex(ValueError, "num_experts=7 is not divisible"):
+      pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+
+  def test_moe_spread_experts_over_fsdp_always_mode_applies(self):
+    """Test 'always' mode applies transformation when divisibility is satisfied."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "always",
+        "num_experts": 8,
+        "ici_fsdp_parallelism": 2,
+        "ici_expert_parallelism": 2,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+    rules = raw_keys["logical_axis_rules"]
+    exp_rule = next(r for r in rules if r[0] == "exp")
+    embed_moe_rule = next(r for r in rules if r[0] == "embed_moe")
+    self.assertIn("fsdp", exp_rule[1])
+    self.assertNotIn("fsdp", embed_moe_rule[1])
+
+  def test_moe_spread_experts_over_fsdp_auto_with_auto_filled_fsdp(self):
+    """Test 'auto' mode declines when fsdp=-1 (auto-fill)."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "auto",
+        "num_experts": 8,
+        "ici_fsdp_parallelism": -1,  # Auto-fill
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    original_rules = raw_keys["logical_axis_rules"]
+    pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+    # Should not apply with auto-fill, cannot verify divisibility
+    self.assertEqual(raw_keys["logical_axis_rules"], original_rules)
+
+  def test_moe_spread_experts_over_fsdp_always_with_auto_filled_fsdp(self):
+    """Test 'always' mode accepts auto-filled fsdp (user's responsibility)."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "always",
+        "num_experts": 8,
+        "ici_fsdp_parallelism": -1,  # Auto-fill
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    # Should apply without raising (user assumes divisibility)
+    pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+    rules = raw_keys["logical_axis_rules"]
+    exp_rule = next(r for r in rules if r[0] == "exp")
+    embed_moe_rule = next(r for r in rules if r[0] == "embed_moe")
+    self.assertIn("fsdp", exp_rule[1])
+    self.assertNotIn("fsdp", embed_moe_rule[1])
+
+  def test_moe_spread_experts_over_fsdp_invalid_mode(self):
+    """Test that invalid modes raise ValueError."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "invalid_mode",
+        "num_experts": 8,
+        "ici_fsdp_parallelism": 2,
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", ("expert",)),
+            ("embed_moe", ("embed", "fsdp")),
+        ),
+    }
+    with self.assertRaisesRegex(ValueError, "must be 'never', 'auto' or 'always'"):
+      pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+
+  def test_moe_spread_experts_over_fsdp_handles_tuple_and_string_axes(self):
+    """Test that function handles both tuple and string axis formats."""
+    raw_keys = {
+        "moe_spread_experts_over_fsdp": "auto",
+        "num_experts": 8,
+        "ici_fsdp_parallelism": 2,
+        "ici_expert_parallelism": 1,
+        "logical_axis_rules": (
+            ("exp", "expert"),  # String format
+            ("embed_moe", ("embed", "fsdp")),  # Tuple format
+        ),
+    }
+    pyconfig._maybe_spread_moe_experts_over_fsdp(raw_keys)
+    rules = raw_keys["logical_axis_rules"]
+    exp_rule = next(r for r in rules if r[0] == "exp")
+    # Should convert string to tuple and add fsdp
+    self.assertIsInstance(exp_rule[1], tuple)
+    self.assertIn("fsdp", exp_rule[1])
+
 
 if __name__ == "__main__":
   unittest.main()
