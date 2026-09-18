@@ -905,6 +905,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       qkv = jnp.where((decoder_segment_ids != 0)[..., None], qkv, 0.0)
     batch, seq_len, _ = qkv.shape
     conv_kernel_size = self.config.gdn_conv_kernel_dim
+    if decoder_segment_ids is not None:
+      qkv = jnp.where((decoder_segment_ids != 0)[..., None], qkv, 0.0)
 
     conv_state = None
     recurrent_state = None
