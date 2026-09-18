@@ -613,7 +613,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   }
   if config.retry_when_tokens_dropped:
     metrics["has_moe_overflow"] = (  # pyrefly: ignore[bad-assignment]
-        has_moe_overflow if has_moe_overflow is not None else jnp.bool_(False)
+        has_moe_overflow if has_moe_overflow is not None else jnp.bool_(False)  # pyrefly: ignore[bad-assignment]
     )
   if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
