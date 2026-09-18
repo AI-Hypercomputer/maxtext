@@ -79,6 +79,12 @@ def _config(**overrides) -> pyconfig.HyperParameters:
       "grad_dtype=float32",
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
+      # MicroStepProfiler keys only off profiler_steps, which defaults to 5, so an engine
+      # opens a real trace even though profiler is "". jax.profiler is process-global and
+      # compare_layouts builds one engine per arm, so arm 2 dies with "Profile has already
+      # been started". TODO(mazumdera): drop this once MicroStepProfiler gates on
+      # config.profiler the way common/profiler.py does.
+      "profiler_steps=0",
       "skip_jax_distributed_system=True",
       "warmup_steps_fraction=0.0",
       "learning_rate=1e-4",
@@ -150,17 +156,31 @@ def _segment_valid_lens(ceiling, batch, offset):
   return np.array([max(1, round(ceiling * f[(offset + i) % len(f)])) for i in range(batch)], np.int64)
 
 
-def _train_example(model, algo_config, seed, batch, prompt_len, completion_len, valid_len):
+def _train_example(model, algo_config, seed, batch, prompt_len, completion_len, valid_len, pad_to=None):
   """One micro-batch whose reference log-probs are the model's own.
 
   `valid_len` truncates completion_mask, which is what makes the per-micro-batch
   denominator (`Σ completion_mask`) differ across the accumulation window. Per sequence: a
   scalar applies to all, a `[batch]` array gives each its own, which is what keeps this arm
   comparable to a packed one built with ragged segments.
+
+  `pad_to` right-pads each row out past its `prompt_len + completion_len` tokens, which is the
+  waste packing exists to remove: one short sequence per row, the rest of the row spent on
+  padding. The pad tokens are drawn from no distribution -- they are `_PAD_ID`, appended after
+  the same draws an unpadded call would make, so a padded arm and a packed arm built from the
+  same seed still hold byte-identical real tokens. `completion_mask` covers only `valid_len`,
+  so the padding scores nothing and, since the adapter falls back to `segment_ids = token_mask`
+  when a payload carries none, is excluded from attention as well. It still costs a row's worth
+  of every per-token matmul, which is what the packed arm is measured against.
   """
+  slack = 0 if pad_to is None else pad_to - (prompt_len + completion_len)
+  if slack < 0:
+    raise ValueError(f"pad_to {pad_to} cannot hold prompt {prompt_len} + completion {completion_len}.")
   rng = np.random.default_rng(seed)
   prompt_ids = jnp.asarray(rng.integers(1000, 2000, size=(batch, prompt_len)), dtype=jnp.int32)
   completion_ids = jnp.asarray(rng.integers(1000, 2000, size=(batch, completion_len)), dtype=jnp.int32)
+  if slack:
+    completion_ids = jnp.concatenate([completion_ids, jnp.full((batch, slack), _PAD_ID, jnp.int32)], axis=1)
 
   graphdef, state = nnx.split(model)
   ref_logps = tunix_common.compute_per_token_logps(
@@ -177,7 +197,9 @@ def _train_example(model, algo_config, seed, batch, prompt_len, completion_len, 
     ref_logps = ref_logps[0]
 
   lens = _as_lens(valid_len, batch)
-  mask = jnp.asarray((np.arange(completion_len)[None, :] < lens[:, None]).astype(np.int32))
+  # Widened by `slack` rather than masked separately: `lens` never exceeds `completion_len`, so
+  # the comparison zeroes the padding on its own.
+  mask = jnp.asarray((np.arange(completion_len + slack)[None, :] < lens[:, None]).astype(np.int32))
   return tunix_common.TrainExample(
       prompt_ids=prompt_ids,
       prompt_mask=jnp.ones((batch, prompt_len), dtype=jnp.int32),
@@ -1108,6 +1130,19 @@ def main():
   )
   ap.add_argument("--segments-per-row", type=int, default=2)
   ap.add_argument(
+      "--row-width",
+      type=int,
+      default=0,
+      help="pad every row out to this many tokens, in BOTH arms, leaving --seq as the real "
+      "sequence length. This is the only way to measure what packing is for. Without it the "
+      "packed arm's row is --seq x --segments-per-row, so the two arms move the same padded "
+      "area, packing has no padding to remove, and the run can only report its overhead. With "
+      "it the arms hold the same --batch sequences and the same real tokens at the same row "
+      "width, and the packed arm needs --segments-per-row times fewer rows. Must be at least "
+      "--seq unpacked, and --seq x --segments-per-row packed. Ignored by --compare-layouts, "
+      "which derives its own widths from tunix's budgets.",
+  )
+  ap.add_argument(
       "--compare-layouts",
       action="store_true",
       help="7d: train one trainer on packed and unpacked layouts of identical data and diff the "
@@ -1134,6 +1169,15 @@ def main():
       default=128,
       help="round every --compare-layouts row width up to a multiple of this. TPU splash attention "
       "requires 128; 0 disables it, which only works on a kernel that accepts arbitrary lengths.",
+  )
+  ap.add_argument(
+      "--beta",
+      type=float,
+      default=_GrpoConfig.beta,
+      help="KL coefficient. 0 removes the frozen-reference KL term from the loss. The reference "
+      "log-probs are the model's own initial weights, so the term is identically 0 at step 0 and "
+      "first becomes live at step 1. Under --compare-layouts this isolates whether a step-1 loss "
+      "is the KL term or the objective; it does not affect the step-0 gradient the verdict rests on.",
   )
   ap.add_argument(
       "--loss-agg-mode",
@@ -1188,19 +1232,39 @@ def main():
   if args.compare_layouts:
     if args.trainer not in ("maxtext", "tunix", "tunix_no_axis_rules"):
       raise SystemExit(f"--compare-layouts needs a trainer that trains; got --trainer {args.trainer}.")
+    if args.row_width:
+      raise SystemExit("--row-width has no effect under --compare-layouts, which sets each budget's width itself.")
     probe = _config()
     mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(probe), probe.mesh_axes)
-    algo_config = _GrpoConfig(loss_agg_mode=args.loss_agg_mode or "sequence-mean-token-mean")
+    algo_config = _GrpoConfig(beta=args.beta, loss_agg_mode=args.loss_agg_mode or "sequence-mean-token-mean")
     _emit(
         compare_layouts(args, mesh, algo_config, prompt_len=prompt_len, completion_len=completion_len, valid=valid),
         args.out,
     )
     return
 
-  # Packing keeps the token count and shrinks the row count, so the model sees the same work
-  # laid out differently -- which is the only way the two runs are comparable.
+  # Two ways to hold the arms comparable, and they answer different questions.
+  #
+  # Default: the packed row widens by exactly the factor the row count shrinks by, so both arms
+  # move the same padded area and carry the same tokens. Layout is the only difference, which
+  # isolates what the packed path *costs* -- but it also means there is no padding for packing
+  # to remove, so the measurement can only ever come out against it.
+  #
+  # `--row-width`: the row width is fixed for both arms and `--seq` is the real sequence length,
+  # so the unpacked arm spends `row_width - seq` tokens per row on padding and the packed arm
+  # fits `--segments-per-row` sequences into the same row. Same sequences, same real tokens,
+  # `--segments-per-row` times fewer rows -- which is what packing is actually for.
   rows = args.batch // args.segments_per_row if args.packed else args.batch
-  row_len = args.seq * args.segments_per_row if args.packed else args.seq
+  if args.row_width:
+    needed = args.seq * args.segments_per_row if args.packed else args.seq
+    if args.row_width < needed:
+      raise SystemExit(
+          f"--row-width {args.row_width} cannot hold {needed} tokens "
+          f"({'--seq x --segments-per-row' if args.packed else '--seq'})."
+      )
+    row_len = args.row_width
+  else:
+    row_len = args.seq * args.segments_per_row if args.packed else args.seq
   if args.packed and rows < 1:
     raise SystemExit(f"--batch {args.batch} is too small to pack {args.segments_per_row} per row.")
 
@@ -1212,13 +1276,16 @@ def main():
   )
   mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
   algo_config = _GrpoConfig(
-      loss_agg_mode=args.loss_agg_mode or ("sequence-mean-token-mean" if args.packed else _GrpoConfig.loss_agg_mode)
+      beta=args.beta,
+      loss_agg_mode=args.loss_agg_mode or ("sequence-mean-token-mean" if args.packed else _GrpoConfig.loss_agg_mode),
   )
 
   # One model builds the shared micro-batches so every trainer sees byte-identical inputs.
   ref_model = _build_model(cfg, mesh)
   build = (
-      functools.partial(_packed_train_example, segments_per_row=args.segments_per_row) if args.packed else _train_example
+      functools.partial(_packed_train_example, segments_per_row=args.segments_per_row, pad_to=args.row_width or None)
+      if args.packed
+      else functools.partial(_train_example, pad_to=args.row_width or None)
   )
   examples = [
       _shard_example(
@@ -1252,6 +1319,8 @@ def main():
       "segments_per_row": args.segments_per_row if args.packed else None,
       "rows": rows,
       "row_len": row_len,
+      "row_width": args.row_width or None,
+      "pad_tokens_per_row": row_len - args.seq * (args.segments_per_row if args.packed else 1),
       "loss_agg_mode": algo_config.loss_agg_mode,
   }
 
