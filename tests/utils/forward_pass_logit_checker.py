@@ -75,6 +75,8 @@ import os
 from pathlib import Path
 import sys
 import absl
+from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 from google.cloud import storage
 import jax
 import jax.numpy as jnp
@@ -425,6 +427,31 @@ def main(config, test_args):  # pylint: disable=W0621
         golden_data = pickle.load(f)
     else:
       raise ValueError("golden_logits_path must end with .jsonl, .pickle, or .pkl")
+    if state is None:
+      # Split once so the jitted step receives the existing parameter arrays
+      # rather than a staged second copy of them.
+      nnx_graphdef, nnx_state = nnx.split(model)
+
+      @jax.jit
+      def eval_step_nnx(step_state, ids, decoder_positions, decoder_segment_ids, images):
+        """Fused NNX forward pass.
+
+        Without jit the decoder runs op-by-op and every layer's intermediates stay
+        live, which exhausts HBM on the sparse MoE path.
+        """
+        # Logical axis rules are read from a Flax thread-local at trace time, so
+        # they must be active here or every PartitionSpec resolves to replicated.
+        with nn_partitioning.axis_rules(config.logical_axis_rules):
+          nnx_model = nnx.merge(nnx_graphdef, step_state)
+          return nnx_model(
+              decoder_input_tokens=ids,
+              decoder_positions=decoder_positions,
+              decoder_segment_ids=decoder_segment_ids,
+              encoder_images=images,
+              enable_dropout=False,
+          )
+
+
     max_logging.log(f"loaded {len(golden_data)} golden data points")
     all_data_to_save = []
     for golden_data_index, golden_data_point in enumerate(golden_data):
@@ -432,24 +459,23 @@ def main(config, test_args):  # pylint: disable=W0621
       ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
       max_logging.log("maxtext forward pass")
       if state is None:
-        full_train_logits = model(
+        full_train_logits = eval_step_nnx(
+            nnx_state, ids, decoder_positions, decoder_segment_ids, images
+        )
+      else:
+        full_train_logits = model.apply(
+            state.params,
             decoder_input_tokens=ids,
             decoder_positions=decoder_positions,
             decoder_segment_ids=decoder_segment_ids,
             encoder_images=images,
             enable_dropout=False,
-        )
-      else:
-        full_train_logits = model.apply(
-            state.params,
-            ids,
-            decoder_positions,
-            decoder_segment_ids,
-            encoder_images=images,
-            enable_dropout=False,
             rngs={"aqt": init_rng},
         )
 
+      # Only batch element 0 is compared; slice before the allgather so the
+      # full [batch, seq, vocab] logits are never materialized per host.
+      full_train_logits = full_train_logits[:1]
       full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits, tiled=True)
       # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
       if full_train_logits.ndim == 4:
