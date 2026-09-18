@@ -115,6 +115,7 @@ import contextlib
 import functools
 import gc
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -470,14 +471,8 @@ def _is_non_layer_key(key: str) -> bool:
 
 
 def _weight_stats_str(arr) -> str:
-  a = jnp.array(arr).astype(jnp.float32)
-  return (
-      f"shape={tuple(arr.shape)} dtype={arr.dtype} "
-      f"mean_abs={float(jnp.mean(jnp.abs(a))):.6f} "
-      f"std={float(jnp.std(a)):.6f} "
-      f"min={float(jnp.min(a)):.6f} "
-      f"max={float(jnp.max(a)):.6f}"
-  )
+  """Stats for a device array. Pulls to host and defers to `_host_stats_str`."""
+  return _host_stats_str(np.asarray(jax.device_get(arr.value if hasattr(arr, "value") else arr)))
 
 
 def _log_weight_stats(converted_state: dict, vllm_state: dict, compare: bool) -> None:
@@ -758,6 +753,27 @@ def _resolve_param_key_fn():
   return _fallback_param_key
 
 
+def _sampler_consumes_converter(sampler) -> bool:
+  """Whether this tunix build's `update_params` actually reads `sampler.converter`.
+
+  `sampler.converter = converter` is only a handshake: tunix's `VllmSampler`
+  branches on `to_hf_key_mappings` and otherwise calls `transfer_state_directly`,
+  and builds without converter support ignore the attribute entirely. Then the
+  full-sync arm silently runs the legacy path while its label claims the
+  converter -- a mislabelled measurement rather than a visible failure.
+  """
+  for klass in type(sampler).__mro__:
+    update_params = getattr(klass, "update_params", None)
+    if update_params is None:
+      continue
+    try:
+      if "converter" in inspect.getsource(update_params):
+        return True
+    except (OSError, TypeError):
+      continue
+  return False
+
+
 def _raiden_bindable(arr) -> bool:
   """Mirrors `raiden_synchronizer._bindable`: what actually gets transferred.
 
@@ -836,13 +852,19 @@ def _check_raiden_manifest(source: dict, destination: dict) -> list:
 
 
 def _host_stats_str(host) -> str:
-  """`_weight_stats_str` for a host array, so describing a tensor never bounces
-  it back onto a device -- the point of the host copy is to free the buffer.
+  """Stats for an array already on the host.
+
+  The single implementation behind `_weight_stats_str` too. Fingerprinting works
+  on host copies precisely so the device buffer can be freed, so describing a
+  tensor must never bounce it back onto a device.
   """
   as32 = host.astype(np.float32)
   return (
-      f"shape={tuple(host.shape)} mean_abs={float(np.mean(np.abs(as32))):.6f} "
-      f"std={float(np.std(as32)):.6f} min={float(np.min(as32)):.6f} max={float(np.max(as32)):.6f}"
+      f"shape={tuple(host.shape)} dtype={host.dtype} "
+      f"mean_abs={float(np.mean(np.abs(as32))):.6f} "
+      f"std={float(np.std(as32)):.6f} "
+      f"min={float(np.min(as32)):.6f} "
+      f"max={float(np.max(as32)):.6f}"
   )
 
 
@@ -892,8 +914,8 @@ def _compare_against_fingerprints(target_free: dict, oracle: dict) -> tuple:
   problems = []
   compared = set()
   for name in sorted(set(target_free) & set(oracle)):
-    free_shape, free_dtype, free_hash, free_stats = _tensor_fingerprint(target_free[name])
-    aware_shape, aware_dtype, aware_hash, aware_stats = oracle[name]
+    free_shape, _, free_hash, free_stats = _tensor_fingerprint(target_free[name])
+    aware_shape, _, aware_hash, aware_stats = oracle[name]
     compared.add(name)
     if free_shape != aware_shape:
       # Not redundant with the manifest check, which compares the target-free
@@ -913,7 +935,7 @@ def _compare_against_fingerprints(target_free: dict, oracle: dict) -> tuple:
     )
     problems.append(
         f"value: {name!r} differs from the target-aware conversion ({hint}). "
-        f"target_free[{free_stats} dtype={free_dtype}] vs target_aware[{aware_stats} dtype={aware_dtype}]"
+        f"target_free[{free_stats}] vs target_aware[{aware_stats}]"
     )
   return problems, compared
 
@@ -1345,11 +1367,6 @@ def validate_converter(argv) -> None:
   )
   sampler.converter = converter
   golden_llm_state = sampler.transformer_state
-  # Captured before any sync so a post-sync structural change (which will
-  # otherwise surface only as an opaque PyTreeDef mismatch during generation)
-  # can be caught and reported with the actual offending key(s) -- see
-  # _check_leaf_structure_unchanged.
-  pre_sync_leaf_signature = _leaf_path_signature(golden_llm_state)
 
   # --- Debug checks (key coverage, weight stats, GCS upload) ---------------
   # Calling converter.convert() directly here (rather than through
@@ -1417,6 +1434,17 @@ def validate_converter(argv) -> None:
       else "sampler.update_params via legacy tunix sync (convert+reshard+assign)"
   )
   if run_full_sync:
+    if converter is not None and not _sampler_consumes_converter(sampler):
+      raise ValueError(
+          f"the installed tunix {type(sampler).__name__}.update_params does not read "
+          "`sampler.converter`, so this sync would run tunix's legacy transfer_state_directly "
+          f"while reporting it as '{sync_label}'. Run with debug_converter=true (or "
+          "validate_raiden_path=true), which exercises the converter directly, or install a "
+          "tunix build whose update_params consumes the converter."
+      )
+    # Captured before the sync so a post-sync structural change -- otherwise an
+    # opaque PyTreeDef mismatch during generation -- names the offending key.
+    pre_sync_leaf_signature = _leaf_path_signature(golden_llm_state)
     with _SyncPhase(sync_label) as phase:
       sampler.update_params(model_state)
       phase.block_on(sampler.transformer_state)
