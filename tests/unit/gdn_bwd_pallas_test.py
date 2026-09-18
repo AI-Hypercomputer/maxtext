@@ -1074,15 +1074,9 @@ class GdnBwdPallasTest(absltest.TestCase):
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
     key = jax.random.PRNGKey(42)
-    k1, k2, k3, k4, k5, k6, k7, k8 = jax.random.split(key, 8)
-    qkv = jax.random.normal(k1, (batch_size, seq_len, dim_size), dtype=jnp.float32)
-    b = jax.random.normal(k2, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
-    a = jax.random.normal(k3, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
-    conv_weight = jax.random.normal(k4, (conv_kernel_size, 1, dim_size), dtype=jnp.float32)
-    conv_bias = jax.random.normal(k5, (dim_size,), dtype=jnp.float32)
-    a_log = jax.random.normal(k6, (num_v_heads,), dtype=jnp.float32)
-    dt_bias = jax.random.normal(k7, (num_v_heads,), dtype=jnp.float32)
-    do = jax.random.normal(k8, (batch_size, seq_len, num_v_heads, head_v_dim), dtype=jnp.float32)
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        key, batch_size, seq_len, dim_size, num_v_heads, head_v_dim, conv_kernel_size
+    )
 
     def layer_fn(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
       out, _ = gdn_bwd_pallas.gdn_decoupled_conv1d(
