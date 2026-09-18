@@ -293,7 +293,10 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
     L2 normalized array with the same shape as x.
   """
 
-  inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) + jnp.array(eps, dtype=x.dtype))
+  norm_sq = (x * x).sum(axis=dim, keepdims=True)
+  is_zero = norm_sq == 0.0
+  safe_norm_sq = jnp.where(is_zero, 1.0, norm_sq)
+  inv_norm = jnp.where(is_zero, 0.0, jax.lax.rsqrt(safe_norm_sq + jnp.array(eps, dtype=x.dtype)))
   return x * inv_norm
 
 
