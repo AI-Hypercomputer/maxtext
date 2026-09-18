@@ -24,8 +24,8 @@ Sanity check utility to verify parameter freezing and training after SFT.
    - Vision encoder and LLM backbone weights are 100% identical (frozen).
 
 Example usage:
-  python3 -m maxtext.experimental.omni_poc.tests.compare_sft_checkpoint_test \
-      src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+  python3 -m maxtext.experimental.omni_pipeline.tests.compare_sft_checkpoint_test \
+      src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
       load_parameters_path=gs://YOUR_BUCKET/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items \
       base_output_directory=gs://YOUR_BUCKET/sft_multimodal_omni_output \
       run_name=sft_omni_chartqa
@@ -57,7 +57,7 @@ def _define_flag(fn, name, default, help_str):
 _define_flag(
     flags.DEFINE_string,
     "config_path",
-    os.path.join(MAXTEXT_PKG_DIR, "experimental", "omni_poc", "configs", "sft-maxtext-omni-gemma3-qwen3.yml"),
+    os.path.join(MAXTEXT_PKG_DIR, "experimental", "omni_pipeline", "configs", "sft-maxtext-omni-gemma3-qwen3.yml"),
     "Path to the config YAML file.",
 )
 _define_flag(
