@@ -1,14 +1,13 @@
 #!/bin/bash
 
 # This script launches a Reinforcement Learning (RL) training workload for the
-# gemma4-26b model on a GKE cluster using XPK.
+# gemma4-26b model on a GKE cluster using Cluster Toolkit (gcluster).
 
 set -e
 
 # --- Environment Setup ---
-if ! pip show xpk &> /dev/null; then
-    echo "xpk not found in the environment. Please install it by running:"
-    echo "uv pip install -e .[runner] --resolution=lowest"
+if ! command -v gcluster &> /dev/null; then
+    echo "gcluster not found in the environment. Please install Cluster Toolkit before running this script."
     exit 1
 fi
 
@@ -19,14 +18,15 @@ export ZONE="${ZONE:-}" # Zone where your v7x cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-}" # GCS bucket path for outputs (e.g., gs://my-bucket/outputs)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-}" # Full path to the Docker image you pushed (e.g., us-docker.pkg.dev/<project_id>/<repository_name>/<image_name>:<tag>)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-}" # GCS path of the MaxText checkpoint you want to fine-tune from (e.g., gs://my-bucket/checkpoints/maxtext-ckpt)
-export TPU_TYPE="tpu7x-4x4x4" # v7x (Ironwood) 4x4x4 = 64-chip slice (tpu7x-standard-4t, 4 chips/VM)
-export WORKLOAD_NAME="rl-$(date +%Y%m%d-%H%M)"
+export COMPUTE_TYPE="${COMPUTE_TYPE:-tpu7x-standard-4t}" # v7x (Ironwood) 4 chips/VM
+export TOPOLOGY="${TOPOLOGY:-4x4x4}" # v7x (Ironwood) 4x4x4 = 64-chip slice
+export RUN_NAME="${RUN_NAME:-rl-$(date +%Y%m%d-%H%M)}"
 
 # Pathways component images, pinned to specific versions (mirrors the reference config).
-# Note: --server-image is used for BOTH the Pathways resource-manager server and the
+# Note: PATHWAYS_SERVER_IMAGE is used for BOTH the Pathways resource-manager server and the
 # workers; in the reference config the worker and pathwaysServer images are identical.
-export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:6f5031086c3d603f275763c933e85e587e9332be1642fff515e9ecb52374950b"
-export PATHWAYS_PROXY_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@sha256:8ffcc48a7bbd093a9071e0842ed7055d09d140d75f2b6c0a98bdb76cac77c44e"
+export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:6f5031086c3d603f275763c933e85e587e9332be1642fff515e9ecb52374950b}"
+export PATHWAYS_PROXY_SERVER_IMAGE="${PATHWAYS_PROXY_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@sha256:8ffcc48a7bbd093a9071e0842ed7055d09d140d75f2b6c0a98bdb76cac77c44e}"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
@@ -95,7 +95,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 model_name=gemma4-26b \
 tokenizer_type=huggingface \
 tokenizer_path=google/gemma-4-26B-A4B \
-run_name=$WORKLOAD_NAME \
+run_name=$RUN_NAME \
 async_scheduling=True \
 base_output_directory=$BASE_OUTPUT_DIRECTORY \
 chips_per_vm=4 \
@@ -162,17 +162,26 @@ vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"gemma4-26b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
 # Workload Creation
-xpk workload create-pathways \
-  --cluster=$CLUSTER_NAME \
-  --project=$PROJECT_ID \
-  --zone=$ZONE \
-  --priority=medium \
-  --max-restarts=0 \
-  --tpu-type=$TPU_TYPE \
+gcloud config set project "$PROJECT_ID"
+gcloud container clusters get-credentials "$CLUSTER_NAME" \
+  --location "$ZONE" \
+  --project "$PROJECT_ID"
+gcluster job config set project "$PROJECT_ID"
+gcluster job config set cluster "$CLUSTER_NAME"
+gcluster job config set location "$ZONE"
+
+gcluster job submit \
+  --image="${DOCKER_IMAGE}" \
+  --name="${RUN_NAME}" \
+  --pathways \
+  --compute-type="${COMPUTE_TYPE}" \
+  --topology="${TOPOLOGY}" \
   --num-slices=1 \
-  --docker-image="${DOCKER_IMAGE}" \
-  --workload="${WORKLOAD_NAME}" \
-  --server-image="${PATHWAYS_SERVER_IMAGE}" \
-  --proxy-server-image="${PATHWAYS_PROXY_SERVER_IMAGE}" \
-  --custom-pathways-proxy-server-args='${XLA_FLAGS}' \
+  --priority=medium \
+  --restarts=0 \
+  --pathways-gcs-location="${BASE_OUTPUT_DIRECTORY}" \
+  --pathways-server-image="${PATHWAYS_SERVER_IMAGE}" \
+  --pathways-worker-image="${PATHWAYS_SERVER_IMAGE}" \
+  --pathways-proxy-server-image="${PATHWAYS_PROXY_SERVER_IMAGE}" \
+  --pathways-proxy-args="${XLA_FLAGS}" \
   --command="${MAXTEXT_COMMAND}"
