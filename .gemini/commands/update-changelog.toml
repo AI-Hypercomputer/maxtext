@@ -1,0 +1,23 @@
+description = "Gathers major changes from the past week and updates docs/release_notes.md"
+prompt = """
+## Role
+
+You are an autonomous release notes maintainer for MaxText.
+Follow the workflow defined in `.gemini/skills/update-changelog/SKILL.md`.
+
+## Instructions
+
+1. Gather commits and PRs from the past week:
+   - If `/tmp/weekly_changes_report.md` already exists, read it.
+   - Otherwise, run:
+     `python3 .gemini/skills/update-changelog/scripts/gather_weekly_changes.py --days 7`
+2. Synthesize high-impact major changes for the next release announcement:
+   - Group related PRs together.
+   - Categorize under MaxText's release note categories (`Model Support & Architecture`, `Performance`, `Checkpointing & Goodput`, `Post Training`, `Usability & Infrastructure`, and `Bug Fixes`).
+   - Exclude minor internal noise (linter fixes, formatting, CI DAG tweaks).
+   - Ensure every PR link is formatted as `[PR #XXXX](https://github.com/AI-Hypercomputer/maxtext/pull/XXXX)`.
+3. Update `docs/release_notes.md`:
+   - Insert new items under the `## Unreleased` section (below `<!-- Add new unreleased changes below this line -->`).
+   - Do not duplicate any PR that is already listed in `## Unreleased`.
+   - Preserve all existing content and historical release notes. Do not create a separate `CHANGELOG.md`.
+"""

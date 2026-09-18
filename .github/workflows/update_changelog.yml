@@ -1,0 +1,130 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow runs every week to gather major changes and open a PR updating
+# docs/release_notes.md using the update-changelog skill.
+
+name: 'Update Changelog'
+
+on:
+  schedule:
+    # Runs every Monday at 09:00 UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Number of days to look back for commits/PRs'
+        required: false
+        default: '7'
+        type: string
+
+concurrency:
+  group: '${{ github.workflow }}-weekly-changelog'
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  update-changelog:
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'write'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+    steps:
+      - name: Mint identity token
+        id: 'mint_identity_token'
+        if: |-
+          ${{ vars.APP_ID }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: '${{ vars.APP_ID }}'
+          private-key: '${{ secrets.APP_PRIVATE_KEY }}'
+          permission-contents: 'write'
+          permission-issues: 'write'
+          permission-pull-requests: 'write'
+
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          token: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+
+      - name: Gather weekly changes report
+        id: 'gather_changes'
+        run: |
+          python3 .gemini/skills/update-changelog/scripts/gather_weekly_changes.py \
+            --days "${{ inputs.days || '7' }}" > /tmp/weekly_changes_report.md
+          cat /tmp/weekly_changes_report.md
+
+      - name: Run Gemini CLI with update-changelog skill
+        id: 'run_gemini'
+        continue-on-error: true
+        uses: google-github-actions/run-gemini-cli@f5a57753971eb5f2734c70df7e796f2fcfbef6e7
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+          GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+        with:
+          gcp_location: '${{ vars.GOOGLE_CLOUD_LOCATION }}'
+          gcp_project_id: '${{ vars.GOOGLE_CLOUD_PROJECT }}'
+          gcp_service_account: '${{ vars.SERVICE_ACCOUNT_EMAIL }}'
+          gcp_workload_identity_provider: '${{ vars.GCP_WIF_PROVIDER }}'
+          gemini_api_key: '${{ secrets.GEMINI_API_KEY }}'
+          gemini_cli_version: '${{ vars.GEMINI_CLI_VERSION }}'
+          gemini_debug: '${{ fromJSON(vars.GEMINI_DEBUG || vars.ACTIONS_STEP_DEBUG || false) }}'
+          gemini_model: '${{ vars.GEMINI_MODEL }}'
+          google_api_key: '${{ secrets.GOOGLE_API_KEY }}'
+          use_gemini_code_assist: '${{ vars.GOOGLE_GENAI_USE_GCA }}'
+          use_vertex_ai: '${{ vars.GOOGLE_GENAI_USE_VERTEXAI }}'
+          workflow_name: 'update-changelog'
+          prompt: '/update-changelog'
+
+      - name: Create or Update Pull Request
+        env:
+          GH_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+        run: |
+          if git diff --quiet docs/release_notes.md; then
+            echo "No new unreleased changes to announce this week."
+            exit 0
+          fi
+
+          DATE_STR=$(date -u +"%Y-%m-%d")
+          BRANCH_NAME="chore/changelog-update"
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B "${BRANCH_NAME}"
+          git add docs/release_notes.md
+          git commit -m "docs: release notes update (${DATE_STR})"
+          git push -u origin "${BRANCH_NAME}" --force
+
+          EXISTING_PR=$(gh pr list --head "${BRANCH_NAME}" --state open --json number --jq '.[0].number' || true)
+          if [ -n "${EXISTING_PR}" ] && [ "${EXISTING_PR}" != "null" ]; then
+            echo "Updating existing PR #${EXISTING_PR}..."
+            gh pr edit "${EXISTING_PR}" \
+              --title "docs: release notes update (${DATE_STR})" \
+              --body-file /tmp/weekly_changes_report.md
+          else
+            echo "Creating new PR..."
+            gh pr create \
+              --title "docs: release notes update (${DATE_STR})" \
+              --body-file /tmp/weekly_changes_report.md \
+              --base main \
+              --head "${BRANCH_NAME}"
+          fi
