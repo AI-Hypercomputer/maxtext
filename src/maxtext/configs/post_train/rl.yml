@@ -213,6 +213,10 @@ reward_functions: ''
 # with this disabled the copies accumulate and the run can OOM over time. The collection costs about
 # one second per step on a colocated setup, so disable it only when there is enough HBM headroom.
 gc_collect_after_weight_sync: true
+# Maps to tunix RolloutConfig.rollout_vllm_free_kv_cache_during_weight_sync -> VllmConfig.free_kv_cache_during_weight_sync
+# (effective once the tunix pin declares it). false keeps the vLLM KV cache pool allocated across trainer->sampler
+# weight syncs and only resets its prefix-cache entries; disable only when the incoming weights fit on HBM next to it.
+free_kv_cache_during_weight_sync: true
 
 # Worker processes tunix uses to evaluate the reward functions over the batch
 # (tunix GrpoConfig.reward_num_workers; effective once the tunix pin declares it).

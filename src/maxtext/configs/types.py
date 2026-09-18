@@ -2801,6 +2801,15 @@ class RLCluster(BaseModel):
           "disable it only when there is enough HBM headroom."
       ),
   )
+  free_kv_cache_during_weight_sync: bool = Field(
+      True,
+      description=(
+          "Maps to tunix RolloutConfig.rollout_vllm_free_kv_cache_during_weight_sync -> "
+          "VllmConfig.free_kv_cache_during_weight_sync. False keeps the vLLM KV cache pool allocated across "
+          "trainer->sampler weight syncs and only resets its prefix-cache entries. Disable only when the incoming "
+          "weights fit on HBM next to the allocated KV pool."
+      ),
+  )
 
 
 class VLLM(BaseModel):
