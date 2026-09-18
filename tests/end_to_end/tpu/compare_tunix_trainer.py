@@ -137,12 +137,22 @@ def _as_lens(valid_len, batch):
 # ceiling: any inequality breaks the degeneracy, since the collapse into `token-mean` needs the
 # counts *equal* rather than close, so a wider spread buys no coverage and measurably costs.
 #
-# TODO(mazumdera): explain the ragged step-1 loss spike. Measured on
-# `--batch 24 --seq 128 --layout-steps 3`: a 0.125 floor puts step-1 loss at 4.99e+05, this 0.5
-# floor at 2.26e+03, uniform segments at 0.66. It is confined to the corroborating loss column --
-# step 2 recovers to 0.41, the arms agree to ~15%, weights move a normal 2.8e-03, and the verdict
-# metric is the step-0 gradient -- so it does not affect any recorded verdict. Until it is
-# understood, do not read a step-1 loss under packing as meaningful.
+# A ragged spread makes the step-1 loss large: on `--batch 24 --seq 128 --layout-steps 3` a 0.125
+# floor puts it at 4.99e+05, this 0.5 floor at 2.26e+03, uniform segments at 0.66. It is the
+# frozen-reference KL term and nothing else -- at `--beta 0` the loss is flat at the step-0 value
+# for every step and every budget, because `old_per_token_logps=None` makes the importance ratio
+# identically 1 and the policy-gradient term a constant.
+#
+# The KL is `low_var_kl`, `exp(d) - d - 1` over `d = ref_logp - logp`, so the reported mean is an
+# extreme value: 94% of the ragged figure is one token at `d = 17.67`, against a uniform maximum of
+# 9.00. Per-sequence normalization gives a 36-token sequence 64/36 the per-token weight of a
+# 64-token one, which pushes whichever tokens were already outliers further, and `exp()` turns 8.7
+# nats into 5900x. No mask is wrong and this is not packing's: the unpacked arm reproduces it
+# exactly. Measured in `~/ws_item17a` and `~/ws_item17b`.
+#
+# TODO(mazumdera): set `kl_clamp_value` on `_GrpoConfig`. Tunix documents it
+# (`tunix/rl/common.py:160-165`) as the bound for exactly this `exp(diff)` blow-up, and leaving it
+# `None` means a step whose gradient is ~94% one token.
 _SEGMENT_LEN_FRACTIONS = (1.0, 0.5625, 0.875, 0.625, 0.9375, 0.5, 0.8125, 0.75)
 
 
