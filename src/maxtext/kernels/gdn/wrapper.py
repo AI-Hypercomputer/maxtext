@@ -22,31 +22,13 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-try:
-  from maxtext.models.kernels.gdn import compute_conv1d
-  from maxtext.models.kernels.gdn import compute_gdn
-  from maxtext.models.kernels.gdn import config
-  from maxtext.models.kernels.gdn import memory_ref
-  from maxtext.models.kernels.gdn import metadata
-  from maxtext.models.kernels.gdn import tiling
-  from maxtext.models.kernels.gdn import vmem_ldst
-except (ImportError, ModuleNotFoundError):
-  try:
-    from maxtext.src.maxtext.models.kernels.gdn import compute_conv1d
-    from maxtext.src.maxtext.models.kernels.gdn import compute_gdn
-    from maxtext.src.maxtext.models.kernels.gdn import config
-    from maxtext.src.maxtext.models.kernels.gdn import memory_ref
-    from maxtext.src.maxtext.models.kernels.gdn import metadata
-    from maxtext.src.maxtext.models.kernels.gdn import tiling
-    from maxtext.src.maxtext.models.kernels.gdn import vmem_ldst
-  except (ImportError, ModuleNotFoundError):
-    from . import compute_conv1d
-    from . import compute_gdn
-    from . import config
-    from . import memory_ref
-    from . import metadata
-    from . import tiling
-    from . import vmem_ldst
+from . import compute_conv1d
+from . import compute_gdn
+from . import config
+from . import memory_ref
+from . import metadata
+from . import tiling
+from . import vmem_ldst
 
 
 def inner_kernel(

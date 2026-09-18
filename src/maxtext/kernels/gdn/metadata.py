@@ -19,16 +19,8 @@ import jax
 from jax.experimental import pallas as pl
 import jax.numpy as jnp
 
-try:
-  from maxtext.models.kernels.gdn import config
-  from maxtext.models.kernels.gdn import memory_ref
-except (ImportError, ModuleNotFoundError):
-  try:
-    from maxtext.src.maxtext.models.kernels.gdn import config
-    from maxtext.src.maxtext.models.kernels.gdn import memory_ref
-  except (ImportError, ModuleNotFoundError):
-    from . import config
-    from . import memory_ref
+from . import config
+from . import memory_ref
 
 
 def compute_batched_seq_metadata(
