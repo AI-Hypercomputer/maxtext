@@ -45,12 +45,28 @@ on:
         required: false
         type: boolean
         default: false
+      fast_rebuild:
+        description: 'Use code-overlay rebuild instead of full build'
+        required: false
+        type: boolean
+        default: false
+      source_run_id:
+        description: 'Run ID of the source image for fast-rebuild'
+        required: false
+        type: string
+        default: ''
+      allow_dependency_drift:
+        description: 'Allow fast-rebuild even if dependency files changed'
+        required: false
+        type: boolean
+        default: false
     secrets:
       HF_TOKEN:
         required: true
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   pre_build_check:
@@ -86,12 +102,52 @@ jobs:
             echo "Skipping $IMAGE_NAME build for device: $INPUT_DEVICE in $BUILD_MODE mode."
           fi
 
+  drift_guard:
+    name: Fast-rebuild Pre-flight
+    needs: pre_build_check
+    runs-on: ubuntu-latest
+    outputs:
+      overlay_variant: ${{ steps.guard.outputs.overlay_variant }}
+    if: needs.pre_build_check.outputs.should_run == 'true' && inputs.fast_rebuild
+    # Runs the guard script from the workflow's own checkout (not from inputs.maxtext_sha)
+    # and only reads the source/current commits as git data; no code from the commit being
+    # built executes here. Fails fast before a build runner is allocated.
+    steps:
+      - name: Validate fast-rebuild inputs
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          if [ -z "${SOURCE_RUN_ID}" ]; then
+            echo "::error::source_run_id is required when using fast-rebuild mode."
+            echo "Find the run ID in the Actions tab → previous pipeline run → run ID in the URL."
+            exit 1
+          fi
+          echo "Fast-rebuild mode: overlaying new code on source run ${SOURCE_RUN_ID}"
+
+      - name: Checkout workflow ref
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Dependency drift guard
+        id: guard
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          CURRENT_SHA: ${{ inputs.maxtext_sha }}
+          ALLOW_DRIFT: ${{ inputs.allow_dependency_drift }}
+          WORKFLOW: ${{ inputs.workflow }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bash .github/scripts/fast_rebuild_drift_guard.sh
+
   build_and_push:
     name: Build and Push Docker Image
-    needs: pre_build_check
+    needs: [pre_build_check, drift_guard]
     runs-on: linux-x86-n2-16-buildkit
     container: google/cloud-sdk:524.0.0
-    if: needs.pre_build_check.outputs.should_run == 'true'
+    # drift_guard is skipped in build-all mode, so !cancelled() keeps this job eligible;
+    # in fast-rebuild mode the guard must have passed.
+    if: ${{ !cancelled() && needs.pre_build_check.outputs.should_run == 'true' && (!inputs.fast_rebuild || needs.drift_guard.result == 'success') }}
     steps:
       - name: Matrix Debugger
         env:
@@ -154,7 +210,44 @@ jobs:
           cp -r "${PWD}/tests" .venv/lib/python3.12/site-packages/
           cp "${PWD}/pytest.ini" .venv/lib/python3.12/site-packages/
 
-      - name: Build and push Docker image
+      - name: Resolve source image digest
+        if: ${{ inputs.fast_rebuild }}
+        id: resolve_source
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          OVERLAY_VARIANT: ${{ needs.drift_guard.outputs.overlay_variant }}
+        run: |
+          echo "Overlay variant selected by the drift guard: ${OVERLAY_VARIANT}"
+          IMAGE_PATH="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${IMAGE_NAME}"
+          SOURCE_REF="${IMAGE_PATH}:${SOURCE_RUN_ID}"
+          echo "Looking up source image: ${SOURCE_REF}"
+
+          DIGEST=$(gcloud container images describe "${SOURCE_REF}" \
+            --format='value(image_summary.digest)' 2>/dev/null) || {
+            echo "::error::Source image not found: ${SOURCE_REF}"
+            echo "The source run's image may have been garbage-collected, the run ID may be incorrect,"
+            echo "or the source run pushed to a different repository_name."
+            echo "Available recent tags:"
+            gcloud container images list-tags "${IMAGE_PATH}" \
+              --limit=5 --format='table(digest.slice(7,19),tags,timestamp.date())' || true
+            exit 1
+          }
+
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::Could not read the digest of ${SOURCE_REF}"
+            exit 1
+          fi
+
+          SOURCE_IMAGE="${IMAGE_PATH}@${DIGEST}"
+          echo "Resolved source image: ${SOURCE_IMAGE}"
+          echo "source_image=${SOURCE_IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image (full build)
+        if: ${{ !inputs.fast_rebuild }}
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           push: true
@@ -166,6 +259,25 @@ jobs:
           build-args: |
             DEVICE=${{ inputs.device }}
             MODE=${{ inputs.build_mode }}
+            WORKFLOW=${{ inputs.workflow }}
+            PACKAGE_DIR=.venv/lib/python3.12/site-packages
+            INCLUDE_TEST_ASSETS=${{ inputs.include_test_assets }}
+
+      - name: Build and push Docker image (fast-rebuild overlay)
+        if: ${{ inputs.fast_rebuild }}
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          push: true
+          context: .
+          # The drift guard picks the COPY-only fast variant unless code files were removed
+          # (or, for post-training, the vLLM adapter changed), see the guard script.
+          file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ needs.drift_guard.outputs.overlay_variant == 'clean' && 'maxtext_code_overlay.Dockerfile' || 'maxtext_code_overlay_fast.Dockerfile' }}
+          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ inputs.repository_name }}/${{ inputs.image_name }}:${{ github.run_id }}
+          # No force-compression: the source image's layers pass through untouched, only
+          # the new code layers are compressed and uploaded.
+          outputs: type=image,compression=zstd
+          build-args: |
+            SOURCE_IMAGE=${{ steps.resolve_source.outputs.source_image }}
             WORKFLOW=${{ inputs.workflow }}
             PACKAGE_DIR=.venv/lib/python3.12/site-packages
             INCLUDE_TEST_ASSETS=${{ inputs.include_test_assets }}
