@@ -215,6 +215,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if (config.use_indexer and not config.indexer_sparse_training) and is_train:
     # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
     # The main model parameters are frozen and only the indexer is trained via KL divergence.
+    if config.indexer_loss_scaling_factor <= 0.0:
+      raise ValueError(
+          "use_indexer=True with indexer_sparse_training=False and indexer_loss_scaling_factor<=0.0 "
+          "zeroes the entire training objective. Enable indexer_sparse_training or set a positive indexer_loss_scaling_factor."
+      )
     xent_sum = 0.0
     total_z_loss = 0.0
   elif config.num_vocab_tiling > 1:
