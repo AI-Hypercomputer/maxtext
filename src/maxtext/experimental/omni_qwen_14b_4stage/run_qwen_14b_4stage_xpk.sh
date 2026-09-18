@@ -14,8 +14,12 @@ ACTION="${1:-help}"
 # Global Experiment / Model Name
 EXP_NAME="${EXP_NAME:-omni_qwen3_vl_14b_4stage}"
 
+: "${HF_TOKEN:?Error: HF_TOKEN is not set. Please run: export HF_TOKEN=hf_...}"
+: "${GCS_BUCKET:?Error: GCS_BUCKET is not set. Please run: export GCS_BUCKET=gs://your-bucket}"
+export HF_TOKEN
+export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+
 # Base Storage Buckets & Checkpoints
-GCS_BUCKET="${GCS_BUCKET:-gs://yuchenhou-maxtext-logs}"
 VISION_SOURCE_CKPT="${VISION_SOURCE_CKPT:-${GCS_BUCKET}/checkpoints/qwen3-vl-4b-processor/0/items}"
 LLM_SOURCE_CKPT="${LLM_SOURCE_CKPT:-${GCS_BUCKET}/omni_checkpoints/qwen3-14b_unscanned/0/items}"
 STITCHED_CKPT="${STITCHED_CKPT:-${GCS_BUCKET}/omni_checkpoints/${EXP_NAME}/0/items}"
@@ -48,8 +52,7 @@ XPK_DEVICE_TYPE="${XPK_DEVICE_TYPE:-v4-128}"
 XPK_NUM_SLICES="${XPK_NUM_SLICES:-1}"
 XPK_BASE_DOCKER_IMAGE="${XPK_BASE_DOCKER_IMAGE:-gcr.io/tpu-prod-env-multipod/maxtext_base_image:latest}"
 
-USER_PREFIX="${USER_PREFIX:-yuchenhou}"
-HF_TOKEN="${HF_TOKEN:-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}"
+USER_PREFIX="${USER_PREFIX:-user}"
 TIMESTAMP=$(date +%m%d-%H%M)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,7 +71,7 @@ stitch_ckpt() {
 
   (
     cd "${MAXTEXT_ROOT}"
-    JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+    JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
       "${SCRIPT_DIR}/maxtext-omni-qwen3-vl-14b.yml" \
       "scan_layers=false" \
       "vision_load_path=${VISION_SOURCE_CKPT}" \
@@ -100,7 +103,7 @@ stage1_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage1-pretrain-coco-narratives.yml load_parameters_path=${STITCHED_CKPT} base_output_directory=${STAGE1_OUTPUT_DIR} run_name=${STAGE1_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage1-pretrain-coco-narratives.yml load_parameters_path=${STITCHED_CKPT} base_output_directory=${STAGE1_OUTPUT_DIR} run_name=${STAGE1_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
   )
 }
 
@@ -128,7 +131,7 @@ stage2_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage2-pretrain-chartnet-summary.yml load_parameters_path=${input_ckpt} base_output_directory=${STAGE2_OUTPUT_DIR} run_name=${STAGE2_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage2-pretrain-chartnet-summary.yml load_parameters_path=${input_ckpt} base_output_directory=${STAGE2_OUTPUT_DIR} run_name=${STAGE2_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
   )
 }
 
@@ -156,7 +159,7 @@ stage3_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage3-pretrain-chartnet-csv.yml load_parameters_path=${input_ckpt} base_output_directory=${STAGE3_OUTPUT_DIR} run_name=${STAGE3_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage3-pretrain-chartnet-csv.yml load_parameters_path=${input_ckpt} base_output_directory=${STAGE3_OUTPUT_DIR} run_name=${STAGE3_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
   )
 }
 
@@ -184,7 +187,7 @@ stage4_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage4-sft-chartqa.yml load_parameters_path=${input_ckpt} base_output_directory=${STAGE4_OUTPUT_DIR} run_name=${STAGE4_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage4-sft-chartqa.yml load_parameters_path=${input_ckpt} base_output_directory=${STAGE4_OUTPUT_DIR} run_name=${STAGE4_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
   )
 }
 
@@ -213,7 +216,7 @@ pipeline_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && echo '=== Stage 1: COCO Narratives ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage1-pretrain-coco-narratives.yml load_parameters_path=${STITCHED_CKPT} base_output_directory=${STAGE1_OUTPUT_DIR} run_name=${STAGE1_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0 && echo '=== Stage 2: ChartNet Summary ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage2-pretrain-chartnet-summary.yml load_parameters_path=${STAGE1_FINAL_CKPT} base_output_directory=${STAGE2_OUTPUT_DIR} run_name=${STAGE2_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0 && echo '=== Stage 3: ChartNet CSV ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage3-pretrain-chartnet-csv.yml load_parameters_path=${STAGE2_FINAL_CKPT} base_output_directory=${STAGE3_OUTPUT_DIR} run_name=${STAGE3_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0 && echo '=== Stage 4: ChartQA SFT ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage4-sft-chartqa.yml load_parameters_path=${STAGE3_FINAL_CKPT} base_output_directory=${STAGE4_OUTPUT_DIR} run_name=${STAGE4_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && echo '=== Stage 1: COCO Narratives ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage1-pretrain-coco-narratives.yml load_parameters_path=${STITCHED_CKPT} base_output_directory=${STAGE1_OUTPUT_DIR} run_name=${STAGE1_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0 && echo '=== Stage 2: ChartNet Summary ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage2-pretrain-chartnet-summary.yml load_parameters_path=${STAGE1_FINAL_CKPT} base_output_directory=${STAGE2_OUTPUT_DIR} run_name=${STAGE2_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0 && echo '=== Stage 3: ChartNet CSV ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage3-pretrain-chartnet-csv.yml load_parameters_path=${STAGE2_FINAL_CKPT} base_output_directory=${STAGE3_OUTPUT_DIR} run_name=${STAGE3_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0 && echo '=== Stage 4: ChartQA SFT ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b_4stage/stage4-sft-chartqa.yml load_parameters_path=${STAGE3_FINAL_CKPT} base_output_directory=${STAGE4_OUTPUT_DIR} run_name=${STAGE4_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
   )
 
   echo ""
@@ -230,7 +233,7 @@ eval_sft() {
   echo ">>> [EVAL] Evaluating Final Stage 4 SFT Checkpoint: ${ckpt_path}"
   echo "=================================================================="
 
-  python3 -m maxtext.experimental.omni_poc.eval_sft_omni \
+  python3 -m maxtext.experimental.omni_pipeline.eval_sft_omni \
     "${SCRIPT_DIR}/stage4-sft-chartqa.yml" \
     "load_parameters_path=${ckpt_path}" \
     --ckpt_type=sft \

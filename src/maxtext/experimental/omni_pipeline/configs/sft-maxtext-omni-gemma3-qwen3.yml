@@ -13,12 +13,12 @@
 # limitations under the License.
 
 # Example command to run SFT on TPU VM:
-# python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_poc/sft-omni-gemma3-qwen3.yml
+# python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+#   src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml
 
 # Inherit model architecture from maxtext-omni-gemma3-qwen3.yml
 
-# TODO (yuchenhou): move it under the config folder
-base_config: "maxtext-omni-gemma3-qwen3.yml"
+base_config: "../maxtext-omni-gemma3-qwen3.yml"
 
 use_sft: true
 use_tunix_gradient_accumulation: false
@@ -41,10 +41,10 @@ hf_eval_split: 'val'
 train_data_columns: ['query', 'label']
 eval_data_columns: ['query', 'label']
 
-# Checkpoint paths (override via CLI if needed)
-load_parameters_path: "gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items"
-base_output_directory: "gs://yuchenhou-maxtext-logs/sft_multimodal_omni_output_v3"
-run_name: "sft_omni_chartqa_v3"
+# Checkpoint paths (override via CLI for your bucket)
+load_parameters_path: "gs://YOUR_BUCKET/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items"
+base_output_directory: "gs://YOUR_BUCKET/sft_multimodal_omni_output"
+run_name: "sft_omni_chartqa"
 
 # Training schedule (5 epochs = 8840 steps, 1 epoch = 1768 steps)
 per_device_batch_size: 4

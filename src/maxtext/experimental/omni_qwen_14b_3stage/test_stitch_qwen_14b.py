@@ -40,7 +40,7 @@ from transformers import AutoTokenizer
 
 from maxtext.common import checkpointing
 from maxtext.configs import pyconfig
-from maxtext.experimental.omni_poc.utils import stitch_checkpoint
+from maxtext.experimental.omni_pipeline.utils import stitch_checkpoint
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -62,17 +62,17 @@ flags.DEFINE_string(
 )
 flags.DEFINE_string(
     "vision_checkpoint",
-    "gs://yuchenhou-maxtext-logs/checkpoints/qwen3-vl-4b-processor/0/items",
+    "gs://your-bucket/checkpoints/qwen3-vl-4b-processor/0/items",
     "Source Qwen3-VL-4B checkpoint.",
 )
 flags.DEFINE_string(
     "llm_checkpoint",
-    "gs://yuchenhou-maxtext-logs/omni_checkpoints/qwen3-14b_unscanned/0/items",
+    "gs://your-bucket/omni_checkpoints/qwen3-14b_unscanned/0/items",
     "Source Qwen3-14B LLM checkpoint.",
 )
 flags.DEFINE_string(
     "output_checkpoint",
-    "gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_qwen3_vl_14b_3stage/0/items",
+    "gs://your-bucket/omni_checkpoints/omni_qwen3_vl_14b_3stage/0/items",
     "Destination stitched checkpoint.",
 )
 flags.DEFINE_boolean("skip_stitch", False, "Skip stitching if output checkpoint already exists.")

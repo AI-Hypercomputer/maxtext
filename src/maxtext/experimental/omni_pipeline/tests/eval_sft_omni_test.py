@@ -19,7 +19,7 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from maxtext.experimental.omni_poc import eval_sft_omni
+from maxtext.experimental.omni_pipeline import eval_sft_omni
 
 
 class TestEvalSftOmni(unittest.TestCase):

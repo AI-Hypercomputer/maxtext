@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import unittest
 import numpy as np
 
-from maxtext.experimental.omni_poc.utils import processor_maxtext_omni as omni_processor
+from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni as omni_processor
 
 
 class TestProcessorMaxtextOmni(unittest.TestCase):
@@ -73,6 +73,19 @@ class TestProcessorMaxtextOmni(unittest.TestCase):
 
     # Text-only returns original
     np.testing.assert_array_equal(omni_processor.add_extra_tokens_for_omni([1, 2], "gemma3", "qwen3"), [1, 2])
+
+  def test_bidirectional_mask_image_and_video(self):
+    image_pad_id = omni_processor.DECODER_SPECIAL_TOKENS["qwen3"]["image_pad"]
+    video_pad_id = omni_processor.DECODER_SPECIAL_TOKENS["qwen3"]["video_pad"]
+    tokens = np.array([10, image_pad_id, video_pad_id, 20])
+
+    # Image mask
+    mask_img = omni_processor.get_bidirectional_mask_vision_omni("gemma3", "qwen3", tokens, is_video=False)
+    np.testing.assert_array_equal(mask_img, np.array([False, True, False, False]))
+
+    # Video mask
+    mask_vid = omni_processor.get_bidirectional_mask_vision_omni("qwen3_vl", "qwen3", tokens, is_video=True)
+    np.testing.assert_array_equal(mask_vid, np.array([False, False, True, False]))
 
 
 if __name__ == "__main__":

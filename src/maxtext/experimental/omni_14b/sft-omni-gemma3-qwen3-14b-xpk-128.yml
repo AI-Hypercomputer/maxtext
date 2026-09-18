@@ -38,8 +38,8 @@ train_data_columns: ['query', 'label']
 eval_data_columns: ['query', 'label']
 
 # Checkpoint paths (override via CLI if needed)
-load_parameters_path: "gs://yuchenhou-maxtext-logs/omni-gemma3-qwen3-14b/multimodal/pretrain_chartnet_xpk/omni_14b_pretrain_chartnet_xpk_128_csv/checkpoints/2100/items"
-base_output_directory: "gs://yuchenhou-maxtext-logs/omni-gemma3-qwen3-14b/multimodal/sft_after_chartnet"
+load_parameters_path: ""
+base_output_directory: ""
 run_name: "omni_14b_sft_chartqa_xpk_128"
 
 # Training schedule for 5 epochs on v4-128 (128 devices * 1 per_device_batch_size = 128 global batch size):

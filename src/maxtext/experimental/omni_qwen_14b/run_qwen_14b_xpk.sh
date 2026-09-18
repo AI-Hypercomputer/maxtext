@@ -7,11 +7,15 @@ set -e
 
 ACTION="${1:-help}"
 
+: "${HF_TOKEN:?Error: HF_TOKEN is not set. Please run: export HF_TOKEN=hf_...}"
+: "${GCS_BUCKET:?Error: GCS_BUCKET is not set. Please run: export GCS_BUCKET=gs://your-bucket}"
+export HF_TOKEN
+export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+
 # Global Experiment / Model Name
 EXP_NAME="${EXP_NAME:-qwen3-vl-14b-3mlp-layernorm}"
 
 # Base Storage Buckets & Checkpoints
-GCS_BUCKET="${GCS_BUCKET:-gs://yuchenhou-maxtext-logs}"
 VISION_SOURCE_CKPT="${VISION_SOURCE_CKPT:-${GCS_BUCKET}/checkpoints/qwen3-vl-4b-processor/0/items}"
 LLM_SOURCE_CKPT="${LLM_SOURCE_CKPT:-${GCS_BUCKET}/omni_checkpoints/qwen3-14b_unscanned/0/items}"
 STITCHED_CKPT="${STITCHED_CKPT:-${GCS_BUCKET}/omni_checkpoints/${EXP_NAME}/0/items}"
@@ -32,8 +36,7 @@ XPK_DEVICE_TYPE="${XPK_DEVICE_TYPE:-v4-128}"
 XPK_NUM_SLICES="${XPK_NUM_SLICES:-1}"
 XPK_BASE_DOCKER_IMAGE="${XPK_BASE_DOCKER_IMAGE:-gcr.io/tpu-prod-env-multipod/maxtext_base_image:latest}"
 
-USER_PREFIX="${USER_PREFIX:-yuchenhou}"
-HF_TOKEN="${HF_TOKEN:-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}"
+USER_PREFIX="${USER_PREFIX:-user}"
 TIMESTAMP=$(date +%m%d-%H%M)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,7 +55,7 @@ stitch_ckpt() {
 
   (
     cd "${MAXTEXT_ROOT}"
-    JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+    JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
       "${SCRIPT_DIR}/maxtext-omni-qwen3-vl-14b.yml" \
       "scan_layers=false" \
       "vision_load_path=${VISION_SOURCE_CKPT}" \
@@ -86,7 +89,7 @@ pretrain_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b/pretrain-omni-qwen3-vl-14b-chartnet.yml load_parameters_path=${STITCHED_CKPT} base_output_directory=${PRETRAIN_OUTPUT_DIR} run_name=${PRETRAIN_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b/pretrain-omni-qwen3-vl-14b-chartnet.yml load_parameters_path=${STITCHED_CKPT} base_output_directory=${PRETRAIN_OUTPUT_DIR} run_name=${PRETRAIN_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
   )
 
   echo ""
@@ -124,7 +127,7 @@ sft_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b/sft-omni-qwen3-vl-14b-chartqa.yml load_parameters_path=${input_ckpt} base_output_directory=${SFT_OUTPUT_DIR} run_name=${SFT_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b/sft-omni-qwen3-vl-14b-chartqa.yml load_parameters_path=${input_ckpt} base_output_directory=${SFT_OUTPUT_DIR} run_name=${SFT_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
   )
 
   echo ""
@@ -159,7 +162,7 @@ pipeline_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && echo '=== Stage 1: Pretrain ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b/pretrain-omni-qwen3-vl-14b-chartnet.yml load_parameters_path=${STITCHED_CKPT} base_output_directory=${PRETRAIN_OUTPUT_DIR} run_name=${PRETRAIN_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0 && echo '=== Stage 2: SFT ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_qwen_14b/sft-omni-qwen3-vl-14b-chartqa.yml load_parameters_path=${PRETRAIN_FINAL_CKPT} base_output_directory=${SFT_OUTPUT_DIR} run_name=${SFT_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && export HF_TOKEN=${HF_TOKEN} && echo '=== Stage 1: Pretrain ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b/pretrain-omni-qwen3-vl-14b-chartnet.yml load_parameters_path=${STITCHED_CKPT} base_output_directory=${PRETRAIN_OUTPUT_DIR} run_name=${PRETRAIN_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0 && echo '=== Stage 2: SFT ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_qwen_14b/sft-omni-qwen3-vl-14b-chartqa.yml load_parameters_path=${PRETRAIN_FINAL_CKPT} base_output_directory=${SFT_OUTPUT_DIR} run_name=${SFT_RUN_NAME} scan_layers=false ici_fsdp_parallelism=-1 ici_tensor_parallelism=4 grain_worker_count=0"
   )
 
   echo ""
@@ -176,7 +179,7 @@ eval_sft() {
   echo ">>> [EVAL] Evaluating SFT Checkpoint: ${ckpt_path}"
   echo "=================================================================="
 
-  python3 -m maxtext.experimental.omni_poc.eval_sft_omni \
+  python3 -m maxtext.experimental.omni_pipeline.eval_sft_omni \
     "${SCRIPT_DIR}/sft-omni-qwen3-vl-14b-chartqa.yml" \
     "load_parameters_path=${ckpt_path}" \
     --ckpt_type=sft \

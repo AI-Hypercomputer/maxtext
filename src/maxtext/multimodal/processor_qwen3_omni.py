@@ -473,7 +473,7 @@ def _read_video_decord(video_path, video_start=0.0, video_end=None) -> tuple[np.
       "video_end": video_end,
   }
   try:
-    vr = decord.VideoReader(video_path)
+    vr = decord.VideoReader(video_path, num_threads=1)
     total_frames, video_fps = len(vr), vr.get_avg_fps()
     start_frame, end_frame, total_frames = calculate_video_frame_range(
         video_config,

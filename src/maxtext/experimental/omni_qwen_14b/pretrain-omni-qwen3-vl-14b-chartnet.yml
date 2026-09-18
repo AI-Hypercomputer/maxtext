@@ -54,8 +54,8 @@ eval_data_columns: ['prompt', 'csv']
 default_prompt: "Extract the data table from this chart in CSV format."
 
 # Checkpoint paths
-load_parameters_path: "gs://yuchenhou-maxtext-logs/omni_checkpoints/qwen3-vl-14b-3mlp/0/items"
-base_output_directory: "gs://yuchenhou-maxtext-logs/experimental/omni_qwen_14b/pretrain"
+load_parameters_path: ""
+base_output_directory: ""
 run_name: "omni_qwen3_vl_14b_pretrain_chartnet"
 
 # Data loader settings (in-process data loading to prevent TPU worker subprocess conflict)

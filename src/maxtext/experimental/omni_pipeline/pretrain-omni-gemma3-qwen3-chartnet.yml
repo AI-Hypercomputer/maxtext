@@ -16,8 +16,8 @@
 # using dense chart analytical summaries (Chart-to-Text).
 #
 # Example command to run pretraining on TPU VM:
-# python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-#   src/maxtext/experimental/omni_poc/pretrain-omni-gemma3-qwen3-chartnet.yml
+# python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+#   src/maxtext/experimental/omni_pipeline/pretrain-omni-gemma3-qwen3-chartnet.yml
 
 # Inherit model architecture (Gemma 3 4B Vision Tower + Qwen 3 4B Decoder + Custom MLP Connector)
 base_config: "maxtext-omni-gemma3-qwen3.yml"
@@ -62,8 +62,8 @@ eval_data_columns: ['prompt', 'summary']
 default_prompt: "Summarize the key information and data trends in this chart in detail."
 
 # Initial stitched checkpoint path (or override via CLI to point to COCO step 14000)
-load_parameters_path: "gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items"
-base_output_directory: "gs://yuchenhou-maxtext-logs/omni-gemma3-qwen3/multimodal/pretrain_chartnet"
+load_parameters_path: ""
+base_output_directory: ""
 run_name: "omni_pretrain_chartnet_embedder_only"
 
 # Training schedule (~3 full epochs across ~92.6k human-verified samples at global batch size 16)

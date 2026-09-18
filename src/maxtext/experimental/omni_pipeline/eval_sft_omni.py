@@ -20,8 +20,8 @@ providing Omni-specific defaults and CLI.
 Usage:
   export HF_TOKEN="<YOUR_HF_TOKEN>"
 
-  python3 -m maxtext.experimental.omni_poc.eval_sft_omni \
-    src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+  python3 -m maxtext.experimental.omni_pipeline.eval_sft_omni \
+    src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
     load_parameters_path=gs://YOUR_BUCKET/path/to/checkpoint/items \
     base_output_directory=gs://YOUR_BUCKET/eval_output \
     run_name=eval_run \
@@ -61,8 +61,7 @@ def main(argv: Sequence[str]) -> None:
     parser.add_argument("--remove_tmp_results", type=str2bool, default=True)
     parser.add_argument("--ckpt_type", type=str, default="sft", choices=["base", "sft"])
     parser.add_argument("--image_resize", type=int, default=-1)
-    parser.add_argument("--hf_eval_split", "--split", type=str, default=None)
-    parser.add_argument("--hf_path", "--dataset", type=str, default=None)
+    parser.add_argument("--hf_eval_split", "--split", type=str, default="test")
 
     local_args, remaining_args = parser.parse_known_args(list(argv[1:]))
 
@@ -73,7 +72,7 @@ def main(argv: Sequence[str]) -> None:
             os.path.join(
                 MAXTEXT_PKG_DIR,
                 "experimental",
-                "omni_poc",
+                "omni_pipeline",
                 "configs",
                 "sft-maxtext-omni-gemma3-qwen3.yml",
             ),
@@ -84,8 +83,10 @@ def main(argv: Sequence[str]) -> None:
         ("override_model_config", "True"),
         ("per_device_batch_size", "1"),
         ("async_checkpointing", "False"),
-        ("hf_eval_split", local_args.hf_eval_split),
-        ("hf_path", local_args.hf_path),
+        ("hf_path", "HuggingFaceM4/ChartQA"),
+        ("hf_eval_files", ""),
+        ("hf_train_files", ""),
+        ("hf_eval_split", local_args.hf_eval_split or "test"),
     ]
     for key, val in defaults:
         if val is not None and not any(a.startswith(f"{key}=") for a in remaining_args):

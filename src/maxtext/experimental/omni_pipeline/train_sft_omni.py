@@ -18,12 +18,21 @@ Executes native MaxText SFT training with multimodal data processing and
 trainable parameter masking to fine-tune the custom MLP vision projector.
 
 Example usage:
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
     load_parameters_path=gs://YOUR_BUCKET/path/to/checkpoint/items \
     base_output_directory=gs://YOUR_BUCKET/output_directory \
     run_name=my_omni_sft_run
 """
+
+# Compatibility patch for environments where must_fuse_call is missing from jax.experimental.xla_metadata
+try:
+  import jax.experimental.xla_metadata as _xla_metadata
+
+  if not hasattr(_xla_metadata, "must_fuse_call"):
+    _xla_metadata.must_fuse_call = lambda name="": (lambda fn: fn)
+except Exception:
+  pass
 
 import maxtext
 # Eagerly initialize core MaxText C++ and model dependencies before train.py
@@ -38,6 +47,19 @@ from maxtext.common.goodput import (
     maybe_monitor_goodput,
     record_goodput,
 )
+import jax
+from maxtext.common.data_loader import DataLoader
+
+# Drop non-model auxiliary timing metadata before device_put & p_train_step
+def _sharded_load_next_batch(self, *args, **kwargs):
+  example_batch = self.load_next_batch_pre_sharding()
+  example_batch.pop("second_per_grids", None)
+  if self.config.enable_diloco:
+    from maxtext.utils import diloco_sharding
+    example_batch = diloco_sharding.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
+  return jax.device_put(example_batch, self.input_data_shardings)
+
+DataLoader.load_next_batch = _sharded_load_next_batch
 
 
 def main(argv: Sequence[str]) -> None:

@@ -39,7 +39,11 @@ ACTION="${1:-help}"
 TARGET_VARIANT="${2:-all}"
 
 # Base Storage Buckets
-GCS_BUCKET="${GCS_BUCKET:-gs://yuchenhou-maxtext-logs}"
+: "${HF_TOKEN:?Error: HF_TOKEN is not set. Please run: export HF_TOKEN=hf_...}"
+: "${GCS_BUCKET:?Error: GCS_BUCKET is not set. Please run: export GCS_BUCKET=gs://your-bucket}"
+export HF_TOKEN
+export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+
 VISION_SOURCE_CKPT="${VISION_SOURCE_CKPT:-${GCS_BUCKET}/omni_checkpoints/gemma3-4b_converted/0/items}"
 LLM_SOURCE_CKPT="${LLM_SOURCE_CKPT:-${GCS_BUCKET}/omni_checkpoints/qwen3-4b_converted/0/items}"
 
@@ -52,15 +56,11 @@ XPK_NUM_SLICES="${XPK_NUM_SLICES:-1}"
 XPK_BASE_DOCKER_IMAGE="${XPK_BASE_DOCKER_IMAGE:-gcr.io/tpu-prod-env-multipod/maxtext_base_image:latest}"
 
 # User Prefix for Workload Isolation
-USER_PREFIX="${USER_PREFIX:-yuchenhou}"
-
-# Hugging Face Auth Tokens
-HF_TOKEN="${HF_TOKEN:-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}"
-HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-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}"
+USER_PREFIX="${USER_PREFIX:-user}"
 
 # Project Root Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OMNI_POC_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+OMNI_PIPELINE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MAXTEXT_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null || (cd "${SCRIPT_DIR}/../../../../../.." && pwd))"
 export PYTHONPATH="${MAXTEXT_ROOT}/src:${PYTHONPATH}"
 
@@ -111,7 +111,7 @@ stitch_variant() {
   echo ">>> Output Path: ${output_ckpt}"
   echo "=================================================================="
 
-  JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+  JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
     "${model_yaml}" \
     "vision_load_path=${VISION_SOURCE_CKPT}" \
     "llm_load_path=${LLM_SOURCE_CKPT}" \
@@ -154,7 +154,7 @@ pretrain_xpk_variant() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "bash src/maxtext/experimental/omni_poc/experiments/projector_sweep/train_variant.sh pretrain ${tag} ${layers} ${hidden} ${act}"
+      --command "bash src/maxtext/experimental/omni_pipeline/experiments/projector_sweep/train_variant.sh pretrain ${tag} ${layers} ${hidden} ${act}"
   )
 
   echo ""
@@ -199,7 +199,7 @@ sft_xpk_variant() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "bash src/maxtext/experimental/omni_poc/experiments/projector_sweep/train_variant.sh sft ${tag} ${layers} ${hidden} ${act}"
+      --command "bash src/maxtext/experimental/omni_pipeline/experiments/projector_sweep/train_variant.sh sft ${tag} ${layers} ${hidden} ${act}"
   )
 
   echo ""
@@ -243,7 +243,7 @@ pipeline_xpk_variant() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "bash src/maxtext/experimental/omni_poc/experiments/projector_sweep/train_variant.sh pipeline ${tag} ${layers} ${hidden} ${act}"
+      --command "bash src/maxtext/experimental/omni_pipeline/experiments/projector_sweep/train_variant.sh pipeline ${tag} ${layers} ${hidden} ${act}"
   )
 
   echo ""
@@ -272,8 +272,8 @@ test_vm_variant() {
   local input_ckpt="${GCS_BUCKET}/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b_${tag}/0/items"
   local test_out_dir="${GCS_BUCKET}/omni_test_runs/${tag}"
 
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    "${OMNI_POC_DIR}/pretrain-omni-gemma3-qwen3-chartnet.yml" \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    "${OMNI_PIPELINE_DIR}/pretrain-omni-gemma3-qwen3-chartnet.yml" \
     "vision_connector_num_layers=${layers}" \
     "vision_connector_hidden_size=${hidden}" \
     "vision_connector_activation=${act}" \

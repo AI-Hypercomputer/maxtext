@@ -12,13 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Example command to run SFT on TPU VM:
-# python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-#   src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml
+# Config for SFT Omni-Gemma3-Qwen3 on TPU v4-128 (128 devices) for 2 Epochs
 
-# Inherit model architecture from maxtext-omni-gemma3-qwen3.yml
-
-base_config: "../maxtext-omni-gemma3-qwen3.yml"
+base_config: "maxtext-omni-gemma3-qwen3.yml"
 
 use_sft: true
 use_tunix_gradient_accumulation: false
@@ -26,7 +22,7 @@ use_multimodal: true
 sft_train_on_completion_only: true
 packing: false
 freeze_vision_encoder_params: true
-learning_rate: 2.e-4
+learning_rate: 3.e-4
 
 # Train ONLY the custom MLP projector by freezing all other parameters
 trainable_parameters_mask: ["custom_linear"]
@@ -41,23 +37,24 @@ hf_eval_split: 'val'
 train_data_columns: ['query', 'label']
 eval_data_columns: ['query', 'label']
 
-# Checkpoint paths (override via CLI for your bucket)
-load_parameters_path: "gs://YOUR_BUCKET/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items"
-base_output_directory: "gs://YOUR_BUCKET/sft_multimodal_omni_output"
-run_name: "sft_omni_chartqa"
+# Checkpoint paths (override via CLI if needed)
+load_parameters_path: ""
+base_output_directory: ""
+run_name: "omni_sft_chartqa_v4_128"
 
-# Training schedule (5 epochs = 8840 steps, 1 epoch = 1768 steps)
-per_device_batch_size: 4
+# Training schedule for 5 epochs on v4-128 (128 chips * 1 = global batch size 128):
+# 28,288 examples * 5 / 128 = 1105 steps
+per_device_batch_size: 1
 num_epoch: 5
-steps: 8841
-checkpoint_period: 500
+steps: 1105
+checkpoint_period: 100
 log_period: 1
 save_checkpoint_on_completion: true
 async_checkpointing: true
 
 # Evaluation settings
-eval_interval: 500
-eval_steps: 50
+eval_interval: 100
+eval_steps: 10
 
 # Sequence length & attention settings
 max_prefill_predict_length: 1024
@@ -65,4 +62,3 @@ max_target_length: 1600
 max_num_images_per_example: 1
 scan_layers: true
 attention: "dot_product"
-

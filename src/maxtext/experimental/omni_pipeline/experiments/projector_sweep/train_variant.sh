@@ -9,12 +9,15 @@ TAG="${2:-l2_h4096_silu}"           # architecture tag
 LAYERS="${3:-2}"                    # num layers
 HIDDEN="${4:-4096}"                 # hidden dimension
 ACT="${5:-silu}"                    # activation
-GCS_BUCKET="${GCS_BUCKET:-gs://yuchenhou-maxtext-logs}"
+
+: "${HF_TOKEN:?Error: HF_TOKEN is not set. Please run: export HF_TOKEN=hf_...}"
+: "${GCS_BUCKET:?Error: GCS_BUCKET is not set. Please run: export GCS_BUCKET=gs://your-bucket}"
+export HF_TOKEN
+export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+
 
 export TMPDIR=/dev/shm
 export PYTHONPATH=src:${PYTHONPATH:-}
-export HF_TOKEN="${HF_TOKEN:-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}"
-export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-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}"
 
 INIT_CKPT="${GCS_BUCKET}/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b_${TAG}/0/items"
 PRETRAIN_DIR="${GCS_BUCKET}/omni-gemma3-qwen3/multimodal/pretrain_chartnet_xpk/${TAG}"
@@ -59,8 +62,8 @@ if [ "$STAGE" == "pretrain" ] || [ "$STAGE" == "pipeline" ] || [ "$STAGE" == "al
   echo "Output Directory:    ${PRETRAIN_DIR}"
   echo ""
 
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    src/maxtext/experimental/omni_poc/pretrain-omni-gemma3-qwen3-chartnet-xpk-128.yml \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    src/maxtext/experimental/omni_pipeline/pretrain-omni-gemma3-qwen3-chartnet-xpk-128.yml \
     vision_connector_num_layers=${LAYERS} \
     vision_connector_hidden_size=${HIDDEN} \
     vision_connector_activation=${ACT} \
@@ -82,8 +85,8 @@ if [ "$STAGE" == "sft" ] || [ "$STAGE" == "pipeline" ] || [ "$STAGE" == "all" ];
   echo "Output Directory:    ${SFT_DIR}"
   echo ""
 
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    src/maxtext/experimental/omni_poc/sft-omni-gemma3-qwen3-xpk-128.yml \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    src/maxtext/experimental/omni_pipeline/sft-omni-gemma3-qwen3-xpk-128.yml \
     vision_connector_num_layers=${LAYERS} \
     vision_connector_hidden_size=${HIDDEN} \
     vision_connector_activation=${ACT} \

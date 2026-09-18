@@ -34,6 +34,7 @@ DECODER_SPECIAL_TOKENS = {
         "vision_start": QWEN_SPECIAL_TOKEN_CONFIGS["qwen3-omni-30b-a3b"]["vision_start"],  # 151652
         "vision_end": QWEN_SPECIAL_TOKEN_CONFIGS["qwen3-omni-30b-a3b"]["vision_end"],  # 151653
         "image_pad": QWEN_SPECIAL_TOKEN_CONFIGS["qwen3-omni-30b-a3b"]["image_pad"],  # 151655
+        "video_pad": QWEN_SPECIAL_TOKEN_CONFIGS["qwen3-omni-30b-a3b"]["video_pad"],  # 151656
     },
 }
 
@@ -115,11 +116,14 @@ def add_extra_tokens_for_omni(
   return np.array(token_list, dtype=dtype)
 
 
-def get_bidirectional_mask_vision_omni(vision_block, decoder_block, decoder_input_tokens):
+def get_bidirectional_mask_vision_omni(
+    vision_block, decoder_block, decoder_input_tokens, is_video: bool = False
+):
   """Generates bidirectional attention mask for vision tokens in stitched models."""
   if decoder_block not in DECODER_SPECIAL_TOKENS:
     raise ValueError(f"Stitched model not supported for decoder='{decoder_block}'.")
 
-  image_pad_id = DECODER_SPECIAL_TOKENS[decoder_block]["image_pad"]
-  return decoder_input_tokens == image_pad_id
+  pad_token_key = "video_pad" if is_video else "image_pad"
+  pad_id = DECODER_SPECIAL_TOKENS[decoder_block][pad_token_key]
+  return decoder_input_tokens == pad_id
 

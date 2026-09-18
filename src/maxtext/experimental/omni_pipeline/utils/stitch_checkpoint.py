@@ -21,8 +21,8 @@ This script initializes a target multimodal model and restores subtrees from sep
 
 
 Example usage:
-JAX_PLATFORMS=cpu python -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
-    src/maxtext/experimental/omni_poc/maxtext-omni-gemma3-qwen3.yml \
+JAX_PLATFORMS=cpu python -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
+    src/maxtext/experimental/omni_pipeline/maxtext-omni-gemma3-qwen3.yml \
     --vision_load_path=gs://YOUR_BUCKET_NAME/checkpoints/gemma3-4b_converted/0/items \
     --llm_load_path=gs://YOUR_BUCKET_NAME/checkpoints/qwen3-4b_converted/0/items \
     --stitched_output_path=gs://YOUR_BUCKET_NAME/checkpoints/omni-gemma3-qwen3-4b/0/items

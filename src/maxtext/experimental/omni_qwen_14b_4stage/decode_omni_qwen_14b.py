@@ -21,24 +21,24 @@ Evaluates stitched (untrained pre-SFT or post-SFT) checkpoints on:
 Usage:
   # 1. Text-only decoding (verifies LLM backbone weights):
   python3 src/maxtext/experimental/omni_qwen_14b/decode_omni_qwen_14b.py \
-    --checkpoint_path="gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_stitched_qwen3-vl-4b_qwen3-14b_unscanned/0/items" \
+    --checkpoint_path="gs://your-bucket/omni_checkpoints/omni_stitched_qwen3-vl-4b_qwen3-14b_unscanned/0/items" \
     --text_only \
     --prompt="What is the capital of France?"
 
   # 2. Text-only default test prompts:
   python3 src/maxtext/experimental/omni_qwen_14b/decode_omni_qwen_14b.py \
-    --checkpoint_path="gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_stitched_qwen3-vl-4b_qwen3-14b_unscanned/0/items" \
+    --checkpoint_path="gs://your-bucket/omni_checkpoints/omni_stitched_qwen3-vl-4b_qwen3-14b_unscanned/0/items" \
     --text_only
 
   # 3. Multimodal decode random ChartQA validation samples:
   python3 src/maxtext/experimental/omni_qwen_14b/decode_omni_qwen_14b.py \
-    --checkpoint_path="gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_stitched_qwen3-vl-4b_qwen3-14b_unscanned/0/items" \
+    --checkpoint_path="gs://your-bucket/omni_checkpoints/omni_stitched_qwen3-vl-4b_qwen3-14b_unscanned/0/items" \
     --num_samples=3 \
     --max_new_tokens=128
 
   # 4. Multimodal decode with custom text prompt and synthetic/local image:
   python3 src/maxtext/experimental/omni_qwen_14b/decode_omni_qwen_14b.py \
-    --checkpoint_path="gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_stitched_qwen3-vl-4b_qwen3-14b_unscanned/0/items" \
+    --checkpoint_path="gs://your-bucket/omni_checkpoints/omni_stitched_qwen3-vl-4b_qwen3-14b_unscanned/0/items" \
     --prompt="Describe the trends shown in this chart."
 """
 
@@ -91,7 +91,7 @@ _define_flag(
 _define_flag(
     flags.DEFINE_string,
     "checkpoint_path",
-    "gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_qwen3_vl_14b_4stage/0/items",
+    "gs://your-bucket/omni_checkpoints/omni_qwen3_vl_14b_4stage/0/items",
     "Path to checkpoint parameters directory.",
 )
 _define_flag(flags.DEFINE_boolean, "text_only", False, "Enable pure text-only decoding without visual input.")

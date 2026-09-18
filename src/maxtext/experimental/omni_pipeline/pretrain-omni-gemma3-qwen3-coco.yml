@@ -15,7 +15,7 @@
 # Step 1: Pretrain / Align the custom MLP vision projector on COCO-Narratives image-caption data.
 #
 # Example command to run COCO pretraining on TPU VM:
-# python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_poc/pretrain-omni-gemma3-qwen3-coco.yml
+# python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_pipeline/pretrain-omni-gemma3-qwen3-coco.yml
 
 # Inherit model architecture (Gemma 3 4B Vision Tower + Qwen 3 4B Decoder + Custom MLP Connector)
 base_config: "maxtext-omni-gemma3-qwen3.yml"
@@ -49,8 +49,8 @@ eval_data_columns: ['prompt', 'narratives']
 default_prompt: "Describe the image concisely"
 
 # Checkpoint paths
-load_parameters_path: "gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items"
-base_output_directory: "gs://yuchenhou-maxtext-logs/omni-gemma3-qwen3/multimodal/pretrain_coco"
+load_parameters_path: ""
+base_output_directory: ""
 run_name: "omni_pretrain_coco_embedder_only"
 
 # Training schedule (~2 full epochs of COCO narratives ~120k samples)

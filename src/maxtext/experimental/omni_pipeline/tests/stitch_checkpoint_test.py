@@ -51,7 +51,7 @@ import omegaconf
 from orbax import checkpoint as ocp
 
 from maxtext.configs import pyconfig
-from maxtext.experimental.omni_poc.utils import stitch_checkpoint
+from maxtext.experimental.omni_pipeline.utils import stitch_checkpoint
 from maxtext.layers import encoders
 from maxtext.layers.embeddings import Embed
 from maxtext.models import gemma3
@@ -123,7 +123,7 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
     omni_config_path = os.path.join(
         MAXTEXT_PKG_DIR,
         "experimental",
-        "omni_poc",
+        "omni_pipeline",
         "maxtext-omni-gemma3-qwen3.yml",
     )
     custom_cfg = omegaconf.OmegaConf.to_container(omegaconf.OmegaConf.load(omni_config_path), resolve=True)

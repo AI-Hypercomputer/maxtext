@@ -54,8 +54,8 @@ eval_data_columns: ['prompt', 'csv']
 default_prompt: "Extract the data table from this chart in CSV format."
 
 # Checkpoint paths (override via CLI for specific architecture variants if needed)
-load_parameters_path: "gs://yuchenhou-maxtext-logs/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-14b/0/items"
-base_output_directory: "gs://yuchenhou-maxtext-logs/omni-gemma3-qwen3-14b/multimodal/pretrain_chartnet_xpk"
+load_parameters_path: ""
+base_output_directory: ""
 run_name: "omni_14b_pretrain_chartnet_xpk_128_csv"
 
 # Training schedule for 3 full epochs on v4-128 (128 devices * 1 per_device_batch_size = 128 global batch size):

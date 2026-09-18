@@ -7,8 +7,11 @@ set -e
 
 ACTION="${1:-help}"
 
-# Base Storage Buckets & Checkpoints
-GCS_BUCKET="${GCS_BUCKET:-gs://yuchenhou-maxtext-logs}"
+: "${HF_TOKEN:?Error: HF_TOKEN is not set. Please run: export HF_TOKEN=hf_...}"
+: "${GCS_BUCKET:?Error: GCS_BUCKET is not set. Please run: export GCS_BUCKET=gs://your-bucket}"
+export HF_TOKEN
+export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+
 STITCHED_CKPT="${STITCHED_CKPT:-${GCS_BUCKET}/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-14b/0/items}"
 
 # XPK Cluster Configuration
@@ -19,7 +22,7 @@ XPK_DEVICE_TYPE="${XPK_DEVICE_TYPE:-v4-128}"
 XPK_NUM_SLICES="${XPK_NUM_SLICES:-1}"
 XPK_BASE_DOCKER_IMAGE="${XPK_BASE_DOCKER_IMAGE:-gcr.io/tpu-prod-env-multipod/maxtext_base_image:latest}"
 
-USER_PREFIX="${USER_PREFIX:-yuchenhou}"
+USER_PREFIX="${USER_PREFIX:-user}"
 TIMESTAMP=$(date +%m%d-%H%M)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +52,7 @@ pretrain_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_14b/pretrain-omni-gemma3-qwen3-14b-chartnet-xpk-128-csv.yml load_parameters_path=${STITCHED_CKPT}"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_14b/pretrain-omni-gemma3-qwen3-14b-chartnet-xpk-128-csv.yml load_parameters_path=${STITCHED_CKPT}"
   )
 
   echo ""
@@ -86,7 +89,7 @@ sft_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_14b/sft-omni-gemma3-qwen3-14b-xpk-128.yml load_parameters_path=${input_ckpt}"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_14b/sft-omni-gemma3-qwen3-14b-xpk-128.yml load_parameters_path=${input_ckpt}"
   )
 
   echo ""
@@ -121,7 +124,7 @@ pipeline_xpk() {
       --num-slices "${XPK_NUM_SLICES}" \
       --base-docker-image "${XPK_BASE_DOCKER_IMAGE}" \
       --script-dir . \
-      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && echo '=== Stage 1: Pretrain ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_14b/pretrain-omni-gemma3-qwen3-14b-chartnet-xpk-128-csv.yml load_parameters_path=${STITCHED_CKPT} && echo '=== Stage 2: SFT ===' && python3 -m maxtext.experimental.omni_poc.train_sft_omni src/maxtext/experimental/omni_14b/sft-omni-gemma3-qwen3-14b-xpk-128.yml load_parameters_path=${GCS_BUCKET}/omni-gemma3-qwen3-14b/multimodal/pretrain_chartnet_xpk/omni_14b_pretrain_chartnet_xpk_128_csv/checkpoints/2100/items"
+      --command "export TMPDIR=/dev/shm && export PYTHONPATH=src:\${PYTHONPATH:-} && export HF_HOME=/dev/shm/huggingface && echo '=== Stage 1: Pretrain ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_14b/pretrain-omni-gemma3-qwen3-14b-chartnet-xpk-128-csv.yml load_parameters_path=${STITCHED_CKPT} && echo '=== Stage 2: SFT ===' && python3 -m maxtext.experimental.omni_pipeline.train_sft_omni src/maxtext/experimental/omni_14b/sft-omni-gemma3-qwen3-14b-xpk-128.yml load_parameters_path=${GCS_BUCKET}/omni-gemma3-qwen3-14b/multimodal/pretrain_chartnet_xpk/omni_14b_pretrain_chartnet_xpk_128_csv/checkpoints/2100/items"
   )
 
   echo ""
