@@ -3651,7 +3651,10 @@ class RoutedMoE(nnx.Module):
     hidden_states = jnp.reshape(inputs, (batch_size * seq_len, emb_dim))
     gating_output = jnp.reshape(gate_logits, (batch_size * seq_len, self.num_experts))
 
-    _, top_k_indices = jax.lax.top_k(gating_output, self.num_experts_per_tok)
+    _, top_k_indices = jax.lax.top_k(
+        jax.nn.softmax(gating_output.astype(jnp.float32), axis=-1),
+        self.num_experts_per_tok,
+    )
     self.selected_experts = nnx.Intermediate(top_k_indices)
 
     # Concatenate gate and up projections: [E, D, H] + [E, D, H] -> [E, D, 2H]
