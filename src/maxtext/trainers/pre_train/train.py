@@ -480,6 +480,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         max_utils.with_memory_kind(params_shardings, "device"),
     )
 
+  # XLA fuses the sparse MoE backward with the downstream update and produces
+  # non-finite gradients; the barrier keeps those regions separate.
+  raw_grads = jax.lax.optimization_barrier(raw_grads)
+
   # Extract aux fields into locals
   intermediate_outputs = aux["intermediate_outputs"]
   xent_sum = aux["xent_sum"]
