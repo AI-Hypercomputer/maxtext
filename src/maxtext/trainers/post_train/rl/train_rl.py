@@ -46,6 +46,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 from __future__ import annotations
 import functools
 from functools import wraps
+import inspect
 from typing import Any, Callable, Optional, Sequence
 
 import dataclasses
@@ -304,6 +305,27 @@ def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
   ]
 
 
+def _kwargs_supported_by(cls: Any, **kwargs: Any) -> dict[str, Any]:
+  """Keeps only the kwargs that the installed tunix `cls` accepts.
+
+  Lets MaxText forward newer tunix knobs while still running against an older
+  pinned tunix that does not know them; dropped settings are logged. A `cls`
+  that itself takes `**kwargs`, or whose signature cannot be inspected (some
+  builtin/C-implemented callables), accepts anything, so every kwarg is
+  passed through unchanged.
+  """
+  try:
+    params = inspect.signature(cls).parameters
+  except (ValueError, TypeError):
+    return kwargs
+  if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+    return kwargs
+  dropped = sorted(k for k in kwargs if k not in params)
+  if dropped:
+    max_logging.log(f"Installed tunix {cls.__name__} does not support {dropped}; those settings are ignored.")
+  return {k: v for k, v in kwargs.items() if k in params}
+
+
 def create_rl_components(  # pylint: disable=too-many-positional-arguments
     trainer_config,
     sampler_config,
@@ -392,6 +414,10 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
       },
       rollout_engine=rl_rollout_engine,
       offload_to_cpu=False,
+      **_kwargs_supported_by(
+          rl_cluster_lib.ClusterConfig,
+          gc_collect_after_weight_sync=trainer_config.gc_collect_after_weight_sync,
+      ),
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
           eval_every_n_steps=trainer_config.eval_interval,
@@ -537,6 +563,10 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         epsilon=trainer_config.rl.grpo_epsilon,
         loss_algo=trainer_config.rl.loss_algo,
         loss_agg_mode=trainer_config.rl.loss_agg_mode,
+    )
+    max_logging.log(
+        "GRPO config resolved:\n"
+        + "\n".join(f"  {k} = {v!r}" for k, v in sorted(dataclasses.asdict(grpo_config).items()))
     )
     rl_trainer = GrpoLearner(
         rl_cluster=rl_cluster,

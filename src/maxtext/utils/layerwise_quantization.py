@@ -36,7 +36,7 @@ from typing import Any, Sequence
 from absl import app
 from aqt.jax.v2 import aqt_tensor
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 import jax
 import jax.numpy as jnp
 from maxtext.common import common_types
@@ -205,7 +205,7 @@ class LayerwiseQuantization:
 
     max_logging.log("Building CONVERT-mode model (random init) and copying kernels in...")
     rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=self.rng)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       convert_model = model_creation_utils.from_config(
           config,
           mesh=self._mesh,
@@ -222,7 +222,7 @@ class LayerwiseQuantization:
     decoder_positions = jnp.arange(L, dtype=jnp.int32)[None, :]
     decoder_segment_ids = jnp.ones((1, L), dtype=jnp.int32)
     max_logging.log("Running CONVERT-mode forward to populate AQT scale factors...")
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       _ = convert_model(
           decoder_input_tokens,
           decoder_positions,
@@ -313,7 +313,7 @@ class LayerwiseQuantization:
     """Loads a specific layer's parameters from the checkpoint."""
 
     config = self.config
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
 
       params = checkpointing.load_params_from_path(
           config.load_parameters_path,

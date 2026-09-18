@@ -102,8 +102,7 @@ For instructions on building and uploading the MaxText Docker image with post-tr
 
 ```bash
 # The Docker image you pushed in the previous step
-export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+export DOCKER_IMAGE=<IMAGE_NAME>
 
 # Run the RL training script on your cluster
 run_tutorial maxtext/trainers/post_train/rl/scripts/run_gemma4_e4b_rl.sh

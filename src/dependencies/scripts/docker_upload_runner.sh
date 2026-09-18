@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -128,6 +128,11 @@ if [[ "${CLOUD_IMAGE_NAME}" == *"/"* ]]; then
   export FULL_IMAGE_PATH="${CLOUD_IMAGE_NAME}"
 else
   # Otherwise, default to GCR
+  echo "================================================================================================================================"
+  echo "WARNING: Google Container Registry (gcr.io) is deprecated and will be shut down."
+  echo "To upload to Artifact Registry instead, please provide full URI in CLOUD_IMAGE_NAME (e.g. us-docker.pkg.dev/project/repo/image)."
+  echo "Falling back to legacy gcr.io/${PROJECT}/${CLOUD_IMAGE_NAME}..."
+  echo "================================================================================================================================"
   export FULL_IMAGE_PATH="gcr.io/${PROJECT}/${CLOUD_IMAGE_NAME}"
 fi
 
