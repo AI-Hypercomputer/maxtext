@@ -930,6 +930,38 @@ def maybe_dequantize_restored_params(restored_weights: Any, expected_param_pytre
   return out
 
 
+def _maybe_sideload_tid2eid_into_restored(path, want, restored_weights):
+  """Sideloads tid2eid.safetensors into restored_weights when omitted by converter (b/563048036)."""
+  if not isinstance(want, dict) or not isinstance(restored_weights, dict):
+    return
+  want_dec = want.get("decoder", {})
+  rest_dec = restored_weights.get("decoder", {})
+  if not isinstance(want_dec, dict) or not isinstance(rest_dec, dict):
+    return
+  missing_layers = []
+  for idx in range(16):
+    lk = f"layers_{idx}"
+    w_moe = want_dec.get(lk, {}).get("mlp", {}).get("MoeBlock_0", {})
+    r_moe = rest_dec.get(lk, {}).get("mlp", {}).get("MoeBlock_0", {})
+    if isinstance(w_moe, dict) and "tid2eid" in w_moe and isinstance(r_moe, dict) and "tid2eid" not in r_moe:
+      missing_layers.append((idx, w_moe["tid2eid"], r_moe))
+  if not missing_layers:
+    return
+  p = epath.Path(path)
+  for cand in (p.parent.parent.parent / "tid2eid.safetensors", p.parent.parent / "tid2eid.safetensors"):
+    if cand.exists():
+      from safetensors.numpy import load as load_safetensors  # pylint: disable=import-outside-toplevel
+
+      tables = load_safetensors(cand.read_bytes())
+      for idx, want_leaf, r_moe in missing_layers:
+        tbl = tables.get(f"layers_{idx}")
+        if tbl is not None:
+          arr = tbl.astype(jnp.float32)
+          sharding = getattr(want_leaf, "sharding", None)
+          r_moe["tid2eid"] = jax.device_put(arr, sharding) if sharding is not None else jnp.asarray(arr)
+      break
+
+
 def load_params_from_path(
     load_parameters_from_path,
     abstract_unboxed_params,
@@ -1098,6 +1130,7 @@ def load_params_from_path(
   # Validate against everything the model needs. Rebuilding the expectation from the
   # post-filter request would excuse precisely the weight whose collection the checkpoint
   # lacked -- which is the silent corruption this check exists to catch, not an exemption.
+  _maybe_sideload_tid2eid_into_restored(path, want, restored_weights)
   _raise_on_weight_mismatch(want, restored_weights)
   # Answer the other half of the question: did the model consume everything the checkpoint
   # offered? Compare against what is ON DISK; comparing against the restored tree can never
