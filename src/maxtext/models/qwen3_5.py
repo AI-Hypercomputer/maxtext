@@ -202,12 +202,12 @@ class Qwen3_5DecoderLayer(nnx.Module):
           config=cfg, inputs_shape=dummy_inputs_shape, mesh=self.mesh, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs
       )
 
-    # Second LayerNorm, applied before the MoE block.
+    # Second LayerNorm, applied before the MoE block (outputs fp32 into MoE router when float32_gate_logits=True).
     self.post_attention_layernorm = Qwen3NextRMSNorm(
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
-        dtype=cfg.dtype,
-        weight_dtype=get_weight_dtype(cfg, "norm"),
+        dtype=jnp.float32 if cfg.float32_gate_logits else cfg.dtype,
+        weight_dtype=jnp.float32 if cfg.float32_gate_logits else get_weight_dtype(cfg, "norm"),
         shard_mode=cfg.shard_mode,
         rngs=rngs,
     )

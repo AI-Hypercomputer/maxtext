@@ -478,7 +478,7 @@ class GateLogit(nnx.Module):
     return getattr(self, self._quant_dot_general_name)
 
   def __call__(self, inputs: jax.Array, _initializing: bool = False) -> Tuple[jax.Array, Optional[jax.Array]]:
-    inputs = jnp.asarray(inputs, self.dtype)
+    inputs = jnp.asarray(inputs, jnp.float32 if self.dtype == jnp.float32 else self.dtype)
     norm_axis = linears.normalize_axes(self.axis, inputs.ndim)
 
     if quantizations.in_serve_mode(self.quant):
@@ -486,7 +486,7 @@ class GateLogit(nnx.Module):
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
       kernel = self.kernel[...]
-    kernel = jnp.asarray(kernel, self.dtype)
+    kernel = jnp.asarray(kernel, jnp.float32 if self.dtype == jnp.float32 else self.dtype)
 
     contract_ind = tuple(range(0, len(norm_axis)))
     output_sharding = (
@@ -499,7 +499,7 @@ class GateLogit(nnx.Module):
         kernel,
         norm_axis,
         contract_ind,
-        self.matmul_precision,
+        "highest" if self.dtype == jnp.float32 else self.matmul_precision,
         self.quant_dot_general,
         _initializing,
         out_sharding=output_sharding,
@@ -957,17 +957,25 @@ class RoutedMoE(nnx.Module):
     # (batch, sequence, num_experts_per_tok).
     valid_token_mask = None
     if forced_routed_experts is not None:
-      top_k_indices = forced_routed_experts
-      # Any id outside [0, num_experts) is an unused slot, same as the -1 sentinel.
-      valid_token_mask = valid_expert_mask(top_k_indices, self.num_experts)
-      # Gather at 0, not -1: take_along_axis would wrap -1 onto the last expert and
-      # that value reaches the softmax denominator before the mask zeroes it.
+      router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
+      auto_weights, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
+      slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
+      # A token has real forced routing only if its slots are within [0, num_experts)
+      # and not an uninitialized all-zero [0, 0, ..., 0] buffer. Tokens with
+      # UNSET_ROUTED_EXPERT (-1) or all-zero slots must fall back to auto_indices
+      # rather than zeroing out the entire MoE layer output.
+      token_is_forced = jnp.all(slot_valid, axis=-1, keepdims=True) & jnp.any(
+          forced_routed_experts > 0, axis=-1, keepdims=True
+      )
+      top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
+      valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.ones_like(slot_valid, dtype=jnp.bool_))
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
-        router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
-      else:
+      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")) or self.is_hash_routing:
         top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
+      else:
+        top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1)
     else:
       if self.config.use_random_routing:
         if rngs is None:
@@ -995,7 +1003,8 @@ class RoutedMoE(nnx.Module):
         _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
         top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
       else:
-        top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+        router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
+        top_k_weights, top_k_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
 
     if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
@@ -1003,11 +1012,7 @@ class RoutedMoE(nnx.Module):
         top_k_weights = top_k_weights * valid_token_mask
     else:
       if self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
-        if valid_token_mask is not None:
-          # Padding must stay out of the softmax denominator or it rescales the
-          # real slots. Large-negative, not -inf: a fully-padded token would be NaN.
-          top_k_weights = jnp.where(valid_token_mask, top_k_weights, jnp.finfo(jnp.float32).min / 2)
-        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+        top_k_weights = top_k_weights.astype(jnp.float32)
 
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -1016,9 +1021,10 @@ class RoutedMoE(nnx.Module):
       if self.config.norm_topk_prob:
         weight_sum = top_k_weights.sum(axis=-1, keepdims=True)
         if valid_token_mask is not None:
-          # A fully-padded token sums to zero; 0/0 would NaN the whole batch loss.
           weight_sum = jnp.where(weight_sum == 0, 1.0, weight_sum)
-        top_k_weights /= weight_sum
+        top_k_weights = top_k_weights / weight_sum
+      if not self.config.float32_weight_sum:
+        top_k_weights = top_k_weights.astype(self.dtype)
 
       if self.per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
@@ -3611,7 +3617,7 @@ class RoutedMoE(nnx.Module):
             "BSEM,BSE -> BSM",
             intermediate_layer,
             weights,
-            precision=matmul_precision,
+            precision=jax.lax.Precision.HIGHEST if self.config.float32_weight_sum else matmul_precision,
         ).astype(self.dtype)
       return output, lb_loss, bias_updates
 
@@ -3846,15 +3852,14 @@ class RoutedMoE(nnx.Module):
       and any routed bias updates.
     """
     cfg = self.config
+    gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
+    routing_inputs = inputs.astype(gate_dtype) if gate_inputs is None else gate_inputs.astype(gate_dtype)
     inputs = inputs.astype(cfg.dtype)
 
     if cfg.te_moe_block and gate_inputs is not None:
       raise ValueError("te_moe_block=True does not support separate gate_inputs.")
     if cfg.te_moe_block and quantizations.in_serve_mode(self.quant):
       raise ValueError("te_moe_block=True does not support serve-mode quantized weights.")
-
-    gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
-    routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
 
     if cfg.te_moe_block:
       gate_kernel = jnp.asarray(self.gate.kernel[...], self.dtype)
