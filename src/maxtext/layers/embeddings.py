@@ -16,7 +16,7 @@
 
 import dataclasses
 import math
-from typing import Any
+from typing import Any, Sequence
 
 import jax
 from jax import lax
@@ -26,6 +26,7 @@ from jax.sharding import Mesh, NamedSharding
 from flax import nnx
 
 from maxtext.common.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType, get_weight_dtype
+from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.initializers import Initializer, default_embed_init
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -1779,3 +1780,592 @@ def _apply_rotary_pos_emb(
   rotated = ((rope_f32 * cos) + (_rotate_half(rope_f32) * sin)).astype(x.dtype)
 
   return jnp.concatenate([nope, rotated], axis=-1)
+
+
+# ==============================================================================
+# Cosmos 3 Diffusion Conditioning, Unified 3D mRoPE & Patchify Primitives
+# ==============================================================================
+
+
+def get_cosmos3_timestep_embedding(
+    timesteps: jax.Array,
+    embedding_dim: int = 256,
+    flip_sin_to_cos: bool = True,
+    downscale_freq_shift: float = 0.0,
+    scale: float = 1.0,
+    max_period: int = 10000,
+) -> jax.Array:
+  """Computes sinusoidal timestep embeddings matching Diffusers `get_timestep_embedding`."""
+  timesteps_f32 = jnp.asarray(timesteps, dtype=jnp.float32)
+  if timesteps_f32.ndim == 0:
+    timesteps_f32 = timesteps_f32[jnp.newaxis]
+
+  half_dim = embedding_dim // 2
+  exponent = -math.log(max_period) * jnp.arange(0, half_dim, dtype=jnp.float32)
+  exponent = exponent / (half_dim - downscale_freq_shift)
+
+  emb = timesteps_f32[..., jnp.newaxis] * jnp.exp(exponent) * scale
+  if flip_sin_to_cos:
+    emb = jnp.concatenate([jnp.cos(emb), jnp.sin(emb)], axis=-1)
+  else:
+    emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
+
+  if embedding_dim % 2 == 1:
+    emb = jnp.pad(emb, [(0, 0)] * (emb.ndim - 1) + [(0, 1)])
+  return emb
+
+
+class Cosmos3Timesteps(nnx.Module):
+  """Sinusoidal timestep projection module (`time_proj`) for Cosmos 3."""
+
+  def __init__(
+      self,
+      num_channels: int = 256,
+      flip_sin_to_cos: bool = True,
+      downscale_freq_shift: float = 0.0,
+      scale: float = 1.0,
+      max_period: int = 10000,
+  ):
+    self.num_channels = num_channels
+    self.flip_sin_to_cos = flip_sin_to_cos
+    self.downscale_freq_shift = downscale_freq_shift
+    self.scale = scale
+    self.max_period = max_period
+
+  def __call__(self, timesteps: jax.Array) -> jax.Array:
+    return get_cosmos3_timestep_embedding(
+        timesteps,
+        embedding_dim=self.num_channels,
+        flip_sin_to_cos=self.flip_sin_to_cos,
+        downscale_freq_shift=self.downscale_freq_shift,
+        scale=self.scale,
+        max_period=self.max_period,
+    )
+
+
+class Cosmos3TimeEmbedder(nnx.Module):
+  """Cosmos 3 continuous timestep embedder: sinusoidal `time_proj` + 2-layer SiLU MLP."""
+
+  def __init__(
+      self,
+      in_channels: int = 256,
+      time_embed_dim: int = 4096,
+      out_dim: int | None = None,
+      timestep_scale: float = 0.001,
+      flip_sin_to_cos: bool = True,
+      downscale_freq_shift: float = 0.0,
+      sample_proj_bias: bool = True,
+      dtype: DType = jnp.float32,
+      weight_dtype: DType = jnp.float32,
+      matmul_precision: str = "default",
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.in_channels = in_channels
+    self.time_embed_dim = time_embed_dim
+    self.out_dim = out_dim if out_dim is not None else time_embed_dim
+    self.timestep_scale = timestep_scale
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+
+    self.time_proj = Cosmos3Timesteps(
+        num_channels=in_channels,
+        flip_sin_to_cos=flip_sin_to_cos,
+        downscale_freq_shift=downscale_freq_shift,
+    )
+    self.linear_1 = DenseGeneral(
+        in_features_shape=in_channels,
+        out_features_shape=time_embed_dim,
+        use_bias=sample_proj_bias,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        matmul_precision=matmul_precision,
+        rngs=rngs,
+    )
+    self.linear_2 = DenseGeneral(
+        in_features_shape=time_embed_dim,
+        out_features_shape=self.out_dim,
+        use_bias=sample_proj_bias,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        matmul_precision=matmul_precision,
+        rngs=rngs,
+    )
+
+  def load_from_torch(
+      self,
+      linear_1_weight: Any,
+      linear_1_bias: Any,
+      linear_2_weight: Any,
+      linear_2_bias: Any,
+  ) -> None:
+    """Copies weights from PyTorch `TimestepEmbedding` (transposing linear kernels)."""
+    self.linear_1.kernel.value = jnp.asarray(linear_1_weight, dtype=self.weight_dtype).T
+    if self.linear_1.bias is not None and linear_1_bias is not None:
+      self.linear_1.bias.value = jnp.asarray(linear_1_bias, dtype=self.weight_dtype)
+    self.linear_2.kernel.value = jnp.asarray(linear_2_weight, dtype=self.weight_dtype).T
+    if self.linear_2.bias is not None and linear_2_bias is not None:
+      self.linear_2.bias.value = jnp.asarray(linear_2_bias, dtype=self.weight_dtype)
+
+  def __call__(
+      self,
+      timesteps: jax.Array,
+      target_dtype: DType | None = None,
+      apply_sinusoidal: bool | None = None,
+      apply_scale: bool = True,
+  ) -> jax.Array:
+    """Projects scalar/1D/2D timesteps (or pre-projected sinusoids) through the 2-layer MLP."""
+    t_arr = jnp.asarray(timesteps)
+    if apply_sinusoidal is None:
+      apply_sinusoidal = not (t_arr.ndim >= 2 and t_arr.shape[-1] == self.in_channels)
+
+    if apply_sinusoidal:
+      scaled_t = t_arr.astype(jnp.float32) * (self.timestep_scale if apply_scale else 1.0)
+      sample = self.time_proj(scaled_t).astype(self.dtype)
+    else:
+      sample = t_arr.astype(self.dtype)
+
+    hidden = jax.nn.silu(self.linear_1(sample))
+    out = self.linear_2(hidden)
+    return out.astype(target_dtype) if target_dtype is not None else out
+
+
+def apply_timestep_embeds_to_noisy_tokens(
+    packed_tokens: jax.Array,
+    packed_timestep_embeds: jax.Array,
+    noisy_frame_indexes: Sequence[jax.Array] | None = None,
+    token_shapes: Sequence[tuple[int, ...]] | None = None,
+    noisy_frame_mask: jax.Array | None = None,
+) -> jax.Array:
+  """Adds timestep embeddings only to noisy frames, leaving clean conditioning frames untouched.
+
+  Supports both:
+  1. Static-shape masked mode (`noisy_frame_mask` of shape `[B, T]` or `[T]`) for TPU training/serving.
+  2. Packed multi-sample index mode (`noisy_frame_indexes` and `token_shapes`) matching Diffusers.
+  """
+  if noisy_frame_mask is not None:
+    mask = jnp.asarray(noisy_frame_mask, dtype=packed_tokens.dtype)
+    if packed_tokens.ndim == 4:
+      # packed_tokens: [B, T, S, D], packed_timestep_embeds: [B, T, D] or [B, 1, D] or [B, T, S, D]
+      t_emb = packed_timestep_embeds
+      if t_emb.ndim == 2:
+        t_emb = t_emb[:, jnp.newaxis, jnp.newaxis, :]
+      elif t_emb.ndim == 3:
+        t_emb = t_emb[:, :, jnp.newaxis, :]
+      return packed_tokens + t_emb.astype(packed_tokens.dtype) * mask[..., jnp.newaxis, jnp.newaxis]
+    if packed_tokens.ndim == 3:
+      # packed_tokens: [B, T * S, D], mask: [B, T]
+      bsz, total_tokens, dim = packed_tokens.shape
+      num_frames = mask.shape[1]
+      spatial_numel = total_tokens // num_frames
+      t_emb = packed_timestep_embeds.astype(packed_tokens.dtype)
+      if t_emb.ndim == 2:
+        t_emb = t_emb[:, jnp.newaxis, jnp.newaxis, :]
+      elif t_emb.ndim == 3 and t_emb.shape[1] == 1:
+        t_emb = t_emb[:, :, jnp.newaxis, :]
+      elif t_emb.ndim == 3 and t_emb.shape[1] == num_frames:
+        t_emb = t_emb[:, :, jnp.newaxis, :]
+      else:
+        t_emb = t_emb.reshape(bsz, num_frames, spatial_numel, dim)
+      tokens_4d = packed_tokens.reshape(bsz, num_frames, spatial_numel, dim)
+      out_4d = tokens_4d + t_emb * mask[:, :, jnp.newaxis, jnp.newaxis]
+      return out_4d.reshape(bsz, total_tokens, dim)
+
+  if noisy_frame_indexes is None or token_shapes is None:
+    return packed_tokens + packed_timestep_embeds.astype(packed_tokens.dtype)
+
+  start_noisy_index = 0
+  flattened_indexes = []
+  for noisy_indexes_i, token_shape_i in zip(noisy_frame_indexes, token_shapes):
+    spatial_numel_i = math.prod(token_shape_i[1:])
+    spatial_indexes_i = jnp.arange(spatial_numel_i, dtype=jnp.int32)
+    noisy_idx_arr = jnp.asarray(noisy_indexes_i, dtype=jnp.int32)
+    frame_offsets = (noisy_idx_arr[:, jnp.newaxis] * spatial_numel_i) + spatial_indexes_i + start_noisy_index
+    flattened_indexes.append(frame_offsets.reshape(-1))
+    start_noisy_index += token_shape_i[0] * spatial_numel_i
+
+  all_indices = jnp.concatenate(flattened_indexes, axis=0)
+  return packed_tokens.at[all_indices].add(packed_timestep_embeds.astype(packed_tokens.dtype))
+
+
+def get_3d_mrope_ids_text_tokens(
+    num_tokens: int,
+    temporal_offset: int | float = 0,
+    use_float_positions: bool = False,
+) -> tuple[jax.Array, int | float]:
+  """Generates `[3, num_tokens]` 3D mRoPE position IDs for text tokens."""
+  if use_float_positions:
+    ids = jnp.arange(num_tokens, dtype=jnp.float32) + float(temporal_offset)
+  else:
+    ids = jnp.arange(num_tokens, dtype=jnp.int32) + int(temporal_offset)
+  mrope_ids = jnp.broadcast_to(ids[jnp.newaxis, :], (3, num_tokens))
+  return mrope_ids, temporal_offset + num_tokens
+
+
+def get_3d_mrope_ids_vae_tokens(
+    grid_t: int,
+    grid_h: int,
+    grid_w: int,
+    temporal_offset: int | float = 0,
+    reset_spatial_indices: bool = True,
+    fps: float | None = None,
+    base_fps: float = 24.0,
+    temporal_compression_factor: int = 4,
+    base_temporal_compression_factor: int | None = None,
+    start_frame_offset: int = 0,
+) -> tuple[jax.Array, int]:
+  """Generates `[3, grid_t * grid_h * grid_w]` 3D mRoPE position IDs for VAE/modality tokens."""
+  fps_modulation_enabled = fps is not None and grid_t > 1
+  effective_base_tcf = (
+      base_temporal_compression_factor
+      if base_temporal_compression_factor is not None
+      else temporal_compression_factor
+  )
+
+  if fps_modulation_enabled:
+    tps = fps / temporal_compression_factor
+    base_tps = base_fps / effective_base_tcf
+    frame_indices = jnp.arange(grid_t, dtype=jnp.float32)
+    scaled_t = (frame_indices + start_frame_offset) / tps * base_tps + temporal_offset
+    t_index = jnp.repeat(scaled_t, grid_h * grid_w)
+  else:
+    frame_indices = jnp.arange(grid_t, dtype=jnp.int32) + temporal_offset + start_frame_offset
+    t_index = jnp.repeat(frame_indices, grid_h * grid_w)
+
+  h_grid = jnp.arange(grid_h, dtype=jnp.int32)[jnp.newaxis, :, jnp.newaxis]
+  w_grid = jnp.arange(grid_w, dtype=jnp.int32)[jnp.newaxis, jnp.newaxis, :]
+  h_index = jnp.broadcast_to(h_grid, (grid_t, grid_h, grid_w)).reshape(-1)
+  w_index = jnp.broadcast_to(w_grid, (grid_t, grid_h, grid_w)).reshape(-1)
+
+  if not reset_spatial_indices:
+    spatial_offset = temporal_offset
+    h_index = h_index + spatial_offset
+    w_index = w_index + spatial_offset
+
+  if fps_modulation_enabled:
+    mrope_ids = jnp.stack([t_index, h_index.astype(jnp.float32), w_index.astype(jnp.float32)], axis=0)
+    tps = fps / temporal_compression_factor
+    base_tps = base_fps / effective_base_tcf
+    max_t = (grid_t - 1 + start_frame_offset) / tps * base_tps + temporal_offset
+  else:
+    mrope_ids = jnp.stack([t_index, h_index, w_index], axis=0)
+    max_t = grid_t - 1 + temporal_offset + start_frame_offset
+
+  if reset_spatial_indices:
+    max_h = grid_h - 1
+    max_w = grid_w - 1
+  else:
+    max_h = grid_h - 1 + temporal_offset
+    max_w = grid_w - 1 + temporal_offset
+
+  if isinstance(max_t, jax.core.Tracer):
+    max_coord = jnp.maximum(max_t, max(max_h, max_w) if isinstance(max_h, int) else jnp.maximum(max_h, max_w))
+    next_temporal_offset = jnp.ceil(max_coord).astype(jnp.int32) + 1
+  else:
+    next_temporal_offset = int(math.ceil(max(max_t, max_h, max_w))) + 1
+  return mrope_ids, next_temporal_offset
+
+
+def build_cosmos3_3d_mrope_position_ids(
+    text_len: int,
+    vision_grid_thw: tuple[int, int, int],
+    temporal_modality_margin: int = 15000,
+    reset_spatial_indices: bool = True,
+    enable_fps_modulation: bool = True,
+    fps: float | None = 24.0,
+    base_fps: float = 24.0,
+    temporal_compression_factor: int = 4,
+    sound_len: int | None = None,
+    sound_fps: float | None = 25.0,
+    action_len: int | None = None,
+) -> tuple[jax.Array, int | float]:
+  """Constructs the joint `[3, total_seq_len]` 3D mRoPE position IDs for Cosmos 3."""
+  text_mrope_ids, next_offset = get_3d_mrope_ids_text_tokens(
+      num_tokens=text_len,
+      temporal_offset=0,
+      use_float_positions=enable_fps_modulation,
+  )
+  vision_start_offset = next_offset + temporal_modality_margin
+  effective_vision_fps = fps if enable_fps_modulation else None
+
+  grid_t, grid_h, grid_w = vision_grid_thw
+  vision_mrope_ids, _ = get_3d_mrope_ids_vae_tokens(
+      grid_t=grid_t,
+      grid_h=grid_h,
+      grid_w=grid_w,
+      temporal_offset=vision_start_offset,
+      reset_spatial_indices=reset_spatial_indices,
+      fps=effective_vision_fps,
+      base_fps=base_fps,
+      temporal_compression_factor=temporal_compression_factor,
+  )
+  segments = [text_mrope_ids, vision_mrope_ids]
+
+  if sound_len is not None and sound_len > 0:
+    effective_sound_fps = sound_fps if enable_fps_modulation else None
+    sound_mrope_ids, _ = get_3d_mrope_ids_vae_tokens(
+        grid_t=sound_len,
+        grid_h=1,
+        grid_w=1,
+        temporal_offset=vision_start_offset,
+        reset_spatial_indices=reset_spatial_indices,
+        fps=effective_sound_fps,
+        base_fps=base_fps,
+        temporal_compression_factor=1,
+    )
+    segments.append(sound_mrope_ids)
+
+  if action_len is not None and action_len > 0:
+    action_mrope_ids, _ = get_3d_mrope_ids_vae_tokens(
+        grid_t=action_len,
+        grid_h=1,
+        grid_w=1,
+        temporal_offset=vision_start_offset,
+        reset_spatial_indices=reset_spatial_indices,
+        fps=effective_vision_fps,
+        base_fps=base_fps,
+        temporal_compression_factor=1,
+        base_temporal_compression_factor=temporal_compression_factor,
+        start_frame_offset=1,
+    )
+    segments.append(action_mrope_ids)
+
+  return jnp.concatenate(segments, axis=1), vision_start_offset
+
+
+def _cosmos3_rotate_half(x: jax.Array) -> jax.Array:
+  """Splits the last dimension in half and rotates `[x1, x2] -> [-x2, x1]`."""
+  half = x.shape[-1] // 2
+  return jnp.concatenate([-x[..., half:], x[..., :half]], axis=-1)
+
+
+def apply_cosmos3_rope(x: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
+  """Applies Cosmos 3 rotary embeddings `x * cos + rotate_half(x) * sin` across heads."""
+  if cos.ndim == x.ndim - 1:
+    cos = jnp.expand_dims(cos, axis=-2)
+    sin = jnp.expand_dims(sin, axis=-2)
+  return x * cos.astype(x.dtype) + _cosmos3_rotate_half(x) * sin.astype(x.dtype)
+
+
+class Cosmos3RotaryEmbedding(nnx.Module):
+  """Cosmos 3 interleaved 3D Multimodal Rotary Position Embedding (mRoPE)."""
+
+  def __init__(
+      self,
+      head_dim: int = 128,
+      rope_theta: float = 5000000.0,
+      rope_axes_dim: Sequence[int] = (24, 20, 20),
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      rngs: nnx.Rngs | None = None,
+  ):
+    del rngs
+    self.head_dim = head_dim
+    self.rope_theta = float(rope_theta)
+    self.rope_axes_dim = tuple(rope_axes_dim) if rope_axes_dim is not None else (24, 20, 20)
+    self.cast_as_fprop_dtype = cast_as_fprop_dtype
+    self.fprop_dtype = fprop_dtype
+
+    if sum(self.rope_axes_dim) != head_dim // 2:
+      raise ValueError(
+          f"rope_axes_dim {self.rope_axes_dim} sum must equal head_dim // 2 ({head_dim // 2})."
+      )
+
+  @property
+  def inv_freq(self) -> jax.Array:
+    return 1.0 / (self.rope_theta ** (jnp.arange(0, self.head_dim, 2, dtype=jnp.float32) / self.head_dim))
+
+  def apply_interleaved_mrope(self, freqs: jax.Array) -> jax.Array:
+    """Reorganizes chunked `[..., 3, head_dim // 2]` layout into interleaved `[..., head_dim // 2]`."""
+    freqs_t = freqs[..., 0, :]
+    for dim, offset in enumerate((1, 2), start=1):
+      length = self.rope_axes_dim[dim] * 3
+      idx = slice(offset, length, 3)
+      freqs_t = freqs_t.at[..., idx].set(freqs[..., dim, idx])
+    return freqs_t
+
+  def compute_cos_sin(
+      self,
+      position_ids: jax.Array,
+      dtype: DType | None = None,
+  ) -> tuple[jax.Array, jax.Array]:
+    """Computes `(cos, sin)` rotary tables in float32 and casts to `dtype` (`fprop_dtype` default).
+
+    Accepts `position_ids` in any standard layout:
+    - `[3, N]` or `[N, 3]` or `[N]` -> returns `(cos, sin)` of shape `[N, head_dim]`.
+    - `[3, B, N]`, `[B, 3, N]`, `[B, N, 3]`, or `[B, N]` -> returns `(cos, sin)` of shape `[B, N, head_dim]`.
+    """
+    pos = jnp.asarray(position_ids, dtype=jnp.float32)
+    if pos.ndim == 3 and pos.shape[-1] == 1:
+      pos = jnp.squeeze(pos, axis=-1)
+
+    if pos.ndim == 1:
+      pos_3d = jnp.broadcast_to(pos[:, jnp.newaxis], (pos.shape[0], 3))
+    elif pos.ndim == 2:
+      if pos.shape[0] == 3 and pos.shape[1] != 3:
+        pos_3d = jnp.swapaxes(pos, 0, 1)  # [N, 3]
+      elif pos.shape[1] == 3 and pos.shape[0] != 3:
+        pos_3d = pos  # [N, 3]
+      elif pos.shape[0] == 3 and pos.shape[1] == 3:
+        pos_3d = jnp.swapaxes(pos, 0, 1)  # default [3, N] -> [N, 3]
+      else:
+        pos_3d = jnp.broadcast_to(pos[..., jnp.newaxis], pos.shape + (3,))  # [B, N, 3]
+    elif pos.ndim == 3:
+      if pos.shape[0] == 3 and pos.shape[-1] != 3:
+        pos_3d = jnp.moveaxis(pos, 0, -1)  # [3, B, N] -> [B, N, 3]
+      elif pos.shape[1] == 3 and pos.shape[-1] != 3:
+        pos_3d = jnp.moveaxis(pos, 1, -1)  # [B, 3, N] -> [B, N, 3]
+      else:
+        pos_3d = pos  # [B, N, 3]
+    else:
+      raise ValueError(f"Unsupported position_ids shape: {pos.shape}")
+
+    # Compute outer product in float32: [..., 3, 1] * [head_dim // 2] -> [..., 3, head_dim // 2]
+    freqs = pos_3d[..., jnp.newaxis] * self.inv_freq
+    freqs = self.apply_interleaved_mrope(freqs)
+    emb = jnp.concatenate([freqs, freqs], axis=-1)
+
+    out_dtype = dtype if dtype is not None else (self.fprop_dtype if self.cast_as_fprop_dtype else jnp.float32)
+    return jnp.cos(emb).astype(out_dtype), jnp.sin(emb).astype(out_dtype)
+
+  def __call__(
+      self,
+      inputs: jax.Array,
+      position: jax.Array | None = None,
+      dtype: DType | None = None,
+  ) -> tuple[jax.Array, jax.Array] | jax.Array:
+    """Computes `(cos, sin)` when called with `position_ids`, or rotates `inputs` when `position` is given."""
+    if position is None:
+      return self.compute_cos_sin(inputs, dtype=dtype)
+    cos, sin = self.compute_cos_sin(position, dtype=inputs.dtype)
+    out = apply_cosmos3_rope(inputs, cos, sin)
+    return out.astype(self.fprop_dtype) if self.cast_as_fprop_dtype else out
+
+
+Cosmos3VLTextRotaryEmbedding = Cosmos3RotaryEmbedding
+
+
+def patchify_latents(
+    latents: jax.Array,
+    patch_size: int = 2,
+) -> tuple[jax.Array, tuple[int, int, int], tuple[int, int, int]]:
+  """Patchifies 4D `[C, T, H, W]` or 5D `[B, C, T, H, W]` latents into `[..., T * H_p * W_p, p * p * C]`."""
+  latents_arr = jnp.asarray(latents)
+  is_4d = latents_arr.ndim == 4
+  if is_4d:
+    latents_arr = latents_arr[jnp.newaxis, ...]
+
+  bsz, channels, t_actual, h_actual, w_actual = latents_arr.shape
+  p = patch_size
+  h_padded = ((h_actual + p - 1) // p) * p
+  w_padded = ((w_actual + p - 1) // p) * p
+
+  if h_padded != h_actual or w_padded != w_actual:
+    latents_arr = jnp.pad(
+        latents_arr,
+        ((0, 0), (0, 0), (0, 0), (0, h_padded - h_actual), (0, w_padded - w_actual)),
+    )
+
+  h_patches = h_padded // p
+  w_patches = w_padded // p
+  reshaped = latents_arr.reshape(bsz, channels, t_actual, h_patches, p, w_patches, p)
+  patches = jnp.einsum("bcthpwq->bthwpqc", reshaped).reshape(bsz, t_actual * h_patches * w_patches, p * p * channels)
+
+  if is_4d:
+    patches = jnp.squeeze(patches, axis=0)
+  return patches, (t_actual, h_patches, w_patches), (t_actual, h_actual, w_actual)
+
+
+def unpatchify_latents(
+    patches: jax.Array,
+    latent_shape: tuple[int, int, int],
+    patch_size: int = 2,
+    latent_channel: int = 48,
+    noisy_frame_indexes: jax.Array | Sequence[int] | None = None,
+) -> jax.Array:
+  """Unpatchifies `[..., N_tokens, p * p * C]` tokens back into `[..., C, T, H, W]` latents."""
+  patches_arr = jnp.asarray(patches)
+  is_2d = patches_arr.ndim == 2
+  if is_2d:
+    patches_arr = patches_arr[jnp.newaxis, ...]
+
+  bsz = patches_arr.shape[0]
+  t_orig, h_orig, w_orig = latent_shape
+  p = patch_size
+  h_padded = ((h_orig + p - 1) // p) * p
+  w_padded = ((w_orig + p - 1) // p) * p
+  h_patches = h_padded // p
+  w_patches = w_padded // p
+
+  if noisy_frame_indexes is None:
+    t_n = t_orig
+  else:
+    noisy_idx_arr = jnp.asarray(noisy_frame_indexes, dtype=jnp.int32)
+    t_n = noisy_idx_arr.shape[0]
+
+  if t_n > 0:
+    grid = patches_arr.reshape(bsz, t_n, h_patches, w_patches, p, p, latent_channel)
+    decoded = jnp.einsum("bthwpqc->bcthpwq", grid).reshape(bsz, latent_channel, t_n, h_padded, w_padded)
+    decoded = decoded[:, :, :, :h_orig, :w_orig]
+  else:
+    decoded = jnp.zeros((bsz, latent_channel, 0, h_orig, w_orig), dtype=patches_arr.dtype)
+
+  if noisy_frame_indexes is None:
+    out = decoded
+  else:
+    out = jnp.zeros((bsz, latent_channel, t_orig, h_orig, w_orig), dtype=patches_arr.dtype)
+    if t_n > 0:
+      out = out.at[:, :, noisy_idx_arr, :, :].set(decoded)
+
+  return jnp.squeeze(out, axis=0) if is_2d else out
+
+
+def patchify_and_pack_latents(
+    tokens_vision: Sequence[jax.Array],
+    patch_size: int = 2,
+) -> tuple[jax.Array, list[tuple[int, int, int]]]:
+  """Patchifies and packs a list of `[1, C, T, H, W]` or `[C, T, H, W]` tensors into `[total_tokens, p * p * C]`."""
+  packed_latent = []
+  original_shapes = []
+  for latent in tokens_vision:
+    latent_4d = jnp.squeeze(latent, axis=0) if latent.ndim == 5 else latent
+    patches, _, orig_shape = patchify_latents(latent_4d, patch_size=patch_size)
+    packed_latent.append(patches)
+    original_shapes.append(orig_shape)
+  return jnp.concatenate(packed_latent, axis=0), original_shapes
+
+
+def unpatchify_and_unpack_latents(
+    packed_mse_preds: jax.Array,
+    token_shapes_vision: Sequence[tuple[int, int, int]],
+    noisy_frame_indexes_vision: Sequence[jax.Array | Sequence[int]],
+    original_latent_shapes: Sequence[tuple[int, int, int]],
+    patch_size: int = 2,
+    latent_channel: int = 48,
+) -> list[jax.Array]:
+  """Unpacks and unpatchifies `[total_noisy_tokens, p * p * C]` predictions into `[1, C, T, H, W]` tensors."""
+  unpatchified = []
+  start_idx = 0
+  for token_shape, noisy_frame_indexes, orig_shape in zip(
+      token_shapes_vision, noisy_frame_indexes_vision, original_latent_shapes
+  ):
+    t_c = token_shape[0]
+    _, h_orig, w_orig = orig_shape
+    h_patches = ((h_orig + patch_size - 1) // patch_size)
+    w_patches = ((w_orig + patch_size - 1) // patch_size)
+    noisy_idx_arr = jnp.asarray(noisy_frame_indexes, dtype=jnp.int32)
+    t_n = noisy_idx_arr.shape[0]
+    num_patches = t_n * h_patches * w_patches
+    end_idx = start_idx + num_patches
+    item_patches = packed_mse_preds[start_idx:end_idx]
+    latent_4d = unpatchify_latents(
+        item_patches,
+        latent_shape=(t_c, h_orig, w_orig),
+        patch_size=patch_size,
+        latent_channel=latent_channel,
+        noisy_frame_indexes=noisy_idx_arr,
+    )
+    unpatchified.append(latent_4d[jnp.newaxis, ...])
+    start_idx = end_idx
+  return unpatchified
+
