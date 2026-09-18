@@ -478,7 +478,9 @@ class GateLogit(nnx.Module):
     return getattr(self, self._quant_dot_general_name)
 
   def __call__(self, inputs: jax.Array, _initializing: bool = False) -> Tuple[jax.Array, Optional[jax.Array]]:
-    inputs = jnp.asarray(inputs, jnp.float32 if self.dtype == jnp.float32 else self.dtype)
+    # GateLogit.dtype is set to jnp.float32 by RoutedMoE when config.float32_gate_logits=True
+    # even when the MoE block's expert dtype is bfloat16.
+    inputs = jnp.asarray(inputs, self.dtype)
     norm_axis = linears.normalize_axes(self.axis, inputs.ndim)
 
     if quantizations.in_serve_mode(self.quant):
@@ -486,7 +488,7 @@ class GateLogit(nnx.Module):
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
       kernel = self.kernel[...]
-    kernel = jnp.asarray(kernel, jnp.float32 if self.dtype == jnp.float32 else self.dtype)
+    kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(norm_axis)))
     output_sharding = (
@@ -637,7 +639,11 @@ class RoutedMoE(nnx.Module):
         mesh=self.mesh,
         model_name=self.config.model_name,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
-        weight_dtype=ctypes.get_weight_dtype(self.config, "gate"),
+        weight_dtype=(
+            jnp.float32
+            if self.config.float32_gate_logits
+            else ctypes.get_weight_dtype(self.config, "gate")
+        ),
         quant=self.quant,
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
@@ -1374,7 +1380,11 @@ class RoutedMoE(nnx.Module):
             "BKE,BK -> BE",
             reshaped_intermediate,
             reshaped_weights,
-            precision=matmul_precision,
+            precision=(
+                jax.lax.Precision.HIGHEST
+                if self.config.float32_weight_sum
+                else matmul_precision
+            ),
         )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
