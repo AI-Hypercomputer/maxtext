@@ -77,6 +77,7 @@ def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
           interaction_t,
           solved_x,
           dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+          precision=jax.lax.Precision.DEFAULT,
           preferred_element_type=jnp.float32,
       )
       target_b = e_block - prev_sum
@@ -92,16 +93,11 @@ def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
 def fused_transpose_broadcast(x: jax.Array, src_dim: int, dst_dim: int) -> jax.Array:
   """Perform 1D transpose where results are broadcasted along src_dim."""
   assert x.shape[dst_dim] == 1
-
-  dtype = x.dtype
-  mask_dtype = get_mask_dtype(dtype)
-  mask_shape = list(x.shape)
-  mask_size = mask_shape[src_dim]
-  mask_shape[dst_dim] = mask_size
-  src_mask = jax.lax.broadcasted_iota(mask_dtype, mask_shape, src_dim)
-  dst_mask = jax.lax.broadcasted_iota(mask_dtype, mask_shape, dst_dim)
-  mask = src_mask == dst_mask
-  return jnp.where(mask, x, 0).sum(axis=src_dim, keepdims=True, dtype=dtype)
+  # NOTE: Reshape performs better than squeeze / expand_dims.
+  shape = list(x.shape)
+  shape[dst_dim] = shape[src_dim]
+  shape[src_dim] = 1
+  return jnp.swapaxes(x, src_dim, dst_dim).reshape(shape)
 
 
 def chunked_gdn_per_seq(
@@ -162,6 +158,7 @@ def chunked_gdn_per_seq(
       k_beta_repeat,
       k_repeat,
       dimension_numbers=(((2,), (2,)), ((0,), (0,))),
+      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=jnp.float32,
   ).astype(cfg.dtypes.compute)
   gating_beta_k_k_t = gating_map_masked * beta_k_k_t
@@ -183,6 +180,7 @@ def chunked_gdn_per_seq(
       t_inv,
       merged_v_k,
       dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=jnp.float32,
   ).astype(cfg.dtypes.compute)
 
@@ -200,6 +198,7 @@ def chunked_gdn_per_seq(
       merged_w_q,
       state_prev,
       dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=jnp.float32,
   )
 
@@ -218,6 +217,7 @@ def chunked_gdn_per_seq(
       k_repeat_gating,
       u_ws,
       dimension_numbers=(((1,), (1,)), ((0,), (0,))),
+      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=jnp.float32,
   )
 
@@ -230,6 +230,7 @@ def chunked_gdn_per_seq(
       q_large,
       k_large,
       dimension_numbers=(((2,), (2,)), ((0,), (0,))),
+      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=jnp.float32,
   ).astype(cfg.dtypes.compute)
   # NOTE: must perform repeat after matmul to reduce required compute.
@@ -243,6 +244,7 @@ def chunked_gdn_per_seq(
       out_qk,
       u_ws,
       dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=jnp.float32,
   )
   out = out_updated + out_new
@@ -357,6 +359,7 @@ def recurrent_gdn_per_seq(
         k_curr,
         state_updated,
         dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+        precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=jnp.float32,
     ).astype(cfgs.dtypes.compute)
 
@@ -376,6 +379,7 @@ def recurrent_gdn_per_seq(
         q_curr,
         state,
         dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+        precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=jnp.float32,
     ).astype(cfgs.dtypes.compute)
 
