@@ -56,6 +56,7 @@ from maxtext.layers.attention_op import AttentionOp, _resolve_attention_type
 from maxtext.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
+    Cosmos3RotaryEmbedding,
     Qwen3OmniMoeThinkerTextRotaryEmbedding,
     Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
@@ -916,7 +917,17 @@ class Attention(nnx.Module):
         raise ValueError(f"Unsupported model type for vision rotary embedding: {self.config.model_name}")
 
     elif self.use_mrope:
-      rotary_embedding = Qwen3OmniMoeThinkerTextRotaryEmbedding(
+      if self.config.model_name.startswith("cosmos3"):
+        rotary_embedding = Cosmos3RotaryEmbedding(
+            head_dim=rope_embedding_dims,
+            rope_theta=self.rope_max_timescale,
+            rope_axes_dim=self.mrope_section if self.mrope_section is not None else (24, 20, 20),
+            cast_as_fprop_dtype=True,
+            fprop_dtype=self.dtype,
+            rngs=self.rngs,
+        )
+      else:
+        rotary_embedding = Qwen3OmniMoeThinkerTextRotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.rope_max_timescale,
           embedding_dims=rope_embedding_dims,
