@@ -79,3 +79,4 @@ compressed_rope_max_timescale: 160000      # Compressed RoPE theta
 max_position_embeddings: 1048576
 original_max_position_embeddings: 65536
 # Token-id to expert-id table for hash routing; artifact used by the passing v5p e2e run.
+tid2eid_sideload_path: "gs://maxtext-deepseek/deepseek4-284b/2026-09-17/tid2eid.safetensors"

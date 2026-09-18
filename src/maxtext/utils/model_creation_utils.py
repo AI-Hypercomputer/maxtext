@@ -44,6 +44,7 @@ from flax.core.spmd import logical_axis_rules
 import flax.linen as nn
 from huggingface_hub import get_token
 import jax
+from jax.sharding import NamedSharding, PartitionSpec
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common import checkpointing
@@ -57,6 +58,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx, sharding
 import numpy as np
 from orbax import checkpoint as ocp
+from safetensors.numpy import load as load_safetensors
 
 try:
   from orbax.checkpoint.metadata import ArrayMetadata as _OrbaxArrayMetadata
@@ -832,6 +834,46 @@ def verify_and_sync_scan_layers(config):
   return config
 
 
+def _get_moe_block(model, layer_idx: int):
+  """Returns the MoE block of an unscanned decoder layer, or None if absent."""
+  layer = getattr(model.decoder, f"layers_{layer_idx}", None)
+  return getattr(getattr(layer, "mlp", None), "MoeBlock_0", None)
+
+
+def _sideload_tid2eid(model, mesh, sideload_path: str, num_hash_layers: int) -> None:
+  """Populates the hash-routing `tid2eid` tables from an external safetensors file.
+
+  The MaxText checkpoint converter never writes the `Tid2EidVar` collection, so a
+  restored checkpoint would otherwise route through a zero-initialized table
+  (b/563048036).
+  """
+  max_logging.log(f"Sideloading Tid2EidVar tables from {sideload_path}...")
+  tables = load_safetensors(epath.Path(sideload_path).read_bytes())
+  replicated = NamedSharding(mesh, PartitionSpec())
+  assigned_count = 0
+  for layer_idx in range(num_hash_layers):
+    table = tables.get(f"layers_{layer_idx}")
+    moe_block = _get_moe_block(model, layer_idx)
+    if table is None or moe_block is None or getattr(moe_block, "tid2eid", None) is None:
+      continue
+    moe_block.tid2eid.value = jax.device_put(table.astype(np.float32), replicated)
+    assigned_count += 1
+  if assigned_count != num_hash_layers:
+    raise ValueError(f"Tid2EidVar sideload error: expected {num_hash_layers} layer assignments, got {assigned_count}")
+
+
+def _validate_tid2eid(model, num_hash_layers: int, num_experts: int) -> None:
+  """Raises if any hash-routing layer has a missing, zero, or out-of-range table."""
+  for layer_idx in range(num_hash_layers):
+    tid_var = getattr(_get_moe_block(model, layer_idx), "tid2eid", None)
+    if tid_var is None or tid_var.value.sum() == 0:
+      raise ValueError(f"Hash-routing layer {layer_idx} has a missing or zero-initialized tid2eid table.")
+    lo, hi = int(tid_var.value.min()), int(tid_var.value.max())
+    if lo < 0 or hi >= num_experts:
+      raise ValueError(f"Tid2EidVar layer {layer_idx}: ids out of range [{lo}, {hi}] for num_experts={num_experts}")
+    max_logging.log(f"tid2eid verified for layer {layer_idx}: sum={tid_var.value.sum()} lo={lo} hi={hi}")
+
+
 # pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
@@ -1163,6 +1205,19 @@ def from_pretrained(
         checkpoint = to_dict(checkpoint)
         logical_axes_tree = to_dict(logical_axes_tree)
 
+        if not is_nnx_checkpoint and hasattr(restored, "get") and hasattr(restored.get("params"), "items"):
+          restored_params = to_dict(restored["params"])
+          for coll_name, coll_dict in restored_params.items():
+            if coll_name == "params":
+              continue
+            def _deep_merge(tgt, src):
+              for k, v in src.items():
+                if isinstance(v, dict) and k in tgt and isinstance(tgt[k], dict):
+                  _deep_merge(tgt[k], v)
+                else:
+                  tgt[k] = v
+            _deep_merge(checkpoint, coll_dict)
+
         checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
         # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
         # This prevents the replicated intermediate copies from persisting until function return.
@@ -1196,6 +1251,13 @@ def from_pretrained(
 
         checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
         nnx.update(model, checkpoint)
+
+        tid2eid_sideload_path = getattr(config, "tid2eid_sideload_path", "")
+        first_num_hash_layers = getattr(config, "first_num_hash_layers", 0)
+        if tid2eid_sideload_path and first_num_hash_layers > 0:
+          _sideload_tid2eid(model, mesh, tid2eid_sideload_path, first_num_hash_layers)
+        _validate_tid2eid(model, first_num_hash_layers, config.num_experts)
+
       else:
         raise ValueError(
             f"Checkpoint restore from '{config.load_parameters_path}' yielded no parameters. "
