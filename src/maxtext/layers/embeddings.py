@@ -1661,6 +1661,12 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
       min_timescale: int = 10000,
       max_timescale: int = 10000,
       mesh: Any = None,
+      rope_type: str = "default",
+      rope_factor: float = 16.0,
+      beta_fast: float = 32.0,
+      beta_slow: float = 1.0,
+      original_max_position_embeddings: int = 65536,
+      truncate: bool = True,
       **kwargs,
   ):
     super().__init__(
@@ -1674,6 +1680,12 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
     self.partial_rotary_factor = partial_rotary_factor
     self.rope_theta = rope_theta
     self.fprop_dtype = fprop_dtype
+    self.rope_type = rope_type
+    self.rope_factor = rope_factor
+    self.beta_fast = beta_fast
+    self.beta_slow = beta_slow
+    self.original_max_position_embeddings = original_max_position_embeddings
+    self.truncate = truncate
 
     # Compute the partial rotary dimension (rope_head_dim)
     self.dim = int(head_dim * partial_rotary_factor)
@@ -1683,7 +1695,30 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
     # Compute base inverse frequencies for half of self.dim
     half_dim = self.dim // 2
     fraction = 2 * jnp.arange(0, half_dim, dtype=jnp.float32) / self.dim
-    return 1.0 / (self.rope_theta**fraction)
+    freqs = 1.0 / (self.rope_theta**fraction)
+    if self.rope_type != "yarn":
+      return freqs
+
+    def find_correction_dim(num_rotations):
+      return (
+          self.dim
+          * math.log(self.original_max_position_embeddings / (num_rotations * 2 * math.pi))
+          / (2 * math.log(self.rope_theta))
+      )
+
+    low = find_correction_dim(self.beta_fast)
+    high = find_correction_dim(self.beta_slow)
+    if self.truncate:
+      low = math.floor(low)
+      high = math.ceil(high)
+    low = max(low, 0)
+    high = min(high, self.dim - 1)
+
+    if low == high:
+      high += 0.001
+    linear_func = (jnp.arange(half_dim, dtype=jnp.float32) - low) / (high - low)
+    smooth = 1 - jnp.clip(linear_func, 0, 1)
+    return freqs / self.rope_factor * (1 - smooth) + freqs * smooth
 
   def get_freqs(self, position_ids: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
     # position_ids: [B, S]
