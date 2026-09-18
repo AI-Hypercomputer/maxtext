@@ -984,6 +984,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # STEP B: 1D Convolution
     # =========================================================================
     qkv = jnp.concatenate([q, k, v], axis=-1)
+    if decoder_segment_ids is not None:
+      # Mask pad positions (segment 0) BEFORE the causal 1D convolution.
+      # Step C masks key/value/g before the delta-rule recurrence, but without
+      # masking here first, conv1d (kernel size 4) smears non-zero pad-token qkv
+      # across the left-padding boundary into the first 3 real tokens, corrupting
+      # the recurrent state S_t across the sequence.
+      qkv = jnp.where((decoder_segment_ids != 0)[..., None], qkv, 0.0)
     batch, seq_len, _ = qkv.shape
     conv_kernel_size = self.config.gdn_conv_kernel_dim
 
@@ -1218,7 +1225,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           next_conv_state = next_conv_state[:orig_cache_batch]
           next_recurrent_state = next_recurrent_state[:orig_cache_batch]
 
-    next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
+    # `jax_chunk_gated_delta_rule` returns `None` for the final state when it is
+    # called without an `initial_state` (the unsharded `self.mesh is None` train
+    # path), so only cast when a state was actually produced.
+    if next_recurrent_state is not None:
+      next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
 
