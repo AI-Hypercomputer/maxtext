@@ -832,6 +832,15 @@ def verify_and_sync_scan_layers(config):
   return config
 
 
+def _deep_merge(tgt: dict, src: dict) -> None:
+  """Recursively merges `src` into `tgt`, keeping subtrees that only `tgt` has."""
+  for k, v in src.items():
+    if isinstance(v, dict) and k in tgt and isinstance(tgt[k], dict):
+      _deep_merge(tgt[k], v)
+    else:
+      tgt[k] = v
+
+
 # pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
@@ -1162,6 +1171,14 @@ def from_pretrained(
         model_arrays = to_dict(model_arrays)
         checkpoint = to_dict(checkpoint)
         logical_axes_tree = to_dict(logical_axes_tree)
+
+        if not is_nnx_checkpoint and hasattr(restored, "get") and hasattr(restored.get("params"), "items"):
+          restored_params = to_dict(restored["params"])
+
+          for coll_name, coll_dict in restored_params.items():
+            if coll_name == "params":
+              continue
+            _deep_merge(checkpoint, coll_dict)
 
         checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
         # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
