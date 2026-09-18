@@ -39,6 +39,13 @@ Extra debugging flags (all optional, passed as key=value in argv):
                               When set alongside debug_converter=true, weight stats are
                               compared between the HF reference and the converted MaxText
                               weights side-by-side.
+  validate_raiden_path=true   Also validate the target-free conversion the Raiden path
+                              runs on the trainer (everything else here converts with
+                              target_state=sampler.transformer_state). Replays the
+                              weight-sync manifest preflight against the real rollout tree
+                              and diffs the tensors against the target-aware ones. No
+                              Raiden or second job needed. Implies debug_converter=true,
+                              whose conversion is its oracle.
   gcs_debug_path=gs://…       Upload layer-0 and global tensors from the converted state
                               as .npy files to this GCS prefix for offline inspection.
                               Only active when debug_converter=true.
@@ -99,12 +106,15 @@ are covered:
     so `use_weight_converter=false` alone still runs the new rule-table
     converter for them.
 
-Currently this validator supports: qwen3-30b-a3b, qwen3-30b-a3b-base, qwen3-235b-a22b, gemma4-26b.
+Currently this validator supports: qwen3-30b-a3b, qwen3-30b-a3b-base, qwen3-235b-a22b,
+gemma4-26b, qwen3.5-35b-a3b, qwen3-0.6b.
 """
 
 import ast
 import contextlib
+import functools
 import gc
+import hashlib
 import io
 import json
 import logging
@@ -150,6 +160,8 @@ from maxtext.integration.vllm.maxtext_vllm_rollout import (
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
+from maxtext.integration.vllm.weight_converter import WeightConverter
+from maxtext.integration.vllm.convert_utils import resolve_prefuse_moe_weights, resolve_rollout_tp
 from maxtext.configs import types
 from maxtext.utils import model_creation_utils
 
@@ -163,6 +175,10 @@ vllm_model_name_mapping = {
     "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B",
     "gemma4-26b": "google/gemma-4-26B-A4B",
     "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
+    # Dense, ~1.2GB bf16: lets the validator run on one small host, where the MoE
+    # models above do not fit. Covers unscan, name pairing and the target-free
+    # diff -- not MoE fusion, which only the a3b models exercise.
+    "qwen3-0.6b": "Qwen/Qwen3-0.6B",
     # Add more mappings as needed
 }
 
@@ -178,6 +194,11 @@ def _setup_vllm_environment():
   os.environ["SKIP_JAX_PRECOMPILE"] = "1"
   os.environ["JAX_RANDOM_WEIGHTS"] = "False"
   os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+  # Without this `TPURunner._init_mesh` builds the legacy 2D ('data', 'model')
+  # mesh, and any MoE model whose axis rules name `expert` dies at construction
+  # with "Resource axis: expert ... is not found in mesh". Production sets it in
+  # vllm_decode.py and every run_*_rl.sh; setdefault because gpt-oss wants 0.
+  os.environ.setdefault("NEW_MODEL_DESIGN", "1")
 
 
 def _clean_device_memory():
@@ -657,6 +678,377 @@ def _upload_tensors_to_gcs(converted_state: dict, gcs_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Raiden-path validation, without Raiden
+# ---------------------------------------------------------------------------
+#
+# The rest of this file converts *target-aware*, reading the rollout's shapes,
+# shardings, dtypes and `wi` leaf off `sampler.transformer_state`. The Raiden
+# path cannot: the converter runs on the trainer, in
+# `MaxTextTrainingEngine.prepare_weight_sync`, which calls `convert(params_state)`
+# with no target_state -- tunix tries to seed one via `set_target_state`, which
+# `MaxTextTrainingEngine` does not implement, and the AttributeError is swallowed.
+# The resulting plan comes entirely from the trainer's config, which is the skew
+# `MaxTextToMaxTextConverter`'s docstring warns about.
+#
+# These helpers cover that target-free arm in one process:
+#   1. Build the converter as `MaxTextTrainingEngine.__init__` does
+#      (`_create_model_converter` passes only `tp`, so it would test a different
+#      configuration than the trainer runs).
+#   2. Convert with no target -- what Raiden's `bind()` would receive.
+#   3. Replay the controller's manifest preflight (`_check_raiden_manifest`).
+#   4. Diff values against the target-aware conversion
+#      (`_compare_against_fingerprints`). Preflight and Raiden checksums both
+#      pass for a correctly-named, correctly-shaped, wrong tensor, so this is the
+#      only step catching a bad fuse order, unstack axis or MoE padding.
+#
+# What one process cannot cover, and a green run here does not promise: hosts
+# disagreeing on a global shape (the real preflight compares one manifest entry
+# per host), trainer-vs-rollout mesh and per-shard placement (recorded in
+# `_tensor_metadata` but never diffed by the controller either), and the
+# destination names really advertised by `tpu_inference.rl.raiden_worker_sync`,
+# which binds `state["model"]` rather than the whole runner state.
+
+# Raiden folds `layers_0` to `layers.0`, drops `base`/`model` roots and the nnx
+# `.value` leaf, so the trainer's `['base'][...]` and the rollout's `['model'][...]`
+# spellings of one parameter collapse to the same key.
+_FALLBACK_PATH_COMPONENT_RE = re.compile(r"\[([^\]]*)\]|([^.\[\]]+)")
+_FALLBACK_FOLDED_INDEX_RE = re.compile(r"^(.+?)_(\d+)$")
+# Destination-only buffers Raiden refuses to bind; see `_is_kv_cache`.
+_KV_CACHE_SEGMENTS = frozenset({"cache", "cached_prefill_key", "cached_prefill_value"})
+
+
+def _fallback_param_key(name: str) -> str:
+  """Local replica of `raiden_synchronizer._param_key`, used if tunix lacks it."""
+  segments = []
+  for bracketed, dotted in _FALLBACK_PATH_COMPONENT_RE.findall(name):
+    component = (bracketed or dotted).strip("'\"")
+    if not component:
+      continue
+    folded = _FALLBACK_FOLDED_INDEX_RE.match(component)
+    segments.extend(folded.groups() if folded else (component,))
+  while segments and segments[0] in ("base", "model"):
+    segments.pop(0)
+  if segments and segments[-1] == "value":
+    segments.pop()
+  return ".".join(segments)
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_param_key_fn():
+  """Raiden's own canonicalizer when importable, else the local replica.
+
+  The check only means something if it pairs names by the rule the controller
+  uses, so prefer the real (private, and so mutable) helper and fall back only
+  on tunix builds that ship no `raiden_synchronizer`.
+  """
+  try:
+    from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    fn = getattr(raiden_synchronizer, "_param_key", None)
+    if callable(fn):
+      logging.info("Pairing names with tunix raiden_synchronizer._param_key (the rule the controller uses).")
+      return fn
+  except Exception:  # pylint: disable=broad-except
+    pass
+  logging.warning(
+      "tunix.experimental.weight_sync.raiden_synchronizer._param_key is unavailable; "
+      "falling back to this module's local copy. The pairing rule is replicated, not "
+      "shared, so a change on the tunix side will not be reflected here."
+  )
+  return _fallback_param_key
+
+
+def _raiden_bindable(arr) -> bool:
+  """Mirrors `raiden_synchronizer._bindable`: what actually gets transferred.
+
+  Raiden drops rank-0, non-floating and non-device leaves (binding an RNG key
+  can SIGSEGV), so filtering them here keeps phantom "no counterpart" entries
+  out of the diff. The device/platform gate matters: a host numpy leaf has no
+  `.devices()`, so Raiden would drop it while a shape/dtype-only check keeps it,
+  and the local run would pass where the real preflight reports it missing.
+  """
+  try:
+    if not hasattr(arr, "shape") or not hasattr(arr, "dtype"):
+      return False
+    if getattr(arr, "ndim", 0) < 1:
+      return False
+    if not jnp.issubdtype(arr.dtype, jnp.floating):
+      return False
+    devices = arr.devices()
+    return bool(devices) and all(getattr(d, "platform", "?") in ("tpu", "cpu") for d in devices)
+  except Exception:  # pylint: disable=broad-except
+    return False
+
+
+def _canonical_raiden_state(state, param_key_fn) -> dict:
+  """Flattens a weight tree the way Raiden's `bind()` + manifest would see it."""
+  canonical = {}
+  collisions = []
+  for raw_key, value in _flatten_weight_dict(state).items():
+    key = param_key_fn(raw_key)
+    if not key:
+      # The real destination raises on this too (`_canonicalize_variable_names`);
+      # skipping it locally would pass a tree the round would reject.
+      raise ValueError(f"{raw_key!r} canonicalizes to an empty Raiden key")
+    if any(seg in _KV_CACHE_SEGMENTS for seg in key.split(".")):
+      continue
+    if not _raiden_bindable(value):
+      continue
+    if key in canonical:
+      # Two leaves canonicalizing to one name is itself the bug: the controller
+      # pairs by exact name, so one would silently overwrite the other.
+      collisions.append(key)
+    canonical[key] = value
+  if collisions:
+    raise ValueError(f"canonical key collision on {len(collisions)} name(s), first: {sorted(collisions)[:5]}")
+  return canonical
+
+
+def _check_raiden_manifest(source: dict, destination: dict) -> list:
+  """Replays `weight_sync_coordinator._manifest_mismatches` on two local trees.
+
+  Returns the problems the controller would report, rather than raising, so a
+  single run shows every one of them.
+  """
+  problems = []
+  for name in sorted(set(source) - set(destination)):
+    problems.append(f"preflight: source variable {name!r} has no destination counterpart (shape {source[name].shape})")
+  for name in sorted(set(destination) - set(source)):
+    problems.append(
+        f"preflight: destination variable {name!r} has no source counterpart (shape {destination[name].shape})"
+    )
+  for name in sorted(set(source) & set(destination)):
+    src, dst = source[name], destination[name]
+    if tuple(src.shape) != tuple(dst.shape):
+      problems.append(
+          f"preflight: {name!r} global shape differs: source {tuple(src.shape)}, destination {tuple(dst.shape)}"
+      )
+    # Independent `if`, as in `_manifest_mismatches`: a tensor wrong in both
+    # shape and width should report both, not just the first.
+    if src.dtype.itemsize != dst.dtype.itemsize:
+      # item_size, not dtype: Raiden moves bytes, so a float32 source against a
+      # bf16 rollout is the mismatch that actually corrupts the transfer.
+      problems.append(
+          f"preflight: {name!r} item_size differs: source {src.dtype.itemsize} ({src.dtype}), "
+          f"destination {dst.dtype.itemsize} ({dst.dtype})"
+      )
+  return problems
+
+
+def _host_stats_str(host) -> str:
+  """`_weight_stats_str` for a host array, so describing a tensor never bounces
+  it back onto a device -- the point of the host copy is to free the buffer.
+  """
+  as32 = host.astype(np.float32)
+  return (
+      f"shape={tuple(host.shape)} mean_abs={float(np.mean(np.abs(as32))):.6f} "
+      f"std={float(np.std(as32)):.6f} min={float(np.min(as32)):.6f} max={float(np.max(as32)):.6f}"
+  )
+
+
+def _tensor_fingerprint(arr) -> tuple:
+  """Returns `(shape, dtype, blake2b-of-bytes, stats-string)` for one tensor.
+
+  Fingerprints, not arrays, so the oracle can be released before the second
+  conversion runs -- rollout + target-aware + target-free is three full copies,
+  and 35B does not fit three times in a v6e-8.
+
+  The hash covers raw bytes, not reductions: sum/mean/min/max are
+  permutation-invariant and so blind to a wrong fuse order or unstack axis, the
+  errors this exists to catch. The stats string is only a diagnostic -- matching
+  stats on a differing hash means a permutation, differing stats mean bad math.
+  """
+  value = arr.value if hasattr(arr, "value") else arr
+  host = np.asarray(jax.device_get(value))
+  digest = hashlib.blake2b(host.tobytes(), digest_size=16).hexdigest()
+  return (tuple(host.shape), str(host.dtype), digest, _host_stats_str(host))
+
+
+def _fingerprint_oracle(target_aware_state) -> dict:
+  """Reduces the target-aware conversion to per-tensor fingerprints.
+
+  Call immediately before dropping the caller's `target_aware_state`: the result
+  is a few hundred bytes per tensor, so releasing the tree frees its HBM.
+  """
+  canonical = _canonical_raiden_state(target_aware_state, _resolve_param_key_fn())
+  oracle = {}
+  for name in sorted(canonical):
+    oracle[name] = _tensor_fingerprint(canonical.pop(name))
+  logging.info("Fingerprinted %d target-aware tensors; the oracle tree can now be released.", len(oracle))
+  return oracle
+
+
+def _compare_against_fingerprints(target_free: dict, oracle: dict) -> tuple:
+  """Diffs a target-free conversion piece against the target-aware fingerprints.
+
+  Exact by construction: both arms run the same arithmetic on the same inputs,
+  so any difference is a structural divergence (different fuse order, different
+  unstack axis, different padding), not floating-point noise.
+
+  Returns `(problems, compared_names)`. The caller needs the second element to
+  prove coverage: this only sees the intersection, so an oracle tensor the
+  target-free arm never emits would otherwise pass unexamined.
+  """
+  problems = []
+  compared = set()
+  for name in sorted(set(target_free) & set(oracle)):
+    free_shape, free_dtype, free_hash, free_stats = _tensor_fingerprint(target_free[name])
+    aware_shape, aware_dtype, aware_hash, aware_stats = oracle[name]
+    compared.add(name)
+    if free_shape != aware_shape:
+      # Not redundant with the manifest check, which compares the target-free
+      # tree against the rollout and never looks at the oracle's shapes.
+      problems.append(
+          f"value: {name!r} shape differs from the target-aware conversion: "
+          f"target_free {free_shape}, target_aware {aware_shape}"
+      )
+      continue
+    if free_hash == aware_hash:
+      continue
+    hint = (
+        "identical stats -- the elements are the same but in a different order, "
+        "which is a permutation/fuse-order/unstack-axis bug"
+        if free_stats == aware_stats
+        else "different stats -- the arithmetic itself diverged"
+    )
+    problems.append(
+        f"value: {name!r} differs from the target-aware conversion ({hint}). "
+        f"target_free[{free_stats} dtype={free_dtype}] vs target_aware[{aware_stats} dtype={aware_dtype}]"
+    )
+  return problems, compared
+
+
+def _engine_equivalent_converter(config) -> WeightConverter:
+  """Builds the converter with the arguments `MaxTextTrainingEngine` uses.
+
+  The trainer resolves `kv_tp_size`, `moe_mlp_tp_size`, `prefuse_moe_weights` and
+  `rollout_backend` explicitly; `_create_model_converter` passes only `tp` and
+  lets them default, which would test a different object than Raiden runs.
+  """
+  rollout_tp = resolve_rollout_tp(config)
+  rollout_backend = getattr(config, "rollout_backend", "maxtext")
+  converter = WeightConverter(
+      config=config,
+      tp=rollout_tp,
+      kv_tp_size=getattr(config, "kv_tp_size", 0) or rollout_tp,
+      moe_mlp_tp_size=getattr(config, "moe_mlp_tp_size", 0) or rollout_tp,
+      prefuse_moe_weights=resolve_prefuse_moe_weights(config),
+      rollout_backend=rollout_backend,
+      debug=getattr(config, "weight_sync_debug", False),
+  )
+  if converter._direct is None:  # pylint: disable=protected-access
+    # Rule (torchax) mode emits an HF-shaped tree no Raiden round carries, so
+    # comparing it would be a wall of meaningless key mismatches.
+    raise ValueError(
+        f"validate_raiden_path needs the direct MaxText-to-MaxText converter, but "
+        f"rollout_backend={rollout_backend!r} with the current model selected the torchax "
+        "rule path. The Raiden path requires vLLM to run MaxTextForCausalLM: pass "
+        "rollout_backend=maxtext and the MaxTextForCausalLM vllm_hf_overrides."
+    )
+  return converter
+
+
+def _stream_target_free_conversion(config, model_state, oracle: dict, param_key_fn):
+  """Runs the target-free conversion piece by piece, diffing each against the oracle.
+
+  Streamed because the rollout tree is already a full copy on device and a
+  materialized target-free tree would be a second. Each piece is fingerprinted,
+  compared and dropped; only per-tensor metadata survives, for the manifest diff.
+
+  Returns `(source_meta, value_problems, compared)`.
+  """
+  converter = _engine_equivalent_converter(config)
+  source_meta = {}
+  value_problems = []
+  compared = set()
+  collisions = []
+  with _SyncPhase("WeightConverter.convert_streaming (target-free, as prepare_weight_sync converts)") as phase:
+    for piece in converter.convert_streaming(model_state):
+      canonical_piece = _canonical_raiden_state(piece, param_key_fn)
+      phase.block_on(canonical_piece)
+      for name, arr in canonical_piece.items():
+        if name in source_meta:
+          collisions.append(name)
+        source_meta[name] = jax.ShapeDtypeStruct(arr.shape, arr.dtype)
+      piece_problems, piece_compared = _compare_against_fingerprints(canonical_piece, oracle)
+      value_problems.extend(piece_problems)
+      compared |= piece_compared
+      del piece, canonical_piece
+      gc.collect()
+
+  if collisions:
+    raise ValueError(
+        f"the target-free conversion produced {len(collisions)} duplicate canonical name(s), "
+        f"first: {sorted(collisions)[:5]}. Raiden pairs by exact name, so one would silently "
+        "overwrite the other on the wire."
+    )
+  return source_meta, value_problems, compared
+
+
+def _validate_raiden_path(config, model_state, rollout_state, oracle: dict) -> None:
+  """Checks the trainer-side, target-free conversion the Raiden path performs.
+
+  `oracle` is `_fingerprint_oracle`'s dict, not the target-aware tree itself.
+  Raises with every problem found; quiet when the target-free conversion is
+  byte-identical to the oracle and would clear the controller's preflight.
+  """
+  print("=" * 80)
+  print("Validating the Raiden (target-free) conversion path -- no Raiden required")
+  print("=" * 80)
+  param_key_fn = _resolve_param_key_fn()
+
+  canonical_rollout = _canonical_raiden_state(rollout_state, param_key_fn)
+
+  source_meta, value_problems, compared = _stream_target_free_conversion(config, model_state, oracle, param_key_fn)
+  # Without this the value diff is only over the intersection, so a run in which
+  # the two arms share no keys at all would compare nothing and still pass.
+  for name in sorted(set(oracle) - compared):
+    value_problems.append(f"value: {name!r} is in the target-aware conversion but the target-free arm never emitted it")
+  for name in sorted(set(source_meta) - set(oracle)):
+    value_problems.append(
+        f"value: {name!r} was emitted by the target-free arm but is absent from the target-aware oracle"
+    )
+  logging.info(
+      "Canonical leaf counts -- target-free source: %d, rollout destination: %d, target-aware oracle: %d",
+      len(source_meta),
+      len(canonical_rollout),
+      len(oracle),
+  )
+
+  problems = _check_raiden_manifest(source_meta, canonical_rollout)
+  if problems:
+    logging.error("Manifest preflight would FAIL the weight-sync round (%d problem(s)):", len(problems))
+    for problem in problems[:40]:
+      logging.error("  %s", problem)
+  else:
+    logging.info("Manifest preflight OK: %d variables pair by name, shape and item size.", len(source_meta))
+
+  if value_problems:
+    logging.error(
+        "Target-free conversion DIFFERS from the target-aware conversion for %d tensor(s). "
+        "Preflight and Raiden checksums cannot see this class of error -- the names and "
+        "shapes are right and the bytes transfer intact, they are just the wrong bytes:",
+        len(value_problems),
+    )
+    for problem in value_problems[:40]:
+      logging.error("  %s", problem)
+  else:
+    logging.info("Values OK: all %d compared tensors are identical to the target-aware conversion.", len(compared))
+
+  del source_meta, canonical_rollout, compared
+  gc.collect()
+  jax.clear_caches()
+
+  total = len(problems) + len(value_problems)
+  if total:
+    raise ValueError(
+        f"Raiden-path validation failed: {len(problems)} manifest problem(s), "
+        f"{len(value_problems)} value mismatch(es) -- see logs above."
+    )
+  print(f"{GREEN}Raiden-path validation PASSED: target-free conversion matches the rollout tree and the oracle{RESET}")
+
+
+# ---------------------------------------------------------------------------
 # Main validation logic
 # ---------------------------------------------------------------------------
 
@@ -675,6 +1067,7 @@ class ConverterValidationConfig(types.RLConfig):
   hbm_utilization_vllm: float = 0.6
   use_standalone_converter: bool = False
   debug_converter: bool = False
+  validate_raiden_path: bool = False
   benchmark_weight_sync: bool = False
   vllm_load_format: str = "dummy"
   gcs_debug_path: str = ""
@@ -714,6 +1107,12 @@ def validate_converter(argv) -> None:
   # Optional debugging flags.
   vllm_load_format = getattr(trainer_config, "vllm_load_format", "dummy")
   debug_converter = getattr(trainer_config, "debug_converter", False)
+  validate_raiden_path = getattr(trainer_config, "validate_raiden_path", False)
+  # The Raiden check needs the target-aware conversion as its oracle, and that
+  # only runs under debug_converter, so imply it rather than erroring.
+  if validate_raiden_path and not debug_converter:
+    logging.info("validate_raiden_path=true implies debug_converter=true (it needs the target-aware conversion).")
+    debug_converter = True
   gcs_debug_path = getattr(trainer_config, "gcs_debug_path", "")
   benchmark_weight_sync = getattr(trainer_config, "benchmark_weight_sync", False)
 
@@ -828,6 +1227,21 @@ def validate_converter(argv) -> None:
   use_standalone_converter = getattr(trainer_config, "use_standalone_converter", False) or getattr(
       getattr(trainer_config, "vllm", None), "use_standalone_converter", False
   )
+
+  # Checked here, before vLLM boots, rather than after the oracle has been
+  # built. The Raiden check compares two conversions by name, so both arms must
+  # target the same tree: only mode 1 with the WeightConverter does. Under
+  # mode 2 / the standalone torchax converters the oracle is HF-shaped
+  # (`vllm_model.*`) while the target-free arm emits MaxText names, the key
+  # intersection is empty, and the run would otherwise "pass" having compared
+  # nothing.
+  if validate_raiden_path and not (direct_maxtext_sync and use_weight_converter and not use_standalone_converter):
+    raise ValueError(
+        "validate_raiden_path=true requires the direct MaxText-to-MaxText converter, which is "
+        f"what the Raiden path runs: got direct_maxtext_sync={direct_maxtext_sync} "
+        f"(vllm_hf_overrides must name MaxTextForCausalLM), use_weight_converter={use_weight_converter}, "
+        f"use_standalone_converter={use_standalone_converter}."
+    )
 
   # For direct MaxText sync with MoE + TP>1, forces the target's prefused
   # `wi` layout so each shard gets its local gate chunk followed by its local
@@ -973,6 +1387,23 @@ def validate_converter(argv) -> None:
       with timer("GCS tensor upload"):
         _upload_tensors_to_gcs(flat_maxtext_vllm_state, gcs_debug_path)
 
+    del flat_golden_llm_state, flat_maxtext_vllm_state
+
+  # --- Raiden-path (target-free) validation ---------------------------------
+  if validate_raiden_path:
+    if converter is None or maxtext_vllm_state is None:
+      # Unreachable given the guard above; a mode change upstream should fail
+      # loudly here rather than silently skip the check.
+      raise ValueError("validate_raiden_path=true produced no target-aware conversion to use as an oracle.")
+    # Fingerprint, then drop the tree: the rollout already holds a full copy and
+    # the target-free conversion builds another, so keeping this one is a third.
+    raiden_oracle = _fingerprint_oracle(maxtext_vllm_state)
+    del maxtext_vllm_state
+    gc.collect()
+    jax.clear_caches()
+    _validate_raiden_path(trainer_config, model_state, golden_llm_state, raiden_oracle)
+    del raiden_oracle
+
   # --- Weight sync via sampler.update_params() ------------------------------
   # Legacy paths always pay for the full sync here (transfer_state_directly /
   # transfer_state_with_mappings can't be split into convert-only). The
@@ -1021,8 +1452,9 @@ def validate_converter(argv) -> None:
     # converter testable on models whose *inference* path is still being fixed
     # elsewhere -- conversion correctness is pure weight math and does not
     # depend on decode working.
-    print("debug_converter=true: conversion checks complete, skipping generation.", flush=True)
-    logging.info("debug_converter=true: skipping weight assignment and generation.")
+    cause = "validate_raiden_path=true" if validate_raiden_path else "debug_converter=true"
+    print(f"{cause}: conversion checks complete, skipping generation.", flush=True)
+    logging.info("%s: skipping weight assignment and generation.", cause)
     return
 
   num_synced = len(jax.tree_util.tree_leaves(sampler.transformer_state))
