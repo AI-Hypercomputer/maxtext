@@ -2185,6 +2185,16 @@ class TrainingLoop(BaseModel):
   data_shuffle_seed: int = Field(0, description="Seed for data shuffling.")
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
   max_inflight_computations: int = Field(2, description="Maximum number of inflight computations on device.")
+  optimization_barrier_on_gradients: bool = Field(
+      False,
+      description=(
+          "Whether to fence the raw gradients with jax.lax.optimization_barrier"
+          " before the optimizer update. XLA otherwise fuses the sparse MoE"
+          " backward pass into the update, which produces non-finite gradients"
+          " at scale. The barrier is mathematically an identity, but it blocks"
+          " otherwise beneficial fusions, so it stays off by default."
+      ),
+  )
 
 
 class ManifoldConstrainedHyperConnections(BaseModel):

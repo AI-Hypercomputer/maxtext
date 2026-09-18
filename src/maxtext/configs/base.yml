@@ -927,6 +927,7 @@ olmo_apply_ngram_filter: true # mask instances with repetitive n-grams (OLMo-cor
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
 log_period: 100 # The frequency of Tensorboard flush, gcs metrics writing, and managed profiler metrics updating.
 max_inflight_computations: 2 # Maximum number of inflight computations on device.
+optimization_barrier_on_gradients: false # fence raw gradients with jax.lax.optimization_barrier so XLA cannot fuse the MoE backward pass into the optimizer update (that fusion yields non-finite gradients at scale); it also blocks beneficial fusions, so leave false unless a model needs it.
 training_objective: 'causal_lm' # Supported objectives: causal_lm, block_diffusion
 block_diffusion_mask_id: -1 # Tokenizer mask-token id; required for training_objective='block_diffusion'
 block_diffusion_min_noise: 0.001 # Minimum per-block corruption probability for block-diffusion training
