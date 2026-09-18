@@ -3506,10 +3506,14 @@ class RoutedMoE(nnx.Module):
         onehot_moe_permute_threshold=tpu_inference_envs.ONEHOT_MOE_PERMUTE_THRESHOLD,
         moe_chunk_size=tpu_inference_envs.VLLM_MOE_CHUNK_SIZE,
         scatter_results=(
-            self.mesh.shape.get("data", 1)
-            * self.mesh.shape.get("attn_dp", 1)
-            * self.mesh.shape.get("attn_dp_expert", 1)
-        ) > 1,
+            self.mesh is not None
+            and (
+                self.mesh.shape.get("data", 1)
+                * self.mesh.shape.get("attn_dp", 1)
+                * self.mesh.shape.get("attn_dp_expert", 1)
+            )
+            > 1
+        ),
     )
 
     # Reshape output 2D [T, D] -> 3D [B, S, D]
