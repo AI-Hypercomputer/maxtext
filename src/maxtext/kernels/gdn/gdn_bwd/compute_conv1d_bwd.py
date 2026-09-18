@@ -47,6 +47,7 @@ def conv1d_silu_bwd(
     conv_bias: Optional[jax.Array],
     dy: jax.Array,
     kernel_size: int,
+    conv_out: Optional[jax.Array] = None,
 ) -> Tuple[jax.Array, jax.Array, Optional[jax.Array]]:
   """Dedicated Conv1D + SiLU backward pass using JAX primitives."""
   _, seq_len, _ = qkv.shape
@@ -55,12 +56,13 @@ def conv1d_silu_bwd(
   else:
     conv_weight_3d = conv_weight[:, None, :].astype(jnp.float32)
 
-  # 1. Forward pass: z = conv1d(x) + b
   conv_input = jnp.pad(qkv.astype(jnp.float32), ((0, 0), (kernel_size - 1, 0), (0, 0)))
-  conv_out = sum(conv_input[:, k : k + seq_len, :] * conv_weight_3d[k, 0, :] for k in range(kernel_size))
-  if conv_bias is not None:
-    conv_out = conv_out + conv_bias.astype(jnp.float32)
-  z = conv_out
+  if conv_out is None:
+    # 1. Forward pass: z = conv1d(x) + b
+    conv_out = sum(conv_input[:, k : k + seq_len, :] * conv_weight_3d[k, 0, :] for k in range(kernel_size))
+    if conv_bias is not None:
+      conv_out = conv_out + conv_bias.astype(jnp.float32)
+  z = conv_out.astype(jnp.float32)
 
   # 2. Adjoint: dz = dy * SiLU'(z)
   sig_z = jax.nn.sigmoid(z)

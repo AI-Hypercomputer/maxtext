@@ -66,7 +66,7 @@ def decoupled_conv1d_gdn_bwd_kernel(
 ]:
   """Decoupled Conv1D + GDN backward combining Pallas GDN bwd and JAX Conv1D bwd."""
   del seq_lens, qkv
-  _, qkv_conv = conv1d_silu_fwd(
+  conv_out, qkv_conv = conv1d_silu_fwd(
       qkv=pre_conv_qkv,
       conv_weight=conv_weight,
       conv_bias=conv_bias,
@@ -86,6 +86,7 @@ def decoupled_conv1d_gdn_bwd_kernel(
       kq_head_dim=kq_head_dim,
       v_head_dim=v_head_dim,
       chunk_size=chunk_size,
+      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
       vmem_limit_mb=vmem_limit_mb,
       head_tile=head_tile,
       segment_ids=segment_ids,
@@ -98,6 +99,7 @@ def decoupled_conv1d_gdn_bwd_kernel(
       conv_bias=conv_bias,
       dy=dy_conv,
       kernel_size=kernel_size,
+      conv_out=conv_out,
   )
 
   return (
@@ -228,7 +230,7 @@ def _run_local_gdn_decoupled_fwd(
       d_k=head_k_dim,
       d_v=head_v_dim,
       kernel_size=conv_kernel_size,
-      compute_precision=jnp.dtype(jnp.float32),
+      compute_precision=jnp.dtype(compute_dtype),
       mixed_tile_size=chunk_size,
       is_prefill_only=True,
   )
@@ -393,9 +395,64 @@ def _gdn_decoupled_conv1d_bwd(
 
   d_out, d_states = cotangents
   d_conv_state, d_recurrent_state = d_states
-  del d_conv_state, d_recurrent_state
+
+  if jax.extend.backend.get_backend().platform == "cpu":
+
+    def _pure_fwd(qkv_, b_, a_, cw_, cb_, al_, dt_):
+      out_, (cs_, rs_) = pure_jax_decoupled_conv1d_gdn(
+          qkv=qkv_,
+          b=b_,
+          a=a_,
+          conv_weight=cw_,
+          conv_bias=cb_,
+          a_log=al_,
+          dt_bias=dt_,
+          conv_state=conv_state,
+          recurrent_state=recurrent_state,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          conv_kernel_size=conv_kernel_size,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+          compute_dtype=compute_dtype,
+      )
+      return out_, (cs_, rs_)
+
+    (out_, (cs_, rs_)), vjp_fn = jax.vjp(_pure_fwd, pre_conv_qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
+    cotangent_cs = d_conv_state if d_conv_state is not None else jnp.zeros_like(cs_)
+    cotangent_rs = d_recurrent_state if d_recurrent_state is not None else jnp.zeros_like(rs_)
+    (
+        d_pre_conv_qkv,
+        d_b,
+        d_a,
+        d_conv_weight,
+        d_conv_bias,
+        d_a_log,
+        d_dt_bias,
+    ) = vjp_fn(
+        (
+            d_out,
+            (cotangent_cs, cotangent_rs),
+        )
+    )
+    d_conv_state_out = None if conv_state is None else jnp.zeros_like(conv_state)
+    d_recurrent_state_out = None if recurrent_state is None else jnp.zeros_like(recurrent_state)
+    return (
+        d_pre_conv_qkv,
+        d_b,
+        d_a,
+        d_conv_weight,
+        d_conv_bias,
+        d_a_log,
+        d_dt_bias,
+        d_conv_state_out,
+        d_recurrent_state_out,
+    )
 
   # Recompute forward chunk states and t_inv if not cached in residuals
+  conv_out_cached = None
   if chunk_states is None or t_inv_fwd is None:
     qkv_conv, chunk_states_recomputed, t_inv_recomputed = _compute_forward_conv_and_states(
         qkv=pre_conv_qkv,
@@ -421,7 +478,7 @@ def _gdn_decoupled_conv1d_bwd(
     if t_inv_fwd is None:
       t_inv_fwd = t_inv_recomputed
   else:
-    _, qkv_conv = conv1d_silu_fwd(
+    conv_out_cached, qkv_conv = conv1d_silu_fwd(
         qkv=pre_conv_qkv,
         conv_weight=conv_weight,
         conv_bias=conv_bias,
@@ -442,6 +499,7 @@ def _gdn_decoupled_conv1d_bwd(
       kq_head_dim=head_k_dim,
       v_head_dim=head_v_dim,
       chunk_size=chunk_size,
+      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
   )
 
   d_pre_conv_qkv, d_conv_weight, d_conv_bias = conv1d_silu_bwd(
@@ -450,6 +508,7 @@ def _gdn_decoupled_conv1d_bwd(
       conv_bias=conv_bias,
       dy=dy_conv,
       kernel_size=conv_kernel_size,
+      conv_out=conv_out_cached,
   )
 
   d_conv_state_out = None if conv_state is None else jnp.zeros_like(conv_state)

@@ -16,10 +16,6 @@
 
 import os
 
-# Force 2 CPU devices before JAX initialization only if running CPU test target
-if "ghostfish" not in os.environ.get("TEST_TARGET", "") and "tpu" not in os.environ.get("TEST_TARGET", ""):
-  if "XLA_FLAGS" not in os.environ:
-    os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
 
 import time
 import types
@@ -127,25 +123,20 @@ class GdnCpHeadShardedTest(absltest.TestCase):
         cp_size=2,
     )
 
-    rng = nnx.Rngs(42)
     model_cp1 = qwen3.Qwen3NextGatedDeltaNet(
         config=cfg_cp1,
         mesh=mesh_cp1,
         dtype=jnp.float32,
-        rngs=rng,
+        rngs=nnx.Rngs(42),
     )
 
-    # Instantiate model_cp2 with the same initial parameters
+    # Instantiate model_cp2 with the same initial parameters and its own mesh
     model_cp2 = qwen3.Qwen3NextGatedDeltaNet(
         config=cfg_cp2,
         mesh=mesh_cp2,
         dtype=jnp.float32,
-        rngs=rng,
+        rngs=nnx.Rngs(42),
     )
-
-    # Exact parameter sync
-    _, state1 = nnx.split(model_cp1)
-    nnx.update(model_cp2, state1)
 
     key = jax.random.PRNGKey(101)
     k1, k2 = jax.random.split(key)
@@ -153,11 +144,11 @@ class GdnCpHeadShardedTest(absltest.TestCase):
     proj = jax.random.normal(k2, (batch, seq_len, emb_dim), dtype=jnp.float32)
 
     # CP=1 training step
-    @jax.jit
-    def train_step_cp1(model, x):
+    @nnx.jit
+    def train_step_cp1(model, x, p):
       def loss_fn(m):
         out, _ = m(x)
-        loss = jnp.mean(out * proj)
+        loss = jnp.mean(out * p)
         return loss, out
 
       (loss, out), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
@@ -168,7 +159,7 @@ class GdnCpHeadShardedTest(absltest.TestCase):
     x_input_sharded = jax.device_put(x_input, sharding_cp2)
     proj_sharded = jax.device_put(proj, sharding_cp2)
 
-    @jax.jit
+    @nnx.jit
     def train_step_cp2(model, x, p):
       def loss_fn(m):
         out, _ = m(x)
@@ -179,10 +170,16 @@ class GdnCpHeadShardedTest(absltest.TestCase):
       return loss, out, grads
 
     with mesh_cp1:
-      loss_cp1, out_cp1, grads_cp1 = train_step_cp1(model_cp1, x_input)
+      loss_cp1, out_cp1, grads_cp1 = train_step_cp1(model_cp1, x_input, proj)
+      loss_cp1 = jax.block_until_ready(loss_cp1)
+      out_cp1 = jax.block_until_ready(out_cp1)
+      grads_cp1 = jax.block_until_ready(grads_cp1)
 
     with mesh_cp2:
       loss_cp2, out_cp2, grads_cp2 = train_step_cp2(model_cp2, x_input_sharded, proj_sharded)
+      loss_cp2 = jax.block_until_ready(loss_cp2)
+      out_cp2 = jax.block_until_ready(out_cp2)
+      grads_cp2 = jax.block_until_ready(grads_cp2)
 
     # 1. Forward output equivalence
     out_cp1_np = np.asarray(out_cp1)
@@ -333,9 +330,15 @@ class GdnCpHeadShardedTest(absltest.TestCase):
 
     with mesh_cp1:
       out_cp1, next_rs_cp1, next_cs_cp1 = step_fn(model_cp1, x_input, cache_cp1)
+      out_cp1 = jax.block_until_ready(out_cp1)
+      next_rs_cp1 = jax.block_until_ready(next_rs_cp1)
+      next_cs_cp1 = jax.block_until_ready(next_cs_cp1)
 
     with mesh_cp2:
       out_cp2, next_rs_cp2, next_cs_cp2 = step_fn(model_cp2, x_input_sharded, cache_cp2)
+      out_cp2 = jax.block_until_ready(out_cp2)
+      next_rs_cp2 = jax.block_until_ready(next_rs_cp2)
+      next_cs_cp2 = jax.block_until_ready(next_cs_cp2)
 
     # Assert execution succeeds and next_conv_state is 3D with correct shape
     self.assertEqual(next_cs_cp2.ndim, 3)
@@ -400,29 +403,25 @@ class GdnCpHeadShardedTest(absltest.TestCase):
         cp_size=2,
     )
 
-    rng = nnx.Rngs(123)
     model_cp1 = qwen3.Qwen3NextGatedDeltaNet(
         config=cfg_cp1,
         mesh=mesh_cp1,
         dtype=jnp.bfloat16,
-        rngs=rng,
+        rngs=nnx.Rngs(123),
     )
     model_cp2 = qwen3.Qwen3NextGatedDeltaNet(
         config=cfg_cp2,
         mesh=mesh_cp2,
         dtype=jnp.bfloat16,
-        rngs=rng,
+        rngs=nnx.Rngs(123),
     )
-
-    _, state1 = nnx.split(model_cp1)
-    nnx.update(model_cp2, state1)
 
     key = jax.random.PRNGKey(2026)
     k1, k2 = jax.random.split(key)
     x_input = jax.random.normal(k1, (batch, seq_len, emb_dim), dtype=jnp.bfloat16)
     proj = jax.random.normal(k2, (batch, seq_len, emb_dim), dtype=jnp.bfloat16)
 
-    @jax.jit
+    @nnx.jit
     def step_cp1(model, x, p):
       def loss_fn(m):
         out, _ = m(x)
@@ -439,7 +438,7 @@ class GdnCpHeadShardedTest(absltest.TestCase):
     x_sharded = jax.device_put(x_input, sharding_cp2)
     proj_sharded = jax.device_put(proj, sharding_cp2)
 
-    @jax.jit
+    @nnx.jit
     def step_cp2(model, x, p):
       def loss_fn(m):
         out, _ = m(x)
