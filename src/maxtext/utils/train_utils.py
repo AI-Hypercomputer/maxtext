@@ -440,6 +440,13 @@ def validate_train_config(config):
   if getattr(config, "use_dpo", False):
     raise ValueError("Legacy DPO implementation in train.py is removed. Please use post-training train_dpo.py instead.")
 
+  if getattr(config, "use_indexer", False) and not getattr(config, "indexer_sparse_training", False):
+    if getattr(config, "indexer_loss_scaling_factor", 0.0) <= 0.0:
+      raise ValueError(
+          "use_indexer=True with indexer_sparse_training=False and indexer_loss_scaling_factor<=0.0 "
+          "zeroes the entire training objective. Enable indexer_sparse_training or set a positive indexer_loss_scaling_factor."
+      )
+
   assert config.run_name, "Erroring out, need a real run_name"
   if config.dataset_path and not config.dataset_path.startswith("gs://"):
     max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
