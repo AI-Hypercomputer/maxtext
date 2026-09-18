@@ -52,6 +52,9 @@ class MockConfig:
   gradient_accumulation_steps: int = 1
   packing: bool = False
   dataset_type: str = "synthetic"
+  use_indexer: bool = False
+  indexer_sparse_training: bool = False
+  indexer_loss_scaling_factor: float = 0.0
 
   # Fields needed for create_training_optimizer
   opt_type: str = "adamw"
@@ -183,6 +186,22 @@ class TestValidateTrainConfig(unittest.TestCase):
     """Verifies no exception raised for a valid config."""
     config = MockConfig()
     # Should not raise
+    validate_train_config(config)
+
+  def test_indexer_zero_objective_raises(self):
+    """Verifies ValueError when use_indexer leaves both the LM and indexer losses at zero."""
+    config = MockConfig(use_indexer=True, indexer_sparse_training=False, indexer_loss_scaling_factor=0.0)
+    with self.assertRaisesRegex(ValueError, "zeroes the entire training objective"):
+      validate_train_config(config)
+
+  def test_indexer_sparse_training_passes(self):
+    """Verifies sparse training keeps the LM loss, so no indexer loss is required."""
+    config = MockConfig(use_indexer=True, indexer_sparse_training=True, indexer_loss_scaling_factor=0.0)
+    validate_train_config(config)
+
+  def test_indexer_dense_warmup_with_indexer_loss_passes(self):
+    """Verifies dense warm-up is valid when the indexer loss is enabled."""
+    config = MockConfig(use_indexer=True, indexer_sparse_training=False, indexer_loss_scaling_factor=1.0)
     validate_train_config(config)
 
   def test_missing_run_name_raises(self):
