@@ -456,7 +456,6 @@ def ragged_gather(
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
-          needs_layout_passes=False,
       ),
       cost_estimate=get_cost_estimate(
           out_size=out_size + out_pad_size,

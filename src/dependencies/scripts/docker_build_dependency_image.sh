@@ -132,4 +132,6 @@ echo "docker run -v $(pwd):/deps --rm -it --privileged --entrypoint bash ${LOCAL
 echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
 be reflected inside the docker container."
-echo "Once you want to upload your docker container to GCR, run 'upload_maxtext_docker_image CLOUD_IMAGE_NAME=your_image_name'."
+echo "Once you want to upload your docker container to Artifact Registry, 
+run 'upload_maxtext_docker_image CLOUD_IMAGE_NAME=LOCATION-docker.pkg.dev/PROJECT_ID/REPOSITORY_NAME/IMAGE_NAME'."
+echo "(e.g., CLOUD_IMAGE_NAME=us-docker.pkg.dev/my-project/my-repo/my-image)."

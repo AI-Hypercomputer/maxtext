@@ -797,6 +797,10 @@ class CompressedAttention(BaseModel):
   compressed_rope_max_timescale: int = Field(
       160000, description="If positive, used for Compressed Sparse/Heavy Attention."
   )
+  use_csa_streamindex_kernel: bool = Field(
+      False,
+      description="Whether to use Pallas TPU kernel for CSA StreamIndex score computation.",
+  )
 
 
 class AttentionIndexer(BaseModel):
@@ -2780,6 +2784,16 @@ class RLCluster(BaseModel):
   )
   use_pathways_reshard: bool = Field(
       True, description="Legacy experimental GRPO: use Pathways resharding to move policy params to the sampler."
+  )
+  gc_collect_after_weight_sync: bool = Field(
+      True,
+      description=(
+          "Run a full host gc.collect() after every trainer->sampler weight sync "
+          "(tunix ClusterConfig.gc_collect_after_weight_sync). Each sync leaves another copy of the weights on "
+          "HBM until Python's garbage collector releases it; with this disabled the copies accumulate and the "
+          "run can OOM over time. The collection costs about one second per step on a colocated setup, so "
+          "disable it only when there is enough HBM headroom."
+      ),
   )
 
 

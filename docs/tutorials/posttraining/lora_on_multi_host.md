@@ -95,9 +95,8 @@ export NUM_SLICES=<NUM_SLICES>
 export COMPUTE_TYPE=<COMPUTE_TYPE>
 export TOPOLOGY=<TOPOLOGY>
 
-# The Docker image you pushed in the prerequisite step
-export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+# The Docker image you pushed in the previous step
+export DOCKER_IMAGE=<IMAGE_NAME>
 
 # -- Fine-Tuning configuration --
 export STEPS=<STEPS> # e.g., 1000
