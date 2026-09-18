@@ -59,6 +59,9 @@ jobs:
       run_posttrain_tests: ${{ steps.check.outputs.run_posttrain_tests }}
       run_pathways_tests: ${{ steps.check.outputs.run_pathways_tests }}
       run_gpu_tests: ${{ steps.check.outputs.run_gpu_tests }}
+      # true when the PR touched a test that can run on TPU7X: marked tpu_only and not
+      # skip_on_tpu7x (see analyze_code_changes.sh). Always true for non-PR events. Gates tpu7x-tests.
+      has_new_tests: ${{ steps.check.outputs.has_new_tests }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -182,10 +185,16 @@ jobs:
 
   tpu7x-tests:
     name: TPU7X Tests
-    needs: [gate_test_run]
+    needs: [gate_test_run, analyze_code_changes]
+    # TPU7X runners are scarce. A pull request runs this job only when it touched a test that
+    # can run on TPU (has_new_tests), and then only the touched tests: is_pull_request switches
+    # run_tests_against_package.yml to `-m "<flavor marker> and newly_added"` and
+    # run_tests_coordinator.yml to a single worker. Every other event (schedule,
+    # workflow_dispatch, release via workflow_call) runs the full suite.
     if: |
       always() &&
-      needs.gate_test_run.result == 'success' && github.event_name != 'pull_request'
+      needs.gate_test_run.result == 'success' &&
+      (github.event_name != 'pull_request' || needs.analyze_code_changes.outputs.has_new_tests == 'true')
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -193,6 +202,7 @@ jobs:
         flavor: [tpu7x-unit, tpu7x-integration, tpu7x-post-training-unit]
     with:
       flavor: ${{ matrix.flavor }}
+      is_pull_request: ${{ github.event_name == 'pull_request' }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
