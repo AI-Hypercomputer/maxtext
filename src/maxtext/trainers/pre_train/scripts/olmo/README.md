@@ -15,22 +15,25 @@ global batch ≈4M tokens, peak LR 3e-4 cosine to 0.1×, 2k warmup, β=(0.9, 0.9
 
 Both scripts are env-var driven. Header comments in each enumerate required vs. optional env.
 
-## Quick start (multi-host TPU via XPK)
+## Legacy quick start (multi-host TPU via XPK)
+
+For new deployments, use the Cluster Toolkit version below. The XPK wrapper
+section is retained for existing environments.
 
 ```bash
 source ~/.hf_token.sh
 
-export XPK_CLUSTER=<your-cluster>
-export XPK_PROJECT=<your-project>
-export XPK_ZONE=<your-zone>
+export XPK_CLUSTER=<CLUSTER_NAME>
+export XPK_PROJECT=<PROJECT_ID>
+export XPK_ZONE=<ZONE>
 export XPK_DEVICE_TYPE=tpu7x-4x8x8       # or tpu7x-4x4x4 for a smoke run
 export XPK_TOTAL_DEVICES=512             # set to match device-type * 2 (Ironwood has 2 JAX devices/chip)
-export XPK_BASE_OUTPUT_DIR=gs://<your-bucket>/olmo/runs
+export XPK_BASE_OUTPUT_DIR=gs://<GCS_BUCKET>/olmo/runs
 export XPK_RUN_NAME=olmo3_7b_stage1
 
 export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json
-export OLMO_GCS_BASE=gs://<your-bucket>/
-export LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+export OLMO_GCS_BASE=gs://<GCS_BUCKET>/
+export LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
 
 bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
 bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh monitor
@@ -43,18 +46,62 @@ STEPS_OVERRIDE=1414078 \
 horizon. The wrapper passes `LIBTPU_INIT_ARGS` (Ironwood XLA flags) and the
 full MaxText perf flag set automatically — no manual override needed.
 
+## Quick start (multi-host TPU via Cluster Toolkit)
+
+```bash
+export PROJECT_ID=<PROJECT_ID>
+export GKE_CLUSTER=<CLUSTER_NAME>
+export LOCATION=<ZONE>
+export RUN_NAME=<RUN_NAME>
+export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/olmo/runs
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
+export IMAGE_URI="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
+
+export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json
+export OLMO_GCS_BASE=gs://<GCS_BUCKET>/
+export LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
+export HF_TOKEN=<HF_TOKEN>
+
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --location ${LOCATION?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${LOCATION?}
+
+gcluster job submit \
+  --image=${IMAGE_URI?} \
+  --name=${RUN_NAME?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --command="INDEX_PATH=${OLMO_INDEX_PATH?} \
+GCS_BASE=${OLMO_GCS_BASE?} \
+LOCAL_MOUNT=/tmp/olmo-data \
+OUTPUT_DIR=${BASE_OUTPUT_DIRECTORY?} \
+LOAD_PARAMETERS_PATH=${LOAD_PARAMETERS_PATH?} \
+HF_TOKEN=${HF_TOKEN?} \
+MOUNT_GCSFUSE=1 \
+VENV_PATH=/__skip_venv__ \
+bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh"
+```
+
+Set the data, checkpoint, and launcher environment variables before invoking `run_olmo3_7b_stage1.sh`. For smoke testing without tokenized OLMo data, see the single-host or synthetic data section below.
+
+
 ## Quick start (single-host / smoke test)
 
 ```bash
-source $MAXTEXT_ROOT/maxtext_venv/bin/activate
+source ${MAXTEXT_ROOT?}/maxtext_venv/bin/activate
 
 INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json \
-GCS_BASE=gs://<your-bucket>/ \
+GCS_BASE=gs://<GCS_BUCKET>/ \
 LOCAL_MOUNT=/tmp/olmo-data \
-OUTPUT_DIR=gs://<your-bucket>/olmo/runs \
-LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items \
+OUTPUT_DIR=gs://<GCS_BUCKET>/olmo/runs \
+LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items \
 HF_SECRETS=~/.hf_token.sh \
-RUN_NAME=olmo3_7b_stage1 \
+RUN_NAME=<RUN_NAME> \
 STEPS=50 WARMUP_STEPS=10 CHECKPOINT_PERIOD=50 \
 bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh
 ```
@@ -74,11 +121,11 @@ underlying preprocessed `.npy` tokens live under AI2's `s3://ai2-llm/` bucket
 (see the `base_dir` arg on `DataMix.build` in
 [`OLMo-core`](https://github.com/allenai/OLMo-core/blob/main/src/olmo_core/data/mixes/__init__.py));
 mirror them into your own GCS bucket with
-[`tools/data_generation/download_olmo_data_to_gcs.py`](../../../../../tools/data_generation/download_olmo_data_to_gcs.py)
+[`tools/data_generation/download_olmo_data_to_gcs.py`](../../../../../../tools/data_generation/download_olmo_data_to_gcs.py)
 (reads a manifest, pulls from AI2's source, uploads to `--gcs-dest`).
 
 **Data index.** Once the corpus is mirrored, build the index with
-[`tools/data_generation/build_olmo_npy_index.py`](../../../../../tools/data_generation/build_olmo_npy_index.py)
+[`tools/data_generation/build_olmo_npy_index.py`](../../../../../../tools/data_generation/build_olmo_npy_index.py)
 against the same manifest + sequence length, then upload the resulting JSON
 to GCS. Mount your bucket read-only via gcsfuse inside the pod — the XPK
 wrapper does this automatically (`MOUNT_GCSFUSE=1`).
@@ -93,7 +140,7 @@ for the full data-pipeline reference.
 This puts MaxText at exactly the same weights as the PyTorch reference, so
 the loss curve can be overlaid against AI2's published WandB curve. AI2
 also publishes intermediate checkpoints at every 1000-step boundary on the
-[`allenai/Olmo-3-1025-7B`](https://huggingface.co/allenai/Olmo-3-1025-7B/refs)
+[`allenai/Olmo-3-1025-7B`](https://huggingface.co/allenai/Olmo-3-1025-7B)
 HF repo (`stage1-step0`, `stage1-step1000`, …, `stage1-step1413814`); the
 same procedure works for any of them — just swap the `--revision` flag.
 
@@ -101,7 +148,7 @@ same procedure works for any of them — just swap the `--revision` flag.
    peak ~26 GB RAM; needs `huggingface_hub` auth via `HF_TOKEN`):
 
    ```bash
-   export HF_TOKEN=...
+   export HF_TOKEN=<HF_TOKEN>
    python -m maxtext.checkpoint_conversion.to_maxtext \
      model_name=olmo3-7b-pt scan_layers=True \
      --revision=stage1-step0 \
@@ -109,20 +156,22 @@ same procedure works for any of them — just swap the `--revision` flag.
    ```
 
    The script writes an Orbax checkpoint under
-   `<output>/<run_name>/0/items/` (default `<output>` is `/tmp/maxtext`;
+   `<OUTPUT>/<RUN_NAME>/0/items/` (default `<OUTPUT>` is `/tmp/maxtext`;
    override with `--base_output_directory=...`).
 
 2. Upload the converted checkpoint to GCS so all pods can read it:
 
    ```bash
-   gsutil -m cp -r <output>/0/items gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
+   gcloud storage cp -r <OUTPUT>/0/items gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
    ```
 
-3. Point the launcher at it via `LOAD_PARAMETERS_PATH`:
+3. Point the launcher at it via `LOAD_PARAMETERS_PATH` when submitting with `gcluster job submit` (or `xpk_olmo3_7b_stage1.sh` for legacy XPK):
 
    ```bash
-   export LOAD_PARAMETERS_PATH=gs://<your-bucket>/olmo/checkpoints/stage1-step0/0/items
-   bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
+   export LOAD_PARAMETERS_PATH=gs://<GCS_BUCKET>/olmo/checkpoints/stage1-step0/0/items
+   # Then submit via Cluster Toolkit (see "Quick start (multi-host TPU via Cluster Toolkit)" above)
+   # Or for legacy XPK:
+   # bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
    ```
 
    AI2's published checkpoints are parameters only — Adam state is freshly
@@ -141,7 +190,8 @@ tracks the AI2-init curve within data-shuffle noise).
 
 ```bash
 unset LOAD_PARAMETERS_PATH
-bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
+# Submit via Cluster Toolkit without LOAD_PARAMETERS_PATH, or for legacy XPK:
+# bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
 ```
 
 **Runner image** (XPK only). Build + push once:
@@ -150,16 +200,16 @@ bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
 sudo bash src/dependencies/scripts/docker_build_dependency_image.sh \
   MODE=stable WORKFLOW=pre-training
 sudo bash src/dependencies/scripts/docker_upload_runner.sh \
-  CLOUD_IMAGE_NAME=maxtext-olmo3 PROJECT=$XPK_PROJECT
+  CLOUD_IMAGE_NAME=maxtext-olmo3 PROJECT=${XPK_PROJECT?}
 ```
 
 Override the resulting image with `XPK_DOCKER_IMAGE` (defaults to
-`gcr.io/${XPK_PROJECT}/maxtext-olmo3:latest`).
+`gcr.io/${XPK_PROJECT?}/maxtext-olmo3:latest`).
 
 ## Resume
 
-Keep `XPK_RUN_NAME` and `XPK_BASE_OUTPUT_DIR` stable across submissions.
-Orbax picks up the latest checkpoint under `${OUTPUT_DIR}/${RUN_NAME}/checkpoints/`;
+Keep `RUN_NAME` and `BASE_OUTPUT_DIRECTORY` (or `XPK_RUN_NAME` and `XPK_BASE_OUTPUT_DIR` for legacy XPK) stable across submissions.
+Orbax picks up the latest checkpoint under `${OUTPUT_DIR?}/${RUN_NAME?}/checkpoints/`;
 the OLMo grain sampler resumes its data position via stateless
 `initial_step = step × per-host-batch` (no Grain-iterator-state in the
 checkpoint).
