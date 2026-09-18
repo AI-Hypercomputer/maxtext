@@ -183,13 +183,14 @@ class FusedMoeMatmulTest(unittest.TestCase):
         "tpu_inference.layers.common.fused_moe_gmm": gmm,
     }
 
-  def _make_layer(self, calls):
+  def _make_layer(self, calls, return_routed_experts=False, mesh=None):
     test = self
     config = types.SimpleNamespace(
         mlp_activations=("silu",),
         routed_score_func="softmax",
         norm_topk_prob=True,
         decoder_block=ctypes.DecoderBlockType.MIXTRAL,
+        return_routed_experts=return_routed_experts,
     )
 
     class Layer(nnx.Module):
@@ -203,7 +204,7 @@ class FusedMoeMatmulTest(unittest.TestCase):
         self.config = config
         self.num_experts = test.num_experts
         self.num_experts_per_tok = test.top_k
-        self.mesh = None
+        self.mesh = mesh
 
       def get_expert_parallelism_size(self):
         return 1
@@ -229,6 +230,28 @@ class FusedMoeMatmulTest(unittest.TestCase):
     self.assertEqual(call["w1"].shape, (self.num_experts, self.emb_dim, 2 * self.mlp_dim))
     self.assertIsNone(call["w1_scale"])
     self.assertIsNone(call["w2_scale"])
+    self.assertFalse(call["scatter_results"])
+
+  def test_return_routed_experts_records_selected_experts(self):
+    calls = []
+    inputs, gate_logits = self._inputs()
+    layer = self._make_layer(calls, return_routed_experts=True)
+    layer(inputs, gate_logits)
+    self.assertTrue(hasattr(layer, "selected_experts"))
+    self.assertEqual(layer.selected_experts[...].shape, (self.tokens, self.top_k))
+
+  def test_scatter_results_reflects_dp_mesh_size(self):
+    inputs, gate_logits = self._inputs()
+
+    calls_dp1 = []
+    mesh_dp1 = types.SimpleNamespace(shape={"data": 1, "attn_dp": 1, "attn_dp_expert": 1})
+    self._make_layer(calls_dp1, mesh=mesh_dp1)(inputs, gate_logits)
+    self.assertFalse(calls_dp1[0]["scatter_results"])
+
+    calls_dp2 = []
+    mesh_dp2 = types.SimpleNamespace(shape={"data": 1, "attn_dp": 2, "attn_dp_expert": 1})
+    self._make_layer(calls_dp2, mesh=mesh_dp2)(inputs, gate_logits)
+    self.assertTrue(calls_dp2[0]["scatter_results"])
 
   def test_fp8_rule_prequantizes_weights_outside_qwix(self):
     calls = []
