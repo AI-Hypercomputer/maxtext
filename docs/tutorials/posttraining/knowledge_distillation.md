@@ -231,13 +231,15 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
 
 #### b. Install Tunix
 
-The online distillation trainer depends on Tunix. For local runs or custom images, install Tunix from GitHub:
+The online distillation trainer depends on Tunix. If you installed MaxText with `maxtext[tpu-post-train]` and ran `install_tpu_post_train_extra_deps` (see [Install MaxText](../../install_maxtext.md)), the tested Tunix commit is already installed from [`src/dependencies/extra_deps/post_train_github_deps.txt`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/extra_deps/post_train_github_deps.txt).
+
+For manual local installations or layering onto a custom base image, install the exact Tunix commit pinned in `post_train_github_deps.txt`:
 
 ```bash
-pip install "git+https://github.com/google/tunix@348959d18a4a09c75e58a7d49aec9d8b0eb4a8b6"
+pip install "git+https://github.com/google/tunix@a8d70582f1e2f1fb65973210989e0e148b5ef7ad"
 ```
 
-> **Note:** Once a Tunix PyPI release ships, this will become a versioned `google-tunix==<ver>` install.
+> **Note:** MaxText pins Tunix to a specific GitHub commit in [`src/dependencies/extra_deps/post_train_github_deps.txt`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/extra_deps/post_train_github_deps.txt) (and `TUNIX_SOURCE` in [`run_distill_xpk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh)) to pick up required upstream changes (such as multi-host `shard_input` fixes, hook API updates, and weight-sync changes) before an official PyPI release is cut. Whenever you sync with a newer MaxText `main`, check `post_train_github_deps.txt` (or re-run `install_tpu_post_train_extra_deps`) and update your installed Tunix commit to match. Once a Tunix PyPI release ships with these changes, this will become a versioned `google-tunix==<ver>` install.
 
 ### Configuration
 
