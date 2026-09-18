@@ -214,6 +214,13 @@ reward_functions: ''
 # one second per step on a colocated setup, so disable it only when there is enough HBM headroom.
 gc_collect_after_weight_sync: true
 
+# Worker processes tunix uses to evaluate the reward functions over the batch
+# (tunix GrpoConfig.reward_num_workers; effective once the tunix pin declares it).
+# 0 = evaluate reward functions serially in the trainer process (default); -1 = one worker per CPU.
+reward_num_workers: 0
+# Seconds to wait for one reward-function chunk in a worker before falling back to the parent process.
+reward_worker_timeout_seconds: 180.0
+
 # ====== Configuration for math_verify Pool ======
 # Global timeout (seconds) for math_verify calls across all examples in a batch
 math_verify_timeout: 120
