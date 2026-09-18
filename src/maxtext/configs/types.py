@@ -1050,6 +1050,17 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to cast inputs to fp32 to compute MoE gate logits for numerical stability.",
   )
+  router_replay_enabled: bool = Field(
+      True,
+      description="Whether supplied `forced_routed_experts` actually override the router. "
+      "Set False to keep the routing payload flowing but let the router decide, which is the "
+      "replay-off arm of an A/B and the baseline for `router_replay_report_agreement`.",
+  )
+  router_replay_report_agreement: bool = Field(
+      False,
+      description="Whether to report how often supplied `forced_routed_experts` match the router's "
+      "own top-k. Off by default because it costs an extra top-k per MoE layer.",
+  )
   prefuse_moe_weights: bool = Field(
       False,
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "

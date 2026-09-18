@@ -227,13 +227,22 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
   return top_k_weights, top_k_indices
 
 
+# Router-replay sentinels. The contract is owned by Tunix
+# (`tunix/common/router_replay.py`); these must not drift from it.
+# -1: a real token sits here but its route was not captured -> this layer's
+#     router decides for it.
+# -2: no token sits here at all (padding) -> no routing, no MoE output.
+ROUTER_REPLAY_MISSING = -1
+ROUTER_REPLAY_PADDING = -2
+
+
 def valid_expert_mask(indices, num_experts):
   """True where an expert id is real.
 
-  Forced routing marks unused slots with -1, and any out-of-range id is treated
-  the same way.
+  Both router-replay sentinels, and any other out-of-range id, are false.
   """
   return (indices >= 0) & (indices < num_experts)
+
 
 
 def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
@@ -851,6 +860,38 @@ class RoutedMoE(nnx.Module):
     """
     return self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and not self.is_hash_routing
 
+  def sow_route_agreement(self, gate_logits, forced_routed_experts):
+    """Reports how often rollout routing already matches this router's own pick.
+
+    That gap is the whole reason router replay exists, so it is also the number
+    that says whether replay is worth paying for. Counts are sown rather than a
+    ratio, so summing them across layers and microbatches stays exact.
+    """
+    # Every block in FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS picks its experts
+    # with a plain top-k over the gate logits (`native_topk` below), so there is
+    # no per-model routing rule to mirror here. `check_forced_routing_support`
+    # holds us to that set, and `get_topk` rejects the one other router that
+    # would invalidate the comparison (`use_random_routing`).
+    expected = gate_logits.shape[:-1] + (self.num_experts_per_tok,)
+    if forced_routed_experts.shape != expected:
+      raise ValueError(f"forced_routed_experts must be {expected}; got {forced_routed_experts.shape}")
+
+    _, native_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+
+    # Sentinel rows carry no rollout opinion, so they must not count either way.
+    replayed = jnp.all(forced_routed_experts >= 0, axis=-1)
+    # top-k emits experts in logit order and the rollout in its own, so the
+    # comparison has to be between sets. Sorting beats one-hot here: top_k is
+    # tiny, num_experts is not. Sorted equality is a set test only because both
+    # sides are duplicate-free -- `top_k` cannot repeat an expert, and a rollout
+    # row that does is malformed, so reading it as disagreement is correct.
+    agrees = jnp.all(
+        jnp.sort(forced_routed_experts, axis=-1) == jnp.sort(native_indices, axis=-1),
+        axis=-1,
+    )
+    self.sow(nnx.Intermediate, "router_replay_agree_count", jnp.sum(agrees & replayed))
+    self.sow(nnx.Intermediate, "router_replay_row_count", jnp.sum(replayed))
+
   def get_topk(
       self,
       gate_logits,
@@ -862,47 +903,61 @@ class RoutedMoE(nnx.Module):
     """get topk."""
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
-    valid_token_mask = None
-    if forced_routed_experts is not None:
-      top_k_indices = forced_routed_experts
-      # Any id outside [0, num_experts) is an unused slot, same as the -1 sentinel.
-      valid_token_mask = valid_expert_mask(top_k_indices, self.num_experts)
-      # Gather at 0, not -1: take_along_axis would wrap -1 onto the last expert and
-      # that value reaches the softmax denominator before the mask zeroes it.
-      gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
-      if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
-        router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-        top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
-      else:
-        top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
-    else:
+    # The model's own router, factored out so replay can fall back to it one
+    # row at a time. Returns pre-normalization weights and indices.
+    def native_topk():
       if self.config.use_random_routing:
         if rngs is None:
           raise ValueError("The random key cannot be None for random routing.")
         # Reuse the 'params' RNG stream to ensure random routing
         rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
-        top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
-        return top_k_weights, top_k_indices
+        return random_routing(rng, gate_logits, self.num_experts_per_tok)
 
       if self.is_hash_routing:
         if input_ids is None:
           raise ValueError("input_ids cannot be None when is_hash_routing is True")
-        # Access the static routing table
-        tid2eid_int = self.tid2eid.value
-        # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
-        tid2eid_int = tid2eid_int.astype(jnp.int32)
-        # Cast input_ids to int32 to safely index the hash routing table
-        top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
-        top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
+        # Access the static routing table. Cast the float32 array to int32 (JAX
+        # automatically assigns 0.0 gradients to integer casts), and cast
+        # input_ids too so the table is indexed safely.
+        tid2eid_int = self.tid2eid.value.astype(jnp.int32)
+        indices = tid2eid_int[input_ids.astype(jnp.int32)]
+        return jnp.take_along_axis(pre_bias_logits, indices, axis=-1), indices
       # NOTE: deepseek2 has a different pattern
-      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
-        top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
-      elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
+      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+        return self.deepseek_routing(gate_logits, pre_bias_logits)
+      if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-        _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-        top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+        _, indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+        return jnp.take_along_axis(router_probs, indices, axis=-1).astype(self.dtype), indices
+      return jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+
+    valid_token_mask = None
+    if forced_routed_experts is None:
+      top_k_weights, top_k_indices = native_topk()
+      if self.config.use_random_routing:
+        return top_k_weights, top_k_indices
+    else:
+      if self.config.use_random_routing:
+        raise ValueError("use_random_routing cannot be combined with router replay.")
+      expected_shape = gate_logits.shape[:-1] + (self.num_experts_per_tok,)
+      if forced_routed_experts.shape != expected_shape:
+        raise ValueError(f"forced_routed_experts must be {expected_shape}; got {forced_routed_experts.shape}.")
+      # The data is guaranteed atomic by the host. We only need to check the first element.
+      # Avoid computing expensive bounds checks on the whole array.
+      fallback_row = forced_routed_experts[..., 0] == ROUTER_REPLAY_MISSING
+      native_weights, native_indices = native_topk()
+      top_k_indices = jnp.where(fallback_row[..., None], native_indices, forced_routed_experts)
+      valid_token_mask = valid_expert_mask(top_k_indices, self.num_experts)
+      # Gather at 0, not at a sentinel: take_along_axis would wrap -1 onto the last
+      # expert and that value reaches the softmax denominator before the mask zeroes it.
+      gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
+      if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
+        router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
+        replay_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
       else:
-        top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+        replay_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
+      top_k_weights = jnp.where(fallback_row[..., None], native_weights, replay_weights)
+
 
     if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
@@ -930,7 +985,10 @@ class RoutedMoE(nnx.Module):
       if self.per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
       ):
-        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
+        # Sentinel rows still hold -2 here; gather in range and let the mask
+        # above keep their (already zero) weight at zero.
+        scale_indices = top_k_indices if valid_token_mask is None else jnp.where(valid_token_mask, top_k_indices, 0)
+        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], scale_indices, axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
     return top_k_weights, top_k_indices
@@ -3651,6 +3709,10 @@ class RoutedMoE(nnx.Module):
 
     if cfg.te_moe_block and gate_inputs is not None:
       raise ValueError("te_moe_block=True does not support separate gate_inputs.")
+    if cfg.te_moe_block and forced_routed_experts is not None:
+      # The TE block routes internally and takes no routing argument, so
+      # accepting one here would silently fall back to the native router.
+      raise ValueError("te_moe_block=True does not support router replay.")
     if cfg.te_moe_block and quantizations.in_serve_mode(self.quant):
       raise ValueError("te_moe_block=True does not support serve-mode quantized weights.")
 
@@ -3681,6 +3743,17 @@ class RoutedMoE(nnx.Module):
       )
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
+
+    # Router replay is inspected here rather than in `get_topk`, which runs
+    # inside the `sparse_matmul` shard_map where a sow would not escape. This is
+    # also the one point every dispatch backend passes through.
+    if forced_routed_experts is not None and cfg.router_replay_report_agreement:
+      self.sow_route_agreement(gate_logits, forced_routed_experts)
+    if not cfg.router_replay_enabled:
+      # Measure-only: the routing was reported on above, but the router still
+      # chooses, so the forward stays identical to one that was handed no
+      # routing at all. That is what makes the agreement number a baseline.
+      forced_routed_experts = None
 
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
 

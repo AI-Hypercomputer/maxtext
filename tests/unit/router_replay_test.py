@@ -886,7 +886,7 @@ class GetTopkUnforcedRegressionTest(unittest.TestCase):
 class PaddingExcludedFromSoftmaxTest(unittest.TestCase):
   """Padding must not enter the top-k softmax denominator.
 
-  Gathering with a -1 index wraps to the last expert, and softmaxing that
+  Gathering with a negative index wraps to the last expert, and softmaxing that
   value before masking rescales the *real* slots. With norm_topk_prob the
   renormalization happens to cancel it, but Mixtral is supported and defaults
   to norm_topk_prob=false, so the error survives there.
@@ -902,7 +902,7 @@ class PaddingExcludedFromSoftmaxTest(unittest.TestCase):
     config = DummyConfig(model_name="mixtral-8x7b", decoder_block=decoder_block)
     config.norm_topk_prob = norm_topk_prob
     config.routed_scaling_factor = 1.0
-    # Expert 2 has a large logit; it is the one -1 wraps onto.
+    # Expert 2 has a large logit; it is the one a negative index wraps onto.
     gate_logits = jnp.array([[[0.0, 1.0, 5.0]]])
     weights, _ = moe.RoutedMoE.get_topk(
         DummyRoutedMoE(config),
@@ -912,17 +912,21 @@ class PaddingExcludedFromSoftmaxTest(unittest.TestCase):
     )
     return weights
 
-  def test_single_real_expert_keeps_full_weight(self):
-    # One real slot (expert 1) and one padding slot. The real slot is the only
-    # thing routed to, so after softmax it must carry all the weight.
+  def test_partial_row_falls_back_rather_than_becoming_top_1(self):
+    """One real slot plus a sentinel is a broken row, not a top-1 request.
+
+    Honouring it per slot would quietly reduce that token's top-k, which is a
+    different model rather than a replay of the sampled one.
+    """
     weights = self._weights(jnp.array([[[1, -1]]]), norm_topk_prob=False)
-    self.assertAlmostEqual(float(weights[0, 0, 0]), 1.0, places=5)
-    self.assertEqual(float(weights[0, 0, 1]), 0.0)
+    native = self._weights(None, norm_topk_prob=False)
+    self.assertTrue(jnp.allclose(weights, native, rtol=1e-5, atol=1e-5))
 
   def test_fully_padded_token_is_zero_not_nan(self):
-    weights = self._weights(jnp.array([[[-1, -1]]]), norm_topk_prob=False)
+    weights = self._weights(jnp.array([[[-2, -2]]]), norm_topk_prob=False)
     self.assertFalse(bool(jnp.any(jnp.isnan(weights))))
     self.assertEqual(float(jnp.sum(weights)), 0.0)
+
 
   def test_unpadded_forced_routing_is_unaffected(self):
     """The masking must not perturb the no-padding case."""
@@ -964,7 +968,7 @@ class ForcedRoutingGradientTest(unittest.TestCase):
           model,
           gate_logits,
           gate_logits,
-          forced_routed_experts=jnp.array([[[-1, -1]]]),
+          forced_routed_experts=jnp.array([[[-2, -2]]]),
       )
       return jnp.sum(weights**2)
 
@@ -973,11 +977,13 @@ class ForcedRoutingGradientTest(unittest.TestCase):
 
 
 class OutOfRangeExpertIdTest(unittest.TestCase):
-  """An expert id outside [0, num_experts) must behave like an unused slot.
+  """An expert id outside [0, num_experts) must make the row fall back.
 
-  Before this was masked, take_along_axis clamped the gather while the scatter
-  in reshape_and_update_weights dropped the index, producing a NaN loss that
-  silently poisoned the whole accumulated gradient.
+  A row is only replayed when every slot is a real expert, so a corrupt id
+  makes the whole token route natively. Before this, take_along_axis clamped
+  the gather while the scatter in reshape_and_update_weights dropped the
+  index, producing a NaN loss that silently poisoned the whole accumulated
+  gradient.
   """
 
   def _model(self):
@@ -987,18 +993,18 @@ class OutOfRangeExpertIdTest(unittest.TestCase):
     model.num_experts = 4
     return model
 
-  def test_out_of_range_id_is_masked_not_nan(self):
+  def test_out_of_range_id_falls_back_to_native_routing(self):
     gate_logits = jnp.array([[[0.0, 1.0, 5.0, 2.0]]])
-    weights, _ = moe.RoutedMoE.get_topk(
+    weights, indices = moe.RoutedMoE.get_topk(
         self._model(),
         gate_logits,
         gate_logits,
         forced_routed_experts=jnp.array([[[1, 9]]]),
     )
+    native_weights, native_indices = moe.RoutedMoE.get_topk(self._model(), gate_logits, gate_logits)
     self.assertFalse(bool(jnp.any(jnp.isnan(weights))))
-    # The one valid slot keeps all the weight, exactly as for a -1 slot.
-    self.assertAlmostEqual(float(weights[0, 0, 0]), 1.0, places=5)
-    self.assertEqual(float(weights[0, 0, 1]), 0.0)
+    self.assertTrue(jnp.allclose(weights, native_weights))
+    self.assertTrue(jnp.array_equal(indices, native_indices))
 
   def test_out_of_range_matches_negative_sentinel(self):
     gate_logits = jnp.array([[[0.0, 1.0, 5.0, 2.0]]])
@@ -1256,6 +1262,195 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
             "routing; max abs diff "
             f"{float(jnp.max(jnp.abs(out_ragged.astype(jnp.float32) - out_ref.astype(jnp.float32))))}"
         ),
+    )
+
+
+class RouteAgreementMetricTest(unittest.TestCase):
+  """The measurement that decides whether replay is worth its cost.
+
+  A quietly wrong count here is worse than no measurement at all, because it
+  would be used to justify (or skip) everything built on top of it.
+  """
+
+  def _counts(self, gate_logits, forced):
+    """Returns (agreeing rows, scored rows) for one call to the metric."""
+    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
+    model = DummyRoutedMoE(config)
+    sown = {}
+    model.sow = lambda _kind, name, value: sown.__setitem__(name, value)
+    moe.RoutedMoE.sow_route_agreement(model, gate_logits, forced)
+    return int(sown["router_replay_agree_count"]), int(sown["router_replay_row_count"])
+
+  def test_replaying_the_routers_own_pick_agrees_everywhere(self):
+    gate_logits = jnp.array([[[1.0, 2.0, 0.5], [0.25, -1.0, 3.0]]])
+    _, native = jax.lax.top_k(gate_logits, 2)
+    self.assertEqual(self._counts(gate_logits, native), (2, 2))
+
+  def test_slot_order_does_not_matter(self):
+    """top-k emits experts in logit order; the rollout has no such convention.
+
+    Comparing slot-by-slot instead of as sets would report near-total
+    disagreement on a sampler that happens to order its slots differently --
+    the exact false alarm that would justify building replay we do not need.
+    """
+    gate_logits = jnp.array([[[1.0, 2.0, 0.5], [0.25, -1.0, 3.0]]])
+    _, native = jax.lax.top_k(gate_logits, 2)
+    self.assertEqual(self._counts(gate_logits, jnp.flip(native, axis=-1)), (2, 2))
+
+  def test_a_different_expert_disagrees(self):
+    # top-2 of [1.0, 2.0, 0.5] is {1, 0}; {1, 2} shares only one expert.
+    gate_logits = jnp.array([[[1.0, 2.0, 0.5]]])
+    self.assertEqual(self._counts(gate_logits, jnp.array([[[1, 2]]])), (0, 1))
+
+  def test_sentinel_rows_are_scored_in_neither(self):
+    gate_logits = jnp.array([[[1.0, 2.0, 0.5], [0.25, -1.0, 3.0]]])
+    _, native = jax.lax.top_k(gate_logits, 2)
+    forced = native.at[:, 1, :].set(-1)
+    self.assertEqual(self._counts(gate_logits, forced), (1, 1))
+
+  def test_partially_filled_row_is_scored_in_neither(self):
+    """Half a row is not a rollout opinion, so it must not count as agreement."""
+    gate_logits = jnp.array([[[1.0, 2.0, 0.5]]])
+    self.assertEqual(self._counts(gate_logits, jnp.array([[[1, -1]]])), (0, 0))
+
+  def test_wrong_top_k_width_raises(self):
+    """A mismatched width would broadcast into a number that looks plausible."""
+    gate_logits = jnp.array([[[1.0, 2.0, 0.5]]])
+    with self.assertRaises(ValueError):
+      self._counts(gate_logits, jnp.array([[[1]]]))
+
+
+class RouteFallbackTest(unittest.TestCase):
+  """A row with no usable route must be routed by the model, not deleted.
+
+  Every sentinel row used to produce zero MoE output. That silently removed the
+  expert block for any live token the sampler did not capture -- the whole
+  prompt, in practice -- which is far worse than not replaying at all.
+  """
+
+  # top-2 of token 0 is {2, 1}; of token 1 is {1, 2}.
+  _GATE = jnp.array([[[1.0, 2.0, 3.0], [4.0, 6.0, 5.0]]])
+
+  def _topk(self, forced, **config_overrides):
+    config = DummyConfig()
+    for name, value in config_overrides.items():
+      setattr(config, name, value)
+    return moe.RoutedMoE.get_topk(
+        DummyRoutedMoE(config), self._GATE, self._GATE, forced_routed_experts=forced
+    )
+
+  def _assert_matches_native(self, forced, token):
+    native_weights, native_indices = self._topk(None)
+    weights, indices = self._topk(forced)
+    self.assertTrue((indices[0, token] == native_indices[0, token]).all())
+    self.assertTrue(jnp.allclose(weights[0, token], native_weights[0, token], rtol=1e-6))
+
+  def test_unusable_row_falls_back_without_disturbing_its_neighbour(self):
+    """Fallback is per row: one bad row must not cost the batch its replay."""
+    bad_rows = {
+        "uncaptured": [moe.ROUTER_REPLAY_MISSING] * 2,
+        "half_filled": [1, moe.ROUTER_REPLAY_MISSING],
+        "mixed_sentinels": [moe.ROUTER_REPLAY_MISSING, moe.ROUTER_REPLAY_PADDING],
+        "out_of_range": [1, 99],
+    }
+    for name, bad_row in bad_rows.items():
+      with self.subTest(name):
+        forced = jnp.array([[bad_row, [0, 2]]])
+        self._assert_matches_native(forced, token=0)
+        self.assertTrue((self._topk(forced)[1][0, 1] == jnp.array([0, 2])).all())
+
+  def test_padding_row_is_not_routed_at_all(self):
+    """-2 means no token here, so it must consume no expert and emit nothing."""
+    weights, _ = self._topk(jnp.full((1, 2, 2), moe.ROUTER_REPLAY_PADDING))
+    self.assertTrue((weights == 0).all())
+
+
+  def test_replay_with_random_routing_is_rejected(self):
+    """Random routing has no reproducible pick, so replaying against it is a lie."""
+    with self.assertRaises(ValueError):
+      self._topk(jnp.array([[[0, 2], [0, 2]]]), use_random_routing=True)
+
+  def test_shape_mismatch_is_rejected(self):
+    with self.assertRaises(ValueError):
+      self._topk(jnp.array([[[0, 2]]]))
+
+
+
+class RouterReplayDisabledTest(unittest.TestCase):
+  """`router_replay_enabled=False` must be exactly a no-op.
+
+  It is both the replay-off arm of the A/B and the baseline the agreement
+  metric is read against. If any routing leaked through, both would be
+  measuring something other than what they claim.
+  """
+
+  def _logits_for(self, router_replay_enabled, run_name, forced):
+    seq_len, batch_size, num_experts, top_k = 8, 2, 4, 2
+    cfg = _init_test_cfg(
+        extra_args=["attention=dot_product"],
+        **_tiny_qwen35_kwargs(
+            seq_len,
+            batch_size,
+            num_experts,
+            top_k,
+            run_name=run_name,
+            base_num_decoder_layers=1,
+            num_decoder_layers=1,
+            scan_layers=False,
+            weight_dtype="float32",
+            dtype="float32",
+            router_replay_enabled=router_replay_enabled,
+        ),
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    tokens = jnp.array(([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32)
+    inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_size, 1))
+    positions = jnp.tile(jnp.expand_dims(jnp.arange(seq_len, dtype=jnp.int32), axis=0), (batch_size, 1))
+    segmentation = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
+    # Same key for both configs: the flag cannot change parameter shapes, so
+    # the two models are weight-identical and the outputs are comparable.
+    init_params_rng, init_dropout_rng = jax.random.split(jax.random.PRNGKey(0))
+    params = model.init(
+        {"params": init_params_rng, "dropout": init_dropout_rng},
+        inputs,
+        positions,
+        segmentation,
+        enable_dropout=False,
+    )
+    return model.apply(
+        params,
+        inputs,
+        positions,
+        segmentation,
+        enable_dropout=False,
+        forced_routed_experts=(
+            None
+            if not forced
+            # Everything to expert 0 -- routing the router would never choose.
+            else jnp.zeros((batch_size, seq_len, 1, top_k), dtype=jnp.int32)
+        ),
+    )
+
+  def test_disabled_replay_ignores_forced_routing(self):
+    baseline = self._logits_for(True, "test_replay_disabled_baseline", forced=False)
+    disabled = self._logits_for(False, "test_replay_disabled_forced", forced=True)
+    self.assertTrue(
+        jnp.array_equal(baseline, disabled),
+        "router_replay_enabled=False must be bit-identical to passing no routing;"
+        f" max abs diff {float(jnp.max(jnp.abs(baseline - disabled)))}",
+    )
+
+  def test_enabled_replay_does_change_the_output(self):
+    """Control: without this, the test above could pass because replay is broken."""
+    baseline = self._logits_for(True, "test_replay_enabled_baseline", forced=False)
+    enabled = self._logits_for(True, "test_replay_enabled_forced", forced=True)
+    self.assertFalse(
+        jnp.array_equal(baseline, enabled),
+        "forcing every token to expert 0 must change the output when replay is on",
     )
 
 

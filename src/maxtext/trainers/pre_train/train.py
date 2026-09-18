@@ -366,6 +366,15 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     if moe_overflow_flags:
       has_moe_overflow = jnp.any(jnp.stack([jnp.any(x) for x in moe_overflow_flags]))
   aux["has_moe_overflow"] = has_moe_overflow
+  if config.router_replay_report_agreement:
+    agree_counts = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "router_replay_agree_count")
+    row_counts = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "router_replay_row_count")
+    if agree_counts and row_counts:
+      # Counts, not a ratio: gradient accumulation sums every aux leaf across
+      # microbatches, and summed ratios mean nothing. The division happens once,
+      # in train_step, after the totals are in.
+      aux["router_replay_agree"] = jnp.sum(jnp.concatenate(agree_counts))
+      aux["router_replay_rows"] = jnp.sum(jnp.concatenate(row_counts))
   return loss, aux
 
 
@@ -584,6 +593,18 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             "learning/te_moe_capacity_overflow": aux["te_moe_capacity_overflow"].astype(jnp.int32),
             "learning/te_moe_max_total_recv_tokens": aux["te_moe_max_total_recv_tokens"],
             "learning/te_moe_recv_capacity_per_rank": aux["te_moe_recv_capacity_per_rank"],
+        }
+    )
+  if config.router_replay_report_agreement:
+    # Ratio of sums, not mean of ratios: a layer or microbatch with three
+    # replayed rows should not weigh as much as one with eight thousand.
+    replay_rows = aux.get("router_replay_rows", 0)
+    scalar_metrics.update(
+        {
+            "learning/router_replay_agreement": aux.get("router_replay_agree", 0) / jnp.maximum(replay_rows, 1),
+            # Ships with the rate because a rate over a handful of rows is noise,
+            # and because 0 rows is what tells you no routing arrived at all.
+            "learning/router_replay_rows": replay_rows,
         }
     )
   scalar_metrics.update(bias_metrics)
