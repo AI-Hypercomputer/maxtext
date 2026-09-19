@@ -502,6 +502,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       mesh=None,
       dtype: DType = jnp.float32,
       model_mode: str = MODEL_MODE_TRAIN,
+      quant: None | Quant = None,
       *,
       rngs: nnx.Rngs,
   ):
@@ -509,10 +510,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     Args:
       config: MaxText configuration object.
       mesh: Optional JAX device mesh (required for vLLM paged-state path).
+      quant: Optional quantization configuration.
       rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
     """
     self.config = config
     self.mesh = mesh
+    self.quant = quant
 
     self._gdn_replicate_expert = os.environ.get("MAXTEXT_GDN_REPLICATE_EXPERT", "False").lower() == "true"
     cfg = self.config
@@ -563,6 +566,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
+        quant=self.quant,
         rngs=rngs,
     )
     self.in_proj_ba = DenseGeneral(
@@ -573,6 +577,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
+        quant=self.quant,
         rngs=rngs,
     )
 
@@ -622,6 +627,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
+        quant=self.quant,
         rngs=rngs,
     )
 
@@ -1750,7 +1756,13 @@ class Qwen3NextDecoderLayer(nnx.Module):
       batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
       dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
       self.attention = Qwen3NextGatedDeltaNet(
-          config=cfg, inputs_shape=dummy_inputs_shape, mesh=self.mesh, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs
+          config=cfg,
+          inputs_shape=dummy_inputs_shape,
+          mesh=self.mesh,
+          dtype=cfg.dtype,
+          model_mode=model_mode,
+          quant=self.quant,
+          rngs=rngs,
       )
 
     # Second LayerNorm, applied before the MoE block.

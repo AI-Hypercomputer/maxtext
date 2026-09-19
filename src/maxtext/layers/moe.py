@@ -456,7 +456,7 @@ class GateLogit(nnx.Module):
     else:
       self.bias = None
 
-    if quant:
+    if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
       dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
       dot_general_linen = dot_general_cls()
       quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
@@ -1785,11 +1785,13 @@ class RoutedMoE(nnx.Module):
       # AQT describes its numerics through a `quant_dg`, while the fp8 schemes just name the
       # dtype they quantize to. Under qwix there is no quantization object here at all, and
       # the gmm takes its rule from the qwix rule instead.
-      quant_dg = getattr(self.quant, "quant_dg", None)
-      if quant_dg is not None:
-        return quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype(), quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
-      quantize_dtype = getattr(self.quant, "quantize_dtype", None)
-      return quantize_dtype, quantize_dtype
+      if self.quant is not None and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization):
+        quant_dg = getattr(self.quant, "quant_dg", None)
+        if quant_dg is not None:
+          return quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype(), quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
+        quantize_dtype = getattr(self.quant, "quantize_dtype", None)
+        return quantize_dtype, quantize_dtype
+      return None, None
 
     def gmm(
         inputs,
@@ -1816,12 +1818,10 @@ class RoutedMoE(nnx.Module):
           return tuple(sorted(a.strip() for a in vma_content.split(",")))
         return tuple()
 
-      # VMA (varying mesh axes) extraction is only required for the legacy Megablox backend
-      # fallback (_fwd_run_megablox) to restore lost sharding properties via jax.lax.pcast.
-      # Tokamax and GMM v2 track shard mapping natively and do not consume VMA axes.
+      is_native_kernel = isinstance(kernel, qpl.QArray)
       if self.config.megablox and not self.config.use_tokamax_gmm and not self.config.moe_quantize_token_all_gather:
         lhs_vma_axes = extract_vma(inputs)
-        rhs_vma_axes = extract_vma(kernel)
+        rhs_vma_axes = extract_vma(kernel.qvalue if is_native_kernel else kernel)
       else:
         lhs_vma_axes = tuple()
         rhs_vma_axes = tuple()
@@ -1840,7 +1840,8 @@ class RoutedMoE(nnx.Module):
         partial_sum = jnp.pad(partial_sum, ((0, padding_amount), (0, 0)))
       if not isinstance(inputs, qpl.QArray):
         inputs = inputs.astype(self.dtype)
-      kernel = kernel.astype(self.dtype)
+      if not is_native_kernel:
+        kernel = kernel.astype(self.dtype)
       lhs_quantize_dtype, rhs_quantize_dtype = get_quantization_dtypes()
 
       # Interpret the megablox Pallas kernel only when the TARGET is NOT TPU (CPU or GPU,
@@ -3248,7 +3249,7 @@ class RoutedMoE(nnx.Module):
     ):
       return jnp.einsum
 
-    if self.quant:
+    if self.quant and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization):
       op_id = einsum_name if einsum_name is not None else "einsum"
 
       def quant_einsum(*args, **kwargs):  # pylint: disable=unused-argument
@@ -3624,6 +3625,8 @@ class RoutedMoE(nnx.Module):
       w1_kernel=None,
       fused_kernel=None,
       forced_routed_experts=None,
+      native_w1_scale=None,
+      native_w2_scale=None,
   ) -> tuple[jax.Array, None, None]:
     """Fused MoE via tpu_inference fused_moe_func (vllm_rpa path only).
 
@@ -3665,15 +3668,21 @@ class RoutedMoE(nnx.Module):
         self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4)
     )
 
-    # The fused kernel quantizes for itself: expert weights go in pre-quantized with
-    # per-block scales (when the qwix rule covers the grouped matmul) and the kernel
-    # quantizes the activations in-kernel, accumulating in f32. The call runs outside
-    # qwix's interception: qwix only guards pallas_call, while the kernel is launched
-    # through pl.kernel, so under a QtProvider its tiled matmuls would otherwise be
-    # fake-quantized into fp8 x fp8 with a bf16 accumulator, which Mosaic rejects.
-    rule = quantizations.get_fused_moe_rule()
-    quantized_w1, w1_scale = quantizations.quantize_weight_for_fused_moe(fused_kernel, rule)
-    quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
+    if native_w1_scale is not None and native_w2_scale is not None:
+      # Checkpoint-native FP8: kernels are already raw FP8, scales already in
+      # gmm_v2's rhs_scale layout (see prepare_fused_gmm_scale) -- no requantize.
+      quantized_w1, quantized_w2 = fused_kernel, wo_kernel
+      w1_scale, w2_scale = native_w1_scale, native_w2_scale
+    else:
+      # The fused kernel quantizes for itself: expert weights go in pre-quantized with
+      # per-block scales (when the qwix rule covers the grouped matmul) and the kernel
+      # quantizes the activations in-kernel, accumulating in f32. The call runs outside
+      # qwix's interception: qwix only guards pallas_call, while the kernel is launched
+      # through pl.kernel, so under a QtProvider its tiled matmuls would otherwise be
+      # fake-quantized into fp8 x fp8 with a bf16 accumulator, which Mosaic rejects.
+      rule = quantizations.get_fused_moe_rule()
+      quantized_w1, w1_scale = quantizations.quantize_weight_for_fused_moe(fused_kernel, rule)
+      quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
     fused_moe = quantizations.without_qwix_interception(fused_moe_func)
 
     output_2d = fused_moe(
@@ -3881,15 +3890,52 @@ class RoutedMoE(nnx.Module):
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
+    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
+
+    native_gmm = (
+        isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
+        and cfg.sparse_matmul
+        and cfg.use_gmm_v2
+        and not is_fused_moe_path
+    )
+    is_kernel_quantized = isinstance(self.quant, quantizations.ServeFp8WeightQuantization) and is_fused_moe_path
+
+    def _maybe_native_gmm_weight(kernel, scale):
+      """Non-fused (gmm_v2) path: a qpl.QArray wrapping kernel+scale when
+      native_gmm applies, else the plain dequantized kernel."""
+      if native_gmm and ctypes.is_fp8_dtype(kernel.dtype) and scale is not None:
+        scheme, channel_axis = quantizations.infer_scale_granularity(scale.shape[1:])
+        if scheme == "per_tensor":
+          per_expert_scale = jnp.max(scale.reshape(scale.shape[0], -1), axis=1).reshape(-1, 1, 1)
+          return qpl.QArray(qvalue=kernel, scale=per_expert_scale)
+        elif scheme == "per_channel" and channel_axis == 1:
+          # gmm_v2 only natively broadcasts per-output-channel (N-axis) scales.
+          per_channel_scale = scale.reshape(scale.shape[0], 1, -1)
+          return qpl.QArray(qvalue=kernel, scale=per_channel_scale)
+      return linears.dequantize_weight(kernel, scale, self.dtype)
+
+    def _maybe_native_fused_weight(kernel, scale):
+      """Fused (tpu_inference) path: returns (kernel, native_scale). Native
+      (is_kernel_quantized, FP8 kernel, scale present): kernel stays raw FP8,
+      scale is expanded to gmm_v2's rhs_scale layout. Otherwise: kernel is
+      dequantized and native_scale is None."""
+      if is_kernel_quantized and ctypes.is_fp8_dtype(kernel.dtype) and scale is not None:
+        return kernel, quantizations.prepare_fused_gmm_scale(scale, kernel.shape)
+      return linears.dequantize_weight(kernel, scale, self.dtype), None
+
     wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
-    wo_kernel = quantizations.dequantize_weight(self.wo[...], wo_scale, self.dtype)
+    if is_fused_moe_path:
+      wo_kernel, wo_native_scale = _maybe_native_fused_weight(self.wo[...], wo_scale)
+    else:
+      wo_kernel, wo_native_scale = _maybe_native_gmm_weight(self.wo[...], wo_scale), None
 
     fused_kernel = None
     w0_kernel = None
     w1_kernel = None
-    if cfg.prefuse_moe_weights and cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
+    wi_native_scale = None
+    if cfg.prefuse_moe_weights and is_fused_moe_path:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
-      fused_kernel = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
+      fused_kernel, wi_native_scale = _maybe_native_fused_weight(self.wi[...], wi_scale)
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
@@ -3899,17 +3945,27 @@ class RoutedMoE(nnx.Module):
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
-      w0_kernel = quantizations.dequantize_weight(self.wi_0[...], wi_0_scale, self.dtype)
-      w1_kernel = quantizations.dequantize_weight(self.wi_1[...], wi_1_scale, self.dtype)
+      if is_fused_moe_path:
+        w0_kernel, w0_native_scale = _maybe_native_fused_weight(self.wi_0[...], wi_0_scale)
+        w1_kernel, w1_native_scale = _maybe_native_fused_weight(self.wi_1[...], wi_1_scale)
+        if w0_native_scale is not None and w1_native_scale is not None:
+          wi_native_scale = jnp.concatenate([w0_native_scale, w1_native_scale], axis=-1)
+      else:
+        w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
+        w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because
     # fused_moe_func doesn't support them. Other paths (dense/sparse
     # matmul) apply them to top_k_weights in get_topk.
-    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
     if is_fused_moe_path:
       if self.per_expert_scale is not None and not (cfg.model_call_mode == "inference" and cfg.fuse_expert_scales):
-        wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
+        if wo_native_scale is not None:
+          # Fold into the companion scale -- wo_kernel is still raw FP8 here.
+          per_expert = jnp.asarray(self.per_expert_scale[...], jnp.float32)[:, None, None, None]
+          wo_native_scale = wo_native_scale * per_expert
+        else:
+          wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
 
     if self.wi_0_sparsity_module is not None:
       _, w0_kernel = self.wi_0_sparsity_module(jnp.zeros_like(w0_kernel), w0_kernel)
@@ -3926,7 +3982,7 @@ class RoutedMoE(nnx.Module):
     # The fused MoE kernel currently only supports standard Top-K routing with associated
     # weights. Hash routed layers bypass this kernel and fall back
     # to the sparse matmul implementation.
-    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
+    if is_fused_moe_path:
       output, lb_loss, bias_updates = self.fused_moe_matmul(
           inputs,
           gate_logits,
@@ -3935,6 +3991,8 @@ class RoutedMoE(nnx.Module):
           w1_kernel=w1_kernel,
           fused_kernel=fused_kernel,
           forced_routed_experts=forced_routed_experts,
+          native_w1_scale=wi_native_scale,
+          native_w2_scale=wo_native_scale,
       )
     elif cfg.sparse_matmul:
       if quantizations.in_serve_mode(self.quant):
