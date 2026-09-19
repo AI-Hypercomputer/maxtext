@@ -18,6 +18,7 @@
 # pylint: disable=no-name-in-module
 
 import functools
+import inspect
 import math
 import os
 from typing import Any, cast
@@ -124,7 +125,7 @@ def gdn_context_axes(cfg) -> tuple[str, ...]:
   return tuple(
       name
       for name, size in (
-          ("context", cfg.ici_context_parallelism),
+          ("context", getattr(cfg, "ici_context_parallelism", 1)),
           ("context_usp_ulysses", getattr(cfg, "ici_context_usp_ulysses_parallelism", 1)),
       )
       if size > 1
@@ -592,6 +593,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       self.cache = None  # No cache for train mode or when inputs_shape not provided
 
     block_size = getattr(cfg, "weight_block_size", None)
+    dense_kwargs = {}
+    if block_size is not None:
+      try:
+        if "block_size" in inspect.signature(DenseGeneral.__init__).parameters:
+          dense_kwargs["block_size"] = block_size
+      except (ValueError, TypeError):
+        pass
 
     # Submodule instantiations
     self.in_proj_qkvz = DenseGeneral(
@@ -602,8 +610,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
-        block_size=block_size,
         rngs=rngs,
+        **dense_kwargs,
     )
     self.in_proj_ba = DenseGeneral(
         in_features_shape=in_features,
@@ -660,8 +668,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         kernel_axes=("gdn_head", "embed_attn"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
-        block_size=block_size,
         rngs=rngs,
+        **dense_kwargs,
     )
 
   def _explicit_activation_shardings(self, batch: int):
@@ -935,13 +943,39 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP B: 1D Convolution
     # =========================================================================
-    qkv = jnp.concatenate([q, k, v], axis=-1)
-    batch, seq_len, _ = qkv.shape
+    cp_axes = gdn_context_axes(self.config)
+    cp_axis_name = cp_axes[0] if cp_axes else None
+    cp_size = (
+        self.mesh.shape[cp_axis_name] if (self.mesh and cp_axis_name and cp_axis_name in self.mesh.axis_names) else 1
+    )
+
+    use_head_sharded_cp = (
+        1 < cp_size <= self.num_k_heads
+        and getattr(cfg, "use_gdn_kernel", False)
+        and model_mode != MODEL_MODE_AUTOREGRESSIVE
+    )
+
+    if use_head_sharded_cp:
+      if self.num_k_heads % cp_size != 0:
+        raise ValueError(
+            f"GDN head-sharded CP requires num_k_heads ({self.num_k_heads}) to be " f"divisible by cp_size ({cp_size})."
+        )
+      if getattr(self.config, "context_parallel_load_balance", False):
+        raise ValueError("GDN does not support context_parallel_load_balance.")
+
+      num_groups = self.num_k_heads  # 16
+      channels_per_group = 2 * self.head_k_dim + self.v_heads_per_k_head * self.head_v_dim  # 768
+      # Reshape qkv into head groups [B, S, 16, 768]
+      qkv = jnp.concatenate([query, key, value_raw], axis=3)
+    else:
+      qkv = jnp.concatenate([q, k, v], axis=-1)
+    batch, seq_len = qkv.shape[:2]
     conv_kernel_size = self.config.gdn_conv_kernel_dim
 
     conv_state = None
     recurrent_state = None
     next_conv_state = None
+    conv_input = None
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       recurrent_state, conv_state = active_cache.get_gdn_states()
       orig_cache_batch = conv_state.shape[0]
@@ -966,19 +1000,21 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         else:
           recurrent_state = recurrent_state[:batch]
 
-      conv_input = jnp.concatenate([conv_state, qkv], axis=1)
+      if not getattr(cfg, "use_gdn_kernel", False):
+        conv_input = jnp.concatenate([conv_state, qkv], axis=1)
 
-      if decoder_segment_ids is not None:
-        valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1)
+        if decoder_segment_ids is not None:
+          valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1)
 
-        def extract_state(c_in, v_len):
-          return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
+          def extract_state(c_in, v_len):
+            return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
 
-        next_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
-      else:
-        next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
-    else:
-      conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
+          next_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
+        else:
+          next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+    elif not getattr(cfg, "use_gdn_kernel", False):
+      pad_width = ((0, 0), (conv_kernel_size - 1, 0)) + ((0, 0),) * (qkv.ndim - 2)
+      conv_input = jnp.pad(qkv, pad_width)
 
     if getattr(cfg, "use_gdn_kernel", False):
       try:
@@ -986,11 +1022,16 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       except ImportError:
         try:
           from maxtext.kernels.gdn import gdn_decoupled_conv1d  # pylint: disable=import-outside-toplevel
-        except ImportError as e:
-          raise ImportError(
-              "Unable to import GDN backward kernel (gdn_decoupled_conv1d). " "Ensure `maxtext.kernels.gdn` is available."
-          ) from e
+        except ImportError:
+          try:
+            from maxtext.src.maxtext.kernels.gdn.gdn_bwd_pallas import gdn_decoupled_conv1d  # pylint: disable=import-outside-toplevel
+          except ImportError as e:
+            raise ImportError(
+                "Unable to import GDN backward kernel (gdn_decoupled_conv1d). Ensure `maxtext.kernels.gdn` is available."
+            ) from e
 
+      conv_bias_arg = self.conv1d.bias.value if getattr(self.conv1d, "bias", None) is not None else None
+      conv_weight_arg = self.conv1d.kernel.value
       conv_state_arg = (
           conv_state
           if conv_state is not None
@@ -1007,14 +1048,103 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
               dtype=state_dtype,
           )
       )
-      conv_bias_arg = self.conv1d.bias.value if getattr(self.conv1d, "bias", None) is not None else None
 
       if self.mesh is not None:
         logical_rules = self.config.logical_axis_rules
-        qkv_pspec = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
-        b_a_pspec = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
-        conv_state_pspec = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
-        recurrent_state_pspec = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=self.mesh, rules=logical_rules)
+        if use_head_sharded_cp:
+          num_groups = self.num_k_heads
+          channels_per_group = 2 * self.head_k_dim + self.v_heads_per_k_head * self.head_v_dim
+
+          # Grouped conv_weight: [16, 1, conv_kernel_size, 768]
+          w = self.conv1d.kernel.value
+          w_q = w[..., : self.key_dim].reshape(conv_kernel_size, 1, num_groups, self.head_k_dim)
+          w_k = w[..., self.key_dim : 2 * self.key_dim].reshape(conv_kernel_size, 1, num_groups, self.head_k_dim)
+          w_v = w[..., 2 * self.key_dim :].reshape(
+              conv_kernel_size, 1, num_groups, self.v_heads_per_k_head * self.head_v_dim
+          )
+          conv_weight_grouped = jnp.concatenate([w_q, w_k, w_v], axis=-1)
+          conv_weight_arg = jnp.swapaxes(conv_weight_grouped, 0, 2)
+
+          if conv_bias_arg is not None:
+            cb = conv_bias_arg
+            cb_q = cb[: self.key_dim].reshape(num_groups, self.head_k_dim)
+            cb_k = cb[self.key_dim : 2 * self.key_dim].reshape(num_groups, self.head_k_dim)
+            cb_v = cb[2 * self.key_dim :].reshape(num_groups, self.v_heads_per_k_head * self.head_v_dim)
+            conv_bias_arg = jnp.concatenate([cb_q, cb_k, cb_v], axis=-1)
+            conv_bias_pspec = P(cp_axis_name, None)
+          else:
+            conv_bias_pspec = P()
+
+          if conv_state is not None:
+            cs_q = conv_state[..., : self.key_dim].reshape(
+                batch, self.config.gdn_conv_kernel_dim - 1, num_groups, self.head_k_dim
+            )
+            cs_k = conv_state[..., self.key_dim : 2 * self.key_dim].reshape(
+                batch, self.config.gdn_conv_kernel_dim - 1, num_groups, self.head_k_dim
+            )
+            cs_v = conv_state[..., 2 * self.key_dim :].reshape(
+                batch, self.config.gdn_conv_kernel_dim - 1, num_groups, self.v_heads_per_k_head * self.head_v_dim
+            )
+            conv_state_arg = jnp.concatenate([cs_q, cs_k, cs_v], axis=-1)
+          else:
+            conv_state_arg = jnp.zeros(
+                (batch, self.config.gdn_conv_kernel_dim - 1, num_groups, channels_per_group),
+                dtype=cfg.dtype,
+            )
+          recurrent_state_arg = (
+              recurrent_state.astype(state_dtype)
+              if recurrent_state is not None
+              else jnp.zeros(
+                  (batch, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+                  dtype=state_dtype,
+              )
+          )
+          a_log_arg = self.A_log[...]
+          dt_bias_arg = self.dt_bias[...]
+
+          mesh_batch = logical_to_mesh_axes((KV_BATCH,), mesh=self.mesh, rules=logical_rules)[0]
+          qkv_pspec = P(mesh_batch, None, cp_axis_name, None)
+          b_a_pspec = P(mesh_batch, None, cp_axis_name)
+          conv_weight_pspec = P(cp_axis_name, None, None, None)
+          a_log_pspec = P(
+              cp_axis_name,
+          )
+          dt_bias_pspec = P(
+              cp_axis_name,
+          )
+          conv_state_pspec = P(mesh_batch, None, cp_axis_name, None)
+          recurrent_state_pspec = P(mesh_batch, cp_axis_name, None, None)
+          out_attn_pspec = P(mesh_batch, cp_axis_name, None, None)
+        else:
+          conv_weight_arg = self.conv1d.kernel.value
+          conv_state_arg = (
+              conv_state
+              if conv_state is not None
+              else jnp.zeros(
+                  (batch, self.config.gdn_conv_kernel_dim - 1, qkv.shape[-1]),
+                  dtype=cfg.dtype,
+              )
+          )
+          recurrent_state_arg = (
+              recurrent_state.astype(state_dtype)
+              if recurrent_state is not None
+              else jnp.zeros(
+                  (batch, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+                  dtype=state_dtype,
+              )
+          )
+          a_log_arg = self.A_log[...]
+          dt_bias_arg = self.dt_bias[...]
+
+          qkv_pspec = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
+          b_a_pspec = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
+          conv_weight_pspec = P()
+          conv_bias_pspec = P()
+          a_log_pspec = P()
+          dt_bias_pspec = P()
+          conv_state_pspec = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
+          recurrent_state_pspec = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=self.mesh, rules=logical_rules)
+          out_attn_pspec = qkv_pspec
 
         qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
             qkv_pspec, qkv.shape, self.mesh, dims=(0,), allow_remove_axes=True
@@ -1027,6 +1157,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         )
         recurrent_state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
             recurrent_state_pspec, recurrent_state_arg.shape, self.mesh, dims=(0,), allow_remove_axes=True
+        )
+        out_attn_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            out_attn_pspec,
+            (batch, seq_len, self.num_v_heads, self.head_v_dim),
+            self.mesh,
+            dims=(0,),
+            allow_remove_axes=True,
         )
 
         if cfg.shard_mode == ShardMode.EXPLICIT:
@@ -1045,15 +1182,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
                 qkv_pspec,
                 b_a_pspec,
                 b_a_pspec,
-                P(),
-                P(),
-                P(),
-                P(),
+                conv_weight_pspec,
+                conv_bias_pspec,
+                a_log_pspec,
+                dt_bias_pspec,
                 conv_state_pspec,
                 recurrent_state_pspec,
             ),
             out_specs=(
-                qkv_pspec,
+                out_attn_pspec,
                 (conv_state_pspec, recurrent_state_pspec),
             ),
             check_vma=False,
@@ -1069,6 +1206,82 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             cs_val,
             rs_val,
         ):
+          if use_head_sharded_cp:
+            local_num_k_heads = self.num_k_heads // cp_size
+            local_num_v_heads = self.num_v_heads // cp_size
+
+            b_sz, full_s, _, _ = qkv_val.shape
+            q_val = qkv_val[..., : self.head_k_dim].reshape(b_sz, full_s, -1)
+            k_val = qkv_val[..., self.head_k_dim : 2 * self.head_k_dim].reshape(b_sz, full_s, -1)
+            v_val = qkv_val[..., 2 * self.head_k_dim :].reshape(b_sz, full_s, -1)
+            qkv_val_flat = jnp.concatenate([q_val, k_val, v_val], axis=-1)
+
+            cw_swapped = jnp.swapaxes(cw_val, 0, 2)
+            cw_q = cw_swapped[..., : self.head_k_dim].reshape(self.config.gdn_conv_kernel_dim, 1, -1)
+            cw_k = cw_swapped[..., self.head_k_dim : 2 * self.head_k_dim].reshape(self.config.gdn_conv_kernel_dim, 1, -1)
+            cw_v = cw_swapped[..., 2 * self.head_k_dim :].reshape(self.config.gdn_conv_kernel_dim, 1, -1)
+            cw_val_flat = jnp.concatenate([cw_q, cw_k, cw_v], axis=-1)
+
+            if cb_val is not None:
+              cb_q = cb_val[..., : self.head_k_dim].reshape(-1)
+              cb_k = cb_val[..., self.head_k_dim : 2 * self.head_k_dim].reshape(-1)
+              cb_v = cb_val[..., 2 * self.head_k_dim :].reshape(-1)
+              cb_val_flat = jnp.concatenate([cb_q, cb_k, cb_v], axis=-1)
+            else:
+              cb_val_flat = None
+
+            if cs_val is not None:
+              cs_q = cs_val[..., : self.head_k_dim].reshape(b_sz, self.config.gdn_conv_kernel_dim - 1, -1)
+              cs_k = cs_val[..., self.head_k_dim : 2 * self.head_k_dim].reshape(
+                  b_sz, self.config.gdn_conv_kernel_dim - 1, -1
+              )
+              cs_v = cs_val[..., 2 * self.head_k_dim :].reshape(b_sz, self.config.gdn_conv_kernel_dim - 1, -1)
+              cs_val_flat = jnp.concatenate([cs_q, cs_k, cs_v], axis=-1)
+            else:
+              cs_val_flat = None
+
+            out, (next_cs, next_rs) = gdn_decoupled_conv1d(
+                qkv=qkv_val_flat,
+                b=b_val,
+                a=a_val,
+                conv_weight=cw_val_flat,
+                conv_bias=cb_val_flat,
+                a_log=alog_val,
+                dt_bias=dt_val,
+                conv_state=cs_val_flat,
+                recurrent_state=rs_val,
+                num_k_heads=local_num_k_heads,
+                num_v_heads=local_num_v_heads,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                conv_kernel_size=self.config.gdn_conv_kernel_dim,
+                chunk_size=self.config.gdn_chunk_size,
+                use_qk_norm_in_gdn=self.config.use_qk_norm_in_gdn,
+                compute_dtype=state_dtype,
+            )
+
+            if next_cs is not None:
+              cs_k_dim = local_num_k_heads * self.head_k_dim
+              n_cs_q = next_cs[..., :cs_k_dim].reshape(
+                  b_sz, self.config.gdn_conv_kernel_dim - 1, local_num_k_heads, self.head_k_dim
+              )
+              n_cs_k = next_cs[..., cs_k_dim : 2 * cs_k_dim].reshape(
+                  b_sz, self.config.gdn_conv_kernel_dim - 1, local_num_k_heads, self.head_k_dim
+              )
+              n_cs_v = next_cs[..., 2 * cs_k_dim :].reshape(
+                  b_sz, self.config.gdn_conv_kernel_dim - 1, local_num_k_heads, self.v_heads_per_k_head * self.head_v_dim
+              )
+              next_cs_out = jnp.concatenate([n_cs_q, n_cs_k, n_cs_v], axis=-1)
+            else:
+              next_cs_out = None
+
+            # All-to-All resharding collective:
+            # Exchanges local heads over full sequence [B, T_full, local_num_v_heads, head_v_dim]
+            # to all heads over local sequence [B, T_local, num_v_heads, head_v_dim].
+            out = jax.lax.all_to_all(out, axis_name=cp_axis_name, split_axis=1, concat_axis=2, tiled=True)
+
+            return out, (next_cs_out, next_rs)
+
           return gdn_decoupled_conv1d(
               qkv=qkv_val,
               b=b_val,
@@ -1094,13 +1307,18 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             qkv,
             b,
             a,
-            self.conv1d.kernel.value,
+            conv_weight_arg,
             conv_bias_arg,
-            self.A_log[...],
-            self.dt_bias[...],
+            a_log_arg,
+            dt_bias_arg,
             conv_state_arg,
             recurrent_state_arg,
         )
+        if use_head_sharded_cp and next_conv_state is not None and next_conv_state.ndim == 4:
+          n_cs_q = next_conv_state[..., : self.head_k_dim].reshape(batch, conv_kernel_size - 1, -1)
+          n_cs_k = next_conv_state[..., self.head_k_dim : 2 * self.head_k_dim].reshape(batch, conv_kernel_size - 1, -1)
+          n_cs_v = next_conv_state[..., 2 * self.head_k_dim :].reshape(batch, conv_kernel_size - 1, -1)
+          next_conv_state = jnp.concatenate([n_cs_q, n_cs_k, n_cs_v], axis=-1)
       else:
         gdn_step_fn = gdn_decoupled_conv1d
         core_attn_out, (next_conv_state, next_recurrent_state) = gdn_step_fn(
