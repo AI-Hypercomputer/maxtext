@@ -739,11 +739,11 @@ class LhsScaleTest(unittest.TestCase):
     self.assertIsNone(scale)
 
 
-class GateLogitsQwixInterceptionTest(unittest.TestCase):
-  """Verifies Qwix interception behavior for MoE gate logits."""
+class RouterProjQwixInterceptionTest(unittest.TestCase):
+  """Verifies Qwix interception behavior for the MoE router projection."""
 
-  def _assert_gate_logits_interception(self, quantize_gate_logits: bool):
-    """Verifies Qwix interception behavior for MoE router gate logits."""
+  def _assert_router_proj_interception(self, quantize_router_proj: bool):
+    """Verifies Qwix interception behavior for the MoE router (gate) projection."""
     cfg = pyconfig.initialize(
         [
             "",
@@ -753,9 +753,9 @@ class GateLogitsQwixInterceptionTest(unittest.TestCase):
             "use_qwix_quantization=true",
             "per_device_batch_size=1",
             "max_target_length=16",
-            f"quantize_gate_logits={quantize_gate_logits}",
+            f"quantize_router_proj={quantize_router_proj}",
         ],
-        run_name="deepseek3_gate_quantize_test",
+        run_name="deepseek3_router_proj_quantize_test",
         skip_jax_distributed_system=True,
     )
     rules = quantizations.get_quantization_rule(cfg)
@@ -771,7 +771,7 @@ class GateLogitsQwixInterceptionTest(unittest.TestCase):
     other_logs = [log for log in cm.output if "shared_experts" in log and "op=dot_general" in log]
     self.assertTrue(other_logs, "Expected shared_experts dot_general operations to be traced by Qwix")
 
-    if quantize_gate_logits:
+    if quantize_router_proj:
       self.assertEqual(len(rules), 1)
       self.assertIsNotNone(rules[0].weight_qtype)
       for log in other_logs:
@@ -782,13 +782,13 @@ class GateLogitsQwixInterceptionTest(unittest.TestCase):
       for log in other_logs:
         self.assertIn("rule=1", log)
 
-  def test_deepseek3_quantize_gate_logits_true_intercepts_gate_ops(self):
-    """DeepSeek3 with quantize_gate_logits=True intercepts gate ops with quantized rule=0."""
-    self._assert_gate_logits_interception(quantize_gate_logits=True)
+  def test_deepseek3_quantize_router_proj_true_intercepts_gate_ops(self):
+    """DeepSeek3 with quantize_router_proj=True intercepts gate ops with quantized rule=0."""
+    self._assert_router_proj_interception(quantize_router_proj=True)
 
-  def test_deepseek3_quantize_gate_logits_false_leaves_gate_unquantized(self):
-    """DeepSeek3 with quantize_gate_logits=False matches unquantized rule=0 (weight_qtype=None) for gate."""
-    self._assert_gate_logits_interception(quantize_gate_logits=False)
+  def test_deepseek3_quantize_router_proj_false_leaves_gate_unquantized(self):
+    """DeepSeek3 with quantize_router_proj=False matches unquantized rule=0 (weight_qtype=None) for gate."""
+    self._assert_router_proj_interception(quantize_router_proj=False)
 
 
 if __name__ == "__main__":

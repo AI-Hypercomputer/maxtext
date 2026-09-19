@@ -153,7 +153,7 @@ quantize_kvcache: false # set to true to quantize kv cache values, defaults to f
 kv_quant_axis: "heads_and_dkv"
 kv_quant_dtype: "int8"
 quantize_mtp: false # set to true to quantize mtp layers when quantization is enabled. requires mtp_num_layers > 0 and quantization=fp8_full.
-quantize_gate_logits: true # set to false to exclude moe gate layers from quantization when quantization is enabled. default is true for backward compatibility. applicable when use_qwix_quantization=true and quantization is set; ignored otherwise.
+quantize_router_proj: true # set to false to exclude the moe router (gate) projection matmul from quantization when quantization is enabled. default is true for backward compatibility. applicable when use_qwix_quantization=true and quantization is set; ignored otherwise.
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
 # saves params quantized on fly at following path
 save_quantized_params_path: ""
@@ -219,8 +219,10 @@ float32_logits: false # in dot_product attention, whether to cast to fp32 the in
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the MLA Indexer (DeepSeek-V3 / DeepSeek-V3.2) across the unsharded local heads dimension natively.
 csa_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the CSA Indexer (DeepSeek-V4) across the unsharded local heads dimension natively.
 float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
-float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
-
+# whether to run the MoE gate (router) module in fp32 for numerical stability. 
+# compute dtype only (the kernel is still stored in weight_dtype): casts the gate inputs and kernel, emits fp32 logits, and applies to the routed bias add and score function. 
+# see quantize_router_proj for whether the gate projection matmul is quantized; enabling both is rejected.
+float32_gate_logits: false
 # multi-token prediction configs
 # the number of auxiliary prediction layers to use for mtp.
 # set to 0 to disable the feature.

@@ -55,7 +55,11 @@ Dropping:
 
 `first_num_dense_layers`: The number of initial dense layers before the first MoE layer is introduced.
 
-`float32_weight_sum`: If enabled, performs the summation of expert weights using float32 precision for improved numerical stability. Recommended specifically when lower precision types cause convergence or quality issues.
+`float32_weight_sum`: Controls the accumulation precision of the MoE combine reduction — the weighted sum of expert outputs $E_k(x)$ by their routing weights $g_k$ (not a sum of model parameters):
+\$$y = \sum_{k=1}^{K} g_k E_k(x)$\$
+
+- **`True` (default)**: Casts both operands to `float32` before the combine einsum, accumulates in `float32`, then casts back to the model `dtype`. Recommended for numerical stability.
+- **`False`**: Reduces directly in the model `dtype` (e.g. `bfloat16`), halving operand memory traffic. Useful for throughput- or HBM-constrained recipes if `bfloat16` accumulation does not degrade convergence.
 
 ### Routing Mechanism
 
@@ -67,9 +71,15 @@ Dropping:
 
 `routed_bias_update_rate`: Defines the update rate to the routed bias term above. Applicable only to the DeepSeek decoder block. For DeepSeek V4, this enables a specialized, auxiliary-loss-free routing bias mechanism. This implementation utilizes a pure `nnx.Variable` (`MoEBiasVar`) instead of a standard `nnx.Param`, which completely isolates the bias update step from the global model optimizer state. The bias is updated directly at the end of the routing step to balance the token distribution mathematically across experts without compromising language modeling convergence.
 
-`float32_gate_logits`: If enabled, casts router input activations and gate weights to `float32` prior to the gate projection matmul for improved numerical stability and routing precision.
+`float32_gate_logits`: If enabled, runs the MoE gate (router) module in `float32` for improved numerical stability and routing precision (compute dtype only; the kernel is stored in `weight_dtype` and cast at use). Specifically, it:
 
-`quantize_gate_logits`: Applicable when `use_qwix_quantization=True` and `quantization` is set; ignored otherwise. (1) If enabled (default: `True` for backward compatibility), quantizes MoE routing gate projections. (2) Set to `False` to preserve unquantized gate projections across all quantization schemes (e.g., `fp8_full`, `int8`). When using `float32_gate_logits=True` under quantization, `quantize_gate_logits` must be set to `False`.
+- casts router input activations and gate weights before the gate projection matmul;
+- makes emitted logits `float32` for downstream top-k selection and balance losses;
+- evaluates the routed bias add and score function (e.g. sigmoid) in `float32`.
+- for `gemma4`, it casts separate gate inputs if supplied, and sets the router norm and scale dtype
+- **Quantization Interaction**: Does **not** control quantization. Enabling alongside `quantize_router_proj=True` is rejected at config init: quantizing the projection matmul immediately requantizes `float32` operands to low precision (e.g. 8-bit), nullifying the cast. Downstream `float32` bias and score operations cannot recover the lost precision. To run the projection in `float32` under quantization, set `quantize_router_proj=False`. (**Note on `gemma4`**: Because `float32_gate_logits` also sets the router norm and scale, an unquantized norm paired with a quantized gate matmul is currently not expressible.)
+
+`quantize_router_proj`: Applicable when `use_qwix_quantization=True` and `quantization` is set; ignored otherwise. Set to `false` to exclude the router projection matmul from quantization (default: `true` for backward compatibility). To run the projection in `float32` under quantization, pair `quantize_router_proj=False` with `float32_gate_logits=True`.
 
 #### DeepSeek V4 Auxiliary-Loss-Free & Sequence-Wise Load Balancing
 

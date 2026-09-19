@@ -545,11 +545,14 @@ class Quantization(BaseModel):
           " `mtp_num_layers > 0` and `quantization=fp8_full`."
       ),
   )
-  quantize_gate_logits: bool = Field(
+  quantize_router_proj: bool = Field(
       True,
       description=(
-          "If True, quantizes the MoE routing gate when quantization is enabled. Default is True for backward"
-          " compatibility. Applicable when use_qwix_quantization=True and quantization is set; ignored otherwise."
+          "If True, quantizes the MoE router (gate) projection matmul when quantization is enabled. Targets the"
+          " `GateLogit` module (matching path regex r'.*/gate$'). Default is True for backward compatibility."
+          " Applicable when use_qwix_quantization=True and quantization is set; ignored otherwise. Distinct from"
+          " `float32_gate_logits`, which sets the gate module's compute dtype (operand casts, bias add, score"
+          " function) and does not control quantization."
       ),
   )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
@@ -1116,7 +1119,18 @@ class MoEGeneral(BaseModel):
   )
   float32_gate_logits: bool = Field(
       False,
-      description="Whether to cast inputs to fp32 to compute MoE gate logits for numerical stability.",
+      description=(
+          "Whether to run the MoE gate (router) module in fp32 for numerical stability and routing precision."
+          " This is a compute dtype, not a storage dtype: the gate kernel is still stored in `weight_dtype` and"
+          " is cast at use. When True it sets the `GateLogit` compute dtype, which (1) casts the gate input"
+          " activations and kernel before the projection matmul, (2) makes the emitted logits fp32, so downstream"
+          " consumers such as top-k selection and the load balance loss see fp32 values, and (3) applies to the"
+          " routed bias add and the score function. If a decoder block supplies separate gate inputs, those are"
+          " cast as well; for gemma4 it additionally sets the router norm dtype and the router scale cast. It"
+          " does not control quantization -- see `quantize_router_proj`, which governs whether the gate"
+          " projection matmul is quantized. Setting both is rejected at config init, because quantizing the"
+          " projection discards the fp32 operand precision."
+      ),
   )
   prefuse_moe_weights: bool = Field(
       False,
@@ -4496,10 +4510,13 @@ class MaxTextConfig(
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
-    if self.quantization and self.use_qwix_quantization and self.quantize_gate_logits and self.float32_gate_logits:
+    if self.quantization and self.use_qwix_quantization and self.quantize_router_proj and self.float32_gate_logits:
       raise ValueError(
-          "`float32_gate_logits=True` is incompatible with `quantize_gate_logits=True` when"
-          " quantization is enabled. Set `quantize_gate_logits=False` to compute gate logits in FP32."
+          "`float32_gate_logits=True` is rejected with `quantize_router_proj=True`: the fp32 cast on"
+          " the gate operands is undone by requantization at the projection matmul, so the projection"
+          " remains quantized while believing you configured fp32. The flag's remaining effects (bias"
+          " add, score function, gemma4 router norm) are second-order next to the quantization error."
+          " Set `quantize_router_proj=False` to keep the projection in fp32."
       )
     if (
         self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
