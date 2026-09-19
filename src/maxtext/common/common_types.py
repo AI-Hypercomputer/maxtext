@@ -42,6 +42,16 @@ def is_fp8_dtype(dtype: Any) -> bool:
 
 def get_weight_dtype(config: Config, module_name: str) -> DType:
   """Resolves parameter storage dtype for a submodule, honoring unquantized_modules."""
+  if getattr(config, "float32_gate_logits", False) and module_name in (
+      "norm",
+      "gate",
+      "shared_expert_gate",
+      "A_log",
+      "dt_bias",
+      "conv1d",
+      "logits_dense",
+  ):
+    return "float32"
   if not is_fp8_dtype(config.weight_dtype):
     return config.weight_dtype
   unquantized = getattr(config, "unquantized_modules", None) or ()
