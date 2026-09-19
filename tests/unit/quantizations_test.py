@@ -743,6 +743,7 @@ class GateLogitsQwixInterceptionTest(unittest.TestCase):
   """Verifies Qwix interception behavior for MoE gate logits."""
 
   def _assert_gate_logits_interception(self, quantize_gate_logits: bool):
+    """Verifies Qwix interception behavior for MoE router gate logits."""
     cfg = pyconfig.initialize(
         [
             "",

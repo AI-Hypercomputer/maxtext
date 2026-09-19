@@ -960,7 +960,7 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
 
   # Qwix rules are evaluated in a first-match way
   rules = []
-  
+
   if not config.quantize_gate_logits:
     # Setting all qtypes to None bypasses quantization, falling back to standard unquantized
     # jax.lax.dot_general for both forward and backward passes.

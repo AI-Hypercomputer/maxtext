@@ -4496,12 +4496,7 @@ class MaxTextConfig(
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
-    if (
-        self.quantization
-        and self.use_qwix_quantization
-        and self.quantize_gate_logits
-        and self.float32_gate_logits
-    ):
+    if self.quantization and self.use_qwix_quantization and self.quantize_gate_logits and self.float32_gate_logits:
       raise ValueError(
           "`float32_gate_logits=True` is incompatible with `quantize_gate_logits=True` when"
           " quantization is enabled. Set `quantize_gate_logits=False` to compute gate logits in FP32."
