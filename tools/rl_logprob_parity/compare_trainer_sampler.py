@@ -143,15 +143,16 @@ def stage_tokenize(args, hf_home, maxtext_root, out_dir):
     # One real prompt per JSONL line ({"text": ...}); each becomes one row, truncated to SEQ_LEN. Rows stay
     # uniform width so no padding or attention masking is needed -- supply prompts that are long enough.
     rows, short = [], []
-    for ln in open(args.prompts_file, encoding="utf-8"):
-      ln = ln.strip()
-      if not ln:
-        continue
-      rec = json.loads(ln)
-      ids = tok(rec["text"], add_special_tokens=False)["input_ids"]
-      if len(ids) < SEQ_LEN:
-        short.append(len(ids))
-      rows.append(ids[:SEQ_LEN])
+    with open(args.prompts_file, encoding="utf-8") as f:
+      for ln in f:
+        ln = ln.strip()
+        if not ln:
+          continue
+        rec = json.loads(ln)
+        ids = tok(rec["text"], add_special_tokens=False)["input_ids"]
+        if len(ids) < SEQ_LEN:
+          short.append(len(ids))
+        rows.append(ids[:SEQ_LEN])
     if short:
       raise SystemExit(f"{len(short)} prompt(s) shorter than SEQ_LEN={SEQ_LEN}: {short[:5]}")
     tokens = np.array(rows, dtype=np.int32)
@@ -166,7 +167,11 @@ def stage_tokenize(args, hf_home, maxtext_root, out_dir):
     files = sorted(glob.glob(os.path.join(maxtext_root, args.text_glob), recursive=True))
   if not files:
     raise SystemExit(f"no text matched {args.text_glob!r} under {maxtext_root}")
-  text = "\n\n".join(open(f, encoding="utf-8").read() for f in files)
+  texts = []
+  for f in files:
+    with open(f, encoding="utf-8") as fh:
+      texts.append(fh.read())
+  text = "\n\n".join(texts)
   ids = tok(text)["input_ids"]
   if len(ids) < B * SEQ_LEN:
     raise SystemExit(f"need {B * SEQ_LEN} tokens, corpus has {len(ids)}")

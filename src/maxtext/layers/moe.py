@@ -501,7 +501,7 @@ class GateLogit(nnx.Module):
         kernel,
         norm_axis,
         contract_ind,
-        "highest" if self.dtype == jnp.float32 else self.matmul_precision,
+        jax.lax.Precision.HIGHEST if self.dtype == jnp.float32 else self.matmul_precision,
         self.quant_dot_general,
         _initializing,
         out_sharding=output_sharding,
@@ -966,13 +966,10 @@ class RoutedMoE(nnx.Module):
       router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
       auto_weights, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
       slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
-      # A token has real forced routing only if its slots are within [0, num_experts)
-      # and not an uninitialized all-zero [0, 0, ..., 0] buffer. Tokens with
-      # UNSET_ROUTED_EXPERT (-1) or all-zero slots must fall back to auto_indices
+      # A token has real forced routing only if its slots are within [0, num_experts).
+      # Tokens with UNSET_ROUTED_EXPERT (-1) slots must fall back to auto_indices
       # rather than zeroing out the entire MoE layer output.
-      token_is_forced = jnp.all(slot_valid, axis=-1, keepdims=True) & jnp.any(
-          forced_routed_experts > 0, axis=-1, keepdims=True
-      )
+      token_is_forced = jnp.all(slot_valid, axis=-1, keepdims=True)
       top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
       valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.ones_like(slot_valid, dtype=jnp.bool_))
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
@@ -1018,7 +1015,13 @@ class RoutedMoE(nnx.Module):
         top_k_weights = top_k_weights * valid_token_mask
     else:
       if self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
-        top_k_weights = top_k_weights.astype(jnp.float32)
+        if not self.config.norm_topk_prob:
+          top_k_logits = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
+          if valid_token_mask is not None:
+            top_k_logits = jnp.where(valid_token_mask, top_k_logits, jnp.finfo(jnp.float32).min / 2)
+          top_k_weights = jax.nn.softmax(top_k_logits.astype(jnp.float32), axis=-1)
+        else:
+          top_k_weights = top_k_weights.astype(jnp.float32)
 
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -1029,7 +1032,7 @@ class RoutedMoE(nnx.Module):
         if valid_token_mask is not None:
           weight_sum = jnp.where(weight_sum == 0, 1.0, weight_sum)
         top_k_weights = top_k_weights / weight_sum
-      if not self.config.float32_weight_sum:
+      if not getattr(self.config, "float32_weight_sum", False):
         top_k_weights = top_k_weights.astype(self.dtype)
 
       if self.per_expert_scale is not None and not (

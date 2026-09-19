@@ -1347,7 +1347,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           weight_dtype=jnp.float32 if cfg.float32_gate_logits else get_weight_dtype(cfg, "shared_expert_gate"),
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
-          matmul_precision="highest" if cfg.float32_gate_logits else cfg.matmul_precision,
+          matmul_precision=jax.lax.Precision.HIGHEST if cfg.float32_gate_logits else cfg.matmul_precision,
           rngs=rngs,
       )
     else:

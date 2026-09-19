@@ -472,7 +472,7 @@ class NNXDecoder(nnx.Module):
           dtype=jnp.float32 if config.logits_dot_in_fp32 else config.dtype,
           kernel_axes=("embed_vocab", "vocab"),
           shard_mode=config.shard_mode,
-          matmul_precision="highest" if config.logits_dot_in_fp32 else self.config.matmul_precision,
+          matmul_precision=jax.lax.Precision.HIGHEST if config.logits_dot_in_fp32 else self.config.matmul_precision,
           parameter_memory_host_offload=config.parameter_memory_host_offload,
           weight_quant=quantizations.get_weight_quant_config(config, "logits_dense"),
           rngs=rngs,
