@@ -161,20 +161,33 @@ For each dimension, you can control:
 - `..._embed_dim`: Tile size for embedding dimension.
 - `..._mlp_dim`: Tile size for MLP dimension.
 
+### Evaluation-Stage Forward Tiling
+
+Separate evaluation tile sizes are enabled when `eval_step` uses a custom logical mesh or sharding rule (`custom_mesh_and_rule_for_eval=True`, where `logical_axis_rules_for_eval != logical_axis_rules`). MaxText checks the active logical axis rules via `max_utils.is_eval(config)` to apply the evaluation tile sizes.
+
+When the logical mesh rules are identical between training and evaluation, the training tile sizes are used directly.
+
+Available forward-pass evaluation tile parameters in GMM:
+
+- `eval_wi_tile_fwd_batch_seq`, `eval_wi_tile_fwd_embed_dim`, `eval_wi_tile_fwd_mlp_dim`
+- `eval_wo_tile_fwd_batch_seq`, `eval_wo_tile_fwd_embed_dim`, `eval_wo_tile_fwd_mlp_dim`
+
+All `eval_*` tile sizes default to `None`. Only forward-pass tile configurations are needed for evaluation since backward gradients (`dlhs` and `drhs`) are not computed during evaluation.
+
 Implementation Support:
 
 - JAX Ragged Dot:
 
-  - Supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`).
+  - Supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`, plus their `eval_...` counterparts).
   - Configs are enabled for INT8, FP8, and BF16.
 
 - Megablox:
 
-  - Supports all 18 configurations.
+  - Supports all 18 configurations (plus the 6 `eval_...` forward counterparts).
   - Configs are enabled for INT8, FP8, and BF16.
 
 - Tokamax Ragged Dot (Includes two implementations):
 
   - **GMM v1**: Uses Tokamax's native autotuner; does not accept manual tile sizes from MaxText.
-  - **GMM v2**: Supports all 18 manual tiling configurations. Optionally, use `use_gmm_v2_heuristic_tiling=True` for heuristic tiling.
+  - **GMM v2**: Supports all 18 manual tiling configurations (plus the 6 `eval_...` forward counterparts). Optionally, use `use_gmm_v2_heuristic_tiling=True` for heuristic tiling.
   - Enabled for FP8 and BF16.

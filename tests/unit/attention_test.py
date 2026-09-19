@@ -817,6 +817,31 @@ class BlockCausalMaskTest(unittest.TestCase):
         selected_mask = self._capture_splash_mask(op, query)
         self.assertIsInstance(selected_mask, expected_mask_type)
 
+  def test_tpu_splash_uses_eval_block_sizes_on_eval_batch(self):
+    op = self._make_flash_op(attention_type=AttentionType.GLOBAL)
+    op.config.logical_axis_rules_for_eval = (("activation_batch", "data"),)
+    op.config.eval_sa_block_q = op.config.eval_sa_block_kv = op.config.eval_sa_block_kv_compute = 8
+    op.config.eval_sa_q_layout = op.config.eval_sa_k_layout = op.config.eval_sa_v_layout = "SEQ_MINOR"
+
+    def capture_block_sizes():
+      with (
+          mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+          mock.patch.object(
+              attention_op.splash_attention_kernel, "BlockSizes", side_effect=RuntimeError("blocks captured")
+          ) as make_block_sizes,
+          self.assertRaisesRegex(RuntimeError, "blocks captured"),
+      ):
+        query = jnp.zeros((2, 16, 1, 8))
+        op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+      return make_block_sizes.call_args.kwargs
+
+    qkv_layout = attention_op.splash_attention_kernel.QKVLayout
+    train_kw = capture_block_sizes()
+    self.assertEqual((train_kw["block_q"], train_kw["q_layout"]), (4, qkv_layout["HEAD_DIM_MINOR"]))
+    with nn_partitioning.logical_axis_rules(op.config.logical_axis_rules_for_eval):
+      eval_kw = capture_block_sizes()
+    self.assertEqual((eval_kw["block_q"], eval_kw["q_layout"]), (8, qkv_layout["SEQ_MINOR"]))
+
   def _capture_splash_mask(self, op, query, q_axis="context"):
     """Runs `tpu_flash_attention` far enough to see which mask it built."""
     with (
