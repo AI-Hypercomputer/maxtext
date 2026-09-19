@@ -18,8 +18,8 @@ Executes native MaxText SFT training with multimodal data processing and
 trainable parameter masking to fine-tune the custom MLP vision projector.
 
 Example usage:
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
     load_parameters_path=gs://YOUR_BUCKET/path/to/checkpoint/items \
     base_output_directory=gs://YOUR_BUCKET/output_directory \
     run_name=my_omni_sft_run

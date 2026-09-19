@@ -12,18 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for MLPerf DS v3 continuous stream chunking in tfds_data_processing_c4_mlperf."""
+"""Unit tests for tfds_data_processing_c4_mlperf: MLPerf DS v3 continuous stream chunking and eval batch decimation."""
 
+import os
 import types
 import unittest
+from unittest import mock
+import jax
+from jax.sharding import Mesh
 import numpy as np
 import pytest
+
+# A handful of devices is needed to exercise the local row to device mapping.
+os.environ["XLA_FLAGS"] = os.environ.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8"
 
 tf = pytest.importorskip("tensorflow")
 tfds = pytest.importorskip("tensorflow_datasets")
 
+from maxtext.input_pipeline import tfds_data_processing_c4_mlperf as c4_mlperf
 from maxtext.input_pipeline.tfds_data_processing_c4_mlperf import (
     _pad_to_batch_size,
+    _place_real_rows_in_local_batch,
     chunk_token_stream,
     format_continuous_stream_fn,
     format_fn,
@@ -388,6 +397,122 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
     b0 = batches[0]
     # Under sequence packing, trailing padding has segment ID 0
     self.assertIn(0, b0["inputs_segmentation"][0])
+
+
+def _make_eval_dataset(num_examples: int, seq_len: int) -> "tf.data.Dataset":
+  """Builds a formatted eval dataset with `num_examples` real examples."""
+
+  def gen():
+    for i in range(num_examples):
+      value = tf.fill([seq_len], tf.constant(i + 1, dtype=tf.int32))
+      yield {
+          "inputs": value,
+          "targets": value,
+          "inputs_position": tf.range(seq_len, dtype=tf.int32),
+          "targets_position": tf.range(seq_len, dtype=tf.int32),
+          "inputs_segmentation": tf.ones([seq_len], dtype=tf.int32),
+          "targets_segmentation": tf.ones([seq_len], dtype=tf.int32),
+      }
+
+  signature = {
+      key: tf.TensorSpec(shape=[seq_len], dtype=tf.int32)
+      for key in (
+          "inputs",
+          "targets",
+          "inputs_position",
+          "targets_position",
+          "inputs_segmentation",
+          "targets_segmentation",
+      )
+  }
+  return tf.data.Dataset.from_generator(gen, output_signature=signature)
+
+
+class PadToBatchSizeTest(unittest.TestCase):
+  """Tests for deriving the batch count without a cross-host allgather."""
+
+  def test_skips_allgather_when_only_a_subset_of_processes_loads(self):
+    ds = _make_eval_dataset(2, seq_len=4)
+    with mock.patch.object(c4_mlperf.jax, "process_count", return_value=8):
+      with mock.patch.object(c4_mlperf.multihost_utils, "process_allgather") as allgather:
+        padded = list(_pad_to_batch_size(ds, batch_size=4, num_examples=2, dataloading_host_count=2).as_numpy_iterator())
+    allgather.assert_not_called()
+    self.assertEqual(len(padded), 4)
+    self.assertTrue((padded[2]["targets_segmentation"] == 0).all())
+    self.assertTrue((padded[3]["targets_segmentation"] == 0).all())
+
+  def test_explicit_num_batches_skips_allgather(self):
+    ds = _make_eval_dataset(2, seq_len=4)
+    with mock.patch.object(c4_mlperf.multihost_utils, "process_allgather") as allgather:
+      padded = list(_pad_to_batch_size(ds, batch_size=2, num_examples=2, num_batches=3).as_numpy_iterator())
+    allgather.assert_not_called()
+    self.assertEqual(len(padded), 6)
+
+
+class PlaceRealRowsTest(unittest.TestCase):
+  """Tests for scattering real examples onto the rows that are evaluated."""
+
+  def test_scatters_full_batch(self):
+    seq_len = 3
+    batch = {
+        "inputs": tf.constant([[1, 1, 1], [2, 2, 2]], dtype=tf.int32),
+        "targets_segmentation": tf.ones([2, seq_len], dtype=tf.int32),
+    }
+    out = _place_real_rows_in_local_batch(batch, local_batch_size=4, real_data_rows=[0, 2])
+    inputs = out["inputs"].numpy()
+    segmentation = out["targets_segmentation"].numpy()
+    self.assertEqual(inputs.shape, (4, seq_len))
+    np.testing.assert_array_equal(inputs[0], [1, 1, 1])
+    np.testing.assert_array_equal(inputs[2], [2, 2, 2])
+    # The rows that are decimated away hold dummy data with zero loss weight.
+    np.testing.assert_array_equal(inputs[1], [0, 0, 0])
+    np.testing.assert_array_equal(inputs[3], [0, 0, 0])
+    self.assertEqual(segmentation[0].sum(), seq_len)
+    self.assertEqual(segmentation[1].sum(), 0)
+    self.assertEqual(segmentation[2].sum(), seq_len)
+    self.assertEqual(segmentation[3].sum(), 0)
+
+  def test_scatters_short_final_batch(self):
+    batch = {"inputs": tf.constant([[7, 7, 7]], dtype=tf.int32)}
+    out = _place_real_rows_in_local_batch(batch, local_batch_size=4, real_data_rows=[1, 3])
+    inputs = out["inputs"].numpy()
+    self.assertEqual(inputs.shape, (4, 3))
+    np.testing.assert_array_equal(inputs[1], [7, 7, 7])
+    self.assertEqual(inputs.sum(), 21)
+
+
+class LocalRowsLoadingRealDataTest(unittest.TestCase):
+  """Tests for the local row to device mapping helper."""
+
+  def setUp(self):
+    super().setUp()
+    devices = jax.devices()
+    if len(devices) < 8:
+      self.skipTest(f"Test needs 8 devices, got {len(devices)}")
+    self.devices = devices[:8]
+    self.mesh = Mesh(np.array(self.devices).reshape(4, 2), ("fsdp", "expert"))
+
+  def test_all_rows_when_nothing_is_decimated(self):
+    rows = c4_mlperf.get_local_rows_loading_real_data([["fsdp", "expert"]], 8, 8, 128, self.mesh)
+    self.assertEqual(rows, list(range(8)))
+
+  def test_only_rows_on_evaluated_devices(self):
+    # Simulate a host that owns every other device of the mesh, like a host whose
+    # devices span two mesh rows.
+    local_devices = [self.devices[i] for i in (0, 2, 4, 6)]
+    with mock.patch.object(type(self.mesh), "local_devices", property(lambda _: local_devices)):
+      with mock.patch.object(c4_mlperf.jax, "process_count", return_value=2):
+        rows = c4_mlperf.get_local_rows_loading_real_data([["fsdp", "expert"]], 8, 4, 128, self.mesh)
+    # Global rows 0 and 2 (local positions 0 and 1) are below the cutoff of 4.
+    self.assertEqual(rows, [0, 1])
+
+  def test_multiple_rows_per_device(self):
+    local_devices = [self.devices[i] for i in (0, 2, 4, 6)]
+    with mock.patch.object(type(self.mesh), "local_devices", property(lambda _: local_devices)):
+      with mock.patch.object(c4_mlperf.jax, "process_count", return_value=2):
+        rows = c4_mlperf.get_local_rows_loading_real_data([["fsdp", "expert"]], 16, 8, 128, self.mesh)
+    # Each device holds 2 rows; local positions 0 and 1 are below the cutoff.
+    self.assertEqual(rows, [0, 1, 2, 3])
 
 
 if __name__ == "__main__":

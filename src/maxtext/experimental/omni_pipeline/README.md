@@ -42,7 +42,7 @@ export EVAL_SPLIT="test"        # Evaluation dataset split (default: test)
 ### Quick Start
 
 ```bash
-bash src/maxtext/experimental/omni_poc/maxtext_omni_pipeline_e2e.sh
+bash src/maxtext/experimental/omni_pipeline/maxtext_omni_pipeline_e2e.sh
 ```
 
 ### How It Works (Step-by-Step)
@@ -72,8 +72,8 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
 #### Step 2: Stitch Subtrees into Unified Omni Checkpoint
 Runs [`utils/stitch_checkpoint.py`](utils/stitch_checkpoint.py) to extract the `vision_encoder` from Gemma 3, the `decoder` from Qwen 3, initialize the fresh projector, and save the stitched base checkpoint:
 ```bash
-python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
-  src/maxtext/experimental/omni_poc/maxtext-omni-gemma3-qwen3.yml \
+python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
+  src/maxtext/experimental/omni_pipeline/maxtext-omni-gemma3-qwen3.yml \
   hf_access_token=${HF_TOKEN} \
   vision_load_path=${BASE_OUTPUT_DIRECTORY}/converted/gemma3-4b/0/items \
   llm_load_path=${BASE_OUTPUT_DIRECTORY}/converted/qwen3-4b/0/items \
@@ -83,8 +83,8 @@ python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
 #### Step 3: Curriculum Post-Training Stage 1: Projector Alignment (ChartNet)
 Trains the MLP projector on chart summaries from `ibm-granite/ChartNet`. As the first stage of curriculum post-training, this step aligns the vision tower with the language model through our customized MLP.
 ```bash
-python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-  src/maxtext/experimental/omni_poc/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml \
+python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+  src/maxtext/experimental/omni_pipeline/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml \
   load_parameters_path=${BASE_OUTPUT_DIRECTORY}/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items \
   base_output_directory=${BASE_OUTPUT_DIRECTORY}/pretrain_chartnet \
   run_name=pretrain_chartnet \
@@ -94,8 +94,8 @@ python3 -m maxtext.experimental.omni_poc.train_sft_omni \
 #### Step 4: Curriculum Post-Training Stage 2: Projector Task Fine-Tuning (ChartQA)
 Trains the MLP projector for visual question answering using `HuggingFaceM4/ChartQA`:
 ```bash
-python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-  src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+  src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
   load_parameters_path=${PRETRAIN_FINAL_CKPT} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft_after_chartnet \
   run_name=sft_chartqa \
@@ -105,8 +105,8 @@ python3 -m maxtext.experimental.omni_poc.train_sft_omni \
 #### Step 5: Multimodal Quality Evaluation (ChartQA Test Split)
 Runs benchmark evaluation on the ChartQA test split using [`eval_sft_omni.py`](eval_sft_omni.py):
 ```bash
-python3 -m maxtext.experimental.omni_poc.eval_sft_omni \
-  src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+python3 -m maxtext.experimental.omni_pipeline.eval_sft_omni \
+  src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
   load_parameters_path=${SFT_FINAL_CKPT} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft_after_chartnet \
   run_name=eval \
@@ -123,8 +123,8 @@ python3 -m maxtext.experimental.omni_poc.eval_sft_omni \
 For quick qualitative testing and visual validation without running a training or benchmark job, use [`utils/decode_omni.py`](utils/decode_omni.py):
 
 ```bash
-python3 -m maxtext.experimental.omni_poc.utils.decode_omni \
-  --config_path=src/maxtext/experimental/omni_poc/maxtext-omni-gemma3-qwen3.yml \
+python3 -m maxtext.experimental.omni_pipeline.utils.decode_omni \
+  --config_path=src/maxtext/experimental/omni_pipeline/maxtext-omni-gemma3-qwen3.yml \
   --checkpoint_path=gs://YOUR_BUCKET/path/to/checkpoint/0/items \
   --image_path=/path/to/test_chart.png \
   --prompt="What is the highest value in this chart?" \
@@ -141,19 +141,19 @@ Unit and integration tests are organized under [`tests/`](tests/):
 export OMNI_TEST_BASE_DIR="${BASE_OUTPUT_DIRECTORY}"
 
 # 1. Verify checkpoint stitching, layer counts, and weight equality
-python3 -m unittest src/maxtext/experimental/omni_poc/tests/stitch_checkpoint_test.py
+python3 -m unittest src/maxtext/experimental/omni_pipeline/tests/stitch_checkpoint_test.py
 
 # 2. Verify tokenizer placeholder expansion and multimodal offset calculations (no GPU/GCS needed)
-python3 -m unittest src/maxtext/experimental/omni_poc/tests/processor_maxtext_omni_test.py
+python3 -m unittest src/maxtext/experimental/omni_pipeline/tests/processor_maxtext_omni_test.py
 
 # 3. Checkpoint diff audit: verify only projector weights changed after SFT
-python3 -m maxtext.experimental.omni_poc.tests.compare_sft_checkpoint_test \
-  src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+python3 -m maxtext.experimental.omni_pipeline.tests.compare_sft_checkpoint_test \
+  src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
   --stitched_checkpoint_path=${BASE_OUTPUT_DIRECTORY}/omni_checkpoints/omni_stitched_gemma3-4b_qwen3-4b/0/items \
   --sft_checkpoint_path=${BASE_OUTPUT_DIRECTORY}/sft_after_chartnet/sft_chartqa/checkpoints/19/items
 
 # 4. Verify custom projector forward pass and parameter freezing invariants on Qwen3-VL
-python3 -m maxtext.experimental.omni_poc.tests.custom_vision_projector_test \
+python3 -m maxtext.experimental.omni_pipeline.tests.custom_vision_projector_test \
   --load_parameters_path=${BASE_OUTPUT_DIRECTORY}/converted/gemma3-4b/0/items
 ```
 
@@ -217,7 +217,7 @@ python3 -m maxtext.experimental.omni_poc.tests.custom_vision_projector_test \
 ## Codebase Organization
 
 ```
-src/maxtext/experimental/omni_poc/
+src/maxtext/experimental/omni_pipeline/
 ├── README.md                                       # Documentation (this file)
 ├── maxtext-omni-gemma3-qwen3.yml                   # Base architecture config for the stitched model
 ├── maxtext_omni_pipeline_e2e.sh                    # Automated 5-stage end-to-end pipeline script

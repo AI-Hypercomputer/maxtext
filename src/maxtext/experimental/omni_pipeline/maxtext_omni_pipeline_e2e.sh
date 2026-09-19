@@ -30,7 +30,7 @@
 #   export SCAN_LAYERS=true         # Optional: scan layers (default: true)
 #   export EVAL_NUM_EXAMPLES=100    # Optional: -1 for full test split (default: 100)
 #   export EVAL_SPLIT="test"        # Optional: evaluation split (default: test)
-#   ./src/maxtext/experimental/omni_poc/maxtext_omni_pipeline_e2e.sh
+#   ./src/maxtext/experimental/omni_pipeline/maxtext_omni_pipeline_e2e.sh
 # ==============================================================================
 
 set -e
@@ -156,8 +156,8 @@ fi
 # ------------------------------------------------------------------------------
 echo -e "\n=== [Step 2/5] Stitching Omni Checkpoint ==="
 if ! path_exists "$STITCHED_ITEMS_PATH"; then
-  JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
-    src/maxtext/experimental/omni_poc/maxtext-omni-gemma3-qwen3.yml \
+  JAX_PLATFORMS=cpu python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
+    src/maxtext/experimental/omni_pipeline/maxtext-omni-gemma3-qwen3.yml \
     hf_access_token=${HF_TOKEN} \
     vision_load_path=${VISION_ITEMS_PATH} \
     llm_load_path=${LLM_ITEMS_PATH} \
@@ -171,8 +171,8 @@ fi
 # ------------------------------------------------------------------------------
 echo -e "\n=== [Step 3/5] SFT Stage 1: Projector Alignment (ChartNet) ==="
 if [ -n "${PRETRAIN_STEPS}" ]; then
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    src/maxtext/experimental/omni_poc/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    src/maxtext/experimental/omni_pipeline/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml \
     load_parameters_path=${STITCHED_ITEMS_PATH} \
     base_output_directory=${PRETRAIN_DIR} \
     run_name=${PRETRAIN_RUN_NAME} \
@@ -181,8 +181,8 @@ if [ -n "${PRETRAIN_STEPS}" ]; then
     checkpoint_period=${PRETRAIN_STEPS} \
     save_checkpoint_on_completion=true
 else
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    src/maxtext/experimental/omni_poc/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    src/maxtext/experimental/omni_pipeline/configs/pretrain-maxtext-omni-gemma3-qwen3-chartnet.yml \
     load_parameters_path=${STITCHED_ITEMS_PATH} \
     base_output_directory=${PRETRAIN_DIR} \
     run_name=${PRETRAIN_RUN_NAME} \
@@ -201,8 +201,8 @@ echo "--> Stage 1 Alignment Checkpoint: ${PRETRAIN_FINAL_CKPT}"
 # ------------------------------------------------------------------------------
 echo -e "\n=== [Step 4/5] SFT Stage 2: Projector Task Fine-Tuning (ChartQA) ==="
 if [ -n "${SFT_STEPS}" ]; then
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
     load_parameters_path=${PRETRAIN_FINAL_CKPT} \
     base_output_directory=${SFT_DIR} \
     run_name=${SFT_RUN_NAME} \
@@ -211,8 +211,8 @@ if [ -n "${SFT_STEPS}" ]; then
     checkpoint_period=${SFT_STEPS} \
     save_checkpoint_on_completion=true
 else
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
     load_parameters_path=${PRETRAIN_FINAL_CKPT} \
     base_output_directory=${SFT_DIR} \
     run_name=${SFT_RUN_NAME} \
@@ -230,8 +230,8 @@ echo "--> SFT Final Checkpoint: ${SFT_FINAL_CKPT}"
 # STEP 5: Multimodal Quality Evaluation (ChartQA Benchmark)
 # ------------------------------------------------------------------------------
 echo -e "\n=== [Step 5/5] Evaluating SFT Omni Model on ChartQA ==="
-python3 -m maxtext.experimental.omni_poc.eval_sft_omni \
-  src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+python3 -m maxtext.experimental.omni_pipeline.eval_sft_omni \
+  src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
   load_parameters_path=${SFT_FINAL_CKPT} \
   base_output_directory=${EVAL_DIR} \
   run_name=${EVAL_RUN_NAME} \

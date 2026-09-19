@@ -339,6 +339,12 @@ class RunInfo(BaseModel):
   )
   debug_sharding: bool = Field(False, description="If True, print model weight sharding details.")
   base_output_directory: PathStr = Field("", description="Base directory for all outputs, typically a GCS path.")
+  enable_mllog: bool = Field(False, description="If True, enables MLPerf logging (mllog).")
+  mllog_file: None | PathStr = Field(
+      "",
+      description="Optional filename or path for mllog export in base_output_directory "
+      "(defaults to 'mllog_<data_shuffle_seed>.log').",
+  )
   sharding_strategy: None | Literal["experimental"] = Field(
       None,
       description="Experimental sharding strategy used for some inference configs.",
@@ -3027,6 +3033,17 @@ class RLReward(BaseModel):
       None,
       description=("Max worker processes for the math_verify pool. None ⇒ " "min(batch_size, cpu_count())."),
   )
+  reward_num_workers: int = Field(
+      0,
+      description=(
+          "Worker processes tunix uses to evaluate the reward functions over the batch "
+          "(GrpoConfig.reward_num_workers). 0 = serial (default), -1 = one worker per CPU."
+      ),
+  )
+  reward_worker_timeout_seconds: float = Field(
+      180.0,
+      description="Seconds to wait for one reward-function chunk in a worker before falling back to the parent process.",
+  )
   reward_functions_path: str = Field(
       "",
       description=(
@@ -3610,6 +3627,21 @@ class MaxTextConfig(
           f"({self.num_kv_heads}) to be divisible by ici_context_usp_ulysses_parallelism ({usp_ulysses_size})."
       )
 
+  def validate_mllog(self):
+    """
+    Warns when MLPerf logging is enabled without evaluation.
+
+    The compliance checker requires at least one eval_accuracy event (REQ: AT_LEAST_ONE in
+    common.yaml), so a no-eval run is useful for measuring evaluation overhead on end-to-end
+    time but will not pass MLPerf compliance checking.
+    """
+    if self.enable_mllog and self.eval_interval <= 0:
+      max_logging.warning(
+          f"enable_mllog=True with eval_interval={self.eval_interval} (<= 0): running without "
+          "evaluation. The resulting log will not pass MLPerf compliance (which requires "
+          "at least one eval_accuracy event)."
+      )
+
   def validate_num_moe_emb_chunks(self):
     """
     Validates that num_moe_emb_chunks is used with supported settings.
@@ -3774,6 +3806,13 @@ class MaxTextConfig(
       # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
       telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
       self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
+      if self.enable_mllog:
+        if not self.mllog_file:
+          self.mllog_file = os.path.join(output_dir, f"mllog_{self.data_shuffle_seed}.log")
+        elif not self.mllog_file.startswith("gs://") and not os.path.isabs(self.mllog_file):
+          self.mllog_file = os.path.join(output_dir, self.mllog_file)
+      else:
+        self.mllog_file = ""
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
           None,
@@ -4517,6 +4556,7 @@ class MaxTextConfig(
       self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_mllog()
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:

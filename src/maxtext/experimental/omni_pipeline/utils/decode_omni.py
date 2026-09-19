@@ -21,7 +21,7 @@ ChartQA sample Q&A, ground truth and model responses are logged.
 
 Example usage:
 
-python src/maxtext/experimental/omni_poc/utils/decode_omni.py \
+python src/maxtext/experimental/omni_pipeline/utils/decode_omni.py \
   --checkpoint_path="gs://YOUR_BUCKET_NAME/omni_stitched_gemma3-4b_qwen3-4b/0/items" \
   --num_samples=3 \
   --max_new_tokens=128
@@ -361,7 +361,7 @@ Sample {idx+1}/{len(sample_indices)} (Index {i}):
 
 def main(argv):
   config_path = FLAGS.config_path or os.path.join(
-      MAXTEXT_PKG_DIR, "experimental", "omni_poc", "maxtext-omni-gemma3-qwen3.yml"
+      MAXTEXT_PKG_DIR, "experimental", "omni_pipeline", "maxtext-omni-gemma3-qwen3.yml"
   )
   assert FLAGS.checkpoint_path, "Must specify --checkpoint_path"
   config = load_omni_config(config_path, FLAGS.checkpoint_path)

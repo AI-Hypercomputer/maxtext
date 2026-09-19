@@ -42,7 +42,7 @@ LLM_MAXTEXT_MODEL="qwen3-4b"
 
 # Automatically find maxtext package directory
 MAXTEXT_PKG_DIR=$(python3 -c "import os, maxtext; print(os.path.dirname(maxtext.__file__))")
-OMNI_CONFIG_PATH="${MAXTEXT_PKG_DIR}/experimental/omni_poc/maxtext-omni-gemma3-qwen3.yml"
+OMNI_CONFIG_PATH="${MAXTEXT_PKG_DIR}/experimental/omni_pipeline/maxtext-omni-gemma3-qwen3.yml"
 
 VISION_CKPT_DIR="${BASE_OUTPUT_DIRECTORY}/${VISION_MAXTEXT_MODEL}_converted"
 LLM_CKPT_DIR="${BASE_OUTPUT_DIRECTORY}/${LLM_MAXTEXT_MODEL}_converted"
@@ -109,7 +109,7 @@ fi
 # Step 3: Checkpoint Stitching (Vision Tower + LLM Decoder + Fresh Projector)
 echo "============================================================"
 echo "Stitching Vision and LLM subtrees into unified Omni checkpoint..."
-python3 -m maxtext.experimental.omni_poc.utils.stitch_checkpoint \
+python3 -m maxtext.experimental.omni_pipeline.utils.stitch_checkpoint \
   "$OMNI_CONFIG_PATH" \
   "hf_access_token=${HF_TOKEN}" \
   "vision_load_path=${VISION_ITEMS_PATH}" \
