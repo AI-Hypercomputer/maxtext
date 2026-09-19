@@ -781,8 +781,6 @@ def training_loop_iteration(
       eval_batch = jax.device_put(
           eval_batch, sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
       )
-      if 0 < eval_steps <= eval_step_count:
-        break
       with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_eval):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
         if (
@@ -801,6 +799,11 @@ def training_loop_iteration(
           eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
       )
       eval_step_count += 1
+      # Stop before fetching another batch: the extra fetch would reshard a batch that
+      # is never used, and the data loading hosts may already be out of data while the
+      # placeholder iterators of the other hosts keep going.
+      if 0 < eval_steps <= eval_step_count:
+        break
 
   prof.maybe_deactivate_profiler(step, state)
 

@@ -135,9 +135,9 @@ class SyntheticDataIterator:
 class PlaceHolderDataIterator:
   """Creates a place holder synthetic data iterator for loading on subset of hosts"""
 
-  def __init__(self, config: pyconfig.HyperParameters, mesh):
+  def __init__(self, config: pyconfig.HyperParameters, mesh, is_training: bool = True):
     self.mesh = mesh
-    dataset = PlaceHolderDataIterator.get_place_holder_synthetic_data(config)
+    dataset = PlaceHolderDataIterator.get_place_holder_synthetic_data(config, is_training=is_training)
     self.data_generator = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
 
   def __iter__(self):
@@ -150,9 +150,17 @@ class PlaceHolderDataIterator:
     pass
 
   @staticmethod
-  def get_place_holder_synthetic_data(config: pyconfig.HyperParameters):
-    """fill negative value in synthetic data"""
-    batch_size = config.global_batch_size_to_load // jax.process_count()
+  def get_place_holder_synthetic_data(config: pyconfig.HyperParameters, is_training: bool = True):
+    """fill negative value in synthetic data
+
+    Args:
+      config: hyperparameters, used for the loaded batch size and the sequence length.
+      is_training: whether this placeholder stands in for the train iterator. The eval
+        iterator loads `global_batch_size_to_load_eval` rows instead, and every host has
+        to contribute the same number of rows to the global batch.
+    """
+    global_batch_size_to_load = config.global_batch_size_to_load if is_training else config.global_batch_size_to_load_eval
+    batch_size = global_batch_size_to_load // jax.process_count()
     neg_ones = np.full((batch_size, config.max_target_length), -1, dtype=np.int32)
     batch = {
         "inputs": neg_ones,
