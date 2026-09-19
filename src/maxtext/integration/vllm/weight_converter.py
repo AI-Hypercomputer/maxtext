@@ -1048,7 +1048,7 @@ class MaxTextToMaxTextConverter:
 
     if group.op == "identity":
       raw_val = src_flat[group.source_keys[0]]
-      tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
+      tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path or getattr(raw_val, "dtype", None) == jnp.float32) else target_dtype
       val = _apply_dtype_cast(raw_val, tgt_dt, path)
       is_kv = "key.kernel" in path or "value.kernel" in path
       if (
