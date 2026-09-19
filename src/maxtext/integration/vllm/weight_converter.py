@@ -1074,7 +1074,11 @@ class MaxTextToMaxTextConverter:
 
     # group.op == "slice"
     raw_val = src_flat[group.source_keys[0]]
-    tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
+    tgt_dt = (
+        getattr(raw_val, "dtype", target_dtype)
+        if ("gate" in path or "router" in path or getattr(raw_val, "dtype", None) == jnp.float32)
+        else target_dtype
+    )
     val = _apply_dtype_cast(raw_val, tgt_dt, path)
     self._check_scan_axis(val, path)
     per_block = self._slice_bulk_target_free(val, path)
