@@ -25,6 +25,7 @@ converters and scanned MaxText-to-MaxText state unrolling. The converters handle
 import ast
 import contextlib
 import copy
+import inspect
 import json
 import logging
 import re
@@ -477,6 +478,15 @@ def unroll_gemma_scanned_weights(weights):
   return unflatten_dict(new_flat_w)
 
 
+def _accepts_kwarg(cls: Any, name: str) -> bool:
+  """Whether `cls(...)` takes the keyword `name` (or `**kwargs`); True when its signature cannot be inspected."""
+  try:
+    params = inspect.signature(cls).parameters
+  except (ValueError, TypeError):
+    return True
+  return name in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def _log_and_flush_traceback(msg: str) -> None:
   """Logs an error with formatted traceback and flushes all logging handlers."""
   logging.error("%s:\n%s", msg, traceback.format_exc())
@@ -615,6 +625,16 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     )
     self._maxtext_config = maxtext_config
 
+    # Forwarded only when the installed tunix declares the option on both
+    # configs; an older tunix always frees the KV cache around a weight sync.
+    optional_vllm_config = {}
+    if hasattr(rollout_config, "rollout_vllm_free_kv_cache_during_weight_sync") and _accepts_kwarg(
+        VllmConfig, "free_kv_cache_during_weight_sync"
+    ):
+      optional_vllm_config["free_kv_cache_during_weight_sync"] = (
+          rollout_config.rollout_vllm_free_kv_cache_during_weight_sync
+      )
+
     self._sampler = MaxTextVllmSampler(
         tokenizer=tokenizer,
         config=VllmConfig(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
@@ -637,6 +657,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             engine_kwargs=engine_kwargs,
             additional_config=rollout_additional_config,
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
+            **optional_vllm_config,
         ),
         direct_maxtext_sync=direct_maxtext_sync,
         model_name=getattr(maxtext_config, "model_name", ""),

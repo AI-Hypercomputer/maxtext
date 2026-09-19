@@ -86,12 +86,15 @@ class TrainRLTest(unittest.TestCase):
     config = types.RLConfig(model_name="gemma4-26b")
 
     self.assertTrue(config.gc_collect_after_weight_sync)
+    self.assertTrue(config.free_kv_cache_during_weight_sync)
 
     config = types.RLConfig(
         model_name="gemma4-26b",
         gc_collect_after_weight_sync=False,
+        free_kv_cache_during_weight_sync=False,
     )
     self.assertFalse(config.gc_collect_after_weight_sync)
+    self.assertFalse(config.free_kv_cache_during_weight_sync)
 
   def test_rl_config_reward_worker_defaults(self):
     """The reward worker knobs default to tunix's own defaults."""
@@ -288,6 +291,71 @@ class TrainRLTest(unittest.TestCase):
     self.assertLess(elapsed, 200.0, "the fallback must not wait for reward_worker_timeout_seconds")
     # Summed over the two fns: _echo_reward from the workers plus a correct math_verify grade from the parent.
     self.assertEqual(list(np.asarray(out["rewards"]).ravel()), [1.0 + config.reward_exact_answer] * 4)
+
+  def _rollout_config_kwargs_from_create_rl_components(self, rollout_config_fields, **config_overrides):
+    """Runs create_rl_components with the tunix pieces faked; returns the kwargs RolloutConfig received.
+
+    `rollout_config_fields` is the set of keyword names the fake RolloutConfig declares, which is how
+    `_kwargs_supported_by` tells a tunix that has an option from one that predates it.
+    """
+    received = {}
+
+    class FakeRolloutConfig:
+
+      def __init__(self, **fields):
+        unknown = sorted(set(fields) - set(rollout_config_fields))
+        if unknown:
+          raise TypeError(f"unexpected keyword arguments {unknown}")
+        received.update(fields)
+
+    FakeRolloutConfig.__signature__ = inspect.Signature(
+        [inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=None) for name in sorted(rollout_config_fields)]
+    )
+    trainer_config = types.RLConfig(
+        model_name="qwen3-0.6b", enable_checkpointing=False, enable_tunix_perf_metrics=False, **config_overrides
+    )
+    with (
+        mock.patch.object(train_rl.utils_rl, "get_optimizer"),
+        mock.patch.object(train_rl.pyconfig, "initialize", return_value=SimpleNamespace(logical_axis_rules=[])),
+        mock.patch.object(train_rl.base_rollout, "RolloutConfig", FakeRolloutConfig),
+        mock.patch.object(train_rl.rl_cluster_lib, "ClusterConfig"),
+        mock.patch.object(train_rl.rl_cluster_lib, "RLTrainingConfig"),
+        mock.patch.object(train_rl.rl_cluster_lib, "RLCluster"),
+        mock.patch.object(train_rl, "get_rollout_kwargs_for_parallelism", return_value={}),
+        mock.patch.object(train_rl, "build_reward_fns", return_value=[]),
+        mock.patch.object(train_rl, "GrpoLearner"),
+    ):
+      train_rl.create_rl_components(
+          trainer_config=trainer_config,
+          sampler_config=SimpleNamespace(enable_expert_parallel=False),
+          sampler_devices=[object()],
+          actor_model=object(),
+          actor_mesh=object(),
+          reference_model=object(),
+          reference_mesh=object(),
+          rollout_mesh=object(),
+          model_tokenizer=object(),
+      )
+    return received
+
+  def test_create_rl_components_forwards_free_kv_cache_to_rollout_config(self):
+    """The RLConfig key must reach tunix's RolloutConfig under tunix's field name."""
+    field = "rollout_vllm_free_kv_cache_during_weight_sync"
+    declared = set(inspect.signature(train_rl.base_rollout.RolloutConfig).parameters) | {field}
+
+    for value in (False, True):
+      received = self._rollout_config_kwargs_from_create_rl_components(declared, free_kv_cache_during_weight_sync=value)
+      self.assertIs(received[field], value)
+
+  def test_create_rl_components_drops_free_kv_cache_for_a_tunix_that_predates_it(self):
+    """An older tunix RolloutConfig must not receive (and choke on) the unknown kwarg."""
+    field = "rollout_vllm_free_kv_cache_during_weight_sync"
+    declared = set(inspect.signature(train_rl.base_rollout.RolloutConfig).parameters) - {field}
+
+    received = self._rollout_config_kwargs_from_create_rl_components(declared, free_kv_cache_during_weight_sync=False)
+
+    self.assertNotIn(field, received)
+    self.assertIn("max_tokens_to_generate", received)
 
   def test_kwargs_supported_by_keeps_declared_fields_only(self):
     """Knobs the installed tunix does not declare are dropped, with a log line."""
