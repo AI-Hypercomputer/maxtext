@@ -19,6 +19,7 @@ import os.path
 import sys
 from typing import Any
 import unittest
+from absl import logging as absl_logging
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from flax import nnx
@@ -738,34 +739,55 @@ class LhsScaleTest(unittest.TestCase):
     self.assertIsNone(scale)
 
 
-class QuantizeMoeGateRuleTest(unittest.TestCase):
-  """Tests for moe gate quantization rule filtering."""
+class GateLogitsQwixInterceptionTest(unittest.TestCase):
+  """Verifies Qwix interception behavior for MoE gate logits."""
 
-  @pytest.mark.tpu_backend
-  def test_fp8_full_moe_gate_quantized_by_default(self):
-    config = pyconfig.initialize(
-        [None, get_test_config_path()],
-        quantization="fp8_full",
-        quantize_moe_gate=True,
+  def _assert_gate_logits_interception(self, quantize_gate_logits: bool):
+    cfg = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "model_name=deepseek3-671b",
+            "quantization=fp8_full",
+            "use_qwix_quantization=true",
+            "per_device_batch_size=1",
+            "max_target_length=16",
+            f"quantize_gate_logits={quantize_gate_logits}",
+        ],
+        run_name="deepseek3_gate_quantize_test",
+        skip_jax_distributed_system=True,
     )
-    rules = quantizations.get_quantization_rule(config)
-    self.assertEqual(len(rules), 1)
-    self.assertEqual(rules[0].module_path, "decoder/.*layers.*")
-    self.assertEqual(rules[0].weight_qtype, jnp.float8_e4m3fn)
+    rules = quantizations.get_quantization_rule(cfg)
+    with self.assertLogs(absl_logging.get_absl_logger(), level="DEBUG") as cm:
+      # Create abstract model using nnx.eval_shape (0 FLOPs, 0 device allocation)
+      _, _ = model_creation_utils.create_nnx_abstract_model(cfg)
 
-  @pytest.mark.tpu_backend
-  def test_fp8_full_moe_gate_unquantized_rule_prepended(self):
-    config = pyconfig.initialize(
-        [None, get_test_config_path()],
-        quantization="fp8_full",
-        quantize_moe_gate=False,
-    )
-    rules = quantizations.get_quantization_rule(config)
-    self.assertEqual(len(rules), 2)
-    self.assertEqual(rules[0].module_path, r".*/gate$")
-    self.assertIsNone(rules[0].weight_qtype)
-    self.assertEqual(rules[1].module_path, "decoder/.*layers.*")
-    self.assertEqual(rules[1].weight_qtype, jnp.float8_e4m3fn)
+    gate_logs = [log for log in cm.output if "/gate'" in log and "op=dot_general" in log]
+    self.assertTrue(gate_logs, "Expected gate dot_general operations to be traced by Qwix")
+    for log in gate_logs:
+      self.assertIn("rule=0", log)
+
+    other_logs = [log for log in cm.output if "shared_experts" in log and "op=dot_general" in log]
+    self.assertTrue(other_logs, "Expected shared_experts dot_general operations to be traced by Qwix")
+
+    if quantize_gate_logits:
+      self.assertEqual(len(rules), 1)
+      self.assertIsNotNone(rules[0].weight_qtype)
+      for log in other_logs:
+        self.assertIn("rule=0", log)
+    else:
+      self.assertEqual(len(rules), 2)
+      self.assertIsNone(rules[0].weight_qtype)
+      for log in other_logs:
+        self.assertIn("rule=1", log)
+
+  def test_deepseek3_quantize_gate_logits_true_intercepts_gate_ops(self):
+    """DeepSeek3 with quantize_gate_logits=True intercepts gate ops with quantized rule=0."""
+    self._assert_gate_logits_interception(quantize_gate_logits=True)
+
+  def test_deepseek3_quantize_gate_logits_false_leaves_gate_unquantized(self):
+    """DeepSeek3 with quantize_gate_logits=False matches unquantized rule=0 (weight_qtype=None) for gate."""
+    self._assert_gate_logits_interception(quantize_gate_logits=False)
 
 
 if __name__ == "__main__":

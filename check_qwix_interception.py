@@ -13,7 +13,7 @@ absl_logging.set_verbosity(absl_logging.DEBUG)
 
 def main(argv):
 
-  print("DEBUG 1: quantize_moe_gate=true (default: gate quantized)")
+  print("DEBUG 1: quantize_gate_logits=true (default: gate quantized)")
 
   config_args = [
       "",
@@ -24,13 +24,13 @@ def main(argv):
       "scan_layers=true",
       "per_device_batch_size=1",
       "max_target_length=128",
-      "quantize_moe_gate=true",
+      "quantize_gate_logits=true",
       "skip_jax_distributed_system=True",
   ] + (argv[1:] if len(argv) > 1 else [])
   config = pyconfig.initialize(config_args)
   model_creation_utils.create_nnx_abstract_model(config)
 
-  print("DEBUG 2: quantize_moe_gate=false (gate unquantized)")
+  print("DEBUG 2: quantize_gate_logits=false (gate unquantized)")
 
   config_args = [
       "",
@@ -41,7 +41,7 @@ def main(argv):
       "scan_layers=true",
       "per_device_batch_size=1",
       "max_target_length=128",
-      "quantize_moe_gate=false",
+      "quantize_gate_logits=false",
       "skip_jax_distributed_system=True",
   ] + (argv[1:] if len(argv) > 1 else [])
   config = pyconfig.initialize(config_args)
