@@ -2866,14 +2866,14 @@ class VLLM(BaseModel):
       ),
   )
   kv_tp_size: int = Field(
-      1,
-      ge=1,
-      description="Degree of tensor parallelism for KV cache / attention heads in rollout.",
+      0,
+      ge=0,
+      description="Degree of tensor parallelism for KV cache / attention heads in rollout. 0 to default to rollout TP.",
   )
   moe_mlp_tp_size: int = Field(
-      1,
-      ge=1,
-      description="Degree of tensor parallelism for MoE MLP dimension in rollout.",
+      0,
+      ge=0,
+      description="Degree of tensor parallelism for MoE MLP dimension in rollout. 0 to default to rollout TP.",
   )
   vllm_load_format: str = Field(
       "dummy",
