@@ -33,7 +33,7 @@ from orbax import checkpoint as ocp
 import pathwaysutils
 
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 
 from tunix.sft import metrics_logger, profiler
 from tunix.sft.dpo.dpo_trainer import DPOTrainer, DPOTrainingConfig
@@ -148,7 +148,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None, test_only_training_hoo
     data_hooks = hooks.DPODataHooks(mt_config, mesh, goodput_recorder)
 
     # Provide rules context so logical axes (e.g. 'norm') are translated to mesh axes during maybe_restore
-    with nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+    with logical_axis_rules(mt_config.logical_axis_rules):
       trainer = DPOTrainer(
           model=model, ref_model=ref_model, optimizer=optimizer, training_config=tunix_config, tokenizer=None
       )
@@ -160,7 +160,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None, test_only_training_hoo
 
 def train_model(mt_config: MaxTextConfig, trainer, mesh):
   """Runs the DPO training loop in Tunix."""
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+  with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
     trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
   return trainer
 

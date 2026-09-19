@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This workflow will build and push MaxText Docker image to GCR.
+# This workflow will build and push MaxText Docker image to Artifact Registry.
 
 name: Build and Push MaxText Docker Images
 
 on:
   workflow_call:
     inputs:
+      repository_name:
+        required: true
+        type: string
       image_name:
         required: true
         type: string
@@ -114,7 +117,7 @@ jobs:
         run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
 
       - name: Set up Docker BuildX
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
@@ -157,7 +160,7 @@ jobs:
           push: true
           context: .
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
-          tags: gcr.io/${{ vars.PROJECT_NAME }}/${{ inputs.image_name }}:${{ github.run_id }}
+          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ inputs.repository_name }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
           outputs: type=image,compression=zstd,force-compression=true
           build-args: |
@@ -170,7 +173,7 @@ jobs:
       - name: Add tags to Docker image
         shell: bash
         run: |
-          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${INPUTS_IMAGE_NAME}"
+          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${INPUTS_REPOSITORY_NAME}/${INPUTS_IMAGE_NAME}"
           TEMP_IMG="${SOURCE_IMAGE}:${{ github.run_id }}"
 
           # Add date tag
@@ -184,5 +187,6 @@ jobs:
           MAXTEXT_SHA=$(git rev-parse --short HEAD)
           gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
         env:
+          INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}

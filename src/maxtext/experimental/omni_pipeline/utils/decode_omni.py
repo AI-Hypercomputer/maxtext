@@ -21,7 +21,7 @@ ChartQA sample Q&A, ground truth and model responses are logged.
 
 Example usage:
 
-python src/maxtext/experimental/omni_poc/utils/decode_omni.py \
+python src/maxtext/experimental/omni_pipeline/utils/decode_omni.py \
   --checkpoint_path="gs://YOUR_BUCKET_NAME/omni_stitched_gemma3-4b_qwen3-4b/0/items" \
   --num_samples=3 \
   --max_new_tokens=128
@@ -131,7 +131,6 @@ def load_omni_config(yaml_path, checkpoint_path):
       "vision_model_name",
       "llm_model_name",
       "base_config",
-      "model_name",
       # Batch and parallelism keys overridden for single-sample decoding
       "per_device_batch_size",
       "eval_per_device_batch_size",
@@ -156,8 +155,7 @@ def load_omni_config(yaml_path, checkpoint_path):
       skip_jax_distributed_system=True,
       log_config=False,
   )
-  # Explicitly set model_name and single-sample batch sizes on the frozen config
-  object.__setattr__(config, "model_name", "maxtext-omni-gemma3-qwen3")
+  # Explicitly set single-sample batch sizes on the frozen config
   object.__setattr__(config, "micro_batch_size_to_train_on", 1)
   object.__setattr__(config, "global_batch_size_to_train_on", 1)
   object.__setattr__(config, "per_device_batch_size", per_dev_bs)
@@ -363,7 +361,7 @@ Sample {idx+1}/{len(sample_indices)} (Index {i}):
 
 def main(argv):
   config_path = FLAGS.config_path or os.path.join(
-      MAXTEXT_PKG_DIR, "experimental", "omni_poc", "maxtext-omni-gemma3-qwen3.yml"
+      MAXTEXT_PKG_DIR, "experimental", "omni_pipeline", "maxtext-omni-gemma3-qwen3.yml"
   )
   assert FLAGS.checkpoint_path, "Must specify --checkpoint_path"
   config = load_omni_config(config_path, FLAGS.checkpoint_path)

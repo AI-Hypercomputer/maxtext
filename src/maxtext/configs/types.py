@@ -68,6 +68,8 @@ class DType(str, Enum):
   BFLOAT16 = "bfloat16"
   FLOAT32 = "float32"
   FLOAT16 = "float16"
+  FLOAT8_E4M3FN = "float8_e4m3fn"
+  FLOAT8_E5M2 = "float8_e5m2"
 
 
 class MatmulPrecision(str, Enum):
@@ -292,7 +294,10 @@ ModelName = Literal[
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-35b-a3b",
+    "qwen3.5-35b-a3b-fp8",
+    "qwen3.5-35b-fp8",
     "qwen3.5-397b-a17b",
+    "qwen3.5-397b-a17b-fp8",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -334,6 +339,12 @@ class RunInfo(BaseModel):
   )
   debug_sharding: bool = Field(False, description="If True, print model weight sharding details.")
   base_output_directory: PathStr = Field("", description="Base directory for all outputs, typically a GCS path.")
+  enable_mllog: bool = Field(False, description="If True, enables MLPerf logging (mllog).")
+  mllog_file: None | PathStr = Field(
+      "",
+      description="Optional filename or path for mllog export in base_output_directory "
+      "(defaults to 'mllog_<data_shuffle_seed>.log').",
+  )
   sharding_strategy: None | Literal["experimental"] = Field(
       None,
       description="Experimental sharding strategy used for some inference configs.",
@@ -439,6 +450,12 @@ class OrbaxStorage(BaseModel):
       True, description="Whether to use Zarr3 with OCDbT. Requires use_ocdbt=True."
   )
   checkpoint_storage_concurrent_gb: int = Field(96, description="Concurrent GB for I/O operations during checkpointing.")
+  # Concurrent GB limit for device->host staging during checkpoint saves.
+  # When set, bounds in-flight bytes staged from accelerator to host RAM per handler.
+  # None restores the Orbax upstream default (unbounded).
+  checkpoint_storage_device_host_concurrent_gb: int | None = Field(
+      8, description="Concurrent GB for device->host staging during checkpoint save. None = unbounded."
+  )
 
 
 class EmergencyCheckpointing(BaseModel):
@@ -497,6 +514,23 @@ class Quantization(BaseModel):
   quantization: None | QuantizationType = Field(
       QuantizationType.NONE,
       description="Activates quantization for transformer layers.",
+  )
+  unquantized_modules: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of submodule names or name patterns to keep unquantized even when weight_dtype is FP8. "
+          "Weights for modules specified here will use `dtype` (e.g. bfloat16). "
+          "Accepted names include: 'token_embedder', 'logits_dense', 'gate', 'shared_expert_gate', "
+          "'conv1d', 'in_proj_ba', 'norm'."
+      ),
+  )
+  weight_block_size: None | int | list[int] = Field(
+      None,
+      description=(
+          "Block size for block-scaled quantized weights (e.g. 128 for symmetric 128x128 block scaling, "
+          "or a list/tuple like [128, 64] for asymmetric block scaling). "
+          "None for per-tensor scaling."
+      ),
   )
   replicate_quant_scale: bool = Field(
       False,
@@ -772,6 +806,10 @@ class CompressedAttention(BaseModel):
   )
   compressed_rope_max_timescale: int = Field(
       160000, description="If positive, used for Compressed Sparse/Heavy Attention."
+  )
+  use_csa_streamindex_kernel: bool = Field(
+      False,
+      description="Whether to use Pallas TPU kernel for CSA StreamIndex score computation.",
   )
 
 
@@ -2757,6 +2795,16 @@ class RLCluster(BaseModel):
   use_pathways_reshard: bool = Field(
       True, description="Legacy experimental GRPO: use Pathways resharding to move policy params to the sampler."
   )
+  gc_collect_after_weight_sync: bool = Field(
+      True,
+      description=(
+          "Run a full host gc.collect() after every trainer->sampler weight sync "
+          "(tunix ClusterConfig.gc_collect_after_weight_sync). Each sync leaves another copy of the weights on "
+          "HBM until Python's garbage collector releases it; with this disabled the copies accumulate and the "
+          "run can OOM over time. The collection costs about one second per step on a colocated setup, so "
+          "disable it only when there is enough HBM headroom."
+      ),
+  )
 
 
 class VLLM(BaseModel):
@@ -2988,6 +3036,17 @@ class RLReward(BaseModel):
   math_verify_num_procs: int | None = Field(
       None,
       description=("Max worker processes for the math_verify pool. None ⇒ " "min(batch_size, cpu_count())."),
+  )
+  reward_num_workers: int = Field(
+      0,
+      description=(
+          "Worker processes tunix uses to evaluate the reward functions over the batch "
+          "(GrpoConfig.reward_num_workers). 0 = serial (default), -1 = one worker per CPU."
+      ),
+  )
+  reward_worker_timeout_seconds: float = Field(
+      180.0,
+      description="Seconds to wait for one reward-function chunk in a worker before falling back to the parent process.",
   )
   reward_functions_path: str = Field(
       "",
@@ -3572,6 +3631,21 @@ class MaxTextConfig(
           f"({self.num_kv_heads}) to be divisible by ici_context_usp_ulysses_parallelism ({usp_ulysses_size})."
       )
 
+  def validate_mllog(self):
+    """
+    Warns when MLPerf logging is enabled without evaluation.
+
+    The compliance checker requires at least one eval_accuracy event (REQ: AT_LEAST_ONE in
+    common.yaml), so a no-eval run is useful for measuring evaluation overhead on end-to-end
+    time but will not pass MLPerf compliance checking.
+    """
+    if self.enable_mllog and self.eval_interval <= 0:
+      max_logging.warning(
+          f"enable_mllog=True with eval_interval={self.eval_interval} (<= 0): running without "
+          "evaluation. The resulting log will not pass MLPerf compliance (which requires "
+          "at least one eval_accuracy event)."
+      )
+
   def validate_num_moe_emb_chunks(self):
     """
     Validates that num_moe_emb_chunks is used with supported settings.
@@ -3736,6 +3810,13 @@ class MaxTextConfig(
       # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
       telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
       self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
+      if self.enable_mllog:
+        if not self.mllog_file:
+          self.mllog_file = os.path.join(output_dir, f"mllog_{self.data_shuffle_seed}.log")
+        elif not self.mllog_file.startswith("gs://") and not os.path.isabs(self.mllog_file):
+          self.mllog_file = os.path.join(output_dir, self.mllog_file)
+      else:
+        self.mllog_file = ""
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
           None,
@@ -4226,8 +4307,12 @@ class MaxTextConfig(
           "Set `grain_train_mixture_config_path` to empty and use a single "
           "`grain_train_files` pattern (no ';' separator)."
       )
-    if (self.load_parameters_path or self.load_full_state_path) and not self.enable_checkpointing:
-      raise ValueError("You must set enable_checkpointing=True to load a checkpoint.")
+    # Only a full-state resume needs the CheckpointManager, which `enable_checkpointing`
+    # gates. `load_parameters_path` is a warm start: it restores through its own
+    # `ocp.Checkpointer` in `model_creation_utils.from_pretrained`, before the manager is
+    # ever consulted, so it stays legal with saving turned off.
+    if self.load_full_state_path and not self.enable_checkpointing:
+      raise ValueError("You must set enable_checkpointing=True to resume from load_full_state_path.")
     if self.enable_multi_tier_checkpointing:
       if not self.local_checkpoint_directory:
         raise ValueError("`local_checkpoint_directory` must be set for multi-tier checkpointing.")
@@ -4475,6 +4560,7 @@ class MaxTextConfig(
       self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_mllog()
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:

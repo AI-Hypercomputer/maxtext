@@ -42,7 +42,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
 from flax import nnx, traverse_util
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
@@ -78,6 +78,7 @@ from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
+from maxtext.utils import mllog_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_nnx_loss
 
@@ -612,7 +613,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "scalars": {},
   }
   if config.retry_when_tokens_dropped:
-    metrics["has_moe_overflow"] = has_moe_overflow if has_moe_overflow is not None else jnp.bool_(False)
+    metrics["has_moe_overflow"] = (  # pyrefly: ignore[bad-assignment]
+        has_moe_overflow if has_moe_overflow is not None else jnp.bool_(False)  # pyrefly: ignore[bad-assignment]
+    )
   if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -715,7 +718,7 @@ def training_loop_iteration(
     else:
       step_rng_args = ()
     with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_train):
+      with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_train):
         if config.retry_when_tokens_dropped and p_train_step_dropless is not None:
           candidate_state, metrics = p_train_step(state, example_batch, *step_rng_args)
           if bool(metrics.get("has_moe_overflow")):
@@ -740,6 +743,8 @@ def training_loop_iteration(
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
 
+  completed_step = step + 1
+
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
@@ -752,21 +757,24 @@ def training_loop_iteration(
         all_host_upload=dump_hlo_upload_all,
     )
 
-  if (
+  ran_eval = (
       eval_interval > 0
       and step >= start_step
       and step >= eval_start_step
       and (step - eval_start_step) % eval_interval == 0
-  ):
+  )
+  if ran_eval:
     assert eval_data_iterator
     # Explicitly reset the eval iterator and counters before starting the eval loop
     if hasattr(eval_data_iterator, "reset"):
       eval_data_iterator.reset()
     metric_logger_instance.reset_eval_metrics()
+    mllog_utils.eval_start(config, completed_step, start_step=start_step)
     max_logging.log(f"Starting eval after train step {step}")
 
     eval_step_count = 0
     last_eval_step_completion = datetime.datetime.now()
+    metric_logger_instance.mark_eval_loop_start()
     # pylint: disable=not-callable
     for eval_batch in eval_data_iterator:
       # Shard input eval data
@@ -775,7 +783,7 @@ def training_loop_iteration(
       )
       if 0 < eval_steps <= eval_step_count:
         break
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_eval):
+      with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_eval):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
         if (
             config.retry_when_tokens_dropped
@@ -800,6 +808,8 @@ def training_loop_iteration(
     max_utils.print_mem_stats("After params initialized")
 
   metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
+  if not ran_eval:
+    mllog_utils.step_end(config, completed_step)
 
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
@@ -887,7 +897,7 @@ def train_loop(config, recorder, state=None):
   # Do not enter the legacy `mesh` context manager here: the training loop calls
   # p_train_step without it, and the mismatch in jit's tracing-cache key would
   # cause train_step to be traced and compiled a second time on the first step.
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules):
     data_sharding = sharding.get_input_data_sharding(config, mesh)
     shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     if config.shard_optimizer_over_data:
@@ -914,7 +924,7 @@ def train_loop(config, recorder, state=None):
   # warm up the XLA executable cache and avoid JIT compilation pause on the
   # first eval step.
   if p_eval_step is not None and config.compiled_trainstep_file == "" and not jax.config.jax_enable_pgle:
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules_for_eval):
+    with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules_for_eval):
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
       data_sharding_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
       shaped_eval_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding_eval, is_eval=True)
@@ -926,7 +936,9 @@ def train_loop(config, recorder, state=None):
       compiled_eval_stats = compiled_eval.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_eval_stats, prefix="eval")
   prof = profiler.Profiler(config, offset_step=start_step)
-  metric_logger_instance = metric_logger.MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
+  metric_logger_instance = metric_logger.MetricLogger(
+      config=config, learning_rate_schedule=learning_rate_schedule, start_step=start_step
+  )
 
   # Write train config params, num model params, and XLA flags to tensorboard
   if config.enable_diloco:
@@ -989,6 +1001,11 @@ def train_loop(config, recorder, state=None):
   try:
     python_vars["last_step_completion"] = datetime.datetime.now()
 
+    mllog_utils.init_print(config)
+    mllog_utils.init_stop()
+    mllog_utils.run_start()
+    mllog_utils.block_start(config, start_step)
+
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
       step = python_vars["step"]
@@ -1047,9 +1064,15 @@ def train_loop(config, recorder, state=None):
     max_logging.log(f"Training stopped: {str(e)}")
     _job_completed_gracefully = True
   finally:
+    # Flush before run_stop: the last buffered step still owes a tracked_stats event, and the
+    # reference log ends at run_stop. Not enforced by the 6.0 compliance checker.
+    metric_logger_instance.flush_metrics_and_cleanup()
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
-    metric_logger_instance.flush_metrics_and_cleanup()
+      samples_count = (python_vars["step"] - immutable_data["start_step"]) * config.global_batch_size_to_train_on
+      # Only reached when eval never hit target_eval_loss; a converged run already
+      # logged RUN_STOP with status "success" from eval_stop.
+      mllog_utils.run_stop(status="aborted", current_epoch_num=samples_count, step=python_vars["step"])
     train_utils.maybe_cleanup_dcn_throttling(config)
 
   return state
@@ -1083,6 +1106,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
     max_utils.bootstrap_transformer_engine_cgemm(config)
 
   # Create the Goodput recorder
+  mllog_utils.init_start(config)
   recorder = create_goodput_recorder(config)
 
   return config, recorder

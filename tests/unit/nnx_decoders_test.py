@@ -52,7 +52,7 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.models import gemma4, gemma4_small, qwen3
+from maxtext.models import gemma4, gemma4_small, qwen3, qwen3_5
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx
@@ -1539,6 +1539,167 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
       )
     finally:
       maxtext_utils_nnx.nnx_add_and_sync_scan_axis = original_add_scan_axis
+
+
+class TestNNXDecoderFP8WeightOnly(unittest.TestCase):
+  """Tests for NNXDecoder with FP8 weight-only storage and dynamic dequantization."""
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = _make_config(
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+        unquantized_modules=["token_embedder", "logits_dense"],
+    )
+    self.mesh = _make_mesh(self.cfg)
+    self.rngs = nnx.Rngs(params=0, dropout=1)
+    self.decoder = NNXDecoder(
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+    self.shared_embedding = Embed(
+        num_embeddings=self.cfg.vocab_size,
+        num_features=self.cfg.emb_dim,
+        dtype=self.cfg.dtype,
+        embedding_init=jax.nn.initializers.normal(stddev=1.0),
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+
+  def test_fp8_weights_and_unquantized_layers(self):
+    """Verifies that dense linear weights are FP8 while embedding and norms are BF16."""
+    layer_0 = self.decoder.layers_0
+    self.assertEqual(layer_0.self_attention.query.kernel[...].dtype, jnp.float8_e4m3fn)
+    self.assertIsNotNone(layer_0.self_attention.query.kernel_scale)
+    self.assertEqual(layer_0.mlp.wi_0.kernel[...].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(self.shared_embedding.embedding[...].dtype, jnp.bfloat16)
+    self.assertEqual(self.decoder.decoder_norm.scale[...].dtype, jnp.bfloat16)
+
+  def test_fp8_forward_pass_execution(self):
+    """Verifies that an end-to-end forward pass with dynamic FP8 dequantization executes and produces valid logits."""
+    cfg = self.cfg
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    logits, hidden_state, _ = self.decoder(
+        self.shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+    self.assertEqual(hidden_state.shape, (batch, seq_len, cfg.emb_dim))
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))
+
+
+# Unbound forward of the Qwen3.5 scannable block. It is invoked below against a
+# stand-in `self` rather than a real instance, so it is bound here once instead
+# of being called as a dunder at each call site.
+_QWEN3_5_BLOCK_FORWARD = qwen3_5.Qwen3_5ScannableBlock.__call__
+
+
+class Qwen3_5ScannableBlockKVCacheTest(unittest.TestCase):
+  """Qwen3.5 must thread vLLM's externally-managed KV caches through its block.
+
+  `Qwen3_5ScannableBlock.__call__` only touches `self.config` and its
+  `layer_{i}` attributes, so it is exercised here against a stand-in `self`.
+  That keeps the test on CPU and focused on the cache plumbing rather than on
+  building a real MoE block.
+  """
+
+  CYCLE = 4
+
+  def _fake_block(self):
+    """Builds a stand-in block whose sub-layers record the kwargs they receive."""
+    calls = []
+
+    def make_layer(idx):
+      def layer(x, *args, **kwargs):
+        calls.append({"idx": idx, "args": args, "kwargs": kwargs})
+        return x + 1, f"updated_kv_{idx}"
+
+      return layer
+
+    block = SimpleNamespace(config=SimpleNamespace(inhomogeneous_layer_cycle_interval=self.CYCLE))
+    for i in range(self.CYCLE):
+      setattr(block, f"layer_{i}", make_layer(i))
+    return block, calls
+
+  def _call(self, block, **kwargs):
+    return _QWEN3_5_BLOCK_FORWARD(
+        block,
+        0,  # carry
+        None,  # decoder_segment_ids
+        None,  # decoder_positions
+        True,  # deterministic
+        MODEL_MODE_AUTOREGRESSIVE,
+        **kwargs,
+    )
+
+  @pytest.mark.cpu_only
+  def test_each_sublayer_gets_its_own_cache_and_updates_are_returned(self):
+    block, calls = self._fake_block()
+    kv_cache = tuple(f"kv_{i}" for i in range(self.CYCLE))
+
+    carry, updated = self._call(block, kv_cache=kv_cache, attention_metadata={"meta": 1})
+
+    self.assertEqual(carry, self.CYCLE)  # every sub-layer ran exactly once
+    self.assertEqual(updated, tuple(f"updated_kv_{i}" for i in range(self.CYCLE)))
+    self.assertEqual([c["kwargs"]["kv_cache"] for c in calls], list(kv_cache))
+    # attention_metadata must reach the sub-layers; without it the attention
+    # kernel cannot address vLLM's paged cache.
+    self.assertTrue(all(c["kwargs"]["attention_metadata"] == {"meta": 1} for c in calls))
+
+  @pytest.mark.cpu_only
+  def test_training_path_returns_none_and_passes_no_cache(self):
+    block, calls = self._fake_block()
+
+    carry, updated = self._call(block)
+
+    self.assertEqual(carry, self.CYCLE)
+    self.assertIsNone(updated)
+    self.assertTrue(all(c["kwargs"]["kv_cache"] is None for c in calls))
+
+  @pytest.mark.cpu_only
+  def test_shorter_cache_does_not_index_out_of_range(self):
+    block, calls = self._fake_block()
+
+    _, updated = self._call(block, kv_cache=("kv_0",))
+
+    self.assertEqual([c["kwargs"]["kv_cache"] for c in calls], ["kv_0", None, None, None])
+    self.assertEqual(len(updated), self.CYCLE)
+
+  @pytest.mark.cpu_only
+  def test_flat_per_layer_caches_survive_the_per_block_round_trip(self):
+    """vLLM hands over one cache per layer; the scan runs over 4-layer blocks."""
+    num_layers = 8
+    scan_length = num_layers // self.CYCLE
+    kv_caches = [f"kv_{i}" for i in range(num_layers)]
+
+    grouped = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, self.CYCLE, stack=False)
+    self.assertEqual(grouped, [("kv_0", "kv_1", "kv_2", "kv_3"), ("kv_4", "kv_5", "kv_6", "kv_7")])
+
+    # Mimic _apply_layers_sequentially replacing each block entry with the
+    # tuple the block returned.
+    for block_idx in range(scan_length):
+      fake_block, _ = self._fake_block()
+      _, updated = self._call(fake_block, kv_cache=grouped[block_idx])
+      grouped[block_idx] = tuple(f"{kv}_b{block_idx}" for kv in updated)
+
+    maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped, scan_length, self.CYCLE, stacked=False)
+
+    self.assertEqual(
+        kv_caches,
+        [f"updated_kv_{i % self.CYCLE}_b{i // self.CYCLE}" for i in range(num_layers)],
+    )
 
 
 if __name__ == "__main__":

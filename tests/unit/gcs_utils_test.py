@@ -125,6 +125,62 @@ class GcsUtilsTest(unittest.TestCase):
     # Assert
     mock_client_instance.get_bucket.assert_called_with("valid_bucket")
     mock_path_instance.mkdir.assert_called_with(exist_ok=True, parents=True)
-    mock_path_instance.exists.assert_called_once()
+    # `exists()` is meaningless for GCS prefixes, so it must not gate the result.
+    mock_path_instance.exists.assert_not_called()
     mock_temp_file_instance.write_text.assert_called_once_with("test")
     mock_temp_file_instance.unlink.assert_called_once()
+
+  @mock.patch("maxtext.utils.gcs_utils.epath.Path")
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  def test_mkdir_gcs_writable_when_mkdir_is_noop(self, mock_storage_client, mock_epath):
+    """Tests that a writable GCS path succeeds even when `mkdir` leaves nothing behind.
+
+    Regression test: the `gcsfs` backend (used whenever TensorFlow is not installed) is a no-op when
+    asked to create a sub-path, because GCS has no real directories. The previous `exists()` check
+    then raised a spurious PermissionError on paths the caller could write to just fine.
+    """
+    # Arrange: Mock the GCS client to simulate a valid bucket
+    mock_client_instance = mock_storage_client.return_value
+
+    # Arrange: simulate the gcsfs backend, where `mkdir` does nothing and `exists()` stays False.
+    mock_path_instance = mock.MagicMock()
+    mock_path_instance.as_posix.return_value = "gs://valid_bucket/some/dir"
+    mock_path_instance.parts = ["gs:", "", "valid_bucket", "some", "dir"]
+    mock_path_instance.exists.return_value = False
+
+    # The temp file write succeeds, i.e. the path really is writable.
+    mock_temp_file_instance = mock.MagicMock()
+    mock_path_instance.__truediv__.return_value = mock_temp_file_instance
+
+    mock_epath.return_value = mock_path_instance
+    gcs_path = "gs://valid_bucket/some/dir"
+
+    # Act: must not raise.
+    result = gcs_utils.mkdir_and_check_permissions(gcs_path)
+
+    # Assert: the real write test is what determines success.
+    self.assertIs(result, mock_path_instance)
+    mock_client_instance.get_bucket.assert_called_with("valid_bucket")
+    mock_temp_file_instance.write_text.assert_called_once_with("test")
+    mock_temp_file_instance.unlink.assert_called_once()
+
+  @mock.patch("maxtext.utils.gcs_utils.epath.Path")
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  def test_mkdir_gcs_not_writable(self, mock_storage_client, mock_epath):
+    """Tests that a PermissionError is raised when the GCS path cannot be written to."""
+    del mock_storage_client  # Bucket lookup succeeds; only the write test should fail.
+
+    mock_path_instance = mock.MagicMock()
+    mock_path_instance.as_posix.return_value = "gs://valid_bucket/some/dir"
+    mock_path_instance.parts = ["gs:", "", "valid_bucket", "some", "dir"]
+    mock_path_instance.exists.return_value = False
+
+    # Arrange: writing the temp file fails, which is a genuine permission problem.
+    mock_temp_file_instance = mock.MagicMock()
+    mock_temp_file_instance.write_text.side_effect = Exception("403 Forbidden")
+    mock_path_instance.__truediv__.return_value = mock_temp_file_instance
+
+    mock_epath.return_value = mock_path_instance
+
+    with self.assertRaises(PermissionError):
+      gcs_utils.mkdir_and_check_permissions("gs://valid_bucket/some/dir")

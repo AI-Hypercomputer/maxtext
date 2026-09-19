@@ -173,6 +173,7 @@ def _tiny_cfg(seq_len, run_name, **overrides):
       log_config=False,
       skip_jax_distributed_system=True,
       run_name=run_name,
+      profiler_steps=0,
   )
 
 

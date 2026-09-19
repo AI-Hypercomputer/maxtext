@@ -19,6 +19,9 @@ name: MaxText CI Tests on Docker Images
 on:
   workflow_call:
     inputs:
+      repository_name:
+        required: true
+        type: string
       image_name:
         required: true
         type: string
@@ -49,8 +52,9 @@ jobs:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           IMAGE_NAME: ${{ inputs.image_name }}
           IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
         run: |
-          if gcloud container images describe "gcr.io/${PROJECT_NAME}/${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
+          if gcloud container images describe "us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -84,7 +88,7 @@ jobs:
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
       - name: Add tags
         shell: bash
         env:
@@ -92,10 +96,11 @@ jobs:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           IMAGE_NAME_EXPR: ${{ inputs.image_name }}
           IMAGE_TAG_EXPR: ${{ inputs.image_tag }}
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
         run: |
           image_name="$IMAGE_NAME_EXPR"
           image_tag="$IMAGE_TAG_EXPR"
-          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${image_name}"
+          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${image_name}"
 
           # Add the traceability tag to confirm it passed validation suite
           gcloud container images add-tag "${SOURCE_IMAGE}:${image_tag}" \

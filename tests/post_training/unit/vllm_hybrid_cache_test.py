@@ -24,6 +24,7 @@ import torch
 
 from maxtext.integration.vllm.hybrid_cache_utils import (
     build_qwen_gdn_cache_layout,
+    call_with_supported_kwargs,
     gather_layer_kv_caches,
     normalize_vllm_input_positions,
     resolve_layer_kv_cache_indices,
@@ -32,6 +33,84 @@ from maxtext.integration.vllm.hybrid_cache_utils import (
 
 
 pytestmark = [pytest.mark.post_training]
+
+
+class CallWithSupportedKwargsTest(unittest.TestCase):
+  """Tolerate tpu-inference signature drift instead of raising TypeError."""
+
+  @pytest.mark.cpu_only
+  def test_drops_kwargs_the_callee_does_not_declare(self):
+    # Newer tpu-inference: `_maybe_set_compact_mamba_num_blocks_override`
+    # re-derives the group layout itself and only takes page sizes / counts.
+    def newer_signature(attn_page_size_bytes, unpadded_mamba_page_size_bytes, num_attn_layers, num_mamba_layers):
+      return (attn_page_size_bytes, unpadded_mamba_page_size_bytes, num_attn_layers, num_mamba_layers)
+
+    result = call_with_supported_kwargs(
+        newer_signature,
+        attn_page_size_bytes=1,
+        unpadded_mamba_page_size_bytes=2,
+        num_attn_groups=3,
+        num_mamba_groups=4,
+        num_attn_layers=5,
+        num_mamba_layers=6,
+        group_size=7,
+    )
+
+    self.assertEqual(result, (1, 2, 5, 6))
+
+  @pytest.mark.cpu_only
+  def test_forwards_group_layout_when_the_callee_requires_it(self):
+    # Older tpu-inference (e.g. the pinned post-training commit) additionally
+    # requires the kv-cache group layout; omitting it raised a TypeError.
+    def older_signature(
+        attn_page_size_bytes,
+        unpadded_mamba_page_size_bytes,
+        num_attn_groups,
+        num_mamba_groups,
+        num_attn_layers,
+        num_mamba_layers,
+        group_size,
+    ):
+      return (
+          attn_page_size_bytes,
+          unpadded_mamba_page_size_bytes,
+          num_attn_groups,
+          num_mamba_groups,
+          num_attn_layers,
+          num_mamba_layers,
+          group_size,
+      )
+
+    result = call_with_supported_kwargs(
+        older_signature,
+        attn_page_size_bytes=1,
+        unpadded_mamba_page_size_bytes=2,
+        num_attn_groups=3,
+        num_mamba_groups=4,
+        num_attn_layers=5,
+        num_mamba_layers=6,
+        group_size=7,
+    )
+
+    self.assertEqual(result, (1, 2, 3, 4, 5, 6, 7))
+
+  @pytest.mark.cpu_only
+  def test_var_keyword_callee_receives_everything(self):
+    def var_kwargs(**kwargs):
+      return kwargs
+
+    result = call_with_supported_kwargs(var_kwargs, a=1, b=2)
+
+    self.assertEqual(result, {"a": 1, "b": 2})
+
+  @pytest.mark.cpu_only
+  def test_missing_required_argument_still_raises(self):
+    def needs_extra(attn_page_size_bytes, required_but_unknown):
+      return (attn_page_size_bytes, required_but_unknown)
+
+    # Filtering must not mask a genuine mismatch the adapter cannot satisfy.
+    with self.assertRaises(TypeError):
+      call_with_supported_kwargs(needs_extra, attn_page_size_bytes=1)
 
 
 class QwenGdnCacheLayoutTest(unittest.TestCase):

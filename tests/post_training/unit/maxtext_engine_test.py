@@ -115,6 +115,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         "tensorboard_dir": self.create_tempdir().full_path,
         "skip_jax_distributed_system": True,
         "enable_checkpointing": enable_checkpointing,
+        "profiler_steps": 0,
     }
     if enable_checkpointing:
       overrides.update(
@@ -277,7 +278,52 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     )
     self.assertEqual(mock_handler.call_count, 4)
     mock_handler.assert_has_calls(
-        [mock.call(use_ocdbt=False, use_zarr3=False)] * 4,
+        [
+            mock.call(
+                use_ocdbt=False,
+                use_zarr3=False,
+                save_device_host_concurrent_gb=mock_config.checkpoint_storage_device_host_concurrent_gb,
+            )
+        ]
+        * 4,
+    )
+
+  @mock.patch("orbax.checkpoint.PyTreeCheckpointHandler")
+  @mock.patch("orbax.checkpoint.CheckpointManager")
+  def test_max_text_trainer_checkpoint_manager_init_custom_device_host_concurrent_gb(self, mock_create_mgr, mock_handler):
+    mock_config = self.setup_config(
+        enable_checkpointing=True,
+        checkpoint_storage_use_ocdbt=True,
+        checkpoint_storage_use_zarr3=True,
+        checkpoint_storage_device_host_concurrent_gb=16,
+    )
+
+    _ = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    self.assertEqual(mock_handler.call_count, 4)
+    mock_handler.assert_has_calls(
+        [
+            mock.call(
+                use_ocdbt=True,
+                use_zarr3=True,
+                save_device_host_concurrent_gb=16,
+            )
+        ]
+        * 4,
+    )
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_maybe_register_pathways_persistence(self, mock_register_type_handlers):
+    import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=import-outside-toplevel
+    from maxtext.training_engine import checkpointing as checkpointing_module  # pylint: disable=import-outside-toplevel
+
+    checkpointing_module._PATHWAYS_PERSISTENCE_REGISTERED = False
+    checkpointing_module._maybe_register_pathways_persistence()
+
+    mock_register_type_handlers.assert_called_once()
+    self.assertEqual(
+        mock_register_type_handlers.call_args.kwargs["checkpointing_impl"],
+        ocp_pathways.CheckpointingImpl.PERSISTENCE,
     )
 
   def test_save_checkpoint_called_after_update(self):

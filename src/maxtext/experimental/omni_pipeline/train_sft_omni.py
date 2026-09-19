@@ -18,8 +18,8 @@ Executes native MaxText SFT training with multimodal data processing and
 trainable parameter masking to fine-tune the custom MLP vision projector.
 
 Example usage:
-  python3 -m maxtext.experimental.omni_poc.train_sft_omni \
-    src/maxtext/experimental/omni_poc/configs/sft-maxtext-omni-gemma3-qwen3.yml \
+  python3 -m maxtext.experimental.omni_pipeline.train_sft_omni \
+    src/maxtext/experimental/omni_pipeline/configs/sft-maxtext-omni-gemma3-qwen3.yml \
     load_parameters_path=gs://YOUR_BUCKET/path/to/checkpoint/items \
     base_output_directory=gs://YOUR_BUCKET/output_directory \
     run_name=my_omni_sft_run
@@ -43,14 +43,14 @@ from maxtext.common.goodput import (
 def main(argv: Sequence[str]) -> None:
   """Runs the native SFT training loop for Omni."""
   argv = list(argv)
-  if "use_sft=True" not in argv and not any(a.startswith("use_sft=") for a in argv):
-    argv.append("use_sft=True")
-  if "use_tunix_gradient_accumulation=False" not in argv and not any(
-      a.startswith("use_tunix_gradient_accumulation=") for a in argv
-  ):
-    argv.append("use_tunix_gradient_accumulation=False")
-  if "override_model_config=True" not in argv and not any(a.startswith("override_model_config=") for a in argv):
-    argv.append("override_model_config=True")
+  defaults = {
+      "use_sft": "True",
+      "use_tunix_gradient_accumulation": "False",
+      "override_model_config": "True",
+  }
+  for key, value in defaults.items():
+    if not any(a.startswith(f"{key}=") for a in argv):
+      argv.append(f"{key}={value}")
 
   # Initialize config and goodput recorder using native SFT initialization
   mt_config, goodput_recorder = initialize(argv)

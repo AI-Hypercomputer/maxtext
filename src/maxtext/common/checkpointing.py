@@ -29,6 +29,7 @@ from flax import struct
 from flax.training import train_state
 import jax
 from jax.experimental import multihost_utils
+import jax.numpy as jnp
 from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.common import checkpoint_context
 from maxtext.common import emergency_checkpointing
@@ -36,12 +37,14 @@ from maxtext.common import grain_utility
 from maxtext.common import train_state_nnx
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline import synthetic_data_processing
+from maxtext.layers import quantizations
 from maxtext.trainers.diloco.utils import spmd_diloco_checkpointing as diloco_checkpoint_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_logging
+from maxtext.utils import sharding as maxtext_sharding
 from orbax.checkpoint import v1 as ocp
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
@@ -656,6 +659,121 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
     )
 
 
+def _scale_sharding(weight_sharding, scale_shape):
+  """Derives a companion scale's sharding from the sharding of the weight it scales.
+
+  A block-scaled scale keeps its weight's rank but shrinks its dims -- a (2048, 512)
+  weight block-scaled at 128 yields (16, 4) -- so the weight's PartitionSpec often
+  does not divide it. `adjust_pspec_for_indivisible_shapes` keeps the mesh axes that
+  do divide and replicates the rest.
+
+  Leaving the sharding unset is not a safe alternative: under Orbax v1 the abstract
+  tree is consumed directly, so a leaf with no sharding yields a host that owns no
+  addressable shards, and the restore dies in
+  `jax.make_array_from_single_device_arrays`. Orbax v0 tolerated it because
+  `construct_restore_args` normalized the tree first.
+  """
+  mesh = getattr(weight_sharding, "mesh", None)
+  if mesh is None:
+    return None
+  spec = getattr(weight_sharding, "spec", None)
+  scale_shape = tuple(scale_shape)
+  # Per-tensor scales (weight_block_size: null) are scalars and share no axis layout
+  # with their weight, so there is no spec to carry over -- replicate instead.
+  if spec is None or len(spec) != len(scale_shape):
+    return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+  try:
+    return jax.sharding.NamedSharding(mesh, maxtext_sharding.adjust_pspec_for_indivisible_shapes(spec, scale_shape, mesh))
+  except Exception:  # pylint: disable=broad-exception-caught
+    return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+
+
+def _augment_target_with_scales(want_node: Any, meta_node: Any) -> Any:
+  """Augments `want_node` with companion scales from `meta_node` if present in checkpoint but not in want."""
+  if not isinstance(want_node, dict) or not isinstance(meta_node, dict):
+    return want_node
+
+  augmented = {}
+  for k, v in want_node.items():
+    scale_key = f"{k}_scale"
+    if isinstance(v, dict):
+      augmented[k] = _augment_target_with_scales(v, meta_node.get(k))
+    elif scale_key not in want_node and scale_key in meta_node:
+      meta_scale = meta_node[scale_key]
+      meta_param = meta_node.get(k)
+      param_dtype = getattr(meta_param, "dtype", getattr(v, "dtype", jnp.bfloat16))
+      weight_sharding = getattr(v, "sharding", None)
+      augmented[k] = jax.ShapeDtypeStruct(
+          shape=v.shape,
+          dtype=param_dtype,
+          sharding=weight_sharding,
+      )
+      augmented[scale_key] = jax.ShapeDtypeStruct(
+          shape=meta_scale.shape,
+          dtype=meta_scale.dtype,
+          sharding=_scale_sharding(weight_sharding, meta_scale.shape),
+      )
+    else:
+      augmented[k] = v
+
+  return augmented
+
+
+def _augment_want_with_scales(want: Any, stored: Any, is_nnx: bool, restore_key: str) -> Any:
+  """Augments the target params dictionary with scales from checkpoint metadata if needed."""
+  if not isinstance(stored, dict) or not isinstance(want, dict):
+    return want
+
+  meta_weights = stored.get(restore_key)
+  if restore_key == "params" and is_nnx and isinstance(meta_weights, dict):
+    meta_weights = meta_weights.get("params")
+
+  if not is_nnx and "params" in want and isinstance(meta_weights, dict) and "params" not in meta_weights:
+    return {"params": _augment_target_with_scales(want["params"], meta_weights)}
+
+  return _augment_target_with_scales(want, meta_weights)
+
+
+def maybe_dequantize_restored_params(restored_weights: Any, expected_param_pytree: Any) -> Any:
+  """Dequantizes restored weights if checkpoint contained companion scales but expected_param_pytree did not.
+
+  For each parameter dictionary containing a weight and its companion scale (e.g. 'kernel' and
+  'kernel_scale', or 'wi_0' and 'wi_0_scale') where the target model (`expected_param_pytree`) does not expect the scale,
+  dynamically dequantizes the weight to the target compute dtype using `dequantize_weight` from
+  `maxtext.layers.quantizations` and removes the companion scale from the restored parameter dictionary.
+
+  Args:
+    restored_weights: The restored parameter PyTree from the checkpoint.
+    expected_param_pytree: The expected parameter PyTree structure / ShapeDtypeStructs.
+
+  Returns:
+    The parameter PyTree with dequantized weights and omitted companion scales where applicable.
+  """
+  if not isinstance(restored_weights, dict):
+    return restored_weights
+
+  expected_dict = expected_param_pytree if isinstance(expected_param_pytree, dict) else {}
+  scales_to_drop = {
+      f"{k}_scale" for k in restored_weights if f"{k}_scale" in restored_weights and f"{k}_scale" not in expected_dict
+  }
+
+  out = {}
+  for k, v in restored_weights.items():
+    if k in scales_to_drop:
+      continue
+    scale_key = f"{k}_scale"
+    if scale_key in scales_to_drop:
+      target_param = expected_dict.get(k)
+      target_dtype = getattr(target_param, "dtype", jnp.bfloat16)
+      out[k] = quantizations.dequantize_weight(v, restored_weights[scale_key], compute_dtype=target_dtype)
+    elif isinstance(v, dict):
+      out[k] = maybe_dequantize_restored_params(v, expected_dict.get(k))
+    else:
+      out[k] = v
+
+  return out
+
+
 def load_params_from_path(
     load_parameters_from_path,
     abstract_unboxed_params,
@@ -683,11 +801,6 @@ def load_params_from_path(
   if restore_key not in ("model_params", "model"):
     restore_key = "params"
 
-  if restore_key in ("model_params", "model"):
-    params_collection = want
-  else:
-    params_collection = {"params": want} if is_nnx else want
-
   # Memory optimization: restore only the "params" key (the checkpoint may also hold opt_state/step);
   # partial_load drops the rest. The abstract carries shape/dtype/sharding directly.
   context = checkpoint_context.build_context(
@@ -710,6 +823,13 @@ def load_params_from_path(
     except Exception as e:  # pylint: disable=broad-except
       max_logging.log(f"Skipping pre-load shape check, checkpoint metadata unreadable: {e}")
       stored = None
+
+    augmented_want = _augment_want_with_scales(want, stored, is_nnx, restore_key)
+    if restore_key in ("model_params", "model"):
+      params_collection = augmented_want
+    else:
+      params_collection = {"params": augmented_want} if is_nnx else augmented_want
+
     if isinstance(stored, dict):
       stored_collection = stored.get(restore_key)
       if restore_key == "params" and is_nnx and isinstance(stored_collection, dict):
@@ -731,11 +851,13 @@ def load_params_from_path(
   else:
     restored_weights = restored_collection["params"] if is_nnx else restored_collection
 
+  # Dequantize if checkpoint had companion kernel_scale and target want is unquantized.
+  restored_weights = maybe_dequantize_restored_params(restored_weights, want)
   _raise_on_weight_mismatch(want, restored_weights)
   if is_nnx:
     nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
     return abstract_unboxed_params
-  return restored_collection
+  return restored_weights
 
 
 def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):

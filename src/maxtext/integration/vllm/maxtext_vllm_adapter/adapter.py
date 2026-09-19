@@ -16,7 +16,7 @@
 
 import os
 from flax import nnx
-import flax.linen as nn
+from flax.core.spmd import logical_axis_rules
 import jax
 from jax import numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
@@ -27,6 +27,7 @@ from maxtext.configs import pyconfig
 from maxtext.integration.vllm.convert_utils import DEFAULT_TPU_NUM_LANES, compute_padded_moe_mlp_dim
 from maxtext.integration.vllm.hybrid_cache_utils import (
     build_qwen_gdn_cache_layout,
+    call_with_supported_kwargs,
     gather_layer_kv_caches,
     normalize_vllm_input_positions,
     resolve_layer_kv_cache_indices,
@@ -355,7 +356,7 @@ class MaxTextForCausalLM(nnx.Module):
     ):
       model_kwargs.pop(extra_key, None)
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
       expert_indices = None
       res = self.model(
@@ -403,7 +404,7 @@ class MaxTextForCausalLM(nnx.Module):
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model is not initialized.")
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       return self.model.token_embedder.embedding
 
   def embed_multimodal(self, **kwargs) -> list[jax.Array]:
@@ -433,7 +434,7 @@ class MaxTextForCausalLM(nnx.Module):
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model is not initialized.")
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       inputs_embeds = self.model.token_embedder(input_ids)
 
       if multimodal_embeddings is not None:
@@ -461,7 +462,7 @@ class MaxTextForCausalLM(nnx.Module):
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model is not initialized.")
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       # Reshape to (num_tokens, 1, hidden_dim) for decoder output head
       y = jnp.expand_dims(hidden_states, axis=1)
 
@@ -480,7 +481,7 @@ class MaxTextForCausalLM(nnx.Module):
     if self.model is not None:
       return
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
       model = model_creation_utils.from_pretrained(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
@@ -606,12 +607,23 @@ def patch_kv_cache_manager():
       self._hybrid_uniform_page_size_bytes = int(uniform_page_size_bytes)
       self.runner.cache_config.mamba_page_size_padded = int(uniform_page_size_bytes)
 
-      # set mamba and attn, needs to be compatible with tpu-inference
-      self._maybe_set_compact_mamba_num_blocks_override(
+      # Size the mamba/attention block pools. The signature of this
+      # tpu-inference private helper has changed across versions: older
+      # revisions also take the vLLM kv-cache group layout
+      # (`num_attn_groups`, `num_mamba_groups`, `group_size`), newer ones
+      # re-derive it internally and only take the page sizes and layer
+      # counts. Pass by keyword and keep only the parameters the installed
+      # version declares, so the adapter works with either revision instead
+      # of dying with a TypeError before the KV cache spec is built.
+      call_with_supported_kwargs(
+          self._maybe_set_compact_mamba_num_blocks_override,
           attn_page_size_bytes=attn_page_size_bytes,
           unpadded_mamba_page_size_bytes=int(unpadded_mamba_page_size),
+          num_attn_groups=num_attn_groups,
+          num_mamba_groups=num_mamba_groups,
           num_attn_layers=num_attn,
           num_mamba_layers=num_mamba,
+          group_size=group_size,
       )
 
     kv_cache_spec = original_get_kv_cache_spec(self)

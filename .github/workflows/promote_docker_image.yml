@@ -132,7 +132,7 @@ jobs:
             (github.event_name == 'repository_dispatch' &&
               (github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type))
           }}
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
       - name: Add tags to Docker image
         if: >-
           ${{
@@ -163,7 +163,7 @@ jobs:
           tagged_any=false
 
           # 1. Check if stable image exists and tag it
-          STABLE_IMAGE="gcr.io/${PROJECT_NAME}/${STABLE_IMAGE_NAME}"
+          STABLE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${STABLE_IMAGE_NAME}"
           if gcloud container images describe "${STABLE_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
             echo "Stable image ${STABLE_IMAGE}:${CALLER_RUN_ID} exists. Tagging stable image..."
             tag_image "${STABLE_IMAGE}" "verified-e2e-${CALLER_RUN_ID}"
@@ -174,7 +174,7 @@ jobs:
           fi
 
           # 2. Check if nightly image exists and tag it
-          NIGHTLY_IMAGE="gcr.io/${PROJECT_NAME}/${NIGHTLY_IMAGE_NAME}"
+          NIGHTLY_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${NIGHTLY_IMAGE_NAME}"
           if gcloud container images describe "${NIGHTLY_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
             echo "Nightly image ${NIGHTLY_IMAGE}:${CALLER_RUN_ID} exists. Tagging nightly image..."
             tag_image "${NIGHTLY_IMAGE}" "latest"

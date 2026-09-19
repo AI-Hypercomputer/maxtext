@@ -15,15 +15,18 @@
 """Unit tests for the checkpointing components."""
 
 import os
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+from flax import nnx
 from flax.training import train_state
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+import orbax.checkpoint as ocp
 from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.checkpoint_conversion.utils.tensor_handling import (
     _binary_chunked_stack,
@@ -32,9 +35,10 @@ from maxtext.checkpoint_conversion.utils.tensor_handling import (
 from maxtext.common import checkpointing
 import numpy as np
 import optax
-import orbax.checkpoint as ocp_v0
 import pytest
 import safetensors.numpy
+
+ocp_v0 = ocp
 
 pytestmark = [pytest.mark.decoupled_target]
 
@@ -472,6 +476,519 @@ class CheckpointErrorHandlerTest(parameterized.TestCase):
         checkpointing.maybe_save_checkpoint(self.mock_manager, self.state, config, data_iterator=None, step=1)
       self.assertIn("Checkpointing failed. GCS failure", str(cm.exception))
       self.assertIs(cm.exception.__cause__, original_error)
+
+
+class FP8DequantizeOnLoadTest(parameterized.TestCase):
+  """Tests for dequantize-on-load parameter restoration."""
+
+  def setUp(self):
+    super().setUp()
+    self.tmp_dir = epath.Path(self.create_tempdir().full_path)
+
+  def _save_and_restore_checkpoint(
+      self,
+      ckpt_name: str,
+      ckpt_weights: dict[str, Any],
+      target_abstract: Any,
+      is_bare: bool = True,
+  ) -> Any:
+    """Helper to save weights to an Orbax checkpoint and restore them."""
+    path = self.tmp_dir / ckpt_name
+    tree = {"params": {"params": ckpt_weights}} if is_bare else {"params": ckpt_weights}
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(
+        path,
+        tree,
+        force=True,
+    )
+    restored = checkpointing.load_params_from_path(str(path), target_abstract, 8)
+    return restored.to_pure_dict() if isinstance(restored, nnx.State) else restored
+
+  def test_load_fp8_checkpoint_into_bf16_nnx_model(self):
+    """Loading an FP8 checkpoint into a BF16 NNX model restores dequantized BF16 weights and drops scale."""
+
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array([[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 0.5]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(2.0, dtype=jnp.float32)
+    bias = jnp.array([0.1, -0.2], dtype=jnp.bfloat16)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+            "bias": bias,
+        }
+    }
+
+    pure = self._save_and_restore_checkpoint("fp8_ckpt", ckpt_weights, params_abstract)
+    # Hand-derived expectation: fp8_kernel * scalar scale (2.0):
+    # [[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 0.5]] * 2.0
+    # = [[0.5, 1.0], [2.0, 3.0], [0.25, 1.5], [4.0, 1.0]]
+    expected_kernel = np.array(
+        [[0.5, 1.0], [2.0, 3.0], [0.25, 1.5], [4.0, 1.0]],
+        dtype=np.float32,
+    )
+
+    self.assertNotIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.bfloat16)
+    self.assertEqual(pure["linear"]["kernel"].shape, (4, 2))
+    np.testing.assert_allclose(
+        np.array(pure["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+    self.assertIn("bias", pure["linear"])
+    self.assertEqual(pure["linear"]["bias"].dtype, jnp.bfloat16)
+    np.testing.assert_array_equal(np.array(pure["linear"]["bias"]), np.array(bias))
+
+  def test_load_fp8_checkpoint_into_fp8_nnx_model(self):
+    """Loading an FP8 checkpoint into an FP8 NNX model preserves FP8 kernel and scale."""
+
+    class FP8Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.float8_e4m3fn)
+        self.linear.kernel_scale = nnx.Param(jnp.ones((), dtype=jnp.float32))
+
+    model = FP8Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array([[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 0.5]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(3.5, dtype=jnp.float32)
+    bias = jnp.zeros((2,), dtype=jnp.float8_e4m3fn)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+            "bias": bias,
+        }
+    }
+
+    pure = self._save_and_restore_checkpoint("fp8_to_fp8_ckpt", ckpt_weights, params_abstract)
+
+    self.assertIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(pure["linear"]["kernel_scale"].dtype, jnp.float32)
+    np.testing.assert_array_equal(np.array(pure["linear"]["kernel"]), np.array(fp8_kernel))
+    np.testing.assert_array_equal(np.array(pure["linear"]["kernel_scale"]), np.array(scale))
+
+  def test_load_fp8_checkpoint_into_bf16_linen_dict(self):
+    """Loading an FP8 checkpoint into a BF16 Linen parameter dict restores dequantized BF16 weights."""
+    target_weights = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.bfloat16),
+                "bias": jax.ShapeDtypeStruct(shape=(2,), dtype=jnp.bfloat16),
+            }
+        }
+    }
+
+    fp8_kernel = jnp.array([[0.5, 1.0], [0.25, 0.75], [1.5, 0.125], [0.5, 2.0]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(0.5, dtype=jnp.float32)
+    bias = jnp.zeros((2,), dtype=jnp.bfloat16)
+
+    ckpt_weights = {
+        "params": {
+            "linear": {
+                "kernel": fp8_kernel,
+                "kernel_scale": scale,
+                "bias": bias,
+            }
+        }
+    }
+
+    # Hand-derived expectation: fp8_kernel * scalar scale (0.5):
+    # [[0.5, 1.0], [0.25, 0.75], [1.5, 0.125], [0.5, 2.0]] * 0.5
+    # = [[0.25, 0.5], [0.125, 0.375], [0.75, 0.0625], [0.25, 1.0]]
+    expected_kernel = np.array(
+        [[0.25, 0.5], [0.125, 0.375], [0.75, 0.0625], [0.25, 1.0]],
+        dtype=np.float32,
+    )
+    restored = self._save_and_restore_checkpoint("fp8_linen_ckpt", ckpt_weights, target_weights, is_bare=False)
+
+    self.assertNotIsInstance(restored, nnx.State)
+    self.assertIn("params", restored)
+    self.assertNotIn("kernel_scale", restored["params"]["linear"])
+    self.assertEqual(restored["params"]["linear"]["kernel"].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        np.array(restored["params"]["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_load_fp8_checkpoint_with_per_channel_scale_into_bf16_model(self):
+    """Loading an FP8 checkpoint with per-channel scale restores dequantized BF16 weights and drops scale."""
+
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array([[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 3.0]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array([2.0, 0.5], dtype=jnp.float32)
+    bias = jnp.array([0.1, -0.2], dtype=jnp.bfloat16)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+            "bias": bias,
+        }
+    }
+
+    pure = self._save_and_restore_checkpoint("fp8_per_channel_ckpt", ckpt_weights, params_abstract)
+    # Hand-derived expectation: fp8_kernel (4, 2) * per-channel scale (2,) [2.0, 0.5]
+    # Column 0 scaled by 2.0: [0.25, 1.0, 0.125, 2.0] * 2.0 = [0.5, 2.0, 0.25, 4.0]
+    # Column 1 scaled by 0.5: [0.5, 1.5, 0.75, 3.0] * 0.5 = [0.25, 0.75, 0.375, 1.5]
+    expected_kernel = np.array(
+        [[0.5, 0.25], [2.0, 0.75], [0.25, 0.375], [4.0, 1.5]],
+        dtype=np.float32,
+    )
+
+    self.assertNotIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.bfloat16)
+    self.assertEqual(pure["linear"]["kernel"].shape, (4, 2))
+    np.testing.assert_allclose(
+        np.array(pure["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_load_fp8_checkpoint_with_blockwise_scales_into_bf16_model(self):
+    """Loading an FP8 checkpoint with 2D block scales restores dequantized BF16 weights and drops scale."""
+
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 4, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array(
+        [[1.0, 2.0, 3.0, 4.0], [0.5, 1.5, 2.5, 3.5], [0.25, 0.75, 1.25, 1.75], [2.0, 1.0, 0.5, 0.25]],
+        dtype=jnp.float8_e4m3fn,
+    )
+    scale = jnp.array([[0.5, 1.0], [2.0, 0.25]], dtype=jnp.float32)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+        }
+    }
+
+    pure = self._save_and_restore_checkpoint("fp8_blockwise_ckpt", ckpt_weights, params_abstract)
+    # Hand-derived expectation: fp8_kernel (4, 4) * 2D block scale (2, 2) with 2x2 blocks:
+    # Block (0, 0) scale 0.5: [[1.0, 2.0], [0.5, 1.5]] * 0.5 = [[0.5, 1.0], [0.25, 0.75]]
+    # Block (0, 1) scale 1.0: [[3.0, 4.0], [2.5, 3.5]] * 1.0 = [[3.0, 4.0], [2.5, 3.5]]
+    # Block (1, 0) scale 2.0: [[0.25, 0.75], [2.0, 1.0]] * 2.0 = [[0.5, 1.5], [4.0, 2.0]]
+    # Block (1, 1) scale 0.25: [[1.25, 1.75], [0.5, 0.25]] * 0.25 = [[0.3125, 0.4375], [0.125, 0.0625]]
+    expected_kernel = np.array(
+        [
+            [0.5, 1.0, 3.0, 4.0],
+            [0.25, 0.75, 2.5, 3.5],
+            [0.5, 1.5, 0.3125, 0.4375],
+            [4.0, 2.0, 0.125, 0.0625],
+        ],
+        dtype=np.float32,
+    )
+
+    self.assertNotIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.bfloat16)
+    self.assertEqual(pure["linear"]["kernel"].shape, (4, 4))
+    np.testing.assert_allclose(
+        np.array(pure["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_load_fp8_checkpoint_with_moe_scales_into_bf16_model(self):
+    """Loading an FP8 checkpoint with 3D block and per-expert MoE scales restores dequantized BF16 weights."""
+    target_weights = {
+        "params": {
+            "moe": {
+                "kernel": jax.ShapeDtypeStruct(shape=(2, 4, 4), dtype=jnp.bfloat16),
+            }
+        }
+    }
+
+    # Asymmetric FP8 kernel (2, 4, 4):
+    # - Expert 0 differs from Expert 1
+    # - Every 2x2 scale block differs from its neighbours
+    # - Asymmetric under transpose of axes (1, 2)
+    # - All values exactly representable in float8_e4m3fn
+    fp8_kernel = jnp.array(
+        [
+            # Expert 0 (4, 4):
+            [
+                [0.5, 1.0, 1.5, 2.0],
+                [2.5, 3.0, 3.5, 4.0],
+                [1.0, 1.5, 2.0, 2.5],
+                [3.0, 3.5, 4.0, 0.5],
+            ],
+            # Expert 1 (4, 4):
+            [
+                [1.5, 2.0, 2.5, 3.0],
+                [0.5, 1.0, 1.5, 2.0],
+                [3.5, 4.0, 0.5, 1.0],
+                [2.0, 2.5, 3.0, 3.5],
+            ],
+        ],
+        dtype=jnp.float8_e4m3fn,
+    )
+
+    # 3D block scale (2, 2, 2) with 2x2 blocks per expert, asymmetric under transpose
+    scale_blockwise = jnp.array(
+        [
+            # Expert 0:
+            [[0.5, 1.0], [2.0, 1.5]],
+            # Expert 1:
+            [[1.0, 2.0], [0.5, 4.0]],
+        ],
+        dtype=jnp.float32,
+    )
+    # Per-expert scale (2,)
+    scale_per_expert = jnp.array([2.0, 0.5], dtype=jnp.float32)
+
+    # Hand-derived expectation for 3D blockwise:
+    # Expert 0:
+    # block (0, 0) scale 0.5: [[0.5, 1.0], [2.5, 3.0]] * 0.5 = [[0.25, 0.5], [1.25, 1.5]]
+    # block (0, 1) scale 1.0: [[1.5, 2.0], [3.5, 4.0]] * 1.0 = [[1.5, 2.0], [3.5, 4.0]]
+    # block (1, 0) scale 2.0: [[1.0, 1.5], [3.0, 3.5]] * 2.0 = [[2.0, 3.0], [6.0, 7.0]]
+    # block (1, 1) scale 1.5: [[2.0, 2.5], [4.0, 0.5]] * 1.5 = [[3.0, 3.75], [6.0, 0.75]]
+    # Expert 1:
+    # block (0, 0) scale 1.0: [[1.5, 2.0], [0.5, 1.0]] * 1.0 = [[1.5, 2.0], [0.5, 1.0]]
+    # block (0, 1) scale 2.0: [[2.5, 3.0], [1.5, 2.0]] * 2.0 = [[5.0, 6.0], [3.0, 4.0]]
+    # block (1, 0) scale 0.5: [[3.5, 4.0], [2.0, 2.5]] * 0.5 = [[1.75, 2.0], [1.0, 1.25]]
+    # block (1, 1) scale 4.0: [[0.5, 1.0], [3.0, 3.5]] * 4.0 = [[2.0, 4.0], [12.0, 14.0]]
+    expected_blockwise = np.array(
+        [
+            [
+                [0.25, 0.5, 1.5, 2.0],
+                [1.25, 1.5, 3.5, 4.0],
+                [2.0, 3.0, 3.0, 3.75],
+                [6.0, 7.0, 6.0, 0.75],
+            ],
+            [
+                [1.5, 2.0, 5.0, 6.0],
+                [0.5, 1.0, 3.0, 4.0],
+                [1.75, 2.0, 2.0, 4.0],
+                [1.0, 1.25, 12.0, 14.0],
+            ],
+        ],
+        dtype=np.float32,
+    )
+
+    # Hand-derived expectation for per-expert:
+    # Expert 0 scaled by 2.0:
+    # [[0.5, 1.0, 1.5, 2.0], [2.5, 3.0, 3.5, 4.0], [1.0, 1.5, 2.0, 2.5], [3.0, 3.5, 4.0, 0.5]] * 2.0
+    # = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 1.0]]
+    # Expert 1 scaled by 0.5:
+    # [[1.5, 2.0, 2.5, 3.0], [0.5, 1.0, 1.5, 2.0], [3.5, 4.0, 0.5, 1.0], [2.0, 2.5, 3.0, 3.5]] * 0.5
+    # = [[0.75, 1.0, 1.25, 1.5], [0.25, 0.5, 0.75, 1.0], [1.75, 2.0, 0.25, 0.5], [1.0, 1.25, 1.5, 1.75]]
+    expected_per_expert = np.array(
+        [
+            [
+                [1.0, 2.0, 3.0, 4.0],
+                [5.0, 6.0, 7.0, 8.0],
+                [2.0, 3.0, 4.0, 5.0],
+                [6.0, 7.0, 8.0, 1.0],
+            ],
+            [
+                [0.75, 1.0, 1.25, 1.5],
+                [0.25, 0.5, 0.75, 1.0],
+                [1.75, 2.0, 0.25, 0.5],
+                [1.0, 1.25, 1.5, 1.75],
+            ],
+        ],
+        dtype=np.float32,
+    )
+
+    test_cases = [
+        ("blockwise", scale_blockwise, expected_blockwise),
+        ("per_expert", scale_per_expert, expected_per_expert),
+    ]
+
+    for scale_name, scale, expected_kernel in test_cases:
+      ckpt_weights = {
+          "params": {
+              "moe": {
+                  "kernel": fp8_kernel,
+                  "kernel_scale": scale,
+              }
+          }
+      }
+      restored = self._save_and_restore_checkpoint(
+          f"fp8_moe_{scale_name}_ckpt", ckpt_weights, target_weights, is_bare=False
+      )
+
+      self.assertNotIn("kernel_scale", restored["params"]["moe"])
+      self.assertEqual(restored["params"]["moe"]["kernel"].dtype, jnp.bfloat16)
+      self.assertEqual(restored["params"]["moe"]["kernel"].shape, (2, 4, 4))
+      np.testing.assert_allclose(
+          np.array(restored["params"]["moe"]["kernel"]),
+          expected_kernel,
+          rtol=1e-3,
+          atol=1e-3,
+      )
+
+  def test_load_fp8_checkpoint_shape_mismatch_raises(self):
+    """Loading an FP8 checkpoint with incompatible weight shape raises a descriptive ValueError."""
+
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": jnp.zeros((4, 3), dtype=jnp.float8_e4m3fn),
+            "kernel_scale": jnp.array(1.0, dtype=jnp.float32),
+        }
+    }
+
+    with self.assertRaisesRegex(ValueError, r"shape \(4, 3\) but the model expects \(4, 2\)"):
+      self._save_and_restore_checkpoint("mismatched_ckpt", ckpt_weights, params_abstract)
+
+  def test_augment_want_with_scales_flat_linen_checkpoint(self):
+    """Verifies that flat Linen checkpoints without an inner 'params' key correctly traverse line 700."""
+    want = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.bfloat16),
+            }
+        }
+    }
+    # In a flat Linen checkpoint, stored.get("params") contains layer dicts directly (no inner "params" key).
+    stored = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.float8_e4m3fn),
+                "kernel_scale": jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
+            }
+        }
+    }
+    # This call directly exercises checkpointing.py:700:
+    # `if not is_nnx and "params" in want and isinstance(meta_weights, dict) and "params" not in meta_weights:`
+    augmented = checkpointing._augment_want_with_scales(  # pylint: disable=protected-access
+        want, stored, is_nnx=False, restore_key="params"
+    )
+    self.assertIn("params", augmented)
+    self.assertIn("kernel_scale", augmented["params"]["linear"])
+    self.assertEqual(augmented["params"]["linear"]["kernel_scale"].shape, ())
+    self.assertEqual(augmented["params"]["linear"]["kernel_scale"].dtype, jnp.float32)
+
+  @mock.patch.object(checkpointing.ocp, "load")
+  @mock.patch.object(checkpointing.ocp, "metadata")
+  def test_load_fp8_flat_linen_checkpoint(self, mock_metadata_fn, mock_load_fn):
+    """Loading an FP8 checkpoint with flat Linen weights exercises checkpointing.py:700 in restore flow."""
+    want = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.bfloat16),
+            }
+        }
+    }
+    fp8_kernel = jnp.array([[0.5, 1.0], [0.25, 0.75], [1.5, 0.125], [0.5, 2.0]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(0.5, dtype=jnp.float32)
+
+    # Stored metadata has flat Linen layout: stored["params"] has no inner "params" key
+    mock_meta = mock.MagicMock()
+    mock_meta.metadata = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.float8_e4m3fn),
+                "kernel_scale": jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
+            }
+        }
+    }
+    mock_metadata_fn.return_value = mock_meta
+
+    # ocp.load returns the loaded pytree matching the augmented target
+    mock_load_fn.return_value = {
+        "params": {
+            "params": {
+                "linear": {
+                    "kernel": fp8_kernel,
+                    "kernel_scale": scale,
+                }
+            }
+        }
+    }
+
+    restored = checkpointing.load_params_from_path(str(self.tmp_dir / "flat_linen_ckpt"), want, 8)
+
+    # Verify that line 700 augmented want["params"] with kernel_scale
+    mock_load_fn.assert_called_once()
+    called_target = mock_load_fn.call_args[0][1]
+    self.assertIn("kernel_scale", called_target["params"]["params"]["linear"])
+
+    # Hand-derived expectation: fp8_kernel * scalar scale (0.5):
+    # [[0.5, 1.0], [0.25, 0.75], [1.5, 0.125], [0.5, 2.0]] * 0.5
+    # = [[0.25, 0.5], [0.125, 0.375], [0.75, 0.0625], [0.25, 1.0]]
+    expected_kernel = np.array(
+        [[0.25, 0.5], [0.125, 0.375], [0.75, 0.0625], [0.25, 1.0]],
+        dtype=np.float32,
+    )
+
+    self.assertIn("params", restored)
+    self.assertNotIn("kernel_scale", restored["params"]["linear"])
+    self.assertEqual(restored["params"]["linear"]["kernel"].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        np.array(restored["params"]["linear"]["kernel"]),
+        expected_kernel,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_scale_sharding_derivation(self):
+    """Tests that _scale_sharding correctly derives shardings across multi-axis meshes."""
+    devices = np.array(jax.devices()[:1]).reshape((1, 1))
+    mesh = jax.sharding.Mesh(devices, ("fsdp", "tensor"))
+
+    # 1. Unsharded / None
+    self.assertIsNone(checkpointing._scale_sharding(None, (16, 4)))  # pylint: disable=protected-access
+
+    # 2. Divisible block scale: retains divisible axes
+    weight_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", "tensor"))
+    scale_sharding = checkpointing._scale_sharding(weight_sharding, (16, 4))  # pylint: disable=protected-access
+    self.assertIsInstance(scale_sharding, jax.sharding.NamedSharding)
+    self.assertEqual(scale_sharding.mesh, mesh)
+    self.assertEqual(scale_sharding.spec, jax.sharding.PartitionSpec("fsdp", "tensor"))
+
+    # 3. Scalar scale (rank 0): falls back to replicated P()
+    scalar_sharding = checkpointing._scale_sharding(weight_sharding, ())  # pylint: disable=protected-access
+    self.assertIsInstance(scalar_sharding, jax.sharding.NamedSharding)
+    self.assertEqual(scalar_sharding.spec, jax.sharding.PartitionSpec())
+
+    # 4. 1D per-channel scale (rank 1): falls back to replicated P()
+    channel_sharding = checkpointing._scale_sharding(weight_sharding, (4,))  # pylint: disable=protected-access
+    self.assertIsInstance(channel_sharding, jax.sharding.NamedSharding)
+    self.assertEqual(channel_sharding.spec, jax.sharding.PartitionSpec())
+
+    # 5. 4D MoE block scale with leading unpartitioned dims
+    moe_weight_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "fsdp", "tensor"))
+    moe_scale_sharding = checkpointing._scale_sharding(moe_weight_sharding, (16, 10, 16, 4))  # pylint: disable=protected-access
+    self.assertIsInstance(moe_scale_sharding, jax.sharding.NamedSharding)
+    self.assertEqual(moe_scale_sharding.spec, jax.sharding.PartitionSpec(None, None, "fsdp", "tensor"))
 
 
 if __name__ == "__main__":

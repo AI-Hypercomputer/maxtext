@@ -51,6 +51,7 @@ class PrepareWeightSyncTest(unittest.TestCase):
     self.engine._last_staged_step = None
     self.engine._staged_metadata = None
     self.engine._train_step = 0
+    self.engine._profiler = None
     self.engine._throttler = mock.MagicMock()
     self.engine._config = pyconfig.initialize(
         [None, get_test_config_path()],

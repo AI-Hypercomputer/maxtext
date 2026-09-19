@@ -206,6 +206,21 @@ penalty_incorrect_answer: 0.0
 reward_functions_path: ''
 reward_functions: ''
 
+# ====== Tunix runtime knobs ======
+# Run a full host gc.collect() after each trainer->sampler weight sync
+# (tunix ClusterConfig.gc_collect_after_weight_sync; effective once the tunix pin declares it).
+# Each sync leaves another copy of the weights on HBM until Python's garbage collector releases it;
+# with this disabled the copies accumulate and the run can OOM over time. The collection costs about
+# one second per step on a colocated setup, so disable it only when there is enough HBM headroom.
+gc_collect_after_weight_sync: true
+
+# Worker processes tunix uses to evaluate the reward functions over the batch
+# (tunix GrpoConfig.reward_num_workers; effective once the tunix pin declares it).
+# 0 = evaluate reward functions serially in the trainer process (default); -1 = one worker per CPU.
+reward_num_workers: 0
+# Seconds to wait for one reward-function chunk in a worker before falling back to the parent process.
+reward_worker_timeout_seconds: 180.0
+
 # ====== Configuration for math_verify Pool ======
 # Global timeout (seconds) for math_verify calls across all examples in a batch
 math_verify_timeout: 120

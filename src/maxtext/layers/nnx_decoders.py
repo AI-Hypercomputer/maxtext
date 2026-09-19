@@ -36,6 +36,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     MultimodalInput,
     ShardMode,
+    get_weight_dtype,
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
@@ -386,7 +387,7 @@ class NNXScannedPipelineStage(nnx.Module):
 
     scan_axis = self.config.param_scan_axis
     if scan_axis != 0:
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
 
     def layer_fn(carry, scanned_vars):
       current_params, current_state = scanned_vars
@@ -410,7 +411,9 @@ class NNXScannedPipelineStage(nnx.Module):
     if scan_axis != 0:
       scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
       if scanned_params:
-        scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
+        scanned_params = jax.tree.map(
+            lambda x: jnp.moveaxis(x, 0, scan_axis) if x.ndim > scan_axis else x, scanned_params
+        )
       scanned_state = nnx.State.merge(scanned_params, scanned_other)
 
     nnx.update(self.scanned_layers, scanned_state)
@@ -465,12 +468,13 @@ class NNXDecoder(nnx.Module):
       self.logits_dense = linears.DenseGeneral(
           in_features_shape=config.emb_dim,
           out_features_shape=config.vocab_size,
-          weight_dtype=config.weight_dtype,
+          weight_dtype=get_weight_dtype(config, "logits_dense"),
           dtype=jnp.float32 if config.logits_dot_in_fp32 else config.dtype,
           kernel_axes=("embed_vocab", "vocab"),
           shard_mode=config.shard_mode,
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=config.parameter_memory_host_offload,
+          weight_quant=quantizations.get_weight_quant_config(config, "logits_dense"),
           rngs=rngs,
       )
 
@@ -481,6 +485,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+    self.is_qwen3_5 = self.config.decoder_block == DecoderBlockType.QWEN3_5
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -1065,7 +1070,7 @@ class NNXDecoder(nnx.Module):
 
     scan_axis = self.config.param_scan_axis
     if scan_axis != 0:
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
 
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
@@ -1478,7 +1483,10 @@ class NNXDecoder(nnx.Module):
             "qwen3-vl-4b",
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
+            "qwen3.5-35b-a3b-fp8",
+            "qwen3.5-35b-fp8",
             "qwen3.5-397b-a17b",
+            "qwen3.5-397b-a17b-fp8",
             "maxtext-omni-gemma3-qwen3",
             "cosmos3-nano-reasoner",
             "cosmos3-super-reasoner",
@@ -1499,7 +1507,10 @@ class NNXDecoder(nnx.Module):
             "qwen3-vl-4b",
             "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
+            "qwen3.5-35b-a3b-fp8",
+            "qwen3.5-35b-fp8",
             "qwen3.5-397b-a17b",
+            "qwen3.5-397b-a17b-fp8",
             "cosmos3-nano-reasoner",
             "cosmos3-super-reasoner",
         }:
@@ -2077,14 +2088,30 @@ class NNXDecoder(nnx.Module):
             # Pass the kv_caches list directly to avoid copying in jnp.stack,
             # which breaks vLLM PagedAttention in-place memory updates.
             # The _apply_layers_sequentially function will handle it by statically unrolling.
+            #
+            # Qwen3.5 is the exception: one scan step is a Qwen3_5ScannableBlock
+            # spanning `cycle_interval` decoder layers, while vLLM hands us one
+            # cache per layer. Group them per block before the scan and write the
+            # returned per-block tuples back afterwards, as
+            # _apply_qwen3_next_scanned_blocks does for Qwen3-Next.
+            group_blocks = self.is_qwen3_5 and cycle_interval > 1
+            grouped_kv_caches = (
+                maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, cycle_interval, stack=False)
+                if group_blocks
+                else kv_caches
+            )
             y, self.layers, _ = self._apply_layers_sequentially(
                 self.layers,
                 y,
                 *layer_args,
                 length=scan_length,
-                kv_caches_stacked=kv_caches,
+                kv_caches_stacked=grouped_kv_caches,
                 **layer_kwargs,
             )
+            if group_blocks:
+              maxtext_utils.update_kv_caches_after_scan(
+                  kv_caches, grouped_kv_caches, scan_length, cycle_interval, stacked=False
+              )
             # kv_caches list is updated in-place inside _apply_layers_sequentially
           else:
             y, self.layers, _ = self._apply_layers_sequentially(
