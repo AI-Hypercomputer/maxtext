@@ -549,7 +549,7 @@ class Quantization(BaseModel):
       True,
       description=(
           "If True, quantizes the MoE routing gate when quantization is enabled. Default is True for backward"
-          " compatibility. Ignored when use_qwix_quantization=False."
+          " compatibility. Applicable when use_qwix_quantization=True and quantization is set; ignored otherwise."
       ),
   )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
