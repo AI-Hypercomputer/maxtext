@@ -445,15 +445,22 @@ def router_replay_gen_model_input_fn(payload: abstract_engine.RLTrainerPayload) 
     # rollout that produced the routing. Count real tokens instead, restarting at each
     # segment -- otherwise the second sequence in a packed row is rotated by the length of
     # the first. `cummax` carries each segment's starting count forward to subtract off.
-    running = jnp.cumsum(token_mask != 0, axis=-1) - 1
+    # The count is exclusive -- real tokens strictly *before* each index, not up to and
+    # including it -- because it is sampled at each segment's first index to get the
+    # pre-segment total. An inclusive count only equals that total when the first slot of
+    # the segment is real; when it is padding the count has not yet incremented and every
+    # position in the segment comes out one too high. The difference below is non-negative
+    # by construction, so it needs no clamp.
+    real = (token_mask != 0).astype(jnp.int32)
+    preceding = jnp.cumsum(real, axis=-1) - real
     starts = jnp.concatenate(
         [jnp.ones((segment_ids.shape[0], 1), dtype=bool), segment_ids[:, 1:] != segment_ids[:, :-1]], axis=-1
     )
     # `lax.cummax` takes an XLA dimension number, so it rejects the `axis=-1` used
     # everywhere else here. `jnp.cumulative_max` would canonicalize it but is not in the
     # pinned JAX.
-    segment_start_count = jax.lax.cummax(jnp.where(starts, running, -1), axis=running.ndim - 1)
-    positions = jnp.maximum(running - segment_start_count, 0).astype(jnp.int32)
+    segment_start_count = jax.lax.cummax(jnp.where(starts, preceding, -1), axis=preceding.ndim - 1)
+    positions = (preceding - segment_start_count).astype(jnp.int32)
 
   # `targets` is a roll(-1), so position i predicts token i+1 and the weight at i is the
   # mask of that *target*: token_mask shifted left by one. Applied unshifted, a packed
@@ -1240,9 +1247,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if freeze_mask is None and self._freeze_mask_fn is not None:
         freeze_mask = self._freeze_mask_fn(accumulated_grads)
       if freeze_mask is not None:
-        def _apply_freeze(g, m):
-          is_frozen = m.get_value() if hasattr(m, "get_value") else m
-          return jnp.where(is_frozen, jnp.zeros_like(g), g)
+        def _apply_freeze(g, is_frozen):
+          return jnp.zeros_like(g) if is_frozen else g
         grads = jax.tree.map(_apply_freeze, grads, freeze_mask)
       # Before clipping, where Tunix's `optax.global_norm` also sits -- `train.py` would call
       # this `raw_grad_norm`. In float32 whatever `grad_dtype` is: a sum of squares over bf16

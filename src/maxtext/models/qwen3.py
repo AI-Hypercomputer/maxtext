@@ -1338,16 +1338,16 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           rngs=rngs,
       )
 
-      # 3. Instantiate and apply the gate for the shared expert.
+      # 3. Instantiate and apply the gate for the shared expert in fp32 (moe_router_dtype: fp32).
       self.shared_expert_gate = DenseGeneral(
           in_features_shape=cfg.emb_dim,
           out_features_shape=1,
           use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
-          dtype=cfg.dtype,
-          weight_dtype=get_weight_dtype(cfg, "shared_expert_gate"),
+          dtype=jnp.float32 if cfg.float32_gate_logits else cfg.dtype,
+          weight_dtype=jnp.float32 if cfg.float32_gate_logits else get_weight_dtype(cfg, "shared_expert_gate"),
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
-          matmul_precision=cfg.matmul_precision,
+          matmul_precision=jax.lax.Precision.HIGHEST if cfg.float32_gate_logits else cfg.matmul_precision,
           rngs=rngs,
       )
     else:
@@ -1397,12 +1397,14 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         out_sharding=out_sharding,
     )
 
-    # 3. Apply the gate for the shared expert. The output is (batch, seq, 1), so it
-    # carries no feature axis to pin and takes the default layout.
-    shared_gate_output = self.shared_expert_gate(hidden_states)
+    # 3. Apply the gate for the shared expert in fp32.
+    shared_gate_output = self.shared_expert_gate(hidden_states.astype(jnp.float32) if self.config.float32_gate_logits else hidden_states)
 
-    # 4. Combine the outputs.
-    final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
+    # 4. Combine the outputs in fp32 then cast back to block dtype.
+    if self.config.float32_weight_sum:
+      final_output = (routed_output.astype(jnp.float32) + jax.nn.sigmoid(shared_gate_output.astype(jnp.float32)) * shared_expert_output.astype(jnp.float32)).astype(self.config.dtype)
+    else:
+      final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
 
     return final_output, load_balance_loss
 
