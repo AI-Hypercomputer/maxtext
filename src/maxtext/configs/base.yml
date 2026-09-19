@@ -288,6 +288,9 @@ moe_ep_all_gather_sparse_core_id: 1
 wi_tile_fwd_batch_seq: 512
 wi_tile_fwd_embed_dim: 1024
 wi_tile_fwd_mlp_dim: 1024
+eval_wi_tile_fwd_batch_seq: 512
+eval_wi_tile_fwd_embed_dim: 1024
+eval_wi_tile_fwd_mlp_dim: 1024
 wi_tile_dlhs_batch_seq: 512
 wi_tile_dlhs_embed_dim: 1024
 wi_tile_dlhs_mlp_dim: 1024
@@ -298,6 +301,9 @@ wi_tile_drhs_mlp_dim: 1024
 wo_tile_fwd_batch_seq: 512
 wo_tile_fwd_embed_dim: 1024
 wo_tile_fwd_mlp_dim: 1024
+eval_wo_tile_fwd_batch_seq: 512
+eval_wo_tile_fwd_embed_dim: 1024
+eval_wo_tile_fwd_mlp_dim: 1024
 wo_tile_dlhs_batch_seq: 512
 wo_tile_dlhs_embed_dim: 1024
 wo_tile_dlhs_mlp_dim: 1024
@@ -1232,6 +1238,9 @@ ragged_block_size: 256
 sa_block_q: 512
 sa_block_kv: 512
 sa_block_kv_compute: 512
+eval_sa_block_q: 512
+eval_sa_block_kv: 512
+eval_sa_block_kv_compute: 512
 sa_block_q_dkv: 512
 sa_block_kv_dkv: 512
 sa_block_kv_dkv_compute: 512
@@ -1242,6 +1251,9 @@ sa_bwd_dkv_megacore: false  # megacore-parallel kv-head groups in the static dkv
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+eval_sa_q_layout: "HEAD_DIM_MINOR"
+eval_sa_k_layout: "HEAD_DIM_MINOR"
+eval_sa_v_layout: "HEAD_DIM_MINOR"
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax
@@ -1251,6 +1263,9 @@ sa_use_base2_exp: true # defaults to true in Tokamax
 local_sa_block_q: None  # inherits from sa_block_q if None
 local_sa_block_kv: None  # inherits from sa_block_kv if None
 local_sa_block_kv_compute: None  # inherits from sa_block_kv_compute if None
+eval_local_sa_block_q: None  # inherits from eval_sa_block_q if None
+eval_local_sa_block_kv: None  # inherits from eval_sa_block_kv if None
+eval_local_sa_block_kv_compute: None  # inherits from eval_sa_block_kv_compute if None
 local_sa_block_q_dkv: None  # inherits from sa_block_q_dkv if None
 local_sa_block_kv_dkv: None  # inherits from sa_block_kv_dkv if None
 local_sa_block_kv_dkv_compute: None  # inherits from sa_block_kv_dkv_compute if None
@@ -1260,6 +1275,9 @@ local_sa_use_fused_bwd_kernel: None  # inherits from sa_use_fused_bwd_kernel if 
 local_sa_q_layout: None  # inherits from sa_q_layout if None
 local_sa_k_layout: None  # inherits from sa_k_layout if None
 local_sa_v_layout: None  # inherits from sa_v_layout if None
+eval_local_sa_q_layout: None  # inherits from eval_sa_q_layout if None
+eval_local_sa_k_layout: None  # inherits from eval_sa_k_layout if None
+eval_local_sa_v_layout: None  # inherits from eval_sa_v_layout if None
 local_use_splash_scheduler: None  # inherits from use_splash_scheduler if None
 local_sa_fuse_reciprocal: None  # inherits from sa_fuse_reciprocal if None
 local_sa_use_base2_exp: None  # inherits from sa_use_base2_exp if None

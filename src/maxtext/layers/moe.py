@@ -1725,6 +1725,20 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
+    if max_utils.is_eval(self.config):
+      wi_tile_fwd_batch_seq = self.config.eval_wi_tile_fwd_batch_seq
+      wi_tile_fwd_embed_dim = self.config.eval_wi_tile_fwd_embed_dim
+      wi_tile_fwd_mlp_dim = self.config.eval_wi_tile_fwd_mlp_dim
+      wo_tile_fwd_batch_seq = self.config.eval_wo_tile_fwd_batch_seq
+      wo_tile_fwd_embed_dim = self.config.eval_wo_tile_fwd_embed_dim
+      wo_tile_fwd_mlp_dim = self.config.eval_wo_tile_fwd_mlp_dim
+    else:
+      wi_tile_fwd_batch_seq = self.config.wi_tile_fwd_batch_seq
+      wi_tile_fwd_embed_dim = self.config.wi_tile_fwd_embed_dim
+      wi_tile_fwd_mlp_dim = self.config.wi_tile_fwd_mlp_dim
+      wo_tile_fwd_batch_seq = self.config.wo_tile_fwd_batch_seq
+      wo_tile_fwd_embed_dim = self.config.wo_tile_fwd_embed_dim
+      wo_tile_fwd_mlp_dim = self.config.wo_tile_fwd_mlp_dim
 
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
@@ -1832,10 +1846,10 @@ class RoutedMoE(nnx.Module):
       orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
       # Pad only the underlying qvalue buffer to tile size boundaries, leaving scale intact.
       if isinstance(inputs, qpl.QArray):
-        padded_qval, padding_amount = max_utils.maybe_pad(inputs.qvalue, self.config.wi_tile_fwd_batch_seq)
+        padded_qval, padding_amount = max_utils.maybe_pad(inputs.qvalue, wi_tile_fwd_batch_seq)
         inputs = dataclasses.replace(inputs, qvalue=padded_qval)
       else:
-        inputs, padding_amount = max_utils.maybe_pad(inputs, self.config.wi_tile_fwd_batch_seq)
+        inputs, padding_amount = max_utils.maybe_pad(inputs, wi_tile_fwd_batch_seq)
       if padding_amount > 0 and partial_sum is not None:
         partial_sum = jnp.pad(partial_sum, ((0, padding_amount), (0, 0)))
       if not isinstance(inputs, qpl.QArray):
@@ -2344,9 +2358,9 @@ class RoutedMoE(nnx.Module):
         # Gather Hidden(2)
         wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
       wi_tile_size = (
-          self.config.wi_tile_fwd_batch_seq,  # m (LHS batch)
-          self.config.wi_tile_fwd_embed_dim,  # k  (contracting)
-          self.config.wi_tile_fwd_mlp_dim,  # n (RHS batch)
+          wi_tile_fwd_batch_seq,  # m (LHS batch)
+          wi_tile_fwd_embed_dim,  # k  (contracting)
+          wi_tile_fwd_mlp_dim,  # n (RHS batch)
           self.config.wi_tile_dlhs_batch_seq,  # m (LHS batch)
           self.config.wi_tile_dlhs_mlp_dim,  # k (contracting)
           self.config.wi_tile_dlhs_embed_dim,  # n (RHS batch)
@@ -2369,9 +2383,9 @@ class RoutedMoE(nnx.Module):
         # Gather Hidden(1)
         wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
       wo_tile_size = (
-          self.config.wo_tile_fwd_batch_seq,  # m (LHS batch)
-          self.config.wo_tile_fwd_mlp_dim,  # k (contracting)
-          self.config.wo_tile_fwd_embed_dim,  # n (RHS batch)
+          wo_tile_fwd_batch_seq,  # m (LHS batch)
+          wo_tile_fwd_mlp_dim,  # k (contracting)
+          wo_tile_fwd_embed_dim,  # n (RHS batch)
           self.config.wo_tile_dlhs_batch_seq,  # m (LHS batch)
           self.config.wo_tile_dlhs_embed_dim,  # k (contracting)
           self.config.wo_tile_dlhs_mlp_dim,  # n (RHS)

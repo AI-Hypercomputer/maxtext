@@ -31,6 +31,7 @@ from packaging.version import Version
 
 from etils import epath
 import flax
+from flax.core.spmd import get_logical_axis_rules
 import jax
 from pathlib import Path
 from contextlib import contextmanager
@@ -1385,3 +1386,21 @@ def maybe_pad(inputs, tile_size):
         [(0, padding_amount, 0), (0, 0, 0)],
     )
   return inputs, padding_amount
+
+
+def is_eval(config) -> bool:
+  """Returns True when evaluation-specific kernel tile sizes/layouts (`eval_*`) should be used.
+
+  Evaluation tile sizes (`eval_*`) take effect when evaluation runs under a
+  custom logical
+  mesh/sharding rule (`logical_axis_rules_for_eval != logical_axis_rules`).
+  Because `eval_step`
+  executes inside `logical_axis_rules(config.logical_axis_rules_for_eval)`,
+  comparing the
+  active logical axis rules against `logical_axis_rules_for_eval` reliably
+  distinguishes
+  evaluation from training without relying on batch size or tensor sharding.
+  """
+  eval_rules = getattr(config, "logical_axis_rules_for_eval", None)
+  train_rules = getattr(config, "logical_axis_rules", None)
+  return bool(eval_rules and eval_rules != train_rules and get_logical_axis_rules() == eval_rules)
