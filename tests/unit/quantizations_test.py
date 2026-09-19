@@ -19,6 +19,7 @@ import os.path
 import sys
 from typing import Any
 import unittest
+from absl import logging as absl_logging
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from flax import nnx
@@ -736,6 +737,58 @@ class LhsScaleTest(unittest.TestCase):
     )
     scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
     self.assertIsNone(scale)
+
+
+class GateLogitsQwixInterceptionTest(unittest.TestCase):
+  """Verifies Qwix interception behavior for MoE gate logits."""
+
+  def _assert_gate_logits_interception(self, quantize_gate_logits: bool):
+    """Verifies Qwix interception behavior for MoE router gate logits."""
+    cfg = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "model_name=deepseek3-671b",
+            "quantization=fp8_full",
+            "use_qwix_quantization=true",
+            "per_device_batch_size=1",
+            "max_target_length=16",
+            f"quantize_gate_logits={quantize_gate_logits}",
+        ],
+        run_name="deepseek3_gate_quantize_test",
+        skip_jax_distributed_system=True,
+    )
+    rules = quantizations.get_quantization_rule(cfg)
+    with self.assertLogs(absl_logging.get_absl_logger(), level="DEBUG") as cm:
+      # Create abstract model using nnx.eval_shape (0 FLOPs, 0 device allocation)
+      _, _ = model_creation_utils.create_nnx_abstract_model(cfg)
+
+    gate_logs = [log for log in cm.output if "/gate'" in log and "op=dot_general" in log]
+    self.assertTrue(gate_logs, "Expected gate dot_general operations to be traced by Qwix")
+    for log in gate_logs:
+      self.assertIn("rule=0", log)
+
+    other_logs = [log for log in cm.output if "shared_experts" in log and "op=dot_general" in log]
+    self.assertTrue(other_logs, "Expected shared_experts dot_general operations to be traced by Qwix")
+
+    if quantize_gate_logits:
+      self.assertEqual(len(rules), 1)
+      self.assertIsNotNone(rules[0].weight_qtype)
+      for log in other_logs:
+        self.assertIn("rule=0", log)
+    else:
+      self.assertEqual(len(rules), 2)
+      self.assertIsNone(rules[0].weight_qtype)
+      for log in other_logs:
+        self.assertIn("rule=1", log)
+
+  def test_deepseek3_quantize_gate_logits_true_intercepts_gate_ops(self):
+    """DeepSeek3 with quantize_gate_logits=True intercepts gate ops with quantized rule=0."""
+    self._assert_gate_logits_interception(quantize_gate_logits=True)
+
+  def test_deepseek3_quantize_gate_logits_false_leaves_gate_unquantized(self):
+    """DeepSeek3 with quantize_gate_logits=False matches unquantized rule=0 (weight_qtype=None) for gate."""
+    self._assert_gate_logits_interception(quantize_gate_logits=False)
 
 
 if __name__ == "__main__":

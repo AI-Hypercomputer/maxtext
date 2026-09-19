@@ -67,6 +67,10 @@ Dropping:
 
 `routed_bias_update_rate`: Defines the update rate to the routed bias term above. Applicable only to the DeepSeek decoder block. For DeepSeek V4, this enables a specialized, auxiliary-loss-free routing bias mechanism. This implementation utilizes a pure `nnx.Variable` (`MoEBiasVar`) instead of a standard `nnx.Param`, which completely isolates the bias update step from the global model optimizer state. The bias is updated directly at the end of the routing step to balance the token distribution mathematically across experts without compromising language modeling convergence.
 
+`float32_gate_logits`: If enabled, casts router input activations and gate weights to `float32` prior to the gate projection matmul for improved numerical stability and routing precision.
+
+`quantize_gate_logits`: Applicable when `use_qwix_quantization=True` and `quantization` is set; ignored otherwise. (1) If enabled (default: `True` for backward compatibility), quantizes MoE routing gate projections. (2) Set to `False` to preserve unquantized gate projections across all quantization schemes (e.g., `fp8_full`, `int8`). When using `float32_gate_logits=True` under quantization, `quantize_gate_logits` must be set to `False`.
+
 #### DeepSeek V4 Auxiliary-Loss-Free & Sequence-Wise Load Balancing
 
 MaxText implements an exact, paper-aligned version of DeepSeek V4's load balancing strategies (as specified in [the DeepSeek-V4 technical report](https://arxiv.org/html/2606.19348v1)). The architecture employs two distinct mechanisms:

@@ -67,6 +67,7 @@ The primary flags to control quantization are:
   - Set to `False` (or omit) to use the AQT library (deprecated) if `quantization` is set.
 - `quantization`: A string that specifies the type of quantization to apply. The accepted values depend on whether you are using Qwix or legacy AQT.
 - `quantization_calibration_method`: The calibration method for weights and activations (e.g., `"absmax"`). This is mainly for Qwix.
+- `quantize_gate_logits`: Applicable when `use_qwix_quantization=True` and `quantization` is set; ignored otherwise. (1) If enabled (default: `True` for backward compatibility), quantizes MoE routing gate projections. (2) Set to `False` to preserve unquantized gate projections across all quantization schemes (e.g., `fp8_full`, `int8`). When using `float32_gate_logits=True` under quantization, `quantize_gate_logits` must be set to `False`.
 
 ### Qwix Quantization (Recommended)
 

@@ -545,6 +545,13 @@ class Quantization(BaseModel):
           " `mtp_num_layers > 0` and `quantization=fp8_full`."
       ),
   )
+  quantize_gate_logits: bool = Field(
+      True,
+      description=(
+          "If True, quantizes the MoE routing gate when quantization is enabled. Default is True for backward"
+          " compatibility. Applicable when use_qwix_quantization=True and quantization is set; ignored otherwise."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -4489,6 +4496,11 @@ class MaxTextConfig(
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
+    if self.quantization and self.use_qwix_quantization and self.quantize_gate_logits and self.float32_gate_logits:
+      raise ValueError(
+          "`float32_gate_logits=True` is incompatible with `quantize_gate_logits=True` when"
+          " quantization is enabled. Set `quantize_gate_logits=False` to compute gate logits in FP32."
+      )
     if (
         self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
         and self.gradient_accumulation_steps > 1

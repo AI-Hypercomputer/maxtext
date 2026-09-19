@@ -958,7 +958,23 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   else:
     module_path = "decoder/.*layers.*"
 
-  return [
+  # Qwix rules are evaluated in a first-match way
+  rules = []
+
+  if not config.quantize_gate_logits:
+    # Setting all qtypes to None bypasses quantization, falling back to standard unquantized
+    # jax.lax.dot_general for both forward and backward passes.
+    rules.append(
+        qwix.QtRule(
+            module_path=r".*/gate$",
+            weight_qtype=None,
+            act_qtype=None,
+            bwd_qtype=None,
+            op_names=("dot_general",),
+        )
+    )
+
+  rules.append(
       qwix.QtRule(
           module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
@@ -969,15 +985,30 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
           bwd_calibration_method=config.bwd_quantization_calibration_method,
           additional_qt_config={"sparsity_rule": sparsity_rule},
           op_names=("dot_general", "gmm", "ragged_dot"),
-      ),
-  ]
+      )
+  )
+  return rules
 
 
 def get_quantization_rule(config: Config):
   """Returns a list of qwix.QtRule from `dtype`."""
 
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
-    return [
+    # Qwix rules are evaluated in a first-match way
+    rules = []
+    if not config.quantize_gate_logits:
+      # Setting all qtypes to None bypasses quantization, falling back to standard unquantized
+      # jax.lax.dot_general for both forward and backward passes.
+      rules.append(
+          qwix.QtRule(
+              module_path=r".*/gate$",
+              weight_qtype=None,
+              act_qtype=None,
+              bwd_qtype=None,
+              op_names=("dot_general",),
+          )
+      )
+    rules.append(
         qwix.QtRule(
             module_path="decoder/.*layers.*",
             weight_qtype=dtype,
@@ -987,7 +1018,8 @@ def get_quantization_rule(config: Config):
             disable_channelwise_axes=False,
             op_names=("dot_general",),
         )
-    ]
+    )
+    return rules
 
   match config.quantization:
     case "int4":
