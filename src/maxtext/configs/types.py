@@ -1115,7 +1115,11 @@ class MoEGeneral(BaseModel):
   )
   float32_weight_sum: bool = Field(
       True,
-      description="Whether to use full fp32 precision to sum expert weights for numerical stability.",
+      description=(
+          "Controls the accumulation precision of the MoE combine reduction (the weighted sum of expert"
+          " outputs by their routing weights). When True, casts operands to float32 before the combine"
+          " einsum and accumulates in float32 before casting back to the model dtype."
+      ),
   )
   float32_gate_logits: bool = Field(
       False,

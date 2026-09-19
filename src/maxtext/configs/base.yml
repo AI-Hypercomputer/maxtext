@@ -218,7 +218,7 @@ float32_qk_product: false # in dot_product attention, whether to cast to fp32 th
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the MLA Indexer (DeepSeek-V3 / DeepSeek-V3.2) across the unsharded local heads dimension natively.
 csa_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the CSA Indexer (DeepSeek-V4) across the unsharded local heads dimension natively.
-float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
+float32_weight_sum: true # whether to use fp32 accumulation for the MoE combine reduction (weighted sum of expert outputs by routing weights)
 # whether to run the MoE gate (router) module in fp32 for numerical stability.
 # compute dtype only (the kernel is still stored in weight_dtype): casts the gate inputs and kernel, emits fp32 logits, and applies to the routed bias add and score function.
 # see quantize_router_proj for whether the gate projection matmul is quantized; enabling both is rejected.
