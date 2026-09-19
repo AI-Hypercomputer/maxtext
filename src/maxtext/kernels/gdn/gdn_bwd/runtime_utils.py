@@ -82,7 +82,7 @@ def invert_triangular_matrix(t: jax.Array) -> jax.Array:
 
 
 def _invert_triangular_matrix_fwd(t: jax.Array):
-  t_inv = invert_triangular_matrix(t)
+  t_inv = local_compute_gdn.invert_triangular_matrix(t, block_size=16)
   return t_inv, t_inv
 
 
