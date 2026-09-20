@@ -33,6 +33,44 @@ import optax
 import pytest
 
 
+class L2WrapPenaltyTest(unittest.TestCase):
+  """`l2wrap_penalty` vs. the backward of BlinkDL's L2Wrap cross-entropy kernel
+  (`RWKV-LM/RWKV-v7/train_temp/cuda/rwkv7_l2wrap_ce_bf16_v2.cu`): per row,
+  softmax * g/rows, minus g/rows at the target, plus max_logit * g * factor / rows
+  at the (first) argmax, where g is the loss cotangent."""
+
+  def test_matches_blinkdl_backward(self):
+    rng = np.random.default_rng(0)
+    rows, vocab, factor = 12, 17, 1e-4
+    logits = jnp.asarray(rng.normal(size=(3, 4, vocab)) * 3, jnp.float32)
+    logits = logits.at[0, 0, 5].set(logits[0, 0].max() + 1).at[0, 0, 9].set(logits[0, 0].max() + 1)  # a tie
+    targets = rng.integers(0, vocab, size=(3, 4))
+    mask = jnp.ones((3, 4))
+
+    def loss(x):
+      xent, _ = max_utils.cross_entropy_with_logits(x, jax.nn.one_hot(targets, vocab), z_loss=0.0)
+      return (jnp.sum(xent) + max_utils.l2wrap_penalty(x, mask, factor)) / rows
+
+    value, grad = jax.value_and_grad(loss)(logits)
+    x = np.asarray(logits, np.float64).reshape(rows, vocab)
+    lse = np.log(np.sum(np.exp(x - x.max(-1, keepdims=True)), -1)) + x.max(-1)
+    self.assertAlmostEqual(float(value), float(np.mean(lse - x[np.arange(rows), targets.reshape(-1)])), places=5)
+    want = np.exp(x - lse[:, None]) / rows
+    want[np.arange(rows), targets.reshape(-1)] -= 1 / rows
+    first_max = np.argmax(x, -1)
+    self.assertEqual(first_max[0], 5)  # ties go to the first index, as in the kernel
+    want[np.arange(rows), first_max] += x[np.arange(rows), first_max] * factor / rows
+    np.testing.assert_allclose(np.asarray(grad).reshape(rows, vocab), want, atol=1e-6)
+
+  def test_value_is_zero_and_mask_applies(self):
+    logits = jnp.asarray(np.random.default_rng(1).normal(size=(2, 3, 5)), jnp.float32)
+    mask = jnp.asarray([[1, 1, 0], [1, 0, 0]])
+    self.assertEqual(float(max_utils.l2wrap_penalty(logits, mask, 1e-4)), 0.0)
+    grad = jax.grad(lambda x: max_utils.l2wrap_penalty(x, mask, 1e-4))(logits)
+    self.assertFalse(np.any(np.asarray(grad)[mask == 0]))
+    self.assertTrue(np.all(np.count_nonzero(np.asarray(grad)[mask == 1], axis=-1) == 1))
+
+
 class MaxUtilsSummaryStats(unittest.TestCase):
   """Tests for the summary stats functions in max_utils.py"""
 

@@ -111,5 +111,19 @@ class HFTokenizerTest(unittest.TestCase):
     self.assertTrue(np.array_equal(self.hf_tokenizer.encode(text), self.sp_tokenizer.encode(text)))
 
 
+class RwkvTokenizerTest(unittest.TestCase):
+  """RwkvTokenizer with the shipped World vocabulary; ids from BlinkDL's own tokenizer."""
+
+  def test_encode_decode(self):
+    vocab_path = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "rwkv_vocab_v20230424.txt")
+    tokenizer = input_pipeline_utils.get_tokenizer(vocab_path, "rwkv", add_bos=True, add_eos=True)
+    text = "Hello world 你好\x00"
+    ids = [0, 33155, 40213, 33, 10464, 11685, 1, 0]  # BOS/EOS are token 0; "\x00" is the raw byte token 1
+    self.assertEqual(tokenizer.encode(text), ids)
+    self.assertEqual(tokenizer.decode(ids + [-1]), text)  # 0 and the -1 padding decode to nothing
+    padded, true_length = tokenizer.encode("Hello world", is_bos=False, prefill_lengths=[4])  # pylint: disable=unexpected-keyword-arg
+    self.assertEqual((list(np.asarray(padded)), true_length), ([33155, 40213, -1, -1], 2))
+
+
 if __name__ == "__main__":
   unittest.main()

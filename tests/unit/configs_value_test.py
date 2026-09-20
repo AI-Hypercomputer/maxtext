@@ -1094,5 +1094,20 @@ class MMapDatasetConfigTest(absltest.TestCase):
     self.assertEqual(config.packing_max_segments_per_sample, 0)
 
 
+class Rwkv7ConfigTest(absltest.TestCase):
+  """RWKV-7 config guards."""
+
+  def test_rwkv7_rejects_unsupported_configs(self):
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "model_name=rwkv7-0.1b", "skip_jax_distributed_system=True"]
+    for overrides, error in (
+        (["ici_pipeline_parallelism=2"], "RWKV-7 does not support pipeline parallelism"),
+        (["override_model_config=True", "scan_layers=True"], "RWKV-7 does not support scan_layers"),
+        (["num_vocab_tiling=2"], "logits_l2wrap_factor"),
+        (["rwkv7_wkv_impl=pallas_chunked", "rwkv7_wkv_chunk_size=512"], "at most 128"),
+    ):
+      with self.assertRaisesRegex(ValueError, error):
+        pyconfig.initialize(argv + overrides)
+
+
 if __name__ == "__main__":
   absltest.main()

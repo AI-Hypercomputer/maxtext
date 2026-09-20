@@ -257,6 +257,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
 
     xent_sum = jnp.sum(xent)
     total_z_loss = jnp.sum(z_loss)
+    if config.logits_l2wrap_factor > 0:
+      # Zero in value; adds the penalty's gradient, normalized with the cross-entropy below.
+      l2wrap_mask = targets_loss_mask if is_block_diffusion else data["targets_segmentation"] != 0
+      xent_sum += max_utils.l2wrap_penalty(logits, l2wrap_mask, config.logits_l2wrap_factor)
 
   if is_block_diffusion:
     assert targets_loss_mask is not None

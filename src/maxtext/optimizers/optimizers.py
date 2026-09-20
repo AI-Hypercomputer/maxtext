@@ -46,6 +46,36 @@ def _get_path_mask_fn(patterns, match_returns_true=True):
   return mask_fn
 
 
+def scale_updates_by_path(lr_multipliers):
+  """Multiplies each parameter's update by the first `regex=multiplier` entry matching its path.
+
+  Applied after the optimizer, this is a per-parameter learning-rate multiplier:
+  every optimizer here produces updates proportional to the learning rate. For
+  AdamW it scales the weight-decay term too. Returns None when there are no
+  entries.
+  """
+  if not lr_multipliers:
+    return None
+  rules = []
+  for entry in lr_multipliers:
+    pattern, _, multiplier = entry.rpartition("=")
+    rules.append((re.compile(pattern), float(multiplier)))
+
+  def multiplier_for(path):
+    path_str = jax.tree_util.keystr(path, simple=True, separator="/")
+    return next((m for pattern, m in rules if pattern.search(path_str)), 1.0)
+
+  def init_fn(params):
+    del params
+    return optax.EmptyState()
+
+  def update_fn(updates, state, params=None):
+    del params
+    return jax.tree_util.tree_map_with_path(lambda path, u: u * multiplier_for(path), updates), state
+
+  return optax.GradientTransformation(init_fn, update_fn)
+
+
 def get_adamw_mask(config):
   """Create a mask function for AdamW optimizer to exclude certain parameters from weight decay."""
   return _get_path_mask_fn(getattr(config, "adamw_mask", None), match_returns_true=False)
@@ -249,6 +279,10 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
       )
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
+
+  lr_scaling = scale_updates_by_path(getattr(config, "lr_multipliers", None))
+  if lr_scaling is not None:
+    base_opt = optax.chain(base_opt, lr_scaling)
 
   if getattr(config, "skip_step_on_spikes", False):
     base_opt = skip_step_on_spikes(

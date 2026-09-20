@@ -620,6 +620,30 @@ def unbox_logicallypartioned(boxed_pytree):
   )
 
 
+def l2wrap_penalty(logits: jnp.ndarray, mask: jnp.ndarray, factor: float) -> jnp.ndarray:
+  """RWKV's L2Wrap as a straight-through term to add to the summed cross-entropy.
+
+  BlinkDL's training loss (`RWKV-LM/RWKV-v7/train_temp`, `l2wrap_cross_entropy`)
+  reports plain cross-entropy but adds `factor * max_logit` to the gradient of
+  each token's largest logit (the first one on ties), scaled like the mean
+  cross-entropy. That is the gradient of `factor * max_logit**2 / 2` per token.
+  The returned value is exactly zero, so the reported loss doesn't change;
+  only the gradient carries the penalty.
+
+  Args:
+    logits: `(..., vocab)` logits.
+    mask: `(...)` weights of the tokens that count toward the loss.
+    factor: the L2Wrap factor (BlinkDL: 1e-4).
+
+  Returns:
+    A scalar that is 0 in value, with the penalty's gradient.
+  """
+  logits = logits.astype(jnp.float32)
+  top = jnp.take_along_axis(logits, jnp.argmax(logits, axis=-1)[..., None], axis=-1)[..., 0]
+  penalty = 0.5 * factor * jnp.sum(jnp.square(top) * mask)
+  return penalty - jax.lax.stop_gradient(penalty)
+
+
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp

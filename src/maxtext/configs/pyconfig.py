@@ -308,6 +308,11 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
     if key in ("dump_hlo_local_module_name", "dump_hlo_module_name") and new_value is None:
       new_value = ""
 
+    if key == "tokenizer_path" and new_value is None and raw_keys.get("decoder_block") == "rwkv7":
+      # RWKV-7 checkpoints use BlinkDL's World vocabulary, which ships with MaxText.
+      new_value = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/rwkv_vocab_v20230424.txt")
+      pydantic_kwargs["_auto_rwkv_tokenizer"] = True
+
     if key == "tokenizer_path" and new_value is None:
       try:
         model_name = raw_keys.get("model_name", "default")
@@ -326,6 +331,8 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
 
   if pydantic_kwargs.pop("_auto_hf_tokenizer", False):
     pydantic_kwargs["tokenizer_type"] = "huggingface"
+  if pydantic_kwargs.pop("_auto_rwkv_tokenizer", False):
+    pydantic_kwargs["tokenizer_type"] = "rwkv"
 
   return pydantic_kwargs
 

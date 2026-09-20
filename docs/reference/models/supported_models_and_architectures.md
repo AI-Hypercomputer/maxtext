@@ -66,6 +66,11 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 - **Variants**: K2 (1T), K2-Thinking (1T), K2.5 (text), K2.6 (text)
 - **Notes**: DeepSeek V3 architecture; MuonClip optimizer
 
+### RWKV
+
+- **Variants**: RWKV-7 "Goose" (x070) 0.1B
+- **Notes**: Attention-free; WKV7 recurrence (generalized delta rule with dynamic decay) with Pallas TPU kernels; fixed-size recurrent decode state; validated on CPU and compiled for TPU ahead of time.
+
 ## Parallelism building blocks
 
 MaxText supports a wide range of parallelism strategies for scaling training and inference across TPUs and GPUs:
@@ -104,6 +109,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
     [Qwen3.5 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3_5.py)
   - **GPT-OSS**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gpt_oss/run_gpt_oss.md) | [GPT-OSS Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/gpt_oss.py)
   - **Kimi**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md) | [K2 reuses DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/deepseek.py)
+  - **RWKV**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/rwkv/run_rwkv7.md) | [RWKV-7 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/rwkv7.py)
 
 - **Technical Explanations:**
 

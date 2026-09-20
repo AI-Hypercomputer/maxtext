@@ -25,6 +25,7 @@ import logging
 import math
 from math import prod
 import os
+import re
 from tempfile import gettempdir
 import yaml
 from typing import Any, Literal, NewType, Optional
@@ -191,6 +192,7 @@ class TokenizerType(str, Enum):
   SENTENCEPIECE = "sentencepiece"
   HUGGINGFACE = "huggingface"
   TIKTOKEN = "tiktoken"
+  RWKV = "rwkv"
 
 
 class DatasetType(str, Enum):
@@ -313,6 +315,7 @@ ModelName = Literal[
     "envy-switch-base",
     "envy-switch-large",
     "envy-switch-xxl",
+    "rwkv7-0.1b",
 ]
 
 
@@ -666,6 +669,14 @@ class LogitsAndLoss(BaseModel):
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
   )
   z_loss_multiplier: float = Field(0.0, description="The multiplier for the z-loss (e.g., 1e-4). 0.0 to disable.")
+  logits_l2wrap_factor: NonNegativeFloat = Field(
+      0.0,
+      description=(
+          "RWKV's L2Wrap: adds factor * max_logit to the gradient of each token's largest logit (the gradient of"
+          " factor * max_logit^2 / 2, normalized like the cross-entropy) without changing the reported loss. BlinkDL"
+          " trains RWKV with 1e-4. 0.0 to disable."
+      ),
+  )
   num_vocab_tiling: int = Field(
       1,
       description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
@@ -1258,6 +1269,49 @@ class Qwen3Next(BaseModel):
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+
+
+class Rwkv7(BaseModel):
+  """Configuration specific to RWKV-7 ("Goose", the x070 architecture)."""
+
+  rwkv7_head_size: int = Field(64, description="Head dimension of the RWKV-7 WKV7 recurrent state (N in an NxN state).")
+  rwkv7_decay_lora_rank: int = Field(64, description="Rank of the low-rank parameterization of the WKV7 decay gate w.")
+  rwkv7_iclr_lora_rank: int = Field(
+      64, description="Rank of the low-rank parameterization of the in-context learning rate a."
+  )
+  rwkv7_value_lora_rank: int = Field(
+      32, description="Rank of the low-rank parameterization of the value-residual mix applied on layers after layer 0."
+  )
+  rwkv7_gate_lora_rank: int = Field(128, description="Rank of the low-rank parameterization of the output gate g.")
+  rwkv7_groupnorm_epsilon: float = Field(
+      64e-5, description="Variance epsilon of the per-head GroupNorm applied to the WKV7 output."
+  )
+  rwkv7_wkv_impl: Literal["autoselected", "naive", "pallas", "pallas_chunked", "pallas_gpu"] = Field(
+      "naive",
+      description=(
+          "Implementation of the WKV7 recurrence. 'naive' is the sequential reference scan and is the correctness"
+          " oracle for every other implementation. 'pallas' and 'pallas_chunked' are Pallas TPU kernels (interpret"
+          " mode off-TPU) that step through each chunk token by token or evaluate it as matmuls, respectively."
+          " 'pallas_gpu' is the Pallas GPU (Triton) kernel, which does not support `rwkv7_segment_resets`."
+          " 'autoselected' picks from the target platform: the chunked TPU kernel on TPU, the GPU kernel on GPU"
+          " unless `rwkv7_segment_resets` is set, and the reference scan otherwise."
+      ),
+  )
+  rwkv7_segment_resets: bool = Field(
+      True,
+      description=(
+          "Start each document of a packed row (a new nonzero segment id) from a zero WKV state and a zero token"
+          " shift, isolating documents like attention's segment masking. False treats the row as one continuous"
+          " stream, as BlinkDL's own training does (documents separated only by an end-of-document token)."
+      ),
+  )
+  rwkv7_wkv_chunk_size: PositiveInt = Field(
+      16,
+      description=(
+          "Timesteps per grid step of the Pallas WKV7 kernels (and their backward checkpoint interval); a multiple"
+          " of 8."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -2240,6 +2294,28 @@ class Optimizer(BaseModel):
           "example: ['.*indexer.*']. If empty (default), all parameters are trained."
       ),
   )
+  lr_multipliers: list[str] = Field(
+      default_factory=list,
+      description=(
+          "Per-parameter learning-rate multipliers as 'regex=multiplier' entries, matched against '/'-joined"
+          " parameter paths; the first match wins, unmatched parameters use 1.0. Scales each parameter's final"
+          " optimizer update (for AdamW that includes its weight-decay term). Example: ['/att/w0/=2.0']."
+      ),
+  )
+
+  @field_validator("lr_multipliers")
+  @classmethod
+  def validate_lr_multipliers(cls, entries: list[str]) -> list[str]:
+    for entry in entries:
+      pattern, sep, multiplier = entry.rpartition("=")
+      if not sep or not pattern:
+        raise ValueError(f"lr_multipliers entries must look like 'regex=multiplier', got {entry!r}")
+      try:
+        re.compile(pattern)
+        float(multiplier)
+      except (re.error, ValueError) as e:
+        raise ValueError(f"invalid lr_multipliers entry {entry!r}: {e}") from e
+    return entries
 
 
 class AdamW(BaseModel):
@@ -3379,6 +3455,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    Rwkv7,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -4872,6 +4949,31 @@ class MaxTextConfig(
             f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
             f"({self.interleave_moe_layer_step})"
         )
+    if self.logits_l2wrap_factor > 0 and self.num_vocab_tiling > 1:
+      raise ValueError("`logits_l2wrap_factor` needs the full logits; it is not compatible with `num_vocab_tiling > 1`.")
+    if self.decoder_block == DecoderBlockType.RWKV7:
+      # Pipeline stages and scanned blocks are built from interchangeable layers and
+      # carry only the residual stream; RWKV-7's layers are indexed (layer 0 owns
+      # `ln0` and produces `v_first`) and carry `v_first` too.
+      if self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1:
+        raise ValueError("RWKV-7 does not support pipeline parallelism yet.")
+      if self.scan_layers:
+        raise ValueError("RWKV-7 does not support scan_layers=True yet; set scan_layers=false.")
+      if self.rwkv7_wkv_impl == "pallas_chunked" and self.rwkv7_wkv_chunk_size > 128:
+        raise ValueError(
+            "`rwkv7_wkv_chunk_size` must be at most 128 with `rwkv7_wkv_impl=pallas_chunked` (the chunked kernel's"
+            f" decay rescaling overflows float32 for much larger chunks), got {self.rwkv7_wkv_chunk_size}."
+        )
+      if self.rwkv7_wkv_impl == "pallas_gpu" and self.rwkv7_wkv_chunk_size > 8:
+        raise ValueError(
+            "`rwkv7_wkv_chunk_size` must be at most 8 with `rwkv7_wkv_impl=pallas_gpu` (its backward inverts steps,"
+            f" which multiplies float32 rounding by up to (1/w)^chunk_size), got {self.rwkv7_wkv_chunk_size}."
+        )
+      if self.rwkv7_wkv_impl == "pallas_gpu" and self.rwkv7_segment_resets:
+        raise ValueError(
+            "`rwkv7_wkv_impl=pallas_gpu` does not support `rwkv7_segment_resets` (its backward inverts steps, "
+            "which cannot see past a reset); use `pallas_chunked` or `naive`."
+        )
     if self.decoder_block == DecoderBlockType.ENVY:
       if self.base_num_decoder_layers % self.interleave_moe_layer_step != 0:
         raise ValueError(
@@ -4980,6 +5082,7 @@ class MaxTextConfig(
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
+        DecoderBlockType.RWKV7,
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
@@ -5195,6 +5298,7 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
+    Rwkv7,
     MultimodalGeneral,
     Muon,
     FineTuning,

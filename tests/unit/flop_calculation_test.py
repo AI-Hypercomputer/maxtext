@@ -18,6 +18,7 @@ from typing import Any
 import unittest
 from unittest.mock import MagicMock
 from absl.testing import parameterized
+import jax
 
 from maxtext.configs import pyconfig
 from maxtext.utils import maxtext_utils
@@ -1236,6 +1237,30 @@ class FlopCalculation(parameterized.TestCase):
     plus expected attention flops for various standard models with a long sequence length.
     """
     self._verify_long_sequence_flops(model_name)
+
+  def test_rwkv7_flops(self):
+    """RWKV-7 counts its projections, low-rank gates and WKV recurrence, all linear in length (no attention term)."""
+    cfg = self._initialize_model_config("rwkv7-0.1b", max_target_length=2048, per_device_batch_size=1)
+    total, weight, recurrence = calculate_tflops_training_per_device(cfg, log=False)
+
+    # rwkv7-0.1b, written out: B*S = 2048 tokens, E = 768, 12 layers, mlp 3072,
+    # vocab 65536, head size 64, gate ranks w/a/g = 64/64/128 in every layer and
+    # v = 32 in layers 1..11 only.
+    tokens, emb, layers = 2048, 768, 12
+    projections = 4 * 2 * tokens * emb * emb * layers
+    gates = 2 * 2 * tokens * emb * ((64 + 64 + 128) * layers + 32 * (layers - 1))
+    channel_mix = 2 * 2 * tokens * emb * 3072 * layers
+    head = 2 * tokens * emb * 65536
+    self.assertAlmostEqual(weight, 3 * (projections + gates + channel_mix + head) / 1e12, places=12)
+    self.assertAlmostEqual(recurrence, 3 * 8 * tokens * emb * 64 * layers / 1e12, places=12)
+    self.assertAlmostEqual(total, weight + recurrence, places=12)
+
+    # Prefill: 2 FLOPs per parameter per token plus the recurrence.
+    devices = jax.device_count()
+    total, weight, recurrence = maxtext_utils.calculate_prefill_tflops_per_device(100_000_000, 128, cfg, log=False)
+    self.assertAlmostEqual(weight, 2 * 100_000_000 * 128 / devices / 1e12, places=12)
+    self.assertAlmostEqual(recurrence, 8 * 12 * 768 * 64 * 128 / devices / 1e12, places=12)
+    self.assertAlmostEqual(total, weight + recurrence, places=12)
 
 
 if __name__ == "__main__":

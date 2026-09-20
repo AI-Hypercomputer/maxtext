@@ -825,6 +825,57 @@ def calculate_gated_delta_net_flops_per_device(config):
   return gdn_weight_flops, gdn_attn_flops
 
 
+def calculate_rwkv7_flops_per_device(config):
+  """Model FLOPs of one RWKV-7 training step per device: (weight TFLOPs, recurrence TFLOPs).
+
+  Counts matmul FLOPs (2 per multiply-add), times 3 for forward + backward, like
+  the other estimators here. This is the model's work, not what executes:
+  rematerialization and the recurrent vs. chunked WKV kernel change the latter.
+  """
+  tokens = config.per_device_batch_size * config.max_target_length
+  emb, layers = config.emb_dim, config.num_decoder_layers
+
+  # Time mix: receptance, key, value and output projections (E -> E each).
+  projection_flops = 4 * 2 * tokens * emb * emb * layers
+  # Dynamic low-rank gates, E -> rank -> E: decay (w), in-context learning rate
+  # (a) and output gate (g) in every layer; the value-residual gate (v) is unused
+  # in layer 0, which produces v_first.
+  gate_ranks = config.rwkv7_decay_lora_rank + config.rwkv7_iclr_lora_rank + config.rwkv7_gate_lora_rank
+  gate_flops = 2 * 2 * tokens * emb * (gate_ranks * layers + config.rwkv7_value_lora_rank * (layers - 1))
+  # Channel mix: ReLU^2 between one E -> mlp_dim and one mlp_dim -> E projection.
+  channel_mix_flops = 2 * 2 * tokens * emb * config.mlp_dim * layers
+  # Output head (the embedding lookup is a gather, not counted).
+  head_flops = 2 * tokens * emb * config.vocab_size
+  weight_flops = projection_flops + gate_flops + channel_mix_flops + head_flops
+
+  # WKV state update per token and head, on the (N, N) state: S @ kk, the rank-1
+  # removal, the v k^T write and the S @ r readout, 2 N^2 FLOPs each. That's the
+  # 8 H N^2 convention of `calculate_gated_delta_net_flops_per_device`; linear in
+  # sequence length.
+  recurrence_flops = 8 * tokens * emb * config.rwkv7_head_size * layers
+
+  return weight_flops * 3 / 10**12, recurrence_flops * 3 / 10**12
+
+
+def calculate_rwkv7_prefill_tflops_per_device(num_model_parameters, prefill_length, config, log=True):
+  """Prefill TFLOPs for RWKV-7: weights plus the WKV recurrence, both linear in length."""
+  learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count() / 1e12
+  recurrence_tflops = (
+      8 * config.num_decoder_layers * config.emb_dim * config.rwkv7_head_size * prefill_length / jax.device_count() / 1e12
+  )
+  total_tflops = learnable_weight_tflops + recurrence_tflops
+  if log:
+    print(
+        "Per prefill step per device: \n",
+        f"\tTotal TFLOPs: {total_tflops:.2f} \n",
+        f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops:.2f} ",
+        f"({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n",
+        f"\t\tWKV recurrence TFLOPs: {recurrence_tflops:.2f} ",
+        f"({100 * recurrence_tflops/total_tflops:.2f})% of Total",
+    )
+  return total_tflops, learnable_weight_tflops, recurrence_tflops
+
+
 def calculate_gemma3_vision_layers_tflops_per_device(config):
   """
   Estimate TFLOPs for Gemma3 vision encoder (ViT-style).
@@ -1153,6 +1204,20 @@ def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_l
 
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
+  if config.decoder_block == DecoderBlockType.RWKV7:
+    learnable_weight_tflops, recurrence_tflops = calculate_rwkv7_flops_per_device(config)
+    total_tflops = learnable_weight_tflops + recurrence_tflops
+    if log:
+      print(
+          "Per train step per device: \n",
+          f"\tTotal TFLOPs: {total_tflops:.2f} \n",
+          f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops:.2f} ",
+          f"({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n",
+          f"\t\tWKV recurrence TFLOPs: {recurrence_tflops:.2f} ",
+          f"({100 * recurrence_tflops/total_tflops:.2f})% of Total",
+      )
+    return total_tflops, learnable_weight_tflops, recurrence_tflops
+
   # MLP flops
   is_ffn_flops_already_total = False
   if config.num_experts > 1:
@@ -1400,6 +1465,8 @@ def calculate_tflops_training_per_device(config, log=True):
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, config, log=True):
   """Calculate training TFLOP"""
+  if config.decoder_block == DecoderBlockType.RWKV7:
+    return calculate_rwkv7_prefill_tflops_per_device(num_model_parameters, prefill_length, config, log=log)
   learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count() / 1e12
   noncausal_attention_flops = (
       4

@@ -1155,5 +1155,48 @@ class TestMuonLogic(unittest.TestCase):
       self.assertEqual(kernel_spec.sharding.spec, jax.sharding.PartitionSpec("data", "model"))
 
 
+class LrMultipliersTest(parameterized.TestCase):
+  """`lr_multipliers`: per-parameter scaling of the final optimizer update."""
+
+  def test_scales_matching_paths_first_match_wins(self):
+    params = {"decoder": {"att": {"w0": jnp.ones(3), "w1": jnp.ones(3)}, "ffn": {"x_k": jnp.ones(3)}}}
+    tx = optimizers.scale_updates_by_path(["/att/w0$=2.0", "w=0.5", "/att/w0$=9.0"])
+    updates, _ = tx.update(jax.tree.map(lambda x: 3 * x, params), tx.init(params))
+    np.testing.assert_array_equal(updates["decoder"]["att"]["w0"], 6.0)
+    np.testing.assert_array_equal(updates["decoder"]["att"]["w1"], 1.5)
+    np.testing.assert_array_equal(updates["decoder"]["ffn"]["x_k"], 3.0)
+    self.assertIsNone(optimizers.scale_updates_by_path([]))
+
+  def test_adamw_update_scaled(self):
+    """With AdamW, the multiplier scales that parameter's whole update and nothing else's."""
+    params = {"a": jnp.array([1.0, -2.0]), "b": jnp.array([0.5, 3.0])}
+    grads = {"a": jnp.array([0.3, -0.1]), "b": jnp.array([-0.2, 0.4])}
+    config = MagicMock(
+        opt_type="adamw",
+        adam_b1=0.9,
+        adam_b2=0.99,
+        adam_eps=1e-8,
+        adam_eps_root=0.0,
+        adam_weight_decay=0.1,
+        mu_dtype=None,
+        adamw_mask=[],
+        skip_step_on_spikes=False,
+        trainable_parameters_mask=[],
+    )
+    config.lr_multipliers = []
+    plain = optimizers.get_optimizer(config, 1e-2)
+    config.lr_multipliers = ["^a$=2.0"]
+    scaled = optimizers.get_optimizer(config, 1e-2)
+    want, _ = plain.update(grads, plain.init(params), params)
+    got, _ = scaled.update(grads, scaled.init(params), params)
+    np.testing.assert_allclose(got["a"], 2 * want["a"], rtol=1e-6)
+    np.testing.assert_array_equal(got["b"], want["b"])
+
+  @parameterized.parameters("no_equals_sign", "[unclosed=2.0")
+  def test_config_rejects_malformed_entries(self, entry):
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(["", get_test_config_path(), "run_name=test", f"lr_multipliers=['{entry}']"])
+
+
 if __name__ == "__main__":
   absltest.main()

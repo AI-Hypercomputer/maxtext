@@ -68,6 +68,7 @@ from maxtext.models import (
     qwen3,
     qwen3_5,
     qwen3_custom,
+    rwkv7,
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
@@ -465,9 +466,13 @@ class NNXDecoder(nnx.Module):
         parameter_memory_host_offload=config.parameter_memory_host_offload,
     )
     if not config.logits_via_embedding:
+      logits_init = {}
+      if config.decoder_block == DecoderBlockType.RWKV7:
+        logits_init["kernel_init"] = rwkv7.logits_kernel_init(config.vocab_size, config.emb_dim)
       self.logits_dense = linears.DenseGeneral(
           in_features_shape=config.emb_dim,
           out_features_shape=config.vocab_size,
+          **logits_init,
           weight_dtype=get_weight_dtype(config, "logits_dense"),
           dtype=jnp.float32 if config.logits_dot_in_fp32 else config.dtype,
           kernel_axes=("embed_vocab", "vocab"),
@@ -486,6 +491,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
     self.is_qwen3_5 = self.config.decoder_block == DecoderBlockType.QWEN3_5
+    self.is_rwkv7 = self.config.decoder_block == DecoderBlockType.RWKV7
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -883,6 +889,10 @@ class NNXDecoder(nnx.Module):
         layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
       elif config.decoder_block == DecoderBlockType.OLMO3:
         layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
+      elif config.decoder_block == DecoderBlockType.RWKV7:
+        # The index sets RWKV-7's depth-dependent initialization; layer 0 also
+        # owns `ln0` and produces `v_first`.
+        layer_kwargs = {"layer_idx": lyr}
 
       self._create_and_register_layer(layer_cls, rngs, "layers", lyr, **layer_kwargs)
 
@@ -1242,6 +1252,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
+        DecoderBlockType.RWKV7: [rwkv7.Rwkv7DecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1380,6 +1391,46 @@ class NNXDecoder(nnx.Module):
         policy = None
     return policy
 
+  def _apply_rwkv7_layers(self, y, decoder_segment_ids, decoder_positions, deterministic, model_mode):
+    """Runs the RWKV-7 stack, threading `v_first` alongside the residual stream.
+
+    Layer 0's value projection feeds every later layer, so RWKV-7 needs a second
+    value carried through the stack; the generic sequential loop carries only the
+    residual stream (and asserts it stays a single array).
+
+    With a remat policy other than "none", each layer is wrapped in
+    `jax.checkpoint` like the other unscanned stacks (`_apply_layer_with_remat`),
+    except that `v_first` is carried as an explicit checkpoint input and output
+    alongside `y` rather than closed over.
+    """
+    cfg = self.config
+    remat = cfg.remat_policy and cfg.remat_policy != "none"
+    if remat:
+      policy = self.get_remat_policy()
+      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+
+    v_first = None
+    for lyr in range(cfg.num_decoder_layers):
+      layer = getattr(self, f"layers_{lyr}", None)
+      if layer is None and getattr(self, "layers", None):
+        layer = self.layers[lyr]
+      if layer is None:
+        raise AttributeError(f"Could not locate decoder layer at index {lyr} in {self.__class__.__name__}")
+      if not remat:
+        y, v_first = layer(y, decoder_segment_ids, decoder_positions, deterministic, model_mode, v_first=v_first)
+        continue
+
+      graphdef, state = nnx.split(layer)
+
+      def pure_layer_fn(state_in, y_in, v_first_in, graphdef=graphdef):
+        merged = nnx.merge(graphdef, state_in)
+        out = merged(y_in, decoder_segment_ids, decoder_positions, deterministic, model_mode, v_first=v_first_in)
+        return out, nnx.state(merged)
+
+      (y, v_first), new_state = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)(state, y, v_first)
+      nnx.update(layer, new_state)
+    return y
+
   def get_norm_layer(self, num_features: int, rngs: nnx.Rngs):
     """get normalization layer (return type inherits from nn.Module)"""
     if self.config.decoder_block in {
@@ -1417,6 +1468,12 @@ class NNXDecoder(nnx.Module):
           num_features=num_features,
           reductions_in_fp32=False,
           use_bias=True,
+          rngs=rngs,
+      )
+    elif self.config.decoder_block == DecoderBlockType.RWKV7:
+      return functools.partial(
+          rwkv7.Rwkv7LayerNorm,
+          num_features=num_features,
           rngs=rngs,
       )
     elif self.config.decoder_block in {
@@ -1949,6 +2006,8 @@ class NNXDecoder(nnx.Module):
             previous_chunk=previous_chunk,
             slot=slot,
         )
+      elif self.is_rwkv7:
+        y = self._apply_rwkv7_layers(y, *layer_args)
       elif cfg.scan_layers:
         if self.is_deepseek:
           if cfg.engram_layers:

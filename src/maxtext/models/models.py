@@ -25,7 +25,7 @@ from jax.sharding import Mesh
 from flax import linen as nn
 from flax import nnx
 
-from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
+from maxtext.common.common_types import Config, DecoderBlockType, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
@@ -33,6 +33,7 @@ from maxtext.layers.embeddings import Embed
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.models import rwkv7
 from maxtext.multimodal import processor as mm_processor
 
 # ------------------------------------------------------------------------------
@@ -129,7 +130,11 @@ class Transformer(nnx.Module):
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
+        embedding_init=(
+            rwkv7.token_embedding_init
+            if cfg.decoder_block == DecoderBlockType.RWKV7
+            else nn.initializers.normal(stddev=1.0)
+        ),
         config=cfg,
         rngs=rngs,
     )

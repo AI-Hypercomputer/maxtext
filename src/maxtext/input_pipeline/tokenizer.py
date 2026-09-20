@@ -14,8 +14,10 @@
 
 """Provides op for tokenizing a dataset."""
 
-from typing import Literal, Sequence, Collection
+import ast
+from typing import Any, Literal, Sequence, Collection
 from pathlib import Path
+import numpy as np
 from maxtext.utils import max_logging
 import transformers
 import tiktoken
@@ -246,6 +248,91 @@ class HFTokenizer:
     return self.tokenizer.decode(t)
 
 
+class RwkvTokenizer:
+  """BlinkDL's RWKV World tokenizer (`rwkv_vocab_v20230424.txt`), used by RWKV-7 checkpoints.
+
+  Greedy longest match over UTF-8 bytes, as `RWKV_TOKENIZER` in RWKV-LM's
+  `RWKV-v7/rwkv_v7_demo.py`. Every single byte is a token, so any text encodes.
+  Token 0 is end-of-text: BlinkDL's training data ends each document with it.
+  There is no BOS token; a requested BOS is token 0 too (the separator that
+  precedes a document in training). Padding is -1, as for `TikTokenTokenizer`,
+  so the input pipelines' pad masking doesn't drop end-of-text targets from the
+  loss. Serves both MaxText's input pipelines and JetStream's tokenizer
+  interface (`encode(..., prefill_lengths=...)` pads and returns
+  `(tokens, true_length)`).
+  """
+
+  def __init__(self, model_path: str, add_bos: bool = False, add_eos: bool = False):
+    max_logging.log(f"Loading RWKV tokenizer from: {model_path}")
+    self.idx2token: dict[int, bytes] = {}
+    # Each line is `<id> <python literal of the token> <byte length>`.
+    with open(model_path, "r", encoding="utf-8") as f:
+      for line in f:
+        idx, rest = line.split(" ", 1)
+        literal, length = rest.rsplit(" ", 1)
+        token = ast.literal_eval(literal)
+        token = token.encode("utf-8") if isinstance(token, str) else token
+        if len(token) != int(length):
+          raise ValueError(f"Bad RWKV vocabulary line: {line!r}")
+        self.idx2token[int(idx)] = token
+    # Byte trie: node[byte] is a child node, node[None] the id of the token ending here.
+    self._trie: dict = {}
+    for idx, token in self.idx2token.items():
+      node = self._trie
+      for byte in token:
+        node = node.setdefault(byte, {})
+      node[None] = idx
+
+    self.add_bos = add_bos
+    self.add_eos = add_eos
+    self.bos_id = self.eos_id = 0
+    self.pad_id = -1
+    self.unk_id = None
+    self.stop_tokens = {0}
+
+  def _encode(self, text: str) -> list[int]:
+    """Greedy longest-match token ids of `text` (no special tokens)."""
+    src = text.encode("utf-8")
+    tokens, start = [], 0
+    while start < len(src):
+      node, end, longest = self._trie, start, None
+      while end < len(src) and src[end] in node:
+        node = node[src[end]]
+        end += 1
+        if None in node:
+          longest = (end, node[None])
+      start, token = longest
+      tokens.append(token)
+    return tokens
+
+  def encode(self, s: str, **kwargs) -> list[int] | tuple[Any, int]:
+    """Token ids of `s`; with JetStream's `prefill_lengths`/`max_prefill_length`, `(padded tokens, true length)`."""
+    tokens = self._encode(s)
+    if "prefill_lengths" in kwargs or "max_prefill_length" in kwargs:
+      from jetstream.engine import token_utils  # pylint: disable=import-outside-toplevel
+
+      return token_utils.pad_tokens(
+          np.array(tokens, np.int32),
+          self.bos_id,
+          self.pad_id,
+          is_bos=kwargs.get("is_bos", self.add_bos),
+          prefill_lengths=kwargs.get("prefill_lengths"),
+          max_prefill_length=kwargs.get("max_prefill_length"),
+          jax_padding=kwargs.get("jax_padding", True),
+      )
+    return [self.bos_id] * self.add_bos + tokens + [self.eos_id] * self.add_eos
+
+  def decode(self, t: Sequence[int], **kwargs) -> str:
+    """Joins the tokens' bytes, then decodes UTF-8. End-of-text, padding and unused ids decode to nothing.
+
+    A token can end inside a multi-byte character, so decoding a stream token by
+    token (`is_streaming`) can yield U+FFFD where a character is split; decode
+    whole sequences for exact text.
+    """
+    del kwargs
+    return b"".join(self.idx2token.get(int(i), b"") for i in t).decode("utf-8", errors="replace")
+
+
 def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token):
   """Loads the tokenizer at `tokenizer_path`"""
   max_logging.log(f"Tokenizer path: {tokenizer_path}")
@@ -256,5 +343,7 @@ def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_
     return HFTokenizer(tokenizer_path, add_bos, add_eos, hf_access_token)
   elif tokenizer_type == "sentencepiece":
     return SentencePieceTokenizer(tokenizer_path, add_bos, add_eos)
+  elif tokenizer_type == "rwkv":
+    return RwkvTokenizer(tokenizer_path, add_bos, add_eos)
   else:
     raise ValueError(f"Invalid tokenizer_type:{tokenizer_type} chosen in config")

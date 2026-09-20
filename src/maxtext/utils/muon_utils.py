@@ -62,6 +62,7 @@ EXCLUDED_SUBSTRINGS = (
 
 EXCLUDED_EXACT_SEGMENTS = {
     "bias",
+    "r_k",  # RWKV-7: a (heads, head_size) per-head vector, not a matrix
 }
 
 # Attention module identifiers and tensor projection names that require

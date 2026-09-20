@@ -445,6 +445,7 @@ causal_block_size: 32
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 z_loss_multiplier: 0.0
+logits_l2wrap_factor: 0.0 # RWKV L2Wrap on the largest logit, gradient only (BlinkDL uses 1e-4)
 use_post_attn_norm: false
 use_post_ffw_norm: false
 v_norm_with_scale: true
@@ -1051,6 +1052,10 @@ skip_step_scaling_factor: 6.0
 # If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].
 # If empty (default), all parameters are trained.
 trainable_parameters_mask: []
+
+# Per-parameter learning-rate multipliers, 'regex=multiplier' against '/'-joined
+# parameter paths (first match wins; others 1.0), e.g. ['/att/w0/=2.0'].
+lr_multipliers: []
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2

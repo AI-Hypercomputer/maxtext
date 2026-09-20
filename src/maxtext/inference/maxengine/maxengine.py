@@ -39,6 +39,7 @@ from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.layers import quantizations
 from maxtext.inference import inference_utils
+from maxtext.input_pipeline import tokenizer
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -201,6 +202,11 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     _, cache_state, _ = nnx.split(src, nnx.Cache, ...)
     cache_dict = nnx.to_pure_dict(cache_state)
     return jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict)
+
+  def _has_fixed_size_recurrent_cache(self) -> bool:
+    """Whether the model keeps per-sequence recurrent states rather than a KV cache."""
+    paths = jax.tree_util.tree_leaves_with_path(nnx.to_pure_dict(self._nnx_cache_state_template(MODEL_MODE_PREFILL)))
+    return any(path[-1].key in ("recurrent_state", "conv_state") for path, _ in paths)
 
   def _nnx_run_model(
       self,
@@ -1048,6 +1054,14 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     """
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
+    if num_prompts > 1 and self._has_fixed_size_recurrent_cache():
+      # One fixed-size state per row can't keep packed prompts apart: each later
+      # prompt would start from the previous prompt's state. insert_partial
+      # refuses these caches too; fail here, before any logits are produced.
+      raise NotImplementedError(
+          "Packed prefill (num_prompts > 1) is not supported for models with fixed-size recurrent caches"
+          " (`recurrent_state` / `conv_state`, e.g. RWKV-7). Prefill one prompt per call instead."
+      )
 
     if rng is None:
       rng = jax.random.PRNGKey(0)
@@ -1695,9 +1709,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           "Install optional dependencies with: install_tpu_pre_train_extra_deps --with-tf"
       )
     try:
+      # JetStream's enum has no RWKV tokenizer; build_tokenizer dispatches on the
+      # config for it, so any enum value will do.
+      tokenizer_type = "huggingface" if self.config.tokenizer_type == "rwkv" else self.config.tokenizer_type
       # pyrefly: ignore[missing-attribute]
       tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[
-          self.config.tokenizer_type
+          tokenizer_type
       ].number  # pyrefly: ignore[missing-attribute]
       return TokenizerParameters(
           path=self.config.tokenizer_path,  # pyrefly: ignore[unexpected-keyword]
@@ -1718,6 +1735,8 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           "JetStream is not installed or stubbed; build_tokenizer is unsupported. "
           "Install optional dependencies with: install_tpu_pre_train_extra_deps --with-tf"
       )
+    if self.config.tokenizer_type == "rwkv":
+      return tokenizer.RwkvTokenizer(metadata.path)  # pyrefly: ignore[missing-attribute]
     if metadata.tokenizer_type == TokenizerType.tiktoken:  # pyrefly: ignore[missing-attribute]
       return token_utils.TikToken(metadata)
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:  # pyrefly: ignore[missing-attribute]

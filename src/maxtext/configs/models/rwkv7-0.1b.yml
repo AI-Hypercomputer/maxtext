@@ -1,0 +1,57 @@
+# model config for RWKV-7 "Goose" 0.1B (x070 / g1 architecture)
+# Matches BlinkDL's public 0.1B checkpoints, e.g. rwkv7-g1d-0.1b-*.pth.
+
+base_emb_dim: 768
+base_mlp_dim: 3072
+base_num_decoder_layers: 12
+base_num_query_heads: 12
+base_num_kv_heads: 12
+head_dim: 64
+vocab_size: 65536
+enable_dropout: false
+logits_via_embedding: false
+normalization_layer_epsilon: 1.0e-5
+decoder_block: "rwkv7"
+# The tokenizer defaults to BlinkDL's World vocabulary (tokenizer_type "rwkv").
+# It has no BOS token, and BlinkDL's inference doesn't prepend one. Token 0 ends
+# each training document, which add_eos (default true) reproduces.
+add_bos: false
+
+rwkv7_head_size: 64
+rwkv7_decay_lora_rank: 64
+rwkv7_iclr_lora_rank: 64
+rwkv7_value_lora_rank: 32
+rwkv7_gate_lora_rank: 128
+
+# RWKV-7 has no attention and no positional embedding: the recurrent state plus
+# token shift carry all history.
+scan_layers: false
+
+# Packing (MaxText's default) works: each document in a packed row starts from a
+# zero state (rwkv7_segment_resets). BlinkDL instead trains on one continuous
+# stream with no resets; set rwkv7_segment_resets=false for that behavior.
+
+# BlinkDL trains RWKV with L2Wrap (gradient-only penalty on each token's largest
+# logit, factor 1e-4). It doesn't affect inference or the reported loss.
+logits_l2wrap_factor: 1.0e-4
+
+# BlinkDL's RWKV-7 optimizer recipe (RWKV-v7/train_temp: train.py and
+# demo-training-run-v7-pile.sh; RWKV.configure_optimizers):
+#  - weight decay only on >=2-D `.weight` matrices, i.e. the dense kernels, the
+#    token embedding and the head. Token-shift ramps, LoRA factors and biases,
+#    k_k/k_a/r_k, the GroupNorm and every LayerNorm are excluded;
+#  - att.w0 at 2x the learning rate;
+#  - Adam betas (0.9, 0.99), eps 1e-18. MaxText's defaults already match the rest
+#    (gradient clipping 1.0, weight decay 0.1). The LR schedule (BlinkDL's Pile
+#    run: 8e-4 -> 3e-5, 10 warmup steps) depends on the run; set it per run.
+# (Patterns end in "(/|$)": the optimizer sees parameter paths without NNX's
+# trailing "/value", e.g. "decoder/layers_3/att/w0".)
+adamw_mask:
+  - "/att/(x_[rwkvag]|[wav][012]|g[12]|k_k|k_a|r_k|ln_x_scale|ln_x_bias)(/|$)"
+  - "/ffn/x_k(/|$)"
+  - "/ln[012]/"
+  - "/decoder_norm/"
+lr_multipliers: ["/att/w0(/|$)=2.0"]
+adam_b1: 0.9
+adam_b2: 0.99
+adam_eps: 1.0e-18
