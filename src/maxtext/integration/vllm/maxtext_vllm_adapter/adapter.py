@@ -301,6 +301,12 @@ class MaxTextForCausalLM(nnx.Module):
     # full-attn (non-linear_attention) layer when possible; otherwise any
     # value works.
     if isinstance(attention_metadata, dict):
+      mamba_state_indices = None
+      for meta in attention_metadata.values():
+        if getattr(meta, "mamba_state_indices", None) is not None:
+          mamba_state_indices = meta.mamba_state_indices
+          break
+
       hf_text_config = getattr(self.cfg, "hf_text_config", getattr(self.cfg, "hf_config", None))
       layer_types = getattr(hf_text_config, "layer_types", None) or []
       attention_metadata_picked = None
@@ -312,6 +318,16 @@ class MaxTextForCausalLM(nnx.Module):
       if attention_metadata_picked is None:
         attention_metadata_picked = next(iter(attention_metadata.values()))
       attention_metadata = attention_metadata_picked
+
+      if mamba_state_indices is not None and getattr(attention_metadata, "mamba_state_indices", None) is None:
+        try:
+          import dataclasses
+          attention_metadata = dataclasses.replace(attention_metadata, mamba_state_indices=mamba_state_indices)
+        except Exception:
+          try:
+            attention_metadata.mamba_state_indices = mamba_state_indices
+          except Exception:
+            pass
 
     # Present the decoder a layer-ordered view of the physical cache list. With
     # the vLLM hybrid layout all Mamba/GDN caches precede the attention caches,

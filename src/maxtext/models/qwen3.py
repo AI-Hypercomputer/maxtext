@@ -910,7 +910,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     recurrent_state = None
     next_conv_state = None
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
-      recurrent_state, conv_state = active_cache.get_gdn_states()
+      if isinstance(active_cache, tuple):
+        conv_state, recurrent_state = active_cache
+      else:
+        recurrent_state, conv_state = active_cache.get_gdn_states()
       orig_cache_batch = conv_state.shape[0]
 
       # 1. Safely shrink/expand conv_state to match incoming qkv (e.g. 16 -> 1)
@@ -1146,7 +1149,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     if next_recurrent_state is not None:
       next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
-      active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
+      if isinstance(active_cache, tuple):
+        active_cache = (next_conv_state, next_recurrent_state)
+      else:
+        active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
 
     # =========================================================================
     # STEP D: Final Output Stage
