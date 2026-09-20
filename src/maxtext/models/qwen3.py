@@ -686,7 +686,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         and isinstance(kv_cache, tuple)
         and len(kv_cache) == 2
         and attention_metadata is not None
-        and getattr(attention_metadata, "mamba_state_indices", None) is not None
+        and (
+            getattr(attention_metadata, "mamba_state_indices", None) is not None
+            or getattr(attention_metadata, "block_tables", None) is not None
+        )
         and self.mesh is not None
     )
 
@@ -838,11 +841,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # maximum-size metadata buffers.
       dp_size = get_mesh_shape_product(self.mesh, attn_data)
       padded_num_reqs_per_dp = attention_metadata.padded_num_reqs // dp_size  # pyrefly: ignore[missing-attribute]
-      state_indices = truncate_sharded_tensor(
-          attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
-          padded_num_reqs_per_dp,
-          dp_size,
-      )
       query_start_loc = truncate_sharded_tensor(
           attention_metadata.query_start_loc,  # pyrefly: ignore[missing-attribute]
           padded_num_reqs_per_dp + 1,
@@ -853,6 +851,33 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           padded_num_reqs_per_dp,
           dp_size,
       )
+
+      if getattr(attention_metadata, "mamba_state_indices", None) is not None:
+        state_indices = truncate_sharded_tensor(
+            attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
+            padded_num_reqs_per_dp,
+            dp_size,
+        )
+        read_state_indices = state_indices
+      else:
+        # Mamba prefix caching ("align" mode): derive read/write state slots
+        # from the mamba block table directly on TPU.
+        block_tables = attention_metadata.block_tables.reshape(attention_metadata.seq_lens.shape[0], -1)  # pyrefly: ignore[missing-attribute]
+        max_num_reqs_per_dp = attention_metadata.seq_lens.shape[0] // dp_size  # pyrefly: ignore[missing-attribute]
+        block_tables_reshaped = block_tables.reshape(dp_size, max_num_reqs_per_dp, -1)
+        block_tables_sliced = block_tables_reshaped[:, :padded_num_reqs_per_dp, :].reshape(-1, block_tables.shape[-1])
+        mamba_block_size = getattr(self.config, "mamba_block_size", 256)
+        query_start_loc_reshaped = query_start_loc.reshape(dp_size, padded_num_reqs_per_dp + 1)
+        query_lens = (query_start_loc_reshaped[:, 1:] - query_start_loc_reshaped[:, :-1]).reshape(-1)
+        num_computed = seq_lens - query_lens
+
+        read_col = jnp.maximum(num_computed - 1, 0) // mamba_block_size
+        write_col = jnp.maximum(seq_lens - 1, 0) // mamba_block_size
+
+        batch_idx = jnp.arange(seq_lens.shape[0])
+        local_rows = max(conv_state_paged.shape[0] // dp_size, 1)
+        read_state_indices = jnp.clip(block_tables_sliced[batch_idx, read_col], 0, local_rows - 1)
+        state_indices = jnp.clip(block_tables_sliced[batch_idx, write_col], 0, local_rows - 1)
 
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
@@ -874,6 +899,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           self.head_v_dim,
           cfg.gdn_conv_kernel_dim,
           mesh=self.mesh,
+          read_state_indices=read_state_indices,
       )
 
       # Reshape GDN output and apply gated norm + out projection.
@@ -883,6 +909,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       output = self.out_proj(gated_output)
 
       return output, (new_conv_state_paged, new_recurrent_state_paged)
+
+    if isinstance(active_cache, tuple):
+      raise RuntimeError(
+          f"active_cache is a tuple ({type(active_cache)}), indicating paged GDN state, "
+          "but use_paged_state was False! Check attention_metadata and mesh."
+      )
 
     # Flatten head dimensions for concatenation before conv
     # q: (B, S, K_dim)
@@ -910,10 +942,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     recurrent_state = None
     next_conv_state = None
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
-      if isinstance(active_cache, tuple):
-        conv_state, recurrent_state = active_cache
-      else:
-        recurrent_state, conv_state = active_cache.get_gdn_states()
+      recurrent_state, conv_state = active_cache.get_gdn_states()
       orig_cache_batch = conv_state.shape[0]
 
       # 1. Safely shrink/expand conv_state to match incoming qkv (e.g. 16 -> 1)
@@ -1149,10 +1178,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     if next_recurrent_state is not None:
       next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
-      if isinstance(active_cache, tuple):
-        active_cache = (next_conv_state, next_recurrent_state)
-      else:
-        active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
+      active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
 
     # =========================================================================
     # STEP D: Final Output Stage
