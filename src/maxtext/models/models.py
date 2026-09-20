@@ -203,6 +203,7 @@ class Transformer(nnx.Module):
       attention_metadata: dict[str, Any] | None = None,
       forced_routed_experts: jnp.ndarray | None = None,
       decoder_input_embeddings: jax.Array | None = None,
+      skip_lm_head: bool = False,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -297,6 +298,7 @@ class Transformer(nnx.Module):
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
         forced_routed_experts=forced_routed_experts,
+        skip_lm_head=skip_lm_head,
     )  # pytype: disable=wrong-keyword-args
     if isinstance(res, tuple) and len(res) == 4:
       logits, hidden_state, kv_caches, expert_indices = res
@@ -341,5 +343,8 @@ class Transformer(nnx.Module):
       if expert_indices is not None:
         return hidden_state, kv_caches, expert_indices
       return hidden_state, kv_caches
+
+    if skip_lm_head:
+      return hidden_state
 
     return logits
