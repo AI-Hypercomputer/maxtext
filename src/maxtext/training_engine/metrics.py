@@ -321,11 +321,19 @@ class MetricsLogger:
     for name, scalar_val in metrics.scalar_metrics.items():
       if name not in _METRICS_TO_LOG:
         continue
-      host_val = np.asarray(scalar_val)
+      host_val = np.asarray(scalar_val, dtype=np.float64)
       if name in metrics.aggregation_fns:
         host_val = metrics.aggregation_fns[name](host_val)
       elif host_val.size > 1:
-        host_val = np.mean(host_val)
+        finite = host_val[np.isfinite(host_val)]
+        if finite.size == 0:
+          host_val = 0.0
+        elif name.endswith(("_max", "/max")):
+          host_val = np.max(finite)
+        elif name.endswith(("_min", "/min")):
+          host_val = np.min(finite)
+        else:
+          host_val = np.mean(finite)
       if isinstance(host_val, (np.ndarray, jax.Array)):
         host_val = host_val.item() if host_val.size == 1 else float(np.mean(host_val))
       processed[name] = host_val
