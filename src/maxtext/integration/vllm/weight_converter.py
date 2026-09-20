@@ -1015,11 +1015,25 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      n_shards = (
-          self.moe_mlp_tp_size
-          if self.moe_mlp_tp_size > 1
-          else (self.tp if self.tp > 1 else _get_n_shards(wi_0, scan_fused_axis))
-      )
+      # n_shards is a property of the DESTINATION mesh: it is how many pieces
+      # the rollout will split the fused axis into. The target-aware twin reads
+      # it off the target leaf; target-free has no target, and falling back to
+      # the source leaf (`wi_0`) reads the TRAINER's sharding instead, which is
+      # a different mesh entirely.
+      #
+      # On a 397B run with trainer ici_tensor_parallelism=2 and rollout
+      # tensor_parallelism=1 that fallback returns 2 where the rollout needs 1,
+      # and _interleave_moe_weights then emits
+      #     [g_lo | u_lo | g_hi | u_hi]   instead of   [g | u]
+      # so every expert MLP is scrambled while embeddings, attention and norms
+      # stay correct -- the model produces a couple of plausible tokens and then
+      # noise. Nothing catches it: the permutation happens before bind(), so
+      # names, shapes, element counts and the per-tensor absolute sums that
+      # weight sync verifies are all identical on both sides.
+      #
+      # Never consult the source. When the destination degree is not known,
+      # 1 (no per-shard interleaving) is the only safe answer.
+      n_shards = max(self.moe_mlp_tp_size, self.tp, 1)
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,
