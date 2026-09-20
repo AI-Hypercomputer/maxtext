@@ -24,6 +24,7 @@ from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
 import functools
+import os
 from typing import Any, Optional
 
 from absl import logging
@@ -1752,6 +1753,29 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         loss, aux, new_rest, acc_grads, acc_denom = self._fwd_bwd_kernel(
             params, rest, batch, self._accumulated_grads, self._accumulated_denominator
         )
+    # Opt-in outlier diagnostic. `grpo_loss_fn` attaches `[B, T]` arrays under
+    # `_outlier_dump/*` when TUNIX_OUTLIER_DUMP_PATH is set, because Cloud
+    # Pathways cannot service `jax.debug.callback` (XlaHostCallback type 7 is
+    # UNIMPLEMENTED and aborting one restarts every TPU worker). They ride home
+    # as ordinary output buffers instead and are stripped here, after all three
+    # fwd_bwd call sites above converge and before `aux` reaches
+    # `_buffered_aux_metrics` / `process_metrics`, which would otherwise
+    # `np.mean` a `[B, T]` array into a meaningless scalar.
+    if isinstance(aux, dict) and "_outlier_dump/log_is_raw" in aux:
+      _dump = {k[len("_outlier_dump/"):]: aux.pop(k)
+               for k in list(aux) if k.startswith("_outlier_dump/")}
+      try:
+        from tunix.rl import algo_core as _algo_core  # pylint: disable=g-import-not-at-top
+
+        _algo_core._write_outlier_dump(  # pylint: disable=protected-access
+            os.environ.get("TUNIX_OUTLIER_DUMP_PATH", ""),
+            _dump.get("log_is_raw"),
+            _dump.get("completion_mask"),
+            _dump.get("completion_ids"),
+        )
+      except Exception:  # pylint: disable=broad-except
+        pass  # A diagnostic must never be able to fail a training step.
+
     nnx.update(model, new_rest)
     self._publish_model_rest(new_rest)
 
