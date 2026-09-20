@@ -21,6 +21,7 @@ from typing import Any
 
 from absl import logging
 from maxtext.configs import pyconfig
+from maxtext.configs.types import ProfilerType
 
 
 class MicroStepProfiler:
@@ -29,7 +30,16 @@ class MicroStepProfiler:
   def __init__(self, config: pyconfig.HyperParameters) -> None:
     """Initializes the profiler."""
     self.do_not_profile = False
-    if jax.process_index() != 0 or config.profiler_steps == 0:
+    # `profiler` is the switch that turns profiling on; profiler_steps only says
+    # how long a window lasts and defaults to 5. Testing only profiler_steps
+    # means ProfilerType.NONE still opens a trace, and under Pathways
+    # jax.profiler.start_trace then raises "No profile started" from inside
+    # fwd_bwd, killing the trainer mid-run.
+    if (
+        jax.process_index() != 0
+        or config.profiler == ProfilerType.NONE
+        or config.profiler_steps == 0
+    ):
       self.do_not_profile = True
       return
 
