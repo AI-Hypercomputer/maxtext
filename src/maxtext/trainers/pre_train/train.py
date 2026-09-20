@@ -840,7 +840,7 @@ def recover(
     immutable_data: dict[str, Any],
     active_state: Any = None,
 ):
-  """Rebuilds MaxText JAX device state and restores state from host snapshot or active state."""
+  """Rebuilds MaxText JAX device state, restores the train state, and snapshots it on the new mesh."""
   config = immutable_data["config"]
   recorder = python_vars["recorder"]
   elastic_manager = python_vars["elastic_manager"]
@@ -1208,6 +1208,11 @@ def recover(
       else:
         raise
 
+  # Snapshot the recovered state here rather than in the caller: the reset above replaced python_vars["snapshot"],
+  # and a snapshot saved through a snapshotter captured before the call would never be read again.
+  if python_vars["snapshot"] is not None:
+    save_snapshot(python_vars["snapshot"], jax_device_state["state"], python_vars["step"], jax_device_state["model"])
+
 
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
@@ -1455,8 +1460,6 @@ def train_loop(config, recorder, state=None):
                 immutable_data,
                 active_state=jax_device_state["state"],
             )
-            # Start snapshot save immediately on the new mesh
-            save_snapshot(snapshot_mgr, jax_device_state["state"], python_vars["step"], model)
 
           training_loop_iteration(jax_device_state, python_vars, immutable_data)
           python_vars["step"] += 1
@@ -1493,9 +1496,6 @@ def train_loop(config, recorder, state=None):
           else:
             # Slice Failure Recovery
             recover(jax_device_state, python_vars, immutable_data)
-
-          # Save snapshot across the newly recovered mesh layout
-          save_snapshot(snapshot_mgr, jax_device_state["state"], python_vars["step"], model)
           continue
 
     # Unpack state for post-loop actions
