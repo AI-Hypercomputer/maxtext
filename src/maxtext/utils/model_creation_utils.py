@@ -219,7 +219,7 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
   return jax.device_put(result, model_arr.sharding)
 
 
-def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
+def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
   """Fuse separate wi_0/wi_1 checkpoint entries into a single wi when model uses fused layout.
 
   This properly interleaves the gate and up projections based on the target tensor
@@ -227,6 +227,7 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
   slice of both wi_0 and wi_1. It also applies any necessary MLP-dim padding
   on a per-shard basis to satisfy kernel constraints.
   """
+  is_vllm_rpa = getattr(config, "attention", "") in ("vllm_rpa", "vllm_batched_rpa")
 
   def _is_fusion_site(node):
     """A ckpt-side dict that holds wi_0/wi_1 leaf siblings — the parent of a fusion."""
@@ -267,10 +268,15 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
     wi_model = model_node["wi"]
     axis = wi_model.ndim - 1
 
-    # Determine the number of shards (TP degree) along the concatenated axis
+    # Determine the number of shards (TP degree) along the concatenated axis.
+    # Only the vllm_rpa / vllm_batched_rpa fused_moe_matmul path passes `wi`
+    # directly into shard_map without first splitting `w0 = wi[..., :n]` and
+    # `w1 = wi[..., n:]` (see moe.py:3908-3915). On trainer paths (`flash`, etc.),
+    # `wi` is split at `n = wi.shape[-1] // 2` prior to `shard_map`, which
+    # requires `n_shards = 1` ([wi_0, wi_1] concatenation).
     n_shards = 1
     wi_sharding = getattr(wi_model, "sharding", None)
-    if isinstance(wi_sharding, jax.sharding.NamedSharding):
+    if is_vllm_rpa and isinstance(wi_sharding, jax.sharding.NamedSharding):
       spec = wi_sharding.spec
       partition = spec[axis] if axis < len(spec) else None
       n_shards = _partition_size(partition, wi_sharding.mesh)
@@ -1163,7 +1169,7 @@ def from_pretrained(
         checkpoint = to_dict(checkpoint)
         logical_axes_tree = to_dict(logical_axes_tree)
 
-        checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
+        checkpoint = _fuse_moe_weights(checkpoint, model_arrays, config=config)
         # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
         # This prevents the replicated intermediate copies from persisting until function return.
         del restored
