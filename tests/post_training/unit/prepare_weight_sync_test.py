@@ -165,6 +165,29 @@ class PrepareWeightSyncTest(unittest.TestCase):
     self.assertIsNone(self.engine._last_staged_step)
     self.assertIsNone(self.engine._staged_metadata)
 
+  @mock.patch("tunix.experimental.weight_sync.gcs_weight_sync.GCSWeightSync")
+  def test_gcs_synchronizer_creation_and_d2h(self, mock_gcs_cls):
+    mock_sync = mock.MagicMock()
+    mock_sync.active = True
+    mock_sync.work_unit_metadata_all.return_value = [self._make_dummy_metadata(num_vars=2)]
+    mock_sync.checksums.return_value = {}
+    mock_gcs_cls.return_value = mock_sync
+
+    converted = {"param_0": 0, "param_1": 1}
+    self.engine._weight_converter.convert.return_value = converted
+    self.engine._config.base_output_directory = "gs://test-bucket"
+    fake_req = mock.MagicMock()
+    fake_req.extra_config = {"weight_sync_mode": "gcs"}
+
+    metadata = self.engine.prepare_weight_sync(sync_request=fake_req)
+
+    self.assertEqual(len(metadata), 1)
+    self.assertIs(self.engine._weight_sync, mock_sync)
+    mock_gcs_cls.assert_called_once()
+    mock_sync.bind.assert_called_once_with(converted)
+    mock_sync.d2h.assert_called_once_with(sync_request=fake_req)
+
 
 if __name__ == "__main__":
   unittest.main()
+

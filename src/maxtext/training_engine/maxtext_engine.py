@@ -24,6 +24,7 @@ from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
 import functools
+import os
 from typing import Any, Optional
 
 from absl import logging
@@ -709,7 +710,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._metrics_logger = metrics_module.MetricsLogger(config=self._config)
     self._throttler = inflight_throttler.InflightThrottler(config=self._config, metrics_logger=self._metrics_logger)
     self._profiler = profiler_module.MicroStepProfiler(self._config)
-    self._raiden_sync: Any = None
+    self._weight_sync: Any = None
     self._last_staged_step: Optional[int] = None
     self._staged_metadata: Any = None
     self._use_weight_converter = bool(self._config.use_weight_converter)
@@ -2204,42 +2205,59 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return nnx.state(model, nnx.Param)
     return self.model
 
+  @property
+  def _raiden_sync(self) -> Any:
+    return getattr(self, "_weight_sync", None)
+
+  @_raiden_sync.setter
+  def _raiden_sync(self, value: Any) -> None:
+    self._weight_sync = value
+
   def prepare_weight_sync(
       self,
-      staging_transport: str = "raiden",
+      staging_transport: Optional[str] = None,
       **kwargs: Any,
   ) -> Any:
     """Stages weights for transfer and returns access coordinates.
 
     Args:
-      staging_transport: Weight staging transport ('raiden' or custom).
-      **kwargs: Weight staging parameters.
+      staging_transport: Weight staging transport ('raiden', 'gcs', 'file', or custom).
+      **kwargs: Weight staging parameters (including `sync_request`).
 
     Returns:
       Sequence of WorkUnitMetadata or synchronization endpoints.
     """
-    if staging_transport == "raiden":
+    sync_request = kwargs.get("sync_request")
+    extra = getattr(sync_request, "extra_config", None)
+    req_mode = extra.get("weight_sync_mode") if isinstance(extra, dict) else None
+    effective_transport = (
+        str(staging_transport or req_mode or os.environ.get("WEIGHT_SYNC_MODE") or "raiden")
+        .strip()
+        .lower()
+    )
+    if effective_transport in ("file", "filesystem"):
+      effective_transport = "gcs"
+
+    if effective_transport in ("raiden", "gcs"):
       try:
-        from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+        from tunix.experimental.weight_sync import weight_sync as tunix_weight_sync  # pylint: disable=g-import-not-at-top,import-outside-toplevel
       except ImportError as exc:
-        # Fatal, not a warning: Raiden staging was explicitly requested and cannot be
-        # provided. Returning empty metadata instead defers the failure to the caller --
-        # `WeightSyncCoordinator` eventually raises "metadata collection returned an empty
-        # side", which reports a count from another process and never mentions the missing
-        # module, leaving the real cause in this worker's log on another host.
         raise RuntimeError(
-            "staging_transport='raiden' requires tunix.experimental.weight_sync."
-            "raiden_synchronizer, which the installed tunix does not provide. Install a"
-            " tunix build that ships it, or select a different staging_transport."
+            f"staging_transport={effective_transport!r} requires"
+            " tunix.experimental.weight_sync, which the installed tunix does"
+            " not provide. Install a tunix build that ships it, or select a"
+            " different staging_transport."
         ) from exc
 
       if (
-          self._raiden_sync is not None
+          self._weight_sync is not None
+          and getattr(self, "_last_staged_transport", None) == effective_transport
           and self._last_staged_step == self.train_step
           and self._staged_metadata is not None
       ):
         logging.info(
-            "Trainer reusing staged weight sync for step %d (%d variables)",
+            "Trainer reusing staged weight sync (%s) for step %d (%d variables)",
+            effective_transport,
             self.train_step,
             sum(len(m.variables) for m in self._staged_metadata),
         )
@@ -2274,33 +2292,51 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
       del params_state
 
-      # 3. Bind parameters to the Raiden transport. Construct the synchronizer
-      # once, matching the persistent-instance-per-cycle pattern the rebind
-      # optimization depends on.
-      if self._raiden_sync is None:
-        self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
+      # 3. Bind parameters to the unified WeightSynchronizer transport
+      # (`RaidenWeightSync` or `GCSWeightSync`).
+      if (
+          self._weight_sync is None
+          or getattr(self, "_last_staged_transport", None) != effective_transport
+      ):
+        if self._weight_sync is not None and hasattr(self._weight_sync, "close"):
+          self._weight_sync.close()
+        base_out = getattr(self._config, "base_output_directory", "") or ""
+        default_staging_dir = (
+            os.environ.get("WEIGHT_SYNC_GCS_DIR")
+            or (os.path.join(base_out, "weight_sync_staging") if base_out else None)
+        )
+        if effective_transport == "gcs" and not default_staging_dir:
+          raise ValueError(
+              "GCS weight synchronization requires a staging directory. Please set the "
+              "WEIGHT_SYNC_GCS_DIR environment variable or configure base_output_directory."
+          )
+        self._weight_sync = tunix_weight_sync.create_weight_synchronizer(
+            mode=effective_transport,
             job_name="trainer",
             worker_index=jax.process_index(),
+            staging_dir=default_staging_dir,
             auto_h2d=False,
             parallelism=4,
         )
+        self._last_staged_transport = effective_transport
 
-      self._raiden_sync.bind(converted_state)
+      self._weight_sync.bind(converted_state)
       del converted_state
 
-      # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
-      if self._raiden_sync.active:
-        self._raiden_sync.d2h()
+      # 4. Initiate Device-to-Host / GCS checkpoint staging for transfer.
+      if self._weight_sync.active:
+        self._weight_sync.d2h(sync_request=sync_request)
 
       verify_weights = is_verify_weights_enabled()
       if verify_weights:
-        logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
+        logging.info("Source weights checksums: %s", self._weight_sync.checksums())
 
-      all_metadata = self._raiden_sync.work_unit_metadata_all()
+      all_metadata = self._weight_sync.work_unit_metadata_all()
       total_variables = sum(len(m.variables) for m in all_metadata)
 
       logging.info(
-          "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s",
+          "Trainer prepared weight sync (%s) for step %d: registered %d work unit(s) with %d variables on mesh %s",
+          effective_transport,
           self.train_step,
           len(all_metadata),
           total_variables,
@@ -2313,14 +2349,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Unknown transport: raise rather than return empty metadata. A typo would otherwise
     # surface only as the coordinator's "empty side" error, with nothing logged anywhere
     # naming the transport that was actually asked for.
-    raise ValueError(f"unknown staging_transport {staging_transport!r}; expected 'raiden'.")
+    raise ValueError(
+        f"unknown staging_transport {effective_transport!r}; expected 'raiden' or 'gcs'."
+    )
 
   def release_weight_sync(self, **kwargs: Any) -> Any:
-    """Releases staged weight buffers after transfer completion."""
+    """Releases staged weight buffers or cleans up temporary checkpoints after transfer completion."""
     self._last_staged_step = None
     self._staged_metadata = None
-    if self._raiden_sync:
-      logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
+    if self._weight_sync:
+      if hasattr(self._weight_sync, "release"):
+        self._weight_sync.release(sync_request=kwargs.get("sync_request"))
+      metrics = (
+          self._weight_sync.metrics()
+          if hasattr(self._weight_sync, "metrics")
+          else "N/A"
+      )
+      logging.vlog(1, "Trainer weight sync metrics: %s", metrics)
     return True
 
   def close(self) -> None:
@@ -2328,10 +2373,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._profiler is not None:
       self._profiler.close(blocking_object=self._read_state_pure() if self._state is not None else None)
 
-    if self._raiden_sync:
-      if hasattr(self._raiden_sync, "close"):
-        self._raiden_sync.close()
-      self._raiden_sync = None
+    if self._weight_sync:
+      if hasattr(self._weight_sync, "close"):
+        self._weight_sync.close()
+      self._weight_sync = None
     self._last_staged_step = None
     self._staged_metadata = None
 
