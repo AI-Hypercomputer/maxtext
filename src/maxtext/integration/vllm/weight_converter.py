@@ -1015,10 +1015,10 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      n_shards = (
+      n_shards = int(
           self.moe_mlp_tp_size
-          if self.moe_mlp_tp_size > 1
-          else (self.tp if self.tp > 1 else _get_n_shards(wi_0, scan_fused_axis))
+          if self.moe_mlp_tp_size >= 1
+          else (self.tp if self.tp >= 1 else 1)
       )
       return _fuse_and_unstack_moe(
           wi_0,
