@@ -942,6 +942,24 @@ class NANOOFp8Provider(qwix.QtProvider):
     return _apply_linen_module_in_nnx(nn.NANOOFp8DotGeneralOp, op_id, *args, **kwargs)
 
 
+def _get_router_proj_unquantized_rule() -> qwix.QtRule:
+  """Returns a Qwix rule that keeps the MoE router (gate) projection unquantized.
+
+  Setting all qtypes to None bypasses quantization, falling back to standard
+  unquantized jax.lax.dot_general for both forward and backward passes.
+
+  Note: Because Qwix rules are evaluated in a first-match way, this rule must be
+  placed before broader layer catch-all rules (e.g., 'decoder/.*layers.*').
+  """
+  return qwix.QtRule(
+      module_path=r".*/gate$",
+      weight_qtype=None,
+      act_qtype=None,
+      bwd_qtype=None,
+      op_names=("dot_general",),
+  )
+
+
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
@@ -958,7 +976,11 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   else:
     module_path = "decoder/.*layers.*"
 
-  return [
+  rules = []
+  if not config.quantize_router_proj:
+    rules.append(_get_router_proj_unquantized_rule())
+
+  rules.append(
       qwix.QtRule(
           module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
@@ -969,15 +991,19 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
           bwd_calibration_method=config.bwd_quantization_calibration_method,
           additional_qt_config={"sparsity_rule": sparsity_rule},
           op_names=("dot_general", "gmm", "ragged_dot"),
-      ),
-  ]
+      )
+  )
+  return rules
 
 
 def get_quantization_rule(config: Config):
   """Returns a list of qwix.QtRule from `dtype`."""
 
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
-    return [
+    rules = []
+    if not config.quantize_router_proj:
+      rules.append(_get_router_proj_unquantized_rule())
+    rules.append(
         qwix.QtRule(
             module_path="decoder/.*layers.*",
             weight_qtype=dtype,
@@ -987,7 +1013,8 @@ def get_quantization_rule(config: Config):
             disable_channelwise_axes=False,
             op_names=("dot_general",),
         )
-    ]
+    )
+    return rules
 
   match config.quantization:
     case "int4":
