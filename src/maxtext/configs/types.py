@@ -1257,6 +1257,15 @@ class Qwen3Next(BaseModel):
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
+  gdn_mamba_block_size: int = Field(
+      0,
+      description=(
+          "Tokens per mamba block when serving under vLLM with mamba prefix caching "
+          '("align" mode). Set by the vLLM adapter from cache_config.mamba_block_size; '
+          "0 means the recurrent state is addressed by a resident per-request slot "
+          "instead of by block id."
+      ),
+  )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
 
 

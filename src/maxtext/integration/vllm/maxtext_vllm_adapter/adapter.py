@@ -193,6 +193,11 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     )
     overrides["padded_base_moe_mlp_dim"] = padded_hidden_size
 
+  # Align mode pins the mamba block size to the attention one.
+  cache_config = vllm_config.cache_config
+  if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+    overrides["gdn_mamba_block_size"] = cache_config.block_size
+
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
   return maxtext_config
 
@@ -322,6 +327,7 @@ class MaxTextForCausalLM(nnx.Module):
       if mamba_state_indices is not None and getattr(attention_metadata, "mamba_state_indices", None) is None:
         try:
           import dataclasses
+
           attention_metadata = dataclasses.replace(attention_metadata, mamba_state_indices=mamba_state_indices)
         except Exception:
           try:
