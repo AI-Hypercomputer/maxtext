@@ -2135,7 +2135,7 @@ def gmm(
         kernel,
         group_sizes=group_sizes,
         dtype=preferred_element_type,
-        qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[0],
+        qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[-1],
     )
   else:
     output = ragged_dot_with_mask(
