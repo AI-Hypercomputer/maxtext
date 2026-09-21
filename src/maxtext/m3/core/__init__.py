@@ -14,8 +14,10 @@
 
 """Core m3 primitives: the pieces NNX does not already provide.
 
-Planned modules:
+Modules:
   * `rope.py` — rotary positional embedding (base implementation).
+
+Planned modules:
   * `sharding.py` — `Sharding` ABC, logical-axis specs, mesh creation.
   * `interfaces.py` — shared ABCs and `CausalLMOutput`.
   * `checkpoint.py` — Orbax wrapper.
