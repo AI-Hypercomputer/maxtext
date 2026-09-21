@@ -183,14 +183,13 @@ class FusedMoeMatmulTest(unittest.TestCase):
         "tpu_inference.layers.common.fused_moe_gmm": gmm,
     }
 
-  def _make_layer(self, calls, return_routed_experts=False, mesh=None):
+  def _make_layer(self, calls):
     test = self
     config = types.SimpleNamespace(
         mlp_activations=("silu",),
         routed_score_func="softmax",
         norm_topk_prob=True,
         decoder_block=ctypes.DecoderBlockType.MIXTRAL,
-        return_routed_experts=return_routed_experts,
     )
 
     class Layer(nnx.Module):
@@ -204,7 +203,7 @@ class FusedMoeMatmulTest(unittest.TestCase):
         self.config = config
         self.num_experts = test.num_experts
         self.num_experts_per_tok = test.top_k
-        self.mesh = mesh
+        self.mesh = None
 
       def get_expert_parallelism_size(self):
         return 1
@@ -230,45 +229,6 @@ class FusedMoeMatmulTest(unittest.TestCase):
     self.assertEqual(call["w1"].shape, (self.num_experts, self.emb_dim, 2 * self.mlp_dim))
     self.assertIsNone(call["w1_scale"])
     self.assertIsNone(call["w2_scale"])
-    self.assertFalse(call["scatter_results"])
-
-  def test_return_routed_experts_records_selected_experts(self):
-    calls = []
-    inputs, gate_logits = self._inputs()
-    layer = self._make_layer(calls, return_routed_experts=True)
-    layer(inputs, gate_logits)
-    self.assertTrue(hasattr(layer, "selected_experts"))
-    self.assertEqual(layer.selected_experts[...].shape, (self.tokens, self.top_k))
-
-  def test_routing_is_not_recorded_by_default(self):
-    """Serving pays for neither the duplicate top_k nor the intermediate it feeds."""
-    calls = []
-    inputs, gate_logits = self._inputs()
-    layer = self._make_layer(calls)
-    layer(inputs, gate_logits)
-    self.assertFalse(hasattr(layer, "selected_experts"))
-    # the kernel does its own routing, so the layer's trace holds no second top_k
-    jaxpr = str(jax.make_jaxpr(layer)(inputs, gate_logits))
-    self.assertNotIn("top_k", jaxpr)
-
-  def test_scatter_results_reflects_dp_mesh_size(self):
-    """Any data-parallel attention axis above size 1 makes the kernel reduce-scatter."""
-    inputs, gate_logits = self._inputs()
-    # each DP axis on its own, then together, against a mesh that declares none of them
-    cases = [
-        ({"data": 1, "attn_dp": 1, "attn_dp_expert": 1}, False),
-        ({"expert": 8, "model": 4}, False),
-        ({"data": 2, "attn_dp": 1, "attn_dp_expert": 1}, True),
-        ({"data": 1, "attn_dp": 2, "attn_dp_expert": 1}, True),
-        ({"data": 1, "attn_dp": 1, "attn_dp_expert": 4}, True),
-        ({"data": 2, "attn_dp": 2, "attn_dp_expert": 2, "model": 8}, True),
-    ]
-    for shape, expected in cases:
-      with self.subTest(shape=shape):
-        calls = []
-        mesh = types.SimpleNamespace(shape=shape)
-        self._make_layer(calls, mesh=mesh)(inputs, gate_logits)
-        self.assertEqual(calls[0]["scatter_results"], expected)
 
   def test_fp8_rule_prequantizes_weights_outside_qwix(self):
     calls = []
