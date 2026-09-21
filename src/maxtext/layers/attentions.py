@@ -481,12 +481,25 @@ class Attention(nnx.Module):
     if self.use_qk_norm and not is_llama4_decoder_block:
       # Check if this is Olmo3, which uses a unique "Global" QK Norm strategy.
       # GlobalRMSNorm flattens (Heads, Dim) to normalize across the entire hidden state.
-      use_global_qk_norm = self.config.model_name.startswith("olmo3")
+      # The trailing dash matters: the OLMo 3.5 family ("olmo35-*") is a different
+      # architecture and uses per-head gains, not the global norm.
+      use_global_qk_norm = self.config.model_name.startswith("olmo3-")
       qk_norm_cls = GlobalRMSNorm if use_global_qk_norm else RMSNorm
 
       # For RMSNorm use `head_dim` (per-head normalization), while for GlobalRMSNorm use `num_heads * head_dim` (global normalization).
       q_features = (self.num_query_heads * self.head_dim) if use_global_qk_norm else self.head_dim
       k_features = (self.num_kv_heads * self.head_dim) if use_global_qk_norm else self.head_dim
+
+      # OLMoE3 keeps an independent gain per head, so the scale is
+      # [heads, head_dim] rather than a single [head_dim] shared across heads.
+      # Normalization is still over head_dim either way.
+      qk_norm_axes = ("norm",)
+      if getattr(self.config, "qk_norm_per_head", False) and not use_global_qk_norm:
+        q_features = (self.num_query_heads, self.head_dim)
+        k_features = (self.num_kv_heads, self.head_dim)
+        # Shard the head axis the way the heads themselves are sharded; head_dim
+        # stays replicated ("norm" would map to `tensor` a second time).
+        qk_norm_axes = ("heads", None)
 
       with_scale = getattr(self.config, "qk_norm_with_scale", True)
 
@@ -496,7 +509,7 @@ class Attention(nnx.Module):
           weight_dtype=self.config.weight_dtype,
           shard_mode=self.config.shard_mode,
           epsilon=self.config.normalization_layer_epsilon,
-          kernel_axes=("norm",),
+          kernel_axes=qk_norm_axes,
           with_scale=with_scale,
           rngs=self.rngs,
       )
@@ -509,7 +522,7 @@ class Attention(nnx.Module):
             weight_dtype=self.config.weight_dtype,
             shard_mode=self.config.shard_mode,
             epsilon=self.config.normalization_layer_epsilon,
-            kernel_axes=("norm",),
+            kernel_axes=qk_norm_axes,
             with_scale=with_scale,
             rngs=self.rngs,
         )
@@ -533,6 +546,15 @@ class Attention(nnx.Module):
     else:
       self.query_norm = None
       self.key_norm = None
+
+    # Scalable softmax (SSMax): one learned gain per query head, initialized to 1.
+    if getattr(self.config, "use_scalable_softmax", False):
+      self.ssmax_scale = nnx.Param(
+          jnp.ones((self.num_query_heads,), self.weight_dtype),
+          out_sharding=(None,),
+      )
+    else:
+      self.ssmax_scale = None
 
     if self.use_v_norm and not self.share_kv_layer:
       with_scale = self.config.v_norm_with_scale
@@ -1309,6 +1331,15 @@ class Attention(nnx.Module):
           + 1.0
       )
       query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
+
+    if self.ssmax_scale is not None:
+      # log of the number of tokens this query can attend to, times a learned
+      # per-head gain. Positions restart per document under packing, so the span
+      # restarts with them. The first token of a document gets log(1) = 0, which
+      # is what the reference does (it attends to itself alone regardless).
+      span = jnp.log(inputs_positions.astype(jnp.float32) + 1.0)[:, :, jnp.newaxis, jnp.newaxis]
+      gain = jnp.asarray(self.ssmax_scale.get_value(), jnp.float32)[jnp.newaxis, jnp.newaxis, :, jnp.newaxis]
+      query = (query.astype(jnp.float32) * span * gain).astype(self.dtype)
 
     if model_mode == MODEL_MODE_PREFILL:
       query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names)

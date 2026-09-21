@@ -313,6 +313,17 @@ ModelName = Literal[
     "olmo3-32b",
     "olmoe3-30m",
     "olmoe3-3p5b",
+    # OLMo 3.5 partner family (allenai/OLMo-core@codex/partner-model-family-20260914).
+    "olmo35-tiny",
+    "olmo35-small",
+    "olmo35-medium",
+    "olmo35-large",
+    # Scaling ladder for the architecture ablation study; see olmoe3-arch-ablations.md.
+    "olmoe3-ladder-d512",
+    "olmoe3-ladder-d768",
+    "olmoe3-ladder-d1024",
+    "olmoe3-ladder-d1536",
+    "olmoe3-ladder-d2048",
     "envy-test",
     "envy-switch-base",
     "envy-switch-large",
@@ -642,6 +653,17 @@ class ModelArchitecture(BaseModel):
   base_mlp_dim: int = Field(7168, description="Base dimension of the MLP layer.")
   dense_init_scale: float = Field(1.0, description="Initialization scale for dense layers")
   base_num_decoder_layers: int = Field(16, description="Base number of decoder layers.")
+  scale_embeddings_by_sqrt_emb_dim: bool = Field(
+      False,
+      description="Multiply the token embeddings by sqrt(emb_dim) before the decoder stack.",
+  )
+  use_embedding_norm: bool = Field(
+      False,
+      description=(
+          "Apply an RMSNorm to the token embeddings before the decoder stack. "
+          "Runs after scale_embeddings_by_sqrt_emb_dim when both are set."
+      ),
+  )
   head_dim: int = Field(
       128,
       description="Model query and key head dimension.",
@@ -674,6 +696,23 @@ class ModelArchitecture(BaseModel):
   v_norm_with_scale: bool = Field(
       True,
       description="Whether to apply scale on value normalization (default True).",
+  )
+  qk_norm_per_head: bool = Field(
+      False,
+      description=(
+          "Give the query/key RMSNorm an independent learned gain per head "
+          "([heads, head_dim]) instead of one gain shared across heads "
+          "([head_dim]). OLMoE3's reference uses per-head gains."
+      ),
+  )
+  use_scalable_softmax: bool = Field(
+      False,
+      description=(
+          "Scalable softmax (SSMax): scale the query by log(visible causal span) "
+          "times a learned per-query-head gain, before the usual 1/sqrt(head_dim). "
+          "The span is taken from the decoder positions, so packed documents that "
+          "restart positions also restart the span."
+      ),
   )
 
 
@@ -1077,6 +1116,13 @@ class MoEGeneral(BaseModel):
       None,
       description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
+  base_shared_expert_mlp_dim: int = Field(
+      -1,
+      description=(
+          "Intermediate dimension of the shared (always-on) expert on MoE layers. "
+          "If < 0, defaults to base_moe_mlp_dim, i.e. the shared expert is as wide as a routed expert."
+      ),
+  )
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
   emo_enabled: bool = Field(
       False,
@@ -1365,6 +1411,23 @@ class MoEKernels(BaseModel):
   use_gmm_v2_heuristic_tiling: bool = Field(
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
+  )
+
+  tokamax_gmm_tile_m: NonNegativeInt = Field(
+      0,
+      description=(
+          "Override the m-tile (the ragged dimension) of the Tokamax v1 ragged-dot kernel. "
+          "0 leaves Tokamax's own heuristic alone. The `wi_tile_*`/`wo_tile_*` knobs do NOT "
+          "reach this kernel: the v1 path calls `tokamax.ragged_dot`, whose public API takes "
+          "no tiling argument, so on that path the `tiling` tuple is silently ignored. The "
+          "heuristic sets tile_m = min(total_rows, 1024) and only ever shrinks it for VMEM, "
+          "never to match a group boundary, so at fewer than 1024 rows per expert every "
+          "m-tile straddles several expert groups and the kernel pays for each. Set this to "
+          "the expected rows per expert, seq_len * per_device_batch_size * top_k / "
+          "num_experts, to align them. Only tile_m is overridden; tile_k, tile_n and the "
+          "buffer count stay with Tokamax's VMEM-aware choice, and lowering tile_m only "
+          "lowers VMEM, so the override cannot push the kernel over budget."
+      ),
   )
 
 
@@ -1811,6 +1874,22 @@ class RematAndOffload(BaseModel):
   moe_mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MoE layer's output.",
+  )
+  moe_routing: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for MoE routing artifacts (top-k weights and indices, dispatch "
+          "sort order, group sizes). Saving them keeps the backward pass from recomputing "
+          "routing; they are a few MB per layer."
+      ),
+  )
+  moe_router_logits: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the MoE router logits (needed by the aux-loss backward).",
+  )
+  moe_dispatch: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the dispatched (expert-sorted) MoE inputs.",
   )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
@@ -3314,6 +3393,10 @@ class DerivedValues(BaseModel):
       None,
       description="Effective MLP dimension for MoE layers, scaled by `global_parameter_scale`.",
   )
+  shared_expert_mlp_dim: None | int = Field(
+      None,
+      description="Effective shared-expert MLP dimension, scaled by `global_parameter_scale`.",
+  )
   num_decoder_layers: None | int = Field(
       None,
       description="Effective number of decoder layers, scaled by `global_parameter_scale`.",
@@ -4220,6 +4303,10 @@ class MaxTextConfig(
     self.num_kv_heads = (2**num_head_scale) * self.base_num_kv_heads
     self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
     self.moe_mlp_dim = (2**mlp_dim_scale) * self.base_moe_mlp_dim
+    # A shared expert defaults to routed-expert width; widen it to shift capacity
+    # from the routed (comm-heavy) path to the dense (compute-bound) path.
+    base_shared = self.base_shared_expert_mlp_dim
+    self.shared_expert_mlp_dim = (2**mlp_dim_scale) * (base_shared if base_shared > 0 else self.base_moe_mlp_dim)
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
 
     # E. HARDWARE-DEPENDENT CALCULATIONS
@@ -4373,6 +4460,9 @@ class MaxTextConfig(
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routing",
+          "moe_router_logits",
+          "moe_dispatch",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -5376,6 +5466,22 @@ class MaxTextConfig(
       if self.capacity_factor <= 0:
         raise ValueError(f"use_lineage=True requires capacity_factor > 0, got capacity_factor={self.capacity_factor}.")
 
+    # `shard_exp_on_fsdp` gives the routed expert kernels the logical axes
+    # ("embed_moe", None, "mlp_moe"), so the expert dimension rides the fsdp axis
+    # and num_experts must divide the fsdp size. Without this, the failure is an
+    # `IndivisibleError` raised inside jit at trace time, after the whole model
+    # has been built. `pyconfig_deprecated.py` carries the same guard; this keeps
+    # the pydantic path from being the laxer of the two. A negative
+    # ici_fsdp_parallelism is the auto-fill sentinel and is resolved later.
+    if self.shard_exp_on_fsdp and self.ici_fsdp_parallelism > 0 and self.num_experts > 0:
+      if self.num_experts % self.ici_fsdp_parallelism != 0:
+        raise ValueError(
+            f"shard_exp_on_fsdp=True requires num_experts ({self.num_experts}) to be divisible by "
+            f"ici_fsdp_parallelism ({self.ici_fsdp_parallelism}). Split the mesh instead of shrinking "
+            f"fsdp, e.g. ici_data_parallelism={self.ici_fsdp_parallelism // self.num_experts} "
+            f"ici_fsdp_parallelism={self.num_experts}, which holds the global batch."
+        )
+
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
         "diloco": self.ici_diloco_parallelism,
@@ -5769,6 +5875,10 @@ class RLConfig(
     self.num_kv_heads = int((2**num_head_scale) * self.base_num_kv_heads)
     self.mlp_dim = int((2**mlp_dim_scale) * self.base_mlp_dim)
     self.moe_mlp_dim = int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0))
+    base_shared = getattr(self, "base_shared_expert_mlp_dim", -1)
+    self.shared_expert_mlp_dim = int(
+        (2**mlp_dim_scale) * (base_shared if base_shared > 0 else getattr(self, "base_moe_mlp_dim", 0))
+    )
     self.num_decoder_layers = int((2**layer_scale) * self.base_num_decoder_layers)
 
     # Mirror into internal MaxText fields for backward compatibility.
@@ -5788,6 +5898,9 @@ class RLConfig(
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routing",
+          "moe_router_logits",
+          "moe_dispatch",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
