@@ -411,9 +411,7 @@ class CudnnFlashJaxInferenceTest(unittest.TestCase):
     key = jnp.zeros((8, 4, 2, 64))
     value = jnp.zeros((8, 4, 2, 64))
     decoder_segment_ids = jnp.ones((1, 4))
-    mock_dot_product_attention = mock.Mock(
-        return_value=(jnp.zeros((8, 1, 2, 64)), jnp.zeros((8, 2)))
-    )
+    mock_dot_product_attention = mock.Mock(return_value=(jnp.zeros((8, 1, 2, 64)), jnp.zeros((8, 2))))
     fused_attention_module = types.ModuleType("jax._src.cudnn.fused_attention_stablehlo")
     fused_attention_module.dot_product_attention = mock_dot_product_attention
     fused_attention_module.MaskType = types.SimpleNamespace(PADDING="padding", CAUSAL="causal")
