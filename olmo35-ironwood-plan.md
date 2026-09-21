@@ -226,6 +226,51 @@ by construction.
 - [ ] 6.5 If below 20%, price the architectural gap: sweep experts, `top_k`, expert width
 - [ ] 6.6 If the 4x4x4 landed, repeat 2.4-5.6 for `small`
 
+## Phase 6.5 result: the shipped geometry is not the problem, pdb=1 is
+
+perfsim at a **realistic** operating point (128 devices, seq 8192, shipped 512-expert
+top-16 geometry), sweeping per-device batch. rows/expert = `8192 * pdb * 16 / 512` =
+`256 * pdb`, and 256 rows is exactly one MXU tile:
+
+| rung | pdb=1 | pdb=2 | pdb=4 | pdb=8 | pdb=16 |
+|---|---|---|---|---|---|
+| tiny | 14.5% | 29.0% | 35.7% | 37.1% | 37.7% |
+| small | 13.6% | 27.3% | 41.3% | 42.6% | 42.9% |
+| large | 12.7% | 25.4% | 50.8% | **77.8%** | 78.2% |
+
+**The shipped geometry clears 20% at pdb=2 on every rung and reaches 35-51% at pdb=4.**
+No architecture change is needed for the 20-30% target. The entire measured deficit is
+the pdb=1 / 8-device operating point we were forced onto, which is also why every
+kernel lever measured neutral there.
+
+### Granularity is a real but secondary lever, and it is one specific thing
+
+Iso-active-FLOP granularity arms at 128 devices, pdb=4 (halving top_k while doubling
+expert hidden leaves compute per token unchanged):
+
+| arm | rows/exp | tiny | small | large |
+|---|---|---|---|---|
+| base 512e top16 eh=d | 1024 | 35.7% | 41.3% | 50.8% |
+| 256e top8 eh=2d | 1024 | 39.7% | 44.6% | 50.7% |
+| **128e top8 eh=2d** | **2048** | **41.5%** | **46.1%** | **81.3%** |
+| 128e top4 eh=4d | 1024 | 42.0% | 46.4% | 50.7% |
+| 64e top4 eh=4d | 2048 | 41.2% | 44.1% | 71.6% |
+
+On `large` the discriminator is exactly **rows per expert, not expert width**: every
+2048-row arm wins big (1.41-1.60x) and every 1024-row arm is flat (1.00x). Since
+rows/expert = `seq * pdb * top_k / num_experts`, halving the expert count and raising
+the batch are interchangeable ways to buy the same thing. Prefer the batch, since it
+needs no architecture change.
+
+### Correction: head_dim 256 does NOT help this architecture
+
+Earlier in this plan I called `head_dim=128` "the single biggest architectural gap",
+on the strength of the guide's measured Qwen3-30B result (+21% at 8K, +46% at 32K).
+That does not transfer to OLMo 3.5: perfsim puts `head_dim=256` at **1.00x on tiny and
+small and 0.99x on large**. The reason is the 7:1 KDA-to-full-attention ratio, so only
+one layer in eight is softmax attention and Principle 1 has almost nothing to act on.
+The guide's measurement was on a full-attention model. Keep head_dim 128.
+
 ## Open bugs found (both block the main levers)
 
 1. **Fused tokamax KDA produces NaN at `per_device_batch_size=2`.** pdb=1 is clean and
