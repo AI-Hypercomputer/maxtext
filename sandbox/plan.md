@@ -182,6 +182,37 @@ per-tensor FP8), the honest framing of this flag is: an opt-in knob to measure t
 speed/accuracy tradeoff on a component the standard recipe deliberately excludes — not
 a default-on optimization.
 
+### 8.6 E2E Throughput Gain Projection (Theoretical vs. Realistic)
+
+#### Arithmetic share and ideal speedup
+For training (Fprop + Dgrad + Wgrad $\approx 6 \times \text{params}$ FLOPs per token):
+$$\text{Head FLOPs / token} = 6 \cdot d_{\text{model}} \cdot V$$
+
+Assuming all transformer layers run in FP8 ($2\times$ MXU throughput relative to BF16) and the head transitions from BF16 to FP8 ($2\times$ GEMM throughput):
+$$\text{Ideal Speedup} = \frac{1}{(1 - S) + \frac{S}{2}} \approx 1 + \frac{S}{2}$$
+where $S$ is the head's share of total model training FLOPs.
+
+#### Theoretical gain by model shape
+| Model | $d_{\text{model}}$ | $V$ | Head Params | Active Params | Head FLOP Share ($S$) | Theoretical Step Time Reduction ($\approx S/2$) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **DeepSeek-V3 (671B, no MTP)** | 7168 | 129,280 | 0.93B | ~37B | **~2.5%** | **~1.2%** ($1.012\times$) |
+| **DeepSeek-V3 (671B, MTP $M=1$)** | 7168 | 129,280 | 0.93B | ~38.5B | **~4.8%** | **~2.4%** ($1.025\times$) |
+| **Dense 8B** (e.g., Llama 3 8B shape) | 4096 | 128,256 | 0.53B | 8.0B | **~6.6%** | **~3.3%** ($1.034\times$) |
+| **Dense 1B–2B** (untied embeddings) | 2048 | 128,256 | 0.26B | ~1.5B | **~17.0%** | **~8.5%** ($1.093\times$) |
+
+*For DeepSeek-V3 with $M=1$ MTP, the head runs $(1 + M) = 2$ times per forward pass, doubling arithmetic weight.*
+
+#### Realistic hardware factors (damping mechanisms)
+Actual observed E2E speedup will be lower than the theoretical compute ceiling due to four mechanisms:
+1. **Unchanged Communication Overhead:** `logits_dense` typically requires an `all-reduce` or `reduce-scatter` across tensor/expert parallel axes. Communication latency is bound by interconnect bandwidth (ICI/NVLink) and remains unchanged.
+2. **Dynamic Calibration Overhead:** Qwix quantizes on the fly, requiring dynamic scale factor reduction (absmax) over activations and weights before each GEMM.
+3. **Unquantized Downstream Ops:** Logits accumulation, `cast_logits_to_fp32`, cross-entropy, and softmax remain in BF16/FP32.
+4. **Memory / MXU Utilization:** When sequence batch size per core ($B \cdot T$) is small, the GEMM may be memory-bandwidth or tiling limited rather than operating at peak MXU compute saturation.
+
+#### Projected real-world E2E gains
+* **DeepSeek-V3 671B (MTP=1):** Real-world gain is expected to be **~1.5% to 2.0%** overall throughput improvement.
+* **Dense architectures (8B):** Real-world gain is expected to be **~2.0% to 2.8%**.
+
 ---
 
 ## 9. Note on shared (tied) embeddings
