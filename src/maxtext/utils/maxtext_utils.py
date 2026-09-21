@@ -1220,7 +1220,9 @@ def calculate_olmoe3_tflops_training_per_device(config, embedding_flops):
           + emb * latent
           + latent * emb  # latent down / up
           + config.num_experts_per_tok * 3 * latent * config.moe_mlp_dim  # routed experts
-          + 3 * emb * config.moe_mlp_dim  # shared SwiGLU
+          # The shared SwiGLU runs on the full-width residual, and its width is
+          # decoupled from the routed experts by `shared_expert_mlp_dim`.
+          + 3 * emb * config.shared_expert_mlp_dim  # shared SwiGLU
       )
   )
   dense_flops_per_layer = 2 * batch_seq * 3 * emb * config.mlp_dim

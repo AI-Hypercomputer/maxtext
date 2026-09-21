@@ -461,3 +461,80 @@ class OLMoE3ChunkedDeltaRuleTest(unittest.TestCase):
     the option is wired correctly, not that it is free.
     """
     self._assert_matches(128, 32, state_dtype="bfloat16", tol=5e-2)
+
+
+class OLMoE3SharedExpertWidthTest(unittest.TestCase):
+  """`shared_expert_mlp_dim` decouples the shared FFN from the routed experts.
+
+  Before this knob existed both were driven by ``moe_mlp_dim``, so every ablation
+  that reshaped the routed experts silently resized the shared expert too and was
+  not a single-variable change. These tests pin the two properties that makes it
+  safe to rely on: unset it is exactly the old behaviour, and set it moves the
+  shared FFN and nothing else.
+  """
+
+  @staticmethod
+  def _shapes(cfg):
+    _, model = _build(cfg)
+    params = _abstract_params(cfg, model, 64)
+    out = {}
+    for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
+      out["/".join(str(getattr(k, "key", k)) for k in path)] = leaf.shape
+    return out
+
+  def test_unset_defaults_to_routed_expert_width(self):
+    """The default has to be the routed width or existing configs change silently."""
+    cfg = _config("olmoe3-3p5b")
+    self.assertEqual(cfg.shared_expert_mlp_dim, cfg.moe_mlp_dim)
+
+  def test_identity_point_is_bit_identical(self):
+    """Setting the knob to the value it defaults to must change nothing at all."""
+    base = self._shapes(_config("olmoe3-30m"))
+    cfg = _config("olmoe3-30m")
+    pinned = self._shapes(
+        _config(
+            "olmoe3-30m",
+            extra=("override_model_config=True", f"base_shared_expert_mlp_dim={cfg.base_moe_mlp_dim}"),
+        )
+    )
+    self.assertEqual(base, pinned)
+
+  def test_widening_moves_only_the_shared_ffn(self):
+    """A wider shared expert must not touch the routed experts or the latent."""
+    cfg = _config("olmoe3-30m")
+    wide = _config(
+        "olmoe3-30m",
+        extra=("override_model_config=True", f"base_shared_expert_mlp_dim={4 * cfg.base_moe_mlp_dim}"),
+    )
+    self.assertEqual(wide.shared_expert_mlp_dim, 4 * cfg.moe_mlp_dim)
+    self.assertEqual(wide.moe_mlp_dim, cfg.moe_mlp_dim)
+
+    before, after = self._shapes(cfg), self._shapes(wide)
+    self.assertEqual(set(before), set(after))
+    changed = {k for k, shape in before.items() if shape != after[k]}
+    self.assertTrue(changed, "widening the shared expert changed no parameter shapes")
+    for key in changed:
+      self.assertIn("shared_ffn", key, f"{key} changed but is not part of the shared FFN")
+    # Layer 0 is dense and sized by mlp_dim, so it must be untouched.
+    for key in changed:
+      self.assertNotIn("layers_0/", key, "the dense layer 0 shared FFN must not follow this knob")
+
+  def test_flop_accounting_follows_the_knob(self):
+    """MFU's denominator is analytic, so a counter that ignores the knob inflates it."""
+    cfg = _config("olmoe3-30m", max_target_length=512)
+    wide = _config(
+        "olmoe3-30m",
+        max_target_length=512,
+        extra=("override_model_config=True", f"base_shared_expert_mlp_dim={4 * cfg.base_moe_mlp_dim}"),
+    )
+    base_tf, _, _ = maxtext_utils.calculate_tflops_training_per_device(cfg, log=False)
+    wide_tf, _, _ = maxtext_utils.calculate_tflops_training_per_device(wide, log=False)
+    self.assertGreater(wide_tf, base_tf, "widening the shared expert did not raise the analytic FLOP count")
+
+    # The delta is exactly the extra SwiGLU width on the MoE layers, fwd+bwd.
+    moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+    batch_seq = cfg.per_device_batch_size * cfg.max_target_length
+    expected = (
+        3 * 2 * batch_seq * 3 * cfg.emb_dim * (wide.shared_expert_mlp_dim - cfg.shared_expert_mlp_dim) * moe_layers
+    ) / 1e12
+    self.assertAlmostEqual(wide_tf - base_tf, expected, places=6)

@@ -14,3 +14,4 @@
 """Megablox kernel"""
 
 from maxtext.kernels.megablox.ops import gmm
+from maxtext.kernels.megablox.ops import tokamax_ragged_dot_v1

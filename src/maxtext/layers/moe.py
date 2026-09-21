@@ -229,6 +229,14 @@ def get_batchsplit_init_kernel_axes():
   )
 
 
+def _fp8_full_gmm_rule(config):
+  """Explicit GMM QtRule for fp8_full (interception is lost under shard_map)."""
+  if config.quantization != "fp8_full" or not config.use_qwix_quantization:
+    return None
+  rules = quantizations.get_quantization_rule(config)
+  return rules[0] if rules else None
+
+
 def random_routing(rng_key, gate_logits, num_experts_per_tok):
   """Performs random routing of tokens to experts.
 
@@ -1208,6 +1216,9 @@ class RoutedMoE(nnx.Module):
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
+    # Remat names: saving these routing artifacts spares their bwd recompute.
+    weights = adc.checkpoint_name(weights, "moe_routing")
+    selected_experts = adc.checkpoint_name(selected_experts, "moe_routing")
     lb_loss = None
     # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
     probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
@@ -1301,7 +1312,7 @@ class RoutedMoE(nnx.Module):
       else:
         flatten_selected_experts_safe = flatten_selected_experts
 
-      sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
+      sorted_selected_experts = adc.checkpoint_name(jnp.argsort(flatten_selected_experts_safe), "moe_routing")
       if self.config.moe_use_direct_token_gather:
         sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
@@ -1312,8 +1323,11 @@ class RoutedMoE(nnx.Module):
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
+      sorted_inputs = adc.checkpoint_name(sorted_inputs, "moe_dispatch")
 
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+      group_size = adc.checkpoint_name(
+          jnp.bincount(flatten_selected_experts_safe, length=self.num_experts), "moe_routing"
+      )
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -1972,16 +1986,17 @@ class RoutedMoE(nnx.Module):
       use_custom_vjp_gmm = self.config.use_tokamax_gmm or self.config.megablox
 
       if is_tokamax_v1_unquantized:
-        # tokamax v1 (unquantized)
-        output = tokamax.ragged_dot(
+        # tokamax v1 (unquantized). Note this path ignores `tiling`: the public
+        # `tokamax.ragged_dot` has no such argument, so the `wi_tile_*`/`wo_tile_*`
+        # config lands nowhere here and tokamax's own heuristic picks the tiles.
+        # `tokamax_gmm_tile_m` is the one override, for the ragged dimension, where
+        # that heuristic goes wrong: it never aligns the m-tile to a group boundary.
+        output = mblx.tokamax_ragged_dot_v1(
             lhs=inputs,
             rhs=kernel,
             group_sizes=tokamax_group_sizes,
-            precision=jax.lax.Precision.DEFAULT,
             preferred_element_type=self.dtype,
-            implementation="mosaic",
-            # `group_offset` is not yet supported
-            group_offset=None,
+            tile_m=self.config.tokamax_gmm_tile_m,
         )
       elif use_custom_vjp_gmm:
         # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
@@ -1994,7 +2009,12 @@ class RoutedMoE(nnx.Module):
             group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
+            # Only "fp8_full" quantizes GMM; other schemes (e.g. "fp8", "int8")
+            # do not define a GMM quantization rule.
+            use_qwix_quantization=bool(self.config.quantization == "fp8_full") and self.config.use_qwix_quantization,
+            # Pass the rule explicitly: qwix interception context does not
+            # survive shard_map, so get_current_rule("gmm") returns None there.
+            qwix_rule=_fp8_full_gmm_rule(self.config),
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,
@@ -4054,6 +4074,7 @@ class RoutedMoE(nnx.Module):
       )
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
+    gate_logits = adc.checkpoint_name(gate_logits, "moe_router_logits")
 
     is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
 

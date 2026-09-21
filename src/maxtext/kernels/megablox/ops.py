@@ -29,6 +29,17 @@ import qwix
 import qwix.pallas as qpl
 import tokamax
 
+# Private tokamax internals, needed only for `tokamax_gmm_tile_m`. The public
+# `tokamax.ragged_dot` takes no tiling argument, so pinning the ragged tile means
+# reaching the op object and its config. Imported defensively: a tokamax upgrade
+# that moves these must not break training for the default path, which does not
+# use them, so the failure is deferred to the point of use.
+try:
+  from tokamax._src.ops.ragged_dot import api as _tokamax_rd_api  # pylint: disable=g-import-not-at-top
+  from tokamax._src.ops.ragged_dot import base as _tokamax_rd_base  # pylint: disable=g-import-not-at-top
+except ImportError:  # pragma: no cover
+  _tokamax_rd_api = _tokamax_rd_base = None
+
 
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
     dot_dimension_numbers=(([1], [2]), ([], [])),
@@ -299,6 +310,63 @@ def _fwd_gather_weight(rhs: qpl.QArray, weight_gather_axes: List[Tuple[str, int]
   return rhs
 
 
+def tokamax_ragged_dot_v1(
+    lhs: jnp.ndarray | qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
+    group_sizes,
+    preferred_element_type: jnp.dtype,
+    *,
+    tile_m: int = 0,
+    **kwargs,
+) -> jnp.ndarray:
+  """`tokamax.ragged_dot` on the mosaic backend, with an optional ragged-tile override.
+
+  `tile_m` of 0 calls the public API unchanged, which lets tokamax pick the tiling.
+  Its TPU heuristic uses `tile_m = min(total_rows, 1024)` and shrinks it only to fit
+  VMEM, never to land on a group boundary, so whenever an expert gets fewer than 1024
+  rows every m-tile spans several expert groups and the kernel is re-run per group it
+  touches. `tokamax.ragged_dot` has no tiling argument, so the only way to say
+  otherwise is to build the op and pin its config.
+
+  Only `tile_m` is replaced. `tile_k`, `tile_n` and the buffer count are taken from
+  whatever tokamax itself would have used for these shapes, which keeps its VMEM
+  accounting intact, and since this is only ever used to lower `tile_m`, VMEM use can
+  only fall. The result is numerically unchanged: tiling picks the loop structure, not
+  the accumulation order within a group.
+  """
+  if not tile_m:
+    return tokamax.ragged_dot(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=preferred_element_type,
+        # `group_offset` is not yet supported
+        group_offset=None,
+        implementation="mosaic",
+        **kwargs,
+    )
+
+  if _tokamax_rd_api is None:
+    raise ImportError(
+        "tokamax_gmm_tile_m requires tokamax._src.ops.ragged_dot, which is not importable "
+        "in this tokamax build. Set tokamax_gmm_tile_m=0 to use tokamax's own heuristic."
+    )
+  # "mosaic" is a per-platform alias inside the public API; on TPU it resolves to
+  # "mosaic_tpu". Resolve it here because we need the op, not the dispatcher.
+  op = _tokamax_rd_api.IMPLEMENTATIONS["mosaic_tpu"]
+  op_kwargs = {
+      "group_sizes": group_sizes,
+      "ragged_dot_dimension_numbers": _tokamax_rd_base.DEFAULT_RAGGED_DOT_DIM_NUMS,
+      "precision": jax.lax.Precision.DEFAULT,
+      "preferred_element_type": preferred_element_type,
+      **kwargs,
+  }
+  config = op.bind(lhs, rhs, **op_kwargs).default_config
+  op = op.replace(config=dataclasses.replace(config, tile_m=tile_m))
+  return op(lhs, rhs, **op_kwargs)
+
+
 def _fwd_run_tokamax_v1(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
@@ -317,15 +385,15 @@ def _fwd_run_tokamax_v1(
   if transpose_rhs:
     rhs = rhs.swapaxes(1, 2)
 
-  return tokamax.ragged_dot(
+  # `tiling` is not threaded here: this entry point is reached through `gmm`'s
+  # custom VJP, whose `tiling` tuple is the megablox one and means something else.
+  # The override is wired at the `moe.py` call site, which is the path the tokamax
+  # v1 kernel actually runs on.
+  return tokamax_ragged_dot_v1(
       lhs=lhs,
       rhs=rhs,
       group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=preferred_element_type,
-      # `group_offset` is not yet supported
-      group_offset=None,
-      implementation="mosaic",
       **out_kwargs,
   )
 

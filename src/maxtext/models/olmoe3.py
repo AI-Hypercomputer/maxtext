@@ -665,9 +665,10 @@ class OLMoE3DecoderLayer(nnx.Module):
     else:
       self.mixer = OLMoE3KimiDeltaAttention(cfg, mesh, quant, rngs=rngs)
 
-    # Layer 0 is dense with a wide SwiGLU; MoE layers keep a narrow shared expert.
+    # Layer 0 is dense with a wide SwiGLU; MoE layers keep a narrow shared expert,
+    # whose width is `shared_expert_mlp_dim` (defaults to the routed-expert width).
     self.is_dense_layer = layer_idx < cfg.first_num_dense_layers
-    shared_dim = cfg.mlp_dim if self.is_dense_layer else cfg.moe_mlp_dim
+    shared_dim = cfg.mlp_dim if self.is_dense_layer else cfg.shared_expert_mlp_dim
     self.shared_ffn = MlpBlock(
         config=cfg,
         mesh=mesh,
