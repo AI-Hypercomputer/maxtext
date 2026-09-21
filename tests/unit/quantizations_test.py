@@ -791,5 +791,44 @@ class RouterProjQwixInterceptionTest(unittest.TestCase):
     self._assert_router_proj_interception(quantize_router_proj=False)
 
 
+class LogitsDenseQwixInterceptionTest(unittest.TestCase):
+  """Verifies Qwix interception behavior for the output embedding (logits_dense)."""
+
+  def _assert_logits_dense_interception(self, quantize_logits_dense: bool, expected_rule: str):
+    """Verifies Qwix interception behavior for the output embedding (logits_dense)."""
+    cfg = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "model_name=deepseek3-671b",
+            "quantization=fp8_full",
+            "use_qwix_quantization=true",
+            "per_device_batch_size=1",
+            "max_target_length=16",
+            f"quantize_logits_dense={quantize_logits_dense}",
+        ],
+        run_name="deepseek3_logits_dense_quantize_test",
+        skip_jax_distributed_system=True,
+    )
+    with self.assertLogs(absl_logging.get_absl_logger(), level="DEBUG") as cm:
+      # Create abstract model using nnx.eval_shape (0 FLOPs, 0 device allocation)
+      _, _ = model_creation_utils.create_nnx_abstract_model(cfg)
+
+    logits_dense_logs = [
+        log for log in cm.output if "module='decoder/logits_dense'" in log and "op=dot_general" in log
+    ]
+    self.assertTrue(logits_dense_logs, "Expected logits_dense dot_general operations to be traced by Qwix")
+    for log in logits_dense_logs:
+      self.assertIn(expected_rule, log)
+
+  def test_deepseek3_quantize_logits_dense_true_intercepts_logits_dense(self):
+    """DeepSeek3 with quantize_logits_dense=True intercepts logits_dense ops with quantized rule=0."""
+    self._assert_logits_dense_interception(quantize_logits_dense=True, expected_rule="rule=0")
+
+  def test_deepseek3_quantize_logits_dense_false_leaves_logits_dense_unquantized(self):
+    """DeepSeek3 with quantize_logits_dense=False leaves logits_dense unquantized (rule=None)."""
+    self._assert_logits_dense_interception(quantize_logits_dense=False, expected_rule="rule=None")
+
+
 if __name__ == "__main__":
   unittest.main()

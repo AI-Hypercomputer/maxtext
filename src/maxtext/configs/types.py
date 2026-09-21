@@ -555,6 +555,14 @@ class Quantization(BaseModel):
           " function) and does not control quantization."
       ),
   )
+  quantize_logits_dense: bool = Field(
+      False,
+      description=(
+          "If True, quantizes the output embedding (logits_dense) projection when quantization is enabled."
+          " Targets the `logits_dense` module (matching path regex r'.*decoder/logits_dense.*'). Default is False."
+          " Only supported with `logits_via_embedding=False` and `quantization=fp8_full`."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -4572,6 +4580,14 @@ class MaxTextConfig(
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
+    if self.quantize_logits_dense:
+      if self.logits_via_embedding:
+        raise ValueError(
+            "`quantize_logits_dense` cannot be enabled when input and output embeddings are tied"
+            " (`logits_via_embedding=True`)."
+        )
+      if self.quantization != "fp8_full":
+        raise ValueError("`quantize_logits_dense` can only be enabled when `quantization='fp8_full'`.")
     if self.quantization and self.use_qwix_quantization and self.quantize_router_proj and self.float32_gate_logits:
       raise ValueError(
           "`float32_gate_logits=True` is rejected with `quantize_router_proj=True`: the fp32 cast on"

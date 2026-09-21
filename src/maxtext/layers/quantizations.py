@@ -972,13 +972,14 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
     )
 
   # main model
-  paths=["decoder/.*layers.*"]
+  paths = ["decoder/.*layers.*"]
   # multi-token prediction
   if config.quantize_mtp:
     paths.append("mtp_block/.*")
   # output embedding
   if config.quantize_logits_dense:
     paths.append("decoder/logits_dense.*")
+  # combine paths
   module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
 
   rules = []
