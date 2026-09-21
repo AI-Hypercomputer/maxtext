@@ -5264,9 +5264,11 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
 
     mock_run_gdn.assert_called_once()
     self.assertEqual(len(mock_run_gdn.call_args.args), 18)
-    self.assertEqual(set(mock_run_gdn.call_args.kwargs), {"mesh"})
+    self.assertEqual(set(mock_run_gdn.call_args.kwargs), {"mesh", "read_state_indices"})
     self.assertIs(mock_run_gdn.call_args.kwargs["mesh"], mesh)
     np.testing.assert_array_equal(mock_run_gdn.call_args.args[9], jnp.array([1], dtype=jnp.int32))
+    # Resident per-request slots read and write the same slot.
+    np.testing.assert_array_equal(mock_run_gdn.call_args.kwargs["read_state_indices"], jnp.array([1], dtype=jnp.int32))
     np.testing.assert_array_equal(mock_run_gdn.call_args.args[10], jnp.array([0, 1], dtype=jnp.int32))
     np.testing.assert_array_equal(mock_run_gdn.call_args.args[12], jnp.array([1], dtype=jnp.int32))
     self.assertEqual(output.shape, hidden_states.shape)
