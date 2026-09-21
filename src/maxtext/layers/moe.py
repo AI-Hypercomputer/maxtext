@@ -1726,6 +1726,10 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
+    def fwd_tile(name):
+      """Reads a forward GMM tile size, preferring `eval_*` under eval axis rules."""
+      return getattr(self.config, f"eval_{name}" if max_utils.is_eval(self.config) else name)
+
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
@@ -1832,10 +1836,10 @@ class RoutedMoE(nnx.Module):
       orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
       # Pad only the underlying qvalue buffer to tile size boundaries, leaving scale intact.
       if isinstance(inputs, qpl.QArray):
-        padded_qval, padding_amount = max_utils.maybe_pad(inputs.qvalue, self.config.wi_tile_fwd_batch_seq)
+        padded_qval, padding_amount = max_utils.maybe_pad(inputs.qvalue, fwd_tile("wi_tile_fwd_batch_seq"))
         inputs = dataclasses.replace(inputs, qvalue=padded_qval)
       else:
-        inputs, padding_amount = max_utils.maybe_pad(inputs, self.config.wi_tile_fwd_batch_seq)
+        inputs, padding_amount = max_utils.maybe_pad(inputs, fwd_tile("wi_tile_fwd_batch_seq"))
       if padding_amount > 0 and partial_sum is not None:
         partial_sum = jnp.pad(partial_sum, ((0, padding_amount), (0, 0)))
       if not isinstance(inputs, qpl.QArray):
@@ -2344,9 +2348,9 @@ class RoutedMoE(nnx.Module):
         # Gather Hidden(2)
         wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
       wi_tile_size = (
-          self.config.wi_tile_fwd_batch_seq,  # m (LHS batch)
-          self.config.wi_tile_fwd_embed_dim,  # k  (contracting)
-          self.config.wi_tile_fwd_mlp_dim,  # n (RHS batch)
+          fwd_tile("wi_tile_fwd_batch_seq"),  # m (LHS batch)
+          fwd_tile("wi_tile_fwd_embed_dim"),  # k  (contracting)
+          fwd_tile("wi_tile_fwd_mlp_dim"),  # n (RHS batch)
           self.config.wi_tile_dlhs_batch_seq,  # m (LHS batch)
           self.config.wi_tile_dlhs_mlp_dim,  # k (contracting)
           self.config.wi_tile_dlhs_embed_dim,  # n (RHS batch)
@@ -2369,9 +2373,9 @@ class RoutedMoE(nnx.Module):
         # Gather Hidden(1)
         wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
       wo_tile_size = (
-          self.config.wo_tile_fwd_batch_seq,  # m (LHS batch)
-          self.config.wo_tile_fwd_mlp_dim,  # k (contracting)
-          self.config.wo_tile_fwd_embed_dim,  # n (RHS batch)
+          fwd_tile("wo_tile_fwd_batch_seq"),  # m (LHS batch)
+          fwd_tile("wo_tile_fwd_mlp_dim"),  # k (contracting)
+          fwd_tile("wo_tile_fwd_embed_dim"),  # n (RHS batch)
           self.config.wo_tile_dlhs_batch_seq,  # m (LHS batch)
           self.config.wo_tile_dlhs_embed_dim,  # k (contracting)
           self.config.wo_tile_dlhs_mlp_dim,  # n (RHS)

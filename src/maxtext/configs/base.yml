@@ -153,6 +153,9 @@ quantize_kvcache: false # set to true to quantize kv cache values, defaults to f
 kv_quant_axis: "heads_and_dkv"
 kv_quant_dtype: "int8"
 quantize_mtp: false # set to true to quantize mtp layers when quantization is enabled. requires mtp_num_layers > 0 and quantization=fp8_full.
+quantize_router_proj: true # set to false to exclude the moe router (gate) projection matmul from quantization when quantization is enabled. default is true for backward compatibility. applicable when use_qwix_quantization=true and quantization is set; ignored otherwise.
+quantize_logits_proj: false # set to true to quantize output logits projection (logits_dense) when quantization is enabled. requires quantization=fp8_full, logits_via_embedding=false, num_vocab_tiling=1. also covers the mtp logits projection, which reuses the same head.
+logits_proj_quant_calibration_method: "" # calibration method for logits_dense when quantize_logits_proj=true. if empty, inherits weight/act_quantization_calibration_method. e.g. "absmax"
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
 # saves params quantized on fly at following path
 save_quantized_params_path: ""
@@ -217,9 +220,12 @@ float32_qk_product: false # in dot_product attention, whether to cast to fp32 th
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the MLA Indexer (DeepSeek-V3 / DeepSeek-V3.2) across the unsharded local heads dimension natively.
 csa_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the CSA Indexer (DeepSeek-V4) across the unsharded local heads dimension natively.
-float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
-float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
-
+# float32_weight_sum - whether to use fp32 accumulation for the MoE combine reduction after GMM for numerical stability (weighted sum of expert outputs by routing weights).
+float32_weight_sum: true
+# float32_gate_logits - whether to run the MoE gate (router) module before GMM in fp32 for numerical stability.
+# compute dtype only (the kernel is still stored in weight_dtype): casts the gate inputs and kernel, emits fp32 logits, and applies to the routed bias add and score function.
+# see quantize_router_proj for whether the gate projection matmul is quantized; enabling both is rejected.
+float32_gate_logits: false
 # multi-token prediction configs
 # the number of auxiliary prediction layers to use for mtp.
 # set to 0 to disable the feature.
@@ -288,6 +294,9 @@ moe_ep_all_gather_sparse_core_id: 1
 wi_tile_fwd_batch_seq: 512
 wi_tile_fwd_embed_dim: 1024
 wi_tile_fwd_mlp_dim: 1024
+eval_wi_tile_fwd_batch_seq: 512
+eval_wi_tile_fwd_embed_dim: 1024
+eval_wi_tile_fwd_mlp_dim: 1024
 wi_tile_dlhs_batch_seq: 512
 wi_tile_dlhs_embed_dim: 1024
 wi_tile_dlhs_mlp_dim: 1024
@@ -298,6 +307,9 @@ wi_tile_drhs_mlp_dim: 1024
 wo_tile_fwd_batch_seq: 512
 wo_tile_fwd_embed_dim: 1024
 wo_tile_fwd_mlp_dim: 1024
+eval_wo_tile_fwd_batch_seq: 512
+eval_wo_tile_fwd_embed_dim: 1024
+eval_wo_tile_fwd_mlp_dim: 1024
 wo_tile_dlhs_batch_seq: 512
 wo_tile_dlhs_embed_dim: 1024
 wo_tile_dlhs_mlp_dim: 1024
@@ -1232,6 +1244,9 @@ ragged_block_size: 256
 sa_block_q: 512
 sa_block_kv: 512
 sa_block_kv_compute: 512
+eval_sa_block_q: 512
+eval_sa_block_kv: 512
+eval_sa_block_kv_compute: 512
 sa_block_q_dkv: 512
 sa_block_kv_dkv: 512
 sa_block_kv_dkv_compute: 512
@@ -1242,6 +1257,9 @@ sa_bwd_dkv_megacore: false  # megacore-parallel kv-head groups in the static dkv
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+eval_sa_q_layout: "HEAD_DIM_MINOR"
+eval_sa_k_layout: "HEAD_DIM_MINOR"
+eval_sa_v_layout: "HEAD_DIM_MINOR"
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax
@@ -1251,6 +1269,9 @@ sa_use_base2_exp: true # defaults to true in Tokamax
 local_sa_block_q: None  # inherits from sa_block_q if None
 local_sa_block_kv: None  # inherits from sa_block_kv if None
 local_sa_block_kv_compute: None  # inherits from sa_block_kv_compute if None
+eval_local_sa_block_q: None  # inherits from eval_sa_block_q if None
+eval_local_sa_block_kv: None  # inherits from eval_sa_block_kv if None
+eval_local_sa_block_kv_compute: None  # inherits from eval_sa_block_kv_compute if None
 local_sa_block_q_dkv: None  # inherits from sa_block_q_dkv if None
 local_sa_block_kv_dkv: None  # inherits from sa_block_kv_dkv if None
 local_sa_block_kv_dkv_compute: None  # inherits from sa_block_kv_dkv_compute if None
@@ -1260,6 +1281,9 @@ local_sa_use_fused_bwd_kernel: None  # inherits from sa_use_fused_bwd_kernel if 
 local_sa_q_layout: None  # inherits from sa_q_layout if None
 local_sa_k_layout: None  # inherits from sa_k_layout if None
 local_sa_v_layout: None  # inherits from sa_v_layout if None
+eval_local_sa_q_layout: None  # inherits from eval_sa_q_layout if None
+eval_local_sa_k_layout: None  # inherits from eval_sa_k_layout if None
+eval_local_sa_v_layout: None  # inherits from eval_sa_v_layout if None
 local_use_splash_scheduler: None  # inherits from use_splash_scheduler if None
 local_sa_fuse_reciprocal: None  # inherits from sa_fuse_reciprocal if None
 local_sa_use_base2_exp: None  # inherits from sa_use_base2_exp if None

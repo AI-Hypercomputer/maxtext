@@ -475,9 +475,14 @@ def _create_mock_flash_op(
     context_parallel_load_balance=False,
     max_target_length=8,
     block_size=4,
+    eval_block_size=None,
+    eval_qkv_layout="HEAD_DIM_MINOR",
     use_tokamax_splash=False,
 ):
   """Helper method to construct a mock AttentionOp for flash testing."""
+  # `eval_sa_*` mirrors base.yml: the evaluation knobs fall back to the
+  # training block sizes/layouts unless a test overrides them.
+  eval_block_size = block_size if eval_block_size is None else eval_block_size
   config = types.SimpleNamespace(
       causal_block_size=4,
       context_parallel_strategy="all_gather",
@@ -486,6 +491,9 @@ def _create_mock_flash_op(
       sa_block_q=block_size,
       sa_block_kv=block_size,
       sa_block_kv_compute=block_size,
+      eval_sa_block_q=eval_block_size,
+      eval_sa_block_kv=eval_block_size,
+      eval_sa_block_kv_compute=eval_block_size,
       sa_block_q_dkv=block_size,
       sa_block_kv_dkv=block_size,
       sa_block_kv_dkv_compute=block_size,
@@ -495,6 +503,9 @@ def _create_mock_flash_op(
       sa_q_layout="HEAD_DIM_MINOR",
       sa_k_layout="HEAD_DIM_MINOR",
       sa_v_layout="HEAD_DIM_MINOR",
+      eval_sa_q_layout=eval_qkv_layout,
+      eval_sa_k_layout=eval_qkv_layout,
+      eval_sa_v_layout=eval_qkv_layout,
       use_splash_scheduler=False,
       sa_fuse_reciprocal=False,
       sa_use_base2_exp=False,
@@ -572,6 +583,8 @@ class BlockCausalMaskTest(unittest.TestCase):
       context_parallel_size=1,
       context_parallel_load_balance=False,
       mesh_shape=None,
+      eval_block_size=4,
+      eval_qkv_layout="HEAD_DIM_MINOR",
   ):
     """Builds a minimal flash-attention operator for dispatch tests."""
     config = types.SimpleNamespace(
@@ -583,6 +596,11 @@ class BlockCausalMaskTest(unittest.TestCase):
         sa_block_q=4,
         sa_block_kv=4,
         sa_block_kv_compute=4,
+        # `eval_sa_*` mirrors base.yml: it defaults to the training values and
+        # only differs when a test asks for evaluation-specific blocks.
+        eval_sa_block_q=eval_block_size,
+        eval_sa_block_kv=eval_block_size,
+        eval_sa_block_kv_compute=eval_block_size,
         sa_block_q_dkv=4,
         sa_block_kv_dkv=4,
         sa_block_kv_dkv_compute=4,
@@ -592,6 +610,9 @@ class BlockCausalMaskTest(unittest.TestCase):
         sa_q_layout="HEAD_DIM_MINOR",
         sa_k_layout="HEAD_DIM_MINOR",
         sa_v_layout="HEAD_DIM_MINOR",
+        eval_sa_q_layout=eval_qkv_layout,
+        eval_sa_k_layout=eval_qkv_layout,
+        eval_sa_v_layout=eval_qkv_layout,
         use_splash_scheduler=False,
         sa_fuse_reciprocal=False,
         sa_use_base2_exp=False,
@@ -816,6 +837,35 @@ class BlockCausalMaskTest(unittest.TestCase):
         )
         selected_mask = self._capture_splash_mask(op, query)
         self.assertIsInstance(selected_mask, expected_mask_type)
+
+  def test_tpu_splash_uses_eval_block_sizes_on_eval_batch(self):
+    # `AttentionOp` snapshots the block sizes/layouts at construction, so the
+    # eval overrides have to be part of the config before the op is built.
+    op = self._make_flash_op(
+        attention_type=AttentionType.GLOBAL,
+        eval_block_size=8,
+        eval_qkv_layout="SEQ_MINOR",
+    )
+    op.config.logical_axis_rules_for_eval = (("activation_batch", "data"),)
+
+    def capture_block_sizes():
+      with (
+          mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+          mock.patch.object(
+              attention_op.splash_attention_kernel, "BlockSizes", side_effect=RuntimeError("blocks captured")
+          ) as make_block_sizes,
+          self.assertRaisesRegex(RuntimeError, "blocks captured"),
+      ):
+        query = jnp.zeros((2, 16, 1, 8))
+        op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+      return make_block_sizes.call_args.kwargs
+
+    qkv_layout = attention_op.splash_attention_kernel.QKVLayout
+    train_kw = capture_block_sizes()
+    self.assertEqual((train_kw["block_q"], train_kw["q_layout"]), (4, qkv_layout["HEAD_DIM_MINOR"]))
+    with nn_partitioning.axis_rules(op.config.logical_axis_rules_for_eval):
+      eval_kw = capture_block_sizes()
+    self.assertEqual((eval_kw["block_q"], eval_kw["q_layout"]), (8, qkv_layout["SEQ_MINOR"]))
 
   def _capture_splash_mask(self, op, query, q_axis="context"):
     """Runs `tpu_flash_attention` far enough to see which mask it built."""

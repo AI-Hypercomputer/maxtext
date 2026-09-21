@@ -545,6 +545,32 @@ class Quantization(BaseModel):
           " `mtp_num_layers > 0` and `quantization=fp8_full`."
       ),
   )
+  quantize_router_proj: bool = Field(
+      True,
+      description=(
+          "If True, quantizes the MoE router (gate) projection matmul when quantization is enabled. Targets the"
+          " `GateLogit` module (matching path regex r'.*/gate$'). Default is True for backward compatibility."
+          " Applicable when use_qwix_quantization=True and quantization is set; ignored otherwise. Distinct from"
+          " `float32_gate_logits`, which sets the gate module's compute dtype (operand casts, bias add, score"
+          " function) and does not control quantization."
+      ),
+  )
+  quantize_logits_proj: bool = Field(
+      False,
+      description=(
+          "If True, quantizes the output logits (logits_dense) projection when quantization is enabled."
+          " Targets the `logits_dense` module (matching path regex r'decoder/logits_dense.*'). Default is False."
+          " Only supported with `quantization=fp8_full`, `logits_via_embedding=False`, and `num_vocab_tiling = 1`."
+      ),
+  )
+  logits_proj_quant_calibration_method: str = Field(
+      "",
+      description=(
+          "Calibration method for the output logits (logits_dense) projection when `quantize_logits_proj=True`."
+          " If empty (default), inherits `weight_quantization_calibration_method` and"
+          " `act_quantization_calibration_method`. Set to e.g. 'absmax' to force absmax calibration."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -854,6 +880,11 @@ class SplashAttention(BaseModel):
   sa_block_q: int = Field(512, description="Block size for Q in splash attention.")
   sa_block_kv: int = Field(512, description="Block size for KV in splash attention.")
   sa_block_kv_compute: int = Field(512, description="Block size for KV compute in splash attention.")
+  eval_sa_block_q: int = Field(512, description="Block size for Q in splash attention during evaluation.")
+  eval_sa_block_kv: int = Field(512, description="Block size for KV in splash attention during evaluation.")
+  eval_sa_block_kv_compute: int = Field(
+      512, description="Block size for KV compute in splash attention during evaluation."
+  )
   sa_block_q_dkv: int = Field(512, description="Block size for Q_dkv in splash attention.")
   sa_block_kv_dkv: int = Field(512, description="Block size for KV_dkv in splash attention.")
   sa_block_kv_dkv_compute: int = Field(512, description="Block size for KV_dkv compute in splash attention.")
@@ -867,6 +898,9 @@ class SplashAttention(BaseModel):
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
+  eval_sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention during evaluation.")
+  eval_sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention during evaluation.")
+  eval_sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention during evaluation.")
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
   ring_scan_unroll: NonNegativeInt = Field(
       1,
@@ -881,6 +915,15 @@ class SplashAttention(BaseModel):
   local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
   local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
   local_sa_block_kv_compute: int | None = Field(None, description="Block size for KV compute in local splash attention.")
+  eval_local_sa_block_q: int | None = Field(
+      None, description="Block size for Q in local splash attention during evaluation."
+  )
+  eval_local_sa_block_kv: int | None = Field(
+      None, description="Block size for KV in local splash attention during evaluation."
+  )
+  eval_local_sa_block_kv_compute: int | None = Field(
+      None, description="Block size for KV compute in local splash attention during evaluation."
+  )
   local_sa_block_q_dkv: int | None = Field(None, description="Block size for Q_dkv in local splash attention.")
   local_sa_block_kv_dkv: int | None = Field(None, description="Block size for KV_dkv in local splash attention.")
   local_sa_block_kv_dkv_compute: int | None = Field(
@@ -894,6 +937,15 @@ class SplashAttention(BaseModel):
   local_sa_q_layout: str | None = Field(None, description="Layout for Q in local splash attention.")
   local_sa_k_layout: str | None = Field(None, description="Layout for K in local splash attention.")
   local_sa_v_layout: str | None = Field(None, description="Layout for V in local splash attention.")
+  eval_local_sa_q_layout: str | None = Field(
+      None, description="Layout for Q in local splash attention during evaluation."
+  )
+  eval_local_sa_k_layout: str | None = Field(
+      None, description="Layout for K in local splash attention during evaluation."
+  )
+  eval_local_sa_v_layout: str | None = Field(
+      None, description="Layout for V in local splash attention during evaluation."
+  )
   local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
   local_sa_fuse_reciprocal: bool | None = Field(None, description="Maps to local fuse_reciprocal in SplashConfig.")
   local_sa_use_base2_exp: bool | None = Field(None, description="Maps to local use_base2_exp in SplashConfig.")
@@ -1105,11 +1157,26 @@ class MoEGeneral(BaseModel):
   )
   float32_weight_sum: bool = Field(
       True,
-      description="Whether to use full fp32 precision to sum expert weights for numerical stability.",
+      description=(
+          "Controls the accumulation precision of the MoE combine reduction after GMM (the weighted sum of expert"
+          " outputs by their routing weights). When True, casts operands to float32 before the combine"
+          " einsum and accumulates in float32 before casting back to the model dtype."
+      ),
   )
   float32_gate_logits: bool = Field(
       False,
-      description="Whether to cast inputs to fp32 to compute MoE gate logits for numerical stability.",
+      description=(
+          "Whether to run the MoE gate (router) module before GMM in fp32 for numerical stability and routing precision."
+          " This is a compute dtype, not a storage dtype: the gate kernel is still stored in `weight_dtype` and"
+          " is cast at use. When True it sets the `GateLogit` compute dtype, which (1) casts the gate input"
+          " activations and kernel before the projection matmul, (2) makes the emitted logits fp32, so downstream"
+          " consumers such as top-k selection and the load balance loss see fp32 values, and (3) applies to the"
+          " routed bias add and the score function. If a decoder block supplies separate gate inputs, those are"
+          " cast as well; for gemma4 it additionally sets the router norm dtype and the router scale cast. It"
+          " does not control quantization -- see `quantize_router_proj`, which governs whether the gate"
+          " projection matmul is quantized. Setting both is rejected at config init, because quantizing the"
+          " projection discards the fp32 operand precision."
+      ),
   )
   prefuse_moe_weights: bool = Field(
       False,
@@ -1156,6 +1223,16 @@ class MoEKernels(BaseModel):
   )
   wi_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wi.")
   wi_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wi.")
+  eval_wi_tile_fwd_batch_seq: int = Field(
+      512,
+      description="evaluation forward pass tiling dimension for batch/sequence in GMM for wi.",
+  )
+  eval_wi_tile_fwd_embed_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for embedding in GMM for wi."
+  )
+  eval_wi_tile_fwd_mlp_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for MLP in GMM for wi."
+  )
   wi_tile_dlhs_batch_seq: int = Field(
       512,
       description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wi.",
@@ -1174,6 +1251,16 @@ class MoEKernels(BaseModel):
   )
   wo_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wo.")
   wo_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wo.")
+  eval_wo_tile_fwd_batch_seq: int = Field(
+      512,
+      description="evaluation forward pass tiling dimension for batch/sequence in GMM for wo.",
+  )
+  eval_wo_tile_fwd_embed_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for embedding in GMM for wo."
+  )
+  eval_wo_tile_fwd_mlp_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for MLP in GMM for wo."
+  )
   wo_tile_dlhs_batch_seq: int = Field(
       512,
       description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wo.",
@@ -4227,13 +4314,19 @@ class MaxTextConfig(
       ):
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
-    # H. RESOLVE local_sa_* FLAGS: inherit from global sa_* if not explicitly set.
+    # H. RESOLVE local_sa_* and eval_local_sa_* FLAGS: inherit from global sa_* / eval_sa_* if not explicitly set.
     if self.local_sa_block_q is None:
       self.local_sa_block_q = self.sa_block_q
     if self.local_sa_block_kv is None:
       self.local_sa_block_kv = self.sa_block_kv
     if self.local_sa_block_kv_compute is None:
       self.local_sa_block_kv_compute = self.sa_block_kv_compute
+    if self.eval_local_sa_block_q is None:
+      self.eval_local_sa_block_q = self.eval_sa_block_q
+    if self.eval_local_sa_block_kv is None:
+      self.eval_local_sa_block_kv = self.eval_sa_block_kv
+    if self.eval_local_sa_block_kv_compute is None:
+      self.eval_local_sa_block_kv_compute = self.eval_sa_block_kv_compute
     if self.local_sa_block_q_dkv is None:
       self.local_sa_block_q_dkv = self.sa_block_q_dkv
     if self.local_sa_block_kv_dkv is None:
@@ -4252,6 +4345,12 @@ class MaxTextConfig(
       self.local_sa_k_layout = self.sa_k_layout
     if self.local_sa_v_layout is None:
       self.local_sa_v_layout = self.sa_v_layout
+    if self.eval_local_sa_q_layout is None:
+      self.eval_local_sa_q_layout = self.eval_sa_q_layout
+    if self.eval_local_sa_k_layout is None:
+      self.eval_local_sa_k_layout = self.eval_sa_k_layout
+    if self.eval_local_sa_v_layout is None:
+      self.eval_local_sa_v_layout = self.eval_sa_v_layout
     if self.local_use_splash_scheduler is None:
       self.local_use_splash_scheduler = self.use_splash_scheduler
     if self.local_sa_fuse_reciprocal is None:
@@ -4489,6 +4588,37 @@ class MaxTextConfig(
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
+    if self.quantize_logits_proj:
+      if self.logits_via_embedding:
+        raise ValueError(
+            "`quantize_logits_proj` cannot be enabled when input and output embeddings are tied"
+            " (`logits_via_embedding=True`)."
+        )
+      if self.quantization != "fp8_full":
+        raise ValueError("`quantize_logits_proj` can only be enabled when `quantization='fp8_full'`.")
+      if self.num_vocab_tiling > 1:
+        raise ValueError(
+            "`quantize_logits_proj` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
+            " decoder skips `apply_output_head` in train mode, so `logits_dense` is absent from the forward"
+            " pass that `qwix.quantize_model` traces, and the projection runs later inside"
+            " `vocab_tiling_nnx_loss` on a merged model copy. Whether interception survives that path is"
+            " unverified; this combination is rejected until it is tested."
+        )
+      if self.logits_dot_in_fp32:
+        raise ValueError(
+            "`logits_dot_in_fp32=True` is rejected with `quantize_logits_proj=True`: the fp32 cast on"
+            " the logits operands is undone by requantization at the projection matmul, so the projection"
+            " remains quantized while believing you configured fp32. Set `quantize_logits_proj=False` to keep"
+            " the projection in fp32."
+        )
+    if self.quantization and self.use_qwix_quantization and self.quantize_router_proj and self.float32_gate_logits:
+      raise ValueError(
+          "`float32_gate_logits=True` is rejected with `quantize_router_proj=True`: the fp32 cast on"
+          " the gate operands is undone by requantization at the projection matmul, so the projection"
+          " remains quantized while believing you configured fp32. The flag's remaining effects (bias"
+          " add, score function, gemma4 router norm) are second-order next to the quantization error."
+          " Set `quantize_router_proj=False` to keep the projection in fp32."
+      )
     if (
         self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
         and self.gradient_accumulation_steps > 1

@@ -63,10 +63,27 @@ You can enable quantization in MaxText by setting flags in your configuration fi
 The primary flags to control quantization are:
 
 - `use_qwix_quantization`: A boolean flag.
+
   - Set to `True` to enable quantization using the Qwix library.
   - Set to `False` (or omit) to use the AQT library (deprecated) if `quantization` is set.
+
 - `quantization`: A string that specifies the type of quantization to apply. The accepted values depend on whether you are using Qwix or legacy AQT.
+
 - `quantization_calibration_method`: The calibration method for weights and activations (e.g., `"absmax"`). This is mainly for Qwix.
+
+- `quantize_router_proj` (default: `True` for backward compatibility): Applicable when `use_qwix_quantization=True` and `quantization` is set; ignored otherwise. (1) If enabled, quantizes the MoE router (gate) projection matmul. (2) Set to `False` to keep the router projection unquantized across all quantization schemes (e.g., `fp8_full`, `int8`).
+
+  - Enabling this together with `float32_gate_logits=True` is rejected at config init, because the fp32 cast on the gate operands would be undone by requantization at the projection matmul — see [MoE configuration](moe_configuration.md) for the full rationale.
+
+- `quantize_mtp` (default: `False`): Applicable when `use_qwix_quantization=True` and `quantization` is set; ignored otherwise. If enabled, quantizes the Multi-Token Prediction (MTP) block. Requires `mtp_num_layers > 0` and `quantization='fp8_full'`.
+
+- `quantize_logits_proj` (default: `False`): Applicable when `use_qwix_quantization=True` and `quantization` is set; ignored otherwise. If enabled, quantizes the output logits (`logits_dense`) projection matmul. Requires `logits_via_embedding=False` (un-tied embeddings) and `quantization='fp8_full'`.
+
+  - `logits_proj_quant_calibration_method` (default: `""`): Calibration method for the logits projection. If empty (default), inherits `weight_quantization_calibration_method` and `act_quantization_calibration_method`. Set to e.g. `'absmax'` to force absmax calibration.
+
+  - Enabling this together with `logits_dot_in_fp32=True` is rejected at config init, because the fp32 cast on the logits operands would be undone by requantization at the projection matmul.
+
+  - MTP has no output head of its own — it reuses the shared `logits_dense` via `apply_output_head`. This flag therefore also quantizes the MTP logits projection, independently of `quantize_mtp`.
 
 ### Qwix Quantization (Recommended)
 
