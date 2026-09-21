@@ -49,6 +49,13 @@ Optimize with Pallas kernels for fine-grained control.
 
 Guide to setting up benchmarks, performing performance tuning, and analyzing metrics.
 ```
+
+```{grid-item-card} 🔀 Shard Mode: explicit vs auto
+:link: optimization/shard_mode_performance
+:link-type: doc
+
+Measured HLO and xprof comparison of `shard_mode: explicit` against `shard_mode: auto` on the onboarded models.
+```
 ````
 
 ```{toctree}
@@ -61,4 +68,5 @@ optimization/sharding.md
 optimization/custom_mesh_and_rule.md
 optimization/pallas_kernels_performance.md
 optimization/benchmark_and_performance.md
+optimization/shard_mode_performance.md
 ```
