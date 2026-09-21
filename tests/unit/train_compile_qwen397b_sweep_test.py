@@ -202,7 +202,7 @@ class Qwen397bThroughputSweepTest(parameterized.TestCase):
         "gdn_chunk_size=64",
         "use_gdn_kernel=true",
         "gdn_cp_mode=auto",
-        "custom_mesh_and_rule=cp-as-ep",
+        f"custom_mesh_and_rule={'cp-as-ep' if ep == 1 else ''}",
         "ici_tensor_parallelism=1",
         f"ici_fsdp_parallelism={fsdp}",
         f"ici_context_parallelism={cp}",
