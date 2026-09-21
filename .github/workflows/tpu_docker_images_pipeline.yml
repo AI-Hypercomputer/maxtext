@@ -28,11 +28,16 @@ on:
         required: false
         type: string
         default: "maxtext-images"
-      run_e2e_tests:
-        description: 'Whether to run E2E tests after building the Docker images'
+      e2e_test_scope:
+        description: 'Which E2E test suites to run after building the Docker images'
         required: false
-        type: boolean
-        default: false
+        type: choice
+        default: none
+        options:
+          - none
+          - all
+          - pre-training
+          - post-training
 
 permissions:
   contents: read
@@ -106,10 +111,12 @@ jobs:
   run_e2e_tests:
     name: Run E2E tests
     needs: build_and_push_docker_images
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_e2e_tests == true)
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.e2e_test_scope != 'none')
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
       mode: stable
+      # Scheduled runs always exercise the full suite; manual runs pick a scope.
+      test_scope: ${{ github.event_name == 'schedule' && 'all' || inputs.e2e_test_scope }}
       run_id: ${{ github.run_id }}
       maxtext_sha: ${{ github.sha }}
     secrets:
