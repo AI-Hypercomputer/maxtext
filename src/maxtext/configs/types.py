@@ -559,8 +559,8 @@ class Quantization(BaseModel):
       False,
       description=(
           "If True, quantizes the output logits (logits_dense) projection when quantization is enabled."
-          " Targets the `logits_dense` module (matching path regex r'.*decoder/logits_dense.*'). Default is False."
-          " Only supported with `logits_via_embedding=False` and `quantization=fp8_full`."
+          " Targets the `logits_dense` module (matching path regex r'decoder/logits_dense.*'). Default is False."
+          " Only supported with `quantization=fp8_full`, `logits_via_embedding=False`, and `num_vocab_tiling = 1`."
       ),
   )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
@@ -4588,6 +4588,20 @@ class MaxTextConfig(
         )
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_logits_proj` can only be enabled when `quantization='fp8_full'`.")
+      if self.use_batch_split_schedule:
+        raise ValueError(
+            "`quantize_logits_proj` is not supported with `use_batch_split_schedule=True`: the batch-split"
+            " path bypasses Qwix model interception and plumbs a single rule directly into the GMM kernel,"
+            " so the logits projection rule would be silently ignored."
+        )
+      if self.num_vocab_tiling > 1:
+        raise ValueError(
+            "`quantize_logits_proj` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
+            " decoder skips `apply_output_head` in train mode, so `logits_dense` is absent from the forward"
+            " pass that `qwix.quantize_model` traces, and the projection runs later inside"
+            " `vocab_tiling_nnx_loss` on a merged model copy. Whether interception survives that path is"
+            " unverified; this combination is rejected until it is tested."
+        )
       if self.logits_dot_in_fp32:
         raise ValueError(
             "`logits_dot_in_fp32=True` is rejected with `quantize_logits_proj=True`: the fp32 cast on"

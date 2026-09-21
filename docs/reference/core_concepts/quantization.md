@@ -81,6 +81,10 @@ The primary flags to control quantization are:
 
   - Enabling this together with `logits_dot_in_fp32=True` is rejected at config init, because the fp32 cast on the logits operands would be undone by requantization at the projection matmul.
 
+  - Enabling this together with `num_vocab_tiling > 1` is rejected at config init. Under vocab tiling the decoder skips `apply_output_head` in train mode, so `logits_dense` is absent from the forward pass that `qwix.quantize_model` traces; the projection instead runs inside `vocab_tiling_nnx_loss` on a merged model copy. Whether interception survives that path has not been verified.
+
+  - MTP has no output head of its own — it reuses the shared `logits_dense` via `apply_output_head`. This flag therefore also quantizes the MTP logits projection, independently of `quantize_mtp`.
+
 ### Qwix Quantization (Recommended)
 
 To use Qwix, you must set `use_qwix_quantization=True`. Qwix is a powerful and non-intrusive library for Quantized Training.
