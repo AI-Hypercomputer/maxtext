@@ -303,6 +303,27 @@ olmo35-tiny, 8 devices, pdb=1, remat full:
 Raising the sequence rather than the batch buys 1.30x *and* stays out of the kernel
 bug's trigger region. That is the recommended workaround until the kernel is fixed.
 
+### Expert parallelism HURTS on hardware, contradicting perfsim
+
+olmo35-tiny, 8 devices, pdb=1, seq 8192, `fsdp x ep = 8`:
+
+| config | TF/s/dev | vs ep=1 |
+|---|---|---|
+| ep=1, fsdp=8 | 43.5 | 1.00x |
+| ep=2, fsdp=4 | 42.4 | 0.97x |
+| ep=4, fsdp=2 | 34.3 | **0.79x** |
+| ep=8, fsdp=1 | OOM (109.59 G) | - |
+
+**This directly contradicts the perfsim result recorded earlier in this plan**, which
+predicted expert parallelism worth 2.6x to 3.8x at pdb=1. On hardware it is
+monotonically worse. The mechanism perfsim misses: `fsdp x ep` is fixed at the device
+count, so every unit of `ep` *removes* a unit of FSDP sharding, and the resulting
+growth in per-device weight traffic and footprint outweighs replacing the expert
+all-gather with a token all-to-all. At ep=8 there is no FSDP at all and it OOMs.
+
+Treat perfsim's parallelism modelling as unvalidated until checked on hardware. Its
+*geometry* ratios (phase 6.5) are a separate question and remain unchecked.
+
 ### tokamax GMM v1 is neutral, not a win
 
 megablox 43.4 vs tokamax gmm v1 43.8 TF/s, loss identical to 4 decimals (10.151).
@@ -458,3 +479,9 @@ One row per configuration. Filled in as runs land.
 | 15 | 3 | olmo35-tiny + `use_tokamax_gmm=True` (v1) | 0.78 | 45.5 | 3.9% | neutral |
 | 16 | 3.1 | olmo35-tiny + `use_gmm_v2=True` | n/a | n/a | n/a | **NaN loss** (needs `use_tokamax_gmm=True` to even validate) |
 | 17 | - | olmo35-tiny at 8 layers (half depth) | 0.47 | 44.3 | 3.8% | **depth-independent**: step is not compute-bound |
+| 18 | 3.6 | spot-sps pod, XLA flags ON vs OFF | 0.77 | 46.1 / 43.9 | 4.0 / 3.8% | **+5%**; first time the flags actually applied |
+| 19 | 4 | seq 16384, pdb 1 | 1.29 | 56.2 | **4.9%** | **1.30x, and dodges the KDA NaN** |
+| 20 | 4 | seq 32768, pdb 1 | n/a | n/a | n/a | OOM 124.35 G |
+| 21 | 3 | expert parallelism ep=2 / ep=4 | 0.83 / 1.03 | 42.4 / 34.3 | 3.7 / 3.0% | **hurts**; perfsim predicted 2.6-3.8x gain |
+| 22 | 3 | tokamax gmm v1 vs megablox | 0.81 | 43.8 vs 43.4 | 3.8% | neutral, loss identical |
+| 23 | 3.1 | gmm_v2 with `use_tokamax_kda=False` | n/a | n/a | n/a | **NaN**: bug is independent of KDA |
