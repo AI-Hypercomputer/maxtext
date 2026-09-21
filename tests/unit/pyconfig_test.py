@@ -588,6 +588,43 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(config.local_sa_v_layout, "SEQ_MINOR")
     self.assertFalse(config.local_use_splash_scheduler)
 
+  def test_sa_and_gmm_eval_flags_inherit_and_override(self):
+    """eval_sa_* and eval_wi/wo_tile_fwd_* use base.yml defaults; eval_local_sa_* inherits from eval_sa_* when unset."""
+    cfg = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        sa_block_q=256,
+        sa_block_kv=512,
+        local_sa_block_q=64,
+        sa_q_layout="SEQ_MINOR",
+        local_sa_q_layout="HEAD_DIM_MINOR",
+        wi_tile_fwd_batch_seq=256,
+        wo_tile_fwd_embed_dim=2048,
+    )
+    self.assertEqual((cfg.eval_sa_block_q, cfg.eval_sa_block_kv, cfg.eval_local_sa_block_q), (512, 512, 512))
+    self.assertEqual((cfg.eval_sa_q_layout, cfg.eval_local_sa_q_layout), ("HEAD_DIM_MINOR", "HEAD_DIM_MINOR"))
+    self.assertEqual((cfg.eval_wi_tile_fwd_batch_seq, cfg.eval_wo_tile_fwd_embed_dim), (512, 1024))
+
+    cfg_override = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        sa_block_q=256,
+        eval_sa_block_q=1024,
+        eval_sa_block_kv=2048,
+        eval_local_sa_block_q=128,
+        sa_q_layout="HEAD_DIM_MINOR",
+        eval_sa_q_layout="SEQ_MINOR",
+        wi_tile_fwd_batch_seq=256,
+        eval_wi_tile_fwd_batch_seq=1024,
+        eval_wo_tile_fwd_mlp_dim=4096,
+    )
+    self.assertEqual(
+        (cfg_override.eval_sa_block_q, cfg_override.eval_local_sa_block_q, cfg_override.eval_local_sa_block_kv),
+        (1024, 128, 2048),
+    )
+    self.assertEqual((cfg_override.eval_sa_q_layout, cfg_override.eval_local_sa_q_layout), ("SEQ_MINOR", "SEQ_MINOR"))
+    self.assertEqual((cfg_override.eval_wi_tile_fwd_batch_seq, cfg_override.eval_wo_tile_fwd_mlp_dim), (1024, 4096))
+
   def test_eval_start_step_config(self):
     """Verifies that eval_start_step defaults to 0 and can be overridden via pyconfig."""
     config_default = pyconfig.initialize(

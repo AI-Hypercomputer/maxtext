@@ -73,7 +73,7 @@ from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules
+from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, maybe_shard_with_pspec
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
 from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
@@ -661,6 +661,9 @@ class AttentionOp(nnx.Module):
         self.block_q = self.config.local_sa_block_q
         self.block_kv = self.config.local_sa_block_kv
         self.block_kv_compute = self.config.local_sa_block_kv_compute
+        self.eval_block_q = self.config.eval_local_sa_block_q
+        self.eval_block_kv = self.config.eval_local_sa_block_kv
+        self.eval_block_kv_compute = self.config.eval_local_sa_block_kv_compute
         self.block_q_dkv = self.config.local_sa_block_q_dkv
         self.block_kv_dkv = self.config.local_sa_block_kv_dkv
         self.block_kv_dkv_compute = self.config.local_sa_block_kv_dkv_compute
@@ -670,6 +673,9 @@ class AttentionOp(nnx.Module):
         self.q_layout = self.config.local_sa_q_layout
         self.k_layout = self.config.local_sa_k_layout
         self.v_layout = self.config.local_sa_v_layout
+        self.eval_q_layout = self.config.eval_local_sa_q_layout
+        self.eval_k_layout = self.config.eval_local_sa_k_layout
+        self.eval_v_layout = self.config.eval_local_sa_v_layout
         self.use_splash_scheduler = self.config.local_use_splash_scheduler
         self.fuse_reciprocal = self.config.local_sa_fuse_reciprocal
         self.use_base2_exp = self.config.local_sa_use_base2_exp
@@ -677,6 +683,9 @@ class AttentionOp(nnx.Module):
         self.block_q = self.config.sa_block_q
         self.block_kv = self.config.sa_block_kv
         self.block_kv_compute = self.config.sa_block_kv_compute
+        self.eval_block_q = self.config.eval_sa_block_q
+        self.eval_block_kv = self.config.eval_sa_block_kv
+        self.eval_block_kv_compute = self.config.eval_sa_block_kv_compute
         self.block_q_dkv = self.config.sa_block_q_dkv
         self.block_kv_dkv = self.config.sa_block_kv_dkv
         self.block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
@@ -686,6 +695,9 @@ class AttentionOp(nnx.Module):
         self.q_layout = self.config.sa_q_layout
         self.k_layout = self.config.sa_k_layout
         self.v_layout = self.config.sa_v_layout
+        self.eval_q_layout = self.config.eval_sa_q_layout
+        self.eval_k_layout = self.config.eval_sa_k_layout
+        self.eval_v_layout = self.config.eval_sa_v_layout
         self.use_splash_scheduler = self.config.use_splash_scheduler
         self.fuse_reciprocal = self.config.sa_fuse_reciprocal
         self.use_base2_exp = self.config.sa_use_base2_exp
@@ -1917,16 +1929,41 @@ class AttentionOp(nnx.Module):
     pad_kv = 0
     decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
 
+    if max_utils.is_eval(self.config):
+      block_q = self.eval_block_q
+      block_kv = self.eval_block_kv
+      block_kv_compute = self.eval_block_kv_compute
+      block_q_dkv = block_q
+      block_kv_dkv = block_kv
+      block_kv_dkv_compute = block_kv_compute
+      block_q_dq = block_q
+      block_kv_dq = block_kv
+      q_layout = self.eval_q_layout
+      k_layout = self.eval_k_layout
+      v_layout = self.eval_v_layout
+    else:
+      block_q = self.block_q
+      block_kv = self.block_kv
+      block_kv_compute = self.block_kv_compute
+      block_q_dkv = self.block_q_dkv
+      block_kv_dkv = self.block_kv_dkv
+      block_kv_dkv_compute = self.block_kv_dkv_compute
+      block_q_dq = self.block_q_dq
+      block_kv_dq = self.block_kv_dq
+      q_layout = self.q_layout
+      k_layout = self.k_layout
+      v_layout = self.v_layout
+
     # Pad sequences to block-sized boundaries upfront for AttentionType.COMPRESSED
     if self.attention_type == AttentionType.COMPRESSED:
-      if query.shape[2] % self.block_q != 0:
-        pad_q = (self.block_q - (query.shape[2] % self.block_q)) % self.block_q
+      if query.shape[2] % block_q != 0:
+        pad_q = (block_q - (query.shape[2] % block_q)) % block_q
         query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
         if decoder_segment_ids is not None:
           decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)), constant_values=-1)
 
-      if key.shape[2] % self.block_kv != 0:
-        pad_kv = (self.block_kv - (key.shape[2] % self.block_kv)) % self.block_kv
+      if key.shape[2] % block_kv != 0:
+        pad_kv = (block_kv - (key.shape[2] % block_kv)) % block_kv
         key = jnp.pad(key, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
         value = jnp.pad(value, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
         if decoder_segment_ids_kv_in is not None:
@@ -1998,16 +2035,16 @@ class AttentionOp(nnx.Module):
     def create_sa_config(config, query, key, attn_logits_soft_cap):
       if config.use_tokamax_splash:
         sa_config = tokamax_splash_kernel.SplashConfig(
-            block_q=min(self.block_q, query.shape[2]),
-            block_kv=min(self.block_kv, key.shape[2]),
-            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
-            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(self.block_kv_dkv_compute, key.shape[2]),
+            block_q=min(block_q, query.shape[2]),
+            block_kv=min(block_kv, key.shape[2]),
+            block_kv_compute=min(block_kv_compute, key.shape[2]),
+            block_q_dkv=min(block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(block_kv_dkv_compute, key.shape[2]),
             use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
-            q_layout=tokamax_splash_kernel.QKVLayout[self.q_layout],
-            k_layout=tokamax_splash_kernel.QKVLayout[self.k_layout],
-            v_layout=tokamax_splash_kernel.QKVLayout[self.v_layout],
+            q_layout=tokamax_splash_kernel.QKVLayout[q_layout],
+            k_layout=tokamax_splash_kernel.QKVLayout[k_layout],
+            v_layout=tokamax_splash_kernel.QKVLayout[v_layout],
             attn_logits_soft_cap=attn_logits_soft_cap,
             fuse_reciprocal=self.fuse_reciprocal,
             use_base2_exp=self.use_base2_exp,
@@ -2038,18 +2075,18 @@ class AttentionOp(nnx.Module):
         )
       else:
         sa_config = splash_attention_kernel.BlockSizes(
-            block_q=min(self.block_q, query.shape[2]),
-            block_kv=min(self.block_kv, key.shape[2]),
-            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
-            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(self.block_kv_dkv_compute, key.shape[2]),
-            block_q_dq=None if self.use_fused_bwd_kernel else min(self.block_q_dq, query.shape[2]),
-            block_kv_dq=None if self.use_fused_bwd_kernel else min(self.block_kv_dq, query.shape[2]),
+            block_q=min(block_q, query.shape[2]),
+            block_kv=min(block_kv, key.shape[2]),
+            block_kv_compute=min(block_kv_compute, key.shape[2]),
+            block_q_dkv=min(block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(block_kv_dkv_compute, key.shape[2]),
+            block_q_dq=None if self.use_fused_bwd_kernel else min(block_q_dq, query.shape[2]),
+            block_kv_dq=None if self.use_fused_bwd_kernel else min(block_kv_dq, key.shape[2]),
             use_fused_bwd_kernel=self.use_fused_bwd_kernel,
-            q_layout=splash_attention_kernel.QKVLayout[self.q_layout],
-            k_layout=splash_attention_kernel.QKVLayout[self.k_layout],
-            v_layout=splash_attention_kernel.QKVLayout[self.v_layout],
+            q_layout=splash_attention_kernel.QKVLayout[q_layout],
+            k_layout=splash_attention_kernel.QKVLayout[k_layout],
+            v_layout=splash_attention_kernel.QKVLayout[v_layout],
         )
       return sa_config
 

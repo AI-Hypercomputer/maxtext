@@ -854,6 +854,11 @@ class SplashAttention(BaseModel):
   sa_block_q: int = Field(512, description="Block size for Q in splash attention.")
   sa_block_kv: int = Field(512, description="Block size for KV in splash attention.")
   sa_block_kv_compute: int = Field(512, description="Block size for KV compute in splash attention.")
+  eval_sa_block_q: int = Field(512, description="Block size for Q in splash attention during evaluation.")
+  eval_sa_block_kv: int = Field(512, description="Block size for KV in splash attention during evaluation.")
+  eval_sa_block_kv_compute: int = Field(
+      512, description="Block size for KV compute in splash attention during evaluation."
+  )
   sa_block_q_dkv: int = Field(512, description="Block size for Q_dkv in splash attention.")
   sa_block_kv_dkv: int = Field(512, description="Block size for KV_dkv in splash attention.")
   sa_block_kv_dkv_compute: int = Field(512, description="Block size for KV_dkv compute in splash attention.")
@@ -867,6 +872,9 @@ class SplashAttention(BaseModel):
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
+  eval_sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention during evaluation.")
+  eval_sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention during evaluation.")
+  eval_sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention during evaluation.")
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
   ring_scan_unroll: NonNegativeInt = Field(
       1,
@@ -881,6 +889,15 @@ class SplashAttention(BaseModel):
   local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
   local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
   local_sa_block_kv_compute: int | None = Field(None, description="Block size for KV compute in local splash attention.")
+  eval_local_sa_block_q: int | None = Field(
+      None, description="Block size for Q in local splash attention during evaluation."
+  )
+  eval_local_sa_block_kv: int | None = Field(
+      None, description="Block size for KV in local splash attention during evaluation."
+  )
+  eval_local_sa_block_kv_compute: int | None = Field(
+      None, description="Block size for KV compute in local splash attention during evaluation."
+  )
   local_sa_block_q_dkv: int | None = Field(None, description="Block size for Q_dkv in local splash attention.")
   local_sa_block_kv_dkv: int | None = Field(None, description="Block size for KV_dkv in local splash attention.")
   local_sa_block_kv_dkv_compute: int | None = Field(
@@ -894,6 +911,15 @@ class SplashAttention(BaseModel):
   local_sa_q_layout: str | None = Field(None, description="Layout for Q in local splash attention.")
   local_sa_k_layout: str | None = Field(None, description="Layout for K in local splash attention.")
   local_sa_v_layout: str | None = Field(None, description="Layout for V in local splash attention.")
+  eval_local_sa_q_layout: str | None = Field(
+      None, description="Layout for Q in local splash attention during evaluation."
+  )
+  eval_local_sa_k_layout: str | None = Field(
+      None, description="Layout for K in local splash attention during evaluation."
+  )
+  eval_local_sa_v_layout: str | None = Field(
+      None, description="Layout for V in local splash attention during evaluation."
+  )
   local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
   local_sa_fuse_reciprocal: bool | None = Field(None, description="Maps to local fuse_reciprocal in SplashConfig.")
   local_sa_use_base2_exp: bool | None = Field(None, description="Maps to local use_base2_exp in SplashConfig.")
@@ -1156,6 +1182,16 @@ class MoEKernels(BaseModel):
   )
   wi_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wi.")
   wi_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wi.")
+  eval_wi_tile_fwd_batch_seq: int = Field(
+      512,
+      description="evaluation forward pass tiling dimension for batch/sequence in GMM for wi.",
+  )
+  eval_wi_tile_fwd_embed_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for embedding in GMM for wi."
+  )
+  eval_wi_tile_fwd_mlp_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for MLP in GMM for wi."
+  )
   wi_tile_dlhs_batch_seq: int = Field(
       512,
       description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wi.",
@@ -1174,6 +1210,16 @@ class MoEKernels(BaseModel):
   )
   wo_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wo.")
   wo_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wo.")
+  eval_wo_tile_fwd_batch_seq: int = Field(
+      512,
+      description="evaluation forward pass tiling dimension for batch/sequence in GMM for wo.",
+  )
+  eval_wo_tile_fwd_embed_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for embedding in GMM for wo."
+  )
+  eval_wo_tile_fwd_mlp_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for MLP in GMM for wo."
+  )
   wo_tile_dlhs_batch_seq: int = Field(
       512,
       description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wo.",
@@ -4227,13 +4273,19 @@ class MaxTextConfig(
       ):
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
-    # H. RESOLVE local_sa_* FLAGS: inherit from global sa_* if not explicitly set.
+    # H. RESOLVE local_sa_* and eval_local_sa_* FLAGS: inherit from global sa_* / eval_sa_* if not explicitly set.
     if self.local_sa_block_q is None:
       self.local_sa_block_q = self.sa_block_q
     if self.local_sa_block_kv is None:
       self.local_sa_block_kv = self.sa_block_kv
     if self.local_sa_block_kv_compute is None:
       self.local_sa_block_kv_compute = self.sa_block_kv_compute
+    if self.eval_local_sa_block_q is None:
+      self.eval_local_sa_block_q = self.eval_sa_block_q
+    if self.eval_local_sa_block_kv is None:
+      self.eval_local_sa_block_kv = self.eval_sa_block_kv
+    if self.eval_local_sa_block_kv_compute is None:
+      self.eval_local_sa_block_kv_compute = self.eval_sa_block_kv_compute
     if self.local_sa_block_q_dkv is None:
       self.local_sa_block_q_dkv = self.sa_block_q_dkv
     if self.local_sa_block_kv_dkv is None:
@@ -4252,6 +4304,12 @@ class MaxTextConfig(
       self.local_sa_k_layout = self.sa_k_layout
     if self.local_sa_v_layout is None:
       self.local_sa_v_layout = self.sa_v_layout
+    if self.eval_local_sa_q_layout is None:
+      self.eval_local_sa_q_layout = self.eval_sa_q_layout
+    if self.eval_local_sa_k_layout is None:
+      self.eval_local_sa_k_layout = self.eval_sa_k_layout
+    if self.eval_local_sa_v_layout is None:
+      self.eval_local_sa_v_layout = self.eval_sa_v_layout
     if self.local_use_splash_scheduler is None:
       self.local_use_splash_scheduler = self.use_splash_scheduler
     if self.local_sa_fuse_reciprocal is None:
