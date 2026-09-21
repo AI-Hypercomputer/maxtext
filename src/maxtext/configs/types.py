@@ -4596,12 +4596,6 @@ class MaxTextConfig(
         )
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_logits_proj` can only be enabled when `quantization='fp8_full'`.")
-      if self.use_batch_split_schedule:
-        raise ValueError(
-            "`quantize_logits_proj` is not supported with `use_batch_split_schedule=True`: the batch-split"
-            " path bypasses Qwix model interception and plumbs a single rule directly into the GMM kernel,"
-            " so the logits projection rule would be silently ignored."
-        )
       if self.num_vocab_tiling > 1:
         raise ValueError(
             "`quantize_logits_proj` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
