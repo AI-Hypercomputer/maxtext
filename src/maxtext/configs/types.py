@@ -555,10 +555,10 @@ class Quantization(BaseModel):
           " function) and does not control quantization."
       ),
   )
-  quantize_logits_dense: bool = Field(
+  quantize_logits_proj: bool = Field(
       False,
       description=(
-          "If True, quantizes the output embedding (logits_dense) projection when quantization is enabled."
+          "If True, quantizes the output logits (logits_dense) projection when quantization is enabled."
           " Targets the `logits_dense` module (matching path regex r'.*decoder/logits_dense.*'). Default is False."
           " Only supported with `logits_via_embedding=False` and `quantization=fp8_full`."
       ),
@@ -4580,14 +4580,21 @@ class MaxTextConfig(
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
-    if self.quantize_logits_dense:
+    if self.quantize_logits_proj:
       if self.logits_via_embedding:
         raise ValueError(
-            "`quantize_logits_dense` cannot be enabled when input and output embeddings are tied"
+            "`quantize_logits_proj` cannot be enabled when input and output embeddings are tied"
             " (`logits_via_embedding=True`)."
         )
       if self.quantization != "fp8_full":
-        raise ValueError("`quantize_logits_dense` can only be enabled when `quantization='fp8_full'`.")
+        raise ValueError("`quantize_logits_proj` can only be enabled when `quantization='fp8_full'`.")
+      if self.logits_dot_in_fp32:
+        raise ValueError(
+            "`logits_dot_in_fp32=True` is rejected with `quantize_logits_proj=True`: the fp32 cast on"
+            " the logits operands is undone by requantization at the projection matmul, so the projection"
+            " remains quantized while believing you configured fp32. Set `quantize_logits_proj=False` to keep"
+            " the projection in fp32."
+        )
     if self.quantization and self.use_qwix_quantization and self.quantize_router_proj and self.float32_gate_logits:
       raise ValueError(
           "`float32_gate_logits=True` is rejected with `quantize_router_proj=True`: the fp32 cast on"

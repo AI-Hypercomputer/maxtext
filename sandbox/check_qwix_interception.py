@@ -13,7 +13,7 @@ absl_logging.set_verbosity(absl_logging.DEBUG)
 
 def main(argv):
 
-  print("DEBUG 1: quantize_logits_dense=true")
+  print("DEBUG 1: quantize_logits_proj=true")
 
   config_args = (
       argv
@@ -28,14 +28,14 @@ def main(argv):
           "per_device_batch_size=1",
           "max_target_length=128",
           "mtp_num_layers=1",
-          "quantize_logits_dense=true",
+          "quantize_logits_proj=true",
           "skip_jax_distributed_system=True",
       ]
   )
   config = pyconfig.initialize(config_args)
   model_creation_utils.create_nnx_abstract_model(config)
 
-  print("DEBUG 2: quantize_logits_dense=false")
+  print("DEBUG 2: quantize_logits_proj=false")
 
   config_args = (
       argv
@@ -50,7 +50,7 @@ def main(argv):
           "per_device_batch_size=1",
           "max_target_length=128",
           "mtp_num_layers=1",
-          "quantize_logits_dense=false",
+          "quantize_logits_proj=false",
           "skip_jax_distributed_system=True",
       ]
   )
