@@ -509,12 +509,13 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
   gate's input width needs overriding.
   """
 
-  def get_topk(self, gate_logits, pre_bias_logits, rngs=None, input_ids=None):
+  def get_topk(self, gate_logits, pre_bias_logits, rngs=None, input_ids=None, forced_routed_experts=None):
     """Top-k routing weights, rescaled to sum to ``top_k`` as in the reference.
 
     ``input_ids`` carries the packed segment ids (EMo routes per document); it
     is consumed here and never forwarded, so the base class's hash-routing
-    interpretation of the argument can't engage.
+    interpretation of the argument can't engage. ``forced_routed_experts`` is
+    passed straight through to the base class.
 
     The base class's softmax over the top-k logits already equals the
     reference's L1-normalized gather of full-softmax scores
@@ -525,7 +526,9 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     """
     if self.config.emo_enabled:
       gate_logits = self._emo_mask_logits(gate_logits, input_ids, rngs)
-    top_k_weights, top_k_indices = super().get_topk(gate_logits, pre_bias_logits, rngs, input_ids=None)
+    top_k_weights, top_k_indices = super().get_topk(
+        gate_logits, pre_bias_logits, rngs, input_ids=None, forced_routed_experts=forced_routed_experts
+    )
     return top_k_weights * self.num_experts_per_tok, top_k_indices
 
   def _emo_mask_logits(self, gate_logits, segment_ids, rngs):
