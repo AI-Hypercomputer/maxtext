@@ -937,8 +937,8 @@ def cancel_checkpoint_manager(checkpoint_manager):
         thread = getattr(async_mgr, "_thread", None)
         if thread is not None:
           max_logging.log(f"Detached background async save thread: {thread.name}")
-          async_mgr._thread = None
-        async_mgr._exception = None
+          async_mgr._thread = None  # pylint: disable=protected-access
+        async_mgr._exception = None  # pylint: disable=protected-access
 
     # 2. Detach and clear finalize thread
     finalize_ref = getattr(checkpoint_manager, "_finalize_thread", None)

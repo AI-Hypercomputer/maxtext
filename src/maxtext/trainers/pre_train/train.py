@@ -22,7 +22,6 @@ from typing import Any, Sequence
 import datetime
 import functools
 import os
-import sys
 import time
 import logging
 
@@ -1034,8 +1033,8 @@ def recover(
       # Reset snapshotter to abandon in-flight host saves while preserving the latest snapshot
       if snapshot_mgr is not None:
         new_snapshot_mgr = Snapshotter(replica_axis_index=snapshot_mgr.replica_axis_index)
-        with snapshot_mgr._lock:
-          new_snapshot_mgr._latest_snapshot = snapshot_mgr._latest_snapshot
+        with snapshot_mgr._lock:  # pylint: disable=protected-access
+          new_snapshot_mgr._latest_snapshot = snapshot_mgr._latest_snapshot  # pylint: disable=protected-access
         python_vars["snapshot"] = new_snapshot_mgr
         snapshot_mgr = new_snapshot_mgr
 
@@ -1257,7 +1256,7 @@ def train_loop(config, recorder, state=None):
           try:
             results = train_utils.setup_train_loop(config, recorder, devices=devices)
             setup_results["results"] = results
-          except Exception as e:
+          except Exception as e:  # pylint: disable=broad-exception-caught
             setup_results["exception"] = e
           finally:
             init_complete_event.set()
@@ -1305,7 +1304,8 @@ def train_loop(config, recorder, state=None):
         is_slice_down = isinstance(e, jax.errors.JaxRuntimeError) and elastic.is_error_due_to_slice_down(e)
         if elastic_utils.elastic_snapshot(config) and (is_scale_up or is_slice_down):
           _logger.warning(
-              "Elastic event or slice failure caught during initialization: %s. Refreshing slice topology and retrying setup.",
+              "Elastic event or slice failure caught during initialization: %s. "
+              "Refreshing slice topology and retrying setup.",
               e,
           )
           if elastic_manager:
