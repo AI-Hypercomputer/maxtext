@@ -328,6 +328,7 @@ class RunInfo(BaseModel):
       description="The name of the run. Checkpoints will be stored under this name.",
   )
   model_name: ModelName = Field("default", description="The name of the model configuration to use.")
+  use_m3_model: bool = Field(False, description="Use the m3 backend for a registered model.")
   override_model_config: bool = Field(False, description="If True, allows overriding model parameters via CLI.")
   override_logical_axis_rules: bool = Field(
       False,

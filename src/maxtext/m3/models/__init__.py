@@ -22,7 +22,20 @@ Each family owns its architecture end to end:
             llama3_sharding.py  # logical-axis -> mesh-axis rules
             llama3_8b.yml       # size-specific config overrides
 
-This module will also hold the single dispatch point (`create_model`) and the
-model registry. There is no shared `Decoder`, no shared attention class, and no
+This module holds the single dispatch point (`create_model`) and the model
+registry, which is empty until model implementations land.
+There is no shared `Decoder`, no shared attention class, and no
 model-name branching
 """
+
+from collections.abc import Callable
+
+
+MODEL_REGISTRY: dict[str, Callable] = {}
+
+
+def create_model(config, mesh, **kwargs):
+  """Dispatches to a registered m3 constructor using driver configuration."""
+  if config.model_name not in MODEL_REGISTRY:
+    raise ValueError(f"Model {config.model_name!r} does not support the m3 backend (use_m3_model=True).")
+  return MODEL_REGISTRY[config.model_name](config, mesh, **kwargs)

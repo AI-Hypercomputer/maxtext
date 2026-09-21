@@ -21,9 +21,9 @@ defines its own attention, MLP and decoder blocks instead of routing through a s
 class and a central `Decoder`, so a model can be read top to bottom in one place. Scalability
 concerns are applied as post-construction transforms rather than branched on inside model code.
 
-> **Status: scaffolding.** This package is not yet wired into any MaxText entry point and nothing
-> here is importable by the legacy stack. Legacy `src/maxtext/layers/` remains the production path
-> until the migration milestones complete.
+> **Status: scaffolding.** Model construction can opt in with `use_m3_model=true`, but the m3
+> registry is currently empty, so every model is rejected. The flag defaults to false;
+> legacy `src/maxtext/layers/` remains the production path until migration milestones complete.
 
 ## Layout
 
