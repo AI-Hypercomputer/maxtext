@@ -662,6 +662,61 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         _sharding((KV_BATCH, KV_HEAD, None, None)),
     )
 
+  @staticmethod
+  def _mamba_block_table_slots(
+      attention_metadata,
+      seq_lens,
+      query_start_loc,
+      mamba_block_size: int,
+      padded_num_reqs_per_dp: int,
+      dp_size: int,
+      local_rows: int,
+  ):
+    """Resolves the write and read mamba slots from the mamba block table.
+
+    Used under mamba prefix caching, where vLLM checkpoints the recurrent state
+    per block rather than keeping one resident slot per request: a request
+    resumes from the block covering its last already-computed token and writes
+    to the block covering its last token, so the two differ whenever a step
+    crosses a block boundary.
+
+    Args:
+      attention_metadata: vLLM attention metadata for this step.
+      seq_lens: Per-request total sequence lengths, truncated to the active
+        request bucket.
+      query_start_loc: Per-request token offsets, truncated to the active
+        request bucket.
+      mamba_block_size: Tokens per mamba block.
+      padded_num_reqs_per_dp: Active request bucket size per DP rank.
+      dp_size: Number of DP ranks.
+      local_rows: Rows of mamba state resident on one DP rank.
+
+    Returns:
+      A `(write_state_indices, read_state_indices)` pair, both rank-local.
+    """
+    block_tables = attention_metadata.block_tables
+    num_reqs_total = attention_metadata.seq_lens.shape[0]
+    block_tables = jnp.reshape(block_tables, (num_reqs_total, -1))
+    max_num_reqs_per_dp = num_reqs_total // dp_size
+    block_tables_sliced = jnp.reshape(
+        jnp.reshape(block_tables, (dp_size, max_num_reqs_per_dp, -1))[:, :padded_num_reqs_per_dp, :],
+        (-1, block_tables.shape[-1]),
+    )
+
+    query_start_loc_reshaped = jnp.reshape(query_start_loc, (dp_size, padded_num_reqs_per_dp + 1))
+    query_lens = jnp.reshape(query_start_loc_reshaped[:, 1:] - query_start_loc_reshaped[:, :-1], (-1,))
+    num_computed = seq_lens - query_lens
+
+    read_col = jnp.maximum(num_computed - 1, 0) // mamba_block_size
+    write_col = jnp.maximum(seq_lens - 1, 0) // mamba_block_size
+    batch_idx = jnp.arange(seq_lens.shape[0])
+
+    # The kernel DMAs these ids with bounds checks disabled, so clamp them here
+    # to keep an out-of-range id from halting the core.
+    write_state_indices = jnp.clip(block_tables_sliced[batch_idx, write_col], 0, local_rows - 1)
+    read_state_indices = jnp.clip(block_tables_sliced[batch_idx, read_col], 0, local_rows - 1)
+    return write_state_indices.astype(jnp.int32), read_state_indices.astype(jnp.int32)
+
   def __call__(
       self,
       hidden_states: Array,
@@ -681,6 +736,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # When kv_cache is a 2-tuple of paged mamba state arrays from vLLM, use
     # run_jax_gdn_attention from tpu_inference for correct sequential token processing.
+    # vLLM addresses the recurrent state one of two ways, and only one of them
+    # is present at a time: a resident per-request slot in
+    # `mamba_state_indices`, or -- under mamba prefix caching, where
+    # `mamba_state_indices` is None -- a block id looked up in the mamba block
+    # table, which needs `gdn_mamba_block_size`.
+    mamba_block_size = cfg.gdn_mamba_block_size
     use_paged_state = (
         kv_cache is not None
         and isinstance(kv_cache, tuple)
@@ -688,7 +749,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         and attention_metadata is not None
         and (
             getattr(attention_metadata, "mamba_state_indices", None) is not None
-            or getattr(attention_metadata, "block_tables", None) is not None
+            or (mamba_block_size and getattr(attention_metadata, "block_tables", None) is not None)
         )
         and self.mesh is not None
     )
@@ -853,6 +914,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       )
 
       if getattr(attention_metadata, "mamba_state_indices", None) is not None:
+        # Resident per-request slot: the same slot is read and written.
         state_indices = truncate_sharded_tensor(
             attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
             padded_num_reqs_per_dp,
@@ -860,24 +922,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         )
         read_state_indices = state_indices
       else:
-        # Mamba prefix caching ("align" mode): derive read/write state slots
-        # from the mamba block table directly on TPU.
-        block_tables = attention_metadata.block_tables.reshape(attention_metadata.seq_lens.shape[0], -1)  # pyrefly: ignore[missing-attribute]
-        max_num_reqs_per_dp = attention_metadata.seq_lens.shape[0] // dp_size  # pyrefly: ignore[missing-attribute]
-        block_tables_reshaped = block_tables.reshape(dp_size, max_num_reqs_per_dp, -1)
-        block_tables_sliced = block_tables_reshaped[:, :padded_num_reqs_per_dp, :].reshape(-1, block_tables.shape[-1])
-        mamba_block_size = getattr(self.config, "mamba_block_size", 256)
-        query_start_loc_reshaped = query_start_loc.reshape(dp_size, padded_num_reqs_per_dp + 1)
-        query_lens = (query_start_loc_reshaped[:, 1:] - query_start_loc_reshaped[:, :-1]).reshape(-1)
-        num_computed = seq_lens - query_lens
-
-        read_col = jnp.maximum(num_computed - 1, 0) // mamba_block_size
-        write_col = jnp.maximum(seq_lens - 1, 0) // mamba_block_size
-
-        batch_idx = jnp.arange(seq_lens.shape[0])
-        local_rows = max(conv_state_paged.shape[0] // dp_size, 1)
-        read_state_indices = jnp.clip(block_tables_sliced[batch_idx, read_col], 0, local_rows - 1)
-        state_indices = jnp.clip(block_tables_sliced[batch_idx, write_col], 0, local_rows - 1)
+        state_indices, read_state_indices = self._mamba_block_table_slots(
+            attention_metadata,
+            seq_lens,
+            query_start_loc,
+            mamba_block_size,
+            padded_num_reqs_per_dp,
+            dp_size,
+            local_rows=max(conv_state_paged.shape[0] // dp_size, 1),
+        )
 
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
