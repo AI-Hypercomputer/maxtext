@@ -791,5 +791,66 @@ class RouterProjQwixInterceptionTest(unittest.TestCase):
     self._assert_router_proj_interception(quantize_router_proj=False)
 
 
+class LogitsProjQwixTest(unittest.TestCase):
+  """Verifies Qwix rule generation and interception behavior for logits projection (logits_dense)."""
+
+  def _assert_logits_proj_interception(self, quantize_logits_proj: bool, expected_rule: str):
+    """Verifies Qwix interception behavior for the logits projection."""
+    cfg = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "model_name=deepseek3-671b",
+            "quantization=fp8_full",
+            "use_qwix_quantization=true",
+            "per_device_batch_size=1",
+            "max_target_length=16",
+            f"quantize_logits_proj={quantize_logits_proj}",
+        ],
+        run_name="deepseek3_logits_proj_quantize_test",
+        skip_jax_distributed_system=True,
+    )
+    with self.assertLogs(absl_logging.get_absl_logger(), level="DEBUG") as cm:
+      # Create abstract model using nnx.eval_shape (0 FLOPs, 0 device allocation)
+      _, _ = model_creation_utils.create_nnx_abstract_model(cfg)
+
+    logits_dense_logs = [log for log in cm.output if "module='decoder/logits_dense'" in log and "op=dot_general" in log]
+    self.assertTrue(logits_dense_logs, "Expected logits_dense dot_general operations to be traced by Qwix")
+    for log in logits_dense_logs:
+      self.assertIn(expected_rule, log)
+
+  def test_deepseek3_quantize_logits_proj_true_intercepts_logits_dense(self):
+    """DeepSeek3 with quantize_logits_proj=True intercepts logits_dense ops with quantized rule=0."""
+    self._assert_logits_proj_interception(quantize_logits_proj=True, expected_rule="rule=0")
+
+  def test_deepseek3_quantize_logits_proj_false_leaves_logits_dense_unquantized(self):
+    """DeepSeek3 with quantize_logits_proj=False leaves logits_dense unquantized (rule=None)."""
+    self._assert_logits_proj_interception(quantize_logits_proj=False, expected_rule="rule=None")
+
+  def test_logits_proj_calibration_methods(self):
+    """Verifies logits_dense QtRule calibration method inheritance and override."""
+    for override, expected in [("", "fixed,-224,224"), ("absmax", "absmax")]:
+      extra = [f"logits_proj_quant_calibration_method={override}"] if override else []
+      cfg = pyconfig.initialize(
+          [
+              "",
+              get_test_config_path(),
+              "model_name=deepseek3-671b",
+              "quantization=fp8_full",
+              "use_qwix_quantization=true",
+              "weight_quantization_calibration_method=fixed,-224,224",
+              "act_quantization_calibration_method=fixed,-224,224",
+              "quantize_logits_proj=true",
+              *extra,
+          ],
+          run_name="logits_proj_calib_test",
+          skip_jax_distributed_system=True,
+      )
+      rule = [
+          r for r in quantizations.get_fp8_full_qwix_rule_w_sparsity(cfg) if r.module_path == "decoder/logits_dense.*"
+      ][0]
+      self.assertEqual((rule.weight_calibration_method, rule.act_calibration_method), (expected, expected))
+
+
 if __name__ == "__main__":
   unittest.main()
