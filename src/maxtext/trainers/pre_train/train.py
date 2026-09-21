@@ -22,7 +22,6 @@ from typing import Any, Sequence
 import datetime
 import functools
 import os
-import sys
 import time
 import logging
 
@@ -840,7 +839,7 @@ def recover(
     immutable_data: dict[str, Any],
     active_state: Any = None,
 ):
-  """Rebuilds MaxText JAX device state and restores state from host snapshot or active state."""
+  """Rebuilds MaxText JAX device state, restores the train state, and snapshots it on the new mesh."""
   config = immutable_data["config"]
   recorder = python_vars["recorder"]
   elastic_manager = python_vars["elastic_manager"]
@@ -862,6 +861,142 @@ def recover(
     if key in python_vars:
       _logger.info("Deleting old %s to release colocated python resources...", key)
       del python_vars[key]
+
+  def _safe_replace(state_obj, pure_dict):
+    """Replaces the entries of an NNX state that the restored values also hold.
+
+    Entries missing from the restored values keep their initialized value, and list indices that come back as
+    strings are matched against the integer keys of the state.
+
+    Args:
+      state_obj: The nnx.State to update in place.
+      pure_dict: A pure dict of restored values, or anything else to leave the state untouched.
+    """
+    if not isinstance(pure_dict, dict):
+      return
+    current_flat = dict(nnx.statelib.to_flat_state(state_obj))
+    flat_pure = traverse_util.flatten_dict(pure_dict)
+    filtered_pure = {}
+    for kp, v in flat_pure.items():
+      if kp in current_flat:
+        filtered_pure[kp] = v
+      else:
+        int_kp = tuple(int(x) if str(x).isdigit() else x for x in kp)
+        if int_kp in current_flat:
+          filtered_pure[int_kp] = v
+    if filtered_pure:
+      nnx.replace_by_pure_dict(state_obj, traverse_util.unflatten_dict(filtered_pure))
+
+  def _restore_from_snapshot(snapshot_mgr, model, state):
+    """Restores the latest in-memory snapshot onto the given train state.
+
+    Args:
+      snapshot_mgr: The snapshotter holding the in-memory snapshots.
+      model: The Linen module, or the NNX graphdef of the train state.
+      state: The freshly initialized train state to restore onto.
+
+    Returns:
+      A tuple of the restored train state and the step to resume training at.
+    """
+    if isinstance(model, nn.Module):
+      abstract_dict = {
+          "step": state.step,
+          "params": state.params,
+          "opt_state": state.opt_state,
+      }
+      replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+      restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+      restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+      restored_state = state.replace(
+          step=restored_dict["step"],
+          params=restored_dict["params"],
+          opt_state=restored_dict["opt_state"],
+      )
+    else:
+      abstract_dict = {
+          "model": nnx.to_pure_dict(nnx.state(state.model)),
+          "optimizer": nnx.to_pure_dict(nnx.state(state.optimizer)),
+      }
+      replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+      restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+      restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+
+      merged = jax.tree.map(
+          lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
+          restored_dict,
+          abstract_dict,
+          is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+      )
+
+      m_state = nnx.state(state.model)
+      _safe_replace(m_state, merged["model"])
+      nnx.update(state.model, m_state)
+      opt_state = nnx.state(state.optimizer)
+      _safe_replace(opt_state, merged["optimizer"])
+      nnx.update(state.optimizer, opt_state)
+      restored_state = state
+    # A train-loop snapshot holds the state after its step's update. Resume from the restored step counter,
+    # because resuming at the snapshot's own step would run that step a second time.
+    return restored_state, get_first_step(model, restored_state)
+
+  def _restore_from_checkpoint(checkpoint_manager, model, state):
+    """Restores the latest persistent checkpoint onto the given train state.
+
+    Args:
+      checkpoint_manager: The CheckpointManager of this run.
+      model: The Linen module, or the NNX graphdef of the train state.
+      state: The freshly initialized train state to restore onto.
+
+    Returns:
+      A tuple of the restored train state and the step to resume training at.
+    """
+    _logger.info("Restoring from persistent checkpoint...")
+    restored, _ = checkpointing.load_state_if_possible(
+        checkpoint_manager,
+        None,
+        config.load_parameters_path,
+        config.load_full_state_path,
+        config.checkpoint_storage_concurrent_gb,
+        # load_state_if_possible maps the checkpoint onto an NNX state only when it is given an nnx.State.
+        # Passing the TrainStateNNX module matches no checkpoint keys, so nothing would be restored.
+        state if isinstance(model, nn.Module) else nnx.state(state),
+        config.enable_single_replica_ckpt_restoring,
+        config.dataset_type,
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
+        enable_orbax_v1=config.enable_orbax_v1,
+        checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+        source_checkpoint_layout=config.source_checkpoint_layout,
+        expansion_factor_real_data=config.expansion_factor_real_data,
+        maxtext_config=config,
+    )
+    if isinstance(model, nn.Module):
+      restored_state = restored["items"] if hasattr(restored, "__getitem__") and "items" in restored else restored
+      return restored_state, int(restored_state.step)
+
+    overlay = restored["items"] if hasattr(restored, "__getitem__") and "items" in restored else restored
+    if isinstance(overlay, train_state_nnx.TrainStateNNX):
+      overlay_model = nnx.to_pure_dict(nnx.state(overlay.model))
+      overlay_opt = nnx.to_pure_dict(nnx.state(overlay.optimizer)) if overlay.optimizer is not None else None
+    elif isinstance(overlay, nnx.State):
+      overlay_dict = overlay.to_pure_dict()
+      overlay_model = overlay_dict.get("model", overlay_dict)
+      overlay_opt = overlay_dict.get("optimizer", None)
+    elif isinstance(overlay, dict):
+      overlay_model = overlay.get("model", overlay)
+      overlay_opt = overlay.get("optimizer", None)
+    else:
+      overlay_model = overlay
+      overlay_opt = None
+
+    m_state = nnx.state(state.model)
+    _safe_replace(m_state, overlay_model)
+    nnx.update(state.model, m_state)
+    if overlay_opt is not None and state.optimizer is not None:
+      opt_state = nnx.state(state.optimizer)
+      _safe_replace(opt_state, overlay_opt)
+      nnx.update(state.optimizer, opt_state)
+    return state, int(state.optimizer.step.value)
 
   while True:
     try:
@@ -898,8 +1033,8 @@ def recover(
       # Reset snapshotter to abandon in-flight host saves while preserving the latest snapshot
       if snapshot_mgr is not None:
         new_snapshot_mgr = Snapshotter(replica_axis_index=snapshot_mgr.replica_axis_index)
-        with snapshot_mgr._lock:
-          new_snapshot_mgr._latest_snapshot = snapshot_mgr._latest_snapshot
+        with snapshot_mgr._lock:  # pylint: disable=protected-access
+          new_snapshot_mgr._latest_snapshot = snapshot_mgr._latest_snapshot  # pylint: disable=protected-access
         python_vars["snapshot"] = new_snapshot_mgr
         snapshot_mgr = new_snapshot_mgr
 
@@ -996,119 +1131,39 @@ def recover(
             elastic_manager.active_slice_indices,
         )
       else:
-        def _safe_replace(state_obj, pure_dict):
-          if not isinstance(pure_dict, dict):
-            return
-          current_flat = dict(nnx.statelib.to_flat_state(state_obj))
-          flat_pure = traverse_util.flatten_dict(pure_dict)
-          filtered_pure = {}
-          for kp, v in flat_pure.items():
-            if kp in current_flat:
-              filtered_pure[kp] = v
-            else:
-              int_kp = tuple(int(x) if str(x).isdigit() else x for x in kp)
-              if int_kp in current_flat:
-                filtered_pure[int_kp] = v
-          if filtered_pure:
-            nnx.replace_by_pure_dict(state_obj, traverse_util.unflatten_dict(filtered_pure))
-
-        snapshot_loaded = False
-        if snapshot_mgr is not None and snapshot_mgr.latest is not None:
+        snapshot_step = snapshot_mgr.latest.step if snapshot_mgr is not None and snapshot_mgr.latest is not None else None
+        checkpoint_step = (
+            checkpointing.latest_step(existing_checkpoint_manager) if existing_checkpoint_manager is not None else None
+        )
+        restored = None
+        # Snapshots are skipped while a persistent save is in flight, so the newest finalized checkpoint can be
+        # far ahead of the latest snapshot. Restore it in that case and keep the snapshot as the fallback.
+        if snapshot_step is not None and checkpoint_step is not None and checkpoint_step > snapshot_step:
+          _logger.info(
+              "Persistent checkpoint at step %d is newer than the in-memory snapshot at step %d.",
+              checkpoint_step,
+              snapshot_step,
+          )
           try:
-            restored_step = snapshot_mgr.latest.step
-            _logger.info("Attempting to restore from in-memory snapshot at step %d...", restored_step)
-            if isinstance(model, nn.Module):
-              abstract_dict = {
-                  "step": state.step,
-                  "params": state.params,
-                  "opt_state": state.opt_state,
-              }
-              replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
-              restored_dict = snapshot_mgr.load(replicated_abstract_dict)
-              restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
-              restored_state = state.replace(
-                  step=restored_dict["step"],
-                  params=restored_dict["params"],
-                  opt_state=restored_dict["opt_state"],
-              )
-            else:
-              abstract_dict = {
-                  "model": nnx.to_pure_dict(nnx.state(state.model)),
-                  "optimizer": nnx.to_pure_dict(nnx.state(state.optimizer)),
-              }
-              replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
-              restored_dict = snapshot_mgr.load(replicated_abstract_dict)
-              restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+            restored = _restore_from_checkpoint(existing_checkpoint_manager, model, state)
+          except Exception as e:  # pylint: disable=broad-exception-caught
+            if elastic.is_error_due_to_slice_down(e):
+              raise
+            _logger.warning("Persistent checkpoint recovery failed (%s). Falling back to in-memory snapshot.", e)
 
-              merged = jax.tree.map(
-                  lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
-                  restored_dict,
-                  abstract_dict,
-                  is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
-              )
-
-              m_state = nnx.state(state.model)
-              _safe_replace(m_state, merged["model"])
-              nnx.update(state.model, m_state)
-              opt_state = nnx.state(state.optimizer)
-              _safe_replace(opt_state, merged["optimizer"])
-              nnx.update(state.optimizer, opt_state)
-              restored_state = state
-
-            snapshot_loaded = True
-            _logger.info("Successfully restored in-memory snapshot at step %d!", restored_step)
+        if restored is None and snapshot_step is not None:
+          try:
+            _logger.info("Attempting to restore from in-memory snapshot at step %d...", snapshot_step)
+            restored = _restore_from_snapshot(snapshot_mgr, model, state)
+            _logger.info("Successfully restored in-memory snapshot at step %d!", snapshot_step)
           except (RuntimeError, jax.errors.JaxRuntimeError) as e:
             _logger.warning("In-memory snapshot recovery failed (%s). Falling back to persistent checkpoint.", e)
 
-        if not snapshot_loaded:
+        if restored is None:
           if existing_checkpoint_manager is None:
             raise RuntimeError("No snapshots or persistent checkpoints available to restore from. Cannot recover.")
-          _logger.info("Restoring from persistent checkpoint...")
-          restored, _ = checkpointing.load_state_if_possible(
-              existing_checkpoint_manager,
-              None,
-              config.load_parameters_path,
-              config.load_full_state_path,
-              config.checkpoint_storage_concurrent_gb,
-              state,
-              config.enable_single_replica_ckpt_restoring,
-              config.dataset_type,
-              use_ocdbt=config.checkpoint_storage_use_ocdbt,
-              use_zarr3=config.checkpoint_storage_use_zarr3,
-              enable_orbax_v1=config.enable_orbax_v1,
-              checkpoint_conversion_fn=config.checkpoint_conversion_fn,
-              source_checkpoint_layout=config.source_checkpoint_layout,
-              expansion_factor_real_data=config.expansion_factor_real_data,
-              maxtext_config=config,
-          )
-          if isinstance(model, nn.Module):
-            restored_state = restored["items"] if hasattr(restored, "__getitem__") and "items" in restored else restored
-            restored_step = int(restored_state.step)
-          else:
-            overlay = restored["items"] if hasattr(restored, "__getitem__") and "items" in restored else restored
-            if isinstance(overlay, train_state_nnx.TrainStateNNX):
-              overlay_model = nnx.to_pure_dict(nnx.state(overlay.model))
-              overlay_opt = nnx.to_pure_dict(nnx.state(overlay.optimizer)) if overlay.optimizer is not None else None
-            elif isinstance(overlay, nnx.State):
-              overlay_dict = overlay.to_pure_dict()
-              overlay_model = overlay_dict.get("model", overlay_dict)
-              overlay_opt = overlay_dict.get("optimizer", None)
-            elif isinstance(overlay, dict):
-              overlay_model = overlay.get("model", overlay)
-              overlay_opt = overlay.get("optimizer", None)
-            else:
-              overlay_model = overlay
-              overlay_opt = None
-
-            m_state = nnx.state(state.model)
-            _safe_replace(m_state, overlay_model)
-            nnx.update(state.model, m_state)
-            if overlay_opt is not None and state.optimizer is not None:
-              opt_state = nnx.state(state.optimizer)
-              _safe_replace(opt_state, overlay_opt)
-              nnx.update(state.optimizer, opt_state)
-            restored_state = state
-            restored_step = int(state.optimizer.step.value)
+          restored = _restore_from_checkpoint(existing_checkpoint_manager, model, state)
+        restored_state, restored_step = restored
 
         if metric_logger_instance is not None:
           metric_logger_instance.learning_rate_schedule = learning_rate_schedule
@@ -1151,6 +1206,11 @@ def recover(
         _logger.warning("Slice state change or error caught during recovery: %s. Retrying recovery.", e)
       else:
         raise
+
+  # Snapshot the recovered state here rather than in the caller: the reset above replaced python_vars["snapshot"],
+  # and a snapshot saved through a snapshotter captured before the call would never be read again.
+  if python_vars["snapshot"] is not None:
+    save_snapshot(python_vars["snapshot"], jax_device_state["state"], python_vars["step"], jax_device_state["model"])
 
 
 def train_loop(config, recorder, state=None):
@@ -1196,7 +1256,7 @@ def train_loop(config, recorder, state=None):
           try:
             results = train_utils.setup_train_loop(config, recorder, devices=devices)
             setup_results["results"] = results
-          except Exception as e:
+          except Exception as e:  # pylint: disable=broad-exception-caught
             setup_results["exception"] = e
           finally:
             init_complete_event.set()
@@ -1244,7 +1304,8 @@ def train_loop(config, recorder, state=None):
         is_slice_down = isinstance(e, jax.errors.JaxRuntimeError) and elastic.is_error_due_to_slice_down(e)
         if elastic_utils.elastic_snapshot(config) and (is_scale_up or is_slice_down):
           _logger.warning(
-              "Elastic event or slice failure caught during initialization: %s. Refreshing slice topology and retrying setup.",
+              "Elastic event or slice failure caught during initialization: %s. "
+              "Refreshing slice topology and retrying setup.",
               e,
           )
           if elastic_manager:
@@ -1399,8 +1460,6 @@ def train_loop(config, recorder, state=None):
                 immutable_data,
                 active_state=jax_device_state["state"],
             )
-            # Start snapshot save immediately on the new mesh
-            save_snapshot(snapshot_mgr, jax_device_state["state"], python_vars["step"], model)
 
           training_loop_iteration(jax_device_state, python_vars, immutable_data)
           python_vars["step"] += 1
@@ -1437,9 +1496,6 @@ def train_loop(config, recorder, state=None):
           else:
             # Slice Failure Recovery
             recover(jax_device_state, python_vars, immutable_data)
-
-          # Save snapshot across the newly recovered mesh layout
-          save_snapshot(snapshot_mgr, jax_device_state["state"], python_vars["step"], model)
           continue
 
     # Unpack state for post-loop actions

@@ -17,6 +17,7 @@
 import asyncio
 import json
 import os
+import threading
 from unittest import mock
 
 from absl.testing import absltest
@@ -35,6 +36,7 @@ from maxtext.common import checkpointing
 from maxtext.common import grain_utility
 import numpy as np
 import optax
+import orbax.checkpoint as ocp
 import safetensors.numpy
 
 
@@ -324,6 +326,53 @@ class CheckpointMetadataTest(parameterized.TestCase):
     loaded_metadata = checkpointing.load_checkpoint_metadata("corrupt/path")
     self.assertEqual(loaded_metadata, {})
     mock_ckptr.metadata.assert_called_once()
+
+
+class CancelCheckpointManagerTest(absltest.TestCase):
+  """Tests for cancel_checkpoint_manager."""
+
+  def test_drops_step_whose_save_fails_after_cancel(self):
+    # Elastic recovery cancels the manager while the in-flight save is still failing on a lost slice. The failed
+    # step must not stay cached as the latest step.
+    state = {"w": np.arange(4.0)}
+    manager = ocp.CheckpointManager(
+        self.create_tempdir().full_path,
+        item_names=("state",),
+        item_handlers={"state": ocp.StandardCheckpointHandler()},
+        options=ocp.CheckpointManagerOptions(enable_async_checkpointing=True),
+    )
+    manager.save(1, args=ocp.args.Composite(state=ocp.args.StandardSave(state)))
+    manager.wait_until_finished()
+
+    release_commit = threading.Event()
+
+    class _FailingCommit:
+
+      def result(self, timeout=None):
+        del timeout
+        release_commit.wait()
+        raise RuntimeError("DATA_LOSS: lost connection to a worker")
+
+    original_async_save = ocp.StandardCheckpointHandler.async_save
+
+    async def _async_save_with_failing_commit(handler, *args, **kwargs):
+      return list(await original_async_save(handler, *args, **kwargs) or []) + [_FailingCommit()]
+
+    with mock.patch.object(ocp.StandardCheckpointHandler, "async_save", _async_save_with_failing_commit):
+      manager.save(2, args=ocp.args.Composite(state=ocp.args.StandardSave(state)))
+    # Orbax caches a step when its save starts and drops it only when wait_until_finished() reports the failure.
+    self.assertEqual(manager.latest_step(), 2)
+
+    commit_thread = manager._checkpointer._async_manager._thread  # pylint: disable=protected-access
+    finalize_thread = manager._finalize_thread.get()  # pylint: disable=protected-access
+    checkpointing.cancel_checkpoint_manager(manager)
+    release_commit.set()
+    commit_thread.join(timeout=60)
+    threading.Thread.join(finalize_thread, timeout=60)  # _FinalizeThread.join() would re-raise the commit error.
+
+    self.assertEqual(manager.all_steps(), [1])
+    self.assertEqual(manager.latest_step(), 1)
+    self.assertTrue(manager.should_save(2))
 
 
 class GrainCheckpointableEquivalenceTest(parameterized.TestCase):

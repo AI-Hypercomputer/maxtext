@@ -937,8 +937,8 @@ def cancel_checkpoint_manager(checkpoint_manager):
         thread = getattr(async_mgr, "_thread", None)
         if thread is not None:
           max_logging.log(f"Detached background async save thread: {thread.name}")
-          async_mgr._thread = None
-        async_mgr._exception = None
+          async_mgr._thread = None  # pylint: disable=protected-access
+        async_mgr._exception = None  # pylint: disable=protected-access
 
     # 2. Detach and clear finalize thread
     finalize_ref = getattr(checkpoint_manager, "_finalize_thread", None)
@@ -948,3 +948,13 @@ def cancel_checkpoint_manager(checkpoint_manager):
 
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.log(f"Warning: error during immediate checkpoint manager cancellation: {e}")
+
+  # 3. Reload the cached steps from storage. Orbax caches a step when its save starts and drops it only when
+  # wait_until_finished() reports the failure, which the detached finalize thread can no longer do. A save that
+  # failed after cancellation would otherwise stay latest_step() and block should_save().
+  if hasattr(checkpoint_manager, "reload"):
+    try:
+      checkpoint_manager.reload()
+      max_logging.log(f"Reloaded finalized checkpoint steps, latest step: {latest_step(checkpoint_manager)}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.log(f"Warning: failed to reload checkpoint steps after cancellation: {e}")

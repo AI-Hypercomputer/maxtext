@@ -1,0 +1,294 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit tests for how pre_train.train.recover() restores the train state after a slice failure.
+
+Pathways, mesh setup and compilation are mocked out. Persistent checkpoints are real Orbax checkpoints of a tiny NNX
+TrainState, saved and restored through MaxText's checkpointing code.
+"""
+
+import threading
+import types
+from unittest import mock
+
+from absl.testing import absltest
+from flax import nnx
+import jax
+import jax.numpy as jnp
+from maxtext.common import checkpointing
+from maxtext.common import train_state_nnx
+from maxtext.trainers.pre_train import train as pre_train
+import numpy as np
+import optax
+
+
+def _make_state(seed, step):
+  model = nnx.Linear(2, 3, rngs=nnx.Rngs(seed))
+  optimizer = nnx.Optimizer(model, optax.adamw(0.1), wrt=nnx.Param)
+  optimizer.step.set_value(jnp.asarray(step, dtype=jnp.uint32))
+  return train_state_nnx.TrainStateNNX(model, optimizer)
+
+
+def _kernel(state):
+  return np.asarray(nnx.to_pure_dict(nnx.state(state))["model"]["kernel"])
+
+
+class _FakeSnapshotter:
+  """Mirrors the pathways Snapshotter attributes that recover() uses."""
+
+  loaded_steps = []
+
+  def __init__(self, *, replica_axis_index=0):
+    self.replica_axis_index = replica_axis_index
+    self._lock = threading.Lock()
+    self._latest_snapshot = None  # A (value, step) pair, where value is a pure state dict or an error to raise.
+
+  @property
+  def latest(self):
+    if self._latest_snapshot is None:
+      return None
+    return types.SimpleNamespace(step=self._latest_snapshot[1])
+
+  def load(self, abstract_state):
+    del abstract_state
+    snapshot, step = self._latest_snapshot
+    if isinstance(snapshot, Exception):
+      raise snapshot
+    _FakeSnapshotter.loaded_steps.append(step)
+    return snapshot
+
+  def save(self, step, state_dict):
+    self._latest_snapshot = (state_dict, step)
+
+
+class RecoverTest(absltest.TestCase):
+  """Tests for what recover() restores after a slice failure, and which step it resumes at."""
+
+  def setUp(self):
+    """Mocks slice discovery, train loop setup and recompilation around recover()'s restore logic."""
+    super().setUp()
+    _FakeSnapshotter.loaded_steps = []
+    self.checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+        self.create_tempdir().full_path, enable_checkpointing=True, use_async=False, save_interval_steps=1
+    )
+    mesh = jax.make_mesh((1,), ("data",))
+    model = object()  # NNX model graphdef stand-in
+
+    def _setup_train_loop(*args, **kwargs):
+      del args, kwargs
+      return (
+          jax.random.PRNGKey(0),  # init_rng
+          self.checkpoint_manager,
+          None,  # state_mesh_shardings
+          model,
+          mesh,
+          None,  # learning_rate_schedule
+          None,
+          None,
+          None,  # rampup_manager
+          None,  # eval_data_iterator
+          _make_state(seed=0, step=0),
+      )
+
+    self.enter_context(mock.patch.object(jax.config, "update"))
+    self.wait_for_slices = self.enter_context(
+        mock.patch.object(pre_train.elastic, "wait_for_slices", return_value=frozenset({0}))
+    )
+    for name in ("record_elastic_wait_end_and_reinit_start", "mutate_config_for_topology", "record_elastic_reinit_end"):
+      self.enter_context(mock.patch.object(pre_train.elastic_utils, name))
+    self.enter_context(mock.patch.object(pre_train.elastic_utils, "live_devices", return_value=jax.devices()[:1]))
+    self.enter_context(mock.patch.object(pre_train, "Snapshotter", _FakeSnapshotter))
+    self.enter_context(mock.patch.object(pre_train.train_utils, "setup_train_loop", side_effect=_setup_train_loop))
+    self.enter_context(
+        mock.patch.object(pre_train.sharding, "maybe_update_params_sharding_with_opt", return_value=(None, None))
+    )
+    self.enter_context(mock.patch.object(pre_train.train_utils, "jit_train_and_eval_step", return_value=(None, None)))
+    self.enter_context(mock.patch.object(pre_train, "recreate_dataloaders", return_value=(None, None, None)))
+
+    # Restore real checkpoints, except for the errors a test queues up for the first calls.
+    self.load_errors = []
+    load_state_if_possible = checkpointing.load_state_if_possible
+
+    def _load(*args, **kwargs):
+      if self.load_errors:
+        raise self.load_errors.pop(0)
+      return load_state_if_possible(*args, **kwargs)
+
+    self.load_checkpoint = self.enter_context(
+        mock.patch.object(pre_train.checkpointing, "load_state_if_possible", side_effect=_load)
+    )
+
+    self.config = types.SimpleNamespace(
+        elastic_min_slice_count=1,
+        num_slices=1,
+        elastic_timeout_seconds=1,
+        load_parameters_path="",
+        load_full_state_path="",
+        checkpoint_storage_concurrent_gb=1,
+        enable_single_replica_ckpt_restoring=False,
+        dataset_type=None,
+        checkpoint_storage_use_ocdbt=True,
+        checkpoint_storage_use_zarr3=True,
+        enable_orbax_v1=False,
+        checkpoint_conversion_fn=None,
+        source_checkpoint_layout="orbax",
+        expansion_factor_real_data=-1,
+        logical_axis_rules=(),
+    )
+    self.python_vars = None
+
+  def _save_checkpoint(self, step, state):
+    """Saves the given train state as a persistent checkpoint, the way the train loop does."""
+    save_config = types.SimpleNamespace(
+        pure_nnx=True,
+        enable_diloco=False,
+        enable_checkpointing=True,
+        checkpoint_period=20,
+        enable_continuous_checkpointing=False,
+        enable_emergency_checkpoint=False,
+        enable_multi_tier_checkpointing=False,
+        enable_autocheckpoint=False,
+        dataset_type=None,
+    )
+    checkpointing.save_checkpoint(self.checkpoint_manager, step, state, save_config, force=True)
+
+  def _recover(self, snapshot, snapshot_step, load_errors=(), active_state=None):
+    """Runs recover() with the given snapshot as the latest one.
+
+    Args:
+      snapshot: The train state the snapshotter returns, or None when no snapshot was taken.
+      snapshot_step: The step the snapshot was taken at.
+      load_errors: Errors to raise from the first calls to load_state_if_possible.
+      active_state: The live train state to reshard, as on a scale-up, or None for a slice failure.
+
+    Returns:
+      A tuple of the step recover() resumes at and the train state it restored.
+    """
+    snapshotter = _FakeSnapshotter()
+    if snapshot is not None:
+      if isinstance(snapshot, train_state_nnx.TrainStateNNX):
+        snapshot = {
+            "model": nnx.to_pure_dict(nnx.state(snapshot.model)),
+            "optimizer": nnx.to_pure_dict(nnx.state(snapshot.optimizer)),
+        }
+      snapshotter._latest_snapshot = (snapshot, snapshot_step)  # pylint: disable=protected-access
+    self.load_errors.extend(load_errors)
+
+    self.python_vars = {
+        "recorder": None,
+        "elastic_manager": types.SimpleNamespace(
+            slice_to_devices={}, default_device=None, active_slice_indices=frozenset({0})
+        ),
+        "snapshot": snapshotter,
+        "rampup_manager": None,
+        "metric_logger_instance": None,
+        "checkpoint_manager": self.checkpoint_manager,
+    }
+    return self._recover_again(active_state)
+
+  def _recover_again(self, active_state=None):
+    """Runs recover() again on the host state that the previous recovery left behind."""
+    jax_device_state = {}
+    pre_train.recover(jax_device_state, self.python_vars, {"config": self.config}, active_state=active_state)
+    return self.python_vars["step"], jax_device_state["state"]
+
+  def test_restores_checkpoint_that_is_newer_than_snapshot(self):
+    snapshot = _make_state(seed=1, step=1616)
+    checkpoint = _make_state(seed=2, step=1801)
+    self._save_checkpoint(1800, checkpoint)
+
+    step, state = self._recover(snapshot, 1615)
+
+    self.load_checkpoint.assert_called_once()
+    self.assertEqual(_FakeSnapshotter.loaded_steps, [])
+    self.assertEqual(step, 1801)
+    np.testing.assert_array_equal(_kernel(state), _kernel(checkpoint))
+
+  def test_restores_snapshot_that_is_not_older_than_checkpoint(self):
+    snapshot = _make_state(seed=1, step=1816)
+    self._save_checkpoint(1800, _make_state(seed=2, step=1801))
+
+    step, state = self._recover(snapshot, 1815)
+
+    self.load_checkpoint.assert_not_called()
+    self.assertEqual(_FakeSnapshotter.loaded_steps, [1815])
+    self.assertEqual(step, 1816)  # The snapshot at step 1815 was taken after that step's update.
+    np.testing.assert_array_equal(_kernel(state), _kernel(snapshot))
+
+  def test_restores_startup_snapshot_at_its_own_step(self):
+    # The startup snapshot is taken before its step runs, e.g. right after restoring checkpoint 1600.
+    snapshot = _make_state(seed=1, step=1601)
+    self._save_checkpoint(1600, _make_state(seed=2, step=1601))
+
+    step, state = self._recover(snapshot, 1601)
+
+    self.load_checkpoint.assert_not_called()
+    self.assertEqual(step, 1601)
+    np.testing.assert_array_equal(_kernel(state), _kernel(snapshot))
+
+  def test_falls_back_to_snapshot_when_newer_checkpoint_fails(self):
+    snapshot = _make_state(seed=1, step=1616)
+    self._save_checkpoint(1820, _make_state(seed=2, step=1821))
+    incomplete = ValueError("Found incomplete checkpoint at gs://bucket/checkpoints/1820.")
+
+    step, state = self._recover(snapshot, 1615, load_errors=[incomplete])
+
+    self.load_checkpoint.assert_called_once()
+    self.assertEqual(_FakeSnapshotter.loaded_steps, [1615])
+    self.assertEqual(step, 1616)
+    np.testing.assert_array_equal(_kernel(state), _kernel(snapshot))
+
+  def test_falls_back_to_checkpoint_when_snapshot_fails(self):
+    checkpoint = _make_state(seed=2, step=1801)
+    self._save_checkpoint(1800, checkpoint)
+
+    step, state = self._recover(RuntimeError("No active replicas found."), 1815)
+
+    self.load_checkpoint.assert_called_once()
+    self.assertEqual(step, 1801)
+    np.testing.assert_array_equal(_kernel(state), _kernel(checkpoint))
+
+  def test_retries_recovery_when_slice_goes_down_during_checkpoint_restore(self):
+    snapshot = _make_state(seed=1, step=1616)
+    checkpoint = _make_state(seed=2, step=1801)
+    self._save_checkpoint(1800, checkpoint)
+    slice_down = jax.errors.JaxRuntimeError("DATA_LOSS: lost connection to a worker")
+
+    step, state = self._recover(snapshot, 1615, load_errors=[slice_down])
+
+    self.assertEqual(self.wait_for_slices.call_count, 2)
+    self.assertEqual(self.load_checkpoint.call_count, 2)
+    self.assertEqual(_FakeSnapshotter.loaded_steps, [])
+    self.assertEqual(step, 1801)
+    np.testing.assert_array_equal(_kernel(state), _kernel(checkpoint))
+
+  def test_restores_snapshot_taken_after_scale_up(self):
+    # The incident: a scale-up resharded the live state at step 1666, then the slice holding the only earlier
+    # snapshot (1660) failed. The snapshot taken on the new mesh has to be the one the next recovery finds.
+    self._save_checkpoint(1600, _make_state(seed=2, step=1601))
+    resharded = _make_state(seed=1, step=1666)
+
+    step, _ = self._recover(RuntimeError("No active replicas found."), 1660, active_state=resharded)
+    self.assertEqual(step, 1666)
+
+    step, state = self._recover_again()
+
+    self.load_checkpoint.assert_not_called()
+    self.assertEqual(_FakeSnapshotter.loaded_steps, [1666])
+    self.assertEqual(step, 1666)
+    np.testing.assert_array_equal(_kernel(state), _kernel(resharded))
+
+
+if __name__ == "__main__":
+  absltest.main()
