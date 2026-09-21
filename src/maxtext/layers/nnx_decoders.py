@@ -1266,7 +1266,7 @@ class NNXDecoder(nnx.Module):
     if with_context:
       names.append("context")
     if with_quantization:
-      names.append("quantization")
+      names.append("te_quantization")
     return jax.checkpoint_policies.save_only_these_names(*names)
 
   def get_remat_policy(self):

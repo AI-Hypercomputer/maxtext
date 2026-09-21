@@ -1370,7 +1370,7 @@ class TransformerEngineQuantization(Quantization):
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
             postfix=postfix,
             variable_collection=OVERWRITE_WITH_GRADIENT,
-            quantization_checkpoint_name="quantization",
+            quantization_checkpoint_name="te_quantization",
             fp8_recipe=fp8_recipe,
             n_groups=n_groups,  # pyrefly: ignore[bad-argument-type]
         )

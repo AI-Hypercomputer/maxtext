@@ -435,6 +435,7 @@ mla_q: 'remat'
 mla_kv: 'remat'
 attention_out: 'remat'
 engram: 'remat'
+te_quantization: 'remat' # TransformerEngine quantization scale tensors
 
 optimizer_memory_host_offload: false
 parameter_memory_host_offload: false
