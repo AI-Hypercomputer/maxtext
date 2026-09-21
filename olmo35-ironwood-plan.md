@@ -254,6 +254,36 @@ BC sub-block tiling is the known overflow site, patch 1 in the patched tree); th
 `TOKAMAX_KDA_DENSE_PAIRS=1`; then bf16 fwd/bwd off individually; then shrink seq at
 pdb=2 to see whether the trigger is total tokens or the batch dimension itself.
 
+## BLOCKER as of 2026-09-21 ~08:00: the SPS service is down
+
+`sps-j6080103-pathways-head-0-0-bpt6z` is in **Error** (0/1) and all its worker pods
+are gone, so every run now hangs waiting for a placement that will never come. The two
+tpu7x nodes on `bodaborg-tpu7x-sps` are Ready and idle, but they belong to that
+JobSet; the service is shared and its owner restarts it (guide section 9: "a new
+Pathways image needs the service redeployed... the service owner handles it"). I did
+not take those nodes, since squatting them would block the service from recovering.
+
+**This ends Ironwood access for now.** To resume: ask in the *Shared Pathways Service
+Users* chat space for a redeploy of `sps-j6080103`, or land a dedicated slice.
+
+An in-flight bisect of the KDA NaN was lost to this. The three tests, still worth
+running first when a slice returns, in this order:
+
+1. `pdb=2 seq=4096` (8192 tokens/device, same as the working pdb=1) versus
+   `pdb=1 seq=16384` (16384 tokens/device, same as the failing pdb=2). This separates
+   "the batch dimension itself" from "total tokens per device", which decides whether
+   to look at batching or at an accumulation overflow.
+2. `pdb=2` with `TOKAMAX_KDA_CHUNK_SIZE=128`.
+3. `pdb=2` with `TOKAMAX_KDA_DENSE_PAIRS=1`.
+
+Note the baseline pdb=2 NaN was already with the bf16 flags **off**, so the fault is in
+the base PR#1103-plus-patches kernel, not the bf16 path.
+
+Code read so far: `pallas_mosaic_tpu_fwd_kernel.py::_pre_process_pallas` does handle
+B > 1, by looping over batch elements and calling the B=1 kernel (line ~187), so the
+obvious "hardcoded batch 0" theory is wrong there. That loop also means the kernel
+serialises over batch, which is worth knowing independently of the NaN.
+
 ## Blocked / infrastructure
 
 - **A 4x4x4 is not currently obtainable.** `bodaborg-tpu7x-nap` has 47 Ironwood nodes
