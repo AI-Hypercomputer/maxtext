@@ -421,6 +421,23 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
   return jnp.broadcast_to(rhs_scale, (G, num_quant_blocks, 1, N))
 
 
+def _clamp_tiles(tile_m: int, tile_k: int, tile_n: int, m: int, k: int, n: int) -> tuple[int, int, int]:
+  """Clamps GMM v2 tile sizes to the operand extents they index.
+
+  A tile larger than its dimension is not a harmless over-request. gmm_v2 indexes
+  the operands by tile, so `tile_k > k` walks off the contracting extent and the
+  kernel returns NaN with no error: measured on tpu7x with olmo35-tiny, whose
+  latent is 512 against the 1024 default of `wi_tile_fwd_embed_dim`. Training
+  aborts on a NaN loss at step 1, while megablox and tokamax GMM v1 are clean at
+  the identical config. On a smaller-VMEM part the same over-request surfaces as
+  CompileTimeScopedVmemOom instead, which is how it stayed hidden.
+
+  `jax_ragged_dot_gmm` in `layers/moe.py` already clamps this way; the tokamax v2
+  path did not, and `wi_tile_*`/`wo_tile_*` reach it unmodified.
+  """
+  return min(tile_m, m), min(tile_k, k), min(tile_n, n)
+
+
 def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array | None:
   """Extracts the static LHS (activation) scale for the GMM v2 forward pass.
 
@@ -493,7 +510,10 @@ def _fwd_run_tokamax_v2(
   if use_gmm_v2_heuristic_tiling:
     fwd_tiling = gmm_v2.calculate_tiling
   else:
-    fwd_tiling = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tiling[2])
+    tm, tk, tn = _clamp_tiles(
+        tiling[0], tiling[1], tiling[2], lhs_operand.shape[0], lhs_operand.shape[1], rhs_operand.shape[2]
+    )
+    fwd_tiling = gmm_v2.TileSizes(tile_m=tm, tile_k=tk, tile_n=tn)
 
   out = gmm_v2.gmm_v2(
       lhs=lhs_operand,  # pyrefly: ignore[bad-argument-type]
@@ -882,7 +902,8 @@ def _dlhs_run_tokamax_v2(
   if use_gmm_v2_heuristic_tiling:
     dlhs_tiling = gmm_v2.calculate_tiling
   else:
-    dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+    tm, tk, tn = _clamp_tiles(tiling[3], tiling[4], tiling[5], dlhs_lhs.shape[0], dlhs_lhs.shape[1], dlhs_rhs.shape[2])
+    dlhs_tiling = gmm_v2.TileSizes(tile_m=tm, tile_k=tk, tile_n=tn)
 
   dlhs = gmm_v2.gmm_v2(
       lhs=dlhs_lhs,
@@ -1037,7 +1058,8 @@ def _drhs_run_tokamax_v2(
   if use_gmm_v2_heuristic_tiling:
     drhs_tiling = tgmm_v2.calculate_tgmm_tiling
   else:
-    drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
+    tm, tk, tn = _clamp_tiles(tiling[6], tiling[7], tiling[8], drhs_lhs.shape[0], drhs_lhs.shape[1], drhs_rhs.shape[1])
+    drhs_tiling = gmm_v2.TileSizes(tile_m=tm, tile_k=tk, tile_n=tn)
 
   return tgmm_v2.tgmm_v2(
       lhs=drhs_lhs,

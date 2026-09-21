@@ -354,10 +354,32 @@ neither alone triggers it, and it is not total tokens per device:
 `TOKAMAX_KDA_DENSE_PAIRS=1` does **not** fix it. `TOKAMAX_KDA_CHUNK_SIZE=128` errors
 out rather than running (MaxText's `gdn_chunk_size` stays 64, so the two disagree).
 
-**Bug 2 is independent of the KDA kernel.** `use_gmm_v2=True` NaNs at pdb=1 seq=8192
-even with `use_tokamax_kda=False`, while `megablox` and tokamax GMM v1 are both clean
-at the identical config. So it is a genuine gmm_v2 fault on this model, not an
-interaction.
+**Bug 2 is FIXED.** Root cause: **MaxText passed unclamped tile sizes to gmm_v2.**
+`wi_tile_fwd_embed_dim` defaults to 1024 while olmo35-tiny's latent (the contracting
+dim) is 512, so `tile_k > k`. gmm_v2 indexes its operands by tile, so the oversized
+tile walks off the contracting extent and the kernel returns NaN with no error.
+`jax_ragged_dot_gmm` in `layers/moe.py:1747` already clamps exactly this way; the
+tokamax v2 path did not.
+
+Why it stayed hidden: on a smaller-VMEM part the same over-request surfaces as
+`CompileTimeScopedVmemOom` rather than NaN (reproduced on v4), and tokamax v1 ignores
+`tiling` entirely (its public `ragged_dot` takes no tiling argument), so only the v2
+path is exposed.
+
+Fix: `_clamp_tiles()` in `kernels/megablox/ops.py`, applied at all three `TileSizes`
+sites (fwd, dlhs, drhs). Measured on tpu7x with the **default** tiles that previously
+aborted at step 1:
+
+| path | TF/s/dev | loss @ step 7 |
+|---|---|---|
+| megablox baseline | 43.3 | 10.151 |
+| tokamax gmm v1 | 44.5 | 10.151 |
+| **tokamax gmm v2, fixed** | **45.9** | 10.157 |
+
+So gmm_v2 is now clean and the fastest of the three, **1.06x over megablox**. Two
+independent workarounds also verified before the fix landed: clamping the
+`wi_tile_*`/`wo_tile_*` config by hand (44.1 TF/s), and `use_gmm_v2_heuristic_tiling=True`
+(42.7 TF/s), which lets tokamax choose all four tile fields itself.
 
 **Repro status.** `scripts/olmo35_nan_repro.py` builds a shrunk OLMo 3.5 (d_model 512,
 8 layers, dk 128 / dv 256, 8 experts top-2) and checks logits and every gradient for
@@ -485,3 +507,6 @@ One row per configuration. Filled in as runs land.
 | 21 | 3 | expert parallelism ep=2 / ep=4 | 0.83 / 1.03 | 42.4 / 34.3 | 3.7 / 3.0% | **hurts**; perfsim predicted 2.6-3.8x gain |
 | 22 | 3 | tokamax gmm v1 vs megablox | 0.81 | 43.8 vs 43.4 | 3.8% | neutral, loss identical |
 | 23 | 3.1 | gmm_v2 with `use_tokamax_kda=False` | n/a | n/a | n/a | **NaN**: bug is independent of KDA |
+| 24 | 3.1 | gmm_v2, `wi/wo_tile_*` clamped to 512 by hand | 0.80 | 44.1 | 3.8% | clean: first evidence the tiles were the cause |
+| 25 | 3.1 | gmm_v2 + `use_gmm_v2_heuristic_tiling=True` | 0.83 | 42.7 | 3.7% | clean: tokamax picks all four tile fields |
+| 26 | 3.1 | **gmm_v2 with `_clamp_tiles()` fix, default tiles** | 0.77 | **45.9** | **4.0%** | **fixed; fastest of the three, 1.06x over megablox** |
