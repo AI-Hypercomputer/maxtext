@@ -237,7 +237,22 @@ by construction.
    measured as the largest single OLMoE3 win (2.06x on the ragged-dot kernel, -6.6%
    step). Note it also requires `use_tokamax_gmm=True` or config validation rejects it.
 
-Both need a minimal repro and a fix before the lever sweep can conclude.
+Both need a fix before the lever sweep can conclude.
+
+**Repro status.** `scripts/olmo35_nan_repro.py` builds a shrunk OLMo 3.5 (d_model 512,
+8 layers, dk 128 / dv 256, 8 experts top-2) and checks logits and every gradient for
+non-finite values across per-device batch. It cannot be used locally: the Mosaic KDA
+kernel raises **"Not supported on TPU v4"**, and the `xla` reference implementation is
+finite at B = 1, 2 and 4 (absmax 1.2455e-01, identical across batch). So the NaN is
+specific to the Mosaic kernel on v7x and can only be bisected on Ironwood, where the
+only vehicle today is the shared single-slice SPS pool. Budget one SPS run per bisect
+step (5-10 minutes each including placement waits), and do not launch two at once:
+concurrent runs contend for the same slice and one dies.
+
+Suggested bisect order, cheapest first: `TOKAMAX_KDA_CHUNK_SIZE` 128/256 at pdb=2 (the
+BC sub-block tiling is the known overflow site, patch 1 in the patched tree); then
+`TOKAMAX_KDA_DENSE_PAIRS=1`; then bf16 fwd/bwd off individually; then shrink seq at
+pdb=2 to see whether the trigger is total tokens or the batch dimension itself.
 
 ## Blocked / infrastructure
 
