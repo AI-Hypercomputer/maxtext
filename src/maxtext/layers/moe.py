@@ -3649,8 +3649,9 @@ class RoutedMoE(nnx.Module):
     hidden_states = jnp.reshape(inputs, (batch_size * seq_len, emb_dim))
     gating_output = jnp.reshape(gate_logits, (batch_size * seq_len, self.num_experts))
 
-    _, top_k_indices = jax.lax.top_k(gating_output, self.num_experts_per_tok)
-    self.selected_experts = nnx.Intermediate(top_k_indices)
+    if self.config.return_routed_experts:
+      _, top_k_indices = jax.lax.top_k(gating_output, self.num_experts_per_tok)
+      self.selected_experts = nnx.Intermediate(top_k_indices)
 
     # Concatenate gate and up projections: [E, D, H] + [E, D, H] -> [E, D, 2H]
     # fused_moe_func splits this internally: gate=w1[..., :H], up=w1[..., H:]
@@ -3707,6 +3708,15 @@ class RoutedMoE(nnx.Module):
         use_gmm_fused_rs_kernel=tpu_inference_envs.USE_GMM_FUSED_RS_KERNEL,
         onehot_moe_permute_threshold=tpu_inference_envs.ONEHOT_MOE_PERMUTE_THRESHOLD,
         moe_chunk_size=tpu_inference_envs.VLLM_MOE_CHUNK_SIZE,
+        scatter_results=(
+            self.mesh is not None
+            and (
+                self.mesh.shape.get("data", 1)
+                * self.mesh.shape.get("attn_dp", 1)
+                * self.mesh.shape.get("attn_dp_expert", 1)
+            )
+            > 1
+        ),
     )
 
     # Reshape output 2D [T, D] -> 3D [B, S, D]
