@@ -182,6 +182,10 @@ vllm_block_size: null  # KV-cache page size; null lets the backend choose
 async_scheduling: true
 # stop generation when any of these strings is generated
 stop_strings: null
+# Record each MoE layer's routing decisions during rollout as `expert_indices`, so the
+# sampler's routing can be replayed on the trainer. Off by default so rollouts do not pay
+# for the extra top-k.
+return_routed_experts: false
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: true
