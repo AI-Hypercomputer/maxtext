@@ -563,6 +563,14 @@ class Quantization(BaseModel):
           " Only supported with `quantization=fp8_full`, `logits_via_embedding=False`, and `num_vocab_tiling = 1`."
       ),
   )
+  logits_proj_quant_calibration_method: str = Field(
+      "",
+      description=(
+          "Calibration method for the output logits (logits_dense) projection when `quantize_logits_proj=True`."
+          " If empty (default), inherits `weight_quantization_calibration_method` and"
+          " `act_quantization_calibration_method`. Set to e.g. 'absmax' to force absmax calibration."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")

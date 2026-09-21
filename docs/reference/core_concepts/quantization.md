@@ -85,6 +85,8 @@ The primary flags to control quantization are:
 
   - MTP has no output head of its own — it reuses the shared `logits_dense` via `apply_output_head`. This flag therefore also quantizes the MTP logits projection, independently of `quantize_mtp`.
 
+- `logits_proj_quant_calibration_method` (default: `""`): Calibration method for the output logits projection (`logits_dense`) when `quantize_logits_proj=True`. If empty (default), inherits `weight_quantization_calibration_method` and `act_quantization_calibration_method`. Set to e.g. `'absmax'` to force absmax calibration.
+
 ### Qwix Quantization (Recommended)
 
 To use Qwix, you must set `use_qwix_quantization=True`. Qwix is a powerful and non-intrusive library for Quantized Training.

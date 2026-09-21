@@ -31,7 +31,7 @@ save the output to sandbox/check_qwix_interception_log.txt, only retain the line
 
 (b) unit test
 ```
-JAX_PLATFORMS=cpu pytest tests/unit/quantizations_test.py -k "LogitsProjQwixInterceptionTest"
+JAX_PLATFORMS=cpu pytest tests/unit/quantizations_test.py -k "LogitsProjQwixTest"
 ```
 
 6. Rationale: Quantizing Logits Projection for Both Main and MTP

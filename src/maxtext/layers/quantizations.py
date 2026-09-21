@@ -971,17 +971,30 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
         weight_sparsity_start_step=config.weight_sparsity_start_step,
     )
 
-  paths = ["decoder/.*layers.*"]  # Main transformer layers
-  if config.quantize_mtp:
-    paths.append("mtp_block/.*")  # Multi-token prediction block
-  if config.quantize_logits_proj:
-    paths.append("decoder/logits_dense.*")  # Output logits projection
-  # Disjunct regex paths, e.g. "(path1|path2|...)"
-  module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
-
   rules = []
   if not config.quantize_router_proj:
     rules.append(_get_router_proj_unquantized_rule())
+
+  if config.quantize_logits_proj:
+    logits_calib = config.logits_proj_quant_calibration_method or None
+    rules.append(
+        qwix.QtRule(
+            module_path="decoder/logits_dense.*",
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=jnp.float8_e5m2,
+            weight_calibration_method=logits_calib or config.weight_quantization_calibration_method,
+            act_calibration_method=logits_calib or config.act_quantization_calibration_method,
+            bwd_calibration_method=config.bwd_quantization_calibration_method,
+            op_names=("dot_general",),
+        )
+    )
+
+  paths = ["decoder/.*layers.*"]  # Main transformer layers
+  if config.quantize_mtp:
+    paths.append("mtp_block/.*")  # Multi-token prediction block
+  # Disjunct regex paths, e.g. "(path1|path2|...)"
+  module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
 
   rules.append(
       qwix.QtRule(
