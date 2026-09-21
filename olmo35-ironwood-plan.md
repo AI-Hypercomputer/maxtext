@@ -134,9 +134,25 @@ mismatch.
 - [ ] 2.1 Install patched tokamax KDA from `olmo35/tokamax-kda-patched/kda` into `venv-maxtext` (0.0.13 ships `gmm_v2` but no `kda`; upstream `kda` is chunk 64 only, no bf16 switches)
 - [ ] 2.2 Re-run parity after the install (KDA is on the logits path)
 - [x] 2.3 SPS smoke test done via phase 1b: `Jax Backend: Pathways`, `Num_devices: 8`, clean teardown, RC=0
-- [ ] 2.4 Baseline: `olmo35-tiny`, seq 8192, pdb 1, 20 steps synthetic; median TF/s/device over the last 10 steps plus spread
+- [x] 2.1 Patched tokamax KDA installed into `venv-maxtext` at `site-packages/tokamax/_src/ops/experimental/kda/` (from `olmo35/tokamax-kda-patched/kda`). `kimi_delta_attention` imports; the two previously-skipped tokamax KDA parity tests now **pass**
+- [x] 2.2 Parity re-run after the install: **8 passed**
+- [x] 2.4 Baseline `olmo35-tiny` seq 8192 pdb 1 remat full: **45.7 TF/s/dev = 3.96% MFU**, step 0.79 s, 10,400 tok/s/dev
 - [ ] 2.5 No leftover `isc-proxy-agagik-*` jobs
 - [ ] 2.6 Start the 4x4x4 hunt for `small` (needs >= 64 chips)
+
+### SPS constraint found: XLA runtime flags do not propagate
+
+`LIBTPU_INIT_ARGS` set on the client has **no effect** over SPS, because the
+Pathways workers are pre-deployed with the service. Measured directly: olmo3-7b at
+identical config gave 318.7 / 315.8 / 321.1 TF/s with the flags and 317.7 / 320.5
+without. The sparse-core collective-offload set is a large part of the OLMo3 recipe's
+27% -> 44.5%, so **that ceiling is not reachable on SPS**; it needs a dedicated slice
+(the 4x4x4 hunt). A second symptom: `sa_block_*=2048` from the recipe OOMs VMEM at
+compile over SPS, because the matching `--xla_tpu_scoped_vmem_limit_kib=65536` never
+arrives.
+
+So on SPS we can tune MaxText-level knobs (remat, attention implementation, MoE
+flags, per-device batch, sharding) but not XLA runtime flags.
 
 ## Phase 3: lever sweep
 
@@ -150,6 +166,40 @@ One factor at a time against 2.4, identical steps and seed.
 - [ ] 3.6 gpt-oss-120b XLA flag set (sparse-core offload; prior 1.93x for 2-SC)
 - [ ] 3.7 Cross-check qwen3-235b where it disagrees (`megablox=False`, `shard_exp_on_fsdp=False`)
 - [ ] 3.8 Keep `use_random_routing` off for headline numbers
+
+### What the tiny measurements actually say
+
+Every kernel lever measured **neutral** (bf16 KDA, tokamax GMM v1, remat=custom), and
+halving the depth from 16 to 8 layers left the step time essentially unchanged
+(45.7 -> 44.3 TF/s). A step whose time does not depend on how many layers it runs is
+not compute-bound. perfsim agrees and names the cause: at 8 devices it puts **90% of
+the step in comm**, because FSDP re-gathers a 12.5B-parameter model across only 8
+devices every step.
+
+Two consequences. First, `olmo35-tiny` on an 8-device slice is a poor vehicle for
+kernel work: there is nothing for a kernel lever to win. Second, the measured 3.96%
+is a slice artifact, not the architecture's number.
+
+perfsim predicts 28.2 TF/s (2.4% MFU) here against 45.7 measured, so at 8 devices it
+is **pessimistic by 0.62x** — the opposite of the 1.7x optimism seen at 128 devices.
+The optimism factor is regime-dependent and cannot be carried across slice sizes.
+
+### Why the rungs will not behave alike
+
+Rows per expert per device is `seq x pdb x top_k / num_experts` = 8192 x 1 x 16 / 512
+= **256** for every rung, which is exactly one MXU tile (256x256). So the M dimension
+never amortizes at pdb=1, and the only thing that grows with rung size is K and N:
+
+| rung | expert GEMM M x K x N | MXU tiles |
+|---|---|---|
+| tiny | 256 x 512 x 1024 | 8 |
+| small | 256 x 768 x 1536 | 18 |
+| medium | 256 x 1280 x 2560 | 50 |
+| large | 256 x 2304 x 4608 | **162** |
+
+`large` does 20x more MXU work per expert GEMM than `tiny`. Measuring only `tiny` and
+generalising to the family would be badly wrong, and `tiny` is the family's worst case
+by construction.
 
 ## Phase 4: per-device batch and remat
 
@@ -176,6 +226,31 @@ One factor at a time against 2.4, identical steps and seed.
 - [ ] 6.5 If below 20%, price the architectural gap: sweep experts, `top_k`, expert width
 - [ ] 6.6 If the 4x4x4 landed, repeat 2.4-5.6 for `small`
 
+## Open bugs found (both block the main levers)
+
+1. **Fused tokamax KDA produces NaN at `per_device_batch_size=2`.** pdb=1 is clean and
+   the unfused chunked path is clean at pdb=2 (loss 11.73 -> 9.26), so it is the
+   kernel, not the model. This blocks the single most valuable lever, since pdb is
+   what every tuned recipe uses to raise MFU. Kernel is
+   `olmo35/tokamax-kda-patched/kda` at dk=128 / dv=256.
+2. **`use_gmm_v2=True` produces NaN at pdb=1.** This is the lever Aleksey Vlasenko
+   measured as the largest single OLMoE3 win (2.06x on the ragged-dot kernel, -6.6%
+   step). Note it also requires `use_tokamax_gmm=True` or config validation rejects it.
+
+Both need a minimal repro and a fix before the lever sweep can conclude.
+
+## Blocked / infrastructure
+
+- **A 4x4x4 is not currently obtainable.** `bodaborg-tpu7x-nap` has 47 Ironwood nodes
+  but none carry a `gke-tpu-partition-4x4x4-id` label (no partitions formed), and the
+  `priority-dev` queue's nominal quota is **51 chips**, under the 64 a 4x4x4 needs.
+- A free **2x2x2 (16 devices)** exists on `tpu7x-cluster-flex` pool
+  `tpu7x-multi-host-spot-2`, no Kueue. It needs a 2-pod JobSet plus getting the
+  rebased source into the run (the `kdaj24` image predates the rebase by 411 commits).
+- `olmo35-small` at 8 layers was attempted and **timed out waiting for SPS placement**,
+  not a model failure. SPS is shared and single-slice, so runs serialise; two
+  concurrent launches contend and one dies.
+
 ## Phase 7: decode
 
 - [ ] 7.1 `inference_microbenchmark` for `tiny` on SPS
@@ -191,3 +266,18 @@ One row per configuration. Filled in as runs land.
 |---|---|---|---|---|---|---|
 | 1 | 1b | olmo3-7b, seq 8192, pdb 1, remat full | 1.41 | 277 | 24.0% | dense baseline, untuned |
 | 2 | 1b | olmo3-32b, seq 8192, pdb 1, remat full | 4.84 | 349 | 30.3% | dense baseline, untuned |
+| 3 | 3 | olmo3-7b + remat=custom, all `=device` | 1.23 | 318 | 27.6% | +15% rel over row 1, loss identical (3.244 vs 3.245) |
+| 4 | 3 | olmo3-7b, row 3 with XLA flags OFF | 1.23 | 318 | 27.6% | **LIBTPU does not propagate over SPS** |
+| 5 | 3 | olmo3-7b + recipe `sa_block_*=2048` | n/a | n/a | n/a | CompileTimeScopedVmemOom; needs the scoped-vmem XLA flag |
+| 6 | 2.4 | **olmo35-tiny**, seq 8192, pdb 1, remat full | 0.79 | 45.7 | **3.96%** | MoE baseline; 10,400 tok/s/dev |
+| 7 | 3 | olmo35-tiny + remat=custom, all `=device` | 0.77 | ~46 | ~4.0% | no change, high variance (0.61-0.95 s) |
+| 8 | 4 | olmo35-tiny pdb=4, remat=custom | n/a | n/a | n/a | OOM: 112.15 G temporaries vs 94.74 G |
+| 9 | 4 | olmo35-tiny pdb=8, remat=custom | n/a | n/a | n/a | OOM: 190.79 G temporaries |
+| 10 | 4 | olmo35-tiny pdb=4, remat=full | n/a | n/a | n/a | OOM 127.93 G, **worse than custom**: MoE dispatch buffers, not activations |
+| 11 | 4 | olmo35-tiny pdb=8, remat=full | n/a | n/a | n/a | OOM 215.12 G |
+| 12 | 4 | olmo35-tiny pdb=2, fused KDA | n/a | n/a | n/a | **NaN loss** (kernel bug) |
+| 13 | 4 | olmo35-tiny pdb=2, `use_tokamax_kda=False` | 1.36 | 52.0 | 4.5% | runs clean, loss 11.7 -> 9.26 |
+| 14 | 3.2 | olmo35-tiny + `TOKAMAX_KDA_BF16_FWD/BWD=1` | 0.77 | 45.8 | 4.0% | neutral, loss unchanged |
+| 15 | 3 | olmo35-tiny + `use_tokamax_gmm=True` (v1) | 0.78 | 45.5 | 3.9% | neutral |
+| 16 | 3.1 | olmo35-tiny + `use_gmm_v2=True` | n/a | n/a | n/a | **NaN loss** (needs `use_tokamax_gmm=True` to even validate) |
+| 17 | - | olmo35-tiny at 8 layers (half depth) | 0.47 | 44.3 | 3.8% | **depth-independent**: step is not compute-bound |

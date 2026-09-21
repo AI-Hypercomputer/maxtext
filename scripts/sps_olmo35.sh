@@ -27,6 +27,30 @@ GCS_BUCKET=gs://cloud-pathways-staging
 SERVICE_JOBSET_NAME=sps-j6080103
 PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260901-jax_0.11.1
 
+# Ironwood XLA flags from run_olmo3_7b_stage1.sh, which took OLMo3-7B from 27% to
+# 44.5% MFU. Set XLA=0 to measure without them. NOTE: with Pathways the workers are
+# pre-deployed, so whether these reach the compiler is itself something to verify.
+if [ "${XLA:-1}" = "1" ]; then
+  export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} \
+    --xla_tpu_scoped_vmem_limit_kib=65536 \
+    --xla_tpu_bf16_emission_mode=NATIVE_EMISSION \
+    --xla_tpu_dvfs_p_state=7 \
+    --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true \
+    --xla_tpu_enable_sparse_core_collective_offload_all_gather=true \
+    --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true \
+    --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true \
+    --xla_tpu_use_tc_device_shape_on_sc=True \
+    --xla_sc_disable_megacore_partitioning=True \
+    --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
+fi
+
+# Patched-tokamax KDA knobs (olmo35/tokamax-kda-patched). All default off, which
+# reproduces PR #1103 bit-for-bit. Exported so the local controller, which builds
+# the kernel, sees them.
+for v in TOKAMAX_KDA_BF16_FWD TOKAMAX_KDA_BF16_BWD TOKAMAX_KDA_DENSE_PAIRS TOKAMAX_KDA_CHUNK_SIZE; do
+  [ -n "${!v:-}" ] && export "$v"
+done
+
 MODEL="${MODEL:-olmo35-tiny}"
 STEPS="${STEPS:-20}"
 SEQ="${SEQ:-8192}"
