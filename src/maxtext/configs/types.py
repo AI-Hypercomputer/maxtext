@@ -2896,6 +2896,19 @@ class VLLM(BaseModel):
   kv_cache_buffer: int = Field(256, gt=0, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, gt=0.0, le=1.0, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, ge=0, description="Swap space in GB for vLLM.")
+  free_kv_cache_during_weight_sync: bool = Field(
+      True,
+      description=(
+          "Maps to tunix RolloutConfig.rollout_vllm_free_kv_cache_during_weight_sync -> "
+          "VllmConfig.free_kv_cache_during_weight_sync (ignored, with a log line, while the installed tunix "
+          "predates it). The weight sync materializes a second copy of the sampler weights on HBM; freeing the KV "
+          "cache first makes room for it. False keeps the pool (hbm_utilization_vllm of each chip) allocated across "
+          "the sync and only resets its prefix-cache entries, saving the free + re-allocation (about 2 s per step "
+          "on a colocated Qwen3-0.6B run at hbm_utilization_vllm=0.3). With False the sync runs out of HBM when "
+          "that second copy does not fit next to the pool: check the headroom before disabling, colocated setups "
+          "and a large hbm_utilization_vllm have the least."
+      ),
+  )
   enable_dp_attention: bool = Field(False, description="Enable the attn_dp mesh axis in vLLM.")
   enable_expert_parallel: bool = Field(False, description="Enable expert parallelism in vLLM.")
   async_scheduling: bool = Field(False, description="Enable asynchronous scheduling in vLLM.")

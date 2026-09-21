@@ -166,6 +166,15 @@ max_target_length: 1024
 kv_cache_buffer: 256
 hbm_utilization_vllm: 0.72
 swap_space_vllm_gb: 2
+# Maps to tunix RolloutConfig.rollout_vllm_free_kv_cache_during_weight_sync -> VllmConfig.free_kv_cache_during_weight_sync
+# (effective once the tunix pin declares it; until then the setting is ignored and the trainer logs that).
+# The weight sync materializes a second copy of the sampler weights on HBM while the new values are resharded in;
+# freeing the KV cache first makes room for that copy. false keeps the pool (hbm_utilization_vllm of each chip)
+# allocated across the sync and only resets its prefix-cache entries, which saves the free + re-allocation
+# (about 2 s per step on a colocated Qwen3-0.6B run at hbm_utilization_vllm=0.3). With false the sync runs out of
+# HBM when that second copy does not fit next to the pool, so check the headroom before disabling: the default
+# hbm_utilization_vllm above leaves far less room than 0.3, and colocated setups have the least.
+free_kv_cache_during_weight_sync: true
 # Generation Configuration During Training
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
