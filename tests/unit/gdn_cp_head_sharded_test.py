@@ -1002,7 +1002,7 @@ class GdnCpHeadShardedTest(absltest.TestCase):
       del model_gt_cp1, model_gt_cp8, grads_gt_cp1, grads_gt_cp8, x_gt_cp1, p_gt_cp1, x_gt_cp8, p_gt_cp8
 
   def test_gdn_cp_auto_mode_selection(self):
-    """Verifies that auto mode defaults to head-sharded CP when cp_size <= 4 and sequence-sharded when cp_size > 4."""
+    """Verifies that auto mode defaults to head-sharded CP when cp_size <= 2 and sequence-sharded when cp_size > 2."""
     devices = jax.devices()
     if len(devices) < 4:
       return
@@ -1016,7 +1016,7 @@ class GdnCpHeadShardedTest(absltest.TestCase):
     out_cp2 = model_cp2(x_dummy, model_mode=common_types.MODEL_MODE_EVAL)
     self.assertEqual(out_cp2.shape, (1, 64, cfg_cp2.emb_dim))
 
-    # 2. auto mode with cp_size=4 and divisible heads (16 % 4 == 0) -> selects head-sharded CP
+    # 2. auto mode with cp_size=4 -> selects sequence-sharded CP
     mesh_cp4 = Mesh(np.array(devices[:4]), ("context",))
     cfg_cp4 = create_gdn_config(cp_size=4, gdn_cp_mode="auto", num_key_heads=16)
     model_cp4 = qwen3.Qwen3NextGatedDeltaNet(cfg_cp4, rngs=nnx.Rngs(0), mesh=mesh_cp4)

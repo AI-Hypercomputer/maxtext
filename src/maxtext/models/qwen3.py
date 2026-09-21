@@ -73,7 +73,7 @@ from jax.experimental import xla_metadata
 import jax.nn
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P
-from maxtext.common.common_types import (
+from maxtext.src.maxtext.common.common_types import (
     Array,
     AttentionType,
     BATCH,
@@ -89,7 +89,7 @@ from maxtext.common.common_types import (
 )
 
 try:
-  from maxtext.common.common_types import get_weight_dtype
+  from maxtext.src.maxtext.common.common_types import get_weight_dtype
 except ImportError:
   try:
     from maxtext.common.common_types import get_weight_dtype
@@ -99,24 +99,24 @@ except ImportError:
       return getattr(config, "weight_dtype", getattr(config, "dtype", jnp.float32))
 
 
-from maxtext.inference import kvcache
-from maxtext.kernels.attention import gdn_cp
-from maxtext.layers import attentions
-from maxtext.layers import initializers as max_initializers
-from maxtext.layers import moe
-from maxtext.layers import nnx_scan
-from maxtext.layers import nnx_wrappers
-from maxtext.layers import quantizations
-from maxtext.layers.attentions import Attention
-from maxtext.layers.embeddings import PositionalEmbedding, Qwen3OmniMoeVisionPosEmbedInterpolate
-from maxtext.layers.initializers import nd_dense_init
-from maxtext.layers.linears import DenseGeneral, MlpBlock
-from maxtext.layers.moe import RoutedMoE
-from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated, RMSNorm, l2norm
-from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import (
+from maxtext.src.maxtext.inference import kvcache
+from maxtext.src.maxtext.kernels.attention import gdn_cp
+from maxtext.src.maxtext.layers import attentions
+from maxtext.src.maxtext.layers import initializers as max_initializers
+from maxtext.src.maxtext.layers import moe
+from maxtext.src.maxtext.layers import nnx_scan
+from maxtext.src.maxtext.layers import nnx_wrappers
+from maxtext.src.maxtext.layers import quantizations
+from maxtext.src.maxtext.layers.attentions import Attention
+from maxtext.src.maxtext.layers.embeddings import PositionalEmbedding, Qwen3OmniMoeVisionPosEmbedInterpolate
+from maxtext.src.maxtext.layers.initializers import nd_dense_init
+from maxtext.src.maxtext.layers.linears import DenseGeneral, MlpBlock
+from maxtext.src.maxtext.layers.moe import RoutedMoE
+from maxtext.src.maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated, RMSNorm, l2norm
+from maxtext.src.maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.src.maxtext.utils import max_utils
+from maxtext.src.maxtext.utils import maxtext_utils
+from maxtext.src.maxtext.utils.sharding import (
     create_sharding,
     get_logical_axis_rules,
     logical_to_mesh_axes,
@@ -975,14 +975,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     if gdn_cp_mode == "head":
       if cp_size > 1 and (cp_size > self.num_k_heads or self.num_k_heads % cp_size != 0):
         raise ValueError(
-            f"GDN head-sharded CP requires num_k_heads ({self.num_k_heads}) to be " f"divisible by cp_size ({cp_size})."
+            f"GDN head-sharded CP requires num_k_heads ({self.num_k_heads}) to" f" be divisible by cp_size ({cp_size})."
         )
       use_head_sharded_cp = (
           cp_size > 1 and getattr(cfg, "use_gdn_kernel", False) and model_mode != MODEL_MODE_AUTOREGRESSIVE
       )
     elif gdn_cp_mode == "auto":
       use_head_sharded_cp = (
-          1 < cp_size <= min(4, self.num_k_heads)
+          1 < cp_size <= min(2, self.num_k_heads)
           and (self.num_k_heads % cp_size == 0)
           and getattr(cfg, "use_gdn_kernel", False)
           and model_mode != MODEL_MODE_AUTOREGRESSIVE
@@ -1064,7 +1064,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           from maxtext.kernels.gdn import gdn_decoupled_conv1d  # pylint: disable=import-outside-toplevel,g-import-not-at-top
         except ImportError:
           try:
-            from maxtext.kernels.gdn.gdn_bwd_pallas import gdn_decoupled_conv1d  # pylint: disable=import-outside-toplevel,g-import-not-at-top
+            from maxtext.src.maxtext.kernels.gdn.gdn_bwd_pallas import gdn_decoupled_conv1d  # pylint: disable=import-outside-toplevel,g-import-not-at-top
           except ImportError as e:
             raise ImportError(
                 "Unable to import GDN backward kernel (gdn_decoupled_conv1d). Ensure `maxtext.kernels.gdn` is available."
@@ -1428,6 +1428,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # Perform the convolution.
       conv_out = self.conv1d(conv_input, out_sharding=flat_sharding)
       # Slice the output to match the original input sequence length.
+      conv_out = conv_out[:, -seq_len:, :]
       qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
       qkv_conv = checkpoint_name(qkv_conv, "gdn_conv_out")
       # q_conv shape: (B, S, key_dim), k_conv shape: (B, S, key_dim), v_conv shape: (B, S, value_dim)
