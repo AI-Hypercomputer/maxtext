@@ -24,7 +24,7 @@ GKE_CLUSTER=bodaborg-tpu7x-sps
 PROJECT=cloud-tpu-shared-capacity
 REGION=us-central1
 GCS_BUCKET=gs://cloud-pathways-staging
-SERVICE_JOBSET_NAME=sps-j6080103
+SERVICE_JOBSET_NAME=${SPS_SERVICE:-sps-j6080103}
 PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260901-jax_0.11.1
 
 # Ironwood XLA flags from run_olmo3_7b_stage1.sh, which took OLMo3-7B from 27% to

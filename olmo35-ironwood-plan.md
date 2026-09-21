@@ -329,6 +329,39 @@ B > 1, by looping over batch elements and calling the B=1 kernel (line ~187), so
 obvious "hardcoded batch 0" theory is wrong there. That loop also means the kernel
 serialises over batch, which is worth knowing independently of the NaN.
 
+## The one thing that unblocks everything: priority-dev RBAC
+
+Attempted 2026-09-21 after the console showed idle capacity. The capacity is real
+and the quota is real, but I cannot reach either.
+
+| what | state |
+|---|---|
+| `nap-tpu7x-stand-4t-14uwd8sw` (bodaborg-tpu7x-nap) | **64 nodes, 256 chips, idle**, topology `4x8x8` = 512 devices |
+| `priority-dev` clusterqueue | **307 chips nominal, 0 used, 0 admitted** |
+| my RBAC in `priority-dev` | **create jobsets / jobs / pods: NO** |
+| my RBAC in `default` | create jobsets / jobs / pods: yes |
+| `default` borrowing headroom | ~3 chips ("insufficient unused quota ... 253 more needed" for a 256-chip ask) |
+| reservation `cloudtpu-20260710003900-159478293` | 315 total, 292 allocated, **23 free** |
+
+So the 256 idle chips are inside the reservation but accounted to other queues; the
+only queue with headroom is `priority-dev`, and that is exactly the namespace I am
+forbidden from. A fallback single-node 2x2x1 ask (4 chips) was admitted by Kueue but
+then failed autoscaling ("FailedScaleUp: Internal error", plus "exceeded quota:
+cluster-wide"), and it tried to provision a new node rather than use one of the 10
+ready ones in `nap-tpu7x-stand-4t-1ch69ok2`.
+
+**The ask:** add `User: 112155357684894056033` (this SA's numeric uniqueId) as an RBAC
+subject able to create jobsets in the `priority-dev` namespace of
+`bodaborg-tpu7x-nap`, project `cloud-tpu-shared-capacity`. Send to
+`%cmcs-shared-clusters-admin-grpadm.prod`. With that, `scripts/olmo35_xpk_4x8x8.sh`
+runs as-is: it is written, YAML-validated at 64 completions, and ships the rebased
+worktree source from `gs://agagik-us/olmo35/src.tgz` so the stale image does not
+matter. It would measure tiny, small and large at pdb=4 on 512 devices, which is the
+exact operating point phase 6.5 predicts at 35-51% MFU.
+
+Also note: on this cluster the XLA flags **do** reach the compiler (the workers are
+ours), unlike SPS. So it would test the sparse-core offload set too.
+
 ## Blocked / infrastructure
 
 - **A 4x4x4 is not currently obtainable.** `bodaborg-tpu7x-nap` has 47 Ironwood nodes
