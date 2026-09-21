@@ -29,13 +29,15 @@ import os
 import sys
 from typing import Optional, Tuple
 
-import flax.linen as nn
 from flax import nnx
+import flax.linen as nn
+from flax.linen import partitioning as nn_partitioning
 import jax
 from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.optimizers.muon import MuonDimensionNumbers as mdn
 from maxtext.utils import maxtext_utils, model_creation_utils
-from optax.contrib._muon import MuonDimensionNumbers as mdn
+from maxtext.utils import sharding as sharding_lib
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 
 
 def _is_path_contain_any(tuples, path):
@@ -83,9 +85,12 @@ ATTENTION_QKV_NAMES = (
     "wq_b",
     "wkv_b",
     "wkv",
+    "q_proj",
+    "k_proj",
+    "v_proj",
 )
 
-ATTENTION_OUT_NAMES = ("out",)
+ATTENTION_OUT_NAMES = ("out", "o_proj")
 
 MOE_BLOCK_NAMES = (
     "MoeBlock_0",
@@ -183,36 +188,120 @@ def transform_logic(
   return mdn((0,), (-1,))
 
 
-def get_transform_tree(tree, path=(), include_routers: bool = True):
-  """Recursively extracts `MuonDimensionNumbers` for Linen abstract parameters."""
+def get_transform_tree(tree, mesh=None, path=(), include_routers: bool = True):
+  """Recursively extracts `MuonDimensionNumbers` and shardings for Linen abstract parameters."""
   if isinstance(tree, (dict, collections.abc.Mapping)) or hasattr(tree, "items"):
-    return {k: get_transform_tree(v, path=path + (k,), include_routers=include_routers) for k, v in tree.items()}
+    return {
+        k: get_transform_tree(v, mesh=mesh, path=path + (k,), include_routers=include_routers)
+        for k, v in tree.items()
+    }
   else:
     val = getattr(tree, "value", tree)
     val_shape = getattr(val, "shape", None)
-    return transform_logic(path, shape=val_shape, include_routers=include_routers)
+    dim_num = transform_logic(path, shape=val_shape, include_routers=include_routers)
+    if dim_num is not None:
+      names = getattr(tree, "names", None)
+      if names is not None:
+        # Prepend None for leading scanned layer dimensions if names length < tensor rank
+        if val_shape is not None and len(names) < len(val_shape):
+          diff = len(val_shape) - len(names)
+          names = (None,) * diff + names
+        # Resolve logical axis names to physical NamedSharding when a device mesh is available
+        if mesh is not None:
+          sharding = sharding_lib.create_sharding(mesh, names)
+        else:
+          sharding = names
+      else:
+        sharding = None
+      return mdn(
+          reduction_axis=dim_num.reduction_axis,
+          output_axis=dim_num.output_axis,
+          sharding=sharding,
+      )
+    return None
 
 
-def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
-  """Extracts a matching pytree of `MuonDimensionNumbers` from a model."""
+def get_muon_weight_dimension_numbers(
+    model, config=None, mesh=None, verbose=False
+):
+  """Extracts a matching pytree of MuonDimensionNumbers with physical shardings from a model.
+
+  Evaluates within an active `nn_partitioning.axis_rules` context to map logical
+  partition axes to physical mesh axes. Supports both NNX and Linen models.
+  """
   include_routers = getattr(config, "muon_include_routers", True) if config is not None else True
-  _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
+  if mesh is None and config is not None and hasattr(config, "mesh_axes"):
+    devices_array = maxtext_utils.create_device_mesh(config)
+    mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
-  def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], leaf):
-    # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
-    path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
-    val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
-    val_shape = getattr(val, "shape", None)
-    return transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
+  logical_rules = (
+      getattr(config, "logical_axis_rules", ()) if config is not None else ()
+  )
+  # Populate logical axis rules in Flax context for automatic NamedSharding resolution
+  with nn_partitioning.axis_rules(logical_rules):
+    if isinstance(model, nnx.Module):
+      # Extract abstract parameters from the NNX model hierarchy
+      _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
 
-  # tree_map_with_path handles NNX's PyTree structure; result is an nnx.State with the
-  # same structure, where each Param's value holds the mdn result.
-  muon_weight_dimension_numbers = jax.tree_util.tree_map_with_path(apply_transform_nnx, nnx.to_pure_dict(abstract_param))
-  muon_weight_dimension_numbers = nnx.State(muon_weight_dimension_numbers)
+      # Resolve physical NamedSharding for each parameter under the active axis rules
+      named_sharding_state = (
+          sharding_lib.nnx_construct_named_sharding(abstract_param, mesh)
+          if mesh is not None
+          else None
+      )
+      abstract_dict = nnx.to_pure_dict(abstract_param)
+      named_sharding_dict = (
+          nnx.to_pure_dict(named_sharding_state)
+          if named_sharding_state is not None
+          else abstract_dict
+      )
 
-  if verbose:
-    _print_structure_debug(abstract_param, muon_weight_dimension_numbers)
-  return muon_weight_dimension_numbers
+      def apply_transform_nnx(
+          path: Tuple[jax.tree_util.KeyEntry, ...], leaf, abs_leaf
+      ):
+        path_strings = tuple(
+            p.key for p in path if isinstance(p, jax.tree_util.DictKey)
+        )
+        abs_val = (
+            abs_leaf.get_value() if hasattr(abs_leaf, "get_value") else abs_leaf
+        )
+        val_shape = getattr(abs_val, "shape", None)
+        dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
+        if dim_num is not None:
+          val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
+          sharding = (
+              val
+              if isinstance(
+                  val, (jax.sharding.NamedSharding, jax.sharding.PartitionSpec)
+              )
+              else getattr(leaf, "sharding", None)
+          )
+          if isinstance(sharding, jax.ShapeDtypeStruct) or not isinstance(
+              sharding, (jax.sharding.NamedSharding, jax.sharding.PartitionSpec)
+          ):
+            sharding = getattr(leaf, "sharding", None)
+          return mdn(
+              reduction_axis=dim_num.reduction_axis,
+              output_axis=dim_num.output_axis,
+              sharding=sharding,
+          )
+        return None
+
+      # Walk the parameter tree to produce a matching nnx.State of MuonDimensionNumbers
+      muon_weight_dimension_numbers = jax.tree_util.tree_map_with_path(
+          apply_transform_nnx, named_sharding_dict, abstract_dict
+      )
+      muon_weight_dimension_numbers = nnx.State(muon_weight_dimension_numbers)
+
+    else:  # Linen
+      abstract_param = maxtext_utils.get_abstract_param(model, config)
+      muon_weight_dimension_numbers = get_transform_tree(
+          abstract_param, mesh=mesh, include_routers=include_routers
+      )
+
+    if verbose:
+      _print_structure_debug(abstract_param, muon_weight_dimension_numbers)
+    return muon_weight_dimension_numbers
 
 
 def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):
@@ -274,7 +363,9 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False, include_routers=T
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
   _, model = model_creation_utils.create_nnx_abstract_model(config, mesh)
   # Get dimension number
-  muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config, verbose=verbose)
+  muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(
+      model, config, mesh=mesh, verbose=verbose
+  )
   return {"params": nnx.to_pure_dict(muon_weight_dimension_numbers)}
 
 

@@ -38,6 +38,12 @@ logical_axis_rules: [
                       ['activation_q_length', ['context']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       # Attention Weights
+                      ['heads', ['fsdp_transpose', 'expert']],
+                      ['q_heads', ['fsdp_transpose', 'expert']],
+                      ['kv_heads', ['fsdp_transpose', 'expert']],
+                      ['qkv', []],
+                      ['kv', []],
+                      ['kv_head_dim', []],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'expert']],
                       ["q_lora_up_proj", []],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'expert']],
@@ -68,8 +74,14 @@ logical_axis_rules: [
                       ['activation_stage', 'stage'],
                       # General Weights
                       ['mlp', ['fsdp_transpose']],
+                      ['gdn_head', ['fsdp_transpose', 'expert']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
                       ['embed', ['fsdp', 'context', 'expert']],
                       ['embed_attn', ['fsdp', 'context', 'expert']],
                       ['norm', []],
                       ['layers', 'stage'],
+                      ['dense_layers', []],
+                      ['moe_layers', []],
+                      ['local_layers', []],
+                      ['mhc', []],
                   ]
