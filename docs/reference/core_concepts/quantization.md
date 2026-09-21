@@ -79,11 +79,11 @@ The primary flags to control quantization are:
 
 - `quantize_logits_proj` (default: `False`): Applicable when `use_qwix_quantization=True` and `quantization` is set; ignored otherwise. If enabled, quantizes the output logits (`logits_dense`) projection matmul. Requires `logits_via_embedding=False` (un-tied embeddings) and `quantization='fp8_full'`.
 
+  - `logits_proj_quant_calibration_method` (default: `""`): Calibration method for the logits projection. If empty (default), inherits `weight_quantization_calibration_method` and `act_quantization_calibration_method`. Set to e.g. `'absmax'` to force absmax calibration.
+
   - Enabling this together with `logits_dot_in_fp32=True` is rejected at config init, because the fp32 cast on the logits operands would be undone by requantization at the projection matmul.
 
   - MTP has no output head of its own — it reuses the shared `logits_dense` via `apply_output_head`. This flag therefore also quantizes the MTP logits projection, independently of `quantize_mtp`.
-
-- `logits_proj_quant_calibration_method` (default: `""`): Calibration method for the output logits projection (`logits_dense`) when `quantize_logits_proj=True`. If empty (default), inherits `weight_quantization_calibration_method` and `act_quantization_calibration_method`. Set to e.g. `'absmax'` to force absmax calibration.
 
 ### Qwix Quantization (Recommended)
 
