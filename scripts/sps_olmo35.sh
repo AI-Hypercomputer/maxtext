@@ -25,7 +25,7 @@ PROJECT=cloud-tpu-shared-capacity
 REGION=us-central1
 GCS_BUCKET=gs://cloud-pathways-staging
 SERVICE_JOBSET_NAME=sps-j6080103
-PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:cloud_pathways.runtime_20260720_0_RC00
+PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260901-jax_0.11.1
 
 MODEL="${MODEL:-olmo35-tiny}"
 STEPS="${STEPS:-20}"
@@ -34,13 +34,20 @@ PDB="${PDB:-1}"
 RUN="${RUN:-o35$(date +%H%M%S)}"
 EXTRA="${EXTRA:-}"
 
+# MoE and KDA flags only apply to the olmoe3/olmo35 family; a dense model like
+# olmo3-7b takes neither, and use_tokamax_kda needs the patched tokamax op.
+case "$MODEL" in
+  olmo35-*|olmoe3-*) FAMILY_FLAGS="megablox=True sparse_matmul=True use_tokamax_kda=${KDA:-True} num_vocab_tiling=8" ;;
+  *)                 FAMILY_FLAGS="" ;;
+esac
+
 CMD="python3 -m maxtext.trainers.pre_train.train $WT/src/maxtext/configs/base.yml
  model_name=$MODEL run_name=$RUN steps=$STEPS
  dataset_type=synthetic enable_checkpointing=false async_checkpointing=false
  per_device_batch_size=$PDB max_target_length=$SEQ
  dtype=bfloat16 weight_dtype=float32
- ici_fsdp_parallelism=-1 megablox=True sparse_matmul=True
- use_tokamax_kda=True remat_policy=full num_vocab_tiling=8
+ ici_fsdp_parallelism=-1 remat_policy=${REMAT:-full}
+ $FAMILY_FLAGS
  enable_single_controller=true
  base_output_directory=$GCS_BUCKET $EXTRA"
 CMD=$(echo "$CMD" | tr '\n' ' ' | tr -s ' ')
@@ -52,7 +59,7 @@ python3 -m pathwaysutils.experimental.shared_pathways_service.run_workload \
   --gcs_bucket=$GCS_BUCKET \
   --pathways_service="$SERVICE_JOBSET_NAME-pathways-head-0-0.$SERVICE_JOBSET_NAME:29001" \
   --tpu_type="tpu7x:2x2x1" --tpu_count=1 \
-  --proxy_server_image=$PROXY_IMAGE --collect_service_metrics \
+  --proxy_server_image=$PROXY_IMAGE \
   --command "$CMD"
 RC=$?
 echo "=== run_workload exit RC=$RC ==="
