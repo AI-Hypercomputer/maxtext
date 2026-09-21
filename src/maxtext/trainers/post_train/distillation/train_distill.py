@@ -893,14 +893,17 @@ def main(argv: Sequence[str]) -> None:
 
   # 2. Initialize STUDENT Config
   # Order of precedence: YAML < CLI < kwargs (student_overrides).
-  student_overrides = global_config.student_overrides
+  # Distillation reads the logits directly -- softmaxes over the vocab axis and, for
+  # top-k, a `take_along_axis` gather along it -- so it needs them in the default
+  # batch-sharded layout rather than the vocab-sharded one that head produces.
+  student_overrides = {"lm_head_vocab_parallel": False, **global_config.student_overrides}
   student_config = pyconfig.initialize(argv, **student_overrides)
 
   is_offline = bool(global_config.offline_data_dir)
 
   # 3. Initialize TEACHER Config
   # We isolate the Teacher from Student CLI arguments (like pruning params).
-  teacher_overrides = global_config.teacher_overrides
+  teacher_overrides = {"lm_head_vocab_parallel": False, **global_config.teacher_overrides}
 
   # Ensure load_parameters_path is set in overrides
   if not is_offline and not teacher_overrides.get("load_parameters_path"):

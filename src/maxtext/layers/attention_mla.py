@@ -137,6 +137,7 @@ class Indexer(nnx.Module):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
@@ -152,6 +153,7 @@ class Indexer(nnx.Module):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
@@ -171,6 +173,7 @@ class Indexer(nnx.Module):
         quant=None,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
@@ -672,6 +675,7 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
+          weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
           rngs=self.rngs,
       )
     else:
@@ -687,6 +691,7 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
+          weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
           rngs=self.rngs,
       )
       self.q_norm = RMSNorm(
@@ -708,6 +713,7 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
+          weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
           rngs=self.rngs,
       )
 
@@ -723,6 +729,7 @@ class MLA(Attention):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
     self.kv_norm = RMSNorm(
@@ -747,6 +754,7 @@ class MLA(Attention):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
