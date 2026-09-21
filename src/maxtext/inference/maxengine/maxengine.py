@@ -1468,6 +1468,20 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         "token_logp": token_logp,
     }, result
 
+  @staticmethod
+  def _get_cache_batch_idx_and_ndim_diff(full_cache: jax.Array, annotations: Any, path_key: str) -> tuple[int, int]:
+    """Calculates the batch axis index and leading dimension offset for a KV cache tensor."""
+    ndim_diff = full_cache.ndim - len(annotations)
+    batch_idx = -1
+    if "cache_batch" in annotations:
+      batch_idx = annotations.index("cache_batch") + ndim_diff
+    elif "cache_scale_batch" in annotations:
+      batch_idx = annotations.index("cache_scale_batch") + ndim_diff
+
+    if batch_idx < 0:
+      raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+    return batch_idx, ndim_diff
+
   @functools.partial(
       jax.jit,
       static_argnums=(0,),
@@ -1498,15 +1512,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       ]:
         return full_cache  # we don't even zero these out because we can mask them out.
 
-      ndim_diff = full_cache.ndim - len(annotations)
-      batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch") + ndim_diff
-      elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch") + ndim_diff
-
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+      batch_idx, ndim_diff = self._get_cache_batch_idx_and_ndim_diff(full_cache, annotations, path_key)
 
       if path_key in _DEEPSEEK_V4_CACHE_KEYS:
         # Copy these states by explicitly overwriting the target slots matching current request id
@@ -1620,15 +1626,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       ]:
         return full_cache
 
-      ndim_diff = full_cache.ndim - len(annotations)
-      batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch") + ndim_diff
-      elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch") + ndim_diff
-
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+      batch_idx, ndim_diff = self._get_cache_batch_idx_and_ndim_diff(full_cache, annotations, path_key)
 
       if path_key in _DEEPSEEK_V4_CACHE_KEYS:
         # Copy these states by explicitly overwriting the target slot matching current request id
@@ -1759,15 +1757,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       ]:
         return full_cache  # we don't even zero these out because we can mask them out.
 
-      ndim_diff = full_cache.ndim - len(annotations)
-      batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch") + ndim_diff
-      elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch") + ndim_diff
-
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+      batch_idx, ndim_diff = self._get_cache_batch_idx_and_ndim_diff(full_cache, annotations, path_key)
 
       if path_key in _DEEPSEEK_V4_CACHE_KEYS:
         # Direct batch slot index overwrite for fixed-size metadata trackers
