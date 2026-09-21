@@ -857,8 +857,10 @@ def train_loop(config, recorder, state=None):
           module.force_dropless = True
           module.num_moe_token_chunks = getattr(config, "retry_num_moe_token_chunks", 2)
           module.moe_chunk_barrier = True
+          max_logging.log("DEBUG SHUNING: 1")
         elif type(module).__name__ == "Decoder":
           module.remat_policy_override = "full"
+          max_logging.log("DEBUG SHUNING: 2")
       jit_model_dropless, _ = nnx.split(reconstructed)
       del reconstructed, _
       gc.collect()

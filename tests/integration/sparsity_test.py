@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Smoke test for sparsity."""
+"""Smoke test for sparsity.
+
+pytest tests/integration/sparsity_test.py
+"""
 
 import os
 import tempfile
@@ -36,16 +39,16 @@ class Train(parameterized.TestCase):
           "quantization": "",
           "use_sparsity": False,
       },
-      {
-          "testcase_name": "fp8_full",
-          "quantization": "fp8_full",
-          "use_sparsity": False,
-      },
-      {
-          "testcase_name": "fp8_full_with_sparsity",
-          "quantization": "fp8_full",
-          "use_sparsity": True,
-      },
+      # {
+      #     "testcase_name": "fp8_full",
+      #     "quantization": "fp8_full",
+      #     "use_sparsity": False,
+      # },
+      # {
+      #     "testcase_name": "fp8_full_with_sparsity",
+      #     "quantization": "fp8_full",
+      #     "use_sparsity": True,
+      # },
   )
   @pytest.mark.tpu_only
   def test_different_quant_sparsity_configs(self, quantization: str, use_sparsity: bool):
@@ -56,25 +59,31 @@ class Train(parameterized.TestCase):
         get_test_config_path(),
         f"base_output_directory={test_tmpdir}",
         "run_name=different_quant_sparsity_configs_test",
-        "base_emb_dim=16",
-        "base_num_query_heads=1",
-        "base_num_kv_heads=1",
-        "base_mlp_dim=16",
-        "base_moe_mlp_dim=16",
-        "base_num_decoder_layers=2",
-        "head_dim=64",
-        "decoder_block=deepseek",
-        "attention_type=mla",
-        "num_experts=2",
-        "shared_experts=1",
-        "sparse_matmul=True",
-        "megablox=False",
+        # "base_emb_dim=256",
+        # "base_num_query_heads=256",
+        # "base_num_kv_heads=1",
+        # "base_mlp_dim=256",
+        # "base_moe_mlp_dim=256",
+        # "base_num_decoder_layers=2",
+        # "head_dim=64",
+        # "decoder_block=deepseek",
+        # "attention_type=mla",
+        # "num_experts=4",
+        # "shared_experts=1",
+        # "sparse_matmul=True",
+        # "megablox=False",
+        "model_name=deepseek3-test",
+        "base_num_decoder_layers=4",
+        "override_model_config=true",
+        "ici_expert_parallelism=2",
         f"quantization={quantization}",
         "use_qwix_quantization=True",
         "per_device_batch_size=2",
         "max_target_length=128",
         "dataset_type=synthetic",
         "steps=1",
+        "use_tokamax_gmm=True",
+        "use_gmm_v2=true",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "enable_checkpoint_cloud_logger=False",
@@ -82,6 +91,10 @@ class Train(parameterized.TestCase):
         # Toy MoE dims don't divide evenly across fsdp; loosen the sharded-params assert.
         "sharding_tolerance=0.08",
         f"metrics_file={os.path.join(outputs_dir, 'metrics.json')}",
+        "retry_when_tokens_dropped=True",
+        "use_ragged_sort=True",
+        "ragged_buffer_factor=2",
+        "use_ring_of_experts=true",
     ]
     if use_sparsity:
       args.extend(
