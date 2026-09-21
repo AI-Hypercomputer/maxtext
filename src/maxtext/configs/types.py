@@ -555,6 +555,22 @@ class Quantization(BaseModel):
           " function) and does not control quantization."
       ),
   )
+  quantize_logits_proj: bool = Field(
+      False,
+      description=(
+          "If True, quantizes the output logits (logits_dense) projection when quantization is enabled."
+          " Targets the `logits_dense` module (matching path regex r'decoder/logits_dense.*'). Default is False."
+          " Only supported with `quantization=fp8_full`, `logits_via_embedding=False`, and `num_vocab_tiling = 1`."
+      ),
+  )
+  logits_proj_quant_calibration_method: str = Field(
+      "",
+      description=(
+          "Calibration method for the output logits (logits_dense) projection when `quantize_logits_proj=True`."
+          " If empty (default), inherits `weight_quantization_calibration_method` and"
+          " `act_quantization_calibration_method`. Set to e.g. 'absmax' to force absmax calibration."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -4572,6 +4588,29 @@ class MaxTextConfig(
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
+    if self.quantize_logits_proj:
+      if self.logits_via_embedding:
+        raise ValueError(
+            "`quantize_logits_proj` cannot be enabled when input and output embeddings are tied"
+            " (`logits_via_embedding=True`)."
+        )
+      if self.quantization != "fp8_full":
+        raise ValueError("`quantize_logits_proj` can only be enabled when `quantization='fp8_full'`.")
+      if self.num_vocab_tiling > 1:
+        raise ValueError(
+            "`quantize_logits_proj` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
+            " decoder skips `apply_output_head` in train mode, so `logits_dense` is absent from the forward"
+            " pass that `qwix.quantize_model` traces, and the projection runs later inside"
+            " `vocab_tiling_nnx_loss` on a merged model copy. Whether interception survives that path is"
+            " unverified; this combination is rejected until it is tested."
+        )
+      if self.logits_dot_in_fp32:
+        raise ValueError(
+            "`logits_dot_in_fp32=True` is rejected with `quantize_logits_proj=True`: the fp32 cast on"
+            " the logits operands is undone by requantization at the projection matmul, so the projection"
+            " remains quantized while believing you configured fp32. Set `quantize_logits_proj=False` to keep"
+            " the projection in fp32."
+        )
     if self.quantization and self.use_qwix_quantization and self.quantize_router_proj and self.float32_gate_logits:
       raise ValueError(
           "`float32_gate_logits=True` is rejected with `quantize_router_proj=True`: the fp32 cast on"
