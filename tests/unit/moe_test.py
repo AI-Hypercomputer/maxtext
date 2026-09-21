@@ -1377,9 +1377,12 @@ class RoutedMoeTest(parameterized.TestCase):
       )
       has_overflow = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_has_overflow")
       self.assertTrue(has_overflow, "Expected a moe_has_overflow intermediate to be sown.")
+      # The sown flags are per-device and unreduced; reducing them is the caller's
+      # job (loss_fn does it once for the whole model). A single overflowing shard
+      # must therefore still make the global reduction True.
       self.assertTrue(
           bool(jnp.any(jnp.array([jnp.any(x) for x in has_overflow]))),
-          "Expected full-mesh all-reduced overflow=True when only shard 0 overflows.",
+          "Expected the reduced overflow flag to be True when only shard 0 overflows.",
       )
 
     # Replay with force_dropless=True matches dropless output.

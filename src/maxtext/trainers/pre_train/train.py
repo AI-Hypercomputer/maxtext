@@ -363,11 +363,52 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     )
   has_moe_overflow = jnp.bool_(False)
   if config.retry_when_tokens_dropped:
-    moe_overflow_flags = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_has_overflow")
+    # RoutedMoE sows one *unreduced* flag per device per layer (scanned layers
+    # arrive pre-stacked), so this is the single point where they are reduced
+    # across the mesh -- one all-reduce for the whole model instead of one per
+    # MoE layer. ravel=False keeps the sharded layout intact until then.
+    moe_overflow_flags = maxtext_utils.collect_intermediates_by_suffix(
+        intermediate_outputs, "moe_has_overflow", ravel=False
+    )
     if moe_overflow_flags:
       has_moe_overflow = jnp.any(jnp.stack([jnp.any(x) for x in moe_overflow_flags]))
   aux["has_moe_overflow"] = has_moe_overflow
   return loss, aux
+
+
+def _rollback_on_overflow(new_state, old_leaves, has_moe_overflow):
+  """Discards the step's update in-graph when MoE tokens were dropped.
+
+  `retry_when_tokens_dropped` replays the step with the dropless executable when
+  the ragged MoE buffer overflows, which needs the pre-step state to still be
+  live. Keeping it by disabling input/output donation would cost the un-aliased
+  state on *every* step (~7 GiB/device on DeepSeek-v3-671B) to cover a rare
+  event. Instead the step always runs and its update is thrown away here with an
+  elementwise select that XLA folds into the optimizer update: the donated
+  buffers are still written in place, and the returned state is bit-identical to
+  the input whenever an overflow occurred, so it can be replayed from.
+
+  Returns `new_state` untouched when the flag is statically false (the dropless
+  replay executable), so that path pays nothing.
+  """
+  if not isinstance(has_moe_overflow, jax.core.Tracer) and not bool(has_moe_overflow):
+    return new_state
+
+  def _select(new, old):
+    dtype = getattr(new, "dtype", None)
+    if dtype is not None and jnp.issubdtype(dtype, jax.dtypes.extended):
+      # Typed PRNG keys aren't selectable; leaving them advanced is harmless
+      # since the replay only needs a valid key, not the original one.
+      return new
+    return jnp.where(has_moe_overflow, old, new)
+
+  new_leaves, treedef = jax.tree_util.tree_flatten(new_state)
+  if len(new_leaves) != len(old_leaves):
+    raise ValueError(
+        "retry_when_tokens_dropped: cannot roll back the step -- the updated state has "
+        f"{len(new_leaves)} leaves but the input state had {len(old_leaves)}."
+    )
+  return jax.tree_util.tree_unflatten(treedef, [_select(n, o) for n, o in zip(new_leaves, old_leaves)])
 
 
 def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
@@ -399,6 +440,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   del dropout_rng  # unused for NNX (kept for jit signature parity)
   # pylint: disable=too-many-nested-blocks
   # --- Per-path initialization ---
+  # Snapshot the incoming leaves before the merge: with retry_when_tokens_dropped
+  # the update is rolled back onto them if the MoE ragged buffer overflows.
+  input_state_leaves = jax.tree_util.tree_leaves(state) if config.retry_when_tokens_dropped else None
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
   loss_model, loss_params, loss_rng = state.model, None, None
 
@@ -622,7 +666,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   # Drop Intermediates (e.g. sowed max_logits for QK-Clip) and the MTP sown
   # vars (mtp_losses/mtp_acceptance) before returning. They're absent from
   # state_mesh_shardings and would cause a leaf-count / structure mismatch.
-  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
+  out_state = nnx.state(new_state, nnx.Not(nnx.Intermediate))
+  if input_state_leaves is not None and has_moe_overflow is not None:
+    out_state = _rollback_on_overflow(out_state, input_state_leaves, has_moe_overflow)
+  return out_state, metrics
 
 
 def eval_step(model, config, state, data, dropout_rng=None):
@@ -719,26 +766,17 @@ def training_loop_iteration(
       step_rng_args = ()
     with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
       with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_train):
-        if config.retry_when_tokens_dropped and p_train_step_dropless is not None:
-          candidate_state, metrics = p_train_step(state, example_batch, *step_rng_args)
-          if bool(metrics.get("has_moe_overflow")):
-            max_logging.log(
-                f"Step {step}: MoE ragged buffer overflow detected! "
-                f"Discarding candidate state and replaying step with dropless buffer..."
-            )
-            # Explicitly deallocate device buffers held by candidate_state before replaying
-            # with p_train_step_dropless to avoid pinning two ~13.4 GB model states in HBM.
-            jax.tree_util.tree_map(
-                lambda x: x.delete() if hasattr(x, "delete") else None,
-                candidate_state,
-            )
-            del candidate_state
-            gc.collect()
-            state, metrics = p_train_step_dropless(state, example_batch, *step_rng_args)
-          else:
-            state = candidate_state
-        else:
-          state, metrics = p_train_step(state, example_batch, *step_rng_args)
+        state, metrics = p_train_step(state, example_batch, *step_rng_args)
+        if (
+            config.retry_when_tokens_dropped
+            and p_train_step_dropless is not None
+            and bool(metrics.get("has_moe_overflow"))
+        ):
+          max_logging.log(f"Step {step}: MoE ragged buffer overflow detected! Replaying step with dropless buffer...")
+          # `train_step` rolled its own update back (see `_rollback_on_overflow`),
+          # so `state` still holds the pre-step values and can be replayed from
+          # directly -- no second copy of the state is ever live.
+          state, metrics = p_train_step_dropless(state, example_batch, *step_rng_args)
 
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
