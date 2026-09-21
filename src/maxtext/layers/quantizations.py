@@ -980,6 +980,8 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   if config.quantize_logits_dense:
     paths.append("decoder/logits_dense.*")
   # combine paths
+  # - single path: "decoder/.*layers.*"
+  # - multiple path: "(decoder/.*layers.*|mtp_block/.*)"
   module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
 
   rules = []
