@@ -567,10 +567,36 @@ prerequisite.
 
 ## Phase 7: decode
 
-- [ ] 7.1 `inference_microbenchmark` for `tiny` on SPS
-- [ ] 7.2 Cross-check the perfsim decode table
-- [ ] 7.3 Serving flags from `tpu-recipes/inference/ironwood`
-- [ ] 7.4 Hold KV-heads-divides-TP (violating it replicates the cache, up to 2x)
+- [x] 7.1 `inference_microbenchmark` run on Ironwood: **prefill works, decode is mesh-infeasible on 8 devices** (see below)
+- [ ] 7.2 Cross-check the perfsim decode table: blocked, no decode step time to compare against
+- [ ] 7.3 Serving flags from `tpu-recipes/inference/ironwood`: not reached
+- [x] 7.4 KV-heads-divides-TP: **MaxText now enforces this itself** and rejected tp=8 outright. The rule from `kda-headdim-answer.md` is validated, and it is what makes decode infeasible here
+
+### Phase 7 finding: `olmo35-tiny` cannot fill an 8-device host for decode
+
+Three constraints that cannot be satisfied together on 8 devices:
+
+1. **KV-head-sharding axes must multiply to at most 4.** `tensor` and
+   `autoregressive` both shard KV heads, and tiny has only 4. MaxText rejects
+   anything larger outright: *"num_kv_heads (4) ... must be divisible by 8 ...
+   Attention heads are atomic under tensor parallelism"*.
+2. **Batch-sharding axes must be 1.** The autoregressive step has batch 1, so
+   `data`/`fsdp` cannot split it: *"Batch dimension should be shardable among the
+   devices in data and fsdp axis got query.shape[0]=1/devices_in_data_fsdp=2"*.
+3. 4 x 1 = 4, not 8.
+
+So decode caps at **4 of the 8 devices**, leaving half the host idle, and the cause is
+the geometry: 8 query / **4 KV** heads. Prefill runs fine; only the AR step is blocked.
+
+A second, independent gap found on the way: the fused tokamax KDA wraps its kernel in
+a `shard_map` that shards **only the batch axis**
+(`olmoe3.py`, `in_specs = [PartitionSpec(batch_axes, None, None, None)]`). At decode
+that batch is 1, so the fused path fails on any mesh with `fsdp>1` before the KV-head
+rule is even reached. The unfused chunked path has no `shard_map` and gets further.
+
+Both are co-design inputs rather than bugs: this is exactly the "an arm that wins
+training MFU and cannot shard for serving is not a win" check. The fix is architectural
+(more KV heads) or a serving-time mesh that uses fewer devices per replica.
 
 ## Run record
 
