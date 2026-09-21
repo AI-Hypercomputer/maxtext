@@ -393,6 +393,7 @@ class CudnnFlashJaxInferenceTest(unittest.TestCase):
     key = jnp.ones((1, 4, 2, 64))
     value = jnp.ones((1, 4, 2, 64))
     with mock.patch("jax.lax.with_sharding_constraint", side_effect=lambda x, _: x):
+      # pylint: disable=protected-access
       _, aligned_key, aligned_value = attention._align_qkv_for_cudnn_flash(query, key, value)
     self.assertEqual(aligned_key.shape[0], 8)
     self.assertEqual(aligned_value.shape[0], 8)
@@ -403,6 +404,7 @@ class CudnnFlashJaxInferenceTest(unittest.TestCase):
     key = jnp.ones((2, 4, 2, 64))
     value = jnp.ones((2, 4, 2, 64))
     with self.assertRaises(ValueError):
+      # pylint: disable=protected-access
       attention._align_qkv_for_cudnn_flash(query, key, value)
 
   def test_cudnn_jax_flash_attention_broadcasts_ar_lengths(self):

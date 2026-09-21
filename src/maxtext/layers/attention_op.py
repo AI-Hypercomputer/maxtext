@@ -1647,6 +1647,7 @@ class AttentionOp(nnx.Module):
       key: Array,
       value: Array,
   ) -> tuple[Array, Array, Array]:
+    """Broadcasts key/value batch dim to match query batch dim for cuDNN flash attention."""
     if query.shape[0] != key.shape[0]:
       if key.shape[0] == 1 and query.shape[0] > 1:
         key = jnp.broadcast_to(key, (query.shape[0], *key.shape[1:]))
