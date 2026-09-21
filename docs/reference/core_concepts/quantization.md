@@ -67,6 +67,7 @@ The primary flags to control quantization are:
   - Set to `False` (or omit) to use the AQT library (deprecated) if `quantization` is set.
 - `quantization`: A string that specifies the type of quantization to apply. The accepted values depend on whether you are using Qwix or legacy AQT.
 - `quantization_calibration_method`: The calibration method for weights and activations (e.g., `"absmax"`). This is mainly for Qwix.
+- `quantize_router_proj`: Applicable when `use_qwix_quantization=True` and `quantization` is set; ignored otherwise. (1) If enabled (default: `True` for backward compatibility), quantizes the MoE router (gate) projection matmul. (2) Set to `False` to keep the router projection unquantized across all quantization schemes (e.g., `fp8_full`, `int8`). Enabling this together with `float32_gate_logits=True` is rejected at config init, because the fp32 cast on the gate operands would be undone by requantization at the projection matmul — see [MoE configuration](moe_configuration.md) for the full rationale.
 
 ### Qwix Quantization (Recommended)
 
