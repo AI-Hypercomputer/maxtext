@@ -1,0 +1,69 @@
+# model config for OLMo 3.5 partner family rung "medium"
+# (15.421B active / 322.602B total).
+#
+# Reference: allenai/OLMo-core@codex/partner-model-family-20260914,
+# src/scripts/standalone/{standalone_configs,partner_model}.py.
+# Canonical parameter counts this config must reproduce:
+#   total 322,601,566,720 / active 15,421,227,520
+#
+# The family holds head_dim 128, latent = d_model/2, expert hidden = d_model,
+# 512 experts top-16, and a full-attention layer every 8th block. d_model,
+# latent and expert hidden are all multiples of 256 for MXU alignment.
+
+base_emb_dim: 2560
+base_num_query_heads: 24
+base_num_kv_heads: 12
+head_dim: 128
+base_num_decoder_layers: 64
+
+# Layer 0 is dense with a wide SwiGLU (8 * d_model); MoE layers use a shared
+# expert at the routed-expert hidden width (= d_model for this family).
+first_num_dense_layers: 1
+base_mlp_dim: 20480
+base_moe_mlp_dim: 2560
+
+# Routed experts run in a compressed latent space; the router still scores the
+# full-width residual (handled by OLMoE3LatentRoutedMoE).
+num_experts: 512
+num_experts_per_tok: 16
+moe_expert_input_dim: 1280
+
+# Mixer cycle: full attention on every 8th layer (indices 7, 15, ...),
+# Kimi Delta Attention elsewhere.
+inhomogeneous_layer_cycle_interval: 8
+gdn_num_key_heads: 24
+gdn_num_value_heads: 24
+gdn_key_head_dim: 128
+gdn_value_head_dim: 256   # head_dim * kda_expand_v (2.0)
+gdn_conv_kernel_dim: 4
+gdn_chunk_size: 64
+
+vocab_size: 100352
+enable_dropout: false
+logits_via_embedding: false   # untied LM head
+normalization_layer_epsilon: 1.0e-6
+mlp_activations: ["silu", "linear"]
+decoder_block: "olmoe3"
+
+# Embedding is scaled by sqrt(d_model) and then RMSNormed, before the stack.
+scale_embeddings_by_sqrt_emb_dim: true
+use_embedding_norm: true
+
+# Full attention: NoPE, per-head QK RMSNorm gains, sigmoid output gate,
+# and scalable softmax (log-span times a learned per-head gain).
+use_qk_norm: true
+qk_norm_per_head: true
+use_scalable_softmax: true
+
+# Auxiliary losses, matching OLMo-core's ladder settings. The router z-loss
+# (1e-5) is a module constant in olmoe3.py.
+load_balance_loss_weight: 0.01
+# The reference computes router logits in fp32 (`x.float() @ w.float()`).
+float32_gate_logits: true
+
+# EMo document-pool routing, canonical ladder settings: min = top_k,
+# max = eval = num_experts.
+emo_enabled: true
+emo_min_document_expert_pool: 16
+emo_max_document_expert_pool: 512
+emo_eval_document_expert_pool: 512
