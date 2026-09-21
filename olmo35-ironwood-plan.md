@@ -271,6 +271,42 @@ small and 0.99x on large**. The reason is the 7:1 KDA-to-full-attention ratio, s
 one layer in eight is softmax attention and Principle 1 has almost nothing to act on.
 The guide's measurement was on a full-attention model. Keep head_dim 128.
 
+## Working Ironwood vehicle (found after SPS went down)
+
+`bodaborg-tpu7x-spot-sps` (project `cloud-tpu-multipod-dev`, us-central1):
+**no Kueue at all**, 5 free single-host 2x2x1 nodes (4 chips = 8 devices each),
+plain `kubectl apply` of a Pod works. This replaced SPS and, unlike SPS, the
+workers are ours so **XLA flags actually reach the compiler**.
+
+One gotcha: the pod runs as `cloud-tpu-multipod-dev.svc.id.goog` and gets **403 on
+`gs://agagik-us`**. Stage the source in a bucket in the pod's own project instead:
+`gs://cloud-pathways-staging/agagik/olmo35-src.tgz`. Then `tar xzf` to `/wt` and
+`export PYTHONPATH=/wt/src`, which overrides the image's stale `/deps/src`.
+
+### First measurement of the XLA flag set (SPS silently ignored it)
+
+olmo35-tiny, 8 devices, pdb=1, seq 8192: **46.1 TF/s with the flags, 43.9 without**,
+so the sparse-core offload set is worth about **+5%** here. Small, because at 8
+devices the model is comm-volume-bound rather than overlap-bound. Cross-check: the
+same config on SPS measured 45.7, so the two vehicles agree.
+
+### Sequence length is a usable lever, and it dodges the KDA bug
+
+olmo35-tiny, 8 devices, pdb=1, remat full:
+
+| seq | TF/s/dev | MFU | note |
+|---|---|---|---|
+| 8192 | 43.1 | 3.7% | |
+| **16384** | **56.2** | **4.9%** | **1.30x, and avoids the NaN** |
+| 32768 | n/a | n/a | OOM, 124.35 G vs 94.74 G |
+
+Raising the sequence rather than the batch buys 1.30x *and* stays out of the kernel
+bug's trigger region. That is the recommended workaround until the kernel is fixed.
+
+### tokamax GMM v1 is neutral, not a win
+
+megablox 43.4 vs tokamax gmm v1 43.8 TF/s, loss identical to 4 decimals (10.151).
+
 ## Open bugs found (both block the main levers)
 
 1. **Fused tokamax KDA produces NaN at `per_device_batch_size=2`.** pdb=1 is clean and
@@ -283,6 +319,24 @@ The guide's measurement was on a full-attention model. Keep head_dim 128.
    step). Note it also requires `use_tokamax_gmm=True` or config validation rejects it.
 
 Both need a fix before the lever sweep can conclude.
+
+**Bug 1 is now precisely characterized.** It needs **B >= 2 AND T >= 8192 together**;
+neither alone triggers it, and it is not total tokens per device:
+
+| per-device batch | seq | tokens/device | result |
+|---|---|---|---|
+| 1 | 8192 | 8192 | OK |
+| 1 | 16384 | 16384 | **OK** |
+| 2 | 4096 | 8192 | OK |
+| 2 | 8192 | 16384 | **NaN** |
+
+`TOKAMAX_KDA_DENSE_PAIRS=1` does **not** fix it. `TOKAMAX_KDA_CHUNK_SIZE=128` errors
+out rather than running (MaxText's `gdn_chunk_size` stays 64, so the two disagree).
+
+**Bug 2 is independent of the KDA kernel.** `use_gmm_v2=True` NaNs at pdb=1 seq=8192
+even with `use_tokamax_kda=False`, while `megablox` and tokamax GMM v1 are both clean
+at the identical config. So it is a genuine gmm_v2 fault on this model, not an
+interaction.
 
 **Repro status.** `scripts/olmo35_nan_repro.py` builds a shrunk OLMo 3.5 (d_model 512,
 8 layers, dk 128 / dv 256, 8 experts top-2) and checks logits and every gradient for
