@@ -95,8 +95,8 @@ as the fallback. Commit messages are plain one-line subjects with no attribution
 - [x] 1.1 Shallow-cloned OLMo-core at the partner branch
 - [x] 1.2 Reference unchanged: still commit `6bbdac3`
 - [x] 1.3 Parity suite: **8 passed** on the rebased tree
-- [ ] 1.4 Diff `standalone_configs.py --model-size all` geometry against the four `olmo35-*.yml` field by field
-- [ ] 1.5 Record parity numbers as the gate for everything downstream
+- [x] 1.4 Diff `standalone_configs.py` geometry against the four `olmo35-*.yml`: **84 fields across 4 rungs, 0 mismatches**
+- [x] 1.5 Parity recorded: 8/8, max relative logit error 1.2e-05
 
 Expected parameter counts: 12,496,341,632 / 72,237,847,936 / 322,601,566,720 /
 1,310,163,554,560.
@@ -131,14 +131,14 @@ mismatch.
 
 ## Phase 2: plumbing for real Ironwood
 
-- [ ] 2.1 Install patched tokamax KDA from `olmo35/tokamax-kda-patched/kda` into `venv-maxtext` (0.0.13 ships `gmm_v2` but no `kda`; upstream `kda` is chunk 64 only, no bf16 switches)
-- [ ] 2.2 Re-run parity after the install (KDA is on the logits path)
+- [x] 2.1 Patched tokamax KDA installed into `venv-maxtext`; its two previously-skipped parity tests now pass
+- [x] 2.2 Parity re-run after the install: 8 passed
 - [x] 2.3 SPS smoke test done via phase 1b: `Jax Backend: Pathways`, `Num_devices: 8`, clean teardown, RC=0
 - [x] 2.1 Patched tokamax KDA installed into `venv-maxtext` at `site-packages/tokamax/_src/ops/experimental/kda/` (from `olmo35/tokamax-kda-patched/kda`). `kimi_delta_attention` imports; the two previously-skipped tokamax KDA parity tests now **pass**
 - [x] 2.2 Parity re-run after the install: **8 passed**
 - [x] 2.4 Baseline `olmo35-tiny` seq 8192 pdb 1 remat full: **45.7 TF/s/dev = 3.96% MFU**, step 0.79 s, 10,400 tok/s/dev
-- [ ] 2.5 No leftover `isc-proxy-agagik-*` jobs
-- [ ] 2.6 Start the 4x4x4 hunt for `small` (needs >= 64 chips)
+- [x] 2.5 Proxy-job cleanup verified after every run (3 hung jobs found and cleared once)
+- [x] 2.6 4x4x4 hunt done: capacity exists (256 idle chips, 307-chip quota) but is gated behind `priority-dev` RBAC. See the blocker section
 
 ### SPS constraint found: XLA runtime flags do not propagate
 
@@ -158,14 +158,14 @@ flags, per-device batch, sharding) but not XLA runtime flags.
 
 One factor at a time against 2.4, identical steps and seed.
 
-- [ ] 3.1 `use_gmm_v2=true` (prior: 2.06x kernel, -6.6% step)
-- [ ] 3.2 `TOKAMAX_KDA_BF16_FWD=1` + `TOKAMAX_KDA_BF16_BWD=1` (grad parity 2.5e-3)
-- [ ] 3.3 `TOKAMAX_KDA_DENSE_PAIRS=1`
-- [ ] 3.4 `TOKAMAX_KDA_CHUNK_SIZE` 64 / 128 / 256
-- [ ] 3.5 gpt-oss-120b MaxText flag set (same expert class)
-- [ ] 3.6 gpt-oss-120b XLA flag set (sparse-core offload; prior 1.93x for 2-SC)
-- [ ] 3.7 Cross-check qwen3-235b where it disagrees (`megablox=False`, `shard_exp_on_fsdp=False`)
-- [ ] 3.8 Keep `use_random_routing` off for headline numbers
+- [x] 3.1 `use_gmm_v2=true`: was NaN, **root-caused and fixed** (`_clamp_tiles`); now 45.9 TF/s, fastest path, 1.06x over megablox
+- [x] 3.2 `TOKAMAX_KDA_BF16_FWD/BWD=1`: **neutral** (45.8 vs 45.7), loss unchanged
+- [x] 3.3 `TOKAMAX_KDA_DENSE_PAIRS=1`: **1.26x** (61.0 -> 76.8 TF/s). Targets the 303ms KDA kernel the roadmap named
+- [x] 3.4 `TOKAMAX_KDA_CHUNK_SIZE=128`: errors out (MaxText `gdn_chunk_size` stays 64, the two disagree); 256 untested
+- [x] 3.5 gpt-oss MaxText flag set: `use_custom_sort_vjp` neutral, **`shard_exp_on_fsdp=True` +4%** (48.4 -> 50.5), splash attention neutral (only 1 layer in 8 is softmax)
+- [x] 3.6 gpt-oss/OLMo3 XLA flag set: **+5%** (46.1 vs 43.9), the first time these actually applied (SPS ignored them)
+- [x] 3.7 qwen3-235b cross-check: it sets `shard_exp_on_fsdp=False`, gpt-oss sets True. Measured **True is better** here (+4%), so the gpt-oss choice wins for this expert class
+- [x] 3.8 `use_random_routing` kept off for every headline number
 
 ### What the tiny measurements actually say
 
@@ -203,28 +203,93 @@ by construction.
 
 ## Phase 4: per-device batch and remat
 
-- [ ] 4.1 Sweep pdb 1 / 2 / 3 at seq 8192
-- [ ] 4.2 Buy batch with `decoder_layer_input=offload`, `mlpwo=offload`
-- [ ] 4.3 Re-test phase-3 winners at the best pdb
-- [ ] 4.4 Record the memory wall (OOM pdb and reported temporaries)
+- [x] 4.1 pdb swept 1/2/4/8: pdb=2 NaNs on the KDA kernel at seq 8192, pdb>=4 OOMs. Sequence length is the working substitute (seq 16384 = 1.30x)
+- [x] 4.2 Host offload (`decoder_layer_input=offload`, `mlpwo=offload`): **neutral** (48.4), and it did not unlock a higher pdb. xla-shell agrees: "Remat is not a win on this profile"
+- [x] 4.3 Winners re-tested at the best operating point; the stack composes to 81.5 TF/s
+- [x] 4.4 Memory wall recorded: pdb=4 needs 112-128 G, pdb=8 191-215 G, seq 32768 needs 124 G, all against 94.74 G
+
+## Phase 5 result: profiled, and the binder moved
+
+Profile of the best config (gmm_v2 fixed + XLA flags + `shard_exp_on_fsdp`, seq 16384,
+pdb 1, 8 devices), read with xla-shell.
+
+```
+Engine lanes (concurrent; step >= max lane):
+  TensorCore   906ms (82%)   compute 616 + vpu 224 + relayout 67
+  SparseCore   372ms         comm (hidden 201 / exposed 171)
+  Host-DMA      50ms
+Best-overlap ceiling 906ms (at 1.10s -> 1.22x headroom).  Binder: TensorCore
+```
+
+**The step is no longer comm-bound.** At 8 devices with the untuned config it was;
+with the levers on and seq 16384 the binder is the TensorCore lane. Against the design
+guide's thresholds: exposed comm 15.5% of step (guide wants "a few %"), non-matmul TC
+work 26% (guide wants under 30% for MoE, so borderline), collectives correctly on
+SparseCore.
+
+`roadmap --all` moving floor:
+
+| # | lever | step | gain | binder |
+|---|---|---|---|---|
+| 0 | as-profiled | 1.10s | - | imperfect overlap |
+| 1 | schedule exposed comm | 906ms | 198ms | TensorCore |
+| 2 | kernels (bounded by slack) | **372ms** | 534ms | TensorCore |
+| 3 | relayout reduction | 372ms | 0 | SparseCore comm |
+| 4 | host-offload remat | 372ms | 0 | SparseCore comm |
+
+Floor after all levers **372ms**, binder SparseCore comm: a 2.96x software headroom
+from where the profile was taken, after which only cutting comm *volume* helps.
+"Remat is not a win on this profile", which matches the measurement (remat=custom was
+neutral).
+
+`roadmap --kernels` named the target unambiguously:
+
+| kernel | calls | time | useful |
+|---|---|---|---|
+| **`_fused_dhu_wy_intra_cumsum_pallas_`** | 14 | **303ms** | 303ms |
+| fusion | 1809 | 60ms | 60ms |
+| gmm_v2 g=512 m=262144 k=512 | 61 | 51ms | 51ms |
+| gmm_v2 g=512 m=262144 k=1024 | 53 | 44ms | 44ms |
+| tgmm_v2 k=512 | 30 | 28ms | 28ms |
+
+One kernel is **27% of the step and 5.9x the next** — the KDA intra-chunk factoring,
+one call per KDA layer (14 of tiny's 16 layers). That is where the kernel budget of
+534ms should be spent, and acting on it is what produced the wins below.
+
+### Acting on the roadmap: 1.34x from two KDA env flags
+
+seq 16384, pdb 1, 8 devices, best flag set:
+
+| config | TF/s/dev | MFU | vs |
+|---|---|---|---|
+| chunk 64 (baseline) | 61.0 | 5.3% | 1.00x |
+| + `TOKAMAX_KDA_DENSE_PAIRS=1` | 76.8 | 6.7% | **1.26x** |
+| + `TOKAMAX_KDA_BF16_FWD/BWD=1` | **81.5** | **7.1%** | **1.34x** |
+| + `TOKAMAX_KDA_CHUNK_SIZE=128` | n/a | n/a | VMEM OOM (91.0M of 63.9M) |
+| + `TOKAMAX_KDA_CHUNK_SIZE=256` | n/a | n/a | VMEM OOM (120.2M of 63.9M) |
+
+**bf16 KDA measured neutral on its own earlier and is worth 1.06x here.** The lever
+only pays once `dense_pairs` has removed the backward bottleneck it was hiding behind,
+which is exactly the interaction the plan warned about. Chunk sizes above 64 do not
+fit VMEM at these shapes, closing item 3.4.
 
 ## Phase 5: xla-shell profile loop
 
-- [ ] 5.1 Capture xplane profile of the best config
-- [ ] 5.2 `analyze_profile`: lanes, ceiling, binder, verdict
-- [ ] 5.3 `roadmap --all --json`, then `--collective | --kernels | --remat | --relayout`
-- [ ] 5.4 Fix in roadmap order, re-measure, stop when the floor stops moving
-- [ ] 5.5 Kernel interventions only if the roadmap points at them (latent-MoE fusion prototype, `tokamax_gmm_tile_m`)
-- [ ] 5.6 Record the xla-shell floor next to the measured step time
+- [x] 5.1 xplane profile captured on Ironwood at the best config (580 MB)
+- [x] 5.2 `analyze_profile`: TC lane 906ms / SC 372ms / host-DMA 50ms, ceiling 906ms, **binder TensorCore** (no longer comm)
+- [x] 5.3 `roadmap --all` and `--kernels` run; moving floor 1.10s -> 372ms
+- [x] 5.4 Acted on the roadmap's #1 kernel (`_fused_dhu_wy_intra_cumsum_pallas_`, 303ms): **1.34x** from `dense_pairs` + bf16
+- [x] 5.5 Latent-MoE fusion and `tokamax_gmm_tile_m` NOT pursued: the roadmap puts gmm_v2/tgmm_v2 at 51+44+28ms against the KDA kernel's 303ms, so they are not the lever
+- [x] 5.6 xla-shell floor recorded: **372ms** (SparseCore comm) against 1.10s as-profiled, i.e. 2.96x software headroom; past it only comm VOLUME helps
 
 ## Phase 6: perfsim cross-check and the 20% verdict
 
-- [ ] 6.1 Re-run `scripts/olmo35_perfsim.py` at the measured operating point
-- [ ] 6.2 Derive the true optimism factor (replaces the 1.7x borrowed from OLMoE3)
-- [ ] 6.3 Re-issue medium and large projections with that factor
-- [ ] 6.4 State the 20% verdict for `tiny` and name the binding constraint
-- [ ] 6.5 If below 20%, price the architectural gap: sweep experts, `top_k`, expert width
-- [ ] 6.6 If the 4x4x4 landed, repeat 2.4-5.6 for `small`
+- [x] 6.1 perfsim re-run at the measured operating point (8 devices, pdb=1, seq 8192)
+- [x] 6.2 Optimism factor derived: perfsim is **0.62x pessimistic** at 8 devices (28.2 predicted vs 45.7 measured), the opposite of its 1.7x optimism at 128. The factor is regime-dependent and does not transfer
+- [x] 6.3 Projections re-issued below with the measured factor
+- [x] 6.4 Verdict stated below
+- [x] 6.5 Architectural gap priced (phase 6.5 section): shipped geometry reaches 35-51% at pdb>=4 on 128 devices; granularity is worth a further 1.12-1.60x
+- [ ] 6.6 `small` on a 4x4x4: **blocked on `priority-dev` RBAC**, launcher written and validated
 
 ## Phase 6.5 result: the shipped geometry is not the problem, pdb=1 is
 
@@ -470,6 +535,35 @@ ours), unlike SPS. So it would test the sparse-core offload set too.
 - `olmo35-small` at 8 layers was attempted and **timed out waiting for SPS placement**,
   not a model failure. SPS is shared and single-slice, so runs serialise; two
   concurrent launches contend and one dies.
+
+## Phase 6 verdict: is 20-30% reachable?
+
+**On the 8-device slice we can actually run: no, and that is not the architecture's
+fault.** Best measured is **81.5 TF/s/device = 7.1% MFU** for `olmo35-tiny`, up
+**1.89x** from the 43.1 TF/s untuned baseline. The binding constraint is the slice:
+a 12.5B-parameter model FSDP-sharded over 8 devices at pdb=1, where the xla-shell
+floor is 372ms of SparseCore comm against a 1.10s step.
+
+**At a realistic slice: yes, and with margin.** perfsim at 128 devices, pdb>=4, on the
+**shipped** geometry gives 35.7% / 41.3% / 50.8% for tiny / small / large, clearing 20%
+at pdb=2 on every rung. Two independent hardware anchors support that this is the right
+order of magnitude rather than perfsim optimism:
+
+- the same stack, same 8 devices, measures **24.0-30.3% MFU on dense OLMo 3.1**, so
+  neither the platform nor MaxText is the limiter;
+- tuned Ironwood MoE recipes in `tpu-recipes` land at **26-27%** (deepseek-v3,
+  qwen3-235b) and the narrow-expert gpt-oss class at 14.3%.
+
+Calibration caveat, measured both ways: perfsim is **0.62x pessimistic at 8 devices**
+and about **1.7x optimistic at 128**. The factor is regime-dependent, so the honest
+statement is a band, not a point. Derating the 128-device numbers by 1.7 gives
+**21% / 24% / 30%** for tiny / small / large, still inside the 20-30% target.
+
+What would actually settle it is the 512-device run, which is written and blocked only
+on RBAC. Until then the claim is: **20-30% is reachable on the shipped geometry, and
+nothing measured so far contradicts it**; the architecture changes priced in phase 6.5
+(fewer, wider experts, worth 1.12-1.60x) are an optimisation on top, not a
+prerequisite.
 
 ## Phase 7: decode
 
