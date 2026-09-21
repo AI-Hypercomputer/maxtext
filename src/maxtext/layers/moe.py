@@ -639,7 +639,11 @@ class RoutedMoE(nnx.Module):
         mesh=self.mesh,
         model_name=self.config.model_name,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
-        weight_dtype=(jnp.float32 if self.config.float32_gate_logits else ctypes.get_weight_dtype(self.config, "gate")),
+        weight_dtype=(
+            jnp.float32
+            if self.config.float32_gate_logits
+            else ctypes.get_weight_dtype(self.config, "gate")
+        ),
         quant=self.quant,
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
@@ -1379,7 +1383,11 @@ class RoutedMoE(nnx.Module):
             "BKE,BK -> BE",
             reshaped_intermediate,
             reshaped_weights,
-            precision=(jax.lax.Precision.HIGHEST if self.config.float32_weight_sum else matmul_precision),
+            precision=(
+                jax.lax.Precision.HIGHEST
+                if self.config.float32_weight_sum
+                else matmul_precision
+            ),
         )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
@@ -3656,12 +3664,11 @@ class RoutedMoE(nnx.Module):
     hidden_states = jnp.reshape(inputs, (batch_size * seq_len, emb_dim))
     gating_output = jnp.reshape(gate_logits, (batch_size * seq_len, self.num_experts))
 
-    if getattr(self.config, "return_routed_experts", False):
-      _, top_k_indices = jax.lax.top_k(
-          jax.nn.softmax(gating_output.astype(jnp.float32), axis=-1),
-          self.num_experts_per_tok,
-      )
-      self.selected_experts = nnx.Intermediate(top_k_indices)
+    _, top_k_indices = jax.lax.top_k(
+        jax.nn.softmax(gating_output.astype(jnp.float32), axis=-1),
+        self.num_experts_per_tok,
+    )
+    self.selected_experts = nnx.Intermediate(top_k_indices)
 
     # Concatenate gate and up projections: [E, D, H] + [E, D, H] -> [E, D, 2H]
     # fused_moe_func splits this internally: gate=w1[..., :H], up=w1[..., H:]
@@ -3718,15 +3725,6 @@ class RoutedMoE(nnx.Module):
         use_gmm_fused_rs_kernel=tpu_inference_envs.USE_GMM_FUSED_RS_KERNEL,
         onehot_moe_permute_threshold=tpu_inference_envs.ONEHOT_MOE_PERMUTE_THRESHOLD,
         moe_chunk_size=tpu_inference_envs.VLLM_MOE_CHUNK_SIZE,
-        scatter_results=(
-            self.mesh is not None
-            and (
-                self.mesh.shape.get("data", 1)
-                * self.mesh.shape.get("attn_dp", 1)
-                * self.mesh.shape.get("attn_dp_expert", 1)
-            )
-            > 1
-        ),
     )
 
     # Reshape output 2D [T, D] -> 3D [B, S, D]

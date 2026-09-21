@@ -41,7 +41,7 @@ logical_axis_rules: [
                       ['activation_embed_and_logits_batch_sequence', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_vocab', ['model', 'expert']],
                       # Vocab Weights
-                      ['vocab', ['model', 'expert']],
+                      ['vocab', []],
                       ['embed_vocab', []],
                       # ==========================================
                       # Attention
@@ -82,12 +82,12 @@ logical_axis_rules: [
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
                       # Dense Activations
-                      ['activation_mlp', ['attn_dp', 'model', 'expert']],
+                      ['activation_mlp', ['attn_dp', 'model']],
                       # Note activation batch and length also get used in attention and vocab
                       ['activation_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_embed', []],
                       # General Weights
-                      ['mlp', ['attn_dp', 'model', 'expert']],
+                      ['mlp', ['attn_dp', 'model']],
                       ['embed', []],
                       ['embed_attn', []],
                       ['norm', []],
