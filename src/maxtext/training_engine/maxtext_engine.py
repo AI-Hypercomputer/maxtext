@@ -24,6 +24,7 @@ from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
 import functools
+import gc
 from typing import Any, Optional
 
 from absl import logging
@@ -2228,8 +2229,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
         return self._staged_metadata
 
-      # 1. Drain all in-flight TPU computations to ensure weights are fully updated
+      # 1. Drain in-flight TPU computations and drop any leftover converted tree
+      # from the previous cycle BEFORE convert(). Do not block on async
+      # checkpoint persistence (`_checkpoint_manager.wait_until_finished()`), so
+      # GCS uploads overlap with weight conversion and transfer.
       self._throttler.wait_for_all()
+      self._purge_raiden_buffers()
 
       # 2. Extract clean trainable parameters
       params_state = self._get_trainable_params_state()
@@ -2298,12 +2303,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # naming the transport that was actually asked for.
     raise ValueError(f"unknown staging_transport {staging_transport!r}; expected 'raiden'.")
 
+  def _purge_raiden_buffers(self) -> int:
+    """Drops the previous cycle's converted tree; returns leaves released."""
+    if self._raiden_sync is None:
+      return 0
+    n = self._raiden_sync.release_buffers()
+    if n:
+      gc.collect()
+    return n
+
   def release_weight_sync(self, **kwargs: Any) -> Any:
     """Releases staged weight buffers after transfer completion."""
     self._last_staged_step = None
     self._staged_metadata = None
     if self._raiden_sync:
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
+      self._purge_raiden_buffers()
     return True
 
   def close(self) -> None:

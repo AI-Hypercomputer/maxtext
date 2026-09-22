@@ -114,6 +114,14 @@ class CheckpointManager:
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if checkpoint_dir:
+      if (
+          os.environ.get("ENABLE_PATHWAYS_PERSISTENCE") == "1"
+          and not str(checkpoint_dir).startswith("gs://")
+      ):
+        raise ValueError(
+            "ENABLE_PATHWAYS_PERSISTENCE=1 dispatches persistence writes to every "
+            f"pathways-worker; checkpoint_dir must be a gs:// URI, got {checkpoint_dir!r}."
+        )
       _maybe_register_pathways_persistence()
 
       # Use configured array format (e.g. use_ocdbt=False for Pathways).
