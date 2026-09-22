@@ -1650,6 +1650,98 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertEqual(shardings["a"].spec[0], "data")
     self.assertFalse(t._replicated_batch_warned)  # pylint: disable=protected-access
 
+  def test_fwd_only_passes_the_live_model_and_mutates_no_training_state(self):
+    """A read-only pass gets the engine's live model and leaves the in-flight step alone."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    t.fwd_bwd(DummyPayload())
+    grads_before = jax.tree.map(jnp.copy, t._accumulated_grads)  # pylint: disable=protected-access
+    micro_steps_before = t._micro_step_count  # pylint: disable=protected-access
+    train_step_before = t.train_step
+
+    def fn(model, x, *, pad_id):
+      return model, pad_id, jnp.sum(x)
+
+    model, pad_id, out = t.fwd_only(fn, np.ones((2, 4), np.int32), pad_id=0)
+
+    # The model comes off the train state, which is what `fwd_bwd` differentiates -- not
+    # `self._model`, which a restore or the `state` setter can leave behind.
+    self.assertIs(model, t.state.model)
+    # Python scalars must survive as scalars: callees take them as `static_argnames`, and
+    # a device array there is unhashable.
+    self.assertIsInstance(pad_id, int)
+    self.assertEqual(float(out), 8.0)
+
+    # Nothing about the in-flight training step moved.
+    self.assertEqual(t._micro_step_count, micro_steps_before)  # pylint: disable=protected-access
+    self.assertEqual(t.train_step, train_step_before)
+    jax.tree.map(np.testing.assert_array_equal, grads_before, t._accumulated_grads)  # pylint: disable=protected-access
+
+  def test_fwd_only_places_arrays_where_a_compiled_step_would(self):
+    """Inputs land on the engine's own batch shardings, per leaf rank."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    # Zero-width: the empty prompt half of a sequence-packed row. There is nothing to
+    # split, so it must be passed through rather than made into a degenerate global array.
+    empty_prompt = np.zeros((2, 0), np.int32)
+
+    def fn(_, tokens, prompt, *, mask):
+      return tokens, prompt, mask
+
+    with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
+      tokens, prompt, mask = t.fwd_only(
+          fn, np.ones((2, 4), np.int32), empty_prompt, mask=np.ones((2,), np.int32)
+      )
+
+    self.assertEqual(tokens.sharding.spec, jax.sharding.PartitionSpec("data", None))
+    # A rank-1 leaf absorbs only the leading entry of the `[batch, sequence]` spec.
+    self.assertEqual(mask.sharding.spec, jax.sharding.PartitionSpec("data"))
+    self.assertIs(prompt, empty_prompt)
+
+  def test_fwd_only_holds_the_logical_axis_rules_open_for_fn(self):
+    """`fn` traces inside `fwd_only`, so the rules must still be in force there."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    inside = t.fwd_only(lambda _: maxtext_engine.sharding.get_logical_axis_rules())
+
+    self.assertTrue(inside)
+    # And released on exit: the scope is a loan, not a global mode switch.
+    self.assertFalse(maxtext_engine.sharding.get_logical_axis_rules())
+
+  def test_fwd_only_throttles_consecutive_calls_and_flushes_pending_metrics(self):
+    """Consecutive `fwd_only` calls stay bounded by the throttler and flush stashed metrics."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    payload = DummyPayload()
+    t.fwd_bwd(payload)
+    t.update()
+    # Queue now holds [fwd_bwd loss, update grad_norm + step 0 metrics] (qsize=2, full).
+    self.assertTrue(t._throttler._inflight_queue.full())
+
+    with (
+        mock.patch.object(t._metrics_logger, "write_metrics") as write_metrics,
+        mock.patch("jax.block_until_ready", wraps=jax.block_until_ready) as mock_block,
+    ):
+      for _ in range(4):
+        _ = t.fwd_only(lambda _, x: jnp.sum(x), np.ones((2, 4), np.int32))
+        self.assertTrue(t._throttler._inflight_queue.full())
+
+      # Every iteration entered with a full queue, so all 4 popped and blocked.
+      self.assertEqual(mock_block.call_count, 4)
+      # The second iteration popped the `update` entry and flushed its stashed step-0 metrics
+      # when `fwd_only` queued its computation.
+      write_metrics.assert_called_once()
+      self.assertIsNone(t._throttler._pending_metrics)
+
 
 if __name__ == "__main__":
   absltest.main()
