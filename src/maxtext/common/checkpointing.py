@@ -799,9 +799,11 @@ def load_state_if_possible(
         maxtext_config=maxtext_config,
     )
     return {"items": restored_state}, None
+  if checkpoint_manager is None:
+    max_logging.log("Checkpoint manager is None, skipping checkpoint restoration.")
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
-    return None, None
+  return None, None
 
 
 def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
@@ -1235,7 +1237,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     return
 
   def _checkpoint_error_handler(err):
-    """Handles checkpointing errors."""
+    """Handles checkpointing errors, when not in an elastic context."""
     raise RuntimeError(f"Checkpointing failed. {str(err)}") from err
 
   with checkpoint_exception_guard(config, checkpoint_manager, _checkpoint_error_handler):
@@ -1360,3 +1362,41 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   except FileExistsError as e:  # ocp.training StepAlreadyExistsError subclasses FileExistsError
     max_logging.log(f"Checkpoint for step {step} already exists, skipping save. ({e})")
     return False
+
+
+def cancel_checkpoint_manager(checkpoint_manager):
+  """Immediately cancels/aborts background saving and finalize threads on a CheckpointManager."""
+  if checkpoint_manager is None:
+    return
+
+  max_logging.log("Immediately cancelling background checkpoint saving operations on CheckpointManager...")
+  try:
+    # TODO: b/443712351 - Use the supported cancellation API once cl/930535575 lands.
+    # 1. Detach and clear async checkpointer saving threads
+    checkpointer = getattr(checkpoint_manager, "_checkpointer", None)
+    checkpointers = []
+    if checkpointer is not None:
+      if isinstance(checkpointer, dict):
+        checkpointers.extend(checkpointer.values())
+      elif hasattr(checkpointer, "values"):
+        checkpointers.extend(checkpointer.values())
+      else:
+        checkpointers.append(checkpointer)
+
+    for ckptr in checkpointers:
+      async_mgr = getattr(ckptr, "_async_manager", None)
+      if async_mgr is not None:
+        thread = getattr(async_mgr, "_thread", None)
+        if thread is not None:
+          max_logging.log(f"Detached background async save thread: {thread.name}")
+          async_mgr._thread = None  # pylint: disable=protected-access
+        async_mgr._exception = None  # pylint: disable=protected-access
+
+    # 2. Detach and clear finalize thread
+    finalize_ref = getattr(checkpoint_manager, "_finalize_thread", None)
+    if finalize_ref is not None:
+      if hasattr(finalize_ref, "set"):
+        finalize_ref.set(None)
+
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Warning: error during immediate checkpoint manager cancellation: {e}")

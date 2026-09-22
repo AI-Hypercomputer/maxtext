@@ -2693,15 +2693,17 @@ class ElasticTraining(BaseModel):
       "snapshot",
       description=("The kind of backup to use for elastic training: 'snapshot' or 'checkpoint'."),
   )
+  elastic_snapshot_interval: int = Field(10, description="The interval in steps to save snapshots to host memory.")
+  elastic_new_slice_check_period: int = Field(10, description="The interval in seconds to poll for newly joined active slices.")
   elastic_timeout_seconds: int = Field(
-      300,
+      1000,
       description=(
           "The maximum number of seconds to wait for `elastic_minimum_slice_count` slices to become active. If this"
           " timeout is reached during any retry attempt, a `TimeoutError` is raised and training fails."
       ),
   )
   elastic_max_retries: int = Field(
-      10,
+      100,
       description="The maximum number of times to retry training when a slice failure occurs or when scaling up.",
   )
   elastic_min_slice_count: int = Field(
@@ -4069,6 +4071,14 @@ class MaxTextConfig(
     self.moe_mlp_dim = (2**mlp_dim_scale) * self.base_moe_mlp_dim
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
 
+    # Automatically determine number of slices if not specified.
+    raw_keys_for_num_slices = {
+        "num_slices": self.num_slices,
+        "hardware": self.hardware,
+        "compile_topology_num_slices": self.compile_topology_num_slices,
+    }
+    self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices, config=self)
+
     # E. HARDWARE-DEPENDENT CALCULATIONS
     if self.elastic_enabled:
       elastic_utils.ensure_elastic_manager_initialized(self)
@@ -4096,14 +4106,6 @@ class MaxTextConfig(
       self.num_target_devices = get_num_target_devices()
     except (RuntimeError, IndexError):
       logger.warning("JAX device system not available for config validation. Assuming 1 device.")
-
-    # Automatically determine number of slices if not specified.
-    raw_keys_for_num_slices = {
-        "num_slices": self.num_slices,
-        "hardware": self.hardware,
-        "compile_topology_num_slices": self.compile_topology_num_slices,
-    }
-    self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
 
     # Check for AQT deprecation warning
     if self.quantization and not self.use_qwix_quantization:
@@ -4134,7 +4136,7 @@ class MaxTextConfig(
     def calculate_global_batch_sizes(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps):
       """Helper to calculate global and micro batch sizes for training and loading."""
       if per_device_batch_size < 1.0:
-        micro_batch_to_load = num_devices * (expansion_factor if expansion_factor > 0 else 1)
+        micro_batch_to_load = int(num_devices * (expansion_factor if expansion_factor > 0 else 1))
       else:
         micro_batch_to_load = int(num_devices * per_device_batch_size * (expansion_factor if expansion_factor > 0 else 1))
       micro_batch_to_train = int(num_devices * per_device_batch_size)
