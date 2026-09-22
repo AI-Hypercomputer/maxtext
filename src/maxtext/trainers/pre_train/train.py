@@ -637,8 +637,20 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
 
 
+# Auxiliary values from `loss_fn` that fractional eval accumulates across
+# microbatches. Keep in sync with the aux dict `loss_fn` returns: a key left
+# out here is silently missing from the eval metrics.
+_AVERAGED_EVAL_KEYS = ("z_loss", "moe_lb_loss", "indexer_loss", "mtp_loss")
+_ACCUMULATED_EVAL_KEYS = ("xent_sum", "total_weights") + _AVERAGED_EVAL_KEYS
+
+
 def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
-  """Accumulates eval metrics across microbatches for fractional batch sizes without backprop."""
+  """Accumulates eval metrics across microbatches for fractional batch sizes without backprop.
+
+  `xent_sum` and `total_weights` are summed over microbatches; the keys in
+  `_AVERAGED_EVAL_KEYS` are per-microbatch quantities and are averaged, which
+  matches how `gradient_accumulation_loss_and_grad` reduces them.
+  """
   def reshape_to_microbatch_accumulations(batch_arr):
     microbatch_shape = (
         batch_arr.shape[0] // num_microbatches,
@@ -653,45 +665,21 @@ def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
 
   def accumulate_eval(acc, micro_batch):
     _, aux = single_eval_fn(micro_batch)
-    new_acc = {
-        "xent_sum": acc["xent_sum"] + aux["xent_sum"],
-        "total_weights": acc["total_weights"] + aux["total_weights"],
-        "z_loss": acc["z_loss"] + aux.get("z_loss", 0.0),
-        "moe_lb_loss": acc["moe_lb_loss"] + aux.get("moe_lb_loss", 0.0),
-        "indexer_loss": acc["indexer_loss"] + aux.get("indexer_loss", 0.0),
-        "mtp_loss": acc["mtp_loss"] + aux.get("mtp_loss", 0.0),
-    }
+    new_acc = {k: acc[k] + aux[k] for k in _ACCUMULATED_EVAL_KEYS}
     return new_acc, None
 
-  init_acc = {
-      "xent_sum": 0.0,
-      "total_weights": 0.0,
-      "z_loss": 0.0,
-      "moe_lb_loss": 0.0,
-      "indexer_loss": 0.0,
-      "mtp_loss": 0.0,
-  }
+  init_acc = {k: 0.0 for k in _ACCUMULATED_EVAL_KEYS}
   acc, _ = jax.lax.scan(
       accumulate_eval, init_acc, micro_data, length=num_microbatches
   )
 
   total_weights = acc["total_weights"]
   denominator = jnp.maximum(total_weights, 1)
-  loss = (
-      acc["xent_sum"] / denominator
-      + acc["moe_lb_loss"] / num_microbatches
-      + acc["indexer_loss"] / num_microbatches
-      + acc["mtp_loss"] / num_microbatches
-  )
+  aux = dict(acc)
+  for key in _AVERAGED_EVAL_KEYS:
+    aux[key] = acc[key] / num_microbatches
+  loss = aux["xent_sum"] / denominator + aux["moe_lb_loss"] + aux["indexer_loss"] + aux["mtp_loss"]
   loss = jnp.where(total_weights > 0, loss, 0.0)
-  aux = {
-      "xent_sum": acc["xent_sum"],
-      "total_weights": total_weights,
-      "z_loss": acc["z_loss"] / num_microbatches,
-      "moe_lb_loss": acc["moe_lb_loss"] / num_microbatches,
-      "indexer_loss": acc["indexer_loss"] / num_microbatches,
-      "mtp_loss": acc["mtp_loss"] / num_microbatches,
-  }
   return loss, aux
 
 
