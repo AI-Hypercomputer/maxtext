@@ -16,9 +16,9 @@
 
 Modules:
   * `rope.py` — rotary positional embedding (base implementation).
+  * `sharding.py` — `Sharding` ABC, logical-axis specs, mesh creation.
 
 Planned modules:
-  * `sharding.py` — `Sharding` ABC, logical-axis specs, mesh creation.
   * `interfaces.py` — shared ABCs and `CausalLMOutput`.
   * `checkpoint.py` — Orbax wrapper.
   * `data.py` — data loading helpers on top of the MaxText input pipeline.
