@@ -21,8 +21,9 @@ defines its own attention, MLP and decoder blocks instead of routing through a s
 class and a central `Decoder`, so a model can be read top to bottom in one place. Scalability
 concerns are applied as post-construction transforms rather than branched on inside model code.
 
-> **Status: scaffolding.** This package is not yet wired into any MaxText entry point and nothing
-> here is importable by the legacy stack. Legacy `src/maxtext/layers/` remains the production path
+> **Status: scaffolding.** Opt in with `use_m3_model=true`. `qwen3-0.6b` has been tested
+> for correctness here, but performance features are not yet available.
+> Legacy `src/maxtext/layers/` remains the production path
 > until the migration milestones complete.
 
 ## Layout

@@ -21,6 +21,7 @@
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
+use_m3_model: false # Use the m3 backend; requires a registered m3 model.
 override_model_config: false # When set to true allows overriding model parameters via CLI (or kwargs or env vars) for the purpose of debugging/testing.
 override_logical_axis_rules: false # When set overrides logical axis rules instead of merging them.
 

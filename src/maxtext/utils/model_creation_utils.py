@@ -531,6 +531,11 @@ def create_model(
     config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None, *, quant_mode_str: str = "train"
 ):
   """Instantiates and returns the model object, sharded across the mesh."""
+  if config.use_m3_model:
+    from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
+
+    return m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+
   # Model definition
   quant = quantizations.configure_quantization(config, quant_mode_str=quant_mode_str)
   model = get_transformer_model(config, mesh, quant, model_mode=model_mode, rngs=rngs)
