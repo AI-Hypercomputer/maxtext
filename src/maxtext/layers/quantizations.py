@@ -14,35 +14,34 @@
 
 """Quantization library."""
 
+from dataclasses import dataclass
 import functools
 import json
 import math
-import qwix.pallas as qpl
 import re
-from typing import ClassVar, Tuple, Sequence, Callable
-from dataclasses import dataclass
+from typing import Any, Callable, ClassVar, Sequence, Tuple
 
-from aqt.jax.v2 import config as aqt_config
+from absl import logging
 from aqt.jax.v2 import aqt_tensor
-from aqt.jax.v2.flax import aqt_flax
-from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
-
-import qwix
-from qwix._src.core import numerics
-from qwix._src.core import dot_general_qt
-from qwix._src.core import sparsity
-from qwix._src import interception as qwix_interception
-
+from aqt.jax.v2 import config as aqt_config
+from aqt.jax.v2 import tiled_dot_general
+from aqt.jax.v2.flax import aqt_flax
+from flax import nnx
+import flax.linen as nn
+from flax.linen import fp8_ops
+from flax.linen import initializers as flax_initializers
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
+import qwix
+from qwix._src import interception as qwix_interception
+from qwix._src.core import dot_general_qt
+from qwix._src.core import numerics
+from qwix._src.core import sparsity
 from jax.sharding import NamedSharding
+import qwix.pallas as qpl
 
-from flax.linen import fp8_ops
-from flax.linen import initializers as flax_initializers
-import flax.linen as nn
-from flax import nnx
 # Support different packaging structures across environments even within
 # the same Qwix version identifier (imports from _src.utils vs _src).
 try:
@@ -90,7 +89,9 @@ class WeightQuantConfig:
   block_size: int | tuple[int, ...] | None = None
 
 
-def get_weight_quant_config(config: Config, module_name: str) -> WeightQuantConfig | None:
+def get_weight_quant_config(
+    config: Config, module_name: str
+) -> WeightQuantConfig | None:
   """Constructs a WeightQuantConfig for module_name if quantized, else returns None."""
   if not is_fp8_dtype(config.weight_dtype):
     return None
@@ -129,14 +130,21 @@ def dequantize_weight(
     return w_c * scale_c.reshape(()) if scale_c.size == 1 else w_c * scale_c
 
   # Block-wise scale (e.g. 2D for Dense, 3D for MoE)
-  if scale_c.ndim == w.ndim and any(s > 1 and s != d for s, d in zip(scale_c.shape, w.shape)):
+  if scale_c.ndim == w.ndim and any(
+      s > 1 and s != d for s, d in zip(scale_c.shape, w.shape)
+  ):
     if not all(d % s == 0 for d, s in zip(w.shape, scale_c.shape)):
       raise ValueError(
-          f"Block scaling requires weight dimensions {w.shape} to be divisible by scale dimensions {scale_c.shape}."
+          f"Block scaling requires weight dimensions {w.shape} to be divisible"
+          f" by scale dimensions {scale_c.shape}."
       )
-    interleaved_shape = tuple(dim for s, w_d in zip(scale_c.shape, w.shape) for dim in (s, w_d // s))
+    interleaved_shape = tuple(
+        dim for s, w_d in zip(scale_c.shape, w.shape) for dim in (s, w_d // s)
+    )
     scale_shape = tuple(dim for s in scale_c.shape for dim in (s, 1))
-    return (w_c.reshape(interleaved_shape) * scale_c.reshape(scale_shape)).reshape(w.shape)
+    return (
+        w_c.reshape(interleaved_shape) * scale_c.reshape(scale_shape)
+    ).reshape(w.shape)
 
   # Leading-dimension scale (e.g. per-expert (num_experts,) on (num_experts, in_dim, out_dim))
   if scale_c.ndim < w.ndim and w.ndim >= 3 and w.shape[: scale_c.ndim] == scale_c.shape:
@@ -268,13 +276,25 @@ def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
 
   (lhs_ca, rhs_ca), _ = dimension_numbers
   ret = tiled_dot_general.Cfg(
-      lhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
-      rhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
+      lhs=tiled_dot_general.TensorTiling(
+          contraction_axes=[], remaining_axes=[]
+      ),
+      rhs=tiled_dot_general.TensorTiling(
+          contraction_axes=[], remaining_axes=[]
+      ),
   )
 
   for lhs_idx, rhs_idx in zip(lhs_ca, rhs_ca):
-    ret.lhs.contraction_axes.append(tiled_dot_general.AxisTiling(axis=lhs_idx, tile_size=tile_size, tile_count=None))
-    ret.rhs.contraction_axes.append(tiled_dot_general.AxisTiling(axis=rhs_idx, tile_size=tile_size, tile_count=None))
+    ret.lhs.contraction_axes.append(
+        tiled_dot_general.AxisTiling(
+            axis=lhs_idx, tile_size=tile_size, tile_count=None
+        )
+    )
+    ret.rhs.contraction_axes.append(
+        tiled_dot_general.AxisTiling(
+            axis=rhs_idx, tile_size=tile_size, tile_count=None
+        )
+    )
 
   return ret
 
@@ -293,7 +313,9 @@ def _rhs_axis_metadata_wrapper(
     # TODO: remove the replication once the 2d sharding quantization
     # works as expected.
     if len(x.shape) == 1:
-      return nn.with_logical_partitioning((lambda: x), tuple(None for _ in mesh_axes))()
+      return nn.with_logical_partitioning(
+          (lambda: x), tuple(None for _ in mesh_axes)
+      )()
 
   mesh_axes = list(mesh_axes)  # pyrefly: ignore[bad-assignment]
   if is_tiled:
@@ -346,12 +368,18 @@ class AqtQuantization:
     return quant_dg, is_tiled, tiling_fn
 
   def _get_rhs_axis_metadata_wrapper(
-      self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
+      self,
+      mesh_axes: Tuple[str, ...] = (),
+      is_tiled: bool = False,
+      replicate_scale: bool = False,
   ):
     if self.quant_mode == aqt_flax.QuantMode.CONVERT:
       return None
     return functools.partial(
-        _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
+        _rhs_axis_metadata_wrapper,
+        mesh_axes=mesh_axes,
+        is_tiled=is_tiled,
+        replicate_scale=replicate_scale,
     )
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
@@ -429,7 +457,9 @@ class QwixQuantization:
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns Qwix dot_general."""
-    return functools.partial(QwixDotGeneral, config=self._get_fp8_full_qwix_config())
+    return functools.partial(
+        QwixDotGeneral, config=self._get_fp8_full_qwix_config()
+    )
 
   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns Qwix einsum."""
@@ -452,7 +482,9 @@ class QwixDotGeneral(nn.Module):
       *,
       out_sharding=None,
   ) -> jax.Array:
-    return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, self.config)
+    return dot_general_qt.dot_general_qt(
+        lhs, rhs, dimension_numbers, self.config
+    )
 
 
 class QwixEinsum(nn.Module):
@@ -532,7 +564,9 @@ class Fp8Einsum(nn.Module):
 
   def setup(self) -> None:
     """init with input_amax_history, kernel_amax_history, output_grad_amax_history,
-    input_scale, kernel_scale, output_grad_scale"""
+
+    input_scale, kernel_scale, output_grad_scale
+    """
     scale_args = (
         flax_initializers.ones_init(),
         jax.random.PRNGKey(0),
@@ -547,13 +581,25 @@ class Fp8Einsum(nn.Module):
     )
 
     OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
-    self.input_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "input_amax_history", *amax_history_args)
-    self.kernel_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "kernel_amax_history", *amax_history_args)
-    self.output_grad_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "output_grad_amax_history", *amax_history_args)
+    self.input_amax_history = self.variable(
+        OVERWRITE_WITH_GRADIENT, "input_amax_history", *amax_history_args
+    )
+    self.kernel_amax_history = self.variable(
+        OVERWRITE_WITH_GRADIENT, "kernel_amax_history", *amax_history_args
+    )
+    self.output_grad_amax_history = self.variable(
+        OVERWRITE_WITH_GRADIENT, "output_grad_amax_history", *amax_history_args
+    )
 
-    self.input_scale = self.variable(OVERWRITE_WITH_GRADIENT, "input_scale", *scale_args)
-    self.kernel_scale = self.variable(OVERWRITE_WITH_GRADIENT, "kernel_scale", *scale_args)
-    self.output_grad_scale = self.variable(OVERWRITE_WITH_GRADIENT, "output_grad_scale", *scale_args)
+    self.input_scale = self.variable(
+        OVERWRITE_WITH_GRADIENT, "input_scale", *scale_args
+    )
+    self.kernel_scale = self.variable(
+        OVERWRITE_WITH_GRADIENT, "kernel_scale", *scale_args
+    )
+    self.output_grad_scale = self.variable(
+        OVERWRITE_WITH_GRADIENT, "output_grad_scale", *scale_args
+    )
 
   def __call__(self, eqn, *args, **kwargs):
     assert len(args) == 2
@@ -564,10 +610,24 @@ class Fp8Einsum(nn.Module):
     k = jnp.asarray(k, comp_dtype)
     x = jnp.asarray(x, comp_dtype)
 
-    x_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, x, self.input_scale.value, self.input_amax_history.value)
-    k_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, k, self.kernel_scale.value, self.kernel_amax_history.value)
+    x_qdq = fp8_ops.in_qdq(
+        comp_dtype,
+        self.e4m3_dtype,
+        x,
+        self.input_scale.value,
+        self.input_amax_history.value,
+    )
+    k_qdq = fp8_ops.in_qdq(
+        comp_dtype,
+        self.e4m3_dtype,
+        k,
+        self.kernel_scale.value,
+        self.kernel_amax_history.value,
+    )
 
-    y_qdq = jnp.einsum(eqn, x_qdq, k_qdq, _dot_general=fp8_ops.dot_general_with_precision)
+    y_qdq = jnp.einsum(
+        eqn, x_qdq, k_qdq, _dot_general=fp8_ops.dot_general_with_precision
+    )
 
     y = fp8_ops.out_qdq(
         comp_dtype,
@@ -595,7 +655,11 @@ class NANOOFp8Quantization(Quantization):
 
   def einsum(self, dtype: DType = jnp.float32):
     """Returns an einsum using the NANOO (fnuz) fp8 formats of AMD MI300/MI325."""
-    return Fp8Einsum(dtype=dtype, e4m3_dtype=jnp.float8_e4m3fnuz, e5m2_dtype=jnp.float8_e5m2fnuz)
+    return Fp8Einsum(
+        dtype=dtype,
+        e4m3_dtype=jnp.float8_e4m3fnuz,
+        e5m2_dtype=jnp.float8_e5m2fnuz,
+    )
 
 
 def _get_int8_quant_config(config):
@@ -769,7 +833,12 @@ def _get_aqt_fp8_default_config(config):
 
 def _get_aqt_fp8_quant_config(config):
   """get aqt for 8-bit floating point quantization configuration"""
-  cfg = aqt_config.config_v4(fwd_bits="e4m3", dlhs_bits=None, drhs_bits=None, fwd_accumulator_dtype=jnp.bfloat16)
+  cfg = aqt_config.config_v4(
+      fwd_bits="e4m3",
+      dlhs_bits=None,
+      drhs_bits=None,
+      fwd_accumulator_dtype=jnp.bfloat16,
+  )
   return cfg
 
 
@@ -792,7 +861,13 @@ def _dot_general_make(quant_cfg):
 
 
 def _get_default_mp_config(default=None):
-  default_config = {_W_BITS: None, _A_BITS: None, _W_SCALE: 1.0, _A_SCALE: 1.0, _TILE_SIZE: -1}
+  default_config = {
+      _W_BITS: None,
+      _A_BITS: None,
+      _W_SCALE: 1.0,
+      _A_SCALE: 1.0,
+      _TILE_SIZE: -1,
+  }
   if default:
     default_config.update(default)
   return default_config
@@ -801,8 +876,13 @@ def _get_default_mp_config(default=None):
 def _get_mixed_precision_quant_config(mixed_precision_config):
   """Set quantization params based on user configuration."""
   ret_config = {}
-  default_mp_config = _get_default_mp_config(default=mixed_precision_config.get(DEFAULT, None))
-  for layer_name_re, layer_quantization_config in mixed_precision_config.items():
+  default_mp_config = _get_default_mp_config(
+      default=mixed_precision_config.get(DEFAULT, None)
+  )
+  for (
+      layer_name_re,
+      layer_quantization_config,
+  ) in mixed_precision_config.items():
     # Make a copy of default_mp_config to avoid updating original dict
     quant_config = default_mp_config.copy()
     # print(f"Mixed precision config: processing
@@ -810,7 +890,10 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
     if layer_name_re != DEFAULT:
       for k in quant_config:
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])
-    ret_config[layer_name_re] = [_dot_general_make(quant_config), quant_config["tile_size"]]
+    ret_config[layer_name_re] = [
+        _dot_general_make(quant_config),
+        quant_config["tile_size"],
+    ]
   return ret_config
 
 
@@ -821,7 +904,9 @@ def _get_quant_config(config):
   if config.quantization == "int8":
     return _get_int8_quant_config(config)
   if config.quantization == "intmp":
-    assert config.quant_cfg_path, "Must specify quant_cfg for mixed precision quantization"
+    assert (
+        config.quant_cfg_path
+    ), "Must specify quant_cfg for mixed precision quantization"
     with open(config.quant_cfg_path, "rt", encoding="utf8") as config_file:
       mixed_precision_config = json.load(config_file)
     return _get_mixed_precision_quant_config(mixed_precision_config)
@@ -836,7 +921,9 @@ def _get_quant_config(config):
   if config.quantization.startswith("te_"):
     return config.quantization
 
-  raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
+  raise ValueError(
+      f"Invalid value configured for quantization {config.quantization}."
+  )
 
 
 def in_convert_mode(quant):
@@ -885,8 +972,14 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     elif isinstance(quant_cfg, str) and quant_cfg.startswith("te_"):
       return TransformerEngineQuantization(config)
     quant_mode = get_quant_mode(quant_mode_str)
-    replicate_scale = config.replicate_quant_scale if config.replicate_quant_scale else False
-    return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)
+    replicate_scale = (
+        config.replicate_quant_scale if config.replicate_quant_scale else False
+    )
+    return AqtQuantization(
+        quant_dg=quant_cfg,
+        quant_mode=quant_mode,
+        replicate_scale=replicate_scale,
+    )
   return None
 
 
@@ -921,8 +1014,12 @@ def match_aqt_and_unquantized_param(aqt_params, params):
 
 def _get_aqt_key_paths(aqt_vars, params):
   """Generate a list of paths which have aqt state"""
-  aqt_to_unquantized_key_path = match_aqt_and_unquantized_param(aqt_vars, params)
-  aqt_key_paths, _ = jax.tree_util.tree_flatten(aqt_to_unquantized_key_path, is_leaf=lambda x: isinstance(x, tuple))
+  aqt_to_unquantized_key_path = match_aqt_and_unquantized_param(
+      aqt_vars, params
+  )
+  aqt_key_paths, _ = jax.tree_util.tree_flatten(
+      aqt_to_unquantized_key_path, is_leaf=lambda x: isinstance(x, tuple)
+  )
   return list(aqt_key_paths)
 
 
@@ -962,20 +1059,29 @@ def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
       wrapper = nnx_wrappers.ToNNX(linen_module_cls(name=op_id), rngs=rngs)
       wrapper.lazy_init(*args, **kwargs)
       setattr(parent, attr_name, wrapper)
-    return getattr(parent, attr_name)(*args, mutable=["_overwrite_with_gradient"], **kwargs)
+    return getattr(parent, attr_name)(
+        *args, mutable=["_overwrite_with_gradient"], **kwargs
+    )
   else:
     return linen_module_cls(name=op_id)(*args, **kwargs)
 
 
-def create_fp8_einsum(quant: Quantization, dtype: DType, rngs: nnx.Rngs) -> nnx_wrappers.ToNNX:
+def create_fp8_einsum(
+    quant: Quantization, dtype: DType, rngs: nnx.Rngs
+) -> nnx_wrappers.ToNNX:
   """Creates an fp8 einsum that an `nnx.Module` can call.
 
-  An fp8 einsum holds its scaling factors and amax histories in Linen variables, which can
-  only be created while the module is bound to a Linen scope. The bridge into NNX therefore
-  has to happen while the parent module is being built; creating the state on the first call
-  instead would grow the module graph inside the scanned layer loop, which NNX rejects.
+  An fp8 einsum holds its scaling factors and amax histories in Linen variables,
+  which can
+  only be created while the module is bound to a Linen scope. The bridge into
+  NNX therefore
+  has to happen while the parent module is being built; creating the state on
+  the first call
+  instead would grow the module graph inside the scanned layer loop, which NNX
+  rejects.
 
-  The state has a fixed shape, so a canonical pair of operands is enough to materialize it.
+  The state has a fixed shape, so a canonical pair of operands is enough to
+  materialize it.
   The returned einsum still accepts operands of any shape.
 
   Args:
@@ -989,23 +1095,33 @@ def create_fp8_einsum(quant: Quantization, dtype: DType, rngs: nnx.Rngs) -> nnx_
   return wrapper
 
 
-def apply_einsum_in_nnx(parent: nnx.Module, op_id: str, einsum, mutable: Sequence[str], *args):
+def apply_einsum_in_nnx(
+    parent: nnx.Module, op_id: str, einsum, mutable: Sequence[str], *args
+):
   """Applies a quantized Linen einsum from within an NNX parent module.
 
-  A Linen module cannot be called unbound, which is all an `nnx.Module` can offer it, so the
-  einsum is bridged into NNX on first use and the bridged instance is reused afterwards.
-  `op_id` must be unique per call site: two call sites sharing an id would also share
-  quantization state. Bridging here rather than while building the parent needs the operands,
+  A Linen module cannot be called unbound, which is all an `nnx.Module` can
+  offer it, so the
+  einsum is bridged into NNX on first use and the bridged instance is reused
+  afterwards.
+  `op_id` must be unique per call site: two call sites sharing an id would also
+  share
+  quantization state. Bridging here rather than while building the parent needs
+  the operands,
   so it only suits einsums whose state is shaped after them, such as AQT.
 
   Args:
-    parent: The NNX module hosting the einsum; it must carry an `rngs` attribute.
+    parent: The NNX module hosting the einsum; it must carry an `rngs`
+      attribute.
     op_id: Stable identifier for the call site.
-    einsum: The einsum returned by a `Quantization`, either a Linen module or a callable.
+    einsum: The einsum returned by a `Quantization`, either a Linen module or a
+      callable.
     mutable: Variable collections the einsum writes to.
     *args: Arguments forwarded to the einsum.
   """
-  linen_einsum = einsum.func if isinstance(einsum, functools.partial) else einsum
+  linen_einsum = (
+      einsum.func if isinstance(einsum, functools.partial) else einsum
+  )
   if not isinstance(linen_einsum, nn.Module):
     return einsum(*args)
 
@@ -1028,7 +1144,9 @@ class NvidaFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return _apply_linen_module_in_nnx(nn.Fp8DirectDotGeneralOp, op_id, *args, **kwargs)
+    return _apply_linen_module_in_nnx(
+        nn.Fp8DirectDotGeneralOp, op_id, *args, **kwargs
+    )
 
   def einsum(self, *args, **kwargs):
     rule, op_id = self._get_current_rule_and_op_id("einsum")
@@ -1044,7 +1162,9 @@ class NANOOFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return _apply_linen_module_in_nnx(nn.NANOOFp8DotGeneralOp, op_id, *args, **kwargs)
+    return _apply_linen_module_in_nnx(
+        nn.NANOOFp8DotGeneralOp, op_id, *args, **kwargs
+    )
 
 
 def _get_router_proj_unquantized_rule() -> qwix.QtRule:
@@ -1065,12 +1185,6 @@ def _get_router_proj_unquantized_rule() -> qwix.QtRule:
   )
 
 
-def _drhs_grad_calibration_override(config: Config) -> dict:
-  """Qwix DotGeneralQtConfig override for the weight-gradient arm's cotangent calibration (see types.py)."""
-  m = getattr(config, "drhs_grad_quantization_calibration_method", None)
-  return {"drhs_grad_calibration_method": m} if m else {}
-
-
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
@@ -1082,33 +1196,12 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
         weight_sparsity_start_step=config.weight_sparsity_start_step,
     )
 
-  rules = []
-  if not config.quantize_router_proj:
-    rules.append(_get_router_proj_unquantized_rule())
-
-  if config.quantize_logits_proj:
-    logits_calib = config.logits_proj_quant_calibration_method or None
-    rules.append(
-        qwix.QtRule(
-            module_path="decoder/logits_dense.*",
-            weight_qtype=jnp.float8_e4m3fn,
-            act_qtype=jnp.float8_e4m3fn,
-            bwd_qtype=jnp.float8_e5m2,
-            weight_calibration_method=logits_calib or config.weight_quantization_calibration_method,
-            act_calibration_method=logits_calib or config.act_quantization_calibration_method,
-            bwd_calibration_method=config.bwd_quantization_calibration_method,
-            additional_qt_config=_drhs_grad_calibration_override(config) or None,
-            op_names=("dot_general",),
-        )
-    )
-
-  paths = ["decoder/.*layers.*"]  # Main transformer layers
   if config.quantize_mtp:
-    paths.append("mtp_block/.*")  # Multi-token prediction block
-  # Disjunct regex paths, e.g. "(path1|path2|...)"
-  module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
+    module_path = "(decoder/.*layers.*|mtp_block/.*)"
+  else:
+    module_path = "decoder/.*layers.*"
 
-  rules.append(
+  return [
       qwix.QtRule(
           module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
@@ -1117,21 +1210,17 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
           weight_calibration_method=config.weight_quantization_calibration_method,
           act_calibration_method=config.act_quantization_calibration_method,
           bwd_calibration_method=config.bwd_quantization_calibration_method,
-          additional_qt_config={"sparsity_rule": sparsity_rule, **_drhs_grad_calibration_override(config)},
+          additional_qt_config={"sparsity_rule": sparsity_rule},
           op_names=("dot_general", "gmm", "ragged_dot"),
-      )
-  )
-  return rules
+      ),
+  ]
 
 
 def get_quantization_rule(config: Config):
   """Returns a list of qwix.QtRule from `dtype`."""
 
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
-    rules = []
-    if not config.quantize_router_proj:
-      rules.append(_get_router_proj_unquantized_rule())
-    rules.append(
+    return [
         qwix.QtRule(
             module_path="decoder/.*layers.*",
             weight_qtype=dtype,
@@ -1141,8 +1230,7 @@ def get_quantization_rule(config: Config):
             disable_channelwise_axes=False,
             op_names=("dot_general",),
         )
-    )
-    return rules
+    ]
 
   match config.quantization:
     case "int4":
@@ -1168,33 +1256,395 @@ def get_quantization_rule(config: Config):
       return None
 
 
+def get_quality_study_qwix_rules(config: Config) -> list[qwix.QtRule]:
+  """Generates separate rules for Attention Entry, Attention Exit, and MLP.
+
+  Supports microscaled FP8 (mxfp8_16 with tile_size=16) and microscaled integer
+  formats (mxint4 and mxint8 with tile_size=32), with multi-pass emulation
+  modes ('triangular', 'full_cross', 'lhs_high_precision', 'rhs_high_precision')
+  and OAS scaling for mxint4.
+  """
+  dtype_map = {
+      "E4M3": "float8_e4m3fn",
+      "E5M2": "float8_e5m2",
+      "E4M3_16": "mxfp8_16",
+      "E2M1_32": "mxfp4",
+      "MXFP8": "mxfp8_16",
+      "MXFP8_16": "mxfp8_16",
+      "MXFP4": "mxfp4",
+      "MXINT4": "mxint4",
+      "MXINT8": "mxint8",
+      "INT4": "mxint4",
+      "INT8": "mxint8",
+      "float8_e4m3fn": "float8_e4m3fn",
+      "float8_e5m2": "float8_e5m2",
+      "mxfp8_16": "mxfp8_16",
+      "mxfp4": "mxfp4",
+      "mxint4": "mxint4",
+      "mxint8": "mxint8",
+  }
+
+  tile_size_map = {
+      "mxfp8_16": 16,
+      "mxfp8": 32,
+      "mxfp4": 32,
+      "nvfp4": 16,
+      "mxint4": 32,
+      "mxint8": 32,
+  }
+
+  trial = getattr(config, "quality_study_trial", "") or ""
+  preset_mlp_lhs = None
+  preset_mlp_rhs = None
+  preset_tile_size = None
+  preset_multipass_mode = None
+
+  if trial == "fp8_1pass":
+    preset_mlp_lhs = "E4M3_16"
+    preset_mlp_rhs = "E4M3_16"
+    preset_tile_size = 16
+    preset_multipass_mode = None
+  elif trial in ("fp8_2pass", "fp8_2pass_act_higher"):
+    preset_mlp_lhs = "E4M3_16"
+    preset_mlp_rhs = "E4M3_16"
+    preset_tile_size = 16
+    preset_multipass_mode = "lhs_high_precision"
+  elif trial in ("fp8_3pass", "fp8_3pass_triangular"):
+    preset_mlp_lhs = "E4M3_16"
+    preset_mlp_rhs = "E4M3_16"
+    preset_tile_size = 16
+    preset_multipass_mode = "triangular"
+  elif trial in ("fp8_4pass", "fp8_4pass_full_cross"):
+    preset_mlp_lhs = "E4M3_16"
+    preset_mlp_rhs = "E4M3_16"
+    preset_tile_size = 16
+    preset_multipass_mode = "full_cross"
+  elif trial == "int4_1pass":
+    preset_mlp_lhs = "MXINT4"
+    preset_mlp_rhs = "MXINT4"
+    preset_tile_size = 32
+    preset_multipass_mode = None
+  elif trial in (
+      "int_2pass",
+      "int4_2pass",
+      "int4_int8_2pass",
+      "int_2pass_act_higher",
+  ):
+    preset_mlp_lhs = "MXINT8"
+    preset_mlp_rhs = "MXINT4"
+    preset_tile_size = 32
+    preset_multipass_mode = "lhs_high_precision"
+  elif trial in ("int8_3pass", "int8_3pass_triangular"):
+    preset_mlp_lhs = "MXINT8"
+    preset_mlp_rhs = "MXINT8"
+    preset_tile_size = 32
+    preset_multipass_mode = "triangular"
+  elif trial in ("int8_4pass", "int8_4pass_full_cross"):
+    preset_mlp_lhs = "MXINT8"
+    preset_mlp_rhs = "MXINT8"
+    preset_tile_size = 32
+    preset_multipass_mode = "full_cross"
+
+  def _resolve_rule_config(
+      lhs_strat: str | None,
+      rhs_strat: str | None,
+      explicit_tile_size: int | None,
+      explicit_multipass_mode: str | None,
+      fallback_lhs: str | None = None,
+      fallback_rhs: str | None = None,
+      fallback_tile_size: int | None = None,
+      fallback_mode: str | None = None,
+  ) -> tuple[str | None, str | None, int | None, dict[str, Any]]:
+    resolved_lhs = (
+        lhs_strat if lhs_strat and lhs_strat != "UNQUANTIZED" else fallback_lhs
+    )
+    resolved_rhs = (
+        rhs_strat if rhs_strat and rhs_strat != "UNQUANTIZED" else fallback_rhs
+    )
+
+    act_qtype = dtype_map.get(resolved_lhs, None)
+    weight_qtype = dtype_map.get(resolved_rhs, None)
+
+    tile_size = (
+        explicit_tile_size
+        or getattr(config, "quant_tile_size", None)
+        or fallback_tile_size
+        or tile_size_map.get(act_qtype or weight_qtype, None)
+    )
+
+    mode = (
+        explicit_multipass_mode
+        or getattr(config, "multipass_mode", None)
+        or fallback_mode
+    )
+    if mode in ("none", "None", ""):
+      mode = None
+    elif mode in ("triangular", "3pass", "3pass_triangular"):
+      mode = (
+          "three_pass_int4"
+          if (
+              act_qtype in ("mxint4", "mxint8")
+              or weight_qtype in ("mxint4", "mxint8")
+          )
+          else "three_pass_fp8"
+      )
+    elif mode in ("full_cross", "4pass", "4pass_full_cross"):
+      mode = (
+          "four_pass_int4"
+          if (
+              act_qtype in ("mxint4", "mxint8")
+              or weight_qtype in ("mxint4", "mxint8")
+          )
+          else "four_pass_fp8"
+      )
+
+    additional_qt_config: dict[str, Any] = {
+        "use_original_residuals": False,
+    }
+    if mode:
+      additional_qt_config["multipass_mode"] = mode
+
+    return act_qtype, weight_qtype, tile_size, additional_qt_config
+
+  rules = []
+
+  # 1. QKV Projections (q_proj, k_proj, v_proj)
+  qkv_act, qkv_wt, qkv_tile, qkv_add = _resolve_rule_config(
+      config.fwd_qkv_lhs_quant_strategy,
+      config.fwd_qkv_rhs_quant_strategy,
+      config.fwd_qkv_tile_size,
+      config.fwd_qkv_multipass_mode,
+  )
+  qkv_add["dlhs_grad_qtype"] = dtype_map.get(
+      config.dlhs_qkv_lhs_quant_strategy, None
+  )
+  qkv_add["dlhs_residual_qtype"] = dtype_map.get(
+      config.dlhs_qkv_rhs_quant_strategy, None
+  )
+  qkv_add["drhs_grad_qtype"] = dtype_map.get(
+      config.drhs_qkv_lhs_quant_strategy, None
+  )
+  qkv_add["drhs_residual_qtype"] = dtype_map.get(
+      config.drhs_qkv_rhs_quant_strategy, None
+  )
+
+  qkv_rule = qwix.QtRule(
+      module_path=r".*self_attention/(query|key|value).*",
+      act_qtype=qkv_act,
+      weight_qtype=qkv_wt,
+      tile_size=qkv_tile,
+      additional_qt_config=qkv_add,
+  )
+  rules.append(qkv_rule)
+
+  # 2. O Projections (o_proj)
+  oproj_act, oproj_wt, oproj_tile, oproj_add = _resolve_rule_config(
+      config.fwd_oproj_lhs_quant_strategy,
+      config.fwd_oproj_rhs_quant_strategy,
+      config.fwd_oproj_tile_size,
+      config.fwd_oproj_multipass_mode,
+  )
+  oproj_add["dlhs_grad_qtype"] = dtype_map.get(
+      config.dlhs_oproj_lhs_quant_strategy, None
+  )
+  oproj_add["dlhs_residual_qtype"] = dtype_map.get(
+      config.dlhs_oproj_rhs_quant_strategy, None
+  )
+  oproj_add["drhs_grad_qtype"] = dtype_map.get(
+      config.drhs_oproj_lhs_quant_strategy, None
+  )
+  oproj_add["drhs_residual_qtype"] = dtype_map.get(
+      config.drhs_oproj_rhs_quant_strategy, None
+  )
+
+  oproj_rule = qwix.QtRule(
+      module_path=r".*self_attention/out.*",
+      act_qtype=oproj_act,
+      weight_qtype=oproj_wt,
+      tile_size=oproj_tile,
+      additional_qt_config=oproj_add,
+  )
+  rules.append(oproj_rule)
+
+  # 3. MLP / Dense Experts (megablox)
+  mlp_act, mlp_wt, mlp_tile, mlp_add = _resolve_rule_config(
+      config.fwd_mlp_lhs_quant_strategy,
+      config.fwd_mlp_rhs_quant_strategy,
+      config.fwd_mlp_tile_size,
+      config.fwd_mlp_multipass_mode,
+      fallback_lhs=preset_mlp_lhs,
+      fallback_rhs=preset_mlp_rhs,
+      fallback_tile_size=preset_tile_size,
+      fallback_mode=preset_multipass_mode,
+  )
+  mlp_add["dlhs_grad_qtype"] = dtype_map.get(
+      config.dlhs_mlp_lhs_quant_strategy, None
+  )
+  mlp_add["dlhs_residual_qtype"] = dtype_map.get(
+      config.dlhs_mlp_rhs_quant_strategy, None
+  )
+  mlp_add["drhs_grad_qtype"] = dtype_map.get(
+      config.drhs_mlp_lhs_quant_strategy, None
+  )
+  mlp_add["drhs_residual_qtype"] = dtype_map.get(
+      config.drhs_mlp_rhs_quant_strategy, None
+  )
+
+  # Multi-pass modes for forward, dlhs, and drhs
+  mlp_multipass = getattr(config, "mlp_multipass_mode", None)
+  fwd_multipass = (
+      getattr(config, "fwd_mlp_multipass_mode", None)
+      or mlp_multipass
+      or preset_multipass_mode
+  )
+  if fwd_multipass in ("none", "None", ""):
+    fwd_multipass = None
+  elif fwd_multipass in ("triangular", "3pass", "3pass_triangular"):
+    fwd_multipass = (
+        "three_pass_int4"
+        if (
+            mlp_act in ("mxint4", "mxint8")
+            or mlp_wt in ("mxint4", "mxint8")
+        )
+        else "three_pass_fp8"
+    )
+  elif fwd_multipass in ("full_cross", "4pass", "4pass_full_cross"):
+    fwd_multipass = (
+        "four_pass_int4"
+        if (
+            mlp_act in ("mxint4", "mxint8")
+            or mlp_wt in ("mxint4", "mxint8")
+        )
+        else "four_pass_fp8"
+    )
+  if fwd_multipass:
+    mlp_add["multipass_mode"] = fwd_multipass
+
+  dlhs_multipass = (
+      getattr(config, "dlhs_mlp_multipass_mode", None) or mlp_multipass
+  )
+  if dlhs_multipass in ("none", "None", ""):
+    dlhs_multipass = None
+  elif dlhs_multipass in ("triangular", "3pass", "3pass_triangular"):
+    dlhs_multipass = (
+        "three_pass_int4"
+        if (
+            mlp_act in ("mxint4", "mxint8")
+            or mlp_wt in ("mxint4", "mxint8")
+        )
+        else "three_pass_fp8"
+    )
+  elif dlhs_multipass in ("full_cross", "4pass", "4pass_full_cross"):
+    dlhs_multipass = (
+        "four_pass_int4"
+        if (
+            mlp_act in ("mxint4", "mxint8")
+            or mlp_wt in ("mxint4", "mxint8")
+        )
+        else "four_pass_fp8"
+    )
+  if dlhs_multipass:
+    mlp_add["dlhs_multipass_mode"] = dlhs_multipass
+
+  drhs_multipass = (
+      getattr(config, "drhs_mlp_multipass_mode", None) or mlp_multipass
+  )
+  if drhs_multipass in ("none", "None", ""):
+    drhs_multipass = None
+  elif drhs_multipass in ("triangular", "3pass", "3pass_triangular"):
+    drhs_multipass = (
+        "three_pass_int4"
+        if (
+            mlp_act in ("mxint4", "mxint8")
+            or mlp_wt in ("mxint4", "mxint8")
+        )
+        else "three_pass_fp8"
+    )
+  elif drhs_multipass in ("full_cross", "4pass", "4pass_full_cross"):
+    drhs_multipass = (
+        "four_pass_int4"
+        if (
+            mlp_act in ("mxint4", "mxint8")
+            or mlp_wt in ("mxint4", "mxint8")
+        )
+        else "four_pass_fp8"
+    )
+  if drhs_multipass:
+    mlp_add["drhs_multipass_mode"] = drhs_multipass
+
+  # Tile sizes
+  dlhs_tile = getattr(config, "dlhs_mlp_tile_size", None) or mlp_tile
+  if dlhs_tile:
+    mlp_add["dlhs_tile_size"] = dlhs_tile
+  drhs_tile = getattr(config, "drhs_mlp_tile_size", None) or mlp_tile
+  if drhs_tile:
+    mlp_add["drhs_tile_size"] = drhs_tile
+
+  mlp_rule = qwix.QtRule(
+      module_path=r".*(mlp|megablox)/(wi_0|wi_1|wo).*",
+      act_qtype=mlp_act,
+      weight_qtype=mlp_wt,
+      tile_size=mlp_tile,
+      additional_qt_config=mlp_add,
+      op_names=("dot_general", "gmm", "ragged_dot"),
+  )
+  rules.append(mlp_rule)
+
+  return rules
+
+
+get_ablation_qwix_rules = get_quality_study_qwix_rules
+
+
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
-    case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
+    case (
+        "int4"
+        | "int8"
+        | "fp4"
+        | "fp4_e2m1"
+        | "fp8"
+        | "fp8_e5m2"
+        | "fp8_e4m3"
+        | "fp8_full"
+    ):
       return qwix.QtProvider(get_quantization_rule(config))
     case "fp8_gpu":
       return NvidaFp8Provider(get_quantization_rule(config))
     case "fp8_nanoo":
       return NANOOFp8Provider(get_quantization_rule(config))
+    case "ablation_study" | "quality_study":
+      return qwix.QtProvider(get_quality_study_qwix_rules(config))
   return None
 
 
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   # Batch split is not using Qwix's interception feature but manual plumbing
-  if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
+  if (
+      config.quantization
+      and config.use_qwix_quantization
+      and not config.use_batch_split_schedule
+  ):
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+      input_shape = (
+          config.micro_batch_size_to_train_on,
+          config.max_target_length,
+      )
       dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
       dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
       dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
       # The MTP block reads the decoder targets, so the qwix forward pass needs them.
       dummy_targets = {}
       if config.mtp_num_layers > 0:
-        dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
-        dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_targets["decoder_target_tokens"] = jnp.ones(
+            input_shape, dtype=jnp.int32
+        )
+        dummy_targets["decoder_target_mask"] = jnp.ones(
+            input_shape, dtype=jnp.int32
+        )
       model = qwix.quantize_model(
           model,
           quantization_provider,
@@ -1217,14 +1667,19 @@ def maybe_quantize_model(model, config):
 # Quantized weight dtypes that tpu-inference's fused MoE kernel (gmm_v2) takes with
 # per-block scales and dequantizes in-kernel. Any other qtype keeps the expert weights
 # unquantized on the fused path.
-FUSED_MOE_KERNEL_WEIGHT_QTYPES = (jnp.dtype(jnp.float8_e4m3fn), jnp.dtype(jnp.int8))
+FUSED_MOE_KERNEL_WEIGHT_QTYPES = (
+    jnp.dtype(jnp.float8_e4m3fn),
+    jnp.dtype(jnp.int8),
+)
 
 
 def get_fused_moe_rule() -> qwix.QuantizationRule | None:
   """Returns the qwix rule that governs the fused MoE grouped matmul, if any.
 
-  The fused kernel is the same grouped matmul that MaxText's own megablox / ragged_dot
-  paths implement, so it takes its rule from the "gmm" op exactly like they do. Rules
+  The fused kernel is the same grouped matmul that MaxText's own megablox /
+  ragged_dot
+  paths implement, so it takes its rule from the "gmm" op exactly like they do.
+  Rules
   that only list "dot_general" (the plain fp8 / int8 recipes) leave the experts
   unquantized on every MoE path, including this one.
   """
@@ -1236,29 +1691,42 @@ def quantize_weight_for_fused_moe(
 ) -> tuple[jax.Array, jax.Array | None]:
   """Quantizes an [E, K, N] expert weight for tpu-inference's fused MoE kernel.
 
-  The kernel contracts over K, dequantizes after the matmul with scales laid out as
-  [E, num_blocks, 1, N] (blocks along K), and quantizes the activations itself with a
-  32-bit accumulator. Scale granularity follows the qwix rule: channelwise over (E, N),
+  The kernel contracts over K, dequantizes after the matmul with scales laid out
+  as
+  [E, num_blocks, 1, N] (blocks along K), and quantizes the activations itself
+  with a
+  32-bit accumulator. Scale granularity follows the qwix rule: channelwise over
+  (E, N),
   plus blockwise along K when the rule sets tile_size.
 
-  Returns the (possibly unchanged) weight and its scale, or None when the rule does not
+  Returns the (possibly unchanged) weight and its scale, or None when the rule
+  does not
   ask for a weight dtype the kernel supports.
   """
 
-  weight_qtype = getattr(rule, "weight_qtype", None) if rule is not None else None
+  weight_qtype = (
+      getattr(rule, "weight_qtype", None) if rule is not None else None
+  )
   if weight_qtype is None:
     return kernel, None
   qtype = jnp.dtype(weight_qtype)
   if qtype not in FUSED_MOE_KERNEL_WEIGHT_QTYPES:
-    max_logging.log(f"fused MoE kernel does not take {qtype} weights; keeping expert weights in {kernel.dtype}.")
+    max_logging.log(
+        f"fused MoE kernel does not take {qtype} weights; keeping expert"
+        f" weights in {kernel.dtype}."
+    )
     return kernel, None
   if kernel.ndim != 3:
-    raise ValueError(f"fused MoE expert weights must be [E, K, N], got {kernel.shape}")
+    raise ValueError(
+        f"fused MoE expert weights must be [E, K, N], got {kernel.shape}"
+    )
 
   tile_size = getattr(rule, "tile_size", None)
   tiled_axes = {1: tile_size} if tile_size else {}
   cal_method = getattr(rule, "weight_calibration_method", None)
-  quant_kwargs = {"calibration_method": cal_method} if cal_method is not None else {}
+  quant_kwargs = (
+      {"calibration_method": cal_method} if cal_method is not None else {}
+  )
 
   quantized = qpl.quantize(
       kernel,
@@ -1275,9 +1743,12 @@ def quantize_weight_for_fused_moe(
 def without_qwix_interception(fn: Callable) -> Callable:
   """Returns `fn` wrapped so that qwix's op interception is off while it runs.
 
-  For ops that do their own quantization (tpu-inference's fused MoE), the qwix rule is
-  applied once up front to their inputs and the op itself is opaque to qwix: neither
-  the routing math around the kernel nor anything traced inside it gets rewritten.
+  For ops that do their own quantization (tpu-inference's fused MoE), the qwix
+  rule is
+  applied once up front to their inputs and the op itself is opaque to qwix:
+  neither
+  the routing math around the kernel nor anything traced inside it gets
+  rewritten.
   """
   return qwix_interception.disable_interceptions(fn)
 
@@ -1298,10 +1769,14 @@ def _make_scale_tensor(scale, arr):
   return _cast_reduced_from(scale_tensor, arr)
 
 
-def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> float:
+def get_static_scale(
+    qtype: jax.typing.DTypeLike, calibration_method: str
+) -> float:
   """Extracts the static scale.
-  Currently, only symmetric fixed range calibration is supported.
-  For symmetric calibration, the calibration_method must be in the format 'fixed,-max,max' or 'fixed,max'.
+
+  Currently, only symmetric fixed range calibration is supported. For symmetric
+  calibration, the calibration_method must be in the format 'fixed,-max,max' or
+  'fixed,max'.
 
   Args:
     qtype: The dtype to quantize to.
@@ -1310,15 +1785,22 @@ def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> fl
   Returns:
     The extracted static scale value.
   """
-  if calibration_method is None or not calibration_method.lower().startswith("fixed"):
-    raise ValueError(f"Only static scale quantization is supported, got {calibration_method}")
+  if calibration_method is None or not calibration_method.lower().startswith(
+      "fixed"
+  ):
+    raise ValueError(
+        f"Only static scale quantization is supported, got {calibration_method}"
+    )
 
   args = [float(a) for a in calibration_method.split(",")[1:]]
   if len(args) == 1:
     args = [-args[0], args[0]]
 
   if len(args) != 2 or args[0] + args[1] != 0 or args[1] <= 0:
-    raise ValueError(f"Expected format: 'fixed,max' or 'fixed,-max,max'. Got: {calibration_method}")
+    raise ValueError(
+        "Expected format: 'fixed,max' or 'fixed,-max,max'. Got:"
+        f" {calibration_method}"
+    )
 
   qmax = numerics.get_symmetric_bound(qtype)
   scale_val = args[1] / qmax
@@ -1331,14 +1813,17 @@ def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> fl
   return scale_val
 
 
-def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_method: str) -> qwix.QArray:
+def manual_quantize(
+    tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_method: str
+) -> qwix.QArray:
   """Manually quantizes a tensor based on per-tensor scaling with symmetric fixed range calibration.
 
   Args:
     tensor: The tensor to quantize.
     dtype: The logical type of the quantized value, e.g. jnp.float8_e4m3fn
-    calibration_method: A string specifying the calibration method. Currently only support
-    symmetric fixed range calibration: Expected format is "fixed,{-max_val},{max_val}".
+    calibration_method: A string specifying the calibration method. Currently
+      only support symmetric fixed range calibration: Expected format is
+      "fixed,{-max_val},{max_val}".
 
   Returns:
     A qwix.QArray containing the quantized value and the scale.
@@ -1373,9 +1858,14 @@ class TransformerEngineQuantization(Quantization):
     self.quant_mode = "train"
 
     if not config.quantization.startswith("te_"):
-      raise ValueError(f"Invalid TransformerEngine quantization config: {config.quantization}")
+      raise ValueError(
+          "Invalid TransformerEngine quantization config:"
+          f" {config.quantization}"
+      )
 
-    self._recipe = TransformerEngineQuantization._get_recipe(config.quantization)
+    self._recipe = TransformerEngineQuantization._get_recipe(
+        config.quantization
+    )
 
     self._te_comm_gemm_overlap_policy = config.te_comm_gemm_overlap
 
@@ -1408,7 +1898,8 @@ class TransformerEngineQuantization(Quantization):
   def needs_apply_rngs(self) -> bool:
     """Whether this recipe draws RNGs at apply time.
 
-    Only NVFP4 does, and only while stochastic rounding is on: TE draws ``sr_rng`` for
+    Only NVFP4 does, and only while stochastic rounding is on: TE draws
+    ``sr_rng`` for
     the DGRAD quantizer. The other recipes take their scales from the tensors.
     """
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
@@ -1436,24 +1927,36 @@ class TransformerEngineQuantization(Quantization):
     This method does a couple things:
 
 
-    1. Wraps the given function in a context that specifies MaxText's physical mesh axes to
-    TransformerEngine. This ensures our collective operations in TransformerEngine are using
+    1. Wraps the given function in a context that specifies MaxText's physical
+    mesh axes to
+    TransformerEngine. This ensures our collective operations in
+    TransformerEngine are using
     the correct axes.
 
-    2. Wraps the given function in a Flax linen module. This module does not store any Flax
-    parameters but can store Flax variables for quantizers if required by the recipe.
+    2. Wraps the given function in a Flax linen module. This module does not
+    store any Flax
+    parameters but can store Flax variables for quantizers if required by the
+    recipe.
 
-    3. When the wrapper is called, it provides two additional arguments to the given function `f`,
-    'generate_quantizer_set' as the first argument and 'generate_collective_op_set' as the second argument.
-    'generate_quantizer_set' is a function that can be called to generate a TransformerEngine/JAX quantizer
-    set object used in TransformerEngine/JAX APIs based on the recipe of this TransformerEngineQuantizer
-    object. Similarly, 'generate_collective_op_set' is a function that can be called to generate a
-    TransformerEngine/JAX collective operation set object used in TransformerEngine/JAX APIs based
+    3. When the wrapper is called, it provides two additional arguments to the
+    given function `f`,
+    'generate_quantizer_set' as the first argument and
+    'generate_collective_op_set' as the second argument.
+    'generate_quantizer_set' is a function that can be called to generate a
+    TransformerEngine/JAX quantizer
+    set object used in TransformerEngine/JAX APIs based on the recipe of this
+    TransformerEngineQuantizer
+    object. Similarly, 'generate_collective_op_set' is a function that can be
+    called to generate a
+    TransformerEngine/JAX collective operation set object used in
+    TransformerEngine/JAX APIs based
     the kernel's mesh axes.
 
     Args:
-      f: The function to wrap. The first argument must be 'generate_quantizer_set'.
-      name: The name of this wrapped operation. If unspecified, will use `f.__name__`.
+      f: The function to wrap. The first argument must be
+        'generate_quantizer_set'.
+      name: The name of this wrapped operation. If unspecified, will use
+        `f.__name__`.
 
     Returns:
       A Flax linen module that wraps the given function.
@@ -1496,7 +1999,10 @@ class TransformerEngineQuantization(Quantization):
           # CGEMM in MLP layer (up projection, down projection)
           if mesh_axes[0] == "embed" and mesh_axes[-1] == "mlp":
             return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
-          elif mesh_axes[0] == "mlp" and mesh_axes[-1] in ("embed", "embed_attn"):
+          elif mesh_axes[0] == "mlp" and mesh_axes[-1] in (
+              "embed",
+              "embed_attn",
+          ):
             # 'embed_attn' covers the flattened attention output projection of Qwen3 hybrid models.
             return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
           elif overlap_policy == TeCommGemmOverlapPolicy.FULL:
@@ -1510,7 +2016,12 @@ class TransformerEngineQuantization(Quantization):
 
       @nn.compact
       def __call__(self, *args, **kwargs):
-        return f(self.generate_quantizer_set, self.generate_collective_op_set, *args, **kwargs)
+        return f(
+            self.generate_quantizer_set,
+            self.generate_collective_op_set,
+            *args,
+            **kwargs,
+        )
 
     TEWrapper.__name__ = f"TEWrapper_{name if name else f.__name__}"
 
@@ -1521,14 +2032,25 @@ class TransformerEngineQuantization(Quantization):
     import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
     import transformer_engine.jax.cpp_extensions as tex  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
-    def te_dot_general(generate_quantizer_set, generate_collective_op_set, x, kernel, dims, **kwargs):
+    def te_dot_general(
+        generate_quantizer_set,
+        generate_collective_op_set,
+        x,
+        kernel,
+        dims,
+        **kwargs,
+    ):
       contracting_dims, batch_dims = dims
-      assert batch_dims == ((), ()), "Batch dimensions must be empty for TransformerEngine dot."
+      assert batch_dims == (
+          (),
+          (),
+      ), "Batch dimensions must be empty for TransformerEngine dot."
 
       quantizer_set = generate_quantizer_set()
       collective_op_set = (
           generate_collective_op_set(mesh_axes)
-          if self._te_comm_gemm_overlap_policy != TeCommGemmOverlapPolicy.DISABLED
+          if self._te_comm_gemm_overlap_policy
+          != TeCommGemmOverlapPolicy.DISABLED
           else tex.noop_collective_op_set
       )
       return transformer_engine.jax.dense.dense(
@@ -1544,7 +2066,9 @@ class TransformerEngineQuantization(Quantization):
   def einsum(self, *args, **kwargs):
     """Placeholder for einsum implementation in subclasses."""
     # quant.einsum is only required for MoE or for inference with KVCache.
-    raise ValueError("Einsum is not yet supported for TransformerEngine quantization.")
+    raise ValueError(
+        "Einsum is not yet supported for TransformerEngine quantization."
+    )
 
   def get_moe_block_quantizer_set(
       self,
@@ -1560,9 +2084,14 @@ class TransformerEngineQuantization(Quantization):
     )
 
     if te_gmm_quantization_recipe_name == "te_no_quant":
-      return QuantizerFactory.create_set(scaling_mode=ScalingMode.NO_SCALING, is_2x2x=False)
+      return QuantizerFactory.create_set(
+          scaling_mode=ScalingMode.NO_SCALING, is_2x2x=False
+      )
     if te_gmm_quantization_recipe_name != "te_mxfp8":
-      raise ValueError(f"Invalid TransformerEngine GMM quantization recipe name: {te_gmm_quantization_recipe_name}")
+      raise ValueError(
+          "Invalid TransformerEngine GMM quantization recipe name:"
+          f" {te_gmm_quantization_recipe_name}"
+      )
     if n_token_groups <= 0 or n_expert_groups <= 0:
       raise ValueError(
           "TE MoEBlock quantizer group counts must be positive, got "
