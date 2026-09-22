@@ -14,9 +14,13 @@
 
 """Trainer abstractions.
 
-Defines the core Trainer interface, republishes the data types shared with
-Tunix (WeightedMetric, LossOutput, TrainerPayload), and defines the on-device
-MetricsBuffer used by the training loop.
+Defines the core Trainer interface (`AbstractTrainingEngine`), the on-device
+`MetricsBuffer` used by the training loop, and `TrainingConfig`.
+
+The trainer data types shared with Tunix -- `WeightedMetric`, `LossOutput`,
+`TrainerPayload` and `RLTrainerPayload` -- are not declared here. They are
+imported from Tunix and re-exported through `__all__`, so that MaxText and Tunix
+name one class object per type; see the comment above those imports for why.
 
 Note: this module imports Tunix, so `training_engine` requires MaxText's
 post-training dependency bundle (`google-tunix`, declared in
@@ -196,6 +200,24 @@ class AbstractTrainingEngine(abc.ABC):
     Args:
       payload: Packed micro-batch payload for evaluation.
       **kwargs: Additional evaluation keyword arguments.
+    """
+
+  @abc.abstractmethod
+  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Read-only.
+
+    Runs a forward pass with the trainer model and caller-supplied function.
+
+    The engine owns model access and shards `args`/`kwargs` on its data axis;
+    `fn` owns the computation and must not mutate the model.
+
+    Args:
+      fn: Called as `fn(model, *args, **kwargs)`.
+      *args: Positional arguments forwarded to `fn` after sharding.
+      **kwargs: Keyword arguments forwarded to `fn` after sharding.
+
+    Returns:
+      Whatever `fn` returns.
     """
 
   @abc.abstractmethod
