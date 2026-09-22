@@ -4,3 +4,4 @@ gcsfs==2026.2.0
 orbax-checkpoint>=0.12.4
 markdown>=3.10.2
 xprof<=2.23.0
+pathwaysutils @ git+https://github.com/AI-Hypercomputer/pathways-utils.git@dbff51fcc22e8d15249ac903376b0e38bbd14ed5
