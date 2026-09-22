@@ -526,7 +526,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   def test_moe_nanoo_fp8(self):
-    train_main(TrainTests.CONFIGS["moe"] + ["quantization=nanoo_fp8"])
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=nanoo_fp8", "enable_tensorboard=False"])
 
   @pytest.mark.integration_test
   def test_moe_fp8_token_dropping(self):
