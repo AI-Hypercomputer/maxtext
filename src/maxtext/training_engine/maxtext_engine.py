@@ -490,7 +490,33 @@ def router_replay_gen_model_input_fn(payload: abstract_engine.RLTrainerPayload) 
   routed_experts = getattr(payload, "routed_experts", None)
   if routed_experts is not None:
     kwargs["forced_routed_experts"] = jnp.asarray(routed_experts)
+  else:
+    _warn_router_replay_inert_once()
   return kwargs
+
+
+_ROUTER_REPLAY_INERT_WARNING = (
+    "[router-replay] payload.routed_experts is None, so forced_routed_experts "
+    "is omitted and the trainer is re-running its OWN gate for 100%% of tokens. "
+    "Router replay is silently INERT. The usual cause is "
+    "return_routed_experts=false: moe.py skips the sow, nnx_decoders leaves "
+    "expert_indices None, and every layer below accepts the shorter tuple "
+    "without complaint. Set return_routed_experts: true (post_train/rl.yml) if "
+    "router replay is intended."
+)
+_ROUTER_REPLAY_INERT_WARNED = False
+
+
+def _warn_router_replay_inert_once() -> None:
+  """Warns once when router replay is requested but no routing arrived.
+
+  This path used to be completely silent, which meant a config regression could
+  disable trainer/sampler routing parity for an entire run with no signal.
+  """
+  global _ROUTER_REPLAY_INERT_WARNED
+  if not _ROUTER_REPLAY_INERT_WARNED:
+    _ROUTER_REPLAY_INERT_WARNED = True
+    logging.warning(_ROUTER_REPLAY_INERT_WARNING)
 
 
 def make_router_replay_loss_fn(

@@ -183,9 +183,22 @@ async_scheduling: true
 # stop generation when any of these strings is generated
 stop_strings: null
 # Record each MoE layer's routing decisions during rollout as `expert_indices`, so the
-# sampler's routing can be replayed on the trainer. Off by default so rollouts do not pay
-# for the extra top-k.
-return_routed_experts: false
+# sampler's routing can be replayed on the trainer.
+#
+# MUST be true for RL router replay. base.yml keeps it false because a serving
+# workload should not pay for the extra top-k, but under this config the flag is
+# load-bearing and turning it off degrades SILENTLY, with no error and no warning:
+#
+#   moe.py:3667            skips the sow
+#   nnx_decoders.py:2314   `if expert_indices_list:` leaves expert_indices = None
+#   adapter.py:394-397     accepts the shorter tuple
+#   maxtext_engine.py:489  omits forced_routed_experts from the payload
+#   moe.py:965-973         the trainer then re-runs its OWN gate for 100% of tokens
+#
+# The result is a trainer/sampler routing mismatch on every token, which is the
+# thing router replay exists to prevent. Their own integration test has to set
+# this True explicitly (inference_router_replay_test.py:96).
+return_routed_experts: true
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: true
