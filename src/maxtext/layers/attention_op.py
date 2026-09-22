@@ -2688,30 +2688,25 @@ class AttentionOp(nnx.Module):
     else:
       # Dense BSHD layout: no context parallelism, and either packing is off or
       # dataset_type is "synthetic", which keeps the non-THD layout.
-      # TE `padding_causal` does not apply a dense ndarray as an attention pattern: it
-      # `logical_not`s it and sums to seqlens. A causal/SWA bitmap therefore collapses
-      # seqlens to the window (local) instead of the sequence length. Build the mask as
-      # FULL so it carries padding/segment occupancy only; causal and the sliding window
-      # come from mask_type and window_size.
+      # Describe only sequence occupancy here. Causality and the sliding window are
+      # separate cuDNN parameters selected by mask_type and window_size. In particular,
+      # putting the sliding-window bitmap in TE's legacy ndarray mask makes its
+      # compatibility path infer the window width as the sequence length.
       if decoder_segment_ids is None:
-        # Without segment ids every token is valid, and FULL would yield no mask at all.
-        decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
+        q_sequence_lengths = jnp.full((query.shape[0],), query.shape[1], dtype=jnp.int32)
+        kv_sequence_lengths = jnp.full((key.shape[0],), key.shape[1], dtype=jnp.int32)
+      else:
+        # BSHD supports one right-padded sequence per batch element. Packing and
+        # arbitrary intra-sequence holes use the THD branch above instead.
+        q_sequence_lengths = jnp.sum(decoder_segment_ids > 0, axis=-1, dtype=jnp.int32)
+        kv_sequence_lengths = q_sequence_lengths
       if sinks is not None:
-        dummy_attn_mask = jnp.zeros(
-            (1, 1, 1, self.max_target_length, self.max_target_length),
-            dtype=jnp.uint8,
+        dummy_attn_mask = SequenceDescriptor.from_seqlens(
+            jnp.full((1,), self.max_target_length, dtype=jnp.int32)
         )
-      mask_attention_type = self.attention_type
-      if mask_attention_type == AttentionType.LOCAL_SLIDING:
-        mask_attention_type = AttentionType.FULL
-      attn_mask = self.generate_attention_mask(
-          query,
-          key,
-          decoder_segment_ids,
-          model_mode,
-          attention_type=mask_attention_type,
+      attn_mask = SequenceDescriptor.from_seqlens(
+          (q_sequence_lengths, kv_sequence_lengths)
       )
-      attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * 0.5), 0, 1).astype(jnp.uint8)
 
     dpa_layer = DotProductAttention(
         head_dim=head_dim,

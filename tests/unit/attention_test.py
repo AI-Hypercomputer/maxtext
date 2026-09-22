@@ -1412,7 +1412,9 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
       mesh=None,
       attention_type=AttentionType.GLOBAL,
       chunk_attn_window_size=None,
+      sliding_window_size=None,
       sinks=None,
+      decoder_segment_ids=None,
   ):
     """Runs TE attention with fake Transformer Engine modules."""
     sequence_descriptor.calls = []
@@ -1473,6 +1475,7 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
         dtype=jnp.float32,
         attention_type=attention_type,
         chunk_attn_window_size=chunk_attn_window_size,
+        sliding_window_size=sliding_window_size,
     )
     query = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
     key = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
@@ -1489,7 +1492,7 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
           query=query,
           key=key,
           value=value,
-          decoder_segment_ids=None,
+          decoder_segment_ids=decoder_segment_ids,
           segment_positions=segment_positions,
           sinks=sinks,
       )
@@ -1580,6 +1583,40 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
     self.assertIn("is_thd", descriptor_calls[0])
     self.assertNotIn("is_thd", descriptor_calls[1])
     self.assertIs(output, descriptor_calls[1])
+
+  def test_bshd_local_attention_uses_sequence_lengths_not_dense_window_mask(self):
+    class SequenceDescriptor:
+      calls = []
+
+      @classmethod
+      def from_seqlens(cls, seqlens):
+        cls.calls.append(seqlens)
+        return seqlens
+
+    config = types.SimpleNamespace(
+        context_sharding="context",
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=False,
+        packing=False,
+        dataset_type="synthetic",
+        max_segments_per_seq=1,
+        head_dim=2,
+        attention_kernel="cudnn_flash_te",
+    )
+    segment_ids = jnp.array([[1, 1, 1, 0]], dtype=jnp.int32)
+    output, descriptor_calls = self._call_te_attention(
+        SequenceDescriptor,
+        config=config,
+        attention_type=AttentionType.LOCAL_SLIDING,
+        sliding_window_size=2,
+        decoder_segment_ids=segment_ids,
+    )
+
+    self.assertEqual(len(descriptor_calls), 1)
+    q_sequence_lengths, kv_sequence_lengths = descriptor_calls[0]
+    np.testing.assert_array_equal(q_sequence_lengths, np.array([3], dtype=np.int32))
+    np.testing.assert_array_equal(kv_sequence_lengths, np.array([3], dtype=np.int32))
+    self.assertIs(output, descriptor_calls[0])
 
   def test_context_parallel_chunk_attention_rejected(self):
     class SequenceDescriptor:
