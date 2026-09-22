@@ -1403,7 +1403,7 @@ _TE_BRIDGE_RNGS = []
 
 
 class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
-  """Tests packed Transformer Engine attention metadata handling."""
+  """Tests Transformer Engine attention metadata handling."""
 
   def _call_te_attention(
       self,
@@ -1584,7 +1584,7 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
     self.assertNotIn("is_thd", descriptor_calls[1])
     self.assertIs(output, descriptor_calls[1])
 
-  def test_bshd_local_attention_uses_sequence_lengths_not_dense_window_mask(self):
+  def test_bshd_local_attention_uses_sequence_length_descriptor(self):
     class SequenceDescriptor:
       calls = []
 

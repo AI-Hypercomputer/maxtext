@@ -2688,16 +2688,14 @@ class AttentionOp(nnx.Module):
     else:
       # Dense BSHD layout: no context parallelism, and either packing is off or
       # dataset_type is "synthetic", which keeps the non-THD layout.
-      # Describe only sequence occupancy here. Causality and the sliding window are
-      # separate cuDNN parameters selected by mask_type and window_size. In particular,
-      # putting the sliding-window bitmap in TE's legacy ndarray mask makes its
-      # compatibility path infer the window width as the sequence length.
+      # SequenceDescriptor carries right-padding lengths, while mask_type and
+      # window_size independently configure causality and local attention.
       if decoder_segment_ids is None:
         q_sequence_lengths = jnp.full((query.shape[0],), query.shape[1], dtype=jnp.int32)
         kv_sequence_lengths = jnp.full((key.shape[0],), key.shape[1], dtype=jnp.int32)
       else:
-        # BSHD supports one right-padded sequence per batch element. Packing and
-        # arbitrary intra-sequence holes use the THD branch above instead.
+        # BSHD represents one right-padded sequence per batch element; packed
+        # sequences use the THD branch above.
         q_sequence_lengths = jnp.sum(decoder_segment_ids > 0, axis=-1, dtype=jnp.int32)
         kv_sequence_lengths = q_sequence_lengths
       if sinks is not None:
