@@ -3001,11 +3001,12 @@ class RoutedMoE(nnx.Module):
         self.rngs,
         forced_routed_experts,
     )
-    if getattr(self, "force_dropless", False) or self.config.ragged_buffer_factor <= 0.0:
-      # No ragged-buffer truncation can happen here, so the flag is statically
-      # false. Sow a compile-time constant rather than the mesh-sharded array so
-      # that the caller's overflow handling folds away completely -- this is the
-      # `force_dropless` replay executable, which must not pay for retry logic.
+    if getattr(self, "force_dropless", False):
+      # `permute` skips ragged-buffer truncation entirely when force_dropless is
+      # set, so the flag is statically false. Sow a compile-time constant rather
+      # than the mesh-sharded array so that the caller's overflow handling folds
+      # away completely -- this is the replay executable, which must not pay for
+      # the retry logic it exists to serve.
       self.sow(nnx.Intermediate, "moe_has_overflow", jnp.zeros((), jnp.bool_))
     else:
       # One *unreduced* flag per device (see `out_specs` above). Callers must
