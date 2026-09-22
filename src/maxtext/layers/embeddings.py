@@ -16,7 +16,7 @@
 
 import dataclasses
 import math
-from typing import Any
+from typing import Any, Optional, Union, List, Dict, Tuple
 
 import jax
 from jax import lax
@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 
 from flax import nnx
+import flax.linen as nn
 
 from maxtext.common.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType, get_weight_dtype
 from maxtext.layers.initializers import Initializer, default_embed_init

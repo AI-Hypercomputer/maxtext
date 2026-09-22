@@ -336,7 +336,12 @@ class HyperParameters:
   maintaining backward compatibility with attribute-style access and JAX object types.
   """
 
-  def __init__(self, pydantic_config: types.MaxTextConfig):
+  def __init__(self, pydantic_config: Any):
+    if isinstance(pydantic_config, dict):
+      object.__setattr__(self, "_pydantic_config", None)
+      object.__setattr__(self, "_flat_config", pydantic_config)
+      return
+
     object.__setattr__(self, "_pydantic_config", pydantic_config)
 
     final_dict = pydantic_config.model_dump()
@@ -350,8 +355,10 @@ class HyperParameters:
     final_dict["logical_axis_rules_for_eval"] = _lists_to_tuples(final_dict["logical_axis_rules_for_eval"])
     final_dict["data_sharding"] = _lists_to_tuples(final_dict["data_sharding"])
 
-    final_dict["decoder_block"] = DecoderBlockType(final_dict["decoder_block"])
-    final_dict["shard_mode"] = ShardMode(final_dict["shard_mode"])
+    if "decoder_block" in final_dict and final_dict["decoder_block"]:
+      final_dict["decoder_block"] = DecoderBlockType(final_dict["decoder_block"])
+    if "shard_mode" in final_dict and final_dict["shard_mode"]:
+      final_dict["shard_mode"] = ShardMode(final_dict["shard_mode"])
 
     object.__setattr__(self, "_flat_config", final_dict)
 
@@ -407,9 +414,167 @@ def _handle_config_exception(e: Exception):
     raise e
 
 
+config: HyperParameters | None = None
+
+
+def _initialize_wan(argv: list[str] | None = None, config_path: str = "", cli_args: list[str] | None = None, **kwargs) -> HyperParameters:
+  """Initializes configuration for Wan diffusion model."""
+  from maxtext.common.common_types import (
+      LENGTH,
+      KV_LENGTH,
+      CONTEXT,
+      RING_ATTENTION_AXIS_RULES,
+      SEQUENCE_PARALLEL_AXIS_RULES,
+      ULYSSES_ATTENTION_AXIS_RULES,
+      ULYSSES_RING_ATTENTION_AXIS_RULES,
+  )
+  base_yml_config = _load_config(config_path)
+  cli_cfg = omegaconf.OmegaConf.from_cli(cli_args or [])
+  merged = omegaconf.OmegaConf.merge(base_yml_config, cli_cfg)
+  raw_keys = omegaconf.OmegaConf.to_container(merged, resolve=True)
+  for k, v in kwargs.items():
+    raw_keys[k] = v
+
+  if "remat_policy" not in raw_keys:
+    raw_keys["remat_policy"] = "None"
+  if "names_which_can_be_saved" not in raw_keys:
+    raw_keys["names_which_can_be_saved"] = []
+  if "names_which_can_be_offloaded" not in raw_keys:
+    raw_keys["names_which_can_be_offloaded"] = []
+  if "offload_encoders" not in raw_keys:
+    raw_keys["offload_encoders"] = False
+  if "prompt_file" not in raw_keys:
+    raw_keys["prompt_file"] = ""
+
+  if "weights_dtype" in raw_keys:
+    raw_keys["weights_dtype"] = jnp.dtype(raw_keys["weights_dtype"])
+  if "activations_dtype" in raw_keys:
+    raw_keys["activations_dtype"] = jnp.dtype(raw_keys["activations_dtype"])
+  if raw_keys.get("run_name") == "" or not raw_keys.get("run_name"):
+    raw_keys["run_name"] = os.environ.get("JOBSET_NAME", "")
+  run_name = raw_keys.get("run_name", "")
+  base_output_directory = raw_keys.get("output_dir", "")
+  if run_name and base_output_directory:
+    raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
+    raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
+    raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
+
+  max_utils.write_config_raw_keys_for_gcs(raw_keys)
+
+  if "logical_axis_rules" in raw_keys:
+    raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
+  if "vae_logical_axis_rules" in raw_keys:
+    raw_keys["vae_logical_axis_rules"] = _lists_to_tuples(raw_keys["vae_logical_axis_rules"])
+
+  attention = raw_keys.get("attention", "")
+  ulysses_ring_attentions = {
+      "ulysses_ring",
+      "ulysses_ring_custom",
+      "ulysses_ring_custom_fixed_m",
+      "ulysses_ring_custom_bidir",
+  }
+  if attention in ulysses_ring_attentions and raw_keys.get("ulysses_shards", -1) <= 0:
+    raise ValueError(f"{attention} requires ulysses_shards to be set from config or command line.")
+  uses_ulysses_ring_attention = attention in ulysses_ring_attentions
+  uses_ring_attention = "ring" in attention and not uses_ulysses_ring_attention
+  uses_ulysses_attention = "ulysses" in attention and not uses_ulysses_ring_attention
+  uses_uniform_sequence_sharding = raw_keys.get("attention_sharding_uniform", False)
+  if uses_ring_attention or uses_ulysses_attention or uses_ulysses_ring_attention or uses_uniform_sequence_sharding:
+    logical_axis_rules = list(raw_keys.get("logical_axis_rules", ()))
+    new_rules = []
+    q_seq_sharding = (LENGTH, CONTEXT)
+    kv_seq_sharding = (KV_LENGTH, CONTEXT)
+    if q_seq_sharding not in logical_axis_rules:
+      logical_axis_rules.append(q_seq_sharding)
+    if kv_seq_sharding not in logical_axis_rules:
+      logical_axis_rules.append(kv_seq_sharding)
+    if uses_ulysses_ring_attention:
+      for r in ULYSSES_RING_ATTENTION_AXIS_RULES:
+        if tuple(r) not in logical_axis_rules:
+          new_rules.append(tuple(r))
+    elif uses_ring_attention:
+      for r in RING_ATTENTION_AXIS_RULES:
+        if tuple(r) not in logical_axis_rules:
+          new_rules.append(tuple(r))
+    elif uses_ulysses_attention:
+      for r in ULYSSES_ATTENTION_AXIS_RULES:
+        if tuple(r) not in logical_axis_rules:
+          new_rules.append(tuple(r))
+    else:
+      for r in SEQUENCE_PARALLEL_AXIS_RULES:
+        if tuple(r) not in logical_axis_rules:
+          new_rules.append(tuple(r))
+    raw_keys["logical_axis_rules"] = tuple(new_rules) + tuple(logical_axis_rules)
+
+  if "data_sharding" in raw_keys:
+    raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
+
+  if raw_keys.get("learning_rate_schedule_steps", -1) == -1 and "max_train_steps" in raw_keys:
+    raw_keys["learning_rate_schedule_steps"] = raw_keys["max_train_steps"]
+
+  if "pretrained_model_name_or_path" in raw_keys:
+    raw_keys["tokenizer_model_name_or_path"] = raw_keys["pretrained_model_name_or_path"]
+    if "gs://" in str(raw_keys["pretrained_model_name_or_path"]):
+      raw_keys["pretrained_model_name_or_path"] = max_utils.download_blobs(raw_keys["pretrained_model_name_or_path"], "/tmp")
+  if "unet_checkpoint" in raw_keys and "gs://" in str(raw_keys["unet_checkpoint"]):
+    raw_keys["unet_checkpoint"] = max_utils.download_blobs(raw_keys["unet_checkpoint"], "/tmp")
+  if "tokenizer_model_name_or_path" in raw_keys and "gs://" in str(raw_keys["tokenizer_model_name_or_path"]):
+    raw_keys["tokenizer_model_name_or_path"] = max_utils.download_blobs(raw_keys["tokenizer_model_name_or_path"], "/tmp")
+  if "dataset_name" in raw_keys and "gs://" in str(raw_keys["dataset_name"]):
+    raw_keys["dataset_name"] = max_utils.download_blobs(raw_keys["dataset_name"], raw_keys.get("dataset_save_location", "/tmp"))
+    raw_keys["dataset_save_location"] = raw_keys["dataset_name"]
+
+  if "hf_train_files" in raw_keys and not raw_keys["hf_train_files"]:
+    raw_keys["hf_train_files"] = None
+  if "hf_access_token" in raw_keys and not raw_keys["hf_access_token"]:
+    raw_keys["hf_access_token"] = None
+
+  per_device_batch_size = raw_keys.get("per_device_batch_size", 1)
+  raw_keys["total_train_batch_size"] = max_utils.get_global_batch_size(per_device_batch_size)
+  raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
+  raw_keys["quantization_local_shard_count"] = (
+      raw_keys["num_slices"]
+      if raw_keys.get("quantization_local_shard_count", -1) == -1
+      else raw_keys.get("quantization_local_shard_count", 1)
+  )
+  num_devices = len(jax.devices())
+  if per_device_batch_size < 1:
+    raw_keys["global_batch_size_to_load"] = num_devices
+  else:
+    raw_keys["global_batch_size_to_load"] = int(num_devices * per_device_batch_size)
+  raw_keys["global_batch_size_to_train_on"] = int(num_devices * per_device_batch_size)
+
+  if "vae_spatial" not in raw_keys:
+    raw_keys["vae_spatial"] = -1
+
+  # wan_init
+  if not any("layers_per_stage" in inner_tuple for inner_tuple in raw_keys.get("logical_axis_rules", ())):
+    raw_keys["logical_axis_rules"] = tuple(raw_keys.get("logical_axis_rules", ())) + (("layers_per_stage", None),)
+
+  if "wan_transformer_pretrained_model_name_or_path" in raw_keys:
+    if raw_keys["wan_transformer_pretrained_model_name_or_path"] == "":
+      raw_keys["wan_transformer_pretrained_model_name_or_path"] = raw_keys.get("pretrained_model_name_or_path", "")
+
+  if not kwargs.get("unittest", False):
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+
+  if raw_keys.get("jax_cache_dir"):
+    jax.config.update("jax_compilation_cache_dir", raw_keys["jax_cache_dir"])
+
+  for k in sorted(raw_keys.keys()):
+    max_logging.log(f"Config param {k}: {raw_keys[k]}")
+
+  return HyperParameters(raw_keys)
+
+
 def initialize(argv: list[str] | None = None, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
+  global config
   try:
+    config_path, cli_args = _resolve_or_infer_config(argv, **kwargs)
+    if "wan" in config_path.lower():
+      config = _initialize_wan(argv, config_path, cli_args, **kwargs)
+      return config
     pydantic_config = _initialize_pydantic(argv, config_class=config_class, **kwargs)
     config = HyperParameters(pydantic_config)
     return config

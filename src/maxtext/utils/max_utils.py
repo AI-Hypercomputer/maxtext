@@ -32,16 +32,25 @@ from packaging.version import Version
 from etils import epath
 import flax
 from flax.core.spmd import get_logical_axis_rules
+from enum import Enum
+import json
+import yaml
 import jax
 from pathlib import Path
 from contextlib import contextmanager
 from jax.experimental import mesh_utils
-from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 import psutil
+
+try:
+  from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+  BlockSizes = splash_attention_kernel.BlockSizes
+except (ImportError, AttributeError):
+  BlockSizes = None
 
 from maxtext.utils import elastic_utils
 from maxtext.common.gcloud_stub import is_decoupled
@@ -183,14 +192,35 @@ def summarize_size_from_pytree(params):
   return num_params, num_bytes, num_bytes / num_params
 
 
-def initialize_summary_writer(tensorboard_dir, run_name, enable_tensorboard=True):
+def initialize_summary_writer(tensorboard_dir, run_name=None, enable_tensorboard=True):
   """Return a tensorboardX SummaryWriter or a no-op stub.
 
-  In decoupled mode (no Google Cloud), this prefers a repo-local
-  ``local_tensorboard`` directory when tensorboardX is available.
+  Supports both MaxText signature:
+    initialize_summary_writer(tensorboard_dir, run_name, enable_tensorboard=True)
+  and Wan/MaxDiffusion signature:
+    initialize_summary_writer(config)
   """
   if jax.process_index() != 0:
     return None
+
+  if isinstance(tensorboard_dir, dict):
+    config = tensorboard_dir
+    tb_dir = config.get("tensorboard_dir", "")
+    r_name = config.get("run_name", run_name or "")
+    if not tb_dir:
+      return None
+    tensorboard_dir = tb_dir
+    run_name = r_name
+    enable_tensorboard = config.get("enable_tensorboard", enable_tensorboard)
+  elif hasattr(tensorboard_dir, "tensorboard_dir") or hasattr(tensorboard_dir, "run_name"):
+    config = tensorboard_dir
+    tb_dir = getattr(config, "tensorboard_dir", "")
+    r_name = getattr(config, "run_name", run_name or "")
+    if not tb_dir:
+      return None
+    tensorboard_dir = tb_dir
+    run_name = r_name
+    enable_tensorboard = getattr(config, "enable_tensorboard", enable_tensorboard)
 
   if not enable_tensorboard:
     max_logging.log("TensorBoard disabled; using no-op SummaryWriter.")
@@ -217,12 +247,12 @@ def initialize_summary_writer(tensorboard_dir, run_name, enable_tensorboard=True
     max_logging.log("tensorboard_dir or run_name missing; using no-op SummaryWriter to avoid crash.")
     return writer.SummaryWriter()
 
-  summary_writer_path = os.path.join(tensorboard_dir, run_name)
+  summary_writer_path = os.path.join(tensorboard_dir, run_name) if run_name else tensorboard_dir
   return writer.SummaryWriter(summary_writer_path)
 
 
 def close_summary_writer(summary_writer):
-  if jax.process_index() == 0:
+  if jax.process_index() == 0 and summary_writer is not None:
     summary_writer.close()
 
 
@@ -242,12 +272,21 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   """
 
   # Early exit for cases where we don't need to initialize the jax distributed system.
-  if raw_keys["skip_jax_distributed_system"]:
+  if raw_keys.get("skip_jax_distributed_system", False):
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
-  if raw_keys["enable_single_controller"]:
+
+  try:
+    from jax._src.xla_bridge import backends_are_initialized
+    if backends_are_initialized():
+      max_logging.log("XLA backends already initialized; skipping jax.distributed.initialize().")
+      return
+  except Exception:
+    pass
+
+  if raw_keys.get("enable_single_controller", False):
     max_logging.log("Skipping jax distributed system since its not needed for single controller.")
-    if raw_keys["enable_multi_tier_checkpointing"]:
+    if raw_keys.get("enable_multi_tier_checkpointing", False):
       max_logging.log("Initializing multi-tier checkpointing for single controller...")
       mtc_init_kwargs = elastic_utils.single_controller_mtc_init_kwargs(raw_keys)
       initialize_multi_tier_checkpointing(
@@ -255,7 +294,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
           backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
           backup_interval_steps=raw_keys["multi_tier_checkpointing_backup_interval_steps"],
           run_name=raw_keys["run_name"],
-          jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
+          jax_initialization_timeout_seconds=raw_keys.get("jax_distributed_initialization_timeout", 300),
           use_colocated_python=True,
           **mtc_init_kwargs,
       )
@@ -263,7 +302,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   if jax.distributed.is_initialized():
     max_logging.log("Jax distributed system is already initialized.")
     return
-  if raw_keys["inference_benchmark_test"] or raw_keys["compile_topology"]:
+  if raw_keys.get("inference_benchmark_test", False) or raw_keys.get("compile_topology", ""):
     max_logging.log("Skipping jax distributed system initialization.")
     return
 
@@ -282,13 +321,14 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     return
 
   # Initialization for gpu_multiprocess hardware
-  if raw_keys["hardware"] == "gpu_multiprocess":
+  if raw_keys.get("hardware", "") == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system for gpu_multiprocess hardware...")
-    if not raw_keys["enable_emergency_checkpoint"]:
-      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+    timeout = raw_keys.get("jax_distributed_initialization_timeout", 300)
+    if not raw_keys.get("enable_emergency_checkpoint", False):
+      jax.distributed.initialize(initialization_timeout=timeout)
     else:
       max_logging.log("Initializing jax distributed to support local checkpointing with GPUs...")
-      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+      jax.distributed.initialize(initialization_timeout=timeout)
       ocp.multihost.initialize_runtime_to_distributed_ids()
       ocp.multihost.initialize_distributed_to_device_ids()
       max_logging.log("Jax distributed system initialized!")
@@ -296,23 +336,27 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   # Initialization for tpu backend
   max_logging.log("Attempting to initialize the jax distributed system for TPU backend...")
-  if raw_keys["enable_multi_tier_checkpointing"]:
+  if raw_keys.get("enable_multi_tier_checkpointing", False):
     initialize_multi_tier_checkpointing(
         local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
         backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
         backup_interval_steps=raw_keys["multi_tier_checkpointing_backup_interval_steps"],
         run_name=raw_keys["run_name"],
-        jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
-        data_parallelism=raw_keys["mtc_data_parallelism"],
-        num_slices=raw_keys["num_slices"],
+        jax_initialization_timeout_seconds=raw_keys.get("jax_distributed_initialization_timeout", 300),
+        data_parallelism=raw_keys.get("mtc_data_parallelism", 1),
+        num_slices=raw_keys.get("num_slices", 1),
     )
     max_logging.log("Jax distributed system initialized on TPUs for multi-tier checkpointing!")
-  elif raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1:
-    if not raw_keys["enable_emergency_checkpoint"]:
-      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
-    else:
-      initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
-    max_logging.log("Jax distributed system initialized on TPUs!")
+  elif raw_keys.get("enable_emergency_checkpoint", False):
+    initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
+    max_logging.log("Jax distributed system initialized on TPUs with emergency checkpointing!")
+  else:
+    try:
+      timeout = raw_keys.get("jax_distributed_initialization_timeout", 300)
+      jax.distributed.initialize(initialization_timeout=timeout)
+      max_logging.log("Jax distributed system initialized on TPUs!")
+    except Exception as e:
+      max_logging.log(f"Warning: jax.distributed.initialize() skipped or failed: {e}")
 
 
 def initialize_jax_for_gpu(raw_keys):
@@ -1408,3 +1452,321 @@ def is_eval(config) -> bool:
   eval_rules = getattr(config, "logical_axis_rules_for_eval", None)
   train_rules = getattr(config, "logical_axis_rules", None)
   return bool(eval_rules and eval_rules != train_rules and get_logical_axis_rules() == eval_rules)
+
+
+class TpuType(Enum):
+  TPU_V6_LITE = "v6e"
+  TPU_7X = "v7x"
+  UNKNOWN = "unknown"
+
+
+def get_tpu_type() -> TpuType:
+  """Detects the current TPU hardware generation."""
+  try:
+    device_kind = jax.devices()[0].device_kind
+    if "7x" in device_kind:
+      return TpuType.TPU_7X
+    elif "v6 lite" in device_kind:
+      return TpuType.TPU_V6_LITE
+    else:
+      return TpuType.UNKNOWN
+  except Exception:
+    return TpuType.UNKNOWN
+
+
+def safe_getattr(obj, name, default=None):
+  try:
+    return getattr(obj, name)
+  except (AttributeError, KeyError):
+    return default
+
+
+def get_precision(config):
+  if not hasattr(config, "precision") or not config.precision:
+    return None
+  return jax.lax.Precision[config.precision]
+
+
+def get_flash_block_sizes(config):
+  if not hasattr(config, "flash_block_sizes") or not config.flash_block_sizes:
+    return None
+  if isinstance(config.flash_block_sizes, str):
+    flash_block_sizes = json.loads(config.flash_block_sizes)
+  else:
+    flash_block_sizes = config.flash_block_sizes
+  if flash_block_sizes and BlockSizes is not None:
+    return BlockSizes(
+        block_q=flash_block_sizes["block_q"],
+        block_kv_compute=flash_block_sizes["block_kv_compute"],
+        block_kv=flash_block_sizes["block_kv"],
+        block_q_dkv=flash_block_sizes["block_q_dkv"],
+        block_kv_dkv=flash_block_sizes["block_kv_dkv"],
+        block_kv_dkv_compute=flash_block_sizes["block_kv_dkv_compute"],
+        block_q_dq=flash_block_sizes["block_q_dq"],
+        block_kv_dq=flash_block_sizes["block_kv_dq"],
+    )
+  return None
+
+
+def device_put_replicated(x, sharding):
+  """Although the name indicates replication, this function can be used
+  to also shard an array based on sharding.
+  """
+  arr = getattr(x, "value", x)
+  shd = getattr(sharding, "value", sharding)
+  if hasattr(shd, "devices") and not hasattr(shd, "device_set"):
+    # If a Mesh was passed instead of a Sharding
+    shd = NamedSharding(shd, P())
+  res = jax.make_array_from_callback(arr.shape, shd, lambda index: arr[index])
+  if hasattr(x, "set_value"):
+    x.set_value(res)
+    return x
+  return res
+
+
+def upload_file_to_gcs(output_dir: str, file_path: str, subdir: str = ""):
+  """Uploads one generated file to {output_dir}/{subdir}/, logging failures."""
+  try:
+    from google.cloud import storage
+    path_without_scheme = output_dir.removeprefix("gs://")
+    parts = path_without_scheme.split("/", 1)
+    bucket_name = parts[0]
+    folder_name = parts[1] if len(parts) > 1 else ""
+    destination_blob_name = os.path.normpath(os.path.join(folder_name, subdir, os.path.basename(file_path))).lstrip("/")
+
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(destination_blob_name)
+
+    max_logging.log(f"Uploading {file_path} to {bucket_name}/{destination_blob_name}...")
+    blob.upload_from_filename(file_path)
+    max_logging.log(f"Upload complete {file_path}.")
+  except Exception as e:
+    max_logging.log(f"An error occurred: {e}")
+
+
+def upload_file_to_gcs_from_str(output_dir: str, file_name: str, data: str):
+  try:
+    from google.cloud import storage
+    path_without_scheme = output_dir.removeprefix("gs://")
+    parts = path_without_scheme.split("/", 1)
+    bucket_name = parts[0]
+    folder_name = parts[1] if len(parts) > 1 else ""
+    destination_blob_name = os.path.normpath(os.path.join(folder_name, file_name)).lstrip("/")
+
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_string(data)
+  except Exception as e:
+    max_logging.log(f"An error occurred uploading to GCS: {e}")
+
+
+def write_config_raw_keys_for_gcs(raw_keys):
+  if "output_dir" not in raw_keys or not raw_keys["output_dir"] or not raw_keys["output_dir"].startswith("gs://"):
+    return
+  run_name = raw_keys.get("run_name")
+  if run_name:
+    output_dir = os.path.join(raw_keys["output_dir"], run_name)
+  else:
+    output_dir = raw_keys["output_dir"]
+  upload_file_to_gcs_from_str(output_dir, "config.yaml", yaml.dump(raw_keys))
+
+
+def delete_file(file_path: str):
+  """Removes a local file, e.g. after it has been uploaded to GCS."""
+  if os.path.exists(file_path):
+    try:
+      os.remove(file_path)
+      max_logging.log(f"Successfully deleted file: {file_path}")
+    except OSError as e:
+      max_logging.log(f"Error deleting file '{file_path}': {e}")
+  else:
+    max_logging.log(f"The file '{file_path}' does not exist.")
+
+
+def get_gcs_output_path(config):
+  output_dir = getattr(config, "output_dir", "")
+  if not output_dir or not output_dir.startswith("gs://"):
+    return None
+  run_name = getattr(config, "run_name", "")
+  return os.path.join(output_dir, run_name) if run_name else output_dir
+
+
+def download_blobs(source_blob_name, destination_file_name):
+  try:
+    from google.cloud import storage
+    path_without_scheme = source_blob_name.removeprefix("gs://")
+    parts = path_without_scheme.split("/", 1)
+    bucket_name = parts[0]
+    blob_name = parts[1] if len(parts) > 1 else ""
+
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    dest_path = os.path.join(destination_file_name, os.path.basename(blob_name))
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    blob.download_to_filename(dest_path)
+    return dest_path
+  except Exception as e:
+    max_logging.log(f"An error occurred downloading blob from GCS: {e}")
+    return source_blob_name
+
+
+def load_prompts(prompt_file_path: str, default_prompt: str = "") -> list:
+  if not prompt_file_path:
+    if not default_prompt:
+      raise ValueError("Neither prompt_file nor prompt was specified.")
+    return [default_prompt]
+  if prompt_file_path.startswith("http://") or prompt_file_path.startswith("https://"):
+    import requests
+    response = requests.get(prompt_file_path)
+    response.raise_for_status()
+    raw_lines = response.text.splitlines()
+  else:
+    if not os.path.isfile(prompt_file_path):
+      raise FileNotFoundError(f"Prompt file not found at local path: {prompt_file_path}")
+    with open(prompt_file_path, "r", encoding="utf-8") as f:
+      raw_lines = f.readlines()
+  prompts = [line.strip() for line in raw_lines if line.strip() and not line.strip().startswith("#")]
+  if not prompts:
+    if default_prompt:
+      return [default_prompt]
+    raise ValueError(f"Prompt file '{prompt_file_path}' contains no valid non-empty prompts.")
+  return prompts
+
+
+def chunk_and_pad(items: list, batch_size: int):
+  if batch_size <= 0:
+    raise ValueError(f"batch_size must be positive, got {batch_size}")
+  for i in range(0, len(items), batch_size):
+    chunk = items[i : i + batch_size]
+    actual_len = len(chunk)
+    padded_chunk = chunk + [chunk[-1]] * (batch_size - actual_len) if actual_len < batch_size else chunk
+    yield i, padded_chunk, actual_len
+
+
+
+
+def profiler_enabled(config):
+  return bool(getattr(config, "enable_profiler", False)) and jax.process_index() == 0
+
+
+class Profiler:
+  def __init__(self, config, session_name=None):
+    self.config = config
+    self.session_name = session_name
+    self._active = None
+
+  def start(self):
+    if not profiler_enabled(self.config):
+      return
+    log_dir = getattr(self.config, "tensorboard_dir", "")
+    if not log_dir or log_dir.startswith("gs://"):
+      run_name = getattr(self.config, "run_name", "run")
+      log_dir = os.path.join("/tmp/profiler_traces", run_name)
+    if self.session_name:
+      log_dir = os.path.join(log_dir, self.session_name)
+    os.makedirs(log_dir, exist_ok=True)
+    max_logging.log(f"Starting profiler trace in: {log_dir}")
+    jax.profiler.start_trace(log_dir)
+    self._active = "jax"
+
+  def stop(self):
+    if self._active == "jax":
+      jax.profiler.stop_trace()
+      trace_dir = getattr(self.config, "tensorboard_dir", "")
+      if trace_dir.startswith("gs://"):
+        run_name = getattr(self.config, "run_name", "run")
+        local_dir = os.path.join("/tmp/profiler_traces", run_name)
+        if os.path.exists(local_dir):
+          try:
+            from google.cloud import storage
+            path_without_scheme = trace_dir.removeprefix("gs://")
+            parts = path_without_scheme.split("/", 1)
+            bucket_name = parts[0]
+            prefix = parts[1] if len(parts) > 1 else ""
+            client = storage.Client()
+            bucket = client.bucket(bucket_name)
+            for root, _, files in os.walk(local_dir):
+              for file in files:
+                local_file = os.path.join(root, file)
+                rel_path = os.path.relpath(local_file, local_dir)
+                blob_name = os.path.join(prefix, rel_path)
+                blob = bucket.blob(blob_name)
+                blob.upload_from_filename(local_file)
+                max_logging.log(f"Uploaded {local_file} to gs://{bucket_name}/{blob_name}")
+          except Exception as e:
+            max_logging.log(f"Failed to upload profiler traces: {e}")
+    self._active = None
+
+
+def get_git_commit_hash():
+  try:
+    return subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("ascii").strip()
+  except Exception:
+    return "UNKNOWN"
+
+
+def get_global_batch_size(per_device_batch_size):
+  num_devices = len(jax.devices())
+  return max(1, int(num_devices * per_device_batch_size))
+
+
+def create_device_mesh(config, devices=None, logging=True):
+  """Creates a device mesh supporting 4D mesh (data, fsdp, context, tensor)."""
+  if devices is None:
+    devices = jax.devices()
+  num_devices = len(devices)
+  try:
+    num_slices = 1 + max([d.slice_index for d in devices])
+  except Exception:
+    num_slices = 1
+  num_devices_per_slice = num_devices // num_slices
+  if logging:
+    max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
+
+  multi_slice_env = num_slices > 1
+  config_keys = config.get_keys() if hasattr(config, "get_keys") else config
+  if "dcn_context_parallelism" in config_keys and "ici_context_parallelism" in config_keys:
+    dcn_parallelism = [
+        config.dcn_data_parallelism,
+        config.dcn_fsdp_parallelism,
+        config.dcn_context_parallelism,
+        config.dcn_tensor_parallelism,
+    ]
+    ici_parallelism = [
+        config.ici_data_parallelism,
+        config.ici_fsdp_parallelism,
+        config.ici_context_parallelism,
+        config.ici_tensor_parallelism,
+    ]
+  else:
+    dcn_parallelism = [
+        getattr(config, "dcn_data_parallelism", 1),
+        getattr(config, "dcn_fsdp_parallelism", 1),
+        getattr(config, "dcn_tensor_parallelism", 1),
+    ]
+    ici_parallelism = [
+        getattr(config, "ici_data_parallelism", 1),
+        getattr(config, "ici_fsdp_parallelism", 1),
+        getattr(config, "ici_tensor_parallelism", 1),
+    ]
+
+  ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
+  allow_split = getattr(config, "allow_split_physical_axes", False)
+  if multi_slice_env:
+    dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
+    mesh = mesh_utils.create_hybrid_device_mesh(
+        ici_parallelism, dcn_parallelism, devices, allow_split_physical_axes=allow_split
+    )
+  else:
+    mesh = mesh_utils.create_device_mesh(
+        ici_parallelism, devices, allow_split_physical_axes=allow_split
+    )
+
+  if logging:
+    max_logging.log(f"Decided on mesh: {mesh}")
+
+  return mesh
+

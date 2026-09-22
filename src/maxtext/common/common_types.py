@@ -29,6 +29,17 @@ PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
 
+import jax
+from flax.linen import partitioning
+
+Mesh = jax.sharding.Mesh
+ScanIn = partitioning.ScanIn
+try:
+  from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+  BlockSizes = splash_attention_kernel.BlockSizes
+except (ImportError, AttributeError):
+  BlockSizes = None
+
 
 def is_fp8_dtype(dtype: Any) -> bool:
   """Checks whether a dtype is FP8."""
@@ -53,6 +64,72 @@ def get_weight_dtype(config: Config, module_name: str) -> DType:
 
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
+
+# Physical axis names for device meshes.
+DATA = "data"
+FSDP = "fsdp"
+CONTEXT = "context"
+TENSOR = "tensor"
+
+# Logical axis names for model parameters and activations.
+KEEP_1 = "activation_keep_1"
+KEEP_2 = "activation_keep_2"
+CONV_OUT = "activation_conv_out_channels"
+
+WAN2_1 = "wan2.1"
+WAN2_2 = "wan2.2"
+LTX2_VIDEO = "ltx2_video"
+LTX2_3 = "ltx2.3"
+Z_IMAGE = "z_image"
+
+WAN_MODEL = WAN2_1
+
+# For setting self/cross attention independently in splash kernel
+SELF_ATTN_HEAD = "activation_self_attn_heads"
+SELF_ATTN_Q_LENGTH = "activation_self_attn_q_length"
+SELF_ATTN_KV_LENGTH = "activation_self_attn_kv_length"
+CROSS_ATTN_HEAD = "activation_cross_attn_heads"
+CROSS_ATTN_Q_LENGTH = "activation_cross_attn_q_length"
+CROSS_ATTN_KV_LENGTH = "activation_cross_attn_kv_length"
+
+### Common axis rules for ring attention ###
+RING_ATTENTION_AXIS_RULES = [
+    [SELF_ATTN_HEAD, None],
+    [SELF_ATTN_Q_LENGTH, CONTEXT],
+    [SELF_ATTN_KV_LENGTH, CONTEXT],
+    [CROSS_ATTN_HEAD, None],
+    [CROSS_ATTN_Q_LENGTH, CONTEXT],
+    [CROSS_ATTN_KV_LENGTH, CONTEXT],
+]
+
+SEQUENCE_PARALLEL_AXIS_RULES = [
+    [SELF_ATTN_HEAD, None],
+    [SELF_ATTN_Q_LENGTH, CONTEXT],
+    [SELF_ATTN_KV_LENGTH, None],
+    [CROSS_ATTN_HEAD, None],
+    [CROSS_ATTN_Q_LENGTH, CONTEXT],
+    [CROSS_ATTN_KV_LENGTH, None],
+]
+
+### Common axis rules for ulysses attention ###
+ULYSSES_ATTENTION_AXIS_RULES = [
+    [SELF_ATTN_HEAD, None],
+    [SELF_ATTN_Q_LENGTH, CONTEXT],
+    [SELF_ATTN_KV_LENGTH, CONTEXT],
+    [CROSS_ATTN_HEAD, None],
+    [CROSS_ATTN_Q_LENGTH, CONTEXT],
+    [CROSS_ATTN_KV_LENGTH, CONTEXT],
+]
+
+### Common axis rules for 2D Ulysses + ring attention ###
+ULYSSES_RING_ATTENTION_AXIS_RULES = [
+    [SELF_ATTN_HEAD, None],
+    [SELF_ATTN_Q_LENGTH, CONTEXT],
+    [SELF_ATTN_KV_LENGTH, CONTEXT],
+    [CROSS_ATTN_HEAD, None],
+    [CROSS_ATTN_Q_LENGTH, CONTEXT],
+    [CROSS_ATTN_KV_LENGTH, CONTEXT],
+]
 
 SEGMENT_ID_BATCH = "segment_ids_batch"
 
