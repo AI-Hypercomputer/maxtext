@@ -31,6 +31,8 @@ from maxtext.utils import gradient_accumulation
 
 @dataclass
 class _Cfg:
+  """Minimal stand-in for the fields of HyperParameters that this module reads."""
+
   gradient_accumulation_steps: int = 2
   use_tunix_gradient_accumulation: bool = False
   shard_optimizer_over_data: bool = False
