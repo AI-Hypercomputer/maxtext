@@ -14,12 +14,24 @@
 
 """Unit tests for the line-range test-change detector in ``newly_added_detection``."""
 
+import subprocess
+import sys
 import textwrap
 
+import pytest
+
+from tests.utils import newly_added_detection
 from tests.utils.newly_added_detection import _build_diff_commands
 from tests.utils.newly_added_detection import _is_test_file
+from tests.utils.newly_added_detection import changed_tests_from_diff
+from tests.utils.newly_added_detection import diff_against_base
+from tests.utils.newly_added_detection import get_changed_tests
+from tests.utils.newly_added_detection import main
 from tests.utils.newly_added_detection import parse_changed_line_map
 from tests.utils.newly_added_detection import touched_test_names
+from tests.utils.newly_added_detection import touched_tests
+
+_SCRIPT = newly_added_detection.__file__
 
 
 # --- _is_test_file -----------------------------------------------------------
@@ -60,6 +72,15 @@ def test_build_diff_commands_honours_non_main_base():
       ["git", "diff", "--unified=0", "origin/release/v2...HEAD"],
       ["git", "diff", "--unified=0", "release/v2...HEAD"],
   ]
+
+
+def test_build_diff_commands_never_contains_twodot_ranges():
+  for base in ["main", "origin/main", "release/v1"]:
+    cmds = _build_diff_commands(base)
+    for cmd in cmds:
+      range_arg = cmd[-1]
+      assert "..." in range_arg, f"Range arg {range_arg} must use three-dot merge-base syntax"
+      assert ".." not in range_arg.replace("...", ""), f"Range arg {range_arg} contains two-dot syntax"
 
 
 # --- parse_changed_line_map --------------------------------------------------
@@ -188,3 +209,164 @@ def test_insertion_after_untouched_test_does_not_flag_it():
   )
   # test_old spans lines 1-2; test_new spans lines 5-6. The added lines are 5-6.
   assert touched_test_names(source, {5, 6}) == {"test_new"}
+
+
+# --- diff_against_base / get_changed_tests / CLI -----------------------------
+
+
+def _git(repo, *args):
+  """Run git in ``repo`` with a fixed identity so commits work on a bare CI runner."""
+  subprocess.run(
+      ["git", "-c", "user.name=ci", "-c", "user.email=ci@example.com", "-c", "commit.gpgsign=false", *args],
+      cwd=repo,
+      check=True,
+      capture_output=True,
+  )
+
+
+@pytest.fixture(name="pr_repo")
+def pr_repo_fixture(tmp_path):
+  """A repo whose ``main`` holds one test file and whose HEAD (branch ``feature``) adds a test to it."""
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  _git(repo, "init", "-q")
+  _git(repo, "checkout", "-q", "-b", "main")
+  test_file = repo / "tests" / "unit" / "sample_test.py"
+  test_file.parent.mkdir(parents=True)
+  test_file.write_text("def test_old():\n  assert True\n", encoding="utf-8")
+  _git(repo, "add", ".")
+  _git(repo, "commit", "-q", "-m", "base")
+  _git(repo, "checkout", "-q", "-b", "feature")
+  test_file.write_text("def test_old():\n  assert True\n\n\ndef test_new():\n  assert True\n", encoding="utf-8")
+  _git(repo, "commit", "-q", "-am", "add test_new")
+  return repo
+
+
+def test_get_changed_tests_reports_only_the_touched_test(pr_repo, monkeypatch):
+  monkeypatch.chdir(pr_repo)
+  # There is no origin remote, so detection falls through to the local ``main...HEAD`` range.
+  assert get_changed_tests("main") == {("tests/unit/sample_test.py", "test_new")}
+
+
+def test_changed_tests_from_diff_reads_sources_relative_to_cwd(pr_repo, monkeypatch):
+  monkeypatch.chdir(pr_repo)
+  diff = "+++ b/tests/unit/sample_test.py\n@@ -2,0 +3,4 @@\n"
+  assert changed_tests_from_diff(diff) == {("tests/unit/sample_test.py", "test_new")}
+
+
+def test_diff_against_base_returns_none_outside_a_git_work_tree(tmp_path, monkeypatch):
+  monkeypatch.chdir(tmp_path)
+  assert diff_against_base("main") is None
+
+
+def test_main_returns_two_and_explains_when_diff_is_unavailable(tmp_path, monkeypatch, capsys):
+  monkeypatch.chdir(tmp_path)
+  assert main(["--base", "main"]) == 2
+  captured = capsys.readouterr()
+  assert captured.out == ""
+  assert "cannot diff" in captured.err
+
+
+def test_script_runs_without_the_tests_package(pr_repo):
+  # `-I` (isolated mode) keeps the script directory, cwd and PYTHONPATH out of sys.path, so this
+  # passes only if the script needs nothing but the standard library. analyze_code_changes.sh
+  # depends on that: it runs on a bare runner where importing the ``tests`` package fails.
+  result = subprocess.run(
+      [sys.executable, "-I", _SCRIPT, "--base", "main"],
+      cwd=pr_repo,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  assert result.returncode == 0, result.stderr
+  assert result.stdout.splitlines() == ["tests/unit/sample_test.py::test_new"]
+
+
+# --- markers -----------------------------------------------------------------
+
+_MARKED_SOURCE = textwrap.dedent(
+    """\
+    import pytest
+
+    pytestmark = [pytest.mark.integration_test, pytest.mark.tpu_backend("arg")]
+
+
+    @pytest.mark.tpu_only
+    class TestOnTpu:
+
+      def test_inherits_class_marker(self):
+        assert True
+
+      @pytest.mark.skip_on_tpu7x
+      def test_skipped_on_tpu7x(self):
+        assert True
+
+
+    @pytest.mark.tpu_only
+    @pytest.mark.parametrize("x", [1])
+    def test_function_marker(x):
+      assert x
+
+
+    def test_unmarked():
+      assert True
+    """
+)
+_ALL_LINES = set(range(1, 40))
+
+
+def test_touched_tests_collects_markers_from_module_class_and_function():
+  found = touched_tests(_MARKED_SOURCE, _ALL_LINES)
+  assert found["test_inherits_class_marker"] == {"integration_test", "tpu_backend", "tpu_only"}
+  assert found["test_skipped_on_tpu7x"] == {"integration_test", "tpu_backend", "tpu_only", "skip_on_tpu7x"}
+  assert found["test_function_marker"] == {"integration_test", "tpu_backend", "tpu_only", "parametrize"}
+  assert found["test_unmarked"] == {"integration_test", "tpu_backend"}
+
+
+def test_touched_tests_ignores_non_pytest_decorators():
+  source = "from unittest import mock\n\n\n@mock.patch('os.getcwd')\ndef test_patched(_):\n  assert True\n"
+  assert touched_tests(source, {5}) == {"test_patched": frozenset()}
+
+
+def test_changed_tests_from_diff_marker_filters_match_the_tpu7x_rule(tmp_path, monkeypatch):
+  monkeypatch.chdir(tmp_path)
+  unit_dir = tmp_path / "tests" / "unit"
+  unit_dir.mkdir(parents=True)
+  (unit_dir / "marked_test.py").write_text(_MARKED_SOURCE, encoding="utf-8")
+  diff = "+++ b/tests/unit/marked_test.py\n@@ -0,0 +1,30 @@\n"
+  path = "tests/unit/marked_test.py"
+  assert changed_tests_from_diff(diff) == {
+      (path, "test_inherits_class_marker"),
+      (path, "test_skipped_on_tpu7x"),
+      (path, "test_function_marker"),
+      (path, "test_unmarked"),
+  }
+  # The CI rule: runnable on TPU7X = carries tpu_only and not skip_on_tpu7x.
+  assert changed_tests_from_diff(diff, require_marker="tpu_only", exclude_marker="skip_on_tpu7x") == {
+      (path, "test_inherits_class_marker"),
+      (path, "test_function_marker"),
+  }
+  assert changed_tests_from_diff(diff, require_marker="gpu_only") == set()
+
+
+def test_script_marker_flags_filter_output(pr_repo):
+  # pr_repo's test_new carries no markers, so requiring tpu_only yields nothing but still exits 0.
+  result = subprocess.run(
+      [
+          sys.executable,
+          "-I",
+          _SCRIPT,
+          "--base",
+          "main",
+          "--require-marker",
+          "tpu_only",
+          "--exclude-marker",
+          "skip_on_tpu7x",
+      ],
+      cwd=pr_repo,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == ""
