@@ -1282,8 +1282,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if freeze_mask is None and self._freeze_mask_fn is not None:
         freeze_mask = self._freeze_mask_fn(accumulated_grads)
       if freeze_mask is not None:
-        def _apply_freeze(g, is_frozen):
-          return jnp.zeros_like(g) if is_frozen else g
+        def _apply_freeze(g, m):
+          # Unwrap an nnx Variable leaf if that is what the mask fn produced.
+          # A bare `if <Variable>` tests object truthiness, which is True for
+          # any Variable, so an un-unwrapped mask would silently zero EVERY
+          # gradient rather than only the frozen ones.
+          is_frozen = m.get_value() if hasattr(m, "get_value") else m
+          if isinstance(is_frozen, bool):
+            # Concrete bool: keep the free Python branch, no op emitted.
+            return jnp.zeros_like(g) if is_frozen else g
+          # Traced or array-valued mask: select instead of branching.
+          return jnp.where(is_frozen, jnp.zeros_like(g), g)
         grads = jax.tree.map(_apply_freeze, grads, freeze_mask)
       # Before clipping, where Tunix's `optax.global_norm` also sits -- `train.py` would call
       # this `raw_grad_norm`. In float32 whatever `grad_dtype` is: a sum of squares over bf16
