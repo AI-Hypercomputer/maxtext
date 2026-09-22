@@ -35,9 +35,76 @@ class CheckpointState:
   optimizer: nnx.optimizer.Optimizer | None = None
   accumulated_metrics: List[abstract_engine.MetricsBuffer] | None = None
   accumulated_grads: Any = None
+  accumulated_denominator: Any = None
   # How many micro-batches of `step` are folded into `accumulated_grads`. 0 for a complete
   # step, whose gradients have already been applied and discarded.
   micro_step_count: int = 0
+
+
+@jax.jit
+def _jit_copy_tree(tree: Any) -> Any:
+  """Clones an entire pytree of JAX arrays in a single fused JIT dispatch to break aliasing."""
+  return jax.tree.map(jax.numpy.copy, tree)
+
+
+def _tree_nbytes(tree: Any) -> int:
+  """Returns the total byte size of all jax.Array leaves in `tree`."""
+  return sum(
+      int(leaf.nbytes)
+      for leaf in jax.tree.leaves(tree)
+      if isinstance(leaf, jax.Array) and hasattr(leaf, "nbytes")
+  )
+
+
+def _has_pinned_host_memory(shd: Any) -> bool:
+  """Returns whether `shd` is on a device memory kind that supports `pinned_host` staging."""
+  if shd is None or getattr(shd, "memory_kind", None) == "pinned_host":
+    return False
+  for dev in getattr(shd, "addressable_devices", ()):
+    for mem in getattr(dev, "addressable_memories", lambda: ())():
+      if getattr(mem, "kind", None) == "pinned_host":
+        return True
+  return False
+
+
+def _isolate_for_async_save(
+    tree: Any,
+    *,
+    already_isolated: bool = False,
+    max_pinned_host_bytes: int | None = None,
+) -> Any:
+  """Isolates a pytree of device arrays from subsequent `donate_argnums` reuse without host-stalling."""
+  if already_isolated:
+    return tree
+  leaves = jax.tree.leaves(tree)
+  first_shd = next(
+      (
+          getattr(leaf, "sharding", None)
+          for leaf in leaves
+          if isinstance(leaf, jax.Array) and getattr(leaf, "sharding", None) is not None
+      ),
+      None,
+  )
+  within_pinned_budget = (
+      max_pinned_host_bytes is None
+      or max_pinned_host_bytes <= 0
+      or _tree_nbytes(tree) <= max_pinned_host_bytes
+  )
+  has_pinned = (
+      not _PATHWAYS_PERSISTENCE_REGISTERED
+      and within_pinned_budget
+      and _has_pinned_host_memory(first_shd)
+  )
+  if has_pinned:
+    with jax.transfer_guard("allow"):
+      pinned_targets = jax.tree.map(
+          lambda leaf: leaf.sharding.with_memory_kind("pinned_host")
+          if isinstance(leaf, jax.Array) and getattr(leaf, "sharding", None) is not None
+          else None,
+          tree,
+      )
+      return jax.device_put(tree, pinned_targets, may_alias=False)
+  return _jit_copy_tree(tree)
 
 
 _PATHWAYS_PERSISTENCE_REGISTERED = False
@@ -113,6 +180,11 @@ class CheckpointManager:
       config: The training configuration.
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
+    self._saved_step_micro_counts: dict[int, int] = {}
+    concurrent_gb = getattr(config, "checkpoint_storage_device_host_concurrent_gb", None)
+    self._max_pinned_host_bytes: int | None = (
+        int(concurrent_gb * (1024**3)) if concurrent_gb and concurrent_gb > 0 else None
+    )
     if checkpoint_dir:
       _maybe_register_pathways_persistence()
 
@@ -137,6 +209,7 @@ class CheckpointManager:
               "optimizer_state": _pytree_handler(),
               "accumulated_metrics": _pytree_handler(),
               "accumulated_grads": _pytree_handler(),
+              "accumulated_denominator": _pytree_handler(),
           },
       )
 
@@ -161,6 +234,8 @@ class CheckpointManager:
       0 if that checkpoint covers a complete step, otherwise the number of micro-batches
       accumulated into it.
     """
+    if step in self._saved_step_micro_counts:
+      return self._saved_step_micro_counts[step]
     if self._checkpoint_manager is None:
       return 0
     try:
@@ -172,7 +247,9 @@ class CheckpointManager:
     if not isinstance(custom_metadata, Mapping):
       return 0
     saved = custom_metadata.get("micro_step_count", 0)
-    return saved if isinstance(saved, int) else 0
+    count = saved if isinstance(saved, int) else 0
+    self._saved_step_micro_counts[step] = count
+    return count
 
   def _supersedes_saved_checkpoint(self, step: int, micro_step_count: int) -> bool:
     """Returns whether a new checkpoint is more complete than the one saved at `step`.
@@ -205,6 +282,7 @@ class CheckpointManager:
     logging.info("Deleting intra-step checkpoint at step %d so a more complete one can replace it.", step)
     self._checkpoint_manager.wait_until_finished()
     self._checkpoint_manager.delete(step)
+    self._saved_step_micro_counts.pop(step, None)
 
   def save_checkpoint(
       self,
@@ -228,6 +306,8 @@ class CheckpointManager:
       logging.info("Checkpointing is disabled, skipping save.")
       return False
 
+    grads_already_isolated = bool(kwargs.pop("grads_already_isolated", False))
+
     # Record micro_step_count on every checkpoint, complete or not, so that a later save at the same step
     # can tell whether it supersedes what is already on disk.
     custom_metadata = dict(custom_metadata) if custom_metadata else {}
@@ -236,7 +316,7 @@ class CheckpointManager:
     # A checkpoint already exists at this step. Skip, unless this one is more complete --
     # the case that matters is a step resumed from an intra-step checkpoint and then run to
     # completion, whose finished state would otherwise never reach disk.
-    if self.get_latest_step() == step:
+    if self.get_latest_step() == step or step in self._saved_step_micro_counts:
       if not self._supersedes_saved_checkpoint(step, checkpoint_state.micro_step_count):
         logging.info(
             "Checkpoint already saved at step %d, skipping save.",
@@ -248,8 +328,11 @@ class CheckpointManager:
       # replacement has to be forced through.
       kwargs["force"] = True
 
+    is_intra_step = checkpoint_state.micro_step_count > 0
+
     params = nnx.state(checkpoint_state.model)
-    jax.block_until_ready(params)
+    if not is_intra_step:
+      jax.block_until_ready(params)
     model_cp_args = ocp.args.PyTreeSave(
         item=params,
         save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params),
@@ -258,7 +341,8 @@ class CheckpointManager:
 
     if checkpoint_state.optimizer:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
-      jax.block_until_ready(optimizer_state)
+      if not is_intra_step:
+        jax.block_until_ready(optimizer_state)
       optimizer_cp_args = ocp.args.PyTreeSave(
           item=optimizer_state,
           save_args=jax.tree.map(lambda _: ocp.SaveArgs(), optimizer_state),
@@ -266,7 +350,8 @@ class CheckpointManager:
       save_args["optimizer_state"] = optimizer_cp_args
 
     if checkpoint_state.accumulated_metrics:
-      jax.block_until_ready(checkpoint_state.accumulated_metrics)
+      if not is_intra_step:
+        jax.block_until_ready(checkpoint_state.accumulated_metrics)
       metrics_cp_args = ocp.args.PyTreeSave(
           item=checkpoint_state.accumulated_metrics,
           save_args=jax.tree.map(
@@ -276,23 +361,65 @@ class CheckpointManager:
       )
       save_args["accumulated_metrics"] = metrics_cp_args
 
-    if checkpoint_state.accumulated_grads:
-      jax.block_until_ready(checkpoint_state.accumulated_grads)
-      grads_cp_args = ocp.args.PyTreeSave(
-          item=checkpoint_state.accumulated_grads,
+    grads_to_save = checkpoint_state.accumulated_grads
+    denom_to_save = checkpoint_state.accumulated_denominator
+
+    if is_intra_step:
+      # Isolate `accumulated_grads` and `accumulated_denominator` from subsequent
+      # `fwd_bwd_accum` buffer donation (`donate_argnums=(3, 4)`) asynchronously on the
+      # device stream without blocking the Python host thread.
+      if grads_to_save is not None and denom_to_save is not None and not grads_already_isolated:
+        grads_to_save, denom_to_save = _isolate_for_async_save(
+            (grads_to_save, denom_to_save),
+            already_isolated=False,
+            max_pinned_host_bytes=self._max_pinned_host_bytes,
+        )
+      else:
+        if grads_to_save is not None:
+          grads_to_save = _isolate_for_async_save(
+              grads_to_save,
+              already_isolated=grads_already_isolated,
+              max_pinned_host_bytes=self._max_pinned_host_bytes,
+          )
+        if denom_to_save is not None:
+          denom_to_save = _isolate_for_async_save(
+              denom_to_save,
+              already_isolated=False,
+              max_pinned_host_bytes=self._max_pinned_host_bytes,
+          )
+    else:
+      if grads_to_save is not None:
+        jax.block_until_ready(grads_to_save)
+      if denom_to_save is not None:
+        jax.block_until_ready(denom_to_save)
+
+    if grads_to_save:
+      save_args["accumulated_grads"] = ocp.args.PyTreeSave(
+          item=grads_to_save,
           save_args=jax.tree.map(
               lambda _: ocp.SaveArgs(),
-              checkpoint_state.accumulated_grads,
+              grads_to_save,
           ),
       )
-      save_args["accumulated_grads"] = grads_cp_args
 
-    return self._checkpoint_manager.save(
+    if denom_to_save is not None:
+      save_args["accumulated_denominator"] = ocp.args.PyTreeSave(
+          item=denom_to_save,
+          save_args=jax.tree.map(
+              lambda _: ocp.SaveArgs(),
+              denom_to_save,
+          ),
+      )
+
+    saved = self._checkpoint_manager.save(
         step=step,
         args=ocp.args.Composite(**save_args),
         custom_metadata=custom_metadata,
         **kwargs,
     )
+    if saved:
+      self._saved_step_micro_counts[step] = checkpoint_state.micro_step_count
+    return saved
 
   def restore_checkpoint(
       self,
@@ -346,6 +473,30 @@ class CheckpointManager:
           restore_args=ocp.checkpoint_utils.construct_restore_args(target=accumulated_grads_target),
       )
 
+    if "accumulated_denominator" in metadata.item_metadata:
+      if checkpoint_state.accumulated_denominator is not None:
+        denom_target = checkpoint_state.accumulated_denominator
+      else:
+        param_mesh = next(
+            (
+                getattr(getattr(leaf, "sharding", None), "mesh", None)
+                for leaf in jax.tree.leaves(abstract_params)
+                if getattr(getattr(leaf, "sharding", None), "mesh", None) is not None
+            ),
+            None,
+        )
+        if param_mesh is not None:
+          denom_target = jax.device_put(
+              jax.numpy.float32(0.0),
+              jax.sharding.NamedSharding(param_mesh, jax.sharding.PartitionSpec()),
+          )
+        else:
+          denom_target = jax.numpy.float32(0.0)
+      restore_args["accumulated_denominator"] = ocp.args.PyTreeRestore(
+          item=denom_target,
+          restore_args=ocp.checkpoint_utils.construct_restore_args(target=denom_target),
+      )
+
     custom_metadata = None
     if metadata and hasattr(metadata, "custom_metadata"):
       custom_metadata = metadata.custom_metadata
@@ -359,6 +510,14 @@ class CheckpointManager:
       logging.exception("Failed to restore checkpoint: %s", e)
       return None, None, None
 
+    restored_micro = (
+        custom_metadata.get("micro_step_count", 0)
+        if isinstance(custom_metadata, Mapping)
+        else 0
+    )
+    if isinstance(restored_micro, int):
+      self._saved_step_micro_counts[step] = restored_micro
+
     if "model_params" in restored_items:
       nnx.update(checkpoint_state.model, restored_items["model_params"])
     if checkpoint_state.optimizer is not None and "optimizer_state" in restored_items:
@@ -367,6 +526,8 @@ class CheckpointManager:
       checkpoint_state.accumulated_metrics = restored_items["accumulated_metrics"]
     if "accumulated_grads" in restored_items:
       checkpoint_state.accumulated_grads = restored_items["accumulated_grads"]
+    if "accumulated_denominator" in restored_items:
+      checkpoint_state.accumulated_denominator = restored_items["accumulated_denominator"]
 
     return step, checkpoint_state, custom_metadata
 
