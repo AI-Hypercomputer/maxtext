@@ -51,6 +51,10 @@ class InflightThrottler:
     metrics, self._pending_metrics = self._pending_metrics, None
     self._metrics_logger.write_metrics(metrics)
 
+  def flush_pending_metrics(self) -> None:
+    """Flushes any completed step metrics without blocking on inflight computations."""
+    self._flush_pending_metrics()
+
   def wait_for_next(self) -> None:
     """If the limit is reached, wait for the next computation to finish.
 
