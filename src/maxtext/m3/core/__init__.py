@@ -26,3 +26,8 @@ Planned modules:
 Leaf layers (`nnx.Linear`, `nnx.Einsum`, `nnx.Embed`, `nnx.RMSNorm`, ...) are
 used directly from NNX and are deliberately not wrapped here.
 """
+
+from maxtext.m3.core.kvcache import KVCache
+from maxtext.m3.core.rope import apply_rope
+
+__all__ = ['KVCache', 'apply_rope']

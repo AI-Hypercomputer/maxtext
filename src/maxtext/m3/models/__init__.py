@@ -1,13 +1,13 @@
 # Copyright 2026 Google LLC
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
+# Licensed under the Apache License, Version 2.0 (the License);
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
+# distributed under the License is distributed on an AS IS BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
@@ -17,21 +17,23 @@
 Each family owns its architecture end to end:
 
     models/
+        qwen3/
+            modeling_qwen3.py  # attention, MLP, decoder layer, model
         llama3/
-            llama3.py           # attention, MLP, decoder layer, model
-            llama3_sharding.py  # logical-axis -> mesh-axis rules
-            llama3_8b.yml       # size-specific config overrides
+            modeling_llama3.py # attention, MLP, decoder layer, model
 
-This module holds the single dispatch point (`create_model`) and the model
-registry, which is empty until model implementations land.
-There is no shared `Decoder`, no shared attention class, and no
-model-name branching
+This module holds the single dispatch point (create_model) and the model
+registry. There is no shared Decoder, no shared attention class, and no
+model-name branching.
 """
 
 from collections.abc import Callable
+from maxtext.m3.models.qwen3 import create_qwen3_model
 
 
-MODEL_REGISTRY: dict[str, Callable] = {}
+MODEL_REGISTRY: dict[str, Callable] = {
+    "qwen3-0.6b": create_qwen3_model,
+}
 
 
 def create_model(config, mesh, **kwargs):
