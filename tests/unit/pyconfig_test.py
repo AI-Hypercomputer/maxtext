@@ -773,7 +773,6 @@ assert train._TF_AVAILABLE is False
           f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
       )
 
-
   def test_calculate_global_batch_sizes_unified(self):
     """Verify batch size calculations work consistently for train and eval via pyconfig."""
     # Case 1: pdbs < 1.0 (0.25 on 4 devices, grad_accum=1)

@@ -3982,9 +3982,7 @@ class MaxTextConfig(
     # implementation would silently change that path too. The trainer derives its
     # microbatch count from whichever set of values it is given, so each path
     # stays internally consistent.
-    def calculate_global_batch_sizes(
-        per_device_batch_size, expansion_factor, num_devices, grad_accum_steps=1
-    ):
+    def calculate_global_batch_sizes(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps=1):
       """Helper to calculate global and micro batch sizes for training or evaluation.
 
       Returns:

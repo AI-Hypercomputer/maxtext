@@ -661,9 +661,7 @@ def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
     reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
     return jnp.swapaxes(reshaped_batch_arr, 0, 1)
 
-  micro_data = jax.tree_util.tree_map(
-      reshape_to_microbatch_accumulations, data
-  )
+  micro_data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
 
   def accumulate_eval(acc, micro_batch):
     _, aux = single_eval_fn(micro_batch)
@@ -673,9 +671,7 @@ def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
 
   init_acc = {k: 0.0 for k in _ACCUMULATED_EVAL_KEYS}
   init_acc.update({k: jnp.bool_(False) for k in _ANY_EVAL_KEYS})
-  acc, _ = jax.lax.scan(
-      accumulate_eval, init_acc, micro_data, length=num_microbatches
-  )
+  acc, _ = jax.lax.scan(accumulate_eval, init_acc, micro_data, length=num_microbatches)
 
   total_weights = acc["total_weights"]
   denominator = jnp.maximum(total_weights, 1)
@@ -711,9 +707,7 @@ def eval_step(model, config, state, data, dropout_rng=None):
   else:
     loss, aux = single_eval_fn(data)
     if config.mtp_eval_target_module > 0:
-      mtp_acceptance_rate = calculate_mtp_acceptance_rate(
-          aux["intermediate_outputs"], config
-      )
+      mtp_acceptance_rate = calculate_mtp_acceptance_rate(aux["intermediate_outputs"], config)
 
   xent_sum = aux["xent_sum"]
   z_loss = aux.get("z_loss", 0.0)

@@ -193,9 +193,7 @@ def gradient_accumulation_loss_and_grad(
   if is_nnx:
     init_grad_and_loss["rest_state"] = rest  # pyrefly: ignore[unbound-name]
 
-  grad_and_loss, aux = jax.lax.scan(
-      accumulate_gradient, init_grad_and_loss, data, length=num_microbatches
-  )
+  grad_and_loss, aux = jax.lax.scan(accumulate_gradient, init_grad_and_loss, data, length=num_microbatches)
   has_weights = grad_and_loss["total_weights"] > 0
   denominator = jnp.maximum(grad_and_loss["total_weights"], 1)
   loss = (
@@ -213,9 +211,7 @@ def gradient_accumulation_loss_and_grad(
     unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
-  divisor = (
-      num_microbatches if getattr(config, "use_tunix_gradient_accumulation", False) else denominator
-  )
+  divisor = num_microbatches if getattr(config, "use_tunix_gradient_accumulation", False) else denominator
   raw_grads = jax.tree_util.tree_map(
       lambda arr: jnp.where(has_weights, arr / divisor, jnp.zeros_like(arr)),
       raw_grads,
