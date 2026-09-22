@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Detect the tests a PR adds or modifies, for scheduled_only pre-submit verification.
+"""Detect the tests a PR adds or modifies, for scheduled_only and TPU7X pre-submit verification.
 
 The pre-submit CI runs ``pytest -m "<marker> and (not scheduled_only or newly_added)"``.
 This module supplies the ``newly_added`` set: the tests a pull request touched, so that a
 newly added or modified ``scheduled_only`` test runs at least once before merge instead of
-being silently skipped until the nightly scheduled pipeline.
+being silently skipped until the nightly scheduled pipeline. On TPU7X runners a pull
+request runs ``pytest -m "<marker> and newly_added"`` instead, so only the touched tests
+occupy that scarce hardware.
 
 Detection maps changed *line numbers* (from ``git diff --unified=0``) onto each test's
 line span (from an ``ast`` parse of the new file). A test counts as changed only when a
@@ -25,14 +27,31 @@ changed line lands inside its own span. This avoids trusting git's hunk-header f
 name, which points at the function *preceding* an insertion and would otherwise flag an
 untouched test that merely sits above newly added code.
 
+The module doubles as a command-line tool for CI jobs that cannot import the ``tests``
+package (``tests/__init__.py`` imports packages a bare runner does not have)::
+
+    python3 tests/utils/newly_added_detection.py --base main \
+        [--require-marker tpu_only] [--exclude-marker skip_on_tpu7x]
+
+It prints one ``path::test_name`` line per changed test and exits 0, or exits 2 when no
+diff against the base could be computed, so callers can tell "nothing changed" from
+"detection is broken". The marker flags filter by the ``pytest.mark.*`` decorators a test
+carries (on the function, its class, or the module's ``pytestmark``). CI asks for
+``tpu_only`` and not ``skip_on_tpu7x``: that is the set the scheduled TPU7X flavors
+collect and do not skip, because ``tests/conftest.py`` marks every test without a
+hardware marker ``cpu_only`` (excluded by the TPU flavors) and skips ``skip_on_tpu7x``
+tests at runtime on TPU7X hardware.
+
 Only the Python standard library is used, since this runs on a bare CI runner where
 MaxText is not necessarily importable.
 """
 
+import argparse
 import ast
 import os
 import re
 import subprocess
+import sys
 
 # Matches pytest.ini's ``python_files = *_test.py *_tests.py``.
 _TEST_SUFFIXES = ("_test.py", "_tests.py")
@@ -86,21 +105,62 @@ def parse_changed_line_map(diff_text):
   return line_map
 
 
+def _marker_names(decorator_list):
+  """Return the pytest marker names applied by a decorator list.
+
+  Recognises ``@pytest.mark.<name>`` and ``@pytest.mark.<name>(...)``. Any other
+  decorator (``@mock.patch`` and the like) is ignored.
+  """
+  names = set()
+  for dec in decorator_list:
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Attribute)
+        and target.value.attr == "mark"
+        and isinstance(target.value.value, ast.Name)
+        and target.value.value.id == "pytest"
+    ):
+      names.add(target.attr)
+  return names
+
+
+def _module_markers(tree):
+  """Return the marker names from a module-level ``pytestmark = ...`` assignment.
+
+  Accepts a single marker or a list/tuple of markers, the two forms pytest documents.
+  """
+  names = set()
+  for node in tree.body:
+    if not isinstance(node, ast.Assign):
+      continue
+    if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets):
+      continue
+    value = node.value
+    elements = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+    names |= _marker_names(elements)
+  return names
+
+
 def _iter_test_defs(tree):
-  """Yield ``(name, start_line, end_line)`` for every test function in an AST.
+  """Yield ``(name, start_line, end_line, markers)`` for every test function in an AST.
 
   Covers module-level test functions and methods declared directly inside a class,
   which is what pytest collects. The span starts at the first decorator (if any) so
-  decorator-only edits are attributed to the test they decorate.
+  decorator-only edits are attributed to the test they decorate. ``markers`` is the
+  set of pytest marker names the test carries, from its own decorators, its class's
+  decorators and the module's ``pytestmark``, mirroring how pytest inherits markers.
   """
   def_types = (ast.FunctionDef, ast.AsyncFunctionDef)
+  module_marks = _module_markers(tree)
   for node in tree.body:
     if isinstance(node, def_types) and node.name.startswith("test_"):
-      yield node.name, _span_start(node), node.end_lineno
+      yield node.name, _span_start(node), node.end_lineno, module_marks | _marker_names(node.decorator_list)
     elif isinstance(node, ast.ClassDef):
+      class_marks = module_marks | _marker_names(node.decorator_list)
       for sub in node.body:
         if isinstance(sub, def_types) and sub.name.startswith("test_"):
-          yield sub.name, _span_start(sub), sub.end_lineno
+          yield sub.name, _span_start(sub), sub.end_lineno, class_marks | _marker_names(sub.decorator_list)
 
 
 def _span_start(node):
@@ -111,29 +171,34 @@ def _span_start(node):
   return start
 
 
-def touched_test_names(source, touched_lines):
-  """Return the names of test functions in ``source`` whose span includes a changed line.
+def touched_tests(source, touched_lines):
+  """Map each test in ``source`` whose span includes a changed line to its marker names.
 
   Args:
     source: The new file's Python source.
     touched_lines: Set of changed new-file line numbers for that file.
 
   Returns:
-    A set of test function names. Empty if ``touched_lines`` is empty or ``source`` does
-    not parse (pytest collection surfaces a syntax error on its own, so raising here would
-    only hide it).
+    ``{test_name: frozenset_of_marker_names}``. Empty if ``touched_lines`` is empty or
+    ``source`` does not parse (pytest collection surfaces a syntax error on its own, so
+    raising here would only hide it).
   """
   if not touched_lines:
-    return set()
+    return {}
   try:
     tree = ast.parse(source)
   except SyntaxError:
-    return set()
-  found = set()
-  for name, start, end in _iter_test_defs(tree):
+    return {}
+  found = {}
+  for name, start, end, markers in _iter_test_defs(tree):
     if any(start <= line <= end for line in touched_lines):
-      found.add(name)
+      found[name] = frozenset(markers)
   return found
+
+
+def touched_test_names(source, touched_lines):
+  """Return the names of test functions in ``source`` whose span includes a changed line."""
+  return set(touched_tests(source, touched_lines))
 
 
 def _build_diff_commands(base):
@@ -153,6 +218,72 @@ def _build_diff_commands(base):
   ]
 
 
+def _resolve_base(base_ref=None):
+  """Return the base ref to diff against: ``base_ref``, else ``$GITHUB_BASE_REF``, else ``main``."""
+  return base_ref or os.environ.get("GITHUB_BASE_REF") or "main"
+
+
+def diff_against_base(base):
+  """Return ``git diff --unified=0`` text against the merge-base with ``base``, or None.
+
+  None means no diff could be computed: the working directory is not inside a git work
+  tree, or neither ``origin/<base>`` nor ``<base>`` resolves to a ref that shares history
+  with HEAD. Callers that gate CI on the result must treat None as "unknown", never as
+  "nothing changed".
+  """
+  try:
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        check=False,
+    )
+    if inside.returncode != 0:
+      return None
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+      subprocess.run(
+          ["git", "fetch", "origin", f"{base}:refs/remotes/origin/{base}"],
+          stdout=subprocess.DEVNULL,
+          stderr=subprocess.DEVNULL,
+          check=False,
+      )
+    for command in _build_diff_commands(base):
+      try:
+        return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
+      except Exception:  # pylint: disable=broad-exception-caught
+        continue
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+  return None
+
+
+def changed_tests_from_diff(diff_text, require_marker=None, exclude_marker=None):
+  """Return ``(file_path, test_name)`` for every test the diff added or modified.
+
+  Args:
+    diff_text: Raw ``git diff --unified=0`` output. Test sources are read from the
+      current working directory, which must be the repository root.
+    require_marker: Optional pytest marker name. When given, only tests carrying it (on
+      the function, its class or the module's ``pytestmark``) are reported.
+    exclude_marker: Optional pytest marker name. Tests carrying it are dropped.
+  """
+  changed = set()
+  for path, touched_lines in parse_changed_line_map(diff_text).items():
+    if not _is_test_file(path):
+      continue
+    try:
+      with open(path, "r", encoding="utf-8") as handle:
+        source = handle.read()
+    except OSError:
+      continue
+    for name, markers in touched_tests(source, touched_lines).items():
+      if require_marker is not None and require_marker not in markers:
+        continue
+      if exclude_marker is not None and exclude_marker in markers:
+        continue
+      changed.add((path, name))
+  return changed
+
+
 def get_changed_tests(base_ref=None):
   """Return ``(file_path, test_name)`` for every test the PR added or modified.
 
@@ -164,43 +295,47 @@ def get_changed_tests(base_ref=None):
     A set of ``(file_path, test_name)`` tuples, or an empty set when not in a git work
     tree or when the diff cannot be computed.
   """
-  base = base_ref or os.environ.get("GITHUB_BASE_REF") or "main"
-  try:
-    inside = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        capture_output=True,
-        check=False,
-    )
-    if inside.returncode != 0:
-      return set()
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-      subprocess.run(
-          ["git", "fetch", "origin", f"{base}:refs/remotes/origin/{base}"],
-          stdout=subprocess.DEVNULL,
-          stderr=subprocess.DEVNULL,
-          check=False,
-      )
-    diff_text = None
-    for command in _build_diff_commands(base):
-      try:
-        diff_text = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
-        break
-      except Exception:  # pylint: disable=broad-exception-caught
-        continue
-    if diff_text is None:
-      return set()
-  except Exception:  # pylint: disable=broad-exception-caught
+  diff_text = diff_against_base(_resolve_base(base_ref))
+  if diff_text is None:
     return set()
+  return changed_tests_from_diff(diff_text)
 
-  changed = set()
-  for path, touched_lines in parse_changed_line_map(diff_text).items():
-    if not _is_test_file(path):
-      continue
-    try:
-      with open(path, "r", encoding="utf-8") as handle:
-        source = handle.read()
-    except OSError:
-      continue
-    for name in touched_test_names(source, touched_lines):
-      changed.add((path, name))
-  return changed
+
+def main(argv=None):
+  """Command-line entry point: print one ``path::test_name`` line per changed test.
+
+  Returns 0 when a diff was computed (the output may be empty) and 2 when it was not, so a
+  CI gate can tell "no changed tests" apart from "detection is broken".
+  """
+  parser = argparse.ArgumentParser(description="List the tests a branch added or modified relative to a base ref.")
+  parser.add_argument(
+      "--base",
+      default=None,
+      help="Base ref to diff against (default: $GITHUB_BASE_REF, then main).",
+  )
+  parser.add_argument(
+      "--require-marker",
+      default=None,
+      help="Only report tests carrying this pytest marker (e.g. tpu_only).",
+  )
+  parser.add_argument(
+      "--exclude-marker",
+      default=None,
+      help="Drop tests carrying this pytest marker (e.g. skip_on_tpu7x).",
+  )
+  args = parser.parse_args(argv)
+  base = _resolve_base(args.base)
+  diff_text = diff_against_base(base)
+  if diff_text is None:
+    print(
+        f"newly_added_detection: cannot diff against origin/{base} or {base} (cwd: {os.getcwd()})",
+        file=sys.stderr,
+    )
+    return 2
+  for path, name in sorted(changed_tests_from_diff(diff_text, args.require_marker, args.exclude_marker)):
+    print(f"{path}::{name}")
+  return 0
+
+
+if __name__ == "__main__":
+  sys.exit(main())
