@@ -991,5 +991,62 @@ class FP8DequantizeOnLoadTest(parameterized.TestCase):
     self.assertEqual(moe_scale_sharding.spec, jax.sharding.PartitionSpec(None, None, "fsdp", "tensor"))
 
 
+class TrainingEngineCheckpointManagerTest(parameterized.TestCase):
+  """Tests for training_engine.checkpointing.CheckpointManager gs:// guard and save_optimizer_state."""
+
+  def _mock_config(self):
+    cfg = mock.MagicMock()
+    cfg.checkpoint_storage_use_ocdbt = False
+    cfg.checkpoint_storage_use_zarr3 = False
+    cfg.checkpoint_storage_device_host_concurrent_gb = 8
+    cfg.checkpoint_period = 1
+    cfg.max_num_checkpoints_to_keep = 2
+    cfg.async_checkpointing = True
+    cfg.save_optimizer_state = True
+    return cfg
+
+  @mock.patch("maxtext.training_engine.checkpointing.ocp.CheckpointManager")
+  @mock.patch("maxtext.training_engine.checkpointing.ocp.PyTreeCheckpointHandler")
+  def test_pathways_persistence_rejects_non_gs_uri_on_first_and_second_init(
+      self, mock_handler, mock_orbax_cm
+  ):
+    from maxtext.training_engine import checkpointing as engine_ckpt  # pylint: disable=import-outside-toplevel
+
+    cfg = self._mock_config()
+    rejected_constructions = 0
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      engine_ckpt._PATHWAYS_PERSISTENCE_REGISTERED = False
+      with self.assertRaisesRegex(ValueError, r"checkpoint_dir must be a gs:// URI"):
+        engine_ckpt.CheckpointManager("/tmp/local_dir", cfg)
+      rejected_constructions += 1
+
+      # Second construction when _PATHWAYS_PERSISTENCE_REGISTERED is already True:
+      engine_ckpt._PATHWAYS_PERSISTENCE_REGISTERED = True
+      with self.assertRaisesRegex(ValueError, r"checkpoint_dir must be a gs:// URI"):
+        engine_ckpt.CheckpointManager("/tmp/local_dir", cfg)
+      rejected_constructions += 1
+
+    self.assertEqual(rejected_constructions, 2)
+    mock_orbax_cm.assert_not_called()
+
+  @mock.patch("maxtext.training_engine.checkpointing._maybe_register_pathways_persistence")
+  @mock.patch("maxtext.training_engine.checkpointing.ocp.CheckpointManager")
+  @mock.patch("maxtext.training_engine.checkpointing.ocp.PyTreeCheckpointHandler")
+  def test_pathways_persistence_accepts_gs_uri_and_registers(
+      self, mock_handler, mock_orbax_cm, mock_register
+  ):
+    from maxtext.training_engine import checkpointing as engine_ckpt  # pylint: disable=import-outside-toplevel
+
+    cfg = self._mock_config()
+    gcs_uri = "gs://yixuannwang-maxtext-dataset/trellis/0921"
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      mgr = engine_ckpt.CheckpointManager(gcs_uri, cfg)
+    mock_register.assert_called_once_with()
+    mock_orbax_cm.assert_called_once()
+    self.assertEqual(mock_orbax_cm.call_args.kwargs["directory"], gcs_uri)
+    self.assertIsNotNone(mgr._checkpoint_manager)
+
+
 if __name__ == "__main__":
   absltest.main()
+
