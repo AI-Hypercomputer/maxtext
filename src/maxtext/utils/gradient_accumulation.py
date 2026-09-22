@@ -31,22 +31,29 @@ def should_accumulate_fractional_batch(config, is_train: bool = True) -> bool:
 
 
 def get_num_microbatches(config, is_train: bool = True) -> int:
-  """Calculates the number of microbatches to accumulate over for train or eval."""
-  load_key = (
-      "global_batch_size_to_load"
-      if is_train
-      else "global_batch_size_to_load_eval"
-  )
-  mbs_key = (
-      "micro_batch_size_to_train_on"
-      if is_train
-      else "micro_batch_size_to_eval_on"
-  )
-  gbs_load = getattr(config, load_key, None)
+  """Calculates the number of microbatches to accumulate over for train or eval.
+
+  The count is derived from the *real* global batch size, not
+  `global_batch_size_to_load`. The latter is inflated by
+  `expansion_factor_real_data`, whose extra rows are placeholder data that
+  `loss_fn` trims away; counting them here would spend microbatches on
+  placeholders and silently change the microbatch count for existing
+  expansion runs.
+
+  This preserves the invariant
+  `num_microbatches * micro_batch_size == global_batch_size`, so it returns
+  `gradient_accumulation_steps` for every `per_device_batch_size >= 1` config,
+  exactly as before.
+  """
+  batch_key = "global_batch_size_to_train_on" if is_train else "global_batch_size_to_eval_on"
+  mbs_key = "micro_batch_size_to_train_on" if is_train else "micro_batch_size_to_eval_on"
+  global_batch = getattr(config, batch_key, None)
   mbs = getattr(config, mbs_key, None)
   steps = getattr(config, "gradient_accumulation_steps", 1) if is_train else 1
-  if gbs_load and mbs and mbs > 0:
-    return max(steps, gbs_load // mbs)
+  # An inexact split would drop the remainder rows, so fall back to `steps`
+  # rather than silently losing data or failing the reshape inside jit.
+  if global_batch and mbs and mbs > 0 and global_batch % mbs == 0:
+    return max(steps, global_batch // mbs)
   return steps
 
 

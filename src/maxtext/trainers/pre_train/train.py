@@ -145,6 +145,19 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       if data[mask_name].shape != target_shape:
         raise ValueError(f"{mask_name} must match targets shape; got {data[mask_name].shape} and {target_shape}")
 
+  # Keep only the rows this forward pass owns. The dataloader hands us
+  # `global_batch_size_to_load` rows, which is larger than the real batch when
+  # `expansion_factor_real_data > 1`: only a subset of hosts read real data and
+  # the remaining rows are placeholder batches. The real rows lead each
+  # microbatch, so trimming here drops exactly the placeholders. When
+  # expansion is off this slice is a no-op, because the microbatch handed in is
+  # already `micro_batch_size_to_train_on`/`micro_batch_size_to_eval_on` rows.
+  if is_train:
+    for k, v in data.items():
+      data[k] = v[: config.micro_batch_size_to_train_on, :]
+  else:
+    for k, v in data.items():
+      data[k] = v[: config.micro_batch_size_to_eval_on, :]
   # Only forward the kwarg when router replay is actually in use, so models
   # and adapters whose __call__ predates the feature keep working.
   forced_routing_kwargs = (
