@@ -27,6 +27,12 @@ This label is used for administrative purposes. Please do not add it manually.
 If you need them (plus the TPU7X suite) on your PR, add the `scheduled-only` label; the full pipeline
 re-runs as a scheduled run. Remove and re-add the label to trigger it again.
 
+*Notice 4:* On PRs, TPU7X runs only the TPU7X tests that the PR adds or modifies, and, like the other TPU/GPU
+suites, only once the PR no longer has the `skip-ci-tests` label. If your PR changes code that can break on TPU7X
+without touching those tests (e.g. kernels, sharding, quantization), add the `run-tpu7x` label: all TPU7X tests
+then run on the usual number of workers, for this and later pushes, except the `scheduled_only` tests that the PR
+does not touch.
+
 # Tests
 
 Please describe how you tested this change, and include any instructions and/or

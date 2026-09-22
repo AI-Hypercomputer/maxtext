@@ -21,27 +21,40 @@
 #
 # Behavior & Logic Flow:
 #   0. FORCE_ALL_TESTS=true: Bypasses all rules and enables every test suite and
-#      notebook (used by the `scheduled-only` PR label).
-#   1. Non-PR Events: If not a pull request, enables all test suites and notebooks.
+#      notebook (used by the `scheduled-only` PR label), and every TPU7X flavor
+#      (has_new_tests=true, no tpu7x_flavors).
+#      RUN_TPU7X=true: Bypasses newly_added test-diff detection for TPU7X and enables
+#      every TPU7X flavor (has_new_tests=true, no tpu7x_flavors, run_tests=true; used
+#      by the `run-tpu7x` PR label). The other suites keep their per-file selection.
+#   1. Non-PR Events: If not a pull request, enables all test suites and notebooks,
+#      and every TPU7X flavor (has_new_tests=true, no tpu7x_flavors).
 #   2. Changed-file source: Uses the GitHub REST API (paginated `pulls/N/files`) when
 #      PR_NUMBER, GITHUB_REPOSITORY and the gh CLI are available; falls back to
 #      `git diff origin/<base>...HEAD` if the API is unavailable, fails, returns no
 #      files, or hits its 3000-file cap.
-#   3. Empty Diff / Error: If no files are detected or diff fails, runs all core
+#   3. TPU7X Test Selection: Unless RUN_TPU7X=true, `tests/utils/newly_added_detection.py
+#      --eligible-flavors` lists the tpu7x-tests matrix flavors that collect a test the
+#      PR touched. Sets has_new_tests, plus tpu7x_flavors when that list is non-empty; a
+#      detection failure enables every TPU7X flavor as a fail-safe. Runs before step 4,
+#      so without RUN_TPU7X a PR with an empty net diff skips TPU7X.
+#   4. Empty Diff / Error: If no files are detected or diff fails, runs all core
 #      test suites (excluding expensive notebook tests) as a fail-safe.
-#   4. Default State: All individual test and notebook flags are initialized to 'false'.
-#   5. File Evaluation Loop: Iterates through each changed file:
+#   5. Default State: All individual test and notebook flags are initialized to 'false'.
+#   6. File Evaluation Loop: Iterates through each changed file:
 #      - Evaluates against specific domain rules (notebook workflows, pathways,
 #        TPU pre/post-training dependencies, GPU files, inference, etc.) and
 #        cumulatively enables corresponding flags.
 #      - Tracks any unmatched files.
-#   6. Exclusion Filtering: Filters out pre-configured excluded patterns/directories
+#   7. Exclusion Filtering: Filters out pre-configured excluded patterns/directories
 #      from the unmatched file list.
-#   7. Fallback Check: If any truly unmatched files remain, triggers a general fallback
+#   8. Fallback Check: If any truly unmatched files remain, triggers a general fallback
 #      enabling all core test suites (excluding notebooks).
-#   8. Heavy-Test Gate: Every successful run ends by writing run_heavy_tests,
+#   9. RUN_TPU7X=true: Enables run_tests, so the package build and tpu7x-tests run even
+#      when the changed files select no other suite.
+#  10. Heavy-Test Gate: Every successful run ends by writing run_heavy_tests,
 #      heavy_tests_gated and heavy_tests_gate_message, which skip the heavy TPU/GPU
-#      suites on drafts and while a PR has `skip-ci-tests` (see gate_heavy_tests).
+#      suites, TPU7X included, on drafts and while a PR has `skip-ci-tests` (see
+#      gate_heavy_tests).
 
 set -e
 
@@ -127,12 +140,13 @@ gate_heavy_tests() {
       message="Heavy tests skipped on the first run of a new PR, which gets the 'skip-ci-tests' label. They run once the PR gets the 'pull ready' label, which a bot adds after 2 approvals (a maintainer adds it to PRs from forks). To run them sooner, remove 'skip-ci-tests' or ask a maintainer to."
     fi
     # Only a change that needs the heavy suites is gated: notebooks run on TPUs, and the test suites that
-    # have a TPU/GPU flavor run when run_tests is true (the flags that the heavy jobs check). If you add a
-    # heavy job or change the flags a heavy job depends on, update this rule too.
+    # have a TPU/GPU flavor run when run_tests is true (the flags that the heavy jobs check; has_new_tests
+    # is tpu7x-tests's, see the TPU7X test selection below). If you add a heavy job or change the flags a
+    # heavy job depends on, update this rule too.
     if [[ "${FLAG_VALUES[run_notebooks]:-}" == "true" ]]; then
       needs_heavy_tests=true
     elif [[ "${FLAG_VALUES[run_tests]:-}" == "true" ]]; then
-      for flag in run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests; do
+      for flag in run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests has_new_tests; do
         if [[ "${FLAG_VALUES[$flag]:-}" == "true" ]]; then
           needs_heavy_tests=true
         fi
@@ -171,15 +185,23 @@ BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS:-false}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS,,}"
 
+# Set to "true" to bypass the newly_added test-diff filter and run every TPU7X
+# flavor, e.g. when a PR carries the `run-tpu7x` label.
+RUN_TPU7X="${RUN_TPU7X:-false}"
+# Lowercased so that values such as "True" from manual runs are also honored.
+RUN_TPU7X="${RUN_TPU7X,,}"
+
 if [[ "$FORCE_ALL_TESTS" == "true" ]]; then
   echo "FORCE_ALL_TESTS is set, running all tests and notebooks"
   set_test_flags "true" "true"
+  emit_flag "has_new_tests" "true"
   finish
 fi
 
 if [ "$EVENT_NAME" != "pull_request" ]; then
   echo "Not a pull request (event: $EVENT_NAME), running all tests and notebooks"
   set_test_flags "true" "true"
+  emit_flag "has_new_tests" "true"
   finish
 fi
 
@@ -269,6 +291,63 @@ fi
 
 echo "Changed files (source: ${DIFF_SOURCE}):"
 echo "$CHANGED_FILES"
+
+# TPU7X test selection: which tpu7x-tests matrix flavors (ci_pipeline.yml) would run a test this PR
+# touched? The detector runs as a script, not via `python3 -c "from tests.utils..."`:
+# importing the package executes tests/__init__.py, which needs packages that are not
+# installed on this bare runner. The script only needs the standard library.
+#
+# `--eligible-flavors` prints one compact JSON array, in matrix order (e.g. ["tpu7x-unit"]
+# or []), of the flavors that collect and run at least one touched test. Its stderr, left in
+# this log, has one "<flavor>: path::test" line per match. The detector's module docstring
+# says what counts as touched and which flavor collects a test.
+#
+#   RUN_TPU7X=true (run-tpu7x label)       -> detector not run; has_new_tests=true,
+#                                             tpu7x_flavors unset (tpu7x-tests runs its full matrix)
+#   exit != 0, or stdout not such an array -> has_new_tests=true, tpu7x_flavors unset
+#                                             (fail-safe: tpu7x-tests runs its full matrix)
+#   []                                     -> has_new_tests=false (tpu7x-tests is skipped)
+#   non-empty array                        -> has_new_tests=true, tpu7x_flavors=<array>
+#
+# tpu7x_flavors is never written as [], so tpu7x-tests never gets an empty matrix. This
+# runs before the "No files detected" fail-safe below, so without RUN_TPU7X a PR with an
+# empty net diff (e.g. an empty commit) gets [] and skips TPU7X.
+if [[ "$RUN_TPU7X" == "true" ]]; then
+  echo "RUN_TPU7X is set, enabling every TPU7X flavor."
+  HAS_NEW_TESTS="true"
+  TPU7X_FLAVORS=""
+else
+  # Strict check of the detector's stdout: one line of valid JSON naming only tpu7x-* flavors.
+  TPU7X_FLAVORS_RE='^\[("tpu7x-[a-z0-9-]+"(,"tpu7x-[a-z0-9-]+")*)?\]$'
+  echo "Checking which TPU7X flavors collect a test this PR touched:"
+  TPU7X_FLAVORS=$(python3 tests/utils/newly_added_detection.py --base "$BASE_REF" --eligible-flavors) \
+    && DETECT_RC=0 || DETECT_RC=$?
+  if [ "$DETECT_RC" -ne 0 ]; then
+    echo "Warning: newly_added detection failed (exit ${DETECT_RC}, see above); enabling every TPU7X flavor as a fail-safe."
+    HAS_NEW_TESTS="true"
+    TPU7X_FLAVORS=""
+  elif [[ ! "$TPU7X_FLAVORS" =~ $TPU7X_FLAVORS_RE ]]; then
+    echo "Warning: newly_added detection exited 0 but did not print a JSON array of tpu7x flavors; enabling every TPU7X flavor as a fail-safe. Its output:"
+    while IFS= read -r detect_line; do
+      echo "  | $detect_line"
+    done <<< "$TPU7X_FLAVORS"
+    HAS_NEW_TESTS="true"
+    TPU7X_FLAVORS=""
+  elif [[ "$TPU7X_FLAVORS" == "[]" ]]; then
+    echo "No TPU7X flavor collects a test this PR touched."
+    HAS_NEW_TESTS="false"
+    TPU7X_FLAVORS=""
+  else
+    echo "TPU7X flavors that collect a test this PR touched: ${TPU7X_FLAVORS}"
+    HAS_NEW_TESTS="true"
+  fi
+fi
+echo "Detected has_new_tests=${HAS_NEW_TESTS}"
+emit_flag "has_new_tests" "$HAS_NEW_TESTS"
+if [[ -n "$TPU7X_FLAVORS" ]]; then
+  echo "tpu7x_flavors=${TPU7X_FLAVORS}"
+  emit_flag "tpu7x_flavors" "$TPU7X_FLAVORS"
+fi
 
 if [ -z "$CHANGED_FILES" ]; then
   echo "No files detected or diff failed. Running core test suites (excluding notebooks) as a fail-safe."
@@ -391,6 +470,11 @@ if [ ${#FINAL_UNMATCHED_FILES[@]} -gt 0 ]; then
   printf '  - %s\n' "${FINAL_UNMATCHED_FILES[@]}"
   echo "Enabling all test suites except notebook tests as a fallback."
   enable_flags run_tests run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests
+fi
+
+if [[ "$RUN_TPU7X" == "true" ]]; then
+  echo "RUN_TPU7X is set, ensuring TPU7X test suite can run."
+  enable_flags run_tests
 fi
 
 finish
