@@ -1103,6 +1103,13 @@ class MoEGeneral(BaseModel):
       False,
       description="Enable top-k probability normalization for router weights (Qwen3-specific).",
   )
+  return_routed_experts: bool = Field(
+      False,
+      description=(
+          "Record each MoE layer's routing as a `selected_experts` intermediate, returned by the "
+          "decoder as `expert_indices`. Required to capture routing from inference for router replay."
+      ),
+  )
   float32_weight_sum: bool = Field(
       True,
       description="Whether to use full fp32 precision to sum expert weights for numerical stability.",

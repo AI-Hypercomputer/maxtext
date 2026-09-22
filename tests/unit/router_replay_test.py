@@ -251,6 +251,22 @@ class CheckForcedRoutingSupportTest(unittest.TestCase):
         check_forced_routing_support(decoder_block)
 
 
+class ReturnRoutedExpertsConfigTest(unittest.TestCase):
+  """`return_routed_experts` has to be a real config field, reachable from a real config.
+
+  moe.fused_moe_matmul reads it as a plain attribute, so if the field is ever dropped
+  the read raises AttributeError for every fused MoE layer. Declaring it is also what
+  keeps routing capture switchable at all: with the field pinned to False no layer sows
+  `selected_experts` and the decoder leaves `expert_indices` out of its return tuple.
+  """
+
+  def test_defaults_to_false(self):
+    self.assertIs(_init_test_cfg().return_routed_experts, False)
+
+  def test_can_be_enabled(self):
+    self.assertIs(_init_test_cfg(return_routed_experts=True).return_routed_experts, True)
+
+
 class UnsupportedConfigGuardTest(unittest.TestCase):
   """Configurations forced routing rejects must fail loudly, not silently
 

@@ -317,6 +317,13 @@ use_gmm_v2_heuristic_tiling: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
+# Record each MoE layer's routing decisions as a `selected_experts` intermediate, which the decoder
+# returns alongside the hidden state as `expert_indices`. Only read on the vLLM fused MoE path
+# (attention: vllm_rpa / vllm_batched_rpa), so in practice only the vLLM sampler in RL sets it, to
+# capture routing for router replay; off by default so standard serving does not pay for the extra
+# top-k.
+return_routed_experts: false
+
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
