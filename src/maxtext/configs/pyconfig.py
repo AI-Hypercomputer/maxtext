@@ -40,6 +40,10 @@ from maxtext.utils import max_logging
 logger = logging.getLogger(__name__)
 
 _BASE_CONFIG_ATTR = "base_config"
+# Set to True by configs emitted by `model_reducer.save_reduced_model_yaml`. Such a file already
+# holds a fully resolved architecture, so it is treated as user intent regardless of its directory.
+_RESOLVED_SNAPSHOT_ATTR = "is_resolved_architecture_snapshot"
+
 _MAX_PREFIX = "M_"
 _yaml_types_to_parser = {str: str, int: int, float: float, bool: str2bool}
 
@@ -64,6 +68,7 @@ _CONFIG_FILE_MAPPING: dict[str, str] = {
     "maxtext.inference.vllm_decode": "base.yml",
     "maxtext.checkpoint_conversion.to_maxtext": "base.yml",
     "maxtext.checkpoint_conversion.to_huggingface": "base.yml",
+    "maxtext.configs.model_reducer": "base.yml",
 }
 
 
@@ -201,6 +206,80 @@ def _load_config(config_name: str) -> omegaconf.DictConfig:
     base_cfg = _load_config(loaded_parent_config_filename)
     cfg = omegaconf.OmegaConf.merge(base_cfg, cfg)
   return cfg
+
+
+def _resolve_base_config_path(base_path: str, referrer_path: str) -> str:
+  """Resolves a `base_config` reference the same way `_load_config` does."""
+  if os.path.isabs(base_path):
+    return base_path
+  sibling = os.path.join(os.path.dirname(referrer_path), base_path)
+  return sibling if os.path.isfile(sibling) else os.path.join(MAXTEXT_CONFIGS_DIR, base_path)
+
+
+def _is_packaged_default_config(path: str) -> bool:
+  """Returns True if `path` is a MaxText-shipped default (`base.yml` or a `models/*.yml`).
+
+  Packaged defaults are not user intent, so keys they declare must remain overridable by the model
+  config. Everything else in the chain IS user intent.
+
+  This is a LOCATION heuristic and is only consulted for files that do not identify themselves; see
+  `_is_resolved_architecture_snapshot`.
+  """
+  norm = os.path.normpath(os.path.abspath(path))
+  configs_dir = os.path.normpath(os.path.abspath(MAXTEXT_CONFIGS_DIR))
+  if norm == os.path.join(configs_dir, "base.yml"):
+    return True
+  return os.path.dirname(norm) == os.path.join(configs_dir, "models")
+
+
+def _is_resolved_architecture_snapshot(cfg: omegaconf.DictConfig) -> bool:
+  """Returns True if a loaded YAML declares itself an already-resolved architecture snapshot.
+
+  Snapshots are emitted by the model reducer and carry a fully resolved architecture. They are user
+  intent by construction, so they must be honored no matter where they are stored. Without this,
+  the location heuristic in `_is_packaged_default_config` classifies any file placed under
+  `configs/models/` as a packaged default and the original architecture is silently restored - the
+  same file would then describe two different models depending only on its directory.
+  """
+  try:
+    return bool(cfg.get(_RESOLVED_SNAPSHOT_ATTR, False))
+  except Exception:  # pylint: disable=broad-except
+    return False
+
+
+def _collect_user_config_keys(config_path: str) -> set[str]:
+  """Collects every key set by the user's YAML files, following the whole `base_config` chain.
+
+  When `override_model_config=True`, the model YAML must not clobber values the user explicitly
+  set. Determining "explicitly set" from the top-level file alone is wrong: a job YAML that does
+  `base_config: my_reduced_model.yml` inherits architecture from a user file, but none of those keys
+  appear in the top-level file, so the model YAML would silently restore the original architecture.
+  This walks the chain by PROVENANCE and stops at MaxText-shipped defaults.
+
+  A file is loaded BEFORE the packaged-default test so that a resolved-architecture snapshot can be
+  recognized by its self-identifying marker rather than by its directory.
+  """
+  keys: set[str] = set()
+  seen: set[str] = set()
+  path = os.path.abspath(config_path)
+
+  while path and path not in seen and os.path.isfile(path):
+    seen.add(path)
+    try:
+      cfg = omegaconf.OmegaConf.load(path)
+    except Exception:  # pylint: disable=broad-except
+      break
+    # Marker beats location: an exported snapshot is user intent wherever it lives.
+    if not _is_resolved_architecture_snapshot(cfg) and _is_packaged_default_config(path):
+      break
+    keys.update(str(k) for k in cfg.keys())
+    base_path = cfg.get(_BASE_CONFIG_ATTR)
+    if not base_path:
+      break
+    path = os.path.abspath(_resolve_base_config_path(str(base_path), path))
+
+  keys.discard(_BASE_CONFIG_ATTR)
+  return keys
 
 
 def _tuples_to_lists(l: list | tuple | Any) -> list | Any:
@@ -486,7 +565,9 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)
       # if override_model_config=True, only apply model configs for keys not present in overrides.
       if temp_cfg.get("override_model_config"):
-        model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in overrides_cfg}
+        # Keys the user set anywhere in their own config chain must win over the model YAML.
+        user_yml_keys = _collect_user_config_keys(config_path)
+        model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in overrides_cfg and k not in user_yml_keys}
       else:
         model_cfg = model_loaded_cfg
         # Validate that no keys are overridden by both model config and CLI/kwargs

@@ -622,6 +622,36 @@ class ModelArchitecture(BaseModel):
       description="The style of DecoderBlock to use (e.g., 'llama2', 'gemma').",
   )
   global_parameter_scale: int = Field(1, description="A global scaling factor for model dimensions.")
+  model_reduce_factor: float = Field(
+      1.0,
+      description="Factor R >= 1.0 by which to shrink total model parameter count (e.g., 2.0 shrinks 1T -> ~500B).",
+  )
+  # `str | None` because an empty CLI/YAML assignment (`target_model_size=`) parses to None; the
+  # reducer normalizes None to "" (unset).
+  target_model_size: str | None = Field(
+      "",
+      description="Target total model parameter size string (e.g., '500B', '0.5T'). Overrides model_reduce_factor if set.",
+  )
+  target_num_cycles: int = Field(
+      -1,
+      description="Directly select the number of repeating architectural layer cycles to retain (-1 means unset).",
+  )
+  hard_budget: bool = Field(
+      False,
+      description="If True, target_model_size / model_reduce_factor is treated as a strict upper bound.",
+  )
+  model_reduce_strategy: str = Field(
+      "auto",
+      description="Strategy for model reduction: 'structural', 'compact', 'budget', 'auto', 'depth', 'balanced', 'width', or 'experts'.",
+  )
+  # Marks a YAML as an already-resolved architecture snapshot emitted by `model_reducer`. Such a
+  # file carries a fully resolved architecture, so `pyconfig` must treat it as user intent no
+  # matter which directory it is stored in - otherwise saving a slice under `configs/models/`
+  # causes it to be classified as a packaged default and the ORIGINAL architecture is restored.
+  is_resolved_architecture_snapshot: bool = Field(
+      False,
+      description="True if this config is a resolved architecture snapshot exported by the model reducer.",
+  )
   base_emb_dim: int = Field(2048, description="Base embedding dimension.")
   base_num_query_heads: int = Field(16, description="Base number of query heads.")
   base_num_kv_heads: int = Field(16, description="Base number of key/value heads.")
@@ -4061,6 +4091,10 @@ class MaxTextConfig(
     self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
     self.moe_mlp_dim = (2**mlp_dim_scale) * self.base_moe_mlp_dim
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
+    if self.model_reduce_factor != 1.0 or self.target_model_size or self.target_num_cycles > 0:
+      from maxtext.configs import model_reducer  # pylint: disable=import-outside-toplevel
+
+      model_reducer.apply_model_reduce_factor(self)
 
     # E. HARDWARE-DEPENDENT CALCULATIONS
     if self.elastic_enabled:

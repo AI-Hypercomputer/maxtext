@@ -198,6 +198,14 @@ unquantized_modules: []
 # or a list/tuple like [128, 64] for asymmetric block scaling). Set to null for per-tensor scaling.
 weight_block_size: null
 global_parameter_scale: 1
+model_reduce_factor: 1.0
+target_model_size: ""
+target_num_cycles: -1
+hard_budget: false
+model_reduce_strategy: "auto"
+# Set to True only in configs exported by the model reducer; marks the file as an
+# already-resolved architecture so it is honored regardless of where it is stored.
+is_resolved_architecture_snapshot: False
 base_emb_dim: 2048
 base_num_query_heads: 16
 base_num_kv_heads: 16
