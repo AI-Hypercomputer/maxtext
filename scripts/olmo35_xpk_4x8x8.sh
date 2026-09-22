@@ -134,6 +134,9 @@ $PP_LINE              cloud.google.com/reservation-name: $RESERVATION
                 export PYTHONPATH=/wt/src
                 export LIBTPU_INIT_ARGS='$LIBTPU'
                 export TMPDIR=/dev/shm
+                # Measured 1.34x together on tpu7x; see olmo35-ironwood-plan.md phase 5.
+                export TOKAMAX_KDA_DENSE_PAIRS=${DENSE_PAIRS:-1}
+                export TOKAMAX_KDA_BF16_FWD=${KDA_BF16:-1} TOKAMAX_KDA_BF16_BWD=${KDA_BF16:-1}
                 for M in $MODELS; do
                   echo "=== MODEL=\$M pdb=$PDB seq=$SEQ ===";
                   python3 -m maxtext.trainers.pre_train.train \
@@ -143,8 +146,9 @@ $PP_LINE              cloud.google.com/reservation-name: $RESERVATION
                     per_device_batch_size=$PDB max_target_length=$SEQ \
                     dtype=bfloat16 weight_dtype=float32 \
                     ici_fsdp_parallelism=-1 remat_policy=full \
-                    megablox=True sparse_matmul=True use_tokamax_kda=True \
-                    num_vocab_tiling=8 \
+                    sparse_matmul=True use_tokamax_kda=True \
+                    megablox=False use_tokamax_gmm=True use_gmm_v2=True \
+                    shard_exp_on_fsdp=True num_vocab_tiling=8 \
                     base_output_directory=$OUT 2>&1 | tail -30;
                   echo "=== \$M exit=\${PIPESTATUS[0]} ===";
                 done

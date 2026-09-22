@@ -491,6 +491,38 @@ B > 1, by looping over batch elements and calling the B=1 kernel (line ~187), so
 obvious "hardcoded batch 0" theory is wrong there. That loop also means the kernel
 serialises over batch, which is worth knowing independently of the NaN.
 
+## 2026-09-22 retry at 64/128 chips: same wall, now measured exactly
+
+A second attempt once the console showed four 4x4x4 pools (16 nodes / 64 chips each).
+
+- Submitted a real **4x4x4 JobSet (16 nodes, 64 chips, 128 devices)** to `default`
+  with the correct `tpu7x-128-4x4x4-placement-policy`, reservation and topology
+  selectors, carrying the full winning flag set. It is **queued, never admitted**:
+  *"insufficient unused quota for google.com/tpu in flavor tpu7x-flavor, 49 more
+  needed"*, i.e. only ~15 chips are borrowable.
+- Kueue never even created a ProvisioningRequest for it (other users' workloads do
+  get one), because it cannot pass the quota check first.
+- Node pools here are **auto-provisioned and churn constantly**. The console's
+  "16 nodes / 64 chips, OK" is the configured size, not what is up: minutes later
+  `kubectl` showed **zero** nodes labelled `4x4x4`, and a different 64-node pool
+  (`1ec0u9s0`, topology **4x8x8**, 256 chips) had appeared and sat **completely idle**.
+- So the capacity is physically there and unused; the quota to claim it is not.
+
+Quota accounting, measured:
+
+| queue | nominal tpu7x | used | can I submit? |
+|---|---|---|---|
+| **priority-dev** | **307** | **0** | **no (RBAC)** |
+| default | 0 (borrow only) | 20 | yes |
+| ubench-regression-tests | 0 | 0 | no |
+| vllm-serving | 0 | 0 | no |
+| cdk-cluster-queue | 0 | 0 | no |
+
+`default` is the **only** namespace where I can create jobsets, and it holds no
+nominal quota of its own. Every chip in the cohort is nominally `priority-dev`'s, and
+that namespace is exactly the one I am forbidden from. This is not a capacity problem
+and not a scheduling problem; it is one RBAC grant.
+
 ## The one thing that unblocks everything: priority-dev RBAC
 
 Attempted 2026-09-21 after the console showed idle capacity. The capacity is real
