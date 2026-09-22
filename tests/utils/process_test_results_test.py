@@ -33,7 +33,10 @@ class ProcessTestResultsTest(unittest.TestCase):
   def test_extract_job_name(self):
     self.assertEqual(extract_job_name("test-results-gpu-unit-1.xml"), "gpu-unit")
     self.assertEqual(extract_job_name("test-results-tpu-unit-1.xml"), "tpu-unit")
-    self.assertEqual(extract_job_name("test-results-cpu-torch-reference-1.xml"), "cpu-torch-reference")
+    self.assertEqual(
+        extract_job_name("test-results-cpu-torch-reference-1.xml"),
+        "cpu-torch-reference",
+    )
     self.assertEqual(
         extract_job_name("test-results-tpu7x-post-training-unit-2.xml"),
         "tpu7x-post-training-unit",
@@ -59,13 +62,16 @@ class ProcessTestResultsTest(unittest.TestCase):
     )
 
     # Process under gpu-unit flavor. 15.99s compared against 15.0s baseline for gpu-unit should NOT trigger regression.
-    failed = process_testcase(
+    module_name, time_val, is_integration, failed = process_testcase(
         testcase_xml,
         "test-results-gpu-unit-1.xml",
         "gpu-unit",
         baseline_data,
         new_baseline,
     )
+    self.assertEqual(module_name, "tests.unit.qk_clip_test")
+    self.assertEqual(time_val, 15.99)
+    self.assertFalse(is_integration)
     self.assertFalse(failed)
     self.assertIn(
         "gpu-unit::tests.unit.qk_clip_test.QKClipMLATest.test_mla_dot_product_integration",
@@ -76,8 +82,8 @@ class ProcessTestResultsTest(unittest.TestCase):
         15.99,
     )
 
-  def test_process_testcase_regression_detection(self):
-    """Verifies that a genuine regression within the same flavor is detected."""
+  def test_process_testcase_regression_enforced_for_non_excluded_module(self):
+    """Verifies that a genuine regression in a non-excluded module sets failed=True."""
     baseline_data = {
         "gpu-unit::tests.unit.slow_test.SlowTest.test_slow": 1.0,
     }
@@ -92,14 +98,107 @@ class ProcessTestResultsTest(unittest.TestCase):
         },
     )
 
-    failed = process_testcase(
+    module_name, time_val, is_integration, failed = process_testcase(
         testcase_xml,
         "test-results-gpu-unit-1.xml",
         "gpu-unit",
         baseline_data,
         new_baseline,
     )
+    self.assertEqual(module_name, "tests.unit.slow_test")
+    self.assertEqual(time_val, 20.0)
+    self.assertFalse(is_integration)
     self.assertTrue(failed)
+
+  def test_process_testcase_regression_warn_only_for_excluded_module(self):
+    """Verifies that a regression in an excluded module (moe_test) sets failed=False."""
+    baseline_data = {
+        "tpu-unit::tests.unit.moe_test.RoutedMoeTest.test_ragged_sort": 25.0,
+    }
+    new_baseline = {}
+
+    testcase_xml = ET.Element(
+        "testcase",
+        {
+            "name": "test_ragged_sort",
+            "classname": "tests.unit.moe_test.RoutedMoeTest",
+            "time": "130.0",
+        },
+    )
+
+    module_name, time_val, _, failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1.xml",
+        "tpu-unit",
+        baseline_data,
+        new_baseline,
+    )
+    self.assertEqual(module_name, "tests.unit.moe_test")
+    self.assertEqual(time_val, 130.0)
+    self.assertFalse(failed)
+
+  def test_process_testcase_regression_warn_only_for_attention_test(self):
+    """Verifies that a regression in attention_test (excluded) sets failed=False."""
+    baseline_data = {
+        "tpu-unit::tests.unit.attention_test.AttentionTest.test_ring_cp": 5.0,
+    }
+    new_baseline = {}
+
+    testcase_xml = ET.Element(
+        "testcase",
+        {
+            "name": "test_ring_cp",
+            "classname": "tests.unit.attention_test.AttentionTest",
+            "time": "40.0",
+        },
+    )
+
+    module_name, _, _, failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1.xml",
+        "tpu-unit",
+        baseline_data,
+        new_baseline,
+    )
+    self.assertEqual(module_name, "tests.unit.attention_test")
+    self.assertFalse(failed)
+
+  def test_process_testcase_skipped_returns_none(self):
+    """Verifies that skipped tests return None for module_name."""
+    testcase_xml = ET.Element(
+        "testcase",
+        {"name": "test_skip", "classname": "tests.unit.foo.Bar", "time": "0.0"},
+    )
+    ET.SubElement(testcase_xml, "skipped")
+
+    module_name, time_val, _, failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1.xml",
+        "tpu-unit",
+        {},
+        {},
+    )
+    self.assertIsNone(module_name)
+    self.assertEqual(time_val, 0.0)
+    self.assertFalse(failed)
+
+  def test_process_testcase_failed_returns_none(self):
+    """Verifies that failed tests return None for module_name."""
+    testcase_xml = ET.Element(
+        "testcase",
+        {"name": "test_fail", "classname": "tests.unit.foo.Bar", "time": "5.0"},
+    )
+    ET.SubElement(testcase_xml, "failure")
+
+    module_name, _, _, failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1.xml",
+        "tpu-unit",
+        {},
+        {},
+    )
+    self.assertIsNone(module_name)
+    self.assertFalse(failed)
 
   def test_cpu_excluded_from_macro_benchmarks(self):
     """Verifies that CPU suites are skipped when building macro-level benchmark entries."""
