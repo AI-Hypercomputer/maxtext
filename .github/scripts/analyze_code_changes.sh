@@ -20,6 +20,8 @@
 # based on the specific files modified.
 #
 # Behavior & Logic Flow:
+#   0. FORCE_ALL_TESTS=true: Bypasses all rules and enables every test suite and
+#      notebook (used by the `scheduled-only` PR label).
 #   1. Non-PR Events: If not a pull request, enables all test suites and notebooks.
 #   2. Empty Diff / Error: If no files are detected or diff fails, runs everything 
 #      as a fail-safe.
@@ -79,6 +81,17 @@ matches_pattern() {
 
 EVENT_NAME="${EVENT_NAME:-${GITHUB_EVENT_NAME:-pull_request}}"
 BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
+# Set to "true" to bypass the per-file rules and run everything, e.g. when a PR
+# carries the `scheduled-only` label and should behave like a scheduled run.
+# Lowercased so that values such as "True" from manual runs are also honored.
+FORCE_ALL_TESTS="${FORCE_ALL_TESTS:-false}"
+FORCE_ALL_TESTS="${FORCE_ALL_TESTS,,}"
+
+if [[ "$FORCE_ALL_TESTS" == "true" ]]; then
+  echo "FORCE_ALL_TESTS is set, running all tests and notebooks"
+  set_test_flags "true" "true"
+  exit 0
+fi
 
 if [ "$EVENT_NAME" != "pull_request" ]; then
   echo "Not a pull request (event: $EVENT_NAME), running all tests and notebooks"
