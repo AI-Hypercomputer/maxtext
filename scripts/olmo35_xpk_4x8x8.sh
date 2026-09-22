@@ -27,13 +27,14 @@ DURATION=${DURATION:-90}
 TOPOLOGY=${TOPOLOGY:-4x8x8}
 NODES=${NODES:-64}
 PLACEMENT_POLICY=${PLACEMENT_POLICY:-tpu7x-512-4x8x8-placement-policy}
-RESERVATION=cloudtpu-20260710003900-159478293
+RESERVATION=${RESERVATION-cloudtpu-20260710003900-159478293}
 
 IMAGE=${IMAGE:-gcr.io/cloud-tpu-multipod-dev/agagik-olmoe3:kdaj24}
 SRC=${SRC:-gs://agagik-us/olmo35/src.tgz}
 OUT=${OUT:-gs://agagik-us/olmo35/4x8x8}
 RUN=${RUN:-o35x$(date +%m%d%H%M)}
 MODELS=${MODELS:-olmo35-tiny olmo35-small}
+CFGS=${CFGS:-1:8192 4:8192 1:16384}
 PDB=${PDB:-4}
 SEQ=${SEQ:-8192}
 STEPS=${STEPS:-20}
@@ -48,6 +49,18 @@ LIBTPU='--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_bf16_emission_mode=NATIV
 # Single-host pools carry no placement policy; only emit the selector when set.
 PP_LINE=""
 [ -n "$PLACEMENT_POLICY" ] && PP_LINE="              cloud.google.com/placement-policy-name: $PLACEMENT_POLICY"$'\n'
+RES_SEL=""; RES_TOL=""
+if [ -n "$RESERVATION" ]; then
+  RES_SEL="              cloud.google.com/reservation-name: $RESERVATION"$'\n'
+  RES_TOL=$'            - key: cloud.google.com/reservation-name\n              operator: Equal\n              value: '"$RESERVATION"$'\n              effect: NoSchedule\n'
+fi
+
+QLABELS=""
+if [ -n "$QUEUE" ]; then
+  QLABELS="    kueue.x-k8s.io/queue-name: $QUEUE"$'\n'"    kueue.x-k8s.io/priority-class: $PRIORITY"
+else
+  QLABELS="    olmo35: bench"
+fi
 
 YAML=/tmp/$RUN.yaml
 cat > "$YAML" <<YAMLEOF
@@ -57,8 +70,7 @@ metadata:
   name: $RUN
   namespace: $NAMESPACE
   labels:
-    kueue.x-k8s.io/queue-name: $QUEUE
-    kueue.x-k8s.io/priority-class: $PRIORITY
+$QLABELS
   annotations:
     alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
 spec:
@@ -94,16 +106,15 @@ spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu7x
               cloud.google.com/gke-tpu-topology: $TOPOLOGY
-$PP_LINE              cloud.google.com/reservation-name: $RESERVATION
+$PP_LINE$RES_SEL
             tolerations:
             - key: google.com/tpu
               operator: Exists
             - key: google.com/tpu
               operator: Exists
               effect: NoSchedule
-            - key: cloud.google.com/reservation-name
-              operator: Equal
-              value: $RESERVATION
+$RES_TOL            - key: cloud.google.com/gke-spot
+              operator: Exists
               effect: NoSchedule
             volumes:
             - name: dshm

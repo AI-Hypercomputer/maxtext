@@ -548,6 +548,31 @@ It carries the full winning configuration (gmm_v2 post-fix, `shard_exp_on_fsdp`,
 `TOKAMAX_KDA_DENSE_PAIRS=1`, bf16 KDA, the Ironwood XLA set) across tiny, small and
 medium at pdb=4. `large` is excluded: at 128 devices it needs ~164 GB/device.
 
+## 4x4x4 attempt, 2026-09-22: two hard blockers, both external
+
+Four healthy **4x4x4 pools** now exist on `bodaborg-tpu7x-nap`
+(`nap-tpu7x-stand-4t-{14m6k6xb,1gasnexi,elw9rs7j,kh8x1mzr}`, 16 nodes / 64 chips each,
+placement policy `tpu7x-128-4x4x4-placement-policy`). A 4x4x4 job is written, renders
+correctly at 16 completions and is **submitted and queued** as `o35q09220400`. It
+cannot be admitted:
+
+| route | state |
+|---|---|
+| `bodaborg-tpu7x-nap` / `priority-dev` | 307 chips nominal, **0 used**, but **no RBAC to create jobsets** |
+| `bodaborg-tpu7x-nap` / `default` | nominal 0, already borrowing 100; my 64-chip ask needs **"49 more"**, and 256/128/128/128-chip jobs are queued ahead |
+| `tpu7x-cluster-flex` / `tpu7x-full-pod-spot` | a real 4x4x4, **no Kueue**, autoscaler fired `0->16`, then **`FailedScaleUp: GCE out of resources`** (spot stockout) |
+
+So reserved 4x4x4 capacity is RBAC-gated and spot 4x4x4 capacity is out of stock.
+Three launcher bugs were fixed getting this far, and are worth keeping:
+the `exclusive-topology` webhook requires an explicit
+`cloud.google.com/gke-nodepool` selector on the pods; a stray
+`kueue.x-k8s.io/queue-name` label suspends the JobSet forever on a cluster whose
+Kueue has no matching queue; and a spot pool needs the reservation selector and
+toleration omitted, not just changed.
+
+The queued job will admit on its own if the `default` queue drains. Otherwise the
+RBAC grant below is the unblock.
+
 ## The one thing that unblocks everything: priority-dev RBAC
 
 Attempted 2026-09-21 after the console showed idle capacity. The capacity is real
