@@ -523,6 +523,31 @@ nominal quota of its own. Every chip in the cohort is nominally `priority-dev`'s
 that namespace is exactly the one I am forbidden from. This is not a capacity problem
 and not a scheduling problem; it is one RBAC grant.
 
+### Full capacity survey, 2026-09-22
+
+Every tpu7x cluster I have any access to, checked in one pass:
+
+| cluster | project | largest slice I can actually get | blocker |
+|---|---|---|---|
+| bodaborg-tpu7x-nap | shared-capacity | **256 chips sit idle** | quota is `priority-dev`'s; I can only create jobsets in `default`, which borrows ~15 |
+| bodaborg-tpu7x-spot-sps | multipod-dev | 8 devices | 5 nodes, but each is its own single-host 2x2x1 pool, so no multi-host slice |
+| bodaborg-tpu7x-spot-256-chip | multipod-dev | 4 chips | jobset+pod create OK, but the spot pools are scaled to 0 |
+| tpu7x-cluster-flex | multipod-dev | 0 | down to 1 node, busy with someone's vLLM |
+| bodaborg-tpu7x-sps (SPS) | shared-capacity | 0 | Pathways head still in Error |
+
+**8 devices is the ceiling anywhere I can submit.** The 4x4x4 JobSet `o35q09220142`
+is left **queued** in `default`: it is suspended so it costs nothing, it is
+duration-bounded at 90 minutes, and Kueue will admit it if the cohort frees. Its
+results land in `gs://agagik-us/olmo35/4x8x8` and pod logs persist 12h
+(`ttlSecondsAfterFinished`). Check it with:
+
+    KUBECONFIG=/tmp/kc-nap-olmo35.yaml kubectl get jobset -n default o35q09220142
+    KUBECONFIG=/tmp/kc-nap-olmo35.yaml kubectl logs -n default -l jobset.sigs.k8s.io/jobset-name=o35q09220142 --tail=40
+
+It carries the full winning configuration (gmm_v2 post-fix, `shard_exp_on_fsdp`,
+`TOKAMAX_KDA_DENSE_PAIRS=1`, bf16 KDA, the Ironwood XLA set) across tiny, small and
+medium at pdb=4. `large` is excluded: at 128 devices it needs ~164 GB/device.
+
 ## The one thing that unblocks everything: priority-dev RBAC
 
 Attempted 2026-09-21 after the console showed idle capacity. The capacity is real
