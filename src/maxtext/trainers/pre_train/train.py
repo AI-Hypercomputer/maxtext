@@ -688,15 +688,7 @@ def eval_step(model, config, state, data, dropout_rng=None):
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
 
   def single_eval_fn(d):
-    return loss_fn(
-        eval_model,
-        config,
-        d,
-        eval_rng,
-        eval_params,
-        sparsity_state=sparsity_state,
-        is_train=False,
-    )
+    return loss_fn(state.model, config, d, None, None, is_train=False)
 
   if should_accumulate_fractional_batch(config, is_train=False):
     num_microbatches = get_num_microbatches(config, is_train=False)
