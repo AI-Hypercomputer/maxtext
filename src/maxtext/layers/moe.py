@@ -36,6 +36,7 @@ from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.kernels import sort_activations
+from maxtext.kernels.moe_topk import moe_topk_pallas
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -994,6 +995,11 @@ class RoutedMoE(nnx.Module):
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
         top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+      elif getattr(self.config, "use_topk_kernel", False):
+        top_k_weights, top_k_indices = moe_topk_pallas.fused_topk_gating(
+            gate_logits, self.num_experts_per_tok
+        )
+        top_k_weights = top_k_weights.astype(self.dtype)
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
@@ -1002,7 +1008,10 @@ class RoutedMoE(nnx.Module):
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
     else:
-      if self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
+      if (
+          self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4)
+          and not getattr(self.config, "use_topk_kernel", False)
+      ):
         if valid_token_mask is not None:
           # Padding must stay out of the softmax denominator or it rescales the
           # real slots. Large-negative, not -inf: a fully-padded token would be NaN.
@@ -1013,7 +1022,7 @@ class RoutedMoE(nnx.Module):
         top_k_weights = top_k_weights * valid_token_mask
 
       # Normalization of router weights (e.g. used by Qwen3, Gemma4).
-      if self.config.norm_topk_prob:
+      if self.config.norm_topk_prob and not getattr(self.config, "use_topk_kernel", False):
         weight_sum = top_k_weights.sum(axis=-1, keepdims=True)
         if valid_token_mask is not None:
           # A fully-padded token sums to zero; 0/0 would NaN the whole batch loss.
