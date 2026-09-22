@@ -78,7 +78,6 @@ from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
-
 from maxtext.utils.gradient_accumulation import (
     get_num_microbatches,
     gradient_accumulation_loss_and_grad,
@@ -653,6 +652,7 @@ def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
   `_AVERAGED_EVAL_KEYS` are per-microbatch quantities and are averaged, which
   matches how `gradient_accumulation_loss_and_grad` reduces them.
   """
+
   def reshape_to_microbatch_accumulations(batch_arr):
     microbatch_shape = (
         batch_arr.shape[0] // num_microbatches,
@@ -692,6 +692,8 @@ def eval_step(model, config, state, data, dropout_rng=None):
   del dropout_rng  # unused for NNX (kept for jit signature parity)
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
 
+  mtp_acceptance_rate = 0.0
+
   def single_eval_fn(d):
     return loss_fn(state.model, config, d, None, None, is_train=False)
 
@@ -706,10 +708,8 @@ def eval_step(model, config, state, data, dropout_rng=None):
       )
     num_microbatches = get_num_microbatches(config, is_train=False)
     loss, aux = _fractional_batch_eval(single_eval_fn, data, num_microbatches)
-    mtp_acceptance_rate = 0.0
   else:
     loss, aux = single_eval_fn(data)
-    mtp_acceptance_rate = 0.0
     if config.mtp_eval_target_module > 0:
       mtp_acceptance_rate = calculate_mtp_acceptance_rate(
           aux["intermediate_outputs"], config
@@ -718,7 +718,7 @@ def eval_step(model, config, state, data, dropout_rng=None):
   xent_sum = aux["xent_sum"]
   z_loss = aux.get("z_loss", 0.0)
   total_weights = aux["total_weights"]
-  moe_lb_loss = aux.get("moe_lb_loss", 0.0)
+  moe_lb_loss = aux["moe_lb_loss"]
   indexer_loss = aux.get("indexer_loss", 0.0)
   mtp_loss = aux.get("mtp_loss", 0.0)
   eval_total_loss = xent_sum

@@ -49,6 +49,7 @@ class _Cfg:
   global_batch_size_to_eval_on: int | None = None
   micro_batch_size_to_eval_on: int | None = None
 
+
 class _TinyNNX(nnx.Module):
   """Single linear layer NNX model."""
 
@@ -277,7 +278,6 @@ class TestGradientAccumulationNNX(unittest.TestCase):
           for gradient in jax.tree.leaves(raw_grads):
             self.assertTrue(jnp.all(jnp.isfinite(gradient)))
             self.assertTrue(jnp.all(gradient == 0))
-
 
   def test_fractional_per_device_batch_size_accumulates_all_samples(self):
     """When per_device_batch_size < 1, GA iterates over all loaded samples."""
