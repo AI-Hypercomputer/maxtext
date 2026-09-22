@@ -27,44 +27,10 @@ def make_bwd_block_specs(
     kq_head_dim: int,
     v_head_dim: int,
     padded_num_v_heads: int | None = None,
+    has_dht: bool = False,
+    has_dh0: bool = False,
 ) -> Tuple[list[pl.BlockSpec], list[pl.BlockSpec], int, int]:
-  """Constructs reverse-scan Pallas emit_pipeline in_specs and out_specs for GDN backward.
-
-  Reverse Time Traversal:
-    Chunk c = 0 corresponds to physical chunk (num_chunks - 1) via reverse-chunk
-    index mapping rc(c) = num_chunks - 1 - c.
-
-  Memory Layout & Block Specifications:
-    [in_specs]
-      0: qkv_conv     [B, C, chunk_size, dim_size]              <- Forward conv activations
-      1: b            [B, C, chunk_size, padded_num_v_heads]    <- Forward decay gates
-      2: a            [B, C, chunk_size, padded_num_v_heads]    <- Forward gating / alpha
-      3: do           [B, C, chunk_size, num_v_heads, v_head]   <- Incoming output cotangent
-      4: chunk_states [B, C, num_v_heads, kq_head, v_head]      <- Cached forward state S_c
-      5: t_inv        [B, C, num_v_heads, chunk_size, chunk_sz] <- Cached triangular inverse T_c^{-1}
-      6: a_log        [B, 1, padded_num_v_heads]                <- Log decay parameter
-      7: dt_bias      [B, 1, padded_num_v_heads]                <- Timestep bias
-      8: reset        [B, C, 1, 128]                            <- Document boundary mask
-
-    [out_specs]
-      0: dy_conv      [B, C, chunk_size, dim_size]              -> Output conv cotangent
-      1: db           [B, C, chunk_size, padded_num_v_heads]    -> Gradient for decay gate b
-      2: da           [B, C, chunk_size, padded_num_v_heads]    -> Gradient for gating a
-      3: dal          [B, C, 1, padded_num_v_heads]             -> Chunk gradient for a_log
-      4: ddt          [B, C, 1, padded_num_v_heads]             -> Chunk gradient for dt_bias
-
-  Args:
-    num_chunks: Total number of sequence chunks.
-    chunk_size: Token sequence chunk length.
-    dim_size: Total feature dimension of convolved QKV activations.
-    num_v_heads: Number of value heads.
-    kq_head_dim: Feature dimension per key/query head.
-    v_head_dim: Feature dimension per value head.
-    padded_num_v_heads: Value head count aligned upward to 128 (hardware tile).
-
-  Returns:
-    A tuple of (in_specs, out_specs, num_in, num_out).
-  """
+  """Constructs reverse-scan Pallas emit_pipeline in_specs and out_specs for GDN backward."""
   if padded_num_v_heads is None:
     padded_num_v_heads = ((num_v_heads + 127) // 128) * 128
 
@@ -72,77 +38,94 @@ def make_bwd_block_specs(
     return num_chunks - 1 - c
 
   in_specs = [
-      # 0: qkv_conv [B, C, chunk_size, dim_size]
+      # 0: qkv_conv [B, G, C, chunk_size, dim_size]
       pl.BlockSpec(
-          (None, None, chunk_size, dim_size),
-          lambda b, c: (b, rc(c), 0, 0),
+          (None, None, None, chunk_size, dim_size),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
       ),
-      # 1: b [B, C, chunk_size, padded_num_v_heads]
+      # 1: b [B, G, C, chunk_size, padded_num_v_heads]
       pl.BlockSpec(
-          (None, None, chunk_size, padded_num_v_heads),
-          lambda b, c: (b, rc(c), 0, 0),
+          (None, None, None, chunk_size, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
       ),
-      # 2: a [B, C, chunk_size, padded_num_v_heads]
+      # 2: a [B, G, C, chunk_size, padded_num_v_heads]
       pl.BlockSpec(
-          (None, None, chunk_size, padded_num_v_heads),
-          lambda b, c: (b, rc(c), 0, 0),
+          (None, None, None, chunk_size, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
       ),
-      # 3: do [B, C, chunk_size, num_v_heads, v_head_dim]
+      # 3: do [B, G, C, chunk_size, num_v_heads, v_head_dim]
       pl.BlockSpec(
-          (None, None, chunk_size, num_v_heads, v_head_dim),
-          lambda b, c: (b, rc(c), 0, 0, 0),
+          (None, None, None, chunk_size, num_v_heads, v_head_dim),
+          lambda b, g, c: (b, g, rc(c), 0, 0, 0),
       ),
-      # 4: chunk_states [B, C, num_v_heads, kq_head_dim, v_head_dim]
+      # 4: chunk_states [B, G, C, num_v_heads, kq_head_dim, v_head_dim]
       pl.BlockSpec(
-          (None, None, num_v_heads, kq_head_dim, v_head_dim),
-          lambda b, c: (b, rc(c), 0, 0, 0),
+          (None, None, None, num_v_heads, kq_head_dim, v_head_dim),
+          lambda b, g, c: (b, g, rc(c), 0, 0, 0),
       ),
-      # 5: t_inv [B, C, num_v_heads, chunk_size, chunk_size]
+      # 5: t_inv [B, G, C, num_v_heads, chunk_size, chunk_size]
       pl.BlockSpec(
-          (None, None, num_v_heads, chunk_size, chunk_size),
-          lambda b, c: (b, rc(c), 0, 0, 0),
+          (None, None, None, num_v_heads, chunk_size, chunk_size),
+          lambda b, g, c: (b, g, rc(c), 0, 0, 0),
       ),
-      # 6: a_log [B, 1, padded_num_v_heads]
+      # 6: a_log [B, G, 1, padded_num_v_heads]
       pl.BlockSpec(
-          (None, 1, padded_num_v_heads),
-          lambda b, c: (b, 0, 0),
+          (None, None, 1, padded_num_v_heads),
+          lambda b, g, c: (b, g, 0, 0),
       ),
-      # 7: dt_bias [B, 1, padded_num_v_heads]
+      # 7: dt_bias [B, G, 1, padded_num_v_heads]
       pl.BlockSpec(
-          (None, 1, padded_num_v_heads),
-          lambda b, c: (b, 0, 0),
+          (None, None, 1, padded_num_v_heads),
+          lambda b, g, c: (b, g, 0, 0),
       ),
-      # 8: reset [B, C, 1, 128]
+      # 8: reset [B, G, C, 1, 128]
       pl.BlockSpec(
-          (None, None, 1, 128),
-          lambda b, c: (b, rc(c), 0, 0),
+          (None, None, None, 1, 128),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
       ),
   ]
+  if has_dht:
+    in_specs.append(
+        # 9: dht [B, G, 1, num_v_heads, kq_head_dim, v_head_dim]
+        pl.BlockSpec(
+            (None, None, 1, num_v_heads, kq_head_dim, v_head_dim),
+            lambda b, g, c: (b, g, 0, 0, 0, 0),
+        )
+    )
+
   out_specs = [
-      # 0: dy_conv [B, C, chunk_size, dim_size]
+      # 0: dy_conv [B, G, C, chunk_size, dim_size]
       pl.BlockSpec(
-          (None, None, chunk_size, dim_size),
-          lambda b, c: (b, rc(c), 0, 0),
+          (None, None, None, chunk_size, dim_size),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
       ),
-      # 1: db [B, C, chunk_size, padded_num_v_heads]
+      # 1: db [B, G, C, chunk_size, padded_num_v_heads]
       pl.BlockSpec(
-          (None, None, chunk_size, padded_num_v_heads),
-          lambda b, c: (b, rc(c), 0, 0),
+          (None, None, None, chunk_size, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
       ),
-      # 2: da [B, C, chunk_size, padded_num_v_heads]
+      # 2: da [B, G, C, chunk_size, padded_num_v_heads]
       pl.BlockSpec(
-          (None, None, chunk_size, padded_num_v_heads),
-          lambda b, c: (b, rc(c), 0, 0),
+          (None, None, None, chunk_size, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
       ),
-      # 3: dal [B, C, 1, padded_num_v_heads]
+      # 3: dal [B, G, C, 1, padded_num_v_heads]
       pl.BlockSpec(
-          (None, None, 1, padded_num_v_heads),
-          lambda b, c: (b, rc(c), 0, 0),
+          (None, None, None, 1, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
       ),
-      # 4: ddt [B, C, 1, padded_num_v_heads]
+      # 4: ddt [B, G, C, 1, padded_num_v_heads]
       pl.BlockSpec(
-          (None, None, 1, padded_num_v_heads),
-          lambda b, c: (b, rc(c), 0, 0),
+          (None, None, None, 1, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
       ),
   ]
+  if has_dh0:
+    out_specs.append(
+        # 5: dh0 [B, G, 1, num_v_heads, kq_head_dim, v_head_dim]
+        pl.BlockSpec(
+            (None, None, 1, num_v_heads, kq_head_dim, v_head_dim),
+            lambda b, g, c: (b, g, 0, 0, 0, 0),
+        )
+    )
   return in_specs, out_specs, len(in_specs), len(out_specs)

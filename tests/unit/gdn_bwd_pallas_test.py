@@ -16,6 +16,10 @@
 
 # pylint: disable=protected-access
 
+import functools
+import sys
+from unittest import mock
+
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp
@@ -826,6 +830,7 @@ class GdnBwdPallasTest(absltest.TestCase):
     t_inv = jax.random.normal(k8, (batch_size, num_chunks, num_v_heads, chunk_size, chunk_size), dtype=jnp.float32)
 
     # 1. Dispatch with head_tile = 4 -> 2 head groups
+    # pylint: disable=unbalanced-tuple-unpacking
     dy1, db1, da1, dal1, ddt1 = gdn_bwd_pallas.pallas_gdn_bwd_kernel(
         qkv_conv=qkv,
         b=b,
@@ -843,6 +848,7 @@ class GdnBwdPallasTest(absltest.TestCase):
     )
 
     # 2. Dispatch with head_tile = 8 -> 1 head group
+    # pylint: disable=unbalanced-tuple-unpacking
     dy2, db2, da2, dal2, ddt2 = gdn_bwd_pallas.pallas_gdn_bwd_kernel(
         qkv_conv=qkv,
         b=b,
@@ -894,6 +900,7 @@ class GdnBwdPallasTest(absltest.TestCase):
     do = jnp.concatenate([do_chunk0, do_chunk1], axis=1)
 
     # 1. No document reset: gradient flows backwards from chunk 1 into chunk 0
+    # pylint: disable=unbalanced-tuple-unpacking
     dy_no_reset, _, _, _, _ = gdn_bwd_pallas.pallas_gdn_bwd_kernel(
         qkv_conv=qkv,
         b=b,
@@ -917,6 +924,7 @@ class GdnBwdPallasTest(absltest.TestCase):
     seg_doc1 = jnp.ones((batch_size, chunk_size), dtype=jnp.int32)
     segment_ids = jnp.concatenate([seg_doc0, seg_doc1], axis=1)
 
+    # pylint: disable=unbalanced-tuple-unpacking
     dy_reset, _, _, _, _ = gdn_bwd_pallas.pallas_gdn_bwd_kernel(
         qkv_conv=qkv,
         b=b,
@@ -1074,15 +1082,9 @@ class GdnBwdPallasTest(absltest.TestCase):
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
     key = jax.random.PRNGKey(42)
-    k1, k2, k3, k4, k5, k6, k7, k8 = jax.random.split(key, 8)
-    qkv = jax.random.normal(k1, (batch_size, seq_len, dim_size), dtype=jnp.float32)
-    b = jax.random.normal(k2, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
-    a = jax.random.normal(k3, (batch_size, seq_len, num_v_heads), dtype=jnp.float32)
-    conv_weight = jax.random.normal(k4, (conv_kernel_size, 1, dim_size), dtype=jnp.float32)
-    conv_bias = jax.random.normal(k5, (dim_size,), dtype=jnp.float32)
-    a_log = jax.random.normal(k6, (num_v_heads,), dtype=jnp.float32)
-    dt_bias = jax.random.normal(k7, (num_v_heads,), dtype=jnp.float32)
-    do = jax.random.normal(k8, (batch_size, seq_len, num_v_heads, head_v_dim), dtype=jnp.float32)
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        key, batch_size, seq_len, dim_size, num_v_heads, head_v_dim, conv_kernel_size
+    )
 
     def layer_fn(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
       out, _ = gdn_bwd_pallas.gdn_decoupled_conv1d(
@@ -1158,6 +1160,362 @@ class GdnBwdPallasTest(absltest.TestCase):
     object.__setattr__(cfg, "use_gdn_kernel", True)
     res = config_types.MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
     self.assertIs(res, cfg)
+
+  def test_pallas_gdn_bwd_kernel_dht_and_dh0_against_autodiff(self):
+    """Verifies pallas_gdn_bwd_kernel with non-zero d_recurrent_state (dht), return_dh0=True, and conv_state."""
+    batch_size = 1
+    chunk_size = 64
+    num_chunks = 2
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128
+    head_v_dim = 128
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(2026),
+        batch_size,
+        seq_len,
+        dim_size,
+        num_v_heads,
+        head_v_dim,
+        conv_kernel_size,
+        with_bias=True,
+    )
+    k_cs, k_h0, k_dht = jax.random.split(jax.random.PRNGKey(2027), 3)
+    conv_state = jax.random.normal(k_cs, (batch_size, conv_kernel_size - 1, dim_size), dtype=jnp.float32) * 0.2
+    h0 = jax.random.normal(k_h0, (batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32) * 0.2
+    dht = jax.random.normal(k_dht, (batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32) * 0.2
+
+    def loss_pure(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, h0_in):
+      out, (_, ht) = gdn_bwd_pallas.pure_jax_decoupled_conv1d_gdn(
+          qkv=qkv_in,
+          b=b_in,
+          a=a_in,
+          conv_weight=cw_in,
+          conv_bias=cb_in,
+          a_log=al_in,
+          dt_bias=dt_in,
+          conv_state=cs_in,
+          recurrent_state=h0_in,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          conv_kernel_size=conv_kernel_size,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+      )
+      return jnp.sum(out * do) + jnp.sum(ht * dht)
+
+    exp_grads = jax.grad(loss_pure, argnums=tuple(range(9)))(
+        qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, h0
+    )
+    exp_dqkv, exp_db, exp_da, exp_dcw, exp_dcb, exp_dal, exp_ddt, exp_dcs, exp_dh0 = exp_grads
+
+    qkv_conv, chunk_states, t_inv = gdn_bwd_pallas._compute_forward_conv_and_states(
+        qkv=qkv,
+        b=b,
+        a=a,
+        conv_weight=conv_weight,
+        conv_bias=conv_bias,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        recurrent_state=h0,
+        conv_state=conv_state,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=True,
+    )
+    dy_conv, d_b, d_a, d_a_log, d_dt_bias, dh0 = gdn_bwd_pallas.pallas_gdn_bwd_kernel(
+        qkv_conv=qkv_conv,
+        b=b,
+        a=a,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        do=do,
+        chunk_states=chunk_states,
+        t_inv=t_inv,
+        num_v_heads=num_v_heads,
+        kq_head_dim=head_k_dim,
+        v_head_dim=head_v_dim,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=True,
+        d_recurrent_state=dht,
+        return_dh0=True,
+    )
+    conv_out, _ = gdn_bwd_pallas.conv1d_silu_fwd(
+        qkv=qkv, conv_weight=conv_weight, conv_bias=conv_bias, kernel_size=conv_kernel_size, conv_state=conv_state
+    )
+    d_qkv, d_cw, d_cb, d_cs = gdn_bwd_pallas.conv1d_silu_bwd(
+        qkv=qkv,
+        conv_weight=conv_weight,
+        conv_bias=conv_bias,
+        dy=dy_conv,
+        kernel_size=conv_kernel_size,
+        conv_out=conv_out,
+        conv_state=conv_state,
+        return_d_conv_state=True,
+    )
+
+    np.testing.assert_allclose(dh0, exp_dh0, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(d_cs, exp_dcs, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(d_qkv, exp_dqkv, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(d_b, exp_db, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(d_a, exp_da, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(d_cw, exp_dcw, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(d_cb, exp_dcb, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(d_a_log, exp_dal, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(d_dt_bias, exp_ddt, rtol=1e-4, atol=1e-4)
+
+  def test_gdn_decoupled_conv1d_cp_axis_against_single_device(self):
+    """Verifies gdn_decoupled_conv1d with cp_axis_name='context' across 4 shards vs CP=1."""
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest(f"Requires >= 4 devices, got {len(devices)}")
+
+    batch_size = 1
+    chunk_size = 16
+    cp_size = 4
+    num_chunks = cp_size * 2  # 2 chunks per rank
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 64
+    head_v_dim = 64
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(2030),
+        batch_size,
+        seq_len,
+        dim_size,
+        num_v_heads,
+        head_v_dim,
+        conv_kernel_size,
+        with_bias=True,
+    )
+    k_cs, k_h0, k_dcs, k_dht = jax.random.split(jax.random.PRNGKey(2031), 4)
+    conv_state = jax.random.normal(k_cs, (batch_size, conv_kernel_size - 1, dim_size), dtype=jnp.float32) * 0.2
+    h0 = jax.random.normal(k_h0, (batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32) * 0.2
+    dcs = jax.random.normal(k_dcs, (batch_size, conv_kernel_size - 1, dim_size), dtype=jnp.float32) * 0.2
+    dht = jax.random.normal(k_dht, (batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32) * 0.2
+
+    def loss_single(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, h0_in):
+      out, (next_cs, next_rs) = gdn_bwd_pallas.gdn_decoupled_conv1d(
+          qkv_in,
+          b_in,
+          a_in,
+          cw_in,
+          cb_in,
+          al_in,
+          dt_in,
+          cs_in,
+          h0_in,
+          num_k_heads,
+          num_v_heads,
+          head_k_dim,
+          head_v_dim,
+          conv_kernel_size,
+          chunk_size,
+          True,
+          jnp.float32,
+          None,
+      )
+      loss = jnp.sum(out * do) + jnp.sum(next_cs * dcs) + jnp.sum(next_rs * dht)
+      return loss, (out, next_cs, next_rs)
+
+    (_, (ref_out, ref_cs, ref_rs)), ref_grads = jax.value_and_grad(loss_single, argnums=tuple(range(9)), has_aux=True)(
+        qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, h0
+    )
+
+    mesh = jax.sharding.Mesh(np.array(devices[:cp_size]), ("context",))
+    P = jax.sharding.PartitionSpec
+
+    @jax.jit
+    def run_cp(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, h0_in):
+      def loss_cp(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, h0_):
+        @functools.partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(
+                P(None, "context", None),
+                P(None, "context", None),
+                P(None, "context", None),
+                P(),
+                P(),
+                P(),
+                P(),
+                P(None, None, None),
+                P(None, None, None, None),
+            ),
+            out_specs=(
+                P(None, "context", None, None),
+                (P(None, None, None), P(None, None, None, None)),
+            ),
+            check_vma=False,
+        )
+        def _mapped(qkv_loc, b_loc, a_loc, cw_loc, cb_loc, al_loc, dt_loc, cs_loc, h0_loc):
+          return gdn_bwd_pallas.gdn_decoupled_conv1d(
+              qkv_loc,
+              b_loc,
+              a_loc,
+              cw_loc,
+              cb_loc,
+              al_loc,
+              dt_loc,
+              cs_loc,
+              h0_loc,
+              num_k_heads,
+              num_v_heads,
+              head_k_dim,
+              head_v_dim,
+              conv_kernel_size,
+              chunk_size,
+              True,
+              jnp.float32,
+              "context",
+          )
+
+        out, (next_cs, next_rs) = _mapped(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, h0_)
+        loss = jnp.sum(out * do) + jnp.sum(next_cs * dcs) + jnp.sum(next_rs * dht)
+        return loss, (out, next_cs, next_rs)
+
+      return jax.value_and_grad(loss_cp, argnums=tuple(range(9)), has_aux=True)(
+          qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, h0_in
+      )
+
+    (_, (cp_out, cp_cs, cp_rs)), cp_grads = run_cp(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, h0)
+
+    np.testing.assert_allclose(cp_out, ref_out, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(cp_cs, ref_cs, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(cp_rs, ref_rs, rtol=1e-4, atol=1e-4)
+    for idx_g, (g_cp, g_ref) in enumerate(zip(cp_grads, ref_grads)):
+      np.testing.assert_allclose(
+          g_cp,
+          g_ref,
+          rtol=1e-4,
+          atol=1e-4,
+          err_msg=f"CP=4 gradient arg {idx_g} diverged from CP=1",
+      )
+
+  def test_bwd_block_specs_and_symbolic_zero_dht_dh0_omission(self):
+    """Verifies make_bwd_block_specs conditional dht/dh0 specs and SymbolicZero omission in gdn_decoupled_conv1d."""
+    bwd_api = sys.modules[gdn_bwd_pallas.gdn_decoupled_conv1d.__module__]
+
+    in_00, out_00, n_in_00, n_out_00 = gdn_bwd_pallas.make_bwd_block_specs(
+        num_chunks=2,
+        chunk_size=16,
+        dim_size=128,
+        num_v_heads=4,
+        kq_head_dim=16,
+        v_head_dim=16,
+        has_dht=False,
+        has_dh0=False,
+    )
+    self.assertEqual(n_in_00, 9)
+    self.assertEqual(n_out_00, 5)
+    self.assertLen(in_00, 9)
+    self.assertLen(out_00, 5)
+
+    _, _, n_in_10, n_out_10 = gdn_bwd_pallas.make_bwd_block_specs(
+        num_chunks=2,
+        chunk_size=16,
+        dim_size=128,
+        num_v_heads=4,
+        kq_head_dim=16,
+        v_head_dim=16,
+        has_dht=True,
+        has_dh0=False,
+    )
+    self.assertEqual((n_in_10, n_out_10), (10, 5))
+
+    _, _, n_in_01, n_out_01 = gdn_bwd_pallas.make_bwd_block_specs(
+        num_chunks=2,
+        chunk_size=16,
+        dim_size=128,
+        num_v_heads=4,
+        kq_head_dim=16,
+        v_head_dim=16,
+        has_dht=False,
+        has_dh0=True,
+    )
+    self.assertEqual((n_in_01, n_out_01), (9, 6))
+
+    _, _, n_in_11, n_out_11 = gdn_bwd_pallas.make_bwd_block_specs(
+        num_chunks=2,
+        chunk_size=16,
+        dim_size=128,
+        num_v_heads=4,
+        kq_head_dim=16,
+        v_head_dim=16,
+        has_dht=True,
+        has_dh0=True,
+    )
+    self.assertEqual((n_in_11, n_out_11), (10, 6))
+
+    batch_size, seq_len, chunk_size = 1, 32, 16
+    num_k_heads, num_v_heads = 2, 4
+    head_k_dim, head_v_dim = 16, 16
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(3030),
+        batch_size,
+        seq_len,
+        dim_size,
+        num_v_heads,
+        head_v_dim,
+        conv_kernel_size,
+        with_bias=True,
+    )
+    recorded_calls = []
+    orig_kernel = bwd_api.pallas_gdn_bwd_kernel
+
+    def wrapped_kernel(*args, **kwargs):
+      recorded_calls.append(
+          (
+              kwargs.get("d_recurrent_state") is not None,
+              bool(kwargs.get("return_dh0", False)),
+          )
+      )
+      return orig_kernel(*args, **kwargs)
+
+    with mock.patch.object(bwd_api, "pallas_gdn_bwd_kernel", side_effect=wrapped_kernel):
+
+      def loss_no_states(qkv_in):
+        out, _ = gdn_bwd_pallas.gdn_decoupled_conv1d(
+            qkv_in,
+            b,
+            a,
+            conv_weight,
+            conv_bias,
+            a_log,
+            dt_bias,
+            None,
+            None,
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_kernel_size,
+            chunk_size,
+            True,
+            jnp.float32,
+            None,
+        )
+        return jnp.sum(out * do)
+
+      _ = jax.grad(loss_no_states)(qkv)
+
+    self.assertEqual(recorded_calls, [(False, False)])
 
 
 if __name__ == "__main__":

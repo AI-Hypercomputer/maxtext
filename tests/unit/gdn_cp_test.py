@@ -45,13 +45,28 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P
 import numpy as np
+from absl.testing import absltest
 import pytest
 
 from maxtext.kernels.attention import gdn_cp
+from maxtext.kernels.gdn import gdn_bwd_pallas
+from maxtext.kernels.gdn.gdn_bwd import cp_gdn
 
 
 @pytest.mark.cpu_only
 def test_gdn_cp_prefix_scan_matches_sequential_reference_on_cpu_mesh():
+  if len(jax.devices()) >= 8:
+    devs_8 = np.array(jax.devices()[:8])
+    _run_composition_checks(Mesh(devs_8, ("context",)), "context")
+    _run_composition_checks(Mesh(devs_8.reshape(2, 4), ("fsdp", "context")), "context")
+    _run_composition_checks(
+        Mesh(devs_8.reshape(2, 4), ("context", "context_usp_ulysses")),
+        ("context", "context_usp_ulysses"),
+    )
+    _run_gradient_checks(Mesh(devs_8, ("context",)), "context")
+    _run_gradient_checks(Mesh(devs_8.reshape(2, 4), ("fsdp", "context")), "context")
+    _run_end_to_end_checks(Mesh(devs_8, ("context",)), "context")
+    return
   env = os.environ.copy()
   env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8"
   env["JAX_PLATFORMS"] = "cpu"
@@ -273,17 +288,136 @@ def _run_end_to_end_checks(mesh, cp_axis):
   assert float(jnp.max(jnp.abs(rolled - reference_out))) > 1e-4
 
 
+class GdnCpTest(absltest.TestCase):
+
+  def test_compose_local_folds_the_chunks_into_one_affine_map(self):
+    test_compose_local_folds_the_chunks_into_one_affine_map()
+
+  def test_incoming_state_is_the_identity_on_a_single_device_mesh(self):
+    test_incoming_state_is_the_identity_on_a_single_device_mesh()
+
+  def test_gdn_cp_prefix_scan_matches_sequential_reference_on_cpu_mesh(self):
+    test_gdn_cp_prefix_scan_matches_sequential_reference_on_cpu_mesh()
+
+  def test_cp_gdn_kernel_module_primitives(self):
+    # 1. Verify compose_local_from_t_inv and compose_bwd_local_from_t_inv for both even (4) and odd (3) chunk counts
+    for num_chunks in (3, 4):
+      batch, chunk_size = 1, 16
+      seq_len = num_chunks * chunk_size
+      num_k_heads, num_v_heads = 2, 4
+      head_k_dim, head_v_dim = 32, 32
+      dim_size = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
+      k0, k1, k2, k3, k4, k5, k6 = jax.random.split(jax.random.PRNGKey(100 + num_chunks), 7)
+      qkv_conv = jax.random.normal(k0, (batch, seq_len, dim_size), jnp.float32) * 0.1
+      b = jax.random.normal(k1, (batch, seq_len, num_v_heads), jnp.float32) * 0.2
+      a = jax.random.normal(k2, (batch, seq_len, num_v_heads), jnp.float32) * 0.2
+      a_log = jnp.log(jax.random.uniform(k3, (num_v_heads,), minval=0.1, maxval=1.0))
+      dt_bias = jax.random.normal(k4, (num_v_heads,), jnp.float32) * 0.1
+      h0 = jax.random.normal(k5, (batch, num_v_heads, head_k_dim, head_v_dim), jnp.float32) * 0.1
+      do = jax.random.normal(k6, (batch, seq_len, num_v_heads, head_v_dim), jnp.float32) * 0.1
+
+      # Compute reference t_inv via _compute_forward_conv_and_states
+      cw_id = jnp.zeros((4, 1, dim_size), jnp.float32).at[3, 0, :].set(1.0)
+      # pylint: disable=protected-access
+      _, _, t_inv = gdn_bwd_pallas._compute_forward_conv_and_states(
+          qkv=qkv_conv,
+          b=b,
+          a=a,
+          conv_weight=cw_id,
+          conv_bias=None,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          recurrent_state=None,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          conv_kernel_size=4,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+      )
+
+      m_loc, s_ext = cp_gdn.compose_local_from_t_inv(
+          qkv_conv=qkv_conv,
+          b=b,
+          a=a,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          t_inv=t_inv,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+      )
+      k_only = qkv_conv[:, :, num_k_heads * head_k_dim : 2 * num_k_heads * head_k_dim]
+      m_loc_konly, s_ext_konly = cp_gdn.compose_local_from_t_inv(
+          qkv_conv=k_only,
+          b=b,
+          a=a,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          t_inv=t_inv,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+          s_ext_pass1=s_ext,
+      )
+      np.testing.assert_allclose(m_loc_konly, m_loc, rtol=1e-6, atol=1e-6)
+      np.testing.assert_allclose(s_ext_konly, s_ext, rtol=1e-6, atol=1e-6)
+
+      dm_uncached, ds_uncached = cp_gdn.compose_bwd_local_from_t_inv(
+          qkv_conv=qkv_conv,
+          b=b,
+          a=a,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          do=do,
+          t_inv=t_inv,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+      )
+      dm_cached, ds_cached = cp_gdn.compose_bwd_local_from_t_inv(
+          qkv_conv=qkv_conv,
+          b=b,
+          a=a,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          do=do,
+          t_inv=t_inv,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+          m_local_cached=m_loc,
+      )
+      np.testing.assert_allclose(dm_uncached, dm_cached, rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(ds_uncached, ds_cached, rtol=1e-5, atol=1e-5)
+      del h0
+
+
 if __name__ == "__main__":
-  _devices = np.array(jax.devices())
-  assert len(_devices) == 8, jax.devices()
-  _run_composition_checks(Mesh(_devices, ("context",)), "context")
-  _run_composition_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
-  # qwen3.py builds cp_axis as a tuple, so both context knobs can be live at once.
-  _run_composition_checks(
-      Mesh(_devices.reshape(2, 4), ("context", "context_usp_ulysses")),
-      ("context", "context_usp_ulysses"),
-  )
-  _run_gradient_checks(Mesh(_devices, ("context",)), "context")
-  _run_gradient_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
-  _run_end_to_end_checks(Mesh(_devices, ("context",)), "context")
-  print("GDN_CP_CHECKS_PASSED")
+  if len(jax.devices()) == 8:
+    _devices = np.array(jax.devices())
+    _run_composition_checks(Mesh(_devices, ("context",)), "context")
+    _run_composition_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
+    _run_composition_checks(
+        Mesh(_devices.reshape(2, 4), ("context", "context_usp_ulysses")),
+        ("context", "context_usp_ulysses"),
+    )
+    _run_gradient_checks(Mesh(_devices, ("context",)), "context")
+    _run_gradient_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
+    _run_end_to_end_checks(Mesh(_devices, ("context",)), "context")
+    print("GDN_CP_CHECKS_PASSED")
+  else:
+    absltest.main()
