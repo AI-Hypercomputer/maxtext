@@ -282,7 +282,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
   if (
-      config.gradient_accumulation_steps > 1 or should_accumulate_fractional_batch(config)
+      config.gradient_accumulation_steps > 1 or should_accumulate_fractional_batch(config, is_train=is_train)
   ) and not config.use_tunix_gradient_accumulation:
     loss = xent_sum
   else:
