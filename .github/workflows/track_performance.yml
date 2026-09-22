@@ -94,10 +94,7 @@ jobs:
           github-token: ${{ github.token }}
           alert-threshold: '115%'
           comment-on-alert: true
-          # Disabled: suite-level totals vary with test count changes between scheduled
-          # main runs and PR runs (e.g. scheduled_only tests inflate the baseline).
-          # Alerts are still posted as PR comments via comment-on-alert for visibility.
-          fail-on-alert: false
+          fail-on-alert: ${{ github.ref != 'refs/heads/main' && github.head_ref != 'ci/test-duration-tracking' }}
           auto-push: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
           gh-pages-branch: 'gh-pages'
           benchmark-data-dir-path: 'dev/bench'
