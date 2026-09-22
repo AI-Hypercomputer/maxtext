@@ -1467,8 +1467,9 @@ class LoadBalancedMaskTest(unittest.TestCase):
     query = jnp.zeros((1, seq_len, 1, 128))
     key = jnp.zeros((1, seq_len, 1, 128))
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
-    # Only the query-length rule: `segment_ids_batch` -> context would shard this batch of 1
-    # across the 4-way context mesh.
+    # Only `activation_q_length` -> context is made ambient: it shards the query length, which is
+    # what the cp gate reads. The config's `segment_ids_batch` -> context rule is left out because
+    # it cannot partition this test's batch of 1 across the 4-way context mesh.
     with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
       op = AttentionOp(
           config=config,
@@ -1518,8 +1519,9 @@ class LoadBalancedMaskTest(unittest.TestCase):
     query = jnp.zeros((1, seq_len, 1, 128))
     key = jnp.zeros((1, seq_len, 1, 128))
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
-    # Only the query-length rule: `segment_ids_batch` -> context would shard this batch of 1
-    # across the 4-way context mesh.
+    # Only `activation_q_length` -> context is made ambient: it shards the query length, which is
+    # what the cp gate reads. The config's `segment_ids_batch` -> context rule is left out because
+    # it cannot partition this test's batch of 1 across the 4-way context mesh.
     with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
       op = AttentionOp(
           config=config,
@@ -5810,6 +5812,7 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     config = types.SimpleNamespace(
         context_parallel_load_balance=True,
         context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
         using_pipeline_parallelism=False,
         logical_axis_rules=[["segment_ids_batch", ["context"]]],
         shard_mode="auto",
@@ -5830,25 +5833,29 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
     compressed_mask = jnp.zeros((1, 1, seq_len, c_len), dtype=jnp.float32)
 
-    op = AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=kv_len,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        attention_type=AttentionType.COMPRESSED,
-        sliding_window_size=sliding_window_size,
-    )
+    # Only `activation_q_length` -> context is made ambient: it shards the query length, which is
+    # what the cp gate reads. The config's `segment_ids_batch` -> context rule is left out because
+    # it cannot partition this test's batch of 1 across the 4-way context mesh.
+    with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
+      op = AttentionOp(
+          config=config,
+          num_query_heads=1,
+          num_kv_heads=1,
+          max_target_length=kv_len,
+          mesh=mesh,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.COMPRESSED,
+          sliding_window_size=sliding_window_size,
+      )
 
-    mask = op.generate_attention_mask(
-        query,
-        key,
-        decoder_segment_ids,
-        MODEL_MODE_TRAIN,
-        compressed_mask=compressed_mask,
-        segment_positions=positions,
-    )
+      mask = op.generate_attention_mask(
+          query,
+          key,
+          decoder_segment_ids,
+          MODEL_MODE_TRAIN,
+          compressed_mask=compressed_mask,
+          segment_positions=positions,
+      )
 
     expected_uncompressed_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
     for r, q_pos in enumerate(np.asarray(positions[0])):
