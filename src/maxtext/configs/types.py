@@ -3975,6 +3975,13 @@ class MaxTextConfig(
         self.quantization_local_shard_count = 1
 
     # F. CALCULATE BATCH SIZES
+    # `pyconfig_deprecated.calculate_global_batch_sizes` is a near-duplicate of
+    # this helper and is deliberately left alone rather than shared. It backs the
+    # legacy config path, which keeps the pre-existing behaviour of shrinking the
+    # batch when `per_device_batch_size < 1`; folding both onto one
+    # implementation would silently change that path too. The trainer derives its
+    # microbatch count from whichever set of values it is given, so each path
+    # stays internally consistent.
     def calculate_global_batch_sizes(
         per_device_batch_size, expansion_factor, num_devices, grad_accum_steps=1
     ):
