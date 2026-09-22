@@ -117,6 +117,7 @@ if os.getenv("JAX_PLATFORMS") == "proxy":
 
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.newly_added_detection import get_changed_tests
+from tests.utils.newly_added_detection import is_changed_item
 from tests.utils.class_split import ClassSplitPlugin
 
 # Configure JAX to use unsafe_rbg PRNG implementation to match main scripts.
@@ -158,9 +159,8 @@ def pytest_collection_modifyitems(config, items):
   changed_tests = get_changed_tests()  # set[(file_path, test_name)]
   if changed_tests:
     for item in items:
-      item_file = item.nodeid.split("::", 1)[0]
-      base_name = getattr(item, "originalname", item.name)
-      if (item_file, base_name) in changed_tests or (item_file, item.name) in changed_tests:
+      # Matches the def name too, so absl parameterized tests (collected as test_x_bf16 or test_x0) are marked.
+      if is_changed_item(item, changed_tests):
         item.add_marker(pytest.mark.newly_added)
 
   decoupled = is_decoupled()

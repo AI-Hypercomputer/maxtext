@@ -49,6 +49,10 @@ on:
       is_scheduled_run:
         required: true
         type: boolean
+      is_pull_request:
+        required: false
+        type: boolean
+        default: false
       xla_python_client_mem_fraction:
         required: true
         type: string
@@ -183,6 +187,14 @@ jobs:
           }
           trap cleanup_tpu_locks TERM INT
 
+          # tests/conftest.py (newly_added marking) and the TPU7X pull-request check below run git
+          # inside this container; the checkout may be owned by another UID, which git otherwise
+          # rejects as "dubious ownership".
+          # Do not fetch with --depth here: it makes the clone shallow and breaks the three-dot
+          # merge-base diff once main has moved. The checkout has full history (fetch-depth: 0)
+          # and newly_added_detection fetches origin/<base> itself under GITHUB_ACTIONS.
+          git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" 2>/dev/null || true
+
           # Determine environment and entry directory
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.
@@ -202,12 +214,51 @@ jobs:
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
+          elif [ "${INPUTS_IS_PULL_REQUEST}" == "true" ] && [[ "${INPUTS_FLAVOR}" =~ ^tpu7x- ]]; then
+            if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
+              FINAL_PYTEST_MARKER="newly_added"
+            else
+              FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and newly_added"
+            fi
           else
             if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
               FINAL_PYTEST_MARKER="not scheduled_only or newly_added"
             else
               FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and (not scheduled_only or newly_added)"
             fi
+          fi
+          # Number of tests the TPU7X pull-request block below expects pytest to select. It stays 0
+          # on every other path, where pytest exit code 5 (no tests selected) remains a success.
+          EXPECTED_TEST_COUNT=0
+          if [ "${INPUTS_IS_PULL_REQUEST}" == "true" ] && [ "${INPUTS_IS_SCHEDULED_RUN}" != "true" ] && [[ "${INPUTS_FLAVOR}" =~ ^tpu7x- ]]; then
+            # TPU7X pull-request run. (A PR carrying the scheduled-only label runs the full suite, and
+            # one carrying run-tpu7x every test except untouched scheduled_only ones; both skip this
+            # block.) ci_pipeline.yml starts this flavor when analyze_code_changes.sh listed it in
+            # tpu7x_flavors, or, when that detection failed, as a fail-safe for every flavor. Re-run
+            # the detector here for this flavor only: it lists the touched tests this flavor collects
+            # and does not skip, which is what `-m "<flavor marker> and newly_added"` should select.
+            CHANGED_TESTS=$(python3 tests/utils/newly_added_detection.py --base "${GITHUB_BASE_REF:-main}" --flavor "${INPUTS_FLAVOR}") \
+              && DETECT_RC=0 || DETECT_RC=$?
+            if [ "${DETECT_RC}" -ne 0 ]; then
+              case "${DETECT_RC}" in
+                2) DETECT_REASON="it cannot compute the PR diff against ${GITHUB_BASE_REF:-main} inside the container (for example a shallow clone or a missing base ref)" ;;
+                64) DETECT_REASON="usage error, for example a flavor it does not know" ;;
+                *) DETECT_REASON="it crashed" ;;
+              esac
+              echo "::error::newly_added_detection --flavor ${INPUTS_FLAVOR} exited ${DETECT_RC}: ${DETECT_REASON}. See its message above. The tests this PR touched are unknown, so the job fails instead of passing without running them."
+              exit 1
+            fi
+            if [ -z "${CHANGED_TESTS}" ]; then
+              # Expected when ci_pipeline.yml started every flavor as a fail-safe. Exiting here ends
+              # this step successfully. The later steps cope with the missing coverage.xml (Codecov
+              # has continue-on-error), and the result upload is skipped on this path.
+              echo "No test touched by this PR is collected by ${INPUTS_FLAVOR}; nothing to run."
+              exit 0
+            fi
+            EXPECTED_TEST_COUNT=$(grep -c . <<< "${CHANGED_TESTS}") || true
+            echo "Tests touched by this PR that ${INPUTS_FLAVOR} collects (marker: ${FINAL_PYTEST_MARKER}):"
+            # shellcheck disable=SC2001
+            echo "${CHANGED_TESTS}" | sed 's/^/  - /'
           fi
           # TODO: Use package data for testing and remove the env vars
           MAXTEXT_REPO_ROOT=$(pwd)
@@ -291,6 +342,43 @@ jobs:
               rm -f "${JUNIT_XML}"
             fi
             if [ "$PYTEST_EXIT_CODE" -eq 5 ]; then
+              if [ "${EXPECTED_TEST_COUNT}" -gt 0 ]; then
+                # TPU7X pull-request run on its single worker (run_tests_coordinator.yml): the
+                # detector listed tests, so selecting none means they never ran. The one benign cause
+                # is that every module holding a listed test skipped itself while pytest collected it
+                # (pytest.skip(allow_module_level=True), e.g. when JetStream is not installed). The
+                # result file records such a module as a testcase with an empty classname and <skipped>.
+                if ! CHANGED_TESTS="${CHANGED_TESTS}" python3 - "${JUNIT_XML}" <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          try:
+            cases = list(ET.parse(sys.argv[1]).iter("testcase"))
+          except (OSError, ET.ParseError) as error:
+            sys.exit(f"Cannot read {sys.argv[1]}: {error}")
+          skipped = {
+              case.get("name"): case.find("skipped")
+              for case in cases
+              if not case.get("classname") and case.find("skipped") is not None
+          }
+          listed_modules = {
+              line.split("::", 1)[0].removesuffix(".py").replace("/", ".")
+              for line in os.environ["CHANGED_TESTS"].splitlines()
+              if line.strip()
+          }
+          if not listed_modules or not listed_modules <= set(skipped):
+            sys.exit(1)
+          print("Modules skipped during collection:")
+          for module in sorted(listed_modules):
+            print(f"  {module}: {(skipped[module].text or skipped[module].get('message', '')).strip()}")
+          PY
+                then
+                  echo "::error::newly_added_detection listed ${EXPECTED_TEST_COUNT} test(s) for ${INPUTS_FLAVOR}, but pytest selected no tests (exit code 5): tests/conftest.py newly_added marking (or pytest's collection) disagrees with newly_added_detection."
+                  exit "$PYTEST_EXIT_CODE"
+                fi
+                echo "::warning::Every module holding a test listed for ${INPUTS_FLAVOR} skipped itself during collection (reasons above), so there is nothing to run here."
+              fi
               echo "No tests collected for worker group ${INPUTS_WORKER_GROUP} (pytest exit code 5), treating as success."
             elif [ "$PYTEST_EXIT_CODE" -ne 0 ]; then
               exit "$PYTEST_EXIT_CODE"
@@ -299,6 +387,7 @@ jobs:
 
         env:
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
+          INPUTS_IS_PULL_REQUEST: ${{ inputs.is_pull_request }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
           INPUTS_FLAVOR: ${{ inputs.flavor }}
@@ -378,7 +467,11 @@ jobs:
           flags: ${{ inputs.is_scheduled_run && 'scheduled' || 'regular' }}
           verbose: true
       - name: Upload Test Results XML
-        if: always()
+        # Not on a single-worker TPU7X pull-request run (one without the scheduled-only or run-tpu7x
+        # label). It runs only the touched tests on one worker, so a test can pay an XLA compile that
+        # the scheduled run shares across its class. track_performance.yml, the only consumer, would
+        # compare those timings with the scheduled per-test baseline and report false regressions.
+        if: ${{ always() && !(inputs.is_pull_request && !inputs.is_scheduled_run && startsWith(inputs.flavor, 'tpu7x-')) }}
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: test-results-${{ inputs.flavor }}-${{ inputs.worker_group }}-${{ github.run_id }}

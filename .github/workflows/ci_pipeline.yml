@@ -18,9 +18,12 @@
 name: MaxText Package Tests
 
 on:
-  # `labeled` lets contributors re-run the pipeline as a scheduled run by adding
-  # the `scheduled-only` label to a PR. `labeled` fires for any label, so the entry
-  # jobs are gated on the label name and adding any other label is a no-op.
+  # `labeled` lets contributors re-run the pipeline as a scheduled run (`scheduled-only`),
+  # run every TPU7X flavor (`run-tpu7x`), or skip CI tests (`skip-ci-tests`) by adding the
+  # label to a PR. `labeled` fires for any label, so the entry jobs are gated on the label
+  # name, and a run started by any other label skips every test job. The concurrency group
+  # below keeps such a run from cancelling the PR's in-progress run, and all_tests_passed
+  # gives its summary another name, so that it never posts the required check.
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   workflow_call:
@@ -40,11 +43,16 @@ on:
     - cron:  '0 */4 * * *'
 
 concurrency:
-  # Dedup pull requests (canceling previous runs of the same workflow for same PR) and queue overlapping scheduled runs
+  # Dedup pull requests (canceling previous runs of the same workflow for same PR) and queue overlapping scheduled runs.
+  # A run started by a label other than scheduled-only, run-tpu7x and skip-ci-tests (e.g. gemini-review) skips every
+  # test job, so it falls through to a group of its own (its run_id): in the PR's group it would cancel the PR's
+  # in-progress run. Keep these labels equal to the ones the entry jobs accept; tests/unit/newly_added_detection_test.py
+  # checks it.
   group: >
     ${{
       github.event_name == 'pull_request' &&
-        (github.event.action != 'labeled' || github.event.label.name == 'scheduled-only' || github.event.label.name == 'skip-ci-tests') &&
+        (github.event.action != 'labeled' || github.event.label.name == 'scheduled-only' ||
+          github.event.label.name == 'run-tpu7x' || github.event.label.name == 'skip-ci-tests') &&
         format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
       github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
       github.run_id
@@ -57,11 +65,13 @@ jobs:
   analyze_code_changes:
     name: Analyze Code Changes for Test Orchestration
     # `labeled` fires for every label, so ignore label events other than the ones
-    # that opt the PR into a scheduled run or skip CI tests. Pushes and scheduled runs are unaffected.
+    # that opt the PR into a scheduled run, a run of every TPU7X flavor, or skipping CI tests.
+    # Pushes and scheduled runs are unaffected.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.action != 'labeled' ||
       github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'run-tpu7x' ||
       github.event.label.name == 'skip-ci-tests'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -76,6 +86,16 @@ jobs:
       run_posttrain_tests: ${{ steps.check.outputs.run_posttrain_tests }}
       run_pathways_tests: ${{ steps.check.outputs.run_pathways_tests }}
       run_gpu_tests: ${{ steps.check.outputs.run_gpu_tests }}
+      # Gates tpu7x-tests (see analyze_code_changes.sh). 'true' for non-PR events and the
+      # scheduled-only or run-tpu7x labels; on other PRs, 'true' when a tpu7x-tests matrix flavor
+      # collects a test the PR touched, or when that detection failed (fail-safe), and 'false'
+      # otherwise.
+      has_new_tests: ${{ steps.check.outputs.has_new_tests }}
+      # PRs without scheduled-only or run-tpu7x: compact JSON array of the matrix flavors that
+      # collect a test the PR touched, e.g. ["tpu7x-unit"]. Set only when detection succeeded and
+      # found at least one, never to []. Unset otherwise, so tpu7x-tests falls back to its full
+      # matrix.
+      tpu7x_flavors: ${{ steps.check.outputs.tpu7x_flavors }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -92,6 +112,9 @@ jobs:
           # A `scheduled-only` PR mirrors a scheduled run, so run every suite
           # regardless of which files the PR touched.
           FORCE_ALL_TESTS: ${{ contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+          # A `run-tpu7x` PR runs all three TPU7X flavors on the normal worker count,
+          # bypassing the newly_added test-diff filter.
+          RUN_TPU7X: ${{ contains(github.event.pull_request.labels.*.name, 'run-tpu7x') }}
           # A `skip-ci-tests` PR disables all tests and notebooks, regardless of which files the PR touched.
           SKIP_CI_TESTS: ${{ contains(github.event.pull_request.labels.*.name, 'skip-ci-tests') }}
         run: |
@@ -103,6 +126,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.action != 'labeled' ||
       github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'run-tpu7x' ||
       github.event.label.name == 'skip-ci-tests'
     uses: ./.github/workflows/code_quality.yml
     with:
@@ -114,6 +138,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.action != 'labeled' ||
       github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'run-tpu7x' ||
       github.event.label.name == 'skip-ci-tests'
     uses: ./.github/workflows/check_docs_build.yml
     with:
@@ -216,19 +241,50 @@ jobs:
 
   tpu7x-tests:
     name: TPU7X Tests
-    needs: [gate_test_run]
+    needs: [gate_test_run, analyze_code_changes]
+    # TPU7X runners are scarce, so what this job runs depends on the event:
+    # - schedule: all three flavors run their full suite, scheduled_only tests included.
+    # - workflow_dispatch, release (workflow_call), and a pull request with the run-tpu7x label:
+    #   all three flavors run `<flavor marker> and (not scheduled_only or newly_added)` on the
+    #   normal worker count.
+    # - A pull request with the scheduled-only label, with or without run-tpu7x, runs as a
+    #   scheduled run.
+    # - Any other pull request runs only the flavors that collect a test it touched
+    #   (tpu7x_flavors), and in each only those tests: is_pull_request, true only on such a run,
+    #   switches run_tests_against_package.yml to `-m "<flavor marker> and newly_added"` and
+    #   run_tests_coordinator.yml to 1 worker. The job is skipped when no flavor collects one
+    #   (has_new_tests is 'false'). If detection fails, all three flavors start and each one
+    #   re-checks inside its container, running nothing if it collects none of the touched tests.
+    # A test counts as touched when the PR adds, changes or deletes a line in its def (decorators
+    # included), in its class's decorators, header or class-body pytestmark/__test__ assignment, or
+    # in the module's pytestmark/__test__ assignment (see tests/utils/newly_added_detection.py).
+    # Deleted tests, pure renames, and edits only to helpers, fixtures, setUp/tearDown, other class
+    # or module code, conftest.py, pytest.ini or src/, never count: such a PR does not run TPU7X
+    # tests before merge unless labeled run-tpu7x or scheduled-only.
+    # No fork guard, by decision, although a PR's content (not only the scheduled-only or
+    # run-tpu7x label) can now start TPU7X runners: tpu-pretrain-tests and tpu-posttrain-tests
+    # have no guard either, this job passes no secrets (the notebooks job's guard exists because
+    # of HF_TOKEN), and fork PRs rely on the repo's approval requirement for outside contributors.
     if: |
       !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       (github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'scheduled-only'))
+        contains(github.event.pull_request.labels.*.name, 'scheduled-only') ||
+        contains(github.event.pull_request.labels.*.name, 'run-tpu7x') ||
+        needs.analyze_code_changes.outputs.has_new_tests == 'true')
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
       matrix:
-        flavor: [tpu7x-unit, tpu7x-integration, tpu7x-post-training-unit]
+        # A PR whose detection succeeded gets the flavors in tpu7x_flavors. Every other run, the
+        # fail-safe and the run-tpu7x / scheduled-only labels included, gets this full list because
+        # tpu7x_flavors is then unset; it is never [], so the matrix is never empty. Keep the list
+        # equal to TPU7X_PR_MATRIX in tests/utils/newly_added_detection.py;
+        # tests/unit/newly_added_detection_test.py checks it.
+        flavor: ${{ fromJSON(needs.analyze_code_changes.outputs.tpu7x_flavors || '["tpu7x-unit", "tpu7x-integration", "tpu7x-post-training-unit"]') }}
     with:
       flavor: ${{ matrix.flavor }}
+      is_pull_request: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'run-tpu7x') && !contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
@@ -338,15 +394,26 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   all_tests_passed:
-    name: All Required Tests Passed
-    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    # "All Required Tests Passed" is the branch's required status check. A run started by a label the entry jobs ignore
+    # skips analyze_code_changes and so every test job. Under that name it would post success over the PR's real
+    # result, and skipping this job would not help: GitHub counts a skipped required check as passed. Such a run gives
+    # this job another name instead, and it keeps `if: always()` so that the name is always evaluated.
+    name: ${{ needs.analyze_code_changes.result == 'skipped' && 'No Tests Run (label event)' || 'All Required Tests Passed' }}
+    needs: [analyze_code_changes, build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()  # must fail, not skip, on cancel: skipped required checks count as passing
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Check test results
         run: |
+          if [ "${NEEDS_ANALYZE_CODE_CHANGES_RESULT}" == "skipped" ]; then
+            echo "This run was started by a label that runs no tests. The PR's required check comes from its last push"
+            echo "or from adding the scheduled-only, run-tpu7x or skip-ci-tests label."
+            exit 0
+          fi
+
           # Check that build and all tests passed or were skipped
+          echo "Analyze result: ${NEEDS_ANALYZE_CODE_CHANGES_RESULT}"
           echo "Build result: ${NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT}"
           echo "Code Quality result: ${NEEDS_CODE_QUALITY_CHECK_RESULT}"
           echo "Docs Build result: ${NEEDS_DOCS_BUILD_CHECK_RESULT}"
@@ -368,6 +435,7 @@ jobs:
 
           echo "All required tests passed successfully"
         env:
+          NEEDS_ANALYZE_CODE_CHANGES_RESULT: ${{ needs.analyze_code_changes.result }}
           NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
           NEEDS_CODE_QUALITY_CHECK_RESULT: ${{ needs.code_quality_check.result }}
           NEEDS_DOCS_BUILD_CHECK_RESULT: ${{ needs.docs_build_check.result }}
@@ -382,7 +450,8 @@ jobs:
           NEEDS_MAXTEXT_TPU_PATHWAYS_INTEGRATION_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}
 
   all_notebooks_passed:
-    name: All Notebooks Passed
+    # Named differently in a run started by an ignored label, like all_tests_passed.
+    name: ${{ needs.analyze_code_changes.result == 'skipped' && 'No Notebooks Run (label event)' || 'All Notebooks Passed' }}
     needs: [analyze_code_changes, build_and_upload_maxtext_package, maxtext_jupyter_notebooks]
     if: always()  # see all_tests_passed
     runs-on: ubuntu-latest
@@ -390,6 +459,10 @@ jobs:
     steps:
       - name: Check notebooks results
         run: |
+          if [ "${NEEDS_ANALYZE_CODE_CHANGES_RESULT}" == "skipped" ]; then
+            echo "This run was started by a label that runs no tests."
+            exit 0
+          fi
           if [ "${NEEDS_ANALYZE_CODE_CHANGES_OUTPUTS_RUN_NOTEBOOKS}" == "false" ]; then
             echo "Non-notebook changes detected, runs were skipped"
             exit 0
@@ -407,6 +480,7 @@ jobs:
 
           echo "All required notebooks passed successfully"
         env:
+          NEEDS_ANALYZE_CODE_CHANGES_RESULT: ${{ needs.analyze_code_changes.result }}
           NEEDS_ANALYZE_CODE_CHANGES_OUTPUTS_RUN_NOTEBOOKS: ${{ needs.analyze_code_changes.outputs.run_notebooks }}
           NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
           NEEDS_MAXTEXT_JUPYTER_NOTEBOOKS_RESULT: ${{ needs.maxtext_jupyter_notebooks.result }}
