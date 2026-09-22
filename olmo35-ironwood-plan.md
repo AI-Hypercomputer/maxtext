@@ -676,6 +676,18 @@ a `shard_map` that shards **only the batch axis**
 that batch is 1, so the fused path fails on any mesh with `fsdp>1` before the KV-head
 rule is even reached. The unfused chunked path has no `shard_map` and gets further.
 
+**`small` hits the same wall by different arithmetic.** It has 8 KV heads, so the
+KV rule that stopped `tiny` is satisfied and tp=8 is legal there. It fails instead on
+width: `mlp`/`heads` are sharded by `tensor` AND `autoregressive` together, so those
+axes multiply to 8 and d_model 1536 / 8 = **192, which is not a multiple of 128**
+(`ValueError: Block size must divide tiling: block_size=192, tiling=128`). Keeping
+1536/(tensor x ar) aligned needs that product to divide 12, so at most 4 in practice
+(1536/4 = 384). Batch axes must still be 1. Again 4 != 8.
+
+So **both measured rungs cap decode at 4 of 8 devices**, for reasons that differ per
+rung but bite identically: `tiny` on KV-head count, `small` on d_model alignment under
+sharding. This is a general property of the family at this host size, not a one-off.
+
 Both are co-design inputs rather than bugs: this is exactly the "an arm that wins
 training MFU and cannot shard for serving is not a win" check. The fix is architectural
 (more KV heads) or a serving-time mesh that uses fewer devices per replica.
