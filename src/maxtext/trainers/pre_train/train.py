@@ -642,6 +642,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 # out here is silently missing from the eval metrics.
 _AVERAGED_EVAL_KEYS = ("z_loss", "moe_lb_loss", "indexer_loss", "mtp_loss")
 _ACCUMULATED_EVAL_KEYS = ("xent_sum", "total_weights") + _AVERAGED_EVAL_KEYS
+# Boolean flags, true if any microbatch raised them, rather than summed.
+_ANY_EVAL_KEYS = ("has_moe_overflow",)
 
 
 def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
@@ -666,9 +668,11 @@ def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
   def accumulate_eval(acc, micro_batch):
     _, aux = single_eval_fn(micro_batch)
     new_acc = {k: acc[k] + aux[k] for k in _ACCUMULATED_EVAL_KEYS}
+    new_acc.update({k: jnp.logical_or(acc[k], aux[k]) for k in _ANY_EVAL_KEYS})
     return new_acc, None
 
   init_acc = {k: 0.0 for k in _ACCUMULATED_EVAL_KEYS}
+  init_acc.update({k: jnp.bool_(False) for k in _ANY_EVAL_KEYS})
   acc, _ = jax.lax.scan(
       accumulate_eval, init_acc, micro_data, length=num_microbatches
   )
@@ -692,6 +696,14 @@ def eval_step(model, config, state, data, dropout_rng=None):
     return loss_fn(state.model, config, d, None, None, is_train=False)
 
   if should_accumulate_fractional_batch(config, is_train=False):
+    # The acceptance rate is derived from per-microbatch intermediates that the
+    # accumulation scan does not carry out, so it would silently read as 0.
+    if config.mtp_eval_target_module > 0:
+      raise ValueError(
+          "mtp_eval_target_module > 0 is not supported with "
+          "eval_per_device_batch_size < 1: the MTP acceptance rate cannot be "
+          "accumulated across microbatches. Set eval_per_device_batch_size >= 1."
+      )
     num_microbatches = get_num_microbatches(config, is_train=False)
     loss, aux = _fractional_batch_eval(single_eval_fn, data, num_microbatches)
     mtp_acceptance_rate = 0.0
