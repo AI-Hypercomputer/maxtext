@@ -539,6 +539,21 @@ class TestSkipStepOnSpikesNNX(unittest.TestCase):
     for b, a in zip(before, after):
       np.testing.assert_allclose(a, b)
 
+  def test_nan_is_skipped_and_params_preserved(self):
+    model = _TinyDecoder(8, hidden=4, rngs=nnx.Rngs(0))
+    tx = optimizers.skip_step_on_spikes(optax.sgd(0.1), interval=4, scaling_factor=6.0)
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    state = train_state_nnx.TrainStateNNX(model, optimizer)
+    grads = jax.tree.map(jnp.ones_like, nnx.state(model, nnx.Param))
+
+    before = [np.asarray(x) for x in jax.tree_util.tree_leaves(nnx.to_pure_dict(nnx.state(model, nnx.Param)))]
+    # Step with NaN loss / grad_norm must be skipped without poisoning parameters
+    state.apply_gradients(grads, loss=jnp.nan, grad_norm=jnp.nan)
+    self.assertTrue(self._is_skipped(optimizer))
+    after = [np.asarray(x) for x in jax.tree_util.tree_leaves(nnx.to_pure_dict(nnx.state(model, nnx.Param)))]
+    for b, a in zip(before, after):
+      np.testing.assert_allclose(a, b)
+
 
 class TestRoutedBiasReadNNX(unittest.TestCase):
   """loss_fn must find the DeepSeek `moe_bias_updates` intermediate on the NNX (model-rooted) shape."""

@@ -1220,7 +1220,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       handle on this update; see the `add_computation` call in `update()`.
     """
     grad_norm = None
-    is_skipped_val = None
+    is_skipped_val = (
+        jnp.array(0.0, dtype=jnp.float32)
+        if (getattr(self._config, "skip_step_on_nan", True) or self._config.skip_step_on_spikes)
+        else None
+    )
     if state_pure is not None:
       # Where the gradients have to land before the optimizer can use them. Under Zero-1
       # that is the sharded layout the moments live on; otherwise the plain parameter one.
@@ -1259,12 +1263,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # this `raw_grad_norm`. In float32 whatever `grad_dtype` is: a sum of squares over bf16
       # overflows on production-size models.
       grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), grads))
+      is_finite = jnp.isfinite(grad_norm)
+      max_spike = getattr(self._config, "max_grad_norm_spike", 0.0)
+      if max_spike > 0.0:
+        is_finite = jnp.logical_and(is_finite, grad_norm <= max_spike)
+
+      skip_on_nan = getattr(self._config, "skip_step_on_nan", True)
+      should_skip = jnp.logical_and(skip_on_nan, jnp.logical_not(is_finite))
+      safe_grads = jax.tree.map(lambda g: jnp.where(should_skip, jnp.zeros_like(g), g), grads)
+
       if self._config.gradient_clipping_threshold > 0:
-        grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
+        safe_grads = maxtext_utils.apply_gradient_clipping(
+            safe_grads, None, self._config.gradient_clipping_threshold
+        )
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if hasattr(local_state, "apply_gradients"):
         if self._config.skip_step_on_spikes:
-          local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
+          local_state.apply_gradients(safe_grads, loss=mean_loss, grad_norm=grad_norm)
           opt_obj = getattr(local_state, "optimizer", self._optimizer)
           if opt_obj is not None:
             opt_state = nnx.to_pure_dict(nnx.state(opt_obj)).get("opt_state", {})
@@ -1272,8 +1287,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             if is_skipped is not None:
               is_skipped_val = is_skipped.astype(jnp.float32)
         else:
-          local_state.apply_gradients(grads)
+          local_state.apply_gradients(safe_grads)
       _, new_state_pure = nnx.split(local_state)
+      new_state_pure = jax.tree.map(lambda n, o: jnp.where(should_skip, o, n), new_state_pure, state_pure)
+      if is_skipped_val is not None:
+        is_skipped_val = jnp.where(should_skip, 1.0, is_skipped_val)
+
       if self._zero1_params_shardings is not None:
         # The one all-gather Zero-1 costs: each replica updated its own slice of every
         # parameter, and the forward pass needs all of them. The moments stay behind,

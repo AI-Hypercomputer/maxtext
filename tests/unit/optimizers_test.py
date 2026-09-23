@@ -853,6 +853,71 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
     # Count shouldn't have incremented
     self.assertEqual(opt_state["count"], 0)
 
+  def test_skip_step_on_nan_loss_warmup(self):
+    inner_opt = optax.sgd(0.1)
+    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+    params = {"x": jnp.array([1.0])}
+    opt_state = opt.init(params)
+
+    # Step 0 with NaN loss during warmup must be skipped
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.nan, grad_norm=jnp.float32(1.0)
+    )
+    self.assertTrue(jnp.all(updates["x"] == 0.0))
+    self.assertTrue(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 0)
+    self.assertFalse(jnp.any(jnp.isnan(opt_state["losses"])))
+
+  def test_skip_step_on_nan_grad_norm_warmup(self):
+    inner_opt = optax.sgd(0.1)
+    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+    params = {"x": jnp.array([1.0])}
+    opt_state = opt.init(params)
+
+    # Step 0 with NaN grad_norm during warmup must be skipped
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(1.0), grad_norm=jnp.nan
+    )
+    self.assertTrue(jnp.all(updates["x"] == 0.0))
+    self.assertTrue(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 0)
+    self.assertFalse(jnp.any(jnp.isnan(opt_state["grad_norms"])))
+
+  def test_nan_does_not_poison_rolling_buffer(self):
+    inner_opt = optax.sgd(0.1)
+    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+    params = {"x": jnp.array([1.0])}
+    opt_state = opt.init(params)
+
+    # Step 0: NaN occurs
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.nan, grad_norm=jnp.nan
+    )
+    self.assertTrue(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 0)
+
+    # Step 1: Normal step succeeds
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(1.0), grad_norm=jnp.float32(1.0)
+    )
+    self.assertFalse(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 1)
+    self.assertFalse(jnp.all(updates["x"] == 0.0))
+
+    # Step 2: Normal step succeeds
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(1.0), grad_norm=jnp.float32(1.0)
+    )
+    self.assertFalse(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 2)
+
+    # Step 3: Spike is properly detected because rolling stats are finite
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(100.0), grad_norm=jnp.float32(1.0)
+    )
+    self.assertTrue(opt_state["is_skipped"])
+    self.assertTrue(jnp.all(updates["x"] == 0.0))
+
 
 class TestMuonLogic(unittest.TestCase):
   """Tests the granular path transformation functions."""
