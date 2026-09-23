@@ -307,7 +307,8 @@ def generate_and_save_data(config, local_args):
 
 def main(argv: Sequence[str], local_args):
   global_config = pyconfig.initialize(argv)
-  teacher_overrides = global_config.teacher_overrides
+  # The top-k gather runs along the vocab axis; keep the logits batch-sharded.
+  teacher_overrides = {"lm_head_vocab_parallel": False, **global_config.teacher_overrides}
 
   teacher_config = pyconfig.initialize(argv, **teacher_overrides)
 

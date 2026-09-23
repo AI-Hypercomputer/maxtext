@@ -84,6 +84,43 @@ class EmbedTest(unittest.TestCase):
 
     self.assertEqual(outputs.shape, (batch_size, seq_len, num_embeddings))
 
+  def test_attend_on_embedding_matches_transposed_dot(self):
+    """`attend_on_embedding` contracts over the table's feature axis directly.
+
+    Expressing the transpose as dimension numbers instead of materializing
+    `table.T` is what lets the input lookup and the tied output head share one
+    bf16 cast under `shard_mode: explicit`. It reassociates the accumulation, so
+    the logits agree to float rounding rather than bit for bit.
+    """
+    table = jax.random.normal(jax.random.PRNGKey(0), (32, 8))
+    for query_shape in ((8,), (3, 8), (2, 3, 8)):
+      with self.subTest(query_shape=query_shape):
+        query = jax.random.normal(jax.random.PRNGKey(1), query_shape)
+        expected = jnp.dot(query, jnp.asarray(table, jnp.bfloat16).T, preferred_element_type=jnp.float32)
+        got = embeddings.attend_on_embedding(query, table, jnp.float32, self.cfg)
+        self.assertEqual(got.shape, expected.shape)
+        np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+  def test_attend_on_embedding_weight_gradient_in_table_order(self):
+    """The tied head's table gradient comes out in the table's own axis order.
+
+    With `table.T` the gradient is built transposed and handed back through a
+    second transpose, which under explicit sharding survives to codegen. The
+    gradient itself must be unchanged.
+    """
+    table = jax.random.normal(jax.random.PRNGKey(0), (32, 8))
+    query = jax.random.normal(jax.random.PRNGKey(1), (2, 3, 8))
+
+    def loss(t, attend):
+      return jnp.sum(jnp.sin(attend(query, t)))
+
+    got = jax.grad(loss)(table, lambda q, t: embeddings.attend_on_embedding(q, t, jnp.float32, self.cfg))
+    expected = jax.grad(loss)(
+        table, lambda q, t: jnp.dot(q, jnp.asarray(t, jnp.bfloat16).T, preferred_element_type=jnp.float32)
+    )
+    self.assertEqual(got.shape, table.shape)
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
 
 class RotaryEmbeddingTest(unittest.TestCase):
   """Tests for RotaryEmbedding."""
@@ -294,6 +331,28 @@ class YarnRotaryEmbeddingTest(unittest.TestCase):
     )
     default_outputs = default_layer(inputs, position=position)
     np.testing.assert_allclose(outputs, default_outputs, atol=1e-5)
+
+  def test_freqs_cis_at_matches_indexing_the_table(self):
+    """`freqs_cis_at` is what `__call__` uses; the full table is what it stands in for.
+
+    Row `p` of `freqs_cis` is `exp(1j * p * corrected_freqs)`, so the two agree
+    bit for bit — `arange(max_position_embeddings)[p]` is exactly `float(p)` for
+    every representable position.
+    """
+    layer = embeddings.YarnRotaryEmbedding(
+        embedding_dims=64,
+        mesh=self.mesh,
+        max_position_embeddings=163840,
+        original_max_position_embeddings=4096,
+        rngs=self.rngs,
+    )
+    table = layer.freqs_cis
+    self.assertEqual(table.shape, (163840, 32))
+    # Sample the bottom, the middle and the very top of the table.
+    for lo in (0, 4096, 163840 - 128):
+      with self.subTest(lo=lo):
+        position = jnp.arange(lo, lo + 128, dtype=jnp.int32)[jnp.newaxis, :]
+        np.testing.assert_array_equal(layer.freqs_cis_at(position), table.at[position].get())
 
   def test_pairwise_explicit_shard_mode_call(self):
     layer = embeddings.YarnRotaryEmbedding(

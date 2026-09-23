@@ -105,6 +105,37 @@ def _compute_dot_general(
   return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
 
 
+def _dot_general_in_auto_axes(inputs, kernel, dimension_numbers, precision, out_sharding):
+  """`lax.dot_general` traced inside an auto-sharding region.
+
+  Under `shard_mode: explicit` JAX wraps every primitive result in a `Sharding`
+  custom-call, and XLA's algebraic simplifier will not fold
+  `transpose(dot(A, B))` back into one dot across it. The transpose autodiff
+  leaves on the weight gradient therefore survives to codegen, and the gradient
+  has to be relaid out before it can be written back to the parameter --
+  worth +0.4% to +4.9% of step time depending on the model
+  (docs/guides/optimization/shard_mode_performance.md section 4.8).
+
+  `jax.sharding.auto_axes` removes the barrier for the length of the dot:
+  inside the region the operands' shardings leave the type system and Shardy
+  re-propagates them, which is exactly what `shard_mode: auto` does, so XLA
+  folds the transpose back into the gradient dot and the gradient comes out in
+  the kernel's stored order. The rest of the model keeps its shardings in its
+  types. No arithmetic changes, so the gradients are bit-identical to the
+  default rule.
+  """
+  dot = functools.partial(lax.dot_general, dimension_numbers=dimension_numbers, precision=precision)
+  if out_sharding is None:
+    # `auto_axes` has to be told what the region produces. Ask JAX for the
+    # sharding the same dot would have carried without the region -- outside a
+    # mesh that is `None`, and there is no barrier to remove in the first place.
+    out_sharding = jax.eval_shape(dot, inputs, kernel).sharding
+    if out_sharding is None:
+      return dot(inputs, kernel)
+  # pylint: disable-next=too-many-function-args  (pylint reads the decorator overload of `auto_axes`)
+  return jax.sharding.auto_axes(dot, out_sharding=out_sharding)(inputs, kernel)
+
+
 def _compute_dot_general_nnx(
     inputs,
     kernel,
@@ -118,6 +149,7 @@ def _compute_dot_general_nnx(
     compute_dtype: DType | None = None,
     native_fp8_compute: bool = False,
     scale_block_size: int | tuple[int, ...] | None = None,
+    weight_grad_in_kernel_order: bool = False,
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -157,6 +189,13 @@ def _compute_dot_general_nnx(
   if kernel_scale is not None or is_fp8_dtype(getattr(kernel, "dtype", None)):
     kernel = dequantize_weight(kernel, kernel_scale, compute_dtype=compute_dtype)
 
+  # Must stay below the dequantize: the auto-axes region takes over the dot, so a
+  # kernel handed to it still carrying its 8-bit encoding would never get scaled.
+  # `DenseGeneral.__call__` also refuses the flag on a quantized layer; this
+  # ordering keeps the function correct for any other caller.
+  if weight_grad_in_kernel_order:
+    return _dot_general_in_auto_axes(inputs, kernel, ((axis, contract_ind), ((), ())), matmul_precision, out_sharding)
+
   return dot_general(
       inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision, out_sharding=out_sharding
   )
@@ -189,6 +228,7 @@ class DenseGeneral(nnx.Module):
       scale_dtype: DType = jnp.float32,
       block_size: int | tuple[int, ...] | None = None,
       weight_quant: quantizations.WeightQuantConfig | None = None,
+      weight_grad_in_kernel_order: bool = False,
       *,  # Following arguments are keyword-only
       rngs: nnx.Rngs = None,
   ):
@@ -222,6 +262,14 @@ class DenseGeneral(nnx.Module):
       scale_dtype: dtype of kernel_scale (default: float32).
       block_size: block size for block-wise quantization scales.
       weight_quant: optional WeightQuantConfig decoupling weight quantization settings.
+      weight_grad_in_kernel_order: trace the dot inside a `jax.sharding.auto_axes`
+        region so that XLA folds `transpose(dot(...))` back into the gradient dot
+        and the weight gradient comes out in the kernel's stored axis order. See
+        docs/guides/optimization/shard_mode_performance.md section 4.3 for why
+        that fold does not happen under `shard_mode: explicit` otherwise. The
+        stored kernel, its initialization and the arithmetic are all untouched,
+        so gradients are bit-identical to the default rule. Only takes effect
+        under `shard_mode: explicit`; ignored when the layer is quantized.
       rngs: RNG state for initialization in nnx.
     """
     if weight_quant is not None:
@@ -249,6 +297,7 @@ class DenseGeneral(nnx.Module):
     self.scale_dtype = scale_dtype
     self.block_size = block_size
     self.weight_quant = weight_quant
+    self.weight_grad_in_kernel_order = weight_grad_in_kernel_order
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -470,19 +519,33 @@ class DenseGeneral(nnx.Module):
       out_sharding = None
 
     contract_ind = tuple(range(0, len(self.axis)))
+    quant_dot_general = self.quant_dot_general if slice_bounds is None else None
+    # The auto-axes region only buys anything where XLA refuses to fold the
+    # transpose away, and it has to own the whole dot to do it -- so it is off
+    # under auto sharding and under any quantized path. `self.quant` only covers
+    # AQT; weight-only fp8 leaves it None and is identified by the scale instead.
+    weight_grad_in_kernel_order = (
+        self.weight_grad_in_kernel_order
+        and self.shard_mode == ShardMode.EXPLICIT
+        and self.quant is None
+        and quant_dot_general is None
+        and kernel_scale is None
+        and not is_fp8_dtype(getattr(kernel, "dtype", None))
+    )
     output = _compute_dot_general_nnx(
         inputs,
         kernel,
         norm_axis,
         contract_ind,
         self.matmul_precision,
-        self.quant_dot_general if slice_bounds is None else None,
+        quant_dot_general,
         _initializing,
         out_sharding,
         kernel_scale=kernel_scale,
         compute_dtype=self.dtype,
         native_fp8_compute=isinstance(self.quant, quantizations.ServeFp8WeightQuantization),
         scale_block_size=self.block_size,
+        weight_grad_in_kernel_order=weight_grad_in_kernel_order,
     )
 
     if self.bias is not None:
@@ -516,6 +579,7 @@ def dense_general(
     scale_dtype: DType = jnp.float32,
     block_size: int | tuple[int, ...] | None = None,
     weight_quant: quantizations.WeightQuantConfig | None = None,
+    weight_grad_in_kernel_order: bool = False,
     name: None | str = None,
 ):
   """Creates a DenseGeneral Linen module using nnx.bridge.to_linen.
@@ -542,6 +606,8 @@ def dense_general(
     scale_dtype: dtype of kernel_scale (default: float32).
     block_size: block size for block-wise quantization scales.
     weight_quant: optional WeightQuantConfig decoupling weight quantization settings.
+    weight_grad_in_kernel_order: compute the weight gradient directly in the
+      kernel's stored axis order; see DenseGeneral for details.
     name: name passed to the ToLinen Module
   """
   if not (inputs_shape is not None) ^ (in_features_shape is not None):
@@ -573,6 +639,7 @@ def dense_general(
       scale_dtype=scale_dtype,
       block_size=block_size,
       weight_quant=weight_quant,
+      weight_grad_in_kernel_order=weight_grad_in_kernel_order,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
@@ -693,6 +760,7 @@ class MlpBlock(nnx.Module):
           quant=self.quant,
           use_bias=self.use_bias,
           shard_mode=self.config.shard_mode,
+          weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
           matmul_precision=self.config.matmul_precision,
           mesh=self.mesh,
           use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
@@ -714,6 +782,7 @@ class MlpBlock(nnx.Module):
             quant=self.quant,
             use_bias=self.use_bias,
             shard_mode=self.config.shard_mode,
+            weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
             matmul_precision=self.config.matmul_precision,
             mesh=self.mesh,
             use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
@@ -734,6 +803,7 @@ class MlpBlock(nnx.Module):
         quant=self.quant,
         use_bias=self.use_bias,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         matmul_precision=self.config.matmul_precision,
         mesh=self.mesh,
         use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
