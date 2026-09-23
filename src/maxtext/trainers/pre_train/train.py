@@ -22,7 +22,6 @@ from typing import Any, Sequence
 import datetime
 import functools
 import os
-import sys
 import time
 import logging
 
@@ -898,8 +897,8 @@ def recover(
       # Reset snapshotter to abandon in-flight host saves while preserving the latest snapshot
       if snapshot_mgr is not None:
         new_snapshot_mgr = Snapshotter(replica_axis_index=snapshot_mgr.replica_axis_index)
-        with snapshot_mgr._lock:
-          new_snapshot_mgr._latest_snapshot = snapshot_mgr._latest_snapshot
+        with snapshot_mgr._lock:  # pylint: disable=protected-access
+          new_snapshot_mgr._latest_snapshot = snapshot_mgr._latest_snapshot  # pylint: disable=protected-access
         python_vars["snapshot"] = new_snapshot_mgr
         snapshot_mgr = new_snapshot_mgr
 
@@ -996,6 +995,7 @@ def recover(
             elastic_manager.active_slice_indices,
         )
       else:
+
         def _safe_replace(state_obj, pure_dict):
           if not isinstance(pure_dict, dict):
             return
@@ -1181,6 +1181,22 @@ def train_loop(config, recorder, state=None):
   else:
     _logger.info("[*] Standard Non-Elastic Training.")
 
+  def run_setup(setup_devices, setup_results, init_complete_event, cancel_event):
+    """Runs one setup attempt and stores its outcome in that attempt's own objects."""
+    # Everything is passed in, not captured from the loop, so an abandoned attempt
+    # that finishes late cannot publish into a newer attempt.
+    try:
+      setup_results["results"] = train_utils.setup_train_loop(
+          config, recorder, devices=setup_devices, cancel_event=cancel_event
+      )
+    except train_utils.SetupCancelledError:
+      _logger.info("Abandoned setup attempt stopped early.")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      setup_results["exception"] = e
+    finally:
+      init_complete_event.set()
+
+  cancel_event = None
   # Kills the workload if initialization takes longer than 20 minutes
   with watchdog.watchdog(name="initialization", timeout=20 * 60, repeat=False):
     while True:
@@ -1191,17 +1207,13 @@ def train_loop(config, recorder, state=None):
 
         setup_results = {}
         init_complete_event = threading.Event()
+        cancel_event = threading.Event()
 
-        def run_setup():
-          try:
-            results = train_utils.setup_train_loop(config, recorder, devices=devices)
-            setup_results["results"] = results
-          except Exception as e:
-            setup_results["exception"] = e
-          finally:
-            init_complete_event.set()
-
-        setup_thread = threading.Thread(target=run_setup, daemon=True)
+        setup_thread = threading.Thread(
+            target=run_setup,
+            args=(devices, setup_results, init_complete_event, cancel_event),
+            daemon=True,
+        )
         setup_thread.start()
 
         while True:
@@ -1237,14 +1249,30 @@ def train_loop(config, recorder, state=None):
             state,
         ) = setup_results["results"]
 
+        # The batch sizes in config must match the mesh the state was built on.
+        if config.elastic_enabled and mesh.devices.size != config.num_target_devices:
+          _logger.warning(
+              "Mesh has %d devices but config expects %d. Retrying setup.",
+              mesh.devices.size,
+              config.num_target_devices,
+          )
+          if elastic_manager:
+            # Refresh the topology first, or the next attempt recomputes the same mismatch.
+            time.sleep(5)
+            elastic_manager.active_slice_indices = elastic.get_active_slice_indices(elastic_manager.slice_to_devices)
+          continue
+
         init_rng = jax.device_put(init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
         break  # Initialization succeeded!
       except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
+        if cancel_event is not None:
+          cancel_event.set()
         is_scale_up = isinstance(e, pathways_manager.ScaleUpSignalError)
         is_slice_down = isinstance(e, jax.errors.JaxRuntimeError) and elastic.is_error_due_to_slice_down(e)
         if elastic_utils.elastic_snapshot(config) and (is_scale_up or is_slice_down):
           _logger.warning(
-              "Elastic event or slice failure caught during initialization: %s. Refreshing slice topology and retrying setup.",
+              "Elastic event or slice failure caught during initialization: %s. "
+              "Refreshing slice topology and retrying setup.",
               e,
           )
           if elastic_manager:

@@ -216,13 +216,30 @@ def jit_train_and_eval_step(
   return p_train_step, p_eval_step
 
 
-def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, checkpoint_manager=None):
+class SetupCancelledError(Exception):
+  """Raised when a setup_train_loop attempt is cancelled by a newer attempt."""
+
+
+def _raise_if_setup_cancelled(cancel_event):
+  """Raises SetupCancelledError if cancel_event is set."""
+  if cancel_event is not None and cancel_event.is_set():
+    raise SetupCancelledError("setup_train_loop was cancelled by a newer attempt.")
+
+
+def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, checkpoint_manager=None, cancel_event=None):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
-  Args: config recorder
+  Args:
+    config: Config object.
+    recorder: Goodput recorder.
+    devices: Devices to build the mesh on.
+    restore_checkpoint: Whether to restore from checkpoint_manager.
+    checkpoint_manager: Existing checkpoint manager to reuse.
+    cancel_event: Optional threading.Event. When set, the setup stops at the
+      next stage boundary and raises SetupCancelledError.
 
   Returns:
     init_rng:
@@ -235,6 +252,9 @@ def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, ch
     data_loader:
     rampup_manager: the class managing rampup batch sizes
     train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
+
+  Raises:
+    SetupCancelledError: If cancel_event is set before data loading or state restore.
   """
   # pylint: disable=import-outside-toplevel
   from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
@@ -244,9 +264,7 @@ def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, ch
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
     with jax.set_mesh(mesh):
       init_rng = jax.random.PRNGKey(config.init_weights_seed)
-      init_rng = jax.device_put(
-          init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-      )
+      init_rng = jax.device_put(init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     if config.pure_nnx:
       # Create abstract NNX model.
@@ -271,6 +289,7 @@ def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, ch
       if checkpoint_step is not None:
         validate_completed_steps(checkpoint_step + 1, config.steps)
 
+  _raise_if_setup_cancelled(cancel_event)
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
@@ -321,6 +340,7 @@ def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, ch
     # Create data_loader AFTER reordering wrapper is applied
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
+    _raise_if_setup_cancelled(cancel_event)
     state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager if restore_checkpoint else None, init_state_fn
     )
@@ -503,25 +523,17 @@ def replicate_single_device_sharded_arrays(pytree):
   """Replicates any single-device sharded arrays across the whole mesh."""
   mesh = None
   for leaf in jax.tree.leaves(pytree):
-    if isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
-        leaf.sharding, jax.sharding.NamedSharding
-    ):
+    if isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(leaf.sharding, jax.sharding.NamedSharding):
       mesh = leaf.sharding.mesh
       break
   if mesh is None:
     return pytree
-  replicated_sharding = jax.sharding.NamedSharding(
-      mesh, jax.sharding.PartitionSpec()
-  )
+  replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
   def _replicate(x):
-    if isinstance(x, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
-        x.sharding, jax.sharding.SingleDeviceSharding
-    ):
+    if isinstance(x, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(x.sharding, jax.sharding.SingleDeviceSharding):
       if isinstance(x, jax.ShapeDtypeStruct):
-        return jax.ShapeDtypeStruct(
-            x.shape, x.dtype, sharding=replicated_sharding
-        )
+        return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=replicated_sharding)
       return jax.device_put(x, replicated_sharding)
     return x
 
@@ -530,6 +542,7 @@ def replicate_single_device_sharded_arrays(pytree):
 
 def restore_original_shardings(restored_pytree, original_abstract_pytree):
   """Puts restored state back onto the original abstract state shardings."""
+
   def _put(restored_leaf, abstract_leaf):
     if hasattr(restored_leaf, "sharding") and hasattr(abstract_leaf, "sharding"):
       if restored_leaf.sharding != abstract_leaf.sharding or (
