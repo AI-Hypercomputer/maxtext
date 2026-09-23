@@ -376,6 +376,71 @@ def GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE(config):
       shapes[f"{hf_prefix}.per_layer_projection.weight"] = [hidden_size, ple_dim]
       shapes[f"{hf_prefix}.post_per_layer_input_norm.weight"] = [hidden_size]
 
+  # Vision tower (multimodal E2B / E4B). Mirrors the vision block of
+  # GEMMA4_HF_WEIGHTS_TO_SHAPE (26B/31B): each clipped-linear vision projection
+  # emits a ``.linear.weight``. Emitted only when a ``vision_config`` is present,
+  # matching GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_MAPPING's ``use_multimodal and vcfg`` gate.
+  #
+  # When the clipped-linears path is enabled, that mapping additionally maps four
+  # scalar activation clip bounds per projection (input_min/input_max/output_min/
+  # output_max). The shape fn takes only the HF config (not the MaxText config) so
+  # it cannot see ``use_clipped_linears_for_vit``; the shape map is a lookup table
+  # keyed by HF target and ``_process`` only iterates targets the param map emits,
+  # so emitting the bound shapes unconditionally is a harmless superset when
+  # clipped-linears is off and required coverage when it is on. Bounds are scalar
+  # ``[]`` (NOT ``[1]``) — a rank-1 shape makes the HF loader reinitialize the
+  # bound to a non-finite sentinel.
+  if vision_cfg:
+    vis_hidden = vision_cfg["hidden_size"]
+    vis_intermediate = vision_cfg["intermediate_size"]
+    vis_num_layers = vision_cfg["num_hidden_layers"]
+    vis_num_heads = vision_cfg["num_attention_heads"]
+    vis_head_dim = vision_cfg["head_dim"]
+    vis_q_dim = vis_num_heads * vis_head_dim
+    vis_kv_heads = vision_cfg.get("num_key_value_heads", vis_num_heads)
+    vis_kv_dim = vis_kv_heads * vis_head_dim
+    vis_pos_emb_size = vision_cfg.get("position_embedding_size", 10240)
+    vis_patch_size = vision_cfg.get("patch_size", 16)
+    num_channels = vision_cfg.get("num_channels", 3)  # RGB
+    patch_flat = num_channels * vis_patch_size * vis_patch_size
+
+    # VisionEntry: input_proj is a linear [patch_flat, vis_hidden] transposed to [vis_hidden, patch_flat].
+    shapes["model.vision_tower.patch_embedder.input_proj.weight"] = [vis_hidden, patch_flat]
+    # pos_emb_param MaxText shape (N, 2, D) -> transpose(1, 0, 2) -> HF (2, N, D).
+    shapes["model.vision_tower.patch_embedder.position_embedding_table"] = [2, vis_pos_emb_size, vis_hidden]
+    # std_scale / std_bias exist only under standardize=true. E2B / E4B ship
+    # standardize=false (0 std keys), consistent with the mapping's placeholder
+    # path (which points std_scale/std_bias at an always-present layernorm key).
+    if vision_cfg.get("standardize", False):
+      shapes["model.vision_tower.std_scale"] = [vis_hidden]
+      shapes["model.vision_tower.std_bias"] = [vis_hidden]
+    # Vision projector: [vis_hidden, hidden_size] -> reshape_kernel -> [hidden_size, vis_hidden].
+    shapes["model.embed_vision.embedding_projection.weight"] = [hidden_size, vis_hidden]
+
+    for i in range(vis_num_layers):
+      vis_prefix = f"model.vision_tower.encoder.layers.{i}"
+      shapes[f"{vis_prefix}.self_attn.q_proj.linear.weight"] = [vis_q_dim, vis_hidden]
+      shapes[f"{vis_prefix}.self_attn.k_proj.linear.weight"] = [vis_kv_dim, vis_hidden]
+      shapes[f"{vis_prefix}.self_attn.v_proj.linear.weight"] = [vis_kv_dim, vis_hidden]
+      shapes[f"{vis_prefix}.self_attn.o_proj.linear.weight"] = [vis_hidden, vis_q_dim]
+      shapes[f"{vis_prefix}.self_attn.q_norm.weight"] = [vis_head_dim]
+      shapes[f"{vis_prefix}.self_attn.k_norm.weight"] = [vis_head_dim]
+      shapes[f"{vis_prefix}.input_layernorm.weight"] = [vis_hidden]
+      shapes[f"{vis_prefix}.post_attention_layernorm.weight"] = [vis_hidden]
+      shapes[f"{vis_prefix}.pre_feedforward_layernorm.weight"] = [vis_hidden]
+      shapes[f"{vis_prefix}.post_feedforward_layernorm.weight"] = [vis_hidden]
+      shapes[f"{vis_prefix}.mlp.gate_proj.linear.weight"] = [vis_intermediate, vis_hidden]
+      shapes[f"{vis_prefix}.mlp.up_proj.linear.weight"] = [vis_intermediate, vis_hidden]
+      shapes[f"{vis_prefix}.mlp.down_proj.linear.weight"] = [vis_hidden, vis_intermediate]
+      # Clipped-linear activation clip bounds (scalar []). Covers the targets
+      # GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_MAPPING maps under use_clipped_linears_for_vit.
+      for _proj in ("q_proj", "k_proj", "v_proj", "o_proj"):
+        for _bound in ("input_min", "input_max", "output_min", "output_max"):
+          shapes[f"{vis_prefix}.self_attn.{_proj}.{_bound}"] = []
+      for _proj in ("gate_proj", "up_proj", "down_proj"):
+        for _bound in ("input_min", "input_max", "output_min", "output_max"):
+          shapes[f"{vis_prefix}.mlp.{_proj}.{_bound}"] = []
+
   return shapes
 
 
