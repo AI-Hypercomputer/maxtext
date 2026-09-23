@@ -105,6 +105,7 @@ class MaxTextTrainingEngineProfilingTest(absltest.TestCase):
     """`fwd_bwd` starts the profile and `update` stops it, without an outer loop."""
     cfg = _tiny_config(
         base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
         skip_first_n_steps_for_profiler=1,
         profiler_steps=1,
     )
@@ -125,9 +126,25 @@ class MaxTextTrainingEngineProfilingTest(absltest.TestCase):
     self.start_trace.assert_called_once()
     self.stop_trace.assert_called_once()
 
+  def test_a_config_that_asks_for_no_profiler_is_never_profiled(self):
+    """`profiler=""`, base.yml's default, is off -- whatever `profiler_steps` says (its default is 5)."""
+    cfg = _tiny_config(base_output_directory=self.create_tempdir().full_path, skip_first_n_steps_for_profiler=0)
+    self.assertEqual(cfg.profiler, "")
+    self.assertGreater(cfg.profiler_steps, 0)
+    mesh = _mesh(cfg)
+    with jax.set_mesh(mesh):
+      engine = _engine(cfg, mesh)
+      for _ in range(3):
+        engine.fwd_bwd(payload=DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2))))
+        engine.update()
+      engine.close()
+    self.start_trace.assert_not_called()
+    self.stop_trace.assert_not_called()
+
   def test_close_rescues_a_profile_left_open_by_an_interrupted_step(self):
     cfg = _tiny_config(
         base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
         skip_first_n_steps_for_profiler=0,
         profiler_steps=5,
     )
