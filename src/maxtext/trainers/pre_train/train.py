@@ -1316,6 +1316,10 @@ def train_loop(config, recorder, state=None):
               mesh.devices.size,
               config.num_target_devices,
           )
+          if elastic_manager:
+            # Refresh the topology first, or the next attempt recomputes the same mismatch.
+            time.sleep(5)
+            elastic_manager.active_slice_indices = elastic.get_active_slice_indices(elastic_manager.slice_to_devices)
           continue
 
         init_rng = jax.device_put(init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))

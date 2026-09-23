@@ -264,9 +264,7 @@ def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, ch
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
     with jax.set_mesh(mesh):
       init_rng = jax.random.PRNGKey(config.init_weights_seed)
-      init_rng = jax.device_put(
-          init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-      )
+      init_rng = jax.device_put(init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     if config.pure_nnx:
       # Create abstract NNX model.
@@ -525,25 +523,17 @@ def replicate_single_device_sharded_arrays(pytree):
   """Replicates any single-device sharded arrays across the whole mesh."""
   mesh = None
   for leaf in jax.tree.leaves(pytree):
-    if isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
-        leaf.sharding, jax.sharding.NamedSharding
-    ):
+    if isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(leaf.sharding, jax.sharding.NamedSharding):
       mesh = leaf.sharding.mesh
       break
   if mesh is None:
     return pytree
-  replicated_sharding = jax.sharding.NamedSharding(
-      mesh, jax.sharding.PartitionSpec()
-  )
+  replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
   def _replicate(x):
-    if isinstance(x, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
-        x.sharding, jax.sharding.SingleDeviceSharding
-    ):
+    if isinstance(x, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(x.sharding, jax.sharding.SingleDeviceSharding):
       if isinstance(x, jax.ShapeDtypeStruct):
-        return jax.ShapeDtypeStruct(
-            x.shape, x.dtype, sharding=replicated_sharding
-        )
+        return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=replicated_sharding)
       return jax.device_put(x, replicated_sharding)
     return x
 
@@ -552,6 +542,7 @@ def replicate_single_device_sharded_arrays(pytree):
 
 def restore_original_shardings(restored_pytree, original_abstract_pytree):
   """Puts restored state back onto the original abstract state shardings."""
+
   def _put(restored_leaf, abstract_leaf):
     if hasattr(restored_leaf, "sharding") and hasattr(abstract_leaf, "sharding"):
       if restored_leaf.sharding != abstract_leaf.sharding or (
