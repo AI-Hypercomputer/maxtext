@@ -702,6 +702,9 @@ class AttentionOp(nnx.Module):
         self.use_splash_scheduler = self.config.use_splash_scheduler
         self.fuse_reciprocal = self.config.sa_fuse_reciprocal
         self.use_base2_exp = self.config.sa_use_base2_exp
+      # Single switch for both global and local layers: the kernel only honours it
+      # for a pure causal mask, so it is applied per layer in `create_sa_config`.
+      self.qk_diag_skip = self.config.sa_qk_diag_skip
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.chunk_attn_window_size = chunk_attn_window_size
@@ -2227,6 +2230,27 @@ class AttentionOp(nnx.Module):
       single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
+      # Skip the causal-diagonal work that the mask zeroes anyway (bit-exact).
+      # The kernel supports it for a pure CausalMask with offset 0 (segment ids
+      # are fine), block_q == block_kv in the forward and square dkv tiles, and
+      # raises otherwise, so only enable it when all of that holds. Older Tokamax
+      # releases (no `qk_diag_grid_fwd`) also need a square forward tile.
+      fwd_ok = sa_config.block_q == sa_config.block_kv and (
+          hasattr(sa_config, "qk_diag_grid_fwd") or sa_config.block_kv == sa_config.block_kv_compute
+      )
+      dkv_ok = sa_config.block_q_dkv == sa_config.block_kv_dkv == sa_config.block_kv_dkv_compute
+      if (
+          self.qk_diag_skip
+          and isinstance(single_head_mask, tokamax_splash_mask.CausalMask)
+          and getattr(single_head_mask, "offset", 0) == 0
+          and fwd_ok
+          and dkv_ok
+      ):
+        sa_config = dataclasses.replace(sa_config, qk_diag_skip=True)
+        if hasattr(sa_config, "qk_diag_grid_fwd"):
+          # (forward, dkv) sub-grids, tuned on TPU7x for DeepSeek V3 (S=4096,
+          # fwd 1024/1024/512, dkv 1024^3). Older releases take an int only.
+          sa_config = dataclasses.replace(sa_config, qk_diag_grid=((2, 2), (4, 4)))
 
       # Create the splash attention kernel object separately, jit it for performance
       @partial(

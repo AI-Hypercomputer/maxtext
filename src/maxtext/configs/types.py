@@ -934,6 +934,16 @@ class SplashAttention(BaseModel):
   )
   sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
   sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
+  sa_qk_diag_skip: bool = Field(
+      False,
+      description=(
+          "Maps to qk_diag_skip in the Tokamax SplashConfig: skip the causal-diagonal"
+          " matmul work that the mask zeroes anyway (bit-exact). Only applied to pure"
+          " causal masks, with sa_block_q == sa_block_kv and square dkv blocks"
+          " (sa_block_q_dkv == sa_block_kv_dkv == sa_block_kv_dkv_compute);"
+          " sa_block_kv_compute may be smaller than sa_block_kv."
+      ),
+  )
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
   local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
   local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")

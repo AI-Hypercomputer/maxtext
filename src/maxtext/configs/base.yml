@@ -1315,6 +1315,7 @@ use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax
 sa_use_base2_exp: true # defaults to true in Tokamax
+sa_qk_diag_skip: false # skip the masked-out causal-diagonal matmul work in Tokamax splash (bit-exact; pure causal mask only; needs sa_block_q == sa_block_kv and square dkv tiles)
 # local_sa_* variants apply to local (sliding window) attention layers;
 # if None, each inherits from the corresponding global sa_* flag.
 local_sa_block_q: None  # inherits from sa_block_q if None
