@@ -142,7 +142,7 @@ def halo_exchange_for_conv(
   if not _has_named_axis(axis_name):
     return _zero_pad()
 
-  cp_size = jax.lax.psum(1, axis_name=axis_name)
+  cp_size = jax.lax.axis_size(axis_name=axis_name)
   if cp_size == 1:
     return _zero_pad()
 
@@ -310,11 +310,16 @@ class KimiDeltaAttention(nnx.Module):
     # KDA head dimensions derived from global config. KDA uses one head count
     # and one head dim for q, k and v alike (no GQA-style grouping):
     #   key_head_dim = value_head_dim = config.head_dim (kv_channels)
-    #   num_key_heads = num_value_heads = config.base_num_query_heads (num_attention_heads)
+    #   num_key_heads = num_value_heads = config.num_query_heads (num_attention_heads)
+    # The derived `num_query_heads` / `emb_dim` below rather than their `base_*`
+    # counterparts: `base_*` are the unscaled model dims, and the derived ones
+    # fold in `global_parameter_scale`, so sizing the projections off `base_*`
+    # would build a layer mismatched to the decoder's hidden states whenever the
+    # scale is anything but 1.
     self.key_head_dim = cfg.head_dim
     self.value_head_dim = cfg.head_dim
-    self.num_key_heads = cfg.base_num_query_heads
-    self.num_value_heads = cfg.base_num_query_heads
+    self.num_key_heads = cfg.num_query_heads
+    self.num_value_heads = cfg.num_query_heads
     self.num_query_heads = self.num_key_heads
 
     # Short convolution for local dependency modeling
@@ -348,7 +353,7 @@ class KimiDeltaAttention(nnx.Module):
     # QKV projections
     # Separate projections for Q, K, V (not fused) to allow independent conv
     self.q_proj = linears.DenseGeneral(
-        in_features_shape=cfg.base_emb_dim,
+        in_features_shape=cfg.emb_dim,
         out_features_shape=(self.num_query_heads, self.key_head_dim),
         axis=-1,
         dtype=cfg.dtype,
@@ -361,7 +366,7 @@ class KimiDeltaAttention(nnx.Module):
     )
 
     self.k_proj = linears.DenseGeneral(
-        in_features_shape=cfg.base_emb_dim,
+        in_features_shape=cfg.emb_dim,
         out_features_shape=(self.num_key_heads, self.key_head_dim),
         axis=-1,
         dtype=cfg.dtype,
@@ -374,7 +379,7 @@ class KimiDeltaAttention(nnx.Module):
     )
 
     self.v_proj = linears.DenseGeneral(
-        in_features_shape=cfg.base_emb_dim,
+        in_features_shape=cfg.emb_dim,
         out_features_shape=(self.num_value_heads, self.value_head_dim),
         axis=-1,
         dtype=cfg.dtype,
@@ -389,7 +394,7 @@ class KimiDeltaAttention(nnx.Module):
     # Output projection
     self.o_proj = linears.DenseGeneral(
         in_features_shape=(self.num_value_heads, self.value_head_dim),
-        out_features_shape=cfg.base_emb_dim,
+        out_features_shape=cfg.emb_dim,
         axis=(-2, -1),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -404,7 +409,7 @@ class KimiDeltaAttention(nnx.Module):
     # per-dim). Public KDA checkpoints name this `f_proj` and the output gate
     # below `g_proj`, so a conversion utility has to swap the two names.
     self.g_proj = linears.DenseGeneral(
-        in_features_shape=cfg.base_emb_dim,
+        in_features_shape=cfg.emb_dim,
         out_features_shape=(self.num_key_heads, self.key_head_dim),
         axis=-1,
         dtype=cfg.dtype,
@@ -419,7 +424,7 @@ class KimiDeltaAttention(nnx.Module):
     # Beta projection for generating beta (Delta rule mixing coefficient)
     # beta has shape [B, T, H] - per-head scalar
     self.b_proj = linears.DenseGeneral(
-        in_features_shape=cfg.base_emb_dim,
+        in_features_shape=cfg.emb_dim,
         out_features_shape=(self.num_key_heads,),
         axis=-1,
         dtype=cfg.dtype,
@@ -439,7 +444,7 @@ class KimiDeltaAttention(nnx.Module):
     # implemented — see the class docstring; use_kda_lora=True is rejected at
     # config time.
     self.gate_proj = linears.DenseGeneral(
-        in_features_shape=cfg.base_emb_dim,
+        in_features_shape=cfg.emb_dim,
         out_features_shape=(self.num_value_heads, self.value_head_dim),
         axis=-1,
         dtype=cfg.dtype,

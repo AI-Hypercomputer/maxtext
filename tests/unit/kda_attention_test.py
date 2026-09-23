@@ -147,12 +147,16 @@ class _MockKdaConfig:
   KDA derives head dims from global config (one head count and head dim
   for q, k and v alike):
     key_head_dim = value_head_dim = head_dim
-    num_key_heads = num_value_heads = base_num_query_heads
+    num_key_heads = num_value_heads = num_query_heads
+
+  `emb_dim` / `num_query_heads` are what MaxText's config exposes after
+  folding in `global_parameter_scale` — the values `KimiDeltaAttention` sizes
+  its projections from. This mock stands at scale 1.
   """
 
   def __init__(self, **overrides):
-    self.base_emb_dim = 128
-    self.base_num_query_heads = 4
+    self.emb_dim = 128
+    self.num_query_heads = 4
     self.head_dim = 32
     self.dtype = jnp.float32
     self.weight_dtype = jnp.float32
@@ -197,7 +201,7 @@ class TestKimiDeltaAttention:
     )
 
   def test_init_head_dims(self, mesh):
-    """Head dims derived from global config: head_dim=32, base_num_query_heads=4."""
+    """Head dims derived from global config: head_dim=32, num_query_heads=4."""
     attn = self._make_attn(mesh)
     assert attn.num_query_heads == 4
     assert attn.num_key_heads == 4
@@ -1613,7 +1617,7 @@ class _KdaBlock(nnx.Module):
 
   def __init__(self, cfg, mesh, layer_idx, *, rngs):
     self.attn_norm = RMSNorm(
-        num_features=cfg.base_emb_dim,
+        num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -1621,15 +1625,15 @@ class _KdaBlock(nnx.Module):
     )
     self.attn = attention_kda.KimiDeltaAttention(cfg, layer_idx=layer_idx, mesh=mesh, rngs=rngs)
     self.mlp_norm = RMSNorm(
-        num_features=cfg.base_emb_dim,
+        num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         rngs=rngs,
     )
-    hidden = 4 * cfg.base_emb_dim
-    self.wi = nnx.Linear(cfg.base_emb_dim, hidden, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
-    self.wo = nnx.Linear(hidden, cfg.base_emb_dim, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
+    hidden = 4 * cfg.emb_dim
+    self.wi = nnx.Linear(cfg.emb_dim, hidden, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
+    self.wo = nnx.Linear(hidden, cfg.emb_dim, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
 
   def __call__(self, x):
     attn_out, _ = self.attn(self.attn_norm(x).astype(self.attn.config.dtype))
@@ -1643,17 +1647,17 @@ class _TinyKdaLM(nnx.Module):
   """Embed -> N x _KdaBlock -> RMSNorm -> lm_head."""
 
   def __init__(self, cfg, mesh, num_layers, *, rngs):
-    self.embed = nnx.Embed(_KDA_SMOKE_VOCAB, cfg.base_emb_dim, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
+    self.embed = nnx.Embed(_KDA_SMOKE_VOCAB, cfg.emb_dim, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
     self.blocks = nnx.List([_KdaBlock(cfg, mesh, i, rngs=rngs) for i in range(num_layers)])
     self.final_norm = RMSNorm(
-        num_features=cfg.base_emb_dim,
+        num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         rngs=rngs,
     )
     self.lm_head = nnx.Linear(
-        cfg.base_emb_dim, _KDA_SMOKE_VOCAB, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs
+        cfg.emb_dim, _KDA_SMOKE_VOCAB, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs
     )
 
   def __call__(self, tokens):
@@ -1689,8 +1693,8 @@ class TestKdaE2eSmoke:
   def test_delayed_copy_loss_collapses(self):
     seq_len, delay, steps, batch, num_layers = 64, 5, 300, 32, 2
     cfg = SimpleNamespace(
-        base_emb_dim=256,
-        base_num_query_heads=8,
+        emb_dim=256,
+        num_query_heads=8,
         head_dim=64,
         dtype=jnp.float32,
         weight_dtype=jnp.float32,

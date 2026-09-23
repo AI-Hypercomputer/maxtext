@@ -4940,8 +4940,10 @@ class MaxTextConfig(
           "inside a scanned layer stack. Set scan_layers: false."
       )
 
-    kda_context_parallel_size = self.ici_context_parallelism * self.dcn_context_parallelism
-    if self.attention_type == "kda" and kda_context_parallel_size > 1 and self.context_parallel_load_balance:
+    # Reuses the `context_parallel_size` derived above, which already resolves the
+    # CP axis from `context_sharding` ("context" by default, "expert" for
+    # expert-as-context) instead of assuming the named axis.
+    if self.attention_type == "kda" and context_parallel_size > 1 and self.context_parallel_load_balance:
       raise ValueError(
           "attention_type='kda' with context parallelism requires context_parallel_load_balance=false. "
           "The KDA recurrence composes state in token order, so device i must hold the sequence chunk "
