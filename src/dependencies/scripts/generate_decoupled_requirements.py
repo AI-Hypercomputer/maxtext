@@ -57,11 +57,12 @@ EXCLUDED_GCLOUD_PACKAGES = (
     "xprof",
 )
 
-# Versions this environment pins away from the source lock. tokamax 0.0.13 imports xprof at module
-# scope, and maxtext imports tokamax from megablox, so with xprof filtered out above every test that
-# reaches maxtext.layers.moe fails to collect. 0.0.12 is the last release that does not need xprof,
-# so the decoupled environment stays free of the Cloud clients without holding the hardware locks
-# back. Drop this once tokamax no longer requires xprof, or once xprof is safe to install here.
+# Versions this environment pins away from the source lock. tokamax imports xprof at module scope
+# from 0.0.13 onwards (still the case in 0.0.14), and maxtext imports tokamax from megablox, so with
+# xprof filtered out above every test that reaches maxtext.layers.moe fails to collect. 0.0.12 is
+# the last release that does not need xprof, so the decoupled environment stays free of the Cloud
+# clients without holding the hardware locks back. Drop this once tokamax no longer requires xprof,
+# or once xprof is safe to install here.
 PINNED_PACKAGES = {"tokamax": "tokamax==0.0.12"}
 # google-pasta is a tensorflow dependency that only provides `pasta`; it has no Cloud surface.
 KEPT_GCLOUD_PACKAGES = ("google-pasta",)
