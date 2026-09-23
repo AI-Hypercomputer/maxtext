@@ -1370,6 +1370,65 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # The recorder is drained, so a later pass cannot re-write this one's numbers.
     self.assertEmpty(t._eval_metrics_recorder.get_metrics_history(clear_cache=False))
 
+  def test_run_eval_returns_the_pass_and_leaves_training_untouched(self):
+    """run_eval, the standalone validation entry point, reports its pass and moves no training state."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    t.fwd_bwd(DummyPayload())
+    grads_before = jax.tree.map(jnp.copy, t._accumulated_grads)
+    micro_steps_before, train_step_before = t.micro_step_count, t.train_step
+
+    # Unequal denominators, so the two plausible reductions disagree: the mean of the
+    # per-micro-batch values is (1 + 2 + 6) / 3 = 3.0, the pooled one 10 / 4 = 2.5. `kl` is not on
+    # the logger's list, so it is returned only if run_eval reduces every metric.
+    sums_and_denominators = iter([(2.0, 2.0), (2.0, 1.0), (6.0, 1.0)])
+
+    def eval_loss(*_args, **_kwargs):
+      total, denominator = next(sums_and_denominators)
+      loss = abstract_engine.WeightedMetric(unreduced_sum=jnp.array(total), denominator=jnp.array(denominator))
+      return loss, {"kl": abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.25), denominator=jnp.array(1.0))}
+
+    t.with_loss_fn(eval_loss, has_aux=True)
+    with mock.patch.object(t._metrics_logger, "write_metrics") as write_metrics:
+      metrics = t.run_eval([DummyPayload(), DummyPayload(), DummyPayload()])
+
+    self.assertEqual(metrics["eval_batches"], 3)
+    self.assertAlmostEqual(metrics["loss"], 3.0, places=5)
+    self.assertAlmostEqual(metrics["kl"], 0.25, places=5)
+    # The pass is still logged once, in EVAL mode, as eval_context always did.
+    self.assertEqual(write_metrics.call_count, 1)
+    self.assertEqual(write_metrics.call_args.kwargs["mode"], metrics_module.Mode.EVAL)
+
+    self.assertEqual(t.micro_step_count, micro_steps_before)
+    self.assertEqual(t.train_step, train_step_before)
+    jax.tree.map(np.testing.assert_array_equal, grads_before, t._accumulated_grads)
+
+  def test_run_eval_on_an_empty_stream_reports_no_batches_and_no_stale_numbers(self):
+    """An empty pass must not hand back the previous pass's metrics as its own."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    with mock.patch.object(t._metrics_logger, "write_metrics"):
+      self.assertIn("loss", t.run_eval([DummyPayload()]))
+      self.assertEqual(t.run_eval([]), {"eval_batches": 0})
+
+  def test_process_metrics_reduces_unlogged_metrics_only_when_asked(self):
+    """The logger's filter still holds by default; `only_logged=False` lifts it for run_eval."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    one = abstract_engine.WeightedMetric(unreduced_sum=jnp.array([1.0]), denominator=jnp.array([1.0]))
+    buffer = abstract_engine.MetricsBuffer(id=0, weighted_metrics={"loss": one, "kl": one})
+    self.assertNotIn("kl", t._metrics_logger.process_metrics(buffer))
+    self.assertIn("kl", t._metrics_logger.process_metrics(buffer, only_logged=False))
+
   def test_get_metrics_returns_one_buffer_and_a_sentinel_when_empty(self):
     """`get_metrics` returns a single buffer, matching both ABCs.
 

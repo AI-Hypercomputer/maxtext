@@ -29,7 +29,6 @@ from maxtext.training_engine import abstract_engine
 from maxtext.utils import max_logging, max_utils, maxtext_utils
 import numpy as np
 
-
 _METRICS_TO_LOG = [
     "learning_rate",
     "loss",
@@ -290,7 +289,7 @@ class MetricsLogger:
       )
       self._tb_writer.flush()
 
-  def process_metrics(self, metrics: abstract_engine.MetricsBuffer) -> dict[str, Any]:
+  def process_metrics(self, metrics: abstract_engine.MetricsBuffer, only_logged: bool = True) -> dict[str, Any]:
     """Reduction and processing pipeline for MetricsBuffer.
 
     Unpacks on-device weighted metrics by invoking safe compute(), extracts
@@ -298,6 +297,8 @@ class MetricsLogger:
 
     Args:
       metrics: MetricsBuffer retrieved from device.
+      only_logged: Reduce only the metrics this logger writes. False reduces every metric in
+        the buffer, for a caller that wants the numbers rather than the log.
     Returns:
       A dictionary of metric names to processed metric values.
     """
@@ -305,7 +306,7 @@ class MetricsLogger:
 
     # Process weighted metrics via safe division
     for name, weighted_metric in metrics.weighted_metrics.items():
-      if name not in _METRICS_TO_LOG:
+      if only_logged and name not in _METRICS_TO_LOG:
         continue
       reduced_val = weighted_metric.compute()
       host_val = np.asarray(reduced_val)
@@ -319,7 +320,7 @@ class MetricsLogger:
 
     # Process scalar metrics
     for name, scalar_val in metrics.scalar_metrics.items():
-      if name not in _METRICS_TO_LOG:
+      if only_logged and name not in _METRICS_TO_LOG:
         continue
       host_val = np.asarray(scalar_val)
       if name in metrics.aggregation_fns:

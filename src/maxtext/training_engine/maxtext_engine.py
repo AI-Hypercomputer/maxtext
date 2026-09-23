@@ -20,7 +20,7 @@ the MaxRL AbstractTrainer interface without running an outer loop.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 import contextlib
 import dataclasses
 import functools
@@ -659,6 +659,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._trainable_patterns = getattr(training_config, "trainable_parameters_mask", None)
     self._freeze_mask_fn = optimizers.get_path_mask_fn(self._trainable_patterns, match_returns_true=False)
     self._freeze_mask: Any = None
+    # What the last `eval_context` reduced its micro-batches to; `run_eval` returns it.
+    self._last_eval_metrics: dict[str, Any] = {}
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     self._model = self._build_model(wrap_with_tunix_adapter, tokenizer_pad_id)
@@ -1685,18 +1687,35 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def _compile_eval(self, dummy_data: abstract_engine.TrainerPayload, compiler_options: dict[str, Any] | None) -> None:
     """Compiles the forward-only eval kernel, so the first `eval_step` does not stall on XLA.
 
-    The eval kernel is not part of an update, so it is not one of `KERNEL_NAMES` and the
-    ahead-of-time report does not cover it; this is only for the live engine. An eval batch
-    shaped unlike `dummy_data` still recompiles inside `eval_step`, as an unforeseen training
-    batch does inside `fwd_bwd`.
+    An eval batch shaped unlike `dummy_data` still recompiles inside `eval_step`, as an
+    unforeseen training batch does inside `fwd_bwd`.
+    """
+    self._compiled_eval = self.compile_eval_kernel(dummy_data, compiler_options)
+
+  def compile_eval_kernel(
+      self,
+      dummy_data: abstract_engine.TrainerPayload,
+      compiler_options: dict[str, Any] | None = None,
+  ) -> jax.stages.Compiled:
+    """Lowers and compiles the forward-only eval kernel, and hands it back.
+
+    What `compile_kernels` is to the training kernels. The eval kernel is not one of
+    `KERNEL_NAMES` because no update runs it, but a validation pass does, and its peak is its
+    own: the whole forward with no backward to trade activations against. So the ahead-of-time
+    path compiles it too rather than assuming it fits because the training step does.
+
+    Args:
+      dummy_data: One eval micro-batch, real or abstract.
+      compiler_options: XLA options, defaulting to `config.compile_xla_flags`.
+
+    Returns:
+      The compiled eval kernel.
     """
     dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
     self._compile_eval_for_batch(dynamic_batch, static_batch)
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
     with self._sharding_ctx():
-      # `_compile_eval_for_batch` leaves the jitted wrapper here; lowering it replaces it with
-      # what it compiles to, which is what `eval_step` then dispatches through.
-      self._compiled_eval = self._compiled_eval.lower(
+      return self._compiled_eval.lower(
           jax.tree.map(_to_aval, params_pure),
           jax.tree.map(_to_aval, rest_pure),
           jax.tree.map(_to_aval, dynamic_batch),
@@ -1917,9 +1936,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     try:
       yield
     finally:
+      reduced: dict[str, Any] = {}
       for buffer in self._eval_metrics_recorder.get_metrics_history(clear_cache=True):
         logging.info("Writing buffered eval metrics for train step %d.", buffer.id)
         self._metrics_logger.write_metrics(buffer, mode=metrics_module.Mode.EVAL)
+        # Every metric, not only the logged ones: a caller of `run_eval` asked for this pass's
+        # numbers, and a custom loss's aux (GRPO's `kl`, `entropy`) is not on the logging list.
+        # One buffer per train step, and nothing inside the context can advance the step.
+        reduced = self._metrics_logger.process_metrics(buffer, only_logged=False)
+      self._last_eval_metrics = reduced
       self._eval_metrics_recorder.cleanup()
 
   def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
@@ -1965,6 +1990,54 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       for key, value in aux.items():
         if value is not None:
           self.record_metrics(key, value, mode=metrics_module.Mode.EVAL)
+
+  def run_eval(self, eval_ds: Iterable[abstract_engine.TrainerPayload], **kwargs: Any) -> dict[str, Any]:
+    """Runs one standalone validation pass over `eval_ds` and returns what it measured.
+
+    The method Tunix's `TrainerWorker.run_eval` dispatches to when a trainer has one, so the
+    orchestrator decides when validation happens rather than a loop inside the engine:
+    `eval_context` around one `eval_step` per micro-batch. It is forward-only -- the
+    parameters are read, and no optimizer state, gradient accumulator, micro-step count or
+    step counter moves -- so it may run between two `fwd_bwd` calls of an unfinished step.
+
+    Args:
+      eval_ds: Any iterable of eval micro-batches, in the shape `eval_step` takes. It does not
+        have to be the training stream: a frozen prompt set, a reference corpus.
+      **kwargs: Forwarded to every `eval_step`.
+
+    Returns:
+      Every metric the loss function produced, reduced over the pass exactly as the engine
+      logs it -- each micro-batch's value computed, then averaged over micro-batches, so a
+      short final micro-batch weighs as much as a full one -- plus `eval_batches`, the number
+      of micro-batches. When `eval_ds` is empty that count is the only entry.
+    """
+    eval_batches = 0
+    with self.eval_context():
+      for payload in eval_ds:
+        self.eval_step(payload, **kwargs)
+        eval_batches += 1
+    # `eval_context` replaces `_last_eval_metrics` on every exit, with `{}` for a pass that
+    # recorded nothing, so an empty pass cannot return the previous pass's numbers.
+    metrics = dict(self._last_eval_metrics)
+    metrics["eval_batches"] = eval_batches
+    return metrics
+
+  def input_sharding(self, leaf: Any) -> jax.sharding.NamedSharding | None:
+    """Returns the sharding a compiled step expects one loss input to arrive on.
+
+    For a caller that builds its payload on device. A multi-host one has to -- `jax.jit` will
+    not take a host array for a sharding that spans other processes -- and building each
+    array here means the kernel receives it without a reshard.
+
+    Args:
+      leaf: The input, or anything with its `shape` (a `jax.ShapeDtypeStruct`).
+
+    Returns:
+      Its sharding on this engine's mesh, or None when the engine has no mesh.
+    """
+    if self._mesh is None:
+      return None
+    return self._leaf_data_sharding(leaf, self._input_data_spec())
 
   def _place_read_only_inputs(self, inputs: Any) -> Any:
     """Commits a read-only call's array inputs to the shardings a step would use.
