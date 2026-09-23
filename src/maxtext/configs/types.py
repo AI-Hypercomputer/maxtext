@@ -5088,12 +5088,6 @@ class MaxTextConfig(
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
-    if (self.gdn != "remat" or self.gdn_conv != "remat" or self.gdn_states != "remat") and not self.use_gdn_kernel:
-      raise ValueError(
-          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
-          "requires `use_gdn_kernel=True`."
-      )
-
     for val in self.compress_ratios:
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")

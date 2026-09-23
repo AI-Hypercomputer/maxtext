@@ -1120,6 +1120,7 @@ class GdnBwdPallasTest(absltest.TestCase):
 
     # 3. Test with GDN custom remat policy (saving gdn residuals and output)
     class DummyConfig:
+      use_gdn_kernel = True
       remat_policy = "custom"
       tensors_on_device = ["decoder_layer_input", "gdn"]
       tensors_to_offload = []
@@ -1178,6 +1179,7 @@ class GdnBwdPallasTest(absltest.TestCase):
     """`gdn_states` expands to exactly the fwd-kernel outputs the Pallas bwd kernel consumes (+ CP-only m_local)."""
 
     class DummyConfig:
+      use_gdn_kernel = True
       remat_policy = "custom"
       tensors_on_device = ["decoder_layer_input", "gdn_states"]
       tensors_to_offload = []
@@ -1193,6 +1195,7 @@ class GdnBwdPallasTest(absltest.TestCase):
       self.assertNotIn(name, save_names)
 
     class OffloadConfig:
+      use_gdn_kernel = True
       remat_policy = "custom"
       tensors_on_device = ["decoder_layer_input"]
       tensors_to_offload = ["gdn_states"]

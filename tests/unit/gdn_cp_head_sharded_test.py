@@ -75,6 +75,7 @@ def create_gdn_config(
       logical_axis_rules=(),
       shard_mode="auto",
       debug_sharding=False,
+      gdn_mamba_block_size=None,
   )
 
 

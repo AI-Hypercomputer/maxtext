@@ -22,6 +22,7 @@ from . import gdn_bwd
 from . import gdn_bwd_pallas
 from . import memory_ref
 from . import metadata
+from . import model_runner
 from . import tiling
 from . import vmem_ldst
 from . import wrapper
@@ -39,6 +40,7 @@ __all__ = [
     "gdn_decoupled_conv1d",
     "memory_ref",
     "metadata",
+    "model_runner",
     "pallas_gdn_bwd_kernel",
     "tiling",
     "vmem_ldst",

@@ -280,8 +280,11 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
         "mlpwo",
     ]
   if config.remat_policy == "custom":
-    save_names = _expand_gdn_remat_names(list(config.tensors_on_device or []))
-    offload_names = _expand_gdn_remat_names(list(config.tensors_to_offload or []))
+    save_names = list(config.tensors_on_device or [])
+    offload_names = list(config.tensors_to_offload or [])
+    if getattr(config, "use_gdn_kernel", False):
+      save_names = _expand_gdn_remat_names(save_names)
+      offload_names = _expand_gdn_remat_names(offload_names)
     return save_names, offload_names
   return [], []
 
