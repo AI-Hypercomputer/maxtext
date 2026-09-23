@@ -243,13 +243,18 @@ def segmented_causal_depthwise_conv1d(
     `(B, S, C)` convolution output.
   """
   kernel_size = kernel.shape[0]
-  x = x.astype(jnp.float32)
+  # Callers that share one layout across the batch may pass a single row; the mask below
+  # indexes the batch, so materialise it, as `jax_chunk_gated_delta_rule` does.
+  segment_ids = jnp.broadcast_to(segment_ids, x.shape[:2])
   taps = kernel.astype(jnp.float32)
-  out = x * taps[kernel_size - 1, 0]
+  # The shift and the mask stay in `x`'s dtype; only the accumulator is float32. Upcasting
+  # `x` first would double the size of every temporary, and at this width they are large.
+  out = x.astype(jnp.float32) * taps[kernel_size - 1, 0]
   for offset in range(1, kernel_size):
     shifted = jnp.pad(x, ((0, 0), (offset, 0), (0, 0)))[:, :-offset]
     same_segment = jnp.pad(segment_ids[:, offset:] == segment_ids[:, :-offset], ((0, 0), (offset, 0)))
-    out += jnp.where(same_segment[..., None], shifted, 0.0) * taps[kernel_size - 1 - offset, 0]
+    shifted = jnp.where(same_segment[..., None], shifted, 0)
+    out += shifted.astype(jnp.float32) * taps[kernel_size - 1 - offset, 0]
   return out.astype(dtype)
 
 
@@ -321,7 +326,7 @@ def jax_chunk_gated_delta_rule(
     beta = pad_fn(beta)
     if segment_ids is not None:
       # 0 is the padding bucket, so the pad tail joins whatever padding the row already had.
-      segment_ids = pad_fn(segment_ids)
+      segment_ids = pad_fn(segment_ids, val=0)
 
   num_chunks = query.shape[1] // chunk_size
 
@@ -1320,7 +1325,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         # TODO(mazumdera): packed segments under context parallelism. Each shard would
         # have to know whether a boundary falls in a later shard before handing its state
         # on, and kernels/attention/gdn_cp.py folds a shard's chunks into a single affine
-        # map, which leaves nowhere to reset mid-shard.
+        # map, which leaves nowhere to reset mid-shard. Withholding the ids here leaves the
+        # recurrence at its previous behaviour under CP; the convolution above is segment
+        # aware on every path, so CP fixes one of the two leaks rather than neither.
         seg_operand = None if cp_axes else decoder_segment_ids
         seg_in_specs = ()
         if seg_operand is not None:
