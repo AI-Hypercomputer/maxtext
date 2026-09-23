@@ -1742,6 +1742,53 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       write_metrics.assert_called_once()
       self.assertIsNone(t._throttler._pending_metrics)
 
+  def test_per_leaf_grad_norms_name_the_parameter_that_went_nan(self):
+    """The global norm says only that some gradient is bad; the per-leaf norms say which."""
+    grads = {
+        "decoder": {
+            "gated_delta_net": {"kernel": jnp.array([3.0, 4.0])},
+            "routed_experts": {"gate": {"kernel": jnp.array([jnp.nan, 1.0])}},
+        }
+    }
+
+    norms = maxtext_engine._per_leaf_grad_norms(grads)  # pylint: disable=protected-access
+
+    self.assertEqual(sorted(norms), ["decoder/gated_delta_net/kernel", "decoder/routed_experts/gate/kernel"])
+    self.assertAlmostEqual(float(norms["decoder/gated_delta_net/kernel"]), 5.0, places=5)
+    self.assertTrue(bool(jnp.isnan(norms["decoder/routed_experts/gate/kernel"])))
+    # The same rendering `trainable_parameters_mask` matches against, so a name reported here
+    # can be pasted into that config as-is.
+    mask = optimizers.get_path_mask_fn(["routed_experts/gate/kernel"])(grads)
+    self.assertTrue(mask["decoder"]["routed_experts"]["gate"]["kernel"])
+    self.assertFalse(mask["decoder"]["gated_delta_net"]["kernel"])
+
+  def test_update_records_per_leaf_grad_norms_only_when_enabled(self):
+    """`log_per_leaf_grad_norm` adds one metric per gradient leaf, and is off by default."""
+    for enabled in (False, True):
+      with self.subTest(enabled=enabled):
+        t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(log_per_leaf_grad_norm=enabled))
+        t.with_loss_fn(
+            lambda model, *args, **kwargs: abstract_engine.WeightedMetric(
+                unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+            )
+        )
+        t.fwd_bwd(DummyPayload())
+        t.update()
+
+        scalars = t.get_metrics(clear_cache=True).scalar_metrics
+        self.assertIn("gradient_norm", scalars)
+        if enabled:
+          # The leaf keeps the `/value` the pure NNX state gives it, which is also what
+          # `get_path_mask_fn` renders, so the two agree on what a parameter is called.
+          # d(unreduced_sum)/dw is 8.0 per element, divided once by the denominator of 4.0,
+          # so the one leaf carries the whole global norm: sqrt(2.0**2 + 2.0**2).
+          np.testing.assert_allclose(float(scalars["gradient_norm_per_leaf/weights/value"][0]), np.sqrt(8.0), rtol=1e-5)
+          np.testing.assert_allclose(
+              float(scalars["gradient_norm_per_leaf/weights/value"][0]), float(scalars["gradient_norm"][0]), rtol=1e-6
+          )
+        else:
+          self.assertNotIn("gradient_norm_per_leaf/weights/value", scalars)
+
 
 if __name__ == "__main__":
   absltest.main()
