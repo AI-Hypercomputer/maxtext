@@ -648,10 +648,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       return None, None, None
 
     if getattr(self.config, "use_gdn_kernel", False):
-      logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = (
-          gdn_kernel_runner.get_gdn_kernel_cp_sharding_info(
-              self.config, self.mesh, get_logical_axis_rules, gdn_context_axes
-          )
+      logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = gdn_kernel_runner.get_gdn_kernel_cp_sharding_info(
+          self.config, self.mesh, get_logical_axis_rules, gdn_context_axes
       )
     else:
       logical_rules = get_logical_axis_rules()
@@ -664,7 +662,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     def _sharding(logical_axes):
       pspec = logical_to_mesh_axes(logical_axes, mesh=self.mesh, rules=logical_rules)
       if cp_axes_active and len(logical_axes) > 1 and logical_axes[1] == LENGTH and pspec[1] is None:
-        pspec = P(pspec[0], cp_axis_for_pspec, *pspec[2:])
+        pspec = jax.sharding.PartitionSpec(pspec[0], cp_axis_for_pspec, *pspec[2:])
       # Training microbatches can be smaller than the physical batch partition.
       # Only dim 0 is inspected, so the trailing sizes are placeholders.
       shape = (batch,) + (1,) * (len(logical_axes) - 1)
@@ -777,7 +775,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
     qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
-    qkvz = checkpoint_name(qkvz, "qkv_proj")
+    if use_gdn_kernel:
+      qkvz = checkpoint_name(qkvz, "qkv_proj")
     # ba: (B, S, 2 * H_v)
     ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
 
@@ -795,10 +794,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     mixed_qkvz = jnp.reshape(qkvz, new_shape_qkvz, out_sharding=head_sharding)
     if self.mesh is not None:
       if use_gdn_kernel:
-        logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = (
-            gdn_kernel_runner.get_gdn_kernel_cp_sharding_info(
-                cfg, self.mesh, get_logical_axis_rules, gdn_context_axes
-            )
+        logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = gdn_kernel_runner.get_gdn_kernel_cp_sharding_info(
+            cfg, self.mesh, get_logical_axis_rules, gdn_context_axes
         )
       else:
         logical_rules = get_logical_axis_rules()
@@ -813,7 +810,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         cp_len = LENGTH if gdn_context_axes(cfg) else None
       qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       if cp_axes_active and qkvz_pspec[1] is None:
-        qkvz_pspec = P(qkvz_pspec[0], cp_axis_for_pspec, *qkvz_pspec[2:])
+        qkvz_pspec = jax.sharding.PartitionSpec(qkvz_pspec[0], cp_axis_for_pspec, *qkvz_pspec[2:])
       # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
       qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
           qkvz_pspec,
@@ -888,6 +885,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             truncate_sharded_tensor,
         )
         from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
       except ImportError as e:
         raise ImportError(
             "GDN attention kernel require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
@@ -910,8 +908,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       mixed_qkv = jax.shard_map(
           lambda q, k, v: jnp.concatenate([q, k, v], axis=-1),
           mesh=self.mesh,
-          in_specs=(P(attn_data, attn_head),) * 3,
-          out_specs=P(attn_data, attn_head),
+          in_specs=(P_spec(attn_data, attn_head),) * 3,
+          out_specs=P_spec(attn_data, attn_head),
           check_vma=False,
       )(q_flat, k_flat, v_flat)
 
@@ -999,22 +997,20 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       )
 
     if use_gdn_kernel:
-      core_attn_out, next_conv_state, next_recurrent_state = (
-          gdn_kernel_runner.run_gdn_kernel_layer(
-              layer=self,
-              query=query,
-              key=key,
-              value=value,
-              value_raw=value_raw,
-              b=b,
-              a=a,
-              active_cache=active_cache,
-              decoder_segment_ids=decoder_segment_ids,
-              model_mode=model_mode,
-              state_dtype=jnp.dtype(getattr(cfg, "gdn_state_dtype", jnp.float32)),
-              flat_sharding=flat_sharding,
-              gdn_context_axes_fn=gdn_context_axes,
-          )
+      core_attn_out, next_conv_state, next_recurrent_state = gdn_kernel_runner.run_gdn_kernel_layer(
+          layer=self,
+          query=query,
+          key=key,
+          value=value,
+          value_raw=value_raw,
+          b=b,
+          a=a,
+          active_cache=active_cache,
+          decoder_segment_ids=decoder_segment_ids,
+          model_mode=model_mode,
+          state_dtype=jnp.dtype(getattr(cfg, "gdn_state_dtype", jnp.float32)),
+          flat_sharding=flat_sharding,
+          gdn_context_axes_fn=gdn_context_axes,
       )
     else:
       # Flatten head dimensions for concatenation before conv
@@ -1087,7 +1083,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       if decoder_segment_ids is not None:
         conv_out = jnp.where((decoder_segment_ids != 0)[..., None], conv_out, 0.0)
       qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
-      qkv_conv = checkpoint_name(qkv_conv, "gdn_conv_out")
       # q_conv shape: (B, S, key_dim), k_conv shape: (B, S, key_dim), v_conv shape: (B, S, value_dim)
       q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
 
@@ -1297,7 +1292,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output, out_sharding=out_sharding)
-    output = checkpoint_name(output, "out_proj")
+    if use_gdn_kernel:
+      output = checkpoint_name(output, "out_proj")
     if decoder_segment_ids is not None:
       output = jnp.where((decoder_segment_ids != 0)[..., None], output, 0.0)
 

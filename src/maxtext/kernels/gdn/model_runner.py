@@ -44,23 +44,21 @@ except ImportError:
   except ImportError:
     name_p = None
 
-_GDN_SAVED_NAMES = frozenset(
-    {
-        "gdn",
-        "gdn_core_attn_out",
-        "gdn_fwd_out",
-        "gdn_qkv",
-        "gdn_b",
-        "gdn_a",
-        "gdn_t_inv",
-        "gdn_chunk_states",
-        "gdn_m_local",
-        "gdn_conv_state",
-        "gdn_recurrent_state",
-        "gdn_conv",
-        "gdn_conv_out",
-    }
-)
+_GDN_SAVED_NAMES = frozenset({
+    "gdn",
+    "gdn_core_attn_out",
+    "gdn_fwd_out",
+    "gdn_qkv",
+    "gdn_b",
+    "gdn_a",
+    "gdn_t_inv",
+    "gdn_chunk_states",
+    "gdn_m_local",
+    "gdn_conv_state",
+    "gdn_recurrent_state",
+    "gdn_conv",
+    "gdn_conv_out",
+})
 
 
 def _default_gdn_context_axes(cfg: Any) -> tuple[str, ...]:
@@ -98,14 +96,10 @@ def get_gdn_kernel_cp_sharding_info(
   """Returns (logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len) for GDN kernel CP sharding."""
   logical_rules = get_logical_axis_rules_fn() or config.logical_axis_rules
   cp_axes_active = tuple(
-      ax
-      for ax in gdn_context_axes_fn(config)
-      if mesh is not None and ax in mesh.axis_names and mesh.shape[ax] > 1
+      ax for ax in gdn_context_axes_fn(config) if mesh is not None and ax in mesh.axis_names and mesh.shape[ax] > 1
   )
   cp_axis_for_pspec = (
-      cp_axes_active[0]
-      if len(cp_axes_active) == 1
-      else (cp_axes_active if cp_axes_active else None)
+      cp_axes_active[0] if len(cp_axes_active) == 1 else (cp_axes_active if cp_axes_active else None)
   )
   cp_len = LENGTH if cp_axes_active else None
   return logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len
@@ -159,11 +153,7 @@ def run_gdn_kernel_layer(
   else:
     use_head_sharded_cp = False
 
-  use_seq_sharded_cp = (
-      cp_size > 1
-      and model_mode != MODEL_MODE_AUTOREGRESSIVE
-      and not use_head_sharded_cp
-  )
+  use_seq_sharded_cp = cp_size > 1 and model_mode != MODEL_MODE_AUTOREGRESSIVE and not use_head_sharded_cp
 
   if use_head_sharded_cp or use_seq_sharded_cp:
     if getattr(cfg, "context_parallel_load_balance", False):
@@ -350,7 +340,9 @@ def run_gdn_kernel_layer(
       a_log_pspec = P()
       dt_bias_pspec = P()
       conv_state_pspec = logical_to_mesh_axes((KV_BATCH, None, None), mesh=layer.mesh, rules=logical_rules)
-      recurrent_state_pspec = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=layer.mesh, rules=logical_rules)
+      recurrent_state_pspec = logical_to_mesh_axes(
+          (KV_BATCH, None, None, None), mesh=layer.mesh, rules=logical_rules
+      )
       out_attn_pspec = qkv_pspec
 
     qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
@@ -378,7 +370,9 @@ def run_gdn_kernel_layer(
       qkv = jax.sharding.reshard(qkv, jax.sharding.NamedSharding(layer.mesh, qkv_pspec))
       b = jax.sharding.reshard(b, jax.sharding.NamedSharding(layer.mesh, b_a_pspec))
       a = jax.sharding.reshard(a, jax.sharding.NamedSharding(layer.mesh, b_a_pspec))
-      conv_state_arg = jax.sharding.reshard(conv_state_arg, jax.sharding.NamedSharding(layer.mesh, conv_state_pspec))
+      conv_state_arg = jax.sharding.reshard(
+          conv_state_arg, jax.sharding.NamedSharding(layer.mesh, conv_state_pspec)
+      )
       recurrent_state_arg = jax.sharding.reshard(
           recurrent_state_arg, jax.sharding.NamedSharding(layer.mesh, recurrent_state_pspec)
       )
@@ -408,7 +402,7 @@ def run_gdn_kernel_layer(
         ),
         check_vma=False,
     )
-    def shard_mapped_gdn(
+    def shard_mapped_gdn(  # pylint: disable=too-many-positional-arguments
         qkv_val,
         b_val,
         a_val,
