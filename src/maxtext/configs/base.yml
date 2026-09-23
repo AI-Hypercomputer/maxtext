@@ -101,6 +101,13 @@ source_checkpoint_layout: "orbax"
 # Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing
 colocated_python_checkpointing: false
 
+# Orbax Pathways array-handler implementation for the RL training engine (training_engine/),
+# active when ENABLE_PATHWAYS_PERSISTENCE=1. Options: "persistence" (shipped default) or
+# "colocated_python" (opt-in; requires a colocated-python sidecar container whose jax/jaxlib
+# versions match the head image exactly). This is NOT the same switch as
+# `colocated_python_checkpointing` above, which drives pre-train Multi-Tier Checkpointing.
+pathways_checkpointing_impl: "persistence"
+
 # enables autocheckpoint, which saves a checkpoint at the preemption step.
 enable_autocheckpoint: false
 ############################### end checkpointing ##################################

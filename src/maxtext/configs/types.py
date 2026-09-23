@@ -433,6 +433,17 @@ class Checkpointing(BaseModel):
       False,
       description="If True, enables checkpointing from remote TPU VMs instead of head node on pathways.",
   )
+  pathways_checkpointing_impl: Literal["persistence", "colocated_python"] = Field(
+      "persistence",
+      description=(
+          "Orbax Pathways array-handler implementation used by the RL training engine when "
+          "ENABLE_PATHWAYS_PERSISTENCE=1. 'persistence' is the shipped default. 'colocated_python' "
+          "is opt-in and requires a colocated-python sidecar container whose jax/jaxlib versions "
+          "match the head image exactly. Distinct from `colocated_python_checkpointing` above, "
+          "which is the pre-train Multi-Tier Checkpointing switch and requires "
+          "enable_single_controller."
+      ),
+  )
   enable_autocheckpoint: bool = Field(
       False,
       description="If True, enables autocheckpoint or preemption induced checkpointing.",
