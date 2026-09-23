@@ -218,6 +218,41 @@ def naive_jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
+def segmented_causal_depthwise_conv1d(
+    x: Array,
+    kernel: Array,
+    segment_ids: Array,
+    dtype: jnp.dtype,
+) -> Array:
+  """Depthwise causal 1D convolution that restarts at every packed-segment boundary.
+
+  `nnx.Conv` sees one contiguous row, so when several sequences share a row its window
+  reaches back across a boundary and mixes the tail of one sequence into the first
+  `kernel_size - 1` tokens of the next. Those tokens are written into the delta-rule
+  state, so the error then reaches every later token of the segment. This evaluates the
+  same convolution one tap at a time and drops any tap whose source token belongs to a
+  different segment.
+
+  Args:
+    x: `(B, S, C)` activations, already zeroed on padding positions.
+    kernel: `(K, 1, C)` depthwise kernel in the layout `nnx.Conv` stores it.
+    segment_ids: `(B, S)` packing ids, 0 marking padding.
+    dtype: dtype of the returned array.
+
+  Returns:
+    `(B, S, C)` convolution output.
+  """
+  kernel_size = kernel.shape[0]
+  x = x.astype(jnp.float32)
+  taps = kernel.astype(jnp.float32)
+  out = x * taps[kernel_size - 1, 0]
+  for offset in range(1, kernel_size):
+    shifted = jnp.pad(x, ((0, 0), (offset, 0), (0, 0)))[:, :-offset]
+    same_segment = jnp.pad(segment_ids[:, offset:] == segment_ids[:, :-offset], ((0, 0), (offset, 0)))
+    out += jnp.where(same_segment[..., None], shifted, 0.0) * taps[kernel_size - 1 - offset, 0]
+  return out.astype(dtype)
+
+
 def jax_chunk_gated_delta_rule(
     query: Array,
     key: Array,
@@ -229,8 +264,21 @@ def jax_chunk_gated_delta_rule(
     use_qk_norm_in_gdn: bool = False,
     cp_axis: None | str = None,
     compute_dtype: jnp.dtype = jnp.bfloat16,
+    segment_ids: None | Array = None,
 ) -> tuple[Array, None | Array]:
-  """Optimized JAX implementation of Gated Delta Rule."""
+  """Optimized JAX implementation of Gated Delta Rule.
+
+  When `segment_ids` is given, the recurrence is restarted wherever the id changes, so a
+  row holding several packed sequences produces the same output per sequence as running
+  each one on its own. Without it the scan is sequential over the whole row and carries
+  one sequence's recurrent state into the next.
+  """
+  if cp_axis is not None and segment_ids is not None:
+    raise NotImplementedError(
+        "GDN context parallelism cannot honour packed-segment boundaries: "
+        "kernels/attention/gdn_cp.py folds each shard's chunks into a single affine map, "
+        "which leaves nowhere to reset the recurrent state mid-shard."
+    )
   # =========================================================================
   # STAGE 1: PREPARATION & PADDING
   # =========================================================================
@@ -255,6 +303,11 @@ def jax_chunk_gated_delta_rule(
   B, seq_len, H, K_dim = key.shape
   V_dim = value.shape[-1]
 
+  if segment_ids is not None:
+    # Callers that share one layout across the batch pass a single row; the masks below
+    # index the batch, so materialise it.
+    segment_ids = jnp.broadcast_to(segment_ids, (B, seq_len))
+
   pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
   if pad_len > 0:
 
@@ -266,6 +319,9 @@ def jax_chunk_gated_delta_rule(
     value = pad_fn(value)
     g = pad_fn(g)
     beta = pad_fn(beta)
+    if segment_ids is not None:
+      # 0 is the padding bucket, so the pad tail joins whatever padding the row already had.
+      segment_ids = pad_fn(segment_ids)
 
   num_chunks = query.shape[1] // chunk_size
 
@@ -283,12 +339,44 @@ def jax_chunk_gated_delta_rule(
   g_c = to_chunk_scalar(g)
   beta_c = to_chunk_scalar(beta)
 
+  # Segment layout. Everything below treats the row as one sequence when no ids are given,
+  # which is what every unpacked caller wants and what this function did before.
+  if segment_ids is None:
+    seg_flat = jnp.ones((B, num_chunks * chunk_size), dtype=jnp.int32)
+  else:
+    raw_flat = segment_ids.astype(jnp.int32)
+    # Padding (id 0) is folded into whichever sequence precedes it. Padding tokens carry
+    # zero key and value, so they leave the state alone, and prefill hands the state at
+    # the end of the real tokens back to the cache rather than a state reset by the tail.
+    positions = jnp.arange(raw_flat.shape[1], dtype=jnp.int32)
+    last_nonzero = jax.lax.cummax(jnp.where(raw_flat > 0, positions, -1), axis=1)
+    seg_flat = jnp.where(last_nonzero >= 0, jnp.take_along_axis(raw_flat, jnp.maximum(last_nonzero, 0), axis=1), 0)
+  seg_c = seg_flat.reshape(B, num_chunks, chunk_size)
+  # Row position 0 is never a boundary, so a supplied `initial_state` still reaches it, and
+  # neither is the first real token of a left-padded row: nothing precedes it to discard.
+  boundaries = jnp.logical_and(seg_flat[:, 1:] != seg_flat[:, :-1], seg_flat[:, :-1] != 0)
+  is_start = jnp.concatenate([jnp.zeros((B, 1), dtype=bool), boundaries], axis=-1).reshape(B, num_chunks, chunk_size)
+  # Index within the chunk of the latest segment start at or before each position; -1 when
+  # the position's segment began in an earlier chunk, which is exactly when the state the
+  # scan carries in still belongs to it.
+  start_idx = jax.lax.cummax(jnp.where(is_start, jnp.arange(chunk_size, dtype=jnp.int32), -1), axis=2)
+  carries_state = start_idx < 0
+  same_segment = seg_c[:, :, :, None] == seg_c[:, :, None, :]
+
   # =========================================================================
   # STAGE 2: INTRA-CHUNK PRE-COMPUTATION (Parallel)
   # =========================================================================
 
-  # Cumulative decay (Must be float32)
-  g_cumsum = jnp.cumsum(g_c, axis=-1)
+  # Cumulative decay (Must be float32), measured from the start of each token's own
+  # segment: subtract the running sum as it stood just before that segment opened.
+  g_cumsum_row = jnp.cumsum(g_c, axis=-1)
+  g_exclusive = g_cumsum_row - g_c
+  base = jnp.take_along_axis(
+      g_exclusive,
+      jnp.broadcast_to(jnp.maximum(start_idx, 0)[:, :, None, :], g_exclusive.shape),
+      axis=-1,
+  )
+  g_cumsum = jnp.where(carries_state[:, :, None, :], g_cumsum_row, g_cumsum_row - base)
   k_beta = k_c * beta_c[..., None]
 
   # S Matrix Calculation
@@ -297,7 +385,10 @@ def jax_chunk_gated_delta_rule(
 
   # Apply mask BEFORE exp to prevent 'inf' gradients
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
-  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
+  mask = jnp.logical_and(
+      jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1),
+      same_segment[:, :, None, :, :],
+  )
   g_diff = jnp.where(mask, g_diff, -1e30)
 
   S = S * jnp.exp(g_diff)
@@ -314,7 +405,8 @@ def jax_chunk_gated_delta_rule(
   u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
   u_chunks = u_chunks.astype(compute_dtype)
 
-  k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
+  # Only tokens whose segment predates this chunk may interact with the carried state.
+  k_beta_g = k_beta.astype(jnp.float32) * (jnp.exp(g_cumsum) * carries_state[:, :, None, :])[..., None]
   w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
   w_chunks = w_chunks.astype(compute_dtype)
 
@@ -329,21 +421,24 @@ def jax_chunk_gated_delta_rule(
   k_scan = k_c.transpose(scan_perm_vec)
   q_scan = q_c.transpose(scan_perm_vec)
   g_scan = g_cumsum.transpose(scan_perm_scl)
+  carry_scan = carries_state.transpose(1, 0, 2)
+  seg_scan = seg_c.transpose(1, 0, 2)
 
   if initial_state is None:
     h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32)
   else:
     h_init = initial_state.astype(jnp.float32)
 
-  xs = (w_scan, u_scan, q_scan, k_scan, g_scan)
+  xs = (w_scan, u_scan, q_scan, k_scan, g_scan, carry_scan, seg_scan)
 
   def scan_body(h, args):
-    w, u, q, k, g = args
+    w, u, q, k, g, carries, seg = args
     prec = jax.lax.Precision.HIGHEST
 
     # --- Output Computation ---
-    # 1. Inter-chunk: q(dtype) * exp(g)(f32) -> f32
-    q_g = q.astype(jnp.float32) * jnp.exp(g)[..., None]
+    # 1. Inter-chunk: q(dtype) * exp(g)(f32) -> f32. Tokens whose segment opened inside
+    #    this chunk read nothing from the carried state.
+    q_g = q.astype(jnp.float32) * (jnp.exp(g) * carries[:, None, :])[..., None]
     attn_inter = jnp.matmul(q_g, h, precision=prec)
 
     # 2. Delta Rule Subtraction (v_prime and v_new)
@@ -357,7 +452,8 @@ def jax_chunk_gated_delta_rule(
 
     # Mask before exp
     g_diff = g[..., :, None] - g[..., None, :]
-    mask_intra = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool))
+    same = (seg[:, :, None] == seg[:, None, :])[:, None, :, :]
+    mask_intra = jnp.logical_and(jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool)), same)
     g_diff = jnp.where(mask_intra, g_diff, -1e30)
 
     attn_i = attn * jnp.exp(g_diff)
@@ -371,11 +467,17 @@ def jax_chunk_gated_delta_rule(
     o_c = attn_inter + term2
 
     # --- State Update ---
-    g_i_last_exp = jnp.exp(g[..., -1, None, None])
+    # A boundary anywhere in this chunk means the state leaving it belongs to a later
+    # sequence than the one that entered, so the incoming state is dropped rather than
+    # decayed. `carries[-1]` is false exactly in that case.
+    g_i_last_exp = jnp.exp(g[..., -1, None, None]) * carries[:, -1][:, None, None, None]
     h_new = h * g_i_last_exp
 
-    # Apply Delta Rule K decay to state
-    g_diff_exp_state = jnp.exp(g[..., -1, None] - g)[..., None]
+    # Apply Delta Rule K decay to state. Masked before the exp: `g` is measured from each
+    # token's own segment start, so a difference taken across a boundary is meaningless
+    # and can be large and positive.
+    same_as_last = (seg == seg[:, -1:])[:, None, :]
+    g_diff_exp_state = jnp.exp(jnp.where(same_as_last, g[..., -1, None] - g, -1e30))[..., None]
     k_i_g_diff = k.astype(jnp.float32) * g_diff_exp_state
 
     update_term = jnp.matmul(k_i_g_diff.swapaxes(-1, -2), v_new, precision=prec)
@@ -1075,10 +1177,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       else:
         conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
 
-      # Perform the convolution.
-      conv_out = self.conv1d(conv_input, out_sharding=flat_sharding)
-      # Slice the output to match the original input sequence length.
-      conv_out = conv_out[:, -seq_len:, :]
+      # Perform the convolution. A packed row holds several sequences, so the window has
+      # to restart at each boundary rather than reach back into the previous sequence.
+      # The cached path below carries one sequence per row and keeps the plain conv.
+      if conv_state is None and decoder_segment_ids is not None:
+        conv_out = segmented_causal_depthwise_conv1d(qkv, self.conv1d.kernel.value, decoder_segment_ids, cfg.dtype)
+        if flat_sharding is not None:
+          conv_out = jax.sharding.reshard(conv_out, flat_sharding)
+      else:
+        conv_out = self.conv1d(conv_input, out_sharding=flat_sharding)
+        # Slice the output to match the original input sequence length.
+        conv_out = conv_out[:, -seq_len:, :]
       if decoder_segment_ids is not None:
         conv_out = jnp.where((decoder_segment_ids != 0)[..., None], conv_out, 0.0)
       qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
@@ -1206,6 +1315,27 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           beta = jax.sharding.reshard(beta, g_beta_pspec)
           recurrent_state_arg = jax.sharding.reshard(recurrent_state_arg, state_pspec)
 
+        # The ids go in as an operand, not as a captured constant: they are batch-sharded
+        # like everything else here.
+        # TODO(mazumdera): packed segments under context parallelism. Each shard would
+        # have to know whether a boundary falls in a later shard before handing its state
+        # on, and kernels/attention/gdn_cp.py folds a shard's chunks into a single affine
+        # map, which leaves nowhere to reset mid-shard.
+        seg_operand = None if cp_axes else decoder_segment_ids
+        seg_in_specs = ()
+        if seg_operand is not None:
+          seg_pspec = logical_to_mesh_axes((KV_BATCH, cp_len), mesh=self.mesh, rules=logical_rules)
+          seg_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+              seg_pspec,
+              seg_operand.shape,
+              self.mesh,
+              dims=(0,),
+              allow_remove_axes=True,
+          )
+          seg_in_specs = (seg_pspec,)
+          if cfg.shard_mode == ShardMode.EXPLICIT:
+            seg_operand = jax.sharding.reshard(seg_operand, seg_pspec)
+
         @functools.partial(
             jax.shard_map,
             mesh=self.mesh,
@@ -1216,14 +1346,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
                 g_beta_pspec,  # g
                 g_beta_pspec,  # beta
                 state_pspec,  # initial_state
-            ),
+            )
+            + seg_in_specs,  # segment_ids, when the caller supplied any
             out_specs=(
                 qkv_pspec,  # core_attn_out
                 state_pspec,  # final_state
             ),
             check_vma=False,
         )
-        def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h):
+        def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h, seg=None):
           return jax_chunk_gated_delta_rule(
               query=q,
               key=k,
@@ -1235,9 +1366,18 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
               use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
               compute_dtype=cfg.dtype,
               cp_axis=cp_axes or None,
+              segment_ids=seg,
           )
 
-        core_attn_out, next_recurrent_state = shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg)
+        core_attn_out, next_recurrent_state = shard_mapped_delta_rule(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            recurrent_state_arg,
+            *((seg_operand,) if seg_operand is not None else ()),
+        )
       else:
         core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
             query,
@@ -1249,6 +1389,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             initial_state=recurrent_state,
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=cfg.dtype,
+            segment_ids=decoder_segment_ids,
         )
 
       if model_mode != MODEL_MODE_TRAIN and active_cache is not None:

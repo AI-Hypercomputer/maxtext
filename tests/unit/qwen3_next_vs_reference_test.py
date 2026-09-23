@@ -991,6 +991,73 @@ class TestQwen3Next(unittest.TestCase):
     )
     print("test_gated_delta_net_left_padding_invariance_and_gradients passed!")
 
+  def test_gated_delta_net_packed_segment_equivalence(self):
+    """Tests that sequences packed into one row match the same sequences run on their own."""
+    print("Running test_gated_delta_net_packed_segment_equivalence.")
+    # None of the boundaries is a multiple of gdn_chunk_size. tunix's packer
+    # (tunix/rl/packing.py, pack_bin) advances its cursor by the exact sequence length, so
+    # an interior boundary lands anywhere inside a chunk, and the row ends with padding
+    # because the last sequence rarely fills the bin.
+    lengths = [40, 37, 31]
+    self.assertLess(sum(lengths), self.seq_len)
+    starts = np.cumsum([0] + lengths[:-1])
+    for start in starts[1:]:
+      self.assertNotEqual(int(start) % self.cfg.gdn_chunk_size, 0)
+
+    hidden = jax.random.normal(
+        jax.random.PRNGKey(321),
+        (self.batch_size, self.seq_len, self.hidden_size),
+        dtype=self.cfg.dtype,
+    )
+    positions = jnp.broadcast_to(jnp.arange(self.seq_len), (self.batch_size, self.seq_len))
+    packed_segment_ids = jnp.zeros((self.batch_size, self.seq_len), dtype=jnp.int32)
+    for i, (start, length) in enumerate(zip(starts, lengths)):
+      in_segment = (positions >= start) & (positions < start + length)
+      packed_segment_ids = jnp.where(in_segment, i + 1, packed_segment_ids)
+
+    jax_model = qwen3.Qwen3NextGatedDeltaNet(
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.nnx_rngs,
+        inputs_shape=hidden.shape,
+    )
+    packed_out, _ = jax_model(hidden, decoder_segment_ids=packed_segment_ids)
+
+    # Every sequence in the row must produce what it would have produced in a bin of its
+    # own: the front of a row, padded out to the full width.
+    for start, length in zip(starts, lengths):
+      solo_ids = jnp.where(positions < length, 1, 0).astype(jnp.int32)
+      solo_hidden = jnp.zeros_like(hidden).at[:, :length].set(hidden[:, start : start + length])
+      solo_out, _ = jax_model(solo_hidden, decoder_segment_ids=solo_ids)
+      np.testing.assert_allclose(
+          np.asarray(packed_out[:, start : start + length]),
+          np.asarray(solo_out[:, :length]),
+          rtol=1e-4,
+          atol=1e-4,
+          err_msg=f"segment at [{start}, {start + length}) does not match its solo run",
+      )
+
+    # Marking the whole row as one segment reproduces the behaviour before the reset
+    # existed, when decoder_segment_ids reached the delta rule only as `!= 0`. The gap it
+    # leaves on the last sequence is a large fraction of the output, so the checks above
+    # are not vacuous.
+    last_start, last_len = int(starts[-1]), lengths[-1]
+    solo_ids = jnp.where(positions < last_len, 1, 0).astype(jnp.int32)
+    solo_hidden = jnp.zeros_like(hidden).at[:, :last_len].set(hidden[:, last_start : last_start + last_len])
+    solo_out, _ = jax_model(solo_hidden, decoder_segment_ids=solo_ids)
+    unreset_out, _ = jax_model(hidden, decoder_segment_ids=(packed_segment_ids != 0).astype(jnp.int32))
+    unreset_tail = np.asarray(unreset_out[:, last_start : last_start + last_len])
+    solo_tail = np.asarray(solo_out[:, :last_len])
+    self.assertGreater(np.max(np.abs(unreset_tail - solo_tail)), 0.05 * np.max(np.abs(solo_tail)))
+
+    # Gradients stay finite across the boundaries.
+    def loss_fn(inputs):
+      out, _ = jax_model(inputs, decoder_segment_ids=packed_segment_ids)
+      return jnp.sum(out.astype(jnp.float32) ** 2)
+
+    self.assertTrue(bool(jnp.all(jnp.isfinite(jax.grad(loss_fn)(hidden)))))
+    print("test_gated_delta_net_packed_segment_equivalence passed!")
+
   def test_qwen3_next_rms_norm(self):
     """Tests the custom Qwen3NextRMSNorm layer against its PyTorch reference."""
     print("Running test_qwen3_next_rms_norm...")
