@@ -587,6 +587,8 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
   assert captured["in_specs"][2] is None
   assert captured["in_specs"][9] is None
   assert captured["out_specs"][0] == P(batch_partition, None, None)
+  # The overflow flag stays unreduced: one flag per device over every mesh axis.
+  assert captured["out_specs"][3] == P(("fsdp", "expert"))
 
 
 class RoutedMoeTest(parameterized.TestCase):
