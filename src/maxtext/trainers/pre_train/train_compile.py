@@ -68,11 +68,21 @@ def validate_config(config):
 def get_topology_mesh(config):
   """Get the target hardware devices, and create configured mesh with them"""
   if config.internal_compile:
-    topology_devices = get_topology_desc(
-        platform="tpu",
-        topology_name=config.compile_topology,
-        num_slices=config.compile_topology_num_slices,
-    ).devices
+    try:
+      topology_devices = get_topology_desc(
+          platform="tpu",
+          topology_name=config.compile_topology,
+          num_slices=config.compile_topology_num_slices,
+      ).devices
+    except jax.errors.JaxRuntimeError:
+      if config.compile_topology.startswith("gf="):
+        topology_devices = get_topology_desc(
+            platform="tpu",
+            topology_name="tpu7x=" + config.compile_topology[len("gf=") :],
+            num_slices=config.compile_topology_num_slices,
+        ).devices
+      else:
+        raise
   else:
     target_hardware = accelerator_to_spec_map.get_system_characteristics(config.compile_topology)
     if target_hardware.platform == "gpu":
@@ -210,6 +220,7 @@ def jit_and_compile(
     lowered = jitted.lower(*func_input_args, **func_input_kwargs)
   # Import libtpu flags as compiler options. Defaults to empty dict if string is empty.
   compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+  print(f"Compiling with {len(compiler_options)} compiler_options: {compiler_options}", flush=True)
   compiled = lowered.compile(compiler_options=compiler_options)
   return compiled
 
@@ -413,6 +424,8 @@ def main(argv: Sequence[str]) -> None:
         delete_local_after=config.dump_hlo_delete_local_after,
         all_host_upload=config.dump_hlo_upload_all,
     )
+
+  return compiled
 
 
 if __name__ == "__main__":

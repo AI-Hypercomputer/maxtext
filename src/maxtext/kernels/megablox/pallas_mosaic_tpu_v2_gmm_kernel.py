@@ -1090,7 +1090,7 @@ def validate_inputs(
 
   assert group_offset.shape == (1,)
 
-  size_lhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(lhs.dtype)
+  size_lhs_sublane = max(pltpu.get_tpu_info().get_sublane_tiling(lhs.dtype), 16)
   size_lhs_sublane = min(size_lhs_sublane, size_m)
   if fuse_act is not None:
     num_lanes = pltpu.get_tpu_info().num_lanes

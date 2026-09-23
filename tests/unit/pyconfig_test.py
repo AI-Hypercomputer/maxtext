@@ -49,6 +49,65 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_gdn_granular_remat_requires_gdn_kernel(self):
+    with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          gdn="device",
+          use_gdn_kernel=False,
+      )
+
+  def test_gdn_granular_remat_accepts_gdn_kernel(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        gdn="device",
+        use_gdn_kernel=True,
+    )
+    self.assertEqual(config.gdn, "device")
+    self.assertTrue(config.use_gdn_kernel)
+
+  def test_gdn_states_requires_gdn_kernel(self):
+    with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          gdn_states="device",
+          use_gdn_kernel=False,
+      )
+
+  def test_gdn_states_custom_remat_resolves_tensors(self):
+    """`gdn_states` defaults to remat and, under remat_policy=custom, lands in tensors_on_device / tensors_to_offload."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        use_gdn_kernel=True,
+    )
+    self.assertEqual(config.gdn_states, "remat")
+
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        remat_policy="custom",
+        gdn="remat",
+        gdn_conv="remat",
+        gdn_states="device",
+        use_gdn_kernel=True,
+    )
+    self.assertEqual(config.tensors_on_device, ["decoder_layer_input", "gdn_states"])
+    self.assertEqual(config.tensors_to_offload, [])
+
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        remat_policy="custom",
+        gdn_states="offload",
+        use_gdn_kernel=True,
+    )
+    self.assertEqual(config.tensors_on_device, ["decoder_layer_input"])
+    self.assertEqual(config.tensors_to_offload, ["gdn_states"])
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 
@@ -61,6 +120,7 @@ class PyconfigTest(unittest.TestCase):
           model_name="qwen3-next-80b-a3b",
           ici_context_parallelism=4,
           context_parallel_load_balance=True,
+          skip_jax_distributed_system=True,
       )
 
   def test_gdn_context_parallelism_accepts_load_balance_off(self):

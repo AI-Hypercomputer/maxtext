@@ -435,14 +435,18 @@ def main_kernel(
     row_block_id = pl.program_id(0)
 
     # Destination output row of each source row in this block.
+    # Use uint32 division so non-power-of-two reduce_group_size (e.g. k=10)
+    # lowers to SparseCore's legal vector ISD::MULHU rather than ISD::MULHS.
     dst_indices_list = [
-        scratch.sorted_by_validity_vmem[
-            pl.ds(
-                row_block_id * row_chunk_size + s * num_simd_lanes,
-                num_simd_lanes,
-            )
-        ]
-        // cfg.reduce_group_size
+        (
+            scratch.sorted_by_validity_vmem[
+                pl.ds(
+                    row_block_id * row_chunk_size + s * num_simd_lanes,
+                    num_simd_lanes,
+                )
+            ].astype(jnp.uint32)
+            // jnp.uint32(cfg.reduce_group_size)
+        ).astype(jnp.int32)
         for s in range(num_row_subchunks)
     ]
 
