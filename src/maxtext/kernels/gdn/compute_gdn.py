@@ -114,11 +114,7 @@ def chunked_gdn_per_seq(
     cfg: config.GDNConfig,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Perform chunked GDN over input [num_heads, chunk, head_dim]."""
-  dot_prec = (
-      jax.lax.Precision.DEFAULT
-      if jnp.dtype(cfg.dtypes.act_in) == jnp.bfloat16
-      else None
-  )
+  dot_prec = jax.lax.Precision.DEFAULT if jnp.dtype(cfg.dtypes.act_in) == jnp.bfloat16 else None
 
   # NOTE: Repeat along non lane/sublane dim is free.
   q_repeat = jnp.repeat(q_large, cfg.v_per_kq_head, axis=0)

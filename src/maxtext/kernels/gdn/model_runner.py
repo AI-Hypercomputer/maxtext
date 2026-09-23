@@ -44,21 +44,23 @@ except ImportError:
   except ImportError:
     name_p = None
 
-_GDN_SAVED_NAMES = frozenset({
-    "gdn",
-    "gdn_core_attn_out",
-    "gdn_fwd_out",
-    "gdn_qkv",
-    "gdn_b",
-    "gdn_a",
-    "gdn_t_inv",
-    "gdn_chunk_states",
-    "gdn_m_local",
-    "gdn_conv_state",
-    "gdn_recurrent_state",
-    "gdn_conv",
-    "gdn_conv_out",
-})
+_GDN_SAVED_NAMES = frozenset(
+    {
+        "gdn",
+        "gdn_core_attn_out",
+        "gdn_fwd_out",
+        "gdn_qkv",
+        "gdn_b",
+        "gdn_a",
+        "gdn_t_inv",
+        "gdn_chunk_states",
+        "gdn_m_local",
+        "gdn_conv_state",
+        "gdn_recurrent_state",
+        "gdn_conv",
+        "gdn_conv_out",
+    }
+)
 
 
 def _default_gdn_context_axes(cfg: Any) -> tuple[str, ...]:
@@ -98,9 +100,7 @@ def get_gdn_kernel_cp_sharding_info(
   cp_axes_active = tuple(
       ax for ax in gdn_context_axes_fn(config) if mesh is not None and ax in mesh.axis_names and mesh.shape[ax] > 1
   )
-  cp_axis_for_pspec = (
-      cp_axes_active[0] if len(cp_axes_active) == 1 else (cp_axes_active if cp_axes_active else None)
-  )
+  cp_axis_for_pspec = cp_axes_active[0] if len(cp_axes_active) == 1 else (cp_axes_active if cp_axes_active else None)
   cp_len = LENGTH if cp_axes_active else None
   return logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len
 
@@ -126,9 +126,7 @@ def run_gdn_kernel_layer(
   batch, seq_len = query.shape[:2]
 
   cp_axes = tuple(
-      ax
-      for ax in gdn_context_axes_fn(cfg)
-      if layer.mesh and ax in layer.mesh.axis_names and layer.mesh.shape[ax] > 1
+      ax for ax in gdn_context_axes_fn(cfg) if layer.mesh and ax in layer.mesh.axis_names and layer.mesh.shape[ax] > 1
   )
   cp_axis_name = cp_axes[0] if len(cp_axes) == 1 else (cp_axes if cp_axes else None)
   cp_size = 1
@@ -140,8 +138,7 @@ def run_gdn_kernel_layer(
   if gdn_cp_mode == "head":
     if cp_size > 1 and (cp_size > layer.num_k_heads or layer.num_k_heads % cp_size != 0):
       raise ValueError(
-          f"GDN head-sharded CP requires num_k_heads ({layer.num_k_heads}) to"
-          f" be divisible by cp_size ({cp_size})."
+          f"GDN head-sharded CP requires num_k_heads ({layer.num_k_heads}) to" f" be divisible by cp_size ({cp_size})."
       )
     use_head_sharded_cp = cp_size > 1 and model_mode != MODEL_MODE_AUTOREGRESSIVE
   elif gdn_cp_mode == "auto":
@@ -246,9 +243,7 @@ def run_gdn_kernel_layer(
         conv_bias_pspec = P()
 
       if conv_state is not None:
-        cs_q = conv_state[..., : layer.key_dim].reshape(
-            batch, cfg.gdn_conv_kernel_dim - 1, num_groups, layer.head_k_dim
-        )
+        cs_q = conv_state[..., : layer.key_dim].reshape(batch, cfg.gdn_conv_kernel_dim - 1, num_groups, layer.head_k_dim)
         cs_k = conv_state[..., layer.key_dim : 2 * layer.key_dim].reshape(
             batch, cfg.gdn_conv_kernel_dim - 1, num_groups, layer.head_k_dim
         )
@@ -340,9 +335,7 @@ def run_gdn_kernel_layer(
       a_log_pspec = P()
       dt_bias_pspec = P()
       conv_state_pspec = logical_to_mesh_axes((KV_BATCH, None, None), mesh=layer.mesh, rules=logical_rules)
-      recurrent_state_pspec = logical_to_mesh_axes(
-          (KV_BATCH, None, None, None), mesh=layer.mesh, rules=logical_rules
-      )
+      recurrent_state_pspec = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=layer.mesh, rules=logical_rules)
       out_attn_pspec = qkv_pspec
 
     qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
@@ -370,16 +363,12 @@ def run_gdn_kernel_layer(
       qkv = jax.sharding.reshard(qkv, jax.sharding.NamedSharding(layer.mesh, qkv_pspec))
       b = jax.sharding.reshard(b, jax.sharding.NamedSharding(layer.mesh, b_a_pspec))
       a = jax.sharding.reshard(a, jax.sharding.NamedSharding(layer.mesh, b_a_pspec))
-      conv_state_arg = jax.sharding.reshard(
-          conv_state_arg, jax.sharding.NamedSharding(layer.mesh, conv_state_pspec)
-      )
+      conv_state_arg = jax.sharding.reshard(conv_state_arg, jax.sharding.NamedSharding(layer.mesh, conv_state_pspec))
       recurrent_state_arg = jax.sharding.reshard(
           recurrent_state_arg, jax.sharding.NamedSharding(layer.mesh, recurrent_state_pspec)
       )
       if decoder_segment_ids is not None:
-        decoder_segment_ids = jax.sharding.reshard(
-            decoder_segment_ids, jax.sharding.NamedSharding(layer.mesh, seg_pspec)
-        )
+        decoder_segment_ids = jax.sharding.reshard(decoder_segment_ids, jax.sharding.NamedSharding(layer.mesh, seg_pspec))
 
     @functools.partial(
         jax.shard_map,
@@ -440,9 +429,7 @@ def run_gdn_kernel_layer(
 
         if cs_val is not None:
           cs_q = cs_val[..., : layer.head_k_dim].reshape(b_sz, cfg.gdn_conv_kernel_dim - 1, -1)
-          cs_k = cs_val[..., layer.head_k_dim : 2 * layer.head_k_dim].reshape(
-              b_sz, cfg.gdn_conv_kernel_dim - 1, -1
-          )
+          cs_k = cs_val[..., layer.head_k_dim : 2 * layer.head_k_dim].reshape(b_sz, cfg.gdn_conv_kernel_dim - 1, -1)
           cs_v = cs_val[..., 2 * layer.head_k_dim :].reshape(b_sz, cfg.gdn_conv_kernel_dim - 1, -1)
           cs_val_flat = jnp.concatenate([cs_q, cs_k, cs_v], axis=-1)
         else:
@@ -471,9 +458,7 @@ def run_gdn_kernel_layer(
 
         if next_cs is not None:
           cs_k_dim = local_num_k_heads * layer.head_k_dim
-          n_cs_q = next_cs[..., :cs_k_dim].reshape(
-              b_sz, cfg.gdn_conv_kernel_dim - 1, local_num_k_heads, layer.head_k_dim
-          )
+          n_cs_q = next_cs[..., :cs_k_dim].reshape(b_sz, cfg.gdn_conv_kernel_dim - 1, local_num_k_heads, layer.head_k_dim)
           n_cs_k = next_cs[..., cs_k_dim : 2 * cs_k_dim].reshape(
               b_sz, cfg.gdn_conv_kernel_dim - 1, local_num_k_heads, layer.head_k_dim
           )
@@ -523,9 +508,7 @@ def run_gdn_kernel_layer(
     )
     if use_head_sharded_cp and next_conv_state is not None and next_conv_state.ndim == 4:
       n_cs_q = next_conv_state[..., : layer.head_k_dim].reshape(batch, conv_kernel_size - 1, -1)
-      n_cs_k = next_conv_state[..., layer.head_k_dim : 2 * layer.head_k_dim].reshape(
-          batch, conv_kernel_size - 1, -1
-      )
+      n_cs_k = next_conv_state[..., layer.head_k_dim : 2 * layer.head_k_dim].reshape(batch, conv_kernel_size - 1, -1)
       n_cs_v = next_conv_state[..., 2 * layer.head_k_dim :].reshape(batch, conv_kernel_size - 1, -1)
       next_conv_state = jnp.concatenate([n_cs_q, n_cs_k, n_cs_v], axis=-1)
   else:

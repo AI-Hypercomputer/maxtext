@@ -885,7 +885,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             truncate_sharded_tensor,
         )
         from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
       except ImportError as e:
         raise ImportError(
             "GDN attention kernel require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
@@ -908,8 +907,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       mixed_qkv = jax.shard_map(
           lambda q, k, v: jnp.concatenate([q, k, v], axis=-1),
           mesh=self.mesh,
-          in_specs=(P_spec(attn_data, attn_head),) * 3,
-          out_specs=P_spec(attn_data, attn_head),
+          in_specs=(P(attn_data, attn_head),) * 3,
+          out_specs=P(attn_data, attn_head),
           check_vma=False,
       )(q_flat, k_flat, v_flat)
 

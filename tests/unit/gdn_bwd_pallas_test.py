@@ -467,7 +467,6 @@ class GdnBwdPallasTest(absltest.TestCase):
     np.testing.assert_allclose(state_cached, expected_state, rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(t_inv_returned, t_inv, rtol=1e-6, atol=1e-6)
 
-
   def test_compute_forward_conv_and_states_with_cached_tinv(self):
     """Verifies _compute_forward_conv_and_states with cached_t_inv matches uncached version."""
     batch_size = 1
@@ -831,6 +830,7 @@ class GdnBwdPallasTest(absltest.TestCase):
     t_inv = jax.random.normal(k8, (batch_size, num_chunks, num_v_heads, chunk_size, chunk_size), dtype=jnp.float32)
 
     # 1. Dispatch with head_tile = 4 -> 2 head groups
+    # pylint: disable=unbalanced-tuple-unpacking
     dy1, db1, da1, dal1, ddt1 = gdn_bwd_pallas.pallas_gdn_bwd_kernel(
         qkv_conv=qkv,
         b=b,
@@ -848,6 +848,7 @@ class GdnBwdPallasTest(absltest.TestCase):
     )
 
     # 2. Dispatch with head_tile = 8 -> 1 head group
+    # pylint: disable=unbalanced-tuple-unpacking
     dy2, db2, da2, dal2, ddt2 = gdn_bwd_pallas.pallas_gdn_bwd_kernel(
         qkv_conv=qkv,
         b=b,
@@ -899,6 +900,7 @@ class GdnBwdPallasTest(absltest.TestCase):
     do = jnp.concatenate([do_chunk0, do_chunk1], axis=1)
 
     # 1. No document reset: gradient flows backwards from chunk 1 into chunk 0
+    # pylint: disable=unbalanced-tuple-unpacking
     dy_no_reset, _, _, _, _ = gdn_bwd_pallas.pallas_gdn_bwd_kernel(
         qkv_conv=qkv,
         b=b,
@@ -922,6 +924,7 @@ class GdnBwdPallasTest(absltest.TestCase):
     seg_doc1 = jnp.ones((batch_size, chunk_size), dtype=jnp.int32)
     segment_ids = jnp.concatenate([seg_doc0, seg_doc1], axis=1)
 
+    # pylint: disable=unbalanced-tuple-unpacking
     dy_reset, _, _, _, _ = gdn_bwd_pallas.pallas_gdn_bwd_kernel(
         qkv_conv=qkv,
         b=b,
@@ -1106,15 +1109,11 @@ class GdnBwdPallasTest(absltest.TestCase):
       return jnp.sum(out * do)
 
     # 1. Baseline uncheckpointed gradients
-    baseline_grads = jax.grad(layer_fn, argnums=(0, 1, 2, 3, 4, 5, 6))(
-        qkv, b, a, conv_weight, conv_bias, a_log, dt_bias
-    )
+    baseline_grads = jax.grad(layer_fn, argnums=(0, 1, 2, 3, 4, 5, 6))(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
 
     # 2. Test with default full remat (policy=None)
     ckpt_full_fn = jax.checkpoint(layer_fn, policy=None)
-    full_grads = jax.grad(ckpt_full_fn, argnums=(0, 1, 2, 3, 4, 5, 6))(
-        qkv, b, a, conv_weight, conv_bias, a_log, dt_bias
-    )
+    full_grads = jax.grad(ckpt_full_fn, argnums=(0, 1, 2, 3, 4, 5, 6))(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
     for g_base, g_full in zip(baseline_grads, full_grads):
       np.testing.assert_allclose(g_full, g_base, rtol=1e-4, atol=1e-4)
 
@@ -1144,9 +1143,7 @@ class GdnBwdPallasTest(absltest.TestCase):
       np.testing.assert_allclose(g_custom, g_base, rtol=1e-4, atol=1e-4)
 
     # 4. Verify that the JAXPR under custom remat policy retains named residuals
-    jaxpr = jax.make_jaxpr(jax.grad(ckpt_custom_fn))(
-        qkv, b, a, conv_weight, conv_bias, a_log, dt_bias
-    )
+    jaxpr = jax.make_jaxpr(jax.grad(ckpt_custom_fn))(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
     jaxpr_str = str(jaxpr)
     self.assertIn("name=gdn_core_attn_out", jaxpr_str)
 
@@ -1377,9 +1374,9 @@ class GdnBwdPallasTest(absltest.TestCase):
       loss = jnp.sum(out * do) + jnp.sum(next_cs * dcs) + jnp.sum(next_rs * dht)
       return loss, (out, next_cs, next_rs)
 
-    (_, (ref_out, ref_cs, ref_rs)), ref_grads = jax.value_and_grad(
-        loss_single, argnums=tuple(range(9)), has_aux=True
-    )(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, h0)
+    (_, (ref_out, ref_cs, ref_rs)), ref_grads = jax.value_and_grad(loss_single, argnums=tuple(range(9)), has_aux=True)(
+        qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, h0
+    )
 
     mesh = jax.sharding.Mesh(np.array(devices[:cp_size]), ("context",))
     P = jax.sharding.PartitionSpec
@@ -1437,9 +1434,7 @@ class GdnBwdPallasTest(absltest.TestCase):
           qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, h0_in
       )
 
-    (_, (cp_out, cp_cs, cp_rs)), cp_grads = run_cp(
-        qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, h0
-    )
+    (_, (cp_out, cp_cs, cp_rs)), cp_grads = run_cp(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, h0)
 
     np.testing.assert_allclose(cp_out, ref_out, rtol=1e-4, atol=1e-4)
     np.testing.assert_allclose(cp_cs, ref_cs, rtol=1e-4, atol=1e-4)
@@ -1527,13 +1522,16 @@ class GdnBwdPallasTest(absltest.TestCase):
     orig_kernel = bwd_api.pallas_gdn_bwd_kernel
 
     def wrapped_kernel(*args, **kwargs):
-      recorded_calls.append((
-          kwargs.get("d_recurrent_state") is not None,
-          bool(kwargs.get("return_dh0", False)),
-      ))
+      recorded_calls.append(
+          (
+              kwargs.get("d_recurrent_state") is not None,
+              bool(kwargs.get("return_dh0", False)),
+          )
+      )
       return orig_kernel(*args, **kwargs)
 
     with mock.patch.object(bwd_api, "pallas_gdn_bwd_kernel", side_effect=wrapped_kernel):
+
       def loss_no_states(qkv_in):
         out, _ = gdn_bwd_pallas.gdn_decoupled_conv1d(
             qkv_in,

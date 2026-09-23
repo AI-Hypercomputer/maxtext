@@ -69,20 +69,22 @@ def _build_sweep_parameters():
           if chunks == 2 and mbs >= 32:
             continue
           test_name = f"{mesh_name}_mbs{mbs}_remat_{remat_name}_c{chunks}"
-          configs.append((
-              test_name,
-              fsdp,
-              cp,
-              ep,
-              mbs,
-              ga,
-              remat_pol,
-              dec_input,
-              gdn_loc,
-              gdn_conv_loc,
-              ctx_loc,
-              chunks,
-          ))
+          configs.append(
+              (
+                  test_name,
+                  fsdp,
+                  cp,
+                  ep,
+                  mbs,
+                  ga,
+                  remat_pol,
+                  dec_input,
+                  gdn_loc,
+                  gdn_conv_loc,
+                  ctx_loc,
+                  chunks,
+              )
+          )
 
   return configs
 
@@ -105,9 +107,7 @@ def _get_peak_memory_gb(compiled) -> float:
     )
     return float(total_bytes) / (1024.0**3)
   if isinstance(mem_obj, dict):
-    b = mem_obj.get("peak_memory_in_bytes", 0) or mem_obj.get(
-        "cumulative_size_in_bytes", 0
-    )
+    b = mem_obj.get("peak_memory_in_bytes", 0) or mem_obj.get("cumulative_size_in_bytes", 0)
     return float(b) / (1024.0**3)
   return 0.0
 
@@ -257,8 +257,7 @@ class Qwen397bThroughputSweepTest(parameterized.TestCase):
       peak_gb = _get_peak_memory_gb(compiled)
       leftover_gb = 94.7 - peak_gb if peak_gb > 0 else 0.0
       print(
-          f"  [MEMORY ANALYSIS] Peak HBM: {peak_gb:.2f} GB / 94.70 GB | "
-          f"Leftover HBM: {leftover_gb:.2f} GB",
+          f"  [MEMORY ANALYSIS] Peak HBM: {peak_gb:.2f} GB / 94.70 GB | " f"Leftover HBM: {leftover_gb:.2f} GB",
           flush=True,
       )
 
@@ -271,10 +270,7 @@ class Qwen397bThroughputSweepTest(parameterized.TestCase):
             " context=device...",
             flush=True,
         )
-        args_lvl2 = [
-            a if not a.startswith("context=") else "context=device"
-            for a in args
-        ]
+        args_lvl2 = [a if not a.startswith("context=") else "context=device" for a in args]
         try:
           compiled_lvl2 = train_compile_main(tuple(args_lvl2))
           peak_lvl2_gb = _get_peak_memory_gb(compiled_lvl2)
@@ -293,11 +289,7 @@ class Qwen397bThroughputSweepTest(parameterized.TestCase):
                 " remat_policy=save_qkv_proj...",
                 flush=True,
             )
-            args_lvl3 = [
-                a if not a.startswith("remat_policy=")
-                else "remat_policy=save_qkv_proj"
-                for a in args_lvl2
-            ]
+            args_lvl3 = [a if not a.startswith("remat_policy=") else "remat_policy=save_qkv_proj" for a in args_lvl2]
             compiled_lvl3 = train_compile_main(tuple(args_lvl3))
             peak_lvl3_gb = _get_peak_memory_gb(compiled_lvl3)
             print(
@@ -307,9 +299,7 @@ class Qwen397bThroughputSweepTest(parameterized.TestCase):
                 flush=True,
             )
         except Exception as e_cascade:  # pylint: disable=broad-exception-caught
-          print(
-              f"  >>> [REMAT CASCADE REACHED CAPACITY] {e_cascade}", flush=True
-          )
+          print(f"  >>> [REMAT CASCADE REACHED CAPACITY] {e_cascade}", flush=True)
 
       # 3. Batch expansion promotion (halve GA steps)
       if mbs == 32 and leftover_gb >= 35.0:
@@ -319,22 +309,16 @@ class Qwen397bThroughputSweepTest(parameterized.TestCase):
             " GA=16 (cuts outer loop by 2x!)...",
             flush=True,
         )
+        args_mbs64 = [a if not a.startswith("per_device_batch_size=") else "per_device_batch_size=0.25" for a in args]
         args_mbs64 = [
-            a if not a.startswith("per_device_batch_size=")
-            else "per_device_batch_size=0.25"
-            for a in args
-        ]
-        args_mbs64 = [
-            a if not a.startswith("gradient_accumulation_steps=")
-            else "gradient_accumulation_steps=16"
+            a if not a.startswith("gradient_accumulation_steps=") else "gradient_accumulation_steps=16"
             for a in args_mbs64
         ]
         try:
           compiled_mbs64 = train_compile_main(tuple(args_mbs64))
           peak_mbs64_gb = _get_peak_memory_gb(compiled_mbs64)
           print(
-              f"  >>> [MBS=64 PASSED] Peak HBM: {peak_mbs64_gb:.2f} GB | "
-              f"Leftover: {94.7 - peak_mbs64_gb:.2f} GB",
+              f"  >>> [MBS=64 PASSED] Peak HBM: {peak_mbs64_gb:.2f} GB | " f"Leftover: {94.7 - peak_mbs64_gb:.2f} GB",
               flush=True,
           )
         except Exception as e_mbs:  # pylint: disable=broad-exception-caught
