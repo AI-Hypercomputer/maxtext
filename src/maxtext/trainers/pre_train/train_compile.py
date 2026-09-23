@@ -25,6 +25,7 @@ message during this compilation
 as you would on the target hardware.
 """
 
+import contextlib
 import functools
 import os
 from typing import Sequence
@@ -196,9 +197,9 @@ def jit_and_compile(
     logical_axis_rules,
 ):
   """Jit, lower, and compile func."""
-  # Use both jax.set_mesh (new API) and `with mesh:` (old API) so that drjax,
-  # which reads from pxla.thread_resources.env.physical_mesh, can find the mesh.
-  with jax.set_mesh(mesh), mesh, logical_axis_rules:
+  # `with mesh:` is only needed for drjax (enable_diloco); omit it otherwise to match train.py.
+  mesh_ctx = mesh if config.enable_diloco else contextlib.nullcontext()
+  with jax.set_mesh(mesh), mesh_ctx, logical_axis_rules:
     jitted = jax.jit(
         func,
         in_shardings=in_shardings,
