@@ -592,6 +592,15 @@ class Quantization(BaseModel):
       "absmax",
       description="Quantization calibration method used for gradients.",
   )
+  drhs_grad_quantization_calibration_method: str | None = Field(
+      None,
+      description=(
+          "Calibration for the cotangent in the weight-gradient matmul only (qwix drhs_grad; dW = X^T dY). None "
+          "inherits bwd_quantization_calibration_method. With absmax, this arm's per-channel scale reduces over the "
+          "token axis and therefore across every data shard, including DCN slices; a fixed range (e.g. 'fixed,0.01') "
+          "removes that reduction. The activation-gradient arm (dX = dY W^T) is unaffected."
+      ),
+  )
   weight_sparsity_n: int | None = Field(
       None,
       description=("The 'N' in N:M sparsity, representing the maximum number of non-zero" " values in each block."),

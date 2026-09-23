@@ -1065,6 +1065,12 @@ def _get_router_proj_unquantized_rule() -> qwix.QtRule:
   )
 
 
+def _drhs_grad_calibration_override(config: Config) -> dict:
+  """Qwix DotGeneralQtConfig override for the weight-gradient arm's cotangent calibration (see types.py)."""
+  m = getattr(config, "drhs_grad_quantization_calibration_method", None)
+  return {"drhs_grad_calibration_method": m} if m else {}
+
+
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
@@ -1091,6 +1097,7 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
             weight_calibration_method=logits_calib or config.weight_quantization_calibration_method,
             act_calibration_method=logits_calib or config.act_quantization_calibration_method,
             bwd_calibration_method=config.bwd_quantization_calibration_method,
+            additional_qt_config=_drhs_grad_calibration_override(config) or None,
             op_names=("dot_general",),
         )
     )
@@ -1110,7 +1117,7 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
           weight_calibration_method=config.weight_quantization_calibration_method,
           act_calibration_method=config.act_quantization_calibration_method,
           bwd_calibration_method=config.bwd_quantization_calibration_method,
-          additional_qt_config={"sparsity_rule": sparsity_rule},
+          additional_qt_config={"sparsity_rule": sparsity_rule, **_drhs_grad_calibration_override(config)},
           op_names=("dot_general", "gmm", "ragged_dot"),
       )
   )
