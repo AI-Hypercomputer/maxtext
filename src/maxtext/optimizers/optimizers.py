@@ -121,6 +121,11 @@ def skip_step_on_spikes(
     losses = state["losses"]
     grad_norms = state["grad_norms"]
 
+    # Ensure non-finite metrics are never treated as valid
+    is_finite = jnp.isfinite(loss)
+    if grad_norm is not None:
+      is_finite = jnp.logical_and(is_finite, jnp.isfinite(grad_norm))
+
     # Compute rolling stats
     loss_mean, loss_std = _compute_rolling_stats(losses, count, interval)
     grad_norm_mean, grad_norm_std = _compute_rolling_stats(grad_norms, count, interval)
@@ -133,10 +138,11 @@ def skip_step_on_spikes(
     else:
       is_ok = is_loss_ok
 
-    # Only enforce skip if we have at least half the interval filled (or 2 elements minimum)
+    # Only enforce skip if we have at least half the interval filled (or 2 elements minimum).
+    # Warmup permits normal variations before statistics stabilize, but never non-finite values.
     min_history = max(2, interval // 2)
     is_warmup = (count + 1) < min_history
-    is_ok = jnp.logical_or(is_warmup, is_ok)
+    is_ok = jnp.logical_and(is_finite, jnp.logical_or(is_warmup, is_ok))
 
     # Conditionally execute the inner optimizer to prevent momentum poisoning
     def do_update():
@@ -149,19 +155,21 @@ def skip_step_on_spikes(
 
     inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
 
-    # Update rolling buffers (append even if skipped so spikes can become the new baseline)
+    # Update rolling buffers (append only finite values so spikes become the new baseline without NaN poisoning)
     idx = count % interval
-    new_losses = losses.at[idx].set(loss)
+    new_losses = jnp.where(is_finite, losses.at[idx].set(loss), losses)
 
     new_grad_norms = grad_norms
     if grad_norm is not None:
-      new_grad_norms = grad_norms.at[idx].set(grad_norm)
+      new_grad_norms = jnp.where(is_finite, grad_norms.at[idx].set(grad_norm), grad_norms)
+
+    new_count = jnp.where(is_finite, count + 1, count)
 
     new_state = {
         "inner_state": new_inner_state,
         "losses": new_losses,
         "grad_norms": new_grad_norms,
-        "count": count + 1,
+        "count": new_count,
         "is_skipped": jnp.logical_not(is_ok),
     }
     return inner_updates, new_state

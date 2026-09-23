@@ -2254,6 +2254,14 @@ class Optimizer(BaseModel):
       description="The rolling interval to calculate the mean and standard deviation.",
   )
   skip_step_scaling_factor: float = Field(6.0, description="The scaling factor to determine if a spike occurred.")
+  skip_step_on_nan: bool = Field(
+      True,
+      description="If True, skip the training step and preserve weights/optimizer state when gradient norm is NaN/Inf.",
+  )
+  max_grad_norm_spike: NonNegativeFloat = Field(
+      0.0,
+      description="If positive, skip the training step when raw grad norm exceeds this threshold.",
+  )
   gradient_accumulation_steps: PositiveInt = Field(
       1, description="Number of steps to accumulate gradients before updating."
   )
