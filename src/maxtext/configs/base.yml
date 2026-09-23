@@ -1149,6 +1149,7 @@ abort_on_inf_loss: true # Check for Inf and abort if found in training loss
 
 # Goodput parameters
 enable_goodput_recording: false
+goodput_job_name: ""
 monitor_goodput: false
 goodput_upload_interval_seconds: 30
 enable_pathways_goodput: false
