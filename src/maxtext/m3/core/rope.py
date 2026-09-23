@@ -43,8 +43,6 @@ numbers the legacy stack produces.
 import jax
 import jax.numpy as jnp
 
-__all__ = ["apply_rope"]
-
 
 def apply_rope(
     x: jax.Array,
