@@ -311,7 +311,9 @@ class MaxTextForCausalLM(nnx.Module):
             break
       if attention_metadata_picked is None:
         attention_metadata_picked = next(iter(attention_metadata.values()))
-      attention_metadata = attention_metadata_picked
+      picked_attention_metadata = attention_metadata_picked
+    else:
+      picked_attention_metadata = attention_metadata
 
     # Present the decoder a layer-ordered view of the physical cache list. With
     # the vLLM hybrid layout all Mamba/GDN caches precede the attention caches,
@@ -336,7 +338,7 @@ class MaxTextForCausalLM(nnx.Module):
       decoder_input_embeddings = None
       input_ids = jnp.expand_dims(input_ids, axis=1)
 
-    positions = getattr(attention_metadata, "input_positions", None)
+    positions = getattr(picked_attention_metadata, "input_positions", None)
     if positions is None:
       positions = _input_positions
     input_positions = normalize_vllm_input_positions(positions)
@@ -530,14 +532,12 @@ def patch_kv_cache_manager():
 
   def patched_get_kv_cache_spec(self):
     runner = self.runner
-    if not hasattr(runner, "model"):
+    if hasattr(runner, "model") and hasattr(runner.model, "maxtext_config"):
+      cfg = runner.model.maxtext_config
+    elif hasattr(runner, "vllm_config"):
+      cfg = generate_maxtext_config(runner.vllm_config)
+    else:
       return original_get_kv_cache_spec(self)
-
-    model = runner.model
-    if not hasattr(model, "maxtext_config"):
-      return original_get_kv_cache_spec(self)
-
-    cfg = model.maxtext_config
     decoder_block = getattr(cfg, "decoder_block", "")
 
     decoder_block_str = ""
@@ -629,14 +629,21 @@ def patch_kv_cache_manager():
     kv_cache_spec = original_get_kv_cache_spec(self)
 
     if decoder_block_str in ("qwen3_next", "qwen3_5"):
+      from dataclasses import replace
+
       for i in range(cfg.base_num_decoder_layers):
-        if (i + 1) % interval != 0:
-          layer_name = f"layer.{i}"
-          if layer_name in kv_cache_spec:
+        layer_name = f"layer.{i}"
+        if layer_name in kv_cache_spec:
+          if (i + 1) % interval != 0:
             kv_cache_spec[layer_name] = MambaSpec(
                 block_size=kv_cache_spec[layer_name].block_size,
                 shapes=mamba_shapes,
                 dtypes=mamba_dtypes,
+                page_size_padded=self._hybrid_uniform_page_size_bytes,
+            )
+          else:
+            kv_cache_spec[layer_name] = replace(
+                kv_cache_spec[layer_name],
                 page_size_padded=self._hybrid_uniform_page_size_bytes,
             )
 

@@ -244,6 +244,13 @@ class Qwen3_5DecoderLayer(nnx.Module):
     hidden_states = self.input_layernorm(inputs, out_sharding=self.out_sharding)
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
+    if isinstance(attention_metadata, dict):
+      layer_attn_md = attention_metadata.get(f"layer.{self.layer_idx}")
+      if layer_attn_md is None:
+        layer_attn_md = next(iter(attention_metadata.values()))
+    else:
+      layer_attn_md = attention_metadata
+
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3_5FullAttention):
       attention_output, new_kv_cache = cast(Qwen3_5FullAttention, self.attention)(
@@ -253,7 +260,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
           deterministic,
           model_mode,
           kv_cache=kv_cache,
-          attention_metadata=attention_metadata,
+          attention_metadata=layer_attn_md,
           out_sharding=self.out_sharding,
       )
     else:
@@ -262,7 +269,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
           model_mode=model_mode,
           kv_cache=kv_cache,
           decoder_segment_ids=decoder_segment_ids,
-          attention_metadata=attention_metadata,
+          attention_metadata=layer_attn_md,
           out_sharding=self.out_sharding,
       )
 
