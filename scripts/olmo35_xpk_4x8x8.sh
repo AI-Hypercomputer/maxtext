@@ -15,9 +15,9 @@
 # scripts/arch_ablation_bench.sh, where each field was established the hard way.
 set -uo pipefail
 
-CLUSTER=bodaborg-tpu7x-nap
-PROJECT=cloud-tpu-shared-capacity
-REGION=us-central1
+CLUSTER=${CLUSTER:-bodaborg-tpu7x-nap}
+PROJECT=${PROJECT:-cloud-tpu-shared-capacity}
+REGION=${REGION:-us-central1}
 # `default` is the namespace this account can actually create in; `priority-dev`
 # holds more chips but denies create. Checked with `kubectl auth can-i`.
 NAMESPACE=${NAMESPACE:-default}
@@ -123,6 +123,11 @@ $PP_LINE$RES_SEL$EXTRA_SEL
               operator: Exists
               effect: NoSchedule
 $RES_TOL            - key: cloud.google.com/gke-spot
+              operator: Exists
+              effect: NoSchedule
+            # flex-start (DWS) pools taint their nodes gke-queued until the
+            # provisioning request lands. Harmless on non-flex pools.
+            - key: cloud.google.com/gke-queued
               operator: Exists
               effect: NoSchedule
             volumes:

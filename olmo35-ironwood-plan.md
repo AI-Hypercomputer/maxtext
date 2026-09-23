@@ -669,6 +669,54 @@ no WorkloadPriorityClass, and tries both `gs://agagik-us` and
 `gs://cloud-pathways-staging` for the source tarball since pod identity differs by
 cluster.
 
+### Hill-climb matrix, pre-screened on perfsim at 128 devices before spending a slice
+
+`olmo35-tiny`, `v7x_4x4x4` (128 devices), seq 8192, remat full:
+
+| pdb | global tokens | TF/s/dev | MFU | comm share of step |
+|---|---|---|---|---|
+| 1 | 1,048,576 | 167 | 14.5% | **50.0%** |
+| 2 | 2,097,152 | 334 | 29.0% | 12.5% |
+| 4 | 4,194,304 | 412 | **35.7%** | 0.0% |
+| 8 | 8,388,608 | 428 | 37.1% | 0.0% |
+
+**The knee is pdb=4**; pdb=8 buys 1.4 more points and costs 2x the HBM, so the
+climb should not spend an admission on it. The comm column is the mechanism and
+also the reason the 8-device 81.5 TF/s number does not extrapolate: at pdb=1 on
+128 devices **half the step is collective**, and raising pdb is what retires it.
+Applying the 1.7x optimism factor measured on OLMoE3 at this device count puts
+pdb=4 at roughly **21% MFU**, which is the first time any estimate has cleared
+the 20% target on the shipped geometry. The submitted matrix
+`CFGS="1:8192 4:8192 1:16384"` brackets this knee.
+
+### Four routes to a 4x4x4, all tried 2026-09-23, all waiting on capacity
+
+| route | mechanism | state |
+|---|---|---|
+| `nap` / `default`, 4x4x4 + 2x4x4 queued | Kueue + TAS | deadlocked, see below |
+| `tpu7x-cluster-flex` / `tpu7x-full-pod-spot` | no Kueue, autoscaler 0->16 | `TriggeredScaleUp` then **`GCE out of resources`** (us-central1-c spot stockout), retrying on backoff |
+| `tpu7x-cluster-flex` / `tpu7x-half-cube-2x4x4` | no Kueue, flex-start DWS 0->8, **not spot** | scale-up triggered, no failure yet, waiting on the provisioning request |
+| `ninja-v7x-512` | 256 chips of real Kueue quota, create rights | **every tpu7x pool is in ERROR**: "Creation of a managed instance group with tpu7x-standard-4t machine type with placement policy is not supported. Use workload policy instead" |
+
+Also checked and rejected: `bodaborg-tpu7x-spot-256-chip` has two autoscaling
+4x4x4 pools but **every flavor's nominal quota is 0** with 4 workloads already
+pending, so Kueue there can never admit.
+
+**The nap deadlock is structural, not a matter of waiting.** NAP builds the pool
+shape that a *Pending* pod asks for, but Kueue suspends the pod before the
+scheduler ever sees it, so NAP only ever sees other people's 2x2x1 requests and
+keeps building 2x2x1 pools (watched it go 22 -> 33 nodes of 2x2x1 while my 4x4x4
+sat at "57 more needed"). There is no bypass: `manageJobsWithoutQueueName: true`
+with every framework enabled (`pod`, `batch/job`, `jobset`, `deployment`,
+`statefulset`) and a namespace selector that does **not** exclude `default`, and
+`create provisioningrequests` is denied so the ProvisioningRequest cannot be
+issued by hand either.
+
+A detail worth keeping for any multi-host JobSet on a scaled-to-zero pool: the
+pod webhook creates **only the leader pod** and logs `FailedCreate: leader pod
+not yet scheduled, not creating follower pod`. That is expected, not a bug, so
+"1 Pending pod" for a 16-node request is the normal pre-provision state.
+
 ## Blocked / infrastructure
 
 - **A 4x4x4 is not currently obtainable.** `bodaborg-tpu7x-nap` has 47 Ironwood nodes
