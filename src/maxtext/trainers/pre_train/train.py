@@ -996,6 +996,7 @@ def recover(
             elastic_manager.active_slice_indices,
         )
       else:
+
         def _safe_replace(state_obj, pure_dict):
           if not isinstance(pure_dict, dict):
             return
@@ -1181,6 +1182,22 @@ def train_loop(config, recorder, state=None):
   else:
     _logger.info("[*] Standard Non-Elastic Training.")
 
+  def run_setup(setup_devices, setup_results, init_complete_event, cancel_event):
+    """Runs one setup attempt and stores its outcome in that attempt's own objects."""
+    # Everything is passed in, not captured from the loop, so an abandoned attempt
+    # that finishes late cannot publish into a newer attempt.
+    try:
+      setup_results["results"] = train_utils.setup_train_loop(
+          config, recorder, devices=setup_devices, cancel_event=cancel_event
+      )
+    except train_utils.SetupCancelledError:
+      _logger.info("Abandoned setup attempt stopped early.")
+    except Exception as e:
+      setup_results["exception"] = e
+    finally:
+      init_complete_event.set()
+
+  cancel_event = None
   # Kills the workload if initialization takes longer than 20 minutes
   with watchdog.watchdog(name="initialization", timeout=20 * 60, repeat=False):
     while True:
@@ -1191,17 +1208,13 @@ def train_loop(config, recorder, state=None):
 
         setup_results = {}
         init_complete_event = threading.Event()
+        cancel_event = threading.Event()
 
-        def run_setup():
-          try:
-            results = train_utils.setup_train_loop(config, recorder, devices=devices)
-            setup_results["results"] = results
-          except Exception as e:
-            setup_results["exception"] = e
-          finally:
-            init_complete_event.set()
-
-        setup_thread = threading.Thread(target=run_setup, daemon=True)
+        setup_thread = threading.Thread(
+            target=run_setup,
+            args=(devices, setup_results, init_complete_event, cancel_event),
+            daemon=True,
+        )
         setup_thread.start()
 
         while True:
@@ -1237,9 +1250,20 @@ def train_loop(config, recorder, state=None):
             state,
         ) = setup_results["results"]
 
+        # The batch sizes in config must match the mesh the state was built on.
+        if config.elastic_enabled and mesh.devices.size != config.num_target_devices:
+          _logger.warning(
+              "Mesh has %d devices but config expects %d. Retrying setup.",
+              mesh.devices.size,
+              config.num_target_devices,
+          )
+          continue
+
         init_rng = jax.device_put(init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
         break  # Initialization succeeded!
       except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
+        if cancel_event is not None:
+          cancel_event.set()
         is_scale_up = isinstance(e, pathways_manager.ScaleUpSignalError)
         is_slice_down = isinstance(e, jax.errors.JaxRuntimeError) and elastic.is_error_due_to_slice_down(e)
         if elastic_utils.elastic_snapshot(config) and (is_scale_up or is_slice_down):
