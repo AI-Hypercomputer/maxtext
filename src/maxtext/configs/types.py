@@ -517,6 +517,11 @@ class DataTypes(BaseModel):
       description="If True, sets activations to float32 before the nonlinearity.",
   )
   dtype_mm: str = Field("float32", description="Data type for multimodal model's vision encoder")
+  gdn_state_dtype: DType = Field(DType.FLOAT32, description="The data type for GDN recurrent states.")
+  gdn_decay_dtype: DType = Field(
+      DType.FLOAT32,
+      description="The data type for GDN decay parameters (A_log, dt_bias).",
+  )
 
 
 class Quantization(BaseModel):
@@ -1285,6 +1290,14 @@ class Qwen3Next(BaseModel):
       ),
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+  use_gdn_kernel: bool = Field(
+      False,
+      description="Whether to use GDN Pallas kernel.",
+  )
+  gdn_cp_mode: str = Field(
+      "auto",
+      description="GDN context parallelism mode ('auto', 'seq', or 'head').",
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -1616,6 +1629,22 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
   )
   context: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the attention context.")
+  gdn: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for GatedDeltaNet (GDN) recurrence kernel and residuals (remat, device, offload).",
+  )
+  gdn_conv: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for GatedDeltaNet (GDN) 1D convolution activations (remat, device, offload).",
+  )
+  gdn_states: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the subset of GatedDeltaNet (GDN) kernel outputs consumed by the Pallas backward "
+          "kernel (core_attn_out, t_inv, chunk_states). Keeping these on device/offload avoids replaying the "
+          "forward Pallas kernel in backward without saving all GDN residuals like `gdn` (remat, device, offload)."
+      ),
+  )
   mlpwi: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the first MLP layer's intermediate output.",
@@ -3736,6 +3765,16 @@ class MaxTextConfig(
     return self
 
   @model_validator(mode="after")
+  def validate_gdn_remat_requires_kernel(self) -> "MaxTextConfig":
+    """Raise ValueError if gdn, gdn_conv or gdn_states is configured for device/offload without use_gdn_kernel=True."""
+    if (self.gdn != "remat" or self.gdn_conv != "remat" or self.gdn_states != "remat") and not self.use_gdn_kernel:
+      raise ValueError(
+          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
+          "requires `use_gdn_kernel=True`."
+      )
+    return self
+
+  @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
     Computes all derived values and runs all cross-field validations after initial parsing.
@@ -4136,6 +4175,9 @@ class MaxTextConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "gdn",
+          "gdn_conv",
+          "gdn_states",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_mlpwi_1",
@@ -4689,7 +4731,7 @@ class MaxTextConfig(
             * self.ici_context_usp_ulysses_parallelism
             * self.dcn_context_usp_ulysses_parallelism
         )
-        if gdn_context_parallel_size > 1:
+        if gdn_context_parallel_size > 1 and not self.use_gdn_kernel:
           raise ValueError(
               f"'explicit' sharding with the '{decoder_name}' decoder does not"
               " support context parallelism yet. The GatedDeltaNet short"
@@ -5485,6 +5527,9 @@ class RLConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "gdn",
+          "gdn_conv",
+          "gdn_states",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_mlpwi_1",
@@ -5505,6 +5550,14 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+
+    if (self.gdn != "remat" or self.gdn_conv != "remat" or self.gdn_states != "remat") and not getattr(
+        self, "use_gdn_kernel", False
+    ):
+      raise ValueError(
+          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
+          "requires `use_gdn_kernel=True`."
+      )
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {

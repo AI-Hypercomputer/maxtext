@@ -20,6 +20,7 @@ import functools
 from typing import Any, cast
 
 from flax import nnx
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config, ShardMode, get_weight_dtype
@@ -231,6 +232,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     residual = inputs
 

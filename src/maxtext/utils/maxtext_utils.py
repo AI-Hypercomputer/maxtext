@@ -214,6 +214,35 @@ def should_prevent_cse_in_remat(config):
   return True
 
 
+def _expand_gdn_remat_names(names: list[str]) -> list[str]:
+  """Expands high-level GDN remat identifiers to individual checkpointed tensor names."""
+  expanded = list(names)
+  if "gdn" in names:
+    expanded.extend(
+        [
+            "gdn_core_attn_out",
+            "gdn_chunk_states",
+            "gdn_t_inv",
+            "gdn_m_local",
+            "gdn_conv_state",
+            "gdn_recurrent_state",
+            "gdn_qkv",
+            "gdn_b",
+            "gdn_a",
+        ]
+    )
+  if "gdn_conv" in names:
+    expanded.extend(["gdn_conv_out", "gdn_fwd_conv", "gdn_conv_state"])
+  if "gdn_states" in names:
+    # Partial GDN remat: keep only the fwd Pallas kernel outputs that the bwd Pallas kernel
+    # consumes (``t_inv``, ``chunk_states``) plus the kernel's primal output. All three are
+    # produced by the same ``pallas_call``, so omitting ``gdn_core_attn_out`` would make JAX
+    # replay the whole fwd kernel in bwd anyway. ``gdn_m_local`` only exists in the
+    # seq-sharded CP path, where it is derived from the pass-1 kernel and is tiny.
+    expanded.extend(["gdn_core_attn_out", "gdn_t_inv", "gdn_chunk_states", "gdn_m_local"])
+  return expanded
+
+
 def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   """Returns the ``(save_names, offload_names)`` split for remat policies built via
   ``jax.checkpoint_policies.save_and_offload_only_these_names``.
@@ -251,7 +280,12 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
         "mlpwo",
     ]
   if config.remat_policy == "custom":
-    return list(config.tensors_on_device or []), list(config.tensors_to_offload or [])
+    save_names = list(config.tensors_on_device or [])
+    offload_names = list(config.tensors_to_offload or [])
+    if getattr(config, "use_gdn_kernel", False):
+      save_names = _expand_gdn_remat_names(save_names)
+      offload_names = _expand_gdn_remat_names(offload_names)
+    return save_names, offload_names
   return [], []
 
 
