@@ -591,11 +591,13 @@ class KimiDeltaAttention(nnx.Module):
     def _inject_cp_axis_on_T(pspec, t_axis=1):
       """Overwrite the T axis of *pspec* with the CP axis name.
 
-      logical_to_mesh_axes may map the LENGTH logical axis to a different
-      mesh axis, or to None, because the activation_norm_length rules do not
-      cover every CP strategy (notably expert-as-context). Overwrite
-      unconditionally so shard_map always sees the correct per-rank sequence
-      shards on the axis the collectives (halo exchange, CP state merge) use.
+      A no-op on the default "context" axis, since activation_norm_length
+      already lists it (configs/types.py:1383) and logical_to_mesh_axes
+      resolves T to "context" on its own. Load-bearing for expert-as-context,
+      where that rule list has no "expert" entry, T resolves to None, and the
+      shard_map would otherwise run replicated over the axis its collectives
+      use. Overwriting on both strategies keeps one code path. The measured
+      pspecs are tabulated in docs/reference/kda_cp_support.md.
       """
       spec = list(pspec)
       spec[t_axis] = cp_axis_name
@@ -662,6 +664,8 @@ class KimiDeltaAttention(nnx.Module):
                   conv_seg_pspec,
               ),
               out_specs=(conv_flat_pspec, conv_flat_pspec, conv_flat_pspec),
+              # Same as the kernel-side shard_map below, see the check_vma
+              # section in docs/reference/kda_cp_support.md.
               check_vma=False,
           )
           def _conv_with_halo(qf, kf, vf, seg):
@@ -803,6 +807,13 @@ class KimiDeltaAttention(nnx.Module):
           )
         cp_ctx = TokamaxContextParallelMetadata(mesh=self.mesh, axis_name=cp_axis_name)
 
+      # check_vma=False is required while KDA calls into tokamax. Enabling it
+      # fails on the fori_loop in cp_utils._derive_cp_metadata_from_segment_ids,
+      # whose carry turns from replicated into varying on the CP axis, and on
+      # the Pallas launcher's ShapeDtypeStructs, which carry no manual_axis_type.
+      # Both are outside this repo, and every other attention shard_map in
+      # MaxText hardcodes False as well. The measured failures and what they
+      # cover are written up in docs/reference/kda_cp_support.md.
       @functools.partial(
           jax.shard_map,
           mesh=self.mesh,

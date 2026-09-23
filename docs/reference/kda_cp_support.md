@@ -21,7 +21,15 @@ CP (cp_size > 1):
                            → [B, T/cp, E]
 ```
 
-Key difference from MLA CP: MLA relies on splash attention kernel internally doing implicit all_gather K/V → local attention; KDA does not rely on all_gather. Instead, `ContextParallelMetadata` lets the kernel coordinate recurrent state across ranks during forward/backward.
+The difference from MLA CP is what the collective carries, not whether one happens at all. MLA all-gathers K/V for the sharded sequence, so its payload grows with sequence length. KDA all-gathers a fixed-size summary of the recurrent state instead. The shapes below are each rank's local shape, and `jax.lax.all_gather` adds a leading `cp_size` axis to the result:
+
+| Path           | What is gathered                                                                                                                                                    | Shapes                            | Source                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------- |
+| Forward        | `S_ext`, the affine contribution of each rank's last segment, and `M`, its transition matrix. `_merge_initial_state` composes them into each rank's incoming state. | `[H, B, K, V]` and `[H, B, K, K]` | `pallas_mosaic_tpu_fwd_kernel.py:411-414`   |
+| Backward       | `dS_ext` and `dM`, packed along the last axis into one tensor so a single gather covers both                                                                        | `[B, H, K, V + K]`                | `pallas_mosaic_tpu_bwd_kernel.py:1752-1754` |
+| Chain metadata | each rank's first and last segment id, used to derive `cu_seqlens`, `pre_num_ranks` and the related per-rank fields                                                 | `2 x cp_size` int32               | `cp_utils.py:260-261`                       |
+
+None of the three carries T, since `chunk_gated_delta_rule_fwd_h_pre_process` returns `[H, B, K, V]` and `[H, B, K, K]` whatever `T_local` is. The CP collective cost is therefore `O(cp_size * B * H * K * (V + K))` per step rather than something proportional to sequence length. That is what `ContextParallelMetadata` coordinates: the merge of recurrent state across ranks in forward and backward, with the sequence itself staying sharded.
 
 ### Plan 1: `halo_exchange_for_conv` (in `layers/attention_kda.py`, KDA-specific)
 
@@ -52,8 +60,19 @@ Change location: the conv call segment after QKV projection in `KimiDeltaAttenti
 Key design decisions:
 
 - **conv shard_map and chunk_kda shard_map are independent**: two separate `jax.shard_map` invocations, freeing conv's ppermute buffer in between
-- `check_vma=False`: FlashAttention custom rules may falsely report VMA errors
+- **both pass `check_vma=False`**, see the `check_vma` section below
 - Zero-overhead fallback when no CP: follows the original path exactly
+
+#### Why `check_vma=False`
+
+`check_vma=True` cannot be used while KDA runs through tokamax. Measured on 4xTPU v6e over the CP selection, `pytest tests/unit/kda_attention_test.py -k "Cp or cp or short_conv or halo"`, which collects 36 tests and skips 24 of them as `cpu_only`. With `check_vma=True` on the kernel-side shard_map, 9 passed and 3 failed. Enabling it on the conv side as well changes nothing: the same 9 pass and the same 3 fail. So the conv-side shard_map tolerates it and the failure is entirely kernel side, for two reasons that are both outside this repo:
+
+1. `tokamax/_src/ops/experimental/kda/cp_utils.py:297`. The `fori_loop` inside `_derive_cp_metadata_from_segment_ids` enters with a replicated carry (`bool[]`, `int32[]`) and returns one that varies on the CP axis (`bool[]{V:context}`, `int32[]{V:context}`). JAX's VMA scan check rejects the type mismatch, and its own error message suggests `jax.lax.pcast(..., ('context',), to='varying')` on the initial carry.
+2. `jax/_src/pallas/core.py:1888`. With `check_vma=True` on a shard_map, every `jax.ShapeDtypeStruct` must set `manual_axis_type`, which tokamax's KDA Pallas launcher does not.
+
+The three failures are `test_kda_cp_full_layer_dummy_segments`, `test_kda_cp_full_layer_packed_segments` and `test_kda_no_cp_without_load_balance_ok`. The last one runs at `cp_size=1`, which shows that reason 2 applies to any KDA forward pass and not only under CP.
+
+Until both are fixed upstream, `False` is what every other attention shard_map in MaxText uses. `layers/attention_op.py` lines 1778, 1843 and 2298 and `kernels/tokamax_splash_attention/splash_attention_kernel.py:2155` all hardcode it, and `config.check_vma` (default `False`, `configs/base.yml:719`, documented as covering "EP / FSDP ICI parallelisms") is consumed only by `layers/moe.py:2625`. It is an MoE knob today rather than an attention one, so adopting it across the attention path is a separate cleanup that needs the two tokamax fixes first.
 
 ### Plan 3: chunk_kda ContextParallelMetadata + Partition Spec (`attention_kda.py`)
 
@@ -78,18 +97,24 @@ if cp_size > 1:
 
 #### 3b. Partition Spec Injection
 
-`nnx.logical_to_mesh_axes` may map the T axis to `None` (or to a mesh axis that does not carry the sequence shard) due to Flax rule priority + size-1 axis stripping, but shard_map requires the T axis to carry the CP axis:
+MaxText's own `logical_to_mesh_axes` (imported from `maxtext.utils.sharding` at `attention_kda.py:57`) already resolves the T axis correctly when the CP axis is named `"context"`. Measured on 4xTPU v6e using the config's own `logical_axis_rules`:
+
+| Config                                                  | Resolved pspec for `(activation_batch, activation_norm_length, None)` | Effect of `_inject_cp_axis_on_T` |
+| ------------------------------------------------------- | --------------------------------------------------------------------- | -------------------------------- |
+| `ici_context_parallelism=2`                             | `P('fsdp', 'context', None)`                                          | none, already correct            |
+| `ici_context_parallelism=4`                             | `P(None, 'context', None)`                                            | none, already correct            |
+| `context_sharding='expert'`, `ici_expert_parallelism=2` | `P(('fsdp', 'expert'), None, None)`                                   | overwrites T with `'expert'`     |
+
+The third row is why the injection exists. `activation_norm_length` maps to `["tensor_sequence", "context", "context_usp_ulysses"]` (`configs/types.py:1383`), and that list has no `expert` entry, so expert-as-context resolves T to `None`. Without the overwrite the shard_map would run replicated over the very axis its collectives use.
 
 ```python
 def _inject_cp_axis_on_T(pspec, t_axis=1):
     spec = list(pspec)
-    spec[t_axis] = cp_axis_name  # overwritten unconditionally
+    spec[t_axis] = cp_axis_name
     return jax.sharding.PartitionSpec(*spec)
 ```
 
-Applied to `qkv_pspec`, `beta_pspec`, `seg_pspec` when CP is enabled, followed by `with_sharding_constraint` to ensure tensor physical layout matches.
-
-`cp_axis_name` is `cfg.context_sharding` (default `"context"`; may be `"expert"` for expert-as-context). The T axis is overwritten **unconditionally** rather than only when it maps to `None`: the `activation_norm_length` logical-axis rules do not cover every CP strategy (notably expert-as-context), so an unconditional overwrite guarantees the shard_map always sees the per-rank sequence shards on the axis the collectives (halo exchange, cross-rank state merge) actually use.
+Applied to `qkv_pspec`, `beta_pspec` and `seg_pspec` when CP is enabled, followed by `with_sharding_constraint` to ensure tensor physical layout matches. `cp_axis_name` is `cfg.context_sharding`, which defaults to `"context"` and is `"expert"` for expert-as-context. Overwriting on every strategy rather than only when T resolves to `None` keeps both cases on one code path, and on `"context"` it is a no-op by construction, as the table above shows.
 
 #### 3c. chunk_kda shard_map
 
