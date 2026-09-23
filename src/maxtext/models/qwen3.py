@@ -692,7 +692,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         and isinstance(kv_cache, tuple)
         and len(kv_cache) == 2
         and attention_metadata is not None
-        and getattr(attention_metadata, "mamba_state_indices", None) is not None
+        and (
+            getattr(attention_metadata, "mamba_state_indices", None) is not None
+            or getattr(attention_metadata, "block_tables", None) is not None
+        )
         and self.mesh is not None
     )
 
@@ -799,6 +802,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             reorder_concatenated_tensor_for_sharding,
             truncate_sharded_tensor,
         )
+
         from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
       except ImportError as e:
@@ -844,8 +848,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # maximum-size metadata buffers.
       dp_size = get_mesh_shape_product(self.mesh, attn_data)
       padded_num_reqs_per_dp = attention_metadata.padded_num_reqs // dp_size  # pyrefly: ignore[missing-attribute]
+      raw_state_indices = (
+          attention_metadata.mamba_state_indices
+          if getattr(attention_metadata, "mamba_state_indices", None) is not None
+          else attention_metadata.block_tables[:, 0]
+      )
       state_indices = truncate_sharded_tensor(
-          attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
+          raw_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
           padded_num_reqs_per_dp,
           dp_size,
       )
@@ -854,11 +863,16 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           padded_num_reqs_per_dp + 1,
           dp_size,
       )
-      seq_lens = truncate_sharded_tensor(
-          attention_metadata.seq_lens,  # pyrefly: ignore[missing-attribute]
-          padded_num_reqs_per_dp,
-          dp_size,
+      seq_lens = (
+          truncate_sharded_tensor(
+              attention_metadata.seq_lens,  # pyrefly: ignore[missing-attribute]
+              padded_num_reqs_per_dp,
+              dp_size,
+          )
+          if getattr(attention_metadata, "seq_lens", None) is not None
+          else None
       )
+      distribution = attention_metadata.request_distribution
 
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
@@ -872,7 +886,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           jnp.asarray(self.dt_bias[...], dtype=cfg.dtype),
           state_indices,
           query_start_loc,
-          attention_metadata.request_distribution,  # pyrefly: ignore[missing-attribute]
+          distribution,
           seq_lens,
           self.num_k_heads,
           self.num_v_heads,
