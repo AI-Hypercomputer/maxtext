@@ -1656,9 +1656,7 @@ class _TinyKdaLM(nnx.Module):
         weight_dtype=cfg.weight_dtype,
         rngs=rngs,
     )
-    self.lm_head = nnx.Linear(
-        cfg.emb_dim, _KDA_SMOKE_VOCAB, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs
-    )
+    self.lm_head = nnx.Linear(cfg.emb_dim, _KDA_SMOKE_VOCAB, dtype=cfg.dtype, param_dtype=cfg.weight_dtype, rngs=rngs)
 
   def __call__(self, tokens):
     x = self.embed(tokens)
