@@ -27,9 +27,35 @@ on:
         description: 'Name of the Docker repository to push images to.'
         required: true
         type: string
+      mode:
+        description: 'Build mode: build-all (default) or fast-rebuild (overlay new code on source image with identical deps)'
+        required: true
+        default: 'build-all'
+        type: choice
+        options:
+          - build-all
+          - fast-rebuild
+      source_run_id:
+        description: 'Source image run ID for fast-rebuild. Leave empty to auto-detect from branch history or main.'
+        required: false
+        type: string
+        default: ''
+      allow_dependency_drift:
+        description: 'Allow fast-rebuild even if dependency files changed between source and current commit (not recommended)'
+        required: false
+        type: boolean
+        default: false
+
+run-name: >-
+  ${{ inputs.mode == 'fast-rebuild'
+      && (inputs.source_run_id != ''
+          && format('Fast-rebuild from run {0}', inputs.source_run_id)
+          || 'Fast-rebuild (auto-detect)')
+      || 'GPU Docker Images Pipeline' }}
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build_maxtext_package:
@@ -40,9 +66,31 @@ jobs:
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
 
+  resolve_source:
+    name: Resolve Source Run
+    if: inputs.mode == 'fast-rebuild'
+    runs-on: ubuntu-latest
+    outputs:
+      source_run_id: ${{ steps.resolve.outputs.source_run_id }}
+    steps:
+      - name: Checkout workflow ref
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Resolve source run ID
+        id: resolve
+        env:
+          EXPLICIT_ID: ${{ inputs.source_run_id }}
+          BRANCH: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_FILE: gpu_docker_images_pipeline.yml
+        run: bash .github/scripts/resolve_source_run.sh
+
   build_and_push_docker_images:
     name: Build ${{ matrix.name }} Docker Image
-    needs: build_maxtext_package
+    needs: [build_maxtext_package, resolve_source]
+    if: ${{ !cancelled() && needs.build_maxtext_package.result == 'success' && (needs.resolve_source.result == 'success' || needs.resolve_source.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +113,9 @@ jobs:
       dockerfile: maxtext_gpu_dependencies.Dockerfile
       maxtext_sha: ${{ needs.build_maxtext_package.outputs.maxtext_sha }}
       include_test_assets: true
+      fast_rebuild: ${{ inputs.mode == 'fast-rebuild' }}
+      source_run_id: ${{ needs.resolve_source.outputs.source_run_id || inputs.source_run_id }}
+      allow_dependency_drift: ${{ inputs.allow_dependency_drift }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
