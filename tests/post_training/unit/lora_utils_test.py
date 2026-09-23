@@ -609,5 +609,222 @@ class LoraUtilsTest(unittest.TestCase):
     )
 
 
+# DeepSeek-V4 LoRA test helpers
+_DS4_TINY_NUM_LAYERS = 5
+_DS4_TINY_PREFIX_LAYERS = 3
+_DS4_BASE_LORA_MODULES = (
+    "self_attention/wq_a",
+    "self_attention/wq_b",
+    "self_attention/wkv",
+    "self_attention/o_a_proj",
+    "self_attention/o_b_proj",
+    "mlp/shared_experts/wi_0",
+    "mlp/shared_experts/wi_1",
+    "mlp/shared_experts/wo",
+)
+# Compressor modules only exist when compress_ratio > 0
+_DS4_COMPRESSOR_LORA_MODULES = (
+    "self_attention/hca_compressor/kv_proj",
+    "self_attention/hca_compressor/gate_proj",
+    "self_attention/csa_compressor/kv_proj",
+    "self_attention/csa_compressor/gate_proj",
+    "self_attention/csa_compressor/indexer/q_proj",
+    "self_attention/csa_compressor/indexer/kv_proj",
+    "self_attention/csa_compressor/indexer/gate_proj",
+    "self_attention/csa_compressor/indexer/weights_proj",
+)
+
+
+def _ds4_expected_lora_paths(layer_template, layer_indices, compress_ratios=None):
+  """Expected LoRAParam state paths for given DeepSeek-V4 layers.
+
+  Args:
+    layer_template: Template string with {i} placeholder for layer index
+    layer_indices: Iterable of layer indices to include
+    compress_ratios: Optional list of compress_ratio values per layer.
+                     - 0: no compressor
+                     - == 4: CSA compressor (with indexer)
+                     - > 4: HCA compressor (kv_proj, gate_proj only)
+  """
+  base_paths = set()
+  for i in layer_indices:
+    layer_path = layer_template.format(i=i)
+    for module in _DS4_BASE_LORA_MODULES:
+      for ab in ("a", "b"):
+        base_paths.add(f"{layer_path}/{module}/kernel_lora_{ab}")
+
+  if compress_ratios is None:
+    # No compression info: assume all layers have compressors (for testing regex)
+    for i in layer_indices:
+      layer_path = layer_template.format(i=i)
+      for module in _DS4_COMPRESSOR_LORA_MODULES:
+        for ab in ("a", "b"):
+          base_paths.add(f"{layer_path}/{module}/kernel_lora_{ab}")
+    return base_paths
+
+  # With compress_ratios: add only the compressor modules that exist for each layer
+  compressor_paths = set()
+  for i in layer_indices:
+    layer_path = layer_template.format(i=i)
+    ratio = compress_ratios[i]
+
+    if ratio == 4:
+      # CSA compressor: kv_proj, gate_proj + indexer projections (q/kv/gate/weights_proj)
+      csa_modules = (
+          "self_attention/csa_compressor/kv_proj",
+          "self_attention/csa_compressor/gate_proj",
+          "self_attention/csa_compressor/indexer/q_proj",
+          "self_attention/csa_compressor/indexer/kv_proj",
+          "self_attention/csa_compressor/indexer/gate_proj",
+          "self_attention/csa_compressor/indexer/weights_proj",
+      )
+      for module in csa_modules:
+        for ab in ("a", "b"):
+          compressor_paths.add(f"{layer_path}/{module}/kernel_lora_{ab}")
+    elif ratio > 4:
+      # HCA compressor: only kv_proj, gate_proj (no indexer)
+      hca_modules = (
+          "self_attention/hca_compressor/kv_proj",
+          "self_attention/hca_compressor/gate_proj",
+      )
+      for module in hca_modules:
+        for ab in ("a", "b"):
+          compressor_paths.add(f"{layer_path}/{module}/kernel_lora_{ab}")
+    # elif ratio == 0 or ratio < 4: no compressor
+
+  return base_paths | compressor_paths
+
+
+class LoraUtilsTest(unittest.TestCase):
+  """Tests for lora_utils.py (Qwix LoRA Utils)"""
+
+  # pylint: disable=protected-access
+
+  def test_deepseek4_lora_path_matching(self):
+    """Test the DeepSeek-V4 LoRA regex with fullmatch against module paths, including new compressor projections."""
+    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
+    mock_config.lora = mock.MagicMock()
+    mock_config.lora.lora_module_path = ""
+    mock_config.model_name = "deepseek4-284b"
+
+    compiled = re.compile(lora_utils._get_lora_module_path(mock_config))
+
+    # Test paths that should match
+    matching_paths = [
+        # Original covered projections
+        "decoder/layers_0/self_attention/wq_a",
+        "decoder/layers_2/self_attention/wq_b",
+        "decoder/layers_1/self_attention/wkv",
+        "decoder/layers_0/self_attention/o_a_proj",
+        "decoder/layers_0/self_attention/o_b_proj",
+        "decoder/layers_0/mlp/shared_experts/wi_0",
+        "decoder/layers_2/mlp/shared_experts/wi_1",
+        "decoder/layers_1/mlp/shared_experts/wo",
+        # Scanned blocks format
+        "decoder/scanned_blocks/layers_0/self_attention/wq_a",
+        "decoder/scanned_blocks/layers_1/mlp/shared_experts/wo",
+        # Alternative layer indexing format (layers/0 instead of layers_0)
+        "decoder/layers/0/self_attention/wkv",
+        "decoder/layers/4/mlp/shared_experts/wi_0",
+        # New projections: HCA compressor
+        "decoder/layers_0/self_attention/hca_compressor/kv_proj",
+        "decoder/layers_1/self_attention/hca_compressor/gate_proj",
+        "decoder/scanned_blocks/layers_0/self_attention/hca_compressor/kv_proj",
+        # New projections: CSA compressor
+        "decoder/layers_0/self_attention/csa_compressor/kv_proj",
+        "decoder/layers_2/self_attention/csa_compressor/gate_proj",
+        # New projections: CSA compressor indexer
+        "decoder/layers_0/self_attention/csa_compressor/indexer/q_proj",
+        "decoder/layers_1/self_attention/csa_compressor/indexer/kv_proj",
+        "decoder/layers_3/self_attention/csa_compressor/indexer/gate_proj",
+        "decoder/layers_2/self_attention/csa_compressor/indexer/weights_proj",
+        "decoder/scanned_blocks/layers_1/self_attention/csa_compressor/indexer/weights_proj",
+    ]
+    for path in matching_paths:
+      self.assertIsNotNone(
+          compiled.fullmatch(path),
+          f"Failed to match valid path: {path}"
+      )
+
+    # Test paths that should NOT match
+    non_matching_paths = [
+        "decoder/scanned_blocks/layers_0/mlp/MoeBlock_0/wi_0",
+        "decoder/layers_0/mlp/MoeBlock_0/wo",
+        "decoder/layers/3/mlp/MoeBlock_0/wi_1",
+        "decoder/layers_0/pre_self_attention_layer_norm/scale",
+        "decoder/decoder_norm/scale",
+        "token_embedder/embedding",
+        "decoder/scanned_blocks/layers_0/mlp/MoeBlock_0/gate/kernel",
+    ]
+    for path in non_matching_paths:
+      self.assertIsNone(
+          compiled.fullmatch(path),
+          f"Incorrectly matched invalid path: {path}"
+      )
+
+  def _deepseek4_tiny_lora_paths(self, scan_layers, compress_ratios):
+    """Materializes LoRA on a 5-layer DeepSeek-V4 and returns its LoRAParam state paths."""
+    cfg = _make_config(
+        model_name="deepseek4-tiny",
+        base_num_decoder_layers=_DS4_TINY_NUM_LAYERS,
+        compress_ratios=compress_ratios,
+        sliding_window_size=32,
+        base_emb_dim=64,
+        base_mlp_dim=64,
+        base_moe_mlp_dim=64,
+        base_num_query_heads=4,
+        base_num_kv_heads=1,
+        num_experts=4,
+        num_experts_per_tok=2,
+        shared_experts=1,
+        vocab_size=32,
+        max_target_length=16,
+        scan_layers=scan_layers,
+        lora={"enable_lora": True, "lora_rank": 4, "lora_alpha": 8.0},
+    )
+    model, _ = model_creation_utils.from_pretrained(cfg, mesh=None, model_mode=model_creation_utils.MODEL_MODE_TRAIN)
+    lora_model = lora_utils.apply_lora_to_model(model, None, cfg)
+    _, state = nnx.split(lora_model)
+    return {"/".join(str(p) for p in path) for path, value in state.flat_state() if isinstance(value, nnx.LoRAParam)}
+
+  def test_apply_lora_to_deepseek4_tiny_unscanned_no_compression(self):
+    """Unscanned layers with no compression: only 8 base projections per layer."""
+    compress_ratios = [0, 0, 0, 0, 0]  # No compression
+    self.assertEqual(
+        self._deepseek4_tiny_lora_paths(scan_layers=False, compress_ratios=compress_ratios),
+        _ds4_expected_lora_paths("decoder/layers_{i}", range(_DS4_TINY_NUM_LAYERS), compress_ratios),
+    )
+
+  def test_apply_lora_to_deepseek4_tiny_unscanned_with_compression(self):
+    """Unscanned layers with selective compression: base + compressor modules."""
+    compress_ratios = [0, 0, 4, 128, 4]  # Layers 2,4: CSA; Layer 3: HCA
+    self.assertEqual(
+        self._deepseek4_tiny_lora_paths(scan_layers=False, compress_ratios=compress_ratios),
+        _ds4_expected_lora_paths("decoder/layers_{i}", range(_DS4_TINY_NUM_LAYERS), compress_ratios),
+    )
+
+  def test_apply_lora_to_deepseek4_tiny_scanned_no_compression(self):
+    """Scanned layers (3 prefix, 2 in block) with no compression."""
+    compress_ratios = [0, 0, 0, 0, 0]  # No compression
+    self.assertEqual(
+        self._deepseek4_tiny_lora_paths(scan_layers=True, compress_ratios=compress_ratios),
+        _ds4_expected_lora_paths("decoder/layers_{i}", range(_DS4_TINY_PREFIX_LAYERS), compress_ratios)
+        | _ds4_expected_lora_paths(
+            "decoder/scanned_blocks/layers_{i}", range(_DS4_TINY_NUM_LAYERS - _DS4_TINY_PREFIX_LAYERS), compress_ratios
+        ),
+    )
+
+  def test_apply_lora_to_deepseek4_tiny_scanned_with_compression(self):
+    """Scanned layers with compression: 3 prefix + 2 in block, selective compressors."""
+    compress_ratios = [0, 0, 4, 128, 4]  # Layers 2,4: CSA; Layer 3: HCA
+    self.assertEqual(
+        self._deepseek4_tiny_lora_paths(scan_layers=True, compress_ratios=compress_ratios),
+        _ds4_expected_lora_paths("decoder/layers_{i}", range(_DS4_TINY_PREFIX_LAYERS), compress_ratios)
+        | _ds4_expected_lora_paths(
+            "decoder/scanned_blocks/layers_{i}", range(_DS4_TINY_NUM_LAYERS - _DS4_TINY_PREFIX_LAYERS), compress_ratios
+        ),
+    )
+
+
 if __name__ == "__main__":
   unittest.main()

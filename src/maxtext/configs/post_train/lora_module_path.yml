@@ -19,7 +19,10 @@ llama3.1: "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1
 qwen3: "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))"
 mistral: "decoder/layers/.*(attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))"
 deepseek2: "decoder/(dense_layers|moe_stack)/self_attention/(query|out|wkv_a|wkv_b)|decoder/(dense_layers|moe_stack)/(mlp|shared_experts)/(wi_0|wi_1|wo)"
-deepseek4: "decoder/(scanned_blocks/)?layers/(self_attention/(wq_a|wq_b|wkv|o_a_proj|o_b_proj)|mlp/shared_experts/(wi_0|wi_1|wo))"
+# DeepSeek-V4: LoRA targets base attention projections, shared experts, and conditional compressor modules.
+# Routed experts (MoeBlock) are excluded because they use expert selection via gating and routing, which is
+# not compatible with LoRA parameter sharing. Compressor modules (HCA/CSA) exist only when compress_ratio > 0.
+deepseek4: "decoder/(scanned_blocks/)?layers/(self_attention/(wq_a|wq_b|wkv|o_a_proj|o_b_proj|hca_compressor/(kv_proj|gate_proj)|csa_compressor/(kv_proj|gate_proj|indexer/(q_proj|kv_proj|gate_proj|weights_proj)))|mlp/shared_experts/(wi_0|wi_1|wo))"
 gemma2: "decoder/(scanned_blocks|layers_remainder|layers)/(self_attention_local|self_attention_global)/(query|key|value|out)|decoder/(scanned_blocks|layers_remainder|layers)/(mlp_local|mlp_global)/(wi_0|wi_1|wo)"
 gemma3: "decoder/(scanned_blocks|layers_remainder|layers)/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo|gate|up|down))"
 gemma4: "decoder/((scanned_blocks|layers_remainder)/)?layers.*/.*(self_attention/(query|key|value|out)|mlp/.*(wi_0|wi_1|wo))"
