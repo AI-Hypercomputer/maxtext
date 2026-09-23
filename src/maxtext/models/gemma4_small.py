@@ -14,6 +14,8 @@
 
 """Specialized layers for Gemma 4 small (E2B and E4B)."""
 
+import functools
+
 import jax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
@@ -22,7 +24,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
+from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL, ShardMode
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
@@ -31,6 +33,7 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 
 # E2B repeats 4 sliding + 1 global (period 5); E4B repeats 5 sliding + 1 global
@@ -186,9 +189,22 @@ class Gemma4SmallPLE(nnx.Module):
         epsilon=config.normalization_layer_epsilon,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=rngs,
     )
+
+    # Both halves of the per-layer input are built at `[B, S, L * D_ple]` and then split into
+    # `[B, S, L, D_ple]`, so the feature axis has to be replicated: a reshape cannot split a
+    # sharded axis, and the consumer -- the gate in Gemma4SmallDecoderLayer -- pins the same
+    # layout. In ShardMode.AUTO these are None and GSPMD infers the layout as before.
+    if config.shard_mode == ShardMode.EXPLICIT:
+      rules = get_logical_axis_rules()
+      self.flat_sharding = create_sharding(mesh, ("activation_batch", "activation_norm_length", None), rules=rules)
+      self.ple_sharding = create_sharding(mesh, ("activation_batch", "activation_norm_length", None, None), rules=rules)
+    else:
+      self.flat_sharding = None
+      self.ple_sharding = None
 
     # Plain Python floats — storing them as jnp arrays would let nnx promote
     # them to Variables, which then collide with the param tree on restore.
@@ -206,13 +222,13 @@ class Gemma4SmallPLE(nnx.Module):
     inv_sqrt2 = jnp.asarray(2.0**-0.5, cfg.dtype)
 
     embedding = jnp.asarray(self.embed_tokens_per_layer.value, cfg.dtype)
-    identity = embedding[input_ids.astype(jnp.int32)] * embed_scale
+    identity = embedding.at[input_ids.astype(jnp.int32)].get(out_sharding=self.flat_sharding) * embed_scale
     identity = identity.reshape(*input_ids.shape, self._num_layers, self._ple_dim)
 
-    context = self.per_layer_model_projection(inputs_embeds.astype(cfg.dtype))
+    context = self.per_layer_model_projection(inputs_embeds.astype(cfg.dtype), out_sharding=self.flat_sharding)
     context = context * proj_scale
     context = context.reshape(*inputs_embeds.shape[:-1], self._num_layers, self._ple_dim)
-    context = self.per_layer_projection_norm(context)
+    context = self.per_layer_projection_norm(context, out_sharding=self.ple_sharding)
 
     out = (identity + context) * inv_sqrt2
     return out.astype(cfg.dtype)
@@ -267,10 +283,33 @@ class Gemma4SmallDecoderLayer(nnx.Module):
     self.num_kv_heads = num_kv_heads
     self.head_dim = head_dim
 
+    if model_mode == MODEL_MODE_PREFILL:
+      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.mlp_activation_axis_names = self.activation_axis_names[:-1] + ("activation_mlp",)
+
+    # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
+    # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
+    self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+    self.mlp_intermediate_sharding = create_sharding(mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules())
+    # The per-layer-input feature axis is left replicated: the gate is multiplied against a
+    # slice of the PLE tensor, whose feature axis falls out of a reshape and so carries no
+    # layout of its own. Pinning the gate here keeps the two operands in agreement.
+    self.ple_sharding = create_sharding(mesh, self.activation_axis_names[:-1] + (None,), rules=get_logical_axis_rules())
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+        extra_stack_level=1,
+    )
+
     self.pre_self_attention_norm = RMSNorm(
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=rngs,
     )
@@ -278,6 +317,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=rngs,
     )
@@ -285,6 +325,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=rngs,
     )
@@ -292,6 +333,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=rngs,
     )
@@ -377,6 +419,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
           epsilon=config.normalization_layer_epsilon,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
           kernel_axes=("norm",),
           rngs=rngs,
       )
@@ -386,11 +429,6 @@ class Gemma4SmallDecoderLayer(nnx.Module):
       self.post_per_layer_input_norm = None
 
     self.layer_scalar = nnx.Param(jnp.ones((1,), dtype=config.weight_dtype), sharding=(None,))
-
-    if model_mode == MODEL_MODE_PREFILL:
-      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
-    else:
-      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
   def compute_shared_kv(self, inputs: jax.Array, decoder_positions: jax.Array) -> tuple[jax.Array, jax.Array]:
     """Returns the rotated, normed K / V for this (non-shared) layer.
@@ -402,7 +440,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
       raise ValueError("compute_shared_kv must not be called on a KV-shared layer.")
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    h = self.pre_self_attention_norm(inputs)
+    h = self.pre_self_attention_norm(inputs, out_sharding=self.out_sharding)
     return self.self_attention.compute_shared_kv(h, inputs_positions=decoder_positions)
 
   def __call__(
@@ -426,7 +464,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
 
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     # Bidirectional image-token mask is only meaningful in local-sliding
@@ -435,8 +473,8 @@ class Gemma4SmallDecoderLayer(nnx.Module):
       bidirectional_mask = None
 
     residual = inputs
-    h = self.pre_self_attention_norm(inputs)
-    h = nn.with_logical_constraint(h, self.activation_axis_names)
+    h = self.pre_self_attention_norm(inputs, out_sharding=self.out_sharding)
+    h = self._maybe_shard_with_logical(h, self.activation_axis_names)
 
     attn_out, kv_cache = self.self_attention(
         h,
@@ -446,34 +484,40 @@ class Gemma4SmallDecoderLayer(nnx.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         bidirectional_mask=bidirectional_mask,
+        out_sharding=self.out_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
         shared_key=shared_key,
         shared_value=shared_value,
     )
-    attn_out = self.post_self_attention_norm(attn_out)
-    attn_out = nn.with_logical_constraint(attn_out, self.activation_axis_names)
+    attn_out = self.post_self_attention_norm(attn_out, out_sharding=self.out_sharding)
+    attn_out = self._maybe_shard_with_logical(attn_out, self.activation_axis_names)
     h = residual + attn_out
 
     residual = h
-    mlp_in = self.pre_ffw_norm(h)
-    mlp_out = self.mlp(mlp_in, deterministic=deterministic)
-    mlp_out = self.post_ffw_norm(mlp_out)
-    mlp_out = nn.with_logical_constraint(mlp_out, self.activation_axis_names)
+    mlp_in = self.pre_ffw_norm(h, out_sharding=self.out_sharding)
+    mlp_out = self.mlp(
+        mlp_in,
+        deterministic=deterministic,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
+    )
+    mlp_out = self.post_ffw_norm(mlp_out, out_sharding=self.out_sharding)
+    mlp_out = self._maybe_shard_with_logical(mlp_out, self.activation_axis_names)
     h = residual + mlp_out
 
     if self.per_layer_input_gate is not None and per_layer_input is not None:
       residual = h
-      gate = self.per_layer_input_gate(h)
+      gate = self.per_layer_input_gate(h, out_sharding=self.ple_sharding)
       gate = jax.nn.gelu(gate.astype(jnp.float32), approximate=True).astype(cfg.dtype)
       gated = gate * per_layer_input.astype(cfg.dtype)
-      proj = self.per_layer_projection(gated)
-      proj = self.post_per_layer_input_norm(proj)
-      proj = nn.with_logical_constraint(proj, self.activation_axis_names)
+      proj = self.per_layer_projection(gated, out_sharding=self.out_sharding)
+      proj = self.post_per_layer_input_norm(proj, out_sharding=self.out_sharding)
+      proj = self._maybe_shard_with_logical(proj, self.activation_axis_names)
       h = residual + proj
 
     h = h * jnp.asarray(self.layer_scalar.value, cfg.dtype)
-    h = nn.with_logical_constraint(h, self.activation_axis_names)
+    h = self._maybe_shard_with_logical(h, self.activation_axis_names)
 
     return h, kv_cache
 
