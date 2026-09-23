@@ -18,25 +18,31 @@ set -uo pipefail
 CLUSTER=bodaborg-tpu7x-nap
 PROJECT=cloud-tpu-shared-capacity
 REGION=us-central1
-NAMESPACE=${NAMESPACE:-priority-dev}
-QUEUE=${QUEUE:-multislice-queue}
+# `default` is the namespace this account can actually create in; `priority-dev`
+# holds more chips but denies create. Checked with `kubectl auth can-i`.
+NAMESPACE=${NAMESPACE:-default}
+QUEUE=${QUEUE-multislice-queue}
 PRIORITY=${PRIORITY:-medium}
 DURATION=${DURATION:-90}
 
 # Read straight off the idle pool's node labels; do not guess these.
-TOPOLOGY=${TOPOLOGY:-4x8x8}
-NODES=${NODES:-64}
-PLACEMENT_POLICY=${PLACEMENT_POLICY:-tpu7x-512-4x8x8-placement-policy}
+TOPOLOGY=${TOPOLOGY:-4x4x4}
+NODES=${NODES:-16}
+PLACEMENT_POLICY=${PLACEMENT_POLICY-tpu7x-128-4x4x4-placement-policy}
 RESERVATION=${RESERVATION-cloudtpu-20260710003900-159478293}
 
 IMAGE=${IMAGE:-gcr.io/cloud-tpu-multipod-dev/agagik-olmoe3:kdaj24}
+# Two buckets because pod identity differs by cluster: shared-capacity pods can
+# read agagik-us, multipod-dev pods 403 on it and need cloud-pathways-staging.
+# The container tries them in order rather than guessing.
 SRC=${SRC:-gs://agagik-us/olmo35/src.tgz}
-OUT=${OUT:-gs://agagik-us/olmo35/4x8x8}
+SRC2=${SRC2:-gs://cloud-pathways-staging/agagik/olmo35-src.tgz}
+OUT=${OUT:-gs://agagik-us/olmo35/4x4x4}
 RUN=${RUN:-o35x$(date +%m%d%H%M)}
-MODELS=${MODELS:-olmo35-tiny olmo35-small}
+MODELS=${MODELS:-olmo35-tiny}
+# pdb:seq pairs. pdb is the knob every tuned Ironwood recipe runs at 10-16 and
+# we have only ever measured at 1, so the sweep is the point of the run.
 CFGS=${CFGS:-1:8192 4:8192 1:16384}
-PDB=${PDB:-4}
-SEQ=${SEQ:-8192}
 STEPS=${STEPS:-20}
 
 export KUBECONFIG=${KUBECONFIG:-/tmp/kc-nap-olmo35.yaml}
@@ -49,6 +55,7 @@ LIBTPU='--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_bf16_emission_mode=NATIV
 # Single-host pools carry no placement policy; only emit the selector when set.
 PP_LINE=""
 [ -n "$PLACEMENT_POLICY" ] && PP_LINE="              cloud.google.com/placement-policy-name: $PLACEMENT_POLICY"$'\n'
+EXTRA_SEL="${EXTRA_SELECTORS:-}"
 RES_SEL=""; RES_TOL=""
 if [ -n "$RESERVATION" ]; then
   RES_SEL="              cloud.google.com/reservation-name: $RESERVATION"$'\n'
@@ -57,7 +64,9 @@ fi
 
 QLABELS=""
 if [ -n "$QUEUE" ]; then
-  QLABELS="    kueue.x-k8s.io/queue-name: $QUEUE"$'\n'"    kueue.x-k8s.io/priority-class: $PRIORITY"
+  # Queue name only. The admitted jobsets on this cluster carry no
+  # `priority-class` label, and Kueue rejects one that names no WorkloadPriorityClass.
+  QLABELS="    kueue.x-k8s.io/queue-name: $QUEUE"
 else
   QLABELS="    olmo35: bench"
 fi
@@ -106,7 +115,7 @@ spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu7x
               cloud.google.com/gke-tpu-topology: $TOPOLOGY
-$PP_LINE$RES_SEL
+$PP_LINE$RES_SEL$EXTRA_SEL
             tolerations:
             - key: google.com/tpu
               operator: Exists
@@ -140,8 +149,11 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                 echo START \$(date);
                 # Ship the rebased worktree source; the image is hundreds of
                 # commits behind and has no olmo35 configs.
-                mkdir -p /wt && gcloud storage cp $SRC /wt/src.tgz >/dev/null 2>&1 \
-                  && tar xzf /wt/src.tgz -C /wt && echo "src ok: \$(ls /wt/src/maxtext | wc -l) entries";
+                mkdir -p /wt
+                for B in $SRC $SRC2; do
+                  gcloud storage cp \$B /wt/src.tgz >/dev/null 2>&1 && { echo "src from \$B"; break; }
+                done
+                tar xzf /wt/src.tgz -C /wt && echo "src ok: \$(ls /wt/src/maxtext | wc -l) entries" || { echo "SRC FETCH FAILED"; exit 1; }
                 export PYTHONPATH=/wt/src
                 export LIBTPU_INIT_ARGS='$LIBTPU'
                 export TMPDIR=/dev/shm
@@ -149,19 +161,22 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                 export TOKAMAX_KDA_DENSE_PAIRS=${DENSE_PAIRS:-1}
                 export TOKAMAX_KDA_BF16_FWD=${KDA_BF16:-1} TOKAMAX_KDA_BF16_BWD=${KDA_BF16:-1}
                 for M in $MODELS; do
-                  echo "=== MODEL=\$M pdb=$PDB seq=$SEQ ===";
-                  python3 -m maxtext.trainers.pre_train.train \
-                    /wt/src/maxtext/configs/base.yml \
-                    model_name=\$M run_name=$RUN-\$M steps=$STEPS \
-                    dataset_type=synthetic enable_checkpointing=False async_checkpointing=False \
-                    per_device_batch_size=$PDB max_target_length=$SEQ \
-                    dtype=bfloat16 weight_dtype=float32 \
-                    ici_fsdp_parallelism=-1 remat_policy=full \
-                    sparse_matmul=True use_tokamax_kda=True \
-                    megablox=False use_tokamax_gmm=True use_gmm_v2=True \
-                    shard_exp_on_fsdp=True num_vocab_tiling=8 \
-                    base_output_directory=$OUT 2>&1 | tail -30;
-                  echo "=== \$M exit=\${PIPESTATUS[0]} ===";
+                  for C in $CFGS; do
+                    P=\${C%%:*}; S=\${C##*:}
+                    echo "=== MODEL=\$M pdb=\$P seq=\$S ===";
+                    python3 -m maxtext.trainers.pre_train.train \
+                      /wt/src/maxtext/configs/base.yml \
+                      model_name=\$M run_name=$RUN-\$M-p\$P-s\$S steps=$STEPS \
+                      dataset_type=synthetic enable_checkpointing=False async_checkpointing=False \
+                      per_device_batch_size=\$P max_target_length=\$S \
+                      dtype=bfloat16 weight_dtype=float32 \
+                      ici_fsdp_parallelism=-1 remat_policy=full \
+                      sparse_matmul=True use_tokamax_kda=True \
+                      megablox=False use_tokamax_gmm=True use_gmm_v2=True \
+                      shard_exp_on_fsdp=True num_vocab_tiling=8 \
+                      base_output_directory=$OUT 2>&1 | tail -25;
+                    echo "=== \$M pdb=\$P seq=\$S exit=\${PIPESTATUS[0]} ===";
+                  done
                 done
                 echo END \$(date)
 YAMLEOF

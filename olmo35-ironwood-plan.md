@@ -606,6 +606,69 @@ exact operating point phase 6.5 predicts at 35-51% MFU.
 Also note: on this cluster the XLA flags **do** reach the compiler (the workers are
 ours), unlike SPS. So it would test the sparse-core offload set too.
 
+## 2026-09-23: the new large capacity is `bodaborg-tpu7x-gsc`, and it is RBAC-gated
+
+A fresh cluster appeared in `cloud-tpu-shared-capacity`, created 2026-09-21:
+**`bodaborg-tpu7x-gsc`, 767 Ironwood nodes (3068 chips)** across ~48 pools of 16,
+including pools already labelled `4x4x4`, `4x4x8` and `8x8x8`. 2236 chips are in use,
+so roughly **830 chips are free**. This is by far the largest Ironwood capacity seen in
+this work, and the right home for the whole remaining matrix.
+
+I cannot submit to it. `kubectl auth can-i create pods` returns **no in every one of
+its 16 namespaces**, and `create rolebinding` is also denied, so it cannot be
+self-granted.
+
+The gap is a single missing rolebinding, and diffing the two clusters names it exactly:
+
+| cluster | namespace `default` bindings to `power-users` |
+|---|---|
+| `bodaborg-tpu7x-nap` (works) | `power-users-binding-default` -> Groups `cmcs-ai-ninja-team@`, `multipod-users@`, **plus `shuwenf-vm-power-users` -> `User: 112155357684894056033`, `User: 630405687483-compute@developer.gserviceaccount.com`** |
+| `bodaborg-tpu7x-gsc` (blocked) | `power-users-binding-default` -> Group `multipod-users@` only. **No user-level binding.** |
+
+**The ask, unchanged in substance from the priority-dev one below but now pointed at
+the cluster that actually has the chips:** replicate the `shuwenf-vm-power-users`
+rolebinding on `bodaborg-tpu7x-gsc`, namespace `default`, i.e. bind
+`User: 630405687483-compute@developer.gserviceaccount.com` (uniqueId
+`112155357684894056033`) to the existing `power-users` role. Adding the account to
+`multipod-users@twosync.google.com` does the same job. Send to
+`%cmcs-shared-clusters-admin-grpadm.prod`.
+
+### Why the other routes are still shut
+
+| cluster | project | state on 2026-09-23 |
+|---|---|---|
+| `bodaborg-tpu7x-gsc` | shared-capacity | 767 nodes, ~830 chips free, **no create rights anywhere** |
+| `bodaborg-tpu7x-nap` | shared-capacity | create OK in `default`, but pools churn; a 16-node `4x4x4` pool was ready at 21:29 and consumed by another job before Kueue admitted mine. Now only `2x2x1` and `1x1x1` remain |
+| `ab-k3-v7x-64` | multipod-dev | two ready **2x4x4** pools (8 nodes / 32 chips each), create OK, but both fully held by a `k3-serve` job running **5-7 days** |
+| `tpu7x-cluster-flex` | multipod-dev | down to 4 tpu7x nodes, largest `2x2x2` |
+| `ninja-v7x-64-spot`, `ninja-v7x-512`, `gtt-cluster`, `y6k`, `y6k-2` | multipod-dev | create OK, **zero tpu7x nodes** |
+
+### Kueue on nap admits against physical topology, not nominal quota
+
+Worth recording because the numbers look contradictory. `nap`'s cohort reports
+`nominal=307, used=57, free=250`, yet a 64-chip ask is refused with **"62 more
+needed"** and a 32-chip ask with **"30 more needed"**: effectively 2 chips available.
+The reason is that `tpu7x-flavor` sets `topologyName: tpu-multihost-topology`, so
+Kueue's TopologyAwareScheduling admits only into a **physically existing, free
+topology domain**. With the cluster down to `2x2x1` and `1x1x1` nodes there is no
+multi-host domain to place into, and the 307-chip nominal quota is unreachable
+regardless. The `check-capacity-prov` ProvisioningRequest check cannot help either:
+it runs **after** QuotaReserved, so it never fires.
+
+Practical consequence: on `nap`, a run only lands if a multi-host pool is physically
+present and idle at the moment Kueue sweeps. Two jobs are queued against exactly that
+event, `o35a232130` (4x4x4, 16 nodes) and `o35b232137` (2x4x4, 8 nodes), both sized so
+the smaller one admits first if only partial capacity frees.
+
+### Launcher changes made for this attempt
+
+`scripts/olmo35_xpk_4x8x8.sh` now defaults to `4x4x4`/16 nodes in namespace `default`
+(the only namespace this account can create in), loops the `CFGS` pdb:seq matrix
+instead of a single point, drops the `kueue.x-k8s.io/priority-class` label that names
+no WorkloadPriorityClass, and tries both `gs://agagik-us` and
+`gs://cloud-pathways-staging` for the source tarball since pod identity differs by
+cluster.
+
 ## Blocked / infrastructure
 
 - **A 4x4x4 is not currently obtainable.** `bodaborg-tpu7x-nap` has 47 Ironwood nodes
