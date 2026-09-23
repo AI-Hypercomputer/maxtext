@@ -46,6 +46,7 @@ import jax
 from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.pre_train import train_compile as pre_train_compile
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import gcs_utils
@@ -104,12 +105,21 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
   is allocated and no checkpoint, tokenizer or network is touched. Nothing can be executed.
   """
 
-  def __init__(self, training_config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh) -> None:
+  def __init__(
+      self,
+      training_config: pyconfig.HyperParameters,
+      mesh: jax.sharding.Mesh,
+      wrap_with_tunix_adapter: bool = False,
+      tokenizer_pad_id: int | None = None,
+  ) -> None:
     """Initializes an engine that can be lowered but not run.
 
     Args:
       training_config: MaxText HyperParameters configuration instance.
       mesh: The mesh to compile against, typically a topology this host does not own.
+      wrap_with_tunix_adapter: As `MaxTextTrainingEngine`'s. Needed to compile a Tunix loss
+        (`algo_core.grpo_loss_fn`), which calls the model with Tunix's signature.
+      tokenizer_pad_id: As `MaxTextTrainingEngine`'s; required with the adapter.
 
     Raises:
       ValueError: If `mesh` is None. With no weights there is no device set to read one off.
@@ -120,21 +130,35 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
           "off, and the point of the abstract path is to compile against a mesh this host does not own -- "
           "build one with `trainers.pre_train.train_compile.get_topology_mesh`."
       )
-    super().__init__(training_config, mesh=mesh)
+    super().__init__(
+        training_config,
+        mesh=mesh,
+        wrap_with_tunix_adapter=wrap_with_tunix_adapter,
+        tokenizer_pad_id=tokenizer_pad_id,
+    )
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     """Returns the model with `jax.ShapeDtypeStruct` weights on their real shardings.
 
     The same `create_nnx_abstract_model` call `from_pretrained` makes before it materializes
-    anything, minus the checkpoint load -- so no weights, no HF token and no network.
+    anything, minus the checkpoint load -- so no weights, no HF token and no network. The
+    adapter wrap is `from_pretrained`'s too, so a compiled Tunix loss sees the module it will
+    see live.
     """
-    del wrap_with_tunix_adapter, tokenizer_pad_id  # `__init__` accepts neither.
     _, abstract_model = model_creation_utils.create_nnx_abstract_model(
         model_creation_utils.verify_and_sync_scan_layers(self._config),
         self._mesh,
         model_mode=common_types.MODEL_MODE_TRAIN,
         rng_key=self._init_rng,
     )
+    if wrap_with_tunix_adapter:
+      with self._mesh:
+        abstract_model = TunixMaxTextAdapter(
+            base_model=abstract_model,
+            use_no_op_mappings="maxtext_config" in self._config.vllm_additional_config,
+            pad_id=tokenizer_pad_id,
+        )
+        abstract_model.config = None
     return abstract_model
 
   def _build_optimizer(self, tx: Any) -> Any:
@@ -156,8 +180,15 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
     inside `tx.init` into the moment allocated from it. The result is merged back onto the real
     mesh, whose axis types -- not the stand-in's -- decide what the compiled kernels do.
 
-    Both run under the engine's own `_sharding_ctx`, so the rules the MaxText layers are written
-    against are the live ones rather than a second copy that can drift from them.
+    The layout trace runs under the engine's own `_sharding_ctx`, so the rules the MaxText layers
+    are written against are the live ones rather than a second copy that can drift from them.
+
+    The graph trace runs with no mesh in context. Given one, `nnx.eval_shape` also re-derives every
+    variable's sharding from its logical names, through flax's own lookup (`get_var_pspec`) rather
+    than MaxText's: a plain rename that neither drops a mesh axis an earlier dimension already took
+    (Qwen3.5's scanned MLP weights put `fsdp_transpose` under both `embed` and `mlp`) nor
+    tolerates a logical name the rules leave unmapped (`norm` under `cp-as-ep`), and raises on
+    either. Only the graph is kept from this trace, so there is nothing to lose by skipping them.
     """
     model_graphdef, model_pure = nnx.split(self._model)
 
@@ -166,9 +197,9 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
       return train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
 
     propagation_mesh = _propagation_mesh(self._mesh)
+    state_graphdef, _ = nnx.split(nnx.eval_shape(build, model_pure))
     with self._sharding_ctx():
-      state_graphdef, _ = nnx.split(nnx.eval_shape(build, model_pure))
-      # Displaces the real mesh for this trace only: the one above needs no propagation, and a
+      # Displaces the real mesh for this trace only: the graph trace above needs none, and a
       # stand-in set around it collides with the config's own AbstractMesh under `shard_mode=auto`.
       with jax.set_mesh(propagation_mesh):
         state_pure = jax.eval_shape(
