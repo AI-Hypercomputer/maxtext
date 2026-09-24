@@ -331,13 +331,6 @@ use_gmm_v2_heuristic_tiling: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
-# Record each MoE layer's routing decisions as a `selected_experts` intermediate, which the decoder
-# returns alongside the hidden state as `expert_indices`. Only read on the vLLM fused MoE path
-# (attention: vllm_rpa / vllm_batched_rpa), so in practice only the vLLM sampler in RL sets it, to
-# capture routing for router replay; off by default so standard serving does not pay for the extra
-# top-k.
-return_routed_experts: false
-
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
@@ -1528,3 +1521,61 @@ elastic_backup_kind: "snapshot"
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
+
+# ============================================================================
+# Layer-Group Quantization Strategies & Quality Study
+# Strategies: "UNQUANTIZED", "E4M3", "E5M2", "E4M3_16", "E2M1_32", "MXFP8_16",
+#             "MXINT4", "MXINT8"
+# Multi-pass modes: "triangular", "full_cross", "lhs_high_precision", "rhs_high_precision"
+# ============================================================================
+fwd_qkv_lhs_quant_strategy: "UNQUANTIZED"
+fwd_qkv_rhs_quant_strategy: "UNQUANTIZED"
+fwd_qkv_tile_size: None
+fwd_qkv_multipass_mode: None
+dlhs_qkv_lhs_quant_strategy: "UNQUANTIZED"
+dlhs_qkv_rhs_quant_strategy: "UNQUANTIZED"
+drhs_qkv_lhs_quant_strategy: "UNQUANTIZED"
+drhs_qkv_rhs_quant_strategy: "UNQUANTIZED"
+
+fwd_oproj_lhs_quant_strategy: "UNQUANTIZED"
+fwd_oproj_rhs_quant_strategy: "UNQUANTIZED"
+fwd_oproj_tile_size: None
+fwd_oproj_multipass_mode: None
+dlhs_oproj_lhs_quant_strategy: "UNQUANTIZED"
+dlhs_oproj_rhs_quant_strategy: "UNQUANTIZED"
+drhs_oproj_lhs_quant_strategy: "UNQUANTIZED"
+drhs_oproj_rhs_quant_strategy: "UNQUANTIZED"
+
+fwd_mlp_lhs_quant_strategy: "UNQUANTIZED"
+fwd_mlp_rhs_quant_strategy: "UNQUANTIZED"
+fwd_mlp_tile_size: None
+fwd_mlp_multipass_mode: None
+dlhs_mlp_lhs_quant_strategy: "UNQUANTIZED"
+dlhs_mlp_rhs_quant_strategy: "UNQUANTIZED"
+dlhs_mlp_tile_size: None
+dlhs_mlp_multipass_mode: None
+drhs_mlp_lhs_quant_strategy: "UNQUANTIZED"
+drhs_mlp_rhs_quant_strategy: "UNQUANTIZED"
+drhs_mlp_tile_size: None
+drhs_mlp_multipass_mode: None
+
+# Multi-pass flags
+mlp_multipass_mode: None
+
+# Global quality study presets and microscaling settings
+quant_tile_size: None
+multipass_mode: None
+quality_study_trial: ""
+
+# Hardware execution flags (True = hardware FP8, False = simulated)
+fwd_qkv_use_fp8: False
+dlhs_qkv_use_fp8: False
+drhs_qkv_use_fp8: False
+
+fwd_oproj_use_fp8: False
+dlhs_oproj_use_fp8: False
+drhs_oproj_use_fp8: False
+
+fwd_mlp_use_fp8: False
+dlhs_mlp_use_fp8: False
+drhs_mlp_use_fp8: False
