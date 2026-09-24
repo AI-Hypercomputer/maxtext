@@ -184,6 +184,18 @@ def _async_log_metrics(
     max_logging.error(f"Error in async metric logging for step {step}: {e}")
 
 
+def _frag_from_payload(payload, dt, keystr, shape, st, en):
+  """One fragment leaf from a transfer payload.
+
+  Packed payload (default): {dtype: 1-D buffer}; slice [st:en] and reshape.
+  Unpacked payload (DILOCO_UNPACKED_TRANSFER=1): {keystr: leaf fragment in its
+  original shape and sharding}; returned as is, so no ICI relayout is needed.
+  """
+  if keystr in payload:
+    return payload[keystr]
+  return jnp.reshape(payload[dt][st:en], shape)
+
+
 def _fused_unpack_and_apply_scanned_fragment_impl(
     params: Any,
     layer_idx: jax.Array,
@@ -201,9 +213,8 @@ def _fused_unpack_and_apply_scanned_fragment_impl(
   start_idx = layer_idx * slice_len
 
   for dt, keys, shapes, offsets in metadata_tuple:
-    packed_1d = packed_dict[dt]
     for keystr, shape, (st, en) in zip(keys, shapes, offsets):
-      frag = jnp.reshape(packed_1d[st:en], shape)
+      frag = _frag_from_payload(packed_dict, dt, keystr, shape, st, en)
       if keystr.endswith("__bucket_slice"):
         b_keystr = keystr[:-14]
         if b_keystr in manipulator.bucketized_leaves_meta:
@@ -255,9 +266,8 @@ def _fused_unpack_and_apply_flat_fragment_impl(
   new_leaves = list(leaves)
 
   for dt, keys, shapes, offsets in metadata_tuple:
-    packed_1d = packed_dict[dt]
     for keystr, shape, (st, en) in zip(keys, shapes, offsets):
-      frag = jnp.reshape(packed_1d[st:en], shape)
+      frag = _frag_from_payload(packed_dict, dt, keystr, shape, st, en)
       if keystr.endswith("__rem"):
         b_keystr = keystr[:-5]
         if b_keystr in manipulator.bucketized_leaves_meta:
@@ -347,13 +357,23 @@ def _make_pinned_apply_fns(params_shardings: Any, donate: bool):
   return flat_fn, scanned_fn
 
 
-@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
+def _emit(packed_dict, flat_pieces, keystr, frag, unpacked):
+  """Unpacked: keep the leaf fragment as its own array (original shape/sharding).
+  Packed: flatten into the dtype group's 1-D buffer."""
+  if unpacked:
+    packed_dict[keystr] = frag
+  else:
+    flat_pieces.append(jnp.reshape(frag, (-1,)))
+
+
+@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim", "unpacked"))
 def _fused_extract_and_pack_scanned_fragment_jit(
     params: Any,
     layer_idx: jax.Array,
     manipulator: Any,
     metadata_tuple: Any,
     has_replica_dim: bool = False,
+    unpacked: bool = False,
 ) -> dict[str, jax.Array]:
   """Fuses dynamic layer extraction, bucket extraction, and 1D buffer packing into a single JIT kernel on TPU."""
   leaves, _ = jax.tree_util.tree_flatten(params)
@@ -374,7 +394,7 @@ def _fused_extract_and_pack_scanned_fragment_jit(
             v = leaves[b_idx]
             b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
             frag = jax.lax.dynamic_slice_in_dim(v, layer_idx * chunk_size, shape[b_axis], axis=b_ax)
-            flat_pieces.append(jnp.reshape(frag, (-1,)))
+            _emit(packed_dict, flat_pieces, keystr, frag, unpacked)
       else:
         idx = manipulator.keystr_to_leaf_index.get(keystr)
         if idx is not None:
@@ -385,18 +405,20 @@ def _fused_extract_and_pack_scanned_fragment_jit(
               else manipulator.param_scan_axis
           )
           frag = jax.lax.dynamic_slice_in_dim(v, start_idx, slice_len, axis=axis)
-          flat_pieces.append(jnp.reshape(frag, (-1,)))
-    packed_dict[dt] = jnp.concatenate(flat_pieces, axis=0) if flat_pieces else jnp.array([], dtype=dt)
+          _emit(packed_dict, flat_pieces, keystr, frag, unpacked)
+    if not unpacked:
+      packed_dict[dt] = jnp.concatenate(flat_pieces, axis=0) if flat_pieces else jnp.array([], dtype=dt)
 
   return packed_dict
 
 
-@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
+@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim", "unpacked"))
 def _fused_extract_and_pack_flat_fragment_jit(
     params: Any,
     manipulator: Any,
     metadata_tuple: Any,
     has_replica_dim: bool = False,
+    unpacked: bool = False,
 ) -> dict[str, jax.Array]:
   """Fuses static non-scanned parameter extraction and 1D buffer packing for Fragment 0 into a single JIT kernel on TPU."""
   leaves, _ = jax.tree_util.tree_flatten(params)
@@ -414,13 +436,14 @@ def _fused_extract_and_pack_flat_fragment_jit(
             b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
             st_pos = manipulator.num_transformer_fragments * chunk_size
             frag = jax.lax.dynamic_slice_in_dim(v, jnp.asarray(st_pos, dtype=jnp.int32), rem_size, axis=b_ax)
-            flat_pieces.append(jnp.reshape(frag, (-1,)))
+            _emit(packed_dict, flat_pieces, keystr, frag, unpacked)
       else:
         idx = manipulator.keystr_to_leaf_index.get(keystr)
         if idx is not None:
           v = leaves[idx]
-          flat_pieces.append(jnp.reshape(v, (-1,)))
-    packed_dict[dt] = jnp.concatenate(flat_pieces, axis=0) if flat_pieces else jnp.array([], dtype=dt)
+          _emit(packed_dict, flat_pieces, keystr, v, unpacked)
+    if not unpacked:
+      packed_dict[dt] = jnp.concatenate(flat_pieces, axis=0) if flat_pieces else jnp.array([], dtype=dt)
 
   return packed_dict
 
@@ -518,6 +541,13 @@ def _outer_sgd_1d_jit(outer_1d, trace_1d, stacked_learners_1d, lr: float, moment
 USE_COLOCATED_CPU_OUTER = os.environ.get("DILOCO_COLOCATED_CPU_OUTER", "0") == "1"
 # Opt-in (default off until measured on hardware): see _async_outer_update_and_dispatch.
 USE_SYMMETRIC_OUTER = os.environ.get("DILOCO_SYMMETRIC_OUTER", "0") == "1"
+# Opt-in: transfer each fragment leaf as its own array (original shape and
+# sharding) instead of one 1-D buffer per dtype. The 1-D packing forces an ICI
+# relayout in every extract/apply: at 2 x v6e-32 / Qwen3-14B the profile
+# (MyStuff/Data/v6e-pwns-s14p-prof/apply_ops.txt) shows all-gather 8.37 ms in
+# apply and 8.36 ms in extract per step. Requires the colocated CPU outer step
+# and the sharded hop (the legacy numpy syncer assumes 1-D buffers).
+USE_UNPACKED_TRANSFER = os.environ.get("DILOCO_UNPACKED_TRANSFER", "0") == "1"
 
 
 def _colocated_cpu_mesh_for(tpu_mesh: jax.sharding.Mesh) -> jax.sharding.Mesh:
@@ -808,7 +838,7 @@ def _run_learner_loop(
       # (With DILOCO_SHARDED_APPLY the apply kernels donate `params`, so they
       # cannot be pre-warmed on the live state; they compile on first use.)
       dummy_0_packed = _fused_extract_and_pack_flat_fragment_jit(
-          params_template, manipulator, frag_metadata_frozen[0]
+          params_template, manipulator, frag_metadata_frozen[0], unpacked=USE_UNPACKED_TRANSFER
       )
       if not USE_SHARDED_APPLY:
         _ = _fused_unpack_and_apply_flat_fragment_jit(
@@ -817,7 +847,7 @@ def _run_learner_loop(
       if num_fragments > 1:
         dummy_layer_idx = jnp.asarray(0, dtype=jnp.int32)
         dummy_1_packed = _fused_extract_and_pack_scanned_fragment_jit(
-            params_template, dummy_layer_idx, manipulator, frag_metadata_frozen[1]
+            params_template, dummy_layer_idx, manipulator, frag_metadata_frozen[1], unpacked=USE_UNPACKED_TRANSFER
         )
         if not USE_SHARDED_APPLY:
           _ = _fused_unpack_and_apply_scanned_fragment_jit(
@@ -829,6 +859,13 @@ def _run_learner_loop(
     # Lazily-built (flat_apply, scanned_apply) with out_shardings pinned to the
     # live params shardings; see `_make_pinned_apply_fns`.
     pinned_apply_fns = [None]
+    if USE_UNPACKED_TRANSFER and not (USE_COLOCATED_CPU_OUTER and USE_SHARDED_APPLY):
+      raise ValueError(
+          "DILOCO_UNPACKED_TRANSFER=1 requires DILOCO_COLOCATED_CPU_OUTER=1 and DILOCO_SHARDED_APPLY=1 "
+          "(the legacy numpy syncer only handles 1-D packed buffers)."
+      )
+    if USE_UNPACKED_TRANSFER:
+      max_logging.log(f"Learner {learner_idx}: DILOCO_UNPACKED_TRANSFER=1 (per-leaf fragment transfer)")
     # frag_idx -> {dtype: PartitionSpec of the TPU-packed buffer}; written by the
     # learner thread at extraction, read by the prefetch thread tau steps later.
     packed_specs = {}
@@ -980,12 +1017,12 @@ def _run_learner_loop(
               params = nnx.state(state.model, nnx.Param)
               if frag_idx == 0:
                 packed_frag_data = _fused_extract_and_pack_flat_fragment_jit(
-                    params, manipulator, frag_metadata_frozen[0]
+                    params, manipulator, frag_metadata_frozen[0], unpacked=USE_UNPACKED_TRANSFER
                 )
               else:
                 layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
                 packed_frag_data = _fused_extract_and_pack_scanned_fragment_jit(
-                    params, layer_idx, manipulator, frag_metadata_frozen[frag_idx]
+                    params, layer_idx, manipulator, frag_metadata_frozen[frag_idx], unpacked=USE_UNPACKED_TRANSFER
                 )
               if frag_idx not in packed_specs:
                 # Remembered for the prefetch thread's CPU->TPU hop on the
@@ -1521,6 +1558,8 @@ def _run_syncer_loop(
           # transfer landing on its TPUs. Measured at 2 x v6e-32 / Qwen3-14B
           # (v6e-pwns-s14a): learner 1 median 3.6196 s/step vs learner 0
           # 3.4942 s/step, no-sync floor 3.46 s/step (v6e-pwns-s14ns).
+          # Payload keys: dtypes (packed) or leaf keystrs (DILOCO_UNPACKED_TRANSFER).
+          payload_keys = list(learner_frags_host[0].keys())
           agg_targets = list(range(num_learners)) if USE_SYMMETRIC_OUTER else [0]
           results = {}
           for t in agg_targets:
@@ -1542,17 +1581,17 @@ def _run_syncer_loop(
               # Lazy init of the resident outer state, on the CPU mesh. Every
               # target initialises from learner 0's fragment, so all replicas of
               # the outer state start (and stay) bit-identical.
-              syncer_frag_params_1d[state_key] = {dt: aligned[0][dt] for dt in meta}
+              syncer_frag_params_1d[state_key] = {dt: aligned[0][dt] for dt in payload_keys}
               syncer_frag_trace_1d[state_key] = {
                   dt: jax.device_put(jnp.zeros_like(aligned[0][dt]),
                                      _same_spec_sharding(aligned[0][dt], agg_mesh))
-                  for dt in meta
+                  for dt in payload_keys
               }
               _assert_on_platform(syncer_frag_params_1d[state_key], "cpu",
                                   f"syncer outer init frag {frag_idx} target {t}")
 
             new_outer_host = {}
-            for dt in meta:
+            for dt in payload_keys:
               new_outer, new_trace = _outer_sgd_stacked_jit(
                   syncer_frag_params_1d[state_key][dt],
                   syncer_frag_trace_1d[state_key][dt],

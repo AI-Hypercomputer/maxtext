@@ -1066,6 +1066,53 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
       np.testing.assert_allclose(np.array(new_params2["embed"]), 10.0)
       np.testing.assert_allclose(np.array(new_params2["layers"]["w"][0]), 5.0)
 
+  def test_unpacked_extract_apply_matches_packed(self):
+    """DILOCO_UNPACKED_TRANSFER: per-leaf payload keeps leaf shapes/shardings and applies identically."""
+    from maxtext.trainers.diloco.threaded_diloco import (
+        _build_fragment_1d_metadata,
+        _freeze_metadata,
+        _fused_extract_and_pack_scanned_fragment_jit,
+        _fused_extract_and_pack_flat_fragment_jit,
+        _make_pinned_apply_fns,
+    )
+
+    P = jax.sharding.PartitionSpec
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:8]), ("x",))
+    num_layers, hidden = 4, 8
+    base = {
+        "layers": {"w": jnp.arange(num_layers * hidden, dtype=jnp.float32).reshape(num_layers, hidden)},
+        "embed": jnp.arange(hidden, dtype=jnp.float32),
+    }
+    params = {
+        "layers": {"w": jax.device_put(base["layers"]["w"], jax.sharding.NamedSharding(mesh, P(None, "x")))},
+        "embed": jax.device_put(base["embed"], jax.sharding.NamedSharding(mesh, P())),
+    }
+    shardings = jax.tree_util.tree_map(lambda x: x.sharding, params)
+    manipulator = _build_manipulator(params, num_layers=num_layers, num_transformer_frags=num_layers)
+    meta1 = _freeze_metadata(_build_fragment_1d_metadata(manipulator.get_flat_fragment(params, 1)))
+    meta0 = _freeze_metadata(_build_fragment_1d_metadata(manipulator.get_flat_fragment(params, 0)))
+    layer = jnp.asarray(2, dtype=jnp.int32)
+
+    packed = _fused_extract_and_pack_scanned_fragment_jit(params, layer, manipulator, meta1)
+    unpacked = _fused_extract_and_pack_scanned_fragment_jit(params, layer, manipulator, meta1, unpacked=True)
+    self.assertTrue(all(isinstance(k, str) for k in unpacked))
+    w_key = [k for k in unpacked][0]
+    self.assertEqual(unpacked[w_key].shape, (1, hidden))
+    self.assertEqual(unpacked[w_key].sharding.spec, P(None, "x"))  # leaf sharding preserved, no 1-D relayout
+    np.testing.assert_allclose(np.array(unpacked[w_key]).reshape(-1), np.array(list(packed.values())[0]))
+
+    flat_fn, scanned_fn = _make_pinned_apply_fns(shardings, donate=False)
+    upd = {k: v * 3.0 for k, v in unpacked.items()}
+    out = scanned_fn(params, layer, upd, manipulator, meta1)
+    np.testing.assert_allclose(np.array(out["layers"]["w"][2]), np.array(base["layers"]["w"][2]) * 3.0)
+    np.testing.assert_allclose(np.array(out["layers"]["w"][1]), np.array(base["layers"]["w"][1]))
+    self.assertEqual(out["layers"]["w"].sharding.spec, P(None, "x"))
+
+    flat_unpacked = _fused_extract_and_pack_flat_fragment_jit(out, manipulator, meta0, unpacked=True)
+    out2 = flat_fn(out, {k: v + 1.0 for k, v in flat_unpacked.items()}, manipulator, meta0)
+    np.testing.assert_allclose(np.array(out2["embed"]), np.array(base["embed"]) + 1.0)
+    self.assertEqual(out2["embed"].sharding.spec, P())
+
   def test_prefetch_target_sharding_numpy_and_array_inputs(self):
     """Sharded hop is the default, so it must also work on the legacy numpy path (no .sharding)."""
     from maxtext.trainers.diloco.threaded_diloco import _prefetch_target_sharding, USE_SHARDED_APPLY
