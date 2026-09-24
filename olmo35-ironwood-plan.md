@@ -669,6 +669,63 @@ no WorkloadPriorityClass, and tries both `gs://agagik-us` and
 `gs://cloud-pathways-staging` for the source tarball since pod identity differs by
 cluster.
 
+## MEASURED ON A REAL 4x4x4, 2026-09-24: the binder is HBM, and 128 devices does not beat 8
+
+Run `o35nap240641` on `bodaborg-tpu7x-nap`, pool `nap-tpu7x-stand-4t-*`, **16 nodes,
+64 chips, 128 devices**, `olmo35-tiny`, 20 steps synthetic, median of the last 10.
+
+| arm | pdb | seq | TF/s/dev | MFU | step s | outcome |
+|---|---|---|---|---|---|---|
+| a1_p1s8k | 1 | 8192 | 54.2 | 4.70% | 0.652 | ok |
+| a2_p2s8k | 2 | 8192 | **78.2** | **6.78%** | 0.903 | **best** |
+| a3_p4s8k | 4 | 8192 | | | | **OOM, temporaries 104.02G vs 94.74G** |
+| a4_p2s16k | 2 | 16384 | | | | **OOM, 101.51G vs 94.74G** |
+| b1_rematcustom | 4 | 8192 | 75.0 | 6.50% | 1.885 | fits only via offload, still loses to pdb=2 |
+| b2_ep4 | 4 | 8192 | | | | my config error, see below |
+| b3_noshardexp | 4 | 8192 | | | | OOM, 105.14G |
+| b4_megablox | 4 | 8192 | | | | OOM (pdb=4) |
+| z_profile | 4 | 8192 | | | | OOM (pdb=4), **no xplane captured** |
+
+**Four conclusions, and they change the plan.**
+
+1. **The wall is HBM, not compute.** pdb=4 needs 104.02 GiB of HLO temporaries
+   against 94.74 GiB available, short by 9.3 GiB. Every pdb=4 arm died the same
+   way. The pdb knee that perfsim identified is real but **unreachable in the
+   current memory envelope**, so the lever list moves from compute to memory.
+2. **128 devices does not beat 8.** Best at 128 is 78.2 TF/s/dev against **81.5
+   measured on 8 devices**. Scaling this geometry out is flat to slightly
+   negative, which retires the "8 devices is slice-limited, it will come good at
+   a real slice" hypothesis that motivated the whole 4x4x4 hunt.
+3. **perfsim is 4.3x optimistic here, not 1.7x.** It predicted 29.0% MFU at
+   pdb=2 and hardware gave 6.78%. The *direction* transferred (pdb 1 -> 2 was
+   +44% measured against perfsim's +100%) but the magnitude is unusable. Do not
+   quote perfsim MFU for this family at 128 devices; use it for ranking only.
+4. **Offload buys the memory but not the throughput.** b1 is the one pdb=4 arm
+   that ran, via `remat_policy=custom` with `decoder_layer_input` and `mlpwo`
+   offloaded, and it lands at 75.0, below pdb=2's 78.2. Trading bandwidth for
+   HBM does not pay at this shape.
+
+**b2_ep4 was my bug, not a hardware result.** Passing `ici_expert_parallelism=4`
+while leaving `ici_fsdp_parallelism=-1` left 24.17% of parameters unsharded and
+MaxText asserted. `fsdp x ep` must equal the device count, so the correct form is
+`ici_fsdp_parallelism=32 ici_expert_parallelism=4`. Requeued as `c3_ep4fix`.
+
+### Follow-up matrix queued as `o35c241729`
+
+Aimed at the memory wall and at the two gaps the first run left. `capacity_factor`
+is the untested MoE memory knob: it is `-1.0` (dropless) today, which is what makes
+the expert intermediates unbounded.
+
+| arm | what it answers |
+|---|---|
+| c1_prof_p2 | xplane at the **actual** best point, pdb=2, for xla-shell. The first run pinned the profile to pdb=4 and lost it to the OOM |
+| c2_p3s8k | does pdb=3 fit in the 9.3 GiB gap |
+| c3_ep4fix | expert parallelism with the sharding corrected |
+| c4_p4_cf125 / c8_p4_cf10 | does bounding expert capacity buy pdb=4 |
+| c5_p4_optoff | `optimizer_memory_host_offload` as a cheaper offload than activation offload |
+| c6_p2_megablox / c7_p2_noshardexp | the two kernel/sharding levers, re-tested at the pdb that actually runs |
+| c9_p2_prof_cf125 | whether capacity bounding costs throughput when memory is not binding |
+
 ### Hill-climb matrix, pre-screened on perfsim at 128 devices before spending a slice
 
 `olmo35-tiny`, `v7x_4x4x4` (128 devices), seq 8192, remat full:

@@ -39,8 +39,13 @@ submit() {  # route kubeconfig envs -> prints run name
     sel="              cloud.google.com/gke-nodepool: $np"$'\n'
     envs="${envs//EXTRA_SELECTORS=NODEPOOL:$np/}" ;;
   esac
-  KUBECONFIG=$kc EXTRA_SELECTORS="$sel" RUN=$run MODELS=olmo35-tiny STEPS=20 \
-    env $envs bash scripts/olmo35_xpk_4x8x8.sh >>"$LOG" 2>&1
+  if [ -n "${ARMS_OVERRIDE:-}" ]; then
+    KUBECONFIG=$kc EXTRA_SELECTORS="$sel" RUN=$run MODELS=olmo35-tiny STEPS=20 ARMS="$ARMS_OVERRIDE" \
+      env $envs bash scripts/olmo35_xpk_4x8x8.sh >>"$LOG" 2>&1
+  else
+    KUBECONFIG=$kc EXTRA_SELECTORS="$sel" RUN=$run MODELS=olmo35-tiny STEPS=20 \
+      env $envs bash scripts/olmo35_xpk_4x8x8.sh >>"$LOG" 2>&1
+  fi
   echo "$run"
 }
 
