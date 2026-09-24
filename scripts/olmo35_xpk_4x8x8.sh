@@ -40,10 +40,30 @@ SRC2=${SRC2:-gs://cloud-pathways-staging/agagik/olmo35-src.tgz}
 OUT=${OUT:-gs://agagik-us/olmo35/4x4x4}
 RUN=${RUN:-o35x$(date +%m%d%H%M)}
 MODELS=${MODELS:-olmo35-tiny}
-# pdb:seq pairs. pdb is the knob every tuned Ironwood recipe runs at 10-16 and
-# we have only ever measured at 1, so the sweep is the point of the run.
-CFGS=${CFGS:-1:8192 4:8192 1:16384}
 STEPS=${STEPS:-20}
+
+# The hill climb, as `name|pdb|seq|extra maxtext flags`, arms separated by `;`.
+# One admission runs all of it, because getting a 4x4x4 is the scarce resource
+# and a slice must not be spent on a single data point.
+#
+# Stage A finds the pdb knee. perfsim at 128 devices puts it at pdb=4 (14.5% ->
+# 29.0% -> 35.7% MFU at pdb 1/2/4) with the collective share of the step falling
+# 50% -> 12.5% -> 0%, so a1..a4 are there to confirm that curve on hardware.
+# Stage B re-tests the levers at the knee, because the 8-device ranking does not
+# transfer once comm stops binding. b2 in particular: expert parallelism measured
+# 0.79-0.97x at 8 devices and perfsim claims 2.6-3.8x, and 128 devices is where
+# that disagreement gets settled.
+# z_profile captures an xplane for xla-shell at the best-known config.
+ARMS=${ARMS:-\
+a1_p1s8k|1|8192|;\
+a2_p2s8k|2|8192|;\
+a3_p4s8k|4|8192|;\
+a4_p2s16k|2|16384|;\
+b1_rematcustom|4|8192|remat_policy=custom decoder_layer_input=offload mlpwo=offload;\
+b2_ep4|4|8192|ici_expert_parallelism=4;\
+b3_noshardexp|4|8192|shard_exp_on_fsdp=False;\
+b4_megablox|4|8192|megablox=True use_tokamax_gmm=False use_gmm_v2=False;\
+z_profile|4|8192|profiler=xplane skip_first_n_steps_for_profiler=5 profiler_steps=3}
 
 export KUBECONFIG=${KUBECONFIG:-/tmp/kc-nap-olmo35.yaml}
 gcloud container clusters get-credentials $CLUSTER --region=$REGION --project=$PROJECT >/dev/null 2>&1
@@ -165,13 +185,20 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                 # Measured 1.34x together on tpu7x; see olmo35-ironwood-plan.md phase 5.
                 export TOKAMAX_KDA_DENSE_PAIRS=${DENSE_PAIRS:-1}
                 export TOKAMAX_KDA_BF16_FWD=${KDA_BF16:-1} TOKAMAX_KDA_BF16_BWD=${KDA_BF16:-1}
+                mkdir -p /tmp/hc
+                RES=/tmp/hc/results.tsv
+                printf 'model\tarm\tpdb\tseq\tsteps_ok\tmed_tflops_dev\tmfu_pct\tmed_step_s\texit\n' > \$RES
+                # Only the leader uploads; every pod runs the same command.
+                IDX=\${JOB_COMPLETION_INDEX:-0}
+                push() { [ "\$IDX" = "0" ] && gcloud storage cp -r /tmp/hc/* $OUT/$RUN/hc/ >/dev/null 2>&1; }
                 for M in $MODELS; do
-                  for C in $CFGS; do
-                    P=\${C%%:*}; S=\${C##*:}
-                    echo "=== MODEL=\$M pdb=\$P seq=\$S ===";
+                  echo "$ARMS" | tr ';' '\n' | while IFS='|' read -r NAME P S XTRA; do
+                    [ -z "\$NAME" ] && continue
+                    echo "=== ARM \$NAME model=\$M pdb=\$P seq=\$S extra='\$XTRA' \$(date) ===";
+                    LOG=/tmp/hc/\$M-\$NAME.log
                     python3 -m maxtext.trainers.pre_train.train \
                       /wt/src/maxtext/configs/base.yml \
-                      model_name=\$M run_name=$RUN-\$M-p\$P-s\$S steps=$STEPS \
+                      model_name=\$M run_name=$RUN-\$M-\$NAME steps=$STEPS \
                       dataset_type=synthetic enable_checkpointing=False async_checkpointing=False \
                       per_device_batch_size=\$P max_target_length=\$S \
                       dtype=bfloat16 weight_dtype=float32 \
@@ -179,10 +206,28 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                       sparse_matmul=True use_tokamax_kda=True \
                       megablox=False use_tokamax_gmm=True use_gmm_v2=True \
                       shard_exp_on_fsdp=True num_vocab_tiling=8 \
-                      base_output_directory=$OUT 2>&1 | tail -25;
-                    echo "=== \$M pdb=\$P seq=\$S exit=\${PIPESTATUS[0]} ===";
+                      base_output_directory=$OUT \$XTRA > \$LOG 2>&1
+                    EX=\$?
+                    # Median of the last 10 steps, so compile and warmup do not count.
+                    python3 - "\$LOG" "\$M" "\$NAME" "\$P" "\$S" "\$EX" >> \$RES <<'PYEOF'
+                import re, statistics, sys
+                log, model, arm, pdb, seq, ex = sys.argv[1:7]
+                tf, st = [], []
+                for line in open(log, errors='ignore'):
+                    m = re.search(r'TFLOP/s/device:\s*([0-9.]+)', line)
+                    if m: tf.append(float(m.group(1)))
+                    m = re.search(r'seconds:\s*([0-9.]+)', line)
+                    if m: st.append(float(m.group(1)))
+                mt = statistics.median(tf[-10:]) if tf else 0.0
+                ms = statistics.median(st[-10:]) if st else 0.0
+                print(f"{model}\t{arm}\t{pdb}\t{seq}\t{len(tf)}\t{mt:.1f}\t{100*mt/1153.5:.2f}\t{ms:.3f}\t{ex}")
+                PYEOF
+                    tail -3 \$RES
+                    tail -12 \$LOG
+                    push
                   done
                 done
+                echo "=== RESULTS ==="; cat \$RES; push
                 echo END \$(date)
 YAMLEOF
 
