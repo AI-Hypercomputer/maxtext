@@ -169,7 +169,7 @@ class GroupedAttentionMetadataRoutingTest(unittest.TestCase):
           model_mode=MODEL_MODE_TRAIN,
           attention_metadata={"layer.0": meta0},
       )
-      self.assertEqual(captured, ["meta0", "original_dict"])
+      self.assertEqual(captured, ["meta0", None])
 
       # 3. Test non-dict attention_metadata (e.g. None)
       captured.clear()
@@ -233,7 +233,7 @@ class GroupedAttentionMetadataRoutingTest(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
         attention_metadata={"layer.1": meta},
     )
-    self.assertEqual(layer.attention.call_args.kwargs["attention_metadata"], {"layer.1": meta})
+    self.assertIsNone(layer.attention.call_args.kwargs["attention_metadata"])
 
     # 4. Non-dict metadata
     layer(
@@ -293,7 +293,7 @@ class GroupedAttentionMetadataRoutingTest(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
         attention_metadata={"layer.1": meta},
     )
-    self.assertEqual(layer.attention.call_args.kwargs["attention_metadata"], {"layer.1": meta})
+    self.assertIsNone(layer.attention.call_args.kwargs["attention_metadata"])
 
     # 4. Non-dict metadata
     layer(
