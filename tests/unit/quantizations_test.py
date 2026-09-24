@@ -675,7 +675,8 @@ class MoEQuantizedEinsumTest(unittest.TestCase):
     parent = EinsumParent(nnx.Rngs(0))
     lhs = jnp.ones((2, 2))
     rhs = jnp.ones((2, 2))
-    einsum = quant.einsum(mesh_axes=())
+    aqt_quant: quantizations.AqtQuantization = quant
+    einsum = aqt_quant.einsum(mesh_axes=())
     result1 = quantizations.apply_einsum_in_nnx(parent, "aqt_test", einsum, ["aqt"], "bc,ab->ac", lhs, rhs)
     wrapper = getattr(parent, "quant_einsum_aqt_test")
     result2 = quantizations.apply_einsum_in_nnx(parent, "aqt_test", einsum, ["aqt"], "bc,ab->ac", lhs, rhs)
