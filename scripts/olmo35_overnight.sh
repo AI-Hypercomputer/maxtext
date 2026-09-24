@@ -22,13 +22,31 @@ mkdir -p "$HARVEST"
 # route|kubeconfig|env prefix for the launcher
 ROUTES=(
   "nap4x4x4|/tmp/kc-nap-olmo35.yaml|TOPOLOGY=4x4x4 NODES=16"
-  "flexspot4x4x4|/tmp/kc-flex2.yaml|CLUSTER=tpu7x-cluster-flex PROJECT=cloud-tpu-multipod-dev NAMESPACE=default QUEUE= TOPOLOGY=4x4x4 NODES=16 PLACEMENT_POLICY= RESERVATION= OUT=gs://cloud-pathways-staging/agagik/olmo35-out EXTRA_SELECTORS=NODEPOOL:tpu7x-full-pod-spot"
-  "flexdws2x4x4|/tmp/kc-flex2.yaml|CLUSTER=tpu7x-cluster-flex PROJECT=cloud-tpu-multipod-dev NAMESPACE=default QUEUE= TOPOLOGY=2x4x4 NODES=8 PLACEMENT_POLICY= RESERVATION= OUT=gs://cloud-pathways-staging/agagik/olmo35-out EXTRA_SELECTORS=NODEPOOL:tpu7x-half-cube-2x4x4"
+  "flexspot4x4x4|/tmp/kc-flex2.yaml|CLUSTER=tpu7x-cluster-flex PROJECT=cloud-tpu-multipod-dev NAMESPACE=default QUEUE= TOPOLOGY=4x4x4 NODES=16 PLACEMENT_POLICY= RESERVATION= OUT=/tmp/out EXTRA_SELECTORS=NODEPOOL:tpu7x-full-pod-spot"
+  "flexdws2x4x4|/tmp/kc-flex2.yaml|CLUSTER=tpu7x-cluster-flex PROJECT=cloud-tpu-multipod-dev NAMESPACE=default QUEUE= TOPOLOGY=2x4x4 NODES=8 PLACEMENT_POLICY= RESERVATION= OUT=/tmp/out EXTRA_SELECTORS=NODEPOOL:tpu7x-half-cube-2x4x4"
 )
 
 say() { echo "$(date '+%m-%d %H:%M:%S') $*" >> "$LOG"; }
 
-outdir_for() { case "$1" in nap*) echo "gs://agagik-us/olmo35/4x4x4";; *) echo "gs://cloud-pathways-staging/agagik/olmo35-out";; esac; }
+outdir_for() { case "$1" in nap*) echo "gs://agagik-us/olmo35/4x4x4";; *) echo "POD";; esac; }
+
+# multipod-dev pods can read gs://agagik-us but cannot WRITE any bucket, which
+# blocks the summary writer and loses every result. Those routes keep /tmp/hc
+# inside the leader pod and are copied out over the API instead.
+harvest_pod() {  # kubeconfig run dest -> 0 if a results.tsv came back
+  local kc=$1 run=$2 dest=$3
+  local pod
+  pod=$(KUBECONFIG=$kc timeout 60 kubectl get pods -n default --no-headers 2>/dev/null \
+        | grep "$run" | awk '$3=="Running"{print $1}' | head -1)
+  [ -z "$pod" ] && return 1
+  KUBECONFIG=$kc timeout 120 kubectl exec -n default "$pod" -- cat /tmp/hc/results.tsv > "$dest" 2>/dev/null
+  [ -s "$dest" ] || return 1
+  mkdir -p "${dest%.tsv}-logs"
+  for f in $(KUBECONFIG=$kc timeout 60 kubectl exec -n default "$pod" -- ls /tmp/hc 2>/dev/null); do
+    KUBECONFIG=$kc timeout 180 kubectl exec -n default "$pod" -- cat "/tmp/hc/$f" > "${dest%.tsv}-logs/$f" 2>/dev/null
+  done
+  return 0
+}
 
 submit() {  # route kubeconfig envs -> prints run name
   local route=$1 kc=$2 envs=$3
@@ -69,10 +87,16 @@ while [ "$(date +%s)" -lt "$END" ]; do
     # Snapshot every poll. Do NOT retire the route on the first results.tsv:
     # the runner pushes after each arm, so an early file holds one row and
     # retiring on it loses the other eight (that is what truncated o35nap240641).
-    if [ -n "$run" ] && gcloud storage cp "$out/$run/hc/results.tsv" "$HARVEST/$route-$run.tsv" >/dev/null 2>&1; then
+    got=1
+    if [ "$out" = "POD" ]; then
+      harvest_pod "$kc" "$run" "$HARVEST/$route-$run.tsv" && got=0
+    else
+      gcloud storage cp "$out/$run/hc/results.tsv" "$HARVEST/$route-$run.tsv" >/dev/null 2>&1 && got=0
+    fi
+    if [ -n "$run" ] && [ "$got" = "0" ]; then
       rows=$(( $(wc -l < "$HARVEST/$route-$run.tsv") - 1 ))
       say "HARVEST $route $run rows=$rows/$ARMS_N"
-      gcloud storage cp -r "$out/$run/hc" "$HARVEST/$route-$run-logs" >/dev/null 2>&1
+      [ "$out" != "POD" ] && gcloud storage cp -r "$out/$run/hc" "$HARVEST/$route-$run-logs" >/dev/null 2>&1
       if [ "$rows" -ge "$ARMS_N" ]; then say "$route COMPLETE"; DONE[$route]=1; fi
       continue
     fi

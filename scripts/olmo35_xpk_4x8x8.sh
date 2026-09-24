@@ -190,7 +190,14 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                 printf 'model\tarm\tpdb\tseq\tsteps_ok\tmed_tflops_dev\tmfu_pct\tmed_step_s\texit\n' > \$RES
                 # Only the leader uploads; every pod runs the same command.
                 IDX=\${JOB_COMPLETION_INDEX:-0}
-                push() { [ "\$IDX" = "0" ] && gcloud storage cp -r /tmp/hc/* $OUT/$RUN/hc/ >/dev/null 2>&1; }
+                # Only push when the output is GCS AND this pod can write it.
+                # multipod-dev pods can READ gs://agagik-us but cannot write any
+                # bucket, which hangs the summary writer and silently loses results;
+                # those routes use a local $OUT and are harvested with kubectl.
+                case "$OUT" in
+                  gs://*) push() { [ "\$IDX" = "0" ] && gcloud storage cp -r /tmp/hc/* $OUT/$RUN/hc/ >/dev/null 2>&1; } ;;
+                  *)      push() { :; }; mkdir -p $OUT ;;
+                esac
                 for M in $MODELS; do
                   echo "$ARMS" | tr ';' '\n' | while IFS='|' read -r NAME P S XTRA; do
                     [ -z "\$NAME" ] && continue
