@@ -128,7 +128,9 @@ def _make_layer_adapter(layers, config, layer_name, layer_count):
     raise TypeError(f"Expected a scanned {layer_class.__name__} for {layer_name}")
   graphdef, params, state = nnx.split(layers, nnx.Param, ...)
   if config.param_scan_axis != 0:
-    params = jax.tree.map(lambda x: jnp.moveaxis(x, config.param_scan_axis, 0), params)
+    params = jax.tree.map(
+        lambda x: jnp.moveaxis(x, config.param_scan_axis, 0) if x.ndim > config.param_scan_axis else x, params
+    )
   params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, layer_count)
   state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, layer_count)
 
@@ -218,7 +220,7 @@ def _restore_gradients(layer_grads, boundary_grads, param_scan_axis, layer_names
   if len(groups) != len(layer_names):
     raise ValueError("Layer gradient groups do not match the decoder stack names")
   if param_scan_axis != 0:
-    groups = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), groups)
+    groups = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis) if x.ndim > param_scan_axis else x, groups)
   return nnx.merge_state(boundary_grads, nnx.State({"decoder": dict(zip(layer_names, groups))}))
 
 
