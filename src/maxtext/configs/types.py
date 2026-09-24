@@ -339,6 +339,7 @@ class RunInfo(BaseModel):
       description="If True, prints the final configuration after initialization.",
   )
   debug_sharding: bool = Field(False, description="If True, print model weight sharding details.")
+  debug_tensors: bool = Field(False, description="Captures intermediate tensors during forward pass using NNX sow")
   base_output_directory: PathStr = Field("", description="Base directory for all outputs, typically a GCS path.")
   enable_mllog: bool = Field(False, description="If True, enables MLPerf logging (mllog).")
   mllog_file: None | PathStr = Field(
