@@ -1057,6 +1057,9 @@ gradient_clipping_threshold: 1.0
 # Instead of updating the weights every step, you may effectively use a larger
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
+# Experimental Llama/DeepSeek schedule: pair backward(i) with forward(i+1)
+# inside one layer scan. "serial" keeps the normal training path unchanged.
+gradient_accumulation_schedule: "serial"  # "serial" or "dual_pipe"
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
 

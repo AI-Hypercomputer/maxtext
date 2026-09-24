@@ -109,6 +109,35 @@ def get_first_step(model, state):
 # -----------------------------------------------------------------------------
 
 
+def loss_from_logits(logits, data, config, mesh, loss_mask=None):
+  """Return masked cross-entropy sum, z-loss sum, and token count.
+
+  Shared by ordinary training and the experimental dense 1F1B schedule. The
+  cross-entropy already includes the configured z-loss regularization; the
+  separately returned z-loss is a metric and must not be added to it again.
+  Callers retain their existing loss and metric normalization.
+  """
+  one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+  xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
+  xent = sharding.maybe_shard_with_logical(
+      xent,
+      ("activation_embed_and_logits_batch", "activation_length"),
+      mesh,
+      config.shard_mode,
+      debug_sharding=config.debug_sharding,
+  )
+  z_loss = sharding.maybe_shard_with_logical(
+      z_loss,
+      ("activation_embed_and_logits_batch", "activation_length"),
+      mesh,
+      config.shard_mode,
+      debug_sharding=config.debug_sharding,
+  )
+  mask = data["targets_segmentation"] != 0 if loss_mask is None else loss_mask
+  total_weights = jnp.sum(mask)
+  return jnp.sum(xent * mask), jnp.sum(z_loss * mask), total_weights
+
+
 def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True):
   """loss_fn for both train and eval.
 
@@ -230,33 +259,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           target_positions,
           data["targets_segmentation"] != 0,
       )
-    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-    xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
-
-    xent = sharding.maybe_shard_with_logical(
-        xent,
-        ("activation_embed_and_logits_batch", "activation_length"),
-        model.mesh,
-        config.shard_mode,
-        debug_sharding=config.debug_sharding,
-    )
-    z_loss = sharding.maybe_shard_with_logical(
-        z_loss,
-        ("activation_embed_and_logits_batch", "activation_length"),
-        model.mesh,
-        config.shard_mode,
-        debug_sharding=config.debug_sharding,
-    )
-
-    if is_block_diffusion:
-      xent = xent * targets_loss_mask
-      z_loss = z_loss * targets_loss_mask
-    else:
-      xent = xent * (data["targets_segmentation"] != 0)
-      z_loss = z_loss * (data["targets_segmentation"] != 0)
-
-    xent_sum = jnp.sum(xent)
-    total_z_loss = jnp.sum(z_loss)
+    xent_sum, total_z_loss, _ = loss_from_logits(logits, data, config, model.mesh, loss_mask=targets_loss_mask)
 
   if is_block_diffusion:
     assert targets_loss_mask is not None
@@ -403,7 +406,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   loss_model, loss_params, loss_rng = state.model, None, None
 
   # --- Gradient computation ---
-  if config.gradient_accumulation_steps > 1:
+  if getattr(config, "gradient_accumulation_schedule", "serial") == "dual_pipe":
+    from maxtext.experimental.dense_training_nnx import dualpipe_loss_and_grad  # pylint: disable=import-outside-toplevel
+
+    loss, aux, raw_grads = dualpipe_loss_and_grad(config, loss_model, params_shardings, data, loss_from_logits)
+  elif config.gradient_accumulation_steps > 1:
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
         loss_fn,
         config,
