@@ -18,23 +18,23 @@
 #     vocab embedding, but FSDP for moe (together with FSDP it shards the moe
 #     mlp dimension)
 #   FSDP acts like FSDP everywhere
-#   EP acts like FSDP for attn and shared experts / dense MLP, and EP for moe
+#   EP acts like DP for attn and shared experts / dense MLP, and EP for moe
 #
-# That is, attention weights ('q_lora', 'kv_lora' and 'embed_attn') and shared
-# expert / dense MLP weights ('embed') are sharded on fsdp and expert, and
-# replicated over fsdp_transpose. The vocab embedding ('embed_vocab') is sharded
-# on fsdp only. Routed MoE weights shard their mlp dimension ('mlp_moe') over
+# That is, attention weights ('q_lora', 'kv_lora' and 'embed_attn'), shared
+# expert / dense MLP weights ('embed' and 'mlp') and the vocab embedding
+# ('embed_vocab') are sharded on fsdp only and replicated over fsdp_transpose
+# (and expert). Routed MoE weights shard their mlp dimension ('mlp_moe') over
 # both fsdp and fsdp_transpose, and leave the embed dimension ('embed_moe')
 # unsharded.
 #
 # This is useful at large scale where the total FSDP rank (fsdp *
 # fsdp_transpose) is so large that the small attention / shared expert weights
 # would be split into tiny, latency bound all-gathers. Restricting those weights
-# to the fsdp and (small, fast) expert axes keeps each shard large enough to
-# stay bandwidth bound, at the cost of replicating them over fsdp_transpose.
-# The large routed MoE weights keep scaling over the full fsdp * fsdp_transpose
-# rank. See fsdp-transpose-and-ep-as-dp.yml for the variant where expert also
-# replicates the attention / shared expert weights.
+# to the fsdp axis keeps each shard large enough to stay bandwidth bound, at the
+# cost of replicating them over fsdp_transpose. The large routed MoE weights
+# keep scaling over the full fsdp * fsdp_transpose rank. See
+# fsdp-transpose-as-dp.yml for the variant where expert acts like FSDP for the
+# attention / shared expert weights.
 
 mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert']
 data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert']]
@@ -65,13 +65,13 @@ logical_axis_rules: [
                       ['activation_kv', []],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_head_dim', []],
-                      # Attention Weights, sharded on fsdp and expert:
-                      # fsdp_transpose acts like DP here, expert acts like FSDP
-                      ['q_lora', ['fsdp', 'expert']],
+                      # Attention Weights, sharded on fsdp only:
+                      # fsdp_transpose acts like DP here
+                      ['q_lora', ['fsdp']],
                       ["q_lora_up_proj", []],
-                      ['kv_lora', ['fsdp', 'expert']],
+                      ['kv_lora', ['fsdp']],
                       ["kv_lora_up_proj", []],
-                      ['embed_attn', ['fsdp', 'expert']],
+                      ['embed_attn', ['fsdp']],
                       # ==========================================
                       # Mixture of Experts (MoE)
                       # ==========================================
@@ -98,10 +98,9 @@ logical_axis_rules: [
                       ['activation_embed', []],
                       ['activation_stage', []],
                       # General Weights (shared experts and dense MLP), sharded on
-                      # fsdp and expert: fsdp_transpose acts like DP here, expert
-                      # acts like FSDP
+                      # fsdp only: fsdp_transpose acts like DP here
                       ['mlp', []],
-                      ['embed', ['fsdp', 'expert']],
+                      ['embed', ['fsdp']],
                       # ==========================================
                       # Deprecated / Scheduled for Removal
                       # ==========================================
