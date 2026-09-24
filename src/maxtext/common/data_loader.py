@@ -33,8 +33,9 @@ from maxtext.utils.sharding import get_input_data_sharding
 def loader_exception_guard(config):
   """Context manager that wraps data loading Exception handling.
 
-  On block failure: bubbles up JAX/ScaleUp errors if elastic training is active;
-  otherwise raises a StopTraining exception.
+  On block failure: bubbles up JAX/ScaleUp errors if elastic training is active.
+  Otherwise re-raises JAX runtime errors, so that the job fails and can be
+  restarted, and raises a StopTraining exception for any other error.
 
   Args:
     config: maxtext configuration object.
@@ -43,6 +44,8 @@ def loader_exception_guard(config):
     yield
   except Exception as e:  # pylint: disable=broad-except
     elastic_utils.maybe_bubble_elastic_exception(config, e)
+    if isinstance(e, jax.errors.JaxRuntimeError):
+      raise
     if isinstance(e, StopIteration):
       raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)}" f" exception: ({e})")
     else:
