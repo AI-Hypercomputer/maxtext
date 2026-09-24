@@ -196,6 +196,61 @@ def _inject_te_softmax_offset(dpa_layer, softmax_offset: Array) -> None:
   nnx.update(dpa_layer, nnx.from_flat_state([(offset_path, nnx.Param(softmax_offset))]))
 
 
+def _replicate_indivisible_mqa_kv_head_axis(
+    axis_names_kv: jax.sharding.PartitionSpec | None, num_kv_heads: int, mesh: Mesh
+) -> jax.sharding.PartitionSpec | None:
+  """Replicates K/V head axis for MQA to prevent correctness issues.
+
+  For MQA (num_kv_heads=1): replicates the head axis to avoid sharding K/V heads.
+  For GQA/MHA (num_kv_heads>1): raises if the kv head axis is sharded indivisibly,
+  because each shard would pair its local query heads with the wrong K/V heads,
+  silently computing incorrect attention.
+  """
+  if axis_names_kv is None:
+    return axis_names_kv
+
+  partitions = axis_names_kv.partitions
+  if len(partitions) <= 1:
+    return axis_names_kv
+
+  # partitions[1] is the kv_head axis in flash_axis_names_kv: (embed, kv_heads, kv_head_dim, ...)
+  # Assert the partition exists at the expected logical index to catch override mismatches.
+  assert len(partitions) > 1, "flash_axis_names_kv must have at least 2 partitions (embed, kv_heads)"
+  kv_head_spec = partitions[1]
+  if isinstance(kv_head_spec, str):
+    kv_head_axes = (kv_head_spec,)
+  elif isinstance(kv_head_spec, tuple):
+    kv_head_axes = kv_head_spec
+  else:
+    return axis_names_kv
+
+  kv_head_shards = math.prod(mesh.shape.get(axis, 1) for axis in kv_head_axes)
+
+  if kv_head_shards <= 1:
+    return axis_names_kv
+
+  if num_kv_heads == 1:
+    # MQA (1 kv_head): safe to replicate the sharded kv head axis
+    return jax.sharding.PartitionSpec(
+        partitions[0],
+        None,
+        *partitions[2:],
+        unreduced=axis_names_kv.unreduced,
+        reduced=axis_names_kv.reduced,
+    )
+
+  # GQA/MHA (num_kv_heads > 1): kv heads must divide the shards to maintain correctness
+  # If not divisible, each shard pairs local query heads with wrong K/V heads, causing silent bugs
+  if num_kv_heads % kv_head_shards != 0:
+    raise ValueError(  # Raise exception to catch divisibility problem immediately
+        f"Cannot shard K/V head axis over {kv_head_shards} mesh shards "
+        f"with {num_kv_heads} K/V heads. Each shard would pair its local "
+        f"query heads with the wrong K/V heads, silently computing incorrect attention. "
+        f"K/V heads ({num_kv_heads}) must be divisible by the shard count ({kv_head_shards})."
+    )
+
+  # Divisible case: safe to use the spec unchanged
+  return axis_names_kv
 # TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
 class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
   """Lazy chunked causal mask.
@@ -726,6 +781,10 @@ class AttentionOp(nnx.Module):
 
         context_axis = self.config.context_sharding
         axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
+        # NOTE: For MQA + Tokamax ring: axis_names_kv here is the original (unpatched) spec.
+        # The runtime applies _replicate_indivisible_mqa_kv_head_axis to replicate the kv head axis,
+        # but these validators below see the unpatched spec. This asymmetry is acceptable for Tokamax
+        # because it targets sequence sharding, not head-axis sharding. Matters only for MQA + context parallelism.
         axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
         axis_names_kv = tokamax_ring_attention.with_sequence_axis(
             axis_names_kv,
@@ -772,6 +831,10 @@ class AttentionOp(nnx.Module):
 
       context_axis = self.config.context_sharding
       axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
+      # NOTE: For MQA + Ulysses: axis_names_kv here is the original (unpatched) spec.
+      # The runtime applies _replicate_indivisible_mqa_kv_head_axis to replicate the kv head axis,
+      # but these validators below see the unpatched spec. This asymmetry is acceptable because
+      # Ulysses validates context sharding constraints, not head-axis sharding. Matters only for MQA + context parallelism.
       axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
       axis_names_kv = ulysses_attention.with_sequence_axis(
           axis_names_kv,
@@ -824,6 +887,10 @@ class AttentionOp(nnx.Module):
       ring_axis = self.config.context_sharding
       ulysses_axis = self.config.ulysses_context_sharding
       axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
+      # NOTE: For MQA + USP: axis_names_kv here is the original (unpatched) spec.
+      # The runtime applies _replicate_indivisible_mqa_kv_head_axis to replicate the kv head axis,
+      # but these validators below see the unpatched spec. This asymmetry is acceptable because
+      # USP validates ring/Ulysses sequence sharding constraints, not head-axis sharding. Matters only for MQA + context parallelism.
       axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
       axis_names_kv = usp_attention.with_usp_sequence_axes(
           axis_names_kv,
@@ -1982,6 +2049,7 @@ class AttentionOp(nnx.Module):
     axis_names_splash_kernel = self._logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
     axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
+    axis_names_kv = _replicate_indivisible_mqa_kv_head_axis(axis_names_kv, key.shape[1], self.mesh)
     indexer_mask_axis_names = self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH, KV_LENGTH))
     if use_tokamax_ring:
       context_axis = self.config.context_sharding
