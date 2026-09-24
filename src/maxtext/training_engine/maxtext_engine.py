@@ -322,6 +322,22 @@ def _conform_accumulator(value: Any, target: jax.sharding.NamedSharding) -> Any:
   return jax.device_put(value, target)
 
 
+def _per_leaf_grad_norms(grads: Any) -> dict[str, jax.Array]:
+  """Returns the float32 L2 norm of every gradient leaf, keyed by its parameter path.
+
+  The global norm is a single scalar, so a NaN in it says only that some gradient went bad.
+  These say which one. Paths are rendered exactly as `optimizers.get_path_mask_fn` renders
+  them, so a name reported here can be pasted straight into `trainable_parameters_mask`.
+  """
+  # TODO(mazumdera): a scanned leaf carries its layer axis, so one norm covers every layer in
+  # the block. Reduce over the remaining axes instead to name the layer as well.
+  leaves_with_path, _ = jax.tree_util.tree_flatten_with_path(grads)
+  return {
+      jax.tree_util.keystr(path, simple=True, separator="/"): jnp.sqrt(jnp.sum(jnp.square(leaf.astype(jnp.float32))))
+      for path, leaf in leaves_with_path
+  }
+
+
 def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutput:
   """Normalizes whatever a loss function returned a `LossOutput`.
 
@@ -1216,10 +1232,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Applies accumulated gradients to update the NNX model state.
 
     Returns:
-      `(new_state_pure, grad_norm, is_skipped)`. `grad_norm` doubles as the throttler's
-      handle on this update; see the `add_computation` call in `update()`.
+      `(new_state_pure, grad_norm, is_skipped, per_leaf_grad_norms)`. `grad_norm` doubles as
+      the throttler's handle on this update; see the `add_computation` call in `update()`.
+      `per_leaf_grad_norms` is `None` unless `log_per_leaf_grad_norm` is set.
     """
     grad_norm = None
+    per_leaf_grad_norms = None
     is_skipped_val = (
         jnp.array(0.0, dtype=jnp.float32)
         if (getattr(self._config, "skip_step_on_nan", True) or self._config.skip_step_on_spikes)
@@ -1263,6 +1281,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # this `raw_grad_norm`. In float32 whatever `grad_dtype` is: a sum of squares over bf16
       # overflows on production-size models.
       grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), grads))
+      if getattr(self._config, "log_per_leaf_grad_norm", False):
+        # The same tensors the global norm just summed, at the same point: after the freeze
+        # mask and before clipping, which is where `clip_by_global_norm` would otherwise
+        # spread one bad leaf across every parameter.
+        per_leaf_grad_norms = _per_leaf_grad_norms(grads)
       is_finite = jnp.isfinite(grad_norm)
       max_spike = getattr(self._config, "max_grad_norm_spike", 0.0)
       if max_spike > 0.0:
@@ -1298,8 +1321,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         # parameter, and the forward pass needs all of them. The moments stay behind,
         # sharded, which is the whole point.
         new_state_pure = self._reshard_model_params(new_state_pure, self._gathered_params_shardings)
-      return new_state_pure, grad_norm, is_skipped_val
-    return state_pure, grad_norm, is_skipped_val
+      return new_state_pure, grad_norm, is_skipped_val, per_leaf_grad_norms
+    return state_pure, grad_norm, is_skipped_val, per_leaf_grad_norms
 
   def _eval_kernel(self, params, rest, batch):
     """Executes a single forward pass, returning the loss and its aux metrics.
@@ -1528,7 +1551,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       accum_in_shardings = first_in_shardings + (grad_shardings, replicated)
       fwd_bwd_out_shardings = (None, None, rest_shardings, grad_shardings, replicated)
       update_in_shardings = (state_mesh_shardings, grad_shardings, replicated, None)
-      update_out_shardings = (state_mesh_shardings, None, None)
+      update_out_shardings = (state_mesh_shardings, None, None, None)
       # A live accumulator predates this compile -- a checkpoint restore hands one back, and
       # a recompile can flip the deferral on or off -- so it may not be on the shardings the
       # kernels were just built for. `jax.jit` matches `in_shardings` exactly and would
@@ -1861,11 +1884,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # is torn -- reading one of its arrays raises "Array has been deleted". Keep them adjacent.
     with self._sharding_ctx():
       if self._compiled and hasattr(self, "_compiled_update"):
-        new_state_pure, grad_norm, is_skipped = self._compiled_update(
+        new_state_pure, grad_norm, is_skipped, per_leaf_grad_norms = self._compiled_update(
             state_pure, self._accumulated_grads, self._accumulated_denominator, mean_loss
         )
       else:
-        new_state_pure, grad_norm, is_skipped = self._update_kernel(
+        new_state_pure, grad_norm, is_skipped, per_leaf_grad_norms = self._update_kernel(
             state_pure, self._accumulated_grads, self._accumulated_denominator, mean_loss
         )
     nnx.update(self._state, new_state_pure)
@@ -1875,6 +1898,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self.record_metrics("gradient_norm", grad_norm)
     if is_skipped is not None:
       self.record_metrics("step_skipped", is_skipped)
+    if per_leaf_grad_norms is not None:
+      # `record_metrics` flattens the dict into `gradient_norm_per_leaf/<parameter path>` and
+      # writes it with the rest of the step's metrics, so this costs no extra device sync.
+      self.record_metrics("gradient_norm_per_leaf", per_leaf_grad_norms)
 
     # Queue something the update produced, so `jax.block_until_ready` waits for it before the
     # metrics are logged. The gradient norm rather than the state: the throttler holds queued

@@ -2262,6 +2262,13 @@ class Optimizer(BaseModel):
       0.0,
       description="If positive, skip the training step when raw grad norm exceeds this threshold.",
   )
+  log_per_leaf_grad_norm: bool = Field(
+      False,
+      description=(
+          "If True, record the L2 norm of every gradient leaf next to the global gradient norm,"
+          " which identifies the parameter a NaN/Inf gradient came from."
+      ),
+  )
   gradient_accumulation_steps: PositiveInt = Field(
       1, description="Number of steps to accumulate gradients before updating."
   )
