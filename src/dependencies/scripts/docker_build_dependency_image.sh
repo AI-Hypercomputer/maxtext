@@ -90,7 +90,7 @@ run_docker_build() {
 # Function to build image for GPUs
 build_gpu_image() {
   if [[ ${MODE} == "pinned" ]]; then
-    local base_image=ghcr.io/nvidia/jax:base-2024-12-04
+    local base_image=ubuntu:24.04
     docker_build_args+=("BASEIMAGE=${base_image}")
   fi
 

@@ -90,7 +90,7 @@ jobs:
     name: Build and Push Docker Image
     needs: pre_build_check
     runs-on: linux-x86-n2-16-buildkit
-    container: google/cloud-sdk:524.0.0
+    container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
     if: needs.pre_build_check.outputs.should_run == 'true'
     steps:
       - name: Matrix Debugger
@@ -116,8 +116,17 @@ jobs:
       - name: Mark git repositories as safe
         run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
-      - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev -q
+      - name: Configure Docker and prepare Airlock credentials
+        run: |
+          gcloud auth configure-docker us-docker.pkg.dev -q
+          mkdir -p /tmp/airlock
+          if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]; then
+            cp "${GOOGLE_APPLICATION_CREDENTIALS}" /tmp/airlock/credentials.json
+          elif [ -f "$HOME/.config/gcloud/application_default_credentials.json" ]; then
+            cp "$HOME/.config/gcloud/application_default_credentials.json" /tmp/airlock/credentials.json
+          else
+            touch /tmp/airlock/credentials.json
+          fi
 
       - name: Set up Docker BuildX
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
@@ -163,7 +172,11 @@ jobs:
           tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ inputs.repository_name }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
           outputs: type=image,compression=zstd,force-compression=true
+          secret-files: |
+            credentials=/tmp/airlock/credentials.json
           build-args: |
+            BASEIMAGE=${{ inputs.device == 'gpu' && 'us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/ubuntu:24.04' || 'us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/python:3.12-slim-trixie' }}
+            USE_AIRLOCK=true
             DEVICE=${{ inputs.device }}
             MODE=${{ inputs.build_mode }}
             WORKFLOW=${{ inputs.workflow }}
