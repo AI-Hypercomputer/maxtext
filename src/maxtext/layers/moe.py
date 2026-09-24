@@ -969,7 +969,9 @@ class RoutedMoE(nnx.Module):
       # A token has real forced routing only if its slots are within [0, num_experts).
       # Tokens with UNSET_ROUTED_EXPERT (-1) slots must fall back to auto_indices
       # rather than zeroing out the entire MoE layer output.
-      token_is_forced = jnp.all(slot_valid, axis=-1, keepdims=True)
+      sorted_experts = jnp.sort(forced_routed_experts, axis=-1)
+      has_duplicate = jnp.any(sorted_experts[..., 1:] == sorted_experts[..., :-1], axis=-1, keepdims=True)
+      token_is_forced = jnp.logical_and(jnp.all(slot_valid, axis=-1, keepdims=True), jnp.logical_not(has_duplicate))
       top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
       valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.ones_like(slot_valid, dtype=jnp.bool_))
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)

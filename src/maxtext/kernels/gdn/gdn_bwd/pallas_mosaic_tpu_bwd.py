@@ -167,11 +167,15 @@ def _bwd_gdn_pipeline_body(
   mask_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=0)
 
   if cfg.use_qk_norm_in_gdn:
-    inv_r_q = jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6)
+    q_norm_sq = jnp.sum(q_orig**2, axis=-1, keepdims=True)
+    q_is_zero = q_norm_sq == 0.0
+    inv_r_q = jnp.where(q_is_zero, 0.0, jax.lax.rsqrt(q_norm_sq + 1e-6))
     q_unit = q_orig * inv_r_q
     q_scaled = q_unit * scale
 
-    inv_r_k = jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
+    k_norm_sq = jnp.sum(k_orig**2, axis=-1, keepdims=True)
+    k_is_zero = k_norm_sq == 0.0
+    inv_r_k = jnp.where(k_is_zero, 0.0, jax.lax.rsqrt(k_norm_sq + 1e-6))
     k_unit = k_orig * inv_r_k
     k_scaled_val = k_unit
   else:
