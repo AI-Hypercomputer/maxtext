@@ -8,15 +8,25 @@ import jax
 import jax.numpy as jnp
 
 
+def _reduce_aux(stacked_aux):
+  """Match normal GA: sum loss metrics, but OR/max/min TE capacity metrics."""
+  reducers = {
+      "te_moe_capacity_overflow": jnp.any,
+      "te_moe_max_total_recv_tokens": jnp.max,
+      "te_moe_recv_capacity_per_rank": jnp.min,
+  }
+  return {key: reducers.get(key, jnp.sum)(value, axis=0) for key, value in stacked_aux.items()}
+
+
 def make_training_schedule(
     prefix_apply, layer_apply, loss_apply, schedule="dual_pipe", grad_dtype=jnp.float32,
-    *, layer_has_aux=False, reduce_aux=None,
 ):
   """Build a serial or fused layer-level 1F1B loss/gradient computation.
 
   Callbacks:
     prefix_apply(boundary_params, data) -> hidden
-    layer_apply(params, hidden, state, positions, segments) -> hidden
+    layer_apply: tuple of callbacks (params, hidden, state, positions, segments)
+      -> (hidden, metric_dict), with matching metric keys across all groups
     loss_apply(boundary_params, hidden, data) -> (unnormalized_loss, aux)
 
   The returned step accepts (layer_params, layer_state, boundary_params, data).
@@ -24,17 +34,15 @@ def make_training_schedule(
   leading microbatch axis. The data mapping must contain inputs_position and
   inputs_segmentation. State is read-only and callbacks must be deterministic.
 
-  For heterogeneous stacks, layer_apply may be a tuple of callbacks, one per
+  layer_apply is a tuple of callbacks, one per
   contiguous homogeneous group. Pass matching tuples of layer_params/state;
   each group has its own positive leading layer length and parameter/residual
   structure. Returned layer gradients have the same tuple structure. Only the
   small number of groups/segments is statically expanded, not individual layers.
 
-  With layer_has_aux=True, every layer callback returns (hidden, metric_dict).
-  These metrics are not differentiated and must have different keys from the
-  loss callback's aux dict. reduce_aux(stacked_aux) reduces a leading axis,
-  defaulting to a sum; a custom associative reducer can use any/max/min for
-  overflow/capacity metrics. It also combines metrics across microbatches.
+  Layer metrics are nondifferentiated and disjoint from loss aux. Use {} only
+  if all groups have no metrics; otherwise use neutral values for dense groups.
+  Loss metrics sum; TE overflow/capacity metrics use OR/max/min across layers and microbatches.
 
   Returns (loss_sum, aux_sum, layer_grads_sum, boundary_grads_sum). Boundary
   parameters are shared by prefix and head so tied embeddings receive BOTH
@@ -46,12 +54,12 @@ def make_training_schedule(
     raise RuntimeError("The dual-pipe experiment requires JAX with jax.fwd_and_bwd")
 
   prefix_forward, prefix_backward = jax.fwd_and_bwd(prefix_apply, argnums=(0,), jitted=False)
-  grouped = isinstance(layer_apply, tuple)
-  layer_functions = layer_apply if grouped else (layer_apply,)
-  if not layer_functions:
+  if not isinstance(layer_apply, tuple):
+    raise TypeError("Layer callbacks must be a tuple, one per group")
+  if not layer_apply:
     raise ValueError("At least one layer group is required")
   layer_passes = tuple(
-      jax.fwd_and_bwd(apply, argnums=(0, 1), has_aux=layer_has_aux, jitted=False) for apply in layer_functions
+      jax.fwd_and_bwd(apply, argnums=(0, 1), has_aux=True, jitted=False) for apply in layer_apply
   )
   # Reuse each forward trace's saved-VJP metadata between fill and steady state.
   # These helpers inline into the caller's train_step, not separate GPU calls.
@@ -67,8 +75,7 @@ def make_training_schedule(
       raise ValueError("At least one microbatch is required")
     if any(x.shape[0] != microbatches for x in jax.tree.leaves(microbatch_data)):
       raise ValueError("All input leaves must have the same leading microbatch axis")
-    params = layer_params if grouped else (layer_params,)
-    states = layer_state if grouped else (layer_state,)
+    params, states = layer_params, layer_state
     if not isinstance(params, tuple) or not isinstance(states, tuple) or len(params) != len(forwards) or len(states) != len(forwards):
       raise ValueError("Grouped layer callbacks require matching parameter/state tuples")
     boundaries = [0]
@@ -93,33 +100,16 @@ def make_training_schedule(
       backward_stop = total_layers - start - boundaries[backward_group]
       segments.append((backward_group, forward_group, backward_stop, forward_start, end - start))
 
-    def unpack_groups(values):
-      return tuple(values) if grouped else values[0]
-
     def accumulate(total, grads):
       return jax.tree.map(lambda a, g: a + g.astype(grad_dtype), total, grads)
 
-    def reduce_metrics(stacked):
-      if reduce_aux is not None:
-        return reduce_aux(stacked)
-      return jax.tree.map(lambda x: jnp.sum(x, axis=0), stacked)
-
     def sum_aux(total, aux):
-      return reduce_metrics(jax.tree.map(lambda a, b: jnp.stack((a, b)), total, aux))
+      return _reduce_aux(jax.tree.map(lambda a, b: jnp.stack((a, b)), total, aux))
 
     def merge_layer_metrics(loss_aux, layer_aux):
-      if not layer_has_aux:
-        return loss_aux
       if not isinstance(loss_aux, dict) or not isinstance(layer_aux, dict) or loss_aux.keys() & layer_aux.keys():
         raise ValueError("Layer metrics and loss aux must be dictionaries with distinct keys")
       return {**loss_aux, **layer_aux}
-
-    def call_forward(forward, weights, hidden, state, data):
-      result = forward(weights, hidden, state, data["inputs_position"], data["inputs_segmentation"])
-      if layer_has_aux:
-        return result
-      hidden, residuals = result
-      return hidden, residuals, {}
 
     def forward_layers(hidden, data):
       residual_groups = []
@@ -128,12 +118,14 @@ def make_training_schedule(
         def body(hidden, layer_data):
           weights, state = layer_data
           with jax.named_scope("forward"):
-            hidden, residuals, metrics = call_forward(forward, weights, hidden, state, data)
+            hidden, residuals, metrics = forward(
+                weights, hidden, state, data["inputs_position"], data["inputs_segmentation"]
+            )
           return hidden, (residuals, metrics)
 
         hidden, (residuals, metrics) = jax.lax.scan(body, hidden, (weights, state))
         residual_groups.append(residuals)
-        metrics = reduce_metrics(metrics)
+        metrics = _reduce_aux(metrics)
         layer_metrics = metrics if layer_metrics is None else sum_aux(layer_metrics, metrics)
       return hidden, tuple(residual_groups), layer_metrics
 
@@ -147,7 +139,7 @@ def make_training_schedule(
 
         # reverse=True visits L-1..0 but stacks gradients in original order.
         dhidden, gradient_groups[group] = jax.lax.scan(body, dhidden, residuals[group], reverse=True)
-      return dhidden, unpack_groups(gradient_groups)
+      return dhidden, tuple(gradient_groups)
 
     def forward_microbatch(data):
       with jax.named_scope("prefix_forward"):
@@ -212,8 +204,8 @@ def make_training_schedule(
             with jax.named_scope("backward"):
               dweights, dhidden = backwards[backward_group](old_residual, dhidden)
             with jax.named_scope("forward"):
-              next_hidden, next_residual, metrics = call_forward(
-                  forwards[forward_group], next_weights, next_hidden, next_state, data
+              next_hidden, next_residual, metrics = forwards[forward_group](
+                  next_weights, next_hidden, next_state, data["inputs_position"], data["inputs_segmentation"]
               )
             return (dhidden, next_hidden), (dweights, next_residual, metrics)
 
@@ -222,7 +214,7 @@ def make_training_schedule(
           )
           gradient_parts[backward_group].append(jax.tree.map(lambda g: g[::-1], reversed_grads))
           residual_parts[forward_group].append(next_residuals)
-          metrics = reduce_metrics(metrics)
+          metrics = _reduce_aux(metrics)
           layer_metrics = metrics if layer_metrics is None else sum_aux(layer_metrics, metrics)
 
       def concatenate(parts):
@@ -231,7 +223,7 @@ def make_training_schedule(
         return jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=0), *parts)
 
       # Backward segments arrive in descending group-local layer order.
-      layer_grads = unpack_groups([concatenate(list(reversed(parts))) for parts in gradient_parts])
+      layer_grads = tuple(concatenate(list(reversed(parts))) for parts in gradient_parts)
       next_residuals = tuple(concatenate(parts) for parts in residual_parts)
       with jax.named_scope("prefix_backward"):
         prefix_grads, = prefix_backward(previous_prefix_residuals, dprefix)

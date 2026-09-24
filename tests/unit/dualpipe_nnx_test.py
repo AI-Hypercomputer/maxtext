@@ -15,10 +15,10 @@ import optax
 
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.experimental.dualpipe_nnx import (
-    _layer_groups, _make_boundaries, _make_layer_adapter, _microbatches, _reduce_aux, _restore_gradients,
+    _layer_groups, _make_boundaries, _make_layer_adapter, _microbatches, _restore_gradients,
     _te_layer_metrics, validate_training_config,
 )
-from maxtext.experimental.dualpipe_schedule import make_training_schedule
+from maxtext.experimental.dualpipe_schedule import _reduce_aux, make_training_schedule
 from maxtext.layers import nnx_scan
 from maxtext.utils.globals import EPS
 
@@ -125,14 +125,14 @@ def loss_from_logits(logits, data, config, mesh, loss_mask=None):
 
 def layer_apply(params, hidden, state, positions, segments):
   del positions, segments
-  return jnp.tanh(hidden @ params["kernel"].get_value() + params["bias"].get_value()) * state["gain"].get_value()
+  return jnp.tanh(hidden @ params["kernel"].get_value() + params["bias"].get_value()) * state["gain"].get_value(), {}
 
 
 def expert_apply(params, hidden, state, positions, segments):
   del state, positions, segments
   scores = jax.nn.softmax(hidden @ params["gate"].get_value(), axis=-1)
   outputs = jnp.tanh(jnp.einsum("...d,edh->...eh", hidden, params["experts"].get_value()))
-  return hidden + jnp.sum(outputs * scores[..., None], axis=-2)
+  return hidden + jnp.sum(outputs * scores[..., None], axis=-2), {}
 
 
 def make_data(microbatches, empty=False):
@@ -219,7 +219,7 @@ class DenseTrainingNnxTest(unittest.TestCase):
         layers = nnx.state(model.decoder.layers, nnx.Param)
         leading_layers = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) * 2, layers)
         boundary_grads = jax.tree.map(lambda x: x * 2, boundary)
-        restored = _restore_gradients(leading_layers, boundary_grads, scan_axis)
+        restored = _restore_gradients((leading_layers,), boundary_grads, scan_axis)
         self.assert_tree_allclose(restored, jax.tree.map(lambda x: x * 2, params))
         self.assertEqual(restored["decoder"]["layers"]["kernel"].get_metadata(), params["decoder"]["layers"]["kernel"].get_metadata())
 
@@ -272,8 +272,8 @@ class DenseTrainingNnxTest(unittest.TestCase):
             return total_loss / jnp.maximum(total_weights, 1)
 
           reference_value, reference_grads = jax.jit(jax.value_and_grad(reference))(all_params)
-          schedule = make_training_schedule(prefix, layer_apply, head)
-          loss_sum, aux, layer_grads, boundary_grads = jax.jit(schedule)(layer_params, layer_state, boundary_params, data)
+          schedule = make_training_schedule(prefix, (layer_apply,), head)
+          loss_sum, aux, layer_grads, boundary_grads = jax.jit(schedule)((layer_params,), (layer_state,), boundary_params, data)
           grads = _restore_gradients(layer_grads, boundary_grads, param_scan_axis=1)
           denominator = jnp.maximum(aux["total_weights"], 1)
           grads = jax.tree.map(lambda x: x / denominator, grads)
@@ -315,8 +315,8 @@ class DenseTrainingNnxTest(unittest.TestCase):
               _, weights, state = nnx.split(getattr(local_model.decoder, name), nnx.Param, ...)
               weights = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), weights)
               for index in range(count):
-                hidden = apply(jax.tree.map(lambda x: x[index], weights), hidden,
-                               jax.tree.map(lambda x: x[index], state), None, None)
+                hidden, _ = apply(jax.tree.map(lambda x: x[index], weights), hidden,
+                                  jax.tree.map(lambda x: x[index], state), None, None)
             logits = local_model.decoder.apply_output_head(
                 local_model.token_embedder, hidden, deterministic=True, model_mode="train"
             )
@@ -414,7 +414,7 @@ class DenseTrainingNnxTest(unittest.TestCase):
         for schedule_name in ("serial", "dual_pipe"):
           with self.subTest(schedule=schedule_name):
             schedule = make_training_schedule(
-                prefix, (apply,), head, schedule=schedule_name, layer_has_aux=True, reduce_aux=_reduce_aux,
+                prefix, (apply,), head, schedule=schedule_name,
             )
             loss, _, layer_grads, boundary_grads = jax.jit(schedule)((params,), (state,), boundary, data)
             grads = _restore_gradients(layer_grads, boundary_grads, scan_axis, ("moe_layers",))

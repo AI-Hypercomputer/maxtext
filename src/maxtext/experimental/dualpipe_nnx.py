@@ -107,16 +107,6 @@ def _te_layer_metrics(intermediates, required):
   }
 
 
-def _reduce_aux(stacked_aux):
-  """Match normal GA: sum loss metrics, but OR/max/min TE capacity metrics."""
-  reducers = {
-      "te_moe_capacity_overflow": jnp.any,
-      "te_moe_max_total_recv_tokens": jnp.max,
-      "te_moe_recv_capacity_per_rank": jnp.min,
-  }
-  return {key: reducers.get(key, jnp.sum)(value, axis=0) for key, value in stacked_aux.items()}
-
-
 def _make_layer_adapter(layers, config, layer_name, layer_count):
   """Expose one homogeneous scanned stack as a pure, single-layer function.
 
@@ -152,10 +142,10 @@ def _make_layer_adapter(layers, config, layer_name, layer_count):
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
+    stats = {}
     if config.te_moe_block:
       stats = _te_layer_metrics(nnx.pop(layer, nnx.Intermediate), required=layer_name == "moe_layers")
-      return hidden, stats
-    return hidden
+    return hidden, stats
 
   if config.remat_policy == "full":
     layer_apply = jax.checkpoint(
@@ -224,7 +214,7 @@ def _microbatches(data, count, micro_batch_size):
 
 def _restore_gradients(layer_grads, boundary_grads, param_scan_axis, layer_names=("layers",)):
   """Restore the full model parameter tree and its original layer axis."""
-  groups = layer_grads if isinstance(layer_grads, tuple) else (layer_grads,)
+  groups = layer_grads
   if len(groups) != len(layer_names):
     raise ValueError("Layer gradient groups do not match the decoder stack names")
   if param_scan_axis != 0:
@@ -262,7 +252,6 @@ def dualpipe_loss_and_grad(config, model, params_shardings, data, loss_from_logi
   batch = _microbatches(data, config.gradient_accumulation_steps, config.micro_batch_size_to_train_on)
   schedule = make_training_schedule(
       prefix_apply, layer_apply, loss_apply, grad_dtype=config.grad_dtype,
-      layer_has_aux=config.te_moe_block, reduce_aux=_reduce_aux,
   )
   with jax.named_scope("dual_pipe"):
     loss_sum, aux, layer_grads, boundary_grads = schedule(layer_params, layer_state, boundary_params, batch)
