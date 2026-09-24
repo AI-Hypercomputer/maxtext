@@ -249,6 +249,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
       in_specs.append(PartitionSpec(batch_axes, None))
     in_specs += [PartitionSpec(), PartitionSpec()]
     max_num_segments = int(self.config.tokamax_kda_max_num_segments)
+    decay_floor = float(self.config.tokamax_kda_log_decay_floor)
 
     @functools.partial(
         jax.shard_map,
@@ -267,16 +268,26 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
         # which is MaxText's packed-data convention already.
         seg_kwargs = {"segment_ids": rest[0], "max_num_segments": max_num_segments}
       a_log_, dt_bias_ = rest[-2], rest[-1]
+      g_hf = head_first(g_)
+      if decay_floor > 0:
+        # With the gate activated in-kernel the kernel skips its safe-gate centering and
+        # overflows fp32 exp once a step decays past ~30 nats (NaN). Activate here and floor.
+        heads, dk = g_hf.shape[0], g_hf.shape[-1]
+        log_decay = -jnp.exp(a_log_).reshape(heads, 1, 1, 1) * jax.nn.softplus(
+            g_hf.astype(jnp.float32) + dt_bias_.reshape(heads, 1, 1, dk)
+        )
+        gate_kwargs = {"use_gate_in_kernel": False}
+        g_hf = jnp.maximum(log_decay, -decay_floor)
+      else:
+        gate_kwargs = {"use_gate_in_kernel": True, "a_log": a_log_, "delta_time_bias": dt_bias_}
       out, _ = kda_api.kimi_delta_attention(
           head_first(q_),
           head_first(k_),
           head_first(v_),
-          head_first(g_),
+          g_hf,
           beta_.transpose(2, 0, 1),
-          a_log=a_log_,
-          delta_time_bias=dt_bias_,
           use_qk_l2norm=True,
-          use_gate_in_kernel=True,
+          **gate_kwargs,
           **seg_kwargs,
       )
       return out.transpose(1, 2, 0, 3)

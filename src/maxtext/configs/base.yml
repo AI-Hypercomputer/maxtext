@@ -1455,6 +1455,8 @@ kda_allow_neg_eigval: true
 # Max packed documents/sequence for the KDA kernel (pads to seq + 63*bound; keep near the
 # real packing max to bound HBM). Ignored when packing=false.
 tokamax_kda_max_num_segments: 32
+# Floor (nats) on per-step KDA log-decay fed to the tokamax kernel; it NaNs past ~30. 0 disables.
+tokamax_kda_log_decay_floor: 20.0
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on

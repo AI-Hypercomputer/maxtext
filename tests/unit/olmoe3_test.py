@@ -281,16 +281,18 @@ class OLMoE3TokamaxKDATest(unittest.TestCase):
   transposes, the 1-indexed segment-id convention, and beta in [0, 2).
   """
 
-  def _layer_out(self, use_tokamax, x, segment_ids):
+  def _layer_out(self, use_tokamax, x, segment_ids, dt_bias=None, extra=()):
     """Run one KDA layer, fused or unfused, and return its output."""
     # pylint: disable=g-import-not-at-top,import-outside-toplevel
     from flax import nnx
     from maxtext.models.olmoe3 import OLMoE3KimiDeltaAttention
 
-    cfg = _config("olmoe3-30m", extra=(f"use_tokamax_kda={use_tokamax}",))
+    cfg = _config("olmoe3-30m", extra=(f"use_tokamax_kda={use_tokamax}",) + tuple(extra))
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     with mesh:
       layer = OLMoE3KimiDeltaAttention(cfg, mesh, None, rngs=nnx.Rngs(params=0))
+      if dt_bias is not None:
+        layer.dt_bias.value = jnp.full_like(layer.dt_bias.value, dt_bias)
       # Jitted like training. tokamax's eager-only beta range check rejects the
       # reference's allow_neg_eigval betas (in [0, 2)); under jit the check is
       # skipped and the delta-rule algebra is exact for beta < 2, which is what
@@ -308,6 +310,20 @@ class OLMoE3TokamaxKDATest(unittest.TestCase):
     # rsqrt(sum + 1e-6); the unfused path matches the standalone reference's
     # max(sum, 1e-12). That contributes ~5e-4; anything past 2e-3 means the
     # argument mapping broke.
+    self.assertLess(float(rel), 2e-3, f"tokamax KDA relative error {rel:.2e}")
+
+  def test_matches_unfused_at_large_decay(self):
+    """Fused KDA stays finite and exact when steps decay past fp32 exp range.
+
+    dt_bias=3 puts per-step log-decay near A*3 nats, up to ~48 at A=16. With the
+    gate activated in-kernel this returned NaN on hardware and a 2.4e-2 error in
+    interpret mode; the log-decay floor must fix it without moving the answer.
+    """
+    x = jax.random.normal(jax.random.PRNGKey(3), (2, 64, 128), jnp.float32)
+    expected = self._layer_out(False, x, None, dt_bias=3.0)
+    actual = self._layer_out(True, x, None, dt_bias=3.0)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(actual))), "tokamax KDA returned non-finite output")
+    rel = jnp.max(jnp.abs(actual - expected)) / jnp.max(jnp.abs(expected))
     self.assertLess(float(rel), 2e-3, f"tokamax KDA relative error {rel:.2e}")
 
   def test_matches_unfused_unpacked(self):

@@ -1498,6 +1498,14 @@ class Qwen3Next(BaseModel):
           "(chunk-1)*bound positions, so keep it close to the real packing maximum."
       ),
   )
+  tokamax_kda_log_decay_floor: float = Field(
+      20.0,
+      description=(
+          "Floor, in nats, on the per-step KDA log-decay passed to the tokamax kernel. The kernel overflows"
+          " fp32 exp once a step decays past ~30 nats, returning NaN; a floor of 20 changes the output by"
+          " under exp(-20) per step. 0 disables it and lets the kernel activate the gate itself."
+      ),
+  )
   gdn_chunk_size: int = Field(
       64,
       description="Chunk size for the parallel scan algorithm in the Gated Delta Net.",
