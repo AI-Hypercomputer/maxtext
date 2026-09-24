@@ -199,11 +199,12 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                   *)      push() { :; }; mkdir -p $OUT ;;
                 esac
                 for M in $MODELS; do
-                  echo "$ARMS" | tr ';' '\n' | while IFS='|' read -r NAME P S XTRA; do
+                  echo "$ARMS" | tr ';' '\n' | while IFS='|' read -r NAME P S XTRA ENVX; do
                     [ -z "\$NAME" ] && continue
                     echo "=== ARM \$NAME model=\$M pdb=\$P seq=\$S extra='\$XTRA' \$(date) ===";
                     LOG=/tmp/hc/\$M-\$NAME.log
-                    python3 -m maxtext.trainers.pre_train.train \
+                    # Optional 5th field: per-arm env overrides, e.g. TOKAMAX_KDA_BF16_FWD=0.
+                    env \$ENVX python3 -m maxtext.trainers.pre_train.train \
                       /wt/src/maxtext/configs/base.yml \
                       model_name=\$M run_name=$RUN-\$M-\$NAME steps=$STEPS \
                       dataset_type=synthetic enable_checkpointing=False async_checkpointing=False \
@@ -215,6 +216,8 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                       shard_exp_on_fsdp=True num_vocab_tiling=8 \
                       base_output_directory=$OUT \$XTRA > \$LOG 2>&1
                     EX=\$?
+                    # Pod-local output dies with the pod; park the capture where the harvester looks.
+                    find $OUT -path "*$RUN-\$M-\$NAME*" -name '*.xplane.pb' -exec cp {} /tmp/hc/\$M-\$NAME.xplane.pb \; 2>/dev/null
                     # Median of the last 10 steps, so compile and warmup do not count.
                     python3 - "\$LOG" "\$M" "\$NAME" "\$P" "\$S" "\$EX" >> \$RES <<'PYEOF'
                 import re, statistics, sys

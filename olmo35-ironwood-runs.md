@@ -153,30 +153,90 @@ What it establishes:
 with `ici_fsdp_parallelism=-1` leaves 24.17% of parameters unsharded and MaxText
 asserts. `fsdp x ep` must equal the device count.
 
-### 128 devices (4x4x4): run `o35fle241730`, in flight
+### 128 devices (4x4x4): run `o35fle241836`, c-series
 
-`tpu7x-cluster-flex` pool `tpu7x-full-pod-spot`, no Kueue, spot. The spot
-stockout that blocked this route for two days cleared at 18:25 UTC 2026-09-24 and
-all 16 pods came up. Running the corrected c-series below. **Spot, so it can be
-preempted mid-sweep**; results are pushed to GCS after every arm for that reason.
+`tpu7x-cluster-flex` pool `tpu7x-full-pod-spot`, no Kueue, spot, 2026-09-24. Ran 6
+of 9 arms (c7 was mid-compile) before another user's Pathways job took the pool.
 
-### Queued: `o35c241729` on nap, same c-series
+| arm | pdb | extra | TF/s/dev | MFU | step s | outcome |
+|---|---|---|---|---|---|---|
+| c1_prof_p2 | 2 | `profiler=xplane` | **80.1** | **6.95%** | 0.882 | ok, reproduces 78.2; **capture lost** with the pod |
+| c2_p3s8k | 3 | | | | | **fits in HBM**, loss NaN at step 1 (see below) |
+| c3_ep4fix | 4 | `ici_fsdp_parallelism=32 ici_expert_parallelism=4` | | | | still 24.17% unsharded |
+| c4_p4_cf125 | 4 | `capacity_factor=1.25` | | | | OOM at the **identical** 104.02G |
+| c5_p4_optoff | 4 | `optimizer_memory_host_offload=True` | | | | abort: `MegaScaleCollective only works in multi slice` |
+| c6_p2_megablox | 2 | `megablox=True` | 75.4 | 6.54% | 0.938 | 6% slower than gmm_v2 |
 
-| arm | pdb | seq | extra | what it answers |
-|---|---|---|---|---|
-| c1_prof_p2 | 2 | 8192 | `profiler=xplane` | capture at the point that actually runs |
-| c2_p3s8k | 3 | 8192 | | does pdb=3 fit the 9.3 GiB gap |
-| c3_ep4fix | 4 | 8192 | `ici_fsdp_parallelism=32 ici_expert_parallelism=4` | expert parallelism, sharding corrected |
-| c4_p4_cf125 | 4 | 8192 | `capacity_factor=1.25` | does bounding expert capacity buy pdb=4 |
-| c5_p4_optoff | 4 | 8192 | `optimizer_memory_host_offload=True` | cheaper offload than activation offload |
-| c6_p2_megablox | 2 | 8192 | `megablox=True` | kernel choice at the pdb that runs |
-| c7_p2_noshardexp | 2 | 8192 | `shard_exp_on_fsdp=False` | sharding lever at the pdb that runs |
-| c8_p4_cf10 | 4 | 8192 | `capacity_factor=1.0` | tighter capacity bound |
-| c9_p2_prof_cf125 | 2 | 8192 | `capacity_factor=1.25` | does capacity bounding cost throughput when memory is not binding |
+What it settles:
 
-`capacity_factor` is the untested MoE memory knob. It is `-1.0` (dropless) in
-every run above, which is exactly what leaves the expert intermediates unbounded
-and produces the 104 GiB temporaries.
+1. **pdb=3 fits.** The HBM wall is between 3 and 4, so pdb=3 is the next
+   throughput step, blocked only by the NaN.
+2. **`capacity_factor` does not touch the temporaries.** pdb=4 OOMs at 104.02G
+   with or without it, so the expert intermediates are not what fills HBM. c8/c9
+   retired.
+3. **Optimizer host offload is multi-slice only** on this stack. Dead lever for a
+   single 4x4x4.
+4. **Expert parallelism needs `shard_exp_on_fsdp=False`.** With it True the expert
+   weights are `P('fsdp', None, None)` and never touch the `expert` axis, whatever
+   the mesh. The old validator says so outright (`shard_exp_on_fsdp requires
+   ici_expert_parallelism = 1`). Fixed arm is e5.
+5. **gmm_v2 holds at 128 devices**, 1.06x over megablox, same as at 8.
+
+Raw logs: `/tmp/olmo35_results/flexspot4x4x4-o35fle241836-logs/`.
+
+### The pdb=3 NaN is a KDA decay overflow, not a batch bug
+
+The tokamax Mosaic KDA kernel folds cumulative decay into its matmul operands
+inside each 4-token sub-block. MaxText called it with `use_gate_in_kernel=True`,
+which turns off the kernel's `safe_gate` centering, so the fold reference sits at
+the sub-block start and the exponent spans 3 steps. fp32 `exp` overflows at 88,
+so any step decaying past ~30 nats returns NaN.
+
+Reproduced on CPU with the real kernel in Pallas interpret mode (v7x VMEM
+limits), A=16, constant gate:
+
+| gate | per-step log-decay | 3-step span | kernel |
+|---|---|---|---|
+| 0.0 | 11.1 | 33 | finite |
+| 1.5 | 27.2 | 82 | finite |
+| 2.0 | 34.0 | 102 | **NaN** |
+
+It is independent of batch: B=1, 2 and 3 NaN at the same heads (the ones with the
+largest `A`). At init the gates are small and every step decays ~11 nats, which
+is why step 0 is always clean; one optimizer step can push a gate past the
+threshold, which is what c2 hit. **pdb=2 carries the same latent risk in a longer
+run.**
+
+**Fix**: `tokamax_kda_log_decay_floor` (default 20). MaxText activates the gate
+itself, floors the per-step log-decay at -20, and passes it with
+`use_gate_in_kernel=False`, which also turns `safe_gate` on. A step decaying
+e^-20 or e^-50 is a full state reset either way, so the output moves by under
+e^-20 per step.
+
+| gate scale | as shipped | floor 20 |
+|---|---|---|
+| 0.1 | 1.8e-5 vs XLA ref | 1.9e-5 |
+| 1.0 | **NaN** | 2.0e-5 |
+| 4.0 | **NaN** | 2.4e-5 |
+
+With the production `DENSE_PAIRS` and bf16 flags the same table reads 2.5e-3
+across the board, the documented bf16 level. New unit test
+`test_matches_unfused_at_large_decay` sets `dt_bias=3` (up to ~48 nats per step);
+it fails at 2.4e-2 without the floor and passes at 4.5e-4 with it.
+
+### Queued: e-series on all three routes
+
+| arm | pdb | extra | what it answers |
+|---|---|---|---|
+| e1_p3 | 3 | | pdb=3 throughput with the decay floor |
+| e2_p2_prof | 2 | `profiler=xplane` | 128-device capture; also prices the floor against c1 |
+| e3_p2_floor0 | 2 | `tokamax_kda_log_decay_floor=0` | cost of the floor, same run |
+| e4_p3_prof | 3 | `profiler=xplane` | capture at the new best point |
+| e5_p2_ep4 | 2 | `ici_fsdp_parallelism=32 ici_expert_parallelism=4 shard_exp_on_fsdp=False` | expert parallelism, correctly sharded |
+| e6_p2_noshardexp | 2 | `shard_exp_on_fsdp=False` | the arm c7 lost |
+
+Pod-local captures are now copied into `/tmp/hc` after each arm, so the
+supervisor pulls them with the results instead of losing them with the pod.
 
 ## Profiles and xla-shell output
 
@@ -217,9 +277,10 @@ there is worth far less than the KDA work.
 
 ### 128 devices
 
-**Not yet captured.** The first attempt (`z_profile` in `o35nap240641`) was pinned
-to pdb=4 and died with the OOM. `c1_prof_p2` re-targets it at pdb=2, the
-configuration that actually runs, and is executing now in `o35fle241730`.
+**Not yet captured.** `z_profile` in `o35nap240641` was pinned to pdb=4 and OOMed.
+`c1_prof_p2` in `o35fle241836` ran, but wrote to pod-local `/tmp/out` and the pod
+was lost before harvest. `e2_p2_prof` and `e4_p3_prof` are queued with the fix
+that parks captures in `/tmp/hc`.
 
 The open question the capture has to answer: at 8 devices the binder moved from
 comm to TensorCore once tuned, but at 128 devices pdb=1 was 54.2 against pdb=2's

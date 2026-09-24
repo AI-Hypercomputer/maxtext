@@ -43,14 +43,17 @@ harvest_pod() {  # kubeconfig run dest -> 0 if a results.tsv came back
   [ -s "$dest" ] || return 1
   mkdir -p "${dest%.tsv}-logs"
   for f in $(KUBECONFIG=$kc timeout 60 kubectl exec -n default "$pod" -- ls /tmp/hc 2>/dev/null); do
-    KUBECONFIG=$kc timeout 180 kubectl exec -n default "$pod" -- cat "/tmp/hc/$f" > "${dest%.tsv}-logs/$f" 2>/dev/null
+    KUBECONFIG=$kc timeout 900 kubectl exec -n default "$pod" -- cat "/tmp/hc/$f" > "${dest%.tsv}-logs/$f" 2>/dev/null
   done
   return 0
 }
 
 submit() {  # route kubeconfig envs -> prints run name
   local route=$1 kc=$2 envs=$3
-  local run="o35$(echo "$route" | cut -c1-3)$(date +%d%H%M)"
+  # One letter per route. Both flex routes start "fle", and a shared prefix let
+  # them claim the same jobset name in the same minute and delete each other.
+  local code; case "$route" in nap*) code=n;; flexspot*) code=s;; flexdws*) code=h;; *) code=x;; esac
+  local run="o35$code$(date +%d%H%M)"
   local sel=""
   case "$envs" in *EXTRA_SELECTORS=NODEPOOL:*)
     local np="${envs##*EXTRA_SELECTORS=NODEPOOL:}"; np="${np%% *}"

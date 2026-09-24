@@ -395,7 +395,7 @@ megablox 43.4 vs tokamax gmm v1 43.8 TF/s, loss identical to 4 decimals (10.151)
 
 ## Open bugs found (both block the main levers)
 
-1. **Fused tokamax KDA produces NaN at `per_device_batch_size=2`.** pdb=1 is clean and
+1. **Fused tokamax KDA produces NaN at `per_device_batch_size=2`.** **ROOT-CAUSED AND FIXED 2026-09-24**: a decay overflow, not a batch bug; the B>=2 pattern was coincidence. See `olmo35-ironwood-runs.md`, "The pdb=3 NaN is a KDA decay overflow", and `tokamax_kda_log_decay_floor`. Original notes follow. pdb=1 is clean and
    the unfused chunked path is clean at pdb=2 (loss 11.73 -> 9.26), so it is the
    kernel, not the model. This blocks the single most valuable lever, since pdb is
    what every tuned recipe uses to raise MFU. Kernel is
