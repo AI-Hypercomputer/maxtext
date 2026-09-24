@@ -30,6 +30,7 @@ class ThreadedTransportManager:
 
   def __init__(self, num_learners: int, maxsize: int = 32):
     self.num_learners = num_learners
+    self.maxsize = maxsize
 
     # Thread-safe FIFO queues for each learner.
     # Stores tuples of (step, fragment_id, data).
@@ -75,7 +76,7 @@ class ThreadedTransportManager:
       return buffer.pop(key)
 
     while True:
-      rec_step, rec_frag, data = self._syncer_to_learner_queues[learner_idx].get()
+      rec_step, rec_frag, data = self._syncer_to_learner_queues[learner_idx].get(timeout=300.0)
       if rec_step == step and rec_frag == fragment_id:
         return data
       buffer[(rec_step, rec_frag)] = data

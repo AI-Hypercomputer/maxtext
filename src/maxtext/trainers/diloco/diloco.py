@@ -101,15 +101,21 @@ def reshape_first_axis_with_diloco(num_diloco_replicas: int, pytree: PyTree) -> 
   """
 
   def extend_pspec(pspec: jax.sharding.PartitionSpec | Sequence[str | Sequence[str]] = ()) -> jax.sharding.PartitionSpec:
-    if tuple(*pspec)[0] == "diloco":
-      # pull out diloco axis if already present
-      return jax.sharding.PartitionSpec("diloco", (*pspec[0][1:],), (*pspec[1:],))
+    if not pspec:
+      return jax.sharding.PartitionSpec("diloco")
+    first_axis = pspec[0]
+    if first_axis == "diloco":
+      return jax.sharding.PartitionSpec(*pspec)
+    if isinstance(first_axis, (tuple, list)) and "diloco" in first_axis:
+      rest_first = tuple(x for x in first_axis if x != "diloco")
+      rest_first = rest_first[0] if len(rest_first) == 1 else rest_first
+      return jax.sharding.PartitionSpec("diloco", rest_first, *pspec[1:])
     return jax.sharding.PartitionSpec("diloco", *pspec)
 
   def reshape_for_diloco(arr):
     batch_dim, *example_shape = arr.shape
     diloco_shape = (num_diloco_replicas, batch_dim // num_diloco_replicas, *example_shape)
-    if hasattr(arr, "sharding"):
+    if hasattr(arr, "sharding") and hasattr(arr.sharding, "mesh") and hasattr(arr.sharding, "spec"):
       s = arr.sharding
       s = jax.sharding.NamedSharding(mesh=s.mesh, spec=extend_pspec(s.spec))
       return jax.lax.with_sharding_constraint(jnp.reshape(arr, shape=diloco_shape), s)

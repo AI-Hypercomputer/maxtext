@@ -859,6 +859,8 @@ upload_all_profiler_results: false
 skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
+# Pathways only: override for `max_num_hosts` passed to start_trace. 0 = derive from device topology.
+profiler_max_num_hosts: 0
 hide_profiler_step_metric: false
 profile_cleanly: true # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.

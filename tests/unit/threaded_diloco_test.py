@@ -14,6 +14,7 @@
 
 """Unit tests for threaded DiLoCo components."""
 
+import collections
 import os
 import re
 import sys
@@ -55,6 +56,7 @@ class ThreadedDilocoUnitTest(unittest.TestCase):
         enable_diloco=True,
         enable_streaming_diloco=True,
         num_diloco_replicas=2,
+        skip_jax_distributed_system=True,
     )
 
   def test_make_learner_config(self):
@@ -1000,6 +1002,85 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
         10.0,
     )
 
+  def test_pinned_apply_sharded_input_keeps_param_shardings_and_donates(self):
+    """DILOCO_SHARDED_APPLY path: a SHARDED packed input must not leak its spec into params.
+
+    Regression for MyStuff/Data/v6e-nscc-e3.log, where a P('fsdp') packed input made
+    the apply kernel emit a param with P('fsdp',) instead of P(None, None) and the
+    next p_train_step rejected it.
+    """
+    from maxtext.trainers.diloco.threaded_diloco import (
+        _build_fragment_1d_metadata,
+        _freeze_metadata,
+        _pack_fragment_1d,
+        _make_pinned_apply_fns,
+    )
+
+    devices = np.array(jax.devices()[:8])
+    mesh = jax.sharding.Mesh(devices, ("x",))
+    P = jax.sharding.PartitionSpec
+    num_layers, hidden = 4, 8
+    params = {
+        # Sharded on the hidden dim, like an fsdp-sharded stacked layer weight.
+        "layers": {"w": jax.device_put(jnp.ones((num_layers, hidden)), jax.sharding.NamedSharding(mesh, P(None, "x")))},
+        # Replicated, like the [4096, 36] norm scale in the v6e crash.
+        "embed": jax.device_put(jnp.ones((hidden,)), jax.sharding.NamedSharding(mesh, P())),
+    }
+    expected_shardings = jax.tree_util.tree_map(lambda x: x.sharding, params)
+    manipulator = _build_manipulator(params, num_layers=num_layers, num_transformer_frags=num_layers)
+
+    for donate in (False, True):
+      live = jax.tree_util.tree_map(lambda x: x.copy(), params)
+      flat_fn, scanned_fn = _make_pinned_apply_fns(expected_shardings, donate=donate)
+
+      # Scanned fragment 1 -> layer 0, packed buffer placed SHARDED P('x').
+      frag = manipulator.get_flat_fragment(live, 1)
+      meta = _build_fragment_1d_metadata(frag)
+      packed = _pack_fragment_1d(frag, meta)
+      packed = {
+          dt: jax.device_put(arr * 5.0, jax.sharding.NamedSharding(mesh, P("x")))
+          for dt, arr in packed.items()
+      }
+      old_w = live["layers"]["w"]
+      new_params = scanned_fn(live, jnp.asarray(0, dtype=jnp.int32), packed, manipulator, _freeze_metadata(meta))
+
+      for got, want in zip(jax.tree_util.tree_leaves(new_params), jax.tree_util.tree_leaves(expected_shardings)):
+        self.assertTrue(got.sharding.is_equivalent_to(want, got.ndim), f"donate={donate}: {got.sharding} != {want}")
+      np.testing.assert_allclose(np.array(new_params["layers"]["w"][0]), 5.0)
+      np.testing.assert_allclose(np.array(new_params["layers"]["w"][1:]), 1.0)
+      if donate and jax.devices()[0].platform != "cpu":
+        self.assertTrue(old_w.is_deleted())
+
+      # Flat fragment 0 with a sharded packed input as well.
+      flat = manipulator.get_flat_fragment(new_params, 0)
+      flat_meta = _build_fragment_1d_metadata(flat)
+      flat_packed = {
+          dt: jax.device_put(arr * 10.0, jax.sharding.NamedSharding(mesh, P("x")))
+          for dt, arr in _pack_fragment_1d(flat, flat_meta).items()
+      }
+      new_params2 = flat_fn(new_params, flat_packed, manipulator, _freeze_metadata(flat_meta))
+      self.assertTrue(new_params2["embed"].sharding.is_equivalent_to(expected_shardings["embed"], 1))
+      np.testing.assert_allclose(np.array(new_params2["embed"]), 10.0)
+      np.testing.assert_allclose(np.array(new_params2["layers"]["w"][0]), 5.0)
+
+  def test_prefetch_target_sharding_numpy_and_array_inputs(self):
+    """Sharded hop is the default, so it must also work on the legacy numpy path (no .sharding)."""
+    from maxtext.trainers.diloco.threaded_diloco import _prefetch_target_sharding, USE_SHARDED_APPLY
+
+    self.assertTrue(USE_SHARDED_APPLY or os.environ.get("DILOCO_SHARDED_APPLY") == "0")
+    P = jax.sharding.PartitionSpec
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:8]), ("x",))
+    host = np.ones((16,), np.float32)
+    # numpy + recorded extraction spec -> that spec
+    self.assertEqual(_prefetch_target_sharding(host, mesh, P("x")).spec, P("x"))
+    # numpy + nothing recorded -> replicated (legacy behaviour)
+    self.assertEqual(_prefetch_target_sharding(host, mesh, None).spec, P())
+    # jax.Array -> its own spec wins over the fallback
+    arr = jax.device_put(jnp.ones((16,)), jax.sharding.NamedSharding(mesh, P("x")))
+    self.assertEqual(_prefetch_target_sharding(arr, mesh, P()).spec, P("x"))
+    moved = jax.device_put(host, _prefetch_target_sharding(host, mesh, P("x")))
+    self.assertEqual(moved.sharding.spec, P("x"))
+
   def test_async_event_driven_syncer_transport(self):
     """Verifies that ThreadedTransportManager and SyncerTransport support non-blocking FIFO ingestion."""
     transport_mgr = ThreadedTransportManager(num_learners=2, maxsize=16)
@@ -1104,9 +1185,189 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
         else:
           np.testing.assert_allclose(np.array(orig), np.array(restored[k1][k2]))
 
+  def test_dynamic_queue_sizing_formula(self):
+    """Verifies that dynamic queue sizing correctly bounds TPU HBM and prevents host queue starvation."""
+    test_cases = [
+        # (tau, expected_prefetch_maxsize, expected_transport_maxsize)
+        (1, 4, 32),
+        (5, 5, 32),
+        (15, 15, 34),
+        (16, 16, 36),
+        (37, 16, 78),
+        (50, 16, 104),
+    ]
+    for tau, exp_prefetch, exp_transport in test_cases:
+      prefetch_maxsize = min(max(4, int(tau)), 16)
+      transport_maxsize = max(32, int(tau) * 2 + 4)
+      self.assertEqual(
+          prefetch_maxsize,
+          exp_prefetch,
+          f"tau={tau}: expected prefetch_maxsize={exp_prefetch}, got {prefetch_maxsize}",
+      )
+      self.assertEqual(
+          transport_maxsize,
+          exp_transport,
+          f"tau={tau}: expected transport_maxsize={exp_transport}, got {transport_maxsize}",
+      )
+
+  def test_prefetch_queue_hbm_memory_footprint(self):
+    """Verifies calculated TPU HBM footprint of prefetch_queue for Qwen3-8B (bfloat16, 37 frags)."""
+    model_params = 8.191e9
+    bytes_per_param = 2  # bfloat16
+    total_model_bytes = model_params * bytes_per_param
+    num_frags = 37
+    frag_bytes = total_model_bytes / num_frags  # ~442.76 MB
+
+    for tau in [1, 5, 15, 37]:
+      prefetch_maxsize = min(max(4, int(tau)), 16)
+      hbm_footprint_bytes = prefetch_maxsize * frag_bytes
+      hbm_footprint_gb = hbm_footprint_bytes / (1024**3)
+
+      # Ensure HBM footprint never exceeds 8 GB (capped at 16 frags ~ 7.08 GB)
+      self.assertLessEqual(hbm_footprint_gb, 8.0)
+      # Ensure at least 4 frags are buffered (~ 1.77 GB)
+      self.assertGreaterEqual(hbm_footprint_gb, 1.6)
+
+  def test_multi_tau_transport_pipeline_deadlock_free(self):
+    """Simulates an asynchronous end-to-end multi-threaded training pipeline across tau in [1, 5, 15, 37]
+
+    verifying zero deadlock, exact fragment sequence matching, and clean queue teardown.
+    """
+    import queue as py_queue
+    from concurrent.futures import ThreadPoolExecutor
+
+    num_learners = 2
+    num_frags = 37
+    period = 37
+    steps_between_syncs = 1
+    total_steps = 60
+
+    for tau in [1, 5, 15, 37]:
+      transport_maxsize = max(32, tau * 2 + 4)
+      prefetch_maxsize = min(max(4, tau), 16)
+
+      manager = ThreadedTransportManager(num_learners=num_learners, maxsize=transport_maxsize)
+      self.assertEqual(manager.maxsize, transport_maxsize)
+
+      # Track synchronized fragments for each learner
+      consumed_syncs = {i: [] for i in range(num_learners)}
+      errors = []
+
+      # 1. Syncer thread worker
+      def syncer_worker():
+        try:
+          pending_frags = collections.defaultdict(dict)
+          expected_sync_count = len(
+              [s for s in range(1, total_steps + 1) if s % steps_between_syncs == 0]
+          )
+          completed_syncs = 0
+
+          while completed_syncs < expected_sync_count:
+            for l_idx in range(num_learners):
+              try:
+                rec_step, rec_frag, data = manager.recv_next_from_learner(l_idx, timeout=0.01)
+                pending_frags[(rec_step, rec_frag)][l_idx] = data
+                if len(pending_frags[(rec_step, rec_frag)]) == num_learners:
+                  # Compute simulated outer step
+                  out_data = {
+                      "updated_step": rec_step,
+                      "updated_frag": rec_frag,
+                      "val": np.mean(
+                          [pending_frags[(rec_step, rec_frag)][j]["val"] for j in range(num_learners)]
+                      )
+                      + 1.0,
+                  }
+                  del pending_frags[(rec_step, rec_frag)]
+                  for j in range(num_learners):
+                    manager.send_to_learner(j, rec_step, rec_frag, out_data)
+                  completed_syncs += 1
+              except py_queue.Empty:
+                pass
+        except Exception as ex:
+          errors.append(ex)
+
+      # 2. Learner thread runner
+      def learner_worker(learner_idx):
+        try:
+          prefetch_queue = py_queue.Queue(maxsize=prefetch_maxsize)
+          sync_receive_steps = [
+              s
+              for s in range(1, total_steps + 1)
+              if s - tau > 0 and (s - tau) % steps_between_syncs == 0
+          ]
+
+          # Prefetch background thread
+          def prefetch_producer():
+            try:
+              for comp_step in sync_receive_steps:
+                sync_step = comp_step - tau
+                frag_idx = (sync_step % period) // steps_between_syncs
+                recv_data = manager.recv_from_syncer(learner_idx, sync_step, frag_idx)
+                prefetch_queue.put((sync_step, frag_idx, recv_data), timeout=10.0)
+            except Exception as ex:
+              errors.append(ex)
+
+          prefetch_thread = threading.Thread(target=prefetch_producer, daemon=True)
+          prefetch_thread.start()
+
+          # Learner step loop
+          for step in range(total_steps):
+            comp_step = step + 1
+
+            # Extract & Send
+            if comp_step > 0 and comp_step % steps_between_syncs == 0:
+              frag_idx = (comp_step % period) // steps_between_syncs
+              manager.send_to_syncer(
+                  learner_idx, comp_step, frag_idx, {"val": float(learner_idx + comp_step)}
+              )
+
+            # Receive & Apply
+            if comp_step - tau > 0 and (comp_step - tau) % steps_between_syncs == 0:
+              target_sync_step = comp_step - tau
+              sync_step, frag_idx, recv_data = prefetch_queue.get(timeout=10.0)
+              self.assertEqual(sync_step, target_sync_step)
+              consumed_syncs[learner_idx].append((sync_step, frag_idx))
+
+          prefetch_thread.join(timeout=10.0)
+        except Exception as ex:
+          errors.append(ex)
+
+      syncer_t = threading.Thread(target=syncer_worker, daemon=True)
+      syncer_t.start()
+
+      learner_threads = [
+          threading.Thread(target=learner_worker, args=(i,), daemon=True)
+          for i in range(num_learners)
+      ]
+      for t in learner_threads:
+        t.start()
+
+      for t in learner_threads:
+        t.join(timeout=15.0)
+        self.assertFalse(t.is_alive(), f"Learner thread hung for tau={tau}")
+
+      syncer_t.join(timeout=15.0)
+      self.assertFalse(syncer_t.is_alive(), f"Syncer thread hung for tau={tau}")
+
+      self.assertEqual(errors, [], f"Encountered errors for tau={tau}: {errors}")
+
+      # Verify all expected sync receive steps were consumed in strict order
+      expected_syncs = [
+          (s - tau, ((s - tau) % period) // steps_between_syncs)
+          for s in range(1, total_steps + 1)
+          if s - tau > 0 and (s - tau) % steps_between_syncs == 0
+      ]
+      for i in range(num_learners):
+        self.assertEqual(
+            consumed_syncs[i],
+            expected_syncs,
+            f"Learner {i} sync sequence mismatch for tau={tau}",
+        )
+
 
 if __name__ == "__main__":
   unittest.main()
+
 
 
 

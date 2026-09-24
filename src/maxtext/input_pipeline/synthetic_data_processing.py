@@ -75,9 +75,14 @@ class SyntheticDataIterator:
   data_generator: Callable[[pyconfig.HyperParameters, tuple[Any, ...]], dict]
 
   def __init__(self, config, mesh):
-    self.mesh = mesh
     self.config = config
-    data_pspec_shardings = sharding.get_input_data_sharding(config, mesh)
+    self.mesh = mesh
+    if getattr(config, "enable_diloco", False) and not getattr(config, "enable_single_controller", False):
+      data_pspec_shardings = sharding.create_sharding(
+          mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules
+      )
+    else:
+      data_pspec_shardings = sharding.get_input_data_sharding(config, mesh)
     self.data_generator = jax.jit(
         SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )

@@ -44,8 +44,10 @@ def get_input_data_sharding(config, mesh, rules=None):
   """Get the input data sharding for the model"""
   if rules is None:
     rules = config.logical_axis_rules
-  if getattr(config, "enable_diloco", False):
-    data_sharding = create_sharding(mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=rules)
+  if getattr(config, "enable_diloco", False) and not getattr(config, "enable_non_spmd_diloco", False):
+    first_axis = ("diloco", config.input_data_sharding_logical_axes[0])
+    axes = [first_axis] + list(config.input_data_sharding_logical_axes[1:])
+    data_sharding = create_sharding(mesh, axes, rules=rules)
   else:
     data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=rules)
   return data_sharding

@@ -188,8 +188,7 @@ def _async_log_metrics(
     max_logging.error(f"Error in async metric logging for step {step}: {e}")
 
 
-@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
-def _fused_unpack_and_apply_scanned_fragment_jit(
+def _fused_unpack_and_apply_scanned_fragment_impl(
     params: Any,
     layer_idx: jax.Array,
     packed_dict: dict[str, jax.Array],
@@ -238,8 +237,17 @@ def _fused_unpack_and_apply_scanned_fragment_jit(
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
-@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
-def _fused_unpack_and_apply_flat_fragment_jit(
+_APPLY_STATIC_ARGNAMES = ("manipulator", "metadata_tuple", "has_replica_dim")
+
+# Default (legacy) apply kernels: no out_shardings, no donation. Output
+# shardings are whatever XLA propagates, which is only guaranteed to match
+# `state_mesh_shardings` when the packed input is replicated (P()).
+_fused_unpack_and_apply_scanned_fragment_jit = jax.jit(
+    _fused_unpack_and_apply_scanned_fragment_impl, static_argnames=_APPLY_STATIC_ARGNAMES
+)
+
+
+def _fused_unpack_and_apply_flat_fragment_impl(
     params: Any,
     packed_dict: dict[str, jax.Array],
     manipulator: Any,
@@ -275,6 +283,72 @@ def _fused_unpack_and_apply_flat_fragment_jit(
           new_leaves[idx] = frag
 
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
+
+
+_fused_unpack_and_apply_flat_fragment_jit = jax.jit(
+    _fused_unpack_and_apply_flat_fragment_impl, static_argnames=_APPLY_STATIC_ARGNAMES
+)
+
+
+# ---------------------------------------------------------------------------
+# Sharded CPU->TPU hop + pinned-output, in-place apply (DILOCO_SHARDED_APPLY=1).
+#
+# WHY: the legacy prefetch path device_put's every returned fragment with
+# PartitionSpec() -- i.e. REPLICATED to all 8 chips of the learner slice. For
+# Qwen3-8B one fragment is ~450 MB, so each learner moves ~3.6 GB per step, and
+# learner 1's source lives on learner 0's colocated CPU mesh (other hosts), so
+# that is 3.6 GB/step over DCN. Measured: with syncs disabled (v6e-nscc-a1) the
+# two threaded learners run at 1.3039 s/step, identical to a plain single-slice
+# train step (v6e-p0-s4, 1.3126 s/step); with one fragment per step (v6e-nscc-n2)
+# they run at 1.82 s/step. The whole ~0.5 s/step overhead is the sync path.
+#
+# WHAT: keep the fragment's own PartitionSpec on the CPU->TPU hop (1/8 of the
+# bytes per chip), and pin the apply kernel's out_shardings to the live params
+# shardings so the next p_train_step sees exactly `state_mesh_shardings`.
+# Without the pin, a sharded input made XLA propagate P('fsdp',) onto a leaf the
+# train step expects as P(None, None):
+#   ValueError: Sharding passed to jit does not match the sharding on the
+#   respective arg ... spec=P(None, None) vs spec=P('fsdp',) bfloat16[4096,36]
+# (MyStuff/Data/v6e-nscc-e3.log). Params are also donated so
+# dynamic_update_slice_in_dim on the stacked layer tensors is in place instead
+# of copying the whole stack every step.
+#
+# DEFAULT ON since 2026-09-24: same-image 2 x v6e-8 runs measured 1.3333 s/step
+# (v6e-pwns-r1/r2) vs SPMD 1.3731/1.3825 s/step (v6e-pwspmd-r1/r2), and the
+# loss trajectory is bit-identical to the replicated path (v6e-nscc-f1 vs n2).
+# Set DILOCO_SHARDED_APPLY=0 to get the legacy replicated hop back.
+# ---------------------------------------------------------------------------
+USE_SHARDED_APPLY = os.environ.get("DILOCO_SHARDED_APPLY", "1") == "1"
+DONATE_APPLY = os.environ.get("DILOCO_DONATE_APPLY", "1") == "1"
+
+
+def _prefetch_target_sharding(arr: Any, mesh: jax.sharding.Mesh, fallback_spec: Any = None) -> jax.sharding.NamedSharding:
+  """Target sharding for the CPU->TPU hop of one packed fragment buffer.
+
+  Colocated-CPU path: `arr` is a jax.Array on the CPU mesh -> reuse its spec.
+  Legacy client path: `arr` is a host numpy array with no sharding -> use the
+  spec the TPU extraction produced for this fragment (`fallback_spec`), or
+  replicate if it is unknown. Either input layout is safe because the pinned
+  apply kernels fix the output shardings.
+  """
+  spec = getattr(getattr(arr, "sharding", None), "spec", None)
+  if spec is None:
+    spec = fallback_spec if fallback_spec is not None else jax.sharding.PartitionSpec()
+  return jax.sharding.NamedSharding(mesh, spec)
+
+
+def _make_pinned_apply_fns(params_shardings: Any, donate: bool):
+  """Returns (flat_apply, scanned_apply) jitted with out_shardings pinned to `params_shardings`.
+
+  `params_shardings` must be a pytree with the same structure as the params
+  passed in (e.g. `jax.tree.map(lambda x: x.sharding, params)`).
+  """
+  kwargs = {"static_argnames": _APPLY_STATIC_ARGNAMES, "out_shardings": params_shardings}
+  if donate:
+    kwargs["donate_argnames"] = ("params",)
+  flat_fn = jax.jit(_fused_unpack_and_apply_flat_fragment_impl, **kwargs)
+  scanned_fn = jax.jit(_fused_unpack_and_apply_scanned_fragment_impl, **kwargs)
+  return flat_fn, scanned_fn
 
 
 @functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
@@ -419,6 +493,97 @@ def _outer_sgd_1d_jit(outer_1d, trace_1d, stacked_learners_1d, lr: float, moment
   return new_outer, new_trace
 
 
+# ---------------------------------------------------------------------------
+# Direct TPU <-> colocated-CPU-mesh data path.
+#
+# WHY: the legacy path pulls every fragment into the Pathways CLIENT process as
+# host NumPy (`np.array(arr, copy=True)`), runs the outer optimizer there, and
+# pushes the result back. Measured on the client host plane of
+# MyStuff/Data/dlco-prof-221556: `decomposed_transport.py:102 _send` = 2961 ms
+# per call and `np.asarray(jax.Array)` = 546 ms per call, i.e. roughly a whole
+# 3.15 s step. The learner thread is consequently blocked in
+# `prefetch_queue.get()` for 99.5-99.7% of every step.
+#
+# WHAT: keep the fragment as a `jax.Array` and move it TPU -> colocated CPU
+# devices with a single `jax.device_put`. When the source and destination
+# shardings are HLO-equal and the device counts match, jax dispatches this
+# through `xc.batched_copy_array_to_devices_with_sharding`
+# (jax/_src/array.py: _array_shard_arg), i.e. an IFRT CopyArrays that the
+# Pathways runtime performs worker-side. The client never sees the bytes.
+#
+# CAUTION: if the shardings are NOT HLO-equal, or the layouts differ, jax
+# silently falls back to `shard_sharded_device_array_slow_path` /
+# re-entering device_put with a Format, both of which stage through the client.
+# That would look like "it works" while being slower than what we replaced.
+# `_assert_on_platform` below makes such a fallback loud instead of silent.
+# ---------------------------------------------------------------------------
+
+# Opt-in until validated on hardware; the legacy client-NumPy path stays default.
+USE_COLOCATED_CPU_OUTER = os.environ.get("DILOCO_COLOCATED_CPU_OUTER", "0") == "1"
+
+
+def _colocated_cpu_mesh_for(tpu_mesh: jax.sharding.Mesh) -> jax.sharding.Mesh:
+  """Returns the colocated CPU mesh with identical shape/axis_names.
+
+  Identical shape + axis names is a hard requirement: it is what makes the
+  NamedSharding HLO-equal to the TPU one and keeps device_put on the fast
+  runtime-side copy path.
+  """
+  return colocated_python.colocated_cpu_devices(tpu_mesh)
+
+
+def _same_spec_sharding(arr: jax.Array, target_mesh: jax.sharding.Mesh) -> jax.sharding.NamedSharding:
+  """NamedSharding on `target_mesh` reusing `arr`'s PartitionSpec verbatim."""
+  spec = getattr(arr.sharding, "spec", jax.sharding.PartitionSpec())
+  return jax.sharding.NamedSharding(target_mesh, spec)
+
+
+def _assert_on_platform(tree, platform: str, where: str):
+  """Raises if any leaf is not resident on `platform`.
+
+  Guards against a silent fallback to client staging, which would otherwise be
+  indistinguishable from success except in a profile.
+  """
+  for leaf in jax.tree_util.tree_leaves(tree):
+    if not isinstance(leaf, jax.Array):
+      continue
+    plats = {d.platform for d in leaf.sharding.device_set}
+    if plats != {platform}:
+      raise RuntimeError(
+          f"{where}: expected all shards on '{platform}' but found {sorted(plats)}. "
+          "This means device_put did not take the colocated fast path."
+      )
+
+
+def _move_packed(packed: dict[str, jax.Array], target_mesh: jax.sharding.Mesh) -> dict[str, jax.Array]:
+  """Moves a dtype-keyed dict of packed 1-D buffers onto `target_mesh`.
+
+  Non-blocking: device_put is async, the caller decides when to block.
+  """
+  return {dt: jax.device_put(arr, _same_spec_sharding(arr, target_mesh)) for dt, arr in packed.items()}
+
+
+@functools.partial(jax.jit, static_argnames=("lr", "momentum", "num_learners"))
+def _outer_sgd_stacked_jit(outer_1d, trace_1d, *learner_1d, lr: float, momentum: float, num_learners: int):
+  """Nesterov outer SGD over a varargs list of learner fragments.
+
+  Takes the learner fragments as separate arguments rather than a pre-stacked
+  array so that no `jnp.stack` materialises an extra (num_learners, N) buffer
+  outside the jit. Mathematically identical to `_outer_sgd_1d_jit`.
+  """
+  acc = learner_1d[0].astype(jnp.float32)
+  for x in learner_1d[1:]:
+    acc = acc + x.astype(jnp.float32)
+  avg_inner = acc / float(num_learners)
+  outer_f = outer_1d.astype(jnp.float32)
+  trace_f = trace_1d.astype(jnp.float32)
+  pseudo_grad = outer_f - avg_inner
+  new_trace = momentum * trace_f + pseudo_grad
+  update = lr * (pseudo_grad + momentum * new_trace)
+  new_outer = outer_f - update
+  return new_outer.astype(outer_1d.dtype), new_trace.astype(trace_1d.dtype)
+
+
 def _extract_scalar_metrics(tree):
   """Extracts Python scalar numbers from a JAX metric PyTree safely without dynamic TPU graph compilation."""
   try:
@@ -552,12 +717,33 @@ def get_abstract_syncer_state(config, local_cpu_mesh):
 
 # pylint: disable=too-many-positional-arguments,too-many-arguments,unused-argument
 def _run_learner_loop(
-    learner_idx, config, submesh, transport, recorder, train_step, eval_step, init_lock
+    learner_idx,
+    config,
+    submesh,
+    transport,
+    recorder,
+    train_step,
+    eval_step,
+    init_lock,
+    profiler_barrier=None,
 ):
   """Runs the main training and communication loop for a single learner replica."""
   max_logging.log(f"Learner {learner_idx}: Starting loop")
   learner_config = make_learner_config(config, learner_idx, config.num_diloco_replicas)
   learner_config._flat_config["run_name"] = config.run_name + f"_learner_{learner_idx}"
+
+  # Colocated CPU submesh for this learner's slice. Same shape/axis_names as the
+  # TPU submesh, which is what keeps device_put on the runtime-side fast path.
+  # Measured on v6e (MyStuff/Data/v6e-cocpu-5.log): TPU->colocated CPU 8.61 ms vs
+  # client-numpy->TPU 284.62 ms for a 360 MiB fragment (30.2x).
+  cpu_submesh = None
+  if USE_COLOCATED_CPU_OUTER:
+    cpu_submesh = _colocated_cpu_mesh_for(submesh)
+    max_logging.log(
+        f"Learner {learner_idx}: colocated CPU submesh shape={dict(cpu_submesh.shape)} "
+        f"axes={cpu_submesh.axis_names} "
+        f"platforms={sorted({d.platform for d in cpu_submesh.devices.flat})}"
+    )
 
   with jax.set_mesh(submesh), submesh, nn_partitioning.axis_rules(learner_config.logical_axis_rules):
     learner_config._flat_config["checkpoint_dir"] = config.checkpoint_dir + f"/learner_{learner_idx}"
@@ -653,29 +839,46 @@ def _run_learner_loop(
         frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
       frag_metadata_frozen = {f: _freeze_metadata(m) for f, m in frag_metadata.items()}
       # Pre-warm JIT extract & apply kernels on TPU
+      # (With DILOCO_SHARDED_APPLY the apply kernels donate `params`, so they
+      # cannot be pre-warmed on the live state; they compile on first use.)
       dummy_0_packed = _fused_extract_and_pack_flat_fragment_jit(
           params_template, manipulator, frag_metadata_frozen[0]
       )
-      _ = _fused_unpack_and_apply_flat_fragment_jit(
-          params_template, dummy_0_packed, manipulator, frag_metadata_frozen[0]
-      )
+      if not USE_SHARDED_APPLY:
+        _ = _fused_unpack_and_apply_flat_fragment_jit(
+            params_template, dummy_0_packed, manipulator, frag_metadata_frozen[0]
+        )
       if num_fragments > 1:
         dummy_layer_idx = jnp.asarray(0, dtype=jnp.int32)
         dummy_1_packed = _fused_extract_and_pack_scanned_fragment_jit(
             params_template, dummy_layer_idx, manipulator, frag_metadata_frozen[1]
         )
-        _ = _fused_unpack_and_apply_scanned_fragment_jit(
-            params_template, dummy_layer_idx, dummy_1_packed, manipulator, frag_metadata_frozen[1]
-        )
+        if not USE_SHARDED_APPLY:
+          _ = _fused_unpack_and_apply_scanned_fragment_jit(
+              params_template, dummy_layer_idx, dummy_1_packed, manipulator, frag_metadata_frozen[1]
+          )
         del dummy_1_packed
       del dummy_0_packed
     max_logging.log(f"Learner {learner_idx}: Built 1D fragment packing metadata and pre-warmed JIT kernels for {num_fragments} fragments")
+    # Lazily-built (flat_apply, scanned_apply) with out_shardings pinned to the
+    # live params shardings; see `_make_pinned_apply_fns`.
+    pinned_apply_fns = [None]
+    # frag_idx -> {dtype: PartitionSpec of the TPU-packed buffer}; written by the
+    # learner thread at extraction, read by the prefetch thread tau steps later.
+    packed_specs = {}
+    if USE_SHARDED_APPLY:
+      max_logging.log(
+          f"Learner {learner_idx}: DILOCO_SHARDED_APPLY=1 (sharded CPU->TPU hop, pinned out_shardings, "
+          f"donate={DONATE_APPLY})"
+      )
 
     logging_executor = ThreadPoolExecutor(max_workers=1)
 
     last_log_time = [datetime.datetime.now()]
 
-    prefetch_queue = queue.Queue(maxsize=8)
+    # Prefetching the queue and put to CPU, to avoid contension with the syncer main thread.
+    prefetch_queue_maxsize = min(max(4, int(tau)), 16)
+    prefetch_queue = queue.Queue(maxsize=prefetch_queue_maxsize)
     prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"learner_{learner_idx}_prefetch")
     prefetch_error = []
 
@@ -691,20 +894,54 @@ def _run_learner_loop(
           sync_step = completed_step - tau
           frag_idx = ((sync_step) % period) // steps_between_syncs_plus_1
 
-          # 1. Receive host NumPy 1D dictionary from Syncer
-          received_host_packed = transport.recv_from_syncer(sync_step, frag_idx)
+          # 1. Receive the fragment from the Syncer.
+          #    Legacy path: host NumPy dict. Colocated path: dict of jax.Arrays
+          #    already resident on this slice's colocated CPU devices.
+          received_packed = transport.recv_from_syncer(sync_step, frag_idx)
 
-          # 2. Asynchronously transfer 1D buffers to TPU submesh HBM
-          default_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+          # 2. Move onto TPU submesh HBM.
+          #
+          # NOTE: on the legacy path this MUST stay PartitionSpec() (replicated).
+          # Attempting to preserve the fragment's own spec (P('fsdp')) here
+          # made `_fused_unpack_and_apply_*_jit` emit params with a different
+          # sharding than `state_mesh_shardings`, and the NEXT p_train_step
+          # rejected them:
+          #   ValueError: Sharding passed to jit does not match the sharding on
+          #   the respective arg. Got jit sharding: spec=P(None, None),
+          #   arg sharding: spec=P('fsdp',) for arg type: bfloat16[4096,36]
+          # (observed on v6e in MyStuff/Data/v6e-nscc-e3.log, learners crashed
+          #  at step 6). The apply kernel relies on a replicated input; changing
+          #  that is a separate change requiring explicit out_shardings on the
+          #  fused kernels.
+          #
+          # DILOCO_SHARDED_APPLY=1 is that separate change: the spec is kept
+          # (1/8 of the bytes per chip) and the apply kernels pin out_shardings.
+          #
+          # CORRECTION to an earlier note here: the source is NOT always on this
+          # slice's CPU devices. The syncer aggregates on learner 0's colocated
+          # CPU mesh, so for learner i>0 this is a cross-host transfer, and with
+          # P() it moved (#chips x fragment) bytes, ~3.6 GB/step for Qwen3-8B.
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
-            received_tpu_packed = {
-                dt: jax.device_put(arr, default_shd)
-                for dt, arr in received_host_packed.items()
-            }
+            if USE_SHARDED_APPLY:
+              frag_specs = packed_specs.get(frag_idx, {})
+              received_tpu_packed = {
+                  dt: jax.device_put(arr, _prefetch_target_sharding(arr, mesh, frag_specs.get(dt)))
+                  for dt, arr in received_packed.items()
+              }
+            else:
+              default_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+              received_tpu_packed = {
+                  dt: jax.device_put(arr, default_shd)
+                  for dt, arr in received_packed.items()
+              }
 
           # 3. Put pre-transferred TPU 1D buffers into bounded queue
           prefetch_queue.put((sync_step, frag_idx, received_tpu_packed), timeout=300.0)
-          del received_host_packed
+          max_logging.log(
+              f"Learner {learner_idx} prefetch: buffered sync_step {sync_step} frag {frag_idx}, "
+              f"prefetch_queue size={prefetch_queue.qsize()}/{prefetch_queue_maxsize}"
+          )
+          del received_packed
       except Exception as ex:
         max_logging.error(f"Learner {learner_idx} prefetch worker failed: {ex}")
         prefetch_error.append(ex)
@@ -713,12 +950,29 @@ def _run_learner_loop(
 
     try:
       last_step_completion = datetime.datetime.now()
+      start_prof_step = getattr(config, "skip_first_n_steps_for_profiler", -1) if getattr(config, "profiler", "") != "" else -1
+      end_prof_step = (start_prof_step + getattr(config, "profiler_steps", 1) - 1) if start_prof_step >= 0 else -1
+
       for step in range(start_step, learner_config.steps):
         max_logging.log(f"Learner {learner_idx}: Step {step} starting")
-        try:
-          prof.maybe_activate_profiler(step, state)
-        except Exception:
-          pass
+        if profiler_barrier is not None and step == start_prof_step:
+          if state is not None:
+            try:
+              jax.block_until_ready(state)
+            except Exception:
+              pass
+          profiler_barrier.wait()
+          if learner_idx == 0:
+            try:
+              prof.maybe_activate_profiler(step, state)
+            except Exception:
+              pass
+          profiler_barrier.wait()
+        elif learner_idx == 0:
+          try:
+            prof.maybe_activate_profiler(step, state)
+          except Exception:
+            pass
 
         with jax.profiler.StepTraceAnnotation(f"train_learner_{learner_idx}", step_num=step):
           example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
@@ -737,7 +991,13 @@ def _run_learner_loop(
           now = datetime.datetime.now()
           step_duration = now - last_log_time[0]
           last_log_time[0] = now
-          if step % max(1, getattr(metric_logger_instance, "log_period", 1)) == 0:
+          # NOTE: MetricLogger has no `log_period` attribute (it reads
+          # `self.config.log_period`), so `getattr(metric_logger_instance,
+          # "log_period", 1)` always fell back to 1 and the configured
+          # log_period was silently ignored. That forced a blocking
+          # `jax.device_get` per metric leaf on EVERY step in the logging
+          # thread (measured at 427 ms/leaf on Pathways), saturating it.
+          if step % max(1, int(getattr(learner_config, "log_period", 1))) == 0:
             logging_executor.submit(
                 _async_log_metrics,
                 metric_logger_instance,
@@ -765,10 +1025,30 @@ def _run_learner_loop(
                 packed_frag_data = _fused_extract_and_pack_scanned_fragment_jit(
                     params, layer_idx, manipulator, frag_metadata_frozen[frag_idx]
                 )
-              for dt, arr in packed_frag_data.items():
-                if hasattr(arr, "copy_to_host_async"):
-                  arr.copy_to_host_async()
-            transport.send_to_syncer_async(completed_step, frag_idx, packed_frag_data)
+              if frag_idx not in packed_specs:
+                # Remembered for the prefetch thread's CPU->TPU hop on the
+                # legacy numpy path, where the returned buffer has no sharding.
+                packed_specs[frag_idx] = {
+                    dt: getattr(arr.sharding, "spec", jax.sharding.PartitionSpec())
+                    for dt, arr in packed_frag_data.items()
+                }
+              if USE_COLOCATED_CPU_OUTER:
+                # Move the packed fragment straight to this slice's colocated
+                # CPU devices. This is an IFRT CopyArrays performed by the
+                # Pathways runtime worker-side; the client never sees the bytes.
+                # Replaces np.array(arr, copy=True) in decomposed_transport.py,
+                # measured at 2961 ms per _send call on the client host plane.
+                cpu_packed = _move_packed(packed_frag_data, cpu_submesh)
+              else:
+                for dt, arr in packed_frag_data.items():
+                  if hasattr(arr, "copy_to_host_async"):
+                    arr.copy_to_host_async()
+            if USE_COLOCATED_CPU_OUTER:
+              # Synchronous hand-off of jax.Arrays (no host copy, no D2H thread).
+              transport.send_to_syncer(completed_step, frag_idx, cpu_packed)
+              del cpu_packed
+            else:
+              transport.send_to_syncer_async(completed_step, frag_idx, packed_frag_data)
             del packed_frag_data, params
 
           # 2. Overlapped Prefetched 1D Fragment Receive & Fused JIT Apply
@@ -777,18 +1057,32 @@ def _run_learner_loop(
               raise prefetch_error[0]
 
             target_sync_step = completed_step - tau
+            qsize_before = prefetch_queue.qsize()
             sync_step, frag_idx, received_tpu_packed = prefetch_queue.get(timeout=300.0)
+            max_logging.log(
+                f"Learner {learner_idx}: Step {step} apply frag {frag_idx} (sync_step {sync_step}), "
+                f"prefetch_queue size before get={qsize_before}/{prefetch_queue_maxsize}"
+            )
             assert sync_step == target_sync_step, f"Prefetch step mismatch: expected {target_sync_step}, got {sync_step}"
 
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
+              if USE_SHARDED_APPLY:
+                if pinned_apply_fns[0] is None:
+                  pinned_apply_fns[0] = _make_pinned_apply_fns(
+                      jax.tree_util.tree_map(lambda x: x.sharding, params), donate=DONATE_APPLY
+                  )
+                flat_apply_fn, scanned_apply_fn = pinned_apply_fns[0]
+              else:
+                flat_apply_fn = _fused_unpack_and_apply_flat_fragment_jit
+                scanned_apply_fn = _fused_unpack_and_apply_scanned_fragment_jit
               if frag_idx == 0:
-                new_params = _fused_unpack_and_apply_flat_fragment_jit(
+                new_params = flat_apply_fn(
                     params, received_tpu_packed, manipulator, frag_metadata_frozen[0]
                 )
               else:
                 layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
-                new_params = _fused_unpack_and_apply_scanned_fragment_jit(
+                new_params = scanned_apply_fn(
                     params, layer_idx, received_tpu_packed, manipulator, frag_metadata_frozen[frag_idx]
                 )
 
@@ -828,10 +1122,24 @@ def _run_learner_loop(
               )
               eval_step_count += 1
 
-          try:
-            prof.maybe_deactivate_profiler(step, state)
-          except Exception:
-            pass
+          if profiler_barrier is not None and step == end_prof_step:
+            if state is not None:
+              try:
+                jax.block_until_ready(state)
+              except Exception:
+                pass
+            profiler_barrier.wait()
+            if learner_idx == 0:
+              try:
+                prof.maybe_deactivate_profiler(step, state)
+              except Exception:
+                pass
+            profiler_barrier.wait()
+          elif learner_idx == 0:
+            try:
+              prof.maybe_deactivate_profiler(step, state)
+            except Exception:
+              pass
           last_step_completion = datetime.datetime.now()
 
       if checkpoint_manager is not None:
@@ -853,10 +1161,30 @@ def _run_learner_loop(
 
 
 # pylint: disable=too-many-positional-arguments,too-many-arguments
-def learner_loop(learner_idx, config, submesh, transport, recorder, train_step, eval_step, init_lock):
+def learner_loop(
+    learner_idx,
+    config,
+    submesh,
+    transport,
+    recorder,
+    train_step,
+    eval_step,
+    init_lock,
+    profiler_barrier=None,
+):
   """Wrapper to run the learner loop and handle/log top-level exceptions."""
   try:
-    _run_learner_loop(learner_idx, config, submesh, transport, recorder, train_step, eval_step, init_lock)
+    _run_learner_loop(
+        learner_idx,
+        config,
+        submesh,
+        transport,
+        recorder,
+        train_step,
+        eval_step,
+        init_lock,
+        profiler_barrier=profiler_barrier,
+    )
   except Exception as e:
     max_logging.error(f"Learner {learner_idx} crashed: {e}")
     max_logging.error(traceback.format_exc())
@@ -1124,7 +1452,22 @@ def _run_syncer_loop(
   }
 
   devices_per_mesh = len(submeshes[0].devices.flat)
-  cpu_submeshes = partition_mesh_by_diloco_axis(global_mesh, num_learners)
+  # NOTE: the previous `partition_mesh_by_diloco_axis(global_mesh, ...)` result was
+  # computed here and never used. Replace it with the per-learner COLOCATED CPU
+  # submeshes, which are what the outer step actually runs on. Each is shape- and
+  # axis-identical to the corresponding TPU submesh, which is the precondition for
+  # device_put taking the runtime-side copy path instead of staging through the
+  # Pathways client.
+  syncer_cpu_submeshes = None
+  if USE_COLOCATED_CPU_OUTER:
+    syncer_cpu_submeshes = [_colocated_cpu_mesh_for(sm) for sm in submeshes]
+    max_logging.log(
+        "Syncer: colocated CPU submeshes "
+        + ", ".join(
+            f"[{i}] shape={dict(m.shape)} platforms={sorted({d.platform for d in m.devices.flat})}"
+            for i, m in enumerate(syncer_cpu_submeshes)
+        )
+    )
 
   if restored_state is None:  # (1,a) No checkpoint found, start from scratch
     for i in range(num_learners):
@@ -1199,6 +1542,72 @@ def _run_syncer_loop(
     try:
       with fragment_locks[frag_idx]:
         meta = frag_metadata[frag_idx]
+
+        # ------------------------------------------------------------------
+        # Colocated-CPU-mesh path: the fragments arrive as jax.Arrays already
+        # resident on each learner's colocated CPU devices. We aggregate on
+        # learner 0's CPU submesh and run the outer SGD as an XLA:CPU program
+        # executed natively inside the Pathways worker binary (no sidecar
+        # required -- this is jax.jit, not colocated_python).
+        #
+        # The outer weights and Nesterov trace are kept as PERSISTENT jax.Arrays
+        # on that CPU mesh across steps, so they never cross the client.
+        # ------------------------------------------------------------------
+        if USE_COLOCATED_CPU_OUTER:
+          agg_mesh = syncer_cpu_submeshes[0]
+
+          # Bring every learner's fragment onto the aggregation mesh. Learner 0
+          # is already there (no-op); learner i>0 is a CPU->CPU cross-host copy
+          # of exactly one fragment, which is the algorithmic minimum traffic
+          # and mirrors what SPMD's all-reduce moves.
+          aligned = []
+          for i in range(num_learners):
+            aligned.append({
+                dt: (arr if arr.sharding.mesh is agg_mesh
+                     else jax.device_put(arr, _same_spec_sharding(arr, agg_mesh)))
+                for dt, arr in learner_frags_host[i].items()
+            })
+
+          if frag_idx not in syncer_frag_params_1d:
+            # Lazy init of the resident outer state, on the CPU mesh.
+            syncer_frag_params_1d[frag_idx] = {dt: aligned[0][dt] for dt in meta}
+            syncer_frag_trace_1d[frag_idx] = {
+                dt: jax.device_put(jnp.zeros_like(aligned[0][dt]),
+                                   _same_spec_sharding(aligned[0][dt], agg_mesh))
+                for dt in meta
+            }
+            _assert_on_platform(syncer_frag_params_1d[frag_idx], "cpu",
+                                f"syncer outer init frag {frag_idx}")
+
+          new_outer_host = {}
+          for dt in meta:
+            new_outer, new_trace = _outer_sgd_stacked_jit(
+                syncer_frag_params_1d[frag_idx][dt],
+                syncer_frag_trace_1d[frag_idx][dt],
+                *[aligned[i][dt] for i in range(num_learners)],
+                lr=config.diloco_outer_lr,
+                momentum=config.diloco_outer_momentum,
+                num_learners=num_learners,
+            )
+            syncer_frag_params_1d[frag_idx][dt] = new_outer
+            syncer_frag_trace_1d[frag_idx][dt] = new_trace
+            new_outer_host[dt] = new_outer
+
+          if step <= (start_step + 3 * steps_between_syncs_plus_1):
+            # Cheap one-off validation on the first few syncs only: prove the
+            # outer step really executed on CPU devices and did not silently
+            # fall back to client staging.
+            _assert_on_platform(new_outer_host, "cpu", f"outer SGD output frag {frag_idx}")
+
+          max_logging.log(f"Syncer: Step {step} 1D outer step applied (colocated CPU mesh)")
+          for i in range(num_learners):
+            transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx,
+                                      data=new_outer_host)
+          max_logging.log(f"Syncer: Step {step} sync finished")
+          del learner_frags_host, aligned
+          with pending_lock:
+            completed_sync_count[0] += 1
+          return
 
         # Initialize syncer fragment outer weights and trace lazily on first receipt in original dtype (BF16)
         if frag_idx not in syncer_frag_params_1d:
@@ -1399,7 +1808,7 @@ def run_threaded_diloco(config, recorder, train_step, eval_step):
   colocated_cpu_mesh = colocated_python.colocated_cpu_devices(global_mesh)
 
   transport_manager = ThreadedTransportManager(
-      num_learners, maxsize=max(2, int(config.num_communication_overlapping_steps) + 2)
+      num_learners, maxsize=max(32, int(config.num_communication_overlapping_steps) * 2 + 4)
   )
 
   # Get abstract syncer state on colocated CPU mesh
@@ -1408,6 +1817,7 @@ def run_threaded_diloco(config, recorder, train_step, eval_step):
   max_logging.log("Got abstract syncer state")
 
   init_lock = threading.Lock()
+  profiler_barrier = threading.Barrier(num_learners) if getattr(config, "profiler", "") != "" else None
 
   max_logging.log("Spawning learner threads")
   with ThreadPoolExecutor(max_workers=num_learners) as executor:
@@ -1431,6 +1841,7 @@ def run_threaded_diloco(config, recorder, train_step, eval_step):
                 train_step,
                 eval_step,
                 init_lock=init_lock,
+                profiler_barrier=profiler_barrier,
             )
         )
       else:

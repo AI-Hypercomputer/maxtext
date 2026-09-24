@@ -19,6 +19,9 @@ import os
 import subprocess
 import shutil
 
+import time
+import traceback
+
 import jax
 
 from maxtext.common.gcloud_stub import mldiagnostics_modules
@@ -34,6 +37,7 @@ class Profiler:
 
   def __init__(self, config, offset_step=0):
     self.libcudart = None
+    self.config = config
     self.mode = config.profiler
     if self.mode != "":
       self.base_output_dir = config.tensorboard_dir
@@ -52,9 +56,13 @@ class Profiler:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
 
     self.profiling_options = jax.profiler.ProfileOptions()
+    self.profiling_options.host_tracer_level = 3
+    self.profiling_options.enable_hlo_proto = True
     advanced_config = {}
 
-    if self.mode == "xplane" and not self.managed_mldiagnostics and config.profile_power_events:
+    if self.mode == "xplane" and not self.managed_mldiagnostics and (
+        config.profile_power_events or config.xprof_tpu_power_trace_level > 0
+    ):
       advanced_config.update(
           {
               "tpu_power_trace_level": config.xprof_tpu_power_trace_level,
@@ -70,6 +78,10 @@ class Profiler:
               "tpu_num_chips_to_profile_per_task": config.tpu_num_chips_to_profile_per_task,
               "tpu_num_sparse_core_tiles_to_trace": config.tpu_num_sparse_core_tiles_to_trace,
               "tpu_num_sparse_cores_to_trace": config.tpu_num_sparse_cores_to_trace,
+              "tpu_enable_kernel_profiling": True,
+              "tpu_perf_counters": True,
+              "tpu_trace_mode": "TRACE_ALL",
+              "max_trace_buffers": 65536,
           }
       )
 
@@ -85,6 +97,63 @@ class Profiler:
     if self.mode != "" and (step == self.start_initial_profile_step or self.should_activate_periodic_profile(step)):
       optional_postfix = f"step_{step}" if self.profile_period > 0 else ""
       self.activate(blocking_object=state, optional_postfix=optional_postfix)
+
+  def _pathways_max_num_hosts(self) -> int:
+    """Upper bound on the number of Pathways worker hosts to profile.
+
+    `pathwaysutils.profiling.start_trace` defaults `max_num_hosts=1`, which
+    silently yields a single worker's TPU plane and drops the rest. There is no
+    public "number of hosts" accessor under Pathways (`jax.process_count()`
+    reports 1 because it is single-controller), so derive it from the device
+    topology and log what we saw, then clamp to a safe upper bound.
+
+    A host can never own fewer than one device, so `len(jax.devices())` is
+    always a valid upper bound; `max_num_hosts` is documented as a *limit*, so
+    overshooting is safe while undershooting silently loses planes.
+    """
+    override = getattr(self.config, "profiler_max_num_hosts", 0) or 0
+    try:
+      devs = jax.devices()
+      n_dev = len(devs)
+
+      # Try to group devices into hosts. Different jax/Pathways versions expose
+      # this differently, so probe several attributes and log which worked.
+      # Take the attribute that yields the MOST groups: on v6e Pathways,
+      # `host_id` is constant within a slice (v6e-nscc-p1 logged
+      # "host_groups=2 (via host_id)" for 2 slices x 2 hosts), which made us
+      # profile only 2 of 4 worker hosts. Undershooting silently drops planes;
+      # max_num_hosts is documented as a limit (overshoot not verified on HW).
+      # The only hardware-validated path is the explicit override
+      # profiler_max_num_hosts=4 (v6e-pwns-prof1: all 4 hosts x 4 chips captured).
+      groups = set()
+      attr_used = None
+      for cand in ("task_index", "logical_task", "host_id", "process_index"):
+        if all(hasattr(d, cand) for d in devs):
+          cand_groups = {(getattr(d, "slice_index", 0), getattr(d, cand)) for d in devs}
+          if len(cand_groups) > len(groups):
+            groups = cand_groups
+            attr_used = cand
+      derived = len(groups) if groups else 0
+
+      max_logging.log(
+          f"Profiler: device topology n_devices={n_dev} "
+          f"slices={len({getattr(d, 'slice_index', 0) for d in devs})} "
+          f"host_groups={derived} (via {attr_used}) "
+          f"process_count={jax.process_count()}"
+      )
+
+      if override > 0:
+        max_logging.log(f"Profiler: max_num_hosts overridden by config -> {override}")
+        return int(override)
+
+      # Prefer the derived host count when it looks sane, otherwise fall back to
+      # the device count as a safe over-estimate.
+      if 1 < derived <= n_dev:
+        return int(derived)
+      return int(max(1, n_dev))
+    except Exception as e:  # pylint: disable=broad-except
+      max_logging.error(f"Profiler: could not derive host count ({e}); using 8")
+      return int(override) if override > 0 else 8
 
   def activate(self, blocking_object=None, optional_postfix=""):
     """Start the profiler.
@@ -116,7 +185,56 @@ class Profiler:
         return
       self.libcudart.cudaProfilerStart()
     elif self.mode == "xplane":
-      jax.profiler.start_trace(self.output_path, profiler_options=self.profiling_options)
+      if self.output_path.startswith("gs://"):
+        # ------------------------------------------------------------------
+        # Pathways profiling requires TWO things that are easy to get wrong and
+        # that both fail SILENTLY, producing empty/partial TPU traces:
+        #
+        #  1. `pathwaysutils.profiling.monkey_patch_jax()` must have run, else
+        #     `jax.profiler.start_trace` is the stock PJRT one, which only
+        #     traces the CLIENT process. The TPU worker planes then never
+        #     appear at all.
+        #
+        #  2. `max_num_hosts` DEFAULTS TO 1 in pathwaysutils
+        #     (profiling.py: `max_num_hosts: int = 1`, forwarded as
+        #     `"maxNumHosts"` in the profile request). With N worker hosts you
+        #     get 1 host's trace and N-1 missing ones. On this cluster a
+        #     v6e-8 slice is 2 hosts (Pathways reports logical_task=0 for
+        #     devices 0-3 and logical_task=1 for 4-7), so 2 slices = 4 hosts,
+        #     and the previous `max(2, dcn_diloco_parallelism, process_count())`
+        #     computed 2 -- exactly half.
+        #
+        # We therefore compute an upper bound on the host count from the device
+        # topology, and we LOG the outcome + any exception instead of silently
+        # degrading to a client-only trace.
+        # ------------------------------------------------------------------
+        max_hosts = self._pathways_max_num_hosts()
+        try:
+          import pathwaysutils.profiling as pwp  # pylint: disable=import-outside-toplevel
+
+          pwp.monkey_patch_jax()
+          max_logging.log(
+              f"Profiler: Pathways start_trace path={self.output_path} "
+              f"max_num_hosts={max_hosts}"
+          )
+          jax.profiler.start_trace(
+              self.output_path,
+              profiler_options=self.profiling_options,
+              max_num_hosts=max_hosts,
+          )
+        except Exception as e:  # pylint: disable=broad-except
+          # Do NOT swallow this. A fallback here means client-only traces and
+          # empty TPU planes, which previously looked like a mysterious
+          # "profiling synchronicity" problem.
+          max_logging.error(
+              f"Profiler: Pathways start_trace FAILED ({type(e).__name__}: {e}). "
+              "Falling back to stock jax.profiler.start_trace -- TPU worker "
+              "planes will be MISSING from this trace."
+          )
+          max_logging.error(traceback.format_exc())
+          jax.profiler.start_trace(self.output_path, profiler_options=self.profiling_options)
+      else:
+        jax.profiler.start_trace(self.output_path, profiler_options=self.profiling_options)
     self.is_active = True
 
   def maybe_deactivate_profiler(self, step, state):

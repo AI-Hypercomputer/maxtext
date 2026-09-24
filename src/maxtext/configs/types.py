@@ -2041,6 +2041,13 @@ class Profiling(BaseModel):
   upload_all_profiler_results: bool = Field(False, description="Upload profiler results from all hosts.")
   skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")
   profiler_steps: int = Field(5, description="Number of steps to profile.")
+  profiler_max_num_hosts: int = Field(
+      0,
+      description=(
+          "Override for Pathways `max_num_hosts` in profiler start_trace. 0 means derive the host count from the"
+          " device topology (see Profiler._pathways_max_num_hosts)."
+      ),
+  )
   profile_cleanly: bool = Field(True, description="Add block_until_ready to align profile for each step.")
   profile_periodically_period: int = Field(-1, description="If positive, profile every N steps.")
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")

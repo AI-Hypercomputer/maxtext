@@ -188,10 +188,11 @@ class FragmentedTreeManipulator:
             if rem_size > 0:
               st = self.num_transformer_fragments * chunk_size
               slc = [slice(None)] * v.ndim
-              slc[b_axis] = slice(st, orig_dim)
+              b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+              slc[b_ax] = slice(st, orig_dim)
               if isinstance(v, jax.ShapeDtypeStruct):
                 new_shape = list(v.shape)
-                new_shape[b_axis] = rem_size
+                new_shape[b_ax] = rem_size
                 flat_frag[keystr + "__rem"] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=getattr(v, "sharding", None))
               else:
                 flat_frag[keystr + "__rem"] = v[tuple(slc)]
@@ -262,7 +263,8 @@ class FragmentedTreeManipulator:
             if rem_size > 0:
               st = self.num_transformer_fragments * chunk_size
               slc = [slice(None)] * v.ndim
-              slc[b_axis] = slice(st, orig_dim)
+              b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+              slc[b_ax] = slice(st, orig_dim)
               flat_frag[keystr + "__rem"] = v[tuple(slc)]
           else:
             flat_frag[keystr] = v
@@ -493,7 +495,8 @@ class FragmentedTreeManipulator:
             if rem_key in flat_fragment and rem_size > 0:
               st = self.num_transformer_fragments * chunk_size
               slc = [slice(None)] * leaves[idx].ndim
-              slc[b_axis] = slice(st, orig_dim)
+              b_ax = b_axis + 1 if has_replica_dim and leaves[idx].ndim > b_axis + 1 else b_axis
+              slc[b_ax] = slice(st, orig_dim)
               new_leaves[idx] = leaves[idx].at[tuple(slc)].set(flat_fragment[rem_key])
           elif keystr in flat_fragment:
             frag_val = flat_fragment[keystr]
@@ -595,7 +598,8 @@ class FragmentedTreeManipulator:
           b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
           st = self.num_transformer_fragments * chunk_size
           slc = [slice(None)] * v.ndim
-          slc[b_axis] = slice(st, orig_dim)
+          b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+          slc[b_ax] = slice(st, orig_dim)
           new_kvs.append(v.at[tuple(slc)].set(flat_fragment[keystr + "__rem"]))
         else:
           new_kvs.append(v)

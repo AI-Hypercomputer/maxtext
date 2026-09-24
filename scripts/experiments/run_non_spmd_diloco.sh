@@ -11,7 +11,7 @@ NUM_SLICES=2
 DEVICE_TYPE=v5p-8
 
 # Run configuration
-RUNNAME="${RUNNAME:-dlco-ns-$(date +%d%H%M%S)}"
+RUNNAME="${RUNNAME:-dlco-xp-$(date +%H%M%S)}"
 DOCKER_IMAGE_BASE="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2026-07-17"
 MY_IMAGE="gcr.io/${PROJECT}/jzuo-runner:${RUNNAME}"
 
@@ -27,8 +27,8 @@ DILOCO_COMM_OVERLAP_ALPHA=0.0
 MODEL_NAME="qwen3-8b"
 PER_DEVICE_BATCH_SIZE=8
 MAX_TARGET_LENGTH=2048
-STEPS=200
-
+STEPS=30
+ 
 XLA_FLAGS=" \
   --xla_tpu_scoped_vmem_limit_kib=65536 \
   --xla_tpu_bf16_emission_mode=NATIVE_EMISSION \
@@ -58,7 +58,12 @@ XLA_FLAGS=" \
   --xla_tpu_pcie_bandwidth_multiplier=0.03 \
   --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true \
   --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
-  --xla_tpu_enable_3d_reduce_scatter_decomposer=false "
+  --xla_tpu_enable_3d_reduce_scatter_decomposer=false \
+  --xla_enable_hlo_trace=true \
+  --xla_trace_only_stalling_hlo=false \
+  --xla_xprof_enable_custom_call_tracing=true \
+  --xla_xprof_register_llo_debug_info=true \
+  --xprof_max_trace_buffers=131072 "
 
 TC_CMD="(for iface in \$(ip -o link show | awk -F': ' '{print \$2}' | awk -F'@' '{print \$1}' | grep -E '^eth|^ens'); do tc qdisc replace dev \$iface root tbf rate 10gbit burst 32mbit latency 50ms 2>/dev/null || tc qdisc add dev \$iface root tbf rate 10gbit burst 32mbit latency 50ms 2>/dev/null || true; done; tc qdisc show || true)"
 
@@ -91,6 +96,15 @@ CMD="${TC_CMD} && export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_
              diloco_sync_period=${DILOCO_SYNC_PERIOD} \
              diloco_outer_lr=${DILOCO_OUTER_LR} \
              diloco_outer_momentum=${DILOCO_OUTER_MOMENTUM} \
+             profiler=\"xplane\" \
+             skip_first_n_steps_for_profiler=10 \
+             profiler_steps=1 \
+             profile_cleanly=true \
+             upload_all_profiler_results=true \
+             enable_tpu_profiling_options=true \
+             tpu_num_chips_to_profile_per_task=4 \
+             tpu_num_sparse_core_tiles_to_trace=2 \
+             tpu_num_sparse_cores_to_trace=4 \
              steps=${STEPS}"
 
 # 1. Build and push image from current workspace (/usr/local/google/home/jzuo/maxtext_work)
