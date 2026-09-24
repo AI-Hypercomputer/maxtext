@@ -35,7 +35,34 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 
+from .. import compute_conv1d as local_compute_conv1d
+
 _PREC = jax.lax.Precision.HIGHEST
+
+
+def gather_cp_segment_metadata(
+    segment_ids: Optional[jax.Array],
+    cp_axis: str | tuple[str, ...],
+    kernel_size: int,
+) -> Tuple[Optional[jax.Array], Optional[jax.Array], Optional[jax.Array]]:
+  """Gathers global segment_ids across cp_axis and slices local (s_enc, conv_halo_seg, init_seg)."""
+  if segment_ids is None:
+    return None, None, None
+  batch_size, seq_len = segment_ids.shape
+  halo_len = max(kernel_size - 1, 1)
+  global_seg = lax.all_gather(segment_ids, axis_name=cp_axis, axis=1, tiled=True)
+  global_s_enc = local_compute_conv1d.encode_segment_ids(global_seg)
+  idx = lax.axis_index(cp_axis)
+  start = idx * seq_len
+  s_enc_local = lax.dynamic_slice_in_dim(global_s_enc, start, seq_len, axis=1)
+
+  global_s_enc_pad = jnp.pad(global_s_enc, ((0, 0), (halo_len, 0)))
+  if kernel_size - 1 > 0:
+    conv_halo_seg = lax.dynamic_slice_in_dim(jnp.maximum(global_s_enc_pad, 0.0), start, kernel_size - 1, axis=1)
+  else:
+    conv_halo_seg = jnp.zeros((batch_size, 0), dtype=jnp.float32)
+  init_seg = jnp.abs(lax.dynamic_slice_in_dim(global_s_enc_pad, start + halo_len - 1, 1, axis=1)[:, 0])
+  return s_enc_local, conv_halo_seg, init_seg
 
 
 def compose(left: Tuple[jax.Array, jax.Array], right: Tuple[jax.Array, jax.Array]) -> Tuple[jax.Array, jax.Array]:
@@ -108,13 +135,17 @@ def halo_exchange_for_conv(
   recv_halo = lax.ppermute(tail_qkv, cp_axis, shift1)
 
   if segment_ids is not None:
+    seg_pos = jnp.maximum(segment_ids.astype(jnp.int32), 0)
     if seq_len >= halo_len:
-      tail_seg = segment_ids[:, -halo_len:]
+      tail_seg = seg_pos[:, -halo_len:]
     else:
-      tail_seg = jnp.pad(segment_ids, ((0, 0), (halo_len - seq_len, 0)), constant_values=-1)
+      tail_seg = jnp.pad(seg_pos, ((0, 0), (halo_len - seq_len, 0)), constant_values=-1)
     recv_seg = lax.ppermute(tail_seg, cp_axis, shift1)
-    first_local_seg = segment_ids[:, :1]
-    same_doc = (recv_seg == first_local_seg)[..., None]
+    head_seg = seg_pos[:, : min(seq_len, halo_len)]
+    same_doc = jnp.any(
+        (recv_seg[:, :, None] == head_seg[:, None, :]) & (recv_seg[:, :, None] > 0),
+        axis=-1,
+    )[..., None]
     recv_halo = jnp.where(same_doc, recv_halo, jnp.zeros_like(recv_halo))
 
   if init_conv_state is not None:
@@ -155,14 +186,18 @@ def halo_exchange_for_conv_bwd(
 
   d_cs_masked = d_conv_state
   if segment_ids is not None:
+    seg_pos = jnp.maximum(segment_ids.astype(jnp.int32), 0)
     if seq_len >= halo_len:
-      tail_seg = segment_ids[:, -halo_len:]
+      tail_seg = seg_pos[:, -halo_len:]
     else:
-      tail_seg = jnp.pad(segment_ids, ((0, 0), (halo_len - seq_len, 0)), constant_values=-1)
+      tail_seg = jnp.pad(seg_pos, ((0, 0), (halo_len - seq_len, 0)), constant_values=-1)
     shift1_fwd = [(i, i + 1) for i in range(d_size - 1)]
     recv_seg = lax.ppermute(tail_seg, cp_axis, shift1_fwd)
-    first_local_seg = segment_ids[:, :1]
-    same_doc = (recv_seg == first_local_seg)[..., None]
+    head_seg = seg_pos[:, : min(seq_len, halo_len)]
+    same_doc = jnp.any(
+        (recv_seg[:, :, None] == head_seg[:, None, :]) & (recv_seg[:, :, None] > 0),
+        axis=-1,
+    )[..., None]
     d_cs_masked = jnp.where(
         idx == 0,
         d_conv_state,
@@ -206,6 +241,8 @@ def compose_local_from_t_inv(
     chunk_size: int = 64,
     use_qk_norm_in_gdn: bool = False,
     s_ext_pass1: Optional[jax.Array] = None,
+    segment_ids: Optional[jax.Array] = None,
+    init_seg: Optional[jax.Array] = None,
 ) -> Tuple[jax.Array, jax.Array]:
   """Folds local chunks into (M_local, S_ext_local) using pre-batched GEMMs outside lax.scan."""
   batch, seq_len, _ = qkv_conv.shape
@@ -238,11 +275,43 @@ def compose_local_from_t_inv(
   a_log_f32 = a_log.astype(jnp.float32)[None, None, :, None]
   dt_bias_f32 = dt_bias.astype(jnp.float32)[None, None, :, None]
   log_g = -jnp.exp(a_log_f32) * jax.nn.softplus(a_h + dt_bias_f32)
-  cumsum_h = jnp.cumsum(log_g, axis=-1)
 
-  gating_forward = jnp.exp(cumsum_h)[..., None]
-  gating_last = jnp.exp(cumsum_h[..., -1])[..., None, None]
-  gating_backward = jnp.exp(cumsum_h[..., -1:] - cumsum_h)[..., None]
+  valid_c = None
+  if segment_ids is not None:
+    s_enc = local_compute_conv1d.encode_segment_ids(segment_ids.reshape(batch, seq_len), init_seg=init_seg)
+    seg_c = jnp.transpose(s_enc.reshape(batch, num_chunks, chunk_size), (1, 0, 2))[:, :, None, :]
+    valid_c = seg_c > 0.5
+    active_c = jnp.abs(seg_c)
+    active_end = active_c[..., -1]
+    if init_seg is not None:
+      init_active = jnp.abs(init_seg.astype(jnp.float32).reshape(1, batch, 1))
+    else:
+      init_active = jnp.zeros((1, batch, 1), dtype=jnp.float32)
+    seg_prev = jnp.concatenate([init_active, active_end[:-1]], axis=0)[..., None]
+
+    k_h = jnp.where(valid_c[..., None], k_h, 0.0)
+    beta_h = jnp.where(valid_c, beta_h, 0.0)
+    log_g = jnp.where(valid_c, log_g, 0.0)
+
+    mask_tril = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
+    same_active = (jnp.abs(active_c[..., :, None] - active_c[..., None, :]) < 0.5) & (active_c[..., :, None] > 0.5)
+    mask_cumsum = mask_tril[None, None, None, :, :] * same_active.astype(jnp.float32)
+    cumsum_h = jnp.einsum("nbhij,nbhj->nbhi", mask_cumsum, log_g, precision=_PREC)
+
+    active_last = active_c[..., -1:]
+    m_in = ((jnp.abs(seg_c - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
+    m_out = ((jnp.abs(seg_c - active_last) < 0.5) & (active_last > 0.5)).astype(jnp.float32)
+    m_keep = ((jnp.abs(active_last - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
+
+    gating_forward = jnp.exp(cumsum_h)[..., None] * m_in[..., None]
+    gating_last = jnp.exp(cumsum_h[..., -1])[..., None, None] * m_keep[..., None]
+    bwd_diff = jnp.where(m_out > 0.5, cumsum_h[..., -1:] - cumsum_h, -1e4)
+    gating_backward = jnp.exp(bwd_diff)[..., None] * m_out[..., None]
+  else:
+    cumsum_h = jnp.cumsum(log_g, axis=-1)
+    gating_forward = jnp.exp(cumsum_h)[..., None]
+    gating_last = jnp.exp(cumsum_h[..., -1])[..., None, None]
+    gating_backward = jnp.exp(cumsum_h[..., -1:] - cumsum_h)[..., None]
 
   k_beta_g = k_h * beta_h[..., None] * gating_forward
   k_scaled_bwd = k_h * gating_backward
@@ -271,6 +340,8 @@ def compose_local_from_t_inv(
       .astype(jnp.float32)
   )
   v_h = jnp.transpose(v_orig, (1, 0, 3, 2, 4))
+  if valid_c is not None:
+    v_h = jnp.where(valid_c[..., None], v_h, 0.0)
   v_beta = v_h * beta_h[..., None]
   u_all = jnp.matmul(t_inv_c, v_beta, precision=_PREC)
   s_all = jnp.matmul(jnp.swapaxes(k_scaled_bwd, -1, -2), u_all, precision=_PREC)
@@ -311,6 +382,8 @@ def compose_bwd_local_from_t_inv(
     chunk_size: int = 64,
     use_qk_norm_in_gdn: bool = False,
     m_local_cached: Optional[jax.Array] = None,
+    segment_ids: Optional[jax.Array] = None,
+    init_seg: Optional[jax.Array] = None,
 ) -> Tuple[jax.Array, jax.Array]:
   """Computes backward rank transition (dM_local, dS_ext_local) using pre-batched GEMMs."""
   batch, seq_len, _ = qkv_conv.shape
@@ -354,20 +427,55 @@ def compose_bwd_local_from_t_inv(
   a_log_f32 = a_log.astype(jnp.float32)[None, None, :, None]
   dt_bias_f32 = dt_bias.astype(jnp.float32)[None, None, :, None]
   log_g = -jnp.exp(a_log_f32) * jax.nn.softplus(a_h + dt_bias_f32)
-  cumsum_h = jnp.cumsum(log_g, axis=-1)
 
-  gating_forward = jnp.exp(cumsum_h)[..., None]
-  gating_last = jnp.exp(cumsum_h[..., -1])[..., None, None]
-  gating_backward = jnp.exp(cumsum_h[..., -1:] - cumsum_h)[..., None]
+  mask_causal_base = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=0)
+  if segment_ids is not None:
+    s_enc = local_compute_conv1d.encode_segment_ids(segment_ids.reshape(batch, seq_len), init_seg=init_seg)
+    seg_c = jnp.transpose(s_enc.reshape(batch, num_chunks, chunk_size), (1, 0, 2))[:, :, None, :]
+    valid_c = seg_c > 0.5
+    active_c = jnp.abs(seg_c)
+    active_end = active_c[..., -1]
+    if init_seg is not None:
+      init_active = jnp.abs(init_seg.astype(jnp.float32).reshape(1, batch, 1))
+    else:
+      init_active = jnp.zeros((1, batch, 1), dtype=jnp.float32)
+    seg_prev = jnp.concatenate([init_active, active_end[:-1]], axis=0)[..., None]
+
+    q_h = jnp.where(valid_c[..., None], q_h, 0.0)
+    k_h = jnp.where(valid_c[..., None], k_h, 0.0)
+    do_h = jnp.where(valid_c[..., None], do_h, 0.0)
+    beta_h = jnp.where(valid_c, beta_h, 0.0)
+    log_g = jnp.where(valid_c, log_g, 0.0)
+
+    same_active = (jnp.abs(active_c[..., :, None] - active_c[..., None, :]) < 0.5) & (active_c[..., :, None] > 0.5)
+    same_valid = (jnp.abs(seg_c[..., :, None] - seg_c[..., None, :]) < 0.5) & valid_c[..., :, None]
+    mask_cumsum = mask_causal_base[None, None, None, :, :] * same_active.astype(jnp.float32)
+    mask_causal = mask_causal_base[None, None, None, :, :] * same_valid.astype(jnp.float32)
+    cumsum_h = jnp.einsum("nbhij,nbhj->nbhi", mask_cumsum, log_g, precision=_PREC)
+
+    active_last = active_c[..., -1:]
+    m_in = ((jnp.abs(seg_c - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
+    m_out = ((jnp.abs(seg_c - active_last) < 0.5) & (active_last > 0.5)).astype(jnp.float32)
+    m_keep = ((jnp.abs(active_last - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
+
+    gating_forward = jnp.exp(cumsum_h)[..., None] * m_in[..., None]
+    gating_last = jnp.exp(cumsum_h[..., -1])[..., None, None] * m_keep[..., None]
+    bwd_diff = jnp.where(m_out > 0.5, cumsum_h[..., -1:] - cumsum_h, -1e4)
+    gating_backward = jnp.exp(bwd_diff)[..., None] * m_out[..., None]
+  else:
+    cumsum_h = jnp.cumsum(log_g, axis=-1)
+    gating_forward = jnp.exp(cumsum_h)[..., None]
+    gating_last = jnp.exp(cumsum_h[..., -1])[..., None, None]
+    gating_backward = jnp.exp(cumsum_h[..., -1:] - cumsum_h)[..., None]
+    mask_causal = mask_causal_base
 
   q_g = q_h * gating_forward
   k_beta_g = k_h * beta_h[..., None] * gating_forward
   k_scaled_bwd = k_h * gating_backward
   t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))
 
-  mask_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=0)
   diff = cumsum_h[..., :, None] - cumsum_h[..., None, :]
-  safe_diff_causal = jnp.where(mask_causal == 1.0, diff, -1e4)
+  safe_diff_causal = jnp.where(mask_causal > 0.5, diff, -1e4)
   g_mat_causal = jnp.exp(safe_diff_causal) * mask_causal
 
   # Pre-batched intra-chunk GEMMs across all chunks outside any sequential loop

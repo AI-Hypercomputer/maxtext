@@ -31,6 +31,54 @@ from . import tiling
 from . import vmem_ldst
 
 
+def _pack_fwd_segment_metadata(
+    segment_ids: jax.Array,
+    conv_halo_seg: jax.Array | None,
+    init_seg: jax.Array | None,
+    num_seqs: int,
+    chunk_size: int,
+    kernel_size: int,
+) -> tuple[jax.Array, jax.Array]:
+  """Packs per-token signed active segment IDs and chunk-boundary auxiliary metadata."""
+  prev_kernel_size = kernel_size - 1
+  seg_2d = segment_ids.reshape(num_seqs, -1)
+  seq_len = seg_2d.shape[1]
+  num_chunks = seq_len // chunk_size
+
+  s_enc = compute_conv1d.encode_segment_ids(seg_2d, init_seg=init_seg)
+  s_enc_flat = s_enc.reshape(-1)
+
+  s_valid = jnp.maximum(s_enc, 0.0)
+  if conv_halo_seg is not None:
+    halo_0 = jnp.maximum(
+        conv_halo_seg.astype(jnp.float32).reshape(num_seqs, prev_kernel_size),
+        0.0,
+    )
+  else:
+    halo_0 = jnp.zeros((num_seqs, prev_kernel_size), dtype=jnp.float32)
+  full_valid = jnp.concatenate([halo_0, s_valid], axis=1)
+  chunk_halos = jnp.stack(
+      [full_valid[:, c * chunk_size : c * chunk_size + prev_kernel_size] for c in range(num_chunks)],
+      axis=1,
+  )
+
+  active_3d = jnp.abs(s_enc.reshape(num_seqs, num_chunks, chunk_size))
+  active_end = active_3d[:, :, -1]
+  if init_seg is not None:
+    init_active = jnp.abs(init_seg.astype(jnp.float32).reshape(num_seqs, 1))
+  else:
+    init_active = jnp.zeros((num_seqs, 1), dtype=jnp.float32)
+  seg_prev_all = jnp.concatenate([init_active, active_end[:, :-1]], axis=1)[..., None]
+
+  seg_aux_header = jnp.concatenate([chunk_halos, seg_prev_all], axis=-1)
+  seg_aux = jnp.pad(
+      seg_aux_header,
+      ((0, 0), (0, 0), (0, chunk_size - (prev_kernel_size + 1))),
+  )
+  seg_aux_flat = seg_aux.reshape(-1)
+  return s_enc_flat, seg_aux_flat
+
+
 def inner_kernel(
     # Inputs.
     qkv_slot_ref: jax.Ref,  # [seq, chunk, 1, dim_size]
@@ -88,12 +136,14 @@ def inner_kernel(
   if weights_ref.conv.bias is not None:
     conv_bias = weights_ref.conv.bias[...].astype(jnp.float32)
 
+  b_vreg = b_slot_ref[...].astype(jnp.float32) if cfg.has_seg_ids else None
   qkv_out_compact, new_conv_state = compute_conv1d.causal_conv1d(
       real_sizes=real_sizes,
       lhs=qkv_in_compact,
       conv_weight=conv_weight,
       conv_bias=conv_bias,
       cfg=cfg,
+      b_vreg=b_vreg,
   )
 
   conv_state_slot_ref[...] = new_conv_state
@@ -296,6 +346,9 @@ def fused_conv1d_gdn(
     decode_tile_size: int | None = None,
     mixed_tile_size: int | None = None,
     is_prefill_only: bool = False,
+    segment_ids: jax.Array | None = None,
+    conv_halo_seg: jax.Array | None = None,
+    init_seg: jax.Array | None = None,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array], jax.Array, jax.Array]:
   """Perform conv1d and gdn in a single fused kernel, returning (out, states, t_inv, chunk_states)."""
   act_in_dtype = qkv.dtype
@@ -343,12 +396,25 @@ def fused_conv1d_gdn(
       mixed_tile_size=mixed_tile_size,
   )
 
+  has_seg_ids = segment_ids is not None
+  extra_lanes = 2 if has_seg_ids else 0
   batch_padding_size = padded_batch_size - batch_size
-  aligned_num_v_heads = tiling.align_to(n_v, num_lanes)
+  aligned_num_v_heads = tiling.align_to(n_v + extra_lanes, num_lanes)
   num_v_padding_size = aligned_num_v_heads - n_v
   qkv = jnp.pad(qkv, ((0, batch_padding_size), (0, 0)))
   b = jnp.pad(b, ((0, batch_padding_size), (0, num_v_padding_size)))
   a = jnp.pad(a, ((0, batch_padding_size), (0, num_v_padding_size)))
+  if has_seg_ids:
+    s_enc_flat, seg_aux_flat = _pack_fwd_segment_metadata(
+        segment_ids=segment_ids,
+        conv_halo_seg=conv_halo_seg,
+        init_seg=init_seg,
+        num_seqs=num_seqs,
+        chunk_size=mixed_tile_size,
+        kernel_size=kernel_size,
+    )
+    b = b.at[:batch_size, n_v].set(s_enc_flat)
+    b = b.at[:batch_size, n_v + 1].set(seg_aux_flat)
 
   qkv = qkv.reshape(padded_batch_size, 1, -1)
   b = b.reshape(padded_batch_size, 1, -1)
@@ -392,6 +458,7 @@ def fused_conv1d_gdn(
         num_v_heads=n_v,
         kq_head_dim=d_k,
         v_head_dim=d_v,
+        has_seg_ids=has_seg_ids,
         dtypes=config.Dtypes(
             act_in=act_in_dtype,
             act_out=act_out_dtype,
@@ -516,6 +583,14 @@ def fused_conv1d_gdn(
   out_act = out_act.reshape(padded_batch_size, -1)[:batch_size]
   out_conv_state = out_conv_state.astype(conv_out_dtype)
   out_conv_state = out_conv_state.reshape(conv_state_shape)
+  if has_seg_ids and segment_ids is not None:
+    masked_cs = compute_conv1d.extract_segment_conv_state(
+        out_conv_state[state_indices],
+        segment_ids.reshape(num_seqs, -1),
+        kernel_size,
+        conv_halo_seg,
+    ).astype(conv_out_dtype)
+    out_conv_state = out_conv_state.at[state_indices].set(masked_cs)
   out_recurrent_state = out_recurrent_state.astype(recurrent_out_dtype)
 
   return out_act, (out_conv_state, out_recurrent_state), t_inv, chunk_states

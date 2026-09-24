@@ -1294,6 +1294,10 @@ class Qwen3Next(BaseModel):
       False,
       description="Whether to use GDN Pallas kernel.",
   )
+  enable_gdn_sequence_packing: bool = Field(
+      False,
+      description="Whether to enable GDN sequence packing (document-boundary state resets and causal conv masking).",
+  )
   gdn_cp_mode: str = Field(
       "auto",
       description="GDN context parallelism mode ('auto', 'seq', or 'head').",
@@ -5558,14 +5562,6 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
-
-    if (self.gdn != "remat" or self.gdn_conv != "remat" or self.gdn_states != "remat") and not getattr(
-        self, "use_gdn_kernel", False
-    ):
-      raise ValueError(
-          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
-          "requires `use_gdn_kernel=True`."
-      )
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {

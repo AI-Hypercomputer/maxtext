@@ -24,7 +24,6 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-
 DEFAULT_VMEM_LIMIT_FACTOR: float = 0.90
 
 
@@ -81,6 +80,7 @@ class GDNConfig:
   kq_head_dim: int
   v_head_dim: int
   num_buffers: int = 2
+  has_seg_ids: bool = False
 
   @property
   def chunk_size(self) -> int:
@@ -110,7 +110,8 @@ class GDNConfig:
   def aligned_num_v_heads(self) -> int:
     tpu_info = pltpu.get_tpu_info()
     num_lanes = tpu_info.num_lanes
-    return pl.cdiv(self.num_v_heads, num_lanes) * num_lanes
+    extra_lanes = 2 if self.has_seg_ids else 0
+    return pl.cdiv(self.num_v_heads + extra_lanes, num_lanes) * num_lanes
 
   def get_kernel_name(self) -> str:
     return f"fused_conv1d_gdn_{self.mode.value}_b{self.seq_tile_size}" f"_c{self.chunk_size}"

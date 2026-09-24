@@ -48,6 +48,7 @@ def create_gdn_config(
     decay_dtype: jnp.dtype = jnp.float32,
     use_qk_norm: bool = True,
     gdn_cp_mode: str = "auto",
+    enable_gdn_sequence_packing: bool = False,
 ) -> types.SimpleNamespace:
   """Creates configuration namespace for Qwen3NextGatedDeltaNet."""
   return types.SimpleNamespace(
@@ -66,6 +67,7 @@ def create_gdn_config(
       normalization_layer_epsilon=1e-6,
       use_qk_norm_in_gdn=use_qk_norm,
       use_gdn_kernel=True,
+      enable_gdn_sequence_packing=enable_gdn_sequence_packing,
       gdn_cp_mode=gdn_cp_mode,
       load_balance_loss_weight=0.0,
       scan_layers=False,
@@ -1086,6 +1088,589 @@ class GdnCpHeadShardedTest(absltest.TestCase):
       )
       with self.assertRaises(ValueError):
         run_fwd(model_head_fail, x_cp4)
+
+  def test_cp_sequence_packing_head_and_seq_modes(self):
+    """Verifies CP=2 (head and seq modes) with sequence packing across rank split, conv_halo, and mid-chunk boundaries."""
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest(f"Requires at least 2 devices, found {len(devices)}")
+
+    batch = 1
+    seq_len = 256
+    chunk_size = 64
+    emb_dim = 256
+    num_k_heads = 2
+    num_v_heads = 4
+    head_dim = 128
+
+    # Timeline across 2 ranks (Rank 0: 0..127, Rank 1: 128..255):
+    # - Seq 1: 0..63 (ends on Chunk 0 boundary)
+    # - Seq 2: 64..129 (crosses Rank 0 -> Rank 1 boundary at t=128, and ends at t=129 inside Rank 1's 3-token conv_halo!)
+    # - Seq 3: 130..180 (starts at t=130 inside Rank 1's 3-token conv_halo and ends mid-chunk at 180)
+    # - Seq 4: 181..240 (starts mid-chunk at 181, followed by trailing 0-padding at 241..255)
+    seg_np = np.zeros((batch, seq_len), dtype=np.int32)
+    seg_np[0, 0:64] = 1
+    seg_np[0, 64:130] = 2
+    seg_np[0, 130:181] = 3
+    seg_np[0, 181:241] = 4
+    seg_ids = jnp.asarray(seg_np)
+
+    mesh_cp1 = Mesh(np.array([devices[0]]), axis_names=("context",))
+    mesh_cp2 = Mesh(np.array(devices[:2]), axis_names=("context",))
+
+    key = jax.random.PRNGKey(777)
+    k1, k2 = jax.random.split(key)
+    x_input = jax.random.normal(k1, (batch, seq_len, emb_dim), dtype=jnp.float32)
+    proj = jax.random.normal(k2, (batch, seq_len, emb_dim), dtype=jnp.float32)
+
+    cfg_cp1 = create_gdn_config(
+        hidden_size=emb_dim,
+        num_key_heads=num_k_heads,
+        num_value_heads=num_v_heads,
+        head_dim=head_dim,
+        chunk_size=chunk_size,
+        cp_size=1,
+        enable_gdn_sequence_packing=True,
+    )
+    model_cp1 = qwen3.Qwen3NextGatedDeltaNet(config=cfg_cp1, mesh=mesh_cp1, dtype=jnp.float32, rngs=nnx.Rngs(42))
+
+    @nnx.jit
+    def step_fn(model, x, p, s):
+      def loss_fn(m):
+        out, _ = m(x, decoder_segment_ids=s, model_mode=common_types.MODEL_MODE_TRAIN)
+        return jnp.mean(out * p), out
+
+      (loss, out), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
+      return loss, out, grads
+
+    with mesh_cp1:
+      loss_ref, out_ref, grads_ref = step_fn(model_cp1, x_input, proj, seg_ids)
+      out_ref_np = np.asarray(jax.block_until_ready(out_ref))
+      g_ref_dict = leaves_dict(jax.block_until_ready(grads_ref))
+
+    # Verify Oracle #3: Qwen3NextGatedDeltaNet with use_gdn_kernel=False, enable_gdn_sequence_packing=True
+    cfg_pure_jax = create_gdn_config(
+        hidden_size=emb_dim,
+        num_key_heads=num_k_heads,
+        num_value_heads=num_v_heads,
+        head_dim=head_dim,
+        chunk_size=chunk_size,
+        cp_size=1,
+        enable_gdn_sequence_packing=True,
+    )
+    cfg_pure_jax.use_gdn_kernel = False
+    model_pure_jax = qwen3.Qwen3NextGatedDeltaNet(
+        config=cfg_pure_jax, mesh=mesh_cp1, dtype=jnp.float32, rngs=nnx.Rngs(42)
+    )
+    with mesh_cp1:
+      loss_pj, out_pj, grads_pj = step_fn(model_pure_jax, x_input, proj, seg_ids)
+      out_pj_np = np.asarray(jax.block_until_ready(out_pj))
+      g_pj_dict = leaves_dict(jax.block_until_ready(grads_pj))
+    np.testing.assert_allclose(
+        out_pj_np,
+        out_ref_np,
+        rtol=2e-3,
+        atol=2e-3,
+        err_msg="Pure-JAX Qwen3NextGatedDeltaNet (use_gdn_kernel=False) diverged from Pallas kernel with sequence packing!",
+    )
+    self.assertAlmostEqual(float(loss_pj), float(loss_ref), delta=1e-4)
+    for param_name in sorted(g_ref_dict.keys()):
+      g1 = g_ref_dict[param_name]
+      gpj = g_pj_dict[param_name]
+      max_abs_diff = float(np.max(np.abs(g1 - gpj)))
+      ref_mag = float(np.max(np.abs(g1)))
+      rel_diff = max_abs_diff / (ref_mag + 1e-7)
+      self.assertTrue(
+          rel_diff <= 2e-2 or max_abs_diff <= 1e-3,
+          f"Pure-JAX Qwen3NextGatedDeltaNet gradient {param_name} diverged: rel_diff={rel_diff:.2e}",
+      )
+
+    for mode in ("head", "seq"):
+      cfg_cp2 = create_gdn_config(
+          hidden_size=emb_dim,
+          num_key_heads=num_k_heads,
+          num_value_heads=num_v_heads,
+          head_dim=head_dim,
+          chunk_size=chunk_size,
+          cp_size=2,
+          gdn_cp_mode=mode,
+          enable_gdn_sequence_packing=True,
+      )
+      model_cp2 = qwen3.Qwen3NextGatedDeltaNet(config=cfg_cp2, mesh=mesh_cp2, dtype=jnp.float32, rngs=nnx.Rngs(42))
+      sharding_x = NamedSharding(mesh_cp2, P(None, "context", None))
+      sharding_s = NamedSharding(mesh_cp2, P(None, None) if mode == "head" else P(None, "context"))
+      x_sharded = jax.device_put(x_input, sharding_x)
+      p_sharded = jax.device_put(proj, sharding_x)
+      s_sharded = jax.device_put(seg_ids, sharding_s)
+
+      with mesh_cp2:
+        loss_cp2, out_cp2, grads_cp2 = step_fn(model_cp2, x_sharded, p_sharded, s_sharded)
+        out_cp2_np = np.asarray(jax.block_until_ready(out_cp2))
+        g_cp2_dict = leaves_dict(jax.block_until_ready(grads_cp2))
+
+      np.testing.assert_allclose(
+          out_cp2_np,
+          out_ref_np,
+          rtol=2e-3,
+          atol=2e-3,
+          err_msg=f"Sequence packing CP=2 ({mode}) forward output diverged from CP=1!",
+      )
+      self.assertAlmostEqual(float(loss_cp2), float(loss_ref), delta=1e-4)
+      for param_name in sorted(g_ref_dict.keys()):
+        g1 = g_ref_dict[param_name]
+        g2 = g_cp2_dict[param_name]
+        max_abs_diff = float(np.max(np.abs(g1 - g2)))
+        ref_mag = float(np.max(np.abs(g1)))
+        rel_diff = max_abs_diff / (ref_mag + 1e-7)
+        self.assertTrue(
+            rel_diff <= 2e-2 or max_abs_diff <= 1e-3,
+            f"Sequence packing CP=2 ({mode}) gradient {param_name} diverged: "
+            f"rel_diff={rel_diff:.2e}, max_abs={max_abs_diff:.2e}",
+        )
+
+  def test_cp_4chip_sequence_packing_tpu(self):
+    """Verifies 4-chip (8 TPU cores) CP=4 and 2D (data=2, context=4) sequence packing on TPU."""
+    devices = jax.devices()
+    if len(devices) < 8:
+      self.skipTest(f"Requires 8 devices (4-chip TPU), found {len(devices)}")
+
+    is_tpu = jax.default_backend() == "tpu"
+    batch = 2
+    seq_len = 512 if is_tpu else 256
+    chunk_size = 64
+    emb_dim = 256 if is_tpu else 128
+    num_k_heads = 4 if is_tpu else 2
+    num_v_heads = 16 if is_tpu else 4
+    head_dim = 128 if is_tpu else 64
+
+    seg_np = np.zeros((batch, seq_len), dtype=np.int32)
+    if is_tpu:
+      # Row 0: 6 packed documents across 4 CP ranks (128 tokens per rank)
+      seg_np[0, 0:64] = 1
+      seg_np[0, 64:135] = 2
+      seg_np[0, 135:180] = 3
+      seg_np[0, 180:258] = 4
+      seg_np[0, 258:390] = 5
+      seg_np[0, 390:490] = 6
+      # Row 1: 5 packed documents + mid/trailing 0-padding
+      seg_np[1, 0:100] = 1
+      seg_np[1, 100:128] = 0
+      seg_np[1, 128:260] = 2
+      seg_np[1, 260:320] = 3
+      seg_np[1, 320:410] = 4
+      seg_np[1, 410:500] = 5
+    else:
+      seg_np[0, 0:64] = 1
+      seg_np[0, 64:135] = 2
+      seg_np[0, 135:180] = 3
+      seg_np[0, 180:250] = 4
+      seg_np[1, 0:50] = 1
+      seg_np[1, 50:64] = 0
+      seg_np[1, 64:150] = 2
+      seg_np[1, 150:240] = 3
+    seg_ids = jnp.asarray(seg_np)
+
+    key = jax.random.PRNGKey(888)
+    k1, k2 = jax.random.split(key)
+    x_input = jax.random.normal(k1, (batch, seq_len, emb_dim), dtype=jnp.float32)
+    proj = jax.random.normal(k2, (batch, seq_len, emb_dim), dtype=jnp.float32)
+
+    mesh_cp1 = Mesh(np.array(devices[:2]).reshape(2, 1), axis_names=("data", "context"))
+    mesh_cp4 = Mesh(np.array(devices[:8]).reshape(2, 4), axis_names=("data", "context"))
+    rules = ((common_types.KV_BATCH, "data"), (common_types.LENGTH, "context"))
+
+    cfg_cp1 = create_gdn_config(
+        hidden_size=emb_dim,
+        num_key_heads=num_k_heads,
+        num_value_heads=num_v_heads,
+        head_dim=head_dim,
+        chunk_size=chunk_size,
+        cp_size=1,
+        enable_gdn_sequence_packing=True,
+    )
+    cfg_cp1.logical_axis_rules = rules
+    model_cp1 = qwen3.Qwen3NextGatedDeltaNet(config=cfg_cp1, mesh=mesh_cp1, dtype=jnp.float32, rngs=nnx.Rngs(99))
+
+    cfg_cp4 = create_gdn_config(
+        hidden_size=emb_dim,
+        num_key_heads=num_k_heads,
+        num_value_heads=num_v_heads,
+        head_dim=head_dim,
+        chunk_size=chunk_size,
+        cp_size=4,
+        gdn_cp_mode="seq",
+        enable_gdn_sequence_packing=True,
+    )
+    cfg_cp4.logical_axis_rules = rules
+    model_cp4 = qwen3.Qwen3NextGatedDeltaNet(config=cfg_cp4, mesh=mesh_cp4, dtype=jnp.float32, rngs=nnx.Rngs(99))
+
+    @nnx.jit
+    def step_fn(model, x, p, s):
+      def loss_fn(m):
+        out, _ = m(x, decoder_segment_ids=s, model_mode=common_types.MODEL_MODE_TRAIN)
+        return jnp.mean(out * p), out
+
+      (loss, out), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
+      return loss, out, grads
+
+    with mesh_cp1:
+      x_1 = jax.device_put(x_input, NamedSharding(mesh_cp1, P("data", None, None)))
+      p_1 = jax.device_put(proj, NamedSharding(mesh_cp1, P("data", None, None)))
+      s_1 = jax.device_put(seg_ids, NamedSharding(mesh_cp1, P("data", None)))
+      loss_1, out_1, grads_1 = step_fn(model_cp1, x_1, p_1, s_1)
+      out_1_np = np.asarray(jax.block_until_ready(out_1))
+      g_1_dict = leaves_dict(jax.block_until_ready(grads_1))
+
+    with mesh_cp4:
+      x_4 = jax.device_put(x_input, NamedSharding(mesh_cp4, P("data", "context", None)))
+      p_4 = jax.device_put(proj, NamedSharding(mesh_cp4, P("data", "context", None)))
+      s_4 = jax.device_put(seg_ids, NamedSharding(mesh_cp4, P("data", "context")))
+      loss_4, out_4, grads_4 = step_fn(model_cp4, x_4, p_4, s_4)
+      out_4_np = np.asarray(jax.block_until_ready(out_4))
+      g_4_dict = leaves_dict(jax.block_until_ready(grads_4))
+
+    np.testing.assert_allclose(out_4_np, out_1_np, rtol=2e-3, atol=2e-3)
+    self.assertAlmostEqual(float(loss_4), float(loss_1), delta=1e-4)
+    for param_name in sorted(g_1_dict.keys()):
+      g1 = g_1_dict[param_name]
+      g4 = g_4_dict[param_name]
+      max_abs_diff = float(np.max(np.abs(g1 - g4)))
+      ref_mag = float(np.max(np.abs(g1)))
+      rel_diff = max_abs_diff / (ref_mag + 1e-7)
+      self.assertTrue(
+          rel_diff <= 2e-2 or max_abs_diff <= 1e-3,
+          f"2D (data=2, context=4) CP sequence packing gradient {param_name} diverged: rel_diff={rel_diff:.2e}",
+      )
+
+  def _run_e2e_layer_unpacked_solo_loop(
+      self,
+      *,
+      x_input: jax.Array,
+      proj: jax.Array,
+      seg_ids: jax.Array,
+      emb_dim: int,
+      num_k_heads: int,
+      num_v_heads: int,
+      head_dim: int,
+      chunk_size: int,
+      rng_seed: int,
+      mesh_solo: Mesh,
+  ) -> tuple[float, np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    """Ground-truth E2E layer oracle: loops over each document individually with enable_gdn_sequence_packing=False."""
+    batch, seq_len, _ = x_input.shape
+    total_elems = float(batch * seq_len * emb_dim)
+    seg_np = np.asarray(seg_ids, dtype=np.int32)
+
+    cfg_solo = create_gdn_config(
+        hidden_size=emb_dim,
+        num_key_heads=num_k_heads,
+        num_value_heads=num_v_heads,
+        head_dim=head_dim,
+        chunk_size=chunk_size,
+        cp_size=1,
+        enable_gdn_sequence_packing=False,
+    )
+    cfg_solo.use_gdn_kernel = False
+    model_solo = qwen3.Qwen3NextGatedDeltaNet(config=cfg_solo, mesh=mesh_solo, dtype=jnp.float32, rngs=nnx.Rngs(rng_seed))
+
+    @nnx.jit
+    def solo_step_fn(model, x_d, p_d):
+      def loss_fn(m, x_in):
+        out_d, _ = m(
+            x_in,
+            decoder_segment_ids=None,
+            model_mode=common_types.MODEL_MODE_TRAIN,
+        )
+        return jnp.sum(out_d * p_d) / total_elems, out_d
+
+      (loss_d, out_d), (grads_m, grad_x) = nnx.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)(model, x_d)
+      return loss_d, out_d, grads_m, grad_x
+
+    out_solo = np.zeros((batch, seq_len, emb_dim), dtype=np.float32)
+    dx_solo = np.zeros((batch, seq_len, emb_dim), dtype=np.float32)
+    loss_solo = 0.0
+    g_solo_dict: dict[str, np.ndarray] = {}
+
+    with mesh_solo:
+      for b_idx in range(batch):
+        idx = 0
+        while idx < seq_len:
+          s_val = int(seg_np[b_idx, idx])
+          if s_val <= 0:
+            idx += 1
+            continue
+          end_idx = idx + 1
+          while end_idx < seq_len and int(seg_np[b_idx, end_idx]) == s_val:
+            end_idx += 1
+          l_d = end_idx - idx
+          l_pad = ((l_d + chunk_size - 1) // chunk_size) * chunk_size
+          pad_amt = l_pad - l_d
+          x_d = jnp.pad(
+              x_input[b_idx : b_idx + 1, idx:end_idx, :],
+              ((0, 0), (0, pad_amt), (0, 0)),
+          )
+          p_d = jnp.pad(
+              proj[b_idx : b_idx + 1, idx:end_idx, :],
+              ((0, 0), (0, pad_amt), (0, 0)),
+          )
+          loss_d, out_d, grads_d, dx_d = solo_step_fn(model_solo, x_d, p_d)
+          loss_solo += float(loss_d)
+          out_solo[b_idx, idx:end_idx, :] = np.asarray(out_d[0, :l_d, :], dtype=np.float32)
+          dx_solo[b_idx, idx:end_idx, :] = np.asarray(dx_d[0, :l_d, :], dtype=np.float32)
+          d_dict = leaves_dict(jax.block_until_ready(grads_d))
+          for k, v in d_dict.items():
+            if k in g_solo_dict:
+              g_solo_dict[k] = g_solo_dict[k] + np.asarray(v, dtype=np.float32)
+            else:
+              g_solo_dict[k] = np.asarray(v, dtype=np.float32).copy()
+          idx = end_idx
+
+    return loss_solo, out_solo, dx_solo, g_solo_dict
+
+  def test_e2e_layer_10way_cross_cp_and_solo_loop_parity(self):
+    """Section 4.3 Test 1 & Test 2: Full-Layer Unpacked Solo Loop vs Kernel & Pure JAX across CP=1, 2, 4."""
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest(f"Requires >= 2 devices, found {len(devices)}")
+
+    is_tpu = jax.default_backend() == "tpu"
+    has_8_devs = len(devices) >= 8
+    batch = 2
+    seq_len = 512 if (is_tpu and has_8_devs) else 256
+    chunk_size = 64
+    emb_dim = 256 if is_tpu else 128
+    num_k_heads = 4 if is_tpu else 2
+    num_v_heads = 16 if is_tpu else 4
+    head_dim = 128 if is_tpu else 64
+    rng_seed = 2026
+
+    seg_np = np.zeros((batch, seq_len), dtype=np.int32)
+    if seq_len == 512:
+      # Row 0: chunk boundary (0..63), mid-chunk end (64..135), strictly inside chunk (135..180),
+      # short L<K (180..182), cross-rank (182..390, 390..490)
+      seg_np[0, 0:64] = 1
+      seg_np[0, 64:135] = 2
+      seg_np[0, 135:180] = 3
+      seg_np[0, 180:182] = 4
+      seg_np[0, 182:390] = 5
+      seg_np[0, 390:490] = 6
+      # Row 1: mid-chunk padding + multi-rank segments
+      seg_np[1, 0:100] = 1
+      seg_np[1, 100:128] = 0
+      seg_np[1, 128:260] = 2
+      seg_np[1, 260:320] = 3
+      seg_np[1, 320:500] = 4
+    else:
+      seg_np[0, 0:64] = 1
+      seg_np[0, 64:135] = 2
+      seg_np[0, 135:180] = 3
+      seg_np[0, 180:182] = 4
+      seg_np[0, 182:248] = 5
+      seg_np[1, 0:50] = 1
+      seg_np[1, 50:64] = 0
+      seg_np[1, 64:150] = 2
+      seg_np[1, 150:240] = 3
+    seg_ids = jnp.asarray(seg_np)
+
+    key = jax.random.PRNGKey(901)
+    k1, k2 = jax.random.split(key)
+    x_input = jax.random.normal(k1, (batch, seq_len, emb_dim), dtype=jnp.float32)
+    # Zero proj on 0-padding so loss = mean(out * proj) only scores valid tokens
+    proj = jax.random.normal(k2, (batch, seq_len, emb_dim), dtype=jnp.float32)
+    proj = jnp.where((seg_ids > 0)[:, :, None], proj, 0.0)
+
+    mesh_solo = Mesh(np.array(devices[:1]), axis_names=("context",))
+    loss_solo, out_solo, dx_solo, g_solo_dict = self._run_e2e_layer_unpacked_solo_loop(
+        x_input=x_input,
+        proj=proj,
+        seg_ids=seg_ids,
+        emb_dim=emb_dim,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_dim=head_dim,
+        chunk_size=chunk_size,
+        rng_seed=rng_seed,
+        mesh_solo=mesh_solo,
+    )
+
+    @nnx.jit
+    def packed_step_fn(model, x_in, p_in, s_in):
+      def loss_fn(m, x_arg):
+        out_p, _ = m(
+            x_arg,
+            decoder_segment_ids=s_in,
+            model_mode=common_types.MODEL_MODE_TRAIN,
+        )
+        return jnp.mean(out_p * p_in), out_p
+
+      (loss_p, out_p), (grads_m, grad_x) = nnx.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)(model, x_in)
+      return loss_p, out_p, grads_m, grad_x
+
+    configs_to_test = [
+        ("Packed Kernel (CP=1)", True, 1, "seq", False),
+        ("Packed Pure JAX (CP=1)", False, 1, "seq", False),
+        ("Packed Kernel (CP=2, head)", True, 2, "head", False),
+        ("Packed Kernel (CP=2, seq)", True, 2, "seq", False),
+        ("Packed Pure JAX (CP=2, head)", False, 2, "head", False),
+        ("Packed Pure JAX (CP=2, seq)", False, 2, "seq", False),
+    ]
+    if has_8_devs:
+      configs_to_test.extend(
+          [
+              ("Packed Kernel (CP=4, head, 2D)", True, 4, "head", True),
+              ("Packed Kernel (CP=4, seq, 2D)", True, 4, "seq", True),
+              ("Packed Pure JAX (CP=4, head, 2D)", False, 4, "head", True),
+              ("Packed Pure JAX (CP=4, seq, 2D)", False, 4, "seq", True),
+          ]
+      )
+
+    table_rows = []
+    valid_mask_np = (seg_np > 0)[:, :, None]
+
+    for label, use_kernel, cp_sz, cp_mode, use_2d_mesh in configs_to_test:
+      if use_2d_mesh:
+        mesh = Mesh(np.array(devices[: 2 * cp_sz]).reshape(2, cp_sz), axis_names=("data", "context"))
+        rules = ((common_types.KV_BATCH, "data"), (common_types.LENGTH, "context"))
+        p_x = P("data", "context", None) if cp_sz > 1 else P("data", None, None)
+        p_s = P("data", None) if (cp_sz == 1 or cp_mode == "head") else P("data", "context")
+      else:
+        mesh = Mesh(np.array(devices[:cp_sz]), axis_names=("context",))
+        rules = None
+        p_x = P(None, "context", None) if cp_sz > 1 else P(None, None, None)
+        p_s = P(None, None) if (cp_sz == 1 or cp_mode == "head") else P(None, "context")
+
+      cfg = create_gdn_config(
+          hidden_size=emb_dim,
+          num_key_heads=num_k_heads,
+          num_value_heads=num_v_heads,
+          head_dim=head_dim,
+          chunk_size=chunk_size,
+          cp_size=cp_sz,
+          gdn_cp_mode=cp_mode,
+          enable_gdn_sequence_packing=True,
+      )
+      cfg.use_gdn_kernel = use_kernel
+      if rules is not None:
+        cfg.logical_axis_rules = rules
+
+      model = qwen3.Qwen3NextGatedDeltaNet(config=cfg, mesh=mesh, dtype=jnp.float32, rngs=nnx.Rngs(rng_seed))
+      with mesh:
+        x_s = jax.device_put(x_input, NamedSharding(mesh, p_x))
+        p_s_arr = jax.device_put(proj, NamedSharding(mesh, p_x))
+        s_s = jax.device_put(seg_ids, NamedSharding(mesh, p_s))
+        loss_got, out_got, grads_got, dx_got = packed_step_fn(model, x_s, p_s_arr, s_s)
+        out_got_np = np.asarray(jax.block_until_ready(out_got), dtype=np.float32) * valid_mask_np
+        dx_got_np = np.asarray(jax.block_until_ready(dx_got), dtype=np.float32) * valid_mask_np
+        g_got_dict = leaves_dict(jax.block_until_ready(grads_got))
+
+      fwd_max_abs = float(np.max(np.abs(out_got_np - out_solo)))
+      fwd_rel = fwd_max_abs / (float(np.max(np.abs(out_solo))) + 1e-7)
+      dx_max_abs = float(np.max(np.abs(dx_got_np - dx_solo)))
+      dx_rel = dx_max_abs / (float(np.max(np.abs(dx_solo))) + 1e-7)
+
+      max_param_rel = 0.0
+      for param_name in sorted(g_solo_dict.keys()):
+        g_ref = g_solo_dict[param_name]
+        g_cur = np.asarray(g_got_dict[param_name], dtype=np.float32)
+        p_abs = float(np.max(np.abs(g_cur - g_ref)))
+        p_rel = p_abs / (float(np.max(np.abs(g_ref))) + 1e-7)
+        max_param_rel = max(max_param_rel, p_rel)
+        self.assertTrue(
+            p_rel <= 2.5e-2 or p_abs <= 1e-3,
+            f"[{label}] Parameter {param_name} diverged from Unpacked Solo Loop: rel={p_rel:.2e}, abs={p_abs:.2e}",
+        )
+
+      self.assertTrue(
+          fwd_rel <= 1e-2 or fwd_max_abs <= 2e-3,
+          f"[{label}] Forward output diverged from Unpacked Solo Loop: rel={fwd_rel:.2e}, abs={fwd_max_abs:.2e}",
+      )
+      self.assertTrue(
+          dx_rel <= 2e-2 or dx_max_abs <= 2e-3,
+          f"[{label}] Input grad dx diverged from Unpacked Solo Loop: rel={dx_rel:.2e}, abs={dx_max_abs:.2e}",
+      )
+      self.assertAlmostEqual(float(loss_got), float(loss_solo), delta=2e-4)
+      table_rows.append((label, fwd_max_abs, fwd_rel, dx_rel, max_param_rel, "MATCH"))
+
+    print("\n" + "=" * 118)
+    print(">>> SECTION 4.3 E2E FULL-LAYER PARITY TABLE vs. UNPACKED SOLO LOOP (enable_gdn_sequence_packing=False)")
+    print("=" * 118)
+    print(
+        f"  {'Configuration':<34} | {'Fwd Max Abs':<12} | {'Fwd Rel Diff':<12} | "
+        f"{'dX Rel Diff':<12} | {'Max Param Grad Rel':<18} | Status"
+    )
+    print("  " + "-" * 114)
+    for label, fwd_abs, fwd_r, dx_r, p_r, st in table_rows:
+      print(f"  {label:<34} | {fwd_abs:<12.2e} | {fwd_r:<12.2e} | " f"{dx_r:<12.2e} | {p_r:<18.2e} | {st}")
+    print("=" * 118 + "\n")
+
+  def test_e2e_layer_zero_cross_document_bleed(self):
+    """Section 4.3 Test 3: Perturbing Doc 1 by +100.0 causes exact 0.0 change on Doc 2, 3, 4 in full GDN layer."""
+    devices = jax.devices()
+    is_tpu = jax.default_backend() == "tpu"
+    batch, seq_len, chunk_size = 1, 128, 64
+    emb_dim = 256 if is_tpu else 128
+    num_k_heads = 4 if is_tpu else 2
+    num_v_heads = 16 if is_tpu else 4
+    head_dim = 128 if is_tpu else 64
+
+    seg_np = np.zeros((batch, seq_len), dtype=np.int32)
+    seg_np[0, 0:25] = 1
+    seg_np[0, 25:64] = 2
+    seg_np[0, 64:95] = 3
+    seg_np[0, 95:120] = 4
+    seg_ids = jnp.asarray(seg_np)
+
+    key = jax.random.PRNGKey(999)
+    k1, k2 = jax.random.split(key)
+    x_base = jax.random.normal(k1, (batch, seq_len, emb_dim), dtype=jnp.float32)
+    # Perturb only Doc 1 (tokens 0..24) by +100.0
+    x_perturbed = x_base.at[:, 0:25, :].add(100.0)
+    # Target proj is only non-zero on Docs 2, 3, 4 (tokens 25..119)
+    proj_docs_234 = jax.random.normal(k2, (batch, seq_len, emb_dim), dtype=jnp.float32)
+    proj_docs_234 = jnp.where((seg_ids >= 2)[:, :, None], proj_docs_234, 0.0)
+
+    mesh_1 = Mesh(np.array(devices[:1]), axis_names=("context",))
+    for use_kernel in (True, False):
+      cfg = create_gdn_config(
+          hidden_size=emb_dim,
+          num_key_heads=num_k_heads,
+          num_value_heads=num_v_heads,
+          head_dim=head_dim,
+          chunk_size=chunk_size,
+          cp_size=1,
+          enable_gdn_sequence_packing=True,
+      )
+      cfg.use_gdn_kernel = use_kernel
+      model = qwen3.Qwen3NextGatedDeltaNet(config=cfg, mesh=mesh_1, dtype=jnp.float32, rngs=nnx.Rngs(123))
+
+      @nnx.jit
+      def run_layer(m, x_in):
+        def loss_fn(x_arg):
+          out_y, _ = m(
+              x_arg,
+              decoder_segment_ids=seg_ids,
+              model_mode=common_types.MODEL_MODE_TRAIN,
+          )
+          return jnp.sum(out_y * proj_docs_234), out_y
+
+        (_, out_y), dx = jax.value_and_grad(loss_fn, has_aux=True)(x_in)
+        return out_y, dx
+
+      with mesh_1:
+        out_base, dx_base = run_layer(model, x_base)
+        out_pert, dx_pert = run_layer(model, x_perturbed)
+        out_diff_docs_234 = float(np.max(np.abs(np.asarray(out_base[:, 25:120, :] - out_pert[:, 25:120, :]))))
+        dx_diff_docs_234 = float(np.max(np.abs(np.asarray(dx_base[:, 25:120, :] - dx_pert[:, 25:120, :]))))
+      self.assertEqual(
+          out_diff_docs_234,
+          0.0,
+          f"[use_gdn_kernel={use_kernel}] Doc 1 perturbation leaked into forward outputs of Docs 2..4: {out_diff_docs_234}",
+      )
+      self.assertEqual(
+          dx_diff_docs_234,
+          0.0,
+          f"[use_gdn_kernel={use_kernel}] Doc 1 perturbation leaked into backward dx of Docs 2..4: {dx_diff_docs_234}",
+      )
 
 
 if __name__ == "__main__":

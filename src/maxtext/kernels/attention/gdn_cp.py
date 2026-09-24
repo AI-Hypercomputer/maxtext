@@ -44,7 +44,7 @@ def compose(left, right):
   )
 
 
-def compose_local(w, u, k, g):
+def compose_local(w, u, k, g, m_out=None, m_keep=None):
   """Fold this device's chunks into one affine map, in O(1) memory.
 
   lax.scan rather than associative_scan on purpose: associative_scan would
@@ -63,10 +63,17 @@ def compose_local(w, u, k, g):
   # already live, so recompute them in the backward pass instead of storing them.
   @jax.checkpoint
   def body(carry, x):
-    w_c, u_c, k_c, g_c = x
-    g_last = g_c[..., -1]
-    decay = jnp.exp(g_last)[..., None, None]
-    k_g = k_c.astype(jnp.float32) * jnp.exp(g_last[..., None] - g_c)[..., None]
+    if m_out is not None and m_keep is not None:
+      w_c, u_c, k_c, g_c, m_out_c, m_keep_c = x
+      g_last = g_c[..., -1]
+      decay = (jnp.exp(g_last) * m_keep_c[..., 0])[..., None, None]
+      bwd_diff = jnp.where(m_out_c > 0.5, g_last[..., None] - g_c, -1e4)
+      k_g = k_c.astype(jnp.float32) * (jnp.exp(bwd_diff) * m_out_c)[..., None]
+    else:
+      w_c, u_c, k_c, g_c = x
+      g_last = g_c[..., -1]
+      decay = jnp.exp(g_last)[..., None, None]
+      k_g = k_c.astype(jnp.float32) * jnp.exp(g_last[..., None] - g_c)[..., None]
     k_g_T = k_g.swapaxes(-1, -2)
     A_i = decay * eye - jnp.matmul(k_g_T, w_c.astype(jnp.float32), precision=_PREC)
     B_i = jnp.matmul(k_g_T, u_c.astype(jnp.float32), precision=_PREC)
@@ -77,7 +84,8 @@ def compose_local(w, u, k, g):
       jnp.broadcast_to(eye, lead + (k_dim, k_dim)).astype(jnp.float32),
       jnp.zeros(lead + (k_dim, u.shape[-1]), jnp.float32),
   )
-  (A_loc, B_loc), _ = lax.scan(body, init, (w, u, k, g))
+  scan_inputs = (w, u, k, g, m_out, m_keep) if (m_out is not None and m_keep is not None) else (w, u, k, g)
+  (A_loc, B_loc), _ = lax.scan(body, init, scan_inputs)
   return A_loc, B_loc
 
 

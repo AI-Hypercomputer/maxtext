@@ -78,17 +78,26 @@ def ensure_cpu_interpret_registered() -> None:
 @jax.custom_vjp
 def invert_triangular_matrix(t: jax.Array) -> jax.Array:
   """Computes inverse of unit lower-triangular matrix using Tokamax block forward substitution."""
-  return local_compute_gdn.invert_triangular_matrix(t, block_size=16)
+  return local_compute_gdn.invert_triangular_matrix(t, block_size=16, precision=jax.lax.Precision.HIGHEST)
 
 
 def _invert_triangular_matrix_fwd(t: jax.Array):
-  t_inv = local_compute_gdn.invert_triangular_matrix(t, block_size=16)
+  t_inv = local_compute_gdn.invert_triangular_matrix(t, block_size=16, precision=jax.lax.Precision.HIGHEST)
   return t_inv, t_inv
 
 
 def _invert_triangular_matrix_bwd(res, g):
+  """Backward VJP pass for unit lower-triangular matrix inversion."""
   t_inv = res
-  grad_t = jnp.tril(-(t_inv.mT @ g @ t_inv.mT), k=-1)
+  high_prec = jax.lax.Precision.HIGHEST
+  grad_t = jnp.tril(
+      -jnp.matmul(
+          jnp.matmul(t_inv.mT, g, precision=high_prec),
+          t_inv.mT,
+          precision=high_prec,
+      ),
+      k=-1,
+  )
   return (grad_t,)
 
 

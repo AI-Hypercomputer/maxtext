@@ -23,6 +23,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
+from .. import compute_conv1d as local_compute_conv1d
 from .bwd_memory_ref import make_bwd_block_specs
 from .runtime_utils import ensure_cpu_interpret_registered
 
@@ -46,7 +47,7 @@ def _gdn_matmul(
         precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=jnp.float32,
     )
-  return jnp.matmul(lhs, rhs)
+  return jnp.matmul(lhs, rhs, precision=jax.lax.Precision.HIGHEST)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -62,6 +63,7 @@ class GDNBackwardConfig:
   num_chunks: int = 1
   vmem_limit_mb: Optional[int] = None
   use_qk_norm_in_gdn: bool = False
+  has_seg_ids: bool = False
 
   @property
   def repeats(self) -> int:
@@ -69,7 +71,8 @@ class GDNBackwardConfig:
 
   @property
   def padded_num_v_heads(self) -> int:
-    return ((self.num_v_heads + 127) // 128) * 128
+    extra = 1 if self.has_seg_ids else 0
+    return ((self.num_v_heads + extra + 127) // 128) * 128
 
 
 def _bwd_gdn_pipeline_body(
@@ -79,11 +82,11 @@ def _bwd_gdn_pipeline_body(
     has_dh0: bool = False,
 ) -> None:
   """Inner kernel executed per (batch, group, chunk) by emit_pipeline with manual GDN backward."""
-  # pylint: disable=unbalanced-tuple-unpacking
   if len(refs) == 17:
     has_dht = True
     has_dh0 = True
   idx = 0
+  # pylint: disable=unbalanced-tuple-unpacking
   (
       qkv_conv_ref,
       b_ref,
@@ -94,9 +97,7 @@ def _bwd_gdn_pipeline_body(
       a_log_ref,
       dt_bias_ref,
       reset_ref,
-  ) = refs[
-      idx : idx + 9
-  ]  # pylint: disable=unbalanced-tuple-unpacking
+  ) = refs[idx : idx + 9]
   idx += 9
   if has_dht:
     dht_ref = refs[idx]
@@ -109,9 +110,8 @@ def _bwd_gdn_pipeline_body(
       d_a_ref,
       d_a_log_ref,
       d_dt_bias_ref,
-  ) = refs[
-      idx : idx + 5
-  ]  # pylint: disable=unbalanced-tuple-unpacking
+  ) = refs[idx : idx + 5]
+  # pylint: enable=unbalanced-tuple-unpacking
   idx += 5
   if has_dh0:
     dh0_ref = refs[idx]
@@ -166,6 +166,29 @@ def _bwd_gdn_pipeline_body(
   mask_strict = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
   mask_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=0)
 
+  valid_c = None
+  m_in = None
+  m_out = None
+  m_keep = None
+  if cfg.has_seg_ids:
+    seg_c = b_ref[...][:, num_v_heads : num_v_heads + 1].astype(jnp.float32)
+    seg_prev = reset_ref[...][0, 1].astype(jnp.float32)
+    valid_c = seg_c > 0.5
+    active_c = jnp.abs(seg_c)
+    q_orig = jnp.where(valid_c[:, :, None], q_orig, 0.0)
+    k_orig = jnp.where(valid_c[:, :, None], k_orig, 0.0)
+    v = jnp.where(valid_c[:, :, None], v, 0.0)
+    do_val = jnp.where(valid_c[:, :, None], do_val, 0.0)
+
+    same_active = (jnp.abs(active_c - active_c.T) < 0.5) & (active_c > 0.5)
+    same_valid = (jnp.abs(seg_c - seg_c.T) < 0.5) & valid_c
+    mask_cumsum = mask_cumsum * same_active.astype(jnp.float32)
+    mask_strict = mask_strict * same_valid.astype(jnp.float32)
+    mask_causal = mask_causal * same_valid.astype(jnp.float32)
+    m_in = ((jnp.abs(seg_c - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
+    m_out = ((jnp.abs(seg_c - active_c[-1:]) < 0.5) & (active_c[-1:] > 0.5)).astype(jnp.float32)
+    m_keep = ((jnp.abs(active_c[-1:] - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
+
   if cfg.use_qk_norm_in_gdn:
     inv_r_q = jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6)
     q_unit = q_orig * inv_r_q
@@ -178,6 +201,10 @@ def _bwd_gdn_pipeline_body(
     q_scaled = q_orig * scale
     k_scaled_val = k_orig
 
+  if valid_c is not None:
+    q_scaled = jnp.where(valid_c[:, :, None], q_scaled, 0.0)
+    k_scaled_val = jnp.where(valid_c[:, :, None], k_scaled_val, 0.0)
+
   q_rep = jnp.repeat(q_scaled, repeats, axis=1)
   k_rep = jnp.repeat(k_scaled_val, repeats, axis=1)
   beta = jax.nn.sigmoid(b_val)
@@ -187,7 +214,11 @@ def _bwd_gdn_pipeline_body(
   exp_a_log = jnp.exp(a_log_val)
   log_g = -exp_a_log * sp_val
 
-  cumsum_log_g = jnp.dot(mask_cumsum, log_g)
+  if valid_c is not None:
+    beta = jnp.where(valid_c, beta, 0.0)
+    log_g = jnp.where(valid_c, log_g, 0.0)
+
+  cumsum_log_g = jnp.dot(mask_cumsum, log_g, precision=jax.lax.Precision.HIGHEST)
 
   q_h = jnp.transpose(q_rep, (1, 0, 2))
   k_h = jnp.transpose(k_rep, (1, 0, 2))
@@ -197,15 +228,21 @@ def _bwd_gdn_pipeline_body(
   do_h = jnp.transpose(do_val, (1, 0, 2))
 
   diff = cumsum_h[:, :, None] - cumsum_h[:, None, :]
-  safe_diff_strict = jnp.where(mask_strict[None, :, :] == 1.0, diff, -1e4)
+  safe_diff_strict = jnp.where(mask_strict[None, :, :] > 0.5, diff, -1e4)
   g_mat_strict = jnp.exp(safe_diff_strict) * mask_strict[None, :, :]
 
-  safe_diff_causal = jnp.where(mask_causal[None, :, :] == 1.0, diff, -1e4)
+  safe_diff_causal = jnp.where(mask_causal[None, :, :] > 0.5, diff, -1e4)
   g_mat_causal = jnp.exp(safe_diff_causal) * mask_causal[None, :, :]
 
   gating_forward = jnp.exp(cumsum_h)[:, :, None]
   gating_last = jnp.exp(cumsum_h[:, -1])[:, None, None]
-  gating_backward = jnp.exp(cumsum_h[:, -1:] - cumsum_h)[:, :, None]
+  if m_in is not None and m_out is not None and m_keep is not None:
+    gating_forward = gating_forward * m_in[None, :, :]
+    gating_last = gating_last * m_keep[None, :, :]
+    bwd_diff = jnp.where(m_out.T > 0.5, cumsum_h[:, -1:] - cumsum_h, -1e4)
+    gating_backward = jnp.exp(bwd_diff)[:, :, None] * m_out[None, :, :]
+  else:
+    gating_backward = jnp.exp(cumsum_h[:, -1:] - cumsum_h)[:, :, None]
 
   k_beta = k_h * beta_h[:, :, None]
   k_h_T = jnp.swapaxes(k_h, -1, -2)
@@ -299,7 +336,9 @@ def _bwd_gdn_pipeline_body(
   d_cumsum_h = d_cumsum_h + jnp.pad(last_col_addition, ((0, 0), (chunk_size - 1, 0)))
 
   d_cumsum_log_g = jnp.transpose(d_cumsum_h, (1, 0))
-  d_log_g = jnp.dot(mask_cumsum.T, d_cumsum_log_g)
+  d_log_g = jnp.dot(mask_cumsum.T, d_cumsum_log_g, precision=jax.lax.Precision.HIGHEST)
+  if valid_c is not None:
+    d_log_g = jnp.where(valid_c, d_log_g, 0.0)
 
   sig_sp = jax.nn.sigmoid(sp_input)
   d_a_val = d_log_g * (-exp_a_log * sig_sp)
@@ -308,6 +347,9 @@ def _bwd_gdn_pipeline_body(
 
   d_b_val = (jnp.transpose(d_beta_h, (1, 0))) * beta * (1.0 - beta)
   d_v_val = jnp.transpose(d_v_h, (1, 0, 2))
+  if valid_c is not None:
+    d_b_val = jnp.where(valid_c, d_b_val, 0.0)
+    d_v_val = jnp.where(valid_c[:, :, None], d_v_val, 0.0)
 
   # Sublane-aligned GVA 4:1 head reduction summing over repeats before transpose
   d_q_proj_h = jnp.sum(
@@ -329,6 +371,10 @@ def _bwd_gdn_pipeline_body(
   else:
     d_q = d_q_proj * scale
     d_k = d_k_proj
+
+  if valid_c is not None:
+    d_q = jnp.where(valid_c[:, :, None], d_q, 0.0)
+    d_k = jnp.where(valid_c[:, :, None], d_k, 0.0)
 
   # Flatten gradients to chunk_size x dim_size and write to refs
   d_q_flat = d_q.reshape(chunk_size, q_size).astype(dy_conv_ref.dtype)
@@ -372,6 +418,7 @@ def _pallas_gdn_bwd_kernel_single_group(
     *,
     cfg: GDNBackwardConfig,
     segment_ids: Optional[jax.Array] = None,
+    init_seg: Optional[jax.Array] = None,
     d_recurrent_state: Optional[jax.Array] = None,
     return_dh0: bool = False,
     interpret: bool | pltpu.InterpretParams | None = None,
@@ -395,6 +442,7 @@ def _pallas_gdn_bwd_kernel_single_group(
       vmem_limit_mb=cfg.vmem_limit_mb,
       head_tile=cfg.num_v_heads,
       segment_ids=segment_ids,
+      init_seg=init_seg,
       d_recurrent_state=d_recurrent_state,
       return_dh0=return_dh0,
       interpret=interpret,
@@ -420,6 +468,7 @@ def pallas_gdn_bwd_kernel(
     vmem_limit_mb: Optional[int] = None,
     head_tile: Optional[int] = None,
     segment_ids: Optional[jax.Array] = None,
+    init_seg: Optional[jax.Array] = None,
     d_recurrent_state: Optional[jax.Array] = None,
     return_dh0: bool = False,
     interpret: bool | pltpu.InterpretParams | None = None,
@@ -430,7 +479,9 @@ def pallas_gdn_bwd_kernel(
   Dispatches a single kernel call with 3D grid=(batch_size, num_groups,
   num_chunks).
   """
-  if interpret is None and jax.default_backend() == "cpu":
+  if interpret is None and (
+      jax.default_backend() == "cpu" or kq_head_dim % 128 != 0 or v_head_dim % 128 != 0 or chunk_size != 64
+  ):
     interpret = True
   if interpret:
     ensure_cpu_interpret_registered()
@@ -447,7 +498,7 @@ def pallas_gdn_bwd_kernel(
   has_dh0 = bool(return_dh0)
   if head_tile is not None:
     target_tile = head_tile
-  elif (has_dht or has_dh0) and jnp.dtype(qkv_conv.dtype) == jnp.float32:
+  elif jnp.dtype(qkv_conv.dtype) == jnp.float32:
     target_tile = 16
   else:
     target_tile = 32
@@ -471,6 +522,7 @@ def pallas_gdn_bwd_kernel(
   tile_v_size = tile_v_heads * v_head_dim
   group_dim_size = tile_q_size + tile_k_size + tile_v_size
 
+  has_seg_ids = segment_ids is not None
   cfg = GDNBackwardConfig(
       chunk_size=chunk_size,
       dim_size=group_dim_size,
@@ -481,6 +533,7 @@ def pallas_gdn_bwd_kernel(
       num_chunks=num_chunks,
       vmem_limit_mb=vmem_limit_mb,
       use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+      has_seg_ids=has_seg_ids,
   )
 
   padded_tile_v_heads = cfg.padded_num_v_heads
@@ -572,16 +625,30 @@ def pallas_gdn_bwd_kernel(
       (batch_size, num_groups, 1, padded_tile_v_heads),
   )
 
-  # 7. Prepare reset_hbm into (B, G, C, 1, 128)
-  if segment_ids is not None and num_chunks > 1:
-    end_idx = jnp.arange(1, num_chunks) * chunk_size - 1
-    start_next_idx = jnp.arange(1, num_chunks) * chunk_size
-    boundaries = segment_ids[:, end_idx] != segment_ids[:, start_next_idx]
-    reset_mask = jnp.pad(boundaries, ((0, 0), (0, 1)), constant_values=False)
-    reset_hbm = jnp.pad(
-        reset_mask[:, :, None, None].astype(jnp.float32),
-        ((0, 0), (0, 0), (0, 0), (0, 127)),
-    )
+  # 7. Prepare reset_hbm into (B, G, C, 1, 128) and pack s_enc into b_5d
+  if segment_ids is not None:
+    s_enc = local_compute_conv1d.encode_segment_ids(segment_ids.reshape(batch_size, seq_len), init_seg=init_seg)
+    s_enc_3d = s_enc.reshape(batch_size, num_chunks, chunk_size)
+    b_5d = b_5d.at[:, :, :, :, tile_v_heads].set(s_enc_3d[:, None, :, :].astype(b_5d.dtype))
+    active_2d = jnp.abs(s_enc)
+    active_3d = active_2d.reshape(batch_size, num_chunks, chunk_size)
+    active_end = active_3d[:, :, -1]
+    if init_seg is not None:
+      init_active = jnp.abs(init_seg.astype(jnp.float32).reshape(batch_size, 1))
+    else:
+      init_active = jnp.zeros((batch_size, 1), dtype=jnp.float32)
+    seg_prev_chunks = jnp.concatenate([init_active, active_end[:, :-1]], axis=1)
+
+    if num_chunks > 1:
+      end_idx = jnp.arange(1, num_chunks) * chunk_size - 1
+      start_next_idx = jnp.arange(1, num_chunks) * chunk_size
+      boundaries = active_2d[:, end_idx] != active_2d[:, start_next_idx]
+      reset_mask = jnp.pad(boundaries, ((0, 0), (0, 1)), constant_values=False).astype(jnp.float32)
+    else:
+      reset_mask = jnp.zeros((batch_size, num_chunks), dtype=jnp.float32)
+
+    reset_header = jnp.stack([reset_mask, seg_prev_chunks], axis=-1)[:, :, None, :]
+    reset_hbm = jnp.pad(reset_header, ((0, 0), (0, 0), (0, 0), (0, 126)))
   else:
     reset_hbm = jnp.zeros((batch_size, num_chunks, 1, 128), dtype=jnp.float32)
   reset_hbm_5d = jnp.broadcast_to(reset_hbm[:, None, :, :, :], (batch_size, num_groups, num_chunks, 1, 128))

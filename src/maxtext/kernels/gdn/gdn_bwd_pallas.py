@@ -31,6 +31,7 @@ from .gdn_bwd.cp_gdn import (
     broadcast_end_conv_state,
     compose_bwd_local_from_t_inv,
     compose_local_from_t_inv,
+    gather_cp_segment_metadata,
     halo_exchange_for_conv,
     halo_exchange_for_conv_bwd,
     incoming_grad_state,
@@ -41,6 +42,7 @@ from .gdn_bwd.jax_compute_gdn_states import (
     chunk_forward,
     chunk_forward_with_tinv,
     chunk_state_forward,
+    compute_gdn_states_jax,
     pure_jax_decoupled_conv1d_gdn,
 )
 from .gdn_bwd.pallas_mosaic_tpu_bwd import (
@@ -71,10 +73,12 @@ __all__ = [
     "chunk_state_forward",
     "compose_bwd_local_from_t_inv",
     "compose_local_from_t_inv",
+    "compute_gdn_states_jax",
     "conv1d_silu_bwd",
     "conv1d_silu_fwd",
     "decoupled_conv1d_gdn_bwd_kernel",
     "ensure_cpu_interpret_registered",
+    "gather_cp_segment_metadata",
     "gdn_decoupled_conv1d",
     "halo_exchange_for_conv",
     "halo_exchange_for_conv_bwd",

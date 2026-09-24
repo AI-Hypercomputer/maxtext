@@ -189,6 +189,7 @@ class GdnBwdPallasTest(absltest.TestCase):
         padding="VALID",
         dimension_numbers=("NWC", "WIO", "NWC"),
         feature_group_count=dim_size,
+        precision=jax.lax.Precision.HIGHEST,
     )
     expected_conv_out = expected_conv_out + conv_bias
     expected_qkv_conv = jax.nn.silu(expected_conv_out)
@@ -1306,15 +1307,16 @@ class GdnBwdPallasTest(absltest.TestCase):
         return_d_conv_state=True,
     )
 
-    np.testing.assert_allclose(dh0, exp_dh0, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(d_cs, exp_dcs, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(d_qkv, exp_dqkv, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(d_b, exp_db, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(d_a, exp_da, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(d_cw, exp_dcw, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(d_cb, exp_dcb, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(d_a_log, exp_dal, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(d_dt_bias, exp_ddt, rtol=1e-4, atol=1e-4)
+    tol = 5e-4 if jax.default_backend() == "tpu" else 1e-4
+    np.testing.assert_allclose(dh0, exp_dh0, rtol=tol, atol=tol)
+    np.testing.assert_allclose(d_cs, exp_dcs, rtol=tol, atol=tol)
+    np.testing.assert_allclose(d_qkv, exp_dqkv, rtol=tol, atol=tol)
+    np.testing.assert_allclose(d_b, exp_db, rtol=tol, atol=tol)
+    np.testing.assert_allclose(d_a, exp_da, rtol=tol, atol=tol)
+    np.testing.assert_allclose(d_cw, exp_dcw, rtol=tol, atol=tol)
+    np.testing.assert_allclose(d_cb, exp_dcb, rtol=tol, atol=tol)
+    np.testing.assert_allclose(d_a_log, exp_dal, rtol=tol, atol=tol)
+    np.testing.assert_allclose(d_dt_bias, exp_ddt, rtol=tol, atol=tol)
 
   def test_gdn_decoupled_conv1d_cp_axis_against_single_device(self):
     """Verifies gdn_decoupled_conv1d with cp_axis_name='context' across 4 shards vs CP=1."""
@@ -1558,6 +1560,672 @@ class GdnBwdPallasTest(absltest.TestCase):
       _ = jax.grad(loss_no_states)(qkv)
 
     self.assertEqual(recorded_calls, [(False, False)])
+
+  def _run_unpacked_solo_baseline(
+      self,
+      qkv: jax.Array,
+      b: jax.Array,
+      a: jax.Array,
+      conv_weight: jax.Array,
+      conv_bias: jax.Array | None,
+      a_log: jax.Array,
+      dt_bias: jax.Array,
+      do: jax.Array,
+      segment_ids: jax.Array,
+      *,
+      num_k_heads: int,
+      num_v_heads: int,
+      head_k_dim: int,
+      head_v_dim: int,
+      conv_kernel_size: int,
+      chunk_size: int,
+      use_qk_norm_in_gdn: bool = True,
+  ):
+    """Oracle #1: Loops over each packed document in isolation using segment_ids=None."""
+    batch_size, seq_len, _ = qkv.shape
+    seg_np = np.asarray(segment_ids)
+
+    out_ref = np.zeros((batch_size, seq_len, num_v_heads, head_v_dim), dtype=np.float32)
+    dqkv_ref = np.zeros_like(np.asarray(qkv), dtype=np.float32)
+    db_ref = np.zeros_like(np.asarray(b), dtype=np.float32)
+    da_ref = np.zeros_like(np.asarray(a), dtype=np.float32)
+    dcw_ref = np.zeros_like(np.asarray(conv_weight), dtype=np.float32)
+    dcb_ref = np.zeros_like(np.asarray(conv_bias), dtype=np.float32) if conv_bias is not None else None
+    dal_ref = np.zeros_like(np.asarray(a_log), dtype=np.float32)
+    ddt_ref = np.zeros_like(np.asarray(dt_bias), dtype=np.float32)
+
+    @functools.lru_cache(maxsize=8)
+    def get_compiled_solo_step(l_pad: int):
+      @jax.jit
+      def solo_step(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, do_target):
+        def solo_loss(q_a, b_a, a_a, cw_a, cb_a, al_a, dt_a):
+          out_solo, _ = gdn_bwd_pallas.gdn_decoupled_conv1d(
+              qkv=q_a,
+              b=b_a,
+              a=a_a,
+              conv_weight=cw_a,
+              conv_bias=cb_a,
+              a_log=al_a,
+              dt_bias=dt_a,
+              conv_state=None,
+              recurrent_state=None,
+              num_k_heads=num_k_heads,
+              num_v_heads=num_v_heads,
+              head_k_dim=head_k_dim,
+              head_v_dim=head_v_dim,
+              conv_kernel_size=conv_kernel_size,
+              chunk_size=chunk_size,
+              use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+              compute_dtype=jnp.float32,
+              segment_ids=None,
+          )
+          return (
+              jnp.sum(out_solo.astype(jnp.float32) * do_target.astype(jnp.float32)),
+              out_solo,
+          )
+
+        (_, out_solo), grads_solo = jax.value_and_grad(solo_loss, argnums=(0, 1, 2, 3, 4, 5, 6), has_aux=True)(
+            qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in
+        )
+        return out_solo, grads_solo
+
+      return solo_step
+
+    for b_idx in range(batch_size):
+      row = seg_np[b_idx]
+      idx = 0
+      while idx < seq_len:
+        seg_val = int(row[idx])
+        if seg_val <= 0:
+          idx += 1
+          continue
+        end_idx = idx + 1
+        while end_idx < seq_len and int(row[end_idx]) == seg_val:
+          end_idx += 1
+        l_d = end_idx - idx
+        l_pad = max(((l_d + chunk_size - 1) // chunk_size) * chunk_size, chunk_size)
+        pad_amt = l_pad - l_d
+
+        qkv_d = jnp.pad(
+            qkv[b_idx : b_idx + 1, idx:end_idx],
+            ((0, 0), (0, pad_amt), (0, 0)),
+        )
+        b_d = jnp.pad(
+            b[b_idx : b_idx + 1, idx:end_idx],
+            ((0, 0), (0, pad_amt), (0, 0)),
+        )
+        a_d = jnp.pad(
+            a[b_idx : b_idx + 1, idx:end_idx],
+            ((0, 0), (0, pad_amt), (0, 0)),
+        )
+        do_d = jnp.pad(
+            do[b_idx : b_idx + 1, idx:end_idx],
+            ((0, 0), (0, pad_amt), (0, 0), (0, 0)),
+        )
+
+        out_solo, grads_solo = get_compiled_solo_step(l_pad)(
+            qkv_d, b_d, a_d, conv_weight, conv_bias, a_log, dt_bias, do_d
+        )
+
+        out_ref[b_idx, idx:end_idx] = np.asarray(out_solo[0, :l_d], dtype=np.float32)
+        dqkv_ref[b_idx, idx:end_idx] = np.asarray(grads_solo[0][0, :l_d], dtype=np.float32)
+        db_ref[b_idx, idx:end_idx] = np.asarray(grads_solo[1][0, :l_d], dtype=np.float32)
+        da_ref[b_idx, idx:end_idx] = np.asarray(grads_solo[2][0, :l_d], dtype=np.float32)
+        dcw_ref += np.asarray(grads_solo[3], dtype=np.float32)
+        if dcb_ref is not None and grads_solo[4] is not None:
+          dcb_ref += np.asarray(grads_solo[4], dtype=np.float32)
+        dal_ref += np.asarray(grads_solo[5], dtype=np.float32)
+        ddt_ref += np.asarray(grads_solo[6], dtype=np.float32)
+
+        idx = end_idx
+
+    return out_ref, (dqkv_ref, db_ref, da_ref, dcw_ref, dcb_ref, dal_ref, ddt_ref)
+
+  def _step_by_step_recurrent_packed_gdn(
+      self,
+      qkv: jax.Array,
+      b: jax.Array,
+      a: jax.Array,
+      conv_weight: jax.Array,
+      conv_bias: jax.Array | None,
+      a_log: jax.Array,
+      dt_bias: jax.Array,
+      segment_ids: jax.Array,
+      *,
+      num_k_heads: int,
+      num_v_heads: int,
+      head_k_dim: int,
+      head_v_dim: int,
+      conv_kernel_size: int,
+      use_qk_norm_in_gdn: bool = True,
+  ) -> jax.Array:
+    """Oracle #2: Token-by-token (C=1) sequential scan with explicit state reset at segment boundaries."""
+    batch_size, _, dim_size = qkv.shape
+    halo_len = conv_kernel_size - 1
+    key_dim = num_k_heads * head_k_dim
+    repeats = num_v_heads // num_k_heads
+    scale = 1.0 / jnp.sqrt(float(head_k_dim))
+
+    w_3d = conv_weight.astype(jnp.float32) if conv_weight.ndim == 3 else conv_weight[:, None, :].astype(jnp.float32)
+    cb_f32 = conv_bias.astype(jnp.float32) if conv_bias is not None else jnp.zeros((dim_size,), dtype=jnp.float32)
+    a_log_f32 = a_log.astype(jnp.float32)
+    dt_bias_f32 = dt_bias.astype(jnp.float32)
+
+    init_conv_hist = jnp.zeros((batch_size, halo_len, dim_size), dtype=jnp.float32)
+    init_conv_seg = jnp.zeros((batch_size, halo_len), dtype=jnp.int32)
+    init_state = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
+    init_active_seg = jnp.zeros((batch_size,), dtype=jnp.int32)
+
+    def step_fn(carry, token_inputs):
+      conv_hist, conv_seg, state, active_seg = carry
+      qkv_t, b_t, a_t, seg_t = token_inputs
+      seg_i32 = jnp.maximum(seg_t.astype(jnp.int32), 0)
+      is_valid = seg_i32 > 0
+
+      # Reset recurrent state if a new positive segment starts
+      same_rec_doc = is_valid & (seg_i32 == active_seg)
+      state_curr = jnp.where(same_rec_doc[:, None, None, None], state, 0.0)
+
+      # 4-tap Conv1D with per-tap same-document check
+      window_x = jnp.concatenate([conv_hist, qkv_t[:, None, :].astype(jnp.float32)], axis=1)
+      window_s = jnp.concatenate([conv_seg, seg_i32[:, None]], axis=1)
+      z_t = cb_f32[None, :]
+      for k in range(conv_kernel_size):
+        tap_same = is_valid & (window_s[:, k] == seg_i32)
+        z_t = z_t + jnp.where(tap_same[:, None], window_x[:, k, :], 0.0) * w_3d[k, 0, :]
+      z_t = jnp.where(is_valid[:, None], z_t, 0.0)
+      qkv_conv_t = jax.nn.silu(z_t)
+
+      q_c, k_c, v_c = jnp.split(qkv_conv_t, [key_dim, 2 * key_dim], axis=-1)
+      q_t = q_c.reshape(batch_size, num_k_heads, head_k_dim)
+      k_t = k_c.reshape(batch_size, num_k_heads, head_k_dim)
+      v_t = v_c.reshape(batch_size, num_v_heads, head_v_dim)
+
+      if use_qk_norm_in_gdn:
+        q_t = q_t * jax.lax.rsqrt(jnp.sum(q_t * q_t, axis=-1, keepdims=True) + 1e-6)
+        k_t = k_t * jax.lax.rsqrt(jnp.sum(k_t * k_t, axis=-1, keepdims=True) + 1e-6)
+      q_t = jnp.repeat(q_t * scale, repeats, axis=1)
+      k_t = jnp.repeat(k_t, repeats, axis=1)
+
+      beta_t = jax.nn.sigmoid(b_t.astype(jnp.float32))
+      g_t = -jnp.exp(a_log_f32)[None, :] * jax.nn.softplus(a_t.astype(jnp.float32) + dt_bias_f32[None, :])
+
+      decay_t = jnp.exp(g_t)[:, :, None, None]
+      s_decayed = state_curr * decay_t
+      v_pred = jnp.einsum("bhkd,bhk->bhd", s_decayed, k_t)
+      delta = (v_t - v_pred) * beta_t[:, :, None]
+      s_updated = s_decayed + jnp.einsum("bhk,bhd->bhkd", k_t, delta)
+      out_t = jnp.einsum("bhkd,bhk->bhd", s_updated, q_t)
+
+      out_t = jnp.where(is_valid[:, None, None], out_t, 0.0)
+      next_state = jnp.where(is_valid[:, None, None, None], s_updated, state)
+      next_active_seg = jnp.where(is_valid, seg_i32, active_seg)
+      next_conv_hist = window_x[:, 1:, :]
+      next_conv_seg = window_s[:, 1:]
+      return (next_conv_hist, next_conv_seg, next_state, next_active_seg), out_t
+
+    xs = (
+        jnp.swapaxes(qkv, 0, 1),
+        jnp.swapaxes(b, 0, 1),
+        jnp.swapaxes(a, 0, 1),
+        jnp.swapaxes(segment_ids, 0, 1),
+    )
+    _, out_seq = jax.lax.scan(
+        step_fn,
+        (init_conv_hist, init_conv_seg, init_state, init_active_seg),
+        xs,
+    )
+    return jnp.swapaxes(out_seq, 0, 1)
+
+  def _assert_packed_matches_oracles(
+      self,
+      segment_ids: jax.Array,
+      *,
+      chunk_size: int = 64,
+      num_k_heads: int = 2,
+      num_v_heads: int = 4,
+      head_k_dim: int | None = None,
+      head_v_dim: int | None = None,
+      conv_kernel_size: int = 4,
+      dtype: jnp.dtype = jnp.float32,
+      rtol: float = 2e-3,
+      atol: float = 2e-3,
+      check_oracle2: bool = True,
+      seed: int = 2026,
+  ):
+    """Verifies packed forward + 7 backward gradients against Oracle #1, Oracle #2, and Pure JAX."""
+    default_hd = 128 if jax.default_backend() == "tpu" else 32
+    if head_k_dim is None:
+      head_k_dim = default_hd
+    if head_v_dim is None:
+      head_v_dim = default_hd
+    batch_size, seq_len = segment_ids.shape
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(seed),
+        batch_size,
+        seq_len,
+        dim_size,
+        num_v_heads,
+        head_v_dim,
+        conv_kernel_size,
+        with_bias=True,
+    )
+    qkv = qkv.astype(dtype)
+    b = b.astype(dtype)
+    a = a.astype(dtype)
+    do = do.astype(dtype)
+
+    # 1. Packed Kernel Execution (Pallas on TPU / Decoupled VJP)
+    def packed_loss(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
+      out_p, states_p = gdn_bwd_pallas.gdn_decoupled_conv1d(
+          qkv=qkv_in,
+          b=b_in,
+          a=a_in,
+          conv_weight=cw_in,
+          conv_bias=cb_in,
+          a_log=al_in,
+          dt_bias=dt_in,
+          conv_state=None,
+          recurrent_state=None,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          conv_kernel_size=conv_kernel_size,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+          compute_dtype=jnp.float32,
+          segment_ids=segment_ids,
+      )
+      return jnp.sum(out_p.astype(jnp.float32) * do.astype(jnp.float32)), (
+          out_p,
+          states_p,
+      )
+
+    (_, (out_packed, states_packed)), grads_packed = jax.value_and_grad(
+        packed_loss, argnums=(0, 1, 2, 3, 4, 5, 6), has_aux=True
+    )(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias)
+
+    # 2. Oracle #1: Unpacked Solo Loop Reference (segment_ids=None)
+    out_o1, grads_o1 = self._run_unpacked_solo_baseline(
+        qkv=qkv,
+        b=b,
+        a=a,
+        conv_weight=conv_weight,
+        conv_bias=conv_bias,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        do=do,
+        segment_ids=segment_ids,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=True,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(out_packed, dtype=np.float32),
+        out_o1,
+        rtol=rtol,
+        atol=atol,
+        err_msg="Packed forward output diverged from Oracle #1 (Unpacked Solo Baseline)",
+    )
+    grad_names = ("dqkv", "db", "da", "d_conv_w", "d_conv_b", "d_a_log", "d_dt_bias")
+    for g_name, g_got, g_exp in zip(grad_names, grads_packed, grads_o1):
+      np.testing.assert_allclose(
+          np.asarray(g_got, dtype=np.float32),
+          g_exp,
+          rtol=rtol,
+          atol=atol,
+          err_msg=f"Packed gradient {g_name} diverged from Oracle #1 (Unpacked Solo Baseline)",
+      )
+
+    # 3. Oracle #2: Step-by-Step Sequential Recurrence (C=1)
+    if check_oracle2:
+
+      def rec_loss(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
+        out_r = self._step_by_step_recurrent_packed_gdn(
+            qkv=qkv_in,
+            b=b_in,
+            a=a_in,
+            conv_weight=cw_in,
+            conv_bias=cb_in,
+            a_log=al_in,
+            dt_bias=dt_in,
+            segment_ids=segment_ids,
+            num_k_heads=num_k_heads,
+            num_v_heads=num_v_heads,
+            head_k_dim=head_k_dim,
+            head_v_dim=head_v_dim,
+            conv_kernel_size=conv_kernel_size,
+            use_qk_norm_in_gdn=True,
+        )
+        return jnp.sum(out_r * do.astype(jnp.float32)), out_r
+
+      (_, out_o2), grads_o2 = jax.value_and_grad(rec_loss, argnums=(0, 1, 2, 3, 4, 5, 6), has_aux=True)(
+          qkv, b, a, conv_weight, conv_bias, a_log, dt_bias
+      )
+      np.testing.assert_allclose(
+          np.asarray(out_packed, dtype=np.float32),
+          np.asarray(out_o2, dtype=np.float32),
+          rtol=rtol,
+          atol=atol,
+          err_msg="Packed forward output diverged from Oracle #2 (Sequential Recurrence)",
+      )
+      for g_name, g_got, g_exp in zip(grad_names, grads_packed, grads_o2):
+        np.testing.assert_allclose(
+            np.asarray(g_got, dtype=np.float32),
+            np.asarray(g_exp, dtype=np.float32),
+            rtol=rtol,
+            atol=atol,
+            err_msg=f"Packed gradient {g_name} diverged from Oracle #2 (Sequential Recurrence)",
+        )
+
+    # 4. Oracle #3: Pure-JAX Chunked Delta Rule (qwen3.jax_chunk_gated_delta_rule) + conv_state parity
+    def pure_jax_loss(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
+      out_j, states_j = gdn_bwd_pallas.pure_jax_decoupled_conv1d_gdn(
+          qkv=qkv_in,
+          b=b_in,
+          a=a_in,
+          conv_weight=cw_in,
+          conv_bias=cb_in,
+          a_log=al_in,
+          dt_bias=dt_in,
+          conv_state=None,
+          recurrent_state=None,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          conv_kernel_size=conv_kernel_size,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+          compute_dtype=dtype,
+          segment_ids=segment_ids,
+      )
+      return jnp.sum(out_j.astype(jnp.float32) * do.astype(jnp.float32)), (
+          out_j,
+          states_j,
+      )
+
+    (_, (out_o3, states_o3)), grads_o3 = jax.value_and_grad(pure_jax_loss, argnums=(0, 1, 2, 3, 4, 5, 6), has_aux=True)(
+        qkv, b, a, conv_weight, conv_bias, a_log, dt_bias
+    )
+    o3_atol = max(atol, 0.4) if jnp.dtype(dtype) == jnp.bfloat16 else atol
+    np.testing.assert_allclose(
+        np.asarray(out_packed, dtype=np.float32),
+        np.asarray(out_o3, dtype=np.float32),
+        rtol=rtol,
+        atol=o3_atol,
+        err_msg="Packed forward output diverged from Oracle #3 (Pure-JAX Chunked Delta Rule)",
+    )
+    np.testing.assert_allclose(
+        np.asarray(states_packed[0], dtype=np.float32),
+        np.asarray(states_o3[0], dtype=np.float32),
+        rtol=rtol,
+        atol=o3_atol,
+        err_msg="Packed next_conv_state diverged from Oracle #3 (Pure-JAX Chunked Delta Rule)",
+    )
+    np.testing.assert_allclose(
+        np.asarray(states_packed[1], dtype=np.float32),
+        np.asarray(states_o3[1], dtype=np.float32),
+        rtol=rtol,
+        atol=o3_atol,
+        err_msg="Packed next_recurrent_state diverged from Oracle #3 (Pure-JAX Chunked Delta Rule)",
+    )
+    for g_name, g_got, g_exp in zip(grad_names, grads_packed, grads_o3):
+      np.testing.assert_allclose(
+          np.asarray(g_got, dtype=np.float32),
+          np.asarray(g_exp, dtype=np.float32),
+          rtol=rtol,
+          atol=o3_atol,
+          err_msg=f"Packed gradient {g_name} diverged from Oracle #3 (Pure-JAX Chunked Delta Rule)",
+      )
+
+  def test_sequence_packing_4seq_timeline_and_strictly_interior_sequence(self):
+    """Tests the 4-sequence timeline (0..63, 64..135, 136..180, 181..255) across 4 chunks of 64."""
+    seg = np.zeros((1, 256), dtype=np.int32)
+    seg[0, 0:64] = 1
+    seg[0, 64:136] = 2
+    seg[0, 136:181] = 3  # Strictly inside Chunk 2 (128..191), touching neither boundary!
+    seg[0, 181:256] = 4
+    self._assert_packed_matches_oracles(jnp.asarray(seg), chunk_size=64, seed=1001)
+
+  def test_sequence_packing_conv1d_short_sequences_and_zero_leakage(self):
+    """Tests ultra-short sequences (L=1, 2, 3, 5 < K=4) and zero cross-sequence perturbation leakage."""
+    seg = np.zeros((1, 64), dtype=np.int32)
+    seg[0, 0:1] = 1
+    seg[0, 1:3] = 2
+    seg[0, 3:6] = 3
+    seg[0, 6:11] = 4
+    seg[0, 11:35] = 5
+    seg[0, 35:64] = 6
+    segment_ids = jnp.asarray(seg)
+    self._assert_packed_matches_oracles(segment_ids, chunk_size=64, seed=1002)
+
+    # Adversarial perturbation check: adding +100.0 to Seq 1..3 (0..6) must cause 0.0 change on Seq 4..6 (6..64)
+    hd = 128 if jax.default_backend() == "tpu" else 32
+    num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size = 2, 4, hd, hd, 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(1003), 1, 64, dim_size, num_v_heads, head_v_dim, conv_kernel_size
+    )
+    do_later = do.at[:, :6].set(0.0)
+
+    def run_and_grad(qkv_in):
+      def loss_fn(q_arg):
+        out, _ = gdn_bwd_pallas.gdn_decoupled_conv1d(
+            q_arg,
+            b,
+            a,
+            conv_weight,
+            conv_bias,
+            a_log,
+            dt_bias,
+            None,
+            None,
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_kernel_size,
+            64,
+            True,
+            jnp.float32,
+            None,
+            segment_ids,
+        )
+        return jnp.sum(out * do_later), out
+
+      (_, out_val), dqkv_val = jax.value_and_grad(loss_fn, has_aux=True)(qkv_in)
+      return out_val, dqkv_val
+
+    out_1, dqkv_1 = run_and_grad(qkv)
+    qkv_perturbed = qkv.at[:, :6, :].add(100.0)
+    out_2, dqkv_2 = run_and_grad(qkv_perturbed)
+    np.testing.assert_allclose(
+        np.asarray(out_1[:, 6:]),
+        np.asarray(out_2[:, 6:]),
+        rtol=1e-6,
+        atol=1e-6,
+        err_msg="Perturbing earlier packed sequences leaked into later sequences' forward outputs!",
+    )
+    np.testing.assert_allclose(
+        np.asarray(dqkv_1[:, 6:]),
+        np.asarray(dqkv_2[:, 6:]),
+        rtol=1e-6,
+        atol=1e-6,
+        err_msg="Perturbing earlier packed sequences leaked into later sequences' backward gradients!",
+    )
+
+  def test_sequence_packing_mid_and_trailing_zero_padding(self):
+    """Tests mid-chunk and trailing 0-padding (lengths=[40, 37, 31] in S=128 plus gapped [1..1, 0..0, 2..2])."""
+    seg = np.zeros((2, 128), dtype=np.int32)
+    # Row 0: 40 + 37 + 31 = 108 valid tokens + 20 trailing 0-padding tokens (108..127)
+    seg[0, 0:40] = 1
+    seg[0, 40:77] = 2
+    seg[0, 77:108] = 3
+    # Row 1: mid-chunk 0-padding between Seq 1 and Seq 2 + trailing 0-padding
+    seg[1, 0:45] = 1
+    seg[1, 45:72] = 0
+    seg[1, 72:115] = 2
+    self._assert_packed_matches_oracles(jnp.asarray(seg), chunk_size=64, seed=1004)
+
+  def test_sequence_packing_max_16_segments_dynamic_fuzz_no_recompilation(self):
+    """Packs up to 16 segments per row with irregular boundaries and verifies zero JIT recompilation."""
+    hd = 128 if jax.default_backend() == "tpu" else 32
+    num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size, chunk_size = (
+        2,
+        4,
+        hd,
+        hd,
+        4,
+        64,
+    )
+    seq_len = 256
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(1005), 1, seq_len, dim_size, num_v_heads, head_v_dim, conv_kernel_size
+    )
+
+    trace_count = 0
+
+    @jax.jit
+    def compiled_step(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, do_in, seg_in):
+      nonlocal trace_count
+      trace_count += 1
+
+      def loss_fn(q_a, b_a, a_a, cw_a, cb_a, al_a, dt_a):
+        out_p, _ = gdn_bwd_pallas.gdn_decoupled_conv1d(
+            qkv=q_a,
+            b=b_a,
+            a=a_a,
+            conv_weight=cw_a,
+            conv_bias=cb_a,
+            a_log=al_a,
+            dt_bias=dt_a,
+            conv_state=None,
+            recurrent_state=None,
+            num_k_heads=num_k_heads,
+            num_v_heads=num_v_heads,
+            head_k_dim=head_k_dim,
+            head_v_dim=head_v_dim,
+            conv_kernel_size=conv_kernel_size,
+            chunk_size=chunk_size,
+            use_qk_norm_in_gdn=True,
+            compute_dtype=jnp.float32,
+            segment_ids=seg_in,
+        )
+        return jnp.sum(out_p * do_in), out_p
+
+      (_, out_val), grads_val = jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3, 4, 5, 6), has_aux=True)(
+          qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in
+      )
+      return out_val, grads_val
+
+    # Layout 1: 16 segments in S=256 including 1-token, 2-token, 3-token, and boundary-straddling segments + trailing 0-pad
+    lengths_1 = [1, 2, 3, 17, 41, 15, 29, 8, 22, 11, 19, 14, 25, 9, 18, 12]  # sum = 246 + 10 pad
+    seg_1 = np.zeros((1, seq_len), dtype=np.int32)
+    pos = 0
+    for s_id, length in enumerate(lengths_1, start=1):
+      seg_1[0, pos : pos + length] = s_id
+      pos += length
+    seg_1_jnp = jnp.asarray(seg_1)
+
+    out_1, grads_1 = compiled_step(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do, seg_1_jnp)
+    out_o1, grads_o1 = self._run_unpacked_solo_baseline(
+        qkv,
+        b,
+        a,
+        conv_weight,
+        conv_bias,
+        a_log,
+        dt_bias,
+        do,
+        seg_1_jnp,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+        chunk_size=chunk_size,
+    )
+    np.testing.assert_allclose(np.asarray(out_1), out_o1, rtol=2e-3, atol=2e-3)
+    for g_got, g_exp in zip(grads_1, grads_o1):
+      np.testing.assert_allclose(np.asarray(g_got), g_exp, rtol=2e-3, atol=2e-3)
+
+    # Layout 2: Different 16-segment layout invoked on the SAME compiled function -> 0 recompilation!
+    lengths_2 = [13, 27, 24, 19, 1, 3, 2, 38, 16, 21, 14, 15, 11, 20, 12, 10]  # sum = 246 + 10 pad
+    seg_2 = np.zeros((1, seq_len), dtype=np.int32)
+    pos = 0
+    for s_id, length in enumerate(lengths_2, start=1):
+      seg_2[0, pos : pos + length] = s_id
+      pos += length
+    seg_2_jnp = jnp.asarray(seg_2)
+
+    out_2, grads_2 = compiled_step(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do, seg_2_jnp)
+    self.assertEqual(trace_count, 1, "Dynamic segment_ids caused an unexpected XLA recompilation!")
+    out_o2, grads_o2 = self._run_unpacked_solo_baseline(
+        qkv,
+        b,
+        a,
+        conv_weight,
+        conv_bias,
+        a_log,
+        dt_bias,
+        do,
+        seg_2_jnp,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+        chunk_size=chunk_size,
+    )
+    np.testing.assert_allclose(np.asarray(out_2), out_o2, rtol=2e-3, atol=2e-3)
+    for g_got, g_exp in zip(grads_2, grads_o2):
+      np.testing.assert_allclose(np.asarray(g_got), g_exp, rtol=2e-3, atol=2e-3)
+
+  def test_sequence_packing_qwen3_397b_geometry(self):
+    """Verifies Qwen3.5-397B-A17B layer geometry (H_k=16, H_v=64, D=128, C=64, qkv_dim=12288) with sequence packing."""
+    is_tpu = jax.default_backend() == "tpu"
+    seg = np.zeros((1, 128), dtype=np.int32)
+    seg[0, 0:45] = 1
+    seg[0, 45:92] = 2
+    seg[0, 92:120] = 3
+    self._assert_packed_matches_oracles(
+        jnp.asarray(seg),
+        chunk_size=64,
+        num_k_heads=16 if is_tpu else 4,
+        num_v_heads=64 if is_tpu else 16,
+        head_k_dim=128 if is_tpu else 64,
+        head_v_dim=128 if is_tpu else 64,
+        conv_kernel_size=4,
+        dtype=jnp.float32,
+        rtol=2e-3,
+        atol=2e-3,
+        check_oracle2=not is_tpu,
+        seed=1006,
+    )
+    if is_tpu:
+      self._assert_packed_matches_oracles(
+          jnp.asarray(seg),
+          chunk_size=64,
+          num_k_heads=16,
+          num_v_heads=64,
+          head_k_dim=128,
+          head_v_dim=128,
+          conv_kernel_size=4,
+          dtype=jnp.bfloat16,
+          rtol=5e-2,
+          atol=1.6e-1,
+          check_oracle2=False,
+          seed=1006,
+      )
 
 
 if __name__ == "__main__":

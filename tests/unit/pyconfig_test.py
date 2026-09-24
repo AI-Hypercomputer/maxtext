@@ -833,6 +833,20 @@ assert train._TF_AVAILABLE is False
           f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
       )
 
+  def test_gdn_sequence_packing_flag_config(self):
+    config_default = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(config_default.enable_gdn_sequence_packing)
+
+    config_enabled = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        enable_gdn_sequence_packing=True,
+    )
+    self.assertTrue(config_enabled.enable_gdn_sequence_packing)
+
 
 if __name__ == "__main__":
   unittest.main()
