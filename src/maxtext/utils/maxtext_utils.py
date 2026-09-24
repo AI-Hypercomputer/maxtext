@@ -17,6 +17,7 @@
 
 import functools
 import os
+import time
 from typing import Sequence
 
 from flax import nnx, traverse_util
@@ -30,6 +31,7 @@ from jax.sharding import AxisType, Mesh, NamedSharding
 from maxtext.common import checkpointing
 from maxtext.common.common_types import (
     AttentionType,
+    CustomRule,
     DecoderBlockType,
     ReorderStrategy,
     ShardMode,
@@ -1701,6 +1703,9 @@ def setup_initial_state(
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
       config, mesh, init_state_fn, is_training
   )
+  restore_abstract_state = _get_restore_abstract_state(
+      config, mesh, init_state_fn, is_training, checkpoint_manager, unboxed_abstract_state
+  )
 
   # Initialization
   with axis_rules(config.logical_axis_rules):
@@ -1710,7 +1715,7 @@ def setup_initial_state(
         config.load_parameters_path,
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
-        unboxed_abstract_state,
+        restore_abstract_state,
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
@@ -1769,8 +1774,14 @@ def setup_initial_state(
 
         return traverse_util.unflatten_dict(res_flat)
 
+      reshard_start = time.time()
       sharded_aligned = _reshard_aligned(target_pure, raw_model_params)
       nnx.update(target_model, sharded_aligned)
+      if restore_abstract_state is not unboxed_abstract_state:
+        jax.block_until_ready(jax.tree_util.tree_leaves(sharded_aligned))
+        max_logging.log(
+            f"Resharded restored params into the training layout in {time.time() - reshard_start:.1f}s"
+        )
 
     if restored:
       is_emergency = isinstance(
@@ -1821,12 +1832,52 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 
-def get_abstract_state(config, mesh, init_state_fn, is_training=True):
+def _get_restore_abstract_state(config, mesh, init_state_fn, is_training, checkpoint_manager, unboxed_abstract_state):
+  """Returns the abstract state to restore into, honoring custom_mesh_and_rule_for_restore.
+
+  Only the params-only load (load_parameters_path) supports a separate restore layout: the
+  restored params are later resharded into the training layout by setup_initial_state
+  (`_reshard_aligned`). Resuming this run's own checkpoint, or a full-state load, keeps the
+  training layout, since those restored trees are used as is.
+  """
+  restore_rule = getattr(config, "custom_mesh_and_rule_for_restore", CustomRule.DEFAULT)
+  if restore_rule is CustomRule.DEFAULT or not config.load_parameters_path:
+    return unboxed_abstract_state
+  if checkpoint_manager is not None and checkpointing.latest_step(checkpoint_manager) is not None:
+    max_logging.log(
+        f"custom_mesh_and_rule_for_restore={restore_rule.value} ignored: resuming this run's own checkpoint,"
+        " which is restored in the training layout."
+    )
+    return unboxed_abstract_state
+  max_logging.log(
+      f"Restoring load_parameters_path in the custom_mesh_and_rule_for_restore={restore_rule.value} layout;"
+      f" params are then resharded on device into the custom_mesh_and_rule={config.custom_mesh_and_rule.value} layout."
+  )
+  restore_abstract_state, _, _ = get_abstract_state(
+      config, mesh, init_state_fn, is_training, logical_axis_rules=config.logical_axis_rules_for_restore
+  )
+  # Surface how the restore layout differs from the training one, so a restore rule that is
+  # silently overridden (e.g. by per-variable sharding rules) is visible in the logs.
+  train_leaves = jax.tree_util.tree_leaves_with_path(unboxed_abstract_state)
+  restore_leaves = jax.tree_util.tree_leaves(restore_abstract_state)
+  num_differ = 0
+  for (path, train_leaf), restore_leaf in zip(train_leaves, restore_leaves):
+    train_spec = getattr(getattr(train_leaf, "sharding", None), "spec", None)
+    restore_spec = getattr(getattr(restore_leaf, "sharding", None), "spec", None)
+    if train_spec != restore_spec:
+      num_differ += 1
+      if num_differ <= 8:
+        max_logging.log(f"  restore layout {jax.tree_util.keystr(path)}: train {train_spec} -> restore {restore_spec}")
+  max_logging.log(f"custom_mesh_and_rule_for_restore changes the sharding of {num_differ}/{len(train_leaves)} leaves.")
+  return restore_abstract_state
+
+
+def get_abstract_state(config, mesh, init_state_fn, is_training=True, logical_axis_rules=None):
   """Get a shaped abstraction of the state (including optimizer)."""
-  return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
+  return get_abstract_state_nnx(config, mesh, init_state_fn, is_training, logical_axis_rules=logical_axis_rules)
 
 
-def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=True):
+def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=True, logical_axis_rules=None):
   """Calculates the abstract sharded state and memory placement for an NNX TrainState.
 
   This function performs an abstract trace of the NNX model and optimizer using
@@ -1842,6 +1893,9 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
       TrainStateNNX instance during the abstract trace.
     is_training: Boolean indicating if the state is for training. If True,
       optimizer state is processed and memory offloading strategies are applied.
+    logical_axis_rules: Optional logical axis rules overriding
+      config.logical_axis_rules when resolving the shardings (e.g. to build a
+      restore target in a different layout than the training one).
 
   Returns:
     A tuple containing (abstract_sharded_state, None, state_mesh_shardings):
@@ -1853,8 +1907,10 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
         Sharding objects corresponding to each parameter/variable.
   """
   assert nnx_init_trainstate_fn is not None, "get_abstract_state_nnx: init function must be given."
+  if logical_axis_rules is None:
+    logical_axis_rules = config.logical_axis_rules
 
-  with axis_rules(config.logical_axis_rules):
+  with axis_rules(logical_axis_rules):
     # Use nnx.eval_shape + nnx.split instead of nnx.get_abstract_model, so we can apply
     # nnx_construct_named_sharding which correctly inserts the stacked-layers
     # axis into the partition spec. nnx.get_abstract_model uses get_var_pspec internally

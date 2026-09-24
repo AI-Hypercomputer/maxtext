@@ -200,3 +200,4 @@ class CustomRule(enum.Enum):
   FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
   FSDP_TRANSPOSE_AND_EP_AS_DP = "fsdp-transpose-and-ep-as-dp"
   FSDP_TRANSPOSE_AS_DP = "fsdp-transpose-as-dp"
+  RESTORE_SHARD_EMBED = "restore-shard-embed"  # Restore-only layout, see custom_mesh_and_rule_for_restore

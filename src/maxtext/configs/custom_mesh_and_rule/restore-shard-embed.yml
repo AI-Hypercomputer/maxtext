@@ -1,0 +1,60 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Restore-only weight layout, meant for custom_mesh_and_rule_for_restore.
+#
+# It shards weights only along their embed dimension (and the MLA lora
+# dimensions), and replicates every other dimension (experts, mlp, heads).
+# This matches how MaxText checkpoints saved with FSDP-style rules are chunked
+# on disk: e.g. a MoE kernel [exp, layers, embed, mlp] is stored in zarr chunks
+# of shape [all experts, all layers, embed / N, full mlp]. When the restore
+# target instead shards the expert or mlp dimension, every device's slice cuts
+# across every chunk and each device ends up reading (almost) the whole tensor
+# from GCS. Restoring with this layout makes each device read only the one or
+# two chunks covering its embed rows; the params are then resharded on device
+# (over ICI) into the training layout (custom_mesh_and_rule).
+#
+# Only the weight logical axes matter here: this rule is used solely to build
+# the restore target for load_parameters_path, never for training compute.
+
+mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert']
+data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert']]
+logical_axis_rules: [
+                      # Embed-like weight dimensions: shard over everything.
+                      ['embed', ['fsdp', 'fsdp_transpose', 'expert']],
+                      ['embed', ['fsdp', 'fsdp_transpose']],
+                      ['embed', ['fsdp']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'expert']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose']],
+                      ['embed_moe', ['fsdp']],
+                      ['embed_attn', ['fsdp', 'fsdp_transpose', 'expert']],
+                      ['embed_attn', ['fsdp', 'fsdp_transpose']],
+                      ['embed_attn', ['fsdp']],
+                      ['embed_vocab', ['fsdp', 'fsdp_transpose', 'expert']],
+                      ['embed_vocab', ['fsdp', 'fsdp_transpose']],
+                      ['embed_vocab', ['fsdp']],
+                      # MLA lora dimensions (1536 / 512 for DeepSeek-V3) are too small to
+                      # shard over the whole mesh; keep them on fsdp as FSDP rules do.
+                      ['q_lora', ['fsdp']],
+                      ["q_lora_up_proj", []],
+                      ['kv_lora', ['fsdp']],
+                      ["kv_lora_up_proj", []],
+                      # Everything else is replicated, in particular the dimensions the
+                      # checkpoint chunks do not split.
+                      ['exp', []],
+                      ['mlp_moe', []],
+                      ['mlp', []],
+                      ['vocab', []],
+                      ['exp_with_fsdp', []],
+                  ]

@@ -348,6 +348,7 @@ class HyperParameters:
     )
     final_dict["logical_axis_rules"] = _lists_to_tuples(final_dict["logical_axis_rules"])
     final_dict["logical_axis_rules_for_eval"] = _lists_to_tuples(final_dict["logical_axis_rules_for_eval"])
+    final_dict["logical_axis_rules_for_restore"] = _lists_to_tuples(final_dict["logical_axis_rules_for_restore"])
     final_dict["data_sharding"] = _lists_to_tuples(final_dict["data_sharding"])
 
     final_dict["decoder_block"] = DecoderBlockType(final_dict["decoder_block"])

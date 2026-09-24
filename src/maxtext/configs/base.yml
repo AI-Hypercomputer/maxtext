@@ -724,6 +724,10 @@ ulysses_context_sharding: "context_usp_ulysses"
 # Customized mesh and logical rules for evaluation (e.g. "ep-as-cp")
 custom_mesh_and_rule_for_eval: ""
 logical_axis_rules_for_eval: []
+# Logical rules used only to build the load_parameters_path restore target (e.g. "restore-shard-embed").
+# Params are restored in this layout, then resharded on device into the training layout.
+custom_mesh_and_rule_for_restore: ""
+logical_axis_rules_for_restore: []
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02

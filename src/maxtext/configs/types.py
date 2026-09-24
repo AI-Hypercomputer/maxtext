@@ -1557,6 +1557,15 @@ class HardwareAndMesh(BaseModel):
       CustomRule.DEFAULT,
       description="Customized mesh and logical rules for evaluation.",
   )
+  custom_mesh_and_rule_for_restore: CustomRule = Field(
+      CustomRule.DEFAULT,
+      description=(
+          "Logical rules used only to build the restore target of load_parameters_path. The params are restored"
+          " in this layout and then resharded on device into the training layout. Use a layout matching the"
+          " checkpoint's on-disk chunking (e.g. restore-shard-embed) to avoid read amplification when the training"
+          " rules shard the weights along dimensions the checkpoint chunks do not split."
+      ),
+  )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
@@ -1576,6 +1585,10 @@ class LayoutAndSharding(BaseModel):
   logical_axis_rules_for_eval: Any = Field(
       default_factory=list,
       description="Rules for mapping logical axes to physical mesh axes during evaluation.",
+  )
+  logical_axis_rules_for_restore: Any = Field(
+      default_factory=list,
+      description="Rules used to build the load_parameters_path restore target; empty means logical_axis_rules.",
   )
   data_sharding: Any = Field(
       default_factory=lambda: copy.deepcopy(DEFAULT_DATA_SHARDING),
@@ -3915,6 +3928,23 @@ class MaxTextConfig(
             self.custom_mesh_and_rule.value,
             list(eval_q_axes),
             self.custom_mesh_and_rule_for_eval.value,
+        )
+
+    # Handle restore custom mesh and rule (params-only restore target layout)
+    if self.custom_mesh_and_rule_for_restore is CustomRule.DEFAULT:
+      self.logical_axis_rules_for_restore = self.logical_axis_rules
+    else:
+      restore_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_restore.value)
+      self.logical_axis_rules_for_restore = restore_config.get("logical_axis_rules", self.logical_axis_rules)
+      # As for eval, only the logical rules are swapped; the mesh is built once from the primary rule.
+      dropped_axes = [axis for axis in restore_config.get("mesh_axes", ()) if axis not in self.mesh_axes]
+      if dropped_axes:
+        logger.warning(
+            "custom_mesh_and_rule_for_restore=%s declares mesh axes %s that are absent from the mesh built for "
+            "custom_mesh_and_rule=%s; they are ignored and any restore rule referencing them is treated as replicated.",
+            self.custom_mesh_and_rule_for_restore.value,
+            dropped_axes,
+            self.custom_mesh_and_rule.value,
         )
 
     # A. SET RUN NAME AND PATHS
