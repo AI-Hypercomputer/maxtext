@@ -1609,6 +1609,7 @@ def _run_syncer_loop(
 
   # Asynchronous Event-Driven Syncer Pipeline
   syncer_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="syncer_worker")
+  target_pool = ThreadPoolExecutor(max_workers=max(2, 2 * num_learners), thread_name_prefix="syncer_target")
   outer_sgd_pool = ThreadPoolExecutor(max_workers=min(32, os.cpu_count() or 16), thread_name_prefix="outer_sgd_chunk")
   fragment_locks = [threading.Lock() for _ in range(num_fragments)]
   pending_learner_fragments = collections.defaultdict(dict)
@@ -1645,8 +1646,10 @@ def _run_syncer_loop(
           # Payload keys: dtypes (packed) or leaf keystrs (DILOCO_UNPACKED_TRANSFER).
           payload_keys = list(learner_frags_host[0].keys())
           agg_targets = list(range(num_learners)) if USE_SYMMETRIC_OUTER else [0]
-          results = {}
-          for t in agg_targets:
+          # Targets run concurrently (DILOCO_SYMMETRIC_OUTER) and each learner gets
+          # its result as soon as ITS target finishes. Serial targets made learner 1
+          # always wait for target 0 first (v6e-pwns-s14su3: L1 3.4481 vs L0 3.4164 s/step).
+          def _outer_for_target(t):
             agg_mesh = syncer_cpu_submeshes[t]
 
             # Bring every learner's fragment onto the aggregation mesh. The
@@ -1693,13 +1696,21 @@ def _run_syncer_loop(
               # outer step really executed on CPU devices and did not silently
               # fall back to client staging.
               _assert_on_platform(new_outer_host, "cpu", f"outer SGD output frag {frag_idx}")
-            results[t] = new_outer_host
-            del aligned
 
-          max_logging.log(f"Syncer: Step {step} 1D outer step applied (colocated CPU mesh)")
-          for i in range(num_learners):
-            transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx,
-                                      data=results[i] if USE_SYMMETRIC_OUTER else results[0])
+            del aligned
+            return new_outer_host
+
+          if USE_SYMMETRIC_OUTER:
+            def _run_and_send(t):
+              res = _outer_for_target(t)
+              transport.send_to_learner(learner_idx=t, step=step, fragment_id=frag_idx, data=res)
+            list(target_pool.map(_run_and_send, agg_targets))
+            max_logging.log(f"Syncer: Step {step} 1D outer step applied (colocated CPU mesh)")
+          else:
+            res0 = _outer_for_target(0)
+            max_logging.log(f"Syncer: Step {step} 1D outer step applied (colocated CPU mesh)")
+            for i in range(num_learners):
+              transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=res0)
           max_logging.log(f"Syncer: Step {step} sync finished")
           del learner_frags_host
           with pending_lock:
@@ -1890,6 +1901,7 @@ def _run_syncer_loop(
   finally:
     outer_sgd_pool.shutdown(wait=True)
     syncer_executor.shutdown(wait=True)
+    target_pool.shutdown(wait=True)
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
