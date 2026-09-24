@@ -118,14 +118,21 @@ class Profiler:
 
       # Try to group devices into hosts. Different jax/Pathways versions expose
       # this differently, so probe several attributes and log which worked.
+      # Take the attribute that yields the MOST groups: on v6e Pathways,
+      # `host_id` is constant within a slice (v6e-nscc-p1 logged
+      # "host_groups=2 (via host_id)" for 2 slices x 2 hosts), which made us
+      # profile only 2 of 4 worker hosts. Undershooting silently drops planes;
+      # max_num_hosts is documented as a limit (overshoot not verified on HW).
+      # The only hardware-validated path is the explicit override
+      # profiler_max_num_hosts=4 (v6e-pwns-prof1: all 4 hosts x 4 chips captured).
       groups = set()
       attr_used = None
       for cand in ("task_index", "logical_task", "host_id", "process_index"):
         if all(hasattr(d, cand) for d in devs):
-          groups = {(getattr(d, "slice_index", 0), getattr(d, cand)) for d in devs}
-          if len(groups) > 1:
+          cand_groups = {(getattr(d, "slice_index", 0), getattr(d, cand)) for d in devs}
+          if len(cand_groups) > len(groups):
+            groups = cand_groups
             attr_used = cand
-            break
       derived = len(groups) if groups else 0
 
       max_logging.log(
