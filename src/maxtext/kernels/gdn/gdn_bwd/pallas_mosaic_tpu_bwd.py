@@ -169,13 +169,13 @@ def _bwd_gdn_pipeline_body(
   if cfg.use_qk_norm_in_gdn:
     q_norm_sq = jnp.sum(q_orig**2, axis=-1, keepdims=True)
     q_is_zero = q_norm_sq == 0.0
-    inv_r_q = jnp.where(q_is_zero, 0.0, jax.lax.rsqrt(jnp.where(q_is_zero, 1.0, q_norm_sq) + 1e-6))
+    inv_r_q = jnp.where(q_is_zero, 0.0, jax.lax.rsqrt(q_norm_sq + 1e-6))
     q_unit = q_orig * inv_r_q
     q_scaled = q_unit * scale
 
     k_norm_sq = jnp.sum(k_orig**2, axis=-1, keepdims=True)
     k_is_zero = k_norm_sq == 0.0
-    inv_r_k = jnp.where(k_is_zero, 0.0, jax.lax.rsqrt(jnp.where(k_is_zero, 1.0, k_norm_sq) + 1e-6))
+    inv_r_k = jnp.where(k_is_zero, 0.0, jax.lax.rsqrt(k_norm_sq + 1e-6))
     k_unit = k_orig * inv_r_k
     k_scaled_val = k_unit
   else:
