@@ -1005,6 +1005,67 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
         10.0,
     )
 
+  def test_pinned_apply_sharded_input_keeps_param_shardings_and_donates(self):
+    """DILOCO_SHARDED_APPLY path: a SHARDED packed input must not leak its spec into params.
+
+    Regression for MyStuff/Data/v6e-nscc-e3.log, where a P('fsdp') packed input made
+    the apply kernel emit a param with P('fsdp',) instead of P(None, None) and the
+    next p_train_step rejected it.
+    """
+    from maxtext.trainers.diloco.threaded_diloco import (
+        _build_fragment_1d_metadata,
+        _freeze_metadata,
+        _pack_fragment_1d,
+        _make_pinned_apply_fns,
+    )
+
+    devices = np.array(jax.devices()[:8])
+    mesh = jax.sharding.Mesh(devices, ("x",))
+    P = jax.sharding.PartitionSpec
+    num_layers, hidden = 4, 8
+    params = {
+        # Sharded on the hidden dim, like an fsdp-sharded stacked layer weight.
+        "layers": {"w": jax.device_put(jnp.ones((num_layers, hidden)), jax.sharding.NamedSharding(mesh, P(None, "x")))},
+        # Replicated, like the [4096, 36] norm scale in the v6e crash.
+        "embed": jax.device_put(jnp.ones((hidden,)), jax.sharding.NamedSharding(mesh, P())),
+    }
+    expected_shardings = jax.tree_util.tree_map(lambda x: x.sharding, params)
+    manipulator = _build_manipulator(params, num_layers=num_layers, num_transformer_frags=num_layers)
+
+    for donate in (False, True):
+      live = jax.tree_util.tree_map(lambda x: x.copy(), params)
+      flat_fn, scanned_fn = _make_pinned_apply_fns(expected_shardings, donate=donate)
+
+      # Scanned fragment 1 -> layer 0, packed buffer placed SHARDED P('x').
+      frag = manipulator.get_flat_fragment(live, 1)
+      meta = _build_fragment_1d_metadata(frag)
+      packed = _pack_fragment_1d(frag, meta)
+      packed = {
+          dt: jax.device_put(arr * 5.0, jax.sharding.NamedSharding(mesh, P("x")))
+          for dt, arr in packed.items()
+      }
+      old_w = live["layers"]["w"]
+      new_params = scanned_fn(live, jnp.asarray(0, dtype=jnp.int32), packed, manipulator, _freeze_metadata(meta))
+
+      for got, want in zip(jax.tree_util.tree_leaves(new_params), jax.tree_util.tree_leaves(expected_shardings)):
+        self.assertTrue(got.sharding.is_equivalent_to(want, got.ndim), f"donate={donate}: {got.sharding} != {want}")
+      np.testing.assert_allclose(np.array(new_params["layers"]["w"][0]), 5.0)
+      np.testing.assert_allclose(np.array(new_params["layers"]["w"][1:]), 1.0)
+      if donate and jax.devices()[0].platform != "cpu":
+        self.assertTrue(old_w.is_deleted())
+
+      # Flat fragment 0 with a sharded packed input as well.
+      flat = manipulator.get_flat_fragment(new_params, 0)
+      flat_meta = _build_fragment_1d_metadata(flat)
+      flat_packed = {
+          dt: jax.device_put(arr * 10.0, jax.sharding.NamedSharding(mesh, P("x")))
+          for dt, arr in _pack_fragment_1d(flat, flat_meta).items()
+      }
+      new_params2 = flat_fn(new_params, flat_packed, manipulator, _freeze_metadata(flat_meta))
+      self.assertTrue(new_params2["embed"].sharding.is_equivalent_to(expected_shardings["embed"], 1))
+      np.testing.assert_allclose(np.array(new_params2["embed"]), 10.0)
+      np.testing.assert_allclose(np.array(new_params2["layers"]["w"][0]), 5.0)
+
   def test_async_event_driven_syncer_transport(self):
     """Verifies that ThreadedTransportManager and SyncerTransport support non-blocking FIFO ingestion."""
     transport_mgr = ThreadedTransportManager(num_learners=2, maxsize=16)

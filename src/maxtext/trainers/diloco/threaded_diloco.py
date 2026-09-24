@@ -184,8 +184,7 @@ def _async_log_metrics(
     max_logging.error(f"Error in async metric logging for step {step}: {e}")
 
 
-@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
-def _fused_unpack_and_apply_scanned_fragment_jit(
+def _fused_unpack_and_apply_scanned_fragment_impl(
     params: Any,
     layer_idx: jax.Array,
     packed_dict: dict[str, jax.Array],
@@ -234,8 +233,17 @@ def _fused_unpack_and_apply_scanned_fragment_jit(
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
-@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
-def _fused_unpack_and_apply_flat_fragment_jit(
+_APPLY_STATIC_ARGNAMES = ("manipulator", "metadata_tuple", "has_replica_dim")
+
+# Default (legacy) apply kernels: no out_shardings, no donation. Output
+# shardings are whatever XLA propagates, which is only guaranteed to match
+# `state_mesh_shardings` when the packed input is replicated (P()).
+_fused_unpack_and_apply_scanned_fragment_jit = jax.jit(
+    _fused_unpack_and_apply_scanned_fragment_impl, static_argnames=_APPLY_STATIC_ARGNAMES
+)
+
+
+def _fused_unpack_and_apply_flat_fragment_impl(
     params: Any,
     packed_dict: dict[str, jax.Array],
     manipulator: Any,
@@ -271,6 +279,52 @@ def _fused_unpack_and_apply_flat_fragment_jit(
           new_leaves[idx] = frag
 
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
+
+
+_fused_unpack_and_apply_flat_fragment_jit = jax.jit(
+    _fused_unpack_and_apply_flat_fragment_impl, static_argnames=_APPLY_STATIC_ARGNAMES
+)
+
+
+# ---------------------------------------------------------------------------
+# Sharded CPU->TPU hop + pinned-output, in-place apply (DILOCO_SHARDED_APPLY=1).
+#
+# WHY: the legacy prefetch path device_put's every returned fragment with
+# PartitionSpec() -- i.e. REPLICATED to all 8 chips of the learner slice. For
+# Qwen3-8B one fragment is ~450 MB, so each learner moves ~3.6 GB per step, and
+# learner 1's source lives on learner 0's colocated CPU mesh (other hosts), so
+# that is 3.6 GB/step over DCN. Measured: with syncs disabled (v6e-nscc-a1) the
+# two threaded learners run at 1.3039 s/step, identical to a plain single-slice
+# train step (v6e-p0-s4, 1.3126 s/step); with one fragment per step (v6e-nscc-n2)
+# they run at 1.82 s/step. The whole ~0.5 s/step overhead is the sync path.
+#
+# WHAT: keep the fragment's own PartitionSpec on the CPU->TPU hop (1/8 of the
+# bytes per chip), and pin the apply kernel's out_shardings to the live params
+# shardings so the next p_train_step sees exactly `state_mesh_shardings`.
+# Without the pin, a sharded input made XLA propagate P('fsdp',) onto a leaf the
+# train step expects as P(None, None):
+#   ValueError: Sharding passed to jit does not match the sharding on the
+#   respective arg ... spec=P(None, None) vs spec=P('fsdp',) bfloat16[4096,36]
+# (MyStuff/Data/v6e-nscc-e3.log). Params are also donated so
+# dynamic_update_slice_in_dim on the stacked layer tensors is in place instead
+# of copying the whole stack every step.
+# ---------------------------------------------------------------------------
+USE_SHARDED_APPLY = os.environ.get("DILOCO_SHARDED_APPLY", "0") == "1"
+DONATE_APPLY = os.environ.get("DILOCO_DONATE_APPLY", "1") == "1"
+
+
+def _make_pinned_apply_fns(params_shardings: Any, donate: bool):
+  """Returns (flat_apply, scanned_apply) jitted with out_shardings pinned to `params_shardings`.
+
+  `params_shardings` must be a pytree with the same structure as the params
+  passed in (e.g. `jax.tree.map(lambda x: x.sharding, params)`).
+  """
+  kwargs = {"static_argnames": _APPLY_STATIC_ARGNAMES, "out_shardings": params_shardings}
+  if donate:
+    kwargs["donate_argnames"] = ("params",)
+  flat_fn = jax.jit(_fused_unpack_and_apply_flat_fragment_impl, **kwargs)
+  scanned_fn = jax.jit(_fused_unpack_and_apply_scanned_fragment_impl, **kwargs)
+  return flat_fn, scanned_fn
 
 
 @functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
@@ -729,23 +783,35 @@ def _run_learner_loop(
         frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
       frag_metadata_frozen = {f: _freeze_metadata(m) for f, m in frag_metadata.items()}
       # Pre-warm JIT extract & apply kernels on TPU
+      # (With DILOCO_SHARDED_APPLY the apply kernels donate `params`, so they
+      # cannot be pre-warmed on the live state; they compile on first use.)
       dummy_0_packed = _fused_extract_and_pack_flat_fragment_jit(
           params_template, manipulator, frag_metadata_frozen[0]
       )
-      _ = _fused_unpack_and_apply_flat_fragment_jit(
-          params_template, dummy_0_packed, manipulator, frag_metadata_frozen[0]
-      )
+      if not USE_SHARDED_APPLY:
+        _ = _fused_unpack_and_apply_flat_fragment_jit(
+            params_template, dummy_0_packed, manipulator, frag_metadata_frozen[0]
+        )
       if num_fragments > 1:
         dummy_layer_idx = jnp.asarray(0, dtype=jnp.int32)
         dummy_1_packed = _fused_extract_and_pack_scanned_fragment_jit(
             params_template, dummy_layer_idx, manipulator, frag_metadata_frozen[1]
         )
-        _ = _fused_unpack_and_apply_scanned_fragment_jit(
-            params_template, dummy_layer_idx, dummy_1_packed, manipulator, frag_metadata_frozen[1]
-        )
+        if not USE_SHARDED_APPLY:
+          _ = _fused_unpack_and_apply_scanned_fragment_jit(
+              params_template, dummy_layer_idx, dummy_1_packed, manipulator, frag_metadata_frozen[1]
+          )
         del dummy_1_packed
       del dummy_0_packed
     max_logging.log(f"Learner {learner_idx}: Built 1D fragment packing metadata and pre-warmed JIT kernels for {num_fragments} fragments")
+    # Lazily-built (flat_apply, scanned_apply) with out_shardings pinned to the
+    # live params shardings; see `_make_pinned_apply_fns`.
+    pinned_apply_fns = [None]
+    if USE_SHARDED_APPLY:
+      max_logging.log(
+          f"Learner {learner_idx}: DILOCO_SHARDED_APPLY=1 (sharded CPU->TPU hop, pinned out_shardings, "
+          f"donate={DONATE_APPLY})"
+      )
 
     logging_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -776,7 +842,7 @@ def _run_learner_loop(
 
           # 2. Move onto TPU submesh HBM.
           #
-          # NOTE: this MUST stay PartitionSpec() (replicated).
+          # NOTE: on the legacy path this MUST stay PartitionSpec() (replicated).
           # Attempting to preserve the fragment's own spec (P('fsdp')) here
           # made `_fused_unpack_and_apply_*_jit` emit params with a different
           # sharding than `state_mesh_shardings`, and the NEXT p_train_step
@@ -789,15 +855,25 @@ def _run_learner_loop(
           #  that is a separate change requiring explicit out_shardings on the
           #  fused kernels.
           #
-          # This is cheap on the colocated path anyway: the source is already on
-          # this slice's CPU devices, so the replicate+transfer is worker-local
-          # rather than a client RPC.
+          # DILOCO_SHARDED_APPLY=1 is that separate change: the spec is kept
+          # (1/8 of the bytes per chip) and the apply kernels pin out_shardings.
+          #
+          # CORRECTION to an earlier note here: the source is NOT always on this
+          # slice's CPU devices. The syncer aggregates on learner 0's colocated
+          # CPU mesh, so for learner i>0 this is a cross-host transfer, and with
+          # P() it moved (#chips x fragment) bytes, ~3.6 GB/step for Qwen3-8B.
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
-            default_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-            received_tpu_packed = {
-                dt: jax.device_put(arr, default_shd)
-                for dt, arr in received_packed.items()
-            }
+            if USE_SHARDED_APPLY:
+              received_tpu_packed = {
+                  dt: jax.device_put(arr, _same_spec_sharding(arr, mesh))
+                  for dt, arr in received_packed.items()
+              }
+            else:
+              default_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+              received_tpu_packed = {
+                  dt: jax.device_put(arr, default_shd)
+                  for dt, arr in received_packed.items()
+              }
 
           # 3. Put pre-transferred TPU 1D buffers into bounded queue
           prefetch_queue.put((sync_step, frag_idx, received_tpu_packed), timeout=300.0)
@@ -920,13 +996,22 @@ def _run_learner_loop(
 
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param)
+              if USE_SHARDED_APPLY:
+                if pinned_apply_fns[0] is None:
+                  pinned_apply_fns[0] = _make_pinned_apply_fns(
+                      jax.tree_util.tree_map(lambda x: x.sharding, params), donate=DONATE_APPLY
+                  )
+                flat_apply_fn, scanned_apply_fn = pinned_apply_fns[0]
+              else:
+                flat_apply_fn = _fused_unpack_and_apply_flat_fragment_jit
+                scanned_apply_fn = _fused_unpack_and_apply_scanned_fragment_jit
               if frag_idx == 0:
-                new_params = _fused_unpack_and_apply_flat_fragment_jit(
+                new_params = flat_apply_fn(
                     params, received_tpu_packed, manipulator, frag_metadata_frozen[0]
                 )
               else:
                 layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
-                new_params = _fused_unpack_and_apply_scanned_fragment_jit(
+                new_params = scanned_apply_fn(
                     params, layer_idx, received_tpu_packed, manipulator, frag_metadata_frozen[frag_idx]
                 )
 
