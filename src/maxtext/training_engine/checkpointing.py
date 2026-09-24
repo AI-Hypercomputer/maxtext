@@ -40,22 +40,63 @@ class CheckpointState:
   micro_step_count: int = 0
 
 
-_PATHWAYS_PERSISTENCE_REGISTERED = False
+_PERSISTENCE = "persistence"
+_COLOCATED_PYTHON = "colocated_python"
+_PATHWAYS_CHECKPOINTING_IMPLS = (_PERSISTENCE, _COLOCATED_PYTHON)
+
+# Which impl this process registered, or None if registration has not succeeded yet. Orbax
+# registers type handlers process-globally, so this doubles as the conflict detector.
+_REGISTERED_IMPL: str | None = None
+
+# Handlers that actually dispatch writes off the controller under `persistence`. Anything else
+# means Orbax fell back to the controller-side handler, which stages every shard through
+# proxy-pod host RAM and OOMs at 397B scale.
+_PATHWAYS_PERSISTENCE_HANDLERS = ("CloudPathwaysArrayHandler", "PathwaysPersistenceArrayHandler")
 
 
-def _maybe_register_pathways_persistence() -> None:
-  """Registers Orbax Pathways persistence array handler, if applicable.
+class PathwaysCheckpointingUnavailableError(RuntimeError):
+  """Pathways checkpointing was explicitly requested but could not be registered."""
+
+
+def _maybe_register_pathways_persistence(impl_name: str = _PERSISTENCE) -> None:
+  """Registers the Orbax Pathways array handler for `impl_name`, if applicable.
 
   When ENABLE_PATHWAYS_PERSISTENCE=1, delegates checkpoint saving directly
   from TPU workers to storage (GCS), bypassing host RAM staging.
+
+  Setting the environment variable is an explicit request, so a failure to install
+  the handler raises rather than degrading. The silent fallback is controller-side
+  host staging, which exhausts proxy-pod memory at 397B scale, and it surfaces only
+  once the first save is attempted -- long after the run looks healthy.
+
+  Args:
+    impl_name: Which Pathways implementation to register; one of
+      `_PATHWAYS_CHECKPOINTING_IMPLS`. `persistence` is the shipped default;
+      `colocated_python` additionally requires a version-matched sidecar container.
+
+  Raises:
+    ValueError: If `impl_name` is not a known implementation.
+    PathwaysCheckpointingUnavailableError: If ENABLE_PATHWAYS_PERSISTENCE=1 but the
+      requested handler could not be registered for jax.Array, or if a different
+      implementation is already registered in this process.
   """
-  global _PATHWAYS_PERSISTENCE_REGISTERED
-  if _PATHWAYS_PERSISTENCE_REGISTERED:
+  global _REGISTERED_IMPL
+  if impl_name not in _PATHWAYS_CHECKPOINTING_IMPLS:
+    raise ValueError(
+        f"unknown pathways_checkpointing_impl {impl_name!r}; expected one of {_PATHWAYS_CHECKPOINTING_IMPLS}."
+    )
+  if _REGISTERED_IMPL is not None:
+    if _REGISTERED_IMPL != impl_name:
+      raise PathwaysCheckpointingUnavailableError(
+          f"Orbax type handlers are registered process-globally and this process already "
+          f"registered {_REGISTERED_IMPL!r}; cannot also serve {impl_name!r}. The impl affects "
+          "every save and restore, so mixing them would silently apply one mode to the other's "
+          "checkpoints."
+      )
     return
   if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
     return
 
-  _PATHWAYS_PERSISTENCE_REGISTERED = True
   try:
     # pylint: disable=g-import-not-at-top,import-outside-toplevel
     import orbax.checkpoint.pathways as ocp_pathways
@@ -64,38 +105,66 @@ def _maybe_register_pathways_persistence() -> None:
 
     # pylint: enable=g-import-not-at-top,import-outside-toplevel
 
+    if impl_name == _COLOCATED_PYTHON:
+      impl = ocp_pathways.CheckpointingImpl.COLOCATED_PYTHON
+    else:
+      impl = ocp_pathways.CheckpointingImpl.PERSISTENCE
+
     ocp_pathways.register_type_handlers(
         use_single_replica_array_handler=False,
-        checkpointing_impl=ocp_pathways.CheckpointingImpl.PERSISTENCE,
+        checkpointing_impl=impl,
         # Preserve array metadata store required for pytrees with typed PRNG keys.
         array_metadata_store=array_metadata_store_lib.Store(),
     )
 
     handler = type_handler_registry.get_type_handler(jax.Array)
     handler_name = type(handler).__name__
-    store = getattr(handler, "_array_metadata_store", None)
-    if handler_name in ("CloudPathwaysArrayHandler", "PathwaysPersistenceArrayHandler"):
-      if store is None:
-        logging.error(
-            "Registered %s but array metadata store is None; saving may fail on typed PRNG keys.",
-            handler_name,
-        )
-      else:
-        logging.info(
-            "Registered Pathways persistence array handler (%s, store=%s); TPUs will write directly to storage.",
-            handler_name,
-            type(store).__name__,
-        )
-    else:
-      logging.warning(
-          "Pathways persistence registration fell back: jax.Array is handled by %s, not a persistence handler.",
-          handler_name,
-      )
   except (ImportError, AttributeError, ModuleNotFoundError, NotImplementedError) as e:
-    logging.warning(
-        "Pathways persistence requested but unavailable on this backend (%s). Falling back to host-staged checkpointing.",
-        e,
+    raise PathwaysCheckpointingUnavailableError(
+        f"ENABLE_PATHWAYS_PERSISTENCE=1 explicitly requested Pathways checkpointing "
+        f"(impl={impl_name!r}), but registering the Orbax Pathways array handler failed "
+        f"({type(e).__name__}: {e}). Refusing to fall back to controller-side host-staged "
+        "checkpointing, which exhausts proxy-pod memory at 397B scale. Unset "
+        "ENABLE_PATHWAYS_PERSISTENCE to run without Pathways checkpointing."
+    ) from e
+
+  if impl_name == _COLOCATED_PYTHON:
+    # COLOCATED_PYTHON is the only impl in this Orbax build that attaches a dispatcher, so
+    # has_dispatcher() distinguishes it from NO_DISPATCHER -- the controller-side fallback --
+    # without reaching into Orbax internals. Checking the class name alone would not: the
+    # NO_DISPATCHER fallback yields an ArrayHandler too, just without a dispatcher.
+    registered_as_requested = handler_name == "ArrayHandler" and handler.has_dispatcher()
+    expected = "an ArrayHandler with a dispatcher attached"
+  else:
+    registered_as_requested = handler_name in _PATHWAYS_PERSISTENCE_HANDLERS
+    expected = f"one of {_PATHWAYS_PERSISTENCE_HANDLERS}"
+
+  if not registered_as_requested:
+    raise PathwaysCheckpointingUnavailableError(
+        f"ENABLE_PATHWAYS_PERSISTENCE=1 explicitly requested Pathways checkpointing "
+        f"(impl={impl_name!r}), but after registration jax.Array is handled by {handler_name}, "
+        f"not {expected}. This is the controller-side staging path that exhausts proxy-pod "
+        "memory at 397B scale; aborting before the first save rather than OOM-ing mid-run."
     )
+
+  store = getattr(handler, "_array_metadata_store", None)
+  if store is None:
+    logging.error(
+        "Registered %s but array metadata store is None; saving may fail on typed PRNG keys.",
+        handler_name,
+    )
+  else:
+    logging.info(
+        "Registered Pathways array handler (impl=%s, %s, store=%s); "
+        "TPUs will write directly to storage.",
+        impl.name,
+        handler_name,
+        type(store).__name__,
+    )
+
+  # Latch only on success, so a failed attempt re-raises on the next construction
+  # instead of being swallowed by the early return above.
+  _REGISTERED_IMPL = impl_name
 
 
 class CheckpointManager:
@@ -114,7 +183,15 @@ class CheckpointManager:
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if checkpoint_dir:
-      _maybe_register_pathways_persistence()
+      if (
+          os.environ.get("ENABLE_PATHWAYS_PERSISTENCE") == "1"
+          and not str(checkpoint_dir).startswith("gs://")
+      ):
+        raise ValueError(
+            "ENABLE_PATHWAYS_PERSISTENCE=1 dispatches persistence writes to every "
+            f"pathways-worker; checkpoint_dir must be a gs:// URI, got {checkpoint_dir!r}."
+        )
+      _maybe_register_pathways_persistence(getattr(config, "pathways_checkpointing_impl", _PERSISTENCE))
 
       # Use configured array format (e.g. use_ocdbt=False for Pathways).
       # Build a fresh handler per item as Orbax handlers carry per-item state.

@@ -991,5 +991,245 @@ class FP8DequantizeOnLoadTest(parameterized.TestCase):
     self.assertEqual(moe_scale_sharding.spec, jax.sharding.PartitionSpec(None, None, "fsdp", "tensor"))
 
 
+class TrainingEngineCheckpointManagerTest(parameterized.TestCase):
+  """Tests for training_engine.checkpointing.CheckpointManager gs:// guard and save_optimizer_state."""
+
+  def _mock_config(self):
+    cfg = mock.MagicMock()
+    cfg.checkpoint_storage_use_ocdbt = False
+    cfg.checkpoint_storage_use_zarr3 = False
+    cfg.checkpoint_storage_device_host_concurrent_gb = 8
+    cfg.checkpoint_period = 1
+    cfg.max_num_checkpoints_to_keep = 2
+    cfg.async_checkpointing = True
+    cfg.save_optimizer_state = True
+    cfg.pathways_checkpointing_impl = "persistence"
+    return cfg
+
+  @mock.patch("maxtext.training_engine.checkpointing.ocp.CheckpointManager")
+  @mock.patch("maxtext.training_engine.checkpointing.ocp.PyTreeCheckpointHandler")
+  def test_pathways_persistence_rejects_non_gs_uri_on_first_and_second_init(
+      self, mock_handler, mock_orbax_cm
+  ):
+    from maxtext.training_engine import checkpointing as engine_ckpt  # pylint: disable=import-outside-toplevel
+
+    cfg = self._mock_config()
+    rejected_constructions = 0
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      engine_ckpt._REGISTERED_IMPL = None
+      with self.assertRaisesRegex(ValueError, r"checkpoint_dir must be a gs:// URI"):
+        engine_ckpt.CheckpointManager("/tmp/local_dir", cfg)
+      rejected_constructions += 1
+
+      # Second construction when an impl is already registered:
+      engine_ckpt._REGISTERED_IMPL = "persistence"
+      with self.assertRaisesRegex(ValueError, r"checkpoint_dir must be a gs:// URI"):
+        engine_ckpt.CheckpointManager("/tmp/local_dir", cfg)
+      rejected_constructions += 1
+
+    self.assertEqual(rejected_constructions, 2)
+    mock_orbax_cm.assert_not_called()
+
+  @mock.patch("maxtext.training_engine.checkpointing._maybe_register_pathways_persistence")
+  @mock.patch("maxtext.training_engine.checkpointing.ocp.CheckpointManager")
+  @mock.patch("maxtext.training_engine.checkpointing.ocp.PyTreeCheckpointHandler")
+  def test_pathways_persistence_accepts_gs_uri_and_registers(
+      self, mock_handler, mock_orbax_cm, mock_register
+  ):
+    from maxtext.training_engine import checkpointing as engine_ckpt  # pylint: disable=import-outside-toplevel
+
+    cfg = self._mock_config()
+    gcs_uri = "gs://yixuannwang-maxtext-dataset/trellis/0921"
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      mgr = engine_ckpt.CheckpointManager(gcs_uri, cfg)
+    mock_register.assert_called_once_with("persistence")
+    mock_orbax_cm.assert_called_once()
+    self.assertEqual(mock_orbax_cm.call_args.kwargs["directory"], gcs_uri)
+    self.assertIsNotNone(mgr._checkpoint_manager)
+
+
+def _fake_array_handler(class_name: str, store: Any = object(), has_dispatcher: bool | None = None):
+  """Builds a stand-in Orbax array handler for the mode assertions.
+
+  Args:
+    class_name: Drives the `persistence` handler-name check.
+    store: Stand-in array metadata store.
+    has_dispatcher: When not None, the handler exposes `has_dispatcher()` returning
+      this value, which is what the `colocated_python` check reads.
+  """
+  attrs: dict[str, Any] = {"_array_metadata_store": store}
+  if has_dispatcher is not None:
+    attrs["has_dispatcher"] = lambda self: has_dispatcher
+  return type(class_name, (), attrs)()
+
+
+class _PathwaysRegistrationTestBase(parameterized.TestCase):
+  """Isolates the process-global registration latch between tests."""
+
+  def setUp(self):
+    super().setUp()
+    from maxtext.training_engine import checkpointing as engine_ckpt  # pylint: disable=import-outside-toplevel
+
+    self.engine_ckpt = engine_ckpt
+    self._saved_latch = engine_ckpt._REGISTERED_IMPL
+    engine_ckpt._REGISTERED_IMPL = None
+
+  def tearDown(self):
+    self.engine_ckpt._REGISTERED_IMPL = self._saved_latch
+    super().tearDown()
+
+
+class PathwaysPersistenceFailLoudTest(_PathwaysRegistrationTestBase):
+  """ENABLE_PATHWAYS_PERSISTENCE=1 is an explicit request: register it or crash.
+
+  Silent degradation lands on the controller-side handler, which stages every shard
+  through proxy-pod host RAM and OOMs at 397B scale ~25 minutes into a run.
+  """
+
+  @mock.patch("orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler")
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_registration_failure_raises_every_time(self, mock_register, mock_get_handler):
+    """A failed attempt must not latch, or the retry would silently 'succeed'."""
+    mock_register.side_effect = ImportError("no pathways backend")
+
+    raises_observed = 0
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      for _ in range(2):
+        with self.assertRaisesRegex(
+            self.engine_ckpt.PathwaysCheckpointingUnavailableError,
+            r"Refusing to fall back to controller-side host-staged checkpointing",
+        ):
+          self.engine_ckpt._maybe_register_pathways_persistence()
+        raises_observed += 1
+
+    self.assertEqual(raises_observed, 2)
+    self.assertEqual(mock_register.call_count, 2)
+    self.assertIsNone(self.engine_ckpt._REGISTERED_IMPL)
+    mock_get_handler.assert_not_called()
+
+  @mock.patch("orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler")
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_non_persistence_handler_raises_and_names_it(self, mock_register, mock_get_handler):
+    """Registration 'succeeding' but yielding the controller-side handler is still a failure."""
+    mock_get_handler.return_value = _fake_array_handler("ArrayHandler")
+
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      with self.assertRaisesRegex(
+          self.engine_ckpt.PathwaysCheckpointingUnavailableError,
+          r"jax\.Array is handled by ArrayHandler",
+      ):
+        self.engine_ckpt._maybe_register_pathways_persistence()
+
+    mock_register.assert_called_once()
+    self.assertIsNone(self.engine_ckpt._REGISTERED_IMPL)
+
+  @parameterized.named_parameters(
+      ("cloud", "CloudPathwaysArrayHandler"),
+      ("persistence", "PathwaysPersistenceArrayHandler"),
+  )
+  @mock.patch("orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler")
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_success_latches_and_registers_exactly_once(self, handler_name, mock_register, mock_get_handler):
+    mock_get_handler.return_value = _fake_array_handler(handler_name)
+
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      self.engine_ckpt._maybe_register_pathways_persistence()
+      self.engine_ckpt._maybe_register_pathways_persistence()
+
+    self.assertEqual(mock_register.call_count, 1)
+    self.assertEqual(self.engine_ckpt._REGISTERED_IMPL, "persistence")
+
+  @mock.patch("orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler")
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_env_unset_is_an_unchanged_noop(self, mock_register, mock_get_handler):
+    """Back-compat: without the explicit request, behavior is untouched."""
+    with mock.patch.dict(os.environ):
+      os.environ.pop("ENABLE_PATHWAYS_PERSISTENCE", None)
+      self.engine_ckpt._maybe_register_pathways_persistence()
+
+    mock_register.assert_not_called()
+    mock_get_handler.assert_not_called()
+    self.assertIsNone(self.engine_ckpt._REGISTERED_IMPL)
+
+
+class PathwaysCheckpointingImplSelectorTest(_PathwaysRegistrationTestBase):
+  """`pathways_checkpointing_impl` selects the Orbax impl; the default stays persistence."""
+
+  @parameterized.named_parameters(
+      ("persistence", "persistence", "PERSISTENCE", "CloudPathwaysArrayHandler", None),
+      ("colocated_python", "colocated_python", "COLOCATED_PYTHON", "ArrayHandler", True),
+  )
+  @mock.patch("orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler")
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_selector_maps_to_exact_orbax_impl(
+      self, impl_name, expected_enum, handler_cls, has_dispatcher, mock_register, mock_get_handler
+  ):
+    import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=import-outside-toplevel
+
+    mock_get_handler.return_value = _fake_array_handler(handler_cls, has_dispatcher=has_dispatcher)
+
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      self.engine_ckpt._maybe_register_pathways_persistence(impl_name)
+
+    mock_register.assert_called_once()
+    kwargs = mock_register.call_args.kwargs
+    # Exact enum member, not just "an impl was passed" -- a PERSISTENCE/COLOCATED_PYTHON
+    # swap is otherwise completely invisible.
+    self.assertIs(kwargs["checkpointing_impl"], getattr(ocp_pathways.CheckpointingImpl, expected_enum))
+    # D3: the metadata store is required in BOTH modes for typed PRNG keys.
+    self.assertIn("array_metadata_store", kwargs)
+    self.assertFalse(kwargs["use_single_replica_array_handler"])
+    self.assertEqual(self.engine_ckpt._REGISTERED_IMPL, impl_name)
+
+  @mock.patch("orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler")
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_colocated_without_dispatcher_is_the_oom_path_and_raises(self, mock_register, mock_get_handler):
+    """NO_DISPATCHER also yields an ArrayHandler -- only has_dispatcher() separates them."""
+    mock_get_handler.return_value = _fake_array_handler("ArrayHandler", has_dispatcher=False)
+
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      with self.assertRaisesRegex(
+          self.engine_ckpt.PathwaysCheckpointingUnavailableError,
+          r"not an ArrayHandler with a dispatcher attached",
+      ):
+        self.engine_ckpt._maybe_register_pathways_persistence("colocated_python")
+
+    mock_register.assert_called_once()
+    self.assertIsNone(self.engine_ckpt._REGISTERED_IMPL)
+
+  @mock.patch("orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler")
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_switching_impl_in_one_process_raises(self, mock_register, mock_get_handler):
+    """Orbax registration is process-global, so a second, different impl cannot be honored."""
+    mock_get_handler.return_value = _fake_array_handler("CloudPathwaysArrayHandler")
+
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      self.engine_ckpt._maybe_register_pathways_persistence("persistence")
+      with self.assertRaisesRegex(
+          self.engine_ckpt.PathwaysCheckpointingUnavailableError,
+          r"already registered 'persistence'; cannot also serve 'colocated_python'",
+      ):
+        self.engine_ckpt._maybe_register_pathways_persistence("colocated_python")
+
+    self.assertEqual(mock_register.call_count, 1)
+    self.assertEqual(self.engine_ckpt._REGISTERED_IMPL, "persistence")
+
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_unknown_impl_raises_before_touching_orbax(self, mock_register):
+    with mock.patch.dict(os.environ, {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      with self.assertRaisesRegex(ValueError, r"unknown pathways_checkpointing_impl 'remote_python'"):
+        self.engine_ckpt._maybe_register_pathways_persistence("remote_python")
+
+    mock_register.assert_not_called()
+
+  def test_base_yml_default_is_persistence(self):
+    """Slice A: the shipped default must not change behavior for existing runs."""
+    from maxtext.configs import types as config_types  # pylint: disable=import-outside-toplevel
+
+    field = config_types.Checkpointing.model_fields["pathways_checkpointing_impl"]
+    self.assertEqual(field.default, "persistence")
+
+
 if __name__ == "__main__":
   absltest.main()
+
