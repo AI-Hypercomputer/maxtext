@@ -654,6 +654,31 @@ def _outer_sgd_stacked_jit(outer_1d, trace_1d, *learner_1d, lr: float, momentum:
   return new_outer.astype(outer_1d.dtype), new_trace.astype(trace_1d.dtype)
 
 
+@functools.partial(jax.jit, static_argnames=("lr", "momentum", "num_learners"))
+def _outer_sgd_tree_jit(outer, trace, *learners, lr: float, momentum: float, num_learners: int):
+  """`_outer_sgd_stacked_jit` over a dict of payload arrays in ONE executable.
+
+  With DILOCO_UNPACKED_TRANSFER the payload has one array per leaf (~10 for a
+  transformer layer), so per-key dispatch multiplied syncer host work and made
+  learner 1 sync-latency bound (v6e-pwns-s14su2: prefetch queue empty at get in
+  44/115 learner-1 applies). Same math, same accumulation order (fp32).
+  """
+  new_outer, new_trace = {}, {}
+  for k in outer:
+    acc = learners[0][k].astype(jnp.float32)
+    for x in learners[1:]:
+      acc = acc + x[k].astype(jnp.float32)
+    avg_inner = acc / float(num_learners)
+    outer_f = outer[k].astype(jnp.float32)
+    trace_f = trace[k].astype(jnp.float32)
+    pseudo_grad = outer_f - avg_inner
+    nt = momentum * trace_f + pseudo_grad
+    update = lr * (pseudo_grad + momentum * nt)
+    new_outer[k] = (outer_f - update).astype(outer[k].dtype)
+    new_trace[k] = nt.astype(trace[k].dtype)
+  return new_outer, new_trace
+
+
 def _extract_scalar_metrics(tree):
   """Extracts Python scalar numbers from a JAX metric PyTree safely without dynamic TPU graph compilation."""
   try:
@@ -985,10 +1010,10 @@ def _run_learner_loop(
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
             if USE_SHARDED_APPLY:
               frag_specs = packed_specs.get(frag_idx, {})
-              received_tpu_packed = {
-                  dt: jax.device_put(arr, _prefetch_target_sharding(arr, mesh, frag_specs.get(dt)))
-                  for dt, arr in received_packed.items()
-              }
+              received_tpu_packed = jax.device_put(
+                  dict(received_packed),
+                  {dt: _prefetch_target_sharding(arr, mesh, frag_specs.get(dt)) for dt, arr in received_packed.items()},
+              )
             else:
               default_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
               received_tpu_packed = {
@@ -1629,11 +1654,12 @@ def _run_syncer_loop(
             # cross-host copy of exactly one fragment.
             aligned = []
             for i in range(num_learners):
-              aligned.append({
-                  dt: (arr if arr.sharding.mesh is agg_mesh
-                       else jax.device_put(arr, _same_spec_sharding(arr, agg_mesh)))
-                  for dt, arr in learner_frags_host[i].items()
-              })
+              src = learner_frags_host[i]
+              if all(arr.sharding.mesh is agg_mesh for arr in src.values()):
+                aligned.append(src)
+              else:
+                # One batched pytree device_put instead of one call per key.
+                aligned.append(jax.device_put(src, {dt: _same_spec_sharding(arr, agg_mesh) for dt, arr in src.items()}))
 
             state_key = (frag_idx, t)
             if state_key not in syncer_frag_params_1d:
@@ -1646,22 +1672,21 @@ def _run_syncer_loop(
                                      _same_spec_sharding(aligned[0][dt], agg_mesh))
                   for dt in payload_keys
               }
+              syncer_frag_params_1d[state_key] = {dt: syncer_frag_params_1d[state_key][dt] for dt in payload_keys}
               _assert_on_platform(syncer_frag_params_1d[state_key], "cpu",
                                   f"syncer outer init frag {frag_idx} target {t}")
 
-            new_outer_host = {}
-            for dt in payload_keys:
-              new_outer, new_trace = _outer_sgd_stacked_jit(
-                  syncer_frag_params_1d[state_key][dt],
-                  syncer_frag_trace_1d[state_key][dt],
-                  *[aligned[i][dt] for i in range(num_learners)],
-                  lr=config.diloco_outer_lr,
-                  momentum=config.diloco_outer_momentum,
-                  num_learners=num_learners,
-              )
-              syncer_frag_params_1d[state_key][dt] = new_outer
-              syncer_frag_trace_1d[state_key][dt] = new_trace
-              new_outer_host[dt] = new_outer
+            new_outer_tree, new_trace_tree = _outer_sgd_tree_jit(
+                syncer_frag_params_1d[state_key],
+                syncer_frag_trace_1d[state_key],
+                *[{dt: aligned[i][dt] for dt in payload_keys} for i in range(num_learners)],
+                lr=config.diloco_outer_lr,
+                momentum=config.diloco_outer_momentum,
+                num_learners=num_learners,
+            )
+            syncer_frag_params_1d[state_key] = dict(new_outer_tree)
+            syncer_frag_trace_1d[state_key] = dict(new_trace_tree)
+            new_outer_host = dict(new_outer_tree)
 
             if step <= (start_step + 3 * steps_between_syncs_plus_1):
               # Cheap one-off validation on the first few syncs only: prove the

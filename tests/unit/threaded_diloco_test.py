@@ -1124,6 +1124,20 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
     np.testing.assert_allclose(np.array(out2["embed"]), np.array(base["embed"]) + 1.0)
     self.assertEqual(out2["embed"].sharding.spec, P())
 
+  def test_outer_sgd_tree_matches_stacked(self):
+    """Batched (one-dispatch) outer SGD is bit-identical to the per-key kernel."""
+    from maxtext.trainers.diloco.threaded_diloco import _outer_sgd_tree_jit, _outer_sgd_stacked_jit
+
+    rng = np.random.default_rng(0)
+    keys = ["a", "b", "c"]
+    mk = lambda: {k: jnp.asarray(rng.standard_normal(16), dtype=jnp.bfloat16) for k in keys}
+    outer, trace, l0, l1 = mk(), mk(), mk(), mk()
+    no, nt = _outer_sgd_tree_jit(outer, trace, l0, l1, lr=0.1, momentum=0.9, num_learners=2)
+    for k in keys:
+      ro, rt = _outer_sgd_stacked_jit(outer[k], trace[k], l0[k], l1[k], lr=0.1, momentum=0.9, num_learners=2)
+      np.testing.assert_array_equal(np.asarray(no[k], np.float32), np.asarray(ro, np.float32))
+      np.testing.assert_array_equal(np.asarray(nt[k], np.float32), np.asarray(rt, np.float32))
+
   def test_prefetch_target_sharding_numpy_and_array_inputs(self):
     """Sharded hop is the default, so it must also work on the legacy numpy path (no .sharding)."""
     from maxtext.trainers.diloco.threaded_diloco import _prefetch_target_sharding, USE_SHARDED_APPLY
