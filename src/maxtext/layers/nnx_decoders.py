@@ -2193,6 +2193,10 @@ class NNXDecoder(nnx.Module):
             layer_kwargs["decoder_input_tokens"] = input_tokens
 
           current_kwargs = dict(layer_kwargs)
+          if isinstance(attention_metadata, dict):
+            layer_meta = attention_metadata.get(f"layer.{lyr}", attention_metadata.get(lyr))
+            if layer_meta is not None:
+              current_kwargs["attention_metadata"] = layer_meta
 
           routed_experts = current_kwargs.pop("forced_routed_experts", None)
           if routed_experts is not None:
