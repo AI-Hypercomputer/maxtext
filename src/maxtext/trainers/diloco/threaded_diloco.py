@@ -184,15 +184,52 @@ def _async_log_metrics(
     max_logging.error(f"Error in async metric logging for step {step}: {e}")
 
 
-def _frag_from_payload(payload, dt, keystr, shape, st, en):
+def _local_shard_shape(global_shape, spec, mesh):
+  """Per-device shard shape of `global_shape` under PartitionSpec `spec` on `mesh`."""
+  out = []
+  for i, dim in enumerate(global_shape):
+    entry = spec[i] if i < len(spec) else None
+    axes = () if entry is None else (entry if isinstance(entry, tuple) else (entry,))
+    n = 1
+    for a in axes:
+      n *= mesh.shape[a]
+    if dim % n:
+      return None
+    out.append(dim // n)
+  return tuple(out)
+
+
+def _local_flatten(x, mesh, spec):
+  """Shard-local flatten: each device flattens ITS OWN shard, no communication.
+
+  Result is 1-D, sharded over all mesh axes (P((all axes,))), length
+  n_devices * local_size. Keeping the wire format 1-D avoids the CPU-origin
+  multi-dim layout defect seen in v6e-pwns-s14su (RecursionError in
+  `_array_shard_arg` for BF16[5120,1,17408] with layout {2,1,0}).
+  """
+  all_axes = jax.sharding.PartitionSpec(tuple(mesh.axis_names))
+  return jax.shard_map(lambda a: jnp.reshape(a, (-1,)), mesh=mesh, in_specs=(spec,), out_specs=all_axes,
+                       check_vma=False)(x)
+
+
+def _local_unflatten(y, mesh, spec, global_shape):
+  """Inverse of `_local_flatten`."""
+  local_shape = _local_shard_shape(global_shape, spec, mesh)
+  all_axes = jax.sharding.PartitionSpec(tuple(mesh.axis_names))
+  return jax.shard_map(lambda a: jnp.reshape(a, local_shape), mesh=mesh, in_specs=(all_axes,), out_specs=spec,
+                       check_vma=False)(y)
+
+
+def _frag_from_payload(payload, dt, keystr, shape, st, en, local_layout=None):
   """One fragment leaf from a transfer payload.
 
   Packed payload (default): {dtype: 1-D buffer}; slice [st:en] and reshape.
-  Unpacked payload (DILOCO_UNPACKED_TRANSFER=1): {keystr: leaf fragment in its
-  original shape and sharding}; returned as is, so no ICI relayout is needed.
+  Unpacked payload (DILOCO_UNPACKED_TRANSFER=1): {keystr: shard-locally
+  flattened 1-D array}; un-flattened per device, so no ICI relayout is needed.
   """
   if keystr in payload:
-    return payload[keystr]
+    mesh, specs = local_layout
+    return _local_unflatten(payload[keystr], mesh, dict(specs)[keystr], shape)
   return jnp.reshape(payload[dt][st:en], shape)
 
 
@@ -203,6 +240,7 @@ def _fused_unpack_and_apply_scanned_fragment_impl(
     manipulator: Any,
     metadata_tuple: Any,
     has_replica_dim: bool = False,
+    local_layout: Any = None,
 ):
   """Fuses 1D buffer slicing, dynamic layer update, and bucketized embedding update into a single JIT kernel on TPU."""
   leaves, treedef = jax.tree_util.tree_flatten(params)
@@ -214,7 +252,7 @@ def _fused_unpack_and_apply_scanned_fragment_impl(
 
   for dt, keys, shapes, offsets in metadata_tuple:
     for keystr, shape, (st, en) in zip(keys, shapes, offsets):
-      frag = _frag_from_payload(packed_dict, dt, keystr, shape, st, en)
+      frag = _frag_from_payload(packed_dict, dt, keystr, shape, st, en, local_layout)
       if keystr.endswith("__bucket_slice"):
         b_keystr = keystr[:-14]
         if b_keystr in manipulator.bucketized_leaves_meta:
@@ -244,7 +282,7 @@ def _fused_unpack_and_apply_scanned_fragment_impl(
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
-_APPLY_STATIC_ARGNAMES = ("manipulator", "metadata_tuple", "has_replica_dim")
+_APPLY_STATIC_ARGNAMES = ("manipulator", "metadata_tuple", "has_replica_dim", "local_layout")
 
 # Default (legacy) apply kernels: no out_shardings, no donation. Output
 # shardings are whatever XLA propagates, which is only guaranteed to match
@@ -260,6 +298,7 @@ def _fused_unpack_and_apply_flat_fragment_impl(
     manipulator: Any,
     metadata_tuple: Any,
     has_replica_dim: bool = False,
+    local_layout: Any = None,
 ):
   """Fuses 1D buffer slicing and static parameter update for Fragment 0 (including remainder rows) on TPU."""
   leaves, treedef = jax.tree_util.tree_flatten(params)
@@ -267,7 +306,7 @@ def _fused_unpack_and_apply_flat_fragment_impl(
 
   for dt, keys, shapes, offsets in metadata_tuple:
     for keystr, shape, (st, en) in zip(keys, shapes, offsets):
-      frag = _frag_from_payload(packed_dict, dt, keystr, shape, st, en)
+      frag = _frag_from_payload(packed_dict, dt, keystr, shape, st, en, local_layout)
       if keystr.endswith("__rem"):
         b_keystr = keystr[:-5]
         if b_keystr in manipulator.bucketized_leaves_meta:
@@ -357,16 +396,17 @@ def _make_pinned_apply_fns(params_shardings: Any, donate: bool):
   return flat_fn, scanned_fn
 
 
-def _emit(packed_dict, flat_pieces, keystr, frag, unpacked):
-  """Unpacked: keep the leaf fragment as its own array (original shape/sharding).
-  Packed: flatten into the dtype group's 1-D buffer."""
+def _emit(packed_dict, flat_pieces, keystr, frag, unpacked, local_layout=None):
+  """Unpacked: this leaf becomes its own shard-locally flattened 1-D array.
+  Packed: flatten globally into the dtype group's 1-D buffer."""
   if unpacked:
-    packed_dict[keystr] = frag
+    mesh, specs = local_layout
+    packed_dict[keystr] = _local_flatten(frag, mesh, dict(specs)[keystr])
   else:
     flat_pieces.append(jnp.reshape(frag, (-1,)))
 
 
-@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim", "unpacked"))
+@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim", "unpacked", "local_layout"))
 def _fused_extract_and_pack_scanned_fragment_jit(
     params: Any,
     layer_idx: jax.Array,
@@ -374,6 +414,7 @@ def _fused_extract_and_pack_scanned_fragment_jit(
     metadata_tuple: Any,
     has_replica_dim: bool = False,
     unpacked: bool = False,
+    local_layout: Any = None,
 ) -> dict[str, jax.Array]:
   """Fuses dynamic layer extraction, bucket extraction, and 1D buffer packing into a single JIT kernel on TPU."""
   leaves, _ = jax.tree_util.tree_flatten(params)
@@ -394,7 +435,7 @@ def _fused_extract_and_pack_scanned_fragment_jit(
             v = leaves[b_idx]
             b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
             frag = jax.lax.dynamic_slice_in_dim(v, layer_idx * chunk_size, shape[b_axis], axis=b_ax)
-            _emit(packed_dict, flat_pieces, keystr, frag, unpacked)
+            _emit(packed_dict, flat_pieces, keystr, frag, unpacked, local_layout)
       else:
         idx = manipulator.keystr_to_leaf_index.get(keystr)
         if idx is not None:
@@ -405,20 +446,21 @@ def _fused_extract_and_pack_scanned_fragment_jit(
               else manipulator.param_scan_axis
           )
           frag = jax.lax.dynamic_slice_in_dim(v, start_idx, slice_len, axis=axis)
-          _emit(packed_dict, flat_pieces, keystr, frag, unpacked)
+          _emit(packed_dict, flat_pieces, keystr, frag, unpacked, local_layout)
     if not unpacked:
       packed_dict[dt] = jnp.concatenate(flat_pieces, axis=0) if flat_pieces else jnp.array([], dtype=dt)
 
   return packed_dict
 
 
-@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim", "unpacked"))
+@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim", "unpacked", "local_layout"))
 def _fused_extract_and_pack_flat_fragment_jit(
     params: Any,
     manipulator: Any,
     metadata_tuple: Any,
     has_replica_dim: bool = False,
     unpacked: bool = False,
+    local_layout: Any = None,
 ) -> dict[str, jax.Array]:
   """Fuses static non-scanned parameter extraction and 1D buffer packing for Fragment 0 into a single JIT kernel on TPU."""
   leaves, _ = jax.tree_util.tree_flatten(params)
@@ -436,12 +478,12 @@ def _fused_extract_and_pack_flat_fragment_jit(
             b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
             st_pos = manipulator.num_transformer_fragments * chunk_size
             frag = jax.lax.dynamic_slice_in_dim(v, jnp.asarray(st_pos, dtype=jnp.int32), rem_size, axis=b_ax)
-            _emit(packed_dict, flat_pieces, keystr, frag, unpacked)
+            _emit(packed_dict, flat_pieces, keystr, frag, unpacked, local_layout)
       else:
         idx = manipulator.keystr_to_leaf_index.get(keystr)
         if idx is not None:
           v = leaves[idx]
-          _emit(packed_dict, flat_pieces, keystr, v, unpacked)
+          _emit(packed_dict, flat_pieces, keystr, v, unpacked, local_layout)
     if not unpacked:
       packed_dict[dt] = jnp.concatenate(flat_pieces, axis=0) if flat_pieces else jnp.array([], dtype=dt)
 
@@ -834,11 +876,27 @@ def _run_learner_loop(
         sample_frag = manipulator.get_flat_fragment(params_template, f)
         frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
       frag_metadata_frozen = {f: _freeze_metadata(m) for f, m in frag_metadata.items()}
+      # DILOCO_UNPACKED_TRANSFER: per-leaf PartitionSpecs for the shard-local
+      # flatten/unflatten (static jit args, hence a hashable (mesh, tuple) pair).
+      local_layout = None
+      if USE_UNPACKED_TRANSFER:
+        tmpl_leaves = jax.tree_util.tree_leaves(params_template)
+        leaf_specs = {}
+        for f_meta in frag_metadata.values():
+          for m in f_meta.values():
+            for keystr, shape in zip(m["keys"], m["shapes"]):
+              base = keystr[:-14] if keystr.endswith("__bucket_slice") else (keystr[:-5] if keystr.endswith("__rem") else keystr)
+              idx = manipulator.keystr_to_leaf_index.get(base)
+              spec = getattr(tmpl_leaves[idx].sharding, "spec", jax.sharding.PartitionSpec()) if idx is not None else jax.sharding.PartitionSpec()
+              if _local_shard_shape(tuple(shape), spec, mesh) is None:
+                raise ValueError(f"DILOCO_UNPACKED_TRANSFER: fragment {keystr} shape {shape} not divisible under {spec}")
+              leaf_specs[keystr] = spec
+        local_layout = (mesh, tuple(sorted(leaf_specs.items())))
       # Pre-warm JIT extract & apply kernels on TPU
       # (With DILOCO_SHARDED_APPLY the apply kernels donate `params`, so they
       # cannot be pre-warmed on the live state; they compile on first use.)
       dummy_0_packed = _fused_extract_and_pack_flat_fragment_jit(
-          params_template, manipulator, frag_metadata_frozen[0], unpacked=USE_UNPACKED_TRANSFER
+          params_template, manipulator, frag_metadata_frozen[0], unpacked=USE_UNPACKED_TRANSFER, local_layout=local_layout
       )
       if not USE_SHARDED_APPLY:
         _ = _fused_unpack_and_apply_flat_fragment_jit(
@@ -847,7 +905,7 @@ def _run_learner_loop(
       if num_fragments > 1:
         dummy_layer_idx = jnp.asarray(0, dtype=jnp.int32)
         dummy_1_packed = _fused_extract_and_pack_scanned_fragment_jit(
-            params_template, dummy_layer_idx, manipulator, frag_metadata_frozen[1], unpacked=USE_UNPACKED_TRANSFER
+            params_template, dummy_layer_idx, manipulator, frag_metadata_frozen[1], unpacked=USE_UNPACKED_TRANSFER, local_layout=local_layout
         )
         if not USE_SHARDED_APPLY:
           _ = _fused_unpack_and_apply_scanned_fragment_jit(
@@ -1017,12 +1075,12 @@ def _run_learner_loop(
               params = nnx.state(state.model, nnx.Param)
               if frag_idx == 0:
                 packed_frag_data = _fused_extract_and_pack_flat_fragment_jit(
-                    params, manipulator, frag_metadata_frozen[0], unpacked=USE_UNPACKED_TRANSFER
+                    params, manipulator, frag_metadata_frozen[0], unpacked=USE_UNPACKED_TRANSFER, local_layout=local_layout
                 )
               else:
                 layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
                 packed_frag_data = _fused_extract_and_pack_scanned_fragment_jit(
-                    params, layer_idx, manipulator, frag_metadata_frozen[frag_idx], unpacked=USE_UNPACKED_TRANSFER
+                    params, layer_idx, manipulator, frag_metadata_frozen[frag_idx], unpacked=USE_UNPACKED_TRANSFER, local_layout=local_layout
                 )
               if frag_idx not in packed_specs:
                 # Remembered for the prefetch thread's CPU->TPU hop on the
@@ -1077,12 +1135,13 @@ def _run_learner_loop(
                 scanned_apply_fn = _fused_unpack_and_apply_scanned_fragment_jit
               if frag_idx == 0:
                 new_params = flat_apply_fn(
-                    params, received_tpu_packed, manipulator, frag_metadata_frozen[0]
+                    params, received_tpu_packed, manipulator, frag_metadata_frozen[0], local_layout=local_layout
                 )
               else:
                 layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
                 new_params = scanned_apply_fn(
-                    params, layer_idx, received_tpu_packed, manipulator, frag_metadata_frozen[frag_idx]
+                    params, layer_idx, received_tpu_packed, manipulator, frag_metadata_frozen[frag_idx],
+                    local_layout=local_layout,
                 )
 
               nnx.update(state.model, new_params)

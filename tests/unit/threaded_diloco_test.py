@@ -1092,24 +1092,35 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
     meta1 = _freeze_metadata(_build_fragment_1d_metadata(manipulator.get_flat_fragment(params, 1)))
     meta0 = _freeze_metadata(_build_fragment_1d_metadata(manipulator.get_flat_fragment(params, 0)))
     layer = jnp.asarray(2, dtype=jnp.int32)
+    specs = {}
+    for m in (meta1, meta0):
+      for _, keys, _, _ in m:
+        for k in keys:
+          specs[k] = P(None, "x") if "layers" in k else P()
+    local_layout = (mesh, tuple(sorted(specs.items())))
 
     packed = _fused_extract_and_pack_scanned_fragment_jit(params, layer, manipulator, meta1)
-    unpacked = _fused_extract_and_pack_scanned_fragment_jit(params, layer, manipulator, meta1, unpacked=True)
+    unpacked = _fused_extract_and_pack_scanned_fragment_jit(
+        params, layer, manipulator, meta1, unpacked=True, local_layout=local_layout
+    )
     self.assertTrue(all(isinstance(k, str) for k in unpacked))
     w_key = [k for k in unpacked][0]
-    self.assertEqual(unpacked[w_key].shape, (1, hidden))
-    self.assertEqual(unpacked[w_key].sharding.spec, P(None, "x"))  # leaf sharding preserved, no 1-D relayout
-    np.testing.assert_allclose(np.array(unpacked[w_key]).reshape(-1), np.array(list(packed.values())[0]))
+    # 1-D on the wire, sharded over all mesh axes (shard-local flatten, no relayout).
+    self.assertEqual(unpacked[w_key].ndim, 1)
+    self.assertEqual(unpacked[w_key].sharding.spec, P(("x",)))
+    np.testing.assert_allclose(np.array(unpacked[w_key]), np.array(list(packed.values())[0]))
 
     flat_fn, scanned_fn = _make_pinned_apply_fns(shardings, donate=False)
     upd = {k: v * 3.0 for k, v in unpacked.items()}
-    out = scanned_fn(params, layer, upd, manipulator, meta1)
+    out = scanned_fn(params, layer, upd, manipulator, meta1, local_layout=local_layout)
     np.testing.assert_allclose(np.array(out["layers"]["w"][2]), np.array(base["layers"]["w"][2]) * 3.0)
     np.testing.assert_allclose(np.array(out["layers"]["w"][1]), np.array(base["layers"]["w"][1]))
     self.assertEqual(out["layers"]["w"].sharding.spec, P(None, "x"))
 
-    flat_unpacked = _fused_extract_and_pack_flat_fragment_jit(out, manipulator, meta0, unpacked=True)
-    out2 = flat_fn(out, {k: v + 1.0 for k, v in flat_unpacked.items()}, manipulator, meta0)
+    flat_unpacked = _fused_extract_and_pack_flat_fragment_jit(
+        out, manipulator, meta0, unpacked=True, local_layout=local_layout
+    )
+    out2 = flat_fn(out, {k: v + 1.0 for k, v in flat_unpacked.items()}, manipulator, meta0, local_layout=local_layout)
     np.testing.assert_allclose(np.array(out2["embed"]), np.array(base["embed"]) + 1.0)
     self.assertEqual(out2["embed"].sharding.spec, P())
 
