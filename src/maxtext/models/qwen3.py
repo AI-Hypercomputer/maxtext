@@ -1875,6 +1875,9 @@ class Qwen3NextDecoderLayer(nnx.Module):
     inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     residual = inputs
 
+    if isinstance(attention_metadata, dict):
+      attention_metadata = attention_metadata.get(f"layer.{self.layer_idx}", attention_metadata.get(self.layer_idx))
+
     # First LayerNorm, applied before the attention block.
     hidden_states = self.input_layernorm(inputs, out_sharding=self.out_sharding)
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
