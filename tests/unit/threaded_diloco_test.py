@@ -1066,6 +1066,24 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
       np.testing.assert_allclose(np.array(new_params2["embed"]), 10.0)
       np.testing.assert_allclose(np.array(new_params2["layers"]["w"][0]), 5.0)
 
+  def test_prefetch_target_sharding_numpy_and_array_inputs(self):
+    """Sharded hop is the default, so it must also work on the legacy numpy path (no .sharding)."""
+    from maxtext.trainers.diloco.threaded_diloco import _prefetch_target_sharding, USE_SHARDED_APPLY
+
+    self.assertTrue(USE_SHARDED_APPLY or os.environ.get("DILOCO_SHARDED_APPLY") == "0")
+    P = jax.sharding.PartitionSpec
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:8]), ("x",))
+    host = np.ones((16,), np.float32)
+    # numpy + recorded extraction spec -> that spec
+    self.assertEqual(_prefetch_target_sharding(host, mesh, P("x")).spec, P("x"))
+    # numpy + nothing recorded -> replicated (legacy behaviour)
+    self.assertEqual(_prefetch_target_sharding(host, mesh, None).spec, P())
+    # jax.Array -> its own spec wins over the fallback
+    arr = jax.device_put(jnp.ones((16,)), jax.sharding.NamedSharding(mesh, P("x")))
+    self.assertEqual(_prefetch_target_sharding(arr, mesh, P()).spec, P("x"))
+    moved = jax.device_put(host, _prefetch_target_sharding(host, mesh, P("x")))
+    self.assertEqual(moved.sharding.spec, P("x"))
+
   def test_async_event_driven_syncer_transport(self):
     """Verifies that ThreadedTransportManager and SyncerTransport support non-blocking FIFO ingestion."""
     transport_mgr = ThreadedTransportManager(num_learners=2, maxsize=16)

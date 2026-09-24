@@ -308,9 +308,29 @@ _fused_unpack_and_apply_flat_fragment_jit = jax.jit(
 # (MyStuff/Data/v6e-nscc-e3.log). Params are also donated so
 # dynamic_update_slice_in_dim on the stacked layer tensors is in place instead
 # of copying the whole stack every step.
+#
+# DEFAULT ON since 2026-09-24: same-image 2 x v6e-8 runs measured 1.3333 s/step
+# (v6e-pwns-r1/r2) vs SPMD 1.3731/1.3825 s/step (v6e-pwspmd-r1/r2), and the
+# loss trajectory is bit-identical to the replicated path (v6e-nscc-f1 vs n2).
+# Set DILOCO_SHARDED_APPLY=0 to get the legacy replicated hop back.
 # ---------------------------------------------------------------------------
-USE_SHARDED_APPLY = os.environ.get("DILOCO_SHARDED_APPLY", "0") == "1"
+USE_SHARDED_APPLY = os.environ.get("DILOCO_SHARDED_APPLY", "1") == "1"
 DONATE_APPLY = os.environ.get("DILOCO_DONATE_APPLY", "1") == "1"
+
+
+def _prefetch_target_sharding(arr: Any, mesh: jax.sharding.Mesh, fallback_spec: Any = None) -> jax.sharding.NamedSharding:
+  """Target sharding for the CPU->TPU hop of one packed fragment buffer.
+
+  Colocated-CPU path: `arr` is a jax.Array on the CPU mesh -> reuse its spec.
+  Legacy client path: `arr` is a host numpy array with no sharding -> use the
+  spec the TPU extraction produced for this fragment (`fallback_spec`), or
+  replicate if it is unknown. Either input layout is safe because the pinned
+  apply kernels fix the output shardings.
+  """
+  spec = getattr(getattr(arr, "sharding", None), "spec", None)
+  if spec is None:
+    spec = fallback_spec if fallback_spec is not None else jax.sharding.PartitionSpec()
+  return jax.sharding.NamedSharding(mesh, spec)
 
 
 def _make_pinned_apply_fns(params_shardings: Any, donate: bool):
@@ -807,6 +827,9 @@ def _run_learner_loop(
     # Lazily-built (flat_apply, scanned_apply) with out_shardings pinned to the
     # live params shardings; see `_make_pinned_apply_fns`.
     pinned_apply_fns = [None]
+    # frag_idx -> {dtype: PartitionSpec of the TPU-packed buffer}; written by the
+    # learner thread at extraction, read by the prefetch thread tau steps later.
+    packed_specs = {}
     if USE_SHARDED_APPLY:
       max_logging.log(
           f"Learner {learner_idx}: DILOCO_SHARDED_APPLY=1 (sharded CPU->TPU hop, pinned out_shardings, "
@@ -864,8 +887,9 @@ def _run_learner_loop(
           # P() it moved (#chips x fragment) bytes, ~3.6 GB/step for Qwen3-8B.
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
             if USE_SHARDED_APPLY:
+              frag_specs = packed_specs.get(frag_idx, {})
               received_tpu_packed = {
-                  dt: jax.device_put(arr, _same_spec_sharding(arr, mesh))
+                  dt: jax.device_put(arr, _prefetch_target_sharding(arr, mesh, frag_specs.get(dt)))
                   for dt, arr in received_packed.items()
               }
             else:
@@ -961,6 +985,13 @@ def _run_learner_loop(
                 packed_frag_data = _fused_extract_and_pack_scanned_fragment_jit(
                     params, layer_idx, manipulator, frag_metadata_frozen[frag_idx]
                 )
+              if frag_idx not in packed_specs:
+                # Remembered for the prefetch thread's CPU->TPU hop on the
+                # legacy numpy path, where the returned buffer has no sharding.
+                packed_specs[frag_idx] = {
+                    dt: getattr(arr.sharding, "spec", jax.sharding.PartitionSpec())
+                    for dt, arr in packed_frag_data.items()
+                }
               if USE_COLOCATED_CPU_OUTER:
                 # Move the packed fragment straight to this slice's colocated
                 # CPU devices. This is an IFRT CopyArrays performed by the
