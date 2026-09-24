@@ -516,6 +516,8 @@ def _outer_sgd_1d_jit(outer_1d, trace_1d, stacked_learners_1d, lr: float, moment
 
 # Opt-in until validated on hardware; the legacy client-NumPy path stays default.
 USE_COLOCATED_CPU_OUTER = os.environ.get("DILOCO_COLOCATED_CPU_OUTER", "0") == "1"
+# Opt-in (default off until measured on hardware): see _async_outer_update_and_dispatch.
+USE_SYMMETRIC_OUTER = os.environ.get("DILOCO_SYMMETRIC_OUTER", "0") == "1"
 
 
 def _colocated_cpu_mesh_for(tpu_mesh: jax.sharding.Mesh) -> jax.sharding.Mesh:
@@ -1511,57 +1513,72 @@ def _run_syncer_loop(
         # on that CPU mesh across steps, so they never cross the client.
         # ------------------------------------------------------------------
         if USE_COLOCATED_CPU_OUTER:
-          agg_mesh = syncer_cpu_submeshes[0]
+          # DILOCO_SYMMETRIC_OUTER=1: run the (deterministic, elementwise) outer
+          # step redundantly on EVERY learner's colocated CPU mesh, so each
+          # learner's result is already local and its CPU->TPU hop is a
+          # host-local PCIe copy. Default (0): aggregate on learner 0's mesh
+          # only, which makes learner i>0's CPU->TPU hop a cross-host DCN
+          # transfer landing on its TPUs. Measured at 2 x v6e-32 / Qwen3-14B
+          # (v6e-pwns-s14a): learner 1 median 3.6196 s/step vs learner 0
+          # 3.4942 s/step, no-sync floor 3.46 s/step (v6e-pwns-s14ns).
+          agg_targets = list(range(num_learners)) if USE_SYMMETRIC_OUTER else [0]
+          results = {}
+          for t in agg_targets:
+            agg_mesh = syncer_cpu_submeshes[t]
 
-          # Bring every learner's fragment onto the aggregation mesh. Learner 0
-          # is already there (no-op); learner i>0 is a CPU->CPU cross-host copy
-          # of exactly one fragment, which is the algorithmic minimum traffic
-          # and mirrors what SPMD's all-reduce moves.
-          aligned = []
-          for i in range(num_learners):
-            aligned.append({
-                dt: (arr if arr.sharding.mesh is agg_mesh
-                     else jax.device_put(arr, _same_spec_sharding(arr, agg_mesh)))
-                for dt, arr in learner_frags_host[i].items()
-            })
+            # Bring every learner's fragment onto the aggregation mesh. The
+            # owner's fragment is already there (no-op); others are a CPU->CPU
+            # cross-host copy of exactly one fragment.
+            aligned = []
+            for i in range(num_learners):
+              aligned.append({
+                  dt: (arr if arr.sharding.mesh is agg_mesh
+                       else jax.device_put(arr, _same_spec_sharding(arr, agg_mesh)))
+                  for dt, arr in learner_frags_host[i].items()
+              })
 
-          if frag_idx not in syncer_frag_params_1d:
-            # Lazy init of the resident outer state, on the CPU mesh.
-            syncer_frag_params_1d[frag_idx] = {dt: aligned[0][dt] for dt in meta}
-            syncer_frag_trace_1d[frag_idx] = {
-                dt: jax.device_put(jnp.zeros_like(aligned[0][dt]),
-                                   _same_spec_sharding(aligned[0][dt], agg_mesh))
-                for dt in meta
-            }
-            _assert_on_platform(syncer_frag_params_1d[frag_idx], "cpu",
-                                f"syncer outer init frag {frag_idx}")
+            state_key = (frag_idx, t)
+            if state_key not in syncer_frag_params_1d:
+              # Lazy init of the resident outer state, on the CPU mesh. Every
+              # target initialises from learner 0's fragment, so all replicas of
+              # the outer state start (and stay) bit-identical.
+              syncer_frag_params_1d[state_key] = {dt: aligned[0][dt] for dt in meta}
+              syncer_frag_trace_1d[state_key] = {
+                  dt: jax.device_put(jnp.zeros_like(aligned[0][dt]),
+                                     _same_spec_sharding(aligned[0][dt], agg_mesh))
+                  for dt in meta
+              }
+              _assert_on_platform(syncer_frag_params_1d[state_key], "cpu",
+                                  f"syncer outer init frag {frag_idx} target {t}")
 
-          new_outer_host = {}
-          for dt in meta:
-            new_outer, new_trace = _outer_sgd_stacked_jit(
-                syncer_frag_params_1d[frag_idx][dt],
-                syncer_frag_trace_1d[frag_idx][dt],
-                *[aligned[i][dt] for i in range(num_learners)],
-                lr=config.diloco_outer_lr,
-                momentum=config.diloco_outer_momentum,
-                num_learners=num_learners,
-            )
-            syncer_frag_params_1d[frag_idx][dt] = new_outer
-            syncer_frag_trace_1d[frag_idx][dt] = new_trace
-            new_outer_host[dt] = new_outer
+            new_outer_host = {}
+            for dt in meta:
+              new_outer, new_trace = _outer_sgd_stacked_jit(
+                  syncer_frag_params_1d[state_key][dt],
+                  syncer_frag_trace_1d[state_key][dt],
+                  *[aligned[i][dt] for i in range(num_learners)],
+                  lr=config.diloco_outer_lr,
+                  momentum=config.diloco_outer_momentum,
+                  num_learners=num_learners,
+              )
+              syncer_frag_params_1d[state_key][dt] = new_outer
+              syncer_frag_trace_1d[state_key][dt] = new_trace
+              new_outer_host[dt] = new_outer
 
-          if step <= (start_step + 3 * steps_between_syncs_plus_1):
-            # Cheap one-off validation on the first few syncs only: prove the
-            # outer step really executed on CPU devices and did not silently
-            # fall back to client staging.
-            _assert_on_platform(new_outer_host, "cpu", f"outer SGD output frag {frag_idx}")
+            if step <= (start_step + 3 * steps_between_syncs_plus_1):
+              # Cheap one-off validation on the first few syncs only: prove the
+              # outer step really executed on CPU devices and did not silently
+              # fall back to client staging.
+              _assert_on_platform(new_outer_host, "cpu", f"outer SGD output frag {frag_idx}")
+            results[t] = new_outer_host
+            del aligned
 
           max_logging.log(f"Syncer: Step {step} 1D outer step applied (colocated CPU mesh)")
           for i in range(num_learners):
             transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx,
-                                      data=new_outer_host)
+                                      data=results[i] if USE_SYMMETRIC_OUTER else results[0])
           max_logging.log(f"Syncer: Step {step} sync finished")
-          del learner_frags_host, aligned
+          del learner_frags_host
           with pending_lock:
             completed_sync_count[0] += 1
           return
