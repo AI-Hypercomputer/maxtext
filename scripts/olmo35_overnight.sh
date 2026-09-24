@@ -54,6 +54,7 @@ RUN[nap4x4x4]=$(grep -oP 'RUNN=\K.*' /tmp/olmo35_run.txt 2>/dev/null)
 RUN[flexspot4x4x4]=$(grep -oP 'RUNF=\K.*' /tmp/olmo35_run.txt 2>/dev/null)
 RUN[flexdws2x4x4]=$(grep -oP 'RUNH=\K.*' /tmp/olmo35_run.txt 2>/dev/null)
 
+ARMS_N=$(echo "${ARMS_OVERRIDE:-}" | tr ';' '\n' | grep -c . ); [ "$ARMS_N" -lt 1 ] && ARMS_N=9
 say "supervisor start, ${HOURS}h, period ${PERIOD}s, routes: ${!RUN[*]}"
 END=$(( $(date +%s) + HOURS*3600 ))
 
@@ -65,10 +66,15 @@ while [ "$(date +%s)" -lt "$END" ]; do
     out="$(outdir_for "$route")"
 
     # Harvest first: results.tsv means this route delivered.
+    # Snapshot every poll. Do NOT retire the route on the first results.tsv:
+    # the runner pushes after each arm, so an early file holds one row and
+    # retiring on it loses the other eight (that is what truncated o35nap240641).
     if [ -n "$run" ] && gcloud storage cp "$out/$run/hc/results.tsv" "$HARVEST/$route-$run.tsv" >/dev/null 2>&1; then
-      say "HARVEST $route $run -> $HARVEST/$route-$run.tsv"
+      rows=$(( $(wc -l < "$HARVEST/$route-$run.tsv") - 1 ))
+      say "HARVEST $route $run rows=$rows/$ARMS_N"
       gcloud storage cp -r "$out/$run/hc" "$HARVEST/$route-$run-logs" >/dev/null 2>&1
-      DONE[$route]=1; continue
+      if [ "$rows" -ge "$ARMS_N" ]; then say "$route COMPLETE"; DONE[$route]=1; fi
+      continue
     fi
 
     # Health: resubmit if the jobset is gone, failed, or Kueue deactivated it.
