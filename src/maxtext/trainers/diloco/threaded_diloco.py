@@ -229,7 +229,10 @@ def _frag_from_payload(payload, dt, keystr, shape, st, en, local_layout=None):
   """
   if keystr in payload:
     mesh, specs = local_layout
-    return _local_unflatten(payload[keystr], mesh, dict(specs)[keystr], shape)
+    spec = dict(specs)[keystr]
+    if spec is None:  # non-divisible key: global 1-D reshape (see local_layout construction)
+      return jnp.reshape(payload[keystr], shape)
+    return _local_unflatten(payload[keystr], mesh, spec, shape)
   return jnp.reshape(payload[dt][st:en], shape)
 
 
@@ -401,7 +404,8 @@ def _emit(packed_dict, flat_pieces, keystr, frag, unpacked, local_layout=None):
   Packed: flatten globally into the dtype group's 1-D buffer."""
   if unpacked:
     mesh, specs = local_layout
-    packed_dict[keystr] = _local_flatten(frag, mesh, dict(specs)[keystr])
+    spec = dict(specs)[keystr]
+    packed_dict[keystr] = jnp.reshape(frag, (-1,)) if spec is None else _local_flatten(frag, mesh, spec)
   else:
     flat_pieces.append(jnp.reshape(frag, (-1,)))
 
@@ -914,7 +918,13 @@ def _run_learner_loop(
               idx = manipulator.keystr_to_leaf_index.get(base)
               spec = getattr(tmpl_leaves[idx].sharding, "spec", jax.sharding.PartitionSpec()) if idx is not None else jax.sharding.PartitionSpec()
               if _local_shard_shape(tuple(shape), spec, mesh) is None:
-                raise ValueError(f"DILOCO_UNPACKED_TRANSFER: fragment {keystr} shape {shape} not divisible under {spec}")
+                # Not shard-divisible (e.g. Qwen3-8B on v6e-8: logits_dense
+                # kernel __rem slice (28, 151936) under P('fsdp', None) with
+                # fsdp=8; crashed v6e-pwns-s8su). Fall back to a GLOBAL 1-D
+                # reshape for this key only (same as the packed path).
+                max_logging.log(f"Learner {learner_idx}: unpacked transfer: {keystr} {tuple(shape)} not divisible "
+                                f"under {spec}; using global 1-D reshape for this key")
+                spec = None
               leaf_specs[keystr] = spec
         local_layout = (mesh, tuple(sorted(leaf_specs.items())))
       # Pre-warm JIT extract & apply kernels on TPU

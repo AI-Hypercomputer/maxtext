@@ -1124,6 +1124,16 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
     np.testing.assert_allclose(np.array(out2["embed"]), np.array(base["embed"]) + 1.0)
     self.assertEqual(out2["embed"].sharding.spec, P())
 
+    # Non-shard-divisible keys fall back to a global 1-D reshape (spec None).
+    none_layout = (mesh, tuple(sorted((k, None) for k in specs)))
+    unp_none = _fused_extract_and_pack_scanned_fragment_jit(
+        params, layer, manipulator, meta1, unpacked=True, local_layout=none_layout
+    )
+    np.testing.assert_allclose(np.array(unp_none[w_key]), np.array(list(packed.values())[0]))
+    out3 = scanned_fn(params, layer, {k: v * 3.0 for k, v in unp_none.items()}, manipulator, meta1, local_layout=none_layout)
+    np.testing.assert_allclose(np.array(out3["layers"]["w"][2]), np.array(base["layers"]["w"][2]) * 3.0)
+    self.assertEqual(out3["layers"]["w"].sharding.spec, P(None, "x"))
+
   def test_outer_sgd_tree_matches_stacked(self):
     """Batched (one-dispatch) outer SGD is bit-identical to the per-key kernel."""
     from maxtext.trainers.diloco.threaded_diloco import _outer_sgd_tree_jit, _outer_sgd_stacked_jit
