@@ -14,16 +14,18 @@
 
 # This rule uses data, FSDP, FSDP_transpose and expert, and assigns them as:
 #
-#   FSDP_transpose acts like DP for attn and shared experts / dense MLP, but
-#     FSDP for moe (together with FSDP it shards the moe mlp dimension)
+#   FSDP_transpose acts like DP for attn, shared experts / dense MLP and the
+#     vocab embedding, but FSDP for moe (together with FSDP it shards the moe
+#     mlp dimension)
 #   FSDP acts like FSDP everywhere
 #   EP acts like DP for attn and shared experts / dense MLP, and EP for moe
 #
-# That is, attention weights ('q_lora', 'kv_lora' and 'embed_attn') and shared
-# expert / dense MLP weights ('embed' and 'mlp') are sharded on fsdp only and
-# replicated over fsdp_transpose (and expert). Routed MoE weights shard their
-# mlp dimension ('mlp_moe') over both fsdp and fsdp_transpose, and leave the
-# embed dimension ('embed_moe') unsharded.
+# That is, attention weights ('q_lora', 'kv_lora' and 'embed_attn'), shared
+# expert / dense MLP weights ('embed' and 'mlp') and the vocab embedding
+# ('embed_vocab') are sharded on fsdp only and replicated over fsdp_transpose
+# (and expert). Routed MoE weights shard their mlp dimension ('mlp_moe') over
+# both fsdp and fsdp_transpose, and leave the embed dimension ('embed_moe')
+# unsharded.
 #
 # This is useful at large scale where the total FSDP rank (fsdp *
 # fsdp_transpose) is so large that the small attention / shared expert weights
@@ -42,9 +44,11 @@ logical_axis_rules: [
                       ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_embed_and_logits_batch_sequence', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_vocab', []],
-                      # Vocab Weights
+                      # Vocab Weights, sharded on fsdp only: fsdp_transpose acts
+                      # like DP here (embed dim is too small to shard over the
+                      # full fsdp * fsdp_transpose rank at large scale)
                       ['vocab', []],
-                      ['embed_vocab', ['fsdp', 'fsdp_transpose']],
+                      ['embed_vocab', ['fsdp']],
                       # ==========================================
                       # Attention
                       # ==========================================
