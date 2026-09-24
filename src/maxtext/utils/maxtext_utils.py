@@ -101,6 +101,8 @@ def get_functional_train_with_signature(
   static_argnums = ()  # We partial out the static argnums of model and config
   if getattr(config, "retry_when_tokens_dropped", False) is True:
     donate_argnums = ()  # Preserve state so it can be replayed if an overflow occurs
+  elif hasattr(config, "donate_train_state") and not config.donate_train_state:
+    donate_argnums = ()
   else:
     donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums

@@ -1118,7 +1118,14 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
 def run(config, recorder):
   """Run the job given hyperparameters and utilities."""
   with (max_utils.maybe_get_transformer_engine_context(config),):
-    train_loop(config, recorder)
+    if config.enable_non_spmd_diloco:
+      # Imported lazily: threaded_diloco patches ArrayImpl.format at import time, which must
+      # not leak into SPMD runs.
+      from maxtext.trainers.diloco.threaded_diloco import run_threaded_diloco  # pylint: disable=import-outside-toplevel
+
+      run_threaded_diloco(config, recorder, train_step, eval_step)
+    else:
+      train_loop(config, recorder)
 
 
 def get_train_func(config, recorder, argv):

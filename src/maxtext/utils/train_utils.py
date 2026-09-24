@@ -123,7 +123,12 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
     in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
     out_shardings = (state_mesh_shardings, None)  # State, metrics
     static_argnums = ()  # We partial out the static argnums of model and config
-    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+    if (hasattr(config, "donate_train_state") and not config.donate_train_state) or getattr(
+        config, "enable_non_spmd_diloco", False
+    ):
+      donate_argnums = ()
+    else:
+      donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   else:
     (
         functional_train,
@@ -233,7 +238,7 @@ def _reorder_data_iterator_for_loader(reorder_fn, data_iterator):
   return _ReorderedDataIterator(reorder_fn, data_iterator)
 
 
-def setup_train_loop(config, recorder, devices=None):
+def setup_train_loop(config, recorder, devices=None, mesh=None):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -258,7 +263,8 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    if mesh is None:
+      mesh = maxtext_utils.get_mesh_from_config(config, devices)
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     # Create abstract NNX model.
     _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
@@ -283,7 +289,9 @@ def setup_train_loop(config, recorder, devices=None):
         validate_completed_steps(checkpoint_step + 1, config.steps)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
-    data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
+    learner_idx = getattr(config, "learner_idx", 0)
+    num_learners = getattr(config, "num_learners", 1)
+    data_iterator, eval_data_iterator = create_data_iterator(config, mesh, learner_idx, num_learners)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()

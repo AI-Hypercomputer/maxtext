@@ -2278,6 +2278,21 @@ class DilocoParams(BaseModel):
           " globally shared one."
       ),
   )
+  enable_non_spmd_diloco: bool = Field(False, description="Enable non-SPMD, multi-threaded streaming DiLoCo.")
+  donate_train_state: bool = Field(
+      True, description="Whether to donate train state memory to XLA compiler in train step."
+  )
+
+  @model_validator(mode="after")
+  def validate_overlap_steps(self) -> "DilocoParams":
+    if self.enable_streaming_diloco:
+      if self.num_communication_overlapping_steps >= self.diloco_sync_period:
+        raise ValueError(
+            "num_communication_overlapping_steps must be strictly less than"
+            f" diloco_sync_period. Got {self.num_communication_overlapping_steps=}"
+            f" and {self.diloco_sync_period=}"
+        )
+    return self
 
 
 class Optimizer(BaseModel):
@@ -2590,6 +2605,13 @@ class Profiling(BaseModel):
   upload_all_profiler_results: bool = Field(False, description="Upload profiler results from all hosts.")
   skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")
   profiler_steps: int = Field(5, description="Number of steps to profile.")
+  profiler_max_num_hosts: int = Field(
+      0,
+      description=(
+          "Override for Pathways `max_num_hosts` in profiler start_trace. 0 means derive the host count from the"
+          " device topology (see Profiler._pathways_max_num_hosts)."
+      ),
+  )
   profile_cleanly: bool = Field(True, description="Add block_until_ready to align profile for each step.")
   profile_periodically_period: int = Field(-1, description="If positive, profile every N steps.")
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
@@ -4401,6 +4423,8 @@ class MaxTextConfig(
           "Colocated python data input is only supported with Pathways (single"
           " controller) enabled (`enable_single_controller=True`)."
       )
+    if self.enable_non_spmd_diloco and self.colocated_python_data_input:
+      raise ValueError("Non-SPMD DiLoCo does not support colocated python data input.")
     if self.grain_use_elastic_iterator and self.grain_file_type != "arrayrecord":
       raise ValueError(
           "`grain_use_elastic_iterator=True` only supports `grain_file_type=arrayrecord`. "
