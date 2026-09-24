@@ -2684,6 +2684,18 @@ class RoutedMoE(nnx.Module):
             forced_routed_experts=forced_routed_experts,
             force_dropless=force_dropless,
         )
+        # moe_x_sorted: tag the routed (expert-sorted) MoE input and its small routing/metadata
+        # bundle for the custom remat policy. With moe_x_sorted=device the backward loads these
+        # instead of re-running route(), which removes the rematted dispatch token all-gather (EP
+        # axis) and the SparseCore ragged sort from the backward pass; the expert GMMs re-run from
+        # the saved tensor. The routing/metadata leaves (indices, group sizes, weights) are tiny but
+        # must be saved too, or the sort re-runs just to reproduce them. Tags are inert under the
+        # default moe_x_sorted=remat. tree.map so a QArray input (moe_quantize_token_all_gather)
+        # gets its qvalue/scale leaves tagged.
+        _cn = lambda t: adc.checkpoint_name(t, "moe_x_sorted") if isinstance(t, jax.Array) else t
+        x = jax.tree.map(_cn, x)
+        routing = jax.tree.map(_cn, routing)
+        route_metadata = jax.tree.map(_cn, route_metadata)
         mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
 
         if self.config.mlp_bias:
