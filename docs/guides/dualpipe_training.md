@@ -52,7 +52,7 @@ in the deployment/launcher configuration, not in MaxText wrapper scripts.
   `routed_bias_update_rate=0`; an enabled router bias remains frozen.
 - Ordinary causal-LM loss with `num_vocab_tiling=1`. Other unsupported modes
   are rejected by `validate_training_config` in
-  `src/maxtext/experimental/dense_training_nnx.py`.
+  `src/maxtext/experimental/dualpipe_nnx.py`.
 
 ## Verify the schedule
 

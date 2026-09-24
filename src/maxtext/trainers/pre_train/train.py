@@ -407,7 +407,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   # --- Gradient computation ---
   if getattr(config, "gradient_accumulation_schedule", "serial") == "dual_pipe":
-    from maxtext.experimental.dense_training_nnx import dualpipe_loss_and_grad  # pylint: disable=import-outside-toplevel
+    from maxtext.experimental.dualpipe_nnx import dualpipe_loss_and_grad  # pylint: disable=import-outside-toplevel
 
     loss, aux, raw_grads = dualpipe_loss_and_grad(config, loss_model, params_shardings, data, loss_from_logits)
   elif config.gradient_accumulation_steps > 1:

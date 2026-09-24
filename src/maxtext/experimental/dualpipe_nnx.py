@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 
 from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
-from maxtext.experimental.dense_training_schedule import make_training_schedule
+from maxtext.experimental.dualpipe_schedule import make_training_schedule
 from maxtext.utils.globals import EPS
 
 

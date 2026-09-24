@@ -14,11 +14,11 @@ import numpy as np
 import optax
 
 from maxtext.common.common_types import DecoderBlockType, ShardMode
-from maxtext.experimental.dense_training_nnx import (
+from maxtext.experimental.dualpipe_nnx import (
     _layer_groups, _make_boundaries, _make_layer_adapter, _microbatches, _reduce_aux, _restore_gradients,
     _te_layer_metrics, validate_training_config,
 )
-from maxtext.experimental.dense_training_schedule import make_training_schedule
+from maxtext.experimental.dualpipe_schedule import make_training_schedule
 from maxtext.layers import nnx_scan
 from maxtext.utils.globals import EPS
 

@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from maxtext.experimental.dense_training_schedule import make_training_schedule
+from maxtext.experimental.dualpipe_schedule import make_training_schedule
 
 
 def prefix_apply(params, data):
