@@ -198,3 +198,4 @@ class CustomRule(enum.Enum):
   EP_AS_DP = "ep-as-dp"
   SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
   FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
+  FSDP_TRANSPOSE_AS_DP = "fsdp-transpose-as-dp"
