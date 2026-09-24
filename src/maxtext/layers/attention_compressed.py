@@ -1463,11 +1463,18 @@ class CompressedAttention(Attention):
     # Override the base rotary embedding with the correct theta for this layer.
     # CSA / HCA layers use compressed_rope_max_timescale (160000).
     # Sliding window prefix layers use rope_max_timescale (10000).
-    rope_theta = self.config.compressed_rope_max_timescale if self.compress_ratio > 0 else self.config.rope_max_timescale
+    is_compressed = self.compress_ratio > 0
+    rope_theta = self.config.compressed_rope_max_timescale if is_compressed else self.config.rope_max_timescale
     self.rotary_embedding = DeepSeekV4RotaryEmbedding(
         head_dim=self.config.head_dim,
         partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
         rope_theta=rope_theta,
+        rope_type=self.config.rope_type if is_compressed else "default",
+        rope_factor=self.config.rope_factor,
+        beta_fast=self.config.beta_fast,
+        beta_slow=self.config.beta_slow,
+        original_max_position_embeddings=self.config.original_max_position_embeddings,
+        truncate=self.config.rope_truncate,
         fprop_dtype=self.dtype,
     )
 

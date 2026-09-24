@@ -61,6 +61,7 @@ optimization_barrier_on_gradients: true
 
 
 # --- Attention configuration ---
+attention: "dot_product"  # use_indexer requires dot_product, or flash with use_tokamax_splash
 attention_type: 'compressed'
 use_indexer: true
 q_lora_rank: 1024
@@ -69,8 +70,14 @@ o_lora_rank: 1024
 sliding_window_size: 128
 
 # --- RoPE ---
-rope_type: "default"
+# Values below mirror the official HF config.json `rope_scaling`:
+# {"type": "yarn", "factor": 16, "beta_fast": 32, "beta_slow": 1, "original_max_position_embeddings": 65536}.
+rope_type: "yarn"
+rope_factor: 16
+beta_fast: 32
+beta_slow: 1
 rope_max_timescale: 10000                  # Main RoPE theta
 compressed_rope_max_timescale: 160000      # Compressed RoPE theta
 max_position_embeddings: 1048576
 original_max_position_embeddings: 65536
+# Token-id to expert-id table for hash routing; artifact used by the passing v5p e2e run.
