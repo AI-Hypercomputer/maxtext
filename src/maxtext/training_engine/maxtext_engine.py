@@ -347,8 +347,9 @@ def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutpu
     if isinstance(loss_val, abstract_engine.WeightedMetric):
       primary_loss = loss_val
     elif isinstance(aux, dict) and "xent_sum" in aux and "total_weights" in aux:
+      aux_loss = aux.get("moe_lb_loss", 0.0) + aux.get("indexer_loss", 0.0) + aux.get("mtp_loss", 0.0)
       primary_loss = abstract_engine.WeightedMetric(
-          unreduced_sum=aux["xent_sum"],
+          unreduced_sum=aux["xent_sum"] + aux_loss * aux["total_weights"],
           denominator=aux["total_weights"],
       )
     else:
@@ -740,14 +741,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     """Returns the model to train, adopting a mesh when this engine was given none."""
-    model_or_model_mesh_pair = model_creation_utils.from_pretrained(
-        config=self._config,
-        mesh=self._mesh,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rng_key=self._init_rng,
-        wrap_with_tunix_adapter=wrap_with_tunix_adapter,
-        tokenizer_pad_id=tokenizer_pad_id,
-    )
+    with self._sharding_ctx():
+      model_or_model_mesh_pair = model_creation_utils.from_pretrained(
+          config=self._config,
+          mesh=self._mesh,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          rng_key=self._init_rng,
+          wrap_with_tunix_adapter=wrap_with_tunix_adapter,
+          tokenizer_pad_id=tokenizer_pad_id,
+      )
     # `from_pretrained` returns `(model, mesh)` only when it had to derive the mesh itself. Adopt the
     # derived one so `self._model` is always a module and `compile()` can still build shardings.
     if self._mesh is not None:
@@ -765,6 +767,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _checkpoint_dir(self) -> str:
     """Returns the directory this engine checkpoints through; an empty string disables Orbax entirely."""
+    if not getattr(self._config, "enable_checkpointing", True):
+      return ""
     return self._config.checkpoint_dir
 
   @property
@@ -2272,7 +2276,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metric: The metric to record.
       aggregation_fn: The aggregation function to apply to the metric.
     """
-    if metric is None:
+    if metric is None or name == "intermediate_outputs" or isinstance(metric, (tuple, list)):
       return
     if isinstance(metric, dict):
       for sub_k, sub_v in metric.items():
