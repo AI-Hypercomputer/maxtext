@@ -2136,26 +2136,67 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     else:
       logging.info("Saving checkpoint at step %d.", step)
 
+    # What actually goes into the checkpoint. Full state for a 35B model is
+    # ~485 GB (params bf16 69.3 + AdamW mu/nu fp32 277.3 + fp32 accumulated
+    # grads 138.6) against a 260 GB controller container, so saving everything
+    # cannot fit if any of it stages through the host. Params alone are 69.3 GB,
+    # fit comfortably, and are all an offline eval needs.
+    #
+    # Params-only by default under Pathways. CHECKPOINT_SAVE_OPTIMIZER_STATE=1
+    # restores a training-resumable checkpoint, but only set it once you have
+    # confirmed the save is not staging through the controller.
+    is_pathways = "proxy" in os.environ.get("JAX_PLATFORMS", "").lower()
+    save_model_params_only = os.environ.get(
+        "CHECKPOINT_SAVE_MODEL_PARAMS_ONLY", "1" if is_pathways else "0"
+    ).lower() in ("1", "true") and os.environ.get(
+        "CHECKPOINT_SAVE_OPTIMIZER_STATE", "0"
+    ).lower() not in ("1", "true")
+    # _reduced_accumulated_grads() materialises a fresh fp32 copy of the
+    # gradients, making an intra-step save the most expensive kind. Off by
+    # default; it only buys mid-step resumability.
+    save_intra_step = os.environ.get(
+        "CHECKPOINT_SAVE_INTRA_STEP", "0"
+    ).lower() in ("1", "true")
+    include_grads = (
+        self._micro_step_count > 0
+        and save_intra_step
+        and not save_model_params_only
+    )
+    accumulated_grads = (
+        self._reduced_accumulated_grads() if include_grads else None
+    )
+    effective_micro_step_count = self._micro_step_count if include_grads else 0
+    logging.info(
+        "Checkpoint contents at step %d: model_params_only=%s, grads=%s.",
+        step,
+        save_model_params_only,
+        include_grads,
+    )
+
     custom_metadata = {}
     if metadata:
       # Metadata from Orchestrator
       custom_metadata["additional_metadata"] = metadata
     # The gradients are stored unreduced, so their divisor has to survive the round-trip too.
-    if self._micro_step_count > 0 and self._accumulated_denominator is not None:
+    if effective_micro_step_count > 0 and self._accumulated_denominator is not None:
       custom_metadata["accumulated_denominator"] = float(self._accumulated_denominator)
 
     ckpt_saved = self._checkpoint_manager.save_checkpoint(
         step=step,
         checkpoint_state=checkpointing.CheckpointState(
             model=self.model,
-            optimizer=self.optimizer,
+            optimizer=None if save_model_params_only else self.optimizer,
             # The full history, not `get_metrics()`: CheckpointState.accumulated_metrics is
             # a list, and restore_checkpoint iterates it back into the recorder's buffer.
-            accumulated_metrics=self._metrics_recorder.get_metrics_history(clear_cache=False),
-            accumulated_grads=self._reduced_accumulated_grads(),
+            accumulated_metrics=(
+                None
+                if save_model_params_only
+                else self._metrics_recorder.get_metrics_history(clear_cache=False)
+            ),
+            accumulated_grads=accumulated_grads,
             # Recorded by the CheckpointManager into custom_metadata, so that a later save
             # at this same step can tell it supersedes this one.
-            micro_step_count=self._micro_step_count,
+            micro_step_count=effective_micro_step_count,
         ),
         custom_metadata=custom_metadata,
         **kwargs,
