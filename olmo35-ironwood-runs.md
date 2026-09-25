@@ -305,19 +305,42 @@ xla-shell on the nap f1 capture (sched flags, no DP), against e4 (no sched):
 The flags hide 129 ms of comm and leave the TensorCore lane alone. The remaining
 199 ms is still the first lever; the kernel list is unchanged.
 
-### In flight: g-series, stacked on f3
+### 128 devices (4x4x4): run `o35n251620`, g-series, stacked on f3
 
-All at pdb=3 with the sched flags.
+`bodaborg-tpu7x-nap`, 2026-09-25. All at pdb=3 with the sched flags.
 
-| arm | change on top of f3 | question |
-|---|---|---|
-| g1_ctrl | none | f3 repeat |
-| g2_dp4 | `ici_data_parallelism=4 ici_fsdp_parallelism=32` | does more DP keep paying |
-| g3_gradbf16 | `grad_dtype=bfloat16` | halve reduce-scatter volume |
-| g4_zero1 | `shard_optimizer_over_data=True` | take back the DP memory |
-| g5_dp4_zero1 | DP=4 + ZeRO-1 | DP=4 if it needs the memory |
-| g6_async4 | 4 concurrent async all-gathers and reduce-scatters | more overlap |
-| g7_pinsc | `moe_pin_sparse_core_all_gathers=True` | dedicated SC for MoE gathers |
+| arm | change on top of f3 | TF/s/dev | MFU | step s | outcome |
+|---|---|---|---|---|---|
+| g1_ctrl | none | 106.4 | 9.23% | 0.996 | reproduces f3 |
+| g2_dp4 | `ici_data_parallelism=4 ici_fsdp_parallelism=32` | **107.4** | **9.31%** | 0.986 | **best**, +1%, temp 88.2 GB, args 4.4 GB |
+| g3_gradbf16 | `grad_dtype=bfloat16` | 106.7 | 9.25% | 0.994 | noise |
+| g4_zero1 | `shard_optimizer_over_data=True` | | | | rejected: ZeRO-1 cannot combine with FSDP |
+| g5_dp4_zero1 | DP=4 + ZeRO-1 | | | | same |
+| g6_async4 | 4 concurrent async all-gathers and reduce-scatters | 106.8 | 9.25% | 0.992 | noise |
+| g7_pinsc | `moe_pin_sparse_core_all_gathers=True` | | | | `UNIMPLEMENTED: all_to_all not supported on the SparseCore` |
+
+What it settles: **the comm-side levers are exhausted.** DP past 2, halving
+gradient volume and more collective concurrency all land within 1%. The binder
+is now the TensorCore lane, so the next series goes after recompute.
+
+### In flight: h-series, trading HBM for recompute
+
+Base is g2 (pdb=3, sched, DP=4). Under `remat_policy=full` the forward runs
+twice. In OLMo 3.5 only the MoE GEMMs and the two full-attention layers carry
+checkpoint names; the 14 KDA layers carry none, so the MoE outputs are the only
+real save/offload targets. One `moe_mlpwo` activation is ~0.8 GB per layer at
+pdb=3, 12.9 GB across 16 layers, which does not fit on device at pdb=3 but may
+at pdb=2 or on host.
+
+| arm | pdb | change | question |
+|---|---|---|---|
+| h1_ctrl_prof | 3 | none, captured | profile of the best config |
+| h2_p3_off_mlpwo | 3 | `moe_mlpwo=offload` | host offload hides under compute? |
+| h3_p3_off_moe | 3 | all three MoE GEMM outputs offloaded | more of the same |
+| h4_p2_dev_mlpwo | 2 | `moe_mlpwo=device` | less recompute at lower batch |
+| h5_p2_dev_moe | 2 | all three on device | likely OOM, bounds it |
+| h6_p3_vocab4 | 3 | `num_vocab_tiling=4` | cheaper logits |
+| h7_p2_ctrl | 2 | none | pdb=2 control for h4/h5 |
 
 ## Profiles and xla-shell output
 
