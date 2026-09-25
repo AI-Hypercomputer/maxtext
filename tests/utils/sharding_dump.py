@@ -64,6 +64,18 @@ TEST_CASES = [
     ),
     (
         "deepseek2-16b",
+        "tpu7x-8",
+        1,
+        "fsdp-as-dp-for-attn-cp-as-ep-for-moe",
+        (
+            "ici_fsdp_parallelism=-1",
+            "ici_context_parallelism=2",
+            "ici_expert_parallelism=2",
+            "use_ring_of_experts=true",
+        ),
+    ),
+    (
+        "deepseek2-16b",
         "tpu7x-16",
         1,
         "ep-as-dp",

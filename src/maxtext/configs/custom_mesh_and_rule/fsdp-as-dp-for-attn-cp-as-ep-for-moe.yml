@@ -1,0 +1,105 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This rule is fsdp-as-dp-for-attn.yml plus a context axis that is borrowed by
+# the MoE, as in cp-as-ep.yml. It uses data, FSDP, FSDP_transpose, expert and
+# context, and assigns them as:
+#
+#   FSDP acts like DP for attn, but FSDP for moe
+#   EP acts like FSDP for attn, and EP for moe
+#   CP acts like CP (and FSDP) for attn, and EP for moe
+#
+# It targets fractional per_device_batch_size (e.g. 0.5) on TPU v7x, where
+# context is laid over the two TensorCores of a chip: each chip holds one
+# sequence, split in half along the sequence dimension. Attention weights
+# ('q_lora', 'kv_lora' and 'embed_attn') are sharded on context and expert, so
+# their all-gather stays on the small axes (the context half is on-chip), and
+# they are replicated over fsdp / fsdp_transpose. Inside the core MoE part
+# (between EP all2all) context joins expert, giving EP = context x expert.
+#
+# 'context' is the last mesh axis on purpose: the TPU v7x mesh builder assigns
+# logical axes last-first and offers the core axis first, so this keeps context
+# on the TensorCore pair instead of letting a large expert axis claim it.
+#
+# Pair it with fsdp-as-dp-for-attn-cp-as-ep-for-moe-eval.yml for evaluation at a
+# smaller eval_per_device_batch_size of 1 / (context x expert).
+
+mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']
+data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']]
+logical_axis_rules: [
+                      # ==========================================
+                      # Vocabulary Embedding
+                      # ==========================================
+                      # Vocab Activations
+                      ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
+                      ['activation_vocab', []],
+                      # Vocab Weights
+                      ['vocab', []],
+                      ['embed_vocab', ['fsdp', 'fsdp_transpose']],
+                      # ==========================================
+                      # Attention
+                      # ==========================================
+                      # Attention Activations
+                      ['activation_batch_attn', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_heads', []],
+                      ['activation_kv_heads', []],
+                      ['activation_length_attn', ['context']],
+                      ['activation_q_length', ['context']],
+                      ['activation_kv_length', []],
+                      ['activation_embed_attn', []],
+                      ['activation_kv', []],
+                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_kv_head_dim', []],
+                      # Attention Weights, sharded on context and expert instead of fsdp:
+                      # fsdp acts like DP here, context and expert act like FSDP
+                      ['q_lora', ['context', 'expert']],
+                      ["q_lora_up_proj", []],
+                      ['kv_lora', ['context', 'expert']],
+                      ["kv_lora_up_proj", []],
+                      ['embed_attn', ['context', 'expert']],
+                      # ==========================================
+                      # Mixture of Experts (MoE)
+                      # ==========================================
+                      # MoE Activations
+                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_length_moe', []],
+                      ['activation_norm_length_moe', []],
+                      ['activation_embed_moe', []],
+                      ['activation_mlp_moe', []],
+                      ['activation_exp', ['context', 'expert']],
+                      # MoE Weights
+                      ['exp', ['context', 'expert']],
+                      ['mlp_moe', ['fsdp_transpose']],
+                      ['embed_moe', ['fsdp']],
+                      # ==========================================
+                      # Standard MLP / Dense Layers / Model Structure
+                      # ==========================================
+                      # Dense Activations
+                      ['activation_mlp', []],
+                      # Note activation batch and length also get used in vocab
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_length', ['context']],
+                      ['activation_norm_length', ['context']],
+                      ['activation_embed', []],
+                      ['activation_stage', []],
+                      # General Weights
+                      ['mlp', ['fsdp_transpose']],
+                      ['embed', ['fsdp', 'fsdp_transpose']],
+                      ['embed', ['fsdp']],
+                      # ==========================================
+                      # Deprecated / Scheduled for Removal
+                      # ==========================================
+                      ['exp_with_fsdp', 'fsdp'],
+                  ]
