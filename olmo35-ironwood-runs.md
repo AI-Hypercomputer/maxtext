@@ -249,7 +249,7 @@ What it settles:
 
 Raw logs: `/tmp/olmo35_results/nap4x4x4-o35n242234-logs/`.
 
-### In flight: f-series, targeting the exposed comm
+### 128 devices (4x4x4): run `o35s251513`, f-series, targeting the exposed comm
 
 The 128-device profiles (below) show 328 ms of SparseCore comm exposed at pdb=3,
 batch-independent. The f-series attacks it at pdb=3. "sched" is the 17
@@ -267,6 +267,42 @@ passed as `+--flag` tokens in the fifth arm field.
 | f4_p3_sched_1sc | 3 | sched + single-SC all-gather | recipe-exact against our dual-SC default |
 | f5_p4_sched_offload | 4 | sched + `remat_policy=custom` offload | does hidden comm turn pdb=4 into a win |
 | f6_p3_ctrl | 3 | none | same-run control |
+
+Results, `tpu7x-cluster-flex` spot, 2026-09-25. The pod was preempted during f6,
+so the control row is missing; e1/e4 (87.2) are the baseline, same code and
+flags. Replicate running on nap as `o35n251513`.
+
+| arm | TF/s/dev | MFU | step s | vs 87.2 | outcome |
+|---|---|---|---|---|---|
+| f1_p3_sched_prof | 96.0 | 8.32% | 1.105 | 1.10x | capture truncated by the preemption |
+| f2_p3_dp2 | 100.7 | 8.73% | 1.052 | 1.15x | |
+| f3_p3_sched_dp2 | **106.9** | **9.27%** | 0.992 | **1.23x** | **best**, loss matches (10.83 at step 18) |
+| f4_p3_sched_1sc | 95.8 | 8.30% | 1.107 | 1.10x | single-SC gather = dual-SC, drop it |
+| f5_p4_sched_offload | | | | | OOM, 102.88G vs 94.74G |
+
+What it settles:
+
+1. **The recipe scheduler flags are worth 1.10x** on their own and compose with
+   DP=2 to 1.23x. The xla-shell roadmap called the 1.39x scheduling ceiling; this
+   is most of the first lever.
+2. **DP=2 on the intra-chip pair is worth 1.15x.** It doubles the parameter and
+   optimizer footprint (argument size 1.1 to 2.2 GB) but shortens the FSDP ring
+   to 64 chips and puts the gradient all-reduce on the fast link.
+3. **pdb=4 is still out,** 8G short even with offload.
+
+### In flight: g-series, stacked on f3
+
+All at pdb=3 with the sched flags.
+
+| arm | change on top of f3 | question |
+|---|---|---|
+| g1_ctrl | none | f3 repeat |
+| g2_dp4 | `ici_data_parallelism=4 ici_fsdp_parallelism=32` | does more DP keep paying |
+| g3_gradbf16 | `grad_dtype=bfloat16` | halve reduce-scatter volume |
+| g4_zero1 | `shard_optimizer_over_data=True` | take back the DP memory |
+| g5_dp4_zero1 | DP=4 + ZeRO-1 | DP=4 if it needs the memory |
+| g6_async4 | 4 concurrent async all-gathers and reduce-scatters | more overlap |
+| g7_pinsc | `moe_pin_sparse_core_all_gathers=True` | dedicated SC for MoE gathers |
 
 ## Profiles and xla-shell output
 
