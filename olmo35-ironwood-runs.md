@@ -455,19 +455,26 @@ The fp32 conv weight promoted q/k/v to fp32, so the fused KDA kernel ran and
 saved residuals in fp32. With the flag the whole KDA path is bf16, which needs a
 loss check on hardware before it counts.
 
-### In flight: m-series, scheduler and VMEM limits (o35n252023)
+### m-series, scheduler and VMEM limits (o35n252023)
 
-Needs no new source, so it runs while the l-series (the two new flags, arms in
+Needs no new source, so it ran while the l-series (the two new flags, arms in
 `/tmp/olmo35_l_arms.txt`) waits for the source upload. Base j2 at pdb=3.
 
-| arm | change | TF/s/dev | MFU |
-|---|---|---|---|
-| m1_ctrl | none | | |
-| m2_lim100 | `xla_tpu_scheduler_percent_shared_memory_limit=100` | | |
-| m3_lim200 | same, 200 | | |
-| m4_vt8 | `num_vocab_tiling=8` | | |
-| m5_vmem96 | `xla_tpu_scoped_vmem_limit_kib=98304` | | |
-| m6_vmem32 | `xla_tpu_scoped_vmem_limit_kib=32768` | | |
+| arm | change | TF/s/dev | MFU | step s |
+|---|---|---|---|---|
+| m1_ctrl | none | 109.7 | 9.51% | 0.966 |
+| m2_lim100 | `xla_tpu_scheduler_percent_shared_memory_limit=100` | 107.1 | 9.28% | 0.990 |
+| m3_lim200 | same, 200 | 109.8 | 9.52% | 0.966 |
+| m4_vt8 | `num_vocab_tiling=8` | 108.8 | 9.44% | 0.974 |
+| m5_vmem96 | `xla_tpu_scoped_vmem_limit_kib=98304` | 109.8 | 9.52% | 0.966 |
+| m6_vmem32 | `xla_tpu_scoped_vmem_limit_kib=32768` | 109.9 | 9.52% | 0.965 |
+
+Flag tuning is exhausted at pdb=3. Scheduler limit 150 and above and any scoped
+VMEM limit give the same step. Tightening the limit to 100 or doubling the vocab
+tiles costs 1% to 2.4%, which also prices the two pdb=4 memory trims. The
+control has now landed at 109.6 to 109.9 across three series. The remaining
+levers are the bf16 KDA path (l3/l4) and pdb=4 (l5/l6), both waiting on the
+new source.
 
 ## Profiles and xla-shell output
 
