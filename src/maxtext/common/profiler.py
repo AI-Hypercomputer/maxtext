@@ -185,7 +185,13 @@ class Profiler:
         return
       self.libcudart.cudaProfilerStart()
     elif self.mode == "xplane":
-      if self.output_path.startswith("gs://"):
+      # Pathways (single-controller, JAX_PLATFORMS=proxy set by xpk) needs the
+      # pathwaysutils trace path below. Multi-controller McJAX (e.g. SPMD
+      # DiLoCo) must use the stock per-process start_trace: previously every gs://
+      # path went down the Pathways branch, whose failure then fell back to the
+      # stock call with a misleading "TPU worker planes MISSING" error.
+      is_pathways = "proxy" in os.environ.get("JAX_PLATFORMS", "")
+      if self.output_path.startswith("gs://") and is_pathways:
         # ------------------------------------------------------------------
         # Pathways profiling requires TWO things that are easy to get wrong and
         # that both fail SILENTLY, producing empty/partial TPU traces:
