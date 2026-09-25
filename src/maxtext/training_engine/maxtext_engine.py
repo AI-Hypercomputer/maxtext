@@ -354,9 +354,7 @@ def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutpu
       idx_l = aux.get("indexer_loss")
       mtp_l = aux.get("mtp_loss")
       aux_loss = (
-          (0.0 if moe_lb is None else moe_lb)
-          + (0.0 if idx_l is None else idx_l)
-          + (0.0 if mtp_l is None else mtp_l)
+          (0.0 if moe_lb is None else moe_lb) + (0.0 if idx_l is None else idx_l) + (0.0 if mtp_l is None else mtp_l)
       )
       primary_loss = abstract_engine.WeightedMetric(
           unreduced_sum=aux["xent_sum"] + aux_loss * aux["total_weights"],
@@ -1275,8 +1273,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if freeze_mask is None and self._freeze_mask_fn is not None:
         freeze_mask = self._freeze_mask_fn(accumulated_grads)
       if freeze_mask is not None:
+
         def _apply_freeze(g, is_frozen):
           return jnp.zeros_like(g) if is_frozen else g
+
         grads = jax.tree.map(_apply_freeze, grads, freeze_mask)
       # Before clipping, where Tunix's `optax.global_norm` also sits -- `train.py` would call
       # this `raw_grad_norm`. In float32 whatever `grad_dtype` is: a sum of squares over bf16
@@ -1292,9 +1292,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       safe_grads = jax.tree.map(lambda g: jnp.where(should_skip, jnp.zeros_like(g), g), grads)
 
       if self._config.gradient_clipping_threshold > 0:
-        safe_grads = maxtext_utils.apply_gradient_clipping(
-            safe_grads, None, self._config.gradient_clipping_threshold
-        )
+        safe_grads = maxtext_utils.apply_gradient_clipping(safe_grads, None, self._config.gradient_clipping_threshold)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if hasattr(local_state, "apply_gradients"):
         if self._config.skip_step_on_spikes:
@@ -2395,9 +2393,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     extra = getattr(sync_request, "extra_config", None)
     req_mode = extra.get("weight_sync_mode") if isinstance(extra, dict) else None
     effective_transport = (
-        str(staging_transport or req_mode or os.environ.get("WEIGHT_SYNC_MODE") or "raiden")
-        .strip()
-        .lower()
+        str(staging_transport or req_mode or os.environ.get("WEIGHT_SYNC_MODE") or "raiden").strip().lower()
     )
     if effective_transport in ("file", "filesystem"):
       effective_transport = "gcs"
@@ -2462,16 +2458,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
       # 3. Bind parameters to the unified WeightSynchronizer transport
       # (`RaidenWeightSync` or `GCSWeightSync`).
-      if (
-          self._weight_sync is None
-          or getattr(self, "_last_staged_transport", None) != effective_transport
-      ):
+      if self._weight_sync is None or getattr(self, "_last_staged_transport", None) != effective_transport:
         if self._weight_sync is not None and hasattr(self._weight_sync, "close"):
           self._weight_sync.close()
         base_out = getattr(self._config, "base_output_directory", "") or ""
-        default_staging_dir = (
-            os.environ.get("WEIGHT_SYNC_GCS_DIR")
-            or (os.path.join(base_out, "weight_sync_staging") if base_out else None)
+        default_staging_dir = os.environ.get("WEIGHT_SYNC_GCS_DIR") or (
+            os.path.join(base_out, "weight_sync_staging") if base_out else None
         )
         if effective_transport == "gcs" and not default_staging_dir:
           raise ValueError(
@@ -2517,9 +2509,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Unknown transport: raise rather than return empty metadata. A typo would otherwise
     # surface only as the coordinator's "empty side" error, with nothing logged anywhere
     # naming the transport that was actually asked for.
-    raise ValueError(
-        f"unknown staging_transport {effective_transport!r}; expected 'raiden' or 'gcs'."
-    )
+    raise ValueError(f"unknown staging_transport {effective_transport!r}; expected 'raiden' or 'gcs'.")
 
   def _purge_raiden_buffers(self) -> int:
     """Drops the previous cycle's converted tree; returns leaves released."""
@@ -2537,11 +2527,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._weight_sync:
       if hasattr(self._weight_sync, "release"):
         self._weight_sync.release(sync_request=kwargs.get("sync_request"))
-      metrics = (
-          self._weight_sync.metrics()
-          if hasattr(self._weight_sync, "metrics")
-          else "N/A"
-      )
+      metrics = self._weight_sync.metrics() if hasattr(self._weight_sync, "metrics") else "N/A"
       logging.vlog(1, "Trainer weight sync metrics: %s", metrics)
       self._purge_raiden_buffers()
     return True

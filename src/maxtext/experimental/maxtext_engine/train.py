@@ -60,9 +60,7 @@ def _split_global_batch(
       continue
     micro_size = value.shape[0] // num_micro_steps
     for k in range(num_micro_steps):
-      micro_batches[k][name] = jax.device_put(
-          value[k * micro_size : (k + 1) * micro_size], data_sharding
-      )
+      micro_batches[k][name] = jax.device_put(value[k * micro_size : (k + 1) * micro_size], data_sharding)
   return micro_batches
 
 
@@ -121,12 +119,7 @@ def run_training_loop(
 
   # Precompute per-step token count and per-device TFLOPs for throughput logging.
   num_devices = jax.device_count()
-  tokens_per_step = (
-      config.per_device_batch_size
-      * num_devices
-      * num_micro_steps
-      * config.max_target_length
-  )
+  tokens_per_step = config.per_device_batch_size * num_devices * num_micro_steps * config.max_target_length
   total_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
 
   max_logging.log(
