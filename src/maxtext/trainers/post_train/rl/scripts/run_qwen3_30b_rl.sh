@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # This script launches a Reinforcement Learning (RL) training workload for the
-# Qwen3-30B-A3B model on a GKE cluster using XPK.
+# Qwen3-30B-A3B model on a GKE cluster using Cluster Toolkit (gcluster).
 
 set -e
 
 # --- Environment Setup ---
-if ! pip show xpk &> /dev/null; then
-    echo "xpk not found in the environment. Please install maxtext[runner] before running this script."
+if ! command -v gcluster &> /dev/null; then
+    echo "gcluster not found in the environment. Please install Cluster Toolkit before running this script."
     exit 1
 fi
 
@@ -18,8 +18,9 @@ export ZONE="${ZONE:-}" # Zone where your Ironwood cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-}" # GCS bucket path for outputs (e.g., gs://my-bucket/outputs)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-}" # Full path to the Docker image you pushed (e.g., us-docker.pkg.dev/<project_id>/<repository_name>/<image_name>:<tag>)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-}" # GCS path of the MaxText checkpoint you want to fine-tune from (e.g., gs://my-bucket/checkpoints/maxtext-ckpt)
-export TPU_TYPE="tpu7x-128"
-export WORKLOAD_NAME="rl-$(date +%Y%m%d-%H%M)"
+export COMPUTE_TYPE="${COMPUTE_TYPE:-tpu7x-standard-4t}" # v7x (Ironwood) 4 chips/VM
+export TOPOLOGY="${TOPOLOGY:-4x4x4}" # v7x (Ironwood) 4x4x4 = 64-chip (128-core) slice
+export RUN_NAME="${RUN_NAME:-rl-$(date +%Y%m%d-%H%M)}"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
@@ -93,7 +94,7 @@ ENABLE_PATHWAYS_PERSISTENCE=1 \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
 model_name=qwen3-30b-a3b-base \
 tokenizer_path=Qwen/Qwen3-30B-A3B-Base \
-run_name=$WORKLOAD_NAME \
+run_name=$RUN_NAME \
 async_scheduling=True \
 base_output_directory=$BASE_OUTPUT_DIRECTORY \
 chips_per_vm=8 \
@@ -138,15 +139,23 @@ vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-30b-a3b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
 # Workload Creation
-xpk workload create-pathways \
-  --cluster=$CLUSTER_NAME \
-  --project=$PROJECT_ID \
-  --zone=$ZONE \
-  --priority=medium \
-  --max-restarts=0 \
-  --tpu-type=$TPU_TYPE \
+gcloud config set project "$PROJECT_ID"
+gcloud container clusters get-credentials "$CLUSTER_NAME" \
+  --location "$ZONE" \
+  --project "$PROJECT_ID"
+gcluster job config set project "$PROJECT_ID"
+gcluster job config set cluster "$CLUSTER_NAME"
+gcluster job config set location "$ZONE"
+
+gcluster job submit \
+  --image="${DOCKER_IMAGE}" \
+  --name="${RUN_NAME}" \
+  --pathways \
+  --compute-type="${COMPUTE_TYPE}" \
+  --topology="${TOPOLOGY}" \
   --num-slices=1 \
-  --docker-image="${DOCKER_IMAGE}" \
-  --workload="${WORKLOAD_NAME}" \
-  --custom-pathways-proxy-server-args='${XLA_FLAGS}' \
+  --priority=medium \
+  --restarts=0 \
+  --pathways-gcs-location="${BASE_OUTPUT_DIRECTORY}" \
+  --pathways-proxy-args="${XLA_FLAGS}" \
   --command="${MAXTEXT_COMMAND}"

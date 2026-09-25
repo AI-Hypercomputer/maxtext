@@ -1,25 +1,26 @@
 #!/bin/bash
 
 # This script launches a Reinforcement Learning (RL) training workload for the
-# GPT-OSS 20B model on a GKE cluster using XPK.
+# GPT-OSS 20B model on a GKE cluster using Cluster Toolkit (gcluster).
 
 set -e
 
 # --- Environment Setup ---
-if ! pip show xpk &> /dev/null; then
-    echo "xpk not found in the environment. Please install maxtext[runner] before running this script."
+if ! command -v gcluster &> /dev/null; then
+    echo "gcluster not found in the environment. Please install Cluster Toolkit before running this script."
     exit 1
 fi
 
 # --- Environment Variables ---
 export PROJECT_ID="${PROJECT_ID:-}" # GCP project ID where the Ironwood cluster is deployed
-export CLUSTER_NAME="${CLUSTER_NAME:-}" # Name of your Ironwood cluster
+export CLUSTER_NAME="${CLUSTER_NAME:-}" # Name of your cluster
 export ZONE="${ZONE:-}" # Zone where your Ironwood cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-}" # GCS bucket path for outputs (e.g., gs://my-bucket/outputs)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-}" # Full path to the Docker image you pushed (e.g., us-docker.pkg.dev/<project_id>/<repository_name>/<image_name>:<tag>)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-}" # GCS path of the MaxText checkpoint you want to fine-tune from (e.g., gs://my-bucket/checkpoints/maxtext-ckpt)
-export TPU_TYPE="v5p-64"
-export WORKLOAD_NAME="rl-$(date +%Y%m%d-%H%M)"
+export COMPUTE_TYPE="${COMPUTE_TYPE:-ct5p-hightpu-4t}" # v5p 4 chips/VM
+export TOPOLOGY="${TOPOLOGY:-2x4x4}" # v5p 2x4x4 = 32-chip (64-core) slice
+export RUN_NAME="${RUN_NAME:-rl-$(date +%Y%m%d-%H%M)}"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
@@ -95,14 +96,14 @@ MAXTEXT_COMMAND="MODEL_IMPL_TYPE=flax_nnx \
   model_name=gpt-oss-20b  \
   tokenizer_path=unsloth/gpt-oss-20b-BF16   \
   load_parameters_path=${MAXTEXT_CKPT_PATH}  \
-  run_name=${WORKLOAD_NAME}  \
+  run_name=${RUN_NAME}  \
   base_output_directory=${BASE_OUTPUT_DIRECTORY}  \
   checkpoint_storage_use_ocdbt=False \
   checkpoint_storage_use_zarr3=False \
   rollout_data_parallelism=2 \
   rollout_tensor_parallelism=8 \
   hbm_utilization_vllm=0.8 \
-  batch_size=8 profiler=xplane \
+  profiler=xplane \
   profiler_steps=2 \
   num_batches=500 \
   base_emb_dim=2880 \
@@ -118,16 +119,24 @@ MAXTEXT_COMMAND="MODEL_IMPL_TYPE=flax_nnx \
 "
 
 # Workload Creation
-xpk workload create-pathways \
-  --cluster=$CLUSTER_NAME \
-  --project=$PROJECT_ID \
-  --zone=$ZONE \
-  --priority=medium \
-  --max-restarts=0 \
-  --tpu-type=$TPU_TYPE \
+gcloud config set project "$PROJECT_ID"
+gcloud container clusters get-credentials "$CLUSTER_NAME" \
+  --location "$ZONE" \
+  --project "$PROJECT_ID"
+gcluster job config set project "$PROJECT_ID"
+gcluster job config set cluster "$CLUSTER_NAME"
+gcluster job config set location "$ZONE"
+
+gcluster job submit \
+  --image="${DOCKER_IMAGE}" \
+  --name="${RUN_NAME}" \
+  --pathways \
+  --compute-type="${COMPUTE_TYPE}" \
+  --topology="${TOPOLOGY}" \
   --num-slices=1 \
-  --docker-image="${DOCKER_IMAGE}" \
-  --workload="${WORKLOAD_NAME}" \
-  --custom-pathways-proxy-server-args='${XLA_FLAGS}' \
+  --priority=medium \
+  --restarts=0 \
+  --pathways-gcs-location="${BASE_OUTPUT_DIRECTORY}" \
+  --pathways-proxy-args="${XLA_FLAGS}" \
   --command="${MAXTEXT_COMMAND}"
 
