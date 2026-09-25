@@ -325,6 +325,20 @@ def get_dataset(
   return ds
 
 
+def _files_hold_one_example_each(
+    dataset_name: str, split: str, data_dir: str | None, dataloading_host_count: int
+) -> bool:
+  """Whether sharding `split` by file gives every host the same examples as sharding by example.
+
+  With `shard_in_read=True` host i opens only files i, i + n, i + 2n, ... (n loading hosts),
+  while `ds.shard` after reading makes host i read files 0..i to find its first example.
+  When every file holds exactly one example the two select the same examples in the same
+  order, so the eval batches are unchanged. Only the dataset metadata is read here.
+  """
+  file_instructions = tfds.builder(dataset_name, data_dir=data_dir).info.splits[split].file_instructions
+  return len(file_instructions) >= dataloading_host_count and all(f.skip == 0 and f.take == 1 for f in file_instructions)
+
+
 def format_fn(x, eos_id: int = 1, pad_id: int = 0):
   """Format function for c4_mlperf."""
   x["inputs"] = x["targets"]
@@ -519,6 +533,13 @@ def preprocess_eval_dataset(
         num_parallel_calls=AUTOTUNE,
     )
 
+  # The eval loop consumes at most `num_batches` batches per eval. Truncate before the
+  # cache so that the first eval completes it: `cache()` only commits after a full pass
+  # over its input, and a partially read cache is discarded when the iterator is reset,
+  # which would make every eval read the eval files again.
+  if num_batches > 0:
+    eval_ds = eval_ds.take(num_batches)
+
   # We are running eval over exactly one epoch.
   # We explicitly cache the entire epoch (in memory) to ensure that it is the
   # same across different iterations.
@@ -605,6 +626,9 @@ def make_c4_mlperf_eval_iterator(
       dataloading_host_count=len(process_indices),
       data_dir=eval_data_dir,
       enable_data_shuffling=False,
+      shard_in_read=_files_hold_one_example_each(
+          config.eval_dataset_name, eval_split, eval_data_dir, len(process_indices)
+      ),
   )
   eval_ds = rekey(eval_ds, {"inputs": None, "targets": eval_col})
 
