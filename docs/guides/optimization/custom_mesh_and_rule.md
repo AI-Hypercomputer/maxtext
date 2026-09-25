@@ -55,6 +55,14 @@ Similar in philosophy to `ep-as-cp.yml`, this configuration explicitly includes 
 
 Different with the rule in `base.yml`, this rule configures expert physical axis to function as data parallelism rather than FSDP. This removes the constraint where FSDPxEP is limited by specific model dimensions, particularly for small tensors such as attention projections. Ultimately, this change benefits large-scale training.
 
+### `fsdp-as-dp-for-attn-cp-as-ep-for-moe.yml`
+
+Combines `fsdp-as-dp-for-attn.yml` with the context-axis borrowing of `cp-as-ep.yml`, for fractional batch size (e.g. `per_device_batch_size=0.5`) at large scale on TPU v7x. The `context` axis is laid over the two TensorCores of a chip, so each chip holds one sequence split in half. In attention, `fsdp` / `fsdp_transpose` act as data parallelism and the attention weights are sharded on `context` and `expert` (the `context` part of their all-gather stays on-chip). Inside the MoE, `context` joins `expert`, giving EP = `context` x `expert`. `context` is the last mesh axis so that the v7x mesh builder, which assigns axes last-first and offers the core axis first, places it on the TensorCore pair.
+
+### `fsdp-as-dp-for-attn-cp-as-ep-for-moe-eval.yml`
+
+The evaluation companion of the rule above (`custom_mesh_and_rule_for_eval`). It keeps the same mesh and weight rules. The only difference is that `expert` stops carrying the batch and joins `context` in sharding the sequence, which enables `eval_per_device_batch_size = 1 / (context x expert)`, e.g. 1/64 with `ici_context_parallelism=2` and `ici_expert_parallelism=32`. Keep `context_parallel_load_balance=false`, since the input pipeline reorders for the training CP extent only.
+
 ### `shard-exp-on-fsdp`
 
 When enabled, this shards the expert dimension of the MoE weights across the FSDP axis. It requires `num_experts` to be a multiple of FSDP rank and is particularly useful when using the Muon optimizer.

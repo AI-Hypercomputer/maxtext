@@ -23,7 +23,7 @@ import yaml
 
 from maxtext.configs import pyconfig
 from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
-from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, infer_cp_axes, infer_ep_axes
+from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, axes_for_logical, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
@@ -711,6 +711,31 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(infer_ep_axes(cp_as_ep_rules), ("context", "expert"))
     # CP still inferred from activation_length
     self.assertEqual(infer_cp_axes(cp_as_ep_rules), ("context",))
+
+  def test_fsdp_as_dp_for_attn_cp_as_ep_for_moe_rules(self):
+    """The train rule lends context to EP in MoE; its eval companion only moves expert from batch to sequence."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        custom_mesh_and_rule="fsdp-as-dp-for-attn-cp-as-ep-for-moe",
+        custom_mesh_and_rule_for_eval="fsdp-as-dp-for-attn-cp-as-ep-for-moe-eval",
+    )
+    train_rules, eval_rules = config.logical_axis_rules, config.logical_axis_rules_for_eval
+    # context is the last mesh axis so the TPU v7x mesh builder lays it over the TensorCore pair.
+    self.assertEqual(config.mesh_axes[-1], "context")
+    self.assertEqual(config.context_sharding, "context")
+    self.assertEqual(infer_ep_axes(train_rules), ("context", "expert"))
+    self.assertEqual(axes_for_logical(train_rules, "activation_q_length"), ("context",))
+    self.assertIn("expert", axes_for_logical(train_rules, "activation_batch"))
+    self.assertEqual(axes_for_logical(eval_rules, "activation_q_length"), ("context", "expert"))
+    self.assertEqual(axes_for_logical(eval_rules, "activation_norm_length"), ("context", "expert"))
+    self.assertNotIn("expert", axes_for_logical(eval_rules, "activation_batch"))
+
+    # Eval consumes the train state as-is, so every weight rule must be shared.
+    def weight_rules(rules):
+      return [rule for rule in rules if not rule[0].startswith("activation_")]
+
+    self.assertEqual(weight_rules(train_rules), weight_rules(eval_rules))
 
   def test_ep_as_cp_infer_axes(self):
     """ep-as-cp: activation_length -> ['expert'], exp -> 'expert'. Expert axis serves both CP and EP."""

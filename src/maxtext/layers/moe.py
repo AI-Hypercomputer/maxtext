@@ -615,7 +615,10 @@ class RoutedMoE(nnx.Module):
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") and self.config.enable_dp_attention:
       self._expert_parallelism_name = "attn_dp_expert"
-    elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
+    elif self.config.custom_mesh_and_rule in (
+        ctypes.CustomRule.CP_AS_EP,
+        ctypes.CustomRule.FSDP_AS_DP_FOR_ATTN_CP_AS_EP_FOR_MOE,
+    ):
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
     else:
