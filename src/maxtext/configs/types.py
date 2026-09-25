@@ -1004,6 +1004,10 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
   )
+  eval_ragged_buffer_factor: float = Field(
+      -1.0,
+      description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
+  )
   retry_when_tokens_dropped: bool = Field(
       False,
       description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
@@ -3636,13 +3640,16 @@ class MaxTextConfig(
         raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
 
   def validate_ragged_buffer_factor(self):
-    """Validates that ragged_buffer_factor is used with supported settings."""
+    """Validates that ragged_buffer_factor and eval_ragged_buffer_factor are used with supported settings."""
     if self.te_moe_block:
-      if 0 < self.ragged_buffer_factor < 1.0:
-        raise ValueError("te_moe_block=True requires ragged_buffer_factor >= 1.0, or <= 0 for worst-case capacity.")
+      if 0 < self.ragged_buffer_factor < 1.0 or self.eval_ragged_buffer_factor > 0:
+        raise ValueError(
+            "te_moe_block=True requires ragged_buffer_factor >= 1.0, or <= 0 for worst-case capacity, "
+            "and does not support eval_ragged_buffer_factor > 0."
+        )
       return
 
-    if self.ragged_buffer_factor <= 0:
+    if self.ragged_buffer_factor <= 0 and self.eval_ragged_buffer_factor <= 0:
       return  # Not using a ragged buffer factor
 
     if self.use_ring_of_experts and not self.use_ragged_sort:
@@ -3883,6 +3890,7 @@ class MaxTextConfig(
         }
         if not self.te_moe_block:
           _ep_disabled_flags["ragged_buffer_factor"] = -1.0
+          _ep_disabled_flags["eval_ragged_buffer_factor"] = -1.0
         for flag_name, disabled_value in _ep_disabled_flags.items():
           current = getattr(self, flag_name)
           if current != disabled_value:
