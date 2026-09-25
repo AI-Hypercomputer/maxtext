@@ -198,3 +198,5 @@ class CustomRule(enum.Enum):
   EP_AS_DP = "ep-as-dp"
   SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
   FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
+  FSDP_AS_DP_FOR_ATTN_CP_AS_EP_FOR_MOE = "fsdp-as-dp-for-attn-cp-as-ep-for-moe"  # Context axis joins EP in MoE
+  FSDP_AS_DP_FOR_ATTN_CP_AS_EP_FOR_MOE_EVAL = "fsdp-as-dp-for-attn-cp-as-ep-for-moe-eval"  # Eval companion
