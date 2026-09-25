@@ -347,7 +347,17 @@ def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutpu
     if isinstance(loss_val, abstract_engine.WeightedMetric):
       primary_loss = loss_val
     elif isinstance(aux, dict) and "xent_sum" in aux and "total_weights" in aux:
-      aux_loss = aux.get("moe_lb_loss", 0.0) + aux.get("indexer_loss", 0.0) + aux.get("mtp_loss", 0.0)
+      # `maxtext_train.loss_fn` adds normalized auxiliary losses (`moe_lb_loss`,
+      # `indexer_loss`, `mtp_loss`) to `loss`, so scale them by `total_weights` when
+      # reconstructing the unreduced numerator for `WeightedMetric`.
+      moe_lb = aux.get("moe_lb_loss")
+      idx_l = aux.get("indexer_loss")
+      mtp_l = aux.get("mtp_loss")
+      aux_loss = (
+          (0.0 if moe_lb is None else moe_lb)
+          + (0.0 if idx_l is None else idx_l)
+          + (0.0 if mtp_l is None else mtp_l)
+      )
       primary_loss = abstract_engine.WeightedMetric(
           unreduced_sum=aux["xent_sum"] + aux_loss * aux["total_weights"],
           denominator=aux["total_weights"],
@@ -741,6 +751,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     """Returns the model to train, adopting a mesh when this engine was given none."""
+    # `from_pretrained` calls `create_nnx_sharded_model` outside `logical_axis_rules`,
+    # which re-runs model `__init__` under `jax.jit`. Entering `_sharding_ctx()` here
+    # ensures both the active mesh and `logical_axis_rules` are bound during model
+    # initialization (required by e.g. scanned NNX layers and Tokamax ring attention).
     with self._sharding_ctx():
       model_or_model_mesh_pair = model_creation_utils.from_pretrained(
           config=self._config,
@@ -909,7 +923,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     cannot divide gives NaN gradients once the constraints are real.
     """
     if self._mesh is None:
-      yield
+      with logical_axis_rules(self._config.logical_axis_rules):
+        yield
       return
     with jax.set_mesh(self._mesh), logical_axis_rules(self._config.logical_axis_rules):
       yield
@@ -2276,6 +2291,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metric: The metric to record.
       aggregation_fn: The aggregation function to apply to the metric.
     """
+    # `loss_fn` auxiliary outputs can contain `None` entries (disabled optional losses),
+    # `"intermediate_outputs"` (sow activations/mutable collections), or tuples/lists
+    # (e.g., `(total_loss, aux)`). Skip these so `buffer_metrics` only receives scalar
+    # metrics, arrays, or nested metric dicts.
     if metric is None or name == "intermediate_outputs" or isinstance(metric, (tuple, list)):
       return
     if isinstance(metric, dict):

@@ -110,11 +110,16 @@ def run_training_loop(
   engine.compile(first_batch)
   stream = itertools.chain([first_batch], stream)
 
-  # Disable inner micro-step profiler so outer Profiler(config) captures full
-  # optimizer steps (N * fwd_bwd + 1 * update) identically to pre_train/train.py.
+  # `MaxTextTrainingEngine._profiler` (`MicroStepProfiler`) only wraps `fwd_bwd` and
+  # counts `skip_first_n_steps_for_profiler` / `profiler_steps` in micro-steps rather
+  # than optimizer steps. Disable it here and use MaxText's standard `Profiler` around
+  # the outer loop so `skip_first_n_steps_for_profiler` and `profiler_steps` capture
+  # full optimizer steps (`N * fwd_bwd + 1 * update`) identically to `pre_train/train.py`.
   # pylint: disable=protected-access
   engine._profiler.do_not_profile = True
   prof = Profiler(config, offset_step=start_step)
+
+  # Precompute per-step token count and per-device TFLOPs for throughput logging.
   num_devices = jax.device_count()
   tokens_per_step = (
       config.per_device_batch_size
@@ -136,13 +141,13 @@ def run_training_loop(
       prof.maybe_activate_profiler(step, engine.state)
       t0 = time.perf_counter()
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        for micro_idx in range(num_micro_steps):
+        for _ in range(num_micro_steps):
           engine.fwd_bwd(next(stream))
-          if step == start_step and micro_idx in (0, num_micro_steps - 1):
-            engine._throttler.wait_for_all()
         engine.update()
+      # Wait for the step's asynchronous device execution (`update`) and metrics flush
+      # to complete before measuring step wall time or closing the profiler window.
       engine._throttler.wait_for_all()
-      step_time_s = time.perf_counter() - t0
+      step_time_s = max(time.perf_counter() - t0, 1e-9)
       tps_per_chip = tokens_per_step / step_time_s / num_devices
       tflops_per_dev = total_tflops / step_time_s
       max_logging.log(
