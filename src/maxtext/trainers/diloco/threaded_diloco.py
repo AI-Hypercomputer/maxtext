@@ -38,7 +38,7 @@ import optax
 
 from maxtext.common import checkpointing, profiler, metric_logger
 from maxtext.common.goodput import maybe_record_goodput, GoodputEvent
-from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager, LearnerTransport, SyncerTransport
+from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager, LearnerTransport, SyncerTransport, TRANSPORT_TIMEOUT_S
 from maxtext.trainers.diloco.threaded_fragmenter import FragmentedTreeManipulator, _get_tree_mesh
 from maxtext.utils import exceptions
 from maxtext.utils import max_logging
@@ -1040,7 +1040,7 @@ def _run_learner_loop(
               }
 
           # 3. Put pre-transferred TPU 1D buffers into bounded queue
-          prefetch_queue.put((sync_step, frag_idx, received_tpu_packed), timeout=300.0)
+          prefetch_queue.put((sync_step, frag_idx, received_tpu_packed), timeout=TRANSPORT_TIMEOUT_S)
           max_logging.log(
               f"Learner {learner_idx} prefetch: buffered sync_step {sync_step} frag {frag_idx}, "
               f"prefetch_queue size={prefetch_queue.qsize()}/{prefetch_queue_maxsize}"
@@ -1158,7 +1158,7 @@ def _run_learner_loop(
 
             target_sync_step = completed_step - tau
             qsize_before = prefetch_queue.qsize()
-            sync_step, frag_idx, received_tpu_packed = prefetch_queue.get(timeout=300.0)
+            sync_step, frag_idx, received_tpu_packed = prefetch_queue.get(timeout=TRANSPORT_TIMEOUT_S)
             max_logging.log(
                 f"Learner {learner_idx}: Step {step} apply frag {frag_idx} (sync_step {sync_step}), "
                 f"prefetch_queue size before get={qsize_before}/{prefetch_queue_maxsize}"
