@@ -26,6 +26,45 @@ from flax import nnx
 import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
+
+try:
+  from jax.extend.core.primitives import name_p
+except ImportError:
+  try:
+    from jax._src.ad_checkpoint import name_p
+  except ImportError:
+    name_p = None
+
+_GDN_SAVED_NAMES = frozenset(
+    {
+        "gdn",
+        "gdn_core_attn_out",
+        "gdn_fwd_out",
+        "gdn_qkv",
+        "gdn_b",
+        "gdn_a",
+        "gdn_t_inv",
+        "gdn_chunk_states",
+        "gdn_conv",
+        "gdn_conv_out",
+    }
+)
+
+
+def _get_gdn_aware_remat_policy(base_policy):
+  """Checkpoint policy that preserves GDN forward residuals under any remat policy."""
+
+  def policy(prim, *args, **params):
+    is_name = (name_p is not None and prim is name_p) or getattr(prim, "name", None) == "name"
+    if is_name and params.get("name") in _GDN_SAVED_NAMES:
+      return True
+    if base_policy is not None:
+      return base_policy(prim, *args, **params)
+    return False
+
+  return policy
+
+
 from jax.experimental import xla_metadata
 import jax.nn
 import jax.numpy as jnp
@@ -1168,6 +1207,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             use_qk_norm_in_gdn=self.config.use_qk_norm_in_gdn,
             compute_dtype=state_dtype,
         )
+      core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")
     else:
       # Perform the convolution.
       conv_out = self.conv1d(conv_input, out_sharding=flat_sharding)
@@ -1359,7 +1399,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           next_conv_state = next_conv_state[:orig_cache_batch]
           next_recurrent_state = next_recurrent_state[:orig_cache_batch]
 
-    next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
+    if next_recurrent_state is not None:
+      next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
 
@@ -1378,6 +1419,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output, out_sharding=out_sharding)
+    output = checkpoint_name(output, "out_proj")
 
     return output, active_cache
 
@@ -1752,6 +1794,11 @@ class Qwen3NextScannableBlock(nnx.Module):
   def _scan_local_layers(self, y, layer_kwargs):
     """Runs the local (linear attention / GatedDeltaNet) layers via a per-layer rematerialized jax.lax.scan."""
     remat = self._remat_enabled
+    remat_policy = self.remat_policy_fn
+    if remat and getattr(self.config, "use_gdn_kernel", False):
+      should_save_gdn = getattr(self.config, "gdn", "remat") == "device"
+      if should_save_gdn:
+        remat_policy = _get_gdn_aware_remat_policy(remat_policy)
     return nnx_scan.apply_scanned_layers(
         self.local_layers,
         y,
@@ -1759,7 +1806,7 @@ class Qwen3NextScannableBlock(nnx.Module):
         param_scan_axis=self.config.param_scan_axis,
         apply_fn=lambda layer, carry: self._run_layer(layer, carry, layer_kwargs)[0],
         remat=remat,
-        remat_policy=self.remat_policy_fn if remat else None,
+        remat_policy=remat_policy if remat else None,
         prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config) if remat else True,
     )
 
