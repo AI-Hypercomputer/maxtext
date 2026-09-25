@@ -323,24 +323,29 @@ What it settles: **the comm-side levers are exhausted.** DP past 2, halving
 gradient volume and more collective concurrency all land within 1%. The binder
 is now the TensorCore lane, so the next series goes after recompute.
 
-### In flight: h-series, trading HBM for recompute
+### 128 devices (4x4x4): run `o35n251712`, h-series, trading HBM for recompute
 
-Base is g2 (pdb=3, sched, DP=4). Under `remat_policy=full` the forward runs
-twice. In OLMo 3.5 only the MoE GEMMs and the two full-attention layers carry
-checkpoint names; the 14 KDA layers carry none, so the MoE outputs are the only
-real save/offload targets. One `moe_mlpwo` activation is ~0.8 GB per layer at
-pdb=3, 12.9 GB across 16 layers, which does not fit on device at pdb=3 but may
-at pdb=2 or on host.
+Base is g2 (pdb=3, sched, DP=4). In OLMo 3.5 only the MoE GEMMs and the two
+full-attention layers carry checkpoint names; the 14 KDA layers carry none, so
+the MoE outputs are the only real save/offload targets.
 
-| arm | pdb | change | question |
-|---|---|---|---|
-| h1_ctrl_prof | 3 | none, captured | profile of the best config |
-| h2_p3_off_mlpwo | 3 | `moe_mlpwo=offload` | host offload hides under compute? |
-| h3_p3_off_moe | 3 | all three MoE GEMM outputs offloaded | more of the same |
-| h4_p2_dev_mlpwo | 2 | `moe_mlpwo=device` | less recompute at lower batch |
-| h5_p2_dev_moe | 2 | all three on device | likely OOM, bounds it |
-| h6_p3_vocab4 | 3 | `num_vocab_tiling=4` | cheaper logits |
-| h7_p2_ctrl | 2 | none | pdb=2 control for h4/h5 |
+| arm | pdb | change | TF/s/dev | MFU | step s | vs control |
+|---|---|---|---|---|---|---|
+| h1_ctrl_prof | 3 | none, captured | 107.3 | 9.30% | 0.988 | |
+| h2_p3_off_mlpwo | 3 | `moe_mlpwo=offload` | 100.1 | 8.67% | 1.059 | 0.93x |
+| h3_p3_off_moe | 3 | all three MoE outputs offloaded | 56.2 | 4.87% | 1.885 | 0.52x |
+| h4_p2_dev_mlpwo | 2 | `moe_mlpwo=device` | 99.0 | 8.59% | 0.714 | 1.03x vs h7 |
+| h5_p2_dev_moe | 2 | all three on device | 99.8 | 8.65% | 0.708 | 1.04x vs h7 |
+| h6_p3_vocab4 | 3 | `num_vocab_tiling=4` | **108.0** | **9.36%** | 0.982 | 1.01x |
+| h7_p2_ctrl | 2 | none | 96.4 | 8.35% | 0.733 | |
+
+What it settles:
+
+1. **Host offload is a loss here.** 12.9 GB per step of MoE activations over the
+   host link does not hide; offloading all three halves throughput.
+2. **Saving MoE outputs on device is worth 1.04x at pdb=2** but does not beat
+   pdb=3 with full remat (99.8 against 107.3). Batch beats recompute savings.
+3. `num_vocab_tiling=4` is a marginal +0.6%, retested in the i-series.
 
 ## Profiles and xla-shell output
 
@@ -427,6 +432,33 @@ What it says:
    faster kernels. KDA is 128 ms of kernel time at pdb=3, no longer dominant.
 5. **Non-matmul TensorCore work is 34% of the step,** which is what any
    FLOP-based estimate misses and part of why perfsim is 4.3x optimistic here.
+
+### 128 devices, best configuration (h1: pdb=3, sched, DP=4)
+
+`o35n251712-h1_ctrl_prof`, report in `/tmp/olmo35_profiles/o35n251712-h1/`.
+
+| lane | e4 (no sched, DP=1) | h1 |
+|---|---|---|
+| step | 1210 ms | 986 ms |
+| TensorCore | 875 ms | 920 ms (93%) |
+| of which matmul | 458 ms | 479 ms |
+| of which vpu | 335 ms | 351 ms |
+| of which relayout | 82 ms | 91 ms |
+| SparseCore comm | 532 ms | 379 ms |
+| comm exposed | 328 ms | **59 ms** |
+
+**Comm is solved; the step is now TensorCore-bound** with 1.07x of scheduling
+headroom left. The remaining levers are on the TensorCore lane:
+
+| item | share | note |
+|---|---|---|
+| matmul | 479 ms | KDA fused kernel 75 ms, gmm_v2 129 ms, tgmm_v2 62 ms, KDA shard_map 53 ms |
+| VPU: MoE routing `argsort` | ~22% of VPU | xla-shell tags it offloadable to SparseCore |
+| VPU: `top_k`, `silu`/`ffn_act` mul, KDA bwd mul | most of the rest | inherent elementwise |
+| relayout: fp32 to bf16 weight casts | largest relayout scopes | expert weights `[512,512,1024]` reformatted each step |
+| VPU: `pad` | ~2% of VPU | gmm tile padding |
+
+The i-series goes after the routing sort and gather.
 
 ## Infrastructure notes that cost real time
 
