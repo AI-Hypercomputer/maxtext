@@ -248,6 +248,7 @@ ModelName = Literal[
     "deepseek3-671b",
     "deepseek3-671b-2dfsdp",
     "deepseek3-671b-batchsplit",
+    "deepseek3-671b-lineage",
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
@@ -1342,6 +1343,10 @@ class DeepSeekMoE(BaseModel):
   batch_split_factor: int = Field(
       1,
       description="Factor by which to split the batch into micro-batches. Only used if use_batch_split_schedule is True.",
+  )
+  use_lineage: bool = Field(
+      False,
+      description="Whether to use Lineage DeepSeek-V3 execution.",
   )
 
 
@@ -3461,6 +3466,13 @@ def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
+def _resolve_parallelism(configured: list[int] | None, axis_map: dict[str, int], mesh_axes: list[str]) -> list[int]:
+  """Per-axis parallelism list for `mesh_axes` (preserves explicit list for custom physical mesh axes)."""
+  if configured and len(configured) == len(mesh_axes) and any(axis not in axis_map for axis in mesh_axes):
+    return list(configured)
+  return [axis_map.get(axis, 1) for axis in mesh_axes]
+
+
 def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
   """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
 
@@ -5232,6 +5244,18 @@ class MaxTextConfig(
             f"max_target_length={self.max_target_length}."
         )
 
+    if self.use_lineage:
+      if not self.scan_layers:
+        raise ValueError("use_lineage=True requires scan_layers=True.")
+      if self.decoder_block != DecoderBlockType.DEEPSEEK:
+        raise ValueError(f"use_lineage=True requires decoder_block='deepseek', got decoder_block={self.decoder_block!r}.")
+      if self.attention_type != "mla":
+        raise ValueError(f"use_lineage=True requires attention_type='mla', got attention_type={self.attention_type!r}.")
+      if self.rope_type != RopeType.YARN:
+        raise ValueError(f"use_lineage=True requires rope_type='yarn', got rope_type={self.rope_type!r}.")
+      if self.capacity_factor <= 0:
+        raise ValueError(f"use_lineage=True requires capacity_factor > 0, got capacity_factor={self.capacity_factor}.")
+
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
         "diloco": self.ici_diloco_parallelism,
@@ -5253,7 +5277,7 @@ class MaxTextConfig(
         "dcp": (1),
         "pcp": (1),
     }
-    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+    self.ici_parallelism = _resolve_parallelism(self.ici_parallelism, ici_map, self.mesh_axes)
 
     dcn_map = {
         "diloco": self.dcn_diloco_parallelism,
@@ -5275,7 +5299,7 @@ class MaxTextConfig(
         "dcp": (1),
         "pcp": (1),
     }
-    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+    self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
 
     # Zero-1 (`shard_optimizer_over_data`) shards the optimizer moments over the "data"
     # axis on top of whatever layout the parameters already have. FSDP shards the
@@ -5684,9 +5708,9 @@ class RLConfig(
       }
 
     ici_map = get_parallelism_map("ici")
-    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+    self.ici_parallelism = _resolve_parallelism(self.ici_parallelism, ici_map, self.mesh_axes)
 
     dcn_map = get_parallelism_map("dcn")
-    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+    self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
 
     return self

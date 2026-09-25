@@ -32,6 +32,12 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.globals import EPS
 
+try:
+  # lineage_adapter is Google-internal and excluded from the open-source export.
+  from maxtext.experimental.lineage import lineage_adapter  # pylint: disable=g-import-not-at-top
+except ImportError:
+  lineage_adapter = None
+
 
 # Custom Variable types for MTP intermediate outputs
 # These will be automatically converted to Linen mutable collections by ToLinen wrapper
@@ -65,6 +71,14 @@ def _shift_left_one_cp_aware(x: jnp.ndarray, axis_name: str = "context") -> jnp.
   Returns:
     Array shaped like x, left-shifted by 1 across CP boundaries.
   """
+  # jnp.roll cannot slice an explicitly sharded sequence axis, so shift a copy
+  # gathered along it and restore the original sharding.
+  x_sharding = jax.typeof(x).sharding
+  spec = x_sharding.spec.partitions
+  if len(spec) > 1 and spec[1] is not None:
+    gathered = jax.sharding.NamedSharding(x_sharding.mesh, jax.sharding.PartitionSpec(spec[0], None, *spec[2:]))
+    return jax.reshard(_shift_left_one_cp_aware(jax.reshard(x, gathered), axis_name), x_sharding)
+
   local_rolled = jnp.roll(x, -1, axis=1)
 
   # Mask for the last position along axis=1 (avoids .at[...].set() scatter).
@@ -278,6 +292,22 @@ class MultiTokenPredictionLayer(nnx.Module):
     Returns:
         Processed hidden state. Shape [batch, seq_len, hidden_size].
     """
+    if self.config.use_lineage:
+      # Lineage runs everything but `final_norm`, which the block applies.
+      out, mtp_lb_loss = lineage_adapter.run_lineage_mtp_layer(
+          prev_hidden_state=prev_hidden_state,
+          target_token_embedding=target_token_embedding,
+          mtp_params=nnx.state(self, (nnx.Param, moe.MoEBiasVar)),
+          layer_number=self.layer_number,
+          decoder_positions=position_ids,
+          mesh=self.mesh,
+          cfg=self.config,
+          decoder_segment_ids=decoder_segment_ids,
+      )
+      if mtp_lb_loss is not None:
+        self.sow(nnx.Intermediate, "moe_lb_loss", mtp_lb_loss)
+      return out
+
     target_token_embedding = sharding.maybe_shard_with_logical(
         target_token_embedding,
         ("activation_batch", "activation_length", "activation_embed"),
