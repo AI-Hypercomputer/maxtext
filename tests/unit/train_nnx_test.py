@@ -777,5 +777,45 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
     self.assertEqual(dropless_call_count, 0)
 
 
+class TestDroplessRematOverrideNNX(unittest.TestCase):
+  """Covers setting remat_policy_override=\"full\" on NNXDecoder during dropless model preparation."""
+
+  def test_dropless_override_targets_nnx_decoder(self):
+    class NNXDecoder(nnx.Module):
+
+      def __init__(self):
+        self.remat_policy_override = None
+
+      def get_remat_policy(self):
+        return self.remat_policy_override
+
+    class RoutedMoE(nnx.Module):
+
+      def __init__(self):
+        self.force_dropless = False
+        self.num_moe_token_chunks = 1
+        self.moe_chunk_barrier = False
+
+    class FakeModel(nnx.Module):
+
+      def __init__(self):
+        self.decoder = NNXDecoder()
+        self.moe = RoutedMoE()
+
+    model = FakeModel()
+    jit_model, state = nnx.split(model)
+    reconstructed = nnx.merge(jit_model, state)
+    for _, module in nnx.iter_graph(reconstructed):
+      if type(module).__name__ == "RoutedMoE":
+        module.force_dropless = True
+        module.num_moe_token_chunks = 2
+        module.moe_chunk_barrier = True
+      elif hasattr(module, "get_remat_policy"):  # The decoder (NNXDecoder)
+        module.remat_policy_override = "full"
+
+    self.assertEqual(reconstructed.decoder.remat_policy_override, "full")
+    self.assertTrue(reconstructed.moe.force_dropless)
+
+
 if __name__ == "__main__":
   unittest.main()
