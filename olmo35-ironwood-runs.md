@@ -440,6 +440,13 @@ instead of freeing it, and DP=8 loses 7%, so DP=4 x FSDP=32 stays.
 | j2 + `kda_conv_in_compute_dtype` | 3 | 90.87 GiB | 88.9 GiB | KDA residuals and chunk states go bf16 (6.6 to 3.05 GiB); the scheduler spends the saving on more MoE rows in flight (20.3 to 27.8 GiB) |
 | j2 + `cast_params_to_compute_dtype` | 3 | 90.75 GiB | | gathers and reduce-scatters already bf16 in j2, so the collectives are unchanged |
 | j2 + both flags | 4 | 97.10G | | OOM by 2.4G, down from 11.2G |
+| j2 + both flags, `num_vocab_tiling=8` | 4 | 95.08G | | OOM by 0.34G |
+| j2 + both flags, scheduler memory limit 100 | 4 | 95.31G | | OOM by 0.57G |
+| j2 + both flags, vocab 8, limit 100 | 4 | 95.74G | | OOM by 1.0G, the two trims do not stack |
+
+pdb=4 sits within half a gigabyte of fitting once KDA runs in bf16. The trims
+left are small, so pdb=4 is a question of shaving the MoE row working set, not of
+flags.
 
 XLA already hoists the bf16 convert above the FSDP all-gather, and gradients are
 reduce-scattered in bf16, so fp32 weights cost no extra collective bytes. The
@@ -447,6 +454,20 @@ likelier source of k3's 11% is KDA: with bf16 weights the conv weight is bf16 to
 The fp32 conv weight promoted q/k/v to fp32, so the fused KDA kernel ran and
 saved residuals in fp32. With the flag the whole KDA path is bf16, which needs a
 loss check on hardware before it counts.
+
+### In flight: m-series, scheduler and VMEM limits (o35n252023)
+
+Needs no new source, so it runs while the l-series (the two new flags, arms in
+`/tmp/olmo35_l_arms.txt`) waits for the source upload. Base j2 at pdb=3.
+
+| arm | change | TF/s/dev | MFU |
+|---|---|---|---|
+| m1_ctrl | none | | |
+| m2_lim100 | `xla_tpu_scheduler_percent_shared_memory_limit=100` | | |
+| m3_lim200 | same, 200 | | |
+| m4_vt8 | `num_vocab_tiling=8` | | |
+| m5_vmem96 | `xla_tpu_scoped_vmem_limit_kib=98304` | | |
+| m6_vmem32 | `xla_tpu_scoped_vmem_limit_kib=32768` | | |
 
 ## Profiles and xla-shell output
 
