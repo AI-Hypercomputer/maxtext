@@ -585,15 +585,23 @@ def _outer_sgd_1d_jit(outer_1d, trace_1d, stacked_learners_1d, lr: float, moment
 
 # Opt-in until validated on hardware; the legacy client-NumPy path stays default.
 USE_COLOCATED_CPU_OUTER = os.environ.get("DILOCO_COLOCATED_CPU_OUTER", "0") == "1"
-# Opt-in (default off until measured on hardware): see _async_outer_update_and_dispatch.
-USE_SYMMETRIC_OUTER = os.environ.get("DILOCO_SYMMETRIC_OUTER", "0") == "1"
+# Default ON (colocated path only): see _async_outer_update_and_dispatch. Measured 2 x v6e-32 /
+# Qwen3-14B: learners 3.5196/3.5918 -> 3.4722/3.4708 s/step (v6e-pwns-s14a -> s14sym).
+USE_SYMMETRIC_OUTER = os.environ.get("DILOCO_SYMMETRIC_OUTER", "1") == "1"
 # Opt-in: transfer each fragment leaf as its own array (original shape and
 # sharding) instead of one 1-D buffer per dtype. The 1-D packing forces an ICI
 # relayout in every extract/apply: at 2 x v6e-32 / Qwen3-14B the profile
 # (MyStuff/Data/v6e-pwns-s14p-prof/apply_ops.txt) shows all-gather 8.37 ms in
 # apply and 8.36 ms in extract per step. Requires the colocated CPU outer step
 # and the sharded hop (the legacy numpy syncer assumes 1-D buffers).
-USE_UNPACKED_TRANSFER = os.environ.get("DILOCO_UNPACKED_TRANSFER", "0") == "1"
+# Default ON when its prerequisites are on (colocated outer + sharded hop); an explicit
+# DILOCO_UNPACKED_TRANSFER=1 without them raises in the learner. Measured with symmetric + batched
+# syncer: 2 x v6e-32 / Qwen3-14B 3.4164/3.4481 and 3.4137/3.4419 s/step vs SPMD 3.4450-3.4530
+# (v6e-pwns-s14su3/su3b); 2 x v6e-8 / Qwen3-8B 1.3310/1.3305 vs 1.3333 without it (v6e-pwns-s8su2).
+_UNPACKED_ENV = os.environ.get("DILOCO_UNPACKED_TRANSFER")
+USE_UNPACKED_TRANSFER = (_UNPACKED_ENV == "1") if _UNPACKED_ENV is not None else (
+    USE_COLOCATED_CPU_OUTER and os.environ.get("DILOCO_SHARDED_APPLY", "1") == "1"
+)
 
 
 def _colocated_cpu_mesh_for(tpu_mesh: jax.sharding.Mesh) -> jax.sharding.Mesh:
