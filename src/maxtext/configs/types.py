@@ -1045,6 +1045,14 @@ class MoEGeneral(BaseModel):
       True,
       description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul.",
   )
+  router_topk_matmul_vjp: bool = Field(
+      False,
+      description=(
+          "DeepSeek routing: take the top-k routing weights with a custom VJP whose backward builds the dense"
+          " [..., num_experts] gradient as a one-hot compare-select-sum over the k slots, instead of the scatter-add"
+          " that jnp.take_along_axis transposes to. Forward and gradient values are unchanged."
+      ),
+  )
   use_ring_of_experts: bool = Field(
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
