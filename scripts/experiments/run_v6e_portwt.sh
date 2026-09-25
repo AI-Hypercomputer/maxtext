@@ -71,7 +71,7 @@ submit() {
     # is passed explicitly because the topology probe under-counted hosts on
     # v6e Pathways (v6e-nscc-p1 logged "host_groups=2 (via host_id)").
     COMMON="${COMMON} profiler=xplane skip_first_n_steps_for_profiler=${PROF_SKIP:-40} \
-     profiler_steps=${PROF_STEPS:-5} profile_cleanly=true upload_all_profiler_results=true \
+     profiler_steps=${PROF_STEPS:-5} profile_cleanly=${PROF_CLEAN:-true} upload_all_profiler_results=true \
      enable_tpu_profiling_options=${PROF_TPU_OPTS:-true} tpu_num_chips_to_profile_per_task=4 \
      profiler_max_num_hosts=${PROF_HOSTS:-4}"
   fi
@@ -84,7 +84,7 @@ submit() {
       SUB="workload create-pathways"
       ENVS="export JAX_NUM_CPU_DEVICES=8 && export DILOCO_COLOCATED_CPU_OUTER=1 \
 && export DILOCO_SHARDED_APPLY=${SHARDED_APPLY:-1} && export DILOCO_DONATE_APPLY=${DONATE_APPLY:-1} \
-&& export DILOCO_SYMMETRIC_OUTER=${SYMMETRIC_OUTER:-1} && export DILOCO_UNPACKED_TRANSFER=${UNPACKED_TRANSFER:-1}"
+&& export DILOCO_SYMMETRIC_OUTER=${SYMMETRIC_OUTER:-1} && export DILOCO_UNPACKED_TRANSFER=${UNPACKED_TRANSFER:-1} && export DILOCO_PROFILE_BARRIER=${PROF_BARRIER:-1}"
       DILOCO_ARGS="enable_non_spmd_diloco=true enable_single_controller=true" ;;
     *) echo "arm must be spmd|ns"; exit 2 ;;
   esac
