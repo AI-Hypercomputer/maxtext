@@ -38,6 +38,8 @@ from maxtext.integration.tunix.weight_mapping import raiden_unscan
 from maxtext.integration.vllm.convert_utils import (
     is_verify_weights_enabled,
     resolve_prefuse_moe_weights,
+    resolve_rollout_kv_tp,
+    resolve_rollout_moe_tp,
     resolve_rollout_tp,
 )
 from maxtext.trainers.pre_train import train as maxtext_train
@@ -714,8 +716,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._use_weight_converter = bool(self._config.use_weight_converter)
     self._rollout_backend = self._config.rollout_backend
     rollout_tp = resolve_rollout_tp(self._config)
-    kv_tp = self._config.kv_tp_size or rollout_tp
-    moe_tp = self._config.moe_mlp_tp_size or rollout_tp
+    kv_tp = resolve_rollout_kv_tp(self._config, tp=rollout_tp)
+    moe_tp = resolve_rollout_moe_tp(self._config, tp=rollout_tp)
     prefuse_moe = resolve_prefuse_moe_weights(self._config)
     if self._use_weight_converter:
       from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel

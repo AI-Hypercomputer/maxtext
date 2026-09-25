@@ -1447,10 +1447,10 @@ use_weight_converter: true
 rollout_tensor_parallelism: -1
 # Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax')
 rollout_backend: "maxtext"
-# Degree of tensor parallelism for KV cache / attention heads in rollout
-kv_tp_size: 1
-# Degree of tensor parallelism for MoE MLP dimension in rollout
-moe_mlp_tp_size: 1
+# Degree of tensor parallelism for KV cache / attention heads in rollout (0 for auto-determined from rollout TP)
+kv_tp_size: 0
+# Degree of tensor parallelism for MoE MLP dimension in rollout (0 for auto-determined from rollout TP)
+moe_mlp_tp_size: 0
 # Enable debug verification and checksum logging during weight sync
 weight_sync_debug: false
 # Whether to use Raiden FFI transport for weight sync (null derives from platform)

@@ -744,3 +744,32 @@ def resolve_prefuse_moe_weights(config: Any, prefuse_moe_weights: Optional[bool]
 def is_verify_weights_enabled() -> bool:
   """Returns whether weight verification / checksum validation is active."""
   return os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
+
+
+def resolve_rollout_kv_tp(config: Any, kv_tp_size: Optional[int] = None, tp: int = 1) -> int:
+  """Resolves rollout KV TP from explicit override, config, or rollout TP * EP fallback."""
+  if kv_tp_size is not None and int(kv_tp_size) > 0:
+    return int(kv_tp_size)
+
+  if config is not None:
+    raw = getattr(config, "kv_tp_size", 0)
+    if raw and int(raw) > 0:
+      return int(raw)
+
+  resolved_tp = resolve_rollout_tp(config, tp)
+  ep = max(1, int(getattr(config, "rollout_expert_parallelism", 1) or 1)) if config is not None else 1
+  return resolved_tp * ep
+
+
+def resolve_rollout_moe_tp(config: Any, moe_mlp_tp_size: Optional[int] = None, tp: int = 1) -> int:
+  """Resolves rollout MoE MLP TP from explicit override, config, or rollout TP fallback."""
+  if moe_mlp_tp_size is not None and int(moe_mlp_tp_size) > 0:
+    return int(moe_mlp_tp_size)
+
+  if config is not None:
+    raw = getattr(config, "moe_mlp_tp_size", 0)
+    if raw and int(raw) > 0:
+      return int(raw)
+
+  resolved_tp = resolve_rollout_tp(config, tp)
+  return int(resolved_tp or 1)
