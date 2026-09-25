@@ -639,6 +639,7 @@ def build_training_components(
         skip_first_n_steps=student_config.skip_first_n_steps_for_profiler,
         profiler_steps=student_config.profiler_steps,
         set_profile_options=False,
+        enable_continuous_profiling=student_config.enable_continuous_profiling,
     )
 
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
