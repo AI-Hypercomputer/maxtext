@@ -23,6 +23,7 @@ pytestmark = [pytest.mark.decoupled_target]
 
 
 from maxtext.checkpoint_conversion.to_maxtext import _build_multi_axis_stacked_tensor
+from maxtext.checkpoint_conversion.utils import hf_shape
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import utils
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
@@ -532,6 +533,7 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config.base_num_decoder_layers = 4
     maxtext_config.first_num_hash_layers = 2
     maxtext_config.compress_ratios = [0, 0, 4, 128]
+    maxtext_config.mtp_num_layers = 0
     mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
 
     # Core embeddings and norms
@@ -567,6 +569,7 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config.base_num_decoder_layers = 5
     maxtext_config.first_num_hash_layers = 3
     maxtext_config.compress_ratios = [0, 0, 4, 128, 4]
+    maxtext_config.mtp_num_layers = 0
     mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
 
     # Prefix layer 0 has no compressor
@@ -593,6 +596,7 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock()
     maxtext_config.base_num_decoder_layers = 4
     maxtext_config.first_num_hash_layers = 2
+    maxtext_config.mtp_num_layers = 0
     hooks_to_mt = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
         config, maxtext_config, scan_layers=False, saving_to_hf=False
     )
@@ -605,6 +609,146 @@ class ParamMappingTest(unittest.TestCase):
     )
     self.assertIn("params-token_embedder-embedding", hooks_to_hf)
     self.assertIn("params-decoder-logits_dense-kernel", hooks_to_hf)
+
+  def _deepseek_v4_mtp_config(self):
+    """Returns a (hf_config, maxtext_config) pair for a DeepSeek V4 model with MTP enabled."""
+    config = {
+        "num_hidden_layers": 5,
+        "n_routed_experts": 8,
+        "num_hash_layers": 3,
+        "compress_ratios": [0, 0, 4, 128, 4],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 8
+    maxtext_config.base_num_decoder_layers = 5
+    maxtext_config.first_num_hash_layers = 3
+    maxtext_config.compress_ratios = [0, 0, 4, 128, 4]
+    maxtext_config.mtp_num_layers = 1
+    return config, maxtext_config
+
+  def test_deepseek_v4_mtp_mapping(self):
+    """The MTP block contributes its own norms, a fused projection, a hyper-connection
+    head, and a full transformer layer. The key names below match those found in a
+    converted DeepSeek V4 MTP checkpoint."""
+    config, maxtext_config = self._deepseek_v4_mtp_config()
+    prefix = "params-mtp_block-mtp_layer_1"
+    layer = f"{prefix}-mtp_1_transformer_layer"
+
+    # MTP is outside the decoder, so it is identical in both scanned and unscanned layouts.
+    for scan_layers in (False, True):
+      mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=scan_layers)
+
+      self.assertEqual(mapping[f"{prefix}-mtp_1_embedding_norm-scale"], "mtp.0.enorm.weight")
+      self.assertEqual(mapping[f"{prefix}-mtp_1_hidden_state_norm-scale"], "mtp.0.hnorm.weight")
+      self.assertEqual(mapping[f"{prefix}-mtp_1_final_norm-scale"], "mtp.0.norm.weight")
+      # MaxText fuses the two projections into a single [2 * emb, emb] kernel.
+      self.assertEqual(
+          mapping[f"{prefix}-mtp_1_projection-kernel"],
+          ("mtp.0.e_proj.weight", "mtp.0.h_proj.weight"),
+      )
+
+      # `hc_head` is the one MTP submodule that is not renamed to `mtp_{k}_*`.
+      self.assertEqual(mapping[f"{prefix}-hc_head-hc_fn"], "mtp.0.hc_head_fn")
+      self.assertEqual(mapping[f"{prefix}-hc_head-hc_base"], "mtp.0.hc_head_base")
+      self.assertEqual(mapping[f"{prefix}-hc_head-hc_scale"], "mtp.0.hc_head_scale")
+
+      self.assertEqual(mapping[f"{layer}-self_attention-wq_a-kernel"], "mtp.0.attn.wq_a.weight")
+      self.assertEqual(mapping[f"{layer}-mhc_attention-pre_alpha"], "mtp.0.hc_attn_fn")
+      self.assertEqual(mapping[f"{layer}-mlp-MoeBlock_0-wi_0"][0], "mtp.0.ffn.experts.0.w1.weight")
+
+      # The MTP layer is built with compress_ratio=0 and is_hash_routing=False, so it
+      # carries a MoE gate bias but neither a compressor nor a hash routing table.
+      self.assertNotIn(f"{layer}-self_attention-csa_compressor-gate_proj-kernel", mapping)
+      self.assertNotIn(f"{layer}-self_attention-hca_compressor-gate_proj-kernel", mapping)
+      self.assertNotIn("Tid2EidVar-mtp_block-mtp_layer_1-mtp_1_transformer_layer-mlp-MoeBlock_0-tid2eid", mapping)
+      self.assertEqual(
+          mapping["MoEBiasVar-mtp_block-mtp_layer_1-mtp_1_transformer_layer-mlp-MoeBlock_0-gate-bias"],
+          "mtp.0.ffn.gate.bias",
+      )
+
+  def test_deepseek_v4_mtp_absent_when_disabled(self):
+    config, maxtext_config = self._deepseek_v4_mtp_config()
+    maxtext_config.mtp_num_layers = 0
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    self.assertEqual([k for k in mapping if "mtp_block" in k], [])
+
+  def test_deepseek_v4_shape_map_covers_every_mapping_target(self):
+    """Every HF target the mapping emits must have an entry in the shape map.
+
+    `to_huggingface` looks up each target key (including composite tuple keys) in
+    `DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE` and raises `ValueError` when it is absent, so a
+    mapping entry without a matching shape breaks export. Exercising both scan layouts
+    keeps the MTP keys - which live outside the decoder - honest.
+    """
+    config = {
+        "hidden_size": 64,
+        "vocab_size": 256,
+        "num_hidden_layers": 5,
+        "q_lora_rank": 32,
+        "o_lora_rank": 8,
+        "o_groups": 2,
+        "num_attention_heads": 4,
+        "head_dim": 16,
+        "moe_intermediate_size": 32,
+        "n_routed_experts": 8,
+        "num_key_value_heads": 1,
+        "num_experts_per_tok": 2,
+        "hc_mult": 4,
+        "num_hash_layers": 3,
+        "compress_ratios": [0, 0, 4, 128, 4],
+        "num_nextn_predict_layers": 1,
+    }
+    _, maxtext_config = self._deepseek_v4_mtp_config()
+    shape_map = hf_shape.DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config)
+
+    def _targets(value):
+      """Flattens a mapping value into the key(s) the exporter looks up."""
+      if value is None:
+        return []
+      if isinstance(value, (str, tuple)):
+        return [value]
+      if isinstance(value, list):
+        return [target for item in value for target in _targets(item)]
+      return []
+
+    for scan_layers in (False, True):
+      mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=scan_layers)
+      missing = sorted(
+          {
+              f"{target} (from {mt_key})"
+              for mt_key, value in mapping.items()
+              for target in _targets(value)
+              if target not in shape_map
+          }
+      )
+      self.assertEqual(missing, [], f"scan_layers={scan_layers}: mapping targets with no shape entry: {missing[:10]}")
+
+  def test_deepseek_v4_mtp_projection_hook_roundtrip(self):
+    """The fused MaxText projection kernel must split into, and rejoin from, the
+    separate e_proj / h_proj tensors without loss."""
+    config, maxtext_config = self._deepseek_v4_mtp_config()
+    key = "params-mtp_block-mtp_layer_1-mtp_1_projection-kernel"
+
+    to_mt = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=True, saving_to_hf=False
+    )[key]
+    to_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=True, saving_to_hf=True
+    )[key]
+
+    emb = 4
+    e_proj = np.arange(emb * emb, dtype=np.float32).reshape(emb, emb)
+    h_proj = e_proj + 100.0
+
+    fused = to_mt((e_proj, h_proj), None)
+    self.assertEqual(fused.shape, (2 * emb, emb))
+    # The embedding projection occupies the top half, the hidden-state one the bottom.
+    np.testing.assert_array_equal(fused[:emb], e_proj.T)
+    np.testing.assert_array_equal(fused[emb:], h_proj.T)
+
+    out_e, out_h = to_hf(fused, None)
+    np.testing.assert_array_equal(out_e, e_proj)
+    np.testing.assert_array_equal(out_h, h_proj)
 
   def test_detect_and_extract_checkpoint_multi_collection(self):
     fake_ckpt = {
