@@ -41,6 +41,7 @@ from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
 from flax.core.spmd import logical_axis_rules
+from flax.nnx import variablelib
 import flax.linen as nn
 from huggingface_hub import get_token
 import jax
@@ -1011,32 +1012,53 @@ def from_pretrained(
           lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
       )
       is_nnx_checkpoint = True
+      restored_collections = set()
       if (
           "params" in metadata.item_metadata.tree.keys()
           and "params" in metadata.item_metadata.tree.get("params", {}).keys()
       ):
         # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
         is_nnx_checkpoint = False
-        target_for_restore = jax.tree.map(
-            lambda v: v[...],
-            param_state,
-            is_leaf=lambda n: isinstance(n, nnx.Variable),
+
+        # The checkpoint keys collections separately under `params` (`params`, and custom
+        # ones like `Tid2EidVar` / `MoEBiasVar`). Requesting everything under
+        # `params/params` would ask for custom-collection weights at a path the checkpoint
+        # does not use, so Orbax would skip them. Build one target per collection instead.
+        disk_collections = metadata.item_metadata.tree.get("params", {})
+
+        params_collection = checkpointing._group_leaves_by_collection(param_state)  # pylint: disable=protected-access
+        if "params" not in params_collection:
+          params_collection["params"] = jax.tree.map(
+              lambda v: v[...],
+              param_state,
+              is_leaf=lambda n: isinstance(n, nnx.Variable),
+          )
+        # Older checkpoints predate a weight's promotion to a custom collection and still
+        # store it inside `params/params`. Request such weights from there; otherwise they
+        # are never asked for and silently keep their initializer values.
+        params_collection, aliased_collections = checkpointing._alias_legacy_collections(  # pylint: disable=protected-access
+            params_collection, disk_collections
         )
 
-        target_for_restore = _adjust_target_for_moe_fusion(
-            target_for_restore, metadata.item_metadata.tree["params"]["params"], False
-        )
-
-        item_to_restore = {"params": {"params": target_for_restore}}
-        base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
-        restore_args = {
-            "params": {
-                "params": _fix_restore_args_for_shape_mismatch(
-                    base_restore_args,
-                    metadata.item_metadata.tree["params"]["params"],
-                    mesh,
-                )
-            }
+        item_to_restore = {"params": {}}
+        restore_args = {"params": {}}
+        for col_name, col_target in params_collection.items():
+          if col_name not in disk_collections:
+            # A model collection the checkpoint does not hold; leave it at its initializer.
+            continue
+          col_meta = disk_collections[col_name]
+          col_target = _adjust_target_for_moe_fusion(col_target, col_meta, False)
+          item_to_restore["params"][col_name] = col_target
+          base_restore_args = ocp.checkpoint_utils.construct_restore_args(col_target)
+          restore_args["params"][col_name] = _fix_restore_args_for_shape_mismatch(
+              base_restore_args,
+              col_meta,
+              mesh,
+          )
+        # Collections whose every leaf the restore will overwrite: those read from disk, plus
+        # those aliased into `params` in full. Only these are safe to free before restoring.
+        restored_collections = set(item_to_restore["params"]) | {
+            col for col in aliased_collections if col not in params_collection
         }
       else:
         # NNX checkpoint: {'decoder': {'value': ...}}, or NNX-RL with extra 'base' nesting.
@@ -1103,6 +1125,14 @@ def from_pretrained(
             and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
             and not is_custom
         ):
+          if not is_nnx_checkpoint:
+            # Only free what the restore will actually overwrite. A collection it does not
+            # restore keeps its initialized buffer; deleting it here would leave a dangling
+            # deleted array that fails much later at first use.
+            type_ = node.type if isinstance(node, nnx.Variable) else type(node)
+            col_name = variablelib.variable_name_from_type(type_, allow_register=True)
+            if col_name not in restored_collections:
+              return node
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
           # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
@@ -1132,7 +1162,10 @@ def from_pretrained(
             is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
         )
       else:
-        checkpoint = restored["params"]["params"]
+        # The checkpoint may carry custom collections (e.g. `Tid2EidVar`, `MoEBiasVar`)
+        # alongside `params`. Taking only `params` here would silently drop them, leaving
+        # those variables un-restored. Merge every collection into one tree instead.
+        checkpoint = checkpointing._merge_restored_collections(restored["params"])  # pylint: disable=protected-access
 
       if checkpoint:
         # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
