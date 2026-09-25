@@ -28,7 +28,7 @@ NUM_SLICES="${NUM_SLICES:-2}"
 DEVICE_TYPE="${DEVICE_TYPE:-v5p-128}"
 
 RUNNAME="${RUNNAME:-dlco-moe-$(date +%H%M)}"
-DOCKER_IMAGE_BASE="${DOCKER_IMAGE_BASE:-gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:latest}"
+DOCKER_IMAGE_BASE="${DOCKER_IMAGE_BASE:-us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext_jax_stable:latest}"
 MY_IMAGE="gcr.io/${PROJECT}/$(whoami)-runner:${RUNNAME}"
 
 if [ -z "${BASE_OUTPUT_DIRECTORY:-}" ]; then
