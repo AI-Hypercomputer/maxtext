@@ -367,19 +367,61 @@ has no flag for it. The argsort outputs do carry the checkpoint name
 `moe_routing` (about 1.5 MB per layer), so the j-series saves them to stop full
 remat from re-running the sort.
 
-### In flight: j-series, save the routing so remat skips the sort
+### j-series, save the routing so remat skips the sort (o35n251823)
 
 Base i7 (pdb=3, sched, DP=4, `num_vocab_tiling=4`), all `remat_policy=custom`
-except the control.
+except the control. Loss is 10.813 in every arm.
 
-| arm | pdb | saved | approx size |
-|---|---|---|---|
-| j1_ctrl | 3 | none (full remat) | |
-| j2_route | 3 | `moe_routing` | 25 MB |
-| j3_route_logits | 3 | + `moe_router_logits` | + 0.8 GB |
-| j4_route_disp | 3 | + `moe_dispatch` | + 6.4 GB, may OOM |
-| j5_route_dispoff | 3 | routing + logits on device, dispatch offloaded | |
-| j6_p2_allmoe | 2 | every MoE name on device | |
+| arm | pdb | saved | TF/s/dev | MFU | step s |
+|---|---|---|---|---|---|
+| j1_ctrl | 3 | none (full remat) | 108.1 | 9.37% | 0.981 |
+| **j2_route** | 3 | `moe_routing` | **109.6** | **9.50%** | 0.968 |
+| j3_route_logits | 3 | + `moe_router_logits` | 109.4 | 9.48% | 0.969 |
+| j4_route_disp | 3 | + `moe_dispatch` | 109.7 | 9.51% | 0.967 |
+| j5_route_dispoff | 3 | routing + logits on device, dispatch offloaded | 95.2 | 8.25% | 1.114 |
+| j6_p2_allmoe | 2 | every MoE name on device | 101.8 | 8.83% | |
+
+Saving `moe_routing` (about 25 MB) is the whole win, +1.4%. Saving the logits or
+the dispatch on top is within noise, and offloading the dispatch costs 13%, the
+same host-transfer penalty as the h-series. Saving everything at pdb=2 does not
+beat pdb=3 with full MoE remat. The k-series control (k1, same flags as j2)
+replicated at 109.9, so j2 is the new base.
+
+### Memory at pdb=3 (local AOT)
+
+`train_compile` with `compile_topology=tpu7x-128` and the j2 flags, peak from the
+buffer live ranges (`/tmp/aot_p4/peak.py`). The peak is 88.9 GiB of 94.7, reached at
+the forward to backward boundary, so it is the saved residual set plus the gathered
+weights of the first backward layers.
+
+| live at peak | GiB | what it is |
+|---|---|---|
+| MoE rows `bf16[393216,1024]` | 20.3 | 27 buffers, gmm_v2 wi_0/wi_1 outputs and activations (24576 tokens x top-16 rows) |
+| MoE rows `bf16[393216,512]` | 7.9 | 21 buffers, dispatched input and wo output |
+| gathered expert weights, bf16 | 20.0 | `[512,512,1024]` and `[512,1024,512]` full-layer copies after the FSDP all-gather, plus weight gradients before reduce-scatter |
+| KDA residuals, f32 | about 20 | chunk states `f32[8,3,160,128,256]` (6.6 GiB across the 14 KDA layers) plus q/k/v/gate in f32 |
+| other activations | about 16 | layer inputs, attention, norms |
+| f32 params and optimizer | 4.2 | |
+
+pdb=4 needs about a third more activation memory, roughly 25 GiB more, so no
+single lever unlocks it. The three blocks that could are the MoE rows (the
+remat already drops them per layer, what is left is the working set of the
+layers in flight), the full-layer gathered expert banks, which expert
+parallelism would avoid by moving tokens instead of weights, and the f32 KDA
+residuals, which a bf16 residual path would halve.
+
+### In flight: k-series (o35n251859)
+
+Base j2 (pdb=3, sched, DP=4, vocab 4, `remat_policy=custom moe_routing=device`).
+
+| arm | pdb | change | TF/s/dev | MFU | note |
+|---|---|---|---|---|---|
+| k1_ctrl | 3 | none | 109.9 | 9.52% | replicates j2 |
+| k2_noscan | 3 | `scan_layers=False` | | | |
+| k3_wbf16_bound | 3 | `weight_dtype=bfloat16` | | | bound on the fp32 to bf16 relayout |
+| k4_dp8 | 3 | DP=8, FSDP=16 | | | |
+| k5_tp2_p3 | 3 | DP=4, FSDP=16, TP=2 | | | |
+| k6_tp2_p4 | 4 | same as k5 | | | does TP free enough memory for pdb=4 |
 
 ## Profiles and xla-shell output
 
