@@ -25,6 +25,7 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config, ShardMode, get_weight_dtype
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import nnx_wrappers
+from maxtext.layers.linears import MlpBlock
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models.qwen3 import (
@@ -208,7 +209,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
           rngs=rngs,
       )
 
-    # Second LayerNorm, applied before the MoE block.
+    # Second LayerNorm, applied before the MoE / MLP block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
@@ -218,8 +219,22 @@ class Qwen3_5DecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    # Instantiate our `Qwen3_5SparseMoEBlock`.
-    self.mlp = Qwen3_5SparseMoEBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    if getattr(cfg, "num_experts", 1) > 1:
+      self.mlp = Qwen3_5SparseMoEBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    else:
+      self.mlp = MlpBlock(
+          config=cfg,
+          mesh=self.mesh,
+          in_features=cfg.emb_dim,
+          intermediate_dim=cfg.mlp_dim,
+          activations=tuple(cfg.mlp_activations),
+          intermediate_dropout_rate=cfg.dropout_rate,
+          dtype=cfg.dtype,
+          weight_dtype=get_weight_dtype(cfg, "mlp"),
+          quant=self.quant,
+          model_mode=model_mode,
+          rngs=rngs,
+      )
 
   def __call__(
       self,
@@ -274,26 +289,34 @@ class Qwen3_5DecoderLayer(nnx.Module):
     hidden_states = residual + attention_output
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
-    # Prepare for the MoE block by capturing the new residual
+    # Prepare for the MoE / MLP block by capturing the new residual
     residual = hidden_states
 
-    # Second LayerNorm, applied before the MoE block.
+    # Second LayerNorm, applied before the MoE / MLP block.
     hidden_states = self.post_attention_layernorm(hidden_states, out_sharding=self.out_sharding)
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
-    # Instantiate and call our `Qwen3_5SparseMoEBlock`.
-    mlp_output, load_balance_loss = self.mlp(
-        hidden_states,
-        deterministic=deterministic,
-        forced_routed_experts=forced_routed_experts,
-        intermediate_sharding=self.mlp_intermediate_sharding,
-        out_sharding=self.out_sharding,
-    )
+    # Instantiate and call our `Qwen3_5SparseMoEBlock` or `MlpBlock`.
+    if getattr(self.config, "num_experts", 1) > 1:
+      mlp_output, load_balance_loss = self.mlp(
+          hidden_states,
+          deterministic=deterministic,
+          forced_routed_experts=forced_routed_experts,
+          intermediate_sharding=self.mlp_intermediate_sharding,
+          out_sharding=self.out_sharding,
+      )
 
-    # We sow the load balancing loss so it can be collected and added to the total loss
-    # during training.
-    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+      # We sow the load balancing loss so it can be collected and added to the total loss
+      # during training.
+      if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+        self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+    else:
+      mlp_output = self.mlp(
+          hidden_states,
+          deterministic=deterministic,
+          intermediate_sharding=self.mlp_intermediate_sharding,
+          out_sharding=self.out_sharding,
+      )
 
     # Final residual connection (after the MoE block)
     mlp_output = self._maybe_shard_with_logical(mlp_output, self.activation_axis_names)
