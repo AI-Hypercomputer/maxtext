@@ -132,6 +132,7 @@ dtype: "bfloat16"
 # 'fp8' for 8-bit floating-point gemms on nvidia gpus.
 # 'nanoo_fp8' for 8-bit floating-point gemms on amd mi300/mi325 gpus.
 # 'fp8_full' for fp8 quantization with static scaling.
+# 'serve_fp8_weight' to load and use FP8 checkpoint directly at inference time.
 quantization: ""
 # used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
 constant_bound_config: ""
@@ -169,6 +170,7 @@ use_manual_quantization: false # a flag if to use manual quantization for batch 
 weight_quantization_calibration_method: "absmax"
 act_quantization_calibration_method: "absmax"
 bwd_quantization_calibration_method: "absmax"
+drhs_grad_quantization_calibration_method: null  # weight-gradient-arm cotangent calibration; null = bwd_quantization_calibration_method
 # shard the range finding operation for quantization. by default this is set to number of slices.
 quantization_local_shard_count: -1
 # The 'N' in N:M sparsity, representing the maximum number of non-zero values in each block.
@@ -328,6 +330,13 @@ use_gmm_v2: false
 use_gmm_v2_heuristic_tiling: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
+
+# Record each MoE layer's routing decisions as a `selected_experts` intermediate, which the decoder
+# returns alongside the hidden state as `expert_indices`. Only read on the vLLM fused MoE path
+# (attention: vllm_rpa / vllm_batched_rpa), so in practice only the vLLM sampler in RL sets it, to
+# capture routing for router replay; off by default so standard serving does not pay for the extra
+# top-k.
+return_routed_experts: false
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
@@ -1141,6 +1150,7 @@ abort_on_inf_loss: true # Check for Inf and abort if found in training loss
 
 # Goodput parameters
 enable_goodput_recording: false
+goodput_job_name: ""
 monitor_goodput: false
 goodput_upload_interval_seconds: 30
 enable_pathways_goodput: false

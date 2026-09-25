@@ -23,6 +23,10 @@ This label is used for administrative purposes. Please do not add it manually.
 
 *Notice 2:* For external contributions, our settings currently require an approval from a MaxText maintainer to trigger CI tests.
 
+*Notice 3:* Tests marked `scheduled_only` are skipped on PRs and only run in the periodic scheduled CI.
+If you need them (plus the TPU7X suite) on your PR, add the `scheduled-only` label; the full pipeline
+re-runs as a scheduled run. Remove and re-add the label to trigger it again.
+
 # Tests
 
 Please describe how you tested this change, and include any instructions and/or

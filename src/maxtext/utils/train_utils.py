@@ -142,7 +142,10 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
     execution_mesh = mesh if mesh is not None else model.mesh
     execution_devices = execution_mesh.devices.flatten().tolist()
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state, execution_devices)
+    with jax.set_mesh(execution_mesh), logical_axis_rules(config.logical_axis_rules):
+      p_train_step = maxtext_utils.load_compiled(
+          config, functional_train, state, execution_devices, data_sharding=data_sharding
+      )
     max_logging.log("Loaded compiled function!")
   else:
     p_train_step = jax.jit(

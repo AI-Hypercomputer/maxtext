@@ -105,6 +105,7 @@ class QuantizationType(str, Enum):
   TE_MXFP8 = "te_mxfp8"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
+  SERVE_FP8_WEIGHT = "serve_fp8_weight"
 
 
 class TEGroupedGemmQuantizationType(str, Enum):
@@ -590,6 +591,15 @@ class Quantization(BaseModel):
   bwd_quantization_calibration_method: str = Field(
       "absmax",
       description="Quantization calibration method used for gradients.",
+  )
+  drhs_grad_quantization_calibration_method: str | None = Field(
+      None,
+      description=(
+          "Calibration for the cotangent in the weight-gradient matmul only (qwix drhs_grad; dW = X^T dY). None "
+          "inherits bwd_quantization_calibration_method. With absmax, this arm's per-channel scale reduces over the "
+          "token axis and therefore across every data shard, including DCN slices; a fixed range (e.g. 'fixed,0.01') "
+          "removes that reduction. The activation-gradient arm (dX = dY W^T) is unaffected."
+      ),
   )
   weight_sparsity_n: int | None = Field(
       None,
@@ -1155,6 +1165,13 @@ class MoEGeneral(BaseModel):
       False,
       description="Enable top-k probability normalization for router weights (Qwen3-specific).",
   )
+  return_routed_experts: bool = Field(
+      False,
+      description=(
+          "Record each MoE layer's routing as a `selected_experts` intermediate, returned by the "
+          "decoder as `expert_indices`. Required to capture routing from inference for router replay."
+      ),
+  )
   float32_weight_sum: bool = Field(
       True,
       description=(
@@ -1343,6 +1360,15 @@ class Qwen3Next(BaseModel):
   use_qk_norm_in_gdn: bool = Field(
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
+  )
+  gdn_mamba_block_size: int = Field(
+      0,
+      description=(
+          "Tokens per mamba block when serving under vLLM with mamba prefix caching "
+          '("align" mode). Set by the vLLM adapter from cache_config.mamba_block_size; '
+          "0 means the recurrent state is addressed by a resident per-request slot "
+          "instead of by block id."
+      ),
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
 
@@ -2666,6 +2692,9 @@ class Goodput(BaseModel):
   """Configuration for goodput monitoring."""
 
   enable_goodput_recording: bool = Field(False, description="Enable goodput recording.")
+  goodput_job_name: str = Field(
+      "", description="Optional job name override for goodput recording and monitoring. Defaults to run_name when empty."
+  )
   monitor_goodput: bool = Field(False, description="Monitor goodput.")
   goodput_upload_interval_seconds: int = Field(30, description="Interval to upload goodput metrics.")
   enable_pathways_goodput: bool = Field(False, description="Enable goodput monitoring for Pathways.")
@@ -2896,6 +2925,19 @@ class VLLM(BaseModel):
   kv_cache_buffer: int = Field(256, gt=0, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, gt=0.0, le=1.0, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, ge=0, description="Swap space in GB for vLLM.")
+  free_kv_cache_during_weight_sync: bool = Field(
+      True,
+      description=(
+          "Maps to tunix RolloutConfig.rollout_vllm_free_kv_cache_during_weight_sync -> "
+          "VllmConfig.free_kv_cache_during_weight_sync (ignored, with a log line, while the installed tunix "
+          "predates it). The weight sync materializes a second copy of the sampler weights on HBM; freeing the KV "
+          "cache first makes room for it. False keeps the pool (hbm_utilization_vllm of each chip) allocated across "
+          "the sync and only resets its prefix-cache entries, saving the free + re-allocation (about 2 s per step "
+          "on a colocated Qwen3-0.6B run at hbm_utilization_vllm=0.3). With False the sync runs out of HBM when "
+          "that second copy does not fit next to the pool: check the headroom before disabling, colocated setups "
+          "and a large hbm_utilization_vllm have the least."
+      ),
+  )
   enable_dp_attention: bool = Field(False, description="Enable the attn_dp mesh axis in vLLM.")
   enable_expert_parallel: bool = Field(False, description="Enable expert parallelism in vLLM.")
   async_scheduling: bool = Field(False, description="Enable asynchronous scheduling in vLLM.")
@@ -5149,6 +5191,16 @@ class MaxTextConfig(
 
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
+
+    # Validation for serve_fp8_weight (native FP8 compute without dequantization).
+    if self.quantization == QuantizationType.SERVE_FP8_WEIGHT:
+      if self.weight_dtype not in (DType.FLOAT8_E4M3FN, DType.FLOAT8_E5M2):
+        raise ValueError(
+            "quantization='serve_fp8_weight' requires weight_dtype to be an FP8 dtype "
+            f"('float8_e4m3fn' or 'float8_e5m2'), got weight_dtype={self.weight_dtype!r}."
+        )
+      if self.use_qwix_quantization:
+        raise ValueError("quantization='serve_fp8_weight' is not supported with use_qwix_quantization=True.")
 
     # Validation for GMM v2
     if self.use_gmm_v2:

@@ -444,15 +444,22 @@ def router_replay_gen_model_input_fn(payload: abstract_engine.RLTrainerPayload) 
     # rollout that produced the routing. Count real tokens instead, restarting at each
     # segment -- otherwise the second sequence in a packed row is rotated by the length of
     # the first. `cummax` carries each segment's starting count forward to subtract off.
-    running = jnp.cumsum(token_mask != 0, axis=-1) - 1
+    # The count is exclusive -- real tokens strictly *before* each index, not up to and
+    # including it -- because it is sampled at each segment's first index to get the
+    # pre-segment total. An inclusive count only equals that total when the first slot of
+    # the segment is real; when it is padding the count has not yet incremented and every
+    # position in the segment comes out one too high. The difference below is non-negative
+    # by construction, so it needs no clamp.
+    real = (token_mask != 0).astype(jnp.int32)
+    preceding = jnp.cumsum(real, axis=-1) - real
     starts = jnp.concatenate(
         [jnp.ones((segment_ids.shape[0], 1), dtype=bool), segment_ids[:, 1:] != segment_ids[:, :-1]], axis=-1
     )
     # `lax.cummax` takes an XLA dimension number, so it rejects the `axis=-1` used
     # everywhere else here. `jnp.cumulative_max` would canonicalize it but is not in the
     # pinned JAX.
-    segment_start_count = jax.lax.cummax(jnp.where(starts, running, -1), axis=running.ndim - 1)
-    positions = jnp.maximum(running - segment_start_count, 0).astype(jnp.int32)
+    segment_start_count = jax.lax.cummax(jnp.where(starts, preceding, -1), axis=preceding.ndim - 1)
+    positions = (preceding - segment_start_count).astype(jnp.int32)
 
   # `targets` is a roll(-1), so position i predicts token i+1 and the weight at i is the
   # mask of that *target*: token_mask shifted left by one. Applied unshifted, a packed
@@ -701,6 +708,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._raiden_sync: Any = None
     self._last_staged_step: Optional[int] = None
     self._staged_metadata: Any = None
+    # Stays None unless the rollout worker calls `set_target_state`; the converter reads it
+    # on every sync and treats None as "no target", i.e. target-free conversion.
+    self._target_state: Any = None
     self._use_weight_converter = bool(self._config.use_weight_converter)
     self._rollout_backend = self._config.rollout_backend
     rollout_tp = resolve_rollout_tp(self._config)
@@ -1361,14 +1371,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       size *= self._mesh.shape[name]
     return size
 
-  def _batch_data_shardings(self, dynamic_batch: Any) -> Any:
-    """Builds a per-leaf sharding tree for the traced part of a batch.
+  def _input_data_spec(self) -> tuple[Any, ...]:
+    """Returns the PartitionSpec entries MaxText shards a `[batch, sequence]` input by.
 
-    `get_input_data_sharding` returns one sharding describing a rank-2 `[batch, sequence]`
-    input. It cannot be used as a pytree prefix for a `gen_model_input_fn` batch, whose
-    leaves have mixed rank -- a rank-2 spec applied to a rank-1 array is an error. Each
-    leaf instead takes the leading entries of that spec that its own rank can absorb, so
-    the batch dimension stays sharded and everything below it is replicated.
+    One call to `get_input_data_sharding`, which resolves
+    `config.input_data_sharding_logical_axes` against the live mesh and rules. Read once
+    per batch rather than per leaf: it is the same answer for all of them.
+    """
+    return tuple(sharding.get_input_data_sharding(self._config, self._mesh).spec)
+
+  def _leaf_data_sharding(self, leaf: Any, data_spec: tuple[Any, ...]) -> jax.sharding.NamedSharding | None:
+    """Returns where one loss input goes, given the `[batch, sequence]` spec above.
+
+    `data_spec` describes a rank-2 input, so it cannot be used as a pytree prefix for a
+    `gen_model_input_fn` batch, whose leaves have mixed rank -- a rank-2 spec applied to a
+    rank-1 array is an error. Each leaf instead takes the leading entries its own rank can
+    absorb, so the batch dimension stays sharded and everything below it is replicated.
 
     A leaf whose batch dim doesn't evenly divide the batch axis's mesh size replicates
     that dim instead of sharding it -- every device holds and computes on the same data
@@ -1378,28 +1396,42 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Sequence packing reaches this from the distributed packer, whose row count is tunix's
     `train_micro_batch_size` and defaults to 1; the colocated packer sizes its rows as
     `fsdp * dp` and so shards cleanly by construction.
+
+    Args:
+      leaf: One loss input, or None.
+      data_spec: The `[batch, sequence]` PartitionSpec entries from `_input_data_spec`.
     """
-    data_sharding = sharding.get_input_data_sharding(self._config, self._mesh)
-    data_spec = tuple(data_sharding.spec)
+    if leaf is None:
+      return None
+    rank = jnp.ndim(leaf)
+    spec = list(data_spec[:rank])
+    if spec and spec[0] is not None:
+      axis_size = self._batch_axis_size(spec[0])
+      if leaf.shape[0] % axis_size:
+        # Warn once per instance, not per leaf: this runs under a tree_map over every
+        # loss input, and they normally share a batch dim. Silence here would leave an
+        # N-fold compute cliff visible only in a docstring.
+        if not self._replicated_batch_warned:
+          self._replicated_batch_warned = True
+          logging.warning(_REPLICATED_BATCH_DIM_WARNING, leaf.shape[0], spec[0], axis_size, axis_size)
+        spec[0] = None
+    return jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(*spec))
 
-    def leaf_sharding(leaf):
-      if leaf is None:
-        return None
-      rank = jnp.ndim(leaf)
-      spec = list(data_spec[:rank])
-      if spec and spec[0] is not None:
-        axis_size = self._batch_axis_size(spec[0])
-        if leaf.shape[0] % axis_size:
-          # Warn once per instance, not per leaf: this runs under a tree_map over every
-          # loss input, and they normally share a batch dim. Silence here would leave an
-          # N-fold compute cliff visible only in a docstring.
-          if not self._replicated_batch_warned:
-            self._replicated_batch_warned = True
-            logging.warning(_REPLICATED_BATCH_DIM_WARNING, leaf.shape[0], spec[0], axis_size, axis_size)
-          spec[0] = None
-      return jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(*spec))
+  def _batch_data_shardings(self, dynamic_batch: Any) -> Any:
+    """Builds a per-leaf sharding tree for the traced part of a batch.
 
-    return jax.tree.map(leaf_sharding, dynamic_batch)
+    The `in_shardings` half of what `_compile_for_batch` needs; `fwd_only` places its
+    own inputs through the same `_leaf_data_sharding`, so a read-only forward pass lands
+    the batch exactly where a compiled step would.
+
+    Args:
+      dynamic_batch: The traced half of a loss-input batch.
+
+    Returns:
+      A sharding tree matching `dynamic_batch`'s structure.
+    """
+    data_spec = self._input_data_spec()
+    return jax.tree.map(lambda leaf: self._leaf_data_sharding(leaf, data_spec), dynamic_batch)
 
   def _compile_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
     """JIT-compiles the fwd/bwd and update kernels for one batch structure.
@@ -1896,6 +1928,94 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         if value is not None:
           self.record_metrics(key, value, mode=metrics_module.Mode.EVAL)
 
+  def _place_read_only_inputs(self, inputs: Any) -> Any:
+    """Commits a read-only call's array inputs to the shardings a step would use.
+
+    The same placement `fwd_bwd` gets from `in_shardings`, done eagerly because
+    `fwd_only` does not own the jit -- `fn` does.
+    Leaving the arrays where they arrived would hand that jit a host array per
+    leaf and let XLA pick the partitioning, which is the same mis-sharding
+    `_sharding_ctx` exists to avoid.
+
+    Only arrays move. A read-only call carries Python scalars alongside them
+    (`pad_id`, `eos_id`, `chunk_size`, `temperature`), and those reach the
+    callee's `static_argnames`; `device_put` would turn them into arrays and
+    make the call untraceable.
+
+    Args:
+      inputs: An arbitrary pytree of the call's positional and keyword
+        arguments.
+
+    Returns:
+      The same pytree with its placeable array leaves committed to this engine's
+      mesh.
+    """
+    if self._mesh is None:
+      return inputs
+    data_spec = self._input_data_spec()
+
+    def place(leaf: Any) -> Any:
+      if not isinstance(leaf, (jax.Array, np.ndarray)):
+        return leaf
+      # A rank-0 leaf has no batch dim to place, and a zero-width one -- the empty prompt
+      # half of a sequence-packed row -- has no data to split.
+      if leaf.ndim == 0 or 0 in leaf.shape:
+        return leaf
+      # Already a global array spanning devices this process does not own: it was built
+      # by whoever produced it, and `device_put` cannot rebuild it from local data.
+      if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
+        return leaf
+      target = self._leaf_data_sharding(leaf, data_spec)
+      if target is None or getattr(leaf, "sharding", None) == target:
+        return leaf
+      return jax.device_put(leaf, target)
+
+    return jax.tree.map(place, inputs)
+
+  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Runs `fn(model, *args, **kwargs)` on the live model under the engine's placement.
+
+    The engine supplies the model and the placement, exactly as `fwd_bwd` does -- the
+    live model off the train state, the inputs on `_leaf_data_sharding`, and `fn`
+    executed under `_sharding_ctx` so MaxText's logical axis rules are active while `fn`
+    traces. `fn` owns the computation and its own `jax.jit`, so nothing here is compiled
+    or cached, and none of the engine's kernels, accumulators or metrics are touched.
+
+    Args:
+      fn: Callable invoked as `fn(model, *placed_args, **placed_kwargs)`.
+      *args: Positional inputs to shard before passing to `fn`.
+      **kwargs: Keyword inputs to shard before passing to `fn`.
+
+    Returns:
+      Whatever `fn` returns.
+
+    Raises:
+      TypeError: If the engine's model is not an NNX module.
+    """
+    # TODO: Enable precompile for fn.
+    if self._state is None:
+      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+    # Off the train state, not `self._model`: a restore or the `state` setter can rebind
+    # the model, and `fwd_bwd`/`eval_step` read it from here for the same reason.
+    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
+    if not isinstance(model, nnx.Module):
+      raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
+
+    # Bound the dispatch queue as every other entry point does. Not a correctness
+    # barrier -- JAX orders reads of the weights against the writes already queued --
+    # just the same back-pressure, so a scoring call cannot run ahead of the throttle.
+    self._throttler.wait_for_next()
+
+    with self._sharding_ctx():
+      args, kwargs = self._place_read_only_inputs((args, kwargs))
+      out = fn(model, *args, **kwargs)
+
+    self._throttler.add_computation(
+        computation=[leaf for leaf in jax.tree.leaves(out) if isinstance(leaf, jax.Array)],
+        metrics=None,
+    )
+    return out
+
   def _reduced_accumulated_grads(self) -> Any:
     """Returns the accumulated gradients in the form Orbax can serialize.
 
@@ -2180,6 +2300,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return nnx.state(model, nnx.Param)
     return self.model
 
+  def set_target_state(self, target_state: Any) -> None:
+    """Stores target state shape/dtype pytree for rollout parameter conversion.
+
+    Args:
+      target_state: The target state pytree from the rollout worker.
+    """
+    self._target_state = target_state
+
   def prepare_weight_sync(
       self,
       staging_transport: str = "raiden",
@@ -2228,7 +2356,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       params_state = self._get_trainable_params_state()
 
       if self._use_weight_converter:
-        converted_state = self._weight_converter.convert(params_state)
+        converted_state = self._weight_converter.convert(params_state, target_state=self._target_state)
       else:
         # UNCHANGED, deliberately out of scope: this fp32->bf16 cast is an
         # on-device (HBM, not host RAM) full materialization -- a different

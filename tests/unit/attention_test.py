@@ -232,6 +232,98 @@ class JaxFlashAttentionTest(unittest.TestCase):
         atol=1e-2,
     )
 
+  def test_flash_attention_block_masked_long_sequence(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 1, 8192, 8192, 32
+    block_q, block_kv = 2048, 2048
+    cap = 50.0
+    mask_value = -1.0e9
+
+    rng = np.random.default_rng(456)
+    query = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)) / np.sqrt(head_dim), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    mask_obj = splash_attention_mask.CausalMask((q_len, kv_len))
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask_obj,
+        mask_value=mask_value,
+        cap=cap,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    mask_arr = mask_obj[:, :]
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.tanh(logits / cap) * cap
+    logits = jnp.where(mask_arr[None, None, :, :], logits, mask_value)
+    expected_output = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+    expected_max_logits = jnp.max(logits, axis=-1)
+    expected_logsumexp = jax.nn.logsumexp(logits, axis=-1)
+
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected_output),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+    np.testing.assert_allclose(
+        np.asarray(stats["max_logits"]),
+        np.asarray(expected_max_logits),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+    np.testing.assert_allclose(
+        np.asarray(stats["logsumexp"]),
+        np.asarray(expected_logsumexp),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_flash_attention_block_masked_long_sequence_no_residuals(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 1, 8192, 8192, 32
+    block_q, block_kv = 2048, 2048
+    mask_value = -1.0e9
+
+    rng = np.random.default_rng(789)
+    query = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)) / np.sqrt(head_dim), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    mask_obj = splash_attention_mask.CausalMask((q_len, kv_len))
+
+    output = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask_obj,
+        mask_value=mask_value,
+        cap=None,
+        save_residuals=False,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    mask_arr = mask_obj[:, :]
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.where(mask_arr[None, None, :, :], logits, mask_value)
+    expected_output = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected_output),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
 
 class SplashLocalMaskTest(unittest.TestCase):
   """Tests for Splash local masks."""
@@ -1375,8 +1467,9 @@ class LoadBalancedMaskTest(unittest.TestCase):
     query = jnp.zeros((1, seq_len, 1, 128))
     key = jnp.zeros((1, seq_len, 1, 128))
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
-    # Only the query-length rule: `segment_ids_batch` -> context would shard this batch of 1
-    # across the 4-way context mesh.
+    # Only `activation_q_length` -> context is made ambient: it shards the query length, which is
+    # what the cp gate reads. The config's `segment_ids_batch` -> context rule is left out because
+    # it cannot partition this test's batch of 1 across the 4-way context mesh.
     with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
       op = AttentionOp(
           config=config,
@@ -1426,8 +1519,9 @@ class LoadBalancedMaskTest(unittest.TestCase):
     query = jnp.zeros((1, seq_len, 1, 128))
     key = jnp.zeros((1, seq_len, 1, 128))
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
-    # Only the query-length rule: `segment_ids_batch` -> context would shard this batch of 1
-    # across the 4-way context mesh.
+    # Only `activation_q_length` -> context is made ambient: it shards the query length, which is
+    # what the cp gate reads. The config's `segment_ids_batch` -> context rule is left out because
+    # it cannot partition this test's batch of 1 across the 4-way context mesh.
     with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
       op = AttentionOp(
           config=config,
@@ -1665,6 +1759,67 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
           attention_type=AttentionType.CHUNK,
           chunk_attn_window_size=2,
       )
+
+
+class CudnnFlashJaxInferenceTest(unittest.TestCase):
+
+  def _make_attention_op(self):
+    config = types.SimpleNamespace(ici_context_autoregressive_parallelism=0)
+    mesh = types.SimpleNamespace()
+    return AttentionOp(
+        config=config,
+        mesh=mesh,
+        attention_kernel="cudnn_flash_jax",
+        max_target_length=128,
+        num_query_heads=2,
+        num_kv_heads=2,
+    )
+
+  def test_align_qkv_broadcasts_kv_batch(self):
+    attention = self._make_attention_op()
+    query = jnp.ones((8, 1, 2, 64))
+    key = jnp.ones((1, 4, 2, 64))
+    value = jnp.ones((1, 4, 2, 64))
+    with mock.patch("jax.lax.with_sharding_constraint", side_effect=lambda x, _: x):
+      # pylint: disable=protected-access
+      _, aligned_key, aligned_value = attention._align_qkv_for_cudnn_flash(query, key, value)
+    self.assertEqual(aligned_key.shape[0], 8)
+    self.assertEqual(aligned_value.shape[0], 8)
+
+  def test_align_qkv_raises_on_invalid_batch(self):
+    attention = self._make_attention_op()
+    query = jnp.ones((8, 1, 2, 64))
+    key = jnp.ones((2, 4, 2, 64))
+    value = jnp.ones((2, 4, 2, 64))
+    with self.assertRaises(ValueError):
+      # pylint: disable=protected-access
+      attention._align_qkv_for_cudnn_flash(query, key, value)
+
+  def test_cudnn_jax_flash_attention_broadcasts_ar_lengths(self):
+    attention = self._make_attention_op()
+    query = jnp.zeros((8, 1, 2, 64))
+    key = jnp.zeros((8, 4, 2, 64))
+    value = jnp.zeros((8, 4, 2, 64))
+    decoder_segment_ids = jnp.ones((1, 4))
+    mock_dot_product_attention = mock.Mock(return_value=(jnp.zeros((8, 1, 2, 64)), jnp.zeros((8, 2))))
+    fused_attention_module = types.ModuleType("jax._src.cudnn.fused_attention_stablehlo")
+    fused_attention_module.dot_product_attention = mock_dot_product_attention
+    fused_attention_module.MaskType = types.SimpleNamespace(PADDING="padding", CAUSAL="causal")
+    with mock.patch.dict(
+        sys.modules,
+        {"jax._src.cudnn.fused_attention_stablehlo": fused_attention_module},
+    ):
+      attention.cudnn_jax_flash_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+    q_seqlen = mock_dot_product_attention.call_args.kwargs["q_seqlen"]
+    kv_seqlen = mock_dot_product_attention.call_args.kwargs["kv_seqlen"]
+    self.assertEqual(q_seqlen.shape, (8,))
+    self.assertEqual(kv_seqlen.shape, (8,))
 
 
 class AttentionTest(parameterized.TestCase):
@@ -5264,9 +5419,11 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
 
     mock_run_gdn.assert_called_once()
     self.assertEqual(len(mock_run_gdn.call_args.args), 18)
-    self.assertEqual(set(mock_run_gdn.call_args.kwargs), {"mesh"})
+    self.assertEqual(set(mock_run_gdn.call_args.kwargs), {"mesh", "read_state_indices"})
     self.assertIs(mock_run_gdn.call_args.kwargs["mesh"], mesh)
     np.testing.assert_array_equal(mock_run_gdn.call_args.args[9], jnp.array([1], dtype=jnp.int32))
+    # Resident per-request slots read and write the same slot.
+    np.testing.assert_array_equal(mock_run_gdn.call_args.kwargs["read_state_indices"], jnp.array([1], dtype=jnp.int32))
     np.testing.assert_array_equal(mock_run_gdn.call_args.args[10], jnp.array([0, 1], dtype=jnp.int32))
     np.testing.assert_array_equal(mock_run_gdn.call_args.args[12], jnp.array([1], dtype=jnp.int32))
     self.assertEqual(output.shape, hidden_states.shape)
@@ -5718,6 +5875,7 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     config = types.SimpleNamespace(
         context_parallel_load_balance=True,
         context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
         using_pipeline_parallelism=False,
         logical_axis_rules=[["segment_ids_batch", ["context"]]],
         shard_mode="auto",
@@ -5738,25 +5896,29 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
     compressed_mask = jnp.zeros((1, 1, seq_len, c_len), dtype=jnp.float32)
 
-    op = AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=kv_len,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        attention_type=AttentionType.COMPRESSED,
-        sliding_window_size=sliding_window_size,
-    )
+    # Only `activation_q_length` -> context is made ambient: it shards the query length, which is
+    # what the cp gate reads. The config's `segment_ids_batch` -> context rule is left out because
+    # it cannot partition this test's batch of 1 across the 4-way context mesh.
+    with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
+      op = AttentionOp(
+          config=config,
+          num_query_heads=1,
+          num_kv_heads=1,
+          max_target_length=kv_len,
+          mesh=mesh,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.COMPRESSED,
+          sliding_window_size=sliding_window_size,
+      )
 
-    mask = op.generate_attention_mask(
-        query,
-        key,
-        decoder_segment_ids,
-        MODEL_MODE_TRAIN,
-        compressed_mask=compressed_mask,
-        segment_positions=positions,
-    )
+      mask = op.generate_attention_mask(
+          query,
+          key,
+          decoder_segment_ids,
+          MODEL_MODE_TRAIN,
+          compressed_mask=compressed_mask,
+          segment_positions=positions,
+      )
 
     expected_uncompressed_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
     for r, q_pos in enumerate(np.asarray(positions[0])):
