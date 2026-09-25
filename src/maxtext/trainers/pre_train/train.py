@@ -857,7 +857,8 @@ def train_loop(config, recorder, state=None):
           module.force_dropless = True
           module.num_moe_token_chunks = getattr(config, "retry_num_moe_token_chunks", 2)
           module.moe_chunk_barrier = True
-        elif hasattr(module, "get_remat_policy"):  # the decoder (NNXDecoder); matching the class name "Decoder" matched nothing
+        # The decoder (NNXDecoder); matching the class name "Decoder" matched nothing.
+        elif hasattr(module, "get_remat_policy"):
           module.remat_policy_override = "full"
       jit_model_dropless, _ = nnx.split(reconstructed)
       del reconstructed, _
