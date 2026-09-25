@@ -41,6 +41,7 @@ from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
 from flax.core.spmd import logical_axis_rules
+from flax.nnx import variablelib
 import flax.linen as nn
 from huggingface_hub import get_token
 import jax
@@ -68,6 +69,17 @@ except ImportError:
 
   def _is_orbax_array_metadata(x):
     return hasattr(x, "shape") and hasattr(x, "sharding") and hasattr(x, "dtype") and not isinstance(x, jax.Array)
+
+
+def _deep_merge_dicts(target, source):
+  """Recursively merges source dict into target dict."""
+  out = dict(target)
+  for k, v in source.items():
+    if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+      out[k] = _deep_merge_dicts(out[k], v)
+    else:
+      out[k] = v
+  return out
 
 
 # Logical axis names whose padding semantics are "replicate the existing values"
@@ -1012,27 +1024,42 @@ def from_pretrained(
       ):
         # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
         is_nnx_checkpoint = False
-        target_for_restore = jax.tree.map(
-            lambda v: v[...],
-            param_state,
-            is_leaf=lambda n: isinstance(n, nnx.Variable),
-        )
 
-        target_for_restore = _adjust_target_for_moe_fusion(
-            target_for_restore, metadata.item_metadata.tree["params"]["params"], False
-        )
+        # The checkpoint keys collections separately under `params` (`params`, and custom
+        # ones like `Tid2EidVar` / `MoEBiasVar`). Requesting everything under
+        # `params/params` would ask for custom-collection weights at a path the checkpoint
+        # does not use, so Orbax would skip them. Build one target per collection instead.
+        disk_collections = metadata.item_metadata.tree.get("params", {})
 
-        item_to_restore = {"params": {"params": target_for_restore}}
-        base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
-        restore_args = {
-            "params": {
-                "params": _fix_restore_args_for_shape_mismatch(
-                    base_restore_args,
-                    metadata.item_metadata.tree["params"]["params"],
-                    mesh,
-                )
-            }
-        }
+        collection_leaves = collections.defaultdict(dict)
+        for path, leaf in nnx.to_flat_state(param_state):
+          type_ = leaf.type if isinstance(leaf, nnx.Variable) else type(leaf)
+          col_name = variablelib.variable_name_from_type(type_, allow_register=True)
+          val = leaf.get_value() if hasattr(leaf, "get_value") else leaf[...]
+          collection_leaves[col_name][tuple(path)] = val
+
+        item_to_restore = {"params": {}}
+        restore_args = {"params": {}}
+        for col_name, col_meta in disk_collections.items():
+          if col_name in collection_leaves:
+            col_target = nnx.traversals.unflatten_mapping(collection_leaves[col_name])
+          elif col_name == "params":
+            col_target = jax.tree.map(
+                lambda v: v[...],
+                param_state,
+                is_leaf=lambda n: isinstance(n, nnx.Variable),
+            )
+          else:
+            # A collection on disk that this model does not define; nothing to restore into.
+            continue
+          col_target = _adjust_target_for_moe_fusion(col_target, col_meta, False)
+          item_to_restore["params"][col_name] = col_target
+          base_restore_args = ocp.checkpoint_utils.construct_restore_args(col_target)
+          restore_args["params"][col_name] = _fix_restore_args_for_shape_mismatch(
+              base_restore_args,
+              col_meta,
+              mesh,
+          )
       else:
         # NNX checkpoint: {'decoder': {'value': ...}}, or NNX-RL with extra 'base' nesting.
         # Restore only nnx.Param — RNG variable shapes may differ between checkpoint and model,
@@ -1098,6 +1125,14 @@ def from_pretrained(
             and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
             and not is_custom
         ):
+          if not is_nnx_checkpoint:
+            # Only free what the restore will actually overwrite. A collection absent from
+            # `item_to_restore` keeps its initialized buffer; deleting it here would leave a
+            # dangling deleted array that fails much later at first use.
+            type_ = node.type if isinstance(node, nnx.Variable) else type(node)
+            col_name = variablelib.variable_name_from_type(type_, allow_register=True)
+            if col_name not in item_to_restore.get("params", {}):
+              return node
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
           # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
@@ -1127,7 +1162,16 @@ def from_pretrained(
             is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
         )
       else:
-        checkpoint = restored["params"]["params"]
+        # The checkpoint may carry custom collections (e.g. `Tid2EidVar`, `MoEBiasVar`)
+        # alongside `params`. Taking only `params` here would silently drop them, leaving
+        # those variables un-restored. Merge every collection into one tree instead.
+        restored_params = restored["params"]
+        checkpoint = {}
+        for col_name, col_data in restored_params.items():
+          if isinstance(col_data, dict):
+            checkpoint = _deep_merge_dicts(checkpoint, col_data)
+          else:
+            checkpoint[col_name] = col_data
 
       if checkpoint:
         # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
