@@ -295,6 +295,7 @@ ModelName = Literal[
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
+    "qwen3.5-9b",
     "qwen3.5-35b-a3b",
     "qwen3.5-35b-a3b-fp8",
     "qwen3.5-35b-fp8",
@@ -5170,7 +5171,7 @@ class MaxTextConfig(
           DecoderBlockType.QWEN3_NEXT,
       ):
         decoder_name = self.decoder_block.value
-        if not self.sparse_matmul:
+        if self.num_experts > 1 and not self.sparse_matmul:
           raise ValueError(
               f"'explicit' sharding with the '{decoder_name}' decoder requires"
               " `sparse_matmul=True`; the dense matmul MoE path has not been"
