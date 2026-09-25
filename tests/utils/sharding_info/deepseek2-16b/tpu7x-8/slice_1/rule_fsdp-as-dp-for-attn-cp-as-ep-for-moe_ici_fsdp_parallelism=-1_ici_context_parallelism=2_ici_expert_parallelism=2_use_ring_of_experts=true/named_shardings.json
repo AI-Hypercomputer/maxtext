@@ -1,0 +1,2807 @@
+{
+  "['model']/['decoder']/['decoder_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null
+    ],
+    "shape": [
+      2048
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      10944,
+      1,
+      2048
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['aqt']/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['aqt']/['key']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['dropout']/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['dropout']/['key']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['params']/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['params']/['key']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      null,
+      [
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      16,
+      1,
+      128,
+      2048
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      16,
+      192
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      576
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      1,
+      16,
+      256
+    ]
+  },
+  "['model']/['decoder']/['logits_dense']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null
+    ],
+    "shape": [
+      2048,
+      102400
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      64
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['aqt']/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['aqt']/['key']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['dropout']/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['dropout']/['key']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['params']/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['params']/['key']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      "fsdp",
+      null
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      "fsdp",
+      null
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      64,
+      26,
+      1408,
+      2048
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      2816,
+      26,
+      2048
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      null,
+      [
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      16,
+      26,
+      128,
+      2048
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      16,
+      192
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      576
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      26,
+      16,
+      256
+    ]
+  },
+  "['model']/['decoder']/['rngs']/['aqt']/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['aqt']/['key']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['dropout']/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['dropout']/['key']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['params']/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['params']/['key']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['token_embedder']/['embedding']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      102400,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['decoder_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null
+    ],
+    "shape": [
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      10944,
+      1,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      1
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      null,
+      [
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      16,
+      1,
+      128,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      16,
+      192
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      576
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      1,
+      16,
+      256
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['logits_dense']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null
+    ],
+    "shape": [
+      2048,
+      102400
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      64
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      "fsdp",
+      null
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      "fsdp",
+      null
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      64,
+      26,
+      1408,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      2816,
+      26,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      26
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      null,
+      [
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      16,
+      26,
+      128,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      16,
+      192
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      576
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      26,
+      16,
+      256
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['token_embedder']/['embedding']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      102400,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['decoder_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null
+    ],
+    "shape": [
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      10944,
+      1,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      1
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      null,
+      [
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      16,
+      1,
+      128,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      16,
+      192
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      576
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      1,
+      16,
+      256
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['logits_dense']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null
+    ],
+    "shape": [
+      2048,
+      102400
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      64
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      "fsdp",
+      null
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      "fsdp",
+      null
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      64,
+      26,
+      1408,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      "fsdp",
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      2816,
+      26,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      26
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      null,
+      null,
+      [
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      16,
+      26,
+      128,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      16,
+      192
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      576
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      [
+        "context",
+        "expert"
+      ],
+      null,
+      null,
+      null
+    ],
+    "shape": [
+      512,
+      26,
+      16,
+      256
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['token_embedder']/['embedding']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [
+      null,
+      "fsdp"
+    ],
+    "shape": [
+      102400,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[2]/['count']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  },
+  "['optimizer']/['step']/.value": {
+    "mesh": {
+      "axis_names": [
+        "data",
+        "fsdp",
+        "fsdp_transpose",
+        "expert",
+        "context"
+      ],
+      "shape": {
+        "data": 1,
+        "fsdp": 2,
+        "fsdp_transpose": 1,
+        "expert": 2,
+        "context": 2
+      }
+    },
+    "partition_spec": [],
+    "shape": []
+  }
+}
