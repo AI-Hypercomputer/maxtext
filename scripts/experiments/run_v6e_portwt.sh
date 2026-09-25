@@ -72,7 +72,7 @@ submit() {
     # v6e Pathways (v6e-nscc-p1 logged "host_groups=2 (via host_id)").
     COMMON="${COMMON} profiler=xplane skip_first_n_steps_for_profiler=${PROF_SKIP:-40} \
      profiler_steps=${PROF_STEPS:-5} profile_cleanly=true upload_all_profiler_results=true \
-     enable_tpu_profiling_options=true tpu_num_chips_to_profile_per_task=4 \
+     enable_tpu_profiling_options=${PROF_TPU_OPTS:-true} tpu_num_chips_to_profile_per_task=4 \
      profiler_max_num_hosts=${PROF_HOSTS:-4}"
   fi
   case "${ARM}" in
