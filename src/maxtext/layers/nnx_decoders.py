@@ -1494,8 +1494,8 @@ class NNXDecoder(nnx.Module):
             "qwen3.5-397b-a17b",
             "qwen3.5-397b-a17b-fp8",
             "maxtext-omni-gemma3-qwen3",
-            "cosmos3-nano-reasoner",
-            "cosmos3-super-reasoner",
+            "weaver-mini",
+            "weaver-max",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1517,8 +1517,8 @@ class NNXDecoder(nnx.Module):
             "qwen3.5-35b-fp8",
             "qwen3.5-397b-a17b",
             "qwen3.5-397b-a17b-fp8",
-            "cosmos3-nano-reasoner",
-            "cosmos3-super-reasoner",
+            "weaver-mini",
+            "weaver-max",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
