@@ -22,15 +22,26 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config, DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
+from maxtext.layers import mhc
 from maxtext.layers import moe
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.models import deepseek4
 from maxtext.models import deepseek_batchsplit
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.globals import EPS
+
+
+def _is_deepseek4(config: Config) -> bool:
+  """Returns True when the model uses the DeepSeek-V4 decoder block.
+
+  `decoder_block` may hold either the `DecoderBlockType` enum or its raw string value
+  depending on how the config was constructed, so both are accepted.
+  """
+  return config.decoder_block in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.DEEPSEEK4.value)
 
 
 # Custom Variable types for MTP intermediate outputs
@@ -198,12 +209,42 @@ class MultiTokenPredictionLayer(nnx.Module):
         rngs=rngs,
     )
     # Use MODEL_MODE_TRAIN for initialization; runtime model_mode is passed dynamically.
-    self.transformer_layer = transformer_layer_module(
-        config=cfg,
-        mesh=mesh,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=rngs,
-    )
+    self.is_mhc = _is_deepseek4(cfg) and cfg.mhc_expansion_rate > 1
+    if _is_deepseek4(cfg):
+      # `Decoder.get_decoder_layers()` returns `DeepSeek4ScannableBlock` when
+      # `scan_layers=True`, which bundles one HCA and one CSA layer. An MTP module is a
+      # single standard layer, so build `DeepSeek4DecoderLayer` directly rather than
+      # using the passed-in blueprint. `compress_ratio=0` selects sliding-window
+      # attention and `is_hash_routing=False` keeps it out of the hash-routed prefix,
+      # matching the reference MTP block. `layer_idx` places this layer after the main
+      # trunk, as the reference does with `MTPBlock(args.n_layers + layer_id)`.
+      self.transformer_layer = deepseek4.DeepSeek4DecoderLayer(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs=rngs,
+          layer_idx=cfg.base_num_decoder_layers + layer_number - 1,
+          compress_ratio=0,
+          is_hash_routing=False,
+      )
+    else:
+      self.transformer_layer = transformer_layer_module(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs=rngs,
+      )
+
+    if self.is_mhc:
+      # Collapses this module's `[batch, seq, mhc_expansion_rate, emb]` output down to
+      # `[batch, seq, emb]` for the logits head. The main decoder's `hc_head` is not
+      # reused: each MTP depth is a separate sublayer with its own learned collapse,
+      # mirroring the reference implementation.
+      self.hc_head = mhc.DeepSeek4HyperHead(
+          config=cfg,
+          mesh=mesh,
+          rngs=rngs,
+      )
 
     self.final_norm = RMSNorm(
         num_features=cfg.emb_dim,
@@ -288,6 +329,14 @@ class MultiTokenPredictionLayer(nnx.Module):
 
     embedding_norm = self.embedding_norm(target_token_embedding)
     hidden_state_norm = self.hidden_state_norm(prev_hidden_state)
+
+    if self.is_mhc:
+      # `prev_hidden_state` arrives as `[batch, seq, mhc_expansion_rate, emb]` because the
+      # decoder no longer collapses its mHC streams. The target embedding is `[batch, seq,
+      # emb]`, so broadcast it across the stream axis to make the two concatenable.
+      mhc_expand, _ = mhc.get_functions(self.config.mhc_expansion_rate)
+      embedding_norm = mhc_expand(embedding_norm)
+
     if self.config.shard_mode == ShardMode.EXPLICIT:
       # Ensure that the embedding norm has the same sharding as the hidden state
       # norm.
@@ -519,8 +568,15 @@ class MultiTokenPredictionBlock(nnx.Module):
           model_mode=self.decoder.model_mode,
       )
 
+      # Collapse the parallel mHC streams before the head. `mtp_hidden_state` itself stays
+      # in its expanded, unnormalized form so the next MTP depth receives the full state,
+      # exactly as the main decoder hands it over.
+      mtp_hidden_state_to_head = mtp_hidden_state
+      if mtp_layer.is_mhc:
+        mtp_hidden_state_to_head = mtp_layer.hc_head(mtp_hidden_state)
+
       # Apply separate normalization to the MTP hidden state before projecting to logits.
-      normed_mtp_hidden_state = mtp_layer.final_norm(mtp_hidden_state)
+      normed_mtp_hidden_state = mtp_layer.final_norm(mtp_hidden_state_to_head)
       normed_mtp_hidden_state = sharding.maybe_shard_with_logical(
           normed_mtp_hidden_state,
           ("activation_batch", "activation_length", "activation_embed"),
@@ -529,8 +585,15 @@ class MultiTokenPredictionBlock(nnx.Module):
           sharding.get_logical_axis_rules(),
       )
 
+      # `reduce_mhc=False` because the collapse already happened above with this layer's own
+      # `hc_head`; `normalize_y=False` because `final_norm` already ran.
       mtp_logits = self.decoder.apply_output_head(
-          shared_embedding, normed_mtp_hidden_state, deterministic, model_mode, normalize_y=False
+          shared_embedding,
+          normed_mtp_hidden_state,
+          deterministic,
+          model_mode,
+          normalize_y=False,
+          reduce_mhc=False,
       )
 
       logits_logical_axes = (

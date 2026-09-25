@@ -4274,6 +4274,43 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=
         compressor_type="csa",
     )
 
+  # 3. MTP Layers (shared by both the scanned and unrolled paths above).
+  mtp_num_layers = maxtext_config.mtp_num_layers
+  if mtp_num_layers == 0:
+    mtp_num_layers = _get(config, "num_nextn_predict_layers", _get(config, "num_mtp_layers", 0))
+
+  def _make_mtp_hf_key_fn(mtp_idx):
+    def get_hf_key(target, per_expert=False):
+      if per_expert:
+        return [f"mtp.{mtp_idx}.{target.replace('{e}', str(e))}" for e in range(num_experts)]
+      return f"mtp.{mtp_idx}.{target}"
+
+    return get_hf_key
+
+  for j in range(mtp_num_layers):
+    mtp_prefix = f"params-mtp_block-mtp_layer_{j + 1}"
+
+    # Note: MultiTokenPredictionLayer renames its submodules to `mtp_{k}_*` via property
+    # setters, except for `hc_head`, which keeps its bare name.
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_embedding_norm-scale"] = f"mtp.{j}.enorm.weight"
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_hidden_state_norm-scale"] = f"mtp.{j}.hnorm.weight"
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_final_norm-scale"] = f"mtp.{j}.norm.weight"
+    # MaxText fuses the embedding and hidden-state projections into one [2 * emb, emb] kernel.
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_projection-kernel"] = (f"mtp.{j}.e_proj.weight", f"mtp.{j}.h_proj.weight")
+    mapping[f"{mtp_prefix}-hc_head-hc_fn"] = f"mtp.{j}.hc_head_fn"
+    mapping[f"{mtp_prefix}-hc_head-hc_base"] = f"mtp.{j}.hc_head_base"
+    mapping[f"{mtp_prefix}-hc_head-hc_scale"] = f"mtp.{j}.hc_head_scale"
+
+    # The MTP transformer layer is built as DeepSeek4DecoderLayer(compress_ratio=0,
+    # is_hash_routing=False), so it has neither a compressor nor hash routing, but it
+    # does carry a MoE gate bias.
+    _add_layer(
+        f"{mtp_prefix}-mtp_{j + 1}_transformer_layer",
+        _make_mtp_hf_key_fn(j),
+        is_hash=False,
+        compressor_type=None,
+    )
+
   return mapping
 
 
@@ -4356,6 +4393,18 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
     else:
       return input_tensor[: target_shape[1], :].T
 
+  def reshape_mtp_projection(weights, target_shape=None):
+    """Splits/joins the fused MTP projection kernel against separate e_proj/h_proj tensors."""
+    del target_shape
+    if saving_to_hf:
+      half = weights.shape[0] // 2
+      e_proj = weights[:half, :].T
+      h_proj = weights[half:, :].T
+      return e_proj, h_proj
+    else:
+      e_proj, h_proj = weights
+      return np.concatenate([e_proj.T, h_proj.T], axis=0)
+
   mapping = {
       "params-token_embedder-embedding": unpad_hf_embedding_layer,
       "params-decoder-logits_dense-kernel": unpad_logits_layer,
@@ -4408,6 +4457,16 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
     prefixes.extend(["params-decoder-scanned_blocks-layers_0", "params-decoder-scanned_blocks-layers_1"])
   for prefix in prefixes:
     _attach_layer_hooks(prefix)
+
+  # MTP layers reuse the same per-layer hooks, plus two MTP-specific transforms.
+  mtp_num_layers = maxtext_config.mtp_num_layers
+  if mtp_num_layers == 0:
+    mtp_num_layers = _get(config, "num_nextn_predict_layers", _get(config, "num_mtp_layers", 0))
+  for j in range(mtp_num_layers):
+    mtp_prefix = f"params-mtp_block-mtp_layer_{j + 1}"
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_projection-kernel"] = reshape_mtp_projection
+    mapping[f"{mtp_prefix}-hc_head-hc_fn"] = reshape_kernel
+    _attach_layer_hooks(f"{mtp_prefix}-mtp_{j + 1}_transformer_layer")
 
   return mapping
 

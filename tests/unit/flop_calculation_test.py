@@ -430,16 +430,21 @@ class FlopCalculation(parameterized.TestCase):
     self.assertFlopsAlmostEqual(calculated_total, golden_total_flops)
     self.assertFlopsAlmostEqual(calculated_weight, golden_weight_flops)
 
-  def test_deepseek4_mtp_validation(self):
-    """Test that DeepSeek-V4 with MTP layers raises a ValueError"""
-    with self.assertRaises(ValueError):
-      self._initialize_model_config(
-          "deepseek4-284b",
-          max_target_length=4096,
-          per_device_batch_size=4,
-          attention="dot_product",
-          mtp_num_layers=1,
-      )
+  def test_deepseek4_mtp_flops(self):
+    """Test that DeepSeek-V4 supports MTP layers and accounts for their FLOPs."""
+    common_kwargs = {
+        "max_target_length": 4096,
+        "per_device_batch_size": 4,
+        "attention": "dot_product",
+    }
+    cfg_no_mtp = self._initialize_model_config("deepseek4-284b", mtp_num_layers=0, **common_kwargs)
+    cfg_with_mtp = self._initialize_model_config("deepseek4-284b", mtp_num_layers=1, **common_kwargs)
+
+    tflops_no_mtp, _, _ = calculate_tflops_training_per_device(cfg_no_mtp)
+    tflops_with_mtp, _, _ = calculate_tflops_training_per_device(cfg_with_mtp)
+
+    # The auxiliary MTP layer is real extra compute, so it must show up in the estimate.
+    self.assertGreater(tflops_with_mtp, tflops_no_mtp)
 
   def test_custom_engram_flops(self):
     """Test model with Engram Flops calculation"""
