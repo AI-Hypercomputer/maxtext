@@ -1175,17 +1175,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
               qkv,
               decoder_segment_ids,
               conv_kernel_size,
-              sequence_packing=bool(getattr(cfg, "enable_gdn_sequence_packing", False)),
+              sequence_packing=True,
           ).astype(conv_input.dtype)
         else:
           next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
       else:
         conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
 
+      # The pure-JAX path always honours `decoder_segment_ids` (as in #5351).
+      # `enable_gdn_sequence_packing` only gates the Pallas kernel packing path.
       packed_segment_ids = (
-          jnp.broadcast_to(decoder_segment_ids, (batch, seq_len))
-          if (decoder_segment_ids is not None and getattr(cfg, "enable_gdn_sequence_packing", False))
-          else None
+          jnp.broadcast_to(decoder_segment_ids, (batch, seq_len)) if decoder_segment_ids is not None else None
       )
 
       # Perform the convolution.
@@ -1199,6 +1199,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             kernel_size=conv_kernel_size,
             conv_state=conv_state,
         )
+        if flat_sharding is not None:
+          conv_out = jax.sharding.reshard(conv_out, flat_sharding)
       else:
         conv_out = self.conv1d(conv_input, out_sharding=flat_sharding)
         # Slice the output to match the original input sequence length.

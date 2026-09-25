@@ -1018,9 +1018,11 @@ class TestQwen3Next(unittest.TestCase):
     orig_pack = getattr(self.cfg, "enable_gdn_sequence_packing", False)
     orig_kernel = getattr(self.cfg, "use_gdn_kernel", False)
     try:
-      self.cfg.get_keys()["enable_gdn_sequence_packing"] = True
       for use_kernel in (False, True):
         self.cfg.get_keys()["use_gdn_kernel"] = use_kernel
+        # The pure-JAX path must honour segment ids with the flag at its default (#5351);
+        # only the Pallas kernel path needs `enable_gdn_sequence_packing`.
+        self.cfg.get_keys()["enable_gdn_sequence_packing"] = use_kernel
         jax_model = qwen3.Qwen3NextGatedDeltaNet(
             config=self.cfg,
             mesh=self.mesh,

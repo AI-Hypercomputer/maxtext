@@ -30,6 +30,8 @@ from .compute_conv1d_bwd import conv1d_silu_fwd
 from .jax_compute_gdn_states import _compute_forward_conv_and_states
 from .jax_compute_gdn_states import pure_jax_decoupled_conv1d_gdn
 from .pallas_mosaic_tpu_bwd import pallas_gdn_bwd_kernel
+from .runtime_utils import pallas_unsupported_reason
+from .runtime_utils import warn_gdn_pallas_fallback_once
 
 
 def decoupled_conv1d_gdn_bwd_kernel(
@@ -154,13 +156,13 @@ def _run_local_gdn_decoupled_fwd(
     Optional[jax.Array],
 ]:
   """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU."""
-  if (
-      jax.extend.backend.get_backend().platform == "cpu"
-      or head_k_dim % 128 != 0
-      or head_v_dim % 128 != 0
-      or chunk_size != 64
-      or qkv.shape[1] % chunk_size != 0
-  ):
+  on_cpu = jax.extend.backend.get_backend().platform == "cpu"
+  fallback_reason = pallas_unsupported_reason(
+      head_k_dim=head_k_dim, head_v_dim=head_v_dim, chunk_size=chunk_size, seq_len=qkv.shape[1]
+  )
+  if on_cpu or fallback_reason is not None:
+    if not on_cpu:
+      warn_gdn_pallas_fallback_once("forward", f"{fallback_reason}; falling back to pure JAX")
     out, states = pure_jax_decoupled_conv1d_gdn(
         qkv=qkv,
         b=b,

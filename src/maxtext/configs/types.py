@@ -60,9 +60,9 @@ logger = logging.getLogger(__name__)
 def _warn_gdn_sequence_packing_disabled_once() -> None:
   """Logs the packing / GDN sequence packing mismatch warning once per process."""
   max_logging.warning(
-      "packing=True but enable_gdn_sequence_packing=False: GatedDeltaNet layers will ignore"
-      " packed document boundaries (conv and recurrent state leak across documents). Set"
-      " enable_gdn_sequence_packing=True to make GDN layers segment-aware."
+      "packing=True and use_gdn_kernel=True but enable_gdn_sequence_packing=False: the GDN Pallas"
+      " kernel will ignore packed document boundaries (conv and recurrent state leak across"
+      " documents). Set enable_gdn_sequence_packing=True to make the kernel segment-aware."
   )
 
 
@@ -1308,7 +1308,10 @@ class Qwen3Next(BaseModel):
   )
   enable_gdn_sequence_packing: bool = Field(
       False,
-      description="Whether to enable GDN sequence packing (document-boundary state resets and causal conv masking).",
+      description=(
+          "Whether to enable GDN sequence packing (document-boundary state resets and causal conv masking) in the"
+          " Pallas GDN kernel path. The pure-JAX path (use_gdn_kernel=False) always honours decoder_segment_ids."
+      ),
   )
   gdn_cp_mode: str = Field(
       "auto",
@@ -3800,9 +3803,10 @@ class MaxTextConfig(
 
   @model_validator(mode="after")
   def warn_gdn_packing_without_gdn_sequence_packing(self) -> "MaxTextConfig":
-    """Warns (once per process) when packed inputs reach GDN layers that ignore segment boundaries."""
+    """Warns (once per process) when packed inputs reach GDN kernel layers that ignore segment boundaries."""
     if (
         self.packing
+        and self.use_gdn_kernel
         and self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
         and not self.enable_gdn_sequence_packing
     ):
@@ -5585,6 +5589,14 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+
+    if (self.gdn != "remat" or self.gdn_conv != "remat" or self.gdn_states != "remat") and not getattr(
+        self, "use_gdn_kernel", False
+    ):
+      raise ValueError(
+          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
+          "requires `use_gdn_kernel=True`."
+      )
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {

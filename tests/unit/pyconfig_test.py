@@ -144,22 +144,36 @@ class PyconfigTest(unittest.TestCase):
     )
 
   def test_gdn_packing_without_gdn_sequence_packing_warns_once(self):
-    """packing=True on a GDN model without enable_gdn_sequence_packing logs one warning per process."""
+    """packing=True with the GDN kernel but without enable_gdn_sequence_packing logs one warning per process."""
     config_types._warn_gdn_sequence_packing_disabled_once.cache_clear()  # pylint: disable=protected-access
     with mock.patch.object(config_types.max_logging, "warning") as warn:
-      config = self._init_qwen3_next_packing(packing=True, enable_gdn_sequence_packing=False)
-      self._init_qwen3_next_packing(packing=True, enable_gdn_sequence_packing=False)
+      config = self._init_qwen3_next_packing(packing=True, use_gdn_kernel=True, enable_gdn_sequence_packing=False)
+      self._init_qwen3_next_packing(packing=True, use_gdn_kernel=True, enable_gdn_sequence_packing=False)
     self.assertFalse(config.enable_gdn_sequence_packing)
     gdn_warnings = [c for c in warn.call_args_list if "enable_gdn_sequence_packing" in str(c)]
     self.assertEqual(len(gdn_warnings), 1)
 
-  def test_gdn_packing_warning_not_emitted_when_enabled_or_unpacked(self):
+  def test_gdn_packing_warning_not_emitted_when_enabled_unpacked_or_pure_jax(self):
+    """No warning when the kernel is segment-aware, inputs are unpacked, or the pure-JAX path is used."""
     config_types._warn_gdn_sequence_packing_disabled_once.cache_clear()  # pylint: disable=protected-access
     with mock.patch.object(config_types.max_logging, "warning") as warn:
-      config = self._init_qwen3_next_packing(packing=True, enable_gdn_sequence_packing=True)
-      self._init_qwen3_next_packing(packing=False, enable_gdn_sequence_packing=False)
+      config = self._init_qwen3_next_packing(packing=True, use_gdn_kernel=True, enable_gdn_sequence_packing=True)
+      self._init_qwen3_next_packing(packing=False, use_gdn_kernel=True, enable_gdn_sequence_packing=False)
+      # The pure-JAX path always honours decoder_segment_ids, so the flag is irrelevant there.
+      self._init_qwen3_next_packing(packing=True, use_gdn_kernel=False, enable_gdn_sequence_packing=False)
     self.assertTrue(config.enable_gdn_sequence_packing)
     self.assertEqual([c for c in warn.call_args_list if "enable_gdn_sequence_packing" in str(c)], [])
+
+  def test_rl_config_gdn_granular_remat_requires_gdn_kernel(self):
+    """RLConfig does not inherit MaxTextConfig's validators, so it carries its own GDN remat guard."""
+    with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
+      pyconfig.initialize(
+          ["", get_post_train_test_config_path("rl")],
+          skip_jax_distributed_system=True,
+          config_class=config_types.RLConfig,
+          gdn="device",
+          use_gdn_kernel=False,
+      )
 
   def test_enable_gdn_sequence_packing_defaults_false(self):
     config = self._init_qwen3_next_packing()

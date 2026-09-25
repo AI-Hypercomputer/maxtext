@@ -26,6 +26,8 @@ import jax.numpy as jnp
 from .. import compute_conv1d as local_compute_conv1d
 from .bwd_memory_ref import make_bwd_block_specs
 from .runtime_utils import ensure_cpu_interpret_registered
+from .runtime_utils import pallas_unsupported_reason
+from .runtime_utils import warn_gdn_pallas_fallback_once
 
 # Default number of value heads per grid step, by activation dtype.
 _F32_HEAD_TILE = 16
@@ -508,10 +510,13 @@ def pallas_gdn_bwd_kernel(
   Dispatches a single kernel call with 3D grid=(batch_size, num_groups,
   num_chunks).
   """
-  if interpret is None and (
-      jax.default_backend() == "cpu" or kq_head_dim % 128 != 0 or v_head_dim % 128 != 0 or chunk_size != 64
-  ):
-    interpret = True
+  if interpret is None:
+    on_cpu = jax.default_backend() == "cpu"
+    fallback_reason = pallas_unsupported_reason(head_k_dim=kq_head_dim, head_v_dim=v_head_dim, chunk_size=chunk_size)
+    if on_cpu or fallback_reason is not None:
+      if not on_cpu:
+        warn_gdn_pallas_fallback_once("backward", f"{fallback_reason}; running Pallas in interpret mode (very slow)")
+      interpret = True
   if interpret:
     ensure_cpu_interpret_registered()
 
@@ -519,6 +524,11 @@ def pallas_gdn_bwd_kernel(
   assert dt_bias.ndim == 1, f"dt_bias must be 1D with shape (num_v_heads,), got {dt_bias.shape}"
 
   batch_size, seq_len, dim_size = qkv_conv.shape
+  if seq_len % chunk_size != 0:
+    raise ValueError(
+        f"GDN backward kernel requires the local sequence length ({seq_len}) to be a multiple of"
+        f" chunk_size ({chunk_size}); with sequence-sharded context parallelism this is seq_len / cp."
+    )
   num_chunks = seq_len // chunk_size
   num_kq_heads = (dim_size - num_v_heads * v_head_dim) // (kq_head_dim * 2)
   repeats = num_v_heads // num_kq_heads
