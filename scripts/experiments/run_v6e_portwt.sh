@@ -83,7 +83,8 @@ submit() {
     ns)
       SUB="workload create-pathways"
       ENVS="export JAX_NUM_CPU_DEVICES=8 && export DILOCO_COLOCATED_CPU_OUTER=1 \
-&& export DILOCO_SHARDED_APPLY=${SHARDED_APPLY:-1} && export DILOCO_DONATE_APPLY=${DONATE_APPLY:-1}"
+&& export DILOCO_SHARDED_APPLY=${SHARDED_APPLY:-1} && export DILOCO_DONATE_APPLY=${DONATE_APPLY:-1} \
+&& export DILOCO_SYMMETRIC_OUTER=${SYMMETRIC_OUTER:-1} && export DILOCO_UNPACKED_TRANSFER=${UNPACKED_TRANSFER:-1}"
       DILOCO_ARGS="enable_non_spmd_diloco=true enable_single_controller=true" ;;
     *) echo "arm must be spmd|ns"; exit 2 ;;
   esac
