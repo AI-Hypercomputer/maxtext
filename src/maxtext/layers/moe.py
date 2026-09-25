@@ -1013,7 +1013,10 @@ class RoutedMoE(nnx.Module):
       if self.mesh is not None and "dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1:
         expert_axes.append("dcp")
       self._expert_parallelism_name = tuple(expert_axes)
-    elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
+    elif self.config.custom_mesh_and_rule in (
+        ctypes.CustomRule.CP_AS_EP,
+        ctypes.CustomRule.FSDP_AS_DP_FOR_ATTN_CP_AS_EP_FOR_MOE,
+    ):
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
     else:

@@ -63,6 +63,10 @@ Built on `ep-as-dp.yml` for large-scale training where the FSDP rank is large en
 
 Identical to `fsdp-as-dp-for-attn.yml` except that the MoE router weight (`embed_router`) is sharded on `fsdp` (as in `ep-as-dp.yml`) instead of being fully replicated. With a replicated router, GSPMD reduces the `bf16[embed, num_experts]` router gradient with a synchronous TensorCore all-reduce over every device inside the backward scan loop; sharding it on `fsdp` does not remove the reduction (the gradient is still a partial sum over every batch axis, including `expert`), but splits it into a reduce-scatter over `fsdp` plus an all-reduce of only the `[embed / fsdp, num_experts]` shard over the remaining batch axes (`data`, `fsdp_transpose`, `expert`), at the cost of a small forward/remat all-gather. Prefer this variant at large FSDP ranks when the router-gradient all-reduce shows up as exposed time in the backward pass.
 
+### `fsdp-as-dp-for-attn-cp-as-ep-for-moe.yml`
+
+Combines `fsdp-as-dp-for-attn.yml` with the context-axis borrowing of `cp-as-ep.yml`, for fractional batch size (e.g. `per_device_batch_size=0.5`) at large scale on TPU v7x. The `context` axis is laid over the two TensorCores of a chip, so each chip holds one sequence split in half. In attention, `fsdp` / `fsdp_transpose` act as data parallelism and the attention weights are sharded on `context` and `expert` (the `context` part of their all-gather stays on-chip). Inside the MoE, `context` joins `expert`, giving EP = `context` x `expert`. As in `fsdp-as-dp-for-attn.yml`, the MoE router weight (`embed_router`) is fully replicated. `context` is the last mesh axis so that the v7x mesh builder, which assigns axes last-first and offers the core axis first, places it on the TensorCore pair.
+
 ### `shard-exp-on-fsdp`
 
 When enabled, this shards the expert dimension of the MoE weights across the FSDP axis. It requires `num_experts` to be a multiple of FSDP rank and is particularly useful when using the Muon optimizer.

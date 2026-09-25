@@ -216,3 +216,4 @@ class CustomRule(enum.Enum):
   EXPERT_ON_FSDP_EP = "expert-on-fsdp-ep"
   FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
   FSDP_AS_DP_FOR_ATTN_RF = "fsdp-as-dp-for-attn-rf"  # fsdp-as-dp-for-attn with the router weight sharded on fsdp
+  FSDP_AS_DP_FOR_ATTN_CP_AS_EP_FOR_MOE = "fsdp-as-dp-for-attn-cp-as-ep-for-moe"  # Context axis joins EP in MoE
