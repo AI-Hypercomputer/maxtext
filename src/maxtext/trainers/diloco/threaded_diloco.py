@@ -1937,7 +1937,12 @@ def run_threaded_diloco(config, recorder, train_step, eval_step):
   max_logging.log("Got abstract syncer state")
 
   init_lock = threading.Lock()
-  profiler_barrier = threading.Barrier(num_learners) if getattr(config, "profiler", "") != "" else None
+  # DILOCO_PROFILE_BARRIER=0: no cross-learner barrier / drain around the profiler window, so the
+  # trace shows the learners' natural (asynchronous) relative timing. Pair with profile_cleanly=false.
+  use_prof_barrier = os.environ.get("DILOCO_PROFILE_BARRIER", "1") == "1"
+  profiler_barrier = (
+      threading.Barrier(num_learners) if (getattr(config, "profiler", "") != "" and use_prof_barrier) else None
+  )
 
   max_logging.log("Spawning learner threads")
   with ThreadPoolExecutor(max_workers=num_learners) as executor:

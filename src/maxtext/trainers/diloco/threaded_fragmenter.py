@@ -89,9 +89,12 @@ class FragmentedTreeManipulator:
     num_layers = config.num_decoder_layers
     num_transformer_fragments = config.num_diloco_fragments
 
-    # If user provided total fragments (e.g. 37 = 1 non-scanned + 36 layer fragments)
-    if num_transformer_fragments == num_layers + 1:
-      num_transformer_fragments = num_layers
+    # Same semantics as the SPMD fragmenter (diloco/utils/fragmenter.py):
+    # num_diloco_fragments counts ALL fragments = 1 non-scanned + (N-1) layer
+    # fragments, whenever N-1 divides num_layers (e.g. 37 for 36 layers, 17 for 64
+    # layers). Otherwise keep the legacy meaning (N = number of layer fragments).
+    if num_transformer_fragments > 1 and num_layers % (num_transformer_fragments - 1) == 0:
+      num_transformer_fragments = num_transformer_fragments - 1
 
     assert num_layers % num_transformer_fragments == 0, (
         f"num_decoder_layers ({num_layers}) must be divisible by "
