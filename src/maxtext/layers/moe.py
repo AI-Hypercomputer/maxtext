@@ -1198,14 +1198,15 @@ class RoutedMoE(nnx.Module):
             self.config.num_experts,
         )
       # roll_to_expert_id is not directly used in the kernel, ep axis id is directly called
-      if not force_dropless and self.config.ragged_buffer_factor > 0.0:
+      ragged_buffer_factor = self.get_ragged_buffer_factor()
+      if not force_dropless and ragged_buffer_factor > 0.0:
         balanced_size = (bsz_times_seq_len // num_expert_parallelism) * self.num_experts_per_tok
         buffer_size = self.get_ragged_buffer_size(
             balanced_size,
             num_expert_parallelism,
             self.config.num_experts,
             self.num_experts_per_tok,
-            self.config.ragged_buffer_factor,
+            ragged_buffer_factor,
         )
       else:
         buffer_size = None
@@ -1673,6 +1674,12 @@ class RoutedMoE(nnx.Module):
   def transform_bias(self, experts_index, *biases):
     """Selects bias values for a variable number of bias tensors based on chosen experts."""
     return tuple(bias[experts_index] for bias in biases)
+
+  def get_ragged_buffer_factor(self):
+    """Reads ragged_buffer_factor, preferring `eval_ragged_buffer_factor` under eval axis rules."""
+    if max_utils.is_eval(self.config):
+      return self.config.eval_ragged_buffer_factor
+    return self.config.ragged_buffer_factor
 
   @staticmethod
   def get_ragged_buffer_size(local_batch, ep_degree, global_experts, top_k, ragged_buffer_factor):
@@ -2224,13 +2231,13 @@ class RoutedMoE(nnx.Module):
               num_ep,
               self.config.num_experts,
               self.config.num_experts_per_tok,
-              self.config.ragged_buffer_factor,
+              self.get_ragged_buffer_factor(),
           )
           input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
               all_shards_group_sizes,
               expert_shard_id,
               num_ep,
-              ragged_buffer_factor=self.config.ragged_buffer_factor,
+              ragged_buffer_factor=self.get_ragged_buffer_factor(),
               buffer_size=buffer_size,
           )
 
@@ -2253,7 +2260,7 @@ class RoutedMoE(nnx.Module):
               shard_index=expert_shard_id,
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
-              ragged_buffer_factor=self.config.ragged_buffer_factor,
+              ragged_buffer_factor=self.get_ragged_buffer_factor(),
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
@@ -2266,7 +2273,7 @@ class RoutedMoE(nnx.Module):
               global_sorted_experts=selected_experts,
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
-              ragged_buffer_factor=self.config.ragged_buffer_factor,
+              ragged_buffer_factor=self.get_ragged_buffer_factor(),
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
 
@@ -2509,7 +2516,7 @@ class RoutedMoE(nnx.Module):
             route_metadata.all_shards_group_sizes,
             route_metadata.expert_shard_id,
             self.get_expert_parallelism_size(),
-            ragged_buffer_factor=self.config.ragged_buffer_factor,
+            ragged_buffer_factor=self.get_ragged_buffer_factor(),
             buffer_size=buffer_size,
             is_dispatch=False,
         )
