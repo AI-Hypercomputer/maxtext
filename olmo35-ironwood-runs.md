@@ -347,6 +347,40 @@ What it settles:
    pdb=3 with full remat (99.8 against 107.3). Batch beats recompute savings.
 3. `num_vocab_tiling=4` is a marginal +0.6%, retested in the i-series.
 
+### 128 devices (4x4x4): run `o35n251752`, i-series, MoE routing path
+
+Base g2 (pdb=3, sched, DP=4).
+
+| arm | change | TF/s/dev | MFU | step s | outcome |
+|---|---|---|---|---|---|
+| i1_ctrl | none | 107.2 | 9.29% | 0.989 | |
+| i2_raggedsort | `use_ragged_sort=True` | | | | rejected: needs EP > 1 |
+| i3_directgather | `moe_use_direct_token_gather=True` | 104.6 | 9.07% | 1.014 | 0.98x |
+| i4_mosaicgather | `use_gather_mosaic_kernel=True` | 107.4 | 9.31% | 0.987 | neutral |
+| i5_rs_dg | ragged sort + direct gather | | | | rejected, as i2 |
+| i6_nocustomsort | `use_custom_sort_vjp=False` | 98.3 | 8.52% | 1.078 | 0.92x, keep it on |
+| i7_vocab4 | `num_vocab_tiling=4` | **108.0** | **9.36%** | 0.982 | reproduces h6, **adopted** |
+
+None of the gather or sort kernels moves the routing cost. The xla-shell
+"offloadable to SparseCore" tag on `argsort` is a label heuristic, and libtpu
+has no flag for it. The argsort outputs do carry the checkpoint name
+`moe_routing` (about 1.5 MB per layer), so the j-series saves them to stop full
+remat from re-running the sort.
+
+### In flight: j-series, save the routing so remat skips the sort
+
+Base i7 (pdb=3, sched, DP=4, `num_vocab_tiling=4`), all `remat_policy=custom`
+except the control.
+
+| arm | pdb | saved | approx size |
+|---|---|---|---|
+| j1_ctrl | 3 | none (full remat) | |
+| j2_route | 3 | `moe_routing` | 25 MB |
+| j3_route_logits | 3 | + `moe_router_logits` | + 0.8 GB |
+| j4_route_disp | 3 | + `moe_dispatch` | + 6.4 GB, may OOM |
+| j5_route_dispoff | 3 | routing + logits on device, dispatch offloaded | |
+| j6_p2_allmoe | 2 | every MoE name on device | |
+
 ## Profiles and xla-shell output
 
 Captures are pulled and analysed with `scripts/olmo35_profile_report.sh`, which
